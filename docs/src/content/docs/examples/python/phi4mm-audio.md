@@ -59,4 +59,4 @@ response = runner.send_chat_completion_request(
 print(response.choices[0].message.content)
 ```
 
-Source: [`examples/python/phi4mm_audio.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/phi4mm_audio.py)
+Source: [`examples/python/phi4mm_audio.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/phi4mm_audio.py)

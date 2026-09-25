@@ -31,8 +31,8 @@ from typing import Optional
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 REPO_ROOT = SCRIPT_DIR.parent
-PYPROJECT_PATH = REPO_ROOT / "inference_rs-pyo3" / "pyproject.toml"
-CARGO_MANIFEST = REPO_ROOT / "inference_rs-pyo3" / "Cargo.toml"
+PYPROJECT_PATH = REPO_ROOT / "inference-pyo3" / "pyproject.toml"
+CARGO_MANIFEST = REPO_ROOT / "inference-pyo3" / "Cargo.toml"
 DOCKERFILE_PATH = REPO_ROOT / "Dockerfile.manylinux"
 
 # Releases now publish a single `inference_rs` package (CPU on linux/windows, Metal on macOS) via
@@ -360,7 +360,7 @@ def _build_with_docker(features: list[str], output_dir: Path, plat: Platform) ->
             "docker",
             "build",
             "-t",
-            "inference_rs-wheelmaker:latest",
+            "inference-wheelmaker:latest",
             "-f",
             "Dockerfile.manylinux",
             ".",
@@ -377,7 +377,7 @@ def _build_with_docker(features: list[str], output_dir: Path, plat: Platform) ->
         "-o",
         f"/io/wheels/{output_dir.name}",
         "-m",
-        "inference_rs-pyo3/Cargo.toml",
+        "inference-pyo3/Cargo.toml",
         "--interpreter",
         "python3.10",
     ]
@@ -396,7 +396,7 @@ def _build_with_docker(features: list[str], output_dir: Path, plat: Platform) ->
         "RUSTFLAGS=-C target-cpu=generic",
     ]
 
-    docker_cmd.extend(["inference_rs-wheelmaker:latest"] + maturin_args)
+    docker_cmd.extend(["inference-wheelmaker:latest"] + maturin_args)
 
     print("  Running Docker build with RUSTFLAGS=-C target-cpu=generic")
     print(f"  Maturin args: {' '.join(maturin_args)}")

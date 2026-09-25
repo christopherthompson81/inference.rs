@@ -74,6 +74,7 @@ Members and their wire/config names where relevant. The members are fieldless Py
 | `MultimodalArchitecture.Gemma4` | `'Gemma4'` |
 | `MultimodalArchitecture.MuseGlimmer` | `'MuseGlimmer'` |
 | `MultimodalArchitecture.DiffusionGemma` | `'DiffusionGemma'` |
+| `MultimodalArchitecture.PaddleOcrVl` | `'paddleocr_vl'` |
 
 
 ## `DiffusionArchitecture`
@@ -228,4 +229,4 @@ Members and their wire/config names where relevant. The members are fieldless Py
 
 ---
 
-<small>Generated from [`inference-pyo3/inference_rs.pyi`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs-pyo3/mistralrs.pyi).</small>
+<small>Generated from [`inference-pyo3/inference_rs.pyi`](https://github.com/christopherthompson81/inference.rs/blob/master/inference-pyo3/inference_rs.pyi).</small>

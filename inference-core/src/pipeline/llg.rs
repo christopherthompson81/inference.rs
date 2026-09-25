@@ -28,6 +28,14 @@ pub fn build_llg_factory(mut tokenizer: Tokenizer) -> Result<Arc<ParserFactory>>
         .map(|(id, at)| (id, at.content))
         .collect();
 
+    // toktrie marks every added token special; unmark non-special ones (e.g. OTSL <fcel>) like transformers does.
+    let added_nonspecial: Vec<u32> = tokenizer
+        .get_added_tokens_decoder()
+        .into_iter()
+        .filter(|(_, at)| !at.special)
+        .map(|(id, _)| id)
+        .collect();
+
     let bt = toktrie_hf_tokenizers::ByteTokenizer::from_tokenizer(tokenizer)?;
     let info = bt.tokrx_info();
     let mut token_bytes = bt.token_bytes();
@@ -44,6 +52,15 @@ pub fn build_llg_factory(mut tokenizer: Tokenizer) -> Result<Arc<ParserFactory>>
             let mut bytes = content.as_bytes().to_vec();
             bytes.insert(0, toktrie::TokTrie::SPECIAL_TOKEN_MARKER);
             token_bytes[idx] = bytes;
+        }
+    }
+
+    for id in &added_nonspecial {
+        let idx = *id as usize;
+        if idx < token_bytes.len()
+            && token_bytes[idx].first() == Some(&toktrie::TokTrie::SPECIAL_TOKEN_MARKER)
+        {
+            token_bytes[idx].remove(0);
         }
     }
 
@@ -74,4 +91,172 @@ pub fn constraint_from_llg_grammar(
 ) -> Result<llguidance::Matcher> {
     let parser = factory.create_parser(grm)?;
     Ok(llguidance::Matcher::new(Ok(parser)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Mirrors build_llg_factory; `apply_fix=false` leaves every added token special-marked, as toktrie does.
+    fn build_trie(mut tokenizer: Tokenizer, apply_fix: bool) -> toktrie::TokTrie {
+        let decoder = match tokenizer.get_decoder() {
+            Some(DecoderWrapper::Sequence(sequence)) if sequence.get_decoders().len() == 1 => {
+                match &sequence.get_decoders()[0] {
+                    DecoderWrapper::ByteLevel(decoder) => Some(DecoderWrapper::ByteLevel(*decoder)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        if let Some(decoder) = decoder {
+            tokenizer.with_decoder(Some(decoder));
+        }
+        let added_special: Vec<(u32, String)> = tokenizer
+            .get_added_tokens_decoder()
+            .into_iter()
+            .filter(|(_, at)| at.special)
+            .map(|(id, at)| (id, at.content))
+            .collect();
+        let added_nonspecial: Vec<u32> = tokenizer
+            .get_added_tokens_decoder()
+            .into_iter()
+            .filter(|(_, at)| !at.special)
+            .map(|(id, _)| id)
+            .collect();
+        let bt = toktrie_hf_tokenizers::ByteTokenizer::from_tokenizer(tokenizer).unwrap();
+        let info = bt.tokrx_info();
+        let mut token_bytes = bt.token_bytes();
+        for (id, content) in &added_special {
+            let idx = *id as usize;
+            if idx < token_bytes.len()
+                && (token_bytes[idx].is_empty()
+                    || token_bytes[idx][0] != toktrie::TokTrie::SPECIAL_TOKEN_MARKER)
+            {
+                let mut bytes = content.as_bytes().to_vec();
+                bytes.insert(0, toktrie::TokTrie::SPECIAL_TOKEN_MARKER);
+                token_bytes[idx] = bytes;
+            }
+        }
+        if apply_fix {
+            for id in &added_nonspecial {
+                let idx = *id as usize;
+                if idx < token_bytes.len()
+                    && token_bytes[idx].first() == Some(&toktrie::TokTrie::SPECIAL_TOKEN_MARKER)
+                {
+                    token_bytes[idx].remove(0);
+                }
+            }
+        }
+        toktrie::TokTrie::from(&info, &token_bytes)
+    }
+
+    fn dec(trie: &toktrie::TokTrie, id: u32) -> String {
+        String::from_utf8_lossy(&trie.decode_ext(&[id], false)).into_owned()
+    }
+
+    // Env-gated on local tokenizer files, so it skips in CI.
+    #[test]
+    fn honors_tokenizer_special_flag() {
+        if let Ok(p) = std::env::var("REGRESSION_PADDLE_TOK") {
+            let tok = Tokenizer::from_file(&p).unwrap();
+            let fcel = tok.token_to_id("<fcel>").unwrap();
+            let eos = tok.token_to_id("</s>").unwrap();
+            let imend = tok.token_to_id("<|IMAGE_END|>").unwrap();
+            let (before, after) = (build_trie(tok.clone(), false), build_trie(tok, true));
+            println!(
+                "paddle <fcel>  before={:?} after={:?}",
+                dec(&before, fcel),
+                dec(&after, fcel)
+            );
+            println!(
+                "paddle </s>    before={:?} after={:?}",
+                dec(&before, eos),
+                dec(&after, eos)
+            );
+            println!(
+                "paddle IMG_END before={:?} after={:?}",
+                dec(&before, imend),
+                dec(&after, imend)
+            );
+            assert!(
+                dec(&before, fcel).is_empty(),
+                "pre-fix drops the non-special OTSL token"
+            );
+            assert_eq!(
+                dec(&after, fcel),
+                "<fcel>",
+                "fix keeps non-special content token"
+            );
+            assert!(
+                dec(&after, eos).is_empty(),
+                "special=true </s> still dropped"
+            );
+            assert!(
+                dec(&after, imend).is_empty(),
+                "special=true image token still dropped"
+            );
+        }
+        if let Ok(p) = std::env::var("REGRESSION_QWEN_TOK") {
+            let tok = Tokenizer::from_file(&p).unwrap();
+            let im_start = tok.token_to_id("<|im_start|>").unwrap();
+            let im_end = tok.token_to_id("<|im_end|>").unwrap();
+            let tool = tok.token_to_id("<tool_call>").unwrap();
+            let (before, after) = (build_trie(tok.clone(), false), build_trie(tok, true));
+            println!(
+                "qwen im_start  before={:?} after={:?}",
+                dec(&before, im_start),
+                dec(&after, im_start)
+            );
+            println!(
+                "qwen tool_call before={:?} after={:?}",
+                dec(&before, tool),
+                dec(&after, tool)
+            );
+            assert!(
+                dec(&before, im_start).is_empty() && dec(&after, im_start).is_empty(),
+                "chat delimiter <|im_start|> (special=true) stays dropped before AND after"
+            );
+            assert!(
+                dec(&after, im_end).is_empty(),
+                "chat delimiter <|im_end|> stays dropped"
+            );
+        }
+    }
+
+    // Both <x> (special=false) and <s> (special=true) are <...>-shaped, so from_tokenizer marks both.
+    #[test]
+    fn honors_special_flag_inline_fixture() {
+        use tokenizers::{
+            decoders::byte_level::ByteLevel as ByteLevelDecoder, models::bpe::BpeBuilder,
+            AddedToken,
+        };
+        let vocab = ahash::AHashMap::from([("a".to_string(), 0u32)]);
+        let bpe = BpeBuilder::new()
+            .vocab_and_merges(vocab, vec![])
+            .build()
+            .unwrap();
+        let mut tok = Tokenizer::new(bpe);
+        tok.with_decoder(Some(ByteLevelDecoder::new(true, false, false)));
+        tok.add_tokens(&[
+            AddedToken::from("<x>", false),
+            AddedToken::from("<s>", true),
+        ]);
+        let x = tok.token_to_id("<x>").unwrap();
+        let s = tok.token_to_id("<s>").unwrap();
+        let before = build_trie(tok.clone(), false);
+        let after = build_trie(tok, true);
+        assert!(
+            dec(&before, x).is_empty(),
+            "pre-fix: <...> heuristic drops the special=false token"
+        );
+        assert_eq!(
+            dec(&after, x),
+            "<x>",
+            "fix keeps the special=false content token"
+        );
+        assert!(
+            dec(&after, s).is_empty(),
+            "special=true token stays dropped"
+        );
+    }
 }

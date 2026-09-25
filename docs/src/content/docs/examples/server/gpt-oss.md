@@ -103,4 +103,4 @@ resp = completion.choices[0].message.content
 print(resp)
 ```
 
-Source: [`examples/server/gpt_oss.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/gpt_oss.py)
+Source: [`examples/server/gpt_oss.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/gpt_oss.py)

@@ -112,4 +112,4 @@ if __name__ == "__main__":
     main()
 ```
 
-Source: [`examples/python/shell_skills.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/shell_skills.py)
+Source: [`examples/python/shell_skills.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/shell_skills.py)

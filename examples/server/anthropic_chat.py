@@ -2,7 +2,7 @@
 Anthropic Messages API example for the inference.rs server.
 
 Run the server:
-    inference_rs serve -p 1234 -m Qwen/Qwen3-4B
+    inference serve -p 1234 -m Qwen/Qwen3-4B
 
 Then run:
     python3 examples/server/anthropic_chat.py

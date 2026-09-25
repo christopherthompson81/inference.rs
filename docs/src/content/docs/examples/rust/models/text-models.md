@@ -89,4 +89,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/models/text_models/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/text_models/main.rs)
+Source: [`inference/examples/models/text_models/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/models/text_models/main.rs)

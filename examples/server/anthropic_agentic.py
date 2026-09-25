@@ -2,7 +2,7 @@
 Anthropic-style server tools mapped to inference.rs agentic features.
 
 Run the server with search and code execution enabled:
-    inference_rs serve --agent -p 1234 -m Qwen/Qwen3-4B
+    inference serve --agent -p 1234 -m Qwen/Qwen3-4B
 
 Then run:
     python3 examples/server/anthropic_agentic.py

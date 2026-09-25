@@ -146,4 +146,4 @@ print("\nRaw response output:")
 pprint(response.output)
 ```
 
-Source: [`examples/server/skills.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/skills.py)
+Source: [`examples/server/skills.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/skills.py)

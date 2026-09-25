@@ -40,4 +40,4 @@ print(res.choices[0].message.content)
 print(f"\nUsage: {res.usage}")
 ```
 
-Source: [`examples/python/smollm3.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/smollm3.py)
+Source: [`examples/python/smollm3.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/smollm3.py)

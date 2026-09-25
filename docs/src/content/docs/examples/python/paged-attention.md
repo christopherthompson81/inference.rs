@@ -39,4 +39,4 @@ print(res.choices[0].message.content)
 print(res.usage)
 ```
 
-Source: [`examples/python/paged_attention.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/paged_attention.py)
+Source: [`examples/python/paged_attention.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/paged_attention.py)

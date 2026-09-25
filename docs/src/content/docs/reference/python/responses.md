@@ -208,4 +208,4 @@ Members and their wire/config names where relevant. The members are fieldless Py
 
 ---
 
-<small>Generated from [`inference-pyo3/inference_rs.pyi`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs-pyo3/mistralrs.pyi).</small>
+<small>Generated from [`inference-pyo3/inference_rs.pyi`](https://github.com/christopherthompson81/inference.rs/blob/master/inference-pyo3/inference_rs.pyi).</small>

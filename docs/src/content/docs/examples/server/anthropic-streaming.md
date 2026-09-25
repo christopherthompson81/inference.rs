@@ -85,4 +85,4 @@ with urllib.request.urlopen(request) as response:
             print()
 ```
 
-Source: [`examples/server/anthropic_streaming.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/anthropic_streaming.py)
+Source: [`examples/server/anthropic_streaming.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/anthropic_streaming.py)

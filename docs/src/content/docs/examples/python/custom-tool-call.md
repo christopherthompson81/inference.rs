@@ -85,4 +85,4 @@ res = runner.send_chat_completion_request(
 print(res.choices[0].message.content)
 ```
 
-Source: [`examples/python/custom_tool_call.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/custom_tool_call.py)
+Source: [`examples/python/custom_tool_call.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/custom_tool_call.py)

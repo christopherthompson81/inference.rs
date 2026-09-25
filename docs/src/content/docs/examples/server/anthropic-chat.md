@@ -69,4 +69,4 @@ for block in response["content"]:
         print(block["text"])
 ```
 
-Source: [`examples/server/anthropic_chat.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/anthropic_chat.py)
+Source: [`examples/server/anthropic_chat.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/anthropic_chat.py)

@@ -9,13 +9,13 @@ pip install openai
 Start the server with a public adapter in one terminal:
 
 ~~~bash
-inference_rs serve --host 127.0.0.1 -m Qwen/Qwen2.5-0.5B-Instruct --lora philosophy=closestfriend/brie-qwen2.5-0.5b
+inference serve --host 127.0.0.1 -m Qwen/Qwen2.5-0.5B-Instruct --lora philosophy=closestfriend/brie-qwen2.5-0.5b
 ~~~
 
 To run the same adapter against a supported GGUF of its base model:
 
 ~~~bash
-inference_rs serve --host 127.0.0.1 -m Qwen/Qwen2.5-0.5B-Instruct-GGUF --quant 4 --lora philosophy=closestfriend/brie-qwen2.5-0.5b
+inference serve --host 127.0.0.1 -m Qwen/Qwen2.5-0.5B-Instruct-GGUF --quant 4 --lora philosophy=closestfriend/brie-qwen2.5-0.5b
 ~~~
 
 Run the client in another terminal:

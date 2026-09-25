@@ -40,4 +40,4 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
-Source: [`examples/server/lfm2_moe.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/lfm2_moe.py)
+Source: [`examples/server/lfm2_moe.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/lfm2_moe.py)

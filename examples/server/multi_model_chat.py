@@ -9,7 +9,7 @@ This example shows how to:
 
 Prerequisites:
 - Start the server in multi-model mode:
-  inference_rs serve -p 1234 --multi-model-config example-multi-model-config.json
+  inference serve -p 1234 --multi-model-config example-multi-model-config.json
 """
 
 import requests
@@ -265,7 +265,7 @@ if __name__ == "__main__":
         print("Error: Could not connect to server.")
         print("Please start the server with:")
         print(
-            "  inference_rs serve -p 1234 --multi-model-config example-multi-model-config.json"
+            "  inference serve -p 1234 --multi-model-config example-multi-model-config.json"
         )
         exit(1)
 

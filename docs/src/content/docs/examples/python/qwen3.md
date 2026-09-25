@@ -109,4 +109,4 @@ resp = completion.choices[0].message.content
 print(resp)
 ```
 
-Source: [`examples/python/qwen3.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/qwen3.py)
+Source: [`examples/python/qwen3.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/qwen3.py)

@@ -66,4 +66,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/models/diffusion_gemma/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/diffusion_gemma/main.rs)
+Source: [`inference/examples/models/diffusion_gemma/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/models/diffusion_gemma/main.rs)

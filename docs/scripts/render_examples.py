@@ -2,7 +2,7 @@
 """
 Render the runnable example trees as Starlight Markdown pages.
 
-Walks `inference_rs/examples/**/main.rs` (Rust SDK), `examples/python/**/*.py`
+Walks `inference/examples/**/main.rs` (Rust SDK), `examples/python/**/*.py`
 (Python SDK), and `examples/server/**/*.py` (HTTP API), extracts the leading
 doc header (`//!` lines for Rust, the module docstring for Python), and
 writes one page per example into `docs/src/content/docs/examples/`. The
@@ -23,12 +23,12 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 WEBSITE_DIR = SCRIPT_DIR.parent
 REPO_DIR = WEBSITE_DIR.parent
 OUT_DIR = WEBSITE_DIR / "src" / "content" / "docs" / "examples"
-GITHUB_BLOB_BASE = "https://github.com/EricLBuehler/mistral.rs/blob/master/"
+GITHUB_BLOB_BASE = "https://github.com/christopherthompson81/inference.rs/blob/master/"
 NEEDS_HEADER_MARKER = "<!-- needs-header -->"
 
 # (sidebar dir, source root relative to repo, label used in stub blurbs)
 TREES = [
-    ("rust", "inference_rs/examples", "Rust SDK"),
+    ("rust", "inference/examples", "Rust SDK"),
     ("python", "examples/python", "Python SDK"),
     ("server", "examples/server", "HTTP server"),
 ]

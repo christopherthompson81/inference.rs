@@ -89,4 +89,4 @@ if __name__ == "__main__":
     main()
 ```
 
-Source: [`examples/python/code_execution_approval.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/code_execution_approval.py)
+Source: [`examples/python/code_execution_approval.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/code_execution_approval.py)

@@ -56,4 +56,4 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ````
 
-Source: [`examples/server/gemma4_gguf.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/gemma4_gguf.py)
+Source: [`examples/server/gemma4_gguf.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/gemma4_gguf.py)

@@ -23,7 +23,7 @@ mod macros;
 mod multimodal;
 mod normal;
 mod paths;
-mod processing;
+pub(crate) mod processing;
 pub(crate) mod prompt_chunks;
 mod response;
 pub(crate) mod sampling;
@@ -73,12 +73,12 @@ pub use loaders::{
     LLaVANextLoader, Lfm2Loader, Lfm2VlLoader, LlamaLoader, Loader, LocalModelPaths,
     MiniCpmOLoader, Mistral3Loader, MistralLoader, MixtralLoader, ModelKind, ModelPaths,
     MultimodalLoaderType, MultimodalModel, MultimodalModelLoader, MuseGlimmerLoader,
-    NormalLoaderType, NormalLoadingMetadata, NormalModel, NormalModelLoader, Phi2Loader,
-    Phi3Loader, Phi3VLoader, Phi3_5MoELoader, Phi4MMLoader, PrettyName, QuantizationKind,
-    Qwen2Loader, Qwen2VLLoader, Qwen2_5VLLoader, Qwen3EmbeddingLoader, Qwen3Loader, Qwen3MoELoader,
-    Qwen3NextLoader, Qwen3VLLoader, Qwen3VLMoELoader, Qwen3_5Loader, Qwen3_5MoeLoader,
-    Qwen3_5TextLoader, SmolLm3Loader, Starcoder2Loader, TokenSource, VLlama4Loader, VLlamaLoader,
-    VoxtralLoader,
+    NormalLoaderType, NormalLoadingMetadata, NormalModel, NormalModelLoader, PaddleOcrVlLoader,
+    Phi2Loader, Phi3Loader, Phi3VLoader, Phi3_5MoELoader, Phi4MMLoader, PrettyName,
+    QuantizationKind, Qwen2Loader, Qwen2VLLoader, Qwen2_5VLLoader, Qwen3EmbeddingLoader,
+    Qwen3Loader, Qwen3MoELoader, Qwen3NextLoader, Qwen3VLLoader, Qwen3VLMoELoader, Qwen3_5Loader,
+    Qwen3_5MoeLoader, Qwen3_5TextLoader, SmolLm3Loader, Starcoder2Loader, TokenSource,
+    VLlama4Loader, VLlamaLoader, VoxtralLoader,
 };
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn get_device_layers_for_loader(

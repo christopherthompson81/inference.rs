@@ -82,4 +82,4 @@ resp2 = client.responses.create(
 print(resp2.output_text)
 ```
 
-Source: [`examples/server/responses_audio.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/responses_audio.py)
+Source: [`examples/server/responses_audio.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/responses_audio.py)

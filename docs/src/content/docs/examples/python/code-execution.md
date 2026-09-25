@@ -80,4 +80,4 @@ if __name__ == "__main__":
     main()
 ```
 
-Source: [`examples/python/code_execution.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/code_execution.py)
+Source: [`examples/python/code_execution.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/code_execution.py)

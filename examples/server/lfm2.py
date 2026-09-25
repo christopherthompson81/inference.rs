@@ -2,7 +2,7 @@
 LiquidAI LFM2.5 text generation through the OpenAI-compatible HTTP API.
 
 Start the server:
-    inference_rs serve -p 1234 -m LiquidAI/LFM2.5-230M
+    inference serve -p 1234 -m LiquidAI/LFM2.5-230M
 """
 
 from openai import OpenAI

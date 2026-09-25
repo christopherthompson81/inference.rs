@@ -47,4 +47,4 @@ with wave.open(output_path, "wb") as wf:
 print(f"WAV audio written to {output_path.resolve()}")
 ```
 
-Source: [`examples/python/dia.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/dia.py)
+Source: [`examples/python/dia.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/dia.py)

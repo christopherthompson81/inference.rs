@@ -73,4 +73,4 @@ if __name__ == "__main__":
     main()
 ```
 
-Source: [`examples/python/shell.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/shell.py)
+Source: [`examples/python/shell.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/shell.py)

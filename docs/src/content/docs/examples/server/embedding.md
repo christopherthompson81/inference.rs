@@ -62,4 +62,4 @@ print(res.data[1].embedding[:10])
 print(res.usage)
 ```
 
-Source: [`examples/server/embedding.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/embedding.py)
+Source: [`examples/server/embedding.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/embedding.py)

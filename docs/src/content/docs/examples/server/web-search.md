@@ -54,4 +54,4 @@ if completion.choices[0].message.tool_calls is not None:
     print(tool_called)
 ```
 
-Source: [`examples/server/web_search.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/web_search.py)
+Source: [`examples/server/web_search.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/web_search.py)

@@ -105,4 +105,4 @@ with urllib.request.urlopen(request) as response:
             print()
 ```
 
-Source: [`examples/server/anthropic_agentic.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/anthropic_agentic.py)
+Source: [`examples/server/anthropic_agentic.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/anthropic_agentic.py)

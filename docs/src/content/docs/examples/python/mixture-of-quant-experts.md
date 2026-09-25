@@ -39,4 +39,4 @@ print(res.choices[0].message.content)
 print(res.usage)
 ```
 
-Source: [`examples/python/mixture_of_quant_experts.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/mixture_of_quant_experts.py)
+Source: [`examples/python/mixture_of_quant_experts.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/mixture_of_quant_experts.py)

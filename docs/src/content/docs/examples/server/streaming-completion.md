@@ -30,4 +30,4 @@ for chunk in response:
     sys.stdout.flush()
 ```
 
-Source: [`examples/server/streaming_completion.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/streaming_completion.py)
+Source: [`examples/server/streaming_completion.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/streaming_completion.py)

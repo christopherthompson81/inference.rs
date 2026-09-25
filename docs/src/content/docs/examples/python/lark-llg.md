@@ -55,4 +55,4 @@ print(res.choices[0].message.content)
 print(res.usage)
 ```
 
-Source: [`examples/python/lark_llg.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/lark_llg.py)
+Source: [`examples/python/lark_llg.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/lark_llg.py)

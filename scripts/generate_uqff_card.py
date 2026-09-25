@@ -1,7 +1,7 @@
 # Generate a UQFF Hugging Face model card .md file.
-# NOTE: This script is deprecated. The `inference_rs quantize` command now
+# NOTE: This script is deprecated. The `inference quantize` command now
 # automatically generates a README.md model card when using directory output mode.
-# Use `inference_rs quantize -m <model> --isq <level> -o <dir>/` instead.
+# Use `inference quantize -m <model> --isq <level> -o <dir>/` instead.
 
 msg = "This script is used to generate a Hugging Face model card."
 print("-" * len(msg))
@@ -71,7 +71,7 @@ try:
         else:
             output += f"|{quants.strip().upper()}|"
 
-        output += f"`inference_rs run -m {display_model_id} --from-uqff {file}`|\n"
+        output += f"`inference run -m {display_model_id} --from-uqff {file}`|\n"
         n += 1
         print()
 except KeyboardInterrupt:

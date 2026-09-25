@@ -175,4 +175,4 @@ if __name__ == "__main__":
     main()
 ```
 
-Source: [`examples/server/tool_dispatch.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/tool_dispatch.py)
+Source: [`examples/server/tool_dispatch.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/tool_dispatch.py)

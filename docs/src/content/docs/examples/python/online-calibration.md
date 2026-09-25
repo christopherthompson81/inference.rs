@@ -46,4 +46,4 @@ res = runner.send_chat_completion_request(request)
 print(res.choices[0].message.content)
 ```
 
-Source: [`examples/python/online_calibration.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/online_calibration.py)
+Source: [`examples/python/online_calibration.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/online_calibration.py)

@@ -57,4 +57,4 @@ print("\nCode response:")
 print(code_response.output_text)
 ```
 
-Source: [`examples/server/responses_tools.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/responses_tools.py)
+Source: [`examples/server/responses_tools.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/responses_tools.py)

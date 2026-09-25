@@ -37,4 +37,4 @@ print(res.choices[0].message.content)
 print(res.usage)
 ```
 
-Source: [`examples/python/text_auto_device_map.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/text_auto_device_map.py)
+Source: [`examples/python/text_auto_device_map.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/text_auto_device_map.py)

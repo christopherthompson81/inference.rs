@@ -45,4 +45,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/models/asr/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/asr/main.rs)
+Source: [`inference/examples/models/asr/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/models/asr/main.rs)

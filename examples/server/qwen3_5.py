@@ -1,7 +1,7 @@
 """
 Start the server:
-    Dense:  inference_rs serve multimodal -p 1234 -m Qwen/Qwen3.5-27B
-    MoE:    inference_rs serve multimodal -p 1234 -m Qwen/Qwen3.5-35B-A3B
+    Dense:  inference serve multimodal -p 1234 -m Qwen/Qwen3.5-27B
+    MoE:    inference serve multimodal -p 1234 -m Qwen/Qwen3.5-35B-A3B
 """
 
 from openai import OpenAI

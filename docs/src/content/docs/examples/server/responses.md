@@ -81,4 +81,4 @@ print(resp2.output_text)
 print(resp2.reasoning)
 ```
 
-Source: [`examples/server/responses.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/responses.py)
+Source: [`examples/server/responses.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/responses.py)

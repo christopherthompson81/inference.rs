@@ -200,4 +200,4 @@ for file in response.get("files", []):
     print(f"Downloaded: {output_path}")
 ````
 
-Source: [`examples/server/anthropic_skills.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/anthropic_skills.py)
+Source: [`examples/server/anthropic_skills.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/anthropic_skills.py)

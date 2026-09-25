@@ -87,4 +87,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/cookbook/structured/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/cookbook/structured/main.rs)
+Source: [`inference/examples/cookbook/structured/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/cookbook/structured/main.rs)

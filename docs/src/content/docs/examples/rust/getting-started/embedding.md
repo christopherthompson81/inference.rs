@@ -38,4 +38,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/getting_started/embedding/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/getting_started/embedding/main.rs)
+Source: [`inference/examples/getting_started/embedding/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/getting_started/embedding/main.rs)

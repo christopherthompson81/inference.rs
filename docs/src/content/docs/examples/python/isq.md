@@ -37,4 +37,4 @@ print(res.choices[0].message.content)
 print(res.usage)
 ```
 
-Source: [`examples/python/isq.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/isq.py)
+Source: [`examples/python/isq.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/isq.py)

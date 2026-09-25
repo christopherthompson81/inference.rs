@@ -77,4 +77,4 @@ resp = completion.choices[0].message.content
 print(resp)
 ```
 
-Source: [`examples/server/llama4.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/llama4.py)
+Source: [`examples/server/llama4.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/llama4.py)

@@ -57,4 +57,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/quantization/uqff_multimodal/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/quantization/uqff_multimodal/main.rs)
+Source: [`inference/examples/quantization/uqff_multimodal/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/quantization/uqff_multimodal/main.rs)

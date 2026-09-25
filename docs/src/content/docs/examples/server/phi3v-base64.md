@@ -84,4 +84,4 @@ response = requests.post(f"{BASE_URL}/chat/completions", headers=headers, json=p
 print(response.json())
 ```
 
-Source: [`examples/server/phi3v_base64.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/phi3v_base64.py)
+Source: [`examples/server/phi3v_base64.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/phi3v_base64.py)

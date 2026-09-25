@@ -75,4 +75,4 @@ fn handle_error(err: error::Error) {
 }
 ```
 
-Source: [`inference/examples/advanced/error_handling/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/error_handling/main.rs)
+Source: [`inference/examples/advanced/error_handling/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/error_handling/main.rs)
