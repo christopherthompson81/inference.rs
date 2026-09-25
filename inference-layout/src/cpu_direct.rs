@@ -1,3 +1,6 @@
+// The AVX2 kernels only exist on x86_64; elsewhere `available()` is false and these ops are never built.
+#![cfg_attr(not(target_arch = "x86_64"), allow(dead_code))]
+
 use candle_core::{CpuStorage, CustomOp3, Layout, Result, Shape, Tensor};
 use rayon::prelude::*;
 

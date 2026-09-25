@@ -3,7 +3,7 @@ on:
 
 name: Test suite
 
-# Suppress .cargo/config.toml target-cpu=native: ring asserts baseline aes/sha2 on aarch64-apple-darwin, native in runner VMs drops them
+# Overriding RUSTFLAGS drops .cargo/config.toml target-cpu=native, which breaks ring on runner VMs
 env:
   RUSTFLAGS: ""
 
@@ -14,17 +14,9 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macOS-latest]
-        rust: [stable]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: ${{ matrix.rust }}
-          override: true
-      - uses: actions-rs/cargo@v1
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test -p inference-core -p inference-quant -p inference-vision
         env:
           TESTS_HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        with:
-          command: test
-          args: -p inference-core -p inference-quant -p inference-vision
