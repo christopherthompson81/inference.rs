@@ -197,6 +197,23 @@ mod paged {
     }
 
     #[tokio::test]
+    async fn isq_q8_0_keeps_ocr_text() -> anyhow::Result<()> {
+        skip_unless_model!("ISQ Q8_0");
+        let model = MultimodalModelBuilder::new(model_dir().expect("checked above"))
+            .with_dtype(ModelDType::BF16)
+            .with_isq(inference::IsqType::Q8_0)
+            .build()
+            .await?;
+        for (name, prompt, golden) in &TEXT_GOLDENS[..3] {
+            let resp = model
+                .send_chat_request(image_request(vec![fixture(name)?], prompt, MAX_LEN))
+                .await?;
+            assert_eq!(text(&resp), *golden, "{name}");
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn mixed_text_and_image_batch_makes_progress() -> anyhow::Result<()> {
         skip_unless_model!("paged mixed batch");
         let model = build(true).await?;
