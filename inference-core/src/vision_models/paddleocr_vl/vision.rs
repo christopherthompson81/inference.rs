@@ -1,16 +1,5 @@
-//! SigLIP/NaViT native-resolution vision tower ported to candle.
-//!
-//! Faithful to the native transformers 5.13 `PaddleOCR*` vision classes on the VLM inference
-//! path (`interpolate_pos_encoding=True, use_rope=True, return_pooler_output=False,
-//! window_size=-1`). f32/CPU for parity.
-//!
-//! Two position signals are BOTH applied: (1) a learned 27x27 position table, bilinearly
-//! interpolated to the native grid and ADDED pre-encoder; (2) 2D axial RoPE inside every
-//! attention layer. The pooling `head.*` is vestigial and not loaded.
-//!
-//! Batch/packing: one layout crop = one image = K=1, so patches are a single `[N, hidden]`
-//! sequence with full (non-causal) attention. Multi-image block-diagonal masking via
-//! `cu_seqlens` is deferred, not exercised by the OCR path.
+//! SigLIP/NaViT vision tower (transformers `PaddleOCR*`, interpolate_pos_encoding + use_rope path).
+//! Uses both an interpolated learned pos table and 2D axial RoPE; the pooling `head.*` is unused.
 
 use super::config::VisionConfig;
 use crate::attention::{AttentionMask, SdpaParams};
@@ -21,7 +10,6 @@ use candle_core::{Device, Result, Tensor, D};
 use candle_nn::{LayerNorm, Linear, Module};
 use inference_quant::ShardedVarBuilder;
 
-/// `rotate_half` (neox): split the last dim in half, return `cat(-x2, x1)`. Same as text.rs.
 fn rotate_half(x: &Tensor) -> Result<Tensor> {
     let hd = x.dim(D::Minus1)?;
     let x1 = x.narrow(D::Minus1, 0, hd / 2)?;
@@ -29,19 +17,13 @@ fn rotate_half(x: &Tensor) -> Result<Tensor> {
     Tensor::cat(&[&x2.neg()?, &x1], D::Minus1)
 }
 
-/// Apply rope to `x` `[heads, seq, head_dim]` with `cos`/`sin` `[seq, head_dim]` (broadcast heads).
 fn apply_rope(x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
-    let cos = cos.unsqueeze(0)?; // [1, seq, head_dim]
+    let cos = cos.unsqueeze(0)?;
     let sin = sin.unsqueeze(0)?;
     x.broadcast_mul(&cos)? + rotate_half(x)?.broadcast_mul(&sin)?
 }
 
-/// 2D axial RoPE cos/sin tables `[N=h*w, head_dim]` (`apply_rotary_pos_emb_vision`).
-///
-/// `SigLIPRotaryEmbedding(dim=head_dim/2, theta=rope_theta)` -> 18 inv-freqs over `arange(0,36,2)/36`.
-/// Per patch (t=1 so within-frame index = flat index): `h_id=j//w`, `w_id=j%w`; the low half of the
-/// rope block gets the height freqs, the high half the width freqs; the block is then repeated to
-/// fill head_dim (neox), so dim `d` pairs with `d + head_dim/2` and shares the same angle.
+// `apply_rotary_pos_emb_vision`: height freqs then width freqs, repeated neox-style to fill head_dim.
 fn vision_rope(
     h: usize,
     w: usize,
@@ -49,8 +31,8 @@ fn vision_rope(
     theta: f64,
     dev: &Device,
 ) -> Result<(Tensor, Tensor)> {
-    let rope_dim = head_dim / 2; // 36
-    let half = rope_dim / 2; // 18 freqs (height block || width block)
+    let rope_dim = head_dim / 2;
+    let half = rope_dim / 2;
     let inv_freq: Vec<f32> = (0..half)
         .map(|k| 1f32 / (theta as f32).powf((2 * k) as f32 / rope_dim as f32))
         .collect();
@@ -61,11 +43,9 @@ fn vision_rope(
         let h_id = (j / w) as f32;
         let w_id = (j % w) as f32;
         for k in 0..half {
-            // freqs36[k] = height freq; freqs36[half+k] = width freq.
             let ah = h_id * inv_freq[k];
             let aw = w_id * inv_freq[k];
             let base = j * head_dim;
-            // low block [0..rope_dim) and its neox mirror [rope_dim..head_dim) share the angle.
             cos[base + k] = ah.cos();
             cos[base + half + k] = aw.cos();
             cos[base + rope_dim + k] = ah.cos();
@@ -82,12 +62,10 @@ fn vision_rope(
     ))
 }
 
-/// Patch embed: `Conv2d(3->hidden, k=patch, s=patch, valid)`. Because kernel==stride==patch and the
-/// input is already patchified `[N, 3, patch, patch]`, the conv is exactly a per-patch flatten
-/// (channel-outer, row-major) + matmul with the weight reshaped to `[hidden, 3*patch*patch]`.
+// kernel == stride == patch on pre-patchified input, so the conv is exactly flatten + matmul.
 struct PatchEmbed {
     weight: Tensor, // [hidden, 3*patch*patch]
-    bias: Tensor,   // [hidden]
+    bias: Tensor,
 }
 
 impl PatchEmbed {
@@ -108,17 +86,15 @@ impl PatchEmbed {
         })
     }
 
-    /// `pixel_values`: `[N, 3, patch, patch]` -> `[N, hidden]`.
     fn forward(&self, pv: &Tensor) -> Result<Tensor> {
         let n = pv.dim(0)?;
         let flat = pv.dim(1)? * pv.dim(2)? * pv.dim(3)?;
-        // pixel_values are f32 from preprocess; cast to the weight dtype (bf16 on the GPU path).
+        // preprocess yields f32 but the weights may be bf16.
         let x = pv.reshape((n, flat))?.to_dtype(self.weight.dtype())?;
         x.matmul(&self.weight.t()?)?.broadcast_add(&self.bias)
     }
 }
 
-/// Non-causal 16-head attention with 2D axial RoPE, biased q/k/v/out. `out_proj` name (not `o_proj`).
 struct VisionAttention {
     q_proj: Linear,
     k_proj: Linear,
@@ -143,7 +119,6 @@ impl VisionAttention {
         })
     }
 
-    /// `x`: `[N, hidden]`; `cos`/`sin`: `[N, head_dim]`. Full (non-causal, single-image) attention.
     fn forward(&self, x: &Tensor, cos: &Tensor, sin: &Tensor) -> Result<Tensor> {
         let n = x.dim(0)?;
         let hd = self.head_dim;
@@ -154,12 +129,9 @@ impl VisionAttention {
         };
         let q = apply_rope(&reshape(self.q_proj.forward(x)?)?, cos, sin)?;
         let k = apply_rope(&reshape(self.k_proj.forward(x)?)?, cos, sin)?;
-        let v = reshape(self.v_proj.forward(x)?)?; // [heads, N, hd]
+        let v = reshape(self.v_proj.forward(x)?)?;
 
-        // K=1 single-image path: full non-causal attention (no cu_seqlens mask). Routed through the
-        // engine Sdpa so GPU builds hit the fused/flash kernel and CPU the fused flash path, instead
-        // of materializing the N-by-N score matrix. Bidirectional, so FlashParams carries causal=false.
-        // Multi-image block-diagonal masking is deferred until the packed path is exercised.
+        // One image per call, so full bidirectional attention with no cu_seqlens mask.
         let sdpa_params = SdpaParams {
             n_kv_groups: 1,
             sliding_window: None,
@@ -169,13 +141,13 @@ impl VisionAttention {
         };
         let flash_params = FlashParams::empty(false);
         let ctx = Sdpa.run_attention(
-            &q.unsqueeze(0)?, // [1, heads, N, hd]
+            &q.unsqueeze(0)?,
             &k.unsqueeze(0)?,
             &v.unsqueeze(0)?,
             &AttentionMask::None,
             Some(&flash_params),
             &sdpa_params,
-        )?; // [1, heads, N, hd]
+        )?;
 
         let ctx = ctx
             .squeeze(0)?
@@ -186,7 +158,6 @@ impl VisionAttention {
     }
 }
 
-/// Vision MLP: `fc2(gelu_pytorch_tanh(fc1(x)))`. candle `.gelu()` is the tanh approximation.
 struct VisionMlp {
     fc1: Linear,
     fc2: Linear,
@@ -201,11 +172,10 @@ impl VisionMlp {
     }
 
     fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        self.fc2.forward(&self.fc1.forward(x)?.gelu()?)
+        self.fc2.forward(&self.fc1.forward(x)?.gelu()?) // gelu_pytorch_tanh
     }
 }
 
-/// Pre-norm encoder block: `x += attn(ln1(x)); x += mlp(ln2(x))`. LayerNorms eps 1e-6.
 struct EncoderLayer {
     layer_norm1: LayerNorm,
     self_attn: VisionAttention,
@@ -232,17 +202,15 @@ impl EncoderLayer {
     }
 }
 
-/// The SigLIP/NaViT vision tower: patch embed -> +interp-pos -> 27 pre-norm blocks -> post_layernorm.
 pub struct VisionModel {
     patch_embed: PatchEmbed,
-    position_embedding: Tensor, // [num_positions=729, hidden]
+    position_embedding: Tensor, // [num_positions, hidden]
     layers: Vec<EncoderLayer>,
     post_layernorm: LayerNorm,
     cfg: VisionConfig,
 }
 
 impl VisionModel {
-    /// `vb` is the vision-tower root (`visual.vision_model.*`).
     pub fn load(vb: ShardedVarBuilder, cfg: &VisionConfig) -> Result<Self> {
         let emb = vb.pp("embeddings");
         let patch_embed = PatchEmbed::load(emb.pp("patch_embedding"), cfg)?;
@@ -265,35 +233,27 @@ impl VisionModel {
         })
     }
 
-    /// Bilinearly interpolate the learned 27x27 position table to `(h, w)` -> `[h*w, hidden]`.
-    ///
-    /// `align_corners=True`: the native transformers 5.13 tower interpolates via
-    /// `get_vision_bilinear_indices_and_weights`, which samples with `linspace(0, side-1, n)`,
-    /// i.e. align_corners=True, NOT the `F.interpolate(align_corners=False)` of the custom_code
-    /// repo file. align_corners=False is off by ~42 vs the reference; align_corners=True
-    /// reconstructs the reference to <1e-4. candle's CPU bilinear uses the same `scale*o`
-    /// (= linspace) formula for align_corners=True.
+    // align_corners=True matches transformers' linspace sampling, not the custom_code F.interpolate(False).
     fn interpolate_pos(&self, h: usize, w: usize) -> Result<Tensor> {
         let g = self.cfg.pos_grid;
         let d = self.cfg.hidden_size;
         let p = self
             .position_embedding
             .reshape((1, g, g, d))?
-            .permute((0, 3, 1, 2))? // [1, d, 27, 27]
+            .permute((0, 3, 1, 2))?
             .contiguous()?;
-        let up = p.upsample_bilinear2d(h, w, true)?; // [1, d, h, w]
-        up.permute((0, 2, 3, 1))?.contiguous()?.reshape((h * w, d)) // row-major (row, col)
+        let up = p.upsample_bilinear2d(h, w, true)?;
+        up.permute((0, 2, 3, 1))?.contiguous()?.reshape((h * w, d))
     }
 
-    /// `pixel_values`: `[N, 3, patch, patch]`; grid `(t, h, w)` with `N = t*h*w`. Still images: t=1.
     pub fn forward(&self, pixel_values: &Tensor, t: usize, h: usize, w: usize) -> Result<Tensor> {
         assert_eq!(
             t, 1,
             "video temporal grid (t>1) not in scope for the OCR path"
         );
         let dev = pixel_values.device();
-        let patch_embed = self.patch_embed.forward(pixel_values)?; // [N, hidden]
-        let pos = self.interpolate_pos(h, w)?; // [h*w, hidden] == [N, hidden] for t=1
+        let patch_embed = self.patch_embed.forward(pixel_values)?;
+        let pos = self.interpolate_pos(h, w)?;
         let mut x = (&patch_embed + &pos)?;
 
         let (cos, sin) = vision_rope(h, w, self.cfg.head_dim, self.cfg.rope_theta, dev)?;
@@ -305,8 +265,7 @@ impl VisionModel {
         self.post_layernorm.forward(&x)
     }
 
-    /// The whole (non-quantized) SigLIP tower, keyed under `visual.vision_model.*`. The patch-embed
-    /// weight is folded back to the 4D conv shape it was flattened from at load, so it round-trips.
+    // Patch-embed weight goes back to its 4D conv shape so UQFF round-trips.
     pub fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
         let uvb_v = uvb.pp("visual").pp("vision_model");

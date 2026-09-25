@@ -328,9 +328,12 @@ impl MultimodalLoaderType {
                 examples: &[ex!("google/diffusiongemma-26B-A4B-it")],
             },
             Self::PaddleOcrVl => ArchMetadata {
-                families: &["PaddleOCR-VL"],
+                families: &["PaddleOCR-VL 1.5", "PaddleOCR-VL 1.6"],
                 modalities: &[Text, Vision],
-                examples: &[ex!("PaddlePaddle/PaddleOCR-VL-1.5")],
+                examples: &[
+                    ex!("PaddlePaddle/PaddleOCR-VL-1.6", "1.6"),
+                    ex!("PaddlePaddle/PaddleOCR-VL-1.5", "1.5"),
+                ],
             },
         }
     }

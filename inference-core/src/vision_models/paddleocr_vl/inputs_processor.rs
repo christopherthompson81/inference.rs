@@ -1,11 +1,4 @@
-//! Inputs processor: turns a templated prompt + one image into the engine's
-//! `ModelInputs` for PaddleOCR-VL. Single image, no video, no deepstack, batch-1 vision path.
-//!
-//! The chat template emits ONE `<|IMAGE_PLACEHOLDER|>` between
-//! `<|IMAGE_START|>`/`<|IMAGE_END|>`; this processor expands that single placeholder into
-//! `t*h*w / merge^2` copies (161 for the ocr fixture: 1*14*46/4) so the token stream matches the
-//! reference input_ids (`...101305 [IMG x161] 101306...`). pixel_values + grid come from
-//! `preprocess::preprocess_decoded`.
+//! PaddleOCR-VL inputs processor; the template emits one placeholder per image, expanded to t*h*w/merge^2.
 
 use std::{any::Any, sync::Arc};
 
@@ -40,24 +33,18 @@ use crate::{
 use super::preprocess::{preprocess_decoded, MERGE};
 use super::PaddleOcrVlVisionSpecificArgs;
 
-/// The `Processor` (message-level). Registers the special tokens the tokenizer must treat atomically
-/// and hands out the `InputsProcessor`.
 pub struct PaddleOcrVlProcessor;
 
 impl PaddleOcrVlProcessor {
     pub const IMAGE_START: &'static str = "<|IMAGE_START|>";
     pub const IMAGE_PLACEHOLDER: &'static str = "<|IMAGE_PLACEHOLDER|>";
     pub const IMAGE_END: &'static str = "<|IMAGE_END|>";
-    /// Temp marker used while expanding so the `while contains(PLACEHOLDER)` loop can't re-match the
-    /// copies it just inserted; swapped back to the real placeholder before re-encoding.
+    // Stops the expand loop from re-matching the copies it just inserted.
     const EXPAND_MARKER: &'static str = "<|IMAGE_EXPAND_TMP|>";
 }
 
 impl Processor for PaddleOcrVlProcessor {
-    // The checkpoint's template reads content as a list of typed parts (it has to, to find the image
-    // part), but a plain text message arrives as a bare string. `Keep` hands that straight to jinja,
-    // which iterates it per character, so `content["type"]` never matches and the text is dropped:
-    // the model then decodes an empty user turn into byte-fallback garbage. Wrap it first.
+    // The template iterates content as typed parts; a bare string would be iterated per char and dropped.
     fn process(
         &self,
         pipeline: &dyn crate::pipeline::Pipeline,
@@ -120,9 +107,7 @@ fn replace_first_occurrence(text: &str, to_replace: &str, replacement: &str) -> 
     }
 }
 
-/// Expand every `<|IMAGE_PLACEHOLDER|>` in `text` into `product(grid)/merge^2` copies, taking the
-/// i-th grid for the i-th placeholder (single image => one grid, one placeholder). Extracted so the
-/// count arithmetic is unit-testable in isolation.
+// The i-th placeholder takes the i-th grid.
 fn expand_placeholders(text: &str, grids: &[(usize, usize, usize)], merge: usize) -> String {
     let merge_length = merge * merge;
     let mut out = text.to_string();
@@ -143,11 +128,8 @@ fn expand_placeholders(text: &str, grids: &[(usize, usize, usize)], merge: usize
     )
 }
 
-/// Tag the `<|IMAGE_START|>..<|IMAGE_END|>` span with the image content hash for the paged prefix
-/// cache. Every expanded placeholder is the same token id, so without this two requests that share a
-/// prompt and a grid shape hash to identical blocks and the second one reuses the first one's image
-/// KV. It also keeps a cache hit off the middle of the span, which would desync the connector rows
-/// `Merger::forward` scatters (it counts image slots from the start of `input_ids`).
+// Placeholders share one token id, so without the image hash on the span, same-shape images collide in
+// the prefix cache. It also keeps a hit off mid-span, where `Merger::forward` would miscount image slots.
 fn register_image_span(seq: &mut Sequence, ids: &[u32], tokenizer: &Tokenizer) {
     if !seq.mm_features().is_empty() {
         return;
@@ -167,7 +149,6 @@ fn register_image_span(seq: &mut Sequence, ids: &[u32], tokenizer: &Tokenizer) {
     }
 }
 
-/// Every `(t, h, w)` row of a `[n_images, 3]` grid tensor, in message order.
 fn grid_rows(grid: &Tensor) -> Vec<(usize, usize, usize)> {
     grid.to_vec2::<u32>()
         .unwrap()
@@ -208,15 +189,9 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
         let config = other_config.expect("Need a PreProcessorConfig config.");
         let config: &PreProcessorConfig = config.downcast_ref().expect("Downcast failed.");
 
-        // Per row, independently: `grids[row]` is that row's image grid, and `vision_rows` is the
-        // subset whose patches are in this pass's `pixel_values`. `Sequence::has_images` is
-        // window-scoped once mm_features are set, so a decode step or a prompt chunk past the span
-        // keeps the grid but skips the tower. Deciding per row (not `all`) keeps a batch correct
-        // when rows sit at different prefill chunks, or when a text-only request shares the batch.
-        //
-        // A grid is only attached once the row's token window actually holds its image tokens:
-        // get_rope_index emits a position block for every grid it is handed, and the first prompt
-        // chunk stops before the span, so a grid there would emit positions for absent tokens.
+        // Decided per row since rows can sit at different prefill chunks. `has_images` is window-scoped
+        // once mm_features are set, so later chunks keep the grid but skip the tower. A grid is only
+        // attached once the window holds its image tokens, else get_rope_index emits phantom positions.
         let image_pad_id = tokenizer.token_to_id(PaddleOcrVlProcessor::IMAGE_PLACEHOLDER);
         let mut grids: Vec<Vec<(usize, usize, usize)>> = Vec::with_capacity(input_seqs.len());
         let mut hashes: Vec<Vec<u64>> = Vec::with_capacity(input_seqs.len());
@@ -280,8 +255,6 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
             grids.push(row_grids);
             hashes.push(seq.image_hashes().map(<[u64]>::to_vec).unwrap_or_default());
             if is_prompt {
-                // Keep pixel_values as [N_patches, 3, 14, 14] (the shape the parity-verified tower
-                // expects); rows concatenate on dim 0 and the model splits them back by grid.
                 pixel_values_accum.push(pixel_values);
                 vision_rows.push(row);
             }
@@ -289,7 +262,6 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
 
         let pixel_values =
             (!pixel_values_accum.is_empty()).then(|| Tensor::cat(&pixel_values_accum, 0).unwrap());
-        // All-empty means no row carries an image at all: let the model take the text-embed path.
         let image_grid_thw = if grids.iter().all(Vec::is_empty) {
             Vec::new()
         } else {
@@ -340,8 +312,7 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
             .unwrap()
         };
 
-        // The model recomputes mrope positions from the full token history, so input_ids_full is each
-        // row's whole sequence (prompt + generated), not just this pass's window.
+        // mrope positions are recomputed from the full history, not just this pass's window.
         let max_len = input_seqs
             .iter()
             .map(|seq| seq.get_toks().len())
@@ -398,8 +369,6 @@ impl ImagePreProcessor for PaddleOcrVlImageProcessor {
         if images.is_empty() {
             candle_core::bail!("PaddleOCR-VL needs at least one image.");
         }
-        // Patches of every image concatenated on dim 0, with one grid row each, in message order.
-        // The forward splits them back by each grid's t*h*w.
         let mut patches = Vec::with_capacity(images.len());
         let mut grid = Vec::with_capacity(images.len() * 3);
         for img in &images {
@@ -434,7 +403,7 @@ mod tests {
     use crate::paged_attention::block_hash::compute_block_hashes;
     use crate::sequence::clamp_prefix_cache_len_for_mm_features;
 
-    // Reference ocr fixture ids; only their distinctness matters here.
+    // Real tokenizer ids; only their distinctness matters.
     const IMAGE_START_ID: u32 = 101305;
     const IMAGE_PAD_ID: u32 = 101304;
     const IMAGE_END_ID: u32 = 101306;
@@ -449,9 +418,6 @@ mod tests {
         ids
     }
 
-    // Every expanded placeholder is the same token id, so two OCR requests that share a prompt and a
-    // grid shape have byte-identical token streams. Only the span's content hash can tell their paged
-    // blocks apart; without it the second request reuses the first one's image KV.
     #[test]
     fn image_span_separates_prefix_cache_blocks() {
         let ids = expanded_ids(161);
@@ -469,7 +435,7 @@ mod tests {
         let b = compute_block_hashes(&ids, BLOCK, &feats(0xBBBB_BBBB), &[]);
         assert!(!a.is_empty(), "prompt must span at least one full block");
         assert_ne!(a, b, "different images hashed to the same blocks");
-        // Guard: the collision is real without the span, so the assert above is not vacuous.
+        // without the span the streams do collide, so the assert above isn't vacuous
         assert_eq!(
             compute_block_hashes(&ids, BLOCK, &[], &[]),
             compute_block_hashes(&ids, BLOCK, &[], &[])
@@ -499,9 +465,6 @@ mod tests {
         );
     }
 
-    // Two images in one message used to be silently reduced to the first, then panic in
-    // `expand_placeholders` on the second placeholder's missing grid. Each image must get its own
-    // grid row, and the patches must concatenate in message order.
     #[test]
     fn every_image_gets_its_own_grid_row() {
         let call = |images: Vec<DynamicImage>| {
@@ -536,7 +499,7 @@ mod tests {
 
     #[test]
     fn expand_placeholder_count_matches_grid() {
-        // ocr fixture grid (t=1, h=14, w=46) => 1*14*46 / 2^2 = 161 image tokens.
+        // 1*14*46 / 2^2 = 161
         let text = format!(
             "User: {}{}{}OCR:",
             PaddleOcrVlProcessor::IMAGE_START,
@@ -548,7 +511,6 @@ mod tests {
             .matches(PaddleOcrVlProcessor::IMAGE_PLACEHOLDER)
             .count();
         assert_eq!(count, 161);
-        // No temp marker leaks and the surrounding text is intact.
         assert!(!expanded.contains(PaddleOcrVlProcessor::EXPAND_MARKER));
         assert!(expanded.contains(PaddleOcrVlProcessor::IMAGE_START));
         assert!(expanded.contains("OCR:"));

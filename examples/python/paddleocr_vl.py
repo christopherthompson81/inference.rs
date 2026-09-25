@@ -6,7 +6,7 @@ from inference_rs import ChatCompletionRequest, MultimodalArchitecture, Runner, 
 
 runner = Runner(
     which=Which.MultimodalPlain(
-        model_id="PaddlePaddle/PaddleOCR-VL-1.5",
+        model_id="PaddlePaddle/PaddleOCR-VL-1.6",
         arch=MultimodalArchitecture.PaddleOcrVl,
     ),
 )

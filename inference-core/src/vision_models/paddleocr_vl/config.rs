@@ -1,12 +1,8 @@
-//! ERNIE-4.5-0.3B text-model hyperparameters (the LM half of PaddleOCR-VL-1.5).
-//!
-//! Values are hard-wired from the checkpoint config (verified against the native transformers
-//! 5.13 `PaddleOCRTextConfig`): 18 layers, hidden 1024, GQA 16 heads / 2 KV heads x head_dim 128,
-//! SwiGLU intermediate 3072, RMSNorm eps 1e-5, 3D chunked mrope theta=500000 sections [16,24,24].
+//! PaddleOCR-VL config (1.5 and 1.6 share it): ERNIE-4.5-0.3B text + SigLIP/NaViT vision hyperparameters.
 
 use inference_quant::QuantizedConfig;
 
-/// Config for the ERNIE-4.5 dense decoder. `Default` = the shipped PaddleOCR-VL-1.5 values.
+// `Default` is the shipped PaddleOCR-VL-1.5/1.6 checkpoint (transformers `PaddleOCRTextConfig`).
 #[derive(Debug, Clone)]
 pub struct TextConfig {
     pub hidden_size: usize,
@@ -18,7 +14,7 @@ pub struct TextConfig {
     pub vocab_size: usize,
     pub rms_norm_eps: f64,
     pub rope_theta: f64,
-    /// mrope_section (temporal, height, width); sum = head_dim/2 = 64.
+    // (temporal, height, width); sums to head_dim/2.
     pub mrope_section: [usize; 3],
     pub quantization_config: Option<QuantizedConfig>,
 }
@@ -41,11 +37,7 @@ impl Default for TextConfig {
     }
 }
 
-/// Config for the SigLIP/NaViT vision tower (the checkpoint config's `vision_config`).
-///
-/// `head_dim` and `rope_theta` are `null` in the JSON: head_dim = hidden/num_heads = 72; the
-/// SigLIP 2D axial rope uses theta=10000. `num_positions = pos_grid^2` is the
-/// learned 27x27 table (image_size 384 / patch 14 = 27), bilinearly interpolated to native grids.
+// Learned pos table is pos_grid^2 (27x27), bilinearly interpolated to each native grid.
 #[derive(Debug, Clone)]
 pub struct VisionConfig {
     pub hidden_size: usize,
@@ -55,9 +47,7 @@ pub struct VisionConfig {
     pub intermediate_size: usize,
     pub patch_size: usize,
     pub num_channels: usize,
-    /// side of the learned position table (image_size / patch_size = 27).
     pub pos_grid: usize,
-    /// number of learned position rows (pos_grid^2, 729).
     pub num_positions: usize,
     pub layer_norm_eps: f64,
     pub rope_theta: f64,
@@ -83,11 +73,6 @@ impl Default for VisionConfig {
     }
 }
 
-// HF config.json deserialization (inference-core loader path only, not in the port/ mirror).
-// The hand-wired `TextConfig`/`VisionConfig` above are what the numerical kernels consume; `Config`
-// below parses the real checkpoint config and produces those verified structs via `text_config()` /
-// `vision_config()`. Loader keys the model by `architectures[0]`, not `model_type`.
-
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct MRopeScaling {
     pub mrope_section: Vec<usize>,
@@ -106,9 +91,7 @@ pub struct VisionConfigRaw {
     pub spatial_merge_size: usize,
 }
 
-/// Full HF `config.json` for PaddleOCR-VL-1.5: the ERNIE-4.5 LM fields sit flat at the top level
-/// (the native custom-code `__post_init__` parses this flat layout) with a nested `vision_config`
-/// for the SigLIP tower, unlike qwen3_vl, which nests both under `text_config`/`vision_config`.
+// LM fields sit flat at the top level with only `vision_config` nested, unlike qwen3_vl.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Config {
     pub hidden_size: usize,
@@ -128,7 +111,7 @@ pub struct Config {
     pub quantization_config: Option<QuantizedConfig>,
 }
 
-/// theta for the SigLIP 2D axial rope: `null` in config.json, fixed by the reference.
+// SigLIP 2D axial rope theta; `null` in config.json, fixed by the reference.
 const VISION_ROPE_THETA: f64 = 10000.0;
 
 impl Config {
@@ -173,8 +156,6 @@ impl Config {
 mod tests {
     use super::*;
 
-    // The serde `Config` must read the real checkpoint config.json and reproduce exactly the
-    // parity-verified constants the numerical kernels were validated against.
     #[test]
     fn config_json_matches_verified_constants() {
         let json = include_str!("reference_config.json");

@@ -2,7 +2,7 @@
 PaddleOCR-VL document OCR through the OpenAI-compatible HTTP API.
 
 Start the server:
-    inference serve -p 1234 -m PaddlePaddle/PaddleOCR-VL-1.5
+    inference serve -p 1234 -m PaddlePaddle/PaddleOCR-VL-1.6
 """
 
 from openai import OpenAI

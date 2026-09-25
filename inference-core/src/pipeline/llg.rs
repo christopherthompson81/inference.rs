@@ -28,9 +28,7 @@ pub fn build_llg_factory(mut tokenizer: Tokenizer) -> Result<Arc<ParserFactory>>
         .map(|(id, at)| (id, at.content))
         .collect();
 
-    // toktrie_hf_tokenizers marks every added-vocab token special; honor the tokenizer's own
-    // `special` flag so non-special added tokens (e.g. PaddleOCR-VL OTSL <fcel>/<nl>) decode as
-    // content, matching transformers decode(skip_special_tokens=True) instead of being dropped.
+    // toktrie marks every added token special; unmark non-special ones (e.g. OTSL <fcel>) like transformers does.
     let added_nonspecial: Vec<u32> = tokenizer
         .get_added_tokens_decoder()
         .into_iter()
@@ -99,9 +97,7 @@ pub fn constraint_from_llg_grammar(
 mod tests {
     use super::*;
 
-    // Mirrors build_llg_factory's toktrie assembly; `apply_fix=false` reproduces the pre-fix
-    // behavior (every added-vocab token stays special-marked), `true` honors the tokenizer's own
-    // `special` flag. Returns the trie so decode_ext can be asserted directly.
+    // Mirrors build_llg_factory; `apply_fix=false` leaves every added token special-marked, as toktrie does.
     fn build_trie(mut tokenizer: Tokenizer, apply_fix: bool) -> toktrie::TokTrie {
         let decoder = match tokenizer.get_decoder() {
             Some(DecoderWrapper::Sequence(sequence)) if sequence.get_decoders().len() == 1 => {
@@ -158,8 +154,7 @@ mod tests {
         String::from_utf8_lossy(&trie.decode_ext(&[id], false)).into_owned()
     }
 
-    // Env-gated on local tokenizer files (skips in CI). Proves: non-special added tokens now decode
-    // as content, while special=true tokens (EOS, chat delimiters, image) stay dropped as before.
+    // Env-gated on local tokenizer files, so it skips in CI.
     #[test]
     fn honors_tokenizer_special_flag() {
         if let Ok(p) = std::env::var("REGRESSION_PADDLE_TOK") {
@@ -228,9 +223,7 @@ mod tests {
         }
     }
 
-    // Self-contained (runs in CI, no external files): a byte-fallback tokenizer with a special=false
-    // <x> and a special=true <s>. Both are <...>-shaped, so from_tokenizer's heuristic marks both;
-    // pre-fix drops <x>, the fix keeps it as content while <s> stays dropped.
+    // Both <x> (special=false) and <s> (special=true) are <...>-shaped, so from_tokenizer marks both.
     #[test]
     fn honors_special_flag_inline_fixture() {
         use tokenizers::{

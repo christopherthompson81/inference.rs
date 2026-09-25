@@ -6109,8 +6109,7 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
 
 // ======================== PaddleOCR-VL Loader
 
-/// [`MultimodalLoader`] for a PaddleOCR-VL-1.5 model (SigLIP/NaViT tower + `mlp_AR` connector +
-/// ERNIE-4.5-0.3B LM).
+/// [`MultimodalLoader`] for a PaddleOCR-VL (1.5, 1.6) model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
 pub struct PaddleOcrVlLoader;
@@ -6118,8 +6117,7 @@ pub struct PaddleOcrVlLoader;
 pub struct PaddleOcrVlPrefixer;
 
 impl MultimodalPromptPrefixer for PaddleOcrVlPrefixer {
-    // No-op: with MessagesAction::Keep the chat template emits the image tokens itself, and the
-    // inputs processor expands the single placeholder into the per-patch stream.
+    // No-op: the chat template emits the image tokens itself (MessagesAction::Keep).
 }
 
 impl MultimodalModelLoader for PaddleOcrVlLoader {
@@ -6158,9 +6156,7 @@ impl MultimodalModelLoader for PaddleOcrVlLoader {
         true
     }
     fn supports_prefix_cacher(&self, _config: &str) -> bool {
-        // Safe because the inputs processor registers the image span as an mm feature, so a block
-        // hash covers the image content and not just the (identical for every image) placeholder
-        // token ids.
+        // Safe only because the inputs processor hashes the image span into its blocks.
         true
     }
     fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
@@ -6185,12 +6181,12 @@ impl IsqModelLoader for PaddleOcrVlLoader {
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
         Ok(vec![
             Regex::new(r"lm_head\.(weight|bias)$")?,
-            // Attention (ERNIE LM keys are `model.layers.N.*`, no `language_model` infix, no bias).
+            // Attention (ERNIE keys have no `language_model` infix)
             Regex::new(r"model\.layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$")?,
             Regex::new(r"model\.layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$")?,
             Regex::new(r"model\.layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$")?,
             Regex::new(r"model\.layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$")?,
-            // MLP (SwiGLU)
+            // MLP
             Regex::new(r"model\.layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$")?,
             Regex::new(r"model\.layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$")?,
             Regex::new(r"model\.layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$")?,
@@ -6221,7 +6217,7 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
         let tcfg = cfg.text_config();
         let vcfg = cfg.vision_config();
 
-        // grid_t=1 (images); after the connector's 2x2 spatial merge each axis is /patch/merge.
+        // Post spatial merge.
         let img_seq_len = {
             let grid_t = 1;
             let grid_h = (max_image_shape.0 / vcfg.patch_size) / vcfg.spatial_merge_size;
@@ -6285,7 +6281,7 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
 
         let text_elems = {
             let embed_tokens = tcfg.hidden_size * tcfg.vocab_size / weight_pack_factor;
-            // Untied lm_head (tie_word_embeddings=false), so a separate matrix.
+            // tie_word_embeddings=false
             let lm_head = tcfg.hidden_size * tcfg.vocab_size / weight_pack_factor;
             let norm = tcfg.hidden_size;
             embed_tokens + lm_head + norm
@@ -6300,7 +6296,6 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
         };
 
         let patch_embed = {
-            // Conv2d(num_channels -> hidden, k=s=patch): weight + bias.
             let weight = vcfg.num_channels * vcfg.hidden_size * vcfg.patch_size * vcfg.patch_size;
             weight + vcfg.hidden_size
         };
@@ -6310,7 +6305,6 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
         let encoder_layer = {
             let norm1 = vcfg.hidden_size + vcfg.hidden_size;
             let norm2 = vcfg.hidden_size + vcfg.hidden_size;
-            // q/k/v/out each hidden->hidden with bias.
             let attn = 4 * (vcfg.hidden_size * vcfg.hidden_size + vcfg.hidden_size);
             let fc1 = vcfg.hidden_size * vcfg.intermediate_size + vcfg.intermediate_size;
             let fc2 = vcfg.intermediate_size * vcfg.hidden_size + vcfg.hidden_size;
@@ -6343,7 +6337,7 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
             let size_in = tcfg.hidden_size;
             let size_q = tcfg.head_dim * tcfg.num_attention_heads;
             let size_kv = tcfg.head_dim * tcfg.num_key_value_heads;
-            // ERNIE LM projections are bias-free (only `.weight` keys in the checkpoint).
+            // ERNIE projections are bias-free.
             let q_proj = size_in * size_q / weight_pack_factor;
             let k_proj = size_in * size_kv / weight_pack_factor;
             let v_proj = size_in * size_kv / weight_pack_factor;
@@ -11426,7 +11420,6 @@ mod tests {
         let loader = PaddleOcrVlLoader;
         let cfg = paddleocr_vl_config_json();
 
-        // Config parses and the LM layer count / attention shape come through unchanged.
         assert_eq!(loader.num_layers(&cfg)?, 18);
         let meta = loader.model_config(&cfg)?;
         assert_eq!(meta.num_layers(), 18);
@@ -11434,12 +11427,9 @@ mod tests {
         assert_eq!(meta.num_kv_heads(), 2);
         assert_eq!(meta.k_head_dim(), 128);
 
-        // Paged attention and the prefix cacher are both advertised; the latter is only safe
-        // because the inputs processor registers the image span for block hashing.
         assert!(loader.supports_paged_attention(&cfg));
         assert!(loader.supports_prefix_cacher(&cfg));
 
-        // ISQ targets the ERNIE LM `model.layers.N.*` projections + `lm_head`, not the norms.
         let regexes = loader.isq_layer_regexes(&cfg)?;
         assert_eq!(regexes.len(), 8);
         assert!(matches_any(
