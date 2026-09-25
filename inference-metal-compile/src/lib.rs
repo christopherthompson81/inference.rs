@@ -152,8 +152,8 @@ macro_rules! metal_source_set {
 
 pub fn compile_metallibs(config: &MetalSourceSet) -> Result<(), String> {
     emit_rerun_directives(config);
+    // Explicit opt-out: empty metallibs make the kernels fall back to runtime source compilation.
     if should_skip_precompile() {
-        println!("cargo:warning=Skipping Metal kernel precompilation ({PRECOMPILE_ENV}=0)");
         write_dummy_metallibs(config)?;
         return Ok(());
     }

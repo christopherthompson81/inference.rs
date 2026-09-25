@@ -1,0 +1,53 @@
+name: Metal shaders
+
+# Shader compile results only change with the shader sources, their build config, or the runner's Xcode (weekly run)
+on:
+  pull_request:
+    branches:
+      - master
+    paths:
+      - '**/*.metal'
+      - 'inference-metal-compile/**'
+      - 'inference-quant/build.rs'
+      - 'inference-quant/src/metal_kernels/source_set.rs'
+      - 'inference-paged-attn/build.rs'
+      - 'inference-paged-attn/src/metal/kernels/source_set.rs'
+      - 'inference-core/src/metal/gdn.rs'
+      - 'inference-core/src/metal/ssm.rs'
+      - '.github/workflows/metal_shaders.yml'
+  push:
+    branches:
+      - master
+    paths:
+      - '**/*.metal'
+      - 'inference-metal-compile/**'
+      - 'inference-quant/build.rs'
+      - 'inference-quant/src/metal_kernels/source_set.rs'
+      - 'inference-paged-attn/build.rs'
+      - 'inference-paged-attn/src/metal/kernels/source_set.rs'
+      - 'inference-core/src/metal/gdn.rs'
+      - 'inference-core/src/metal/ssm.rs'
+      - '.github/workflows/metal_shaders.yml'
+  schedule:
+      - cron: '0 0 * * 1'
+  workflow_dispatch:
+
+env:
+  RUSTFLAGS: "-D warnings"
+
+jobs:
+  shaders:
+    name: Metal shaders
+    runs-on: macOS-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      # build.rs precompiles the quant and paged-attn metallibs for macOS, iOS and tvOS, as release builds do
+      - run: cargo check -p inference-quant -p inference-paged-attn --features metal
+      # core compiles these from source at runtime; match its MTLCompileOptions (gdn: Metal 3.1, both: fast math)
+      - run: |
+          xcrun -sdk macosx metal -std=metal3.1 -ffast-math -c inference-core/src/metal/kernels/gdn.metal -o "$RUNNER_TEMP/gdn.air"
+          xcrun -sdk macosx metal -ffast-math -c inference-core/src/metal/kernels/ssm.metal -o "$RUNNER_TEMP/ssm.air"

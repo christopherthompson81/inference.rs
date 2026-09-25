@@ -41,10 +41,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
-      # iOS/tvOS metallibs triple the shader work; macOS alone still catches shader compile errors
+      # Shaders are compiled by metal_shaders.yml, only when shader sources or their build config change
       - run: cargo check --workspace --features metal
         env:
-          INFERENCE_RS_METAL_PLATFORMS: macos
+          INFERENCE_RS_METAL_PRECOMPILE: "0"
 
   fmt:
     name: Rustfmt
