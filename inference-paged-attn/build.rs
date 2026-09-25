@@ -141,6 +141,7 @@ fn main() -> Result<()> {
 
     let mut builder = cudaforge::KernelBuilder::new()
         .source_glob("src/cuda/*.cu")
+        .source_glob("src/cuda/flashinfer_decode/*.cu")
         .watch(["src/cuda"])
         .out_dir(&kernel_build_dir)
         .arg("-std=c++17")

@@ -105,6 +105,7 @@ fn main() {
 
         let mut builder = cudaforge::KernelBuilder::new()
             .source_glob("src/cuda/*.cu")
+            .source_glob("src/cuda/gdn_chunked/*.cu")
             .watch(["src/cuda"])
             .out_dir(&build_dir)
             .arg("-std=c++17")
