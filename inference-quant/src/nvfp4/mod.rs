@@ -46,7 +46,7 @@ pub struct Nvfp4LayerParts {
     pub scales: Tensor,
     /// F32 dequantization multipliers [..., N], expanded from tensor or fused-group scales.
     pub global_scales: Tensor,
-    /// F32 dequantization multiplier: a scalar for dense layers or [E] for experts, present only for W4A4.
+    /// F32 dequantization multiplier: a scalar for dense layers or `[E]` for experts, present only for W4A4.
     pub input_scale: Option<Tensor>,
     pub activation: Nvfp4ActivationMode,
     pub bias: Option<Tensor>,

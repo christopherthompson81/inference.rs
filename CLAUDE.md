@@ -40,6 +40,9 @@ cargo fmt --all -- --check
 
 # Run clippy
 cargo clippy --workspace --tests --examples -- -D warnings
+
+# Slow checks that are not run per PR (docs by default; --tests adds the core test suite)
+scripts/local_ci.sh [--docs] [--tests]
 ```
 
 ### Running Models

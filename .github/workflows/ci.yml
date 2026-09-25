@@ -15,6 +15,7 @@ name: Continuous integration
 env:
   RUSTFLAGS: ""
 
+# Test Suite runs from tests.yml on demand, and Docs runs locally via scripts/local_ci.sh; both are too slow per PR
 jobs:
   check:
     name: Check
@@ -49,27 +50,6 @@ jobs:
           command: check
           args: --workspace --features metal
 
-  test:
-    name: Test Suite
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macOS-latest]
-        rust: [stable]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: ${{ matrix.rust }}
-          override: true
-      - uses: actions-rs/cargo@v1
-        env:
-          TESTS_HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        with:
-          command: test
-          args: -p inference-core -p inference-quant -p inference-vision
-
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
@@ -101,21 +81,6 @@ jobs:
         with:
           command: clippy
           args: --workspace --tests --examples -- -D warnings
-
-  docs:
-    name: Docs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: doc
-          args: --workspace
 
   typos:
     name: Typos
