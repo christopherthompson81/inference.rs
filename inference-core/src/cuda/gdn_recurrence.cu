@@ -239,22 +239,6 @@ void launch_gated_delta_rule_recurrence(
   }
 }
 
-template void launch_gated_delta_rule_recurrence<__half>(
-    const float *q, const float *k, const float *v, const float *g,
-    const float *beta, __half *state, float *output, int bh, int seq_len,
-    int k_dim, int v_dim, const int32_t *slot_indices, int num_heads,
-    cudaStream_t stream);
-template void launch_gated_delta_rule_recurrence<__nv_bfloat16>(
-    const float *q, const float *k, const float *v, const float *g,
-    const float *beta, __nv_bfloat16 *state, float *output, int bh, int seq_len,
-    int k_dim, int v_dim, const int32_t *slot_indices, int num_heads,
-    cudaStream_t stream);
-template void launch_gated_delta_rule_recurrence<float>(
-    const float *q, const float *k, const float *v, const float *g,
-    const float *beta, float *state, float *output, int bh, int seq_len,
-    int k_dim, int v_dim, const int32_t *slot_indices, int num_heads,
-    cudaStream_t stream);
-
 extern "C" void gated_delta_rule_recurrence(
     const float *q, const float *k, const float *v, const float *g,
     const float *beta, void *state, float *output, int bh, int seq_len,
@@ -645,9 +629,9 @@ void launch_chunked_gated_delta_rule_recurrence(
     int k_dim, int v_dim, const int32_t *slot_indices, int num_heads,
     cudaStream_t stream) {
   if (k_dim == 128) {
-    constexpr int BT = 64;
+    constexpr int BT = GDN_CHUNKED_BT;
     constexpr int BK = 128;
-    constexpr int BV = 64;
+    constexpr int BV = GDN_CHUNKED_BV;
     // Shared memory: BT*BK + BT*BT + BT + BT + BK floats
     size_t smem = (BT * BK + BT * BT + 2 * BT + BK) * sizeof(float);
 
@@ -663,9 +647,9 @@ void launch_chunked_gated_delta_rule_recurrence(
                                           seq_len, v_dim, slot_indices,
                                           num_heads);
   } else if (k_dim == 64) {
-    constexpr int BT = 64;
+    constexpr int BT = GDN_CHUNKED_BT;
     constexpr int BK = 64;
-    constexpr int BV = 64;
+    constexpr int BV = GDN_CHUNKED_BV;
     size_t smem = (BT * BK + BT * BT + 2 * BT + BK) * sizeof(float);
 
     auto kernel =
@@ -716,9 +700,9 @@ cudaError_t launch_vmajor_chunked_gated_delta_rule_recurrence(
     return cudaErrorInvalidValue;
   }
 
-  constexpr int BT = 64;
+  constexpr int BT = GDN_CHUNKED_BT;
   constexpr int BK = 128;
-  constexpr int BV = 64;
+  constexpr int BV = GDN_CHUNKED_BV;
   const size_t smem = (BT * BK + BT * BT + 2 * BT + BK) * sizeof(float);
   auto kernel = gdn_chunked_kernel<StateT, BT, BK, BV, true>();
   const cudaError_t attribute_status = cudaFuncSetAttribute(

@@ -215,4 +215,4 @@ GdnChunkedKernel<StateT> gdn_chunked_kernel() {
 
 #define GDN_CHUNKED_INSTANTIATE(STATE_T, BK, VALUE_MAJOR)                      \
   template GdnChunkedKernel<STATE_T>                                           \
-  gdn_chunked_kernel<STATE_T, 64, BK, 64, VALUE_MAJOR>();
+  gdn_chunked_kernel<STATE_T, GDN_CHUNKED_BT, BK, GDN_CHUNKED_BV, VALUE_MAJOR>();

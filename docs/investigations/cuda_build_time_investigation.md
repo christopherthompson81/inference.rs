@@ -7,7 +7,9 @@ Machine: i7-10700K (8C/16T), 125 GB RAM, RTX sm_86, CUDA 12.8. All timings in th
 the real nvcc (no ccache), with the same flags cudaforge passes (`-gencode=arch=compute_86,code=sm_86 -c
 --default-stream per-thread -std=c++17 -O3 -U__CUDA_NO_HALF*... --expt-relaxed-constexpr --expt-extended-lambda
 --use_fast_math -Xcompiler -fPIC`, plus `-DENABLE_FP8 -I src/cuda` for paged-attn). The wrapper that runs them is
-`/usr/bin/time -f "wall=%es maxrss=%MKB" nvcc ...`.
+`/usr/bin/time -f "wall=%es maxrss=%MKB" nvcc ...`. The helper scripts named below (`nvtime.sh`, `split_gdn.py`,
+`sass_compare.py`, `sampler.sh`) were local scratch tools and are not in the repo. Each one's method is described
+in the run that uses it.
 
 ## Run 1 - 2026-09-24 22:35
 
@@ -15,7 +17,8 @@ Question: what are the standalone compile times of the two files, as a baseline 
 
 Command: both files compiled concurrently (2 of 16 threads busy).
 
-Finding: (pending, see Run 4)
+Finding: gdn.cu took 1584 s (26.4 min) at 1.46 GB, with ~10 other compiles running (Run 7). The FlashInfer
+baseline was stopped at 28 min in that setting, and was re-run for Run 9: 3821 s (63.7 min) at 14.9 GB.
 
 ## Run 2 - 2026-09-24 22:37
 
@@ -47,8 +50,9 @@ Command: a TU with `INFERENCE_FLASHINFER_DECODE_INSTANTIATE(__half, __half, HD)`
 soft cap) for HD = 64 and HD = 512, compiled concurrently.
 
 Finding: hd64 23.2 s, hd512 30.2 s, both with a 435 MB peak RSS. The original file has 24 (dtype pair, head dim)
-combinations, so one combination costs a small fraction of the ~37 min the whole file takes. The whole-file cost is
-superlinear in the instantiation count (ptxas at 14 GB).
+combinations, and the issue measured ~37 min of cicc+ptxas for the whole file (Run 9 later measured 63.7 min
+standalone). One f16 combination is a small fraction of that, so either the cost is superlinear or some pairs are
+much heavier than f16 (Run 6: the fp8 ones are).
 
 Implication: a split by head dim (6 dtype pairs x 4 variants per TU) is worth timing before going finer.
 
@@ -56,8 +60,9 @@ Implication: a split by head dim (6 dtype pairs x 4 variants per TU) is worth ti
 
 Question: after fixing the splitter (families assigned by first code line; spec fused + spec recurrence merged into one
 TU; `launch_gated_delta_rule_recurrence` declared in the header and explicitly instantiated for `__half`,
-`__nv_bfloat16` and `float` in its own TU, because the warp and chunked launchers fall back to it), where does the
-gdn cost sit?
+`__nv_bfloat16` and `float` in its own TU, because the warp and chunked launchers fall back to it when those are
+split apart), where does the gdn cost sit? In the final layout, all three launchers share `gdn_recurrence.cu`, so
+that declaration was dropped in review.
 
 Finding (8 families, all compiled concurrently):
 
@@ -190,3 +195,15 @@ code, makes it redundant for this change.
 
 Follow-ups outside this change: the fp8 decode TUs now form the tail (~5 min of ptxas), and the chunked recurrence's
 full BK unroll makes it the most expensive kernel in the tree to compile. Both are kernel-design questions.
+
+## Review notes - 2026-09-25
+
+- Instantiations shared between instance TUs, such as FlashInfer's merge-states kernels (they depend only on DType)
+  in both `bf16.cu` and each `bf16_fp8_hd*.cu`, appear as weak host stubs in several objects. The linker keeps one,
+  and each TU registers its own identical copy of the device code. This is the case nvcc's
+  `-static-global-template-stub` addresses. It is harmless here because device code and flags are identical in every
+  TU, which the SASS compare confirms.
+- The chunked tile sizes (`GDN_CHUNKED_BT`/`GDN_CHUNKED_BV`) are hoisted, so the launchers and instantiations cannot
+  drift. A mismatch would only fail at link time.
+- `inference-paged-attn/build.rs`'s per-file `rerun-if-changed` list was removed. It was already incomplete, and
+  cudaforge's `.watch(["src/cuda"])` emits `rerun-if-changed=src/cuda` for the whole tree.

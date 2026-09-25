@@ -100,36 +100,6 @@ fn main() -> Result<()> {
 
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=CUDA_NVCC_FLAGS");
-    println!("cargo:rerun-if-changed=src/cuda/pagedattention.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/copy_blocks_kernel.cu");
-    println!("cargo:rerun-if-changed=src/cuda/reshape_and_cache_kernel.cu");
-    println!("cargo:rerun-if-changed=src/cuda/concat_and_cache_mla_kernel.cu");
-    println!("cargo:rerun-if-changed=src/cuda/gather_mla_cache_kernel.cu");
-    println!("cargo:rerun-if-changed=src/cuda/gather_kv_cache_kernel.cu");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer_decode.cu");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer_mla_decode.cu");
-    println!("cargo:rerun-if-changed=src/cuda/update_kvscales.cu");
-    println!("cargo:rerun-if-changed=src/cuda/flash_attn_sinks.cu");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/cp_async.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/exception.h");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/fastdiv.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/fp16.h");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/frag_layout_swizzle.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/layout.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/math.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/mma.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/page.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/permuted_smem.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/pos_enc.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/utils.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/vec_dtypes.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/attention/cascade.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/attention/decode.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/attention/default_decode_params.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/attention/mask.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/attention/state.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/attention/variant_helper.cuh");
-    println!("cargo:rerun-if-changed=src/cuda/flashinfer/attention/variants.cuh");
 
     let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let kernel_build_dir = cuda_build_dir(&out_dir, "kernels");

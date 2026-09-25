@@ -124,13 +124,6 @@ __device__ __forceinline__ size_t gdn_state_row(const int32_t *__restrict__ slot
   return slot * num_heads + h;
 }
 
-template <typename StateT>
-void launch_gated_delta_rule_recurrence(
-    const float *q, const float *k, const float *v, const float *g,
-    const float *beta, StateT *state, float *output, int bh, int seq_len,
-    int k_dim, int v_dim, const int32_t *slot_indices, int num_heads,
-    cudaStream_t stream);
-
 template <int WARP_SIZE>
 __device__ __forceinline__ float gdn_warp_sum(float x) {
 #pragma unroll
@@ -407,11 +400,14 @@ constexpr int GDN_TRANSITION_APPLY_CONV_STATE = 9;
 
 constexpr int GDN_TRANSITION_APPLY_RECURRENT_STATE = 10;
 
+constexpr int GDN_CHUNKED_BT = 64;
+constexpr int GDN_CHUNKED_BV = 64;
+
 template <typename StateT>
 using GdnChunkedKernel = void (*)(const float *, const float *, const float *,
                                   const float *, const float *, StateT *,
                                   float *, int, int, const int32_t *, int);
 
-// Each chunked configuration costs minutes of cicc, so they are specialized one per TU in gdn_chunked/.
+// Each chunked configuration costs minutes of cicc, so each is explicitly instantiated in its own TU in gdn_chunked/.
 template <typename StateT, int BT, int BK, int BV, bool VALUE_MAJOR>
 GdnChunkedKernel<StateT> gdn_chunked_kernel();

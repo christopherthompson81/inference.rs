@@ -1,5 +1,5 @@
 // GDN (Gated Delta Net) Metal kernels for inference.rs
-// Ported from CUDA kernels in cuda/gdn.cu
+// Ported from CUDA kernels in cuda/gdn_*.cu
 
 #include <metal_stdlib>
 using namespace metal;
