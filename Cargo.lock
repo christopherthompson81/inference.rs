@@ -3153,6 +3153,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-examples"
+version = "0.9.3"
+dependencies = [
+ "anyhow",
+ "clap",
+ "either",
+ "futures",
+ "image",
+ "inference",
+ "rand 0.9.4",
+ "reqwest 0.13.1",
+ "schemars 1.2.0",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "walkdir",
+]
+
+[[package]]
 name = "inference-ffi"
 version = "0.9.3"
 dependencies = [

@@ -16,7 +16,7 @@ Load and run a model with a LoRA adapter.
 Run with:
 
 ~~~bash
-cargo run --release --example lora -p inference
+cargo run --release --example lora -p inference-examples
 ~~~
 
 ```rust
@@ -29,7 +29,7 @@ cargo run --release --example lora -p inference
 //! Run with:
 //!
 //! ~~~bash
-//! cargo run --release --example lora -p inference
+//! cargo run --release --example lora -p inference-examples
 //! ~~~
 
 use anyhow::Result;
@@ -72,4 +72,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/lora/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/lora/main.rs)
+Source: [`examples/rust/advanced/lora/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/lora/main.rs)

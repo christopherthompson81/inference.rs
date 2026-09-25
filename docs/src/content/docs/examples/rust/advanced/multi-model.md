@@ -9,12 +9,12 @@ sidebar:
 
 Load and dispatch requests across multiple models simultaneously.
 
-Run with: `cargo run --release --example multi_model -p inference`
+Run with: `cargo run --release --example multi_model -p inference-examples`
 
 ```rust
 //! Load and dispatch requests across multiple models simultaneously.
 //!
-//! Run with: `cargo run --release --example multi_model -p inference`
+//! Run with: `cargo run --release --example multi_model -p inference-examples`
 
 use anyhow::{anyhow, Result};
 use inference::{
@@ -155,4 +155,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/multi_model/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/multi_model/main.rs)
+Source: [`examples/rust/advanced/multi_model/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/multi_model/main.rs)

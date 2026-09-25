@@ -41,7 +41,7 @@ Runnable Rust SDK example `multimodal_models`.
 ///
 /// * LLaVA 1.5 requires `.with_chat_template("chat_templates/vicuna.json")`.
 ///
-/// Run with: `cargo run --release --example multimodal_models -p inference`
+/// Run with: `cargo run --release --example multimodal_models -p inference-examples`
 use anyhow::Result;
 use inference::{IsqBits, ModelBuilder, MultimodalMessages, TextMessageRole};
 
@@ -86,4 +86,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/models/multimodal_models/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/models/multimodal_models/main.rs)
+Source: [`examples/rust/models/multimodal_models/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/models/multimodal_models/main.rs)

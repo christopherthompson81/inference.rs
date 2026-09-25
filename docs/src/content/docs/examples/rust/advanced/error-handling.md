@@ -9,12 +9,12 @@ sidebar:
 
 Error handling patterns: matching on error variants and recovering partial responses.
 
-Run with: `cargo run --release --example error_handling -p inference`
+Run with: `cargo run --release --example error_handling -p inference-examples`
 
 ```rust
 //! Error handling patterns: matching on error variants and recovering partial responses.
 //!
-//! Run with: `cargo run --release --example error_handling -p inference`
+//! Run with: `cargo run --release --example error_handling -p inference-examples`
 
 use inference::{error, IsqBits, ModelBuilder, TextMessageRole, TextMessages};
 
@@ -75,4 +75,4 @@ fn handle_error(err: error::Error) {
 }
 ```
 
-Source: [`inference/examples/advanced/error_handling/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/error_handling/main.rs)
+Source: [`examples/rust/advanced/error_handling/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/error_handling/main.rs)

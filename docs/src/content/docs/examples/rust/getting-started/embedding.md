@@ -9,12 +9,12 @@ sidebar:
 
 Generate text embeddings using an embedding model.
 
-Run with: `cargo run --release --example embedding -p inference`
+Run with: `cargo run --release --example embedding -p inference-examples`
 
 ```rust
 //! Generate text embeddings using an embedding model.
 //!
-//! Run with: `cargo run --release --example embedding -p inference`
+//! Run with: `cargo run --release --example embedding -p inference-examples`
 
 use anyhow::Result;
 use inference::{EmbeddingModelBuilder, EmbeddingRequest};
@@ -38,4 +38,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/getting_started/embedding/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/getting_started/embedding/main.rs)
+Source: [`examples/rust/getting_started/embedding/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/getting_started/embedding/main.rs)

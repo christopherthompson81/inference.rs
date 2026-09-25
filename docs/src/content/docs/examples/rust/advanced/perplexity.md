@@ -9,12 +9,12 @@ sidebar:
 
 Compute perplexity of a text file using a loaded model.
 
-Run with: `cargo run --release --example perplexity -p inference`
+Run with: `cargo run --release --example perplexity -p inference-examples`
 
 ```rust
 //! Compute perplexity of a text file using a loaded model.
 //!
-//! Run with: `cargo run --release --example perplexity -p inference`
+//! Run with: `cargo run --release --example perplexity -p inference-examples`
 
 use std::{fs::read_to_string, path::PathBuf, time::Instant};
 
@@ -186,4 +186,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/perplexity/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/perplexity/main.rs)
+Source: [`examples/rust/advanced/perplexity/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/perplexity/main.rs)

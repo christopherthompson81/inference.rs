@@ -116,7 +116,7 @@ When adding new quantization methods:
 - `inference-core/src/pipeline/mod.rs` - Pipeline trait and common logic
 - `inference-server-core/src/routes.rs` - HTTP API endpoints
 - `inference-pyo3/src/lib.rs` - Python SDK entry point
-- `inference/examples/` - Usage examples for Rust SDK
+- `examples/rust/` - Rust SDK examples (`inference-examples`, not a default member: build with `-p inference-examples --example <name>`)
 
 ### Pull Requests
 

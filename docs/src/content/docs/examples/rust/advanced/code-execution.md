@@ -12,7 +12,7 @@ Python code execution example.
 The model is given `execute_python` and `reset_python_session` tools and
 can write and run Python code to answer questions.
 
-Run with: `cargo run --release --features code-execution --example code_execution -p inference`
+Run with: `cargo run --release --features code-execution --example code_execution -p inference-examples`
 
 ```rust
 //! Python code execution example.
@@ -20,7 +20,7 @@ Run with: `cargo run --release --features code-execution --example code_executio
 //! The model is given `execute_python` and `reset_python_session` tools and
 //! can write and run Python code to answer questions.
 //!
-//! Run with: `cargo run --release --features code-execution --example code_execution -p inference`
+//! Run with: `cargo run --release --features code-execution --example code_execution -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -67,4 +67,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/code_execution/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/code_execution/main.rs)
+Source: [`examples/rust/advanced/code_execution/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/code_execution/main.rs)

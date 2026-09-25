@@ -17,7 +17,7 @@ Runnable Rust SDK example `auto_device_map`.
 /// Device mapping distributes model layers across available GPUs automatically.
 /// This example shows both text and multimodal model usage with auto device mapping.
 ///
-/// Run with: `cargo run --release --example auto_device_map -p inference`
+/// Run with: `cargo run --release --example auto_device_map -p inference-examples`
 use anyhow::Result;
 use inference::{
     AutoDeviceMapParams, DeviceMapSetting, IsqBits, TextMessageRole, TextMessages, TextModelBuilder,
@@ -72,4 +72,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/auto_device_map/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/auto_device_map/main.rs)
+Source: [`examples/rust/advanced/auto_device_map/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/auto_device_map/main.rs)

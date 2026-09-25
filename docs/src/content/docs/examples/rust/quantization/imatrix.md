@@ -9,12 +9,12 @@ sidebar:
 
 ISQ quantization using a calibration file for importance-matrix collection.
 
-Run with: `cargo run --release --example imatrix -p inference`
+Run with: `cargo run --release --example imatrix -p inference-examples`
 
 ```rust
 //! ISQ quantization using a calibration file for importance-matrix collection.
 //!
-//! Run with: `cargo run --release --example imatrix -p inference`
+//! Run with: `cargo run --release --example imatrix -p inference-examples`
 
 use anyhow::Result;
 use inference::{IsqBits, ModelBuilder, PagedAttentionMetaBuilder, TextMessageRole, TextMessages};
@@ -51,4 +51,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/quantization/imatrix/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/quantization/imatrix/main.rs)
+Source: [`examples/rust/quantization/imatrix/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/quantization/imatrix/main.rs)

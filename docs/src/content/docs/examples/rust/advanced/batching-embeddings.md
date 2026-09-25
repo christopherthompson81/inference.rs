@@ -9,12 +9,12 @@ sidebar:
 
 Batch multiple embedding requests for efficient parallel encoding.
 
-Run with: `cargo run --release --example batching_embeddings -p inference`
+Run with: `cargo run --release --example batching_embeddings -p inference-examples`
 
 ```rust
 //! Batch multiple embedding requests for efficient parallel encoding.
 //!
-//! Run with: `cargo run --release --example batching_embeddings -p inference`
+//! Run with: `cargo run --release --example batching_embeddings -p inference-examples`
 
 use anyhow::Result;
 use inference::{EmbeddingModelBuilder, EmbeddingRequest};
@@ -61,4 +61,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/batching_embeddings/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/batching_embeddings/main.rs)
+Source: [`examples/rust/advanced/batching_embeddings/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/batching_embeddings/main.rs)

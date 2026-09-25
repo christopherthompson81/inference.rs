@@ -9,12 +9,12 @@ sidebar:
 
 Enable PagedAttention for efficient KV-cache memory management.
 
-Run with: `cargo run --release --example paged_attn -p inference`
+Run with: `cargo run --release --example paged_attn -p inference-examples`
 
 ```rust
 //! Enable PagedAttention for efficient KV-cache memory management.
 //!
-//! Run with: `cargo run --release --example paged_attn -p inference`
+//! Run with: `cargo run --release --example paged_attn -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -58,4 +58,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/paged_attn/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/paged_attn/main.rs)
+Source: [`examples/rust/advanced/paged_attn/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/paged_attn/main.rs)

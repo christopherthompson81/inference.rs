@@ -9,12 +9,12 @@ sidebar:
 
 JSON schema-constrained generation for typed structured output.
 
-Run with: `cargo run --release --example json_schema -p inference`
+Run with: `cargo run --release --example json_schema -p inference-examples`
 
 ```rust
 //! JSON schema-constrained generation for typed structured output.
 //!
-//! Run with: `cargo run --release --example json_schema -p inference`
+//! Run with: `cargo run --release --example json_schema -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -56,4 +56,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/json_schema/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/json_schema/main.rs)
+Source: [`examples/rust/advanced/json_schema/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/json_schema/main.rs)

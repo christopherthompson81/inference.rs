@@ -9,12 +9,12 @@ sidebar:
 
 Log model output to a file using the tracing framework.
 
-Run with: `cargo run --release --example file_logging -p inference`
+Run with: `cargo run --release --example file_logging -p inference-examples`
 
 ```rust
 //! Log model output to a file using the tracing framework.
 //!
-//! Run with: `cargo run --release --example file_logging -p inference`
+//! Run with: `cargo run --release --example file_logging -p inference-examples`
 
 use anyhow::Result;
 use inference::{IsqBits, ModelBuilder, TextMessageRole, TextMessages};
@@ -84,4 +84,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/file_logging/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/file_logging/main.rs)
+Source: [`examples/rust/advanced/file_logging/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/file_logging/main.rs)

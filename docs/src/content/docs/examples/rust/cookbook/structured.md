@@ -17,7 +17,7 @@ Runnable Rust SDK example `structured`.
 /// Demonstrates constraining the model's output to a JSON schema derived
 /// from a Rust struct, then deserializing the result automatically.
 ///
-/// Run with: `cargo run --release --example cookbook_structured -p inference`
+/// Run with: `cargo run --release --example cookbook_structured -p inference-examples`
 use anyhow::Result;
 use inference::{IsqBits, ModelBuilder, TextMessageRole, TextMessages};
 use schemars::JsonSchema;
@@ -87,4 +87,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/cookbook/structured/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/cookbook/structured/main.rs)
+Source: [`examples/rust/cookbook/structured/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/cookbook/structured/main.rs)

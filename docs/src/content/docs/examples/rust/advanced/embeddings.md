@@ -9,12 +9,12 @@ sidebar:
 
 Compute and compare text embeddings with cosine similarity.
 
-Run with: `cargo run --release --example embeddings -p inference`
+Run with: `cargo run --release --example embeddings -p inference-examples`
 
 ```rust
 //! Compute and compare text embeddings with cosine similarity.
 //!
-//! Run with: `cargo run --release --example embeddings -p inference`
+//! Run with: `cargo run --release --example embeddings -p inference-examples`
 
 use anyhow::Result;
 use inference::{Device, EmbeddingModelBuilder, EmbeddingRequest, Tensor};
@@ -37,4 +37,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/embeddings/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/embeddings/main.rs)
+Source: [`examples/rust/advanced/embeddings/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/embeddings/main.rs)

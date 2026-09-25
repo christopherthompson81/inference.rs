@@ -9,12 +9,12 @@ sidebar:
 
 Load and run a GGUF model from a local file path.
 
-Run with: `cargo run --release --example gguf_locally -p inference`
+Run with: `cargo run --release --example gguf_locally -p inference-examples`
 
 ```rust
 //! Load and run a GGUF model from a local file path.
 //!
-//! Run with: `cargo run --release --example gguf_locally -p inference`
+//! Run with: `cargo run --release --example gguf_locally -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -72,4 +72,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/getting_started/gguf_locally/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/getting_started/gguf_locally/main.rs)
+Source: [`examples/rust/getting_started/gguf_locally/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/getting_started/gguf_locally/main.rs)

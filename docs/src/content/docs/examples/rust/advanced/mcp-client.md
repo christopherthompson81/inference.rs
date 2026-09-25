@@ -12,7 +12,7 @@ MCP (Model Context Protocol) client usage with inference.rs.
 Connects to an MCP server, auto-discovers tools, and makes them available
 to the model during conversations.
 
-Run with: `cargo run --release --example mcp_client -p inference`
+Run with: `cargo run --release --example mcp_client -p inference-examples`
 
 ```rust
 //! MCP (Model Context Protocol) client usage with inference.rs.
@@ -20,7 +20,7 @@ Run with: `cargo run --release --example mcp_client -p inference`
 //! Connects to an MCP server, auto-discovers tools, and makes them available
 //! to the model during conversations.
 //!
-//! Run with: `cargo run --release --example mcp_client -p inference`
+//! Run with: `cargo run --release --example mcp_client -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -85,4 +85,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/mcp_client/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/mcp_client/main.rs)
+Source: [`examples/rust/advanced/mcp_client/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/mcp_client/main.rs)

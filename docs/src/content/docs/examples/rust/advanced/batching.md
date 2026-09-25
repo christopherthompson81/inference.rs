@@ -9,12 +9,12 @@ sidebar:
 
 Concurrent request batching by sending multiple requests in parallel.
 
-Run with: `cargo run --release --example batching -p inference`
+Run with: `cargo run --release --example batching -p inference-examples`
 
 ```rust
 //! Concurrent request batching by sending multiple requests in parallel.
 //!
-//! Run with: `cargo run --release --example batching -p inference`
+//! Run with: `cargo run --release --example batching -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -79,4 +79,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/batching/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/batching/main.rs)
+Source: [`examples/rust/advanced/batching/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/batching/main.rs)

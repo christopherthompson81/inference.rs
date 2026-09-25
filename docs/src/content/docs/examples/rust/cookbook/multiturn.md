@@ -19,7 +19,7 @@ Runnable Rust SDK example `multiturn`.
 /// - Accumulating messages across turns
 /// - Streaming responses token-by-token
 ///
-/// Run with: `cargo run --release --example cookbook_multiturn -p inference`
+/// Run with: `cargo run --release --example cookbook_multiturn -p inference-examples`
 use anyhow::Result;
 use inference::{
     ChatCompletionChunkResponse, ChunkChoice, Delta, IsqBits, ModelBuilder, Response,
@@ -93,4 +93,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/cookbook/multiturn/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/cookbook/multiturn/main.rs)
+Source: [`examples/rust/cookbook/multiturn/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/cookbook/multiturn/main.rs)

@@ -1,0 +1,268 @@
+[package]
+name = "inference-examples"
+description = "Rust SDK examples for inference.rs; built on request, not by routine builds."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+autoexamples = false
+
+[dependencies]
+inference = { workspace = true }
+anyhow.workspace = true
+tokio.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+schemars.workspace = true
+walkdir.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+reqwest.workspace = true
+rand.workspace = true
+either.workspace = true
+image.workspace = true
+futures.workspace = true
+clap.workspace = true
+
+[features]
+cuda = ["inference/cuda"]
+cutile = ["inference/cutile"]
+cudnn = ["inference/cudnn"]
+metal = ["inference/metal"]
+flash-attn = ["inference/flash-attn"]
+accelerate = ["inference/accelerate"]
+mkl = ["inference/mkl"]
+nccl = ["inference/nccl"]
+
+[[example]]
+name = "text_generation"
+path = "getting_started/text_generation/main.rs"
+
+[[example]]
+name = "streaming"
+path = "getting_started/streaming/main.rs"
+
+[[example]]
+name = "multimodal_basic"
+path = "getting_started/multimodal/main.rs"
+
+[[example]]
+name = "gguf"
+path = "getting_started/gguf/main.rs"
+
+[[example]]
+name = "gguf_locally"
+path = "getting_started/gguf_locally/main.rs"
+
+[[example]]
+name = "embedding"
+path = "getting_started/embedding/main.rs"
+
+[[example]]
+name = "text_models"
+path = "models/text_models/main.rs"
+
+[[example]]
+name = "multimodal_models"
+path = "models/multimodal_models/main.rs"
+
+[[example]]
+name = "paddleocr_vl_recognize"
+path = "models/paddleocr_vl_recognize/main.rs"
+
+[[example]]
+name = "multimodal_multiturn"
+path = "models/multimodal_multiturn/main.rs"
+
+[[example]]
+name = "audio"
+path = "models/audio/main.rs"
+
+[[example]]
+name = "multimodal"
+path = "models/multimodal/main.rs"
+
+[[example]]
+name = "diffusion"
+path = "models/diffusion/main.rs"
+
+[[example]]
+name = "speech"
+path = "models/speech/main.rs"
+
+[[example]]
+name = "asr"
+path = "models/asr/main.rs"
+
+[[example]]
+name = "isq"
+path = "quantization/isq/main.rs"
+
+[[example]]
+name = "nvfp4"
+path = "quantization/nvfp4/main.rs"
+required-features = ["cutile"]
+
+[[example]]
+name = "imatrix"
+path = "quantization/imatrix/main.rs"
+
+[[example]]
+name = "online_calibration"
+path = "quantization/online_calibration/main.rs"
+
+[[example]]
+name = "uqff"
+path = "quantization/uqff/main.rs"
+
+[[example]]
+name = "uqff_multimodal"
+path = "quantization/uqff_multimodal/main.rs"
+
+[[example]]
+name = "topology"
+path = "quantization/topology/main.rs"
+
+[[example]]
+name = "mixture_of_quant_experts"
+path = "quantization/mixture_of_quant_experts/main.rs"
+
+[[example]]
+name = "tools"
+path = "advanced/tools/main.rs"
+
+[[example]]
+name = "allowed_tools"
+path = "advanced/allowed_tools/main.rs"
+
+[[example]]
+name = "agent"
+path = "advanced/agent/main.rs"
+
+[[example]]
+name = "agent_streaming"
+path = "advanced/agent_streaming/main.rs"
+
+[[example]]
+name = "web_search"
+path = "advanced/web_search/main.rs"
+
+[[example]]
+name = "search_callback"
+path = "advanced/search_callback/main.rs"
+
+[[example]]
+name = "tool_callback"
+path = "advanced/tool_callback/main.rs"
+
+[[example]]
+name = "mcp_client"
+path = "advanced/mcp_client/main.rs"
+
+[[example]]
+name = "grammar"
+path = "advanced/grammar/main.rs"
+
+[[example]]
+name = "json_schema"
+path = "advanced/json_schema/main.rs"
+
+[[example]]
+name = "llguidance"
+path = "advanced/llguidance/main.rs"
+
+[[example]]
+name = "logits_processor"
+path = "advanced/logits_processor/main.rs"
+
+[[example]]
+name = "file_logging"
+path = "advanced/file_logging/main.rs"
+
+[[example]]
+name = "batching"
+path = "advanced/batching/main.rs"
+
+[[example]]
+name = "batching_embeddings"
+path = "advanced/batching_embeddings/main.rs"
+
+[[example]]
+name = "paged_attn"
+path = "advanced/paged_attn/main.rs"
+
+[[example]]
+name = "auto_device_map"
+path = "advanced/auto_device_map/main.rs"
+
+[[example]]
+name = "multi_model"
+path = "advanced/multi_model/main.rs"
+
+[[example]]
+name = "lora"
+path = "advanced/lora/main.rs"
+
+[[example]]
+name = "xlora"
+path = "advanced/xlora/main.rs"
+
+[[example]]
+name = "anymoe"
+path = "advanced/anymoe/main.rs"
+
+[[example]]
+name = "anymoe_lora"
+path = "advanced/anymoe_lora/main.rs"
+
+[[example]]
+name = "error_handling"
+path = "advanced/error_handling/main.rs"
+
+[[example]]
+name = "perplexity"
+path = "advanced/perplexity/main.rs"
+
+[[example]]
+name = "embeddings"
+path = "advanced/embeddings/main.rs"
+
+[[example]]
+name = "code_execution"
+path = "advanced/code_execution/main.rs"
+
+[[example]]
+name = "code_execution_approval"
+path = "advanced/code_execution_approval/main.rs"
+
+[[example]]
+name = "code_execution_files"
+path = "advanced/code_execution_files/main.rs"
+
+[[example]]
+name = "file_inputs"
+path = "advanced/file_inputs/main.rs"
+
+[[example]]
+name = "shell"
+path = "advanced/shell/main.rs"
+
+[[example]]
+name = "shell_skills"
+path = "advanced/shell_skills/main.rs"
+
+[[example]]
+name = "cookbook_rag"
+path = "cookbook/rag/main.rs"
+
+[[example]]
+name = "cookbook_structured"
+path = "cookbook/structured/main.rs"
+
+[[example]]
+name = "cookbook_multiturn"
+path = "cookbook/multiturn/main.rs"
+
+[[example]]
+name = "cookbook_agent"
+path = "cookbook/agent/main.rs"

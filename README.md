@@ -238,7 +238,7 @@ cargo add inference
 
 Embed the engine in a Rust application with the high-level `inference` crate.
 
-[Get started](https://docs.mistralrs.dev/guides/rust/getting-started/) | [docs.rs](https://docs.rs/mistralrs) | [Crate](https://crates.io/crates/mistralrs) | [Examples](inference/examples)
+[Get started](https://docs.mistralrs.dev/guides/rust/getting-started/) | [docs.rs](https://docs.rs/mistralrs) | [Crate](https://crates.io/crates/mistralrs) | [Examples](examples/rust)
 
 ## Docker
 

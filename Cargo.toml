@@ -19,6 +19,28 @@ members = [
     "inference-macros",
     "inference-code-exec",
     "inference-sandbox",
+    "examples/rust",
+]
+# Everything but the examples, so a bare `cargo build`/`cargo test` at the root never links them.
+default-members = [
+    "inference-server-core",
+    "inference-cli",
+    "inference-core",
+    "inference-pyo3",
+    "inference",
+    "inference-vision",
+    "inference-layout",
+    "inference-ffi",
+    "inference-quant",
+    "inference-paged-attn",
+    "inference-metal-compile",
+    "inference-flash-attn",
+
+    "inference-audio",
+    "inference-mcp",
+    "inference-macros",
+    "inference-code-exec",
+    "inference-sandbox",
 ]
 resolver = "2"
 
@@ -220,9 +242,16 @@ debug = true
 # lto = true
 # opt-level = 3
 
+# Line tables keep file:line backtraces; full DWARF made every test and example binary ~1 GB (use `debugging`).
 [profile.dev]
-debug = true
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
 opt-level = 3
+
+# Full debug info for a debugger session: `cargo build --profile debugging`.
+[profile.debugging]
+inherits = "dev"
+debug = true
 
 # cudaforge with cargo jobserver support, so kernel crates building in parallel share `cargo -j`; see third_party/cudaforge/README.md
 [patch.crates-io]

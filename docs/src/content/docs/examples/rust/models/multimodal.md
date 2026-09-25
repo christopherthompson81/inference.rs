@@ -9,12 +9,12 @@ sidebar:
 
 Multimodal streaming with combined image and audio inputs.
 
-Run with: `cargo run --release --example multimodal -p inference`
+Run with: `cargo run --release --example multimodal -p inference-examples`
 
 ```rust
 //! Multimodal streaming with combined image and audio inputs.
 //!
-//! Run with: `cargo run --release --example multimodal -p inference`
+//! Run with: `cargo run --release --example multimodal -p inference-examples`
 
 use std::io::Write;
 
@@ -79,4 +79,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/models/multimodal/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/models/multimodal/main.rs)
+Source: [`examples/rust/models/multimodal/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/models/multimodal/main.rs)

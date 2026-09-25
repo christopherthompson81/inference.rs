@@ -107,7 +107,7 @@ Avoid returning TODOs.
 
 ## Examples
 
-- Rust examples: `inference/examples/`
+- Rust examples: `examples/rust/` (package `inference-examples`)
 - Python examples: `examples/python/`
 - Server samples: `examples/server/`
 - Run Python scripts:

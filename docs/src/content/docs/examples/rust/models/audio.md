@@ -9,12 +9,12 @@ sidebar:
 
 Audio input processing with a multimodal model.
 
-Run with: `cargo run --release --example audio -p inference`
+Run with: `cargo run --release --example audio -p inference-examples`
 
 ```rust
 //! Audio input processing with a multimodal model.
 //!
-//! Run with: `cargo run --release --example audio -p inference`
+//! Run with: `cargo run --release --example audio -p inference-examples`
 
 use anyhow::Result;
 use inference::{AudioInput, MultimodalMessages, MultimodalModelBuilder, TextMessageRole};
@@ -42,4 +42,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/models/audio/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/models/audio/main.rs)
+Source: [`examples/rust/models/audio/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/models/audio/main.rs)

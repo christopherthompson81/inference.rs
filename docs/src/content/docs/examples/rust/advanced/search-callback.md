@@ -9,12 +9,12 @@ sidebar:
 
 Custom search callback to override the default web search function.
 
-Run with: `cargo run --release --example search_callback -p inference`
+Run with: `cargo run --release --example search_callback -p inference-examples`
 
 ```rust
 //! Custom search callback to override the default web search function.
 //!
-//! Run with: `cargo run --release --example search_callback -p inference`
+//! Run with: `cargo run --release --example search_callback -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -91,4 +91,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/search_callback/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/search_callback/main.rs)
+Source: [`examples/rust/advanced/search_callback/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/search_callback/main.rs)

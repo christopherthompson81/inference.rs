@@ -9,12 +9,12 @@ sidebar:
 
 Tool calling (function calling) with manual tool definitions.
 
-Run with: `cargo run --release --example tools -p inference`
+Run with: `cargo run --release --example tools -p inference-examples`
 
 ```rust
 //! Tool calling (function calling) with manual tool definitions.
 //!
-//! Run with: `cargo run --release --example tools -p inference`
+//! Run with: `cargo run --release --example tools -p inference-examples`
 
 use std::collections::HashMap;
 
@@ -103,4 +103,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/tools/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/tools/main.rs)
+Source: [`examples/rust/advanced/tools/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/tools/main.rs)

@@ -9,12 +9,12 @@ sidebar:
 
 Web-search-augmented generation using OpenAI-compatible web_search_options.
 
-Run with: `cargo run --release --example web_search -p inference`
+Run with: `cargo run --release --example web_search -p inference-examples`
 
 ```rust
 //! Web-search-augmented generation using OpenAI-compatible web_search_options.
 //!
-//! Run with: `cargo run --release --example web_search -p inference`
+//! Run with: `cargo run --release --example web_search -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -51,4 +51,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/web_search/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/web_search/main.rs)
+Source: [`examples/rust/advanced/web_search/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/web_search/main.rs)

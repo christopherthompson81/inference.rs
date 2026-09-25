@@ -32,7 +32,7 @@ Runnable Rust SDK example `text_models`.
 /// | Qwen3 (thinking mode)        | `Qwen/Qwen3-30B-A3B`                        |
 /// | Llama 3.3                    | `meta-llama/Llama-3.3-70B-Instruct`         |
 ///
-/// Run with: `cargo run --release --example text_models -p inference`
+/// Run with: `cargo run --release --example text_models -p inference-examples`
 use anyhow::Result;
 use inference::{IsqBits, ModelBuilder, PagedAttentionMetaBuilder, TextMessageRole, TextMessages};
 
@@ -89,4 +89,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/models/text_models/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/models/text_models/main.rs)
+Source: [`examples/rust/models/text_models/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/models/text_models/main.rs)

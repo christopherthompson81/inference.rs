@@ -9,12 +9,12 @@ sidebar:
 
 MoQE: quantize only MoE expert layers at a different precision.
 
-Run with: `cargo run --release --example mixture_of_quant_experts -p inference`
+Run with: `cargo run --release --example mixture_of_quant_experts -p inference-examples`
 
 ```rust
 //! MoQE: quantize only MoE expert layers at a different precision.
 //!
-//! Run with: `cargo run --release --example mixture_of_quant_experts -p inference`
+//! Run with: `cargo run --release --example mixture_of_quant_experts -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -53,4 +53,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/quantization/mixture_of_quant_experts/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/quantization/mixture_of_quant_experts/main.rs)
+Source: [`examples/rust/quantization/mixture_of_quant_experts/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/quantization/mixture_of_quant_experts/main.rs)

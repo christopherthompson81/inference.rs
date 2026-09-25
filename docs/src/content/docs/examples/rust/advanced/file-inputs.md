@@ -13,7 +13,7 @@ The request attaches a CSV as an input file. Text-like files are previewed in
 the prompt and can be paginated with the built-in file tools when the agentic
 runtime is active.
 
-Run with: `cargo run --release --features code-execution --example file_inputs -p inference`
+Run with: `cargo run --release --features code-execution --example file_inputs -p inference-examples`
 
 ```rust
 //! User-provided input files with the Rust SDK.
@@ -22,7 +22,7 @@ Run with: `cargo run --release --features code-execution --example file_inputs -
 //! the prompt and can be paginated with the built-in file tools when the agentic
 //! runtime is active.
 //!
-//! Run with: `cargo run --release --features code-execution --example file_inputs -p inference`
+//! Run with: `cargo run --release --features code-execution --example file_inputs -p inference-examples`
 
 use anyhow::Result;
 use inference::{InputFile, IsqBits, ModelBuilder, RequestBuilder, TextMessageRole, TextMessages};
@@ -55,4 +55,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/file_inputs/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/file_inputs/main.rs)
+Source: [`examples/rust/advanced/file_inputs/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/file_inputs/main.rs)

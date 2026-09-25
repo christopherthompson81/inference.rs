@@ -9,12 +9,12 @@ sidebar:
 
 Multi-turn conversation with a multimodal model across turns.
 
-Run with: `cargo run --release --example multimodal_multiturn -p inference`
+Run with: `cargo run --release --example multimodal_multiturn -p inference-examples`
 
 ```rust
 //! Multi-turn conversation with a multimodal model across turns.
 //!
-//! Run with: `cargo run --release --example multimodal_multiturn -p inference`
+//! Run with: `cargo run --release --example multimodal_multiturn -p inference-examples`
 
 use anyhow::Result;
 use inference::{ModelBuilder, MultimodalMessages, RequestBuilder, TextMessageRole};
@@ -113,4 +113,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/models/multimodal_multiturn/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/models/multimodal_multiturn/main.rs)
+Source: [`examples/rust/models/multimodal_multiturn/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/models/multimodal_multiturn/main.rs)

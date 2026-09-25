@@ -9,12 +9,12 @@ sidebar:
 
 AnyMoE: create a Mixture-of-Experts model from fine-tuned adapters.
 
-Run with: `cargo run --release --example anymoe -p inference`
+Run with: `cargo run --release --example anymoe -p inference-examples`
 
 ```rust
 //! AnyMoE: create a Mixture-of-Experts model from fine-tuned adapters.
 //!
-//! Run with: `cargo run --release --example anymoe -p inference`
+//! Run with: `cargo run --release --example anymoe -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -76,4 +76,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/anymoe/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/anymoe/main.rs)
+Source: [`examples/rust/advanced/anymoe/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/anymoe/main.rs)

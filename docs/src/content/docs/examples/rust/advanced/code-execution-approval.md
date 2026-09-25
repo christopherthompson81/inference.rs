@@ -10,13 +10,13 @@ sidebar:
 Python code execution with an approval callback.
 
 Run with:
-`cargo run --release --features code-execution --example code_execution_approval -p inference`
+`cargo run --release --features code-execution --example code_execution_approval -p inference-examples`
 
 ```rust
 //! Python code execution with an approval callback.
 //!
 //! Run with:
-//! `cargo run --release --features code-execution --example code_execution_approval -p inference`
+//! `cargo run --release --features code-execution --example code_execution_approval -p inference-examples`
 
 use std::{
     io::{self, Write},
@@ -91,4 +91,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/code_execution_approval/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/code_execution_approval/main.rs)
+Source: [`examples/rust/advanced/code_execution_approval/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/code_execution_approval/main.rs)

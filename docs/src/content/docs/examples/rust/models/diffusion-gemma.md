@@ -13,7 +13,7 @@ The model denoises 256-token blocks in parallel instead of sampling tokens one a
 time, so streamed output arrives block by block. Sampling parameters are ignored in
 favor of the checkpoint's denoising schedule.
 
-Run with: `cargo run --release --example diffusion_gemma -p inference`
+Run with: `cargo run --release --example diffusion_gemma -p inference-examples`
 
 ```rust
 //! DiffusionGemma: block-diffusion text generation.
@@ -22,7 +22,7 @@ Run with: `cargo run --release --example diffusion_gemma -p inference`
 //! time, so streamed output arrives block by block. Sampling parameters are ignored in
 //! favor of the checkpoint's denoising schedule.
 //!
-//! Run with: `cargo run --release --example diffusion_gemma -p inference`
+//! Run with: `cargo run --release --example diffusion_gemma -p inference-examples`
 
 use std::io::Write;
 
@@ -66,4 +66,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/models/diffusion_gemma/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/models/diffusion_gemma/main.rs)
+Source: [`examples/rust/models/diffusion_gemma/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/models/diffusion_gemma/main.rs)

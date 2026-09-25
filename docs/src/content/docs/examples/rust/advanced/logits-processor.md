@@ -9,12 +9,12 @@ sidebar:
 
 Custom logits processor that modifies token probabilities during generation.
 
-Run with: `cargo run --release --example logits_processor -p inference`
+Run with: `cargo run --release --example logits_processor -p inference-examples`
 
 ```rust
 //! Custom logits processor that modifies token probabilities during generation.
 //!
-//! Run with: `cargo run --release --example logits_processor -p inference`
+//! Run with: `cargo run --release --example logits_processor -p inference-examples`
 
 use std::sync::Arc;
 
@@ -68,4 +68,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/logits_processor/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/logits_processor/main.rs)
+Source: [`examples/rust/advanced/logits_processor/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/logits_processor/main.rs)
