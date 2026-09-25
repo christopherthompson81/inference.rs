@@ -1,8 +1,9 @@
 use candle_core::{DType, Module, Result, Tensor, D};
-use candle_nn::{LayerNorm, Linear, VarBuilder};
+use candle_nn::{LayerNorm, VarBuilder};
 
 use super::config::PPDocLayoutV3Config;
 use super::encoder::{Mlp, SelfAttention};
+use crate::layers::{linear, Linear};
 
 /// Flattened multi-level feature memory layout.
 #[derive(Debug, Clone)]
@@ -33,6 +34,8 @@ pub struct DecodeCtx<'a> {
     /// `(b, S, d_model)` flattened encoder memory.
     pub memory: &'a Tensor,
     pub geom: &'a LevelGeom,
+    /// `(b * heads, 1)` u32 row offsets for the tensor-op sampler; built once per forward, only when it runs.
+    pub bh_offset: Option<Tensor>,
 }
 
 /// Deformable DETR multi-scale deformable attention with 4-d (box) reference points.
@@ -55,10 +58,10 @@ impl MsDeformAttn {
             cfg.decoder_n_points,
         );
         Ok(Self {
-            sampling_offsets: candle_nn::linear(d, h * l * p * 2, vb.pp("sampling_offsets"))?,
-            attention_weights: candle_nn::linear(d, h * l * p, vb.pp("attention_weights"))?,
-            value_proj: candle_nn::linear(d, d, vb.pp("value_proj"))?,
-            output_proj: candle_nn::linear(d, d, vb.pp("output_proj"))?,
+            sampling_offsets: linear(d, h * l * p * 2, vb.pp("sampling_offsets"))?,
+            attention_weights: linear(d, h * l * p, vb.pp("attention_weights"))?,
+            value_proj: linear(d, d, vb.pp("value_proj"))?,
+            output_proj: linear(d, d, vb.pp("output_proj"))?,
             heads: h,
             levels: l,
             points: p,
@@ -95,8 +98,8 @@ impl MsDeformAttn {
             .reshape((b, q, 1, 1, 1, 2))?;
         let step = (ref_wh * (0.5 / p as f64))?;
         let loc = ref_xy.broadcast_add(&offsets.broadcast_mul(&step)?)?;
-        let out = if query.device().is_metal() {
-            sample_ops(&value, &loc, &attn, ctx.geom)?
+        let out = if let Some(bh_offset) = &ctx.bh_offset {
+            sample_ops(&value, &loc, &attn, ctx.geom, bh_offset)?
         } else {
             crate::msda::ms_deform_attn(&value, &loc, &attn, &ctx.geom.shapes)?
         };
@@ -105,15 +108,18 @@ impl MsDeformAttn {
 }
 
 /// Tensor-op sampler for backends without the fused kernel.
-fn sample_ops(value: &Tensor, loc: &Tensor, attn: &Tensor, geom: &LevelGeom) -> Result<Tensor> {
+fn sample_ops(
+    value: &Tensor,
+    loc: &Tensor,
+    attn: &Tensor,
+    geom: &LevelGeom,
+    bh_offset: &Tensor,
+) -> Result<Tensor> {
     let (b, s, h, hd) = value.dims4()?;
     let &[_, q, _, l, p, _] = loc.dims() else {
         candle_core::bail!("sampling locations must be rank 6");
     };
     let d = h * hd;
-    let bh_offset = Tensor::arange(0u32, (b * h) as u32, value.device())?
-        .affine(s as f64, 0.)?
-        .reshape((b * h, 1))?;
     let value = value
         .transpose(1, 2)?
         .contiguous()?
@@ -172,7 +178,7 @@ fn sample_ops(value: &Tensor, loc: &Tensor, attn: &Tensor, geom: &LevelGeom) -> 
     let idx = idx
         .reshape((b * h, q * k))?
         .to_dtype(DType::U32)?
-        .broadcast_add(&bh_offset)?
+        .broadcast_add(bh_offset)?
         .flatten_all()?;
     let sampled = value.index_select(&idx, 0)?.reshape((b * h * q, k, hd))?;
     let w = w.reshape((b * h * q, 1, k))?;
@@ -244,11 +250,11 @@ mod tests {
         // outside [0, 1] on purpose so zero-padded taps are exercised
         let loc = Tensor::rand(-0.2f32, 1.2, (b, q, h, l, p, 2), &cpu)?;
         let attn = Tensor::rand(0f32, 1., (b, q, h, l, p), &cpu)?;
-        let want = sample_ops(&value, &loc, &attn, &geom)?;
-        let devs = std::iter::once(Ok(cpu.clone()))
-            .chain(cfg!(feature = "cuda").then(|| Device::new_cuda(0)))
-            .collect::<Result<Vec<_>>>()?;
-        for dev in devs {
+        let bh_offset = Tensor::arange(0u32, (b * h) as u32, &cpu)?
+            .affine(geom.total as f64, 0.)?
+            .reshape((b * h, 1))?;
+        let want = sample_ops(&value, &loc, &attn, &geom, &bh_offset)?;
+        for dev in crate::test_util::devices()? {
             let got = crate::msda::ms_deform_attn(
                 &value.to_device(&dev)?,
                 &loc.to_device(&dev)?,
@@ -256,11 +262,7 @@ mod tests {
                 &geom.shapes,
             )?
             .to_device(&cpu)?;
-            let err = (got - &want)?
-                .abs()?
-                .flatten_all()?
-                .max(D::Minus1)?
-                .to_scalar::<f32>()?;
+            let err = crate::test_util::max_abs(&got, &want)?;
             assert!(err < 1e-5, "{dev:?} err={err}");
         }
         Ok(())

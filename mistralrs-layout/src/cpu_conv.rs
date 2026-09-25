@@ -110,7 +110,7 @@ impl CustomOp3 for ImplicitConv {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{Device, D};
+    use candle_core::Device;
 
     #[test]
     fn matches_candle_conv_batched() -> Result<()> {
@@ -129,11 +129,7 @@ mod tests {
                 .broadcast_add(&b.reshape((1, 7, 1, 1))?)?;
             let got = conv2d(&x, &wt, &b, s, p)?;
             assert_eq!(got.dims(), want.dims());
-            let err = (got - want)?
-                .abs()?
-                .flatten_all()?
-                .max(D::Minus1)?
-                .to_scalar::<f32>()?;
+            let err = crate::test_util::max_abs(&got, &want)?;
             assert!(err < 1e-4, "k={k} s={s} {h}x{w} err={err}");
         }
         Ok(())

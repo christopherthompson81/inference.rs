@@ -604,15 +604,8 @@ unsafe fn depthwise_row(_: *const f32, _: &DwChannel, _: &mut [f32]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{Device, D};
-
-    fn max_abs(a: &Tensor, b: &Tensor) -> Result<f32> {
-        (a - b)?
-            .abs()?
-            .flatten_all()?
-            .max(D::Minus1)?
-            .to_scalar::<f32>()
-    }
+    use crate::test_util::rel_err;
+    use candle_core::Device;
 
     fn reference(y: Tensor, act: Act) -> Result<Tensor> {
         match act {
@@ -650,12 +643,7 @@ mod tests {
                 let got = conv2d(&x, &pack_weights(&wt)?, &b, s, p, act)?;
                 assert_eq!(got.dims(), want.dims());
                 // many-term fp32 sums: compare relative to the output scale
-                let scale = want
-                    .abs()?
-                    .flatten_all()?
-                    .max(D::Minus1)?
-                    .to_scalar::<f32>()?;
-                let err = max_abs(&got, &want)? / scale;
+                let err = rel_err(&got, &want)?;
                 assert!(err < 1e-5, "k={k} s={s} {h}x{w} {act:?} rel err={err}");
             }
         }
@@ -686,12 +674,7 @@ mod tests {
                     act,
                 )?;
                 let got = pointwise(&x, &pack_weights(&wt)?, &b, act)?;
-                let scale = want
-                    .abs()?
-                    .flatten_all()?
-                    .max(D::Minus1)?
-                    .to_scalar::<f32>()?;
-                let err = max_abs(&got, &want)? / scale;
+                let err = rel_err(&got, &want)?;
                 assert!(err < 1e-5, "c={c} {h}x{w} {act:?} rel err={err}");
             }
         }
@@ -725,12 +708,7 @@ mod tests {
                 )?;
                 let got = depthwise(&x, &wt, &b, s, p, act)?;
                 // many-term fp32 sums: compare relative to the output scale
-                let scale = want
-                    .abs()?
-                    .flatten_all()?
-                    .max(D::Minus1)?
-                    .to_scalar::<f32>()?;
-                let err = max_abs(&got, &want)? / scale;
+                let err = rel_err(&got, &want)?;
                 assert!(err < 1e-5, "k={k} s={s} {h}x{w} {act:?} rel err={err}");
             }
         }

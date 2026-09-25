@@ -1,8 +1,8 @@
 use candle_core::{Device, Module, Result, Tensor};
-use candle_nn::{Activation, LayerNorm, Linear, VarBuilder};
+use candle_nn::{Activation, LayerNorm, VarBuilder};
 
 use super::config::PPDocLayoutV3Config;
-use crate::layers::{ConvNorm, ConvNormSpec, RTDETR_CONV};
+use crate::layers::{linear, ConvNorm, ConvNormSpec, Linear, RTDETR_CONV};
 
 const CSP_BLOCKS: usize = 3;
 
@@ -19,10 +19,10 @@ pub struct SelfAttention {
 impl SelfAttention {
     pub fn new(hidden: usize, heads: usize, vb: VarBuilder) -> Result<Self> {
         Ok(Self {
-            q: candle_nn::linear(hidden, hidden, vb.pp("q_proj"))?,
-            k: candle_nn::linear(hidden, hidden, vb.pp("k_proj"))?,
-            v: candle_nn::linear(hidden, hidden, vb.pp("v_proj"))?,
-            o: candle_nn::linear(hidden, hidden, vb.pp("out_proj"))?,
+            q: linear(hidden, hidden, vb.pp("q_proj"))?,
+            k: linear(hidden, hidden, vb.pp("k_proj"))?,
+            v: linear(hidden, hidden, vb.pp("v_proj"))?,
+            o: linear(hidden, hidden, vb.pp("out_proj"))?,
             heads,
             head_dim: hidden / heads,
         })
@@ -59,8 +59,8 @@ pub struct Mlp {
 impl Mlp {
     pub fn new(hidden: usize, ffn: usize, act: Activation, vb: &VarBuilder) -> Result<Self> {
         Ok(Self {
-            fc1: candle_nn::linear(hidden, ffn, vb.pp("fc1"))?,
-            fc2: candle_nn::linear(ffn, hidden, vb.pp("fc2"))?,
+            fc1: linear(hidden, ffn, vb.pp("fc1"))?,
+            fc2: linear(ffn, hidden, vb.pp("fc2"))?,
             act,
         })
     }

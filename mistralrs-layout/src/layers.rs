@@ -1,5 +1,5 @@
 use candle_core::{Module, Result, Tensor};
-use candle_nn::{Activation, Conv2d, Conv2dConfig, Linear, VarBuilder};
+use candle_nn::{Activation, Conv2d, Conv2dConfig, VarBuilder};
 
 const BN_EPS: f64 = 1e-5;
 /// Below this many input channels per-tap CPU GEMMs are too thin and im2col + one GEMM wins (stem conv).
@@ -15,8 +15,8 @@ struct Depthwise {
     w: Tensor,
     /// `(C,)`
     b: Tensor,
-    /// `(1, C, 1, 1)` weight per `(ky, kx)`, row-major, for the backends without a custom kernel.
-    taps: Vec<Tensor>,
+    /// `(1, C, 1, 1)` weight per `(ky, kx)`, row-major: built on first use by the fallback path only.
+    taps: std::sync::OnceLock<Vec<Tensor>>,
     bias: Tensor,
     kernel: usize,
     stride: usize,
@@ -33,21 +33,10 @@ impl Depthwise {
     ) -> Result<Self> {
         let (kernel, stride, padding) = geom;
         let c = w.dim(0)?;
-        let mut taps = Vec::with_capacity(kernel * kernel);
-        for ky in 0..kernel {
-            for kx in 0..kernel {
-                taps.push(
-                    w.narrow(2, ky, 1)?
-                        .narrow(3, kx, 1)?
-                        .reshape((1, c, 1, 1))?
-                        .contiguous()?,
-                );
-            }
-        }
         Ok(Self {
             w: w.contiguous()?,
             b: bias.contiguous()?,
-            taps,
+            taps: std::sync::OnceLock::new(),
             bias: bias.reshape((1, c, 1, 1))?,
             kernel,
             stride,
@@ -67,16 +56,34 @@ impl Depthwise {
                 act,
             );
         }
-        let y = if xs.device().is_metal() {
-            self.forward_taps(xs)?
-        } else {
+        let y = if crate::has_kernels(xs.device()) {
             crate::depthwise::depthwise_conv2d(xs, &self.w, &self.b, self.stride, self.padding)?
+        } else {
+            self.forward_taps(xs)?
         };
         activate(y, self.act)
     }
 
+    fn taps(&self) -> Result<&[Tensor]> {
+        if let Some(taps) = self.taps.get() {
+            return Ok(taps);
+        }
+        let (c, k) = (self.w.dim(0)?, self.kernel);
+        let taps = (0..k * k)
+            .map(|t| {
+                self.w
+                    .narrow(2, t / k, 1)?
+                    .narrow(3, t % k, 1)?
+                    .reshape((1, c, 1, 1))?
+                    .contiguous()
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(self.taps.get_or_init(|| taps))
+    }
+
     /// Sum of k*k shifted taps; strided taps are a phase select after padding to a stride multiple.
     fn forward_taps(&self, xs: &Tensor) -> Result<Tensor> {
+        let taps = self.taps()?;
         let (b, c, h, w) = xs.dims4()?;
         let (k, s, p) = (self.kernel, self.stride, self.padding);
         let ho = (h + 2 * p - k) / s + 1;
@@ -97,9 +104,7 @@ impl Depthwise {
                     .squeeze(3)?
                     .narrow(2, ky / s, ho)?
                     .narrow(3, kx / s, wo)?;
-                acc = v
-                    .broadcast_mul(&self.taps[ky * k + kx])?
-                    .broadcast_add(&acc)?;
+                acc = v.broadcast_mul(&taps[ky * k + kx])?.broadcast_add(&acc)?;
             }
         }
         Ok(acc)
@@ -197,7 +202,8 @@ impl Dense {
         let cpu_packed = fused
             .then(|| crate::cpu_direct::pack_weights(&w))
             .transpose()?;
-        let needs_w2d = !fused && (dev.is_cuda() || (dev.is_cpu() && i < IMPLICIT_MIN_IN_C));
+        let cuda_kernels = dev.is_cuda() && crate::has_kernels(&dev);
+        let needs_w2d = !fused && (cuda_kernels || (dev.is_cpu() && i < IMPLICIT_MIN_IN_C));
         let w2d = needs_w2d
             .then(|| {
                 Tensor::cat(
@@ -206,7 +212,8 @@ impl Dense {
                 )
             })
             .transpose()?;
-        let needs_conv = !fused && (dev.is_metal() || (dev.is_cpu() && i >= IMPLICIT_MIN_IN_C));
+        let needs_conv =
+            !fused && (!crate::has_kernels(&dev) || (dev.is_cpu() && i >= IMPLICIT_MIN_IN_C));
         let cfg = Conv2dConfig {
             padding,
             stride,
@@ -343,13 +350,17 @@ impl ConvNormSpec {
         vb: VarBuilder,
         vb_1x1: VarBuilder,
     ) -> Result<ConvNorm> {
+        // centre-tap folding is only exact for a "same"-padded odd k*k conv plus an unpadded, ungrouped 1x1
         if one_by_one.kernel != 1
+            || one_by_one.padding != 0
+            || one_by_one.groups != 1
             || self.groups != 1
             || self.kernel.is_multiple_of(2)
+            || self.padding != (self.kernel - 1) / 2
             || self.stride != one_by_one.stride
         {
             candle_core::bail!(
-                "RepVGG merge needs an odd k*k conv and a 1x1 conv with the same stride"
+                "RepVGG merge needs a same-padded odd k*k conv and an unpadded 1x1 conv with the same stride"
             );
         }
         let (w, b) = self.folded(vb)?;
@@ -398,6 +409,24 @@ impl ConvNormSpec {
     }
 }
 
+/// `candle_nn::Linear` that makes 3-D inputs contiguous first: candle's CPU batched matmul is wrong for batch items
+/// > 0 when the lhs is a transposed view.
+#[derive(Debug, Clone)]
+pub struct Linear(candle_nn::Linear);
+
+pub fn linear(in_dim: usize, out_dim: usize, vb: VarBuilder) -> Result<Linear> {
+    candle_nn::linear(in_dim, out_dim, vb).map(Linear)
+}
+
+impl Module for Linear {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        if xs.rank() == 3 && !xs.is_contiguous() {
+            return self.0.forward(&xs.contiguous()?);
+        }
+        self.0.forward(xs)
+    }
+}
+
 /// HF `MLPPredictionHead`: `layers.{i}` linears with ReLU between.
 #[derive(Debug, Clone)]
 pub struct MlpHead {
@@ -417,7 +446,7 @@ impl MlpHead {
             .map(|i| {
                 let i_d = if i == 0 { in_dim } else { hidden };
                 let o_d = if i == n - 1 { out_dim } else { hidden };
-                candle_nn::linear(i_d, o_d, vb.pp(i))
+                linear(i_d, o_d, vb.pp(i))
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self { layers })
@@ -440,7 +469,8 @@ impl Module for MlpHead {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{Device, D};
+    use crate::test_util::{devices, rel_err};
+    use candle_core::Device;
 
     // GELU has no fused kernel, so it exercises each variant's unfused path next to the fused ones
     const ACTS: [Option<Activation>; 4] = [
@@ -449,12 +479,6 @@ mod tests {
         Some(Activation::Silu),
         Some(Activation::Gelu),
     ];
-
-    fn devices() -> Result<Vec<Device>> {
-        std::iter::once(Ok(Device::Cpu))
-            .chain(cfg!(feature = "cuda").then(|| Device::new_cuda(0)))
-            .collect()
-    }
 
     fn reference(
         x: &Tensor,
@@ -470,22 +494,6 @@ mod tests {
                 .broadcast_add(&b.reshape((1, o, 1, 1))?)?,
             act,
         )
-    }
-
-    fn rel_err(a: &Tensor, b: &Tensor) -> Result<f32> {
-        let a = a.to_device(&Device::Cpu)?;
-        let scale = b
-            .abs()?
-            .flatten_all()?
-            .max(D::Minus1)?
-            .to_scalar::<f32>()?
-            .max(1e-6);
-        Ok((a - b)?
-            .abs()?
-            .flatten_all()?
-            .max(D::Minus1)?
-            .to_scalar::<f32>()?
-            / scale)
     }
 
     #[test]

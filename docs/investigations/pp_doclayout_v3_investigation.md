@@ -422,3 +422,18 @@ Final state of the CPU pass (default threads = physical-core pool; loaded deskto
   TFLOP/s AVX2 peak), MLAS NCHWc ~65-70%. Levers not pursued: NCHWc layout end to end (conv + add + cat + upsample
   custom ops), avoiding the `Tensor::cat` copies in HGNetV2 blocks by writing layer outputs into the concat buffer,
   and the stride-2 phase-plane build (8 ms on the stem conv).
+
+## Run 21 - 2026-09-25 03:00
+
+Question: after the PR #2 review fixes, do the fallback paths work? The review found that `mask_to_box` had no
+Metal path, and that custom ops would fail when candle's CUDA was on but this crate's `cuda` feature was off.
+
+Change: one `has_kernels(device)` gate (CPU, or CUDA with this crate's `cuda` feature) routes every custom op;
+everything else takes tensor-op fallbacks (candle conv, shifted-tap depthwise, tensor-op sampler, tensor-op mask->box).
+
+Command: build with `--features candle-core/cuda,candle-nn/cuda` (i.e. without `mistralrs-layout/cuda`, so every custom
+kernel is disabled on the GPU) and run the parity example on CUDA.
+
+Finding: all fallbacks correct end to end on the GPU: init_reference_points max_abs 4.8e-7, pred_boxes 1.3e-5, same 13
+detections; 60 ms/forward (vs 26 ms with kernels). Before the fix this configuration errored.
+Normal builds unchanged: six-page HF comparison identical on CPU (batched) and CUDA; CPU 0.65 s, CUDA 26.1 ms.

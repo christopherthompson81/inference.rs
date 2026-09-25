@@ -1,17 +1,17 @@
 use candle_core::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{LayerNorm, Linear, VarBuilder};
+use candle_nn::{LayerNorm, VarBuilder};
 
 use super::backbone::HGNetV2Backbone;
 use super::config::PPDocLayoutV3Config;
 use super::decoder::{inverse_sigmoid, DecodeCtx, DecoderLayer, LevelGeom};
 use super::encoder::HybridEncoder;
-use crate::layers::{ConvNorm, ConvNormSpec, MlpHead};
+use crate::layers::{linear, ConvNorm, ConvNormSpec, Linear, MlpHead};
 
 const SEQ_CONV: (&str, &str) = ("0", "1");
 const ANCHOR_EPS: f32 = 1e-2;
 const ANCHOR_GRID: f32 = 0.05;
 const GP_MASK_FILL: f64 = -1e4;
-/// Deformable-attention sample indices are built in f32 before the cast to u32.
+/// The tensor-op deformable-attention sampler builds sample indices in f32 before the cast to u32.
 const MAX_EXACT_F32_INDEX: usize = 1 << 24;
 
 pub struct RawOutputs {
@@ -80,6 +80,10 @@ fn anchor_valid_mask(geom: &LevelGeom, dev: &Device) -> Result<Tensor> {
 impl PPDocLayoutV3 {
     /// The model is shape-specialized to `input_hw` so all positional/anchor tensors are built once here.
     pub fn new(cfg: PPDocLayoutV3Config, input_hw: (usize, usize), vb: VarBuilder) -> Result<Self> {
+        // the custom kernels are f32-only, and TF32-level error already flips the encoder's top-k query selection
+        if vb.dtype() != DType::F32 {
+            candle_core::bail!("PP-DocLayoutV3 runs in f32 only, got {:?}", vb.dtype());
+        }
         if cfg.backbone_config.arch != "L" {
             candle_core::bail!("unsupported HGNetV2 arch {}", cfg.backbone_config.arch);
         }
@@ -137,14 +141,15 @@ impl PPDocLayoutV3 {
             .map(|i| DecoderLayer::new(&cfg, vbm.pp("decoder").pp("layers").pp(i)))
             .collect::<Result<Vec<_>>>()?;
         // only the final decoder layer's order head feeds the output
-        let order_head = candle_nn::linear(
+        let order_head = linear(
             d,
             d,
             vbm.pp("decoder_order_head").pp(cfg.decoder_layers - 1),
         )?;
 
         let geom = LevelGeom::new(shapes);
-        if geom.total < cfg.num_queries || geom.total > MAX_EXACT_F32_INDEX {
+        let fallback_sampler = !crate::has_kernels(&dev);
+        if geom.total < cfg.num_queries || (fallback_sampler && geom.total > MAX_EXACT_F32_INDEX) {
             candle_core::bail!(
                 "input {input_hw:?} gives {} memory tokens; need {}..={MAX_EXACT_F32_INDEX}",
                 geom.total,
@@ -165,16 +170,16 @@ impl PPDocLayoutV3 {
             encoder,
             decoder_input_proj,
             enc_output: (
-                candle_nn::linear(d, d, vbm.pp("enc_output").pp(0))?,
+                linear(d, d, vbm.pp("enc_output").pp(0))?,
                 candle_nn::layer_norm(d, eps, vbm.pp("enc_output").pp(1))?,
             ),
             // decoder.class_embed / bbox_embed are tied to these in the checkpoint
-            enc_score_head: candle_nn::linear(d, nl, vbm.pp("enc_score_head"))?,
+            enc_score_head: linear(d, nl, vbm.pp("enc_score_head"))?,
             enc_bbox_head: MlpHead::new(d, d, 4, 3, vbm.pp("enc_bbox_head"))?,
             layers,
             query_pos_head: MlpHead::new(4, 2 * d, d, 2, vbm.pp("decoder").pp("query_pos_head"))?,
             order_head,
-            global_pointer: candle_nn::linear(
+            global_pointer: linear(
                 d,
                 cfg.global_pointer_head_size * 2,
                 vbm.pp("decoder_global_pointer").pp("dense"),
@@ -293,9 +298,20 @@ impl PPDocLayoutV3 {
         let enc_masks = mask_embed.matmul(&mask_feat)?;
         let init_ref = inverse_sigmoid(&crate::mask_box::mask_to_box(&enc_masks, mh, mw)?)?;
 
+        let bh_offset = if crate::has_kernels(pixel_values.device()) {
+            None
+        } else {
+            let bh = b * self.cfg.decoder_attention_heads;
+            Some(
+                Tensor::arange(0u32, bh as u32, pixel_values.device())?
+                    .affine(s as f64, 0.)?
+                    .reshape((bh, 1))?,
+            )
+        };
         let ctx = DecodeCtx {
             memory: &memory,
             geom: &self.geom,
+            bh_offset,
         };
 
         let mut hs = target;
@@ -348,7 +364,7 @@ impl PPDocLayoutV3 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{Shape, D};
+    use candle_core::Shape;
     use candle_nn::var_builder::SimpleBackend;
 
     const TEST_INPUT: usize = 160;
@@ -409,10 +425,7 @@ mod tests {
 
     #[test]
     fn batched_forward_matches_single() -> Result<()> {
-        let devs = std::iter::once(Ok(Device::Cpu))
-            .chain(cfg!(feature = "cuda").then(|| Device::new_cuda(0)))
-            .collect::<Result<Vec<_>>>()?;
-        for dev in devs {
+        for dev in crate::test_util::devices()? {
             let vb = VarBuilder::from_backend(Box::new(RandomWeights), DType::F32, dev.clone());
             let model = PPDocLayoutV3::new(test_config(), (TEST_INPUT, TEST_INPUT), vb)?;
             let px = Tensor::rand(0f32, 1., (2, 3, TEST_INPUT, TEST_INPUT), &dev)?;
@@ -429,22 +442,10 @@ mod tests {
                 ),
             ];
             for (name, b, s) in pairs {
-                let (b, s) = (b.narrow(0, 1, 1)?, s);
-                let scale = s
-                    .abs()?
-                    .flatten_all()?
-                    .max(D::Minus1)?
-                    .to_scalar::<f32>()?
-                    .max(1e-6);
-                let err = (b - s)?
-                    .abs()?
-                    .flatten_all()?
-                    .max(D::Minus1)?
-                    .to_scalar::<f32>()?;
+                let err = crate::test_util::rel_err(&b.narrow(0, 1, 1)?, s)?;
                 assert!(
-                    err / scale < 1e-4,
-                    "{dev:?} {name}: batch item 1 differs, rel err {}",
-                    err / scale
+                    err < 1e-4,
+                    "{dev:?} {name}: batch item 1 differs, rel err {err}"
                 );
             }
         }

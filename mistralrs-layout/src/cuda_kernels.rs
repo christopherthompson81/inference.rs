@@ -4,6 +4,8 @@ pub const MODULE: &str = "mistralrs_layout";
 pub const DEPTHWISE: &str = "depthwise_conv2d_f32";
 pub const IM2COL: &str = "im2col_cols_last_f32";
 pub const MASK_TO_BOX: &str = "mask_to_box_f32";
+/// Threads per `mask_to_box_f32` block; also sizes its shared reduction arrays.
+pub const MASK_TO_BOX_BLOCK: u32 = 256;
 pub const MS_DEFORM_ATTN: &str = "ms_deform_attn_f32";
 
 const SRC: &str = r#"
@@ -57,9 +59,9 @@ extern "C" __global__ void im2col_cols_last_f32(
     }
 }
 
-// one block per (batch, query) row: block-reduce the bbox of pixels with logit > 0 (blockDim.x must be 256)
+// one block of MASK_TO_BOX_BLOCK threads per (batch, query) row: block-reduce the bbox of pixels with logit > 0
 extern "C" __global__ void mask_to_box_f32(const float* __restrict__ m, float* __restrict__ out, int H, int W) {
-    __shared__ int red[4][256];
+    __shared__ int red[4][MASK_TO_BOX_BLOCK];
     int row = blockIdx.x;
     int n = H * W;
     const float* mr = m + (long)row * n;
@@ -137,9 +139,11 @@ static PTX: OnceLock<std::result::Result<String, String>> = OnceLock::new();
 pub fn ptx() -> candle_core::Result<&'static str> {
     use candle_core::cuda_backend::cudarc::nvrtc;
     PTX.get_or_init(|| {
-        nvrtc::compile_ptx(SRC)
-            .map(|p| p.to_src())
-            .map_err(|e| e.to_string())
+        nvrtc::compile_ptx(format!(
+            "#define MASK_TO_BOX_BLOCK {MASK_TO_BOX_BLOCK}\n{SRC}"
+        ))
+        .map(|p| p.to_src())
+        .map_err(|e| e.to_string())
     })
     .as_deref()
     .map_err(|e| candle_core::Error::Msg(format!("nvrtc layout kernels: {e}")))

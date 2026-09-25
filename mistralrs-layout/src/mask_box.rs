@@ -1,12 +1,52 @@
-use candle_core::{CpuStorage, CustomOp1, Layout, Result, Shape, Tensor};
-use rayon::prelude::*;
+use candle_core::{CpuStorage, CustomOp1, DType, Layout, Result, Shape, Tensor, D};
 
-#[cfg(feature = "cuda")]
-const BLOCK: u32 = 256;
+/// Min-reduction fill for pixels outside the mask in the tensor-op fallback.
+const MASK_MIN_FILL: f64 = 1e9;
+use rayon::prelude::*;
 
 /// `(b, q, h*w)` mask logits -> `(b, q, 4)` normalized cxcywh of each `> 0` region's pixel bbox (zeros if empty).
 pub fn mask_to_box(masks: &Tensor, h: usize, w: usize) -> Result<Tensor> {
+    if !crate::has_kernels(masks.device()) {
+        return mask_to_box_ops(masks, h, w);
+    }
     masks.contiguous()?.apply_op1_no_bwd(&MaskToBox { h, w })
+}
+
+/// Tensor-op version for devices without the custom kernel.
+fn mask_to_box_ops(masks: &Tensor, h: usize, w: usize) -> Result<Tensor> {
+    let dev = masks.device();
+    let coords = |n: usize, shape: (usize, usize)| -> Result<Tensor> {
+        Tensor::arange(0u32, n as u32, dev)?
+            .to_dtype(DType::F32)?
+            .reshape(shape)?
+            .broadcast_as((h, w))?
+            .contiguous()?
+            .reshape((1, 1, h * w))
+    };
+    let (xs, ys) = (coords(w, (1, w))?, coords(h, (h, 1))?);
+    let m = masks.gt(0.)?.to_dtype(DType::F32)?;
+    let fill = (m.affine(-1., 1.)? * MASK_MIN_FILL)?;
+    let mx = m.broadcast_mul(&xs)?;
+    let my = m.broadcast_mul(&ys)?;
+    let x0 = (&mx + &fill)?.min_keepdim(D::Minus1)?;
+    let y0 = (&my + &fill)?.min_keepdim(D::Minus1)?;
+    let x1 = (mx.max_keepdim(D::Minus1)? + 1.)?;
+    let y1 = (my.max_keepdim(D::Minus1)? + 1.)?;
+    let norm = Tensor::new(&[w as f32, h as f32, w as f32, h as f32], dev)?;
+    let xyxy = Tensor::cat(&[x0, y0, x1, y1], D::Minus1)?
+        .broadcast_mul(&m.max_keepdim(D::Minus1)?)?
+        .broadcast_div(&norm)?;
+    let part = |i| xyxy.narrow(D::Minus1, i, 1);
+    let (x0, y0, x1, y1) = (part(0)?, part(1)?, part(2)?, part(3)?);
+    Tensor::cat(
+        &[
+            ((&x0 + &x1)? / 2.)?,
+            ((&y0 + &y1)? / 2.)?,
+            (x1 - x0)?,
+            (y1 - y0)?,
+        ],
+        D::Minus1,
+    )
 }
 
 struct MaskToBox {
@@ -86,7 +126,7 @@ impl CustomOp1 for MaskToBox {
         builder.arg(&w);
         let cfg = LaunchConfig {
             grid_dim: (u32::try_from(b * q)?, 1, 1),
-            block_dim: (BLOCK, 1, 1),
+            block_dim: (crate::cuda_kernels::MASK_TO_BOX_BLOCK, 1, 1),
             shared_mem_bytes: 0,
         };
         unsafe { builder.launch(cfg) }.w()?;
@@ -122,16 +162,15 @@ mod tests {
             ],
             [0.; 4],
         ];
-        let devs = std::iter::once(Ok(Device::Cpu))
-            .chain(cfg!(feature = "cuda").then(|| Device::new_cuda(0)))
-            .collect::<Result<Vec<_>>>()?;
-        for dev in devs {
-            let got = mask_to_box(&t.to_device(&dev)?, h, w)?
-                .to_device(&Device::Cpu)?
-                .to_vec3::<f32>()?;
+        let mut results = vec![("fallback".to_string(), mask_to_box_ops(&t, h, w)?)];
+        for dev in crate::test_util::devices()? {
+            results.push((format!("{dev:?}"), mask_to_box(&t.to_device(&dev)?, h, w)?));
+        }
+        for (name, got) in results {
+            let got = got.to_device(&Device::Cpu)?.to_vec3::<f32>()?;
             for (g, e) in got[0].iter().zip(&want) {
                 for (a, b) in g.iter().zip(e) {
-                    assert!((a - b).abs() < 1e-6, "{dev:?} {g:?} vs {e:?}");
+                    assert!((a - b).abs() < 1e-6, "{name} {g:?} vs {e:?}");
                 }
             }
         }
