@@ -45,6 +45,9 @@ pub const INFERENCE_RS_GIT_REVISION: &str = match option_env!("INFERENCE_RS_GIT_
 };
 pub const INFERENCE_RS_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_ENGINE_REQUEST_QUEUE_CAPACITY: usize = 10_000;
+// Bounded so a wedged engine cannot hang drop forever; normal termination takes milliseconds.
+const ENGINE_DROP_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+const ENGINE_DROP_POLL_INTERVAL: Duration = Duration::from_millis(5);
 pub const REQUEST_QUEUE_DURATION_METRIC: &str = "inference_request_queue_duration_seconds";
 
 // GPU tests share one device and process-global CUDA state (memory pools, graph scopes), so they run one at a time.
@@ -436,6 +439,17 @@ impl EngineInstance {
             }
         }
     }
+
+    fn join_until(&mut self, deadline: Instant) {
+        while !self.is_finished() {
+            if Instant::now() >= deadline {
+                warn!("Engine thread did not stop within {ENGINE_DROP_JOIN_TIMEOUT:?}; not waiting for it.");
+                return;
+            }
+            std::thread::sleep(ENGINE_DROP_POLL_INTERVAL);
+        }
+        self.join();
+    }
 }
 
 /// The InferenceRs struct handles sending requests to multiple engines.
@@ -723,11 +737,15 @@ impl InferenceRsBuilder {
 
 impl Drop for InferenceRs {
     fn drop(&mut self) {
-        // Terminate all engines
-        if let Ok(engines) = self.engines.read() {
+        // Engine threads still inside CUDA when the process exits race the context teardown and segfault, so wait.
+        if let Ok(engines) = self.engines.get_mut() {
             for engine in engines.values() {
-                // Use try_send instead of blocking_send to avoid runtime panics
+                // try_send rather than blocking_send, which panics inside a runtime
                 engine.terminate();
+            }
+            let deadline = Instant::now() + ENGINE_DROP_JOIN_TIMEOUT;
+            for engine in engines.values_mut() {
+                engine.join_until(deadline);
             }
         }
     }

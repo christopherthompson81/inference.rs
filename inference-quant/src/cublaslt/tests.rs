@@ -5,6 +5,10 @@ use float8::F8E4M3;
 #[test]
 fn test_fused_batch_matmul_f8e4m3_nobias() -> Result<()> {
     let device = Device::new_cuda(0)?;
+    if !crate::fp8_tensor_cores(&device) {
+        eprintln!("SKIP: FP8 tensor cores need sm_89+");
+        return Ok(());
+    }
 
     // Use 128x128 matrices for FP8 tensor core compatibility across GPU architectures
     // Use batch_size=1 to simplify testing on new architectures
@@ -63,6 +67,10 @@ fn test_fused_batch_matmul_f8e4m3_nobias() -> Result<()> {
 #[test]
 fn test_fused_batch_matmul_f8e4m3_out_bf16() -> Result<()> {
     let device = Device::new_cuda(0)?;
+    if !crate::fp8_tensor_cores(&device) {
+        eprintln!("SKIP: FP8 tensor cores need sm_89+");
+        return Ok(());
+    }
 
     // Use 128x128 matrices for FP8 tensor core compatibility across GPU architectures
     // Ensure all tensors are contiguous

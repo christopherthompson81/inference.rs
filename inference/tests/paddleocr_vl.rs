@@ -78,14 +78,17 @@ fn image_request(images: Vec<image::DynamicImage>, prompt: &str, max_len: usize)
     .set_sampler_topk(1)
 }
 
+// GPU builds run the parity tests in bf16 on the device (the goldens match in both dtypes); CPU builds use f32.
+const ON_GPU: bool = cfg!(any(feature = "cuda", feature = "metal"));
+
 async fn build(paged: bool) -> anyhow::Result<Model> {
     let dir = model_dir().expect("checked by caller");
-    let mut builder = MultimodalModelBuilder::new(&dir).with_dtype(if paged {
+    let mut builder = MultimodalModelBuilder::new(&dir).with_dtype(if ON_GPU {
         ModelDType::BF16
     } else {
         ModelDType::F32
     });
-    if !paged {
+    if !ON_GPU {
         builder = builder.with_force_cpu();
     }
     #[cfg(any(feature = "cuda", feature = "metal"))]
@@ -95,6 +98,8 @@ async fn build(paged: bool) -> anyhow::Result<Model> {
             .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?)
             .with_prefix_cache_n(Some(16));
     }
+    #[cfg(not(any(feature = "cuda", feature = "metal")))]
+    let _ = paged;
     builder.build().await
 }
 
@@ -125,18 +130,31 @@ async fn greedy_ids_match_transformers() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[tokio::test]
-async fn text_matches_transformers_for_ocr_and_tables() -> anyhow::Result<()> {
-    skip_unless_model!("text parity");
+async fn assert_text_golden(index: usize) -> anyhow::Result<()> {
+    let (name, prompt, golden) = TEXT_GOLDENS[index];
     let model = build(false).await?;
-    for (name, prompt, golden) in TEXT_GOLDENS {
-        let resp = model
-            .send_chat_request(image_request(vec![fixture(name)?], prompt, MAX_LEN))
-            .await?;
-        assert_eq!(text(&resp), *golden, "{name} [{prompt}]");
-    }
+    let resp = model
+        .send_chat_request(image_request(vec![fixture(name)?], prompt, MAX_LEN))
+        .await?;
+    assert_eq!(text(&resp), golden, "{name} [{prompt}]");
     Ok(())
 }
+
+// One test per fixture so the CPU f32 decodes run in parallel instead of as one long pole.
+macro_rules! text_golden_test {
+    ($name:ident, $index:expr) => {
+        #[tokio::test]
+        async fn $name() -> anyhow::Result<()> {
+            skip_unless_model!("text parity");
+            assert_text_golden($index).await
+        }
+    };
+}
+
+text_golden_test!(ocr_text_matches_transformers, 0);
+text_golden_test!(page_00_text_matches_transformers, 1);
+text_golden_test!(page_01_text_matches_transformers, 2);
+text_golden_test!(table_otsl_matches_transformers, 3);
 
 #[tokio::test]
 async fn text_only_matches_transformers() -> anyhow::Result<()> {

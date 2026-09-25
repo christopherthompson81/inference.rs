@@ -313,6 +313,10 @@ mod tests {
         const N: usize = 272;
         const K: usize = 1024;
         let dev = Device::new_cuda(0)?;
+        if !crate::fp8_tensor_cores(&dev) {
+            eprintln!("SKIP: FP8 tensor cores need sm_89+");
+            return Ok(());
+        }
         let weight =
             Tensor::from_vec(patterned(N * K, 3, 2.0, 0.1), (N, K), &dev)?.to_dtype(DType::BF16)?;
         let (weight, weight_scales) =

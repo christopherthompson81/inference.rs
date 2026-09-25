@@ -16,6 +16,24 @@ pub mod metal_kernels;
 
 mod afq;
 mod bitsandbytes;
+
+// FP8 tensor-core paths (cuBLASLt FP8, the blockwise FP8 MMA GEMV) need sm_89+; their tests skip on older GPUs.
+#[cfg(all(test, feature = "cuda"))]
+pub(crate) fn fp8_tensor_cores(device: &candle_core::Device) -> bool {
+    use candle_core::cuda::cudarc::driver::sys::CUdevice_attribute;
+    let Ok(dev) = device.as_cuda_device() else {
+        return false;
+    };
+    let stream = dev.cuda_stream();
+    let context = stream.context();
+    let major = context
+        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
+        .unwrap_or(0);
+    let minor = context
+        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
+        .unwrap_or(0);
+    major * 10 + minor >= 89
+}
 mod blockwise_fp8;
 pub mod cublaslt;
 #[cfg(test)]
