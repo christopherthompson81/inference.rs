@@ -299,6 +299,7 @@ class MultimodalArchitecture(Enum):
     Gemma4 = "Gemma4"
     MuseGlimmer = "MuseGlimmer"
     DiffusionGemma = "DiffusionGemma"
+    PaddleOcrVl = "paddleocr_vl"
 
 @dataclass
 class DiffusionArchitecture(Enum):

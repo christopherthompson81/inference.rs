@@ -327,6 +327,11 @@ impl MultimodalLoaderType {
                 modalities: &[Text, Vision],
                 examples: &[ex!("google/diffusiongemma-26B-A4B-it")],
             },
+            Self::PaddleOcrVl => ArchMetadata {
+                families: &["PaddleOCR-VL"],
+                modalities: &[Text, Vision],
+                examples: &[ex!("PaddlePaddle/PaddleOCR-VL-1.5")],
+            },
         }
     }
 }
@@ -439,6 +444,7 @@ impl MultimodalLoaderType {
             Self::Gemma4 => "Gemma4ForConditionalGeneration",
             Self::MuseGlimmer => "MuseGlimmerForConditionalGeneration",
             Self::DiffusionGemma => "DiffusionGemmaForBlockDiffusion",
+            Self::PaddleOcrVl => "PaddleOCRVLForConditionalGeneration",
         }
     }
 }

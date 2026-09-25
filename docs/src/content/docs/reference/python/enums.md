@@ -74,6 +74,7 @@ Members and their wire/config names where relevant. The members are fieldless Py
 | `MultimodalArchitecture.Gemma4` | `'Gemma4'` |
 | `MultimodalArchitecture.MuseGlimmer` | `'MuseGlimmer'` |
 | `MultimodalArchitecture.DiffusionGemma` | `'DiffusionGemma'` |
+| `MultimodalArchitecture.PaddleOcrVl` | `'paddleocr_vl'` |
 
 
 ## `DiffusionArchitecture`

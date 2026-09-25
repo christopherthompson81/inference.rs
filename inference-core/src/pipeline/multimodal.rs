@@ -14,7 +14,7 @@ use super::{
 use super::{
     DiffusionGemmaLoader, Gemma3nLoader, Gemma4Loader, Idefics2Loader, Idefics3Loader, LLaVALoader,
     LLaVANextLoader, Lfm2VlLoader, Mistral3Loader, MultimodalLoaderType, MuseGlimmerLoader,
-    Phi3VLoader, Qwen2_5VLLoader, VoxtralLoader,
+    PaddleOcrVlLoader, Phi3VLoader, Qwen2_5VLLoader, VoxtralLoader,
 };
 use crate::attention::ATTENTION_CHUNK_SIZE;
 #[cfg(feature = "cuda")]
@@ -394,6 +394,7 @@ impl MultimodalLoaderBuilder {
             Some(MultimodalLoaderType::Gemma4) => Box::new(Gemma4Loader),
             Some(MultimodalLoaderType::MuseGlimmer) => Box::new(MuseGlimmerLoader),
             Some(MultimodalLoaderType::DiffusionGemma) => Box::new(DiffusionGemmaLoader),
+            Some(MultimodalLoaderType::PaddleOcrVl) => Box::new(PaddleOcrVlLoader),
             None => Box::new(AutoMultimodalLoader),
         };
         Box::new(MultimodalLoader {

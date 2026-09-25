@@ -133,6 +133,7 @@ pub enum MultimodalArchitecture {
     Gemma4,
     MuseGlimmer,
     DiffusionGemma,
+    PaddleOcrVl,
 }
 
 impl From<MultimodalArchitecture> for MultimodalLoaderType {
@@ -161,6 +162,7 @@ impl From<MultimodalArchitecture> for MultimodalLoaderType {
             MultimodalArchitecture::Gemma4 => MultimodalLoaderType::Gemma4,
             MultimodalArchitecture::MuseGlimmer => MultimodalLoaderType::MuseGlimmer,
             MultimodalArchitecture::DiffusionGemma => MultimodalLoaderType::DiffusionGemma,
+            MultimodalArchitecture::PaddleOcrVl => MultimodalLoaderType::PaddleOcrVl,
         }
     }
 }
