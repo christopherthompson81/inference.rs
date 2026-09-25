@@ -207,3 +207,80 @@ full BK unroll makes it the most expensive kernel in the tree to compile. Both a
   drift. A mismatch would only fail at link time.
 - `inference-paged-attn/build.rs`'s per-file `rerun-if-changed` list was removed. It was already incomplete, and
   cudaforge's `.watch(["src/cuda"])` emits `rerun-if-changed=src/cuda` for the whole tree.
+
+## Run 10 - 2026-09-25 08:10
+
+Question: why is a CUDA build oversubscribed (a desktop screenshot showed load ~55 on 16 threads), and can the kernel
+crates share cargo's `-j`?
+
+Finding (cause): five crates compile CUDA through cudaforge (inference-core, -quant, -paged-attn, -flash-attn and
+candle-kernels). Each build script sizes its own rayon pool from `CUDAFORGE_THREADS`, or half the cores by default,
+and none of them use cargo's jobserver. So with several running at once, the build has up to ~16 x N nvcc processes
+plus cargo's own 16 rustc jobs.
+
+Change: cudaforge 0.1.6 is vendored as `third_party/cudaforge` and patched in with `[patch.crates-io]`, which also
+covers candle-kernels.
+
+- New `src/jobserver.rs`: every nvcc process holds a slot, either the build script's implicit token or one from cargo.
+- Tokens are requested through jobserver's helper thread, and waiters block on a condvar that wakes on either a token
+  or the implicit slot freeing, so `-j1` cannot deadlock.
+- Polling with `try_acquire` was rejected, because it returns `Unsupported` for inherited anonymous-pipe jobservers.
+- The default pool is raised to all cores, since the jobserver is now what bounds concurrency.
+
+Command: `cargo clean -p inference-core -p inference-paged-attn -p inference-quant -p inference-flash-attn -p
+candle-kernels`, then `NVCC=/usr/local/cuda-12.8/bin/nvcc cargo check -p inference-cli --features cuda`, with no
+`CUDAFORGE_THREADS`, sampled every 10 s (load average and the nvcc/rustc/cicc/ptxas counts).
+
+Finding: **nvcc never exceeded 16 concurrent processes, and load average peaked at 18.7** (it was ~55 before). CPU
+was at 96-99% until ~670 s, then the long-pole files (the fp8 FlashInfer and chunked GDN TUs in ptxas) formed a tail
+to ~990 s. The run took 17m 09s. That is not comparable to Run 8's 15m 47s, because this clean set also rebuilds
+candle-kernels, so Run 11 re-runs the upstream cudaforge on the same set.
+
+## Run 11 - 2026-09-25 08:50
+
+Question: is Run 10's wall time a regression? It needs the same clean set with upstream cudaforge.
+
+Command: Run 10's command with master's `Cargo.toml`/`Cargo.lock` (registry cudaforge) and `CUDAFORGE_THREADS=16`, which
+is the setting used before this change.
+
+Finding: 17m 27s, with **load average up to 57.5 and up to 58 concurrent nvcc processes**. Compared with Run 10:
+
+| | upstream cudaforge | jobserver cudaforge |
+|---|---|---|
+| wall | 17m 27s | 17m 09s |
+| peak load | 57.5 | 18.7 |
+| peak nvcc | 58 | 16 |
+
+The jobserver change removes the oversubscription at no wall-time cost. A fully busy machine finishes the same work
+at the same rate whether it runs 16 or 58 compilers.
+
+## Run 12 - 2026-09-25 09:05
+
+Question: what do warm rebuilds cost?
+
+Method: Run 11's state (every kernel built) and the same env, timing `cargo check -p inference-cli --features cuda`.
+The "Compiling N of M kernels" lines that cargo replays from cached build-script output are not compiles. Only new
+ones count.
+
+Finding:
+
+| change | time | kernels compiled |
+|---|---|---|
+| none | 11.0 s | 0 |
+| `touch` a Rust file in inference-core | 46.5 s | 0 |
+| edit a Rust file inside `inference-core/src/cuda/` | 10.2 s | 0 |
+| edit one `.cu` | 12.1 s | 1 |
+| revert that `.cu` | 12.0 s | 1 |
+
+Kernel incrementality is right. cudaforge rebuilds a `.cu` only when its own content hash changes, and rebuilds the
+whole crate only when a watched `.h`/`.cuh`, or the args (including our header-hash define), change. The 11 s no-op
+was a bug. `CARGO_LOG=cargo::core::compiler::fingerprint=info` showed the inference-core build script stale on
+`missing ".../inference-core/.git/HEAD"`. `set_git_revision` emitted `rerun-if-changed=.git/HEAD`, which cargo
+resolves relative to the package directory. That file never exists, so the script reran and inference-core plus every
+dependent rebuilt on each invocation. In a full `cargo build`, that means recompiling the biggest crate every time.
+
+Fix: ask git for the real paths (`rev-parse --path-format=absolute --git-path` for `HEAD`, the current branch ref and
+`packed-refs`, which also covers worktrees), and emit only paths that exist.
+
+Finding: the first build after the fix reran the script once (10.6 s). After that, **no-op builds take 0.32 s** and
+nothing is marked dirty.

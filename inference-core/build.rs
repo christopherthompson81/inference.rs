@@ -299,29 +299,24 @@ fn add_cudnn_link_search() {
     );
 }
 
-fn set_git_revision() {
-    let commit = std::process::Command::new("git")
-        .args(["rev-parse", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|output| {
-            if output.status.success() {
-                String::from_utf8(output.stdout).ok()
-            } else {
-                None
-            }
-        })
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "unknown".to_string());
+fn git(args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git").args(args).output().ok()?;
+    let text = String::from_utf8(output.stdout).ok()?;
+    let text = text.trim();
+    (output.status.success() && !text.is_empty()).then(|| text.to_string())
+}
 
+fn set_git_revision() {
+    let commit = git(&["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
     println!("cargo:rustc-env=INFERENCE_RS_GIT_REVISION={commit}");
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    if let Ok(head) = std::fs::read_to_string(".git/HEAD") {
-        if let Some(ref_path) = head.strip_prefix("ref:") {
-            let ref_path = ref_path.trim();
-            if !ref_path.is_empty() {
-                println!("cargo:rerun-if-changed=.git/{}", ref_path);
+
+    // Paths come from git so worktrees resolve; a missing watched file would rerun this script on every build.
+    let head_ref = git(&["symbolic-ref", "-q", "HEAD"]);
+    let watched = ["HEAD", head_ref.as_deref().unwrap_or("HEAD"), "packed-refs"];
+    for name in watched {
+        if let Some(path) = git(&["rev-parse", "--path-format=absolute", "--git-path", name]) {
+            if std::path::Path::new(&path).exists() {
+                println!("cargo:rerun-if-changed={path}");
             }
         }
     }
