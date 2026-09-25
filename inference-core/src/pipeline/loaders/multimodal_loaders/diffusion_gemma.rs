@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== DiffusionGemma loader
-
 pub struct DiffusionGemmaLoader;
 
 impl DiffusionGemmaLoader {
@@ -159,7 +157,6 @@ impl DeviceMappedModelLoader for DiffusionGemmaLoader {
         let total_seq_len = *max_seq_len + vision_tokens_per_image * max_num_images;
         Ok(max_batch_size * tc.num_attention_heads * total_seq_len * total_seq_len)
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -198,7 +195,6 @@ impl DeviceMappedModelLoader for DiffusionGemmaLoader {
 
         Ok(max_vision_attn.max(max_vision_hidden).max(canvas_logits))
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -260,7 +256,6 @@ impl DeviceMappedModelLoader for DiffusionGemmaLoader {
 
         Ok(text_elems * dtype.size_in_bytes() + vision_elems * vision_dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -317,7 +312,6 @@ impl DeviceMappedModelLoader for DiffusionGemmaLoader {
             .collect();
         Ok(sizes)
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: DiffusionGemmaConfig = serde_json::from_str(config)?;
         Ok(cfg.text_config.num_hidden_layers)
@@ -326,7 +320,6 @@ impl DeviceMappedModelLoader for DiffusionGemmaLoader {
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
         Some(vec![NonMappedSubModel::Vision])
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: DiffusionGemmaConfig = serde_json::from_str(config)?;
         let tc = &cfg.text_config;

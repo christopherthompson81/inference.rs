@@ -304,7 +304,6 @@ pub(crate) fn try_cuda_qk_rms_norm_rope(
             } else {
                 None
             };
-
             Ok(Some((q_tensor, k_tensor)))
         }};
     }
@@ -523,7 +522,6 @@ pub(crate) fn try_cuda_qk_rms_norm_rope_positions(
     if rot_dim == 0 || rot_dim * 2 > head_dim {
         return Ok(None);
     }
-
     for (name, value) in [
         ("batch", batch),
         ("q_heads", q_heads),
@@ -852,7 +850,6 @@ pub(crate) fn try_cuda_qkv_rms_norm_rope_positions(
     if rot_dim == 0 || rot_dim * 2 > head_dim {
         return Ok(None);
     }
-
     for (name, value) in [
         ("batch", batch),
         ("q_heads", q_heads),
@@ -1078,4 +1075,11 @@ pub(crate) fn try_cuda_qkv_rms_norm_rope_positions(
         DType::F32 => launch!(F32, f32, 2),
         _ => Ok(None),
     }
+}
+
+#[cfg(feature = "cuda")]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum QkRopeOutputLayout {
+    HeadsFirst,
+    TokensFirst,
 }

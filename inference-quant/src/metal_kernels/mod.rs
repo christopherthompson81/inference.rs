@@ -4,22 +4,16 @@
 // Copyright © 2023 Apple Inc.
 
 use candle_core::{DType, MetalDevice};
-
 use candle_metal_kernels::metal::{
     Buffer, ComputeCommandEncoder, ComputePipeline, ConstantValues, Device, Function, Library,
     MetalDeviceType, Value as ConstantValue,
 };
-
 use objc2_metal::{MTLDevice, MTLSize};
-
 use std::os::raw::c_void;
-
 use std::sync::{Arc, RwLock};
-
 use std::{collections::HashMap, sync::OnceLock};
 
 pub mod utils;
-
 use utils::{
     get_2d_grid_dims, get_2d_grid_dims_divisor, get_block_dims, linear_split, EncoderParam,
     EncoderProvider, Output, RawBytesEncoder,
@@ -29,15 +23,12 @@ use crate::set_params;
 
 // Backward-compatible aliases to ease the transition from the `metal` crate API.
 type ComputeCommandEncoderRef = ComputeCommandEncoder;
-
 type ComputePipelineState = ComputePipeline;
 
 #[cfg(target_os = "macos")]
 const KERNELS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/inference_quant.metallib"));
-
 #[cfg(target_os = "ios")]
 const KERNELS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/inference_quant_ios.metallib"));
-
 #[cfg(target_os = "tvos")]
 const KERNELS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/inference_quant_tvos.metallib"));
 
@@ -66,7 +57,6 @@ impl<T> From<std::sync::PoisonError<T>> for MetalKernelError {
 type Pipelines = HashMap<(String, Option<ConstantValues>), ComputePipeline>;
 
 static LIBRARY: OnceLock<Library> = OnceLock::new();
-
 static GLOBAL_KERNELS: OnceLock<Kernels> = OnceLock::new();
 
 #[derive(Debug)]
@@ -182,8 +172,8 @@ impl Kernels {
     }
 }
 
-mod dequant;
-pub use dequant::*;
+mod hqq_dequant;
+pub use hqq_dequant::*;
 mod bitwise;
 pub use bitwise::*;
 mod bnb;

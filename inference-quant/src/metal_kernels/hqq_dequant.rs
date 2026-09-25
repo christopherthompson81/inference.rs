@@ -30,7 +30,6 @@ pub fn call_dequant_8bit(
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -69,7 +68,6 @@ pub fn call_dequant_4bit(
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -108,7 +106,6 @@ pub fn call_dequant_2bit(
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -147,7 +144,6 @@ pub fn call_dequant_1bit(
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -186,7 +182,6 @@ pub fn call_dequant_3bit(
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);

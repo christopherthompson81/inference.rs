@@ -132,7 +132,6 @@ impl DeviceMappedModelLoader for Qwen3Loader {
         };
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -179,12 +178,10 @@ impl DeviceMappedModelLoader for Qwen3Loader {
             cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: models::qwen3::Config = serde_json::from_str(config)?;
         Ok(cfg.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: models::qwen3::Config = serde_json::from_str(config)?;
 

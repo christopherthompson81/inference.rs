@@ -50,7 +50,6 @@ impl IsqModelLoader for GLM4MoeLoader {
             Regex::new(r"^lm_head\.(weight|bias)$")?,
         ])
     }
-
     fn isq_layer_regexes(&self, config: &str) -> Result<Vec<Regex>> {
         let mut data = vec![
             Regex::new(r"lm_head\.(weight|bias)$")?,
@@ -111,7 +110,6 @@ impl IsqModelLoader for GLM4MoeLoader {
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
         self.isq_layer_regexes(config)
     }
-
     fn isq_layer_regexes_moqe(&self, _config: &str) -> Result<Vec<Regex>> {
         Ok(vec![
             Regex::new(
@@ -185,7 +183,6 @@ impl DeviceMappedModelLoader for GLM4MoeLoader {
         };
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -273,12 +270,10 @@ impl DeviceMappedModelLoader for GLM4MoeLoader {
             .map(|x| x * dtype.size_in_bytes())
             .collect())
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: crate::models::glm4_moe::Glm4MoeConfig = serde_json::from_str(config)?;
         Ok(cfg.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: crate::models::glm4_moe::Glm4MoeConfig = serde_json::from_str(config)?;
 

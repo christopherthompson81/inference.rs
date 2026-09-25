@@ -1,32 +1,21 @@
 use std::any::Any;
-
 use std::borrow::Cow;
-
 use std::sync::atomic::AtomicUsize;
-
 use std::sync::{Arc, Mutex};
-
 use std::{fmt::Debug, str::FromStr};
 
 use anyhow::Result;
-
 use candle_core::{DType, Device, Tensor, D};
-
 use candle_nn::Conv2dConfig;
-
 use image::{ColorType, DynamicImage};
-
 use inference_quant::log::once_log_debug;
-
 use inference_quant::ShardedVarBuilder;
-
 use itertools::Itertools;
 
 #[cfg(feature = "pyo3_macros")]
 use pyo3::pyclass;
 
 use regex::Regex;
-
 use serde::Deserialize;
 
 use self::minicpmo::{MiniCpmOConfig, MiniCpmOModel, MiniCpmOProcessor};
@@ -39,125 +28,74 @@ use super::{
 };
 
 use crate::amoe::AnyMoeBaseModelMixin;
-
 use crate::attention::ATTENTION_CHUNK_SIZE;
-
 use crate::block_diffusion::BlockDiffusionMixin;
-
 use crate::device_map::DeviceMapper;
-
 use crate::gguf::normal_registry::RopePairing;
-
 use crate::layers::Conv3dConfig;
-
 use crate::matformer::MatformerSliceConfig;
-
 use crate::paged_attention::{
     encoder_cache::EncoderCacheManager, AttentionImplementation, HybridPagedKvCacheConfig,
     ModelConfigLike, ModelConfigMetadata,
 };
-
 use crate::pipeline::isq::IsqModelLoader;
-
 use crate::pipeline::loaders::AutoDeviceMapParams;
-
 use crate::pipeline::{
     EitherCache, IsqModel, Modalities, ModelForwardContext, MultimodalPromptPrefixer, Processor,
     ProcessorCreator, SupportedModality,
 };
-
 use crate::speculative::SpeculativeTargetMixin;
-
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
-
 use crate::vision_models::clip::ClipConfig;
-
 use crate::vision_models::diffusion_gemma::{DiffusionGemmaConfig, DiffusionGemmaModel};
-
 use crate::vision_models::gemma3::config::Gemma3Config;
-
 use crate::vision_models::gemma3::{Gemma3Model, Gemma3Processor};
-
 use crate::vision_models::gemma3n::config::{Gemma3nConfig, IntermediateSize};
-
 use crate::vision_models::gemma3n::{Gemma3nModel, Gemma3nProcessor};
-
 use crate::vision_models::gemma4::config::Gemma4Config;
-
 use crate::vision_models::gemma4::{Gemma4Model, Gemma4Processor, Gemma4ProcessorSettings};
-
 use crate::vision_models::idefics2::{Config as Idefics2Config, Idefics2};
-
 use crate::vision_models::idefics2_input_processor::Idefics2Processor;
-
 use crate::vision_models::idefics3::{Idefics3Config, Idefics3Model, Idefics3Processor};
-
 use crate::vision_models::image_processor::ImagePreProcessor;
-
 use crate::vision_models::inputs_processor::Phi4MMProcessor;
-
 use crate::vision_models::lfm2_vl::{Config as Lfm2VlConfig, Lfm2VlModel, Lfm2VlProcessor};
-
 use crate::vision_models::llama4::{
     self, Llama4Config, Llama4ImageProcessor, Llama4Model, Llama4Processor,
 };
-
 use crate::vision_models::llava::config::Config as LLaVAConfig;
-
 use crate::vision_models::llava15::Model as LLaVA;
-
 use crate::vision_models::llava_inputs_processor::{self, LLaVAProcessor};
-
 use crate::vision_models::llava_next::Model as LLaVANext;
-
 use crate::vision_models::llava_next_inputs_processor::{self, LLaVANextProcessor};
-
 use crate::vision_models::mistral3::{Mistral3Config, Mistral3Model, Mistral3Processor};
-
 use crate::vision_models::mllama::{MLlamaConfig, MLlamaModel, MLlamaProcessor};
-
 use crate::vision_models::muse_glimmer::{
     Config as MuseGlimmerConfig, MuseGlimmerModel, MuseGlimmerProcessor,
 };
-
 use crate::vision_models::paddleocr_vl::config::Config as PaddleOcrVlConfig;
-
 use crate::vision_models::paddleocr_vl::{
     inputs_processor::PaddleOcrVlProcessor, PaddleOcrVlModel,
 };
-
 use crate::vision_models::phi3::{Config as Phi3Config, Model as Phi3, PHI3V_CLIP_CONFIG};
-
 use crate::vision_models::phi3_inputs_processor::Phi3Processor;
-
 use crate::vision_models::phi4::{Phi4MMConfig, Phi4MMModel, PHI4_MM_VISION_CFG};
-
 use crate::vision_models::preprocessor_config::PreProcessorConfig;
-
 use crate::vision_models::processor_config::ProcessorConfig;
-
 use crate::vision_models::qwen2_5_vl::{
     Config as Qwen2_5VLConfig, Qwen2_5VLModel, Qwen2_5VLProcessor,
 };
-
 use crate::vision_models::qwen2vl::{Config as Qwen2VLConfig, Qwen2VLModel, Qwen2VLProcessor};
-
 use crate::vision_models::qwen3_5::{Config as Qwen3_5Config, Qwen3_5Model, Qwen3_5Processor};
-
 use crate::vision_models::qwen3_5_moe::{
     Config as Qwen3_5MoeConfig, Qwen3_5MoeModel, Qwen3_5MoeProcessor,
 };
-
 use crate::vision_models::qwen3_vl::{Config as Qwen3VLConfig, Qwen3VLModel, Qwen3VLProcessor};
-
 use crate::vision_models::qwen3_vl_moe::{
     Config as Qwen3VLMoEConfig, Qwen3VLMoEModel, Qwen3VLMoEProcessor,
 };
-
 use crate::vision_models::voxtral::config::VoxtralConfig;
-
 use crate::vision_models::voxtral::{VoxtralModel, VoxtralProcessor};
-
 use crate::vision_models::{minicpmo, phi4};
 
 // HF Qwen3VLVideoProcessor sampling defaults, shared by the Qwen3-VL/3.5 family.
@@ -491,15 +429,6 @@ impl std::fmt::Display for MultimodalLoaderType {
     }
 }
 
-#[derive(Deserialize)]
-struct AutoMultimodalLoaderConfig {
-    #[serde(default)]
-    architectures: Vec<String>,
-    /// Voxtral params.json uses a `multimodal` key instead of `architectures`.
-    #[serde(default)]
-    multimodal: Option<serde_json::Value>,
-}
-
 macro_rules! bias_if {
     ($cond:expr, $size:expr) => {
         if $cond {
@@ -553,23 +482,6 @@ fn get_clip_vit_num_elems(cfg: &ClipConfig) -> usize {
         + cfg.num_hidden_layers * encoder_layer_elems
 }
 
-pub struct Gemma3Prefixer;
-
-impl MultimodalPromptPrefixer for Gemma3Prefixer {
-    fn prefix_image(&self, _image_indexes: Vec<usize>, prompt: &str) -> String {
-        prompt.to_string()
-    }
-}
-
-#[allow(dead_code)]
-pub struct Gemma3nPrefixer;
-
-impl MultimodalPromptPrefixer for Gemma3nPrefixer {
-    fn prefix_image(&self, _image_indexes: Vec<usize>, prompt: &str) -> String {
-        prompt.to_string()
-    }
-}
-
 fn supports_gemma4_incremental_cache(config: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(config)
         .ok()
@@ -581,18 +493,6 @@ fn supports_gemma4_incremental_cache(config: &str) -> bool {
         })
         .as_deref()
         != Some("all")
-}
-
-#[allow(dead_code)]
-pub struct Gemma4Prefixer;
-
-impl MultimodalPromptPrefixer for Gemma4Prefixer {
-    fn prefix_image(&self, _image_indexes: Vec<usize>, prompt: &str) -> String {
-        prompt.to_string()
-    }
-    fn prefix_video(&self, _video_indexes: Vec<usize>, prompt: &str) -> String {
-        prompt.to_string()
-    }
 }
 
 mod auto;

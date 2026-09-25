@@ -37,7 +37,6 @@ pub fn call_softmax_with_sinks(
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -129,7 +128,6 @@ pub fn call_sdpa_vector_with_sinks(
     let name = format!("sdpa_vector_with_sinks_{type_name}_{head_dim}");
 
     let pipeline = kernels.load_pipeline(device, &name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -317,7 +315,6 @@ pub fn call_flash_attn_sinks_prefill(
 
     let name = format!("flash_attn_sinks_{type_name}_hd{head_dim}_br{br}_bc{bc}");
     let pipeline = kernels.load_pipeline(device, &name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -408,7 +405,6 @@ pub fn call_flash_attn_sinks_varlen_prefill(
 
     let name = format!("flash_attn_sinks_varlen_{type_name}_hd{head_dim}_br{br}_bc{bc}");
     let pipeline = kernels.load_pipeline(device, &name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);

@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== Phi 3 loader
-
 /// [`MultimodalLoader`] for a Phi 3 Vision model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
@@ -131,7 +129,6 @@ impl DeviceMappedModelLoader for Phi3VLoader {
 
         Ok(max_text_attn)
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -161,7 +158,6 @@ impl DeviceMappedModelLoader for Phi3VLoader {
 
         Ok(max_vision_attn)
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -235,7 +231,6 @@ impl DeviceMappedModelLoader for Phi3VLoader {
 
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -272,12 +267,10 @@ impl DeviceMappedModelLoader for Phi3VLoader {
             cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: Phi3Config = serde_json::from_str(config)?;
         Ok(cfg.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: Phi3Config = serde_json::from_str(config)?;
 

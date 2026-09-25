@@ -44,7 +44,6 @@ impl NormalModelLoader for Qwen3_5TextLoader {
             )?,
         ))
     }
-
     fn load_xlora(
         &self,
         _config: &str,
@@ -57,16 +56,13 @@ impl NormalModelLoader for Qwen3_5TextLoader {
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
         anyhow::bail!("Qwen3.5 does not support X-LoRA")
     }
-
     fn is_gptx(&self, _: &str) -> Result<bool> {
         Ok(true)
     }
-
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let cfg = parse_qwen35_text_config(config)?;
         Ok(Box::new(cfg))
     }
-
     fn supports_paged_attention(&self, _config: &str) -> Result<bool> {
         Ok(true)
     }
@@ -96,7 +92,6 @@ impl IsqModelLoader for Qwen3_5TextLoader {
             )?,
         ])
     }
-
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
         self.isq_layer_regexes(config)
     }
@@ -122,7 +117,6 @@ impl DeviceMappedModelLoader for Qwen3_5TextLoader {
                 * max_seq_len.min(&ATTENTION_CHUNK_SIZE).pow(2),
         )
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         _config: &str,
@@ -161,7 +155,6 @@ impl DeviceMappedModelLoader for Qwen3_5TextLoader {
         };
         Ok((embed_tokens + lm_head + cfg.hidden_size) * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -197,12 +190,10 @@ impl DeviceMappedModelLoader for Qwen3_5TextLoader {
         }
         Ok(sizes)
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg = parse_qwen35_text_config(config)?;
         Ok(cfg.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg = parse_qwen35_text_config(config)?;
         Ok(Box::new(ModelConfigMetadata {

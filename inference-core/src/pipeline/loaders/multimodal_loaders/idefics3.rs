@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== Idefics 3 loader
-
 /// [`MultimodalLoader`] for an Idefics 3 Vision model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
@@ -156,7 +154,6 @@ impl DeviceMappedModelLoader for Idefics3Loader {
 
         Ok(max_text_attn)
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -189,7 +186,6 @@ impl DeviceMappedModelLoader for Idefics3Loader {
 
         Ok(max_vision_attn)
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -201,7 +197,6 @@ impl DeviceMappedModelLoader for Idefics3Loader {
         let cfg: Idefics3Config = serde_json::from_str(config)?;
         let text_elems = {
             let cfg = &cfg.text_config;
-
             let (embed_tokens_pack_factor, lm_head_pack_factor) =
                 super::language_model_pack_factors(
                     _quantization,
@@ -270,7 +265,6 @@ impl DeviceMappedModelLoader for Idefics3Loader {
 
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -313,7 +307,6 @@ impl DeviceMappedModelLoader for Idefics3Loader {
             cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: Idefics3Config = serde_json::from_str(config)?;
         Ok(cfg.text_config.num_hidden_layers)

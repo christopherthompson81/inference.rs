@@ -33,7 +33,6 @@ pub(super) fn cuda_topk(input: &Tensor, k: usize) -> Result<TopKOutput> {
         candle_core::Storage::Cuda(s) => s,
         _ => candle_core::bail!("cuda_topk requires CUDA tensor"),
     };
-
     let dev = storage.device();
     let stream = dev.cuda_stream();
     let stream_raw = stream.cu_stream() as i64;
@@ -366,44 +365,4 @@ pub struct TopKLogitsPackedOutput {
     pub packed: Tensor,
     pub k: usize,
     pub(super) _workspace: Vec<Tensor>,
-}
-
-#[cfg(feature = "cuda")]
-pub(crate) struct RankedTopKPackedOutput {
-    /// Each row is packed as `[values; indices_as_f32]`.
-    pub(crate) packed: Tensor,
-    pub(crate) k: usize,
-    pub(super) _workspace: Vec<Tensor>,
-}
-
-#[cfg(feature = "cuda")]
-pub(crate) struct CategoricalLogitsPackedOutput {
-    /// Each row is packed as `[token_index_as_f32, full_softmax_logprob]`.
-    pub(crate) packed: Tensor,
-    pub(super) _workspace: Vec<Tensor>,
-}
-
-#[cfg(feature = "cuda")]
-#[allow(dead_code)]
-pub(crate) struct Top1LogitsPackedOutput {
-    pub(crate) packed: Tensor,
-    pub(super) _workspace: Vec<Tensor>,
-}
-
-#[cfg(feature = "cuda")]
-pub(crate) struct DFlashSelectorSampleInput<'a> {
-    pub(crate) topk: &'a RankedTopKPackedOutput,
-    pub(crate) projected_hidden: &'a Tensor,
-    pub(crate) predecessor_codebook: &'a Tensor,
-    pub(crate) successor_codebook: &'a Tensor,
-    pub(crate) anchors: &'a Tensor,
-    pub(crate) inverse_temperatures: &'a Tensor,
-    pub(crate) uniforms: &'a Tensor,
-}
-
-#[cfg(feature = "cuda")]
-pub(crate) struct DFlashSelectorSampleOutput {
-    pub(crate) tokens: Tensor,
-    pub(crate) candidate_ids: Tensor,
-    pub(crate) candidate_probs: Tensor,
 }

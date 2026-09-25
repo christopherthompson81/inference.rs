@@ -15,7 +15,6 @@ pub fn cuda_topk_logits_f32(
     if temperature <= 0.0 || !temperature.is_finite() {
         candle_core::bail!("cuda_topk_logits_f32 requires a positive finite temperature");
     }
-
     let input = input.contiguous()?;
     if input.dtype() != DType::F32 {
         candle_core::bail!("cuda_topk_logits_f32 requires F32 logits");
@@ -48,7 +47,6 @@ pub fn cuda_topk_logits_f32(
         candle_core::Storage::Cuda(s) => s,
         _ => candle_core::bail!("cuda_topk_logits_f32 requires CUDA tensor"),
     };
-
     let dev = storage.device();
     let stream = dev.cuda_stream();
     let stream_raw = stream.cu_stream() as i64;
@@ -177,7 +175,6 @@ pub fn cuda_topk_logits_f32_packed(
     if temperature <= 0.0 || !temperature.is_finite() {
         candle_core::bail!("cuda_topk_logits_f32_packed requires a positive finite temperature");
     }
-
     let input = input.contiguous()?;
     if input.dtype() != DType::F32 {
         candle_core::bail!("cuda_topk_logits_f32_packed requires F32 logits");
@@ -210,7 +207,6 @@ pub fn cuda_topk_logits_f32_packed(
         candle_core::Storage::Cuda(s) => s,
         _ => candle_core::bail!("cuda_topk_logits_f32_packed requires CUDA tensor"),
     };
-
     let dev = storage.device();
     let stream = dev.cuda_stream();
     let stream_raw = stream.cu_stream() as i64;
@@ -516,7 +512,6 @@ pub(crate) fn cuda_topk_logits_packed_batched_with_workspace(
     if !input.device().same_device(inverse_temperatures.device()) {
         candle_core::bail!("{OP} tensors must be on the same CUDA device");
     }
-
     let vocab =
         input.dims().last().copied().ok_or_else(|| {
             candle_core::Error::Msg(format!("{OP} requires logits with rank >= 1"))
@@ -590,7 +585,6 @@ pub(crate) fn cuda_topk_logits_packed_batched_with_workspace(
     let CudaStorageSlice::F32(temperature_slice) = &temperature_storage.slice else {
         candle_core::bail!("{OP} only supports F32 inverse temperatures");
     };
-
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
     let needs_alloc = cache
@@ -1030,4 +1024,12 @@ pub fn metal_topk_logits_packed(
         k,
         _workspace: vec![],
     })
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) struct RankedTopKPackedOutput {
+    /// Each row is packed as `[values; indices_as_f32]`.
+    pub(crate) packed: Tensor,
+    pub(crate) k: usize,
+    pub(super) _workspace: Vec<Tensor>,
 }

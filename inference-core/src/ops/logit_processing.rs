@@ -37,7 +37,6 @@ pub fn cuda_apply_sparse_penalties_f32(
             "cuda_apply_sparse_penalties_f32 tensors must be on the same CUDA device"
         );
     }
-
     let input = input.contiguous()?;
     let token_ids = token_ids.contiguous()?;
     let counts = counts.contiguous()?;
@@ -86,7 +85,6 @@ pub fn cuda_apply_sparse_penalties_f32(
     let CudaStorageSlice::F32(count_src) = &count_storage.slice else {
         candle_core::bail!("cuda_apply_sparse_penalties_f32 only supports F32 counts");
     };
-
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
     let mut out = unsafe { dev.alloc::<f32>(elem_count) }?;
@@ -164,7 +162,6 @@ pub fn cuda_apply_sparse_logits_bias_f32(
             "cuda_apply_sparse_logits_bias_f32 tensors must be on the same CUDA device"
         );
     }
-
     let input = input.contiguous()?;
     let token_ids = token_ids.contiguous()?;
     let biases = biases.contiguous()?;
@@ -213,7 +210,6 @@ pub fn cuda_apply_sparse_logits_bias_f32(
     let CudaStorageSlice::F32(bias_src) = &bias_storage.slice else {
         candle_core::bail!("cuda_apply_sparse_logits_bias_f32 only supports F32 biases");
     };
-
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
     let mut out = unsafe { dev.alloc::<f32>(elem_count) }?;
@@ -350,7 +346,6 @@ pub fn metal_apply_sparse_penalties(
     if counts.elem_count() != n_tokens {
         candle_core::bail!("token_ids and counts length mismatch");
     }
-
     let input = input.contiguous()?;
     let token_ids = token_ids.contiguous()?;
     let counts = counts.contiguous()?;

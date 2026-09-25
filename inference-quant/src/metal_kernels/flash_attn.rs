@@ -7,15 +7,11 @@ use super::*;
 
 // Must stay in sync with the tile constants in flash_attn.metal.
 pub const FA_NQPSG: usize = 8;
-
 pub const FA_NCPSG: usize = 64;
-
 const FA_NSG: usize = 8;
-
 const FA_HEAD_DIM: usize = 512;
 
 const FC_FLASH_ATTN_EXT_PAD: usize = 100;
-
 const FC_FLASH_ATTN_EXT: usize = 300;
 
 #[repr(C)]
@@ -148,7 +144,6 @@ pub fn call_flash_attn_ext_bf16_dk512(
 
     let bf16 = 2u64;
     let halfsz = 2u64;
-
     let q_nb = [
         q_stride_elems[3] as u64 * bf16,
         q_stride_elems[2] as u64 * bf16,
@@ -311,7 +306,6 @@ pub fn call_flash_attn_ext_bf16_dk512(
             n_head_log2: 0,
             logit_softcap: 0.0,
         };
-
         encoder.set_compute_pipeline_state(&pipeline);
         encoder.set_bytes(0, &args);
         encoder.set_input_buffer(1, Some(q.0), q.1);

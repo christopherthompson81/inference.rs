@@ -140,7 +140,6 @@ impl DeviceMappedModelLoader for VoxtralLoader {
         let total_seq = max_audio_tokens + *max_seq_len.min(&ATTENTION_CHUNK_SIZE);
         Ok(max_batch_size * cfg.n_heads * total_seq * total_seq)
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -157,7 +156,6 @@ impl DeviceMappedModelLoader for VoxtralLoader {
         let max_enc_seq = 3000usize;
         Ok(max_batch_size * enc.n_heads * max_enc_seq * max_enc_seq)
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -207,7 +205,6 @@ impl DeviceMappedModelLoader for VoxtralLoader {
 
         Ok((total_encoder + embeddings + output) * elem)
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -231,12 +228,10 @@ impl DeviceMappedModelLoader for VoxtralLoader {
 
         Ok(vec![per_layer; cfg.n_layers])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: VoxtralConfig = serde_json::from_str(config)?;
         Ok(cfg.n_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: VoxtralConfig = serde_json::from_str(config)?;
 

@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== Llama 4 Loader
-
 /// [`MultimodalLoader`] for an Llama Vision model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
@@ -245,7 +243,6 @@ impl DeviceMappedModelLoader for VLlama4Loader {
             * max_seq_len
             * max_seq_len)
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -329,10 +326,8 @@ impl DeviceMappedModelLoader for VLlama4Loader {
         };
 
         let elems = text_elems + vision_elems;
-
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -372,7 +367,6 @@ impl DeviceMappedModelLoader for VLlama4Loader {
                 let gate_proj = h_size * i_size / weight_pack_factor;
                 let up_proj = h_size * i_size / weight_pack_factor;
                 let down_proj = i_size * h_size / weight_pack_factor;
-
                 gate_proj + up_proj + down_proj
             };
 
@@ -392,12 +386,10 @@ impl DeviceMappedModelLoader for VLlama4Loader {
             .map(|x| x * dtype.size_in_bytes())
             .collect())
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: Llama4Config = serde_json::from_str(config)?;
         Ok(cfg.text_config.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: Llama4Config = serde_json::from_str(config)?;
         let cfg = &cfg.text_config;

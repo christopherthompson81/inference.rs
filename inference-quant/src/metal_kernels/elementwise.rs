@@ -31,7 +31,6 @@ pub fn call_fused_glu(
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -74,7 +73,6 @@ pub fn call_softcap(
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);

@@ -32,7 +32,6 @@ pub fn call_fp8_to_dtype(
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -67,7 +66,6 @@ pub fn call_dtype_to_fp8(
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -104,7 +102,6 @@ pub fn call_fp8_pertensor_dequant(
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -144,7 +141,6 @@ pub fn call_fp8_vector_dequant(
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);

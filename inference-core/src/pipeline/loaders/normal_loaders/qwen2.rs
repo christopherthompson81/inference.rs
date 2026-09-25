@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== Qwen2 loader
-
 /// [`NormalLoader`] for a Qwen 2 model.
 ///
 /// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
@@ -139,7 +137,6 @@ impl DeviceMappedModelLoader for Qwen2Loader {
         };
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -182,13 +179,11 @@ impl DeviceMappedModelLoader for Qwen2Loader {
             cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: crate::models::qwen2::Config = serde_json::from_str(config)?;
 
         Ok(cfg.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: crate::models::qwen2::Config = serde_json::from_str(config)?;
 

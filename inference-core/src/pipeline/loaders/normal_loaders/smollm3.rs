@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== SmolLm3 loader
-
 /// [`NormalLoader`] for a SmolLm3 model.
 ///
 /// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
@@ -134,7 +132,6 @@ impl DeviceMappedModelLoader for SmolLm3Loader {
         };
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -177,7 +174,6 @@ impl DeviceMappedModelLoader for SmolLm3Loader {
             cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: crate::models::smollm3::Config = serde_json::from_str(config)?;
 

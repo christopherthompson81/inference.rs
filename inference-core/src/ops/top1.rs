@@ -53,7 +53,6 @@ pub(crate) fn cuda_top1_logits_f32_packed_batched(
     let CudaStorageSlice::F32(input_slice) = &input_storage.slice else {
         candle_core::bail!("{OP} only supports F32 logits");
     };
-
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
     let mut block_values = unsafe { dev.alloc::<f32>(workspace_elems) }?;
@@ -202,7 +201,6 @@ pub(crate) fn cuda_categorical_logits_f32_packed_batched(
     let CudaStorageSlice::F32(uniform_slice) = &uniform_storage.slice else {
         candle_core::bail!("{OP} only supports F32 uniforms");
     };
-
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
     let mut block_values = unsafe { dev.alloc::<f32>(workspace_elems) }?;
@@ -1277,11 +1275,15 @@ pub(crate) fn cuda_top1_logits_f32_packed_batched_cached(
 }
 
 #[cfg(feature = "cuda")]
-#[derive(Clone, Copy)]
-pub(crate) struct CudaTopKSamplingParams {
-    pub(crate) inverse_temperature: f32,
-    pub(crate) top_k: usize,
-    pub(crate) top_p: f32,
-    pub(crate) min_p: f32,
-    pub(crate) uniform: f32,
+pub(crate) struct CategoricalLogitsPackedOutput {
+    /// Each row is packed as `[token_index_as_f32, full_softmax_logprob]`.
+    pub(crate) packed: Tensor,
+    _workspace: Vec<Tensor>,
+}
+
+#[cfg(feature = "cuda")]
+#[allow(dead_code)]
+pub(crate) struct Top1LogitsPackedOutput {
+    pub(crate) packed: Tensor,
+    _workspace: Vec<Tensor>,
 }

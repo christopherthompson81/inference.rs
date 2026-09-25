@@ -38,7 +38,6 @@ pub fn call_moe_weighted_reduce_flat(
     };
     let name = format!("moe_weighted_reduce_flat_{type_string}");
     let pipeline = kernels.load_pipeline(device, &name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);

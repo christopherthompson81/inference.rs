@@ -46,7 +46,6 @@ impl MultimodalModelLoader for MuseGlimmerLoader {
             attention_mechanism,
         )?))
     }
-
     fn runtime_config<'a>(
         &self,
         config: &'a str,
@@ -54,15 +53,12 @@ impl MultimodalModelLoader for MuseGlimmerLoader {
     ) -> Result<Cow<'a, str>> {
         muse_glimmer_runtime_config(config, max_model_len)
     }
-
     fn is_gptx(&self, _config: &str) -> bool {
         true
     }
-
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         Ok(Box::new(serde_json::from_str::<MuseGlimmerConfig>(config)?))
     }
-
     fn get_processor(
         &self,
         model_config: &str,
@@ -77,19 +73,15 @@ impl MultimodalModelLoader for MuseGlimmerLoader {
                 .expect("Failed to create Muse-Glimmer processor"),
         )
     }
-
     fn supports_paged_attention(&self, _config: &str) -> bool {
         true
     }
-
     fn supports_encoder_cache(&self, _config: &str) -> bool {
         true
     }
-
     fn supports_prefix_cacher(&self, _config: &str) -> bool {
         true
     }
-
     fn modalities(&self, config: &str) -> Result<Modalities> {
         let cfg: MuseGlimmerConfig = serde_json::from_str(config)?;
         let mut input = vec![SupportedModality::Text, SupportedModality::Vision];
@@ -101,11 +93,9 @@ impl MultimodalModelLoader for MuseGlimmerLoader {
             output: vec![SupportedModality::Text],
         })
     }
-
     fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
         Arc::new(MuseGlimmerPrefixer)
     }
-
     fn get_device_for_tensor(
         &self,
         config: &str,
@@ -149,7 +139,6 @@ impl IsqModelLoader for MuseGlimmerLoader {
             )?,
         ])
     }
-
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
         self.isq_layer_regexes(config)
     }
@@ -179,7 +168,6 @@ impl DeviceMappedModelLoader for MuseGlimmerLoader {
         let query_len = total_seq_len.min(ATTENTION_CHUNK_SIZE);
         Ok(max_batch_size * cfg.text_config.num_attention_heads * query_len * total_seq_len)
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -202,7 +190,6 @@ impl DeviceMappedModelLoader for MuseGlimmerLoader {
         let hidden = items * raw_patches * vc.hidden_size.max(vc.intermediate_size);
         Ok(attention.max(hidden))
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -249,7 +236,6 @@ impl DeviceMappedModelLoader for MuseGlimmerLoader {
             + projection;
         Ok((text + vision) * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -273,7 +259,6 @@ impl DeviceMappedModelLoader for MuseGlimmerLoader {
         let layer = (projections + attention_biases + mlp + norms) * dtype.size_in_bytes();
         Ok(vec![layer; tc.num_hidden_layers])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         Ok(serde_json::from_str::<MuseGlimmerConfig>(config)?
             .text_config
@@ -283,7 +268,6 @@ impl DeviceMappedModelLoader for MuseGlimmerLoader {
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
         Some(vec![NonMappedSubModel::Vision])
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: MuseGlimmerConfig = serde_json::from_str(config)?;
         let tc = cfg.text_config;

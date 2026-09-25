@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== Phi2 loader
-
 /// [`NormalLoader`] for a Phi 2 model.
 ///
 /// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
@@ -145,7 +143,6 @@ impl DeviceMappedModelLoader for Phi2Loader {
         };
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -183,13 +180,11 @@ impl DeviceMappedModelLoader for Phi2Loader {
             cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: crate::models::phi2::Config = serde_json::from_str(config)?;
 
         Ok(cfg.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: crate::models::phi2::Config = serde_json::from_str(config)?;
 

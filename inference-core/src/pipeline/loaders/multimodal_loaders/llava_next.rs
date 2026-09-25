@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== LLaVANext Loader
-
 /// [`MultimodalLoader`] for an LLaVANext Vision model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
@@ -136,13 +134,11 @@ impl DeviceMappedModelLoader for LLaVANextLoader {
             let cfg = &config.text_config;
             // This model injects the vision information directly into the input embeddings
             let max_seq_len = img_seq_len + max_seq_len.min(&ATTENTION_CHUNK_SIZE);
-
             max_batch_size * cfg.num_attention_heads * max_seq_len * max_seq_len
         };
 
         Ok(max_text_attn)
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -176,7 +172,6 @@ impl DeviceMappedModelLoader for LLaVANextLoader {
 
         Ok(max_vision_attn)
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -220,7 +215,6 @@ impl DeviceMappedModelLoader for LLaVANextLoader {
         let elems = text_elems + image_newline + mmproj + vision_tower;
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -263,12 +257,10 @@ impl DeviceMappedModelLoader for LLaVANextLoader {
             cfg.text_config.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: LLaVAConfig = serde_json::from_str(config)?;
         Ok(cfg.text_config.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: LLaVAConfig = serde_json::from_str(config)?;
         let cfg = &cfg.text_config;

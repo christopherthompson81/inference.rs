@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== Qwen3Next loader
-
 /// [`NormalLoader`] for a Qwen3Next (Qwen3-Coder-Next) model.
 ///
 /// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
@@ -154,7 +152,6 @@ impl DeviceMappedModelLoader for Qwen3NextLoader {
         };
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -219,7 +216,6 @@ impl DeviceMappedModelLoader for Qwen3NextLoader {
 
         Ok(layer_sizes)
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: crate::models::qwen3_next::Config = serde_json::from_str(config)?;
         Ok(cfg.num_hidden_layers)

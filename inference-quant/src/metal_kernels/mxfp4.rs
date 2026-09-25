@@ -31,9 +31,7 @@ pub fn call_mxfp4_matmul(
             })
         }
     };
-
     let pipeline = kernels.load_pipeline(device, name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -96,9 +94,7 @@ pub fn call_mxfp4_vecmat(
             })
         }
     };
-
     let pipeline = kernels.load_pipeline(device, name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -166,9 +162,7 @@ pub fn call_mxfp4_moe_gemm(
             })
         }
     };
-
     let pipeline = kernels.load_pipeline(device, name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);

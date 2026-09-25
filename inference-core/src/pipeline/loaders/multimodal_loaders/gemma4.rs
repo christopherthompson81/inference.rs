@@ -227,7 +227,6 @@ impl DeviceMappedModelLoader for Gemma4Loader {
 
         Ok(max_text_attn)
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -302,7 +301,6 @@ impl DeviceMappedModelLoader for Gemma4Loader {
             .max(max_vision_hidden)
             .max(max_audio_activation))
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -469,7 +467,6 @@ impl DeviceMappedModelLoader for Gemma4Loader {
             + vision_elems * vision_dtype.size_in_bytes()
             + audio_elems * DType::F32.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -535,7 +532,6 @@ impl DeviceMappedModelLoader for Gemma4Loader {
             .collect();
         Ok(sizes)
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: Gemma4Config = serde_json::from_str(config)?;
         Ok(cfg.text_config.num_hidden_layers)
@@ -544,7 +540,6 @@ impl DeviceMappedModelLoader for Gemma4Loader {
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
         Some(vec![NonMappedSubModel::Vision, NonMappedSubModel::Audio])
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: Gemma4Config = serde_json::from_str(config)?;
         let tc = &cfg.text_config;
@@ -562,5 +557,17 @@ impl DeviceMappedModelLoader for Gemma4Loader {
         };
 
         Ok(Box::new(cfg))
+    }
+}
+
+#[allow(dead_code)]
+pub struct Gemma4Prefixer;
+
+impl MultimodalPromptPrefixer for Gemma4Prefixer {
+    fn prefix_image(&self, _image_indexes: Vec<usize>, prompt: &str) -> String {
+        prompt.to_string()
+    }
+    fn prefix_video(&self, _video_indexes: Vec<usize>, prompt: &str) -> String {
+        prompt.to_string()
     }
 }

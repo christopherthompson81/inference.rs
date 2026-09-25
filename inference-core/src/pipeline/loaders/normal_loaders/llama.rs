@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== Llama loader
-
 /// [`NormalLoader`] for a Llama model.
 ///
 /// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
@@ -145,7 +143,6 @@ impl DeviceMappedModelLoader for LlamaLoader {
         };
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -188,7 +185,6 @@ impl DeviceMappedModelLoader for LlamaLoader {
             cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: crate::models::llama::Config = serde_json::from_str(config)?;
 

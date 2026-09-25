@@ -42,7 +42,6 @@ pub fn call_affine_quantize(
     let name = format!("{kernel_func}_{type_string}_gs_{group_size}_b_{bits}");
 
     let pipeline = kernels.load_pipeline(device, &name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -144,7 +143,6 @@ pub fn call_afq_embedding(
     };
     let name = format!("affine_embedding_{type_string}_gs_{group_size}_b_{bits}");
     let pipeline = kernels.load_pipeline(device, &name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -427,7 +425,6 @@ pub fn call_afq_qmm(
     }
 
     let pipeline = kernels.load_pipeline(device, &name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -562,7 +559,6 @@ pub fn call_afq_qmm_splitk(
     };
     let name = format!("qmm_t_splitk_{type_string}_gs_{group_size}_b_{bits}_alN_{aligned}");
     let pipeline = kernels.load_pipeline(device, &name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -595,7 +591,6 @@ pub fn call_afq_qmm_splitk(
 // Tile presets for the MLX-ported sorted-MoE gather GEMM. Must match the
 // instantiations in quantized.metal: (BM, BN, BK, WM, WN).
 const AFQ_GATHER_RHS_BN: usize = 32;
-
 const AFQ_GATHER_RHS_BK: usize = 32;
 
 fn pick_afq_gather_rhs_tile(m: usize) -> (usize, usize, usize, usize, usize) {
@@ -654,9 +649,7 @@ pub fn call_afq_gather_qmm_rhs(
     let name = format!(
         "affine_gather_qmm_rhs_{type_string}_gs_{group_size}_b_{bits}_bm_{bm}_bn_{bn}_bk_{bk}_wm_{wm}_wn_{wn}_t_true_alM_{am}_alN_{an}_alK_{ak}",
     );
-
     let pipeline = kernels.load_pipeline(device, &name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -740,9 +733,7 @@ pub fn call_afq_gather_qmm_rhs_gate_up(
     let name = format!(
         "affine_gather_qmm_rhs_gate_up_{type_string}_gs_{group_size}_b_{bits}_act_{act_idx}_bm_{bm}_bn_{bn}_bk_{bk}_wm_{wm}_wn_{wn}_alM_{am}_alN_{an}_alK_{ak}",
     );
-
     let pipeline = kernels.load_pipeline(device, &name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);
@@ -817,7 +808,6 @@ pub fn call_afq_qmm_gate_up(
         "qmm_t_gate_up_{type_string}_gs_{group_size}_b_{bits}_act_{act_code}_alN_{aligned}"
     );
     let pipeline = kernels.load_pipeline(device, &name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);

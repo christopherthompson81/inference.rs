@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== MiniCpm-O loader
-
 /// [`MultimodalLoader`] for an MiniCpm-O model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
@@ -128,7 +126,6 @@ impl DeviceMappedModelLoader for MiniCpmOLoader {
 
         Ok(max_text_attn)
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -161,7 +158,6 @@ impl DeviceMappedModelLoader for MiniCpmOLoader {
 
         Ok(max_vision_attn)
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -173,7 +169,6 @@ impl DeviceMappedModelLoader for MiniCpmOLoader {
         let cfg: MiniCpmOConfig = serde_json::from_str(config)?;
         let text_elems = {
             let cfg = &cfg.text_config;
-
             let (embed_tokens_pack_factor, lm_head_pack_factor) =
                 super::language_model_pack_factors(
                     _quantization,
@@ -235,7 +230,6 @@ impl DeviceMappedModelLoader for MiniCpmOLoader {
 
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -278,7 +272,6 @@ impl DeviceMappedModelLoader for MiniCpmOLoader {
             cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: MiniCpmOConfig = serde_json::from_str(config)?;
         Ok(cfg.text_config.num_hidden_layers)

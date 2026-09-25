@@ -62,7 +62,6 @@ impl MultimodalModelLoader for AutoMultimodalLoader {
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
         Self::get_loader(config)?.load(config, vb, normal_loading_metadata, attention_mechanism)
     }
-
     fn runtime_config<'a>(
         &self,
         config: &'a str,
@@ -76,11 +75,9 @@ impl MultimodalModelLoader for AutoMultimodalLoader {
             .expect("AutoMultimodalLoader get_loader")
             .is_gptx(config)
     }
-
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         Self::get_loader(config)?.get_config_repr(config)
     }
-
     fn get_processor(
         &self,
         model_config: &str,
@@ -92,29 +89,24 @@ impl MultimodalModelLoader for AutoMultimodalLoader {
             .expect("AutoMultimodalLoader get_loader")
             .get_processor(model_config, proc_cfg, preproc_cfg, max_edge)
     }
-
     fn supports_paged_attention(&self, config: &str) -> bool {
         Self::get_loader(config)
             .expect("AutoMultimodalLoader")
             .supports_paged_attention(config)
     }
-
     fn supports_encoder_cache(&self, config: &str) -> bool {
         Self::get_loader(config)
             .expect("AutoMultimodalLoader")
             .supports_encoder_cache(config)
     }
-
     fn modalities(&self, config: &str) -> Result<Modalities> {
         Self::get_loader(config)?.modalities(config)
     }
-
     fn supports_prefix_cacher(&self, config: &str) -> bool {
         Self::get_loader(config)
             .expect("AutoMultimodalLoader")
             .supports_prefix_cacher(config)
     }
-
     fn auto_device_map_params(
         &self,
         config: &str,
@@ -142,7 +134,6 @@ impl MultimodalModelLoader for AutoMultimodalLoader {
     fn default_bos_eos(&self, config: &str) -> Option<(String, String)> {
         Self::get_loader(config).ok()?.default_bos_eos(config)
     }
-
     fn get_device_for_tensor(
         &self,
         config: &str,
@@ -229,4 +220,13 @@ impl DeviceMappedModelLoader for AutoMultimodalLoader {
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         Self::get_loader(config)?.model_config(config)
     }
+}
+
+#[derive(Deserialize)]
+struct AutoMultimodalLoaderConfig {
+    #[serde(default)]
+    architectures: Vec<String>,
+    /// Voxtral params.json uses a `multimodal` key instead of `architectures`.
+    #[serde(default)]
+    multimodal: Option<serde_json::Value>,
 }

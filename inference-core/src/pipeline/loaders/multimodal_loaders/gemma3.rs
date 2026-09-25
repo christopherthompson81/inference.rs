@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== Gemma 3 Loader
-
 /// [`MultimodalLoader`] for an Gemma 3 model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
@@ -191,7 +189,6 @@ impl DeviceMappedModelLoader for Gemma3Loader {
             }
         }
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -217,7 +214,6 @@ impl DeviceMappedModelLoader for Gemma3Loader {
             * img_seq_len
             * img_seq_len)
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -300,7 +296,6 @@ impl DeviceMappedModelLoader for Gemma3Loader {
 
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -353,7 +348,6 @@ impl DeviceMappedModelLoader for Gemma3Loader {
             txt_cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: Gemma3Config = serde_json::from_str(config)?;
 
@@ -364,7 +358,6 @@ impl DeviceMappedModelLoader for Gemma3Loader {
 
         Ok(txt_cfg.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: Gemma3Config = serde_json::from_str(config)?;
 
@@ -391,7 +384,6 @@ impl DeviceMappedModelLoader for Gemma3Loader {
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
         Some(vec![NonMappedSubModel::Vision])
     }
-
     fn non_mapped_sub_models_for_config(
         &self,
         config: &str,
@@ -401,5 +393,13 @@ impl DeviceMappedModelLoader for Gemma3Loader {
             Gemma3Config::Text(_) => None,
             Gemma3Config::WithVision { .. } => self.non_mapped_sub_models(),
         })
+    }
+}
+
+pub struct Gemma3Prefixer;
+
+impl MultimodalPromptPrefixer for Gemma3Prefixer {
+    fn prefix_image(&self, _image_indexes: Vec<usize>, prompt: &str) -> String {
+        prompt.to_string()
     }
 }

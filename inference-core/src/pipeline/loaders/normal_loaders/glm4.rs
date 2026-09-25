@@ -131,7 +131,6 @@ impl DeviceMappedModelLoader for GLM4Loader {
         };
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -173,12 +172,10 @@ impl DeviceMappedModelLoader for GLM4Loader {
             cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: models::glm4::Config = serde_json::from_str(config)?;
         Ok(cfg.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: models::glm4::Config = serde_json::from_str(config)?;
 

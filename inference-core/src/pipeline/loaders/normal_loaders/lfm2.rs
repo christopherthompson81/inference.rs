@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== LFM2 loader
-
 /// [`NormalLoader`] for an LFM2 hybrid attention/short-conv model.
 ///
 /// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
@@ -25,7 +23,6 @@ impl NormalModelLoader for Lfm2Loader {
             attention_mechanism,
         )?))
     }
-
     fn load_xlora(
         &self,
         _config: &str,
@@ -42,12 +39,10 @@ impl NormalModelLoader for Lfm2Loader {
     fn is_gptx(&self, _config: &str) -> Result<bool> {
         Ok(true)
     }
-
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let cfg: crate::models::lfm2::Config = serde_json::from_str(config)?;
         Ok(Box::new(cfg))
     }
-
     fn supports_paged_attention(&self, _config: &str) -> Result<bool> {
         Ok(true)
     }
@@ -81,11 +76,9 @@ impl IsqModelLoader for Lfm2Loader {
             )?,
         ])
     }
-
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
         self.isq_layer_regexes(config)
     }
-
     fn isq_layer_regexes_moqe(&self, _config: &str) -> Result<Vec<Regex>> {
         Ok(vec![
             Regex::new(r"layers\.(\d+)\.feed_forward\.experts\.(\d+)\.w1\.(weight|bias)$")?,
@@ -96,7 +89,6 @@ impl IsqModelLoader for Lfm2Loader {
             )?,
         ])
     }
-
     fn immediate_isq_predicates_moqe(&self, config: &str) -> Result<Vec<Regex>> {
         self.isq_layer_regexes_moqe(config)
     }
@@ -124,7 +116,6 @@ impl DeviceMappedModelLoader for Lfm2Loader {
                 * max_seq_len.min(&ATTENTION_CHUNK_SIZE).pow(2),
         )
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         _config: &str,
@@ -160,7 +151,6 @@ impl DeviceMappedModelLoader for Lfm2Loader {
         let norm = cfg.hidden_size;
         Ok((embed_tokens + lm_head + norm) * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -212,15 +202,12 @@ impl DeviceMappedModelLoader for Lfm2Loader {
             sizes
                 .push((operator_norm + ffn_norm + operator + feed_forward) * dtype.size_in_bytes());
         }
-
         Ok(sizes)
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: crate::models::lfm2::Config = serde_json::from_str(config)?;
         Ok(cfg.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: crate::models::lfm2::Config = serde_json::from_str(config)?;
         let head_dim = cfg.head_dim();

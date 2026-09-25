@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== Gemma 3n Loader
-
 /// [`MultimodalLoader`] for an Gemma 3n model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
@@ -221,7 +219,6 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
 
         Ok(max_text_attn)
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -334,7 +331,6 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
 
         Ok(max_activation)
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -739,7 +735,6 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
 
         Ok(total_elems)
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -868,12 +863,10 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
 
         Ok(layer_sizes)
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: Gemma3nConfig = serde_json::from_str(config)?;
         Ok(cfg.text_config.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: Gemma3nConfig = serde_json::from_str(config)?;
         let cfg = cfg.text_config;
@@ -895,5 +888,14 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
 
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
         Some(vec![NonMappedSubModel::Vision, NonMappedSubModel::Audio])
+    }
+}
+
+#[allow(dead_code)]
+pub struct Gemma3nPrefixer;
+
+impl MultimodalPromptPrefixer for Gemma3nPrefixer {
+    fn prefix_image(&self, _image_indexes: Vec<usize>, prompt: &str) -> String {
+        prompt.to_string()
     }
 }

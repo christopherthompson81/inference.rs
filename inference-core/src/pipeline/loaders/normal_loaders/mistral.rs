@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== Mistral loader
-
 pub struct MistralLoader;
 
 impl NormalModelLoader for MistralLoader {
@@ -140,7 +138,6 @@ impl DeviceMappedModelLoader for MistralLoader {
         };
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -183,12 +180,10 @@ impl DeviceMappedModelLoader for MistralLoader {
             cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: crate::models::mistral::Config = serde_json::from_str(config)?;
         Ok(cfg.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: crate::models::mistral::Config = serde_json::from_str(config)?;
 

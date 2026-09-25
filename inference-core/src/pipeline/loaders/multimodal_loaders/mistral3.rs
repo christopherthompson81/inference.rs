@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== Mistral 3 Loader
-
 /// [`MultimodalLoader`] for an Mistral 3 model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
@@ -155,7 +153,6 @@ impl DeviceMappedModelLoader for Mistral3Loader {
         let max_seq_len = img_seq_len * max_num_images + *max_seq_len.min(&ATTENTION_CHUNK_SIZE);
         Ok(max_batch_size * tcfg.num_attention_heads * max_seq_len * max_seq_len)
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -199,7 +196,6 @@ impl DeviceMappedModelLoader for Mistral3Loader {
 
         Ok((max_batch_size * max_num_images) * cfg.num_attention_heads * img_seq_len * img_seq_len)
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -212,7 +208,6 @@ impl DeviceMappedModelLoader for Mistral3Loader {
 
         let text_elems = {
             let cfg = &cfg.text_config;
-
             let (embed_tokens_pack_factor, lm_head_pack_factor) =
                 super::language_model_pack_factors(
                     _quantization,
@@ -266,10 +261,8 @@ impl DeviceMappedModelLoader for Mistral3Loader {
         };
 
         let elems = text_elems + vision_elems;
-
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -313,13 +306,11 @@ impl DeviceMappedModelLoader for Mistral3Loader {
             cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: Mistral3Config = serde_json::from_str(config)?;
         let cfg = &cfg.text_config;
         Ok(cfg.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: Mistral3Config = serde_json::from_str(config)?;
         let cfg = &cfg.text_config;

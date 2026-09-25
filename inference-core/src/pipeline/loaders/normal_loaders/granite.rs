@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== GraniteMoeHybrid loader
-
 /// [`NormalLoader`] for a GraniteMoeHybrid model (IBM Granite 4.0).
 ///
 /// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
@@ -146,7 +144,6 @@ impl DeviceMappedModelLoader for GraniteMoeHybridLoader {
         };
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -213,7 +210,6 @@ impl DeviceMappedModelLoader for GraniteMoeHybridLoader {
             })
             .collect())
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: crate::models::granite::Config = serde_json::from_str(config)?;
 

@@ -9,7 +9,6 @@ use std::{
 use crate::{attention::ATTENTION_CHUNK_SIZE, matformer::MatformerSliceConfig};
 
 use crate::speculative::SpeculativeTargetMixin;
-
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     device_map::DeviceMapper,
@@ -22,22 +21,16 @@ use crate::{
     utils::varbuilder_utils::DeviceForLoadTensor,
     xlora_models::NonGranularState,
 };
-
 use anyhow::Result;
-
 use candle_core::{DType, Device, Tensor};
-
 use inference_quant::log::once_log_debug;
 
 use indicatif::MultiProgress;
-
 use inference_quant::ShardedVarBuilder;
-
 #[cfg(feature = "pyo3_macros")]
 use pyo3::pyclass;
 
 use regex::Regex;
-
 use serde::Deserialize;
 
 use crate::{

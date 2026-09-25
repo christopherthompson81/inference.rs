@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== GPT-OSS loader
-
 /// [`NormalLoader`] for a GPT-OSS model.
 ///
 /// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
@@ -141,7 +139,6 @@ impl DeviceMappedModelLoader for GptOssLoader {
         };
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -202,7 +199,6 @@ impl DeviceMappedModelLoader for GptOssLoader {
             cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: crate::models::gpt_oss::Config = serde_json::from_str(config)?;
 

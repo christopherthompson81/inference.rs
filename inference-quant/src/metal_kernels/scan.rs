@@ -79,7 +79,6 @@ pub fn call_scan(
     name.push_str(&format!("{type_name}_{type_name}"));
 
     let pipeline = kernels.load_pipeline(device, name)?;
-
     let encoder = ep.encoder();
     let encoder: &ComputeCommandEncoderRef = encoder.as_ref();
     encoder.set_compute_pipeline_state(&pipeline);

@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== Mixtral loader
-
 pub struct MixtralLoader;
 
 impl NormalModelLoader for MixtralLoader {
@@ -160,7 +158,6 @@ impl DeviceMappedModelLoader for MixtralLoader {
         };
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -206,13 +203,11 @@ impl DeviceMappedModelLoader for MixtralLoader {
             cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: crate::models::mixtral::Config = serde_json::from_str(config)?;
 
         Ok(cfg.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: crate::models::mixtral::Config = serde_json::from_str(config)?;
 

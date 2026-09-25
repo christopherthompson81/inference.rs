@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== Phi3 loader
-
 /// [`NormalLoader`] for a Phi 3.5 MoE model.
 ///
 /// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
@@ -86,7 +84,6 @@ impl IsqModelLoader for Phi3_5MoELoader {
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
         self.isq_layer_regexes(config)
     }
-
     fn isq_layer_regexes_moqe(&self, _config: &str) -> Result<Vec<Regex>> {
         Ok(vec![
             // MLP
@@ -164,7 +161,6 @@ impl DeviceMappedModelLoader for Phi3_5MoELoader {
         };
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -214,13 +210,11 @@ impl DeviceMappedModelLoader for Phi3_5MoELoader {
             cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: crate::models::phi3_5_moe::Config = serde_json::from_str(config)?;
 
         Ok(cfg.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: crate::models::phi3_5_moe::Config = serde_json::from_str(config)?;
 

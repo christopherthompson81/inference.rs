@@ -105,7 +105,6 @@ impl IsqModelLoader for AutoNormalLoader {
     fn promoted_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
         Self::get_loader(config)?.promoted_isq_predicates(config)
     }
-
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
         Self::get_loader(config)?.immediate_isq_predicates(config)
     }

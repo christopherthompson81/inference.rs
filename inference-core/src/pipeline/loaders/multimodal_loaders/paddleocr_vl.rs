@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== PaddleOCR-VL Loader
-
 /// [`MultimodalLoader`] for a PaddleOCR-VL (1.5, 1.6) model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
@@ -126,7 +124,6 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
 
         Ok(max_text_attn)
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -159,7 +156,6 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
 
         Ok(max_vision_attn)
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -213,7 +209,6 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
 
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -257,12 +252,10 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
             tcfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: PaddleOcrVlConfig = serde_json::from_str(config)?;
         Ok(cfg.text_config().num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: PaddleOcrVlConfig = serde_json::from_str(config)?;
         let tcfg = cfg.text_config();

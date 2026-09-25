@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== Phi 4MM loader
-
 /// [`MultimodalLoader`] for a Phi 4MM Vision model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
@@ -12,7 +10,6 @@ pub struct Phi4MMPrefixer;
 impl MultimodalPromptPrefixer for Phi4MMPrefixer {
     fn prefix_image(&self, image_indexes: Vec<usize>, prompt: &str) -> String {
         // Image indexing starts at 0.
-
         format!(
             "{}{prompt}",
             image_indexes
@@ -23,7 +20,6 @@ impl MultimodalPromptPrefixer for Phi4MMPrefixer {
     }
     fn prefix_audio(&self, audio_indexes: Vec<usize>, prompt: &str) -> String {
         // Image indexing starts at 0.
-
         format!(
             "{}{prompt}",
             audio_indexes
@@ -147,7 +143,6 @@ impl DeviceMappedModelLoader for Phi4MMLoader {
 
         Ok(max_text_attn)
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         _config: &str,
@@ -189,7 +184,6 @@ impl DeviceMappedModelLoader for Phi4MMLoader {
 
         Ok(max_vision_attn + max_qkv)
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -299,7 +293,6 @@ impl DeviceMappedModelLoader for Phi4MMLoader {
 
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -336,12 +329,10 @@ impl DeviceMappedModelLoader for Phi4MMLoader {
             cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: Phi4MMConfig = serde_json::from_str(config)?;
         Ok(cfg.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: Phi4MMConfig = serde_json::from_str(config)?;
 

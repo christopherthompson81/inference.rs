@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== Qwen3VL Loader
-
 /// [`MultimodalLoader`] for an Qwen3VL model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
@@ -153,7 +151,6 @@ impl DeviceMappedModelLoader for Qwen3VLLoader {
 
         Ok(max_text_attn)
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -180,7 +177,6 @@ impl DeviceMappedModelLoader for Qwen3VLLoader {
             let grid_w = max_image_shape.1 / cfg.patch_size;
             grid_t * grid_h * grid_w
         };
-
         let max_vision_attn = {
             let cfg = &cfg.vision_config;
             (max_batch_size * max_num_images) * cfg.num_heads * img_seq_len * img_seq_len
@@ -188,7 +184,6 @@ impl DeviceMappedModelLoader for Qwen3VLLoader {
 
         Ok(max_vision_attn)
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -286,7 +281,6 @@ impl DeviceMappedModelLoader for Qwen3VLLoader {
 
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -334,13 +328,11 @@ impl DeviceMappedModelLoader for Qwen3VLLoader {
             cfg.text_config.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: Qwen3VLConfig = serde_json::from_str(config)?;
         let cfg = &cfg.text_config;
         Ok(cfg.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: Qwen3VLConfig = serde_json::from_str(config)?;
         let cfg = &cfg.text_config;

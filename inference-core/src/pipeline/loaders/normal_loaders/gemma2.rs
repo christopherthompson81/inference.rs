@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== Gemma2 loader
-
 /// [`NormalLoader`] for a Gemma2 model.
 ///
 /// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
@@ -140,7 +138,6 @@ impl DeviceMappedModelLoader for Gemma2Loader {
         };
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -187,7 +184,6 @@ impl DeviceMappedModelLoader for Gemma2Loader {
             cfg.num_hidden_layers
         ])
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: crate::models::gemma2::Config = serde_json::from_str(config)?;
 

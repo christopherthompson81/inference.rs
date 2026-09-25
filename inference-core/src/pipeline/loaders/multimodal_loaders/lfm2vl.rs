@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== LFM2-VL loader
-
 /// [`MultimodalLoader`] for an LFM2-VL model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
@@ -68,16 +66,13 @@ impl MultimodalModelLoader for Lfm2VlLoader {
             attention_mechanism,
         )?))
     }
-
     fn is_gptx(&self, _config: &str) -> bool {
         true
     }
-
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let cfg: Lfm2VlConfig = serde_json::from_str(config)?;
         Ok(Box::new(cfg))
     }
-
     fn get_processor(
         &self,
         model_config: &str,
@@ -89,26 +84,21 @@ impl MultimodalModelLoader for Lfm2VlLoader {
             serde_json::from_str(model_config).expect("Failed to parse LFM2-VL config");
         Arc::new(Lfm2VlProcessor::new(&cfg, &preprocessor_config))
     }
-
     fn supports_paged_attention(&self, _config: &str) -> bool {
         true
     }
-
     fn supports_prefix_cacher(&self, _config: &str) -> bool {
         true
     }
-
     fn modalities(&self, _config: &str) -> Result<Modalities> {
         Ok(Modalities {
             input: vec![SupportedModality::Text, SupportedModality::Vision],
             output: vec![SupportedModality::Text],
         })
     }
-
     fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
         Arc::new(Lfm2VlPrefixer)
     }
-
     fn get_device_for_tensor(
         &self,
         config: &str,
@@ -175,7 +165,6 @@ impl IsqModelLoader for Lfm2VlLoader {
             Regex::new(r"model\.multi_modal_projector\.linear_2\.(weight|bias)$")?,
         ])
     }
-
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
         self.isq_layer_regexes(config)
     }
@@ -202,7 +191,6 @@ impl DeviceMappedModelLoader for Lfm2VlLoader {
             max_seq_len.min(&ATTENTION_CHUNK_SIZE) + Self::max_image_seq_len(&cfg) * max_num_images;
         Ok(max_batch_size * cfg.text_config.num_attention_heads * seq_len * seq_len)
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -235,7 +223,6 @@ impl DeviceMappedModelLoader for Lfm2VlLoader {
                 .max(cfg.vision_config.intermediate_size);
         Ok(max_vision_attn.max(max_vision_hidden))
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -300,7 +287,6 @@ impl DeviceMappedModelLoader for Lfm2VlLoader {
         };
         Ok((text + vision + projector) * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -341,7 +327,6 @@ impl DeviceMappedModelLoader for Lfm2VlLoader {
 
         Ok(sizes)
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg: Lfm2VlConfig = serde_json::from_str(config)?;
         Ok(cfg.text_config.num_hidden_layers)
@@ -350,7 +335,6 @@ impl DeviceMappedModelLoader for Lfm2VlLoader {
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
         Some(vec![NonMappedSubModel::Vision])
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: Lfm2VlConfig = serde_json::from_str(config)?;
         let tc = cfg.text_config;

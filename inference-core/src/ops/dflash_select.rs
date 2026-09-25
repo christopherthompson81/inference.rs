@@ -99,7 +99,6 @@ pub(crate) fn cuda_dflash_greedy_select(
             candle_core::bail!("{OP} tensors must be on the same CUDA device");
         }
     }
-
     let positions = rows / batch;
     let batch_i32 = i32::try_from(batch).map_err(candle_core::Error::wrap)?;
     let positions_i32 = i32::try_from(positions).map_err(candle_core::Error::wrap)?;
@@ -510,4 +509,22 @@ pub(crate) fn cuda_dflash_sample_select(
         candidate_ids,
         candidate_probs,
     })
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) struct DFlashSelectorSampleInput<'a> {
+    pub(crate) topk: &'a RankedTopKPackedOutput,
+    pub(crate) projected_hidden: &'a Tensor,
+    pub(crate) predecessor_codebook: &'a Tensor,
+    pub(crate) successor_codebook: &'a Tensor,
+    pub(crate) anchors: &'a Tensor,
+    pub(crate) inverse_temperatures: &'a Tensor,
+    pub(crate) uniforms: &'a Tensor,
+}
+
+#[cfg(feature = "cuda")]
+pub(crate) struct DFlashSelectorSampleOutput {
+    pub(crate) tokens: Tensor,
+    pub(crate) candidate_ids: Tensor,
+    pub(crate) candidate_probs: Tensor,
 }

@@ -341,3 +341,13 @@ pub(crate) fn cuda_topk_sampling_submission_cancel(
         .token_ring
         .cancel(&submission.token, "cuda_topk_sampling_submission_cancel")
 }
+
+#[cfg(feature = "cuda")]
+#[derive(Clone, Copy)]
+pub(crate) struct CudaTopKSamplingParams {
+    pub(crate) inverse_temperature: f32,
+    pub(crate) top_k: usize,
+    pub(crate) top_p: f32,
+    pub(crate) min_p: f32,
+    pub(crate) uniform: f32,
+}

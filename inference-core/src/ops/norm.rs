@@ -14,7 +14,6 @@ pub(crate) fn try_cuda_rms_norm_strided_4d(
     if !input.device().is_cuda() || input.rank() != 4 {
         return Ok(None);
     }
-
     let dtype = input.dtype();
     if !matches!(dtype, DType::BF16 | DType::F16 | DType::F32) || weight.dtype() != dtype {
         return Ok(None);
@@ -58,7 +57,6 @@ pub(crate) fn try_cuda_rms_norm_strided_4d(
         candle_core::Storage::Cuda(s) => s,
         _ => return Ok(None),
     };
-
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
     let stream_ptr = stream.cu_stream() as i64;
@@ -267,7 +265,6 @@ pub fn cuda_rms_norm_residual(
             let (residual_ptr, residual_guard) = residual_src.device_ptr(&stream);
             let (weight_ptr, weight_guard) = weight_src.device_ptr(&stream);
             let (out_ptr, out_guard) = out.device_ptr_mut(&stream);
-
             let src_ptr = unsafe { (src_ptr as *const $ty).add(input_layout.start_offset()) };
             let residual_ptr =
                 unsafe { (residual_ptr as *const $ty).add(residual_layout.start_offset()) };
@@ -304,7 +301,6 @@ pub fn cuda_rms_norm_residual(
             )))
         }};
     }
-
     match input.dtype() {
         DType::BF16 => launch!(BF16, half::bf16, rms_norm_residual_bf16),
         DType::F16 => launch!(F16, half::f16, rms_norm_residual_f16),
@@ -389,7 +385,6 @@ pub fn cuda_add_rms_norm(
         candle_core::Storage::Cuda(storage) => storage,
         _ => candle_core::bail!("cuda_add_rms_norm requires CUDA weight"),
     };
-
     let dev = input_storage.device();
     let stream = dev.cuda_stream();
     let stream_ptr = stream.cu_stream() as i64;
@@ -455,7 +450,6 @@ pub fn cuda_add_rms_norm(
             ))
         }};
     }
-
     match input.dtype() {
         DType::BF16 => launch!(BF16, half::bf16, add_rms_norm_bf16),
         DType::F16 => launch!(F16, half::f16, add_rms_norm_f16),
@@ -490,7 +484,6 @@ pub fn metal_rms_norm_residual(
             return Ok(None);
         }
     }
-
     let input = input.contiguous()?;
     let residual = residual.contiguous()?;
     let weight = weight.contiguous()?;
@@ -790,7 +783,6 @@ pub fn cuda_rms_norm_residual_then_rms_norm(
             ))
         }};
     }
-
     match input.dtype() {
         DType::BF16 => launch!(BF16, half::bf16, rms_norm_residual_then_rms_norm_bf16),
         DType::F16 => launch!(F16, half::f16, rms_norm_residual_then_rms_norm_f16),
@@ -799,11 +791,4 @@ pub fn cuda_rms_norm_residual_then_rms_norm(
             candle_core::bail!("cuda_rms_norm_residual_then_rms_norm unsupported dtype {dtype:?}")
         }
     }
-}
-
-#[cfg(feature = "cuda")]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum QkRopeOutputLayout {
-    HeadsFirst,
-    TokensFirst,
 }

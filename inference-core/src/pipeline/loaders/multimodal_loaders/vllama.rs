@@ -1,7 +1,5 @@
 use super::*;
 
-// ======================== MLlama Loader
-
 /// [`MultimodalLoader`] for an Llama Vision model.
 ///
 /// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
@@ -186,7 +184,6 @@ impl DeviceMappedModelLoader for VLlamaLoader {
 
         Ok(max_self_text_attn.max(max_cross_text_attn))
     }
-
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -217,7 +214,6 @@ impl DeviceMappedModelLoader for VLlamaLoader {
 
         Ok(max_vision_attn)
     }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -320,7 +316,6 @@ impl DeviceMappedModelLoader for VLlamaLoader {
         let elems = text_elems + vision_elems;
         Ok(elems * dtype.size_in_bytes())
     }
-
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -375,12 +370,10 @@ impl DeviceMappedModelLoader for VLlamaLoader {
 
         Ok(layer_sizes)
     }
-
     fn num_layers(&self, config: &str) -> Result<usize> {
         let config: MLlamaConfig = serde_json::from_str(config)?;
         Ok(config.text_config.num_hidden_layers)
     }
-
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: MLlamaConfig = serde_json::from_str(config)?;
         let cfg = &cfg.text_config;
