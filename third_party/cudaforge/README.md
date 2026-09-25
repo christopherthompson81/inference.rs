@@ -1,9 +1,13 @@
 > **Vendored copy for inference.rs.** This is [cudaforge](https://github.com/guoqingbao/cudaforge) 0.1.6
-> (MIT OR Apache-2.0, by Guoqing Bao), patched in through `[patch.crates-io]` in the workspace `Cargo.toml`. The only
-> change is `src/jobserver.rs` and its call sites. Each nvcc process now holds a cargo jobserver slot (the build
-> script's implicit token, or one requested from cargo), so several kernel crates building at once share `cargo -j`
-> instead of each running a full pool. The default pool size is raised to all cores to match, and `CUDAFORGE_THREADS`
-> still caps it. Everything else is upstream, so re-sync by diffing against a new release.
+> (MIT OR Apache-2.0, by Guoqing Bao), patched in through `[patch.crates-io]` in the workspace `Cargo.toml`. Changes:
+> - New `src/jobserver.rs`. In `src/builder.rs`, each nvcc compile holds a cargo jobserver slot (the build script's
+>   implicit token, or one requested from cargo), so kernel crates building at once share `cargo -j` instead of each
+>   running a full pool. The thread-count warning is reworded to say so.
+> - `src/parallel.rs`: the default pool size is raised from half to all cores, since the jobserver now bounds
+>   concurrency. `CUDAFORGE_THREADS` still caps it, and its test is updated to match.
+> - `Cargo.toml`: adds the `jobserver` dependency.
+>
+> Everything else is upstream 0.1.6. To re-sync, diff against a new release.
 
 # CudaForge
 

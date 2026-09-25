@@ -221,10 +221,12 @@ plus cargo's own 16 rustc jobs.
 Change: cudaforge 0.1.6 is vendored as `third_party/cudaforge` and patched in with `[patch.crates-io]`, which also
 covers candle-kernels.
 
-- New `src/jobserver.rs`: every nvcc process holds a slot, either the build script's implicit token or one from cargo.
+- New `src/jobserver.rs`: every nvcc compile holds a slot, either the build script's implicit token or one from
+  cargo. The final `nvcc --lib` archive step runs on the build script's own slot.
 - Tokens are requested through jobserver's helper thread, and waiters block on a condvar that wakes on either a token
   or the implicit slot freeing, so `-j1` cannot deadlock.
-- Polling with `try_acquire` was rejected, because it returns `Unsupported` for inherited anonymous-pipe jobservers.
+- Polling with `try_acquire` was rejected: it busy-waits, and it returns `Unsupported` on non-Linux Unixes, or when
+  reopening the inherited pipe fails (on Linux, jobserver 0.1.34 reopens `/dev/fd/N` non-blocking).
 - The default pool is raised to all cores, since the jobserver is now what bounds concurrency.
 
 Command: `cargo clean -p inference-core -p inference-paged-attn -p inference-quant -p inference-flash-attn -p
@@ -284,3 +286,13 @@ Fix: ask git for the real paths (`rev-parse --path-format=absolute --git-path` f
 
 Finding: the first build after the fix reran the script once (10.6 s). After that, **no-op builds take 0.32 s** and
 nothing is marked dirty.
+
+Review follow-ups:
+
+- An arrived token is now used before the implicit slot. Previously, a waiter woken by a token could take the freed
+  implicit slot instead and leave the token unreturned, which cost a `-j` slot for the rest of the build.
+- A helper error wakes its waiter and stops limiting instead of stalling.
+- `from_env_ext(true)` validates the inherited fds.
+- The git-revision watch now also covers a packed branch ref (the nearest existing ref directory plus
+  `packed-refs`, only in that case), so the first commit after `git gc` or a fresh clone is picked up. Verified in a
+  scratch repo: `pack-refs --all`, then a commit writes the loose ref under the watched directory.

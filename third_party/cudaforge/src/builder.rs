@@ -403,6 +403,9 @@ impl KernelBuilder {
                     return Ok(());
                 }
                 let _slot = crate::jobserver::acquire();
+                if had_error.load(Ordering::Relaxed) {
+                    return Ok(());
+                }
 
                 let gencode_arg = gpu_arch.to_gencode_arg();
 

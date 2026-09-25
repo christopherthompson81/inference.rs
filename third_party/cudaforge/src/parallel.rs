@@ -167,7 +167,7 @@ mod tests {
     #[test]
     fn test_default_config() {
         let config = ParallelConfig::default();
-        assert_eq!(config.thread_percentage, 0.5);
+        assert_eq!(config.thread_percentage, 1.0);
         assert!(config.max_threads.is_none());
     }
 
