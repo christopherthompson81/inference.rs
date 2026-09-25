@@ -3772,7 +3772,9 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "clap",
+ "gemm",
  "image",
+ "rayon",
  "serde",
  "serde_json",
 ]

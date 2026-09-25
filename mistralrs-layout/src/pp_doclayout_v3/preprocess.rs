@@ -1,5 +1,6 @@
 use candle_core::{Device, Result, Tensor};
 use image::RgbImage;
+use rayon::prelude::*;
 
 /// torch / cv2 bicubic coefficient (PIL and the `image` crate use -0.5).
 const CUBIC_A: f64 = -0.75;
@@ -79,25 +80,30 @@ pub fn resize_bicubic(img: &RgbImage, out_w: usize, out_h: usize) -> Vec<u8> {
     let ys = cubic_taps(in_h, out_h);
 
     let mut horiz = vec![0u8; in_h * out_w * 3];
-    for y in 0..in_h {
-        let row = &src[y * in_w * 3..(y + 1) * in_w * 3];
-        for (ox, (idx, w)) in xs.idx.iter().zip(&xs.weights).enumerate() {
-            for c in 0..3 {
-                horiz[(y * out_w + ox) * 3 + c] =
-                    accumulate(|i| row[i * 3 + c], idx, w, xs.precision);
+    horiz
+        .par_chunks_mut(out_w * 3)
+        .enumerate()
+        .for_each(|(y, dst)| {
+            let row = &src[y * in_w * 3..(y + 1) * in_w * 3];
+            for (ox, (idx, w)) in xs.idx.iter().zip(&xs.weights).enumerate() {
+                for c in 0..3 {
+                    dst[ox * 3 + c] = accumulate(|i| row[i * 3 + c], idx, w, xs.precision);
+                }
             }
-        }
-    }
+        });
 
     let mut out = vec![0u8; out_h * out_w * 3];
-    for (oy, (idx, w)) in ys.idx.iter().zip(&ys.weights).enumerate() {
-        for ox in 0..out_w {
-            for c in 0..3 {
-                out[(oy * out_w + ox) * 3 + c] =
-                    accumulate(|r| horiz[(r * out_w + ox) * 3 + c], idx, w, ys.precision);
+    out.par_chunks_mut(out_w * 3)
+        .enumerate()
+        .for_each(|(oy, dst)| {
+            let (idx, w) = (&ys.idx[oy], &ys.weights[oy]);
+            for ox in 0..out_w {
+                for c in 0..3 {
+                    dst[ox * 3 + c] =
+                        accumulate(|r| horiz[(r * out_w + ox) * 3 + c], idx, w, ys.precision);
+                }
             }
-        }
-    }
+        });
     out
 }
 

@@ -136,7 +136,8 @@ struct Aifi {
 impl Aifi {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let (b, c, h, w) = xs.dims4()?;
-        let mut hs = xs.flatten_from(2)?.transpose(1, 2)?;
+        // candle CPU batched matmul is wrong for items > 0 when lhs is a transposed view, so materialize
+        let mut hs = xs.flatten_from(2)?.transpose(1, 2)?.contiguous()?;
         for l in &self.layers {
             hs = l.forward(&hs, &self.pos)?;
         }
@@ -144,23 +145,11 @@ impl Aifi {
     }
 }
 
-struct RepVggBlock {
-    conv1: ConvNorm,
-    conv2: ConvNorm,
-    act: Activation,
-}
-
-impl Module for RepVggBlock {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        self.act
-            .forward(&(self.conv1.forward(xs)? + self.conv2.forward(xs)?)?)
-    }
-}
-
 struct CspRepLayer {
     conv1: ConvNorm,
     conv2: ConvNorm,
-    bottlenecks: Vec<RepVggBlock>,
+    /// RepVGG blocks, each re-parameterized into one 3x3 conv.
+    bottlenecks: Vec<ConvNorm>,
 }
 
 impl CspRepLayer {
@@ -175,17 +164,17 @@ impl CspRepLayer {
         let bottlenecks = (0..CSP_BLOCKS)
             .map(|i| {
                 let vb = vb.pp("bottlenecks").pp(i);
-                Ok(RepVggBlock {
-                    conv1: ConvNormSpec::new(hidden, hidden, 3)
-                        .names(RTDETR_CONV)
-                        .eps(cfg.batch_norm_eps)
-                        .load(vb.pp("conv1"))?,
-                    conv2: ConvNormSpec::new(hidden, hidden, 1)
-                        .names(RTDETR_CONV)
-                        .eps(cfg.batch_norm_eps)
-                        .load(vb.pp("conv2"))?,
-                    act,
-                })
+                ConvNormSpec::new(hidden, hidden, 3)
+                    .act(act)
+                    .names(RTDETR_CONV)
+                    .eps(cfg.batch_norm_eps)
+                    .load_with_1x1(
+                        ConvNormSpec::new(hidden, hidden, 1)
+                            .names(RTDETR_CONV)
+                            .eps(cfg.batch_norm_eps),
+                        vb.pp("conv1"),
+                        vb.pp("conv2"),
+                    )
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(Self {

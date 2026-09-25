@@ -11,6 +11,7 @@ use std::path::Path;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
 use image::RgbImage;
+use rayon::prelude::*;
 
 pub use config::{PPDocLayoutV3Config, PPDocLayoutV3PreprocessorConfig, LABELS};
 pub use model::{Intermediates, PPDocLayoutV3, RawOutputs};
@@ -77,7 +78,7 @@ impl PPDocLayoutV3Detector {
             return Ok(Vec::new());
         }
         let pixels = images
-            .iter()
+            .par_iter()
             .map(|im| self.preprocessor.preprocess(im, &self.device))
             .collect::<Result<Vec<_>>>()?;
         let out = self.model.forward(&Tensor::stack(&pixels, 0)?, false)?;
