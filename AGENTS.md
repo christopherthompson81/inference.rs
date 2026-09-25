@@ -73,7 +73,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - Core test suite (requires HF token for some tests):
   ```bash
   export HF_TOKEN=<your_token>  # or TESTS_HF_TOKEN for CI parity
-  cargo test -p inference-core -p inference-quant -p inference-vision
+  scripts/local_ci.sh --tests   # or --cuda; runs the suite under cargo-nextest
   ```
 - Run all tests across workspace (may skip some crates without tests):
   ```bash

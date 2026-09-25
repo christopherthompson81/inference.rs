@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
-# The canonical local checks; usage: scripts/local_ci.sh [--lint] [--tests] [--cuda] [--docs] (default: --lint --tests)
-# Each mode always builds the same package and feature set, so cargo reuses its artifacts between runs instead of
-# rebuilding for a new combination. Keep CC/CXX/NVCC and the INFERENCE_TEST_* model paths in ~/.cargo/config.toml
-# [env] rather than on the command line: build scripts track them, and changing one rebuilds everything above ring.
+# Canonical local checks with fixed package/feature sets: scripts/local_ci.sh [--lint] [--tests] [--cuda] [--docs]
+# Build env (CC/CXX/NVCC) and INFERENCE_TEST_* paths belong in ~/.cargo/config.toml [env]; changing one rebuilds deps.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 

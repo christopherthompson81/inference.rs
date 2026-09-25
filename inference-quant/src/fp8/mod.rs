@@ -174,7 +174,11 @@ impl QuantMethod for FP8Linear {
         // Batch matrix multiplication
         maybe_init_cublas_lt_wrapper(x.device().clone());
 
-        match CUBLASLT_CONTROLLER.get_for_device(x.device()) {
+        // cuBLASLt FP8 GEMMs return NOT_SUPPORTED below sm_89, so those GPUs dequantize instead
+        let cublaslt = CUBLASLT_CONTROLLER
+            .get_for_device(x.device())
+            .filter(|_| crate::fp8_tensor_cores(x.device()));
+        match cublaslt {
             Some(handle) => {
                 let n_dims = x.dims().len();
                 if n_dims < 3 {

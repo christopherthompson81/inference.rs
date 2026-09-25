@@ -17,23 +17,6 @@ pub mod metal_kernels;
 mod afq;
 mod bitsandbytes;
 
-// FP8 tensor-core paths (cuBLASLt FP8, the blockwise FP8 MMA GEMV) need sm_89+; their tests skip on older GPUs.
-#[cfg(all(test, feature = "cuda"))]
-pub(crate) fn fp8_tensor_cores(device: &candle_core::Device) -> bool {
-    use candle_core::cuda::cudarc::driver::sys::CUdevice_attribute;
-    let Ok(dev) = device.as_cuda_device() else {
-        return false;
-    };
-    let stream = dev.cuda_stream();
-    let context = stream.context();
-    let major = context
-        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
-        .unwrap_or(0);
-    let minor = context
-        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
-        .unwrap_or(0);
-    major * 10 + minor >= 89
-}
 mod blockwise_fp8;
 pub mod cublaslt;
 #[cfg(test)]
@@ -69,6 +52,36 @@ mod vector_fp8;
 
 use gptq::gptq_linear;
 use regex::Regex;
+
+// FP8 tensor-core paths (cuBLASLt FP8, the blockwise FP8 MMA GEMV) need sm_89+; older GPUs take the dequantize path.
+#[cfg(feature = "cuda")]
+const FP8_TENSOR_CORE_MIN_COMPUTE_CAPABILITY: i32 = 89;
+
+#[cfg(feature = "cuda")]
+static FP8_TENSOR_CORE_SUPPORT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<candle_core::cuda::DeviceId, bool>>,
+> = std::sync::LazyLock::new(Default::default);
+
+pub(crate) fn fp8_tensor_cores(device: &candle_core::Device) -> bool {
+    #[cfg(feature = "cuda")]
+    if let candle_core::Device::Cuda(dev) = device {
+        use candle_core::cuda::cudarc::driver::sys::CUdevice_attribute;
+        let mut cache = FP8_TENSOR_CORE_SUPPORT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        return *cache.entry(dev.id()).or_insert_with(|| {
+            let stream = dev.cuda_stream();
+            let context = stream.context();
+            let attribute = |a| context.attribute(a).unwrap_or(0);
+            attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR) * 10
+                + attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
+                >= FP8_TENSOR_CORE_MIN_COMPUTE_CAPABILITY
+        });
+    }
+    let _ = device;
+    false
+}
+
 pub use safetensors::{Shard, ShardedSafeTensors, TensorShapes};
 pub use uqff::{
     bias_shard, build_output_report_from_layers, build_uqff_report,

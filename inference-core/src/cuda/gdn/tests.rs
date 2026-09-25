@@ -1064,8 +1064,8 @@ fn flashinfer_sm90_prefill_matches_sequential_recurrence() -> Result<()> {
 
 #[cfg(feature = "cutile")]
 #[test]
+#[ignore = "requires a CUDA device with cuTile support"]
 fn cutile_prefill_matches_sequential_recurrence() -> Result<()> {
-    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     for case in [
         FusedPrefillCase {

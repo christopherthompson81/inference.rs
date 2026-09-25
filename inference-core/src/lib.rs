@@ -414,7 +414,7 @@ struct EngineInstance {
 
 impl Drop for EngineInstance {
     fn drop(&mut self) {
-        // Free decode graphs (they capture the engine thread's cuTile modules) before it exits when `sender` drops.
+        // The engine frees its own graphs on exit; this covers an engine that never ran its loop.
         if let Ok(pipeline) = self.reboot_state.pipeline.try_lock() {
             pipeline.cleanup_cuda_graphs();
         }
@@ -738,15 +738,17 @@ impl InferenceRsBuilder {
 impl Drop for InferenceRs {
     fn drop(&mut self) {
         // Engine threads still inside CUDA when the process exits race the context teardown and segfault, so wait.
-        if let Ok(engines) = self.engines.get_mut() {
-            for engine in engines.values() {
-                // try_send rather than blocking_send, which panics inside a runtime
-                engine.terminate();
-            }
-            let deadline = Instant::now() + ENGINE_DROP_JOIN_TIMEOUT;
-            for engine in engines.values_mut() {
-                engine.join_until(deadline);
-            }
+        let engines = self
+            .engines
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for engine in engines.values() {
+            // try_send rather than blocking_send, which panics inside a runtime
+            engine.terminate();
+        }
+        let deadline = Instant::now() + ENGINE_DROP_JOIN_TIMEOUT;
+        for engine in engines.values_mut() {
+            engine.join_until(deadline);
         }
     }
 }

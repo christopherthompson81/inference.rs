@@ -38,6 +38,14 @@ const TEXT_GOLDENS: &[(&str, &str, &str)] = &[
     ),
 ];
 
+fn golden(fixture_name: &str) -> (&'static str, &'static str) {
+    TEXT_GOLDENS
+        .iter()
+        .find(|(name, _, _)| *name == fixture_name)
+        .map(|&(_, prompt, golden)| (prompt, golden))
+        .expect("fixture has a golden")
+}
+
 fn model_dir() -> Option<String> {
     std::env::var(MODEL_ENV)
         .ok()
@@ -130,8 +138,8 @@ async fn greedy_ids_match_transformers() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn assert_text_golden(index: usize) -> anyhow::Result<()> {
-    let (name, prompt, golden) = TEXT_GOLDENS[index];
+async fn assert_text_golden(name: &str) -> anyhow::Result<()> {
+    let (prompt, golden) = golden(name);
     let model = build(false).await?;
     let resp = model
         .send_chat_request(image_request(vec![fixture(name)?], prompt, MAX_LEN))
@@ -142,19 +150,19 @@ async fn assert_text_golden(index: usize) -> anyhow::Result<()> {
 
 // One test per fixture so the CPU f32 decodes run in parallel instead of as one long pole.
 macro_rules! text_golden_test {
-    ($name:ident, $index:expr) => {
+    ($name:ident, $fixture:literal) => {
         #[tokio::test]
         async fn $name() -> anyhow::Result<()> {
             skip_unless_model!("text parity");
-            assert_text_golden($index).await
+            assert_text_golden($fixture).await
         }
     };
 }
 
-text_golden_test!(ocr_text_matches_transformers, 0);
-text_golden_test!(page_00_text_matches_transformers, 1);
-text_golden_test!(page_01_text_matches_transformers, 2);
-text_golden_test!(table_otsl_matches_transformers, 3);
+text_golden_test!(ocr_text_matches_transformers, "ocr.png");
+text_golden_test!(page_00_text_matches_transformers, "page_00.png");
+text_golden_test!(page_01_text_matches_transformers, "page_01.png");
+text_golden_test!(table_otsl_matches_transformers, "table.png");
 
 #[tokio::test]
 async fn text_only_matches_transformers() -> anyhow::Result<()> {
@@ -183,7 +191,7 @@ async fn two_images_in_one_message_match_transformers() -> anyhow::Result<()> {
     let resp = model
         .send_chat_request(image_request(pages, OCR_PROMPT, 2 * MAX_LEN))
         .await?;
-    assert_eq!(text(&resp), TEXT_GOLDENS[1].2);
+    assert_eq!(text(&resp), golden("page_00.png").1);
     Ok(())
 }
 
@@ -207,8 +215,8 @@ mod gpu {
             ))
         };
         let first = run("page_00.png").await?;
-        assert_eq!(first, TEXT_GOLDENS[1].2);
-        assert_eq!(run("page_01.png").await?, TEXT_GOLDENS[2].2);
+        assert_eq!(first, golden("page_00.png").1);
+        assert_eq!(run("page_01.png").await?, golden("page_01.png").1);
         assert_eq!(
             run("page_00.png").await?,
             first,
@@ -225,11 +233,12 @@ mod gpu {
             .with_isq(inference::IsqType::Q8_0)
             .build()
             .await?;
-        for (name, prompt, golden) in &TEXT_GOLDENS[..3] {
+        for name in ["ocr.png", "page_00.png", "page_01.png"] {
+            let (prompt, golden) = golden(name);
             let resp = model
                 .send_chat_request(image_request(vec![fixture(name)?], prompt, MAX_LEN))
                 .await?;
-            assert_eq!(text(&resp), *golden, "{name}");
+            assert_eq!(text(&resp), golden, "{name}");
         }
         Ok(())
     }
