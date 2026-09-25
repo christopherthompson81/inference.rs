@@ -15,6 +15,7 @@ name: Continuous integration
 env:
   RUSTFLAGS: "-D warnings"
 
+# Caches are saved from master only, so PRs restore master's and do not churn the repo cache limit
 # Test Suite runs from tests.yml on demand, and Docs runs locally via scripts/local_ci.sh; both are too slow per PR
 jobs:
   check:
@@ -26,6 +27,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - run: cargo check
 
   check-metal:
@@ -34,7 +38,13 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      # iOS/tvOS metallibs triple the shader work; macOS alone still catches shader compile errors
       - run: cargo check --workspace --features metal
+        env:
+          INFERENCE_RS_METAL_PLATFORMS: macos
 
   fmt:
     name: Rustfmt
@@ -54,6 +64,9 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - run: cargo clippy --workspace --tests --examples -- -D warnings
 
   typos:
@@ -62,7 +75,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - name: Typos check with custom config file
-        uses: crate-ci/typos@master
+        uses: crate-ci/typos@v1.50.2
         with:
           config: .typos.toml
 

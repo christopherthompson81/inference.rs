@@ -17,6 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
       - run: cargo test -p inference-core -p inference-quant -p inference-vision
         env:
           TESTS_HF_TOKEN: ${{ secrets.HF_TOKEN }}
