@@ -178,9 +178,11 @@ impl CspRepLayer {
                 Ok(RepVggBlock {
                     conv1: ConvNormSpec::new(hidden, hidden, 3)
                         .names(RTDETR_CONV)
+                        .eps(cfg.batch_norm_eps)
                         .load(vb.pp("conv1"))?,
                     conv2: ConvNormSpec::new(hidden, hidden, 1)
                         .names(RTDETR_CONV)
+                        .eps(cfg.batch_norm_eps)
                         .load(vb.pp("conv2"))?,
                     act,
                 })
@@ -190,10 +192,12 @@ impl CspRepLayer {
             conv1: ConvNormSpec::new(in_c, hidden, 1)
                 .act(act)
                 .names(RTDETR_CONV)
+                .eps(cfg.batch_norm_eps)
                 .load(vb.pp("conv1"))?,
             conv2: ConvNormSpec::new(in_c, hidden, 1)
                 .act(act)
                 .names(RTDETR_CONV)
+                .eps(cfg.batch_norm_eps)
                 .load(vb.pp("conv2"))?,
             bottlenecks,
         })
@@ -341,6 +345,7 @@ impl HybridEncoder {
                 ConvNormSpec::new(h, h, 1)
                     .act(act)
                     .names(RTDETR_CONV)
+                    .eps(cfg.batch_norm_eps)
                     .load(vb.pp("lateral_convs").pp(i))?,
             );
             fpn_blocks.push(CspRepLayer::new(cfg, vb.pp("fpn_blocks").pp(i))?);
@@ -349,6 +354,7 @@ impl HybridEncoder {
                     .stride(2)
                     .act(act)
                     .names(RTDETR_CONV)
+                    .eps(cfg.batch_norm_eps)
                     .load(vb.pp("downsample_convs").pp(i))?,
             );
             pan_blocks.push(CspRepLayer::new(cfg, vb.pp("pan_blocks").pp(i))?);

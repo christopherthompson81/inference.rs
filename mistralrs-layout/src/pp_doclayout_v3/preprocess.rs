@@ -21,8 +21,7 @@ struct Taps {
     precision: u32,
 }
 
-/// torch's native CPU uint8 bicubic (antialias=False): standard clamped 4-tap placement, f64 weights quantized to
-/// int16 fixed point with the largest precision that keeps `2 * max_weight` below 2^15.
+/// torch native CPU uint8 bicubic (antialias=False): clamped 4 taps, f64 weights quantized to int16 fixed point.
 fn cubic_taps(in_len: usize, out_len: usize) -> Taps {
     let scale = in_len as f64 / out_len as f64;
     let last = in_len as i64 - 1;

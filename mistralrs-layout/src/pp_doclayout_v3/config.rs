@@ -67,6 +67,20 @@ pub struct PPDocLayoutV3Config {
     pub x4_feat_dim: usize,
     pub global_pointer_head_size: usize,
     pub id2label: std::collections::HashMap<String, String>,
+    #[serde(default = "default_true")]
+    pub mask_enhanced: bool,
+    #[serde(default)]
+    pub learn_initial_query: bool,
+    #[serde(default)]
+    pub normalize_before: bool,
+    #[serde(default)]
+    pub anchor_image_size: Option<Vec<usize>>,
+    #[serde(default)]
+    pub eval_size: Option<Vec<usize>>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_num_prototypes() -> usize {

@@ -105,7 +105,7 @@ impl Module for ConvNorm {
     }
 }
 
-/// Defaults to stride 1, groups 1, `(k-1)/2` padding, no activation and `convolution`/`normalization` keys.
+/// Defaults to stride 1, groups 1, `(k-1)/2` padding, no activation, BN eps 1e-5 and `convolution`/`normalization` keys.
 pub struct ConvNormSpec {
     in_c: usize,
     out_c: usize,
@@ -115,6 +115,7 @@ pub struct ConvNormSpec {
     groups: usize,
     act: Option<Activation>,
     names: (&'static str, &'static str),
+    eps: f64,
 }
 
 impl ConvNormSpec {
@@ -128,6 +129,7 @@ impl ConvNormSpec {
             groups: 1,
             act: None,
             names: HF_CONV,
+            eps: BN_EPS,
         }
     }
 
@@ -143,6 +145,11 @@ impl ConvNormSpec {
 
     pub fn act(mut self, act: Activation) -> Self {
         self.act = Some(act);
+        self
+    }
+
+    pub fn eps(mut self, eps: f64) -> Self {
+        self.eps = eps;
         self
     }
 
@@ -166,7 +173,7 @@ impl ConvNormSpec {
         let beta = bn.get(self.out_c, "bias")?;
         let mean = bn.get(self.out_c, "running_mean")?;
         let var = bn.get(self.out_c, "running_var")?;
-        let scale = gamma.div(&(var + BN_EPS)?.sqrt()?)?;
+        let scale = gamma.div(&(var + self.eps)?.sqrt()?)?;
         let w = w.broadcast_mul(&scale.reshape((self.out_c, 1, 1, 1))?)?;
         let b = (beta - mean.mul(&scale)?)?;
         let conv = if self.groups > 1 && self.groups == self.in_c && self.in_c == self.out_c {

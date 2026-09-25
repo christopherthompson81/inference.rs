@@ -117,11 +117,13 @@ fn main() -> Result<()> {
     compare("logits", &out.logits, &r["logits"])?;
     compare("pred_boxes", &out.pred_boxes, &r["pred_boxes"])?;
     compare("order_logits", &out.order_logits, &r["order_logits"])?;
-    compare("out_masks", &out.masks, &r["out_masks"])?;
+    if let Some(masks) = &out.masks {
+        compare("out_masks", masks, &r["out_masks"])?;
+    }
 
     for _ in 0..3 {
         let t0 = std::time::Instant::now();
-        let o = det.model().forward(&pv)?;
+        let o = det.model().forward(&pv, false)?;
         o.logits.to_device(&Device::Cpu)?;
         println!("forward {:?}", t0.elapsed());
     }

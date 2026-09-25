@@ -129,3 +129,20 @@ Findings:
 
 Implication: functionally complete for boxes/classes/scores/reading order. Masks/polygons are computed by the model
 but not yet exposed by post-processing (the C# pipeline only consumes boxes).
+
+## Run 6 - 2026-09-24 20:10
+
+Question: do the PR #1 review fixes keep parity?
+
+Fixes: u32 cross-head gather offsets (f32 offsets lose exactness once b*heads*S > 2^24, ~160 pages per batch);
+load-time bail when memory tokens < num_queries or > 2^24; config `batch_norm_eps` wired into the RT-DETR
+`conv/norm` layers and `decoder_input_proj` (HF uses defaults elsewhere); bail on unsupported `mask_enhanced`,
+`learn_initial_query`, `normalize_before`, `anchor_image_size`, `eval_size`; final masks only on request; mask->box
+temporaries deduplicated; one host transfer per output in `detect_batch`; empty batches return `Ok(vec![])`;
+the crate's `cudnn` feature was removed. Candle-wide feature unification can still turn cuDNN on if another crate in
+the same build enables `candle-core/cudnn`, and that re-introduces the Run 4 drift. Keep layout builds cuDNN-free.
+
+Commands: parity example on CPU and CUDA; `pp_doclayout_v3_detect --batch` on the six pages + `compare_dets.py`.
+
+Findings: CPU pred_boxes max_abs 3.8e-6, CUDA 1.4e-5 (unchanged); six-page HF comparison identical to Run 5;
+empty batch returns immediately; CUDA forward 70 ms (skipping final masks is not a measurable win on GPU).

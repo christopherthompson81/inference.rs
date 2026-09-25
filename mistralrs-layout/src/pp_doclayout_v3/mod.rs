@@ -73,11 +73,18 @@ impl PPDocLayoutV3Detector {
         images: &[RgbImage],
         threshold: f32,
     ) -> Result<Vec<Vec<LayoutDetection>>> {
+        if images.is_empty() {
+            return Ok(Vec::new());
+        }
         let pixels = images
             .iter()
             .map(|im| self.preprocessor.preprocess(im, &self.device))
             .collect::<Result<Vec<_>>>()?;
-        let out = self.model.forward(&Tensor::stack(&pixels, 0)?)?;
+        let out = self.model.forward(&Tensor::stack(&pixels, 0)?, false)?;
+        // one host transfer per output instead of one per image
+        let logits = out.logits.to_device(&Device::Cpu)?;
+        let boxes = out.pred_boxes.to_device(&Device::Cpu)?;
+        let order = out.order_logits.to_device(&Device::Cpu)?;
         images
             .iter()
             .enumerate()
@@ -86,12 +93,7 @@ impl PPDocLayoutV3Detector {
                     threshold,
                     orig_size: im.dimensions(),
                 };
-                postprocess::postprocess(
-                    &out.logits.get(i)?,
-                    &out.pred_boxes.get(i)?,
-                    &out.order_logits.get(i)?,
-                    &args,
-                )
+                postprocess::postprocess(&logits.get(i)?, &boxes.get(i)?, &order.get(i)?, &args)
             })
             .collect()
     }

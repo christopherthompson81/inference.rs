@@ -25,5 +25,4 @@ clap.workspace = true
 
 [features]
 cuda = ["candle-core/cuda", "candle-nn/cuda"]
-cudnn = ["candle-core/cudnn"]
 metal = ["candle-core/metal", "candle-nn/metal"]

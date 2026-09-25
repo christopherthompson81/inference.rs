@@ -33,7 +33,7 @@ pub struct DecodeCtx<'a> {
     /// `(b, S, d_model)` flattened encoder memory.
     pub memory: &'a Tensor,
     pub geom: &'a LevelGeom,
-    /// `(b * heads, 1)` f32 row offsets into the flattened per-head value table.
+    /// `(b * heads, 1)` u32 row offsets into the flattened per-head value table.
     pub bh_offset: &'a Tensor,
 }
 
@@ -150,11 +150,12 @@ impl MsDeformAttn {
         let w = Tensor::cat(&w_l, 3)?.broadcast_mul(&attn.unsqueeze(D::Minus1)?)?;
         let k = l * p * 4;
 
+        // per-head indices are < S and exact in f32; the cross-head offset is added in u32
         let idx = idx
             .reshape((b * h, q * k))?
+            .to_dtype(DType::U32)?
             .broadcast_add(ctx.bh_offset)?
-            .flatten_all()?
-            .to_dtype(DType::U32)?;
+            .flatten_all()?;
         let sampled = value.index_select(&idx, 0)?.reshape((b * h * q, k, hd))?;
         let w = w.reshape((b * h * q, 1, k))?;
         let out = w

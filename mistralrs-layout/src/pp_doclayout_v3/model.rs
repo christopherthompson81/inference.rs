@@ -12,6 +12,8 @@ const ANCHOR_EPS: f32 = 1e-2;
 const ANCHOR_GRID: f32 = 0.05;
 const MASK_MIN_FILL: f64 = 1e9;
 const GP_MASK_FILL: f64 = -1e4;
+/// Deformable-attention sample indices are built in f32 before the cast to u32.
+const MAX_EXACT_F32_INDEX: usize = 1 << 24;
 /// Backbone stride of the x4 feature map that the mask prototypes live on.
 const MASK_STRIDE: usize = 4;
 
@@ -22,8 +24,8 @@ pub struct RawOutputs {
     pub pred_boxes: Tensor,
     /// `(b, q, q)` pairwise reading-order logits.
     pub order_logits: Tensor,
-    /// `(b, q, H/4, W/4)` mask logits.
-    pub masks: Tensor,
+    /// `(b, q, H/4, W/4)` mask logits, only when requested.
+    pub masks: Option<Tensor>,
 }
 
 pub struct Intermediates {
@@ -91,6 +93,17 @@ impl PPDocLayoutV3 {
         if cfg.decoder_in_channels.len() != cfg.num_feature_levels {
             candle_core::bail!("extra strided decoder levels are not supported");
         }
+        if !cfg.mask_enhanced
+            || cfg.learn_initial_query
+            || cfg.normalize_before
+            || cfg.anchor_image_size.is_some()
+            || cfg.eval_size.is_some()
+        {
+            candle_core::bail!(
+                "only mask_enhanced=true, learn_initial_query=false, normalize_before=false and \
+                 anchor_image_size/eval_size=null are supported"
+            );
+        }
         let dev = vb.device().clone();
         let vbm = vb.pp("model");
         let d = cfg.d_model;
@@ -120,6 +133,7 @@ impl PPDocLayoutV3 {
             .map(|(i, &c)| {
                 ConvNormSpec::new(c, d, 1)
                     .names(SEQ_CONV)
+                    .eps(cfg.batch_norm_eps)
                     .load(vbm.pp("decoder_input_proj").pp(i))
             })
             .collect::<Result<Vec<_>>>()?;
@@ -137,6 +151,13 @@ impl PPDocLayoutV3 {
         )?;
 
         let geom = LevelGeom::new(shapes);
+        if geom.total < cfg.num_queries || geom.total > MAX_EXACT_F32_INDEX {
+            candle_core::bail!(
+                "input {input_hw:?} gives {} memory tokens; need {}..={MAX_EXACT_F32_INDEX}",
+                geom.total,
+                cfg.num_queries
+            );
+        }
         let anchor_valid = anchor_valid_mask(&geom, &dev)?;
 
         let (mh, mw) = (ih / MASK_STRIDE, iw / MASK_STRIDE);
@@ -202,8 +223,8 @@ impl PPDocLayoutV3 {
         self.input_hw
     }
 
-    pub fn forward(&self, pixel_values: &Tensor) -> Result<RawOutputs> {
-        self.forward_inner(pixel_values, None)
+    pub fn forward(&self, pixel_values: &Tensor, with_masks: bool) -> Result<RawOutputs> {
+        self.forward_inner(pixel_values, with_masks, None)
     }
 
     pub fn forward_with_intermediates(
@@ -211,7 +232,7 @@ impl PPDocLayoutV3 {
         pixel_values: &Tensor,
     ) -> Result<(RawOutputs, Intermediates)> {
         let mut inter = None;
-        let out = self.forward_inner(pixel_values, Some(&mut inter))?;
+        let out = self.forward_inner(pixel_values, true, Some(&mut inter))?;
         Ok((out, inter.expect("intermediates recorded")))
     }
 
@@ -219,12 +240,13 @@ impl PPDocLayoutV3 {
     fn mask_to_box(&self, masks: &Tensor) -> Result<Tensor> {
         let m = masks.gt(0.)?.to_dtype(DType::F32)?;
         let not_m = m.affine(-1., 1.)?;
-        let x_max = (m.broadcast_mul(&self.mask_x)?.max_keepdim(D::Minus1)? + 1.)?;
-        let y_max = (m.broadcast_mul(&self.mask_y)?.max_keepdim(D::Minus1)? + 1.)?;
-        let x_min =
-            (m.broadcast_mul(&self.mask_x)? + (&not_m * MASK_MIN_FILL)?)?.min_keepdim(D::Minus1)?;
-        let y_min =
-            (m.broadcast_mul(&self.mask_y)? + (&not_m * MASK_MIN_FILL)?)?.min_keepdim(D::Minus1)?;
+        let mx = m.broadcast_mul(&self.mask_x)?;
+        let my = m.broadcast_mul(&self.mask_y)?;
+        let fill = (not_m * MASK_MIN_FILL)?;
+        let x_max = (mx.max_keepdim(D::Minus1)? + 1.)?;
+        let y_max = (my.max_keepdim(D::Minus1)? + 1.)?;
+        let x_min = (mx + &fill)?.min_keepdim(D::Minus1)?;
+        let y_min = (my + fill)?.min_keepdim(D::Minus1)?;
         let non_empty = m.max_keepdim(D::Minus1)?;
         let xyxy = Tensor::cat(&[x_min, y_min, x_max, y_max], D::Minus1)?
             .broadcast_mul(&non_empty)?
@@ -276,6 +298,7 @@ impl PPDocLayoutV3 {
     fn forward_inner(
         &self,
         pixel_values: &Tensor,
+        with_masks: bool,
         inter: Option<&mut Option<Intermediates>>,
     ) -> Result<RawOutputs> {
         let (b, _, h, w) = pixel_values.dims4()?;
@@ -327,8 +350,8 @@ impl PPDocLayoutV3 {
         let enc_masks = mask_embed.matmul(&mask_feat)?;
         let init_ref = inverse_sigmoid(&self.mask_to_box(&enc_masks)?)?;
 
-        let bh_offset = (Tensor::arange(0u32, (b * heads) as u32, dev)?.to_dtype(DType::F32)?
-            * s as f64)?
+        let bh_offset = Tensor::arange(0u32, (b * heads) as u32, dev)?
+            .affine(s as f64, 0.)?
             .reshape((b * heads, 1))?;
         let ctx = DecodeCtx {
             memory: &memory,
@@ -352,11 +375,16 @@ impl PPDocLayoutV3 {
 
         let out_query = self.decoder_norm.forward(&hs)?;
         let logits = self.enc_score_head.forward(&out_query)?;
-        let masks = self
-            .mask_query_head
-            .forward(&out_query)?
-            .matmul(&mask_feat)?
-            .reshape((b, q, mh, mw))?;
+        let masks = if with_masks {
+            Some(
+                self.mask_query_head
+                    .forward(&out_query)?
+                    .matmul(&mask_feat)?
+                    .reshape((b, q, mh, mw))?,
+            )
+        } else {
+            None
+        };
         let order_logits = self.global_pointer(&self.order_head.forward(&out_query)?)?;
 
         if let Some(slot) = inter {
