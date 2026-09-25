@@ -9,15 +9,15 @@ sidebar:
 
 Load a pre-quantized UQFF text model.
 
-Run with: `cargo run --release --example uqff -p mistralrs`
+Run with: `cargo run --release --example uqff -p inference`
 
 ```rust
 //! Load a pre-quantized UQFF text model.
 //!
-//! Run with: `cargo run --release --example uqff -p mistralrs`
+//! Run with: `cargo run --release --example uqff -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     PagedAttentionMetaBuilder, RequestBuilder, TextMessageRole, TextMessages, UqffTextModelBuilder,
 };
 
@@ -74,4 +74,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/quantization/uqff/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/quantization/uqff/main.rs)
+Source: [`inference/examples/quantization/uqff/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/quantization/uqff/main.rs)

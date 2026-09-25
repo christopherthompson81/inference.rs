@@ -10,7 +10,7 @@ sidebar:
 Python SDK code-execution approval callback.
 
 Run with:
-    pip install -e mistralrs-pyo3 --features code-execution
+    pip install -e inference-rs-pyo3 --features code-execution
     python examples/python/code_execution_approval.py
 
 ```python
@@ -18,11 +18,11 @@ Run with:
 Python SDK code-execution approval callback.
 
 Run with:
-    pip install -e mistralrs-pyo3 --features code-execution
+    pip install -e inference-rs-pyo3 --features code-execution
     python examples/python/code_execution_approval.py
 """
 
-from mistralrs import (
+from inference_rs import (
     AgentPermission,
     AgentToolApproval,
     AgentToolApprovalDecision,

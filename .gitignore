@@ -5,9 +5,9 @@ __pycache__/
 *.a
 .DS_Store
 .idea
-mistral.rs/
+inference.rs/
 
-mistralrs-cli/webui/node_modules/
+inference-cli/webui/node_modules/
 
 # mdbook output
 docs/book/

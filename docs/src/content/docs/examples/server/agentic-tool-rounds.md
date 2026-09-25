@@ -16,10 +16,10 @@ model produces a final text response or the round limit is reached.
 
 Usage:
 1. Start the server with MCP tools and max_tool_rounds:
-   mistralrs serve -p 1234 --mcp-config examples/mcp-simple-config.json --max-tool-rounds 5 -m Qwen/Qwen3-4B
+   inference serve -p 1234 --mcp-config examples/mcp-simple-config.json --max-tool-rounds 5 -m Qwen/Qwen3-4B
 
    Or with built-in agent tools:
-   mistralrs serve -p 1234 --agent --max-tool-rounds 5 -m Qwen/Qwen3-4B
+   inference serve -p 1234 --agent --max-tool-rounds 5 -m Qwen/Qwen3-4B
 
 2. Then run this script:
    python examples/server/agentic_tool_rounds.py
@@ -36,10 +36,10 @@ model produces a final text response or the round limit is reached.
 
 Usage:
 1. Start the server with MCP tools and max_tool_rounds:
-   mistralrs serve -p 1234 --mcp-config examples/mcp-simple-config.json --max-tool-rounds 5 -m Qwen/Qwen3-4B
+   inference serve -p 1234 --mcp-config examples/mcp-simple-config.json --max-tool-rounds 5 -m Qwen/Qwen3-4B
 
    Or with built-in agent tools:
-   mistralrs serve -p 1234 --agent --max-tool-rounds 5 -m Qwen/Qwen3-4B
+   inference serve -p 1234 --agent --max-tool-rounds 5 -m Qwen/Qwen3-4B
 
 2. Then run this script:
    python examples/server/agentic_tool_rounds.py
@@ -89,7 +89,7 @@ def main():
         print()
         print("Make sure the server is running with tool callbacks registered:")
         print(
-            "mistralrs serve -p 1234 --mcp-config examples/mcp-simple-config.json "
+            "inference serve -p 1234 --mcp-config examples/mcp-simple-config.json "
             "--max-tool-rounds 5 -m Qwen/Qwen3-4B"
         )
 

@@ -1,12 +1,12 @@
 ---
 title: Python SDK getting started
-description: Install the mistralrs Python package, load a model in-process, send a chat request, and stream tokens.
+description: Install the inference Python package, load a model in-process, send a chat request, and stream tokens.
 ---
 
-The Python SDK loads the model in-process and wraps the same Rust engine that backs the `mistralrs` binary.
+The Python SDK loads the model in-process and wraps the same Rust engine that backs the `inference` binary.
 
 ```python
-from mistralrs import Runner, Which, ChatCompletionRequest
+from inference_rs import Runner, Which, ChatCompletionRequest
 
 runner = Runner(
     which=Which.Plain(model_id="Qwen/Qwen3-4B"),
@@ -30,10 +30,10 @@ The first run downloads the weights into the Hugging Face cache.
 
 ## Installing
 
-`pip install mistralrs` covers CPU (Linux x86_64/aarch64, Windows) and Metal (macOS arm64) - one package; pip picks the wheel for your platform. Python 3.10 or newer.
+`pip install inference-rs` covers CPU (Linux x86_64/aarch64, Windows) and Metal (macOS arm64) - one package; pip picks the wheel for your platform. Python 3.10 or newer.
 
 ```bash
-pip install mistralrs
+pip install inference-rs
 ```
 
 ### NVIDIA GPU (CUDA)
@@ -53,13 +53,13 @@ CUDA wheels are GitHub release assets because PyPI cannot select by GPU. Pick a 
 Install with `--find-links` pointed at the release. Replace `0.9.2` / `v0.9.2` with the release you want:
 
 ```bash
-pip install "mistralrs==0.9.2+cuda128.sm89" \
+pip install "inference-rs==0.9.2+cuda128.sm89" \
   --find-links https://github.com/EricLBuehler/mistral.rs/releases/expanded_assets/v0.9.2
 ```
 
 Look up your GPU's compute capability in [hardware support](/reference/hardware-support/). CUDA wheels bundle the CUDA runtime but do not include cuTile. For cuTile acceleration, use a [cuTile-capable CLI binary](/quickstart/) and follow [cuTile setup](/developer/moe-backends/).
 
-All install paths expose the same `from mistralrs import ...` API.
+All install paths expose the same `from inference_rs import ...` API.
 
 ## The pieces
 
@@ -76,7 +76,7 @@ Full example: [plain](/examples/python/plain/).
 Set `stream=True` to receive an iterator of chunks instead of a single response:
 
 ```python
-from mistralrs import Runner, Which, ChatCompletionRequest
+from inference_rs import Runner, Which, ChatCompletionRequest
 
 runner = Runner(
     which=Which.Plain(model_id="Qwen/Qwen3-4B"),

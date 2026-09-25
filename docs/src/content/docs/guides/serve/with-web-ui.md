@@ -4,10 +4,10 @@ description: What you get from the built-in web UI mounted at /ui, and how to cu
 ---
 
 ```bash
-mistralrs serve -m Qwen/Qwen3-4B
+inference serve -m Qwen/Qwen3-4B
 ```
 
-Open `http://localhost:1234/ui`. The built-in web UI is mounted at `/ui` by default whenever you run `mistralrs serve`. It is a single-page app bundled into the binary; nothing is fetched from the network at runtime.
+Open `http://localhost:1234/ui`. The built-in web UI is mounted at `/ui` by default whenever you run `inference serve`. It is a single-page app bundled into the binary; nothing is fetched from the network at runtime.
 
 The UI provides:
 
@@ -21,7 +21,7 @@ The UI provides:
 ## With agents enabled
 
 ```bash
-mistralrs serve --agent -m Qwen/Qwen3-4B
+inference serve --agent -m Qwen/Qwen3-4B
 ```
 
 See [tool calling](/guides/agents/tool-calling-basics/) for what `--agent` enables and the individual flags behind it.
@@ -46,4 +46,4 @@ Clearing browser local storage for the site resets all UI state.
 
 ## Disabling the UI
 
-Pass `--no-ui` to `mistralrs serve` to skip mounting the UI router. The HTTP API continues to serve normally.
+Pass `--no-ui` to `inference serve` to skip mounting the UI router. The HTTP API continues to serve normally.

@@ -15,16 +15,16 @@ def pypi_entry(filename: str) -> dict[str, str]:
 
 def expected_pypi_entries(version: str) -> list[dict[str, str]]:
     return [
-        pypi_entry(f"mistralrs-{version}-cp310-abi3-macosx_11_0_arm64.whl"),
+        pypi_entry(f"inference_rs-{version}-cp310-abi3-macosx_11_0_arm64.whl"),
         pypi_entry(
-            f"mistralrs-{version}-cp310-abi3-"
+            f"inference_rs-{version}-cp310-abi3-"
             "manylinux_2_17_aarch64.manylinux2014_aarch64.whl"
         ),
         pypi_entry(
-            f"mistralrs-{version}-cp310-abi3-"
+            f"inference_rs-{version}-cp310-abi3-"
             "manylinux_2_17_x86_64.manylinux2014_x86_64.whl"
         ),
-        pypi_entry(f"mistralrs-{version}-cp310-abi3-win_amd64.whl"),
+        pypi_entry(f"inference_rs-{version}-cp310-abi3-win_amd64.whl"),
     ]
 
 
@@ -57,30 +57,30 @@ class CudaWheelTests(unittest.TestCase):
     }
 
     def test_matches_exact_stable_base_version(self):
-        assets = {"mistralrs-0.9.3+cuda131.sm90-cp310-abi3-manylinux_2_17_x86_64.whl"}
+        assets = {"inference_rs-0.9.3+cuda131.sm90-cp310-abi3-manylinux_2_17_x86_64.whl"}
         self.assertTrue(verifier.has_cuda_wheel(assets, self.row, "0.9.3"))
 
     def test_matches_pep440_prerelease_base_version(self):
         assets = {
-            "mistralrs-0.9.3rc1+cuda131.sm90-cp310-abi3-manylinux_2_17_x86_64.whl"
+            "inference_rs-0.9.3rc1+cuda131.sm90-cp310-abi3-manylinux_2_17_x86_64.whl"
         }
         self.assertTrue(verifier.has_cuda_wheel(assets, self.row, "0.9.3rc1"))
 
     def test_rejects_wrong_base_version(self):
-        assets = {"mistralrs-0.0.0+cuda131.sm90-cp310-abi3-manylinux_2_17_x86_64.whl"}
+        assets = {"inference_rs-0.0.0+cuda131.sm90-cp310-abi3-manylinux_2_17_x86_64.whl"}
         self.assertFalse(verifier.has_cuda_wheel(assets, self.row, "0.9.3"))
 
     def test_rejects_wrong_cuda_axis_or_architecture(self):
         assets = {
-            "mistralrs-0.9.3+cuda130.sm90-cp310-abi3-manylinux_2_17_x86_64.whl",
-            "mistralrs-0.9.3+cuda131.sm90-cp310-abi3-manylinux_2_17_aarch64.whl",
+            "inference_rs-0.9.3+cuda130.sm90-cp310-abi3-manylinux_2_17_x86_64.whl",
+            "inference_rs-0.9.3+cuda131.sm90-cp310-abi3-manylinux_2_17_aarch64.whl",
         }
         self.assertFalse(verifier.has_cuda_wheel(assets, self.row, "0.9.3"))
 
     def test_rejects_wrong_python_abi_or_operating_system(self):
         assets = {
-            "mistralrs-0.9.3+cuda131.sm90-py2-none-manylinux_2_17_x86_64.whl",
-            "mistralrs-0.9.3+cuda131.sm90-cp310-abi3-macosx_11_0_x86_64.whl",
+            "inference_rs-0.9.3+cuda131.sm90-py2-none-manylinux_2_17_x86_64.whl",
+            "inference_rs-0.9.3+cuda131.sm90-cp310-abi3-macosx_11_0_x86_64.whl",
         }
         self.assertFalse(verifier.has_cuda_wheel(assets, self.row, "0.9.3"))
 
@@ -138,7 +138,7 @@ class PypiWheelTests(unittest.TestCase):
 
     def test_ignores_non_wheel_distributions(self):
         entries = expected_pypi_entries("0.9.3")
-        entries.append({"filename": "mistralrs-0.9.3.tar.gz", "packagetype": "sdist"})
+        entries.append({"filename": "inference_rs-0.9.3.tar.gz", "packagetype": "sdist"})
         verified, missing, invalid = verifier.verify_pypi_wheels(
             {"urls": entries}, "0.9.3"
         )
@@ -148,7 +148,7 @@ class PypiWheelTests(unittest.TestCase):
 class PypiDistHashTests(unittest.TestCase):
     def test_matches_complete_dist(self):
         with tempfile.TemporaryDirectory() as directory:
-            wheel = Path(directory) / "mistralrs-0.9.3-cp310-abi3-win_amd64.whl"
+            wheel = Path(directory) / "inference_rs-0.9.3-cp310-abi3-win_amd64.whl"
             wheel.write_bytes(b"wheel")
             data = {
                 "urls": [

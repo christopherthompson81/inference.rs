@@ -12,7 +12,7 @@ Runnable Python SDK example `anymoe_inference`.
 <!-- needs-header -->
 
 ```python
-from mistralrs import (
+from inference_rs import (
     Runner,
     Which,
     ChatCompletionRequest,

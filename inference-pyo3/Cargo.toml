@@ -1,0 +1,63 @@
+[package]
+name = "inference-pyo3"
+publish = false
+authors = ["Eric Buehler"]
+version = "0.9.3" # release CI appends +cudaNNN.smNN here only
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "inference_rs"
+crate-type = ["cdylib"]
+doc = false
+
+[dependencies]
+pyo3.workspace = true
+inference-core = { workspace = true, features = ["pyo3_macros"] }
+inference-mcp = { workspace = true, features = ["pyo3_macros"] }
+serde.workspace = true
+serde_json.workspace = true
+candle-core.workspace = true
+indexmap.workspace = true
+accelerate-src = { workspace = true, optional = true }
+intel-mkl-src = { workspace = true, optional = true }
+either.workspace = true
+futures.workspace = true
+tokio.workspace = true
+image.workspace = true
+reqwest.workspace = true
+base64.workspace = true
+url.workspace = true
+data-url.workspace = true
+anyhow.workspace = true
+itertools.workspace = true
+
+[build-dependencies]
+pyo3-build-config.workspace = true
+
+[dev-dependencies]
+safetensors.workspace = true
+tempfile.workspace = true
+
+[features]
+default = []
+cuda = ["candle-core/cuda", "inference-core/cuda"]
+cutile = ["cuda", "inference-core/cutile"]
+cudnn = ["candle-core/cudnn", "inference-core/cudnn"]
+metal = ["candle-core/metal", "inference-core/metal"]
+flash-attn = ["cuda", "inference-core/flash-attn"]
+accelerate = ["inference-core/accelerate"]
+mkl = ["inference-core/mkl"]
+nccl = ["inference-core/nccl"]
+ring = ["inference-core/ring"]
+code-execution = ["inference-core/code-execution"]
+
+[package.metadata.maturin]
+include = ["inference_rs.pyi", "py.typed"]
+sdist-include = ["inference_rs.pyi", "py.typed"]

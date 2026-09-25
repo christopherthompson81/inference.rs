@@ -10,16 +10,16 @@ sidebar:
 Online calibration: serve an ISQ model, collect activation statistics from real traffic,
 then requantize from the source weights and hot-swap the layers, all without a restart.
 
-Run with: `cargo run --release --example online_calibration -p mistralrs`
+Run with: `cargo run --release --example online_calibration -p inference`
 
 ```rust
 //! Online calibration: serve an ISQ model, collect activation statistics from real traffic,
 //! then requantize from the source weights and hot-swap the layers, all without a restart.
 //!
-//! Run with: `cargo run --release --example online_calibration -p mistralrs`
+//! Run with: `cargo run --release --example online_calibration -p inference`
 
 use anyhow::Result;
-use mistralrs::{IsqBits, ModelBuilder, TextMessageRole, TextMessages};
+use inference::{IsqBits, ModelBuilder, TextMessageRole, TextMessages};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -59,4 +59,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/quantization/online_calibration/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/quantization/online_calibration/main.rs)
+Source: [`inference/examples/quantization/online_calibration/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/quantization/online_calibration/main.rs)

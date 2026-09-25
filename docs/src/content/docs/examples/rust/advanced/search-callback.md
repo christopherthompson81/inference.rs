@@ -9,15 +9,15 @@ sidebar:
 
 Custom search callback to override the default web search function.
 
-Run with: `cargo run --release --example search_callback -p mistralrs`
+Run with: `cargo run --release --example search_callback -p inference`
 
 ```rust
 //! Custom search callback to override the default web search function.
 //!
-//! Run with: `cargo run --release --example search_callback -p mistralrs`
+//! Run with: `cargo run --release --example search_callback -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     IsqBits, ModelBuilder, RequestBuilder, SearchResult, TextMessageRole, TextMessages,
     WebSearchOptions,
 };
@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
     let model = ModelBuilder::new("Qwen/Qwen3-4B")
         .with_auto_isq(IsqBits::Four)
         .with_logging()
-        .with_search_callback(Arc::new(|params: &mistralrs::SearchFunctionParameters| {
+        .with_search_callback(Arc::new(|params: &inference::SearchFunctionParameters| {
             // In a real application there could be network or database calls here – but for the
             // sake of demonstration we simply perform a local filesystem search.
             local_search(&params.query)
@@ -91,4 +91,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/search_callback/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/search_callback/main.rs)
+Source: [`inference/examples/advanced/search_callback/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/search_callback/main.rs)

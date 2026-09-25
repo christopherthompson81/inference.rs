@@ -9,17 +9,17 @@ sidebar:
 
 Custom logits processor that modifies token probabilities during generation.
 
-Run with: `cargo run --release --example logits_processor -p mistralrs`
+Run with: `cargo run --release --example logits_processor -p inference`
 
 ```rust
 //! Custom logits processor that modifies token probabilities during generation.
 //!
-//! Run with: `cargo run --release --example logits_processor -p mistralrs`
+//! Run with: `cargo run --release --example logits_processor -p inference`
 
 use std::sync::Arc;
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     CustomLogitsProcessor, IsqBits, ModelBuilder, PagedAttentionMetaBuilder, RequestBuilder,
     Tensor, TextMessageRole,
 };
@@ -30,7 +30,7 @@ struct ThresholdLogitsProcessor {
 }
 
 impl CustomLogitsProcessor for ThresholdLogitsProcessor {
-    fn apply(&self, logits: &Tensor, _context: &[u32]) -> mistralrs::Result<Tensor> {
+    fn apply(&self, logits: &Tensor, _context: &[u32]) -> inference::Result<Tensor> {
         // Mask is 1 for true, 0 for false.
         let mask = logits.ge(self.threshold)?;
         logits.broadcast_mul(&mask.to_dtype(logits.dtype())?)
@@ -68,4 +68,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/logits_processor/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/logits_processor/main.rs)
+Source: [`inference/examples/advanced/logits_processor/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/logits_processor/main.rs)

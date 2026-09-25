@@ -1,10 +1,10 @@
 ---
 title: Build from source
-description: Compile mistral.rs from a repository checkout with exactly the feature flags you want.
+description: Compile inference.rs from a repository checkout with exactly the feature flags you want.
 ---
 
 :::tip[Most users do not need this]
-The [quickstart install script](/quickstart/) is the recommended way to install. It downloads a prebuilt binary for your platform; `MISTRALRS_INSTALL_TAG=<tag>` installs a specific release, and `MISTRALRS_INSTALL_FROM_SOURCE=1` makes it build the latest `master` from source for you. Build from a checkout manually only to pin an arbitrary commit, apply a local patch, or use a feature combination the published binaries do not include.
+The [quickstart install script](/quickstart/) is the recommended way to install. It downloads a prebuilt binary for your platform; `INFERENCE_RS_INSTALL_TAG=<tag>` installs a specific release, and `INFERENCE_RS_INSTALL_FROM_SOURCE=1` makes it build the latest `master` from source for you. Build from a checkout manually only to pin an arbitrary commit, apply a local patch, or use a feature combination the published binaries do not include.
 :::
 
 ## Platform prerequisites
@@ -19,24 +19,24 @@ A source build needs Rust 1.94+ ([rustup](https://rustup.rs)) plus, per platform
 
 ```bash
 git clone https://github.com/EricLBuehler/mistral.rs.git
-cd mistral.rs
+cd inference.rs
 ```
 
-The CLI binary is in the `mistralrs-cli` crate:
+The CLI binary is in the `inference-cli` crate:
 
 ```bash
 # Release build in-place
-cargo build --release --locked --features "cuda nccl flash-attn cudnn" -p mistralrs-cli
+cargo build --release --locked --features "cuda nccl flash-attn cudnn" -p inference-cli
 
 # Or install globally from the checkout
-cargo install --path mistralrs-cli --locked --features "cuda nccl flash-attn cudnn"
+cargo install --path inference-cli --locked --features "cuda nccl flash-attn cudnn"
 ```
 
 The flags above target CUDA. On macOS use `--features metal`; on CPU omit `--features` entirely. See the [cargo features reference](/reference/cargo-features/) for the full list.
 
-Metal builds precompile macOS, iOS, and tvOS metallibs by default. For local macOS-only development, set `MISTRALRS_METAL_PLATFORMS=macos`; to skip Metal precompilation entirely, set `MISTRALRS_METAL_PRECOMPILE=0`.
+Metal builds precompile macOS, iOS, and tvOS metallibs by default. For local macOS-only development, set `INFERENCE_RS_METAL_PLATFORMS=macos`; to skip Metal precompilation entirely, set `INFERENCE_RS_METAL_PRECOMPILE=0`.
 
-The in-place build leaves the binary at `target/release/mistralrs`. The install variant copies it to `~/.cargo/bin/mistralrs`, which is on `PATH` after a rustup install.
+The in-place build leaves the binary at `target/release/inference`. The install variant copies it to `~/.cargo/bin/inference`, which is on `PATH` after a rustup install.
 
 ## Feature flag combinations
 
@@ -53,12 +53,12 @@ The full flag list, per-hardware recommendations, and per-flag effects live in t
 
 ## Developing against a local checkout
 
-Use `cargo build --release -p mistralrs-cli` for incremental development.
+Use `cargo build --release -p inference-cli` for incremental development.
 
 Some tests are gated behind feature flags. Core test suite:
 
 ```bash
-cargo test -p mistralrs-core -p mistralrs-quant -p mistralrs-vision
+cargo test -p inference-core -p inference-quant -p inference-vision
 ```
 
 In the quantization crate, some tests run only with a specific backend feature enabled.
@@ -69,7 +69,7 @@ Building the Python SDK from source requires `maturin`:
 
 ```bash
 pip install maturin[patchelf]
-cd mistralrs-pyo3
+cd inference-pyo3
 maturin develop --release --features "cuda nccl flash-attn cudnn"
 ```
 
@@ -81,7 +81,7 @@ To depend on the workspace directly (e.g., to use an unreleased change), add a g
 
 ```toml
 [dependencies]
-mistralrs = { git = "https://github.com/EricLBuehler/mistral.rs", branch = "master" }
+inference = { git = "https://github.com/EricLBuehler/mistral.rs", branch = "master" }
 ```
 
 For production, pin to a release tag or a specific commit SHA for reproducible builds.

@@ -9,17 +9,17 @@ sidebar:
 
 X-LoRA: load a model with X-LoRA adapter mixing.
 
-Run with: `cargo run --release --example xlora -p mistralrs`
+Run with: `cargo run --release --example xlora -p inference`
 
 ```rust
 //! X-LoRA: load a model with X-LoRA adapter mixing.
 //!
-//! Run with: `cargo run --release --example xlora -p mistralrs`
+//! Run with: `cargo run --release --example xlora -p inference`
 
 use std::fs::File;
 
 use anyhow::Result;
-use mistralrs::{TextMessageRole, TextMessages, TextModelBuilder, XLoraModelBuilder};
+use inference::{TextMessageRole, TextMessages, TextModelBuilder, XLoraModelBuilder};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -49,4 +49,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/xlora/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/xlora/main.rs)
+Source: [`inference/examples/advanced/xlora/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/xlora/main.rs)

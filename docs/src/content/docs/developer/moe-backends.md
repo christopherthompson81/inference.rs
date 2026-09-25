@@ -5,7 +5,7 @@ description: Install the optional cuTile runtime tool for supported NVIDIA GPUs.
 
 Supported CUDA builds can use cuTile acceleration for MoE, quantized linear, and routed LoRA workloads. The installer
 selects a cuTile-capable binary automatically when one matches the GPU and driver. NVIDIA's
-`tileiras` tool is installed separately. mistral.rs checks it automatically and uses other backends
+`tileiras` tool is installed separately. inference.rs checks it automatically and uses other backends
 for workloads with a supported fallback. NVFP4 CUDA inference requires cuTile and reports an error
 when its requirements are not met. Source builds use the workspace-pinned cuTile Rust 0.3.0 release.
 
@@ -24,7 +24,7 @@ the CUDA 13.3 or newer toolkit components:
 python3 -m pip install --upgrade "cuda-toolkit[tileiras,nvvm,nvcc]>=13.3"
 ```
 
-The pip packages do not add `tileiras` to `PATH`. Point mistral.rs at the installed binary, and add
+The pip packages do not add `tileiras` to `PATH`. Point inference.rs at the installed binary, and add
 the same export to the shell profile or service environment that starts the server:
 
 ```bash
@@ -37,7 +37,7 @@ a reproducible source build, or set `CUTILE_TILEIRAS_PATH` to the executable dir
 searches standard CUDA 13.3 and 13.2 installations before falling back to `PATH`. Release archives
 do not redistribute `tileiras`.
 
-Run `mistralrs doctor` to check cuTile availability for every detected GPU. See NVIDIA's
+Run `inference doctor` to check cuTile availability for every detected GPU. See NVIDIA's
 [cuTile installation guide](https://docs.nvidia.com/cuda/cutile-python/quickstart.html).
 
 ## Requirements
@@ -48,7 +48,7 @@ Run `mistralrs doctor` to check cuTile availability for every detected GPU. See 
   but its published CUDA bindings require CUDA 13.2 or newer headers. NVFP4 kernels require CUDA
   13.3 or newer, including `tileiras`.
 - The `tileiras` installation must support the active GPU.
-- The mistral.rs binary must include the `cutile` feature.
+- The inference.rs binary must include the `cutile` feature.
 - Source builds require `libclang` because cuTile generates CUDA bindings during the build.
 
 `CUTILE_TILEIRAS_PATH` selects a specific `tileiras` binary and takes precedence over
@@ -59,15 +59,15 @@ Run `mistralrs doctor` to check cuTile availability for every detected GPU. See 
 cuTile kernels are JIT-compiled for the GPU in the machine, so their launch configs are measured
 there too. The first time a model loads, the warmup step times candidate tile shapes and compiler
 knobs for each MoE expert shape and FP8 GEMM shape, about a minute for a large MoE model, and
-records the winners under `cutile_tune` in the mistral.rs cache directory. Later loads reuse a
+records the winners under `cutile_tune` in the inference.rs cache directory. Later loads reuse a
 record whose provenance matches: the kernel source, the GPU architecture, the `tileiras` build,
 and the candidate set. A record that no longer matches is re-measured, never approximated. Routed
 LoRA tunes each route bucket the first time it is launched and persists the result the same way.
 
 Every candidate is checked against the built-in policy config's output before it is timed, and a
 winner replaces the policy only when it is measurably faster, so tuning can only leave a machine
-where it started or better. `MISTRALRS_CUTILE_TUNE=off` keeps the built-in policies,
-`force` re-measures, and `MISTRALRS_CUTILE_TUNE_CACHE` moves the records directory.
+where it started or better. `INFERENCE_RS_CUTILE_TUNE=off` keeps the built-in policies,
+`force` re-measures, and `INFERENCE_RS_CUTILE_TUNE_CACHE` moves the records directory.
 
 See also: [environment variables](/reference/environment-variables/),
 [cargo features](/reference/cargo-features/).

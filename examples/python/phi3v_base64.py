@@ -1,4 +1,4 @@
-from mistralrs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
+from inference_rs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
 import base64
 
 runner = Runner(

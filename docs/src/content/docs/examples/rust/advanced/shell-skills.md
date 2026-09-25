@@ -11,19 +11,19 @@ Local shell skill mount example.
 
 The request mounts a local skill directory under `skills/invoice-auditor/`.
 
-Run with: `cargo run --release --features code-execution --example shell_skills -p mistralrs`
+Run with: `cargo run --release --features code-execution --example shell_skills -p inference`
 
 ```rust
 //! Local shell skill mount example.
 //!
 //! The request mounts a local skill directory under `skills/invoice-auditor/`.
 //!
-//! Run with: `cargo run --release --features code-execution --example shell_skills -p mistralrs`
+//! Run with: `cargo run --release --features code-execution --example shell_skills -p inference`
 
 use std::{env, fs, path::PathBuf};
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     IsqBits, ModelBuilder, RequestBuilder, ShellConfig, TextMessageRole, TextMessages,
 };
 
@@ -69,7 +69,7 @@ print("status=match" if line_total == declared else "status=mismatch")
 #[tokio::main]
 async fn main() -> Result<()> {
     let skill_dir = write_invoice_skill(
-        env::temp_dir().join(format!("mistralrs-shell-skill-{}", std::process::id())),
+        env::temp_dir().join(format!("inference-shell-skill-{}", std::process::id())),
     )?;
 
     let model = ModelBuilder::new("google/gemma-4-E4B-it")
@@ -99,4 +99,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/shell_skills/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/shell_skills/main.rs)
+Source: [`inference/examples/advanced/shell_skills/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/shell_skills/main.rs)

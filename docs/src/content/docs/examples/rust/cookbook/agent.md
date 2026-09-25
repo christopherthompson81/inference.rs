@@ -19,9 +19,9 @@ Runnable Rust SDK example `agent`.
 /// - Building an agent that can call the tool
 /// - Running the agent loop for a code review task
 ///
-/// Run with: `cargo run --release --example cookbook_agent -p mistralrs`
+/// Run with: `cargo run --release --example cookbook_agent -p inference`
 use anyhow::Result;
-use mistralrs::{tool, AgentBuilder, IsqBits, ModelBuilder, PagedAttentionMetaBuilder};
+use inference::{tool, AgentBuilder, IsqBits, ModelBuilder, PagedAttentionMetaBuilder};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -91,4 +91,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/cookbook/agent/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/cookbook/agent/main.rs)
+Source: [`inference/examples/cookbook/agent/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/cookbook/agent/main.rs)

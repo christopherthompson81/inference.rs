@@ -7,7 +7,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 Topology is a per-layer placement and [ISQ (in-situ quantization)](/reference/quantization-types/) mechanism. A YAML file specifies, per layer range, the device and quantization to use.
 
-Most cases do not need topology. Defaults work for typical hardware; `mistralrs tune` covers common optimization.
+Most cases do not need topology. Defaults work for typical hardware; `inference tune` covers common optimization.
 
 ## Config
 
@@ -49,14 +49,14 @@ Topology ISQ pins also apply when producing [UQFF (Universal Quantized File Form
 <TabItem label="CLI">
 
 ```bash
-mistralrs serve --topology topology.yaml -m <model>
+inference serve --topology topology.yaml -m <model>
 ```
 
 </TabItem>
 <TabItem label="Python">
 
 ```python
-from mistralrs import Runner, Which
+from inference_rs import Runner, Which
 
 runner = Runner(which=Which.Plain(model_id="<model>", topology="topology.yaml"))
 ```
@@ -65,7 +65,7 @@ runner = Runner(which=Which.Plain(model_id="<model>", topology="topology.yaml"))
 <TabItem label="Rust">
 
 ```rust
-let model = mistralrs::ModelBuilder::new("<model>")
+let model = inference::ModelBuilder::new("<model>")
     .with_topology_from_path("topology.yaml")?
     .build()
     .await?;

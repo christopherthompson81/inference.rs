@@ -5,7 +5,7 @@ description: Generate dense vector representations of text with EmbeddingGemma, 
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Embedding models map text to dense vectors for semantic search, reranking, clustering, and downstream retrieval. mistral.rs serves embeddings through the standard OpenAI `POST /v1/embeddings` endpoint, so any tool that already targets that endpoint (LangChain, LlamaIndex, vector stores) works unchanged.
+Embedding models map text to dense vectors for semantic search, reranking, clustering, and downstream retrieval. inference.rs serves embeddings through the standard OpenAI `POST /v1/embeddings` endpoint, so any tool that already targets that endpoint (LangChain, LlamaIndex, vector stores) works unchanged.
 
 ## Loading an embedding model
 
@@ -15,13 +15,13 @@ Two regularly tested options:
 - `Qwen/Qwen3-Embedding-0.6B`: 600M parameters, 1024-dim vectors.
 
 ```bash
-mistralrs serve -m google/embeddinggemma-300m
+inference serve -m google/embeddinggemma-300m
 ```
 
 Use `Qwen/Qwen3-Embedding-0.6B` the same way:
 
 ```bash
-mistralrs serve -m Qwen/Qwen3-Embedding-0.6B
+inference serve -m Qwen/Qwen3-Embedding-0.6B
 ```
 
 ## Requesting an embedding
@@ -57,7 +57,7 @@ The response includes the vector in `embedding`:
 <TabItem label="Python">
 
 ```python
-from mistralrs import EmbeddingArchitecture, EmbeddingRequest, Runner, Which
+from inference_rs import EmbeddingArchitecture, EmbeddingRequest, Runner, Which
 
 runner = Runner(
     which=Which.Embedding(
@@ -84,7 +84,7 @@ For Qwen3-Embedding, set `arch=EmbeddingArchitecture.Qwen3Embedding` and drop th
 <TabItem label="Rust">
 
 ```rust
-use mistralrs::{EmbeddingModelBuilder, EmbeddingRequest};
+use inference::{EmbeddingModelBuilder, EmbeddingRequest};
 
 let model = EmbeddingModelBuilder::new("google/embeddinggemma-300m")
     .build()
@@ -127,11 +127,11 @@ Beyond `model` and `input`:
 
 - `encoding_format`: `"float"` (default) returns float arrays. `"base64"` returns each vector as base64-encoded little-endian f32 bytes. This matches OpenAI's compact form.
 - `dimensions`: not supported. Passing it returns a validation error rather than silently truncating.
-- `truncate_sequence`: mistral.rs extension. `true` truncates inputs that exceed the model's context length instead of erroring.
+- `truncate_sequence`: inference.rs extension. `true` truncates inputs that exceed the model's context length instead of erroring.
 
 ## Normalization
 
-Whether vectors are L2-normalized is model-dependent: mistral.rs applies the modules the model ships in `modules.json`. EmbeddingGemma includes a `Normalize` module, so its output is already unit-norm; Qwen3-Embedding does not, so its vectors are returned unnormalized. If you compute cosine similarity as a raw dot product and your model does not normalize, normalize on the client first.
+Whether vectors are L2-normalized is model-dependent: inference.rs applies the modules the model ships in `modules.json`. EmbeddingGemma includes a `Normalize` module, so its output is already unit-norm; Qwen3-Embedding does not, so its vectors are returned unnormalized. If you compute cosine similarity as a raw dot product and your model does not normalize, normalize on the client first.
 
 To normalize in Python:
 
@@ -185,4 +185,4 @@ Standard pipeline:
 4. Optionally rerank top results with a reranker.
 5. Feed retrieved documents as language model context.
 
-mistral.rs handles steps 1, 2, and (with a reranker) 4. The rest is the vector store and application logic. The [web search guide](/guides/agents/web-search/) covers using embeddings to rerank search results within an agent.
+inference.rs handles steps 1, 2, and (with a reranker) 4. The rest is the vector store and application logic. The [web search guide](/guides/agents/web-search/) covers using embeddings to rerank search results within an agent.

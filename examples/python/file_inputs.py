@@ -9,7 +9,7 @@ Usage:
     python examples/python/file_inputs.py
 """
 
-from mistralrs import Architecture, ChatCompletionRequest, InputFile, Runner, Which
+from inference_rs import Architecture, ChatCompletionRequest, InputFile, Runner, Which
 
 
 def main():

@@ -12,7 +12,7 @@ Runnable Python SDK example `embedding_gemma`.
 <!-- needs-header -->
 
 ```python
-from mistralrs import EmbeddingRequest, Runner, Which, EmbeddingArchitecture
+from inference_rs import EmbeddingRequest, Runner, Which, EmbeddingArchitecture
 
 
 def main() -> None:

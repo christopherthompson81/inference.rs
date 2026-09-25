@@ -9,15 +9,15 @@ sidebar:
 
 Concurrent request batching by sending multiple requests in parallel.
 
-Run with: `cargo run --release --example batching -p mistralrs`
+Run with: `cargo run --release --example batching -p inference`
 
 ```rust
 //! Concurrent request batching by sending multiple requests in parallel.
 //!
-//! Run with: `cargo run --release --example batching -p mistralrs`
+//! Run with: `cargo run --release --example batching -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     ChatCompletionResponse, IsqBits, ModelBuilder, PagedAttentionMetaBuilder, TextMessageRole,
     TextMessages, Usage,
 };
@@ -79,4 +79,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/batching/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/batching/main.rs)
+Source: [`inference/examples/advanced/batching/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/batching/main.rs)

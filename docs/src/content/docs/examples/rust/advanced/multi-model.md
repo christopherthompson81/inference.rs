@@ -9,15 +9,15 @@ sidebar:
 
 Load and dispatch requests across multiple models simultaneously.
 
-Run with: `cargo run --release --example multi_model -p mistralrs`
+Run with: `cargo run --release --example multi_model -p inference`
 
 ```rust
 //! Load and dispatch requests across multiple models simultaneously.
 //!
-//! Run with: `cargo run --release --example multi_model -p mistralrs`
+//! Run with: `cargo run --release --example multi_model -p inference`
 
 use anyhow::{anyhow, Result};
-use mistralrs::{
+use inference::{
     IsqBits, MultiModelBuilder, MultimodalModelBuilder, TextMessageRole, TextMessages,
     TextModelBuilder,
 };
@@ -155,4 +155,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/multi_model/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/multi_model/main.rs)
+Source: [`inference/examples/advanced/multi_model/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/multi_model/main.rs)

@@ -19,9 +19,9 @@ Runnable Rust SDK example `multiturn`.
 /// - Accumulating messages across turns
 /// - Streaming responses token-by-token
 ///
-/// Run with: `cargo run --release --example cookbook_multiturn -p mistralrs`
+/// Run with: `cargo run --release --example cookbook_multiturn -p inference`
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     ChatCompletionChunkResponse, ChunkChoice, Delta, IsqBits, ModelBuilder, Response,
     TextMessageRole, TextMessages,
 };
@@ -93,4 +93,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/cookbook/multiturn/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/cookbook/multiturn/main.rs)
+Source: [`inference/examples/cookbook/multiturn/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/cookbook/multiturn/main.rs)

@@ -9,15 +9,15 @@ sidebar:
 
 Load and run a GGUF model from a local file path.
 
-Run with: `cargo run --release --example gguf_locally -p mistralrs`
+Run with: `cargo run --release --example gguf_locally -p inference`
 
 ```rust
 //! Load and run a GGUF model from a local file path.
 //!
-//! Run with: `cargo run --release --example gguf_locally -p mistralrs`
+//! Run with: `cargo run --release --example gguf_locally -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     GgufModelBuilder, PagedAttentionMetaBuilder, RequestBuilder, TextMessageRole, TextMessages,
 };
 
@@ -72,4 +72,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/getting_started/gguf_locally/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/getting_started/gguf_locally/main.rs)
+Source: [`inference/examples/getting_started/gguf_locally/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/getting_started/gguf_locally/main.rs)

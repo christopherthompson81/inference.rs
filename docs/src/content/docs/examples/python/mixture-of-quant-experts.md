@@ -12,7 +12,7 @@ Runnable Python SDK example `mixture_of_quant_experts`.
 <!-- needs-header -->
 
 ```python
-from mistralrs import Runner, Which, ChatCompletionRequest, Architecture
+from inference_rs import Runner, Which, ChatCompletionRequest, Architecture
 
 runner = Runner(
     which=Which.Plain(

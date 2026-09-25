@@ -1,12 +1,12 @@
 #!/usr/bin/env python
 """
-Example of using GPT-OSS model with mistral.rs
+Example of using GPT-OSS model with inference.rs
 
 GPT-OSS is a Mixture of Experts model with MXFP4 quantized experts
 and custom attention with per-head sinks.
 """
 
-from mistralrs import Runner, Which, ChatCompletionRequest, Architecture
+from inference_rs import Runner, Which, ChatCompletionRequest, Architecture
 
 # Create a GPT-OSS model runner
 runner = Runner(

@@ -2,7 +2,7 @@
 Anthropic-compatible Skills with upload.
 
 Start the server with shell execution enabled:
-    mistralrs serve --agent -p 1234 -m Qwen/Qwen3-4B
+    inference_rs serve --agent -p 1234 -m Qwen/Qwen3-4B
 
 Then run:
     python3 examples/server/anthropic_skills.py
@@ -17,7 +17,7 @@ import uuid
 import zipfile
 
 
-BASE_URL = os.environ.get("MISTRALRS_BASE_URL", "http://localhost:1234")
+BASE_URL = os.environ.get("INFERENCE_RS_BASE_URL", "http://localhost:1234")
 API_KEY = os.environ.get("ANTHROPIC_API_KEY", "local")
 
 
@@ -97,7 +97,7 @@ def request_json(path: str, payload: dict) -> dict:
 
 
 def upload_skill(zip_path: Path) -> dict:
-    boundary = f"----mistralrs-{uuid.uuid4().hex}"
+    boundary = f"----inference_rs-{uuid.uuid4().hex}"
     body = b"".join(
         [
             f"--{boundary}\r\n".encode("utf-8"),

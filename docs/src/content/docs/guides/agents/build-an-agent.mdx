@@ -6,7 +6,7 @@ description: Start an agent runtime with one flag, then drive it over HTTP with 
 The agentic loop lets the server handle tool calls inside a single request: the model requests a tool, the server runs it, feeds the result back, and continues until the model produces a normal reply. This walkthrough builds one local agent over HTTP that searches the web, runs Python, returns a chart as a typed file, and keeps state across requests.
 
 ```bash
-mistralrs serve --agent -m Qwen/Qwen3-4B
+inference serve --agent -m Qwen/Qwen3-4B
 ```
 
 `--agent` (alias `--agentic`) turns on three built-in tools:
@@ -32,7 +32,7 @@ The UI renders a collapsed search block, the Python code the model ran (with std
 
 ## The same task over HTTP
 
-Apps can make the output contract explicit by declaring files up front. This request asks for a PNG chart and tells mistral.rs to surface it as a typed file:
+Apps can make the output contract explicit by declaring files up front. This request asks for a PNG chart and tells inference.rs to surface it as a typed file:
 
 ```bash
 curl http://localhost:1234/v1/chat/completions \
@@ -55,7 +55,7 @@ curl http://localhost:1234/v1/chat/completions \
   }'
 ```
 
-The response keeps the normal OpenAI-compatible `choices` array and adds mistral.rs fields for tool work, files, and session state. Treat tool identifiers in `agentic_tool_calls` as opaque correlation values; use the `arguments`, `result_content`, and `file_ids` fields for app behavior.
+The response keeps the normal OpenAI-compatible `choices` array and adds inference.rs fields for tool work, files, and session state. Treat tool identifiers in `agentic_tool_calls` as opaque correlation values; use the `arguments`, `result_content`, and `file_ids` fields for app behavior.
 
 ```json
 {
@@ -98,16 +98,16 @@ The [agentic runtime guide](/guides/agents/agentic-runtime/) covers the event st
 
 ```bash
 # Search only
-mistralrs serve --enable-search -m Qwen/Qwen3-4B
+inference serve --enable-search -m Qwen/Qwen3-4B
 
 # Python code execution only
-mistralrs serve --enable-code-execution -m Qwen/Qwen3-4B
+inference serve --enable-code-execution -m Qwen/Qwen3-4B
 
 # Shell only
-mistralrs serve --enable-shell -m Qwen/Qwen3-4B
+inference serve --enable-shell -m Qwen/Qwen3-4B
 
 # Search plus shell, without Python code execution
-mistralrs serve --enable-search --enable-shell -m Qwen/Qwen3-4B
+inference serve --enable-search --enable-shell -m Qwen/Qwen3-4B
 ```
 
 Chat Completions uses `web_search_options` for search and `code_interpreter` for Python code execution. Responses uses hosted tools in `tools[]`, including `web_search`, `code_interpreter`, and `shell`. [OpenAI-compatible Skills](/guides/agents/skills/) use uploaded skill references in the Responses tool environment and require `--enable-shell` or the broader `--agent` preset.

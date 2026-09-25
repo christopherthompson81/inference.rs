@@ -24,14 +24,14 @@ No special flags or APIs: block-diffusion models are detected automatically and 
 <TabItem label="CLI">
 
 ```bash
-mistralrs run -m google/diffusiongemma-26B-A4B-it
+inference run -m google/diffusiongemma-26B-A4B-it
 ```
 
 </TabItem>
 <TabItem label="HTTP">
 
 ```bash
-mistralrs serve -p 1234 -m google/diffusiongemma-26B-A4B-it
+inference serve -p 1234 -m google/diffusiongemma-26B-A4B-it
 ```
 
 ```bash
@@ -50,7 +50,7 @@ curl http://localhost:1234/v1/chat/completions \
 The standard chat-completion API works unchanged. See the [Python example](/examples/python/diffusion-gemma/) (vision input).
 
 ```python
-from mistralrs import ChatCompletionRequest, MultimodalArchitecture, Runner, Which
+from inference_rs import ChatCompletionRequest, MultimodalArchitecture, Runner, Which
 
 runner = Runner(
     which=Which.MultimodalPlain(
@@ -75,7 +75,7 @@ print(response.choices[0].message.content)
 The standard chat API works unchanged. See the [Rust example](/examples/rust/models/diffusion-gemma/) (streaming, shows block-at-a-time output).
 
 ```rust
-use mistralrs::{MultimodalModelBuilder, TextMessageRole, TextMessages};
+use inference::{MultimodalModelBuilder, TextMessageRole, TextMessages};
 
 let model = MultimodalModelBuilder::new("google/diffusiongemma-26B-A4B-it")
     .build()

@@ -10,7 +10,7 @@ sidebar:
 Responses hosted tools with web search and code interpreter.
 
 Start the server:
-    mistralrs serve --agent -p 1234 -m Qwen/Qwen3-4B
+    inference serve --agent -p 1234 -m Qwen/Qwen3-4B
 
 Then run this script:
     python examples/server/responses_tools.py
@@ -20,7 +20,7 @@ Then run this script:
 Responses hosted tools with web search and code interpreter.
 
 Start the server:
-    mistralrs serve --agent -p 1234 -m Qwen/Qwen3-4B
+    inference serve --agent -p 1234 -m Qwen/Qwen3-4B
 
 Then run this script:
     python examples/server/responses_tools.py
@@ -32,7 +32,7 @@ client = OpenAI(api_key="foobar", base_url="http://localhost:1234/v1/")
 
 search_response = client.responses.create(
     model="default",
-    input="Find one current source about mistral.rs and summarize it in two sentences.",
+    input="Find one current source about inference.rs and summarize it in two sentences.",
     tools=[
         {
             "type": "web_search",

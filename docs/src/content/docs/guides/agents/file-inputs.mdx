@@ -5,7 +5,7 @@ description: Upload files, attach them to Chat Completions or Responses requests
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-mistral.rs supports OpenAI-compatible user file inputs on the server API and local SDKs:
+inference.rs supports OpenAI-compatible user file inputs on the server API and local SDKs:
 
 - [`POST /v1/files`](/reference/http-api-generated/operations/upload_file/) multipart uploads with `purpose="user_data"`.
 - [`POST /v1/responses`](/reference/http-api-generated/operations/create_response/) `input_file` content parts with `file_id`, `file_data`, or `file_url`.
@@ -41,14 +41,14 @@ Extraction support is intentionally simple:
 | File kind | Behavior |
 |---|---|
 | Text-like UTF-8 files | Text, CSV, JSON, XML, Markdown, YAML, TOML, HTML, source files, and other valid UTF-8 payloads are readable as text. |
-| Binary or structured documents | PDFs, images, archives, spreadsheets, and other binary formats are stored and mounted, but mistral.rs does not extract OCR, PDF text, or spreadsheet summaries yet. |
+| Binary or structured documents | PDFs, images, archives, spreadsheets, and other binary formats are stored and mounted, but inference.rs does not extract OCR, PDF text, or spreadsheet summaries yet. |
 
 Responses `file_url` fetches only `http` and `https` URLs, with a timeout, redirect cap, decoded-size cap, and basic local/private host rejection. Chat Completions does not support file URLs; upload the file first or use inline `file_data`.
 
 Start a server:
 
 ```bash
-mistralrs serve --agent -m <model>
+inference serve --agent -m <model>
 ```
 
 `--agent` is useful when you want file pagination, Python code execution, shell execution, or OpenAI-compatible Skills. Plain requests still receive text previews even without tool execution.
@@ -93,7 +93,7 @@ print(response.output_text)
 <TabItem label="Python SDK">
 
 ```python
-from mistralrs import Architecture, ChatCompletionRequest, InputFile, Runner, Which
+from inference_rs import Architecture, ChatCompletionRequest, InputFile, Runner, Which
 
 runner = Runner(
     which=Which.Plain(
@@ -127,7 +127,7 @@ print(response.choices[0].message.content)
 
 ```rust
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     InputFile, IsqBits, ModelBuilder, RequestBuilder, TextMessageRole, TextMessages,
 };
 

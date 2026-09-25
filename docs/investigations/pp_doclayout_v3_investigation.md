@@ -1,4 +1,4 @@
-# PP-DocLayoutV3 in candle (mistralrs-layout)
+# PP-DocLayoutV3 in candle (inference-layout)
 
 Goal: port PP-DocLayoutV3 (RT-DETR-style document layout detector, 25 classes, with reading-order and mask heads)
 to candle so layout detection runs in-process in the fork, replacing the ONNX Runtime dependency used by the C#
@@ -37,10 +37,10 @@ checking each against the dump.
 
 ## Run 2 - 2026-09-24 18:25
 
-Question: does the first full candle port (`mistralrs-layout`, CPU, f32) match the HF dump stage by stage?
+Question: does the first full candle port (`inference-layout`, CPU, f32) match the HF dump stage by stage?
 
 Command:
-`cargo run --release -p mistralrs-layout --example pp_doclayout_v3_parity -- --cpu --model .../PP-DocLayoutV3_safetensors --reference ref_demo.safetensors --image layout_demo.jpg`
+`cargo run --release -p inference-layout --example pp_doclayout_v3_parity -- --cpu --model .../PP-DocLayoutV3_safetensors --reference ref_demo.safetensors --image layout_demo.jpg`
 (model forward is fed HF's own `pixel_values`, so model parity is isolated from preprocessing.)
 
 Finding (model): every intermediate cos >= 0.9999999 on the first run.
@@ -88,7 +88,7 @@ Implication: preprocessing is solved; the remaining JPEG delta is decoder-level 
 
 Question: CUDA parity, and why is it slow? (RTX 3090, f32, batch 1, 800x800)
 
-Commands: `cargo build --release -p mistralrs-layout --features cuda --example pp_doclayout_v3_parity` then the
+Commands: `cargo build --release -p inference-layout --features cuda --example pp_doclayout_v3_parity` then the
 parity binary; `nsys profile -t cuda` + `nsys stats -r cuda_gpu_kern_sum`; ORT CPU timing in Python.
 
 Findings:
@@ -431,7 +431,7 @@ Metal path, and that custom ops would fail when candle's CUDA was on but this cr
 Change: one `has_kernels(device)` gate (CPU, or CUDA with this crate's `cuda` feature) routes every custom op;
 everything else takes tensor-op fallbacks (candle conv, shifted-tap depthwise, tensor-op sampler, tensor-op mask->box).
 
-Command: build with `--features candle-core/cuda,candle-nn/cuda` (i.e. without `mistralrs-layout/cuda`, so every custom
+Command: build with `--features candle-core/cuda,candle-nn/cuda` (i.e. without `inference-layout/cuda`, so every custom
 kernel is disabled on the GPU) and run the parity example on CUDA.
 
 Finding: all fallbacks correct end to end on the GPU: init_reference_points max_abs 4.8e-7, pred_boxes 1.3e-5, same 13

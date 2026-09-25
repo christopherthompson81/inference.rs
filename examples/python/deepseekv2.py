@@ -1,4 +1,4 @@
-from mistralrs import Runner, Which, ChatCompletionRequest, Architecture
+from inference_rs import Runner, Which, ChatCompletionRequest, Architecture
 
 runner = Runner(
     which=Which.Plain(

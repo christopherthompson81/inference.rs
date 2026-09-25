@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Example demonstrating tool dispatch URL with mistral.rs server-side agentic loop.
+Example demonstrating tool dispatch URL with inference.rs server-side agentic loop.
 
 The server POSTs tool calls to your endpoint, executes them, and feeds results
 back to the model automatically.
 
 Usage:
-1. Start the mistral.rs server with tool dispatch URL:
-   mistralrs serve -p 1234 --tool-dispatch-url http://localhost:8787/tools --max-tool-rounds 5 -m Qwen/Qwen3-4B
+1. Start the inference.rs server with tool dispatch URL:
+   inference_rs serve -p 1234 --tool-dispatch-url http://localhost:8787/tools --max-tool-rounds 5 -m Qwen/Qwen3-4B
 
 2. Then run this script (it starts a local tool server and sends a chat request):
    python examples/server/tool_dispatch.py
@@ -46,7 +46,7 @@ TOOLS = {
 
 
 class ToolHandler(BaseHTTPRequestHandler):
-    """Handles POST requests from mistral.rs tool dispatch.
+    """Handles POST requests from inference.rs tool dispatch.
 
     Receives: {"name": "tool_name", "arguments": {...}}
     Returns:  {"content": "result string"}
@@ -144,7 +144,7 @@ def main():
         print()
         print("Make sure the server is running with tool dispatch URL:")
         print(
-            f"mistralrs serve -p 1234 --tool-dispatch-url http://localhost:{TOOL_SERVER_PORT}/tools "
+            f"inference_rs serve -p 1234 --tool-dispatch-url http://localhost:{TOOL_SERVER_PORT}/tools "
             "--max-tool-rounds 5 -m Qwen/Qwen3-4B"
         )
 

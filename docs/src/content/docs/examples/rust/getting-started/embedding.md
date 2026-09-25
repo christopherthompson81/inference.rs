@@ -9,15 +9,15 @@ sidebar:
 
 Generate text embeddings using an embedding model.
 
-Run with: `cargo run --release --example embedding -p mistralrs`
+Run with: `cargo run --release --example embedding -p inference`
 
 ```rust
 //! Generate text embeddings using an embedding model.
 //!
-//! Run with: `cargo run --release --example embedding -p mistralrs`
+//! Run with: `cargo run --release --example embedding -p inference`
 
 use anyhow::Result;
-use mistralrs::{EmbeddingModelBuilder, EmbeddingRequest};
+use inference::{EmbeddingModelBuilder, EmbeddingRequest};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -38,4 +38,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/getting_started/embedding/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/getting_started/embedding/main.rs)
+Source: [`inference/examples/getting_started/embedding/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/getting_started/embedding/main.rs)

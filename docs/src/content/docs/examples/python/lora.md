@@ -37,7 +37,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.request import urlretrieve
 
-from mistralrs import ChatCompletionRequest, LoraAdapterError, Runner, Which
+from inference_rs import ChatCompletionRequest, LoraAdapterError, Runner, Which
 
 
 BASE_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -79,7 +79,7 @@ def generate(runner: Runner, label: str, adapter=None):
 
 runner = Runner(which=Which.Lora(model_id=BASE_MODEL))
 
-with TemporaryDirectory(prefix="mistralrs-lora-") as directory:
+with TemporaryDirectory(prefix="inference-lora-") as directory:
     adapter_dir = Path(directory) / "initial"
     replacement_dir = Path(directory) / "replacement"
     adapter_dir.mkdir()

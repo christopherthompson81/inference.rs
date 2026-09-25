@@ -12,7 +12,7 @@ Runnable Python SDK example `multimodal_auto_device_map`.
 <!-- needs-header -->
 
 ```python
-from mistralrs import (
+from inference_rs import (
     Runner,
     Which,
     ChatCompletionRequest,

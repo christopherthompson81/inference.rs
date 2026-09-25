@@ -634,16 +634,16 @@ class PrefixReuseTests(unittest.TestCase):
 
     def test_prefix_gate_uses_only_replay_eligible_tokens_for_reuse(self) -> None:
         before = {
-            "mistralrs_prefix_cache_lookups_total": 0.0,
-            "mistralrs_prefix_cache_hits_total": 0.0,
-            "mistralrs_prefix_cache_tokens_matched_total": 0.0,
-            "mistralrs_prefix_cache_tokens_reused_total": 0.0,
+            "inference_prefix_cache_lookups_total": 0.0,
+            "inference_prefix_cache_hits_total": 0.0,
+            "inference_prefix_cache_tokens_matched_total": 0.0,
+            "inference_prefix_cache_tokens_reused_total": 0.0,
         }
         after = {
-            "mistralrs_prefix_cache_lookups_total": 2.0,
-            "mistralrs_prefix_cache_hits_total": 1.0,
-            "mistralrs_prefix_cache_tokens_matched_total": 10_176.0,
-            "mistralrs_prefix_cache_tokens_reused_total": 6_112.0,
+            "inference_prefix_cache_lookups_total": 2.0,
+            "inference_prefix_cache_hits_total": 1.0,
+            "inference_prefix_cache_tokens_matched_total": 10_176.0,
+            "inference_prefix_cache_tokens_reused_total": 6_112.0,
         }
 
         evidence = soak.prefix_cache_evidence(
@@ -662,16 +662,16 @@ class PrefixReuseTests(unittest.TestCase):
 
     def test_prefix_gate_rejects_vacuous_reuse_contract(self) -> None:
         before = {
-            "mistralrs_prefix_cache_lookups_total": 0.0,
-            "mistralrs_prefix_cache_hits_total": 0.0,
-            "mistralrs_prefix_cache_tokens_matched_total": 0.0,
-            "mistralrs_prefix_cache_tokens_reused_total": 0.0,
+            "inference_prefix_cache_lookups_total": 0.0,
+            "inference_prefix_cache_hits_total": 0.0,
+            "inference_prefix_cache_tokens_matched_total": 0.0,
+            "inference_prefix_cache_tokens_reused_total": 0.0,
         }
         after = {
-            "mistralrs_prefix_cache_lookups_total": 2.0,
-            "mistralrs_prefix_cache_hits_total": 0.0,
-            "mistralrs_prefix_cache_tokens_matched_total": 3_008.0,
-            "mistralrs_prefix_cache_tokens_reused_total": 0.0,
+            "inference_prefix_cache_lookups_total": 2.0,
+            "inference_prefix_cache_hits_total": 0.0,
+            "inference_prefix_cache_tokens_matched_total": 3_008.0,
+            "inference_prefix_cache_tokens_reused_total": 0.0,
         }
 
         evidence = soak.prefix_cache_evidence(
@@ -688,16 +688,16 @@ class PrefixReuseTests(unittest.TestCase):
 
     def test_prefix_gate_rejects_missing_reuse(self) -> None:
         before = {
-            "mistralrs_prefix_cache_lookups_total": 0.0,
-            "mistralrs_prefix_cache_hits_total": 0.0,
-            "mistralrs_prefix_cache_tokens_matched_total": 0.0,
-            "mistralrs_prefix_cache_tokens_reused_total": 0.0,
+            "inference_prefix_cache_lookups_total": 0.0,
+            "inference_prefix_cache_hits_total": 0.0,
+            "inference_prefix_cache_tokens_matched_total": 0.0,
+            "inference_prefix_cache_tokens_reused_total": 0.0,
         }
         after = {
-            "mistralrs_prefix_cache_lookups_total": 1.0,
-            "mistralrs_prefix_cache_hits_total": 0.0,
-            "mistralrs_prefix_cache_tokens_matched_total": 8_160.0,
-            "mistralrs_prefix_cache_tokens_reused_total": 0.0,
+            "inference_prefix_cache_lookups_total": 1.0,
+            "inference_prefix_cache_hits_total": 0.0,
+            "inference_prefix_cache_tokens_matched_total": 8_160.0,
+            "inference_prefix_cache_tokens_reused_total": 0.0,
         }
 
         evidence = soak.prefix_cache_evidence(
@@ -721,7 +721,7 @@ class PrefixPressurePlanTests(unittest.TestCase):
         prefix_cached_blocks: float = 0.0,
     ) -> dict[str, float]:
         return {
-            "mistralrs_kv_cache_blocks_total": total_blocks,
+            "inference_kv_cache_blocks_total": total_blocks,
             soak.KV_CACHE_ACTIVE_GAUGE: active_blocks,
             soak.KV_CACHE_PREFIX_CACHED_GAUGE: prefix_cached_blocks,
         }
@@ -840,7 +840,7 @@ class QualityReplayTests(unittest.TestCase):
         retained_blocks: int = 0,
     ) -> dict[str, float]:
         return {
-            "mistralrs_kv_cache_blocks_total": 27_080,
+            "inference_kv_cache_blocks_total": 27_080,
             soak.PAGED_RECURRENT_PREFIX_OWNERS_CAPACITY_GAUGE: owner_capacity,
             soak.PAGED_RECURRENT_PREFIX_OWNERS_USED_GAUGE: owner_used,
             soak.PAGED_PREFIX_RETAINED_BLOCKS_GAUGE: retained_blocks,
@@ -1077,8 +1077,8 @@ class QualityReplayTests(unittest.TestCase):
                 tags={"prompt_label": "b"},
             ),
         ]
-        before = {"mistralrs_prefix_cache_lookups_total": 0.0}
-        all_miss = {"mistralrs_prefix_cache_lookups_total": 3.0}
+        before = {"inference_prefix_cache_lookups_total": 0.0}
+        all_miss = {"inference_prefix_cache_lookups_total": 3.0}
 
         evidence = soak.quality_replay_prefix_state_evidence(
             before,
@@ -1099,9 +1099,9 @@ class QualityReplayTests(unittest.TestCase):
         self.assertEqual(evidence["duplicate_prompt_tokens"], 100)
 
         duplicate_hit = {
-            "mistralrs_prefix_cache_lookups_total": 3.0,
-            "mistralrs_prefix_cache_hits_total": 1.0,
-            "mistralrs_prefix_cache_tokens_reused_total": 100.0,
+            "inference_prefix_cache_lookups_total": 3.0,
+            "inference_prefix_cache_hits_total": 1.0,
+            "inference_prefix_cache_tokens_reused_total": 100.0,
         }
         self.assertTrue(
             soak.quality_replay_prefix_state_evidence(
@@ -1114,9 +1114,9 @@ class QualityReplayTests(unittest.TestCase):
         )
 
         unexpected_hit = {
-            "mistralrs_prefix_cache_lookups_total": 3.0,
-            "mistralrs_prefix_cache_hits_total": 2.0,
-            "mistralrs_prefix_cache_tokens_reused_total": 300.0,
+            "inference_prefix_cache_lookups_total": 3.0,
+            "inference_prefix_cache_hits_total": 2.0,
+            "inference_prefix_cache_tokens_reused_total": 300.0,
         }
         self.assertFalse(
             soak.quality_replay_prefix_state_evidence(
@@ -1139,8 +1139,8 @@ class QualityReplayTests(unittest.TestCase):
             )
         ]
         evidence = soak.quality_replay_prefix_state_evidence(
-            {"mistralrs_prefix_cache_lookups_total": 0.0},
-            {"mistralrs_prefix_cache_lookups_total": 1.0},
+            {"inference_prefix_cache_lookups_total": 0.0},
+            {"inference_prefix_cache_lookups_total": 1.0},
             specs,
             "hit",
             0.98,
@@ -1579,9 +1579,9 @@ class SpeculativeEvidenceTests(unittest.TestCase):
         cpu_fallbacks: float | None = None,
     ) -> dict[str, float]:
         metrics = {
-            "mistralrs_speculative_drafts_total": drafts,
-            "mistralrs_speculative_draft_tokens_proposed_total": proposed,
-            "mistralrs_speculative_draft_tokens_accepted_total": accepted,
+            "inference_speculative_drafts_total": drafts,
+            "inference_speculative_draft_tokens_proposed_total": proposed,
+            "inference_speculative_draft_tokens_accepted_total": accepted,
         }
         if gpu_verified is not None:
             metrics[soak.SPARSE_VERIFIER_GPU_COUNTER] = gpu_verified
@@ -1654,9 +1654,9 @@ class SpeculativeEvidenceTests(unittest.TestCase):
 class MetricSelectorTests(unittest.TestCase):
     def test_metric_total_filters_labels_independent_of_series_order(self) -> None:
         snapshot = {
-            'mistralrs_windowed_kv_slots_used{pool="live",component="dflash"}': 2.0,
-            'mistralrs_windowed_kv_slots_used{component="other",pool="live"}': 5.0,
-            'mistralrs_windowed_kv_slots_used{component="dflash",pool="checkpoint"}': 3.0,
+            'inference_windowed_kv_slots_used{pool="live",component="dflash"}': 2.0,
+            'inference_windowed_kv_slots_used{component="other",pool="live"}': 5.0,
+            'inference_windowed_kv_slots_used{component="dflash",pool="checkpoint"}': 3.0,
         }
 
         self.assertEqual(
@@ -1688,10 +1688,10 @@ class QueueLatencyEvidenceTests(unittest.TestCase):
     @staticmethod
     def histogram(count: float, bucket_deltas: tuple[float, float, float]) -> dict[str, float]:
         return {
-            'mistralrs_scheduler_queue_seconds_bucket{le="0.1"}': bucket_deltas[0],
-            'mistralrs_scheduler_queue_seconds_bucket{le="1"}': bucket_deltas[1],
-            'mistralrs_scheduler_queue_seconds_bucket{le="+Inf"}': bucket_deltas[2],
-            "mistralrs_scheduler_queue_seconds_count": count,
+            'inference_scheduler_queue_seconds_bucket{le="0.1"}': bucket_deltas[0],
+            'inference_scheduler_queue_seconds_bucket{le="1"}': bucket_deltas[1],
+            'inference_scheduler_queue_seconds_bucket{le="+Inf"}': bucket_deltas[2],
+            "inference_scheduler_queue_seconds_count": count,
         }
 
     def test_positive_observations_and_complete_quantiles_pass(self) -> None:
@@ -1699,7 +1699,7 @@ class QueueLatencyEvidenceTests(unittest.TestCase):
         after = self.histogram(30.0, (12.0, 24.0, 30.0))
 
         evidence = soak.queue_histogram_evidence(before, after)
-        histogram = evidence["histograms"]["mistralrs_scheduler_queue_seconds"]
+        histogram = evidence["histograms"]["inference_scheduler_queue_seconds"]
 
         self.assertTrue(evidence["passed"])
         self.assertEqual(histogram["observation_delta"], 5.0)
@@ -1717,7 +1717,7 @@ class QueueLatencyEvidenceTests(unittest.TestCase):
 
         self.assertFalse(stale["passed"])
         self.assertEqual(
-            stale["histograms"]["mistralrs_scheduler_queue_seconds"][
+            stale["histograms"]["inference_scheduler_queue_seconds"][
                 "observation_delta"
             ],
             0.0,
@@ -1739,7 +1739,7 @@ class CpuTelemetryTests(unittest.TestCase):
             "host_cpu_idle_ticks": host_idle,
             "process_cpu_ticks": process_ticks,
             "process_cpu_clock_ticks_per_second": 100,
-            "process_is_mistralrs": True,
+            "process_is_inference": True,
             "process_vmrss_kib": 1_024,
             "process_gpu_memory_used_mib": 100.0,
             "gpus": [
@@ -1763,15 +1763,15 @@ class CpuTelemetryTests(unittest.TestCase):
         fields[12] = "30"
         self.assertEqual(
             soak.parse_process_cpu_ticks(
-                f"123 (mistralrs worker) {' '.join(fields)}"
+                f"123 (inference_rs worker) {' '.join(fields)}"
             ),
             150,
         )
 
     def test_summary_reports_host_and_server_process_cpu(self) -> None:
         snapshots = [
-            (0.0, {"mistralrs_sequences_running": 1.0}, self.process(1_000, 400, 100)),
-            (1.0, {"mistralrs_sequences_running": 2.0}, self.process(1_100, 420, 150)),
+            (0.0, {"inference_sequences_running": 1.0}, self.process(1_000, 400, 100)),
+            (1.0, {"inference_sequences_running": 2.0}, self.process(1_100, 420, 150)),
         ]
         cadence = soak.scheduled_observation_evidence(
             [0.0, 1.0],
@@ -1785,7 +1785,7 @@ class CpuTelemetryTests(unittest.TestCase):
             42,
             2,
             1.0,
-            ("mistralrs_sequences_running",),
+            ("inference_sequences_running",),
             cadence,
         )
 
@@ -1804,7 +1804,7 @@ class CpuTelemetryTests(unittest.TestCase):
                 42,
                 2,
                 1.0,
-                ("mistralrs_sequences_running",),
+                ("inference_sequences_running",),
                 missed_cadence,
             )["passed"]
         )
@@ -1816,15 +1816,15 @@ class CpuTelemetryTests(unittest.TestCase):
                 42,
                 2,
                 1.0,
-                ("mistralrs_sequences_running",),
+                ("inference_sequences_running",),
                 cadence,
             )["passed"]
         )
 
     def test_process_scoped_gpu_coverage_is_required(self) -> None:
         snapshots = [
-            (0.0, {"mistralrs_sequences_running": 1.0}, self.process(1_000, 400, 100)),
-            (1.0, {"mistralrs_sequences_running": 1.0}, self.process(1_100, 420, 150)),
+            (0.0, {"inference_sequences_running": 1.0}, self.process(1_000, 400, 100)),
+            (1.0, {"inference_sequences_running": 1.0}, self.process(1_100, 420, 150)),
         ]
         snapshots[-1][2]["process_gpu_memory_used_mib"] = None
         cadence = soak.scheduled_observation_evidence(
@@ -1838,7 +1838,7 @@ class CpuTelemetryTests(unittest.TestCase):
             42,
             2,
             0.95,
-            ("mistralrs_sequences_running",),
+            ("inference_sequences_running",),
             cadence,
         )
 
@@ -1924,7 +1924,7 @@ class ProductionRuntimeCoordinationTests(unittest.IsolatedAsyncioTestCase):
             },
         )()
         writer = type("Writer", (), {"emit": AsyncMock()})()
-        clean_metrics = {"mistralrs_sequences_running": 0.0}
+        clean_metrics = {"inference_sequences_running": 0.0}
         cleanup = {"passed": True}
 
         def retrieval(
@@ -1945,7 +1945,7 @@ class ProductionRuntimeCoordinationTests(unittest.IsolatedAsyncioTestCase):
             )
 
         process = {
-            "process_is_mistralrs": True,
+            "process_is_inference": True,
             "process_vmrss_kib": 1,
             "host_cpu_total_ticks": 1,
             "host_cpu_idle_ticks": 1,
@@ -1973,7 +1973,7 @@ class ProductionRuntimeCoordinationTests(unittest.IsolatedAsyncioTestCase):
                 "safe_metrics",
                 new=AsyncMock(
                     side_effect=[
-                        {"mistralrs_sequences_capacity": 16.0},
+                        {"inference_sequences_capacity": 16.0},
                         clean_metrics,
                     ]
                 ),
@@ -2138,7 +2138,7 @@ class ProductionRuntimeCoordinationTests(unittest.IsolatedAsyncioTestCase):
             patch.object(
                 soak,
                 "safe_metrics",
-                new=AsyncMock(return_value={"mistralrs_sequences_running": 0.0}),
+                new=AsyncMock(return_value={"inference_sequences_running": 0.0}),
             ),
             patch.object(
                 soak,
@@ -2171,7 +2171,7 @@ class ProductionRuntimeCoordinationTests(unittest.IsolatedAsyncioTestCase):
 class ServerProvenanceTests(unittest.TestCase):
     def test_command_capture_redacts_secrets_and_extracts_serving_config(self) -> None:
         argv = [
-            "/srv/mistralrs",
+            "/srv/inference_rs",
             "serve",
             "-m",
             "Qwen/Qwen3.8-27B-FP8",
@@ -2211,8 +2211,8 @@ class ServerProvenanceTests(unittest.TestCase):
             "server_pid": 42,
             "system_info": {"build": {"git_revision": "a" * 40}},
             "process": {
-                "process_is_mistralrs": True,
-                "executable": "/srv/mistralrs",
+                "process_is_inference": True,
+                "executable": "/srv/inference_rs",
                 "executable_sha256": "b" * 64,
                 "command_sha256": "c" * 64,
                 "serve_configuration": {
@@ -2313,15 +2313,15 @@ class CudaMemoryPressureEvidenceTests(unittest.TestCase):
     ) -> dict[str, float]:
         return {
             (
-                'mistralrs_cuda_memory_maintenance_total{device="cuda[0]",'
+                'inference_cuda_memory_maintenance_total{device="cuda[0]",'
                 'reason="prompt_boundary",action="maintain",outcome="ok"}'
             ): maintenance,
             (
-                'mistralrs_cuda_memory_maintenance_total{device="cuda[0]",'
+                'inference_cuda_memory_maintenance_total{device="cuda[0]",'
                 'reason="prompt_boundary",action="maintain",outcome="error"}'
             ): errors,
-            'mistralrs_cuda_memory_pressure_total{device="cuda[0]",level="graph"}': pressure,
-            'mistralrs_cuda_memory_maintenance_pending{device="cuda[0]"}': pending,
+            'inference_cuda_memory_pressure_total{device="cuda[0]",level="graph"}': pressure,
+            'inference_cuda_memory_maintenance_pending{device="cuda[0]"}': pending,
             soak.CUDA_MEMORY_RECLAIMED_BYTES_COUNTER: reclaimed,
             soak.CUDA_PROMPT_BATCH_REDUCTIONS_COUNTER: reductions,
             soak.CUDA_PROMPT_SEQUENCES_DEFERRED_COUNTER: deferred,
@@ -2381,13 +2381,13 @@ class ProductionMemoryEvidenceTests(unittest.TestCase):
         recurrent_total: float = 32.0,
     ) -> dict[str, float]:
         return {
-            "mistralrs_sequences_running": 0.0,
-            "mistralrs_sequences_waiting": 0.0,
-            "mistralrs_requests_pending_admission": 0.0,
-            "mistralrs_recurrent_state_slots_used": recurrent_used,
-            "mistralrs_recurrent_state_slots_total": recurrent_total,
+            "inference_sequences_running": 0.0,
+            "inference_sequences_waiting": 0.0,
+            "inference_requests_pending_admission": 0.0,
+            "inference_recurrent_state_slots_used": recurrent_used,
+            "inference_recurrent_state_slots_total": recurrent_total,
             soak.KV_CACHE_ACTIVE_GAUGE: active_blocks,
-            "mistralrs_kv_cache_blocks_total": kv_total,
+            "inference_kv_cache_blocks_total": kv_total,
             "http_requests_in_flight": 0.0,
         }
 
@@ -2420,16 +2420,16 @@ class ProductionMemoryEvidenceTests(unittest.TestCase):
             live_used = 8.0 if index == 1 else 0.0
             checkpoint_used = 4.0 if index == 1 else 0.0
             metrics[
-                'mistralrs_windowed_kv_slots_used{pool="live",component="dflash"}'
+                'inference_windowed_kv_slots_used{pool="live",component="dflash"}'
             ] = live_used
             metrics[
-                'mistralrs_windowed_kv_slots_total{pool="live",component="dflash"}'
+                'inference_windowed_kv_slots_total{pool="live",component="dflash"}'
             ] = 16.0
             metrics[
-                'mistralrs_windowed_kv_slots_used{pool="checkpoint",component="dflash"}'
+                'inference_windowed_kv_slots_used{pool="checkpoint",component="dflash"}'
             ] = checkpoint_used
             metrics[
-                'mistralrs_windowed_kv_slots_total{pool="checkpoint",component="dflash"}'
+                'inference_windowed_kv_slots_total{pool="checkpoint",component="dflash"}'
             ] = 8.0
         return snapshots
 
@@ -2493,7 +2493,7 @@ class ProductionMemoryEvidenceTests(unittest.TestCase):
     def test_dflash_checkpoint_slot_leak_is_gated(self) -> None:
         snapshots = self.dflash_snapshots()
         snapshots[-1][1][
-            'mistralrs_windowed_kv_slots_used{pool="checkpoint",component="dflash"}'
+            'inference_windowed_kv_slots_used{pool="checkpoint",component="dflash"}'
         ] = 1.0
 
         evidence = soak.production_memory_evidence(
@@ -2542,8 +2542,8 @@ class ProductionMemoryEvidenceTests(unittest.TestCase):
     def test_full_recurrent_capacity_is_healthy_by_default(self) -> None:
         snapshots = self.healthy_snapshots()
         for index, (timestamp, metrics, process) in enumerate(snapshots):
-            metrics["mistralrs_recurrent_state_slots_total"] = 17.0
-            metrics["mistralrs_recurrent_state_slots_used"] = (
+            metrics["inference_recurrent_state_slots_total"] = 17.0
+            metrics["inference_recurrent_state_slots_used"] = (
                 17.0 if index == 1 else 1.0
             )
             snapshots[index] = (timestamp, metrics, process)
@@ -3263,10 +3263,10 @@ class ChurnCapacityGateTests(unittest.TestCase):
     @staticmethod
     def sample(running: float, waiting: float = 0.0, pending: float = 0.0) -> dict:
         return {
-            "mistralrs_sequences_capacity": 16.0,
-            "mistralrs_sequences_running": running,
-            "mistralrs_sequences_waiting": waiting,
-            "mistralrs_requests_pending_admission": pending,
+            "inference_sequences_capacity": 16.0,
+            "inference_sequences_running": running,
+            "inference_sequences_waiting": waiting,
+            "inference_requests_pending_admission": pending,
         }
 
     def test_near_capacity_must_be_reached_and_sustained(self) -> None:
@@ -4300,8 +4300,8 @@ class MultimodalOracleTests(unittest.TestCase):
     def test_fresh_server_requires_zero_state_and_encoder_instrumentation(self) -> None:
         snapshot = {
             **{name: 0.0 for name in soak.MULTIMODAL_FRESH_GAUGES},
-            "mistralrs_encoder_cache_hits_total": 0.0,
-            "mistralrs_encoder_cache_misses_total": 0.0,
+            "inference_encoder_cache_hits_total": 0.0,
+            "inference_encoder_cache_misses_total": 0.0,
         }
         evidence = soak.fresh_multimodal_server_evidence(snapshot)
         self.assertTrue(evidence["passed"])
@@ -4310,7 +4310,7 @@ class MultimodalOracleTests(unittest.TestCase):
         snapshot[soak.KV_CACHE_PREFIX_CACHED_GAUGE] = 1.0
         self.assertFalse(soak.fresh_multimodal_server_evidence(snapshot)["passed"])
         snapshot[soak.KV_CACHE_PREFIX_CACHED_GAUGE] = 0.0
-        snapshot["mistralrs_encoder_cache_hits_total"] = 1.0
+        snapshot["inference_encoder_cache_hits_total"] = 1.0
         self.assertFalse(soak.fresh_multimodal_server_evidence(snapshot)["passed"])
 
     def test_vision_capability_requires_c8_capacity(self) -> None:
@@ -4324,26 +4324,26 @@ class MultimodalOracleTests(unittest.TestCase):
         evidence = soak.multimodal_capability_evidence(
             models,
             "model",
-            {"mistralrs_sequences_capacity": 8.0},
+            {"inference_sequences_capacity": 8.0},
         )
         self.assertTrue(evidence["passed"])
         self.assertFalse(
             soak.multimodal_capability_evidence(
                 models,
                 "model",
-                {"mistralrs_sequences_capacity": 7.0},
+                {"inference_sequences_capacity": 7.0},
             )["passed"]
         )
 
     def test_encoder_cache_transitions_exclude_paged_attention_reuse(self) -> None:
         before = {
-            "mistralrs_encoder_cache_hits_total": 0.0,
-            "mistralrs_encoder_cache_misses_total": 0.0,
-            "mistralrs_prefix_cache_tokens_reused_total": 0.0,
+            "inference_encoder_cache_hits_total": 0.0,
+            "inference_encoder_cache_misses_total": 0.0,
+            "inference_prefix_cache_tokens_reused_total": 0.0,
         }
         cold = {
             **before,
-            "mistralrs_encoder_cache_misses_total": 1.0,
+            "inference_encoder_cache_misses_total": 1.0,
         }
         cold_evidence = soak.encoder_cache_transition_evidence(
             before,
@@ -4353,12 +4353,12 @@ class MultimodalOracleTests(unittest.TestCase):
         self.assertTrue(cold_evidence["passed"])
         hit = {
             **cold,
-            "mistralrs_encoder_cache_hits_total": 1.0,
+            "inference_encoder_cache_hits_total": 1.0,
         }
         self.assertTrue(
             soak.encoder_cache_transition_evidence(cold, hit, "hit")["passed"]
         )
-        hit["mistralrs_prefix_cache_tokens_reused_total"] = 32.0
+        hit["inference_prefix_cache_tokens_reused_total"] = 32.0
         self.assertFalse(
             soak.encoder_cache_transition_evidence(cold, hit, "hit")["passed"]
         )
@@ -4376,7 +4376,7 @@ class MultimodalOracleTests(unittest.TestCase):
             ),
             tokenizer=None,
             max_repeated_ngram_ratio=0.20,
-            required_phrases=["mistral.rs"],
+            required_phrases=["inference.rs"],
             expected_attributes=[("dark background", "black background")],
         )
 
@@ -4398,7 +4398,7 @@ class MultimodalOracleTests(unittest.TestCase):
             ),
             tokenizer=None,
             max_repeated_ngram_ratio=0.20,
-            required_phrases=["mistral.rs"],
+            required_phrases=["inference.rs"],
             expected_attributes=[],
         )
 
@@ -4411,11 +4411,11 @@ class MultimodalOracleTests(unittest.TestCase):
                 completion_tokens=12,
                 output_chunks=12,
                 finish_reason="length",
-                output_text="mistral.rs loop loop loop loop loop loop loop loop",
+                output_text="inference.rs loop loop loop loop loop loop loop loop",
             ),
             tokenizer=None,
             max_repeated_ngram_ratio=0.20,
-            required_phrases=["mistral.rs"],
+            required_phrases=["inference.rs"],
             expected_attributes=[],
         )
 
@@ -4432,7 +4432,7 @@ class MultimodalOracleTests(unittest.TestCase):
                 "--tokenizer",
                 "tokenizer.json",
                 "--image-required-phrase",
-                "mistral.rs",
+                "inference.rs",
                 "--image-expected-attribute",
                 "dark background|black background",
                 "--text-prerequisite-artifacts",
@@ -4443,7 +4443,7 @@ class MultimodalOracleTests(unittest.TestCase):
         )
         soak.validate_args(args)
 
-        self.assertIn("mistral.rs", args.image_required_phrases)
+        self.assertIn("inference.rs", args.image_required_phrases)
         self.assertIn(
             ("dark background", "black background"),
             args.image_expected_attributes,

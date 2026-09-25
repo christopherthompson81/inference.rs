@@ -35,7 +35,7 @@ Usage:
 """
 
 import json
-from mistralrs import (
+from inference_rs import (
     Runner,
     Which,
     Architecture,

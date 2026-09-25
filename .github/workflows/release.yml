@@ -134,7 +134,7 @@ jobs:
 
           with open("Cargo.toml", "rb") as f:
               workspace_version = tomllib.load(f)["workspace"]["package"]["version"]
-          with open("mistralrs-pyo3/Cargo.toml", "rb") as f:
+          with open("inference-pyo3/Cargo.toml", "rb") as f:
               python_version = tomllib.load(f)["package"]["version"]
 
           if python_version != workspace_version:
@@ -190,9 +190,9 @@ jobs:
             sleep $((i * 20))
           done
       - name: Build
-        run: cargo build --release --locked --offline --features "metal" -p mistralrs-cli
+        run: cargo build --release --locked --offline --features "metal" -p inference-cli
       - name: Package
-        run: tar czf mistralrs-metal-aarch64-apple-darwin.tar.gz -C target/release mistralrs
+        run: tar czf inference-metal-aarch64-apple-darwin.tar.gz -C target/release inference
       - uses: softprops/action-gh-release@v2
         id: upload_release_asset
         if: ${{ !inputs.dry_run }}
@@ -203,7 +203,7 @@ jobs:
           prerelease: ${{ contains(needs.preflight.outputs.tag, '-') }}
           fail_on_unmatched_files: true
           overwrite_files: true
-          files: mistralrs-metal-aarch64-apple-darwin.tar.gz
+          files: inference-metal-aarch64-apple-darwin.tar.gz
       - uses: softprops/action-gh-release@v2
         if: ${{ !inputs.dry_run && steps.upload_release_asset.outcome == 'failure' }}
         with:
@@ -212,17 +212,17 @@ jobs:
           prerelease: ${{ contains(needs.preflight.outputs.tag, '-') }}
           fail_on_unmatched_files: true
           overwrite_files: true
-          files: mistralrs-metal-aarch64-apple-darwin.tar.gz
+          files: inference-metal-aarch64-apple-darwin.tar.gz
       - name: Build wheel (Metal)
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: mistralrs-pyo3
+          working-directory: inference-pyo3
           command: build
           args: --release --out dist --features metal
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-macos
-          path: mistralrs-pyo3/dist/*.whl
+          path: inference-pyo3/dist/*.whl
           if-no-files-found: error
           overwrite: true
 
@@ -260,9 +260,9 @@ jobs:
             sleep $((i * 20))
           done
       - name: Build
-        run: cargo build --release --locked --offline -p mistralrs-cli
+        run: cargo build --release --locked --offline -p inference-cli
       - name: Package
-        run: tar czf mistralrs-cpu-${{ matrix.triple }}${{ matrix.suffix }}.tar.gz -C target/release mistralrs
+        run: tar czf inference-cpu-${{ matrix.triple }}${{ matrix.suffix }}.tar.gz -C target/release inference
       - uses: softprops/action-gh-release@v2
         id: upload_release_asset
         if: ${{ !inputs.dry_run }}
@@ -273,7 +273,7 @@ jobs:
           prerelease: ${{ contains(needs.preflight.outputs.tag, '-') }}
           fail_on_unmatched_files: true
           overwrite_files: true
-          files: mistralrs-cpu-${{ matrix.triple }}${{ matrix.suffix }}.tar.gz
+          files: inference-cpu-${{ matrix.triple }}${{ matrix.suffix }}.tar.gz
       - uses: softprops/action-gh-release@v2
         if: ${{ !inputs.dry_run && steps.upload_release_asset.outcome == 'failure' }}
         with:
@@ -282,12 +282,12 @@ jobs:
           prerelease: ${{ contains(needs.preflight.outputs.tag, '-') }}
           fail_on_unmatched_files: true
           overwrite_files: true
-          files: mistralrs-cpu-${{ matrix.triple }}${{ matrix.suffix }}.tar.gz
+          files: inference-cpu-${{ matrix.triple }}${{ matrix.suffix }}.tar.gz
       - name: Build wheel (manylinux)
         if: ${{ !matrix.skip_wheel }}
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: mistralrs-pyo3
+          working-directory: inference-pyo3
           command: build
           args: --release --out dist
           manylinux: auto
@@ -295,7 +295,7 @@ jobs:
         if: ${{ !matrix.skip_wheel }}
         with:
           name: wheel-${{ matrix.triple }}
-          path: mistralrs-pyo3/dist/*.whl
+          path: inference-pyo3/dist/*.whl
           if-no-files-found: error
           overwrite: true
 
@@ -303,9 +303,9 @@ jobs:
     needs: preflight
     # Keep every native compiler axis isolated; bump v1 when compiler or build-hook semantics change.
     runs-on: >-
-      ${{ matrix.runner }};overrides.cache-tag=mistral.rs-cuda-v1-${{ matrix.runner }}-${{ matrix.cuda }}-sm${{ matrix.sm }}
+      ${{ matrix.runner }};overrides.cache-tag=inference.rs-cuda-v1-${{ matrix.runner }}-${{ matrix.cuda }}-sm${{ matrix.sm }}
     concurrency:
-      group: mistral.rs-cuda-v1-${{ matrix.runner }}-${{ matrix.cuda }}-sm${{ matrix.sm }}
+      group: inference.rs-cuda-v1-${{ matrix.runner }}-${{ matrix.cuda }}-sm${{ matrix.sm }}
       cancel-in-progress: false
       queue: max
     strategy:
@@ -361,7 +361,7 @@ jobs:
       CUDA_COMPUTE_CAP: ${{ matrix.sm }}
       CUDA_TOOLKIT_PATH: /usr/local/cuda
       CUDAFORGE_HOME: /cache/cudaforge-dependencies-v1
-      MISTRALRS_CUDA_BUILD_ROOT: /cache/mistralrs-cuda-objects-v1
+      INFERENCE_RS_CUDA_BUILD_ROOT: /cache/inference-cuda-objects-v1
       # Cap concurrent nvcc: cicc peaks ~7GB on the worst flash-attn kernels and overlaps the rustc
       # phase; 12 rides the 64GB edge on arm64 (OOM kills present as exit 137 or a lost runner).
       CUDAFORGE_THREADS: ${{ contains(matrix.runner, 'arm64') && '8' || '12' }}
@@ -402,23 +402,23 @@ jobs:
             sleep $((i * 20))
           done
       - name: Build
-        run: cargo build --release --locked --offline --target "${{ matrix.triple }}" --features "${{ matrix.features }}" -p mistralrs-cli
+        run: cargo build --release --locked --offline --target "${{ matrix.triple }}" --features "${{ matrix.features }}" -p inference-cli
       - name: Bundle runtime libraries
         run: |
           set -eux
-          bin=target/${{ matrix.triple }}/release/mistralrs
+          bin=target/${{ matrix.triple }}/release/inference
           mkdir -p package/lib
           # Copy every CUDA/NCCL/cuDNN shared object the binary actually links, so the
           # artifact runs without a CUDA toolkit installed.
           ldd "$bin" | awk '/=> \//{print $3}' \
             | grep -E 'libcud|libnccl|libcublas|libcurand|libnvrtc|libnvJit|libnvjit' \
             | sort -u | xargs -r -I{} cp -Lv {} package/lib/ || true
-          cp "$bin" package/mistralrs
-          patchelf --set-rpath '$ORIGIN/lib' package/mistralrs
+          cp "$bin" package/inference
+          patchelf --set-rpath '$ORIGIN/lib' package/inference
       - name: Package
         run: |
           set -eux
-          name="mistralrs-cuda${{ matrix.cuda_asset }}-sm${{ matrix.sm }}-${{ matrix.triple }}.tar.gz"
+          name="inference-cuda${{ matrix.cuda_asset }}-sm${{ matrix.sm }}-${{ matrix.triple }}.tar.gz"
           tar czf "$name" -C package .
           echo "ASSET=$name" >> "$GITHUB_ENV"
       - uses: softprops/action-gh-release@v2
@@ -446,7 +446,7 @@ jobs:
       # the CUDA runtime libs (driver libcuda excluded). cutile is dropped here, so CUDA wheels use
       # the CUTLASS MoE fallback; cutile users need a cutile-enabled CLI binary and an official
       # tileiras installation.
-      # Only mistralrs-pyo3's version is bumped (not the workspace) so the kernel crates already built
+      # Only inference-pyo3's version is bumped (not the workspace) so the kernel crates already built
       # by the CLI step are reused from target/ instead of recompiling flash-attn's ~90min hdim512 ptxas.
       # Fails the job on wheel breakage (binary asset is already uploaded above; docker legs
       # tolerate failed build legs via !cancelled(), so nothing downstream is lost). Pinned
@@ -456,10 +456,10 @@ jobs:
         run: |
           set -eux
           pip3 install --quiet maturin==1.14.1 auditwheel==6.8.1 patchelf==0.19.1.0
-          sed -i 's/^version = "\([^"]*\)"/version = "\1+cuda${{ matrix.cuda_asset }}.sm${{ matrix.sm }}"/' mistralrs-pyo3/Cargo.toml
+          sed -i 's/^version = "\([^"]*\)"/version = "\1+cuda${{ matrix.cuda_asset }}.sm${{ matrix.sm }}"/' inference-pyo3/Cargo.toml
           # --auditwheel skip: maturin's built-in repair has no --exclude and chokes on libcuda; do
           # our own repair below instead so the driver is excluded rather than bundled.
-          maturin build --release --target "${{ matrix.triple }}" --features "cuda flash-attn nccl" --auditwheel skip -o wheelraw -m mistralrs-pyo3/Cargo.toml
+          maturin build --release --target "${{ matrix.triple }}" --features "cuda flash-attn nccl" --auditwheel skip -o wheelraw -m inference-pyo3/Cargo.toml
           # auditwheel must resolve libcuda.so.1 before it can honor --exclude; the build container
           # has only the driver stub (libcuda.so), so symlink it as libcuda.so.1 on the search path.
           stubdir=/usr/local/cuda/lib64/stubs
@@ -507,9 +507,9 @@ jobs:
             Start-Sleep -Seconds ($i * 20)
           }
       - name: Build
-        run: cargo build --release --locked --offline -p mistralrs-cli
+        run: cargo build --release --locked --offline -p inference-cli
       - name: Package
-        run: Compress-Archive -Path target/release/mistralrs.exe -DestinationPath mistralrs-cpu-x86_64-pc-windows-msvc.zip
+        run: Compress-Archive -Path target/release/inference.exe -DestinationPath inference-cpu-x86_64-pc-windows-msvc.zip
       - uses: softprops/action-gh-release@v2
         id: upload_release_asset
         if: ${{ !inputs.dry_run }}
@@ -520,7 +520,7 @@ jobs:
           prerelease: ${{ contains(needs.preflight.outputs.tag, '-') }}
           fail_on_unmatched_files: true
           overwrite_files: true
-          files: mistralrs-cpu-x86_64-pc-windows-msvc.zip
+          files: inference-cpu-x86_64-pc-windows-msvc.zip
       - uses: softprops/action-gh-release@v2
         if: ${{ !inputs.dry_run && steps.upload_release_asset.outcome == 'failure' }}
         with:
@@ -529,17 +529,17 @@ jobs:
           prerelease: ${{ contains(needs.preflight.outputs.tag, '-') }}
           fail_on_unmatched_files: true
           overwrite_files: true
-          files: mistralrs-cpu-x86_64-pc-windows-msvc.zip
+          files: inference-cpu-x86_64-pc-windows-msvc.zip
       - name: Build wheel
         uses: PyO3/maturin-action@v1
         with:
-          working-directory: mistralrs-pyo3
+          working-directory: inference-pyo3
           command: build
           args: --release --out dist
       - uses: actions/upload-artifact@v4
         with:
           name: wheel-windows
-          path: mistralrs-pyo3/dist/*.whl
+          path: inference-pyo3/dist/*.whl
           if-no-files-found: error
           overwrite: true
 
@@ -565,10 +565,10 @@ jobs:
         run: |
           mkdir -p dist/amd64 dist/arm64
           gh release download "$TAG" -R "${{ github.repository }}" \
-            -p mistralrs-cpu-x86_64-unknown-linux-gnu.tar.gz -O amd64.tar.gz
+            -p inference-cpu-x86_64-unknown-linux-gnu.tar.gz -O amd64.tar.gz
           tar xzf amd64.tar.gz -C dist/amd64
           gh release download "$TAG" -R "${{ github.repository }}" \
-            -p mistralrs-cpu-aarch64-unknown-linux-gnu-v8_0.tar.gz -O arm64.tar.gz
+            -p inference-cpu-aarch64-unknown-linux-gnu-v8_0.tar.gz -O arm64.tar.gz
           tar xzf arm64.tar.gz -C dist/arm64
       - name: Version tag
         id: ver
@@ -656,7 +656,7 @@ jobs:
         run: |
           mkdir -p "dist/${{ matrix.arch }}"
           gh release download "$TAG" -R "${{ github.repository }}" \
-            -p "mistralrs-cuda${{ matrix.cuda_asset }}-sm${{ matrix.sm }}-${{ matrix.triple }}.tar.gz" -O package.tar.gz
+            -p "inference-cuda${{ matrix.cuda_asset }}-sm${{ matrix.sm }}-${{ matrix.triple }}.tar.gz" -O package.tar.gz
           tar xzf package.tar.gz -C "dist/${{ matrix.arch }}"
       - name: Version tag
         id: ver
@@ -779,7 +779,7 @@ jobs:
     needs: [preflight, metal, linux-cpu, linux-cuda, windows-cpu, docker-cpu, docker-cuda, docker-cuda-manifest]
     if: ${{ !cancelled() && github.repository == 'EricLBuehler/mistral.rs' && needs.preflight.outputs.publish_pypi == 'true' && needs.metal.result == 'success' && needs.linux-cpu.result == 'success' && needs.linux-cuda.result == 'success' && needs.windows-cpu.result == 'success' && needs.docker-cpu.result == 'success' && needs.docker-cuda.result == 'success' && needs.docker-cuda-manifest.result == 'success' }}
     runs-on: ubuntu-latest
-    environment: release_mistralrs_pypi
+    environment: release_inference_pypi
     permissions:
       actions: read
       id-token: write

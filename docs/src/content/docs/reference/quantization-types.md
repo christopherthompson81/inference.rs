@@ -3,7 +3,7 @@ title: Quantization types
 description: Supported runtime ISQ and pretrained checkpoint formats, numeric shorthands, and backend constraints.
 ---
 
-Quantization types supported by mistral.rs, including ISQ (in-situ quantization) and pretrained
+Quantization types supported by inference.rs, including ISQ (in-situ quantization) and pretrained
 checkpoints. For format selection guidance and underlying tradeoffs, see the
 [quantization guide](/guides/quantization/quantize-a-model/).
 
@@ -21,7 +21,7 @@ requires an explicit bit width or format name; `--quant auto` is not supported.
 
 ## Numeric shorthands
 
-mistral.rs resolves N to a format based on the detected backend (see table). This happens when `--quant` falls back to runtime ISQ, or when you pass `--isq N` directly.
+inference.rs resolves N to a format based on the detected backend (see table). This happens when `--quant` falls back to runtime ISQ, or when you pass `--isq N` directly.
 
 | Shorthand | Metal resolves to | CUDA / CPU resolves to |
 |---|---|---|
@@ -157,8 +157,8 @@ and a binary built with `cuda,cutile`. Use BF16 or F16 model dtype. With CUDA 13
 build and runtime environment, load [NVIDIA's Qwen3-14B-NVFP4 checkpoint](https://huggingface.co/nvidia/Qwen3-14B-NVFP4):
 
 ```bash
-cargo install --path mistralrs-cli --features cuda,cutile
-mistralrs run -m nvidia/Qwen3-14B-NVFP4 --dtype bf16
+cargo install --path inference-cli --features cuda,cutile
+inference run -m nvidia/Qwen3-14B-NVFP4 --dtype bf16
 ```
 
 The model config selects NVFP4 automatically; omit `--quant` and `--isq`. See
@@ -167,11 +167,11 @@ The model config selects NVFP4 automatically; omit `--quant` and `--isq`. See
 The Rust API and Python source builds also expose the `cutile` feature. Run the Rust example with:
 
 ```bash
-cargo run --release -p mistralrs --example nvfp4 --features cuda,cutile
+cargo run --release -p inference --example nvfp4 --features cuda,cutile
 ```
 
 For a [Python source build](/developer/from-source/#python-wheels), run
-`maturin develop --release --features cuda,cutile` from `mistralrs-pyo3`.
+`maturin develop --release --features cuda,cutile` from `inference-pyo3`.
 
 Dense and MoE projections are supported. Experts within each projection must share a quantization
 scheme, and input-dimension shards must align to 16 weights. NVFP4 creation through ISQ, NVFP4 UQFF
@@ -200,7 +200,7 @@ product rounding of the unfused path; other activations use the existing path.
 To measure decode, prefill, and expert projections on your GPU:
 
 ```bash
-cargo run --release -p mistralrs-quant --features cuda,cutile --example nvfp4_bench -- --graph
+cargo run --release -p inference-quant --features cuda,cutile --example nvfp4_bench -- --graph
 ```
 
 The benchmark checks its outputs and emits JSON with median GPU and host latency. Use
@@ -231,9 +231,9 @@ Half-quadratic quantization.
 Not ISQ types, pre-quantized formats. Load directly when a Hugging Face model is available as GPTQ or AWQ:
 
 ```bash
-mistralrs run --format plain -m <gptq-or-awq-repo>
+inference run --format plain -m <gptq-or-awq-repo>
 ```
 
-mistral.rs detects the quantization from the model's config. No `--quant` or `--isq` required.
+inference.rs detects the quantization from the model's config. No `--quant` or `--isq` required.
 
 See the [quantization guide](/guides/quantization/quantize-a-model/) for format selection.

@@ -9,15 +9,15 @@ sidebar:
 
 Per-layer quantization control using a Topology.
 
-Run with: `cargo run --release --example topology -p mistralrs`
+Run with: `cargo run --release --example topology -p inference`
 
 ```rust
 //! Per-layer quantization control using a Topology.
 //!
-//! Run with: `cargo run --release --example topology -p mistralrs`
+//! Run with: `cargo run --release --example topology -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     IsqBits, IsqType, LayerTopology, ModelBuilder, PagedAttentionMetaBuilder, TextMessageRole,
     TextMessages, Topology,
 };
@@ -84,4 +84,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/quantization/topology/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/quantization/topology/main.rs)
+Source: [`inference/examples/quantization/topology/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/quantization/topology/main.rs)

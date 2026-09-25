@@ -9,15 +9,15 @@ sidebar:
 
 AnyMoE with LoRA adapters for expert specialization.
 
-Run with: `cargo run --release --example anymoe_lora -p mistralrs`
+Run with: `cargo run --release --example anymoe_lora -p inference`
 
 ```rust
 //! AnyMoE with LoRA adapters for expert specialization.
 //!
-//! Run with: `cargo run --release --example anymoe_lora -p mistralrs`
+//! Run with: `cargo run --release --example anymoe_lora -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     AnyMoeConfig, AnyMoeExpertType, AnyMoeModelBuilder, IsqBits, PagedAttentionMetaBuilder,
     TextMessageRole, TextMessages, TextModelBuilder,
 };
@@ -72,4 +72,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/anymoe_lora/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/anymoe_lora/main.rs)
+Source: [`inference/examples/advanced/anymoe_lora/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/anymoe_lora/main.rs)

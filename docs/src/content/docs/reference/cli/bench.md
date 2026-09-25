@@ -1,16 +1,16 @@
 ---
-title: "mistralrs bench"
+title: "inference bench"
 description: "Run performance benchmarks for base or LoRA model generation"
 sidebar:
   order: 11
 ---
 
-<!-- Generated from clap definitions by mistralrs-cli docgen. Do not edit. -->
+<!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->
 
 Run performance benchmarks for base or LoRA model generation
 
 ```
-mistralrs bench [OPTIONS] [COMMAND]
+inference bench [OPTIONS] [COMMAND]
 ```
 
 | Option | Default | Description |
@@ -72,12 +72,12 @@ mistralrs bench [OPTIONS] [COMMAND]
 | `--iterations <ITERATIONS>` | `3` | Number of benchmark iterations |
 | `--warmup <WARMUP>` | `1` | Number of warmup runs per benchmark case (discarded) |
 
-## mistralrs bench auto
+## inference bench auto
 
 Auto-detect model type (recommended)
 
 ```
-mistralrs bench auto [OPTIONS] --model-id <MODEL_ID>
+inference bench auto [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -126,12 +126,12 @@ mistralrs bench auto [OPTIONS] --model-id <MODEL_ID>
 | `--max-num-images <MAX_NUM_IMAGES>` |  | Maximum number of images per request |
 | `--max-image-length <MAX_IMAGE_LENGTH>` |  | Maximum image dimension for device mapping |
 
-## mistralrs bench text
+## inference bench text
 
 Text generation model with explicit configuration
 
 ```
-mistralrs bench text [OPTIONS] --model-id <MODEL_ID>
+inference bench text [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -176,12 +176,12 @@ mistralrs bench text [OPTIONS] --model-id <MODEL_ID>
 | `--pa-block-size <BLOCK_SIZE>` |  | Tokens per block (default: 32 on CUDA) |
 | `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache quantization type |
 
-## mistralrs bench multimodal
+## inference bench multimodal
 
 Multimodal model
 
 ```
-mistralrs bench multimodal [OPTIONS] --model-id <MODEL_ID>
+inference bench multimodal [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -225,12 +225,12 @@ mistralrs bench multimodal [OPTIONS] --model-id <MODEL_ID>
 | `--max-num-images <MAX_NUM_IMAGES>` |  | Maximum number of images per request |
 | `--max-image-length <MAX_IMAGE_LENGTH>` |  | Maximum image dimension for device mapping |
 
-## mistralrs bench diffusion
+## inference bench diffusion
 
 Image generation model (diffusion)
 
 ```
-mistralrs bench diffusion [OPTIONS] --model-id <MODEL_ID>
+inference bench diffusion [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -248,12 +248,12 @@ mistralrs bench diffusion [OPTIONS] --model-id <MODEL_ID>
 | `--max-seq-len <MAX_SEQ_LEN>` | `4096` | Max sequence length for automatic device mapping |
 | `--max-batch-size <MAX_BATCH_SIZE>` | `1` | Max batch size for automatic device mapping |
 
-## mistralrs bench speech
+## inference bench speech
 
 Speech synthesis model
 
 ```
-mistralrs bench speech [OPTIONS] --model-id <MODEL_ID>
+inference bench speech [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -271,12 +271,12 @@ mistralrs bench speech [OPTIONS] --model-id <MODEL_ID>
 | `--max-seq-len <MAX_SEQ_LEN>` | `4096` | Max sequence length for automatic device mapping |
 | `--max-batch-size <MAX_BATCH_SIZE>` | `1` | Max batch size for automatic device mapping |
 
-## mistralrs bench embedding
+## inference bench embedding
 
 Embedding model
 
 ```
-mistralrs bench embedding [OPTIONS] --model-id <MODEL_ID>
+inference bench embedding [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |

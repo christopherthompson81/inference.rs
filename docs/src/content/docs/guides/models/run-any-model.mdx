@@ -5,7 +5,7 @@ description: Load models from Hugging Face IDs, local directories, or GGUF files
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-mistral.rs detects text, multimodal, embedding, speech, and diffusion pipelines from supported
+inference.rs detects text, multimodal, embedding, speech, and diffusion pipelines from supported
 checkpoints. The same `run` and `serve` commands accept Hugging Face model IDs and local model
 directories.
 
@@ -13,8 +13,8 @@ directories.
 <TabItem label="CLI">
 
 ```bash
-mistralrs run -m Qwen/Qwen3-4B
-mistralrs serve -m Qwen/Qwen3-4B
+inference run -m Qwen/Qwen3-4B
+inference serve -m Qwen/Qwen3-4B
 ```
 
 `run` opens an interactive chat (or one-shot with `-i`); `serve` starts the OpenAI-compatible server on port 1234.
@@ -23,7 +23,7 @@ mistralrs serve -m Qwen/Qwen3-4B
 <TabItem label="Python">
 
 ```python
-from mistralrs import Runner, Which, ChatCompletionRequest
+from inference_rs import Runner, Which, ChatCompletionRequest
 
 runner = Runner(which=Which.Plain(model_id="Qwen/Qwen3-4B"))
 
@@ -44,7 +44,7 @@ print(res.choices[0].message.content)
 
 ```rust
 use anyhow::Result;
-use mistralrs::{ModelBuilder, TextMessageRole, TextMessages};
+use inference::{ModelBuilder, TextMessageRole, TextMessages};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -72,17 +72,17 @@ can be used with standard and GGUF model sources. Standard model repositories al
 GGUF repository, `--quant` selects a matching file already present in the repository. Other Hugging
 Face repositories load a matching prebuilt
 [UQFF (Universal Quantized File Format)](/reference/uqff-format/) from
-`mistralrs-community/<model-name>-UQFF` when available and otherwise apply ISQ.
+`inference-community/<model-name>-UQFF` when available and otherwise apply ISQ.
 
 ```bash
-mistralrs run --quant 4 -m Qwen/Qwen3-4B
+inference run --quant 4 -m Qwen/Qwen3-4B
 
 # Select a published 4-bit GGUF without naming the file.
-mistralrs run -m unsloth/Qwen3.5-4B-GGUF --quant 4
+inference run -m unsloth/Qwen3.5-4B-GGUF --quant 4
 ```
 
 For standard model repositories, `--quant auto` probes your hardware (the same analysis as
-`mistralrs tune`) and picks a level, or runs at full precision if the model fits. Choose an explicit
+`inference tune`) and picks a level, or runs at full precision if the model fits. Choose an explicit
 supported bit width or artifact name for a GGUF repository. `--quant` conflicts with the explicit knobs `--isq`
 and `--from-uqff`; use those when you want to force ISQ or a specific UQFF file. Choosing a level
 and the full set of quantization options are covered in the
@@ -93,7 +93,7 @@ and the full set of quantization options are covered in the
 `-m` accepts a local path to a directory containing the model files (safetensors plus configs, or a Mistral-native `consolidated.safetensors` layout):
 
 ```bash
-mistralrs run -m /path/to/model-dir
+inference run -m /path/to/model-dir
 ```
 
 Local model directories are read straight from disk. For safetensors and Mistral-native directories,
@@ -108,13 +108,13 @@ GGUF files can be used with interactive chat and the OpenAI-compatible server:
 
 ```bash
 # Run an exact local file.
-mistralrs run -f /path/to/model.gguf
+inference run -f /path/to/model.gguf
 
 # Select and serve a published 4-bit GGUF.
-mistralrs serve -m unsloth/Qwen3.5-4B-GGUF --quant 4
+inference serve -m unsloth/Qwen3.5-4B-GGUF --quant 4
 ```
 
-The `.gguf` filename selects the format. mistral.rs uses embedded tokenizer and chat-template
+The `.gguf` filename selects the format. inference.rs uses embedded tokenizer and chat-template
 metadata when present, and discovers external configuration and projector files when the repository
 identifies them unambiguously. Use `--tok-model-id` and `--mmproj` to override those selections. The
 same model flags work with `run`, `serve`, and `bench`.
@@ -138,14 +138,14 @@ Set `HF_HUB_OFFLINE=1` to guarantee no network calls are made to the Hugging Fac
 
 ```bash
 # on a machine with network access: populate the cache
-mistralrs run -m Qwen/Qwen3-4B
+inference run -m Qwen/Qwen3-4B
 
 # later, or on the air-gapped machine with the cache copied over
-HF_HUB_OFFLINE=1 mistralrs serve -m Qwen/Qwen3-4B
+HF_HUB_OFFLINE=1 inference serve -m Qwen/Qwen3-4B
 ```
 
-Pre-download with `huggingface-cli download <repo>` or by running mistral.rs once online;
-`mistralrs cache list` shows what is cached. Files resolve from `$HF_HUB_CACHE`, falling back to
+Pre-download with `huggingface-cli download <repo>` or by running inference.rs once online;
+`inference cache list` shows what is cached. Files resolve from `$HF_HUB_CACHE`, falling back to
 `$HF_HOME/hub`, then `~/.cache/huggingface/hub`. A complete local model directory reads from disk.
 For a local multimodal GGUF whose supporting assets are not stored beside it, cache those assets or
 point `--tok-model-id` at a local asset directory before running offline. Related variables

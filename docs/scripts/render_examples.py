@@ -2,7 +2,7 @@
 """
 Render the runnable example trees as Starlight Markdown pages.
 
-Walks `mistralrs/examples/**/main.rs` (Rust SDK), `examples/python/**/*.py`
+Walks `inference_rs/examples/**/main.rs` (Rust SDK), `examples/python/**/*.py`
 (Python SDK), and `examples/server/**/*.py` (HTTP API), extracts the leading
 doc header (`//!` lines for Rust, the module docstring for Python), and
 writes one page per example into `docs/src/content/docs/examples/`. The
@@ -28,7 +28,7 @@ NEEDS_HEADER_MARKER = "<!-- needs-header -->"
 
 # (sidebar dir, source root relative to repo, label used in stub blurbs)
 TREES = [
-    ("rust", "mistralrs/examples", "Rust SDK"),
+    ("rust", "inference_rs/examples", "Rust SDK"),
     ("python", "examples/python", "Python SDK"),
     ("server", "examples/server", "HTTP server"),
 ]

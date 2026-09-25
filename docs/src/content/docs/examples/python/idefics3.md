@@ -12,7 +12,7 @@ Runnable Python SDK example `idefics3`.
 <!-- needs-header -->
 
 ```python
-from mistralrs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
+from inference_rs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
 
 runner = Runner(
     which=Which.MultimodalPlain(

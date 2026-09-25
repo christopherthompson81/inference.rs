@@ -1,8 +1,8 @@
 """
-Anthropic-style server tools mapped to mistral.rs agentic features.
+Anthropic-style server tools mapped to inference.rs agentic features.
 
 Run the server with search and code execution enabled:
-    mistralrs serve --agent -p 1234 -m Qwen/Qwen3-4B
+    inference_rs serve --agent -p 1234 -m Qwen/Qwen3-4B
 
 Then run:
     python3 examples/server/anthropic_agentic.py
@@ -12,7 +12,7 @@ import json
 import os
 import urllib.request
 
-BASE_URL = os.environ.get("MISTRALRS_BASE_URL", "http://localhost:1234")
+BASE_URL = os.environ.get("INFERENCE_RS_BASE_URL", "http://localhost:1234")
 API_KEY = os.environ.get("ANTHROPIC_API_KEY", "local")
 
 

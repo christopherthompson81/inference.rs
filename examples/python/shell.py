@@ -5,11 +5,11 @@ The model is given a shell tool and can run commands in a per-session working
 directory.
 
 Run with:
-    pip install -e mistralrs-pyo3 --features code-execution
+    pip install -e inference-rs-pyo3 --features code-execution
     python examples/python/shell.py
 """
 
-from mistralrs import (
+from inference_rs import (
     ChatCompletionRequest,
     NetworkMode,
     Runner,

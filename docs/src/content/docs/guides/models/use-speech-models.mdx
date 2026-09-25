@@ -5,7 +5,7 @@ description: Voxtral Realtime for speech transcription, Dia for text-to-speech.
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-mistral.rs supports two speech-related model families:
+inference.rs supports two speech-related model families:
 
 - **Voxtral Realtime**: multimodal model accepting audio input for speech transcription through
   `/v1/chat/completions`.
@@ -17,7 +17,7 @@ dedicated speech model.
 ## Voxtral Realtime: audio in, text out
 
 ```bash
-mistralrs serve -m mistralai/Voxtral-Mini-4B-Realtime-2602
+inference serve -m mistralai/Voxtral-Mini-4B-Realtime-2602
 ```
 
 The auto-loader recognizes the Voxtral Realtime layout from `params.json`,
@@ -51,7 +51,7 @@ curl http://localhost:1234/v1/chat/completions \
 <TabItem label="Python">
 
 ```python
-from mistralrs import ChatCompletionRequest, MultimodalArchitecture, Runner, Which
+from inference_rs import ChatCompletionRequest, MultimodalArchitecture, Runner, Which
 
 runner = Runner(
     which=Which.MultimodalPlain(
@@ -83,7 +83,7 @@ print(response.choices[0].message.content)
 <TabItem label="Rust">
 
 ```rust
-use mistralrs::{AudioInput, MultimodalMessages, MultimodalModelBuilder, TextMessageRole};
+use inference::{AudioInput, MultimodalMessages, MultimodalModelBuilder, TextMessageRole};
 
 let model = MultimodalModelBuilder::new("mistralai/Voxtral-Mini-4B-Realtime-2602")
     .build()
@@ -110,7 +110,7 @@ println!("{}", response.choices[0].message.content.as_ref().unwrap());
 `/v1/audio/speech` matches OpenAI:
 
 ```bash
-mistralrs serve -m nari-labs/Dia-1.6B
+inference serve -m nari-labs/Dia-1.6B
 ```
 
 Dia understands dialogue speaker tags such as `[S1]` and `[S2]`, and nonverbal parentheticals such as `(laughs)` or `(coughs)`. Use them in the `input` string when you want dialogue or expressive speech.
@@ -141,7 +141,7 @@ import struct
 import wave
 from pathlib import Path
 
-from mistralrs import Runner, SpeechLoaderType, Which
+from inference_rs import Runner, SpeechLoaderType, Which
 
 runner = Runner(
     which=Which.Speech(
@@ -165,7 +165,7 @@ with wave.open(output_path, "wb") as wav:
 <TabItem label="Rust">
 
 ```rust
-use mistralrs::{speech_utils, SpeechLoaderType, SpeechModelBuilder};
+use inference::{speech_utils, SpeechLoaderType, SpeechModelBuilder};
 
 let model = SpeechModelBuilder::new("nari-labs/Dia-1.6B", SpeechLoaderType::Dia)
     .build()

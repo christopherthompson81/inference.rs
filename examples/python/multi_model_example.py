@@ -1,5 +1,5 @@
 """
-Example demonstrating multi-model usage with mistral.rs Python bindings.
+Example demonstrating multi-model usage with inference.rs Python bindings.
 
 This example shows how to:
 1. Load a model using Runner
@@ -13,7 +13,7 @@ Models used:
 - Text: Qwen/Qwen3-4B (Architecture.Qwen3)
 """
 
-from mistralrs import (
+from inference_rs import (
     Runner,
     Which,
     ChatCompletionRequest,

@@ -7,7 +7,7 @@ This page covers the FFmpeg setup that video input depends on. To actually send 
 
 ## You need FFmpeg on the server PATH
 
-- Non-GIF video formats require the `ffmpeg` binary on the server `PATH`. mistral.rs invokes FFmpeg at request time to decode video files into frames.
+- Non-GIF video formats require the `ffmpeg` binary on the server `PATH`. inference.rs invokes FFmpeg at request time to decode video files into frames.
 - GIF files are decoded natively and do not require FFmpeg.
 
 Check the server environment:
@@ -16,7 +16,7 @@ Check the server environment:
 ffmpeg -version
 ```
 
-If that command fails in the same shell, service, or container that starts `mistralrs`, video requests for non-GIF files will fail.
+If that command fails in the same shell, service, or container that starts `inference`, video requests for non-GIF files will fail.
 
 ## Install FFmpeg
 

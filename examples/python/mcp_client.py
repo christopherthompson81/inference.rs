@@ -1,5 +1,5 @@
 """
-MCP (Model Context Protocol) client usage with mistral.rs Python API.
+MCP (Model Context Protocol) client usage with inference.rs Python API.
 
 Connects to an MCP server, auto-discovers tools, and makes them available
 to the model during conversations.
@@ -7,17 +7,17 @@ to the model during conversations.
 Install the filesystem server first: npx @modelcontextprotocol/server-filesystem . -y
 """
 
-import mistralrs
+import inference_rs
 
 
 def main():
     # Connect to a local filesystem MCP server
-    mcp_config = mistralrs.McpClientConfigPy(
+    mcp_config = inference_rs.McpClientConfigPy(
         servers=[
-            mistralrs.McpServerConfigPy(
+            inference_rs.McpServerConfigPy(
                 id="filesystem",
                 name="Filesystem Tools",
-                source=mistralrs.McpServerSourcePy.Process(
+                source=inference_rs.McpServerSourcePy.Process(
                     command="npx",
                     args=["@modelcontextprotocol/server-filesystem", "."],
                     work_dir=None,
@@ -35,21 +35,21 @@ def main():
     # For authentication, set bearer_token="your-token".
     # To avoid tool name conflicts, set tool_prefix="prefix".
 
-    runner = mistralrs.Runner(
-        which=mistralrs.Which.Plain(
+    runner = inference_rs.Runner(
+        which=inference_rs.Which.Plain(
             model_id="Qwen/Qwen3-4B",
-            arch=mistralrs.Architecture.Qwen3,
+            arch=inference_rs.Architecture.Qwen3,
         ),
         mcp_client_config=mcp_config,
     )
 
-    request = mistralrs.ChatCompletionRequest(
+    request = inference_rs.ChatCompletionRequest(
         model="default",
         messages=[
             {"role": "user", "content": "List the files in the current directory."}
         ],
         max_tokens=1000,
-        tool_choice=mistralrs.ToolChoice.Auto,
+        tool_choice=inference_rs.ToolChoice.Auto,
     )
 
     response = runner.send_chat_completion_request(request)

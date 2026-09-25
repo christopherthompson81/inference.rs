@@ -12,10 +12,10 @@ Standard attention allocates one contiguous KV cache per sequence, sized for the
 
 ```bash
 # Force on, with a specific KV cache memory budget in MB
-mistralrs serve --paged-attn on --pa-memory-mb 8192 -m Qwen/Qwen3-4B
+inference serve --paged-attn on --pa-memory-mb 8192 -m Qwen/Qwen3-4B
 
 # Force off
-mistralrs serve --paged-attn off -m Qwen/Qwen3-4B
+inference serve --paged-attn off -m Qwen/Qwen3-4B
 ```
 
 `--paged-attn` accepts `auto` (default), `on`, or `off`. `auto` enables paged attention on CUDA and disables it on Metal and CPU.
@@ -24,7 +24,7 @@ mistralrs serve --paged-attn off -m Qwen/Qwen3-4B
 <TabItem label="Python">
 
 ```python
-from mistralrs import Runner, Which
+from inference_rs import Runner, Which
 
 runner = Runner(
     which=Which.Plain(model_id="Qwen/Qwen3-4B"),
@@ -39,7 +39,7 @@ runner = Runner(
 <TabItem label="Rust">
 
 ```rust
-use mistralrs::{IsqBits, MemoryGpuConfig, ModelBuilder, PagedAttentionMetaBuilder};
+use inference::{IsqBits, MemoryGpuConfig, ModelBuilder, PagedAttentionMetaBuilder};
 
 let model = ModelBuilder::new("Qwen/Qwen3-4B")
     .with_auto_isq(IsqBits::Eight)
@@ -126,7 +126,7 @@ vLLM and SGLang serving configuration. FP8 cache is not currently supported for 
 To compare with the non-FlashInfer paged decode path, disable the FlashInfer cache layout:
 
 ```bash
-MISTRALRS_FLASHINFER_DECODE=0 mistralrs serve --paged-attn on -m <model>
+INFERENCE_RS_FLASHINFER_DECODE=0 inference serve --paged-attn on -m <model>
 ```
 
 ## Flash attention vs FlashInfer
@@ -136,7 +136,7 @@ Paged attention and flash attention compose; both can be on simultaneously. They
 - `flash-attn` (compute capability 8.0+) and `flash-attn-v3` (Hopper) are Cargo features for the standard attention path and fallback varlen paths. See [cargo features](/reference/cargo-features/).
 - FlashInfer paged decode and prefill kernels are built with the `cuda` feature as part of paged attention. They do not require the `flash-attn` Cargo feature.
 
-Set `MISTRALRS_FLASHINFER_DECODE=0` only when debugging or comparing against the generic paged path.
+Set `INFERENCE_RS_FLASHINFER_DECODE=0` only when debugging or comparing against the generic paged path.
 
 ## CUDA graphs
 
@@ -145,7 +145,7 @@ CUDA graphs capture a fixed decode step once and replay it with new token and me
 They are enabled by default for supported CUDA decode paths. To disable them for comparison or debugging:
 
 ```bash
-MISTRALRS_CUDA_GRAPHS=0 mistralrs serve --paged-attn on -m <model>
+INFERENCE_RS_CUDA_GRAPHS=0 inference serve --paged-attn on -m <model>
 ```
 
 They require a CUDA build and a CUDA device, and they apply to decode, not prompt prefill.
@@ -160,12 +160,12 @@ Graph replay is attempted only when all of these are true:
 - The request is not using a speculative proposer path.
 - The graph key matches the input shape, dtype, cache metadata shapes, and context bucket.
 
-If any condition is not met, mistral.rs runs the normal CUDA path.
+If any condition is not met, inference.rs runs the normal CUDA path.
 
 <details>
 <summary>Capture and replay internals</summary>
 
-The first time a decode shape is seen, mistral.rs runs a normal warmup forward, captures a graph for that shape, uploads it, and caches it. Later matching decode steps copy the current input ids and paged-attention metadata into graph-owned buffers and replay the graph.
+The first time a decode shape is seen, inference.rs runs a normal warmup forward, captures a graph for that shape, uploads it, and caches it. Later matching decode steps copy the current input ids and paged-attention metadata into graph-owned buffers and replay the graph.
 
 Supported pipelines also capture common batch sizes during startup. Ordinary single-token FlashInfer decode reserves metadata capacity through 2048 context tokens, bounded by the available cache and sliding window. This lets startup graphs handle changing admission and drain batches within that capacity. It adds a bounded amount of attention scratch memory; longer contexts can still require another capture.
 

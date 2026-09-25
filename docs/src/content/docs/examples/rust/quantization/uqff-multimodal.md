@@ -9,15 +9,15 @@ sidebar:
 
 Load a pre-quantized UQFF multimodal model.
 
-Run with: `cargo run --release --example uqff_multimodal -p mistralrs`
+Run with: `cargo run --release --example uqff_multimodal -p inference`
 
 ```rust
 //! Load a pre-quantized UQFF multimodal model.
 //!
-//! Run with: `cargo run --release --example uqff_multimodal -p mistralrs`
+//! Run with: `cargo run --release --example uqff_multimodal -p inference`
 
 use anyhow::Result;
-use mistralrs::{IsqBits, MultimodalMessages, TextMessageRole, UqffMultimodalModelBuilder};
+use inference::{IsqBits, MultimodalMessages, TextMessageRole, UqffMultimodalModelBuilder};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -57,4 +57,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/quantization/uqff_multimodal/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/quantization/uqff_multimodal/main.rs)
+Source: [`inference/examples/quantization/uqff_multimodal/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/quantization/uqff_multimodal/main.rs)

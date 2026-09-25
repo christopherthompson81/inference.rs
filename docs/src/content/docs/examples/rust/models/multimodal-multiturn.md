@@ -9,15 +9,15 @@ sidebar:
 
 Multi-turn conversation with a multimodal model across turns.
 
-Run with: `cargo run --release --example multimodal_multiturn -p mistralrs`
+Run with: `cargo run --release --example multimodal_multiturn -p inference`
 
 ```rust
 //! Multi-turn conversation with a multimodal model across turns.
 //!
-//! Run with: `cargo run --release --example multimodal_multiturn -p mistralrs`
+//! Run with: `cargo run --release --example multimodal_multiturn -p inference`
 
 use anyhow::Result;
-use mistralrs::{ModelBuilder, MultimodalMessages, RequestBuilder, TextMessageRole};
+use inference::{ModelBuilder, MultimodalMessages, RequestBuilder, TextMessageRole};
 
 const MODEL_ID: &str = "Qwen/Qwen3-VL-4B-Instruct";
 
@@ -25,7 +25,7 @@ const MODEL_ID: &str = "Qwen/Qwen3-VL-4B-Instruct";
 async fn main() -> Result<()> {
     let model = ModelBuilder::new(MODEL_ID)
         .with_logging()
-        .with_isq(mistralrs::IsqType::Q8_0)
+        .with_isq(inference::IsqType::Q8_0)
         .build()
         .await?;
 
@@ -113,4 +113,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/models/multimodal_multiturn/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/multimodal_multiturn/main.rs)
+Source: [`inference/examples/models/multimodal_multiturn/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/multimodal_multiturn/main.rs)

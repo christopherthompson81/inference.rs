@@ -1,5 +1,5 @@
 ---
-title: mistral.rs
+title: inference.rs
 description: Fast, flexible LLM inference engine written in Rust. Run 40+ model families including text, vision, video, audio, speech, image generation, and embeddings, with OpenAI-compatible APIs, Anthropic-compatible Messages APIs, and built-in agentic features.
 template: splash
 hero:
@@ -68,7 +68,7 @@ import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
   <LinkCard
     title="Use Rust"
     href="/guides/rust/getting-started/"
-    description="Embed mistral.rs in a Rust application."
+    description="Embed inference.rs in a Rust application."
   />
   <LinkCard
     title="Browse examples"
@@ -81,7 +81,7 @@ import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
 
 <CardGrid>
   <Card title="Auto-detection" icon="rocket">
-    `mistralrs run -m <model>` works without flags. The binary infers the
+    `inference run -m <model>` works without flags. The binary infers the
     architecture and chat template from the Hugging Face repository, and
     selects the accelerator from the detected hardware.
     [Quickstart](/quickstart/)
@@ -94,8 +94,8 @@ import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
     [Quantization guide](/guides/quantization/quantize-a-model/)
   </Card>
   <Card title="Tuning and diagnostics" icon="seti:config">
-    `mistralrs tune` recommends quantization and device mapping from the model
-    config and detected hardware, without loading the model. `mistralrs doctor`
+    `inference tune` recommends quantization and device mapping from the model
+    config and detected hardware, without loading the model. `inference doctor`
     checks hardware, build features, and Hugging Face connectivity.
     [CLI reference](/reference/cli/)
   </Card>

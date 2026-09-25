@@ -1,4 +1,4 @@
-from mistralrs import (
+from inference_rs import (
     Runner,
     Which,
     ChatCompletionRequest,
@@ -20,7 +20,7 @@ res = runner.send_chat_completion_request(
         messages=[
             {
                 "role": "user",
-                "content": "Can you show me some code using mistral.rs for running Llama 3.2 Vision?",
+                "content": "Can you show me some code using inference.rs for running Llama 3.2 Vision?",
             }
         ],
         max_tokens=256,

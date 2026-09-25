@@ -1,4 +1,4 @@
-from mistralrs import EmbeddingArchitecture, EmbeddingRequest, Runner, Which
+from inference_rs import EmbeddingArchitecture, EmbeddingRequest, Runner, Which
 
 
 def main() -> None:

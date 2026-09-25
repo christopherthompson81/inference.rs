@@ -5,7 +5,7 @@ description: Constrain generation to a JSON schema with response_format, pydanti
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-mistral.rs constrains generation server-side with [llguidance](https://github.com/guidance-ai/llguidance), so the output is guaranteed to match your schema -- no retry loops or post-hoc validation. The common case is a JSON schema; regex, Lark, and raw llguidance grammars cover everything else.
+inference.rs constrains generation server-side with [llguidance](https://github.com/guidance-ai/llguidance), so the output is guaranteed to match your schema -- no retry loops or post-hoc validation. The common case is a JSON schema; regex, Lark, and raw llguidance grammars cover everything else.
 
 <Tabs>
 <TabItem label="HTTP">
@@ -70,7 +70,7 @@ The Python SDK takes the schema as a JSON string via `grammar` / `grammar_type`.
 ```python
 import json
 from pydantic import BaseModel
-from mistralrs import Runner, Which, ChatCompletionRequest
+from inference_rs import Runner, Which, ChatCompletionRequest
 
 class Address(BaseModel):
     street: str
@@ -99,7 +99,7 @@ Full examples: [pydantic_schema](/examples/python/pydantic-schema/), [json_schem
 `Model::generate_structured::<T>()` derives the schema from a Rust type with [`schemars::JsonSchema`](https://docs.rs/schemars), constrains generation to it, and deserializes the result:
 
 ```rust
-use mistralrs::{IsqBits, ModelBuilder, TextMessageRole, TextMessages};
+use inference::{IsqBits, ModelBuilder, TextMessageRole, TextMessages};
 use schemars::JsonSchema;
 use serde::Deserialize;
 
@@ -155,7 +155,7 @@ In the Python SDK the same four constraints are selected by `grammar_type` (`"re
 
 ```rust
 let request = RequestBuilder::new()
-    .set_constraint(mistralrs::Constraint::Regex(
+    .set_constraint(inference::Constraint::Regex(
         "(- [^\n]*\n)+(- [^\n]*)(\n\n)?".to_string(),
     ))
     .add_message(TextMessageRole::User, "Please write a few jokes.");

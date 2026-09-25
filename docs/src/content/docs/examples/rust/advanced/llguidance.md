@@ -9,15 +9,15 @@ sidebar:
 
 Constrained generation using an llguidance grammar.
 
-Run with: `cargo run --release --example llguidance -p mistralrs`
+Run with: `cargo run --release --example llguidance -p inference`
 
 ```rust
 //! Constrained generation using an llguidance grammar.
 //!
-//! Run with: `cargo run --release --example llguidance -p mistralrs`
+//! Run with: `cargo run --release --example llguidance -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     llguidance::api::GrammarWithLexer, IsqBits, LlguidanceGrammar, ModelBuilder,
     PagedAttentionMetaBuilder, RequestBuilder, TextMessageRole,
 };
@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
     };
 
     let request = RequestBuilder::new()
-        .set_constraint(mistralrs::Constraint::Llguidance(LlguidanceGrammar {
+        .set_constraint(inference::Constraint::Llguidance(LlguidanceGrammar {
             grammars: vec![top, schema],
             max_tokens: None,
         }))
@@ -66,4 +66,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/llguidance/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/llguidance/main.rs)
+Source: [`inference/examples/advanced/llguidance/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/llguidance/main.rs)

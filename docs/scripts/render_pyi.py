@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Render mistralrs-pyo3/mistralrs.pyi as Starlight Markdown pages.
+Render inference_rs-pyo3/inference_rs.pyi as Starlight Markdown pages.
 
 The .pyi file is the single source of truth for the Python API. This script
 parses it with `ast` and writes one Markdown file per logical group into
@@ -23,9 +23,9 @@ from textwrap import dedent
 SCRIPT_DIR = Path(__file__).resolve().parent
 WEBSITE_DIR = SCRIPT_DIR.parent
 REPO_DIR = WEBSITE_DIR.parent
-PYI_PATH = REPO_DIR / "mistralrs-pyo3" / "mistralrs.pyi"
+PYI_PATH = REPO_DIR / "inference_rs-pyo3" / "inference_rs.pyi"
 OUT_DIR = WEBSITE_DIR / "src" / "content" / "docs" / "reference" / "python"
-STUB_REL = "mistralrs-pyo3/mistralrs.pyi"
+STUB_REL = "inference_rs-pyo3/inference_rs.pyi"
 
 # (title, slug, description, [class names to include])
 GROUPS = [
@@ -536,21 +536,21 @@ def _render_index() -> str:
     lines = [
         "---",
         "title: Python API",
-        'description: "The mistralrs Python package."',
+        'description: "The inference_rs Python package."',
         "sidebar:",
         "  order: 6",
         "---",
         "",
-        "The `mistralrs` Python package exposes the same engine that powers the `mistralrs` CLI.",
+        "The `inference_rs` Python package exposes the same engine that powers the `inference_rs` CLI.",
         "",
         "## Install",
         "",
-        "`pip install mistralrs` covers CPU (Linux, Windows) and Metal (macOS arm64). CUDA wheels are GitHub release assets with `+cudaNNN.smNN` versions. See [Python SDK getting started](/guides/python/getting-started/#installing) for install commands and [hardware support](/reference/hardware-support/) for compute capabilities.",
+        "`pip install inference-rs` covers CPU (Linux, Windows) and Metal (macOS arm64). CUDA wheels are GitHub release assets with `+cudaNNN.smNN` versions. See [Python SDK getting started](/guides/python/getting-started/#installing) for install commands and [hardware support](/reference/hardware-support/) for compute capabilities.",
         "",
         "```bash",
-        "pip install mistralrs                                   # CPU / Metal (PyPI)",
+        "pip install inference-rs                                   # CPU / Metal (PyPI)",
         "# NVIDIA (replace version, CUDA level, and SM)",
-        'pip install "mistralrs==0.9.2+cuda128.sm89" \\',
+        'pip install "inference-rs==0.9.2+cuda128.sm89" \\',
         "  --find-links https://github.com/EricLBuehler/mistral.rs/releases/expanded_assets/v0.9.2",
         "```",
         "",

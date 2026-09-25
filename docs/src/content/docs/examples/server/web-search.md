@@ -10,7 +10,7 @@ sidebar:
 Chat Completions web search with the HTTP API.
 
 Start the server:
-    mistralrs serve --agent -p 1234 -m Qwen/Qwen3-4B
+    inference serve --agent -p 1234 -m Qwen/Qwen3-4B
 
 Then run this script:
     python examples/server/web_search.py
@@ -20,7 +20,7 @@ Then run this script:
 Chat Completions web search with the HTTP API.
 
 Start the server:
-    mistralrs serve --agent -p 1234 -m Qwen/Qwen3-4B
+    inference serve --agent -p 1234 -m Qwen/Qwen3-4B
 
 Then run this script:
     python examples/server/web_search.py
@@ -33,7 +33,7 @@ client = OpenAI(api_key="foobar", base_url="http://localhost:1234/v1/")
 messages = [
     {
         "role": "user",
-        "content": "Can you show me some code using mistral.rs for running Llama 3.2 Vision?",
+        "content": "Can you show me some code using inference.rs for running Llama 3.2 Vision?",
     }
 ]
 

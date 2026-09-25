@@ -186,7 +186,7 @@ function metaTags({ title, description, url, ogType }) {
     `<meta name="description" content="${escapeHtml(description)}" />`,
     `<meta property="og:type" content="${ogType}" />`,
     `<meta property="og:url" content="${url}" />`,
-    `<meta property="og:site_name" content="mistral.rs" />`,
+    `<meta property="og:site_name" content="inference.rs" />`,
     `<meta property="og:title" content="${escapeHtml(title)}" />`,
     `<meta property="og:description" content="${escapeHtml(description)}" />`,
     `<meta property="og:image" content="${image}" />`,
@@ -245,7 +245,7 @@ function postPage(post) {
       </article>
     </main>`;
   return page({
-    title: `${post.title} | mistral.rs blog`,
+    title: `${post.title} | inference.rs blog`,
     head: metaTags({ title: post.title, description: post.description, url, ogType: "article" }),
     navLabel: "All posts",
     navHref: "/blog/",
@@ -279,10 +279,10 @@ function indexPage(posts) {
       ${list}
     </main>`;
   return page({
-    title: "Blog | mistral.rs",
+    title: "Blog | inference.rs",
     head: metaTags({
-      title: "mistral.rs blog",
-      description: "Benchmarks and release notes for mistral.rs.",
+      title: "inference.rs blog",
+      description: "Benchmarks and release notes for inference.rs.",
       url,
       ogType: "website",
     }),
@@ -292,9 +292,9 @@ function indexPage(posts) {
   });
 }
 
-export function mistralrsBlog() {
+export function inferenceBlog() {
   return {
-    name: "mistralrs-blog",
+    name: "inference-blog",
     apply: "build",
     async buildStart() {
       const releasesDir = path.resolve(

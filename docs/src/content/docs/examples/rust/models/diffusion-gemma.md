@@ -13,7 +13,7 @@ The model denoises 256-token blocks in parallel instead of sampling tokens one a
 time, so streamed output arrives block by block. Sampling parameters are ignored in
 favor of the checkpoint's denoising schedule.
 
-Run with: `cargo run --release --example diffusion_gemma -p mistralrs`
+Run with: `cargo run --release --example diffusion_gemma -p inference`
 
 ```rust
 //! DiffusionGemma: block-diffusion text generation.
@@ -22,12 +22,12 @@ Run with: `cargo run --release --example diffusion_gemma -p mistralrs`
 //! time, so streamed output arrives block by block. Sampling parameters are ignored in
 //! favor of the checkpoint's denoising schedule.
 //!
-//! Run with: `cargo run --release --example diffusion_gemma -p mistralrs`
+//! Run with: `cargo run --release --example diffusion_gemma -p inference`
 
 use std::io::Write;
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     ChatCompletionChunkResponse, ChunkChoice, Delta, MultimodalModelBuilder, Response,
     TextMessageRole, TextMessages,
 };
@@ -66,4 +66,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/models/diffusion_gemma/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/diffusion_gemma/main.rs)
+Source: [`inference/examples/models/diffusion_gemma/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/diffusion_gemma/main.rs)

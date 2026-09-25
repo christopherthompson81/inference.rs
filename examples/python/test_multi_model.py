@@ -1,5 +1,5 @@
 """
-Simple test script to verify multi-model functionality in mistral.rs
+Simple test script to verify multi-model functionality in inference.rs
 
 This script tests the core multi-model operations:
 - Listing models
@@ -9,7 +9,7 @@ This script tests the core multi-model operations:
 - Model removal (commented out for safety)
 """
 
-from mistralrs import (
+from inference_rs import (
     Runner,
     Which,
     ChatCompletionRequest,
@@ -236,7 +236,7 @@ def test_error_handling():
 
 
 if __name__ == "__main__":
-    print("mistral.rs Multi-Model Test Suite")
+    print("inference.rs Multi-Model Test Suite")
     print("=" * 60)
 
     all_passed = True

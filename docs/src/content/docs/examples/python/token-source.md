@@ -12,7 +12,7 @@ Runnable Python SDK example `token_source`.
 <!-- needs-header -->
 
 ```python
-from mistralrs import Runner, Which, ChatCompletionRequest
+from inference_rs import Runner, Which, ChatCompletionRequest
 
 runner = Runner(
     which=Which.GGUF(

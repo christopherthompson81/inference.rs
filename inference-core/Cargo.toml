@@ -1,0 +1,153 @@
+[package]
+name = "inference-core"
+readme = "../README.md"
+authors = ["Eric Buehler"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+candle-core.workspace = true
+metrics.workspace = true
+candle-nn.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+inference-flash-attn = { workspace = true, optional = true }
+dirs.workspace = true
+hf-hub.workspace = true
+thiserror.workspace = true
+tokenizers.workspace = true
+tqdm.workspace = true
+chrono.workspace = true
+minijinja.workspace = true
+minijinja-contrib.workspace = true
+either.workspace = true
+indexmap.workspace = true
+mime_guess = { workspace = true }
+half.workspace = true
+accelerate-src = { workspace = true, optional = true }
+intel-mkl-src = { workspace = true, optional = true }
+tracing.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+regex-automata.workspace = true
+rustc-hash.workspace = true
+vob.workspace = true
+cfgrammar.workspace = true
+lrtable.workspace = true
+galil-seiferas.workspace = true
+clap.workspace = true
+radix_trie.workspace = true
+bytemuck.workspace = true
+rayon.workspace = true
+tokio.workspace = true
+tokio-rayon.workspace = true
+rand_isaac.workspace = true
+futures.workspace = true
+pyo3 = { workspace = true, optional = true }
+indicatif.workspace = true
+async-trait.workspace = true
+toml.workspace = true
+strum.workspace = true
+image.workspace = true
+derive_more = { workspace = true}
+akin.workspace = true
+variantly.workspace = true
+tracing-subscriber.workspace = true
+derive-new.workspace = true
+itertools.workspace = true
+sysinfo.workspace = true
+inference-vision.workspace = true
+csv.workspace = true
+reqwest.workspace = true
+base64.workspace = true
+bytemuck_derive.workspace = true
+inference-paged-attn = { workspace = true, optional = true }
+inference-quant.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+utoipa = { workspace = true, optional = true }
+schemars.workspace = true
+serde-saphyr.workspace = true
+regex.workspace = true
+serde_plain.workspace = true
+as-any.workspace = true
+float8.workspace = true
+llguidance.workspace = true
+toktrie_hf_tokenizers.workspace = true
+toktrie.workspace = true
+candle-flash-attn-v3 = { workspace = true, optional = true }
+safetensors.workspace = true
+serde-big-array.workspace = true
+interprocess.workspace = true
+urlencoding.workspace = true
+scraper.workspace = true
+html2text.workspace = true
+tokio-tungstenite.workspace = true
+http.workspace = true
+ordered-float.workspace = true
+hashbrown.workspace = true
+parking_lot.workspace = true
+ahash.workspace = true
+num-traits.workspace = true
+libc.workspace = true
+bm25.workspace = true
+rubato.workspace = true
+rustfft.workspace = true
+hound.workspace = true
+apodize.workspace = true
+symphonia.workspace = true
+inference-audio.workspace = true
+rust-mcp-schema.workspace = true
+inference-mcp = { workspace = true, features = ["utoipa"] }
+inference-code-exec.workspace = true
+inference-sandbox.workspace = true
+statrs.workspace = true
+openai-harmony = "0.0.8"
+
+[target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))'.dependencies]
+objc = { workspace = true, optional = true }
+objc2-metal = { workspace = true, optional = true }
+candle-metal-kernels = { workspace = true, optional = true }
+
+[features]
+pyo3_macros = ["pyo3", "inference-mcp/pyo3_macros"]
+cuda = [
+    "candle-core/cuda",
+    "candle-nn/cuda",
+    "dep:cudaforge",
+    "inference-quant/cuda",
+    "dep:inference-paged-attn",
+    "inference-paged-attn/cuda",
+]
+cudnn = ["candle-core/cudnn"]
+cutile = ["cuda", "inference-quant/cutile"]
+metal = [
+    "candle-core/metal",
+    "candle-nn/metal",
+    "inference-quant/metal",
+    "dep:candle-metal-kernels",
+    "dep:objc",
+    "dep:inference-paged-attn",
+    "inference-paged-attn/metal",
+    "dep:objc2-metal"
+]
+flash-attn = ["cuda", "dep:inference-flash-attn", "inference-flash-attn/cuda"]
+flash-attn-v3 = ["cuda", "dep:candle-flash-attn-v3"]
+accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "inference-quant/accelerate"]
+mkl = ["candle-core/mkl", "candle-nn/mkl"]
+nccl = ["cuda", "inference-quant/nccl"]
+utoipa = ["dep:utoipa"]
+ring = ["inference-quant/ring"]
+code-execution = []
+
+[build-dependencies]
+cudaforge = { workspace = true, optional = true }

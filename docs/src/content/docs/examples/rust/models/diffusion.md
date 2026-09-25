@@ -9,17 +9,17 @@ sidebar:
 
 Image generation using a diffusion model.
 
-Run with: `cargo run --release --example diffusion -p mistralrs`
+Run with: `cargo run --release --example diffusion -p inference`
 
 ```rust
 //! Image generation using a diffusion model.
 //!
-//! Run with: `cargo run --release --example diffusion -p mistralrs`
+//! Run with: `cargo run --release --example diffusion -p inference`
 
 use std::time::Instant;
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     DiffusionGenerationParams, DiffusionLoaderType, DiffusionModelBuilder,
     ImageGenerationResponseFormat,
 };
@@ -57,4 +57,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/models/diffusion/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/diffusion/main.rs)
+Source: [`inference/examples/models/diffusion/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/diffusion/main.rs)

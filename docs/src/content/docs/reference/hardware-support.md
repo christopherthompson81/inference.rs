@@ -1,6 +1,6 @@
 ---
 title: Hardware support
-description: GPUs, compute capabilities, and accelerators mistral.rs supports, and which prebuilt binaries are published.
+description: GPUs, compute capabilities, and accelerators inference.rs supports, and which prebuilt binaries are published.
 ---
 
 Use this page to check whether a prebuilt binary exists for your accelerator. If you are installing on a normal workstation or server, start with the [quickstart](/quickstart/) and let the installer choose.
@@ -35,7 +35,7 @@ The minimum supported NVIDIA GPU is **Ampere (compute capability 8.0)**. Turing 
 CUDA artifact names encode both the toolkit lane and compute capability:
 
 ```text
-mistralrs-cuda128-sm90-aarch64-unknown-linux-gnu.tar.gz
+inference-cuda128-sm90-aarch64-unknown-linux-gnu.tar.gz
 ```
 
 The installer chooses the newest published lane that the installed NVIDIA driver can load.

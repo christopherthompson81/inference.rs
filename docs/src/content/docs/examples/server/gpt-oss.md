@@ -10,7 +10,7 @@ sidebar:
 Example of using GPT-OSS model via the HTTP API.
 
 Start the server first:
-    mistralrs serve -p 1234 -m openai/gpt-oss-20b
+    inference serve -p 1234 -m openai/gpt-oss-20b
 
 GPT-OSS is a Mixture of Experts model with MXFP4 quantized experts
 and custom attention with per-head sinks.
@@ -20,7 +20,7 @@ and custom attention with per-head sinks.
 Example of using GPT-OSS model via the HTTP API.
 
 Start the server first:
-    mistralrs serve -p 1234 -m openai/gpt-oss-20b
+    inference serve -p 1234 -m openai/gpt-oss-20b
 
 GPT-OSS is a Mixture of Experts model with MXFP4 quantized experts
 and custom attention with per-head sinks.

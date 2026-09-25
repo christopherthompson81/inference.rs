@@ -7,25 +7,25 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOW = ROOT / ".github/workflows/release.yml"
-BUILD_ROOT_ENV = "MISTRALRS_CUDA_BUILD_ROOT"
-BUILD_ROOT = "/cache/mistralrs-cuda-objects-v1"
+BUILD_ROOT_ENV = "INFERENCE_RS_CUDA_BUILD_ROOT"
+BUILD_ROOT = "/cache/inference_rs-cuda-objects-v1"
 CACHE_IDENTITY = (
-    "mistral.rs-cuda-v1-${{ matrix.runner }}-${{ matrix.cuda }}-sm${{ matrix.sm }}"
+    "inference.rs-cuda-v1-${{ matrix.runner }}-${{ matrix.cuda }}-sm${{ matrix.sm }}"
 )
 BUILD_SCRIPTS = {
-    "mistralrs-core/build.rs": {
+    "inference_rs-core/build.rs": {
         "component": "core",
-        "archives": ["libmistralrscuda.a", "libmistralrsflashinfergdn.a"],
+        "archives": ["libinferencecuda.a", "libinferenceflashinfergdn.a"],
     },
-    "mistralrs-quant/build.rs": {
+    "inference_rs-quant/build.rs": {
         "component": "quant",
-        "archives": ["libmistralrsquant.a", "libmistralrsdeepgemm.a"],
+        "archives": ["libinferencequant.a", "libinferencedeepgemm.a"],
     },
-    "mistralrs-paged-attn/build.rs": {
+    "inference_rs-paged-attn/build.rs": {
         "component": "paged-attn",
-        "archives": ["libmistralrspagedattention.a", "libmistralrsfa3paged.a"],
+        "archives": ["libinferencepagedattention.a", "libinferencefa3paged.a"],
     },
-    "mistralrs-flash-attn/build.rs": {
+    "inference_rs-flash-attn/build.rs": {
         "component": "flash-attn",
         "archives": ["libflashattention.a"],
     },
@@ -108,7 +108,7 @@ class ReleaseCudaCacheWorkflowTests(unittest.TestCase):
         self.assertIn(target, cli)
         self.assertIn(target, wheel)
         self.assertIn(
-            "bin=target/${{ matrix.triple }}/release/mistralrs",
+            "bin=target/${{ matrix.triple }}/release/inference_rs",
             bundle,
         )
 

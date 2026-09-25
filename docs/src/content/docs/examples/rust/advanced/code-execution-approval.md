@@ -10,13 +10,13 @@ sidebar:
 Python code execution with an approval callback.
 
 Run with:
-`cargo run --release --features code-execution --example code_execution_approval -p mistralrs`
+`cargo run --release --features code-execution --example code_execution_approval -p inference`
 
 ```rust
 //! Python code execution with an approval callback.
 //!
 //! Run with:
-//! `cargo run --release --features code-execution --example code_execution_approval -p mistralrs`
+//! `cargo run --release --features code-execution --example code_execution_approval -p inference`
 
 use std::{
     io::{self, Write},
@@ -24,7 +24,7 @@ use std::{
 };
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     AgentPermission, AgentToolApprovalCallback, AgentToolApprovalDecision, CodeExecutionConfig,
     IsqBits, ModelBuilder, RequestBuilder, TextMessageRole, TextMessages,
 };
@@ -91,4 +91,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/code_execution_approval/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/code_execution_approval/main.rs)
+Source: [`inference/examples/advanced/code_execution_approval/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/code_execution_approval/main.rs)

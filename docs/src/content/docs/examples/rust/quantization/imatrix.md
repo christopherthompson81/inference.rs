@@ -9,15 +9,15 @@ sidebar:
 
 ISQ quantization using a calibration file for importance-matrix collection.
 
-Run with: `cargo run --release --example imatrix -p mistralrs`
+Run with: `cargo run --release --example imatrix -p inference`
 
 ```rust
 //! ISQ quantization using a calibration file for importance-matrix collection.
 //!
-//! Run with: `cargo run --release --example imatrix -p mistralrs`
+//! Run with: `cargo run --release --example imatrix -p inference`
 
 use anyhow::Result;
-use mistralrs::{IsqBits, ModelBuilder, PagedAttentionMetaBuilder, TextMessageRole, TextMessages};
+use inference::{IsqBits, ModelBuilder, PagedAttentionMetaBuilder, TextMessageRole, TextMessages};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -51,4 +51,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/quantization/imatrix/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/quantization/imatrix/main.rs)
+Source: [`inference/examples/quantization/imatrix/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/quantization/imatrix/main.rs)

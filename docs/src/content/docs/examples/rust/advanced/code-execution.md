@@ -12,7 +12,7 @@ Python code execution example.
 The model is given `execute_python` and `reset_python_session` tools and
 can write and run Python code to answer questions.
 
-Run with: `cargo run --release --features code-execution --example code_execution -p mistralrs`
+Run with: `cargo run --release --features code-execution --example code_execution -p inference`
 
 ```rust
 //! Python code execution example.
@@ -20,10 +20,10 @@ Run with: `cargo run --release --features code-execution --example code_executio
 //! The model is given `execute_python` and `reset_python_session` tools and
 //! can write and run Python code to answer questions.
 //!
-//! Run with: `cargo run --release --features code-execution --example code_execution -p mistralrs`
+//! Run with: `cargo run --release --features code-execution --example code_execution -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     CodeExecutionConfig, IsqBits, ModelBuilder, NetworkMode, RequestBuilder, SandboxPolicy,
     TextMessageRole, TextMessages,
 };
@@ -67,4 +67,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/code_execution/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/code_execution/main.rs)
+Source: [`inference/examples/advanced/code_execution/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/code_execution/main.rs)

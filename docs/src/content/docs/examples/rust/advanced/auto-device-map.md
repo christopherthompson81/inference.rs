@@ -17,9 +17,9 @@ Runnable Rust SDK example `auto_device_map`.
 /// Device mapping distributes model layers across available GPUs automatically.
 /// This example shows both text and multimodal model usage with auto device mapping.
 ///
-/// Run with: `cargo run --release --example auto_device_map -p mistralrs`
+/// Run with: `cargo run --release --example auto_device_map -p inference`
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     AutoDeviceMapParams, DeviceMapSetting, IsqBits, TextMessageRole, TextMessages, TextModelBuilder,
 };
 
@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
 
     // For multimodal models, use MultimodalModelBuilder with the same DeviceMapSetting:
     //
-    // use mistralrs::{MultimodalModelBuilder, MultimodalMessages};
+    // use inference::{MultimodalModelBuilder, MultimodalMessages};
     //
     // let model = MultimodalModelBuilder::new("lamm-mit/Cephalo-Llama-3.2-11B-Vision-Instruct-128k")
     //     .with_auto_isq(IsqBits::Four)
@@ -72,4 +72,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/auto_device_map/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/auto_device_map/main.rs)
+Source: [`inference/examples/advanced/auto_device_map/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/auto_device_map/main.rs)

@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """
-Example of using IBM Granite 4.0 model with mistral.rs
+Example of using IBM Granite 4.0 model with inference.rs
 """
 
-from mistralrs import Runner, Which, ChatCompletionRequest, Architecture
+from inference_rs import Runner, Which, ChatCompletionRequest, Architecture
 
 # Create a Granite model runner
 runner = Runner(

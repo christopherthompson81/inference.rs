@@ -1,9 +1,9 @@
 ---
 title: Rust SDK reference
-description: The Model API surface of the mistralrs crate, with signatures and links to runnable examples.
+description: The Model API surface of the inference crate, with signatures and links to runnable examples.
 ---
 
-`Model` is the object every builder (`ModelBuilder`, `GgufModelBuilder`, `EmbeddingModelBuilder`, ...) returns. All methods take `&self`; share one instance by reference or in an `Arc`. This page lists the surface; [docs.rs/mistralrs](https://docs.rs/mistralrs) has full rustdoc, and the [Rust examples](/examples/) are runnable.
+`Model` is the object every builder (`ModelBuilder`, `GgufModelBuilder`, `EmbeddingModelBuilder`, ...) returns. All methods take `&self`; share one instance by reference or in an `Arc`. This page lists the surface; [docs.rs/inference](https://docs.rs/mistralrs) has full rustdoc, and the [Rust examples](/examples/) are runnable.
 
 Most request methods have a `*_with_model(..., model_id: Option<&str>)` twin for multi-model setups; `None` targets the default model. The twins are omitted below.
 
@@ -135,10 +135,10 @@ async fn detokenize(&self, tokens: Vec<u32>, skip_special_tokens: bool) -> Resul
 
 ## Introspection and management
 
-- `config() -> Result<MistralRsConfig>`: modalities and device info for the loaded model.
+- `config() -> Result<InferenceRsConfig>`: modalities and device info for the loaded model.
 - `max_sequence_length() -> Result<Option<usize>>`.
 - Multi-model: `list_models`, `add_model`, `remove_model`, `unload_model`, `reload_model`, `get_default_model_id`, `set_default_model_id`, `list_models_with_status`. Example: [multi-model](/examples/rust/advanced/multi-model/).
 - Sessions: `export_session`, `import_session`, `delete_session`, `fork_session`, `list_session_ids`. Guide: [sessions](/guides/agents/persist-sessions/).
 - `list_mcp_tools(model_id)`: [MCP (Model Context Protocol)](/guides/agents/connect-mcp-server/)-provided tools registered for a model, as `(name, description)` pairs.
 - `find_file(id)`: fetch the full body of a file emitted by the agentic runtime.
-- `inner() -> &MistralRs`: escape hatch to the underlying engine; `Model::new(Arc<MistralRs>)` wraps one back up.
+- `inner() -> &InferenceRs`: escape hatch to the underlying engine; `Model::new(Arc<InferenceRs>)` wraps one back up.

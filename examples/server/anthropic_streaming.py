@@ -1,8 +1,8 @@
 """
-Streaming Anthropic Messages API example for the mistral.rs server.
+Streaming Anthropic Messages API example for the inference.rs server.
 
 Run the server:
-    mistralrs serve -p 1234 -m Qwen/Qwen3-4B
+    inference_rs serve -p 1234 -m Qwen/Qwen3-4B
 
 Then run:
     python3 examples/server/anthropic_streaming.py
@@ -12,7 +12,7 @@ import json
 import os
 import urllib.request
 
-BASE_URL = os.environ.get("MISTRALRS_BASE_URL", "http://localhost:1234")
+BASE_URL = os.environ.get("INFERENCE_RS_BASE_URL", "http://localhost:1234")
 API_KEY = os.environ.get("ANTHROPIC_API_KEY", "local")
 
 

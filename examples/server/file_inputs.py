@@ -1,7 +1,7 @@
-"""OpenAI-compatible file input examples for a local mistral.rs server.
+"""OpenAI-compatible file input examples for a local inference.rs server.
 
 Start a server first:
-    mistralrs serve --agent -m <model>
+    inference_rs serve --agent -m <model>
 """
 
 import base64

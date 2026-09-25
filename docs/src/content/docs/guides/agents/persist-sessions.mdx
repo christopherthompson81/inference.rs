@@ -64,7 +64,7 @@ curl -X DELETE http://localhost:1234/v1/sessions/user-42-chat-abc
 `Runner` exposes the same operations as the HTTP endpoints; each takes an optional `model_id` keyword for multi-model setups:
 
 ```python
-from mistralrs import ChatCompletionRequest, Runner, Which
+from inference_rs import ChatCompletionRequest, Runner, Which
 
 runner = Runner(which=Which.Plain(model_id="Qwen/Qwen3-4B"))
 

@@ -1,12 +1,12 @@
 ---
 title: Serve an OpenAI-compatible API
-description: Run mistralrs serve and use OpenAI SDKs and compatible clients against the local server.
+description: Run inference serve and use OpenAI SDKs and compatible clients against the local server.
 ---
 
-`mistralrs serve` puts a local model behind OpenAI-compatible endpoints under `/v1`. OpenAI SDKs and compatible clients work unchanged with `http://localhost:1234/v1` as the base URL.
+`inference serve` puts a local model behind OpenAI-compatible endpoints under `/v1`. OpenAI SDKs and compatible clients work unchanged with `http://localhost:1234/v1` as the base URL.
 
 ```bash
-mistralrs serve -m Qwen/Qwen3-4B
+inference serve -m Qwen/Qwen3-4B
 ```
 
 Then send a request:
@@ -38,7 +38,7 @@ client = OpenAI(base_url="http://localhost:1234/v1", api_key="not-used")
 
 response = client.chat.completions.create(
     model="default",
-    messages=[{"role": "user", "content": "Say hello from mistral.rs."}],
+    messages=[{"role": "user", "content": "Say hello from inference.rs."}],
 )
 
 print(response.choices[0].message.content)
@@ -53,7 +53,7 @@ The `api_key` is required by the client but not validated by the server; see [au
 | Endpoint | Purpose |
 |---|---|
 | `GET /v1/models` | List loaded base models and LoRA alias model cards. |
-| `POST /v1/chat/completions` | Chat, streaming, tool calling, multimodal inputs, and mistral.rs agentic extensions. |
+| `POST /v1/chat/completions` | Chat, streaming, tool calling, multimodal inputs, and inference.rs agentic extensions. |
 | `POST /v1/responses` | OpenAI Responses API: response objects, polling, background runs, cancellation. |
 | `POST /v1/skills` | Upload Skills for OpenAI-compatible Responses or Anthropic-compatible Messages. |
 | `GET /v1/skills` | List uploaded skills. Anthropic headers return Anthropic-shaped list objects. |
@@ -95,7 +95,7 @@ OpenAI-compatible function tools work on Chat Completions and Responses, includi
 Start the server with agentic capabilities to use server-side tools and agentic fields. Chat Completions uses `web_search_options` for web search and `tools: [{"type":"code_interpreter","container":{"type":"auto"}}]` for code execution. Responses uses hosted tools in the `tools` array for web search, code execution, shell, and [OpenAI-compatible Skills](/guides/agents/skills/).
 
 ```bash
-mistralrs serve --agent -m Qwen/Qwen3-4B
+inference serve --agent -m Qwen/Qwen3-4B
 ```
 
 For tool timelines, generated files, search, code execution, shell, Skills, and session state, see [agentic runtime for apps](/guides/agents/agentic-runtime/).

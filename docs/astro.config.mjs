@@ -75,7 +75,7 @@ export default defineConfig({
   },
   integrations: [
     starlight({
-      title: 'mistral.rs',
+      title: 'inference.rs',
       description: 'Fast, flexible LLM inference engine written in Rust.',
       social: [
         { icon: 'github', label: 'GitHub', href: 'https://github.com/EricLBuehler/mistral.rs' },
@@ -84,7 +84,7 @@ export default defineConfig({
       editLink: {
         baseUrl: 'https://github.com/EricLBuehler/mistral.rs/edit/master/docs/',
       },
-      // openapi.json is refreshed by `cargo test -p mistralrs-server-core dump_openapi_json`
+      // openapi.json is refreshed by `cargo test -p inference-server-core dump_openapi_json`
       plugins: [
         starlightOpenAPI([
           {

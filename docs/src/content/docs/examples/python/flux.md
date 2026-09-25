@@ -12,7 +12,7 @@ Runnable Python SDK example `flux`.
 <!-- needs-header -->
 
 ```python
-from mistralrs import (
+from inference_rs import (
     Runner,
     Which,
     DiffusionArchitecture,

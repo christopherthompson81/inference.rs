@@ -11,12 +11,12 @@ For `run`, `serve`, and `bench`, `--quant` selects an available pre-quantized ar
 safetensors source, it falls back to runtime quantization when no matching UQFF is available:
 
 ```bash
-mistralrs run --quant 4 -m google/gemma-4-E4B-it
+inference run --quant 4 -m google/gemma-4-E4B-it
 ```
 
 `--quant 4` first looks for a matching prebuilt
 [UQFF (Universal Quantized File Format)](/guides/quantization/uqff/) in
-`mistralrs-community/<model>-UQFF` and loads it directly if one is published. Otherwise it falls
+`inference-community/<model>-UQFF` and loads it directly if one is published. Otherwise it falls
 back to [ISQ (in-situ quantization)](/reference/quantization-types/): the engine
 quantizes weights on the fly as they load, picking a hardware-appropriate format (AFQ4 on Metal,
 Q4K elsewhere). With ISQ the full unquantized model is never resident in memory; loading just
@@ -30,7 +30,7 @@ local directory containing GGUF files instead selects a matching GGUF artifact.
 Footprint scales roughly linearly with bits per weight: a BF16 model uses about half the memory
 at `--quant 8` and a quarter at `--quant 4`. The KV cache is a separate budget that depends on
 context length, not on weight quantization. Use `nvidia-smi` (or equivalent) to measure, and
-[`mistralrs tune`](#estimate-with-mistralrs-tune) to estimate before downloading anything.
+[`inference tune`](#estimate-with-inference-tune) to estimate before downloading anything.
 
 ## Picking a bit width
 
@@ -51,9 +51,9 @@ output quality.
 `--quant` also accepts format names:
 
 ```bash
-mistralrs run --quant q4k -m google/gemma-4-E4B-it     # 4-bit K-quant
-mistralrs run --quant afq4 -m google/gemma-4-E4B-it    # AFQ, Metal-optimized
-mistralrs run --quant q8_0 -m google/gemma-4-E4B-it    # 8-bit block quant
+inference run --quant q4k -m google/gemma-4-E4B-it     # 4-bit K-quant
+inference run --quant afq4 -m google/gemma-4-E4B-it    # AFQ, Metal-optimized
+inference run --quant q8_0 -m google/gemma-4-E4B-it    # 8-bit block quant
 ```
 
 How the numeric shorthands resolve per backend, plus the full type list and hardware
@@ -63,27 +63,27 @@ For `run`, `serve`, and `bench`, use `--isq` instead of `--quant` only when you 
 runtime ISQ and skip the UQFF lookup. For GGUF, `--quant` selects an existing variant while
 `--isq` requantizes an exact file selected with `-f`.
 
-## Letting mistral.rs decide
+## Letting inference.rs decide
 
 `--quant auto` estimates what fits on the current host and picks for you:
 
 ```bash
-mistralrs run --quant auto -m google/gemma-4-E4B-it
+inference run --quant auto -m google/gemma-4-E4B-it
 ```
 
-It runs the same analysis as `mistralrs tune` with the balanced profile. If the model fits at
+It runs the same analysis as `inference tune` with the balanced profile. If the model fits at
 full precision, no quantization is applied; otherwise the recommended type is resolved like an
 explicit `--quant` value (prebuilt UQFF preferred, ISQ fallback).
 
 `--quant auto` does not select a GGUF file. For a GGUF repository, pass an explicit bit width or
 format name.
 
-### Estimate with mistralrs tune
+### Estimate with inference tune
 
-`mistralrs tune` prints the full analysis instead of acting on it:
+`inference tune` prints the full analysis instead of acting on it:
 
 ```bash
-mistralrs tune -m google/gemma-4-E4B-it
+inference tune -m google/gemma-4-E4B-it
 ```
 
 Output is a table with columns `Quant | Est. Size | VRAM % | Context Room | Quality | Status`.
@@ -98,14 +98,14 @@ No weights are downloaded, no model is loaded, and the quality column is a fixed
 Variations:
 
 ```bash
-mistralrs tune --profile quality -m google/gemma-4-E4B-it     # quality, balanced (default), fast
-mistralrs tune --isq q4k -m google/gemma-4-E4B-it             # bias toward a specific target
-mistralrs tune --json -m google/gemma-4-E4B-it                # machine-readable output
-mistralrs tune --emit-config gemma.toml -m google/gemma-4-E4B-it
+inference tune --profile quality -m google/gemma-4-E4B-it     # quality, balanced (default), fast
+inference tune --isq q4k -m google/gemma-4-E4B-it             # bias toward a specific target
+inference tune --json -m google/gemma-4-E4B-it                # machine-readable output
+inference tune --emit-config gemma.toml -m google/gemma-4-E4B-it
 ```
 
 `--emit-config` writes a TOML config with the recommended settings; run it with
-`mistralrs from-config -f gemma.toml`. `tune` rejects `--quant auto` since tune is the
+`inference from-config -f gemma.toml`. `tune` rejects `--quant auto` since tune is the
 recommender. All flags: [CLI reference](/reference/cli/tune/).
 
 ## Quantization on each surface
@@ -116,14 +116,14 @@ recommender. All flags: [CLI reference](/reference/cli/tune/).
 Use `--quant` for artifact selection with an ISQ fallback, or `--isq` to force runtime ISQ:
 
 ```bash
-mistralrs serve -m google/gemma-4-E4B-it --quant 4
-mistralrs serve -m google/gemma-4-E4B-it --isq q4k
+inference serve -m google/gemma-4-E4B-it --quant 4
+inference serve -m google/gemma-4-E4B-it --isq q4k
 
 # Requantize an exact GGUF source instead of selecting a published variant.
-mistralrs serve -f /path/model-BF16.gguf --isq q4k
+inference serve -f /path/model-BF16.gguf --isq q4k
 ```
 
-To quantize once and reuse the result, write a UQFF file with `mistralrs quantize`. See the
+To quantize once and reuse the result, write a UQFF file with `inference quantize`. See the
 [UQFF guide](/guides/quantization/uqff/). The command accepts safetensors sources and
 compatible GGUF inputs selected with either `-f` or `-m <repo> --quant <level-or-name>`.
 
@@ -148,7 +148,7 @@ curl -X POST localhost:1234/re_isq \
 against the actual device:
 
 ```python
-from mistralrs import Runner, Which
+from inference_rs import Runner, Which
 
 runner = Runner(
     which=Which.Plain(model_id="microsoft/Phi-3.5-mini-instruct"),
@@ -168,7 +168,7 @@ Use `Which.GGUF(...)` with the same `in_situ_quant` argument to requantize a com
 type:
 
 ```rust
-use mistralrs::{IsqBits, ModelBuilder};
+use inference::{IsqBits, ModelBuilder};
 
 let model = ModelBuilder::new("Qwen/Qwen3-4B")
     .with_auto_isq(IsqBits::Four)
@@ -220,7 +220,7 @@ and incompatible combinations are rejected at load time. Full constraint table:
   the shared (non-expert) trunk stays at its source precision.
 
 `moqe` is useful on MoE models where the experts dominate parameter count.
-It applies when mistral.rs performs ISQ, including UQFF generation. Loading a pre-quantized GGUF or UQFF with `--quant` does not change that artifact's layer organization.
+It applies when inference.rs performs ISQ, including UQFF generation. Loading a pre-quantized GGUF or UQFF with `--quant` does not change that artifact's layer organization.
 
 ### imatrix
 
@@ -231,7 +231,7 @@ precision to higher-impact weights, which matters most at low bit widths.
 Two flags, used with `--isq`:
 
 - `--imatrix <path>`: load an existing imatrix. Accepts llama.cpp `.imatrix` files (layer names
-  are mapped automatically) or mistral.rs `.cimatrix` files.
+  are mapped automatically) or inference.rs `.cimatrix` files.
 - `--calibration-file <path>`: generate the importance data at load time by running the
   calibration text through the model, then quantize.
 

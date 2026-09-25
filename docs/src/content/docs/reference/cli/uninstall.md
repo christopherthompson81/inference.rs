@@ -1,16 +1,16 @@
 ---
-title: "mistralrs uninstall"
+title: "inference uninstall"
 description: "Remove an installer-managed install"
 sidebar:
   order: 14
 ---
 
-<!-- Generated from clap definitions by mistralrs-cli docgen. Do not edit. -->
+<!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->
 
 Remove an installer-managed install
 
 ```
-mistralrs uninstall [OPTIONS]
+inference uninstall [OPTIONS]
 ```
 
 | Option | Default | Description |

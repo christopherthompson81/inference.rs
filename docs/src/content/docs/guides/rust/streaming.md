@@ -9,7 +9,7 @@ description: Handle Response variants, errors, tool progress events, cancellatio
 
 ```rust
 use futures::StreamExt;
-use mistralrs::{ChatCompletionChunkResponse, ChunkChoice, Delta, Response};
+use inference::{ChatCompletionChunkResponse, ChunkChoice, Delta, Response};
 use std::io::Write;
 
 let mut stream = model.stream_chat_request(messages).await?;
@@ -56,7 +56,7 @@ The example uses `_ => {}` for brevity; production code should match the agentic
 When the [agentic loop](/guides/agents/build-an-agent/) executes a tool mid-stream (web search, code execution, shell, [MCP (Model Context Protocol)](/guides/agents/connect-mcp-server/) tools), the stream interleaves progress events with content chunks, in stream order:
 
 ```rust
-use mistralrs::core::AgenticToolCallPhase;
+use inference::core::AgenticToolCallPhase;
 
 Response::AgenticToolCallProgress { round, tool_name, phase } => {
     match phase {

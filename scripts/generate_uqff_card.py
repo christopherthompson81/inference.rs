@@ -1,7 +1,7 @@
 # Generate a UQFF Hugging Face model card .md file.
-# NOTE: This script is deprecated. The `mistralrs quantize` command now
+# NOTE: This script is deprecated. The `inference_rs quantize` command now
 # automatically generates a README.md model card when using directory output mode.
-# Use `mistralrs quantize -m <model> --isq <level> -o <dir>/` instead.
+# Use `inference_rs quantize -m <model> --isq <level> -o <dir>/` instead.
 
 msg = "This script is used to generate a Hugging Face model card."
 print("-" * len(msg))
@@ -16,7 +16,7 @@ display_model_id = input(
 output = f"""---
 tags:
   - uqff
-  - mistral.rs
+  - inference.rs
 base_model: {model_id}
 base_model_relation: quantized
 ---
@@ -29,10 +29,10 @@ base_model_relation: quantized
 output += f"# `{model_id}`, UQFF quantization\n\n"
 
 output += """
-Run with [mistral.rs](https://github.com/EricLBuehler/mistral.rs). Documentation: [UQFF docs](https://docs.mistralrs.dev/guides/quantization/uqff/).
+Run with [inference.rs](https://github.com/EricLBuehler/mistral.rs). Documentation: [UQFF docs](https://docs.mistralrs.dev/guides/quantization/uqff/).
 
 1) **Flexible** 🌀: Multiple quantization formats in *one* file format with *one* framework to run them all.
-2) **Versioned**: Embedded semantic-version metadata lets mistral.rs detect incompatible artifacts before loading.
+2) **Versioned**: Embedded semantic-version metadata lets inference.rs detect incompatible artifacts before loading.
 3) **Easy** 🤗: Download UQFF models *easily* and *quickly* from Hugging Face, or use a local file.
 4) **Customizable** 🛠️: Make and publish your own UQFF files in minutes.
 """
@@ -71,7 +71,7 @@ try:
         else:
             output += f"|{quants.strip().upper()}|"
 
-        output += f"`mistralrs run -m {display_model_id} --from-uqff {file}`|\n"
+        output += f"`inference_rs run -m {display_model_id} --from-uqff {file}`|\n"
         n += 1
         print()
 except KeyboardInterrupt:

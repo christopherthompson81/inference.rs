@@ -1,4 +1,4 @@
-# mistral.rs landing page
+# inference.rs landing page
 
 The static one-page site for [mistralrs.dev](https://mistralrs.dev), built with
 Vite for Cloudflare Pages.

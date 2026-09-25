@@ -9,17 +9,17 @@ sidebar:
 
 Multimodal streaming with combined image and audio inputs.
 
-Run with: `cargo run --release --example multimodal -p mistralrs`
+Run with: `cargo run --release --example multimodal -p inference`
 
 ```rust
 //! Multimodal streaming with combined image and audio inputs.
 //!
-//! Run with: `cargo run --release --example multimodal -p mistralrs`
+//! Run with: `cargo run --release --example multimodal -p inference`
 
 use std::io::Write;
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     AudioInput, ChatCompletionChunkResponse, ChunkChoice, Delta, MultimodalMessages,
     MultimodalModelBuilder, Response, TextMessageRole,
 };
@@ -79,4 +79,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/models/multimodal/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/multimodal/main.rs)
+Source: [`inference/examples/models/multimodal/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/multimodal/main.rs)

@@ -1,24 +1,24 @@
 ---
-title: "mistralrs uqff"
+title: "inference uqff"
 description: "Inspect, report, or verify UQFF artifacts"
 sidebar:
   order: 6
 ---
 
-<!-- Generated from clap definitions by mistralrs-cli docgen. Do not edit. -->
+<!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->
 
 Inspect, report, or verify UQFF artifacts
 
 ```
-mistralrs uqff [OPTIONS] <COMMAND>
+inference uqff [OPTIONS] <COMMAND>
 ```
 
-## mistralrs uqff report
+## inference uqff report
 
 Print or write a UQFF report
 
 ```
-mistralrs uqff report [OPTIONS] --model-id <MODEL_ID>
+inference uqff report [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -31,12 +31,12 @@ mistralrs uqff report [OPTIONS] --model-id <MODEL_ID>
 | `--base-model <BASE_MODEL>` |  | Base model ID to include in a written report |
 | `--repo-id <REPO_ID>` |  | Hugging Face repo ID to include in a written report |
 
-## mistralrs uqff verify
+## inference uqff verify
 
 Validate UQFF artifact structure
 
 ```
-mistralrs uqff verify [OPTIONS] --model-id <MODEL_ID>
+inference uqff verify [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -48,12 +48,12 @@ mistralrs uqff verify [OPTIONS] --model-id <MODEL_ID>
 | `--strict` | `false` | Fail on missing report/producer metadata or fallback layers |
 | `--allow-newer-minor` | `false` | Allow same-major UQFF files with a newer minor version |
 
-## mistralrs uqff inspect
+## inference uqff inspect
 
 Open a UQFF-aware tensor explorer
 
 ```
-mistralrs uqff inspect [OPTIONS] --model-id <MODEL_ID>
+inference uqff inspect [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |

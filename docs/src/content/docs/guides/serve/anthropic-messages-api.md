@@ -1,9 +1,9 @@
 ---
 title: Anthropic Messages API
-description: Use Anthropic-compatible clients with the mistralrs HTTP server.
+description: Use Anthropic-compatible clients with the inference HTTP server.
 ---
 
-mistral.rs exposes Anthropic-compatible Messages endpoints at `POST /v1/messages`
+inference.rs exposes Anthropic-compatible Messages endpoints at `POST /v1/messages`
 and `POST /v1/messages/count_tokens`. They run through the same local model,
 scheduler, chat templates, multimodal handling, tool calling, and [agentic runtime](/guides/agents/agentic-runtime/)
 as `/v1/chat/completions`. Anthropic clients use `http://localhost:1234` as the
@@ -117,16 +117,16 @@ Request fields:
 | `temperature`, `top_p`, `top_k`, `min_p` | Supported. |
 | `stop_sequences` | Supported. |
 | `stream` | Supported. |
-| `tools` | Client tools are converted to OpenAI-compatible function tools. Anthropic server tools for `web_search_*` and `code_execution_*` map to mistral.rs agentic features. |
+| `tools` | Client tools are converted to OpenAI-compatible function tools. Anthropic server tools for `web_search_*` and `code_execution_*` map to inference.rs agentic features. |
 | `tool_choice` | `auto`, `any`, `none`, and specific client `tool` choices are supported. `any` requires a client tool call when client tools are present. Anthropic server-tool choices use local agentic auto-selection. |
 | `container.skills` | Supports uploaded custom Skills with `{"type":"custom","skill_id":"...","version":"latest"}`. Anthropic-managed built-in Skills such as `pptx`, `xlsx`, `docx`, and `pdf` are not bundled. |
 | `thinking` | `enabled` and `adaptive` map to thinking on; `disabled` maps to thinking off. `display: "omitted"` suppresses reasoning text while preserving the thinking block lifecycle. The loaded chat template determines the effect. |
-| `output_config` | Native `effort` and JSON Schema `format` are supported. Effort accepts `low`, `medium`, `high`, `xhigh`, and `max`; `max` maps to local `xhigh`. Do not combine these fields with the equivalent mistral.rs extensions. |
-| `enable_thinking`, `reasoning_effort` | Supported as mistral.rs extensions. Effort also accepts `off`; `none` aliases `off`. If all controls are omitted, thinking defaults on with no selected effort. Contradictory native and extension controls return a validation error. |
-| `logit_bias`, `logprobs`, `top_logprobs` | Supported as mistral.rs extensions. |
-| `presence_penalty`, `frequency_penalty`, `repetition_penalty` | Supported as mistral.rs extensions. |
-| `response_format`, `grammar` | Supported as mistral.rs extensions. Do not set both in one request. |
-| `dry_multiplier`, `dry_base`, `dry_allowed_length`, `dry_sequence_breakers` | Supported as mistral.rs extensions. |
+| `output_config` | Native `effort` and JSON Schema `format` are supported. Effort accepts `low`, `medium`, `high`, `xhigh`, and `max`; `max` maps to local `xhigh`. Do not combine these fields with the equivalent inference.rs extensions. |
+| `enable_thinking`, `reasoning_effort` | Supported as inference.rs extensions. Effort also accepts `off`; `none` aliases `off`. If all controls are omitted, thinking defaults on with no selected effort. Contradictory native and extension controls return a validation error. |
+| `logit_bias`, `logprobs`, `top_logprobs` | Supported as inference.rs extensions. |
+| `presence_penalty`, `frequency_penalty`, `repetition_penalty` | Supported as inference.rs extensions. |
+| `response_format`, `grammar` | Supported as inference.rs extensions. Do not set both in one request. |
+| `dry_multiplier`, `dry_base`, `dry_allowed_length`, `dry_sequence_breakers` | Supported as inference.rs extensions. |
 | `metadata` | Accepted for client compatibility. |
 
 Content blocks:
@@ -139,7 +139,7 @@ Content blocks:
 | `tool_result` | Supported on user messages. String and text-block results are forwarded as tool messages. |
 | `thinking`, `redacted_thinking` | Accepted in request history. Returned when the model exposes separate reasoning content. |
 
-mistral.rs agentic extensions accepted on this endpoint: `session_id`,
+inference.rs agentic extensions accepted on this endpoint: `session_id`,
 `web_search_options`, `enable_code_execution`, `agent_permission`,
 `code_execution_permission`, `files`, `max_tool_rounds`, and `truncate_sequence`.
 
@@ -154,10 +154,10 @@ semantics:
 
 | Feature | Local behavior |
 |---|---|
-| Prompt caching | `cache_control` is accepted. mistral.rs uses its own automatic prefix cache, reports detected hits as `cache_read_input_tokens`, and reports `cache_creation_input_tokens` as `0`; explicit breakpoints and TTLs are not implemented. |
-| Extended thinking | Thinking maps to the loaded model's chat-template reasoning controls. `budget_tokens` is accepted but not enforced. Returned thinking blocks include an empty structural signature because mistral.rs cannot produce Anthropic cryptographic signatures. |
+| Prompt caching | `cache_control` is accepted. inference.rs uses its own automatic prefix cache, reports detected hits as `cache_read_input_tokens`, and reports `cache_creation_input_tokens` as `0`; explicit breakpoints and TTLs are not implemented. |
+| Extended thinking | Thinking maps to the loaded model's chat-template reasoning controls. `budget_tokens` is accepted but not enforced. Returned thinking blocks include an empty structural signature because inference.rs cannot produce Anthropic cryptographic signatures. |
 | Rich tool results | Text results are supported. Nested image, document, search-result, and citation blocks are not translated as multimodal tool content, and `is_error` is not separately modeled. |
-| Server tools | Web search and code execution use mistral.rs agentic implementations. Their extra streaming events are mistral.rs extensions, not Anthropic server-tool result blocks. |
+| Server tools | Web search and code execution use inference.rs agentic implementations. Their extra streaming events are inference.rs extensions, not Anthropic server-tool result blocks. |
 | Beta request controls | Unknown forward-compatible fields are ignored. Anthropic context management and context editing are not implemented. |
 
 `max_tokens` must be greater than zero. Authentication headers are accepted for
@@ -210,15 +210,15 @@ Return the result in a later user message with a `tool_result` block:
 }
 ```
 
-For server-executed tools, use the same mistral.rs agent fields as Chat Completions.
-Streaming may include mistral.rs named events such as `agentic_tool_call_progress`,
+For server-executed tools, use the same inference.rs agent fields as Chat Completions.
+Streaming may include inference.rs named events such as `agentic_tool_call_progress`,
 `agentic_tool_approval_required`, and `file_produced`.
 
 ## Agentic server tools
 
-Anthropic web search server-tool declarations enable mistral.rs web search for
+Anthropic web search server-tool declarations enable inference.rs web search for
 the request. The server must be started with search enabled, for example with
-`mistralrs serve --agent ...` or `mistralrs serve --enable-search ...`. Two
+`inference serve --agent ...` or `inference serve --enable-search ...`. Two
 declaration types are accepted:
 
 - `web_search_20250305` enables web search only.
@@ -246,8 +246,8 @@ declaration types are accepted:
 
 Anthropic code-execution server-tool declarations enable the built-in Python
 tool for the request. The server must be started with code execution enabled,
-for example with `mistralrs serve --agent ...` or
-`mistralrs serve --enable-code-execution ...`.
+for example with `inference serve --agent ...` or
+`inference serve --enable-code-execution ...`.
 
 ```json
 {
@@ -273,14 +273,14 @@ Start the server with shell execution enabled. `--agent` is recommended because
 it also enables the rest of the local agent runtime:
 
 ```bash
-mistralrs serve --agent -p 1234 -m Qwen/Qwen3-4B
+inference serve --agent -p 1234 -m Qwen/Qwen3-4B
 ```
 
 List and upload endpoints accept Anthropic headers. When an Anthropic header is
 present, `GET /v1/skills` returns Anthropic-style fields such as
 `display_title`, `latest_version`, `source`, `has_more`, and `next_page`.
 `source=custom` returns uploaded local Skills; `source=anthropic` returns an
-empty list because mistral.rs does not bundle Anthropic-managed built-in Skills.
+empty list because inference.rs does not bundle Anthropic-managed built-in Skills.
 
 Use the uploaded Skill in a Messages request:
 
@@ -314,7 +314,7 @@ declaration is accepted for client compatibility and enables Python code
 execution too, but the skill bundle itself is read from the shell workdir under
 `skills/<skill-name>/`.
 
-Generated artifacts are available the same way as other mistral.rs agentic
+Generated artifacts are available the same way as other inference.rs agentic
 files. Non-streaming responses include a top-level `files` array, and streaming
 responses emit `file_produced` events. Download bytes from
 `GET /v1/files/{file_id}/content`.
@@ -326,5 +326,5 @@ responses emit `file_produced` events. Download bytes from
 | [anthropic_chat](/examples/server/anthropic-chat/) | Plain non-streaming Messages request. |
 | [anthropic_streaming](/examples/server/anthropic-streaming/) | Anthropic SSE parsing. |
 | [anthropic_tool_calling](/examples/server/anthropic-tool-calling/) | Client-side tool use with `tool_use` and `tool_result`. |
-| [anthropic_agentic](/examples/server/anthropic-agentic/) | Anthropic server-tool declarations mapped to mistral.rs web search and code execution. |
+| [anthropic_agentic](/examples/server/anthropic-agentic/) | Anthropic server-tool declarations mapped to inference.rs web search and code execution. |
 | [anthropic_skills](/examples/server/anthropic-skills/) | Upload a custom Skill and use it from `container.skills`. |

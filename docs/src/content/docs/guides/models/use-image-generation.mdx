@@ -1,19 +1,19 @@
 ---
 title: Generate images with diffusion models
-description: Running FLUX and similar image-generation models through the mistralrs OpenAI-compatible API.
+description: Running FLUX and similar image-generation models through the inference OpenAI-compatible API.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-mistral.rs serves diffusion models through `POST /v1/images/generations`. The main supported model is FLUX; see the [supported models reference](/reference/supported-models/).
+inference.rs serves diffusion models through `POST /v1/images/generations`. The main supported model is FLUX; see the [supported models reference](/reference/supported-models/).
 
 ## Running FLUX
 
 ```bash
-mistralrs serve -m black-forest-labs/FLUX.1-schnell
+inference serve -m black-forest-labs/FLUX.1-schnell
 ```
 
-`FLUX.1-schnell` is permissively licensed. `FLUX.1-dev` requires Hugging Face license acceptance: accept on the model page, then authenticate with `mistralrs login`.
+`FLUX.1-schnell` is permissively licensed. `FLUX.1-dev` requires Hugging Face license acceptance: accept on the model page, then authenticate with `inference login`.
 
 The CLI and server always load the fully-resident `Flux` path. To trade speed for a much smaller GPU footprint, use the `FluxOffloaded` loader, which is only selectable from the Python and Rust SDKs shown below:
 
@@ -45,7 +45,7 @@ The response is JSON with a `data` array. Each entry has either `url` or `b64_js
 <TabItem label="Python">
 
 ```python
-from mistralrs import (
+from inference_rs import (
     DiffusionArchitecture,
     ImageGenerationResponseFormat,
     Runner,
@@ -70,7 +70,7 @@ print(response.data[0].url)
 <TabItem label="Rust">
 
 ```rust
-use mistralrs::{
+use inference::{
     DiffusionGenerationParams, DiffusionLoaderType, DiffusionModelBuilder,
     ImageGenerationResponseFormat,
 };

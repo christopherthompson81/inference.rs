@@ -3,15 +3,15 @@ title: Troubleshooting
 description: Verified causes and fixes.
 ---
 
-Before debugging setup issues, run `mistralrs doctor`. It reports detected hardware, compiled accelerator features, and Hugging Face connectivity.
+Before debugging setup issues, run `inference doctor`. It reports detected hardware, compiled accelerator features, and Hugging Face connectivity.
 
 For unlisted issues, file an issue on [GitHub](https://github.com/EricLBuehler/mistral.rs/issues) with a reproducer.
 
 ## Installation and build
 
-### `mistralrs: command not found` after install
+### `inference: command not found` after install
 
-Installer-managed binaries are exposed at `~/.local/bin/mistralrs`, backed by `~/.mistralrs/mistralrs`. Open a new shell or run `source "$HOME/.mistralrs/env"`. Manual Cargo installs use `~/.cargo/bin/mistralrs` and may require `source "$HOME/.cargo/env"`.
+Installer-managed binaries are exposed at `~/.local/bin/inference`, backed by `~/.inference-rs/inference`. Open a new shell or run `source "$HOME/.inference-rs/env"`. Manual Cargo installs use `~/.cargo/bin/inference` and may require `source "$HOME/.cargo/env"`.
 
 ### Build fails with `flash-attn` feature enabled
 
@@ -20,15 +20,15 @@ Flash attention requires compute capability 8.0+ (see [hardware support](/refere
 - `cuda nccl cudnn` on Linux with NCCL installed.
 - `cuda cudnn` otherwise.
 
-### `mistralrs login` rejects the token
+### `inference login` rejects the token
 
-The token must start with `hf_`. The validation happens in `mistralrs login` before saving.
+The token must start with `hf_`. The validation happens in `inference login` before saving.
 
 ## Model loading
 
 ### Gated repository (Gemma, LLaMA, FLUX.1-dev, etc.)
 
-Accept the license on the model's Hugging Face page, then save a token with `mistralrs login`. The token is stored at `~/.cache/huggingface/token` (or `$HF_HOME/token`).
+Accept the license on the model's Hugging Face page, then save a token with `inference login`. The token is stored at `~/.cache/huggingface/token` (or `$HF_HOME/token`).
 
 ### `Out of memory` on load
 
@@ -38,15 +38,15 @@ Add `--quant 4`. If still too large, try `--quant 2` or split across GPUs with `
 
 ### Generation slower than expected
 
-Verify accelerator features are compiled in with `mistralrs doctor`. If `cuda` is missing, the binary was built without GPU support.
+Verify accelerator features are compiled in with `inference doctor`. If `cuda` is missing, the binary was built without GPU support.
 
 For CUDA decode throughput, also check whether [paged attention](/guides/perf/paged-attention/) is active. FlashInfer (a CUDA attention backend) paged decode and CUDA graphs are enabled by default for compatible CUDA paged decode paths.
 
 ### CUDA graphs do not appear to help
 
-CUDA graphs apply to supported single-token decode steps only. They do not speed up prompt prefill. The first time a graph shape is seen, mistral.rs pays warmup and capture overhead; steady-state decode is the part that can improve.
+CUDA graphs apply to supported single-token decode steps only. They do not speed up prompt prefill. The first time a graph shape is seen, inference.rs pays warmup and capture overhead; steady-state decode is the part that can improve.
 
-If graph capture or replay fails, mistral.rs logs a warning and disables CUDA graphs for that loaded pipeline. Set `MISTRALRS_CUDA_GRAPHS=0` to compare with the normal CUDA path. See [CUDA graphs](/guides/perf/paged-attention/#cuda-graphs).
+If graph capture or replay fails, inference.rs logs a warning and disables CUDA graphs for that loaded pipeline. Set `INFERENCE_RS_CUDA_GRAPHS=0` to compare with the normal CUDA path. See [CUDA graphs](/guides/perf/paged-attention/#cuda-graphs).
 
 ### Response cut off
 
@@ -63,11 +63,11 @@ Check the `Server listening on http://...` line in the server output to confirm 
 
 ### CORS errors in a browser
 
-The default allows any origin. Custom CORS configuration is only available programmatically through `MistralRsServerRouterBuilder`.
+The default allows any origin. Custom CORS configuration is only available programmatically through `InferenceRsServerRouterBuilder`.
 
 ### `413 Payload Too Large`
 
-The default body limit is 50 MB and is not configurable via the CLI. Configure programmatically through `MistralRsServerRouterBuilder`.
+The default body limit is 50 MB and is not configurable via the CLI. Configure programmatically through `InferenceRsServerRouterBuilder`.
 
 ### UI does not load at `/ui`
 
@@ -81,9 +81,9 @@ The session expired (30-minute idle TTL) or was evicted (128-session cap, LRU). 
 
 ## Python SDK
 
-### `from mistralrs import Runner` fails with `ImportError`
+### `from inference_rs import Runner` fails with `ImportError`
 
-The wrong wheel was installed. `pip install mistralrs` gives the CPU (Linux/Windows) or Metal (macOS) wheel; for NVIDIA, install a CUDA wheel from the release with `--find-links` and the `+cudaNNN.smNN` matching your driver and GPU. See [Python SDK getting started](/guides/python/getting-started/#installing).
+The wrong wheel was installed. `pip install inference-rs` gives the CPU (Linux/Windows) or Metal (macOS) wheel; for NVIDIA, install a CUDA wheel from the release with `--find-links` and the `+cudaNNN.smNN` matching your driver and GPU. See [Python SDK getting started](/guides/python/getting-started/#installing).
 
 ## Rust SDK
 

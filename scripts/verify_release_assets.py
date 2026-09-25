@@ -21,11 +21,11 @@ import yaml
 
 WORKFLOW = ".github/workflows/release.yml"
 FIXED_ASSETS = [
-    "mistralrs-cpu-x86_64-unknown-linux-gnu.tar.gz",
-    "mistralrs-cpu-aarch64-unknown-linux-gnu.tar.gz",
-    "mistralrs-cpu-aarch64-unknown-linux-gnu-v8_0.tar.gz",
-    "mistralrs-cpu-x86_64-pc-windows-msvc.zip",
-    "mistralrs-metal-aarch64-apple-darwin.tar.gz",
+    "inference_rs-cpu-x86_64-unknown-linux-gnu.tar.gz",
+    "inference_rs-cpu-aarch64-unknown-linux-gnu.tar.gz",
+    "inference_rs-cpu-aarch64-unknown-linux-gnu-v8_0.tar.gz",
+    "inference_rs-cpu-x86_64-pc-windows-msvc.zip",
+    "inference_rs-metal-aarch64-apple-darwin.tar.gz",
 ]
 PYPI_PLATFORMS = (
     "macOS arm64",
@@ -42,7 +42,7 @@ RELEASE_VERSION_RE = re.compile(
     re.IGNORECASE,
 )
 WHEEL_RE = re.compile(
-    r"^mistralrs-(?P<version>[^-]+)-(?P<python>[^-]+)-(?P<abi>[^-]+)-(?P<platform>[^-]+)\.whl$"
+    r"^inference_rs-(?P<version>[^-]+)-(?P<python>[^-]+)-(?P<abi>[^-]+)-(?P<platform>[^-]+)\.whl$"
 )
 
 
@@ -135,7 +135,7 @@ def verify_pypi_wheels(data: dict, version: str) -> tuple[int, list[str], list[s
         if len(filenames) == 1:
             verified += 1
         elif not filenames:
-            missing.append(f"pypi wheel: mistralrs=={version} ({platform})")
+            missing.append(f"pypi wheel: inference_rs=={version} ({platform})")
         else:
             invalid.append(
                 f"pypi wheel: expected one {platform} wheel, found {len(filenames)}"
@@ -279,7 +279,7 @@ def main() -> int:
 
     for row in cuda_rows:
         tarball = (
-            f"mistralrs-cuda{row['cuda_asset']}-sm{row['sm']}-{row['triple']}.tar.gz"
+            f"inference_rs-cuda{row['cuda_asset']}-sm{row['sm']}-{row['triple']}.tar.gz"
         )
         if tarball in assets:
             verified += 1
@@ -290,7 +290,7 @@ def main() -> int:
         else:
             arch = row["triple"].split("-")[0]
             local = f"cuda{row['cuda_asset']}.sm{row['sm']}"
-            missing.append(f"wheel: mistralrs-{version}+{local} (*_{arch}.whl)")
+            missing.append(f"wheel: inference_rs-{version}+{local} (*_{arch}.whl)")
 
     targets = docker_targets(image, docker_version, docker_rows, manifest_rows)
     for docker_tag, expected_platforms in targets:
@@ -314,7 +314,7 @@ def main() -> int:
             with urllib.request.urlopen(url, timeout=30) as response:
                 pypi_data = json.load(response)
         except urllib.error.HTTPError:
-            missing.append(f"pypi: mistralrs=={version}")
+            missing.append(f"pypi: inference_rs=={version}")
         else:
             pypi_verified, pypi_missing, pypi_invalid = verify_pypi_wheels(
                 pypi_data, version

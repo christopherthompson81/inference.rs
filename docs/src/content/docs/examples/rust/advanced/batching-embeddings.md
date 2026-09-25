@@ -9,15 +9,15 @@ sidebar:
 
 Batch multiple embedding requests for efficient parallel encoding.
 
-Run with: `cargo run --release --example batching_embeddings -p mistralrs`
+Run with: `cargo run --release --example batching_embeddings -p inference`
 
 ```rust
 //! Batch multiple embedding requests for efficient parallel encoding.
 //!
-//! Run with: `cargo run --release --example batching_embeddings -p mistralrs`
+//! Run with: `cargo run --release --example batching_embeddings -p inference`
 
 use anyhow::Result;
-use mistralrs::{EmbeddingModelBuilder, EmbeddingRequest};
+use inference::{EmbeddingModelBuilder, EmbeddingRequest};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -61,4 +61,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/batching_embeddings/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/batching_embeddings/main.rs)
+Source: [`inference/examples/advanced/batching_embeddings/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/batching_embeddings/main.rs)

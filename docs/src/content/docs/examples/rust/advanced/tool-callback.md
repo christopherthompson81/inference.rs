@@ -9,15 +9,15 @@ sidebar:
 
 Tool callbacks for automatic server-side tool execution.
 
-Run with: `cargo run --release --example tool_callback -p mistralrs`
+Run with: `cargo run --release --example tool_callback -p inference`
 
 ```rust
 //! Tool callbacks for automatic server-side tool execution.
 //!
-//! Run with: `cargo run --release --example tool_callback -p mistralrs`
+//! Run with: `cargo run --release --example tool_callback -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     CalledFunction, IsqBits, ModelBuilder, RequestBuilder, SearchResult, TextMessageRole,
     TextMessages, Tool, ToolChoice, ToolType,
 };
@@ -56,7 +56,7 @@ async fn main() -> Result<()> {
         .with_logging()
         .with_tool_callback(
             "local_search",
-            Arc::new(|f: &CalledFunction, _ctx: &mistralrs::ToolCallContext| {
+            Arc::new(|f: &CalledFunction, _ctx: &inference::ToolCallContext| {
                 let args: serde_json::Value = serde_json::from_str(&f.arguments)?;
                 let query = args["query"].as_str().unwrap_or("");
                 Ok(serde_json::to_string(&local_search(query)?)?)
@@ -72,7 +72,7 @@ async fn main() -> Result<()> {
     )]);
     let tool = Tool {
         tp: ToolType::Function,
-        function: mistralrs::Function {
+        function: inference::Function {
             description: Some("Local filesystem search".to_string()),
             name: "local_search".to_string(),
             parameters: Some(parameters),
@@ -93,4 +93,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/tool_callback/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/tool_callback/main.rs)
+Source: [`inference/examples/advanced/tool_callback/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/tool_callback/main.rs)

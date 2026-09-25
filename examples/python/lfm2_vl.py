@@ -2,7 +2,7 @@
 LiquidAI LFM2.5-VL image understanding with the Python SDK.
 """
 
-from mistralrs import ChatCompletionRequest, MultimodalArchitecture, Runner, Which
+from inference_rs import ChatCompletionRequest, MultimodalArchitecture, Runner, Which
 
 runner = Runner(
     which=Which.MultimodalPlain(

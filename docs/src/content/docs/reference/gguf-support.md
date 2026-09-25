@@ -90,7 +90,7 @@ projector. Architectures that appear in both tables above, including `gemma3`, `
 
 ## Storage formats
 
-mistral.rs accepts GGUF files using the following storage types. A file can mix types, as common
+inference.rs accepts GGUF files using the following storage types. A file can mix types, as common
 `_K_M` and `_K_S` artifacts do.
 
 | Category | Supported storage types |

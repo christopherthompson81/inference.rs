@@ -76,7 +76,7 @@ SOURCES = (
 def read_range(url: str, start: int, end: int) -> bytes:
     byte_range = f"{start}-{end - 1}"
     request = urllib.request.Request(
-        f"{url}?mistralrs_nvfp4_fixture={byte_range}",
+        f"{url}?inference_nvfp4_fixture={byte_range}",
         headers={"Range": f"bytes={byte_range}"},
     )
     with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS) as response:

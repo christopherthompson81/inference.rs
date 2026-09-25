@@ -31,7 +31,7 @@ jobs:
           - name: cuda+cutile
             features: cuda,cutile
             cuda: "13.2"
-            test_args: "--workspace --exclude mistralrs-flash-attn"
+            test_args: "--workspace --exclude inference-flash-attn"
           # - name: cuda+nccl
           #   features: cuda,nccl
 

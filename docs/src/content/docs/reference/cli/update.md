@@ -1,16 +1,16 @@
 ---
-title: "mistralrs update"
+title: "inference update"
 description: "Update or migrate an install using the installer"
 sidebar:
   order: 13
 ---
 
-<!-- Generated from clap definitions by mistralrs-cli docgen. Do not edit. -->
+<!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->
 
 Update or migrate an install using the installer
 
 ```
-mistralrs update [OPTIONS]
+inference update [OPTIONS]
 ```
 
 | Option | Default | Description |

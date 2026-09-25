@@ -8,7 +8,7 @@ Never push, publish, or send ANY code or content off this machine unless Eric ex
 
 ## Project Overview
 
-mistral.rs is a blazing-fast LLM inference engine written in Rust. It supports text, multimodal, image generation, and speech models with Rust and Python SDKs, plus OpenAI HTTP and MCP APIs.
+inference.rs is a blazing-fast LLM inference engine written in Rust. It supports text, multimodal, image generation, and speech models with Rust and Python SDKs, plus OpenAI HTTP and MCP APIs.
 
 ## Essential Commands
 
@@ -24,13 +24,13 @@ cargo build --release --features "cuda flash-attn cudnn"
 cargo build --release --features metal
 
 # Install CLI binary
-cargo install --path mistralrs-cli --features <features>
+cargo install --path inference-cli --features <features>
 ```
 
 ### Testing & Quality
 ```bash
 # Run core tests
-cargo test -p mistralrs-core -p mistralrs-quant -p mistralrs-vision
+cargo test -p inference-core -p inference-quant -p inference-vision
 
 # Format code (uses rustfmt, ruff, clang-format)
 make fmt
@@ -45,19 +45,19 @@ cargo clippy --workspace --tests --examples -- -D warnings
 ### Running Models
 ```bash
 # Run interactive mode (model type auto-detected)
-mistralrs run -m <model_id>
+inference run -m <model_id>
 
 # Run with GGUF quantized model
-mistralrs run --format gguf -m <repo> -f <file>
+inference run --format gguf -m <repo> -f <file>
 
 # Run server
-mistralrs serve -p 1234 -m <model_id>
+inference serve -p 1234 -m <model_id>
 
 # Run server (built-in web UI is on by default at /ui; pass --no-ui to disable)
-mistralrs serve -m <model_id>
+inference serve -m <model_id>
 
 # Run benchmarks
-mistralrs bench -m <model_id>
+inference bench -m <model_id>
 ```
 
 ## Models
@@ -69,48 +69,48 @@ You should also look for a model.safetensors.index.json file for the model at ha
 ## Architecture Overview
 
 ### Workspace Structure
-- `mistralrs-core/` - Core inference engine, model implementations, pipelines
-- `mistralrs-cli/` - Unified CLI binary (commands: run, serve, bench, from-config)
-- `mistralrs-server-core/` - HTTP server routing, OpenAI API implementation
-- `mistralrs-pyo3/` - Python SDK (PyO3 bindings)
-- `mistralrs/` - Rust SDK (high-level crate)
-- `mistralrs-vision/` - Image processing utilities
-- `mistralrs-quant/` - Quantization implementations (ISQ, GGUF, GPTQ, etc.)
-- `mistralrs-paged-attn/` - PagedAttention implementation
-- `mistralrs-audio/` - Audio processing
-- `mistralrs-mcp/` - Model Context Protocol client
+- `inference-core/` - Core inference engine, model implementations, pipelines
+- `inference-cli/` - Unified CLI binary (commands: run, serve, bench, from-config)
+- `inference-server-core/` - HTTP server routing, OpenAI API implementation
+- `inference-pyo3/` - Python SDK (PyO3 bindings)
+- `inference/` - Rust SDK (high-level crate)
+- `inference-vision/` - Image processing utilities
+- `inference-quant/` - Quantization implementations (ISQ, GGUF, GPTQ, etc.)
+- `inference-paged-attn/` - PagedAttention implementation
+- `inference-audio/` - Audio processing
+- `inference-mcp/` - Model Context Protocol client
 
 ### Key Design Patterns
 
-1. **Pipeline Architecture**: All models implement the `Pipeline` trait in `mistralrs-core/src/pipeline/mod.rs`. Different model types (Plain, GGUF, GGML, Multimodal) have their own pipeline implementations.
+1. **Pipeline Architecture**: All models implement the `Pipeline` trait in `inference-core/src/pipeline/mod.rs`. Different model types (Plain, GGUF, GGML, Multimodal) have their own pipeline implementations.
 
-2. **Model Loading**: Models are loaded through `Loader` traits that handle different formats and quantizations. See `mistralrs-core/src/loader.rs`.
+2. **Model Loading**: Models are loaded through `Loader` traits that handle different formats and quantizations. See `inference-core/src/loader.rs`.
 
-3. **Request Handling**: The server uses message passing with `MistralRs` struct managing a background thread pool. Requests flow through `mistralrs-core/src/engine/mod.rs`.
+3. **Request Handling**: The server uses message passing with `InferenceRs` struct managing a background thread pool. Requests flow through `inference-core/src/engine/mod.rs`.
 
-4. **Device Management**: Automatic and manual device mapping for multi-GPU setups handled in `mistralrs-core/src/device_map.rs`.
+4. **Device Management**: Automatic and manual device mapping for multi-GPU setups handled in `inference-core/src/device_map.rs`.
 
 ### Adding New Features
 
 When adding new model architectures:
-1. Implement the model in `mistralrs-core/src/models/`
-2. Add pipeline support in `mistralrs-core/src/pipeline/`
-3. Update model detection in `mistralrs-core/src/pipeline/normal.rs`
-4. Add architecture enum variant in `mistralrs-core/src/lib.rs`
-5. Update CLI args in `mistralrs-cli/src/main.rs`
+1. Implement the model in `inference-core/src/models/`
+2. Add pipeline support in `inference-core/src/pipeline/`
+3. Update model detection in `inference-core/src/pipeline/normal.rs`
+4. Add architecture enum variant in `inference-core/src/lib.rs`
+5. Update CLI args in `inference-cli/src/main.rs`
 
 When adding new quantization methods:
-1. Implement in `mistralrs-quant/src/`
+1. Implement in `inference-quant/src/`
 2. Add to quantization loading logic in pipelines
 3. Update documentation in `docs/src/content/docs/reference/quantization-types.md`
 
 ### Important Files to Know
 
-- `mistralrs-core/src/engine/mod.rs` - Main engine orchestration
-- `mistralrs-core/src/pipeline/mod.rs` - Pipeline trait and common logic
-- `mistralrs-server-core/src/routes.rs` - HTTP API endpoints
-- `mistralrs-pyo3/src/lib.rs` - Python SDK entry point
-- `mistralrs/examples/` - Usage examples for Rust SDK
+- `inference-core/src/engine/mod.rs` - Main engine orchestration
+- `inference-core/src/pipeline/mod.rs` - Pipeline trait and common logic
+- `inference-server-core/src/routes.rs` - HTTP API endpoints
+- `inference-pyo3/src/lib.rs` - Python SDK entry point
+- `inference/examples/` - Usage examples for Rust SDK
 
 ### Pull Requests
 

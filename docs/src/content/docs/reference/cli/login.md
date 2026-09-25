@@ -1,16 +1,16 @@
 ---
-title: "mistralrs login"
+title: "inference login"
 description: "Authenticate with Hugging Face Hub"
 sidebar:
   order: 9
 ---
 
-<!-- Generated from clap definitions by mistralrs-cli docgen. Do not edit. -->
+<!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->
 
 Authenticate with Hugging Face Hub
 
 ```
-mistralrs login [OPTIONS]
+inference login [OPTIONS]
 ```
 
 | Option | Default | Description |

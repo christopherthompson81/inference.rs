@@ -9,15 +9,15 @@ sidebar:
 
 Streaming text generation with token-by-token output.
 
-Run with: `cargo run --release --example streaming -p mistralrs`
+Run with: `cargo run --release --example streaming -p inference`
 
 ```rust
 //! Streaming text generation with token-by-token output.
 //!
-//! Run with: `cargo run --release --example streaming -p mistralrs`
+//! Run with: `cargo run --release --example streaming -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     ChatCompletionChunkResponse, ChunkChoice, Delta, IsqBits, ModelBuilder,
     PagedAttentionMetaBuilder, RequestBuilder, Response, TextMessageRole, TextMessages,
 };
@@ -83,4 +83,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/getting_started/streaming/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/getting_started/streaming/main.rs)
+Source: [`inference/examples/getting_started/streaming/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/getting_started/streaming/main.rs)

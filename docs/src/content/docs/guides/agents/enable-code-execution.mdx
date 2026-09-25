@@ -8,7 +8,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 `--enable-code-execution` registers a Python execution tool with the model. The tool runs Python in a subprocess; on Linux and macOS it is wrapped in an [OS-level sandbox](/reference/sandbox/) by default (`--sandbox auto`).
 
 ```bash
-mistralrs serve --enable-code-execution -m <model>
+inference serve --enable-code-execution -m <model>
 ```
 
 The `code-execution` Cargo feature is in the default feature set; binaries built with `--no-default-features` need it added explicitly. The code execution and file helper tools use [strict tool calling](/guides/agents/tool-calling-basics/#strict-tool-calling) by default.
@@ -42,7 +42,7 @@ Only `{"type":"auto"}` containers are supported today. Container ids, `file_ids`
 
 Permissioning is separate from sandboxing: the permission mode decides whether a model-requested action may run at all, the sandbox decides what Python can access after it starts.
 
-When sandbox CPU limits are enforced and the configured code execution timeout exceeds `max_cpu_secs`, mistral.rs raises `max_cpu_secs` to match and logs a warning.
+When sandbox CPU limits are enforced and the configured code execution timeout exceeds `max_cpu_secs`, inference.rs raises `max_cpu_secs` to match and logs a warning.
 
 ## Declaring output files
 
@@ -72,7 +72,7 @@ The response gains a top-level `files` array with id, name, mime type, size, and
 <TabItem label="Python">
 
 ```python
-from mistralrs import ChatCompletionRequest, CodeExecutionConfig, RequestedFile, Runner, Which
+from inference_rs import ChatCompletionRequest, CodeExecutionConfig, RequestedFile, Runner, Which
 
 runner = Runner(which=Which.Plain(model_id="Qwen/Qwen3-4B"), code_execution_config=CodeExecutionConfig())
 resp = runner.send_chat_completion_request(
@@ -99,7 +99,7 @@ let model = ModelBuilder::new("Qwen/Qwen3-4B")
     .build()
     .await?;
 
-let req = mistralrs::RequestBuilder::from(messages)
+let req = inference::RequestBuilder::from(messages)
     .with_code_execution()
     .require_file("plot.png");
 
@@ -149,7 +149,7 @@ When streaming, progress is emitted as `agentic_tool_call_progress` SSE events; 
 
 ## Working directory
 
-Without `--code-exec-workdir`, each session gets a unique `mistralrs-code-<random>` temp directory, deleted when the session ends. With `--code-exec-workdir /path`, all sessions share that directory: outputs are inspectable across sessions, but anything written there persists and is visible to subsequent sessions.
+Without `--code-exec-workdir`, each session gets a unique `inference-code-<random>` temp directory, deleted when the session ends. With `--code-exec-workdir /path`, all sessions share that directory: outputs are inspectable across sessions, but anything written there persists and is visible to subsequent sessions.
 
 `--code-exec-workdir` chooses where Python starts and where output files are collected; it does not turn the sandbox on or off. When the sandbox is enabled, the directory is included as the writable working directory.
 
@@ -157,7 +157,7 @@ Without `--code-exec-workdir`, each session gets a unique `mistralrs-code-<rando
 
 **The CLI sandboxes by default; the SDKs do not.** The CLI and TOML entry points default to `--sandbox auto`, which enables the OS-level sandbox on Linux and macOS. The programmatic `CodeExecutionConfig` (Python and Rust SDKs) ships with no sandbox by default. It engages only once you attach a `SandboxPolicy`, so embedding apps must choose one explicitly. Layers, limits, threat model, and tuning are documented in the [sandbox reference](/reference/sandbox/).
 
-For deployments where code execution must leave the mistralrs host entirely, use [`--tool-dispatch-url`](/guides/agents/tool-calling-basics/#dispatch-url).
+For deployments where code execution must leave the inference host entirely, use [`--tool-dispatch-url`](/guides/agents/tool-calling-basics/#dispatch-url).
 
 ## See also
 

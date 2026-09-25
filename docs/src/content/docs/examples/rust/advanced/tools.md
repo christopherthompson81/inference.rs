@@ -9,17 +9,17 @@ sidebar:
 
 Tool calling (function calling) with manual tool definitions.
 
-Run with: `cargo run --release --example tools -p mistralrs`
+Run with: `cargo run --release --example tools -p inference`
 
 ```rust
 //! Tool calling (function calling) with manual tool definitions.
 //!
-//! Run with: `cargo run --release --example tools -p mistralrs`
+//! Run with: `cargo run --release --example tools -p inference`
 
 use std::collections::HashMap;
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     Function, IsqBits, ModelBuilder, RequestBuilder, TextMessageRole, Tool, ToolChoice, ToolType,
 };
 use serde_json::{json, Value};
@@ -103,4 +103,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/tools/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/tools/main.rs)
+Source: [`inference/examples/advanced/tools/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/tools/main.rs)

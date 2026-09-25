@@ -5,14 +5,14 @@ description: Upload and reference Skills from OpenAI-compatible Responses, Anthr
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-mistral.rs implements uploaded Skills for both the OpenAI-compatible Responses API and the Anthropic-compatible Messages API. You can upload a skill bundle to `/v1/skills`, reference it from a request, and let the model use the bundled instructions and files during the run.
+inference.rs implements uploaded Skills for both the OpenAI-compatible Responses API and the Anthropic-compatible Messages API. You can upload a skill bundle to `/v1/skills`, reference it from a request, and let the model use the bundled instructions and files during the run.
 
-This page documents the mistral.rs compatibility surface. For the upstream API shapes and authoring model, see OpenAI's [Tools and Skills guide](https://developers.openai.com/api/docs/guides/tools-skills), Anthropic's [Agent Skills overview](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview), and Anthropic's [Skills API guide](https://platform.claude.com/docs/en/build-with-claude/skills-guide).
+This page documents the inference.rs compatibility surface. For the upstream API shapes and authoring model, see OpenAI's [Tools and Skills guide](https://developers.openai.com/api/docs/guides/tools-skills), Anthropic's [Agent Skills overview](https://platform.claude.com/docs/en/agents-and-tools/agent-skills/overview), and Anthropic's [Skills API guide](https://platform.claude.com/docs/en/build-with-claude/skills-guide).
 
 Start a server with the Skills runtime available:
 
 ```bash
-mistralrs serve --agent -m <model>
+inference serve --agent -m <model>
 ```
 
 `--agent` is the recommended way to run Skills because it turns on the full local agent runtime: web search, Python code execution, and shell execution. Skills require the shell executor, so the minimum server flag is `--enable-shell`; use it only when you want Skills without the other agentic tools.
@@ -31,7 +31,7 @@ Supported today:
 - Responses `skill_reference` entries with `"version": "latest"`, an omitted version, or a concrete version.
 - Messages `container.skills[]` entries with `type = "custom"`, `skill_id`, and `"version": "latest"`, an omitted version, or a concrete version.
 - Responses output items for `shell_call` and `shell_call_output`, so clients can inspect what ran.
-- mistral.rs agentic extensions for Skills requests: `max_tool_rounds` to bound agentic tool loops, and `files` to require specific output files and surface them as downloadable File objects.
+- inference.rs agentic extensions for Skills requests: `max_tool_rounds` to bound agentic tool loops, and `files` to require specific output files and surface them as downloadable File objects.
 - Python and Rust SDK local mounts for in-process users that do not go through `/v1/skills`.
 
 Not implemented today:
@@ -42,7 +42,7 @@ Not implemented today:
 - Container reference environments and container lifecycle APIs.
 - Automatic `agentskills.io` registry installation or `.agents/skills` scanning.
 
-mistral.rs implements the OpenAI-compatible server/runtime layer. It does not act as a separate skill registry client.
+inference.rs implements the OpenAI-compatible server/runtime layer. It does not act as a separate skill registry client.
 
 ## Examples
 
@@ -152,7 +152,7 @@ To list uploaded custom Skills with Anthropic-shaped objects, call
 <TabItem label="Python SDK">
 
 ```python
-from mistralrs import ChatCompletionRequest, Runner, ShellConfig, ShellSkillMount, Which
+from inference_rs import ChatCompletionRequest, Runner, ShellConfig, ShellSkillMount, Which
 
 runner = Runner(
     which=Which.Plain(model_id="Qwen/Qwen3-4B"),
@@ -182,7 +182,7 @@ print(resp.choices[0].message.content)
 <TabItem label="Rust SDK">
 
 ```rust
-use mistralrs::{ModelBuilder, RequestBuilder, ShellConfig, TextMessageRole, TextMessages};
+use inference::{ModelBuilder, RequestBuilder, ShellConfig, TextMessageRole, TextMessages};
 
 let model = ModelBuilder::new("Qwen/Qwen3-4B")
     .with_shell_execution(ShellConfig::default())

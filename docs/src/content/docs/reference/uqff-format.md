@@ -3,10 +3,10 @@ title: UQFF format
 description: Layout of the UQFF quantized model file format.
 ---
 
-UQFF is the native mistral.rs quantized file format. To use UQFF models, see the [UQFF guide](/guides/quantization/uqff/); knowledge of the layout is not required.
+UQFF is the native inference.rs quantized file format. To use UQFF models, see the [UQFF guide](/guides/quantization/uqff/); knowledge of the layout is not required.
 
 :::caution
-UQFF 1.x is not compatible with files produced by earlier mistral.rs releases (pre-1.0). Old files will fail with an error; regenerate them with `mistralrs quantize`.
+UQFF 1.x is not compatible with files produced by earlier inference.rs releases (pre-1.0). Old files will fail with an error; regenerate them with `inference quantize`.
 :::
 
 ## File structure
@@ -28,7 +28,7 @@ Each `.uqff` shard is a standard safetensors file with named entries. Every quan
 - Family-specific metadata next to it, e.g. `<key>.weight.dtype` and `<key>.weight.shape` for GGML types, `<key>.weight.scales`/`.bits`/`.group_size` for AFQ.
 - `<key>.bias` when the layer has one.
 
-Safetensors metadata includes informational producer fields: `uqff.producer`, `uqff.producer.mistralrs.version`, and `uqff.producer.mistralrs.git_revision`. These are recorded for provenance and are not checked by the loader.
+Safetensors metadata includes informational producer fields: `uqff.producer`, `uqff.producer.inference.version`, and `uqff.producer.inference.git_revision`. These are recorded for provenance and are not checked by the loader.
 
 `<key>` is the layer's weight path (`model.layers.0.self_attn.q_proj`). MoE (Mixture of Experts) expert layers use three canonical keys per block: `<...>.experts.gate_proj`, `.up_proj`, `.down_proj`, each holding the stacked `[num_experts, out, in]` weights.
 
@@ -56,7 +56,7 @@ Shards store full tensors; under tensor parallelism each rank slices its portion
 
 ## Reference implementation
 
-Canonical implementations: `mistralrs-quant/src/uqff` (reader, tensor encoding) and `mistralrs-core/src/pipeline/isq.rs` (writer).
+Canonical implementations: `inference-quant/src/uqff` (reader, tensor encoding) and `inference-core/src/pipeline/isq.rs` (writer).
 
 ## Caveats
 

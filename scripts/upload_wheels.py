@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Upload script for mistralrs Python wheels to PyPI.
+Upload script for inference_rs Python wheels to PyPI.
 
 Supports both PyPI and TestPyPI. CUDA wheels use local versions and are release assets, so they are
 skipped by default.
@@ -29,12 +29,12 @@ TESTPYPI_URL = "https://test.pypi.org/legacy/"
 
 # Valid package name prefixes (wheel names use underscores)
 VALID_PACKAGE_PREFIXES = {
-    "mistralrs",
+    "inference_rs",
 }
 
 # Mapping from wheel name prefix to PyPI package name
 WHEEL_TO_PYPI = {
-    "mistralrs": "mistralrs",
+    "inference_rs": "inference_rs",
 }
 
 
@@ -188,7 +188,7 @@ def upload_wheels(
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Upload mistralrs wheels to PyPI",
+        description="Upload inference_rs wheels to PyPI",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
@@ -205,7 +205,7 @@ Examples:
   python scripts/upload_wheels.py ./wheels --token pypi-xxx
 
   # Upload specific packages only
-  python scripts/upload_wheels.py ./wheels -p mistralrs
+  python scripts/upload_wheels.py ./wheels -p inference_rs
         """,
     )
 

@@ -16,7 +16,7 @@ Load and run a model with a LoRA adapter.
 Run with:
 
 ~~~bash
-cargo run --release --example lora -p mistralrs
+cargo run --release --example lora -p inference
 ~~~
 
 ```rust
@@ -29,11 +29,11 @@ cargo run --release --example lora -p mistralrs
 //! Run with:
 //!
 //! ~~~bash
-//! cargo run --release --example lora -p mistralrs
+//! cargo run --release --example lora -p inference
 //! ~~~
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     LoraModelBuilder, RequestBuilder, TextMessageRole, TextMessages, TextModelBuilder,
 };
 
@@ -72,4 +72,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/lora/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/lora/main.rs)
+Source: [`inference/examples/advanced/lora/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/lora/main.rs)

@@ -1,9 +1,9 @@
 ---
 title: Developer Guide
-description: Internals and contributor documentation for mistral.rs.
+description: Internals and contributor documentation for inference.rs.
 ---
 
-How mistral.rs works inside:
+How inference.rs works inside:
 
 - [Architecture](/developer/architecture/) - how the server, engine, and pipeline layers fit together.
 - [cuTile setup](/developer/moe-backends/) - install optional cuTile acceleration on supported NVIDIA GPUs.

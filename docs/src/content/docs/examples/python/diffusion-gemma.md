@@ -12,7 +12,7 @@ Runnable Python SDK example `diffusion_gemma`.
 <!-- needs-header -->
 
 ```python
-from mistralrs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
+from inference_rs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
 
 # DiffusionGemma is a block-diffusion model: it denoises 256-token blocks in
 # parallel instead of sampling tokens one at a time. The API is unchanged, but

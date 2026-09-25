@@ -5,7 +5,7 @@ description: Use MTP assistant models to draft multiple tokens per target verifi
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Speculative decoding lets a smaller assistant propose future tokens while the target model verifies them in parallel. mistral.rs exposes this through the MTP (Multi-Token Prediction) API: attach an assistant checkpoint and the engine drafts several tokens per target step.
+Speculative decoding lets a smaller assistant propose future tokens while the target model verifies them in parallel. inference.rs exposes this through the MTP (Multi-Token Prediction) API: attach an assistant checkpoint and the engine drafts several tokens per target step.
 
 Output stays exact: every accepted token is verified by the target model before it is emitted.
 
@@ -17,18 +17,18 @@ The target must run with [paged attention](/guides/perf/paged-attention/) (the d
 <TabItem label="CLI">
 
 ```bash
-mistralrs run -m google/gemma-4-E4B-it --quant 8 \
+inference run -m google/gemma-4-E4B-it --quant 8 \
   --mtp-model google/gemma-4-E4B-it-assistant \
   --mtp-n-predict 6
 ```
 
-`--mtp-model` accepts a Hugging Face id or a local path. The same flags work with `mistralrs serve`. See [run](/reference/cli/run/) and [serve](/reference/cli/serve/) flag references.
+`--mtp-model` accepts a Hugging Face id or a local path. The same flags work with `inference serve`. See [run](/reference/cli/run/) and [serve](/reference/cli/serve/) flag references.
 
 </TabItem>
 <TabItem label="Python">
 
 ```python
-from mistralrs import Runner, Which
+from inference_rs import Runner, Which
 
 runner = Runner(
     which=Which.MultimodalPlain(model_id="google/gemma-4-E4B-it"),
@@ -44,7 +44,7 @@ Gemma 4 loads via `Which.MultimodalPlain`; it is currently the only model family
 <TabItem label="Rust">
 
 ```rust
-let model = mistralrs::ModelBuilder::new("google/gemma-4-E4B-it")
+let model = inference::ModelBuilder::new("google/gemma-4-E4B-it")
     .with_mtp_model("google/gemma-4-E4B-it-assistant", Some(6))
     .build()
     .await?;
@@ -55,7 +55,7 @@ For full control, `with_mtp_config(MtpConfig { model, n_predict })` is equivalen
 </TabItem>
 </Tabs>
 
-`--mtp-n-predict` controls how many assistant tokens are proposed per step. If it is omitted, mistral.rs reads `num_assistant_tokens` from the assistant's `generation_config.json` and falls back to 6.
+`--mtp-n-predict` controls how many assistant tokens are proposed per step. If it is omitted, inference.rs reads `num_assistant_tokens` from the assistant's `generation_config.json` and falls back to 6.
 
 ## Supported models
 
@@ -72,7 +72,7 @@ Legacy target/draft speculative decoding has been removed. New speculative decod
 Qwen3.5 and Qwen3.8 checkpoints ship a multi-token prediction head (`mtp.*` weights) sharing the target's embeddings and `lm_head`. Pass `--mtp` to load it; no separate assistant model is needed:
 
 ```bash
-mistralrs serve -m Qwen/Qwen3.8-27B --quant 4 --mtp
+inference serve -m Qwen/Qwen3.8-27B --quant 4 --mtp
 ```
 
 The head keeps its own paged KV cache alongside the target's, so the KV budget grows by one attention layer. `--mtp-n-predict` defaults to 2 for these heads. Greedy output is equivalent to non-MTP decoding up to floating-point tie-breaks in the hybrid recurrent layers. UQFF artifacts must include the `mtp.*` tensors to use `--mtp`.
@@ -82,12 +82,12 @@ The head keeps its own paged KV cache alongside the target's, so the KV budget g
 [DFlash](https://arxiv.org/abs/2602.06036) drafters are small block-diffusion models that propose a
 whole block of tokens in one pass, conditioned on hidden states tapped from the target's
 intermediate layers. They reach much higher acceptance than the built-in single-token MTP head.
-Pass a DFlash checkpoint (a HF id or local path) as `--mtp-model`; mistral.rs detects DFlash vs
+Pass a DFlash checkpoint (a HF id or local path) as `--mtp-model`; inference.rs detects DFlash vs
 DFlash 2 from the checkpoint's `architectures` and loads the path selector and dynamic convolutions
 when present:
 
 ```bash
-mistralrs serve -m Qwen/Qwen3.8-27B --quant 4 \
+inference serve -m Qwen/Qwen3.8-27B --quant 4 \
   --mtp-model incoai/Qwen3.8-27B-DFlash2
 ```
 
@@ -96,14 +96,14 @@ its CUDA candidate selector is supported, while DFlash 1 and unsupported devices
 drafting. Pass `--mtp-draft-sampling greedy` to force greedy drafting. Passing `probabilistic`
 requires a supported DFlash 2 selector and fails during loading when that path is unavailable.
 
-The maximum automatic draft depth is `min(block_size - 1, 7)`. During serving, mistral.rs may use a
+The maximum automatic draft depth is `min(block_size - 1, 7)`. During serving, inference.rs may use a
 shallower depth so the recurrent checkpoint layout fits the configured sequence capacity while
 preserving memory for the requested paged KV cache. Pass `--mtp-n-predict` to request a fixed depth
 instead. Automatic CUDA serving also adapts the active depth to live load: up to 8 live DFlash
 contexts use the full reserved depth, while larger loads use up to 3 drafts. Set
-`MISTRALRS_DFLASH_ADAPTIVE=0` (or `false`) to disable load adaptation. The drafter's projection
+`INFERENCE_RS_DFLASH_ADAPTIVE=0` (or `false`) to disable load adaptation. The drafter's projection
 weights are requantized to the target's in-situ quantization type at load (override with the
-`MISTRALRS_DFLASH_ISQ` environment variable, e.g. `q6k` or `none` for bf16).
+`INFERENCE_RS_DFLASH_ISQ` environment variable, e.g. `q6k` or `none` for bf16).
 
 Acceptance is strongly content-dependent: [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2)
 accepts ~7 of 7 drafts on math/code and much less on thinking-mode reasoning traces, which are out
@@ -115,7 +115,7 @@ greedy output is byte-identical to non-speculative decoding.
 Gemma 4 assistant checkpoints are MTP drafters for Gemma 4 target models. See the [`google/gemma-4-E4B-it-assistant`](https://huggingface.co/google/gemma-4-E4B-it-assistant) model card for the upstream checkpoint. A downloaded checkout works too:
 
 ```bash
-mistralrs run -m google/gemma-4-E4B-it --quant 8 \
+inference run -m google/gemma-4-E4B-it --quant 8 \
   --mtp-model ./gemma-4-E4B-it-assistant \
   --mtp-n-predict 6
 ```

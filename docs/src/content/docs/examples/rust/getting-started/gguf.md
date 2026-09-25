@@ -12,7 +12,7 @@ Load a GGUF model from Hugging Face.
 Configuration and tokenizer assets are discovered automatically. Use `with_tok_model_id`
 only to override that choice or when the source cannot be identified.
 
-Run with: `cargo run --release --example gguf -p mistralrs`
+Run with: `cargo run --release --example gguf -p inference`
 
 ```rust
 //! Load a GGUF model from Hugging Face.
@@ -20,10 +20,10 @@ Run with: `cargo run --release --example gguf -p mistralrs`
 //! Configuration and tokenizer assets are discovered automatically. Use `with_tok_model_id`
 //! only to override that choice or when the source cannot be identified.
 //!
-//! Run with: `cargo run --release --example gguf -p mistralrs`
+//! Run with: `cargo run --release --example gguf -p inference`
 
 use anyhow::Result;
-use mistralrs::{GgufModelBuilder, TextMessageRole, TextMessages};
+use inference::{GgufModelBuilder, TextMessageRole, TextMessages};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -54,4 +54,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/getting_started/gguf/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/getting_started/gguf/main.rs)
+Source: [`inference/examples/getting_started/gguf/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/getting_started/gguf/main.rs)

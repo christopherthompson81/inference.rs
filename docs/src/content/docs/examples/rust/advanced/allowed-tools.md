@@ -9,17 +9,17 @@ sidebar:
 
 Restrict tool choice to an allowed subset.
 
-Run with: `cargo run --release --example allowed_tools -p mistralrs`
+Run with: `cargo run --release --example allowed_tools -p inference`
 
 ```rust
 //! Restrict tool choice to an allowed subset.
 //!
-//! Run with: `cargo run --release --example allowed_tools -p mistralrs`
+//! Run with: `cargo run --release --example allowed_tools -p inference`
 
 use std::collections::HashMap;
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     AllowedToolChoice, AllowedToolsMode, AllowedToolsToolChoice, AllowedToolsToolChoiceType,
     Function, IsqBits, ModelBuilder, RequestBuilder, TextMessageRole, Tool, ToolChoice, ToolType,
 };
@@ -92,4 +92,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/allowed_tools/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/allowed_tools/main.rs)
+Source: [`inference/examples/advanced/allowed_tools/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/allowed_tools/main.rs)

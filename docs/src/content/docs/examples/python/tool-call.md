@@ -21,7 +21,7 @@ Usage:
 """
 
 import json
-from mistralrs import Runner, ToolChoice, Which, ChatCompletionRequest, Architecture
+from inference_rs import Runner, ToolChoice, Which, ChatCompletionRequest, Architecture
 
 tools = [
     json.dumps(

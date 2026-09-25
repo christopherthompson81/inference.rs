@@ -1,34 +1,34 @@
 ---
-title: Embed mistralrs inside an Axum application
+title: Embed inference inside an Axum application
 description: Mount the HTTP API inside an existing Axum router.
 ---
 
-To add mistral.rs to an existing Axum app, mount the mistralrs router under a sub-path. The pattern uses two builders from `mistralrs-server-core`:
+To add inference.rs to an existing Axum app, mount the inference router under a sub-path. The pattern uses two builders from `inference-server-core`:
 
-- `MistralRsForServerBuilder` constructs the engine state (`SharedMistralRsState = Arc<MistralRs>`, used later for custom handlers).
-- `MistralRsServerRouterBuilder` produces an Axum `Router` from that state.
+- `InferenceRsForServerBuilder` constructs the engine state (`SharedInferenceRsState = Arc<InferenceRs>`, used later for custom handlers).
+- `InferenceRsServerRouterBuilder` produces an Axum `Router` from that state.
 
 ## Dependencies
 
 ```toml
 [dependencies]
 anyhow = "1"
-mistralrs-core = "0.8"
-mistralrs-server-core = "0.8"
+inference-core = "0.8"
+inference-server-core = "0.8"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 ```
 
-The high-level `mistralrs` crate is not needed here; the server builders take a `ModelSelected` from `mistralrs-core` directly.
+The high-level `inference` crate is not needed here; the server builders take a `ModelSelected` from `inference-core` directly.
 
 ## Mount under a sub-path
 
 ```rust
 use axum::{Router, routing::get};
-use mistralrs_core::{AutoDeviceMapParams, ModelDType, ModelSelected};
-use mistralrs_server_core::{
-    mistralrs_for_server_builder::MistralRsForServerBuilder,
-    mistralrs_server_router_builder::MistralRsServerRouterBuilder,
+use inference_core::{AutoDeviceMapParams, ModelDType, ModelSelected};
+use inference_server_core::{
+    inference_for_server_builder::InferenceRsForServerBuilder,
+    inference_server_router_builder::InferenceRsServerRouterBuilder,
 };
 
 #[tokio::main]
@@ -51,20 +51,20 @@ async fn main() -> anyhow::Result<()> {
         matformer_slice_name: None,
     };
 
-    let shared_mistralrs = MistralRsForServerBuilder::new()
+    let shared_inference = InferenceRsForServerBuilder::new()
         .with_model(model)
         .with_in_situ_quant("4".to_string())
         .build()
         .await?;
 
-    let mistralrs_router = MistralRsServerRouterBuilder::new()
-        .with_mistralrs(shared_mistralrs)
+    let inference_router = InferenceRsServerRouterBuilder::new()
+        .with_inference(shared_inference)
         .build()
         .await?;
 
     let app = Router::new()
         .route("/", get(|| async { "My app" }))
-        .nest("/ai", mistralrs_router);
+        .nest("/ai", inference_router);
 
     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
     axum::serve(listener, app).await?;
@@ -76,11 +76,11 @@ async fn main() -> anyhow::Result<()> {
 
 `with_in_situ_quant("4")` applies [ISQ (in-situ quantization)](/reference/quantization-types/) to 4-bit; omit it to run the model unquantized.
 
-`ModelSelected` names every field, so this literal will not compile when new fields are added. For the current field list, see the [docs.rs `ModelSelected` entry](https://docs.rs/mistralrs-core/latest/mistralrs_core/enum.ModelSelected.html) or the `mistralrs-server-core` crate-level docs.
+`ModelSelected` names every field, so this literal will not compile when new fields are added. For the current field list, see the [docs.rs `ModelSelected` entry](https://docs.rs/mistralrs-core/latest/mistralrs_core/enum.ModelSelected.html) or the `inference-server-core` crate-level docs.
 
 ## Builder options
 
-`MistralRsServerRouterBuilder` exposes:
+`InferenceRsServerRouterBuilder` exposes:
 
 - `with_include_swagger_routes(bool)`
 - `with_base_path(&str)`
@@ -90,10 +90,10 @@ async fn main() -> anyhow::Result<()> {
 - `with_tool_dispatch_url(String)`
 - `with_agent_permission(AgentPermission)` and `with_code_execution_permission(CodeExecutionPermission)`
 
-`MistralRsForServerBuilder` exposes engine-level options (`with_model`, `with_in_situ_quant`, `set_paged_attn`, `with_seed`, multi-model via `add_model`, etc.).
+`InferenceRsForServerBuilder` exposes engine-level options (`with_model`, `with_in_situ_quant`, `set_paged_attn`, `with_seed`, multi-model via `add_model`, etc.).
 
 ## Calling the model directly from a handler
 
-For custom request shapes, share the `SharedMistralRsState` directly with Axum handlers and use the lower-level helpers exposed by `mistralrs-server-core` (`chat_completion::parse_request`, `handler_core::send_request`, ...).
+For custom request shapes, share the `SharedInferenceRsState` directly with Axum handlers and use the lower-level helpers exposed by `inference-server-core` (`chat_completion::parse_request`, `handler_core::send_request`, ...).
 
-A complete example with custom OpenAPI integration is in the [`mistralrs-server-core` crate-level documentation](https://docs.rs/mistralrs-server-core).
+A complete example with custom OpenAPI integration is in the [`inference-server-core` crate-level documentation](https://docs.rs/mistralrs-server-core).

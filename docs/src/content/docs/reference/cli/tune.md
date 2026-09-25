@@ -1,16 +1,16 @@
 ---
-title: "mistralrs tune"
+title: "inference tune"
 description: "Recommend quantization + device mapping for a model. Rejects `--quant auto`; pass `--quant <level>` or `--isq <level>` to bias the recommendation toward a specific quantization target. Adapter options are rejected because adapter memory is not included in the estimate"
 sidebar:
   order: 8
 ---
 
-<!-- Generated from clap definitions by mistralrs-cli docgen. Do not edit. -->
+<!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->
 
 Recommend quantization + device mapping for a model. Rejects `--quant auto`; pass `--quant <level>` or `--isq <level>` to bias the recommendation toward a specific quantization target. Adapter options are rejected because adapter memory is not included in the estimate
 
 ```
-mistralrs tune [OPTIONS] [COMMAND]
+inference tune [OPTIONS] [COMMAND]
 ```
 
 | Option | Default | Description |
@@ -62,12 +62,12 @@ mistralrs tune [OPTIONS] [COMMAND]
 | `--json` | `false` | Output JSON instead of human-readable text |
 | `--emit-config <EMIT_CONFIG>` |  | Emit a TOML config file with the recommended settings |
 
-## mistralrs tune auto
+## inference tune auto
 
 Auto-detect model type (recommended)
 
 ```
-mistralrs tune auto [OPTIONS] --model-id <MODEL_ID>
+inference tune auto [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -116,12 +116,12 @@ mistralrs tune auto [OPTIONS] --model-id <MODEL_ID>
 | `--max-num-images <MAX_NUM_IMAGES>` |  | Maximum number of images per request |
 | `--max-image-length <MAX_IMAGE_LENGTH>` |  | Maximum image dimension for device mapping |
 
-## mistralrs tune text
+## inference tune text
 
 Text generation model with explicit configuration
 
 ```
-mistralrs tune text [OPTIONS] --model-id <MODEL_ID>
+inference tune text [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -166,12 +166,12 @@ mistralrs tune text [OPTIONS] --model-id <MODEL_ID>
 | `--pa-block-size <BLOCK_SIZE>` |  | Tokens per block (default: 32 on CUDA) |
 | `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache quantization type |
 
-## mistralrs tune multimodal
+## inference tune multimodal
 
 Multimodal model
 
 ```
-mistralrs tune multimodal [OPTIONS] --model-id <MODEL_ID>
+inference tune multimodal [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -215,12 +215,12 @@ mistralrs tune multimodal [OPTIONS] --model-id <MODEL_ID>
 | `--max-num-images <MAX_NUM_IMAGES>` |  | Maximum number of images per request |
 | `--max-image-length <MAX_IMAGE_LENGTH>` |  | Maximum image dimension for device mapping |
 
-## mistralrs tune diffusion
+## inference tune diffusion
 
 Image generation model (diffusion)
 
 ```
-mistralrs tune diffusion [OPTIONS] --model-id <MODEL_ID>
+inference tune diffusion [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -238,12 +238,12 @@ mistralrs tune diffusion [OPTIONS] --model-id <MODEL_ID>
 | `--max-seq-len <MAX_SEQ_LEN>` | `4096` | Max sequence length for automatic device mapping |
 | `--max-batch-size <MAX_BATCH_SIZE>` | `1` | Max batch size for automatic device mapping |
 
-## mistralrs tune speech
+## inference tune speech
 
 Speech synthesis model
 
 ```
-mistralrs tune speech [OPTIONS] --model-id <MODEL_ID>
+inference tune speech [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -261,12 +261,12 @@ mistralrs tune speech [OPTIONS] --model-id <MODEL_ID>
 | `--max-seq-len <MAX_SEQ_LEN>` | `4096` | Max sequence length for automatic device mapping |
 | `--max-batch-size <MAX_BATCH_SIZE>` | `1` | Max batch size for automatic device mapping |
 
-## mistralrs tune embedding
+## inference tune embedding
 
 Embedding model
 
 ```
-mistralrs tune embedding [OPTIONS] --model-id <MODEL_ID>
+inference tune embedding [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |

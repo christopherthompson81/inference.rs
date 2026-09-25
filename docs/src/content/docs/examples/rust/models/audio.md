@@ -9,15 +9,15 @@ sidebar:
 
 Audio input processing with a multimodal model.
 
-Run with: `cargo run --release --example audio -p mistralrs`
+Run with: `cargo run --release --example audio -p inference`
 
 ```rust
 //! Audio input processing with a multimodal model.
 //!
-//! Run with: `cargo run --release --example audio -p mistralrs`
+//! Run with: `cargo run --release --example audio -p inference`
 
 use anyhow::Result;
-use mistralrs::{AudioInput, MultimodalMessages, MultimodalModelBuilder, TextMessageRole};
+use inference::{AudioInput, MultimodalMessages, MultimodalModelBuilder, TextMessageRole};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -42,4 +42,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/models/audio/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/audio/main.rs)
+Source: [`inference/examples/models/audio/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/audio/main.rs)

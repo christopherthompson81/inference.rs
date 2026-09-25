@@ -13,7 +13,7 @@ The request attaches a CSV as an input file. Text-like files are previewed in
 the prompt and can be paginated with the built-in file tools when the agentic
 runtime is active.
 
-Run with: `cargo run --release --features code-execution --example file_inputs -p mistralrs`
+Run with: `cargo run --release --features code-execution --example file_inputs -p inference`
 
 ```rust
 //! User-provided input files with the Rust SDK.
@@ -22,10 +22,10 @@ Run with: `cargo run --release --features code-execution --example file_inputs -
 //! the prompt and can be paginated with the built-in file tools when the agentic
 //! runtime is active.
 //!
-//! Run with: `cargo run --release --features code-execution --example file_inputs -p mistralrs`
+//! Run with: `cargo run --release --features code-execution --example file_inputs -p inference`
 
 use anyhow::Result;
-use mistralrs::{InputFile, IsqBits, ModelBuilder, RequestBuilder, TextMessageRole, TextMessages};
+use inference::{InputFile, IsqBits, ModelBuilder, RequestBuilder, TextMessageRole, TextMessages};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -55,4 +55,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/file_inputs/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/file_inputs/main.rs)
+Source: [`inference/examples/advanced/file_inputs/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/file_inputs/main.rs)

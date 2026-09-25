@@ -1,16 +1,16 @@
 ---
 title: Chat templates
-description: How mistral.rs resolves a model's chat template, and how to override it when that goes wrong.
+description: How inference.rs resolves a model's chat template, and how to override it when that goes wrong.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
 A chat template formats messages into the string the model receives. An incorrect template can
-degrade output or expose special tokens. mistral.rs normally resolves the template from the model
+degrade output or expose special tokens. inference.rs normally resolves the template from the model
 files; when it cannot, provide a template file explicitly:
 
 ```bash
-mistralrs run -m <model> --chat-template my-template.jinja
+inference run -m <model> --chat-template my-template.jinja
 ```
 
 ## How the template is resolved
@@ -59,7 +59,7 @@ Both override settings take a file path. A `.jinja` file is the raw template; sp
 <TabItem label="CLI">
 
 ```bash
-mistralrs run -m <model> --chat-template my-template.jinja
+inference run -m <model> --chat-template my-template.jinja
 ```
 
 `--jinja-explicit <file.jinja>` overrides `--chat-template` when both are set and only accepts `.jinja` files. Both flags work on `run` and `serve`.
@@ -94,7 +94,7 @@ let model = ModelBuilder::new("<model>")
 The source repository's [`chat_templates/`](https://github.com/EricLBuehler/mistral.rs/tree/master/chat_templates) directory contains ready-made templates: `.json` templates for common formats (`chatml`, `llama2`, `llama3`, `mistral`, `phi3`, `vicuna`, ...) and `.jinja` tool-calling templates (Mistral Nemo/Small, Hermes 2 Pro/3, DeepSeek, SmolLM3, Gemma 3n). They are plain files, not built into the binary; download or clone them and pass a path:
 
 ```bash
-mistralrs run -m <model> --chat-template chat_templates/llama3.json
+inference run -m <model> --chat-template chat_templates/llama3.json
 ```
 
 ## Writing a template from scratch
@@ -131,4 +131,4 @@ Variables available at render time:
 
 The functions `raise_exception(msg)` and `strftime_now(fmt)` and the `tojson` filter are available, matching Hugging Face's template environment. For model-specific tokens and role markers, the model's Hugging Face page is authoritative.
 
-Multimodal models need templates that handle non-text content parts, usually via placeholder tokens like `<|image|>` or `<|audio|>`; most multimodal repos ship theirs in `processor_config.json` or `chat_template.json`, which mistral.rs picks up automatically.
+Multimodal models need templates that handle non-text content parts, usually via placeholder tokens like `<|image|>` or `<|audio|>`; most multimodal repos ship theirs in `processor_config.json` or `chat_template.json`, which inference.rs picks up automatically.

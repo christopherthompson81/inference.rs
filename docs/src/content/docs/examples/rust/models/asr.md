@@ -13,7 +13,7 @@ Runnable Rust SDK example `asr`.
 
 ```rust
 use anyhow::Result;
-use mistralrs::{AudioInput, MultimodalMessages, MultimodalModelBuilder, TextMessageRole};
+use inference::{AudioInput, MultimodalMessages, MultimodalModelBuilder, TextMessageRole};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -45,4 +45,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/models/asr/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/asr/main.rs)
+Source: [`inference/examples/models/asr/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/asr/main.rs)

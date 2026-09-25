@@ -9,15 +9,15 @@ sidebar:
 
 Enable PagedAttention for efficient KV-cache memory management.
 
-Run with: `cargo run --release --example paged_attn -p mistralrs`
+Run with: `cargo run --release --example paged_attn -p inference`
 
 ```rust
 //! Enable PagedAttention for efficient KV-cache memory management.
 //!
-//! Run with: `cargo run --release --example paged_attn -p mistralrs`
+//! Run with: `cargo run --release --example paged_attn -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     IsqBits, MemoryGpuConfig, ModelBuilder, PagedAttentionMetaBuilder, TextMessageRole,
     TextMessages,
 };
@@ -58,4 +58,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/paged_attn/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/paged_attn/main.rs)
+Source: [`inference/examples/advanced/paged_attn/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/paged_attn/main.rs)

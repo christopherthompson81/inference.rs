@@ -1,9 +1,9 @@
 ---
 title: Rust SDK
-description: Embed the mistral.rs engine into a Rust program.
+description: Embed the inference.rs engine into a Rust program.
 ---
 
-The `mistralrs` crate embeds the engine into a Rust program.
+The `inference` crate embeds the engine into a Rust program.
 
 - [Getting started](/guides/rust/getting-started/) - load a model in-process and send a chat request.
 - [Streaming](/guides/rust/streaming/) - handle `Response` variants, tool progress, and cancellation.

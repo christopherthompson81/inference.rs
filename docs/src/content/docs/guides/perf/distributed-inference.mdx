@@ -5,14 +5,14 @@ description: NCCL tensor parallelism, layer/P2P mapping, multi-node NCCL, and th
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-mistral.rs has four ways to spread one model beyond a single GPU. They solve different problems and use different communication paths.
+inference.rs has four ways to spread one model beyond a single GPU. They solve different problems and use different communication paths.
 
 | Mode | Scope | Transport | Use when |
 |---|---|---|---|
 | NCCL tensor parallelism | One machine, multiple CUDA GPUs | NCCL collectives | You have similar local GPUs and want the default high-throughput CUDA path. |
 | Layer mapping with CUDA P2P | One machine, multiple devices | CUDA peer access when available, CPU staging otherwise | NCCL is unavailable, disabled, or the model/layout needs contiguous layer placement. |
-| Multi-node NCCL | Multiple machines, each with local CUDA GPUs | NCCL across all ranks, with mistral.rs coordinating node startup | You want tensor parallelism across machines and each node contributes one or more local CUDA ranks. |
-| Ring backend | Multiple machines | mistral.rs ring transport from `RING_CONFIG` | You explicitly want the ring backend instead of NCCL. |
+| Multi-node NCCL | Multiple machines, each with local CUDA GPUs | NCCL across all ranks, with inference.rs coordinating node startup | You want tensor parallelism across machines and each node contributes one or more local CUDA ranks. |
+| Ring backend | Multiple machines | inference.rs ring transport from `RING_CONFIG` | You explicitly want the ring backend instead of NCCL. |
 
 **Tensor parallelism** splits each layer across all GPUs: each GPU holds a portion of every layer's weights and computes a portion of every matrix multiply, with an all-reduce per layer combining partial results. **Layer mapping** places different contiguous layer ranges on different devices; activations move only at layer-boundary device changes.
 
@@ -21,10 +21,10 @@ mistral.rs has four ways to spread one model beyond a single GPU. They solve dif
 With a CUDA build and no manual mapping:
 
 1. One visible GPU runs the model on that GPU.
-2. Multiple visible GPUs use NCCL tensor parallelism when the binary has `cuda nccl` and `MISTRALRS_NO_NCCL` is not set.
-3. If NCCL is unavailable or disabled, mistral.rs uses layer mapping. CUDA pairs use P2P when the driver allows it; otherwise transfers stage through CPU.
-4. If `MISTRALRS_MN_GLOBAL_WORLD_SIZE` is set, NCCL tensor parallelism is extended across nodes.
-5. If `RING_CONFIG` is set and the binary has `ring`, the ring backend is available. If the binary also has NCCL, set `MISTRALRS_NO_NCCL=1` to force ring.
+2. Multiple visible GPUs use NCCL tensor parallelism when the binary has `cuda nccl` and `INFERENCE_RS_NO_NCCL` is not set.
+3. If NCCL is unavailable or disabled, inference.rs uses layer mapping. CUDA pairs use P2P when the driver allows it; otherwise transfers stage through CPU.
+4. If `INFERENCE_RS_MN_GLOBAL_WORLD_SIZE` is set, NCCL tensor parallelism is extended across nodes.
+5. If `RING_CONFIG` is set and the binary has `ring`, the ring backend is available. If the binary also has NCCL, set `INFERENCE_RS_NO_NCCL=1` to force ring.
 
 The selected layout is printed in the startup logs at `INFO` level. When a topology file is in use, the logs list the device for each layer; `nvidia-smi` shows per-GPU memory at runtime.
 
@@ -39,21 +39,21 @@ Linux CUDA installs enable `nccl` when the installer or wheel builder finds `lib
 Manual Linux CUDA build with NCCL:
 
 ```bash
-cargo install mistralrs-cli --features "cuda nccl flash-attn cudnn"
+cargo install inference-cli --features "cuda nccl flash-attn cudnn"
 ```
 
-If NCCL is not installed, omit `nccl`. To force the installer decision, use `MISTRALRS_INSTALL_NCCL=1` or `MISTRALRS_INSTALL_NO_NCCL=1`. To disable NCCL at runtime without rebuilding:
+If NCCL is not installed, omit `nccl`. To force the installer decision, use `INFERENCE_RS_INSTALL_NCCL=1` or `INFERENCE_RS_INSTALL_NO_NCCL=1`. To disable NCCL at runtime without rebuilding:
 
 ```bash
-MISTRALRS_NO_NCCL=1 mistralrs serve -m Qwen/Qwen3-32B --quant 4
+INFERENCE_RS_NO_NCCL=1 inference serve -m Qwen/Qwen3-32B --quant 4
 ```
 
 ### Select GPUs
 
-Use `CUDA_VISIBLE_DEVICES` to restrict the GPU set before mistral.rs starts:
+Use `CUDA_VISIBLE_DEVICES` to restrict the GPU set before inference.rs starts:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 mistralrs serve -m Qwen/Qwen3-32B --quant 4
+CUDA_VISIBLE_DEVICES=0,1 inference serve -m Qwen/Qwen3-32B --quant 4
 ```
 
 The ordinals in `--device-layers` are the visible ordinals after `CUDA_VISIBLE_DEVICES` is applied.
@@ -63,7 +63,7 @@ NCCL tensor parallelism uses all visible CUDA GPUs. The tensor-parallel size mus
 - Attention heads must divide evenly across GPUs.
 - KV heads must either divide evenly across GPUs or be replicated evenly when there are fewer KV heads than GPUs.
 
-If the visible GPU count is incompatible, mistral.rs errors instead of selecting a smaller subset. Use `CUDA_VISIBLE_DEVICES` to choose a compatible subset.
+If the visible GPU count is incompatible, inference.rs errors instead of selecting a smaller subset. Use `CUDA_VISIBLE_DEVICES` to choose a compatible subset.
 
 ### Layer mapping (CUDA P2P)
 
@@ -75,10 +75,10 @@ Assign explicit layer counts to devices. For uneven GPUs, put fewer layers on th
 `-n`/`--device-layers` takes the format `ORD:NUM;...`:
 
 ```bash
-mistralrs serve -n "0:32;1:32" -m <model>
+inference serve -n "0:32;1:32" -m <model>
 
 # Uneven split
-mistralrs serve -n "0:44;1:20" -m Qwen/Qwen3-32B --quant 4
+inference serve -n "0:44;1:20" -m Qwen/Qwen3-32B --quant 4
 ```
 
 </TabItem>
@@ -87,7 +87,7 @@ mistralrs serve -n "0:44;1:20" -m Qwen/Qwen3-32B --quant 4
 `num_device_layers` takes a list of `"ORD:NUM"` strings:
 
 ```python
-from mistralrs import Runner, Which
+from inference_rs import Runner, Which
 
 runner = Runner(
     which=Which.Plain(model_id="Qwen/Qwen3-32B"),
@@ -110,11 +110,11 @@ For mixed GPU memory sizes, manually set `--device-layers`; the automatic split 
 
 If the model does not fit even across GPUs, CPU offload places some layers on CPU. Device mapping and dtype are orthogonal, but CPU lacks bf16/fp16 hardware support, so CPU-offloaded layers run at f32 internally even with bf16 on-disk weights.
 
-On Apple Silicon there is no multi-GPU concept: CPU and GPU share unified memory and device mapping is a no-op. `mistralrs doctor` reports a single device on Apple hardware.
+On Apple Silicon there is no multi-GPU concept: CPU and GPU share unified memory and device mapping is a no-op. `inference doctor` reports a single device on Apple hardware.
 
 ## Multi-node NCCL
 
-Multi-node NCCL inference extends tensor parallelism across machines. Each node contributes one or more local CUDA ranks to one global NCCL communicator. It is selected by the `MISTRALRS_MN_*` environment variables and does not use `RING_CONFIG`.
+Multi-node NCCL inference extends tensor parallelism across machines. Each node contributes one or more local CUDA ranks to one global NCCL communicator. It is selected by the `INFERENCE_RS_MN_*` environment variables and does not use `RING_CONFIG`.
 
 Build the same CUDA+NCCL binary on every node, and use the same model, dtype, quantization, and runtime arguments everywhere. Use `CUDA_VISIBLE_DEVICES` on each node to choose the local GPUs that participate.
 
@@ -124,9 +124,9 @@ Use the same local tensor-parallel (TP) size on every node:
 global world size = local TP size * number of nodes
 ```
 
-The global tensor-parallel size must satisfy the same head-divisibility constraints as single-machine TP. Incompatible sizes fail at startup; mistral.rs does not automatically drop ranks.
+The global tensor-parallel size must satisfy the same head-divisibility constraints as single-machine TP. Incompatible sizes fail at startup; inference.rs does not automatically drop ranks.
 
-The head node distributes the NCCL id to workers over TCP, then all ranks join one communicator. The variable roles (`MISTRALRS_MN_GLOBAL_WORLD_SIZE`, `MISTRALRS_MN_LOCAL_WORLD_SIZE`, head vs worker settings) are documented in the [environment variable reference](/reference/environment-variables/). Do not set `MISTRALRS_NO_NCCL` or `RING_CONFIG` in this mode.
+The head node distributes the NCCL id to workers over TCP, then all ranks join one communicator. The variable roles (`INFERENCE_RS_MN_GLOBAL_WORLD_SIZE`, `INFERENCE_RS_MN_LOCAL_WORLD_SIZE`, head vs worker settings) are documented in the [environment variable reference](/reference/environment-variables/). Do not set `INFERENCE_RS_NO_NCCL` or `RING_CONFIG` in this mode.
 
 Two nodes, four GPUs per node:
 
@@ -134,22 +134,22 @@ Head node:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
-MISTRALRS_MN_GLOBAL_WORLD_SIZE=8 \
-MISTRALRS_MN_LOCAL_WORLD_SIZE=4 \
-MISTRALRS_MN_HEAD_NUM_WORKERS=1 \
-MISTRALRS_MN_HEAD_PORT=9000 \
-mistralrs serve -m Qwen/Qwen3-32B --quant 4
+INFERENCE_RS_MN_GLOBAL_WORLD_SIZE=8 \
+INFERENCE_RS_MN_LOCAL_WORLD_SIZE=4 \
+INFERENCE_RS_MN_HEAD_NUM_WORKERS=1 \
+INFERENCE_RS_MN_HEAD_PORT=9000 \
+inference serve -m Qwen/Qwen3-32B --quant 4
 ```
 
 Worker node:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 \
-MISTRALRS_MN_GLOBAL_WORLD_SIZE=8 \
-MISTRALRS_MN_LOCAL_WORLD_SIZE=4 \
-MISTRALRS_MN_WORKER_SERVER_ADDR=10.0.0.1:9000 \
-MISTRALRS_MN_WORKER_ID=0 \
-mistralrs serve -m Qwen/Qwen3-32B --quant 4
+INFERENCE_RS_MN_GLOBAL_WORLD_SIZE=8 \
+INFERENCE_RS_MN_LOCAL_WORLD_SIZE=4 \
+INFERENCE_RS_MN_WORKER_SERVER_ADDR=10.0.0.1:9000 \
+INFERENCE_RS_MN_WORKER_ID=0 \
+inference serve -m Qwen/Qwen3-32B --quant 4
 ```
 
 Send client requests to the head node.
@@ -167,10 +167,10 @@ The ring backend is a distributed transport selected by `RING_CONFIG`, available
 The `ring` feature must be compiled in:
 
 ```bash
-cargo install mistralrs-cli --features "cuda flash-attn ring"
+cargo install inference-cli --features "cuda flash-attn ring"
 ```
 
-If the binary is also built with `nccl`, set `MISTRALRS_NO_NCCL=1` when launching so the ring backend is selected.
+If the binary is also built with `nccl`, set `INFERENCE_RS_NO_NCCL=1` when launching so the ring backend is selected.
 
 The ring backend reads its configuration from a JSON file pointed to by the `RING_CONFIG` environment variable. Each participant has its own `RING_CONFIG` with rank-specific values:
 
@@ -191,4 +191,4 @@ The ring backend reads its configuration from a JSON file pointed to by the `RIN
 ## See also
 
 - [Topology](/guides/perf/topology/): per-layer and per-tensor placement on one host.
-- [Environment variables](/reference/environment-variables/): full `MISTRALRS_MN_*`, `MISTRALRS_NO_NCCL`, and `RING_CONFIG` registry.
+- [Environment variables](/reference/environment-variables/): full `INFERENCE_RS_MN_*`, `INFERENCE_RS_NO_NCCL`, and `RING_CONFIG` registry.

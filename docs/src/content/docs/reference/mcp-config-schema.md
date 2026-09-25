@@ -1,9 +1,9 @@
 ---
 title: MCP configuration schema
-description: JSON schema for mistralrs MCP client configuration files.
+description: JSON schema for inference MCP client configuration files.
 ---
 
-When mistral.rs acts as an [MCP (Model Context Protocol)](/guides/agents/connect-mcp-server/) client, it reads a JSON config describing servers to connect to.
+When inference.rs acts as an [MCP (Model Context Protocol)](/guides/agents/connect-mcp-server/) client, it reads a JSON config describing servers to connect to.
 
 ## Top-level fields
 
@@ -138,7 +138,7 @@ Tools from a server with `tool_prefix = "fs"` are exposed as `fs_read_file`, `fs
 Pass it on the CLI:
 
 ```bash
-mistralrs serve --mcp-config mcp.json -m Qwen/Qwen3-4B
+inference serve --mcp-config mcp.json -m Qwen/Qwen3-4B
 ```
 
 The same path can be supplied via the `MCP_CONFIG_PATH` environment variable.

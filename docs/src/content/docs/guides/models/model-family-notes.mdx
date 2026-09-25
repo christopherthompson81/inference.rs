@@ -5,13 +5,13 @@ description: Per-family behavior that differs from the defaults - thinking tags,
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-Most models need nothing beyond `mistralrs run -m <id>` (see [Run models](/guides/models/run-any-model/)). This page collects the per-family exceptions. The full architecture inventory is in the [supported models reference](/reference/supported-models/).
+Most models need nothing beyond `inference run -m <id>` (see [Run models](/guides/models/run-any-model/)). This page collects the per-family exceptions. The full architecture inventory is in the [supported models reference](/reference/supported-models/).
 
 ## Reasoning controls
 
-`reasoning_effort` accepts `off`, `low`, `medium`, `high`, and `xhigh`; `none` is an alias for `off`. If no effort is set, mistral.rs leaves it unspecified and enables thinking. An explicit positive effort enables thinking, while `off` disables it. The legacy `enable_thinking` boolean remains supported, but contradictory explicit values return an error.
+`reasoning_effort` accepts `off`, `low`, `medium`, `high`, and `xhigh`; `none` is an alias for `off`. If no effort is set, inference.rs leaves it unspecified and enables thinking. An explicit positive effort enables thinking, while `off` disables it. The legacy `enable_thinking` boolean remains supported, but contradictory explicit values return an error.
 
-These controls are template inputs, not sampling parameters. mistral.rs passes an explicit effort under both `reasoning_effort` and the template compatibility name `reasoning_strength`. Each model's template decides whether it distinguishes every positive tier.
+These controls are template inputs, not sampling parameters. inference.rs passes an explicit effort under both `reasoning_effort` and the template compatibility name `reasoning_strength`. Each model's template decides whether it distinguishes every positive tier.
 
 ## Thinking models (Qwen3, SmolLM3)
 
@@ -21,7 +21,7 @@ Qwen3 and SmolLM3 are hybrid reasoning models; their chat templates enable think
 <TabItem label="CLI">
 
 ```bash
-mistralrs run --thinking false -m Qwen/Qwen3-4B
+inference run --thinking false -m Qwen/Qwen3-4B
 ```
 
 `--thinking` and `--reasoning-effort` apply to both one-shot and interactive use. Prompt tags also work inline:
@@ -65,7 +65,7 @@ those weights instead of runtime [ISQ (in-situ quantization)](/reference/quantiz
 For example, Qwen3.8 can serve published block-FP8 weights and an FP8 paged KV cache together:
 
 ```bash
-mistralrs serve -m Qwen/Qwen3.8-27B-FP8 --pa-cache-type f8e4m3 --max-seqs 16
+inference serve -m Qwen/Qwen3.8-27B-FP8 --pa-cache-type f8e4m3 --max-seqs 16
 ```
 
 The checkpoint's dynamic activation scaling and `modules_to_not_convert` declarations are applied
@@ -76,10 +76,10 @@ automatically; `--quant` is not needed for a pre-quantized FP8 repository.
 MoE (Mixture of Experts) families (DeepSeek V2/V3, GLM-4.7, GLM-4.7-Flash, Phi 3.5 MoE, Qwen3 MoE, Qwen3-VL MoE, Qwen3.5/Qwen3.6 MoE, LFM2/LFM2.5 MoE) support MoQE (Mixture of Quantized Experts): quantizing only the routed experts, which dominate memory, while leaving the rest of the model alone. Enable it when applying ISQ with `--isq-organization moqe`:
 
 ```bash
-mistralrs run --isq 4 --isq-organization moqe -m Qwen/Qwen3-30B-A3B
+inference run --isq 4 --isq-organization moqe -m Qwen/Qwen3-30B-A3B
 ```
 
-MoQE also applies when generating UQFF with `mistralrs quantize`. It does not rewrite an already-quantized GGUF or UQFF selected by `--quant`; those weights load as published.
+MoQE also applies when generating UQFF with `inference quantize`. It does not rewrite an already-quantized GGUF or UQFF selected by `--quant`; those weights load as published.
 
 In the Python SDK, pass `organization=IsqOrganization.MoQE` inside `Which.Plain(...)` or `Which.MultimodalPlain(...)`. Expect small output differences between quantization levels: router decisions are sensitive to numerical noise.
 
@@ -95,14 +95,14 @@ On CUDA (Unix builds), a specialized MLA decode kernel is used when all of the f
 
 A parallel fast path covers prefill with prefix caching (paged attention on, CUDA device). Otherwise the generic attention path reconstructs the latent per step.
 
-`MISTRALRS_NO_MLA=1` forces the generic path; use it when debugging suspected MLA kernel issues, and try `--paged-attn off` as a sanity check for unexpected paged-attention behavior. Background: the [DeepSeek V2 paper](https://arxiv.org/abs/2405.04434).
+`INFERENCE_RS_NO_MLA=1` forces the generic path; use it when debugging suspected MLA kernel issues, and try `--paged-attn off` as a sanity check for unexpected paged-attention behavior. Background: the [DeepSeek V2 paper](https://arxiv.org/abs/2405.04434).
 
 ## GPT-OSS
 
 GPT-OSS experts are stored pre-quantized in MXFP4 (4-bit microscaling float), and its attention uses per-head sinks. Load it without a quantization flag first:
 
 ```bash
-mistralrs run -m openai/gpt-oss-20b
+inference run -m openai/gpt-oss-20b
 ```
 
 ISQ applies only to the attention layers (and `lm_head`); the expert weights are already quantized.
@@ -118,7 +118,7 @@ Qwen3.5 and Qwen3.6 dense and MoE checkpoints are supported. Qwen3.6 shares the 
 Use nested Hugging Face config overrides to enable YaRN without editing the downloaded checkpoint. This example extends a native 262,144-token Qwen3.5 model to a 1,010,000-token serving limit:
 
 ```bash
-mistralrs serve -m Qwen/Qwen3.5-27B \
+inference serve -m Qwen/Qwen3.5-27B \
   --hf-overrides '{"text_config":{"rope_parameters":{"rope_type":"yarn","factor":4.0,"original_max_position_embeddings":262144}}}' \
   --max-model-len 1010000
 ```
@@ -137,7 +137,7 @@ The official repos ship `chat_template.jinja`, including the Liquid tool-call fo
 
 ## Gemma
 
-Gemma repos are gated: accept the license on the Hugging Face model page, then authenticate with `mistralrs login`.
+Gemma repos are gated: accept the license on the Hugging Face model page, then authenticate with `inference login`.
 
 Gemma 4 accepts image, audio, and video parts mixed in one message, and enforces its tool-call format through constrained decoding by default; see [tool calling](/guides/agents/tool-calling-basics/).
 
@@ -146,12 +146,12 @@ Gemma 4 accepts image, audio, and video parts mixed in one message, and enforces
 Muse Glimmer loads through normal model auto-detection:
 
 ```bash
-mistralrs run -m meta-models/Muse-Glimmer-30B
+inference run -m meta-models/Muse-Glimmer-30B
 ```
 
 The native safetensors checkpoint accepts text, images, and video; it does not accept audio. Video is represented as timestamped frame groups, and the model card notes that the model was trained primarily for image rather than video understanding.
 
-The model's ATEM chat template is detected automatically. Tool calling supports automatic, required, named, and parallel calls through the same HTTP, Python, Rust, and agent APIs as other tool-capable models. Muse reads the `reasoning_strength` template variable, so mistral.rs maps the public `reasoning_effort` control to it. The published Muse tiers are `low`, `medium`, `high`, and `xhigh`; omission uses the template's `high` default.
+The model's ATEM chat template is detected automatically. Tool calling supports automatic, required, named, and parallel calls through the same HTTP, Python, Rust, and agent APIs as other tool-capable models. Muse reads the `reasoning_strength` template variable, so inference.rs maps the public `reasoning_effort` control to it. The published Muse tiers are `low`, `medium`, `high`, and `xhigh`; omission uses the template's `high` default.
 
 ISQ, UQFF, paged attention, prefix caching, tensor parallelism, and text-backbone LoRA use the standard multimodal model paths. For GGUF-specific requirements and its image-only projector limitation, see [GGUF compatibility](/reference/gguf-support/).
 
@@ -165,7 +165,7 @@ MatFormer-trained models encode multiple model sizes in one checkpoint; the desi
 Without these, the default (full) configuration loads. Gemma 3n (`google/gemma-3n-E4B-it`) is the MatFormer model in the supported list; the bundled `matformer_configs/gemma3n.csv` contains the full E4B configuration, the official E2B slice, and intermediate E1.96B-E3.79B slices:
 
 ```bash
-mistralrs run -m google/gemma-3n-E4B-it \
+inference run -m google/gemma-3n-E4B-it \
   --matformer-config-path matformer_configs/gemma3n.csv \
   --matformer-slice-name "Config for E2.49B (block-level)"
 ```
@@ -184,7 +184,7 @@ Use the full configuration for quality and smaller slices for constrained device
 Mistral Small 3 checkpoints can do tool calling, but some repos do not ship the right chat template. Use the bundled one:
 
 ```bash
-mistralrs serve --quant 4 \
+inference serve --quant 4 \
   --jinja-explicit chat_templates/mistral_small_tool_call.jinja \
   -m mistralai/Mistral-Small-3.2-24B-Instruct-2506
 ```
@@ -194,7 +194,7 @@ mistralrs serve --quant 4 \
 Mistral-backed LLaVA checkpoints work with the default template. Vicuna-backed checkpoints need the Vicuna template:
 
 ```bash
-mistralrs run -m llava-hf/llava-v1.6-vicuna-7b-hf \
+inference run -m llava-hf/llava-v1.6-vicuna-7b-hf \
   -c chat_templates/vicuna.json --image photo.jpg -i "Describe this image"
 ```
 

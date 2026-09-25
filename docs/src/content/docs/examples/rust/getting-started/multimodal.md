@@ -17,9 +17,9 @@ Runnable Rust SDK example `multimodal`.
 /// For a comprehensive example with all supported multimodal model IDs,
 /// see `examples/models/multimodal_models/`.
 ///
-/// Run with: `cargo run --release --example multimodal_basic -p mistralrs`
+/// Run with: `cargo run --release --example multimodal_basic -p inference`
 use anyhow::Result;
-use mistralrs::{IsqBits, ModelBuilder, MultimodalMessages, TextMessageRole};
+use inference::{IsqBits, ModelBuilder, MultimodalMessages, TextMessageRole};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -50,4 +50,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/getting_started/multimodal/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/getting_started/multimodal/main.rs)
+Source: [`inference/examples/getting_started/multimodal/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/getting_started/multimodal/main.rs)

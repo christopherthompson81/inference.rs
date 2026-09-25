@@ -12,7 +12,7 @@ Runnable Python SDK example `dia`.
 <!-- needs-header -->
 
 ```python
-from mistralrs import (
+from inference_rs import (
     Runner,
     Which,
     SpeechLoaderType,

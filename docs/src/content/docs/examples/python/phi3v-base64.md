@@ -12,7 +12,7 @@ Runnable Python SDK example `phi3v_base64`.
 <!-- needs-header -->
 
 ```python
-from mistralrs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
+from inference_rs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
 import base64
 
 runner = Runner(

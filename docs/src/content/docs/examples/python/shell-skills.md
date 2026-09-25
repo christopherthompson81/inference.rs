@@ -12,7 +12,7 @@ Local shell skill mount with the Python SDK.
 The request mounts a local skill directory under `skills/invoice-auditor/`.
 
 Run with:
-    pip install -e mistralrs-pyo3 --features code-execution
+    pip install -e inference-rs-pyo3 --features code-execution
     python examples/python/shell_skills.py
 
 ```python
@@ -22,14 +22,14 @@ Local shell skill mount with the Python SDK.
 The request mounts a local skill directory under `skills/invoice-auditor/`.
 
 Run with:
-    pip install -e mistralrs-pyo3 --features code-execution
+    pip install -e inference-rs-pyo3 --features code-execution
     python examples/python/shell_skills.py
 """
 
 from pathlib import Path
 import tempfile
 
-from mistralrs import ChatCompletionRequest, Runner, ShellConfig, ShellSkillMount, Which
+from inference_rs import ChatCompletionRequest, Runner, ShellConfig, ShellSkillMount, Which
 
 
 def write_invoice_skill(root: Path) -> Path:

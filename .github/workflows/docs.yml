@@ -8,10 +8,10 @@ on:
       - "Cargo.toml"
       - "docs/**"
       - "examples/**"
-      - "mistralrs/examples/**"
-      - "mistralrs-cli/**"
-      - "mistralrs-pyo3/**"
-      - "mistralrs-server-core/**"
+      - "inference/examples/**"
+      - "inference-cli/**"
+      - "inference-pyo3/**"
+      - "inference-server-core/**"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
@@ -19,10 +19,10 @@ on:
       - "Cargo.toml"
       - "docs/**"
       - "examples/**"
-      - "mistralrs/examples/**"
-      - "mistralrs-cli/**"
-      - "mistralrs-pyo3/**"
-      - "mistralrs-server-core/**"
+      - "inference/examples/**"
+      - "inference-cli/**"
+      - "inference-pyo3/**"
+      - "inference-server-core/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 

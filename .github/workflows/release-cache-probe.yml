@@ -102,7 +102,7 @@ jobs:
           sampler=$!
           trap 'kill "$sampler" 2>/dev/null || true' EXIT
           start=$(date +%s)
-          cargo build --release --locked --offline --features "cuda flash-attn nccl" -p mistralrs-cli
+          cargo build --release --locked --offline --features "cuda flash-attn nccl" -p inference-cli
           end=$(date +%s)
           kill "$sampler" 2>/dev/null || true
           trap - EXIT

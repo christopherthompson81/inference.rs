@@ -125,7 +125,7 @@ DEFAULT_MULTIMODAL_IMAGE_PROMPT = (
     "color and the colors used for the title lettering."
 )
 DEFAULT_MULTIMODAL_REQUIRED_PHRASES = (
-    "mistral.rs",
+    "inference.rs",
     "fast, flexible llm inference",
 )
 DEFAULT_MULTIMODAL_EXPECTED_ATTRIBUTES = (
@@ -145,15 +145,15 @@ DEFAULT_QUALITY_REPLAY_MAX_STABILITY_PASSES = 4
 QUALITY_REPLAY_CONTROL_SEED_OFFSET = 80_000_000
 QUALITY_REPLAY_PRESSURE_SEED_OFFSET = 81_000_000
 PAGED_RECURRENT_PREFIX_OWNERS_CAPACITY_GAUGE = (
-    "mistralrs_paged_recurrent_prefix_owners_capacity"
+    "inference_paged_recurrent_prefix_owners_capacity"
 )
 PAGED_RECURRENT_PREFIX_OWNERS_USED_GAUGE = (
-    "mistralrs_paged_recurrent_prefix_owners_used"
+    "inference_paged_recurrent_prefix_owners_used"
 )
 PAGED_PREFIX_RETENTION_PRESSURE_EVICTIONS_COUNTER = (
-    "mistralrs_paged_prefix_retention_pressure_evictions_total"
+    "inference_paged_prefix_retention_pressure_evictions_total"
 )
-PAGED_PREFIX_RETAINED_BLOCKS_GAUGE = "mistralrs_kv_cache_blocks_prefix_retained"
+PAGED_PREFIX_RETAINED_BLOCKS_GAUGE = "inference_kv_cache_blocks_prefix_retained"
 EXACT_TEXT_SOURCE_MARGIN_TOKENS = 8_192
 EXACT_TEXT_LENGTH_REFINEMENT_STEPS = 16
 EXACT_TEXT_LOCAL_SEARCH_RADIUS = 16
@@ -198,25 +198,25 @@ EXACT_CONTEXT_SUFFIX = (
     "\nEnd of deterministic production-soak context.\n"
     "Respond with varied original prose without quoting or repeating the context.\n"
 )
-PROMETHEUS_METRIC_PREFIXES = ("mistralrs_", "http_requests_in_flight")
-KV_CACHE_ACTIVE_GAUGE = "mistralrs_kv_cache_blocks_active"
-KV_CACHE_PREFIX_CACHED_GAUGE = "mistralrs_kv_cache_blocks_prefix_cached"
-REQUEST_OUTCOMES_COUNTER = "mistralrs_request_outcomes_total"
-SPARSE_VERIFIER_GPU_COUNTER = "mistralrs_speculative_sparse_gpu_verify_total"
-SPARSE_VERIFIER_FALLBACK_COUNTER = "mistralrs_speculative_sparse_gpu_fallback_total"
-CUDA_GRAPH_DISPATCH_COUNTER = "mistralrs_cuda_graph_dispatch_total"
-CUDA_GRAPH_EVENTS_COUNTER = "mistralrs_cuda_graph_events_total"
-CUDA_GRAPH_EVICTIONS_COUNTER = "mistralrs_cuda_graph_evictions_total"
+PROMETHEUS_METRIC_PREFIXES = ("inference_", "http_requests_in_flight")
+KV_CACHE_ACTIVE_GAUGE = "inference_kv_cache_blocks_active"
+KV_CACHE_PREFIX_CACHED_GAUGE = "inference_kv_cache_blocks_prefix_cached"
+REQUEST_OUTCOMES_COUNTER = "inference_request_outcomes_total"
+SPARSE_VERIFIER_GPU_COUNTER = "inference_speculative_sparse_gpu_verify_total"
+SPARSE_VERIFIER_FALLBACK_COUNTER = "inference_speculative_sparse_gpu_fallback_total"
+CUDA_GRAPH_DISPATCH_COUNTER = "inference_cuda_graph_dispatch_total"
+CUDA_GRAPH_EVENTS_COUNTER = "inference_cuda_graph_events_total"
+CUDA_GRAPH_EVICTIONS_COUNTER = "inference_cuda_graph_evictions_total"
 CUDA_GRAPH_CACHE_POPULATION_REASON = "cache_population"
-CUDA_MEMORY_PENDING_GAUGE = "mistralrs_cuda_memory_maintenance_pending"
-CUDA_MEMORY_MAINTENANCE_COUNTER = "mistralrs_cuda_memory_maintenance_total"
-CUDA_MEMORY_PRESSURE_COUNTER = "mistralrs_cuda_memory_pressure_total"
-CUDA_MEMORY_RECLAIMED_BYTES_COUNTER = "mistralrs_cuda_memory_reclaimed_bytes_total"
-CUDA_PROMPT_BATCH_REDUCTIONS_COUNTER = "mistralrs_cuda_prompt_batch_reductions_total"
-CUDA_PROMPT_SEQUENCES_DEFERRED_COUNTER = "mistralrs_cuda_prompt_sequences_deferred_total"
-CUDA_PROMPT_MEMORY_REJECTIONS_COUNTER = "mistralrs_cuda_prompt_memory_rejections_total"
-WINDOWED_KV_SLOTS_USED_GAUGE = "mistralrs_windowed_kv_slots_used"
-WINDOWED_KV_SLOTS_TOTAL_GAUGE = "mistralrs_windowed_kv_slots_total"
+CUDA_MEMORY_PENDING_GAUGE = "inference_cuda_memory_maintenance_pending"
+CUDA_MEMORY_MAINTENANCE_COUNTER = "inference_cuda_memory_maintenance_total"
+CUDA_MEMORY_PRESSURE_COUNTER = "inference_cuda_memory_pressure_total"
+CUDA_MEMORY_RECLAIMED_BYTES_COUNTER = "inference_cuda_memory_reclaimed_bytes_total"
+CUDA_PROMPT_BATCH_REDUCTIONS_COUNTER = "inference_cuda_prompt_batch_reductions_total"
+CUDA_PROMPT_SEQUENCES_DEFERRED_COUNTER = "inference_cuda_prompt_sequences_deferred_total"
+CUDA_PROMPT_MEMORY_REJECTIONS_COUNTER = "inference_cuda_prompt_memory_rejections_total"
+WINDOWED_KV_SLOTS_USED_GAUGE = "inference_windowed_kv_slots_used"
+WINDOWED_KV_SLOTS_TOTAL_GAUGE = "inference_windowed_kv_slots_total"
 DFLASH_WINDOWED_KV_LIVE_SLOTS_USED_GAUGE = (
     f'{WINDOWED_KV_SLOTS_USED_GAUGE}{{component="dflash",pool="live"}}'
 )
@@ -230,50 +230,50 @@ DFLASH_WINDOWED_KV_CHECKPOINT_SLOTS_TOTAL_GAUGE = (
     f'{WINDOWED_KV_SLOTS_TOTAL_GAUGE}{{component="dflash",pool="checkpoint"}}'
 )
 REQUIRED_PRODUCTION_GAUGES = (
-    "mistralrs_sequences_running",
-    "mistralrs_sequences_waiting",
-    "mistralrs_sequences_capacity",
-    "mistralrs_requests_pending_admission",
+    "inference_sequences_running",
+    "inference_sequences_waiting",
+    "inference_sequences_capacity",
+    "inference_requests_pending_admission",
     KV_CACHE_ACTIVE_GAUGE,
     KV_CACHE_PREFIX_CACHED_GAUGE,
-    "mistralrs_kv_cache_blocks_total",
-    "mistralrs_recurrent_state_slots_used",
-    "mistralrs_recurrent_state_slots_total",
+    "inference_kv_cache_blocks_total",
+    "inference_recurrent_state_slots_used",
+    "inference_recurrent_state_slots_total",
 )
 MULTIMODAL_FRESH_COUNTERS = (
     REQUEST_OUTCOMES_COUNTER,
-    "mistralrs_sequences_completed_total",
-    "mistralrs_sequences_rejected_total",
-    "mistralrs_tokens_processed_total",
-    "mistralrs_request_queue_duration_seconds_count",
-    "mistralrs_prefix_cache_lookups_total",
-    "mistralrs_prefix_cache_hits_total",
-    "mistralrs_prefix_cache_tokens_matched_total",
-    "mistralrs_prefix_cache_tokens_reused_total",
-    "mistralrs_prefix_cache_evictions_total",
-    "mistralrs_speculative_prefix_cache_hits_total",
-    "mistralrs_speculative_prefix_cache_misses_total",
-    "mistralrs_speculative_prefix_cache_captures_total",
-    "mistralrs_speculative_prefix_cache_restore_copies_total",
-    "mistralrs_speculative_prefix_replay_tokens_avoided_total",
-    "mistralrs_encoder_cache_hits_total",
-    "mistralrs_encoder_cache_misses_total",
+    "inference_sequences_completed_total",
+    "inference_sequences_rejected_total",
+    "inference_tokens_processed_total",
+    "inference_request_queue_duration_seconds_count",
+    "inference_prefix_cache_lookups_total",
+    "inference_prefix_cache_hits_total",
+    "inference_prefix_cache_tokens_matched_total",
+    "inference_prefix_cache_tokens_reused_total",
+    "inference_prefix_cache_evictions_total",
+    "inference_speculative_prefix_cache_hits_total",
+    "inference_speculative_prefix_cache_misses_total",
+    "inference_speculative_prefix_cache_captures_total",
+    "inference_speculative_prefix_cache_restore_copies_total",
+    "inference_speculative_prefix_replay_tokens_avoided_total",
+    "inference_encoder_cache_hits_total",
+    "inference_encoder_cache_misses_total",
 )
 MULTIMODAL_FRESH_GAUGES = (
-    "mistralrs_sequences_running",
-    "mistralrs_sequences_waiting",
-    "mistralrs_requests_pending_admission",
+    "inference_sequences_running",
+    "inference_sequences_waiting",
+    "inference_requests_pending_admission",
     KV_CACHE_ACTIVE_GAUGE,
     KV_CACHE_PREFIX_CACHED_GAUGE,
-    "mistralrs_kv_cache_blocks_used",
-    "mistralrs_recurrent_state_slots_used",
+    "inference_kv_cache_blocks_used",
+    "inference_recurrent_state_slots_used",
     DFLASH_WINDOWED_KV_LIVE_SLOTS_USED_GAUGE,
     DFLASH_WINDOWED_KV_CHECKPOINT_SLOTS_USED_GAUGE,
 )
 MULTIMODAL_TRANSIENT_CLEANUP_GAUGES = (
-    "mistralrs_sequences_running",
-    "mistralrs_sequences_waiting",
-    "mistralrs_requests_pending_admission",
+    "inference_sequences_running",
+    "inference_sequences_waiting",
+    "inference_requests_pending_admission",
     KV_CACHE_ACTIVE_GAUGE,
     "http_requests_in_flight",
     DFLASH_WINDOWED_KV_LIVE_SLOTS_USED_GAUGE,
@@ -1444,9 +1444,9 @@ def read_server_process_provenance(server_pid: int) -> dict[str, Any]:
         "command_sha256": hashlib.sha256(redacted_cmdline).hexdigest(),
         "command_hash_scope": "redacted_nul_delimited_argv",
         "serve_configuration": parse_serve_configuration(argv),
-        "process_is_mistralrs": (
-            "mistralrs" in executable.name
-            or any("mistralrs" in value for value in argv[:1])
+        "process_is_inference": (
+            "inference_rs" in executable.name
+            or any("inference_rs" in value for value in argv[:1])
         ),
     }
 
@@ -1527,16 +1527,16 @@ async def gpu_driver_provenance(server_pid: int | None) -> dict[str, Any]:
 
 def realized_kv_configuration(metrics: dict[str, float]) -> dict[str, Any]:
     return {
-        "blocks_total": metric_total(metrics, "mistralrs_kv_cache_blocks_total"),
+        "blocks_total": metric_total(metrics, "inference_kv_cache_blocks_total"),
         "blocks_total_series": labeled_metric_values(
-            metrics, "mistralrs_kv_cache_blocks_total"
+            metrics, "inference_kv_cache_blocks_total"
         ),
         "blocks_active": metric_total(metrics, KV_CACHE_ACTIVE_GAUGE),
         "blocks_active_series": labeled_metric_values(metrics, KV_CACHE_ACTIVE_GAUGE),
         "blocks_prefix_cached": metric_total(metrics, KV_CACHE_PREFIX_CACHED_GAUGE),
-        "sequence_capacity": metric_total(metrics, "mistralrs_sequences_capacity"),
+        "sequence_capacity": metric_total(metrics, "inference_sequences_capacity"),
         "recurrent_slots_total": metric_total(
-            metrics, "mistralrs_recurrent_state_slots_total"
+            metrics, "inference_recurrent_state_slots_total"
         ),
     }
 
@@ -1558,7 +1558,7 @@ def server_provenance_evidence(provenance: dict[str, Any]) -> dict[str, Any]:
     checks = {
         "git_revision": bool(re.fullmatch(r"[0-9a-fA-F]{40,64}", git_revision)),
         "binary": bool(
-            process.get("process_is_mistralrs")
+            process.get("process_is_inference")
             and process.get("executable")
             and process.get("executable_sha256")
         ),
@@ -1625,11 +1625,11 @@ def server_provenance_required(args: argparse.Namespace) -> bool:
 def prefix_pressure_plan(
     snapshot: dict[str, float], config: PrefixPressureConfig
 ) -> dict[str, int | float]:
-    total = metric_total(snapshot, "mistralrs_kv_cache_blocks_total")
+    total = metric_total(snapshot, "inference_kv_cache_blocks_total")
     active = metric_total(snapshot, KV_CACHE_ACTIVE_GAUGE)
     prefix_cached = metric_total(snapshot, KV_CACHE_PREFIX_CACHED_GAUGE)
     if total is None or total <= 0:
-        raise RuntimeError("prefix pressure requires mistralrs_kv_cache_blocks_total")
+        raise RuntimeError("prefix pressure requires inference_kv_cache_blocks_total")
     if active is None or active < 0:
         raise RuntimeError(f"prefix pressure requires {KV_CACHE_ACTIVE_GAUGE}")
     if prefix_cached is None or prefix_cached < 0:
@@ -3897,12 +3897,12 @@ async def run_long_context_correctness(
     cold_dispatch = labeled_metric_deltas(
         cold_metrics_before,
         cold_metrics_after,
-        "mistralrs_cuda_graph_dispatch_total",
+        "inference_cuda_graph_dispatch_total",
     )
     cold_events = labeled_metric_deltas(
         cold_metrics_before,
         cold_metrics_after,
-        "mistralrs_cuda_graph_events_total",
+        "inference_cuda_graph_events_total",
     )
     cold_eager_captures = sum(
         item["delta"]
@@ -4299,18 +4299,18 @@ async def safe_metrics(client: SoakClient, writer: JsonlWriter, phase: str) -> d
 
 
 CLEANUP_GAUGES = (
-    "mistralrs_sequences_running",
-    "mistralrs_sequences_waiting",
-    "mistralrs_requests_pending_admission",
-    "mistralrs_recurrent_state_slots_used",
+    "inference_sequences_running",
+    "inference_sequences_waiting",
+    "inference_requests_pending_admission",
+    "inference_recurrent_state_slots_used",
     KV_CACHE_ACTIVE_GAUGE,
     "http_requests_in_flight",
 )
 RESIDENT_TRANSIENT_CLEANUP_GAUGES = (
-    "mistralrs_sequences_running",
-    "mistralrs_sequences_waiting",
-    "mistralrs_requests_pending_admission",
-    "mistralrs_recurrent_state_slots_used",
+    "inference_sequences_running",
+    "inference_sequences_waiting",
+    "inference_requests_pending_admission",
+    "inference_recurrent_state_slots_used",
     KV_CACHE_ACTIVE_GAUGE,
     "http_requests_in_flight",
 )
@@ -4323,10 +4323,10 @@ DFLASH_ABORT_CLEANUP_GAUGES = (
     DFLASH_WINDOWED_KV_CHECKPOINT_SLOTS_USED_GAUGE,
 )
 CHURN_REQUIRED_GAUGES = (
-    "mistralrs_sequences_capacity",
-    "mistralrs_sequences_running",
-    "mistralrs_sequences_waiting",
-    "mistralrs_requests_pending_admission",
+    "inference_sequences_capacity",
+    "inference_sequences_running",
+    "inference_sequences_waiting",
+    "inference_requests_pending_admission",
 )
 
 
@@ -4536,17 +4536,17 @@ def churn_capacity_evidence(
     running_values = [
         value
         for sample in queue_samples
-        if (value := sample.get("mistralrs_sequences_running")) is not None
+        if (value := sample.get("inference_sequences_running")) is not None
     ]
     waiting_values = [
         value
         for sample in queue_samples
-        if (value := sample.get("mistralrs_sequences_waiting")) is not None
+        if (value := sample.get("inference_sequences_waiting")) is not None
     ]
     pending_values = [
         value
         for sample in queue_samples
-        if (value := sample.get("mistralrs_requests_pending_admission")) is not None
+        if (value := sample.get("inference_requests_pending_admission")) is not None
     ]
     peak_running = max(running_values, default=None)
     peak_waiting = max(waiting_values, default=None)
@@ -4704,7 +4704,7 @@ async def run_prefix_pressure_workflow(
     pre_prefix_metrics = await safe_metrics(client, writer, "prefix-before-cold")
     sequence_capacity = metric_total(
         pre_prefix_metrics,
-        "mistralrs_sequences_capacity",
+        "inference_sequences_capacity",
     )
     capacity_matches = sequence_capacity == args.max_seqs
     prefix_spec = RequestSpec(
@@ -4756,7 +4756,7 @@ async def run_prefix_pressure_workflow(
     cold_reused_tokens = metric_delta(
         pre_prefix_metrics,
         post_cold_metrics,
-        "mistralrs_prefix_cache_tokens_reused_total",
+        "inference_prefix_cache_tokens_reused_total",
     )
     cold_reuse_fraction = ratio(cold_reused_tokens, args.prefix_context_tokens)
     cold_miss_observed = (
@@ -4766,10 +4766,10 @@ async def run_prefix_pressure_workflow(
 
     total_kv_blocks = metric_total(
         post_hit_metrics,
-        "mistralrs_kv_cache_blocks_total",
+        "inference_kv_cache_blocks_total",
     )
     if total_kv_blocks is None or total_kv_blocks <= 0:
-        raise RuntimeError("prefix pressure requires mistralrs_kv_cache_blocks_total")
+        raise RuntimeError("prefix pressure requires inference_kv_cache_blocks_total")
     pressure_blocks_per_request = math.ceil(
         args.prefix_pressure_context_tokens / args.kv_block_size_tokens
     )
@@ -4831,7 +4831,7 @@ async def run_prefix_pressure_workflow(
     pressure_evictions = metric_delta(
         post_hit_metrics,
         post_pressure_metrics,
-        "mistralrs_prefix_cache_evictions_total",
+        "inference_prefix_cache_evictions_total",
     )
     pressure_reached_eviction = pressure_evictions is not None and pressure_evictions > 0
     after_spec = RequestSpec(
@@ -4860,7 +4860,7 @@ async def run_prefix_pressure_workflow(
     after_reused_tokens = metric_delta(
         post_pressure_metrics,
         post_after_metrics,
-        "mistralrs_prefix_cache_tokens_reused_total",
+        "inference_prefix_cache_tokens_reused_total",
     )
     after_reuse_fraction = ratio(after_reused_tokens, args.prefix_context_tokens)
     target_was_evicted = (
@@ -5199,7 +5199,7 @@ async def adversarial_mode(
     quality_checks: list[dict[str, Any]] = []
     runtime_evidence: list[dict[str, Any]] = []
     runtime_cursor = initial_metrics
-    sequence_capacity = metric_total(initial_metrics, "mistralrs_sequences_capacity")
+    sequence_capacity = metric_total(initial_metrics, "inference_sequences_capacity")
     max_seqs_capacity_ok = sequence_capacity == args.max_seqs == 16
 
     async def record_quality(phase: str, results: Sequence[RequestResult]) -> None:
@@ -5762,7 +5762,7 @@ async def adversarial_mode(
         admitted_cancel_requests = metric_delta(
             pre_cancel_metrics,
             admission_metrics,
-            "mistralrs_prefix_cache_lookups_total",
+            "inference_prefix_cache_lookups_total",
         ) or 0.0
         if admitted_cancel_requests >= len(cancellation_specs):
             break
@@ -5796,7 +5796,7 @@ async def adversarial_mode(
         cancelled_sequences_evidence = labeled_counter_evidence(
             pre_cancel_metrics,
             post_cancel_metrics,
-            "mistralrs_sequences_completed_total",
+            "inference_sequences_completed_total",
             "reason",
             "canceled",
             len(cancellation_specs),
@@ -5895,7 +5895,7 @@ async def adversarial_mode(
         timeout_admissions = metric_delta(
             pre_timeout_metrics,
             timeout_admission_metrics,
-            "mistralrs_prefix_cache_lookups_total",
+            "inference_prefix_cache_lookups_total",
         ) or 0.0
         if timeout_admissions >= 1:
             break
@@ -6046,10 +6046,10 @@ async def adversarial_mode(
                     metric_values(
                         snapshot,
                         (
-                            "mistralrs_sequences_capacity",
-                            "mistralrs_sequences_running",
-                            "mistralrs_sequences_waiting",
-                            "mistralrs_requests_pending_admission",
+                            "inference_sequences_capacity",
+                            "inference_sequences_running",
+                            "inference_sequences_waiting",
+                            "inference_requests_pending_admission",
                             "http_requests_in_flight",
                         ),
                     )
@@ -6098,8 +6098,8 @@ async def adversarial_mode(
     }
 
     final_metrics = await safe_metrics(client, writer, "adversarial-end")
-    running_after_cancel = metric_total(post_cancel_metrics, "mistralrs_sequences_running")
-    waiting_after_cancel = metric_total(post_cancel_metrics, "mistralrs_sequences_waiting")
+    running_after_cancel = metric_total(post_cancel_metrics, "inference_sequences_running")
+    waiting_after_cancel = metric_total(post_cancel_metrics, "inference_sequences_waiting")
     metrics_delta = selected_metric_deltas(initial_metrics, final_metrics)
     adversarial_mtp = configured_speculative_evidence(
         initial_metrics,
@@ -6979,21 +6979,21 @@ def selected_metric_deltas(
     before: dict[str, float], after: dict[str, float]
 ) -> dict[str, float | None]:
     names = (
-        "mistralrs_tokens_processed_total",
-        "mistralrs_speculative_drafts_total",
-        "mistralrs_speculative_draft_tokens_proposed_total",
-        "mistralrs_speculative_draft_tokens_accepted_total",
+        "inference_tokens_processed_total",
+        "inference_speculative_drafts_total",
+        "inference_speculative_draft_tokens_proposed_total",
+        "inference_speculative_draft_tokens_accepted_total",
         SPARSE_VERIFIER_GPU_COUNTER,
         SPARSE_VERIFIER_FALLBACK_COUNTER,
-        "mistralrs_prefix_cache_lookups_total",
-        "mistralrs_prefix_cache_hits_total",
-        "mistralrs_prefix_cache_tokens_matched_total",
-        "mistralrs_prefix_cache_tokens_reused_total",
-        "mistralrs_prefix_cache_evictions_total",
-        "mistralrs_paged_preemptions_total",
-        "mistralrs_speculative_staged_drops_total",
-        "mistralrs_encoder_cache_hits_total",
-        "mistralrs_encoder_cache_misses_total",
+        "inference_prefix_cache_lookups_total",
+        "inference_prefix_cache_hits_total",
+        "inference_prefix_cache_tokens_matched_total",
+        "inference_prefix_cache_tokens_reused_total",
+        "inference_prefix_cache_evictions_total",
+        "inference_paged_preemptions_total",
+        "inference_speculative_staged_drops_total",
+        "inference_encoder_cache_hits_total",
+        "inference_encoder_cache_misses_total",
         CUDA_GRAPH_EVENTS_COUNTER,
         CUDA_GRAPH_DISPATCH_COUNTER,
         CUDA_GRAPH_EVICTIONS_COUNTER,
@@ -7004,7 +7004,7 @@ def selected_metric_deltas(
         CUDA_PROMPT_SEQUENCES_DEFERRED_COUNTER,
         CUDA_PROMPT_MEMORY_REJECTIONS_COUNTER,
         REQUEST_OUTCOMES_COUNTER,
-        "mistralrs_sequences_completed_total",
+        "inference_sequences_completed_total",
         KV_CACHE_ACTIVE_GAUGE,
         KV_CACHE_PREFIX_CACHED_GAUGE,
         DFLASH_WINDOWED_KV_LIVE_SLOTS_USED_GAUGE,
@@ -7163,7 +7163,7 @@ def sparse_verifier_evidence(
     max_fallback_ratio: float,
     min_accounting_coverage: float,
 ) -> dict[str, Any]:
-    drafts = metric_delta(before, after, "mistralrs_speculative_drafts_total")
+    drafts = metric_delta(before, after, "inference_speculative_drafts_total")
     gpu_verified_raw = metric_delta(before, after, SPARSE_VERIFIER_GPU_COUNTER)
     cpu_fallbacks_raw = metric_delta(before, after, SPARSE_VERIFIER_FALLBACK_COUNTER)
     instrumentation_present = gpu_verified_raw is not None or cpu_fallbacks_raw is not None
@@ -7233,22 +7233,22 @@ def speculative_evidence(
         DEFAULT_MIN_SPARSE_VERIFIER_ACCOUNTING_COVERAGE
     ),
 ) -> dict[str, Any]:
-    drafts = metric_delta(before, after, "mistralrs_speculative_drafts_total")
+    drafts = metric_delta(before, after, "inference_speculative_drafts_total")
     proposed = metric_delta(
         before,
         after,
-        "mistralrs_speculative_draft_tokens_proposed_total",
+        "inference_speculative_draft_tokens_proposed_total",
     )
     accepted = metric_delta(
         before,
         after,
-        "mistralrs_speculative_draft_tokens_accepted_total",
+        "inference_speculative_draft_tokens_accepted_total",
     )
     per_position = []
     for item in labeled_metric_deltas(
         before,
         after,
-        "mistralrs_speculative_draft_tokens_accepted_per_pos_total",
+        "inference_speculative_draft_tokens_accepted_per_pos_total",
     ):
         raw_position = item["labels"].get("position")
         if raw_position is None:
@@ -7560,17 +7560,17 @@ def prefix_cache_evidence(
 ) -> dict[str, Any]:
     prompt_tokens = list(expected_prompt_tokens)
     expected_requests = len(prompt_tokens)
-    lookups = metric_delta(before, after, "mistralrs_prefix_cache_lookups_total")
-    hits = metric_delta(before, after, "mistralrs_prefix_cache_hits_total")
+    lookups = metric_delta(before, after, "inference_prefix_cache_lookups_total")
+    hits = metric_delta(before, after, "inference_prefix_cache_hits_total")
     matched_tokens = metric_delta(
         before,
         after,
-        "mistralrs_prefix_cache_tokens_matched_total",
+        "inference_prefix_cache_tokens_matched_total",
     )
     reused_tokens = metric_delta(
         before,
         after,
-        "mistralrs_prefix_cache_tokens_reused_total",
+        "inference_prefix_cache_tokens_reused_total",
     )
     expected_cacheable_tokens = sum(
         cacheable_prefix_tokens(tokens, block_size_tokens) for tokens in prompt_tokens
@@ -8345,16 +8345,16 @@ def summarize_telemetry(
     snapshots: Sequence[tuple[float, dict[str, float], dict[str, Any]]]
 ) -> dict[str, Any]:
     gauge_names = (
-        "mistralrs_sequences_running",
-        "mistralrs_sequences_waiting",
-        "mistralrs_sequences_capacity",
-        "mistralrs_requests_pending_admission",
-        "mistralrs_kv_cache_blocks_used",
+        "inference_sequences_running",
+        "inference_sequences_waiting",
+        "inference_sequences_capacity",
+        "inference_requests_pending_admission",
+        "inference_kv_cache_blocks_used",
         KV_CACHE_ACTIVE_GAUGE,
         KV_CACHE_PREFIX_CACHED_GAUGE,
-        "mistralrs_kv_cache_blocks_total",
-        "mistralrs_recurrent_state_slots_used",
-        "mistralrs_recurrent_state_slots_total",
+        "inference_kv_cache_blocks_total",
+        "inference_recurrent_state_slots_used",
+        "inference_recurrent_state_slots_total",
         DFLASH_WINDOWED_KV_LIVE_SLOTS_USED_GAUGE,
         DFLASH_WINDOWED_KV_LIVE_SLOTS_TOTAL_GAUGE,
         DFLASH_WINDOWED_KV_CHECKPOINT_SLOTS_USED_GAUGE,
@@ -8427,7 +8427,7 @@ def telemetry_evidence(
         for _, _, process in snapshots
     )
     server_process_samples = sum(
-        process.get("process_is_mistralrs") is True
+        process.get("process_is_inference") is True
         for _, _, process in snapshots
     )
     host_cpu_samples = sum(
@@ -8503,8 +8503,8 @@ def telemetry_evidence(
         "process_rss_coverage": rss_coverage,
         "process_gpu_memory_samples": process_gpu_samples,
         "process_gpu_memory_coverage": process_gpu_coverage,
-        "mistralrs_process_samples": server_process_samples,
-        "mistralrs_process_coverage": server_process_coverage,
+        "inference_process_samples": server_process_samples,
+        "inference_process_coverage": server_process_coverage,
         "host_cpu_samples": host_cpu_samples,
         "host_cpu_coverage": host_cpu_coverage,
         "process_cpu_samples": process_cpu_samples,
@@ -8626,8 +8626,8 @@ def final_resource_cleanup_evidence(
     gauges = {}
     cleanup_gauges = tuple(cleanup_gauges)
     stable_capacity_gauges = (
-        "mistralrs_kv_cache_blocks_total",
-        "mistralrs_recurrent_state_slots_total",
+        "inference_kv_cache_blocks_total",
+        "inference_recurrent_state_slots_total",
     )
     if require_dflash_windowed_kv:
         cleanup_gauges = (
@@ -8711,14 +8711,14 @@ def production_memory_evidence(
     kv_blocks = gauge_utilization_evidence(
         snapshots,
         KV_CACHE_ACTIVE_GAUGE,
-        "mistralrs_kv_cache_blocks_total",
+        "inference_kv_cache_blocks_total",
         limits.min_coverage,
         limits.max_kv_block_utilization,
     )
     recurrent_slots = gauge_utilization_evidence(
         snapshots,
-        "mistralrs_recurrent_state_slots_used",
-        "mistralrs_recurrent_state_slots_total",
+        "inference_recurrent_state_slots_used",
+        "inference_recurrent_state_slots_total",
         limits.min_coverage,
         limits.max_recurrent_slot_utilization,
     )
@@ -8866,7 +8866,7 @@ async def process_telemetry(server_pid: int | None) -> dict[str, Any]:
         try:
             status = status_path.read_text(encoding="utf-8")
             cmdline = cmdline_path.read_bytes()
-            telemetry["process_is_mistralrs"] = b"mistralrs" in cmdline
+            telemetry["process_is_inference"] = b"inference_rs" in cmdline
             for key in ("VmRSS", "VmSize", "VmSwap"):
                 match = re.search(rf"^{key}:\s+(\d+)\s+kB$", status, re.MULTILINE)
                 telemetry[f"process_{key.lower()}_kib"] = int(match.group(1)) if match else None
@@ -9353,12 +9353,12 @@ def quality_replay_prefix_state_evidence(
     min_reuse_fraction: float,
 ) -> dict[str, Any]:
     identities = quality_replay_prompt_identity_evidence(specs)
-    lookups = metric_delta(before, after, "mistralrs_prefix_cache_lookups_total")
-    raw_hits = metric_delta(before, after, "mistralrs_prefix_cache_hits_total")
+    lookups = metric_delta(before, after, "inference_prefix_cache_lookups_total")
+    raw_hits = metric_delta(before, after, "inference_prefix_cache_hits_total")
     raw_reused = metric_delta(
         before,
         after,
-        "mistralrs_prefix_cache_tokens_reused_total",
+        "inference_prefix_cache_tokens_reused_total",
     )
     hits = 0.0 if raw_hits is None and lookups is not None else raw_hits
     reused = 0.0 if raw_reused is None and lookups is not None else raw_reused
@@ -9452,17 +9452,17 @@ def quality_replay_prefix_state_evidence(
         "speculative_hits": metric_delta(
             before,
             after,
-            "mistralrs_speculative_prefix_cache_hits_total",
+            "inference_speculative_prefix_cache_hits_total",
         ),
         "speculative_misses": metric_delta(
             before,
             after,
-            "mistralrs_speculative_prefix_cache_misses_total",
+            "inference_speculative_prefix_cache_misses_total",
         ),
         "speculative_captures": metric_delta(
             before,
             after,
-            "mistralrs_speculative_prefix_cache_captures_total",
+            "inference_speculative_prefix_cache_captures_total",
         ),
     }
 
@@ -9617,7 +9617,7 @@ def quality_replay_pressure_plan_evidence(
     config: QualityReplayPressureConfig,
 ) -> dict[str, Any]:
     logical_contexts = {case.prompt_label: case.context_tokens for case in cases}
-    total_blocks = metric_total(snapshot, "mistralrs_kv_cache_blocks_total")
+    total_blocks = metric_total(snapshot, "inference_kv_cache_blocks_total")
     owner_capacity = metric_total(
         snapshot,
         PAGED_RECURRENT_PREFIX_OWNERS_CAPACITY_GAUGE,
@@ -9804,7 +9804,7 @@ async def quality_replay_mode(
         args.seed,
     )
     initial = await safe_metrics(client, writer, "quality-replay-start")
-    sequence_capacity = metric_total(initial, "mistralrs_sequences_capacity")
+    sequence_capacity = metric_total(initial, "inference_sequences_capacity")
     prefix_cached = metric_total(initial, KV_CACHE_PREFIX_CACHED_GAUGE)
     retained_owners = metric_total(
         initial,
@@ -10242,7 +10242,7 @@ async def production_mode(
     )
     lengths = tuple(length for length, _ in args.context_mix)
     capacity_metrics = await safe_metrics(client, writer, "production-capacity")
-    sequence_capacity = metric_total(capacity_metrics, "mistralrs_sequences_capacity")
+    sequence_capacity = metric_total(capacity_metrics, "inference_sequences_capacity")
     preflight_process = await process_telemetry(args.server_pid)
     required_gauges = production_required_gauges(args.expected_graph_components)
     missing_gauges = [
@@ -10253,7 +10253,7 @@ async def production_mode(
     preflight = {
         "passed": (
             not missing_gauges
-            and preflight_process.get("process_is_mistralrs") is True
+            and preflight_process.get("process_is_inference") is True
             and preflight_process.get("process_vmrss_kib") is not None
             and preflight_process.get("host_cpu_total_ticks") is not None
             and preflight_process.get("host_cpu_idle_ticks") is not None
@@ -10269,7 +10269,7 @@ async def production_mode(
     await writer.emit("production_telemetry_preflight", **preflight)
     if not preflight["passed"]:
         raise RuntimeError(
-            "production telemetry preflight requires a live mistralrs --server-pid, "
+            "production telemetry preflight requires a live inference_rs --server-pid, "
             "readable host/process CPU and process RSS, and process-scoped nvidia-smi "
             "GPU data"
         )
@@ -11500,8 +11500,8 @@ def fresh_multimodal_server_evidence(snapshot: dict[str, float]) -> dict[str, An
     encoder_instrumentation = all(
         metric_total(snapshot, name) is not None
         for name in (
-            "mistralrs_encoder_cache_hits_total",
-            "mistralrs_encoder_cache_misses_total",
+            "inference_encoder_cache_hits_total",
+            "inference_encoder_cache_misses_total",
         )
     )
     return {
@@ -11533,7 +11533,7 @@ def multimodal_capability_evidence(
             for modality in model.get("input_modalities") or []
         }
     ]
-    sequence_capacity = metric_total(metrics, "mistralrs_sequences_capacity")
+    sequence_capacity = metric_total(metrics, "inference_sequences_capacity")
     return {
         "passed": bool(vision_candidates)
         and sequence_capacity is not None
@@ -11559,12 +11559,12 @@ def encoder_cache_transition_evidence(
     after: dict[str, float],
     expected: str,
 ) -> dict[str, Any]:
-    hits = metric_delta(before, after, "mistralrs_encoder_cache_hits_total")
-    misses = metric_delta(before, after, "mistralrs_encoder_cache_misses_total")
+    hits = metric_delta(before, after, "inference_encoder_cache_hits_total")
+    misses = metric_delta(before, after, "inference_encoder_cache_misses_total")
     paged_reused = counter_delta_or_zero(
         before,
         after,
-        "mistralrs_prefix_cache_tokens_reused_total",
+        "inference_prefix_cache_tokens_reused_total",
     )
     instrumentation_complete = hits is not None and misses is not None
     if expected == "cold":
@@ -11814,7 +11814,7 @@ async def multimodal_mode(
     process_preflight = {
         "passed": (
             args.server_pid is not None
-            and preflight_process.get("process_is_mistralrs") is True
+            and preflight_process.get("process_is_inference") is True
             and preflight_process.get("process_vmrss_kib") is not None
             and preflight_process.get("host_cpu_total_ticks") is not None
             and preflight_process.get("host_cpu_idle_ticks") is not None
@@ -12478,7 +12478,7 @@ def add_prefix_pressure_args(parser: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Production soak testing for mistral.rs and other OpenAI-compatible servers"
+        description="Production soak testing for inference.rs and other OpenAI-compatible servers"
     )
     subparsers = parser.add_subparsers(dest="mode", required=True)
     common = common_parser()

@@ -1,16 +1,16 @@
 ---
-title: "mistralrs serve"
+title: "inference serve"
 description: "Start HTTP/MCP server and (optionally) the UI at /ui"
 sidebar:
   order: 2
 ---
 
-<!-- Generated from clap definitions by mistralrs-cli docgen. Do not edit. -->
+<!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->
 
 Start HTTP/MCP server and (optionally) the UI at /ui
 
 ```
-mistralrs serve [OPTIONS] [COMMAND]
+inference serve [OPTIONS] [COMMAND]
 ```
 
 | Option | Default | Description |
@@ -104,12 +104,12 @@ mistralrs serve [OPTIONS] [COMMAND]
 | `--sb-max-procs <PROCS>` |  | Per-session process/thread cap (default: 64) |
 | `--sandbox-network <NETWORK>` |  | Network access permitted to the sandboxed session. Possible values: `none`, `loopback`, `full`. |
 
-## mistralrs serve auto
+## inference serve auto
 
 Auto-detect model type (recommended)
 
 ```
-mistralrs serve auto [OPTIONS] --model-id <MODEL_ID>
+inference serve auto [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -158,12 +158,12 @@ mistralrs serve auto [OPTIONS] --model-id <MODEL_ID>
 | `--max-num-images <MAX_NUM_IMAGES>` |  | Maximum number of images per request |
 | `--max-image-length <MAX_IMAGE_LENGTH>` |  | Maximum image dimension for device mapping |
 
-## mistralrs serve text
+## inference serve text
 
 Text generation model with explicit configuration
 
 ```
-mistralrs serve text [OPTIONS] --model-id <MODEL_ID>
+inference serve text [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -208,12 +208,12 @@ mistralrs serve text [OPTIONS] --model-id <MODEL_ID>
 | `--pa-block-size <BLOCK_SIZE>` |  | Tokens per block (default: 32 on CUDA) |
 | `--pa-cache-type <CACHE_TYPE>` | `auto` | KV cache quantization type |
 
-## mistralrs serve multimodal
+## inference serve multimodal
 
 Multimodal model
 
 ```
-mistralrs serve multimodal [OPTIONS] --model-id <MODEL_ID>
+inference serve multimodal [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -257,12 +257,12 @@ mistralrs serve multimodal [OPTIONS] --model-id <MODEL_ID>
 | `--max-num-images <MAX_NUM_IMAGES>` |  | Maximum number of images per request |
 | `--max-image-length <MAX_IMAGE_LENGTH>` |  | Maximum image dimension for device mapping |
 
-## mistralrs serve diffusion
+## inference serve diffusion
 
 Image generation model (diffusion)
 
 ```
-mistralrs serve diffusion [OPTIONS] --model-id <MODEL_ID>
+inference serve diffusion [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -280,12 +280,12 @@ mistralrs serve diffusion [OPTIONS] --model-id <MODEL_ID>
 | `--max-seq-len <MAX_SEQ_LEN>` | `4096` | Max sequence length for automatic device mapping |
 | `--max-batch-size <MAX_BATCH_SIZE>` | `1` | Max batch size for automatic device mapping |
 
-## mistralrs serve speech
+## inference serve speech
 
 Speech synthesis model
 
 ```
-mistralrs serve speech [OPTIONS] --model-id <MODEL_ID>
+inference serve speech [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |
@@ -303,12 +303,12 @@ mistralrs serve speech [OPTIONS] --model-id <MODEL_ID>
 | `--max-seq-len <MAX_SEQ_LEN>` | `4096` | Max sequence length for automatic device mapping |
 | `--max-batch-size <MAX_BATCH_SIZE>` | `1` | Max batch size for automatic device mapping |
 
-## mistralrs serve embedding
+## inference serve embedding
 
 Embedding model
 
 ```
-mistralrs serve embedding [OPTIONS] --model-id <MODEL_ID>
+inference serve embedding [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |

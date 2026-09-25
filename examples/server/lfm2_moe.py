@@ -2,7 +2,7 @@
 LiquidAI LFM2.5 MoE text generation through the OpenAI-compatible HTTP API.
 
 Start the server:
-    mistralrs serve -p 1234 -m LiquidAI/LFM2.5-8B-A1B
+    inference_rs serve -p 1234 -m LiquidAI/LFM2.5-8B-A1B
 """
 
 from openai import OpenAI

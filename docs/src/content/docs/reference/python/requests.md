@@ -15,7 +15,7 @@ Select one exact immutable LoRA adapter generation by its 64-character ID.
 
 ## `ChatCompletionRequest`
 
-A ChatCompletionRequest represents a request sent to the mistral.rs engine. It encodes information
+A ChatCompletionRequest represents a request sent to the inference.rs engine. It encodes information
 about input data, sampling, and how to return the response.
 
 The messages type is as follows: (for normal chat completion, for chat completion with images, pretemplated prompt)
@@ -84,7 +84,7 @@ are omitted, thinking is enabled with no selected effort. Contradictory
 
 ## `CompletionRequest`
 
-A CompletionRequest represents a request sent to the mistral.rs engine. It encodes information
+A CompletionRequest represents a request sent to the inference.rs engine. It encodes information
 about input data, sampling, and how to return the response.
 
 | Field | Type | Default |
@@ -129,4 +129,4 @@ An EmbeddingRequest represents a request to compute embeddings for the provided 
 
 ---
 
-<small>Generated from [`mistralrs-pyo3/mistralrs.pyi`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs-pyo3/mistralrs.pyi).</small>
+<small>Generated from [`inference-pyo3/inference_rs.pyi`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs-pyo3/mistralrs.pyi).</small>

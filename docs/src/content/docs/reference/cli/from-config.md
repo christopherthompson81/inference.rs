@@ -1,16 +1,16 @@
 ---
-title: "mistralrs from-config"
+title: "inference from-config"
 description: "Run from a full TOML configuration file"
 sidebar:
   order: 12
 ---
 
-<!-- Generated from clap definitions by mistralrs-cli docgen. Do not edit. -->
+<!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->
 
 Run from a full TOML configuration file
 
 ```
-mistralrs from-config [OPTIONS] --file <FILE>
+inference from-config [OPTIONS] --file <FILE>
 ```
 
 | Option | Default | Description |

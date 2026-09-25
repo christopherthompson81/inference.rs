@@ -4,7 +4,7 @@ set -e
 REMOTE_SIZE_CONNECT_TIMEOUT=3
 REMOTE_SIZE_MAX_TIME=5
 
-# mistral.rs Installation Script
+# inference.rs Installation Script
 # Cross-platform installer for Linux and macOS with automatic hardware detection
 
 # Check if we can prompt the user (stdin is a tty or we have /dev/tty)
@@ -14,8 +14,8 @@ can_prompt() {
 
 # Read user input, using /dev/tty if stdin is not a terminal (e.g., piped from curl)
 read_input() {
-    # MISTRALRS_INSTALL_YES=1 auto-confirms every prompt (non-interactive installs, `mistralrs update`).
-    if [ "${MISTRALRS_INSTALL_YES:-}" = "1" ]; then
+    # INFERENCE_RS_INSTALL_YES=1 auto-confirms every prompt (non-interactive installs, `inference update`).
+    if [ "${INFERENCE_RS_INSTALL_YES:-}" = "1" ]; then
         REPLY="y"
         return
     fi
@@ -91,9 +91,9 @@ detect_os() {
 # Minimum required Rust version
 REQUIRED_RUST_VERSION="1.94"
 RUSTUP_INSTALL_CMD="curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
-MISTRALRS_REPO_URL="https://github.com/EricLBuehler/mistral.rs"
-MISTRALRS_BRANCH="master"
-MISTRALRS_CLI_PACKAGE="mistralrs-cli"
+INFERENCE_RS_REPO_URL="https://github.com/EricLBuehler/mistral.rs"
+INFERENCE_RS_BRANCH="master"
+INFERENCE_RS_CLI_PACKAGE="inference-cli"
 
 # Check if Rust is installed
 check_rust() {
@@ -212,10 +212,10 @@ check_cuda_source_build_versions() {
     [ -n "$cuda_ver_code" ] && [ -n "$driver_cuda_code" ] || return 0
 
     if [ "$cuda_ver_code" -gt "$driver_cuda_code" ] 2>/dev/null; then
-        if [ "${MISTRALRS_INSTALL_ALLOW_CUDA_MISMATCH:-}" = "1" ]; then
-            warn "Local nvcc CUDA $(version_code_to_str "$cuda_ver_code") is newer than the NVIDIA driver supports ($(version_code_to_str "$driver_cuda_code")); continuing because MISTRALRS_INSTALL_ALLOW_CUDA_MISMATCH=1."
+        if [ "${INFERENCE_RS_INSTALL_ALLOW_CUDA_MISMATCH:-}" = "1" ]; then
+            warn "Local nvcc CUDA $(version_code_to_str "$cuda_ver_code") is newer than the NVIDIA driver supports ($(version_code_to_str "$driver_cuda_code")); continuing because INFERENCE_RS_INSTALL_ALLOW_CUDA_MISMATCH=1."
         else
-            error "Local nvcc CUDA $(version_code_to_str "$cuda_ver_code") is newer than the NVIDIA driver supports ($(version_code_to_str "$driver_cuda_code")). Source builds can fail with CUDA_ERROR_UNSUPPORTED_PTX_VERSION; upgrade the driver, install a matching CUDA toolkit, use a prebuilt, or set MISTRALRS_INSTALL_ALLOW_CUDA_MISMATCH=1 to override."
+            error "Local nvcc CUDA $(version_code_to_str "$cuda_ver_code") is newer than the NVIDIA driver supports ($(version_code_to_str "$driver_cuda_code")). Source builds can fail with CUDA_ERROR_UNSUPPORTED_PTX_VERSION; upgrade the driver, install a matching CUDA toolkit, use a prebuilt, or set INFERENCE_RS_INSTALL_ALLOW_CUDA_MISMATCH=1 to override."
         fi
     fi
 }
@@ -340,16 +340,16 @@ build_features() {
             cc_minor=$(echo "$cuda_cc" | cut -c2-)
             info "CUDA detected (compute capability: ${cc_major}.${cc_minor})"
 
-            if [ "${MISTRALRS_INSTALL_NO_NCCL:-}" = "1" ]; then
-                info "MISTRALRS_INSTALL_NO_NCCL=1 set - skipping nccl"
+            if [ "${INFERENCE_RS_INSTALL_NO_NCCL:-}" = "1" ]; then
+                info "INFERENCE_RS_INSTALL_NO_NCCL=1 set - skipping nccl"
             elif detect_nccl; then
                 features="$features nccl"
                 info "NCCL detected - enabling nccl for CUDA multi-GPU tensor parallelism"
-            elif [ "${MISTRALRS_INSTALL_NCCL:-}" = "1" ]; then
+            elif [ "${INFERENCE_RS_INSTALL_NCCL:-}" = "1" ]; then
                 features="$features nccl"
-                warn "MISTRALRS_INSTALL_NCCL=1 set but NCCL was not detected; the build may fail unless libnccl is on the linker path"
+                warn "INFERENCE_RS_INSTALL_NCCL=1 set but NCCL was not detected; the build may fail unless libnccl is on the linker path"
             else
-                warn "NCCL not found - skipping nccl. Install NCCL or set MISTRALRS_INSTALL_NCCL=1 to force it; NCCL is the preferred CUDA multi-GPU path."
+                warn "NCCL not found - skipping nccl. Install NCCL or set INFERENCE_RS_INSTALL_NCCL=1 to force it; NCCL is the preferred CUDA multi-GPU path."
             fi
 
             # Check for cuDNN
@@ -428,27 +428,27 @@ install_ffmpeg() {
     sh -c "$cmd"
 }
 
-# Install mistralrs-cli
-install_mistralrs() {
+# Install inference-cli
+install_inference() {
     features="$1"
     SOURCE_INSTALL_ROOT=$(mktemp -d)
-    SOURCE_MISTRALRS="$SOURCE_INSTALL_ROOT/bin/mistralrs"
+    SOURCE_INFERENCE_RS="$SOURCE_INSTALL_ROOT/bin/inference"
 
-    # MISTRALRS_INSTALL_TAG pins a git tag; otherwise build the latest master.
-    if [ -n "$MISTRALRS_INSTALL_TAG" ]; then
-        git_ref="--tag $MISTRALRS_INSTALL_TAG"
-        ref_desc="tag $MISTRALRS_INSTALL_TAG"
+    # INFERENCE_RS_INSTALL_TAG pins a git tag; otherwise build the latest master.
+    if [ -n "$INFERENCE_RS_INSTALL_TAG" ]; then
+        git_ref="--tag $INFERENCE_RS_INSTALL_TAG"
+        ref_desc="tag $INFERENCE_RS_INSTALL_TAG"
     else
-        git_ref="--branch $MISTRALRS_BRANCH"
-        ref_desc="branch $MISTRALRS_BRANCH"
+        git_ref="--branch $INFERENCE_RS_BRANCH"
+        ref_desc="branch $INFERENCE_RS_BRANCH"
     fi
 
     if [ -n "$features" ]; then
-        info "Installing mistralrs-cli from GitHub $ref_desc with features: $features"
-        cargo install --root "$SOURCE_INSTALL_ROOT" --force --locked --git "$MISTRALRS_REPO_URL" $git_ref "$MISTRALRS_CLI_PACKAGE" --features "$features"
+        info "Installing inference-cli from GitHub $ref_desc with features: $features"
+        cargo install --root "$SOURCE_INSTALL_ROOT" --force --locked --git "$INFERENCE_RS_REPO_URL" $git_ref "$INFERENCE_RS_CLI_PACKAGE" --features "$features"
     else
-        info "Installing mistralrs-cli from GitHub $ref_desc with default features"
-        cargo install --root "$SOURCE_INSTALL_ROOT" --force --locked --git "$MISTRALRS_REPO_URL" $git_ref "$MISTRALRS_CLI_PACKAGE"
+        info "Installing inference-cli from GitHub $ref_desc with default features"
+        cargo install --root "$SOURCE_INSTALL_ROOT" --force --locked --git "$INFERENCE_RS_REPO_URL" $git_ref "$INFERENCE_RS_CLI_PACKAGE"
     fi
 }
 
@@ -461,17 +461,17 @@ remove_legacy_tileiras_link() {
 }
 
 install_source_from_staging() {
-    if [ ! -f "$SOURCE_MISTRALRS" ]; then
-        error "cargo install succeeded but $SOURCE_MISTRALRS was not found"
+    if [ ! -f "$SOURCE_INFERENCE_RS" ]; then
+        error "cargo install succeeded but $SOURCE_INFERENCE_RS was not found"
     fi
     remove_legacy_tileiras_link
     rm -rf "$PREBUILT_DIR"
     mkdir -p "$PREBUILT_DIR" "$BIN_DIR"
-    cp "$SOURCE_MISTRALRS" "$PREBUILT_DIR/mistralrs"
-    chmod +x "$PREBUILT_DIR/mistralrs" 2>/dev/null || true
-    ln -sf "$PREBUILT_DIR/mistralrs" "$BIN_DIR/mistralrs"
+    cp "$SOURCE_INFERENCE_RS" "$PREBUILT_DIR/inference"
+    chmod +x "$PREBUILT_DIR/inference" 2>/dev/null || true
+    ln -sf "$PREBUILT_DIR/inference" "$BIN_DIR/inference"
     rm -rf "$SOURCE_INSTALL_ROOT"
-    if ! "$PREBUILT_DIR/mistralrs" --version >/dev/null 2>&1; then
+    if ! "$PREBUILT_DIR/inference" --version >/dev/null 2>&1; then
         error "source-built binary did not run after installation"
     fi
 }
@@ -482,20 +482,20 @@ PREBUILT_CUDA_SMS_X86="80 86 89 90 100 120"
 PREBUILT_CUDA_SMS_AARCH64="90 100 121"
 # Newest first. Format is asset-token:minimum-driver-cuda-code.
 PREBUILT_CUDA_VARIANTS="133:1303 132:1302 131:1301 130:1300 129:1209 128:1208"
-# MISTRALRS_INSTALL_TAG pins a specific release (e.g. v0.8.9); default is the latest stable release.
-if [ -n "$MISTRALRS_INSTALL_TAG" ]; then
+# INFERENCE_RS_INSTALL_TAG pins a specific release (e.g. v0.8.9); default is the latest stable release.
+if [ -n "$INFERENCE_RS_INSTALL_TAG" ]; then
     RELEASE_BASE="https://github.com/EricLBuehler/mistral.rs/releases/download/$MISTRALRS_INSTALL_TAG"
 else
     RELEASE_BASE="https://github.com/EricLBuehler/mistral.rs/releases/latest/download"
 fi
-PREBUILT_DIR="$HOME/.mistralrs"
+PREBUILT_DIR="$HOME/.inference-rs"
 BIN_DIR="$HOME/.local/bin"
 CARGO_BIN_DIR="${CARGO_HOME:-$HOME/.cargo}/bin"
-CARGO_MISTRALRS="$CARGO_BIN_DIR/mistralrs"
-MISTRALRS_ENV="$PREBUILT_DIR/env"
+CARGO_INFERENCE_RS="$CARGO_BIN_DIR/inference"
+INFERENCE_RS_ENV="$PREBUILT_DIR/env"
 REPLACE_DUPLICATE_INSTALLS=""
 SOURCE_INSTALL_ROOT=""
-SOURCE_MISTRALRS=""
+SOURCE_INFERENCE_RS=""
 
 cuda_sms_for_variant() {
     cuda_token="$1"
@@ -522,7 +522,7 @@ detect_prebuilt_asset() {
     arch=$(uname -m)
     if [ "$os" = "macos" ]; then
         # Only Apple Silicon has a prebuilt; Intel Macs build from source.
-        [ "$arch" = "arm64" ] && echo "mistralrs-metal-aarch64-apple-darwin.tar.gz"
+        [ "$arch" = "arm64" ] && echo "inference-metal-aarch64-apple-darwin.tar.gz"
         return 0
     fi
     # Linux x86_64 and aarch64 have prebuilts; other arches build from source.
@@ -546,7 +546,7 @@ detect_prebuilt_asset() {
                 cuda_sms=$(cuda_sms_for_variant "$cuda_token" "$arch")
                 for sm in $cuda_sms; do
                     if [ "$cc" = "$sm" ]; then
-                        echo "mistralrs-cuda${cuda_token}-sm${cc}-${triple}.tar.gz"
+                        echo "inference-cuda${cuda_token}-sm${cc}-${triple}.tar.gz"
                         return 0
                     fi
                 done
@@ -564,11 +564,11 @@ detect_prebuilt_asset() {
         if ! grep -qw asimddp /proc/cpuinfo 2>/dev/null \
             || ! grep -qw asimdhp /proc/cpuinfo 2>/dev/null \
             || ! grep -qw asimdfhm /proc/cpuinfo 2>/dev/null; then
-            echo "mistralrs-cpu-${triple}-v8_0.tar.gz"
+            echo "inference-cpu-${triple}-v8_0.tar.gz"
             return 0
         fi
     fi
-    echo "mistralrs-cpu-${triple}.tar.gz"
+    echo "inference-cpu-${triple}.tar.gz"
 }
 
 detect_legacy_cuda_prebuilt_asset() {
@@ -586,7 +586,7 @@ detect_legacy_cuda_prebuilt_asset() {
     [ -n "$driver_cuda_code" ] && [ "$driver_cuda_code" -ge 1301 ] 2>/dev/null || return 0
     for sm in $cuda_sms; do
         if [ "$cc" = "$sm" ]; then
-            echo "mistralrs-cuda-sm${cc}-${triple}.tar.gz"
+            echo "inference-cuda-sm${cc}-${triple}.tar.gz"
             return 0
         fi
     done
@@ -611,17 +611,17 @@ install_prebuilt() {
     remove_legacy_tileiras_link
     rm -rf "$PREBUILT_DIR"
     mkdir -p "$PREBUILT_DIR"
-    # CPU/Metal tarballs contain a bare `mistralrs`; CUDA tarballs add runtime libraries in lib/.
+    # CPU/Metal tarballs contain a bare `inference`; CUDA tarballs add runtime libraries in lib/.
     if ! tar xzf "$tmp/$asset" -C "$PREBUILT_DIR"; then
         rm -rf "$tmp"
         return 1
     fi
     rm -rf "$tmp"
-    chmod +x "$PREBUILT_DIR/mistralrs" 2>/dev/null || true
+    chmod +x "$PREBUILT_DIR/inference" 2>/dev/null || true
     mkdir -p "$BIN_DIR"
     # Symlink onto PATH; $ORIGIN/lib resolves through the symlink to the real lib dir.
-    ln -sf "$PREBUILT_DIR/mistralrs" "$BIN_DIR/mistralrs"
-    if ! "$PREBUILT_DIR/mistralrs" --version >/dev/null 2>&1; then
+    ln -sf "$PREBUILT_DIR/inference" "$BIN_DIR/inference"
+    if ! "$PREBUILT_DIR/inference" --version >/dev/null 2>&1; then
         warn "Prebuilt binary did not run; falling back to source build."
         return 1
     fi
@@ -632,10 +632,10 @@ install_prebuilt() {
 # Builds the latest `master` (bleeding edge), unlike the prebuilt path which is the stable release.
 build_from_source() {
     os="$1"
-    if [ -n "$MISTRALRS_INSTALL_TAG" ]; then
-        info "Building from source: tag $MISTRALRS_INSTALL_TAG."
+    if [ -n "$INFERENCE_RS_INSTALL_TAG" ]; then
+        info "Building from source: tag $INFERENCE_RS_INSTALL_TAG."
     else
-        info "Building from source: latest $MISTRALRS_BRANCH (bleeding edge)."
+        info "Building from source: latest $INFERENCE_RS_BRANCH (bleeding edge)."
     fi
 
     # Check for Rust
@@ -652,7 +652,7 @@ build_from_source() {
             read_input
             case "$REPLY" in
                 [Nn]*)
-                    error "Rust $REQUIRED_RUST_VERSION or newer is required to install mistral.rs"
+                    error "Rust $REQUIRED_RUST_VERSION or newer is required to install inference.rs"
                     ;;
             esac
             update_rust
@@ -669,7 +669,7 @@ build_from_source() {
         read_input
         case "$REPLY" in
             [Nn]*)
-                error "Rust is required to build mistral.rs from source"
+                error "Rust is required to build inference.rs from source"
                 ;;
         esac
         install_rust
@@ -705,7 +705,7 @@ build_from_source() {
     esac
 
     echo ""
-    install_mistralrs "$features"
+    install_inference "$features"
     if [ -f "$HOME/.cargo/env" ]; then
         . "$HOME/.cargo/env"
     fi
@@ -715,8 +715,8 @@ build_from_source() {
 maybe_install_ffmpeg() {
     os="$1"
     FFMPEG_SKIPPED=""
-    # MISTRALRS_INSTALL_IGNORE_FFMPEG=1 leaves ffmpeg untouched (CI, `mistralrs update`).
-    if [ "${MISTRALRS_INSTALL_IGNORE_FFMPEG:-}" = "1" ]; then
+    # INFERENCE_RS_INSTALL_IGNORE_FFMPEG=1 leaves ffmpeg untouched (CI, `inference update`).
+    if [ "${INFERENCE_RS_INSTALL_IGNORE_FFMPEG:-}" = "1" ]; then
         if check_ffmpeg; then
             info "FFmpeg is installed (enables video input support)"
         else
@@ -762,12 +762,12 @@ tildify() {
 write_env_script() {
     printf '%s\n' \
         '#!/bin/sh' \
-        '# mistral.rs shell setup' \
+        '# inference.rs shell setup' \
         'case ":${PATH}:" in' \
         '    *:"$HOME/.local/bin":*) ;;' \
         '    *) export PATH="$HOME/.local/bin:$PATH" ;;' \
         'esac' \
-        > "$MISTRALRS_ENV"
+        > "$INFERENCE_RS_ENV"
 }
 
 append_source_line() {
@@ -775,7 +775,7 @@ append_source_line() {
     [ -n "$rc" ] || return 0
     mkdir -p "$(dirname "$rc")"
     touch "$rc"
-    source_line='. "$HOME/.mistralrs/env"'
+    source_line='. "$HOME/.inference-rs/env"'
     if ! grep -Fqx "$source_line" "$rc"; then
         printf '\n%s\n' "$source_line" >> "$rc"
         PATH_RCS="${PATH_RCS}${PATH_RCS:+, }$(tildify "$rc")"
@@ -796,13 +796,13 @@ setup_shell_path() {
 }
 
 warn_if_shadowed() {
-    resolved=$(command -v mistralrs 2>/dev/null || true)
+    resolved=$(command -v inference 2>/dev/null || true)
     [ -n "$resolved" ] || return 0
     case "$resolved" in
-        "$BIN_DIR/mistralrs"|"$PREBUILT_DIR/mistralrs") ;;
+        "$BIN_DIR/inference"|"$PREBUILT_DIR/inference") ;;
         *)
-            printf "${YELLOW}Note:${NC} another mistralrs appears earlier on PATH: %s\n" "$(tildify "$resolved")"
-            printf "      The managed install is available at: %s\n\n" "$(tildify "$PREBUILT_DIR/mistralrs")"
+            printf "${YELLOW}Note:${NC} another inference appears earlier on PATH: %s\n" "$(tildify "$resolved")"
+            printf "      The managed install is available at: %s\n\n" "$(tildify "$PREBUILT_DIR/inference")"
             ;;
     esac
 }
@@ -811,7 +811,7 @@ add_duplicate_install() {
     candidate="$1"
     [ -n "$candidate" ] && [ -f "$candidate" ] || return 0
     case "$candidate" in
-        "$BIN_DIR/mistralrs"|"$PREBUILT_DIR/mistralrs") return 0 ;;
+        "$BIN_DIR/inference"|"$PREBUILT_DIR/inference") return 0 ;;
     esac
     case "
 $DUPLICATE_INSTALLS
@@ -826,11 +826,11 @@ $candidate
 
 find_duplicate_installs() {
     DUPLICATE_INSTALLS=""
-    add_duplicate_install "$CARGO_MISTRALRS"
+    add_duplicate_install "$CARGO_INFERENCE_RS"
     old_ifs=$IFS
     IFS=:
     for dir in $PATH; do
-        [ -n "$dir" ] && add_duplicate_install "$dir/mistralrs"
+        [ -n "$dir" ] && add_duplicate_install "$dir/inference"
     done
     IFS=$old_ifs
 }
@@ -839,7 +839,7 @@ confirm_duplicate_replacement() {
     find_duplicate_installs
     [ -n "$DUPLICATE_INSTALLS" ] || return 0
     echo ""
-    printf "${YELLOW}warning:${NC} Found duplicate mistralrs installs:\n"
+    printf "${YELLOW}warning:${NC} Found duplicate inference installs:\n"
     printf '%s\n' "$DUPLICATE_INSTALLS" | while IFS= read -r duplicate; do
         printf "  %s\n" "$(tildify "$duplicate")"
     done
@@ -848,7 +848,7 @@ confirm_duplicate_replacement() {
     read_input
     case "$REPLY" in
         [Nn]*)
-            error "duplicate mistralrs installs must be resolved before installing"
+            error "duplicate inference installs must be resolved before installing"
             ;;
     esac
     REPLACE_DUPLICATE_INSTALLS=1
@@ -873,9 +873,9 @@ EOF
 # Shared success message + examples + PATH guidance, tailored to how the binary was installed.
 print_success() {
     method="$1"
-    success_bin="$PREBUILT_DIR/mistralrs"
+    success_bin="$PREBUILT_DIR/inference"
     ver=$("$success_bin" --version 2>/dev/null | head -1)
-    [ -n "$ver" ] || ver="mistral.rs"
+    [ -n "$ver" ] || ver="inference.rs"
     echo ""
     if [ "$method" = "prebuilt" ]; then
         success "$ver installed successfully (prebuilt binary)!"
@@ -886,23 +886,23 @@ print_success() {
     printf "${BOLD}Installed${NC}\n"
     echo "========="
     if [ "$method" = "prebuilt" ]; then
-        printf "  binary      %s\n" "$(tildify "$PREBUILT_DIR/mistralrs")"
+        printf "  binary      %s\n" "$(tildify "$PREBUILT_DIR/inference")"
     else
-        printf "  binary      %s\n" "$(tildify "$PREBUILT_DIR/mistralrs")"
+        printf "  binary      %s\n" "$(tildify "$PREBUILT_DIR/inference")"
     fi
-    printf "  on PATH     %s -> %s\n" "$(tildify "$BIN_DIR/mistralrs")" "$(tildify "$PREBUILT_DIR/mistralrs")"
+    printf "  on PATH     %s -> %s\n" "$(tildify "$BIN_DIR/inference")" "$(tildify "$PREBUILT_DIR/inference")"
     echo ""
     printf "${BOLD}Quick Start${NC}\n"
     echo "==========="
     echo ""
     echo "  # Chat in your terminal (downloads the model on first run)"
-    echo "  mistralrs run -m Qwen/Qwen3-4B"
+    echo "  inference run -m Qwen/Qwen3-4B"
     echo ""
     echo "  # Serve an OpenAI-compatible + Anthropic-compatible API on port 1234"
-    echo "  mistralrs serve -m Qwen/Qwen3-4B"
+    echo "  inference serve -m Qwen/Qwen3-4B"
     echo ""
     echo "  # Run as a local agent (tools, web search, code execution)"
-    echo "  mistralrs serve --agent -m google/gemma-4-E4B-it"
+    echo "  inference serve --agent -m google/gemma-4-E4B-it"
     echo ""
     echo "Docs:     https://docs.mistralrs.dev/"
     echo "Source:   https://github.com/EricLBuehler/mistral.rs"
@@ -914,16 +914,16 @@ print_success() {
     case ":$PATH:" in
         *":$BIN_DIR:"*)
             if [ -n "$path_rcs" ]; then
-                printf "${YELLOW}Note:${NC} configured future shells via %s.\n" "$(tildify "$MISTRALRS_ENV")"
+                printf "${YELLOW}Note:${NC} configured future shells via %s.\n" "$(tildify "$INFERENCE_RS_ENV")"
                 printf "      Updated: %s\n\n" "$path_rcs"
             fi
             ;;
         *)
-            printf "${YELLOW}Note:${NC} added %s to your PATH via %s.\n" "$(tildify "$BIN_DIR")" "$(tildify "$MISTRALRS_ENV")"
+            printf "${YELLOW}Note:${NC} added %s to your PATH via %s.\n" "$(tildify "$BIN_DIR")" "$(tildify "$INFERENCE_RS_ENV")"
             if [ -n "$path_rcs" ]; then
                 printf "      Updated: %s\n" "$path_rcs"
             fi
-            printf "      Restart your terminal or run: . \"%s\"\n\n" "$MISTRALRS_ENV"
+            printf "      Restart your terminal or run: . \"%s\"\n\n" "$INFERENCE_RS_ENV"
             ;;
     esac
     warn_if_shadowed
@@ -939,9 +939,9 @@ main() {
 
     # Bifurcate only on where the binary comes from: a prebuilt download (no toolchain), or a
     # source build. Everything after (FFmpeg, examples, PATH guidance) is shared.
-    # Set MISTRALRS_INSTALL_FROM_SOURCE=1 to force a source build.
+    # Set INFERENCE_RS_INSTALL_FROM_SOURCE=1 to force a source build.
     method=""
-    if [ -z "$MISTRALRS_INSTALL_FROM_SOURCE" ]; then
+    if [ -z "$INFERENCE_RS_INSTALL_FROM_SOURCE" ]; then
         info "Checking for a prebuilt binary for your platform..."
         asset=$(detect_prebuilt_asset "$os")
         if [ -n "$asset" ]; then

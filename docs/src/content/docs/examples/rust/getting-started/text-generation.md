@@ -9,15 +9,15 @@ sidebar:
 
 Basic text generation with ISQ quantization and chat.
 
-Run with: `cargo run --release --example text_generation -p mistralrs`
+Run with: `cargo run --release --example text_generation -p inference`
 
 ```rust
 //! Basic text generation with ISQ quantization and chat.
 //!
-//! Run with: `cargo run --release --example text_generation -p mistralrs`
+//! Run with: `cargo run --release --example text_generation -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     IsqBits, ModelBuilder, PagedAttentionMetaBuilder, RequestBuilder, TextMessageRole, TextMessages,
 };
 
@@ -71,4 +71,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/getting_started/text_generation/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/getting_started/text_generation/main.rs)
+Source: [`inference/examples/getting_started/text_generation/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/getting_started/text_generation/main.rs)

@@ -1,6 +1,6 @@
 ---
 title: Architecture
-description: How mistralrs is organized. Request flow, threading, and how pieces interact.
+description: How inference is organized. Request flow, threading, and how pieces interact.
 ---
 
 ## The three layers

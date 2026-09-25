@@ -12,7 +12,7 @@ Runnable Python SDK example `minicpmo_2_6`.
 <!-- needs-header -->
 
 ```python
-from mistralrs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
+from inference_rs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
 
 MODEL_ID = "openbmb/MiniCPM-o-2_6"
 

@@ -1,32 +1,32 @@
 ---
-title: "mistralrs cache"
+title: "inference cache"
 description: "Manage the Hugging Face model cache"
 sidebar:
   order: 10
 ---
 
-<!-- Generated from clap definitions by mistralrs-cli docgen. Do not edit. -->
+<!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->
 
 Manage the Hugging Face model cache
 
 ```
-mistralrs cache [OPTIONS] <COMMAND>
+inference cache [OPTIONS] <COMMAND>
 ```
 
-## mistralrs cache list
+## inference cache list
 
 List all cached models
 
 ```
-mistralrs cache list [OPTIONS]
+inference cache list [OPTIONS]
 ```
 
-## mistralrs cache delete
+## inference cache delete
 
 Delete a specific model from cache
 
 ```
-mistralrs cache delete [OPTIONS] --model-id <MODEL_ID>
+inference cache delete [OPTIONS] --model-id <MODEL_ID>
 ```
 
 | Option | Default | Description |

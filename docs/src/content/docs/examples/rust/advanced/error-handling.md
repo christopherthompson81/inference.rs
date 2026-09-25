@@ -9,14 +9,14 @@ sidebar:
 
 Error handling patterns: matching on error variants and recovering partial responses.
 
-Run with: `cargo run --release --example error_handling -p mistralrs`
+Run with: `cargo run --release --example error_handling -p inference`
 
 ```rust
 //! Error handling patterns: matching on error variants and recovering partial responses.
 //!
-//! Run with: `cargo run --release --example error_handling -p mistralrs`
+//! Run with: `cargo run --release --example error_handling -p inference`
 
-use mistralrs::{error, IsqBits, ModelBuilder, TextMessageRole, TextMessages};
+use inference::{error, IsqBits, ModelBuilder, TextMessageRole, TextMessages};
 
 #[tokio::main]
 async fn main() {
@@ -75,4 +75,4 @@ fn handle_error(err: error::Error) {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/error_handling/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/error_handling/main.rs)
+Source: [`inference/examples/advanced/error_handling/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/error_handling/main.rs)

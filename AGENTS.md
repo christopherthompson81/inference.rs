@@ -1,18 +1,18 @@
 <!-- AGENTS.md: Guidance for AI agents to navigate, build, test, and contribute to this repository -->
 # AGENTS
 
-This file provides instructions for AI agents to understand the layout of the `mistral.rs` repository, run builds/tests, and follow project conventions.
+This file provides instructions for AI agents to understand the layout of the `inference.rs` repository, run builds/tests, and follow project conventions.
 
 ## Repository Structure
 
-- `/mistralrs/`           : Main Rust crate (text & multimodal inference API)
-- `/mistralrs-core/`      : Core inference logic and tensor operations (text models)
-- `/mistralrs-vision/`    : Image processing utilities (resizing, preprocessing for multimodal models)
-- `/mistralrs-quant/`     : Quantization support (ISQ, GGUF, GPTQ, AWQ, FP8, HQQ, etc.)
-- `/mistralrs-paged-attn/`: PagedAttention implementation
-- `/mistralrs-pyo3/`      : Python bindings (PyO3)
-- `/mistralrs-cli/`       : Unified CLI binary (commands: run, serve, bench, from-config)
-- `/mistralrs-server-core/`: Shared server core logic
+- `/inference/`           : Main Rust crate (text & multimodal inference API)
+- `/inference-core/`      : Core inference logic and tensor operations (text models)
+- `/inference-vision/`    : Image processing utilities (resizing, preprocessing for multimodal models)
+- `/inference-quant/`     : Quantization support (ISQ, GGUF, GPTQ, AWQ, FP8, HQQ, etc.)
+- `/inference-paged-attn/`: PagedAttention implementation
+- `/inference-pyo3/`      : Python bindings (PyO3)
+- `/inference-cli/`       : Unified CLI binary (commands: run, serve, bench, from-config)
+- `/inference-server-core/`: Shared server core logic
 - `/docs/`             : Astro/Starlight documentation site (deployed at https://docs.mistralrs.dev)
 - `/examples/`            : Usage examples (Rust, Python, server samples, notebooks)
 - `/chat_templates/`      : Chat formatting templates (JSON/Jinja)
@@ -23,25 +23,25 @@ This file provides instructions for AI agents to understand the layout of the `m
 Mistral.rs supports multiple model types and advanced features via dedicated crates and CLI subcommands:
 
 - **Text Inference**
-  - Crate: `mistralrs-core` (low-level ops), `mistralrs` (API wrapper)
-  - CLI: `mistralrs run -m <model>` or `mistralrs serve -m <model>` (auto-detects model type)
+  - Crate: `inference-core` (low-level ops), `inference` (API wrapper)
+  - CLI: `inference run -m <model>` or `inference serve -m <model>` (auto-detects model type)
   - Docs: `docs/src/content/docs/guides/customize/sampling.md`, `docs/src/content/docs/guides/agents/`
 - **Multimodal Models**
-  - Crate: `mistralrs-vision`
-  - CLI: `mistralrs run -m <model>` (auto-detects multimodal models)
+  - Crate: `inference-vision`
+  - CLI: `inference run -m <model>` (auto-detects multimodal models)
   - Docs: `docs/src/content/docs/explanation/multimodal-pipeline.md`, `docs/src/content/docs/reference/supported-models.md`
 - **Diffusion Models**
-  - CLI: `mistralrs run -m <model>` (auto-detects diffusion models)
+  - CLI: `inference run -m <model>` (auto-detects diffusion models)
   - Docs: `docs/src/content/docs/reference/supported-models.md`
 - **Speech Models**
-  - CLI: `mistralrs run -m <model>` (auto-detects speech models)
+  - CLI: `inference run -m <model>` (auto-detects speech models)
   - Docs: `docs/src/content/docs/reference/supported-models.md`
 - **Quantization & ISQ**
-  - Crate: `mistralrs-quant`
+  - Crate: `inference-quant`
   - Docs: `docs/src/content/docs/reference/quantization-types.md`, `docs/src/content/docs/explanation/quantization-tradeoffs.md`
   - Conversion Script: `scripts/convert_awq_marlin.py`
 - **Paged Attention**
-  - Crate: `mistralrs-paged-attn`
+  - Crate: `inference-paged-attn`
   - Docs: `docs/src/content/docs/explanation/paged-attention.md`, `docs/src/content/docs/guides/perf/use-paged-attention.md`
 - **Adapters & LoRA/X-LoRA**
   - Docs: `docs/src/content/docs/guides/customize/lora-adapters.md`
@@ -58,8 +58,8 @@ Mistral.rs supports multiple model types and advanced features via dedicated cra
    ```
 4. Or build/install only the CLI binary:
    ```bash
-   cargo build --release --package mistralrs-cli --features "<features>"
-   cargo install --path mistralrs-cli --features "<features>"
+   cargo build --release --package inference-cli --features "<features>"
+   cargo install --path inference-cli --features "<features>"
    ```
 
 ## Models
@@ -73,7 +73,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - Core test suite (requires HF token for some tests):
   ```bash
   export HF_TOKEN=<your_token>  # or TESTS_HF_TOKEN for CI parity
-  cargo test -p mistralrs-core -p mistralrs-quant -p mistralrs-vision
+  cargo test -p inference-core -p inference-quant -p inference-vision
   ```
 - Run all tests across workspace (may skip some crates without tests):
   ```bash
@@ -107,7 +107,7 @@ Avoid returning TODOs.
 
 ## Examples
 
-- Rust examples: `mistralrs/examples/`
+- Rust examples: `inference/examples/`
 - Python examples: `examples/python/`
 - Server samples: `examples/server/`
 - Run Python scripts:
@@ -116,9 +116,9 @@ Avoid returning TODOs.
   ```
 - Run CLI:
   ```bash
-  mistralrs run -m <model>        # Interactive mode
-  mistralrs serve -p 1234 -m <model>  # Server mode
-  mistralrs bench -m <model>      # Benchmarking
+  inference run -m <model>        # Interactive mode
+  inference serve -p 1234 -m <model>  # Server mode
+  inference bench -m <model>      # Benchmarking
   ```
 
 ## CI Parity

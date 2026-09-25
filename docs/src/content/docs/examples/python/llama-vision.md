@@ -12,7 +12,7 @@ Runnable Python SDK example `llama_vision`.
 <!-- needs-header -->
 
 ```python
-from mistralrs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
+from inference_rs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
 
 # MODEL_ID = "meta-llama/Llama-3.2-11B-Vision-Instruct"
 MODEL_ID = "lamm-mit/Cephalo-Llama-3.2-11B-Vision-Instruct-128k"

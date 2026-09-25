@@ -1,4 +1,4 @@
-from mistralrs import Runner, Which, ChatCompletionRequest
+from inference_rs import Runner, Which, ChatCompletionRequest
 
 runner = Runner(
     which=Which.XLoraGGUF(

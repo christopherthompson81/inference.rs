@@ -40,9 +40,9 @@ Runnable Rust SDK example `multimodal_models`.
 ///
 /// * LLaVA 1.5 requires `.with_chat_template("chat_templates/vicuna.json")`.
 ///
-/// Run with: `cargo run --release --example multimodal_models -p mistralrs`
+/// Run with: `cargo run --release --example multimodal_models -p inference`
 use anyhow::Result;
-use mistralrs::{IsqBits, ModelBuilder, MultimodalMessages, TextMessageRole};
+use inference::{IsqBits, ModelBuilder, MultimodalMessages, TextMessageRole};
 
 const MODEL_ID: &str = "google/gemma-4-E4B-it";
 
@@ -85,4 +85,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/models/multimodal_models/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/multimodal_models/main.rs)
+Source: [`inference/examples/models/multimodal_models/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/multimodal_models/main.rs)

@@ -9,15 +9,15 @@ sidebar:
 
 MoQE: quantize only MoE expert layers at a different precision.
 
-Run with: `cargo run --release --example mixture_of_quant_experts -p mistralrs`
+Run with: `cargo run --release --example mixture_of_quant_experts -p inference`
 
 ```rust
 //! MoQE: quantize only MoE expert layers at a different precision.
 //!
-//! Run with: `cargo run --release --example mixture_of_quant_experts -p mistralrs`
+//! Run with: `cargo run --release --example mixture_of_quant_experts -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     IsqBits, PagedAttentionMetaBuilder, TextMessageRole, TextMessages, TextModelBuilder,
 };
 
@@ -53,4 +53,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/quantization/mixture_of_quant_experts/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/quantization/mixture_of_quant_experts/main.rs)
+Source: [`inference/examples/quantization/mixture_of_quant_experts/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/quantization/mixture_of_quant_experts/main.rs)

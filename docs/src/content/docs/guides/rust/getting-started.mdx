@@ -1,13 +1,13 @@
 ---
 title: Rust SDK getting started
-description: Add mistralrs to a Cargo project, load a model in-process, and send a chat request.
+description: Add inference to a Cargo project, load a model in-process, and send a chat request.
 ---
 
 The Rust SDK embeds the engine directly into a Rust program. A Rust toolchain is required; see [rustup.rs](https://rustup.rs).
 
 ```rust
 use anyhow::Result;
-use mistralrs::{IsqBits, ModelBuilder, TextMessageRole, TextMessages};
+use inference::{IsqBits, ModelBuilder, TextMessageRole, TextMessages};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -38,8 +38,8 @@ Full example: [text-generation](/examples/rust/getting-started/text-generation/)
 ## Project setup
 
 ```bash
-cargo new --bin hello-mistralrs
-cd hello-mistralrs
+cargo new --bin hello-inference
+cd hello-inference
 ```
 
 Add the dependencies to `Cargo.toml`:
@@ -47,7 +47,7 @@ Add the dependencies to `Cargo.toml`:
 ```toml
 [dependencies]
 anyhow = "1"
-mistralrs = "0.8"
+inference = "0.8"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -55,13 +55,13 @@ The default features build for CPU. For GPU acceleration, enable the matching fe
 
 ```toml
 # NVIDIA GPU (CUDA)
-mistralrs = { version = "0.8", features = ["cuda", "flash-attn", "cudnn"] }
+inference = { version = "0.8", features = ["cuda", "flash-attn", "cudnn"] }
 
 # Apple Silicon (Metal)
-mistralrs = { version = "0.8", features = ["metal"] }
+inference = { version = "0.8", features = ["metal"] }
 
 # Intel CPU with MKL
-mistralrs = { version = "0.8", features = ["mkl"] }
+inference = { version = "0.8", features = ["mkl"] }
 ```
 
 Feature names match the CLI build features. The [cargo features reference](/reference/cargo-features/) lists every option.
@@ -83,7 +83,7 @@ The [Rust SDK reference](/reference/rust-sdk/) lists the full `Model` surface; s
 ```rust
 use anyhow::Result;
 use futures::StreamExt;
-use mistralrs::{
+use inference::{
     ChatCompletionChunkResponse, ChunkChoice, Delta, IsqBits, ModelBuilder, Response,
     TextMessageRole, TextMessages,
 };

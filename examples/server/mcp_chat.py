@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """
-Example demonstrating how to start a mistral.rs HTTP server with MCP client support
+Example demonstrating how to start a inference.rs HTTP server with MCP client support
 and then interact with it using the OpenAI API format.
 
 This example shows how to:
-1. Start the mistral.rs server with MCP configuration via JSON config file
+1. Start the inference.rs server with MCP configuration via JSON config file
 2. Send chat requests that can automatically use MCP tools
 3. Parse responses to see tool calls made to MCP servers
 
 Usage:
-1. First, start the mistral.rs server with MCP config:
-   mistralrs serve -p 1234 --mcp-config examples/mcp-simple-config.json -m Qwen/Qwen3-4B
+1. First, start the inference.rs server with MCP config:
+   inference_rs serve -p 1234 --mcp-config examples/mcp-simple-config.json -m Qwen/Qwen3-4B
 
 2. Then run this script:
    python examples/server/mcp_chat.py
@@ -20,26 +20,26 @@ from openai import OpenAI
 
 
 def main():
-    # Connect to the mistral.rs server
+    # Connect to the inference.rs server
     # Note: Make sure to start the server with MCP configuration first!
     client = OpenAI(
         base_url="http://localhost:1234/v1",
-        api_key="placeholder",  # mistral.rs doesn't require a real API key
+        api_key="placeholder",  # inference.rs doesn't require a real API key
     )
 
     print("MCP Client HTTP Server Example")
     print("==============================")
     print()
     print(
-        "This example demonstrates using mistral.rs HTTP server with MCP client support."
+        "This example demonstrates using inference.rs HTTP server with MCP client support."
     )
     print("The server should be started with MCP configuration like:")
     print(
-        "mistralrs serve -p 1234 --mcp-config examples/mcp-simple-config.json -m Qwen/Qwen3-4B"
+        "inference_rs serve -p 1234 --mcp-config examples/mcp-simple-config.json -m Qwen/Qwen3-4B"
     )
     print("or for more advanced configuration:")
     print(
-        "mistralrs serve -p 1234 --mcp-config examples/mcp-server-config.json -m Qwen/Qwen3-4B"
+        "inference_rs serve -p 1234 --mcp-config examples/mcp-server-config.json -m Qwen/Qwen3-4B"
     )
     print(
         "Note: Install filesystem server with: npx @modelcontextprotocol/server-filesystem . -y"
@@ -60,7 +60,7 @@ def main():
         },
     ]
 
-    print("Sending chat request to mistral.rs server with MCP support...")
+    print("Sending chat request to inference.rs server with MCP support...")
     print(
         "The model will automatically use MCP tools if needed to answer the question."
     )
@@ -109,13 +109,13 @@ def main():
     except Exception as e:
         print(f"Error making request: {e}")
         print()
-        print("Make sure the mistral.rs server is running with MCP configuration:")
+        print("Make sure the inference.rs server is running with MCP configuration:")
         print(
-            "mistralrs serve -p 1234 --mcp-config examples/mcp-simple-config.json -m Qwen/Qwen3-4B"
+            "inference_rs serve -p 1234 --mcp-config examples/mcp-simple-config.json -m Qwen/Qwen3-4B"
         )
         print("or for advanced configuration:")
         print(
-            "mistralrs serve -p 1234 --mcp-config examples/mcp-server-config.json -m Qwen/Qwen3-4B"
+            "inference_rs serve -p 1234 --mcp-config examples/mcp-server-config.json -m Qwen/Qwen3-4B"
         )
         print()
         print("And that the MCP configuration file exists and is properly configured.")

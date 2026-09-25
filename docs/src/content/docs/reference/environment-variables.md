@@ -1,9 +1,9 @@
 ---
 title: Environment variables
-description: Environment variables read by mistralrs at build time or runtime.
+description: Environment variables read by inference at build time or runtime.
 ---
 
-User-facing environment variables read by `mistralrs` or its build scripts. Standard Cargo build variables such as `OUT_DIR` and `TARGET` are omitted.
+User-facing environment variables read by `inference` or its build scripts. Standard Cargo build variables such as `OUT_DIR` and `TARGET` are omitted.
 
 ## Hugging Face
 
@@ -11,11 +11,11 @@ User-facing environment variables read by `mistralrs` or its build scripts. Stan
 |---|---|
 | `HF_HOME` | Root of the Hugging Face cache. Default `~/.cache/huggingface`. |
 | `HF_HUB_CACHE` | Hugging Face hub cache location. |
-| `HF_TOKEN` | Auth token. Overrides any token saved by `mistralrs login` at `$HF_HOME/token`. |
+| `HF_TOKEN` | Auth token. Overrides any token saved by `inference login` at `$HF_HOME/token`. |
 | `HF_HUB_TOKEN` | Auth token fallback when `HF_TOKEN` is not set. |
-| `HF_HUB_OFFLINE` | Set to `1`/`true`/`yes`/`on` to disable all Hugging Face Hub network calls. Files and listings are then served only from `$HF_HUB_CACHE`/`$HF_HOME/hub`, and a missing file errors out. Also skips the `mistralrs doctor` connectivity check. |
+| `HF_HUB_OFFLINE` | Set to `1`/`true`/`yes`/`on` to disable all Hugging Face Hub network calls. Files and listings are then served only from `$HF_HUB_CACHE`/`$HF_HOME/hub`, and a missing file errors out. Also skips the `inference doctor` connectivity check. |
 
-If `--token-source env:NAME` is used, mistral.rs reads the environment variable named by `NAME` as the token source.
+If `--token-source env:NAME` is used, inference.rs reads the environment variable named by `NAME` as the token source.
 
 For the offline workflow (pre-downloading models, local paths), see [run models](/guides/models/run-any-model/).
 
@@ -23,15 +23,15 @@ For the offline workflow (pre-downloading models, local paths), see [run models]
 
 | Variable | Purpose |
 |---|---|
-| `RUST_LOG` | Override the `tracing` log filter. Examples: `mistralrs_core=debug,tower_http=info`, `trace`. CLI users can usually use `-v` or `-vv` instead. |
-| `MISTRALRS_DEBUG` | `MISTRALRS_DEBUG=1` enables extra debug-level engine tracing. |
+| `RUST_LOG` | Override the `tracing` log filter. Examples: `inference_core=debug,tower_http=info`, `trace`. CLI users can usually use `-v` or `-vv` instead. |
+| `INFERENCE_RS_DEBUG` | `INFERENCE_RS_DEBUG=1` enables extra debug-level engine tracing. |
 
 ## Quantization and loading
 
 | Variable | Purpose |
 |---|---|
-| `MISTRALRS_NO_MMAP` | `MISTRALRS_NO_MMAP=1` loads safetensors without mmap. |
-| `MISTRALRS_ISQ_SINGLETHREAD` | If set, runs [ISQ (in-situ quantization)](/reference/quantization-types/) single-threaded. |
+| `INFERENCE_RS_NO_MMAP` | `INFERENCE_RS_NO_MMAP=1` loads safetensors without mmap. |
+| `INFERENCE_RS_ISQ_SINGLETHREAD` | If set, runs [ISQ (in-situ quantization)](/reference/quantization-types/) single-threaded. |
 
 ## CPU runtime
 
@@ -49,7 +49,7 @@ See [CPU threads and affinity](/guides/perf/throughput-tuning/#cpu-threads-and-a
 
 | Variable | Purpose |
 |---|---|
-| `MISTRALRS_SANDBOX` | `auto`, `on`, or `off`. Overrides the sandbox only when the resolved mode is `auto`; `on` and `off` in CLI/TOML win. See [sandbox reference](/reference/sandbox/). |
+| `INFERENCE_RS_SANDBOX` | `auto`, `on`, or `off`. Overrides the sandbox only when the resolved mode is `auto`; `on` and `off` in CLI/TOML win. See [sandbox reference](/reference/sandbox/). |
 
 ## Server and UI
 
@@ -57,29 +57,29 @@ See [CPU threads and affinity](/guides/perf/throughput-tuning/#cpu-threads-and-a
 |---|---|
 | `MCP_CONFIG_PATH` | [MCP (Model Context Protocol)](/guides/agents/connect-mcp-server/) client configuration path used when `--mcp-config` is not passed. |
 | `KEEP_ALIVE_INTERVAL` | SSE (Server-Sent Events) keep-alive interval in milliseconds. Falls back to the default if missing or invalid. |
-| `MISTRALRS_ALLOW_RUNTIME_LORA_UPDATING` | Set to `1`, `true`, `yes`, or `on` to enable runtime LoRA load and unload endpoints. Disabled by default; the read-only route remains registered, but the target model must have a dynamic LoRA runtime. See [LoRA adapters](/guides/customize/lora-adapters/#enable-http-mutation). |
-| `MISTRALRS_LORA_ADAPTER_ROOT` | Canonical directory root allowed for runtime LoRA adapter paths. Use this whenever runtime LoRA updating is enabled in production. |
-| `XDG_CACHE_HOME` | Base cache directory for web UI state. The UI uses `$XDG_CACHE_HOME/mistralrs`. |
+| `INFERENCE_RS_ALLOW_RUNTIME_LORA_UPDATING` | Set to `1`, `true`, `yes`, or `on` to enable runtime LoRA load and unload endpoints. Disabled by default; the read-only route remains registered, but the target model must have a dynamic LoRA runtime. See [LoRA adapters](/guides/customize/lora-adapters/#enable-http-mutation). |
+| `INFERENCE_RS_LORA_ADAPTER_ROOT` | Canonical directory root allowed for runtime LoRA adapter paths. Use this whenever runtime LoRA updating is enabled in production. |
+| `XDG_CACHE_HOME` | Base cache directory for web UI state. The UI uses `$XDG_CACHE_HOME/inference`. |
 | `HOME` | Fallback for web UI cache path when `XDG_CACHE_HOME` is not set. |
 
 ## CUDA acceleration
 
 | Variable | Purpose |
 |---|---|
-| `MISTRALRS_CUDA_GRAPHS` | CUDA graph acceleration is enabled by default when supported. Set to `0`, `false`, `no`, or `off` to disable. See [CUDA graphs](/guides/perf/paged-attention/#cuda-graphs). |
-| `MISTRALRS_DFLASH_ADAPTIVE` | Set to `1` or `true` to use full DFlash draft depth for batches up to 2 and depth 1 above that. Only applies when `--mtp-n-predict` is not set. |
-| `MISTRALRS_DFLASH_ISQ` | ISQ type for DFlash drafter weights (`q4k`, `q6k`, ... or `none` for bf16); defaults to the target's in-situ quantization type. |
-| `MISTRALRS_FLASHINFER_DECODE` | Disables FlashInfer decode acceleration when set to `0`, `false`, `no`, or `off`. Use only for compatibility troubleshooting. |
-| `MISTRALRS_GDN_DECODE_KERNEL` | Overrides the CUDA GDN decode kernel for benchmarking or troubleshooting. Accepted values are `auto` (default), `baseline`, `cooperative`, `pipelined`, `vmajor4`, and `vmajor32`; an incompatible forced kernel returns an error. The value-major kernels need compute capability 8.0 or newer. |
-| `MISTRALRS_GDN_PREFILL_KERNEL` | Overrides the CUDA GDN prefill kernel. Accepted values are `auto` (default), `vmajor1`, `vmajor2`, `vmajor4`, `vmajor8`, `legacy-chunked`, `cutile` (cuTile builds, head dim 128), and `flashinfer-sm90` (Hopper builds only). |
-| `MISTRALRS_FP8_SM90_PROVIDER` | Selects the SM90 provider for compatible 128x128 blockwise FP8 weights. DeepGEMM decode is selected automatically on Linux with CUDA 12.8 or newer; set `cutlass` to disable it, or `deepgemm`/`auto` to select it explicitly. Kernels are prepared before graph capture, with clean CUTLASS fallback when JIT or cache preparation is unavailable. |
-| `MISTRALRS_DEEPGEMM_CACHE_DIR` | Overrides the owner-private, content-versioned DeepGEMM cubin and JIT-header cache. Defaults below `XDG_CACHE_HOME`, then `~/.cache`. |
-| `MISTRALRS_DEEPGEMM_NVCC` | Path to the `nvcc` executable used only when a DeepGEMM kernel is absent from the cache. A populated cache does not require runtime `nvcc`. |
-| `MISTRALRS_NO_MLA` | Disables MLA acceleration for DeepSeek V2/V3 when set to `1`. Use only for compatibility troubleshooting. |
-| `MISTRALRS_GGUF_AFFINE_BACKEND` | Set to `on` to speed up GGUF matmuls at batch sizes of 8 or more. Off by default because it keeps a second copy of the quantized weights, taking that memory from the KV cache. Worth enabling for production serving with high concurrency. |
-| `MISTRALRS_MOE_BACKEND` | Overrides the MoE experts backend. `fused` (also `native`, `legacy`, `wmma`) selects the fused CUDA kernels, `cutile` the cuTile grouped GEMM, `cutlass` the CUTLASS grouped GEMM, and `fast` the gather-based path used on Metal, CPU, and ISQ. Unset, the fastest eligible backend is chosen; on cuTile builds, checkpoints whose experts carry 128x128 block-FP8 scales use the cuTile blockwise FP8 grouped GEMM unless `fast` is forced. |
-| `MISTRALRS_CUTILE_TUNE` | Controls the cuTile kernel autotuner that runs during warmup on cuTile builds. `auto` (default) reuses a persisted tuning record whose provenance (kernel source, GPU architecture, candidate set) matches and measures candidate configs for each registered kernel shape (MoE experts, FP8 GEMMs, routed LoRA) otherwise, `force` re-measures, and `off` uses the built-in policies. |
-| `MISTRALRS_CUTILE_TUNE_CACHE` | Directory holding the autotuner's records, one JSON file per kernel, shape, and GPU model. Defaults to `cutile_tune` under `XDG_CACHE_HOME/mistralrs`, then `~/.cache/mistralrs`. |
+| `INFERENCE_RS_CUDA_GRAPHS` | CUDA graph acceleration is enabled by default when supported. Set to `0`, `false`, `no`, or `off` to disable. See [CUDA graphs](/guides/perf/paged-attention/#cuda-graphs). |
+| `INFERENCE_RS_DFLASH_ADAPTIVE` | Set to `1` or `true` to use full DFlash draft depth for batches up to 2 and depth 1 above that. Only applies when `--mtp-n-predict` is not set. |
+| `INFERENCE_RS_DFLASH_ISQ` | ISQ type for DFlash drafter weights (`q4k`, `q6k`, ... or `none` for bf16); defaults to the target's in-situ quantization type. |
+| `INFERENCE_RS_FLASHINFER_DECODE` | Disables FlashInfer decode acceleration when set to `0`, `false`, `no`, or `off`. Use only for compatibility troubleshooting. |
+| `INFERENCE_RS_GDN_DECODE_KERNEL` | Overrides the CUDA GDN decode kernel for benchmarking or troubleshooting. Accepted values are `auto` (default), `baseline`, `cooperative`, `pipelined`, `vmajor4`, and `vmajor32`; an incompatible forced kernel returns an error. The value-major kernels need compute capability 8.0 or newer. |
+| `INFERENCE_RS_GDN_PREFILL_KERNEL` | Overrides the CUDA GDN prefill kernel. Accepted values are `auto` (default), `vmajor1`, `vmajor2`, `vmajor4`, `vmajor8`, `legacy-chunked`, `cutile` (cuTile builds, head dim 128), and `flashinfer-sm90` (Hopper builds only). |
+| `INFERENCE_RS_FP8_SM90_PROVIDER` | Selects the SM90 provider for compatible 128x128 blockwise FP8 weights. DeepGEMM decode is selected automatically on Linux with CUDA 12.8 or newer; set `cutlass` to disable it, or `deepgemm`/`auto` to select it explicitly. Kernels are prepared before graph capture, with clean CUTLASS fallback when JIT or cache preparation is unavailable. |
+| `INFERENCE_RS_DEEPGEMM_CACHE_DIR` | Overrides the owner-private, content-versioned DeepGEMM cubin and JIT-header cache. Defaults below `XDG_CACHE_HOME`, then `~/.cache`. |
+| `INFERENCE_RS_DEEPGEMM_NVCC` | Path to the `nvcc` executable used only when a DeepGEMM kernel is absent from the cache. A populated cache does not require runtime `nvcc`. |
+| `INFERENCE_RS_NO_MLA` | Disables MLA acceleration for DeepSeek V2/V3 when set to `1`. Use only for compatibility troubleshooting. |
+| `INFERENCE_RS_GGUF_AFFINE_BACKEND` | Set to `on` to speed up GGUF matmuls at batch sizes of 8 or more. Off by default because it keeps a second copy of the quantized weights, taking that memory from the KV cache. Worth enabling for production serving with high concurrency. |
+| `INFERENCE_RS_MOE_BACKEND` | Overrides the MoE experts backend. `fused` (also `native`, `legacy`, `wmma`) selects the fused CUDA kernels, `cutile` the cuTile grouped GEMM, `cutlass` the CUTLASS grouped GEMM, and `fast` the gather-based path used on Metal, CPU, and ISQ. Unset, the fastest eligible backend is chosen; on cuTile builds, checkpoints whose experts carry 128x128 block-FP8 scales use the cuTile blockwise FP8 grouped GEMM unless `fast` is forced. |
+| `INFERENCE_RS_CUTILE_TUNE` | Controls the cuTile kernel autotuner that runs during warmup on cuTile builds. `auto` (default) reuses a persisted tuning record whose provenance (kernel source, GPU architecture, candidate set) matches and measures candidate configs for each registered kernel shape (MoE experts, FP8 GEMMs, routed LoRA) otherwise, `force` re-measures, and `off` uses the built-in policies. |
+| `INFERENCE_RS_CUTILE_TUNE_CACHE` | Directory holding the autotuner's records, one JSON file per kernel, shape, and GPU model. Defaults to `cutile_tune` under `XDG_CACHE_HOME/inference`, then `~/.cache/inference`. |
 | `CUDA_TOOLKIT_PATH` | CUDA toolkit root used by cuTile for headers, `tileiras`, and Tile IR bytecode compatibility. Recommended when multiple CUDA toolkits are installed. |
 | `CUTILE_TILEIRAS_PATH` | Path to a specific `tileiras` executable. Takes precedence over `CUDA_TOOLKIT_PATH` and automatic discovery. |
 | `CUTILE_SETUP_DIAGNOSTICS` | Set to `1` to print cuTile toolkit and `tileiras` discovery diagnostics. |
@@ -91,14 +91,14 @@ See [CPU threads and affinity](/guides/perf/throughput-tuning/#cpu-threads-and-a
 
 | Variable | Purpose |
 |---|---|
-| `MISTRALRS_NO_NCCL` | Disables NCCL for single-machine multi-GPU inference when set to `1`. Also set this for ring deployments when the binary includes NCCL. |
-| `MISTRALRS_MN_GLOBAL_WORLD_SIZE` | Total NCCL tensor-parallel world size across nodes. Presence of this variable enables multi-node NCCL mode. |
-| `MISTRALRS_MN_LOCAL_WORLD_SIZE` | Local NCCL tensor-parallel size contributed by each node. |
-| `MISTRALRS_MN_HEAD_NUM_WORKERS` | Set on the head node: number of worker nodes. |
-| `MISTRALRS_MN_HEAD_PORT` | Set on the head node: listening port for worker connections. |
-| `MISTRALRS_MN_WORKER_SERVER_ADDR` | Set on worker nodes: address of the head node. |
-| `MISTRALRS_MN_WORKER_ID` | Set on worker nodes: worker index (0-based). |
-| `RING_CONFIG` | Path to the ring backend JSON config. Setting it selects the ring backend when built with the `ring` feature. If the binary also has `nccl`, set `MISTRALRS_NO_NCCL=1` as well. |
+| `INFERENCE_RS_NO_NCCL` | Disables NCCL for single-machine multi-GPU inference when set to `1`. Also set this for ring deployments when the binary includes NCCL. |
+| `INFERENCE_RS_MN_GLOBAL_WORLD_SIZE` | Total NCCL tensor-parallel world size across nodes. Presence of this variable enables multi-node NCCL mode. |
+| `INFERENCE_RS_MN_LOCAL_WORLD_SIZE` | Local NCCL tensor-parallel size contributed by each node. |
+| `INFERENCE_RS_MN_HEAD_NUM_WORKERS` | Set on the head node: number of worker nodes. |
+| `INFERENCE_RS_MN_HEAD_PORT` | Set on the head node: listening port for worker connections. |
+| `INFERENCE_RS_MN_WORKER_SERVER_ADDR` | Set on worker nodes: address of the head node. |
+| `INFERENCE_RS_MN_WORKER_ID` | Set on worker nodes: worker index (0-based). |
+| `RING_CONFIG` | Path to the ring backend JSON config. Setting it selects the ring backend when built with the `ring` feature. If the binary also has `nccl`, set `INFERENCE_RS_NO_NCCL=1` as well. |
 
 See the [distributed inference guide](/guides/perf/distributed-inference/) for use.
 
@@ -106,7 +106,7 @@ See the [distributed inference guide](/guides/perf/distributed-inference/) for u
 
 | Variable | Purpose |
 |---|---|
-| `MISTRALRS_IGPU_MEMORY_FRACTION` | Fraction of integrated GPU memory usable on CUDA systems with iGPUs. Default 0.75. |
+| `INFERENCE_RS_IGPU_MEMORY_FRACTION` | Fraction of integrated GPU memory usable on CUDA systems with iGPUs. Default 0.75. |
 
 ## Build-time
 
@@ -114,17 +114,17 @@ These are read by build scripts, not at runtime.
 
 | Variable | Purpose |
 |---|---|
-| `MISTRALRS_METAL_PRECOMPILE` | `MISTRALRS_METAL_PRECOMPILE=0` skips Metal kernel precompilation at build time; kernels are compiled at runtime on first use. Also accepts `false`, `no`, and `off`. |
-| `MISTRALRS_METAL_PLATFORMS` | Limits which Metal platform metallibs are precompiled. Accepts comma-separated `macos`, `ios`, `tvos`, or `all`; defaults to all platforms. For local macOS development, use `MISTRALRS_METAL_PLATFORMS=macos`. |
+| `INFERENCE_RS_METAL_PRECOMPILE` | `INFERENCE_RS_METAL_PRECOMPILE=0` skips Metal kernel precompilation at build time; kernels are compiled at runtime on first use. Also accepts `false`, `no`, and `off`. |
+| `INFERENCE_RS_METAL_PLATFORMS` | Limits which Metal platform metallibs are precompiled. Accepts comma-separated `macos`, `ios`, `tvos`, or `all`; defaults to all platforms. For local macOS development, use `INFERENCE_RS_METAL_PLATFORMS=macos`. |
 | `CUDA_NVCC_FLAGS` | Extra compiler options passed to CUDA builds. |
-| `MISTRALRS_INSTALL_TAG` | Pins the installers to a specific release tag (e.g. `v0.9.2`): the prebuilt is downloaded from that release, and a source build checks out that git tag. Default is the latest stable release (prebuilt) or latest `master` (source). |
-| `MISTRALRS_INSTALL_FROM_SOURCE` | `MISTRALRS_INSTALL_FROM_SOURCE=1` makes the shell and PowerShell installers skip the prebuilt download and build from the latest `master` (bleeding edge) instead of the latest stable release. |
-| `MISTRALRS_INSTALL_NCCL` | `MISTRALRS_INSTALL_NCCL=1` forces the shell and PowerShell installers to add the `nccl` feature for CUDA builds even if NCCL is not detected. |
-| `MISTRALRS_INSTALL_NO_NCCL` | `MISTRALRS_INSTALL_NO_NCCL=1` makes the shell and PowerShell installers skip the `nccl` feature. |
-| `MISTRALRS_INSTALL_ALLOW_CUDA_MISMATCH` | `MISTRALRS_INSTALL_ALLOW_CUDA_MISMATCH=1` lets a source build continue when local `nvcc` is newer than the CUDA version reported by the NVIDIA driver. |
-| `MISTRALRS_INSTALL_YES` | `MISTRALRS_INSTALL_YES=1` auto-confirms every installer prompt (non-interactive installs for CI/containers; used by `mistralrs update`). |
-| `MISTRALRS_INSTALL_IGNORE_FFMPEG` | `MISTRALRS_INSTALL_IGNORE_FFMPEG=1` skips the installer's FFmpeg step, leaving any existing FFmpeg untouched. |
-| `MISTRALRS_GIT_REVISION` | Git revision embedded in the binary by the build script. |
+| `INFERENCE_RS_INSTALL_TAG` | Pins the installers to a specific release tag (e.g. `v0.9.2`): the prebuilt is downloaded from that release, and a source build checks out that git tag. Default is the latest stable release (prebuilt) or latest `master` (source). |
+| `INFERENCE_RS_INSTALL_FROM_SOURCE` | `INFERENCE_RS_INSTALL_FROM_SOURCE=1` makes the shell and PowerShell installers skip the prebuilt download and build from the latest `master` (bleeding edge) instead of the latest stable release. |
+| `INFERENCE_RS_INSTALL_NCCL` | `INFERENCE_RS_INSTALL_NCCL=1` forces the shell and PowerShell installers to add the `nccl` feature for CUDA builds even if NCCL is not detected. |
+| `INFERENCE_RS_INSTALL_NO_NCCL` | `INFERENCE_RS_INSTALL_NO_NCCL=1` makes the shell and PowerShell installers skip the `nccl` feature. |
+| `INFERENCE_RS_INSTALL_ALLOW_CUDA_MISMATCH` | `INFERENCE_RS_INSTALL_ALLOW_CUDA_MISMATCH=1` lets a source build continue when local `nvcc` is newer than the CUDA version reported by the NVIDIA driver. |
+| `INFERENCE_RS_INSTALL_YES` | `INFERENCE_RS_INSTALL_YES=1` auto-confirms every installer prompt (non-interactive installs for CI/containers; used by `inference update`). |
+| `INFERENCE_RS_INSTALL_IGNORE_FFMPEG` | `INFERENCE_RS_INSTALL_IGNORE_FFMPEG=1` skips the installer's FFmpeg step, leaving any existing FFmpeg untouched. |
+| `INFERENCE_RS_GIT_REVISION` | Git revision embedded in the binary by the build script. |
 
 ## Internal
 
@@ -132,4 +132,4 @@ Not intended for direct use.
 
 | Variable | Purpose |
 |---|---|
-| `__MISTRALRS_DAEMON_INTERNAL` | Set by the engine on spawned worker processes. |
+| `__INFERENCE_RS_DAEMON_INTERNAL` | Set by the engine on spawned worker processes. |

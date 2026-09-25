@@ -1,7 +1,7 @@
 <a name="top"></a>
 <!--
 <h1 align="center">
-  mistral.rs
+  inference.rs
 </h1>
 -->
 
@@ -9,7 +9,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="res/banner-dark.gif">
     <source media="(prefers-color-scheme: light)" srcset="res/banner-light.gif">
-    <img src="res/banner-dark.png" alt="mistral.rs - Fast, flexible LLM inference." width="100%" style="max-width: 800px;">
+    <img src="res/banner-dark.png" alt="inference.rs - Fast, flexible LLM inference." width="100%" style="max-width: 800px;">
   </picture>
 </div>
 
@@ -23,6 +23,17 @@
   </a>
 </p>
 
+## About this fork
+
+**inference.rs** is a fork of [mistral.rs](https://github.com/EricLBuehler/mistral.rs) by Eric Buehler, renamed because
+it is not limited to particular model types: it adds non-LLM models (starting with the PP-DocLayoutV3 document layout
+detector in `inference-layout`) and a C ABI for bindings in other languages. All credit for the engine it builds on goes
+to upstream; see [LICENSE](LICENSE) and [CITATION.cff](CITATION.cff).
+
+Names differ from upstream: crates are `inference-*` (the Rust SDK is `inference`), the CLI binary is `inference`, the
+Python package is `inference_rs`, and environment variables use `INFERENCE_RS_*`. Documentation links below still point
+to upstream's hosted docs, where `mistralrs ...` commands correspond to `inference ...` here.
+
 ## Latest
 
 - **Muse Glimmer 30B**: native text, image, and video inference with ATEM tool calling, reasoning controls, LoRA, ISQ/UQFF, and companion-projector GGUF loading. [Model notes](https://docs.mistralrs.dev/guides/models/model-family-notes/#muse-glimmer)
@@ -30,7 +41,7 @@
 - **OpenAI-compatible Skills**: upload `/v1/skills` bundles and reference them from Responses requests for reusable procedures, helper scripts, and local data. [Guide](https://docs.mistralrs.dev/guides/agents/skills/)
 - **OpenAI-compatible file inputs**: upload `/v1/files`, attach Responses `input_file` or Chat `file` parts, and mount request files into shell/code sessions. [Guide](https://docs.mistralrs.dev/guides/agents/file-inputs/)
 - **DiffusionGemma**: block-diffusion text generation. Fully integrated: paged attention, prefix caching, ISQ, multimodal, and tool calling. [Guide](https://docs.mistralrs.dev/guides/models/use-block-diffusion/)
-- **Anthropic Messages API**: `mistralrs serve` now exposes Anthropic-compatible `/v1/messages` and `/v1/messages/count_tokens` endpoints alongside the OpenAI-compatible `/v1` API. [Guide](https://docs.mistralrs.dev/guides/serve/anthropic-messages-api/)
+- **Anthropic Messages API**: `inference serve` now exposes Anthropic-compatible `/v1/messages` and `/v1/messages/count_tokens` endpoints alongside the OpenAI-compatible `/v1` API. [Guide](https://docs.mistralrs.dev/guides/serve/anthropic-messages-api/)
 - **v0.8.2 CUDA performance**: paged-attention and MoE optimizations deliver strong results on GB10, B200, and H100 SXM. [Benchmarks](#benchmarks)
 - **Agentic runtime**: web search, local Python code execution, shell execution, OpenAI-compatible Skills, session management, and custom tool hooks. [Guide](https://docs.mistralrs.dev/guides/agents/)
 - **Gemma 4**: full multimodal: text, image, video, and audio input. [Supported models](https://docs.mistralrs.dev/reference/supported-models/) | [Video setup](https://docs.mistralrs.dev/guides/models/video-setup/)
@@ -42,9 +53,9 @@
 
 Mean tokens per second across prompt lengths and decode depths from 128 to 16384 tokens. Decode uses 256 generated tokens. See the full [v0.8.2 report](releases/v0.8.2/report.md) for commands, model revisions, host metadata, and appendix tables.
 
-**Q8 prefill TPS: mistral.rs UQFF q8 vs llama.cpp GGUF Q8_0**
+**Q8 prefill TPS: inference.rs UQFF q8 vs llama.cpp GGUF Q8_0**
 
-| Model | Hardware | mistral.rs | llama.cpp |
+| Model | Hardware | inference.rs | llama.cpp |
 |---|---|---:|---:|
 | Gemma 4 E4B | GB10 | 7395.7 | 3973.7 |
 | Gemma 4 E4B | B200 | 27705.6 | 11992.4 |
@@ -53,9 +64,9 @@ Mean tokens per second across prompt lengths and decode depths from 128 to 16384
 | Gemma 4 26B-A4B | B200 | 12725.3 | 8503.4 |
 | Gemma 4 26B-A4B | H100 SXM | 12362.3 | 8055.1 |
 
-**Q8 decode TPS: mistral.rs UQFF q8 vs llama.cpp GGUF Q8_0**
+**Q8 decode TPS: inference.rs UQFF q8 vs llama.cpp GGUF Q8_0**
 
-| Model | Hardware | mistral.rs | llama.cpp |
+| Model | Hardware | inference.rs | llama.cpp |
 |---|---|---:|---:|
 | Gemma 4 E4B | GB10 | 44.1 | 40.5 |
 | Gemma 4 E4B | B200 | 241.4 | 194.4 |
@@ -64,9 +75,9 @@ Mean tokens per second across prompt lengths and decode depths from 128 to 16384
 | Gemma 4 26B-A4B | B200 | 210.9 | 192.2 |
 | Gemma 4 26B-A4B | H100 SXM | 199.8 | 183.9 |
 
-**BF16 prefill TPS: mistral.rs BF16 vs vLLM BF16**
+**BF16 prefill TPS: inference.rs BF16 vs vLLM BF16**
 
-| Model | Hardware | mistral.rs | vLLM |
+| Model | Hardware | inference.rs | vLLM |
 |---|---|---:|---:|
 | Gemma 4 E4B | GB10 | 5838.9 | 5812.9 |
 | Gemma 4 E4B | B200 | 43547.8 | 39431.2 |
@@ -75,9 +86,9 @@ Mean tokens per second across prompt lengths and decode depths from 128 to 16384
 | Gemma 4 26B-A4B | B200 | 3467.3 | 28532.8 |
 | Gemma 4 26B-A4B | H100 SXM | 2766.0 | 26295.9 |
 
-**BF16 decode TPS: mistral.rs BF16 vs vLLM BF16**
+**BF16 decode TPS: inference.rs BF16 vs vLLM BF16**
 
-| Model | Hardware | mistral.rs | vLLM |
+| Model | Hardware | inference.rs | vLLM |
 |---|---|---:|---:|
 | Gemma 4 E4B | GB10 | 25.1 | 18.8 |
 | Gemma 4 E4B | B200 | 202.6 | 196.2 |
@@ -88,15 +99,15 @@ Mean tokens per second across prompt lengths and decode depths from 128 to 16384
 
 </details>
 
-## Why mistral.rs?
+## Why inference.rs?
 
 - **Automatic model loading**: Architecture, weight format, and chat template are detected for supported Hugging Face models and GGUF files, with flags available for explicit selection.
 - **True multimodality**: Text, vision, video, and audio, speech generation, image generation, and embeddings in one engine.
 - **Quantization selection**: `--quant` selects a matching artifact from GGUF repositories. For other Hugging Face repositories, it uses a prebuilt UQFF when available and otherwise applies ISQ. [Docs](https://docs.mistralrs.dev/guides/quantization/quantize-a-model/)
-- **OpenAI + Anthropic compatible serving**: The same `mistralrs serve` process exposes OpenAI-compatible `/v1` endpoints and Anthropic-compatible Messages endpoints.
-- **Prometheus metrics**: `mistralrs serve` exposes a `/metrics` endpoint in Prometheus format, recording per-request counts and latency labeled by method, route, and status. [Docs](https://docs.mistralrs.dev/reference/http-api/)
+- **OpenAI + Anthropic compatible serving**: The same `inference serve` process exposes OpenAI-compatible `/v1` endpoints and Anthropic-compatible Messages endpoints.
+- **Prometheus metrics**: `inference serve` exposes a `/metrics` endpoint in Prometheus format, recording per-request counts and latency labeled by method, route, and status. [Docs](https://docs.mistralrs.dev/reference/http-api/)
 - **Built-in web UI**: Served at `/ui` by default. Shows reasoning, code execution, plots, and files inline. Edit any message and the new branch runs with its own Python state. Pass `--no-ui` to disable.
-- **Hardware-aware**: `mistralrs tune` recommends quantization and device mapping from the model config and your detected hardware.
+- **Hardware-aware**: `inference tune` recommends quantization and device mapping from the model config and your detected hardware.
 - **Flexible SDKs**: Python package and Rust crate to build your projects.
 - **Native agentic support**: built-in [agentic loop](https://docs.mistralrs.dev/guides/agents/) with web search, local Python code execution, shell execution, OpenAI-compatible Skills, session management, and custom tool hooks.
 
@@ -122,45 +133,45 @@ Downloads a self-contained prebuilt binary for your platform (Metal on Apple Sil
 
 ```bash
 # Interactive chat
-mistralrs run -m Qwen/Qwen3-4B
+inference run -m Qwen/Qwen3-4B
 
 # One-shot prompt (no interactive session)
-mistralrs run -m Qwen/Qwen3-4B -i "What is the capital of France?"
+inference run -m Qwen/Qwen3-4B -i "What is the capital of France?"
 
 # One-shot with an image
-mistralrs run -m google/gemma-4-E4B-it --image photo.jpg -i "Describe this image"
+inference run -m google/gemma-4-E4B-it --image photo.jpg -i "Describe this image"
 
 # Run a local GGUF or select a published 4-bit GGUF
-mistralrs run -f /path/to/model.gguf
-mistralrs run -m unsloth/Qwen3.5-4B-GGUF --quant 4
+inference run -f /path/to/model.gguf
+inference run -m unsloth/Qwen3.5-4B-GGUF --quant 4
 
 # Agentic REPL: search + code execution + shell from the terminal
-mistralrs run --agent -m Qwen/Qwen3-4B
+inference run --agent -m Qwen/Qwen3-4B
 
 # Start an API server with the built-in web UI
-mistralrs serve -m google/gemma-4-E4B-it
+inference serve -m google/gemma-4-E4B-it
 ```
 
 For the server command, visit `http://localhost:1234/ui` for the web chat interface. OpenAI-compatible clients use `http://localhost:1234/v1`; Anthropic-compatible clients use `http://localhost:1234`.
 
-### The `mistralrs` CLI
+### The `inference` CLI
 
 The CLI uses the same `run`, `serve`, and `bench` commands for model repositories, local directories, and GGUF files.
 
 - **Auto-detection**: Automatically detects model architecture, quantization format, and chat template
 - **All-in-one**: Single binary for chat, server, benchmarks, and web UI (`run`, `serve`, `bench`)
-- **Hardware-aware tuning**: `mistralrs tune` recommends quantization and device mapping for your model and hardware
+- **Hardware-aware tuning**: `inference tune` recommends quantization and device mapping for your model and hardware
 - **Model formats**: Hugging Face checkpoints, [GGUF files](https://docs.mistralrs.dev/guides/models/run-gguf/), and [UQFF quantizations](https://docs.mistralrs.dev/reference/uqff-format/)
 
 ```bash
 # Recommend settings for your hardware and emit a config file
-mistralrs tune -m Qwen/Qwen3-4B --emit-config config.toml
+inference tune -m Qwen/Qwen3-4B --emit-config config.toml
 
 # Run using the generated config
-mistralrs from-config -f config.toml
+inference from-config -f config.toml
 
 # Diagnose system issues (CUDA, Metal, Hugging Face connectivity)
-mistralrs doctor
+inference doctor
 ```
 
 [Full CLI documentation](https://docs.mistralrs.dev/reference/cli/)
@@ -212,7 +223,7 @@ Text, multimodal, speech, image generation, and embedding models across 45+ arch
 ## Python SDK
 
 ```bash
-pip install mistralrs
+pip install inference-rs
 ```
 
 In-process inference from Python: load a model with `Runner` and send OpenAI-shaped requests, no server required. Accelerator-specific wheels (CUDA, Metal, MKL, Accelerate) are listed in the getting-started guide.
@@ -222,12 +233,12 @@ In-process inference from Python: load a model with `Runner` and send OpenAI-sha
 ## Rust SDK
 
 ```bash
-cargo add mistralrs
+cargo add inference
 ```
 
-Embed the engine in a Rust application with the high-level `mistralrs` crate.
+Embed the engine in a Rust application with the high-level `inference` crate.
 
-[Get started](https://docs.mistralrs.dev/guides/rust/getting-started/) | [docs.rs](https://docs.rs/mistralrs) | [Crate](https://crates.io/crates/mistralrs) | [Examples](mistralrs/examples)
+[Get started](https://docs.mistralrs.dev/guides/rust/getting-started/) | [docs.rs](https://docs.rs/mistralrs) | [Crate](https://crates.io/crates/mistralrs) | [Examples](inference/examples)
 
 ## Docker
 
@@ -250,12 +261,12 @@ For complete documentation, see the **[Documentation](https://docs.mistralrs.dev
 
 ## Citation
 
-If you use mistral.rs in your research, please cite:
+If you use inference.rs in your research, please cite:
 
 ```bibtex
-@misc{mistralrs,
+@misc{inference,
   author = {Buehler, Eric},
-  title = {{mistral.rs}: Fast, flexible {LLM} inference},
+  title = {{inference.rs}: Fast, flexible {LLM} inference},
   year = {2024},
   url = {https://github.com/EricLBuehler/mistral.rs}
 }
@@ -271,7 +282,7 @@ Contributions welcome! Please [open an issue](https://github.com/EricLBuehler/mi
 
 This project would not be possible without the excellent work at [Candle](https://github.com/huggingface/candle). Thank you to all [contributors](https://github.com/EricLBuehler/mistral.rs/graphs/contributors)!
 
-mistral.rs is not affiliated with Mistral AI.
+inference.rs is not affiliated with Mistral AI.
 
 <p align="right">
   <a href="#top">Back to Top</a>

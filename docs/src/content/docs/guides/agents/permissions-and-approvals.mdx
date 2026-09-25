@@ -5,10 +5,10 @@ description: Control whether agent actions run automatically, require approval, 
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-`agent_permission` controls whether mistral.rs may run an agent action after the model asks for one. It applies to all server-executed actions, not just Python: code execution, shell, web search, file tools, registered callbacks, and external tool dispatch.
+`agent_permission` controls whether inference.rs may run an agent action after the model asks for one. It applies to all server-executed actions, not just Python: code execution, shell, web search, file tools, registered callbacks, and external tool dispatch.
 
 ```bash
-mistralrs run --agent -m google/gemma-4-E4B-it --agent-permission ask
+inference run --agent -m google/gemma-4-E4B-it --agent-permission ask
 ```
 
 | Mode | Behavior |
@@ -39,13 +39,13 @@ All five surfaces (CLI, built-in UI, HTTP, Python, Rust) expose the same approva
 In interactive mode, `ask` prompts inline before each agent action. Choosing `always` approves later actions in the same CLI session.
 
 ```bash
-mistralrs run --agent -m google/gemma-4-E4B-it --agent-permission ask
+inference run --agent -m google/gemma-4-E4B-it --agent-permission ask
 ```
 
 `deny` is useful when you want to inspect proposed actions without letting them run:
 
 ```bash
-mistralrs run --agent -m google/gemma-4-E4B-it --agent-permission deny
+inference run --agent -m google/gemma-4-E4B-it --agent-permission deny
 ```
 
 </TabItem>
@@ -103,7 +103,7 @@ The callback receives an `AgentToolApproval` with these fields:
 - `code`: convenience field when the action is Python code
 
 ```python
-from mistralrs import (
+from inference_rs import (
     AgentPermission,
     AgentToolApprovalDecision,
     AgentToolKind,
@@ -142,7 +142,7 @@ Set `AgentPermission::Ask` and pass an `AgentToolApprovalCallback`. The callback
 ```rust
 use std::sync::Arc;
 
-use mistralrs::{
+use inference::{
     AgentPermission, AgentToolApprovalCallback, AgentToolApprovalDecision, RequestBuilder,
 };
 

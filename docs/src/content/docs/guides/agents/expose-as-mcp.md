@@ -1,12 +1,12 @@
 ---
-title: Expose mistralrs as an MCP server
+title: Expose inference as an MCP server
 description: Serve the loaded model as an MCP tool other agents can call.
 ---
 
-mistral.rs can expose the loaded model as an [MCP (Model Context Protocol)](/guides/agents/connect-mcp-server/) server: a `chat` tool over JSON-RPC 2.0 that any MCP client can call.
+inference.rs can expose the loaded model as an [MCP (Model Context Protocol)](/guides/agents/connect-mcp-server/) server: a `chat` tool over JSON-RPC 2.0 that any MCP client can call.
 
 ```bash
-mistralrs serve -m Qwen/Qwen3-4B --mcp-port 4321
+inference serve -m Qwen/Qwen3-4B --mcp-port 4321
 ```
 
 `--mcp-port` starts an additional listener. The port rules:
@@ -30,7 +30,7 @@ Clients connect to `http://<host>:<mcp_port>/mcp`. Each call is a `POST /mcp` wi
 
 ## Methods
 
-- `initialize`: returns `{"capabilities":{"tools":{}},"instructions":...,"protocolVersion":"2025-11-25","serverInfo":{"name":"mistralrs","version":...}}`.
+- `initialize`: returns `{"capabilities":{"tools":{}},"instructions":...,"protocolVersion":"2025-11-25","serverInfo":{"name":"inference","version":...}}`.
 - `ping`: returns `{}`.
 - `tools/list`: returns the `chat` tool. The list is empty if the loaded model does not have text input and output modalities.
 - `tools/call`: runs the `chat` tool.
@@ -74,5 +74,5 @@ The MCP endpoint has no built-in authentication. For non-localhost use, place an
 
 ## See also
 
-- [Connect to an MCP server](/guides/agents/connect-mcp-server/): the opposite direction, using external MCP tools from mistral.rs.
+- [Connect to an MCP server](/guides/agents/connect-mcp-server/): the opposite direction, using external MCP tools from inference.rs.
 - [Serve CLI reference](/reference/cli/serve/).

@@ -17,13 +17,13 @@ wait until it finishes.
 Serve any model with ISQ:
 
 ```bash
-mistralrs serve -m <model> --isq q4k
+inference serve -m <model> --isq q4k
 ```
 
 Online calibration also accepts an exact compatible GGUF source:
 
 ```bash
-mistralrs serve -f /path/model-BF16.gguf --isq q4k
+inference serve -f /path/model-BF16.gguf --isq q4k
 ```
 
 Then drive the lifecycle on the surface of your choice. There is no CLI command for the

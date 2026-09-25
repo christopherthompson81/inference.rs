@@ -9,15 +9,15 @@ sidebar:
 
 Constrained generation using a GBNF grammar.
 
-Run with: `cargo run --release --example grammar -p mistralrs`
+Run with: `cargo run --release --example grammar -p inference`
 
 ```rust
 //! Constrained generation using a GBNF grammar.
 //!
-//! Run with: `cargo run --release --example grammar -p mistralrs`
+//! Run with: `cargo run --release --example grammar -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     IsqBits, ModelBuilder, PagedAttentionMetaBuilder, RequestBuilder, TextMessageRole,
 };
 
@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
 
     // Bullet list regex
     let request = RequestBuilder::new()
-        .set_constraint(mistralrs::Constraint::Regex(
+        .set_constraint(inference::Constraint::Regex(
             "(- [^\n]*\n)+(- [^\n]*)(\n\n)?".to_string(),
         ))
         .add_message(TextMessageRole::User, "Please write a few jokes.");
@@ -45,4 +45,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/grammar/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/grammar/main.rs)
+Source: [`inference/examples/advanced/grammar/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/grammar/main.rs)

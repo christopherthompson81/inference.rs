@@ -1,16 +1,16 @@
 ---
-title: "mistralrs quantize"
+title: "inference quantize"
 description: "Generate UQFF quantized model file"
 sidebar:
   order: 5
 ---
 
-<!-- Generated from clap definitions by mistralrs-cli docgen. Do not edit. -->
+<!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->
 
 Generate UQFF quantized model file
 
 ```
-mistralrs quantize [OPTIONS] [COMMAND]
+inference quantize [OPTIONS] [COMMAND]
 ```
 
 | Option | Default | Description |
@@ -41,12 +41,12 @@ mistralrs quantize [OPTIONS] [COMMAND]
 | `--max-num-images <MAX_NUM_IMAGES>` |  | Maximum number of images per request |
 | `--max-image-length <MAX_IMAGE_LENGTH>` |  | Maximum image dimension for device mapping |
 
-## mistralrs quantize auto
+## inference quantize auto
 
 Auto-detect model type (recommended)
 
 ```
-mistralrs quantize auto [OPTIONS] --isq <IN_SITU_QUANT> --output <OUTPUT_PATH>
+inference quantize auto [OPTIONS] --isq <IN_SITU_QUANT> --output <OUTPUT_PATH>
 ```
 
 | Option | Default | Description |
@@ -77,12 +77,12 @@ mistralrs quantize auto [OPTIONS] --isq <IN_SITU_QUANT> --output <OUTPUT_PATH>
 | `--max-num-images <MAX_NUM_IMAGES>` |  | Maximum number of images per request |
 | `--max-image-length <MAX_IMAGE_LENGTH>` |  | Maximum image dimension for device mapping |
 
-## mistralrs quantize text
+## inference quantize text
 
 Text generation model with explicit architecture
 
 ```
-mistralrs quantize text [OPTIONS] --isq <IN_SITU_QUANT> --output <OUTPUT_PATH>
+inference quantize text [OPTIONS] --isq <IN_SITU_QUANT> --output <OUTPUT_PATH>
 ```
 
 | Option | Default | Description |
@@ -111,12 +111,12 @@ mistralrs quantize text [OPTIONS] --isq <IN_SITU_QUANT> --output <OUTPUT_PATH>
 | `--uqff-base-model <UQFF_BASE_MODEL>` |  | Base model ID for the generated README (skips interactive prompt) |
 | `--uqff-repo-id <UQFF_REPO_ID>` |  | HF repo ID for the generated README and upload hint (skips interactive prompt) |
 
-## mistralrs quantize multimodal
+## inference quantize multimodal
 
 Multimodal model
 
 ```
-mistralrs quantize multimodal [OPTIONS] --isq <IN_SITU_QUANT> --output <OUTPUT_PATH>
+inference quantize multimodal [OPTIONS] --isq <IN_SITU_QUANT> --output <OUTPUT_PATH>
 ```
 
 | Option | Default | Description |
@@ -147,12 +147,12 @@ mistralrs quantize multimodal [OPTIONS] --isq <IN_SITU_QUANT> --output <OUTPUT_P
 | `--max-num-images <MAX_NUM_IMAGES>` |  | Maximum number of images per request |
 | `--max-image-length <MAX_IMAGE_LENGTH>` |  | Maximum image dimension for device mapping |
 
-## mistralrs quantize embedding
+## inference quantize embedding
 
 Embedding model
 
 ```
-mistralrs quantize embedding [OPTIONS] --model-id <MODEL_ID> --isq <IN_SITU_QUANT> --output <OUTPUT_PATH>
+inference quantize embedding [OPTIONS] --model-id <MODEL_ID> --isq <IN_SITU_QUANT> --output <OUTPUT_PATH>
 ```
 
 | Option | Default | Description |

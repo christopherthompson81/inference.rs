@@ -32,9 +32,9 @@ Runnable Rust SDK example `text_models`.
 /// | Qwen3 (thinking mode)        | `Qwen/Qwen3-30B-A3B`                        |
 /// | Llama 3.3                    | `meta-llama/Llama-3.3-70B-Instruct`         |
 ///
-/// Run with: `cargo run --release --example text_models -p mistralrs`
+/// Run with: `cargo run --release --example text_models -p inference`
 use anyhow::Result;
-use mistralrs::{IsqBits, ModelBuilder, PagedAttentionMetaBuilder, TextMessageRole, TextMessages};
+use inference::{IsqBits, ModelBuilder, PagedAttentionMetaBuilder, TextMessageRole, TextMessages};
 
 const MODEL_ID: &str = "Qwen/Qwen3-4B";
 
@@ -89,4 +89,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/models/text_models/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/text_models/main.rs)
+Source: [`inference/examples/models/text_models/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/text_models/main.rs)

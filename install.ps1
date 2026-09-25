@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# mistral.rs Installation Script for Windows
+# inference.rs Installation Script for Windows
 # Automatic hardware detection and feature configuration
 
 $ErrorActionPreference = "Stop"
@@ -33,9 +33,9 @@ function Get-RemoteDownloadSize($Url) {
     return $null
 }
 
-# MISTRALRS_INSTALL_YES=1 auto-confirms every prompt (non-interactive installs, `mistralrs update`).
+# INFERENCE_RS_INSTALL_YES=1 auto-confirms every prompt (non-interactive installs, `inference update`).
 function Read-Confirm($prompt) {
-    if ($env:MISTRALRS_INSTALL_YES -eq "1") { return "y" }
+    if ($env:INFERENCE_RS_INSTALL_YES -eq "1") { return "y" }
     return Read-Host $prompt
 }
 
@@ -57,7 +57,7 @@ function Add-UserPath($PathToAdd) {
 function Warn-IfShadowed {
     param([string]$ExpectedBin, [string]$ExpectedInstall)
 
-    $Command = Get-Command mistralrs -ErrorAction SilentlyContinue | Select-Object -First 1
+    $Command = Get-Command inference -ErrorAction SilentlyContinue | Select-Object -First 1
     if (-not $Command) { return }
 
     $Resolved = $Command.Source
@@ -65,7 +65,7 @@ function Warn-IfShadowed {
     if (-not $Resolved) { return }
 
     if (($Resolved -ine $ExpectedBin) -and ($Resolved -ine $ExpectedInstall)) {
-        Write-Warn "Another mistralrs appears earlier on PATH: $Resolved"
+        Write-Warn "Another inference appears earlier on PATH: $Resolved"
         Write-Host "      The managed install is available at: $ExpectedInstall"
     }
 }
@@ -85,9 +85,9 @@ function Show-Banner {
 
 # Minimum required Rust version (from Cargo.toml rust-version)
 $RequiredRustVersion = "1.94"
-$MistralRsRepoUrl = "https://github.com/EricLBuehler/mistral.rs"
-$MistralRsBranch = "master"
-$MistralRsCliPackage = "mistralrs-cli"
+$InferenceRsRepoUrl = "https://github.com/EricLBuehler/mistral.rs"
+$InferenceRsBranch = "master"
+$InferenceRsCliPackage = "inference-cli"
 
 # Check if Rust is installed
 function Test-Rust {
@@ -224,10 +224,10 @@ function Test-CudaSourceBuildVersions {
     if (($null -eq $cudaVer) -or ($null -eq $driverCuda)) { return }
 
     if ($cudaVer -gt $driverCuda) {
-        if ($env:MISTRALRS_INSTALL_ALLOW_CUDA_MISMATCH -eq "1") {
-            Write-Warn "Local nvcc CUDA $(Format-CudaVersionCode $cudaVer) is newer than the NVIDIA driver supports ($(Format-CudaVersionCode $driverCuda)); continuing because MISTRALRS_INSTALL_ALLOW_CUDA_MISMATCH=1."
+        if ($env:INFERENCE_RS_INSTALL_ALLOW_CUDA_MISMATCH -eq "1") {
+            Write-Warn "Local nvcc CUDA $(Format-CudaVersionCode $cudaVer) is newer than the NVIDIA driver supports ($(Format-CudaVersionCode $driverCuda)); continuing because INFERENCE_RS_INSTALL_ALLOW_CUDA_MISMATCH=1."
         } else {
-            Write-Err "Local nvcc CUDA $(Format-CudaVersionCode $cudaVer) is newer than the NVIDIA driver supports ($(Format-CudaVersionCode $driverCuda)). Source builds can fail with CUDA_ERROR_UNSUPPORTED_PTX_VERSION; upgrade the driver, install a matching CUDA toolkit, use a prebuilt, or set MISTRALRS_INSTALL_ALLOW_CUDA_MISMATCH=1 to override."
+            Write-Err "Local nvcc CUDA $(Format-CudaVersionCode $cudaVer) is newer than the NVIDIA driver supports ($(Format-CudaVersionCode $driverCuda)). Source builds can fail with CUDA_ERROR_UNSUPPORTED_PTX_VERSION; upgrade the driver, install a matching CUDA toolkit, use a prebuilt, or set INFERENCE_RS_INSTALL_ALLOW_CUDA_MISMATCH=1 to override."
         }
     }
 }
@@ -314,16 +314,16 @@ function Get-Features {
         $ccMinor = if ($cudaCC.Length -gt 1) { $cudaCC.Substring(1) } else { "0" }
         Write-Info "CUDA detected (compute capability: $ccMajor.$ccMinor)"
 
-        if ($env:MISTRALRS_INSTALL_NO_NCCL -eq "1") {
-            Write-Info "MISTRALRS_INSTALL_NO_NCCL=1 set - skipping nccl"
+        if ($env:INFERENCE_RS_INSTALL_NO_NCCL -eq "1") {
+            Write-Info "INFERENCE_RS_INSTALL_NO_NCCL=1 set - skipping nccl"
         } elseif (Test-NCCL) {
             $features += "nccl"
             Write-Info "NCCL detected - enabling nccl for CUDA multi-GPU tensor parallelism"
-        } elseif ($env:MISTRALRS_INSTALL_NCCL -eq "1") {
+        } elseif ($env:INFERENCE_RS_INSTALL_NCCL -eq "1") {
             $features += "nccl"
-            Write-Warn "MISTRALRS_INSTALL_NCCL=1 set but NCCL was not detected; the build may fail unless NCCL is on the linker path"
+            Write-Warn "INFERENCE_RS_INSTALL_NCCL=1 set but NCCL was not detected; the build may fail unless NCCL is on the linker path"
         } else {
-            Write-Warn "NCCL not found - skipping nccl. Install NCCL or set MISTRALRS_INSTALL_NCCL=1 to force it; NCCL is the preferred CUDA multi-GPU path."
+            Write-Warn "NCCL not found - skipping nccl. Install NCCL or set INFERENCE_RS_INSTALL_NCCL=1 to force it; NCCL is the preferred CUDA multi-GPU path."
         }
 
         # Check for cuDNN
@@ -362,27 +362,27 @@ function Get-Features {
     return $features -join " "
 }
 
-# Install mistralrs-cli
+# Install inference-cli
 function Install-MistralRS {
     param([string]$Features)
-    $script:SourceInstallRoot = Join-Path $env:TEMP "mistralrs-cargo-install-$([guid]::NewGuid().ToString())"
-    $script:SourceMistralRs = Join-Path $script:SourceInstallRoot "bin\mistralrs.exe"
+    $script:SourceInstallRoot = Join-Path $env:TEMP "inference-cargo-install-$([guid]::NewGuid().ToString())"
+    $script:SourceInferenceRs = Join-Path $script:SourceInstallRoot "bin\inference.exe"
 
-    # MISTRALRS_INSTALL_TAG pins a git tag; otherwise build the latest master.
-    if ($env:MISTRALRS_INSTALL_TAG) {
-        $gitRef = @("--tag", $env:MISTRALRS_INSTALL_TAG)
-        $refDesc = "tag $($env:MISTRALRS_INSTALL_TAG)"
+    # INFERENCE_RS_INSTALL_TAG pins a git tag; otherwise build the latest master.
+    if ($env:INFERENCE_RS_INSTALL_TAG) {
+        $gitRef = @("--tag", $env:INFERENCE_RS_INSTALL_TAG)
+        $refDesc = "tag $($env:INFERENCE_RS_INSTALL_TAG)"
     } else {
-        $gitRef = @("--branch", $MistralRsBranch)
-        $refDesc = "branch $MistralRsBranch"
+        $gitRef = @("--branch", $InferenceRsBranch)
+        $refDesc = "branch $InferenceRsBranch"
     }
 
     if ($Features) {
-        Write-Info "Installing mistralrs-cli from GitHub $refDesc with features: $Features"
-        & cargo install --root $script:SourceInstallRoot --force --locked --git $MistralRsRepoUrl @gitRef $MistralRsCliPackage --features "$Features"
+        Write-Info "Installing inference-cli from GitHub $refDesc with features: $Features"
+        & cargo install --root $script:SourceInstallRoot --force --locked --git $InferenceRsRepoUrl @gitRef $InferenceRsCliPackage --features "$Features"
     } else {
-        Write-Info "Installing mistralrs-cli from GitHub $refDesc with default features"
-        & cargo install --root $script:SourceInstallRoot --force --locked --git $MistralRsRepoUrl @gitRef $MistralRsCliPackage
+        Write-Info "Installing inference-cli from GitHub $refDesc with default features"
+        & cargo install --root $script:SourceInstallRoot --force --locked --git $InferenceRsRepoUrl @gitRef $InferenceRsCliPackage
     }
 
     if ($LASTEXITCODE -ne 0) {
@@ -390,21 +390,21 @@ function Install-MistralRS {
     }
 }
 
-# MISTRALRS_INSTALL_TAG pins a specific release (e.g. v0.8.9); default is the latest stable release.
-$ReleaseBase = if ($env:MISTRALRS_INSTALL_TAG) {
+# INFERENCE_RS_INSTALL_TAG pins a specific release (e.g. v0.8.9); default is the latest stable release.
+$ReleaseBase = if ($env:INFERENCE_RS_INSTALL_TAG) {
     "https://github.com/EricLBuehler/mistral.rs/releases/download/$($env:MISTRALRS_INSTALL_TAG)"
 } else {
     "https://github.com/EricLBuehler/mistral.rs/releases/latest/download"
 }
-$PrebuiltDir = "$env:USERPROFILE\.mistralrs"
+$PrebuiltDir = "$env:USERPROFILE\.inference-rs"
 $BinDir = "$env:USERPROFILE\.local\bin"
 $CargoBinDir = if ($env:CARGO_HOME) { Join-Path $env:CARGO_HOME "bin" } else { "$env:USERPROFILE\.cargo\bin" }
-$CargoMistralRs = Join-Path $CargoBinDir "mistralrs.exe"
-$ManagedBin = Join-Path $PrebuiltDir "mistralrs.exe"
-$LauncherPath = Join-Path $BinDir "mistralrs.cmd"
-$LegacyBinPath = Join-Path $BinDir "mistralrs.exe"
+$CargoInferenceRs = Join-Path $CargoBinDir "inference.exe"
+$ManagedBin = Join-Path $PrebuiltDir "inference.exe"
+$LauncherPath = Join-Path $BinDir "inference.cmd"
+$LegacyBinPath = Join-Path $BinDir "inference.exe"
 $script:SourceInstallRoot = $null
-$script:SourceMistralRs = $null
+$script:SourceInferenceRs = $null
 $script:ReplaceDuplicateInstalls = $false
 $script:DuplicateInstalls = @()
 
@@ -436,12 +436,12 @@ function Add-DuplicateInstall {
 
 function Find-DuplicateInstalls {
     $script:DuplicateInstalls = @()
-    Add-DuplicateInstall $CargoMistralRs
+    Add-DuplicateInstall $CargoInferenceRs
     Add-DuplicateInstall $LegacyBinPath
     foreach ($dir in ($env:PATH -split ';' | Where-Object { $_ })) {
-        Add-DuplicateInstall (Join-Path $dir "mistralrs.exe")
-        Add-DuplicateInstall (Join-Path $dir "mistralrs.cmd")
-        Add-DuplicateInstall (Join-Path $dir "mistralrs.bat")
+        Add-DuplicateInstall (Join-Path $dir "inference.exe")
+        Add-DuplicateInstall (Join-Path $dir "inference.cmd")
+        Add-DuplicateInstall (Join-Path $dir "inference.bat")
     }
     return $script:DuplicateInstalls
 }
@@ -450,14 +450,14 @@ function Confirm-DuplicateReplacement {
     $duplicates = @(Find-DuplicateInstalls)
     if ($duplicates.Count -eq 0) { return }
     Write-Host ""
-    Write-Warn "Found duplicate mistralrs installs:"
+    Write-Warn "Found duplicate inference installs:"
     foreach ($duplicate in $duplicates) {
         Write-Host "  $duplicate"
     }
     Write-Host ""
     $response = Read-Confirm "Replace duplicate installs? [Y/n]"
     if ($response -match "^[Nn]") {
-        Write-Err "duplicate mistralrs installs must be resolved before installing"
+        Write-Err "duplicate inference installs must be resolved before installing"
     }
     $script:ReplaceDuplicateInstalls = $true
 }
@@ -485,12 +485,12 @@ function Install-Launcher {
 }
 
 function Install-SourceFromStaging {
-    if (-not (Test-Path -LiteralPath $script:SourceMistralRs -PathType Leaf)) {
-        Write-Err "cargo install succeeded but $script:SourceMistralRs was not found"
+    if (-not (Test-Path -LiteralPath $script:SourceInferenceRs -PathType Leaf)) {
+        Write-Err "cargo install succeeded but $script:SourceInferenceRs was not found"
     }
     if (Test-Path $PrebuiltDir) { Remove-Item -Recurse -Force $PrebuiltDir }
     New-Item -ItemType Directory -Force -Path $PrebuiltDir | Out-Null
-    Copy-Item -Force $script:SourceMistralRs $ManagedBin
+    Copy-Item -Force $script:SourceInferenceRs $ManagedBin
     Remove-Item -Recurse -Force $script:SourceInstallRoot
     Install-Launcher
     & $ManagedBin --version *> $null
@@ -502,7 +502,7 @@ function Install-SourceFromStaging {
 function Write-InstallSuccess {
     param([string]$Method)
     $ver = (& $ManagedBin --version 2>$null | Select-Object -First 1)
-    if (-not $ver) { $ver = "mistral.rs" }
+    if (-not $ver) { $ver = "inference.rs" }
     if ($Method -eq "prebuilt") {
         Write-Success "$ver installed successfully (prebuilt binary)!"
     } else {
@@ -516,17 +516,17 @@ function Write-InstallSuccess {
     Write-Host ""
     if (($env:PATH -split ';') -notcontains $BinDir) {
         Add-UserPath $BinDir
-        Write-Warn "Added $BinDir to your user PATH. Restart your terminal to use 'mistralrs'."
+        Write-Warn "Added $BinDir to your user PATH. Restart your terminal to use 'inference'."
     }
     Warn-IfShadowed $LauncherPath $ManagedBin
     Write-Host ""
-    Write-Host "  mistralrs run -m Qwen/Qwen3-4B"
+    Write-Host "  inference run -m Qwen/Qwen3-4B"
     Write-Host ""
 }
 
 # Download and install the Windows CPU prebuilt. Returns $true on success.
 function Install-Prebuilt {
-    $asset = "mistralrs-cpu-x86_64-pc-windows-msvc.zip"
+    $asset = "inference-cpu-x86_64-pc-windows-msvc.zip"
     $tmp = Join-Path $env:TEMP $asset
     $downloadSize = Get-RemoteDownloadSize "$ReleaseBase/$asset"
     if ($downloadSize) {
@@ -567,8 +567,8 @@ function Main {
     Confirm-DuplicateReplacement
 
     # Prefer the prebuilt CPU binary: no Rust toolchain, no compile. Set
-    # MISTRALRS_INSTALL_FROM_SOURCE=1 to force a source build instead.
-    if (-not $env:MISTRALRS_INSTALL_FROM_SOURCE) {
+    # INFERENCE_RS_INSTALL_FROM_SOURCE=1 to force a source build instead.
+    if (-not $env:INFERENCE_RS_INSTALL_FROM_SOURCE) {
         Write-Info "Checking for a prebuilt binary..."
         if (Install-Prebuilt) {
             Remove-DuplicateInstalls
@@ -579,10 +579,10 @@ function Main {
         Write-Host ""
     }
 
-    if ($env:MISTRALRS_INSTALL_TAG) {
-        Write-Info "Building from source: tag $($env:MISTRALRS_INSTALL_TAG)."
+    if ($env:INFERENCE_RS_INSTALL_TAG) {
+        Write-Info "Building from source: tag $($env:INFERENCE_RS_INSTALL_TAG)."
     } else {
-        Write-Info "Building from source: latest $MistralRsBranch (bleeding edge)."
+        Write-Info "Building from source: latest $InferenceRsBranch (bleeding edge)."
     }
 
     # Check for Rust
@@ -598,7 +598,7 @@ function Main {
             Show-Cmd "rustup update stable"
             $response = Read-Confirm "Would you like to update Rust now? [Y/n]"
             if ($response -match "^[Nn]") {
-                Write-Err "Rust $RequiredRustVersion or newer is required to install mistral.rs"
+                Write-Err "Rust $RequiredRustVersion or newer is required to install inference.rs"
             }
             Update-Rust
             # Re-check version after update
@@ -613,7 +613,7 @@ function Main {
         Show-Cmd "Invoke-WebRequest https://win.rustup.rs/x86_64 -OutFile rustup-init.exe; .\rustup-init.exe -y"
         $response = Read-Confirm "Would you like to install Rust now? [Y/n]"
         if ($response -match "^[Nn]") {
-            Write-Err "Rust is required to install mistral.rs"
+            Write-Err "Rust is required to install inference.rs"
         }
         Install-Rust
     }

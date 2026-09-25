@@ -18,7 +18,7 @@ This example shows how to:
 
 For non-streaming output, see the `agent` example.
 
-Run with: `cargo run --release --example agent_streaming -p mistralrs`
+Run with: `cargo run --release --example agent_streaming -p inference`
 
 ```rust
 //! Example demonstrating the agentic loop with streaming output
@@ -32,10 +32,10 @@ Run with: `cargo run --release --example agent_streaming -p mistralrs`
 //!
 //! For non-streaming output, see the `agent` example.
 //!
-//! Run with: `cargo run --release --example agent_streaming -p mistralrs`
+//! Run with: `cargo run --release --example agent_streaming -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     tool, AgentBuilder, AgentEvent, AgentStopReason, IsqBits, ModelBuilder,
     PagedAttentionMetaBuilder,
 };
@@ -223,4 +223,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/agent_streaming/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/agent_streaming/main.rs)
+Source: [`inference/examples/advanced/agent_streaming/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/agent_streaming/main.rs)

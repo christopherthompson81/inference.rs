@@ -92,7 +92,7 @@ send_chat_completion_request(
 ) -> ChatCompletionResponse | Iterator[ChatCompletionChunkResponse]
 ```
 
-Send a chat completion request to the mistral.rs engine, returning the response object or a generator
+Send a chat completion request to the inference.rs engine, returning the response object or a generator
 over chunk objects.
 
 **Parameters**
@@ -111,7 +111,7 @@ send_completion_request(
 ) -> CompletionResponse
 ```
 
-Send a completion request to the mistral.rs engine, returning the response object.
+Send a completion request to the inference.rs engine, returning the response object.
 
 **Parameters**
 
@@ -623,4 +623,4 @@ Loaded aliases, resident generations, active leases, and capacity limits.
 
 ---
 
-<small>Generated from [`mistralrs-pyo3/mistralrs.pyi`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs-pyo3/mistralrs.pyi).</small>
+<small>Generated from [`inference-pyo3/inference_rs.pyi`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs-pyo3/mistralrs.pyi).</small>

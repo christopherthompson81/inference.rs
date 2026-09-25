@@ -9,15 +9,15 @@ sidebar:
 
 Compute and compare text embeddings with cosine similarity.
 
-Run with: `cargo run --release --example embeddings -p mistralrs`
+Run with: `cargo run --release --example embeddings -p inference`
 
 ```rust
 //! Compute and compare text embeddings with cosine similarity.
 //!
-//! Run with: `cargo run --release --example embeddings -p mistralrs`
+//! Run with: `cargo run --release --example embeddings -p inference`
 
 use anyhow::Result;
-use mistralrs::{Device, EmbeddingModelBuilder, EmbeddingRequest, Tensor};
+use inference::{Device, EmbeddingModelBuilder, EmbeddingRequest, Tensor};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -37,4 +37,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/embeddings/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/embeddings/main.rs)
+Source: [`inference/examples/advanced/embeddings/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/embeddings/main.rs)

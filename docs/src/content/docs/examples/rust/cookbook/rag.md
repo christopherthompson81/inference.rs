@@ -19,9 +19,9 @@ Runnable Rust SDK example `rag`.
 /// 2. Computing cosine similarity to find the most relevant document
 /// 3. Sending the retrieved context + query to a text model
 ///
-/// Run with: `cargo run --release --example cookbook_rag -p mistralrs`
+/// Run with: `cargo run --release --example cookbook_rag -p inference`
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     EmbeddingModelBuilder, EmbeddingRequest, IsqBits, ModelBuilder, TextMessageRole, TextMessages,
 };
 
@@ -48,7 +48,7 @@ async fn main() -> Result<()> {
     let documents = [
         "Rust is a systems programming language focused on safety, speed, and concurrency.",
         "Python is widely used for data science, machine learning, and scripting.",
-        "mistral.rs is a blazing-fast LLM inference engine written in Rust.",
+        "inference.rs is a blazing-fast LLM inference engine written in Rust.",
         "The Eiffel Tower is a wrought-iron lattice tower in Paris, France.",
     ];
 
@@ -61,7 +61,7 @@ async fn main() -> Result<()> {
     }
 
     // ---- Step 3: Embed the query and find the best match ----
-    let query = "What is mistral.rs?";
+    let query = "What is inference.rs?";
     let query_emb = embed_model
         .generate_embeddings(EmbeddingRequest::builder().add_prompt(format!("query: {query}")))
         .await?;
@@ -104,4 +104,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/cookbook/rag/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/cookbook/rag/main.rs)
+Source: [`inference/examples/cookbook/rag/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/cookbook/rag/main.rs)

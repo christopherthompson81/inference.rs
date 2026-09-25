@@ -12,7 +12,7 @@ Runnable Python SDK example `deepseekr1`.
 <!-- needs-header -->
 
 ```python
-from mistralrs import Runner, Which, ChatCompletionRequest, Architecture
+from inference_rs import Runner, Which, ChatCompletionRequest, Architecture
 
 runner = Runner(
     which=Which.Plain(

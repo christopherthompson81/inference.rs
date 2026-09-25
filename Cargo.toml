@@ -1,31 +1,31 @@
 [workspace]
 members = [
-    "mistralrs-server-core",
-    "mistralrs-cli",
-    "mistralrs-core",
-    "mistralrs-pyo3",
-    "mistralrs",
-    "mistralrs-vision",
-    "mistralrs-layout",
-    "mistralrs-quant",
-    "mistralrs-paged-attn",
-    "mistralrs-metal-compile",
-    "mistralrs-flash-attn",
+    "inference-server-core",
+    "inference-cli",
+    "inference-core",
+    "inference-pyo3",
+    "inference",
+    "inference-vision",
+    "inference-layout",
+    "inference-quant",
+    "inference-paged-attn",
+    "inference-metal-compile",
+    "inference-flash-attn",
 
-    "mistralrs-audio",
-    "mistralrs-mcp",
-    "mistralrs-macros",
-    "mistralrs-code-exec",
-    "mistralrs-sandbox",
+    "inference-audio",
+    "inference-mcp",
+    "inference-macros",
+    "inference-code-exec",
+    "inference-sandbox",
 ]
 resolver = "2"
 
 [workspace.package]
 version = "0.9.3"
 edition = "2021"
-description = "Fast, flexible LLM inference."
-homepage = "https://github.com/EricLBuehler/mistral.rs"
-repository = "https://github.com/EricLBuehler/mistral.rs"
+description = "Fast, flexible model inference."
+homepage = "https://github.com/christopherthompson81/inference.rs"
+repository = "https://github.com/christopherthompson81/inference.rs"
 keywords = ["llm", "inference", "machine-learning", "ai", "transformers"]
 categories = ["science", "api-bindings", "text-processing"]
 license = "MIT"
@@ -194,19 +194,19 @@ nix = { version = "0.31.3", default-features = false }
 itoa = "1.0.18"
 cutile = "=0.3.1"
 
-mistralrs-core = { path = "mistralrs-core", version = "0.9.3" }
-mistralrs-paged-attn = { path = "mistralrs-paged-attn", version = "0.9.3" }
-mistralrs-metal-compile = { path = "mistralrs-metal-compile", version = "0.9.3" }
-mistralrs-flash-attn = { path = "mistralrs-flash-attn", version = "0.9.3" }
-mistralrs-quant = { path = "mistralrs-quant", version = "0.9.3" }
-mistralrs-vision = { path = "mistralrs-vision", version = "0.9.3" }
-mistralrs-server-core = { path = "mistralrs-server-core", version = "0.9.3" }
-mistralrs = { path = "mistralrs", version = "0.9.3" }
-mistralrs-audio = { path = "mistralrs-audio", version = "0.9.3" }
-mistralrs-mcp = { path = "mistralrs-mcp", version = "0.9.3" }
-mistralrs-macros = { path = "mistralrs-macros", version = "0.9.3" }
-mistralrs-code-exec = { path = "mistralrs-code-exec", version = "0.9.3" }
-mistralrs-sandbox = { path = "mistralrs-sandbox", version = "0.9.3" }
+inference-core = { path = "inference-core", version = "0.9.3" }
+inference-paged-attn = { path = "inference-paged-attn", version = "0.9.3" }
+inference-metal-compile = { path = "inference-metal-compile", version = "0.9.3" }
+inference-flash-attn = { path = "inference-flash-attn", version = "0.9.3" }
+inference-quant = { path = "inference-quant", version = "0.9.3" }
+inference-vision = { path = "inference-vision", version = "0.9.3" }
+inference-server-core = { path = "inference-server-core", version = "0.9.3" }
+inference = { path = "inference", version = "0.9.3" }
+inference-audio = { path = "inference-audio", version = "0.9.3" }
+inference-mcp = { path = "inference-mcp", version = "0.9.3" }
+inference-macros = { path = "inference-macros", version = "0.9.3" }
+inference-code-exec = { path = "inference-code-exec", version = "0.9.3" }
+inference-sandbox = { path = "inference-sandbox", version = "0.9.3" }
 
 [profile.release-with-debug]
 inherits = "release"

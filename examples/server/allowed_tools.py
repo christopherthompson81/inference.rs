@@ -2,7 +2,7 @@
 OpenAI-compatible allowed_tools tool choice.
 
 Start the server:
-    mistralrs serve -p 1234 --quant 4 -m Qwen/Qwen3-4B
+    inference_rs serve -p 1234 --quant 4 -m Qwen/Qwen3-4B
 
 Then run this script:
     python examples/server/allowed_tools.py

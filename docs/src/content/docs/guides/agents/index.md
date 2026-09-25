@@ -3,7 +3,7 @@ title: Agents & tools
 description: Tool calling, built-in tools, OpenAI-compatible Skills, permissions, sessions, and MCP.
 ---
 
-mistral.rs can run the entire tool-calling loop server-side, execute Python, shell commands, and web searches locally, use OpenAI-compatible Skills, accept OpenAI-compatible file inputs, and stream model text, tool progress, files, and media from one request.
+inference.rs can run the entire tool-calling loop server-side, execute Python, shell commands, and web searches locally, use OpenAI-compatible Skills, accept OpenAI-compatible file inputs, and stream model text, tool progress, files, and media from one request.
 
 The agent system has three layers:
 

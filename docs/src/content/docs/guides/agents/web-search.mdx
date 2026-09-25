@@ -13,7 +13,7 @@ import { Tabs, TabItem } from '@astrojs/starlight/components';
 <TabItem label="CLI">
 
 ```bash
-mistralrs serve --enable-search -m <model>
+inference serve --enable-search -m <model>
 ```
 
 </TabItem>
@@ -52,7 +52,7 @@ Responses requests use OpenAI hosted-tool syntax instead:
 <TabItem label="Python">
 
 ```python
-from mistralrs import ChatCompletionRequest, Runner, Which
+from inference_rs import ChatCompletionRequest, Runner, Which
 
 runner = Runner(
     which=Which.Plain(model_id="Qwen/Qwen3-4B"),
@@ -64,7 +64,7 @@ runner = Runner(
 <TabItem label="Rust">
 
 ```rust
-use mistralrs::{IsqBits, ModelBuilder, SearchEmbeddingModel};
+use inference::{IsqBits, ModelBuilder, SearchEmbeddingModel};
 
 let model = ModelBuilder::new("Qwen/Qwen3-4B")
     .with_auto_isq(IsqBits::Four)
@@ -87,7 +87,7 @@ The neural reranker is opt-in. When a search embedding model is configured, retr
 In the SDKs, enabling search already loads the reranker (EmbeddingGemma by default). On the CLI it is off until you pass `--search-embedding-model`:
 
 ```bash
-mistralrs serve --enable-search \
+inference serve --enable-search \
   --search-embedding-model embedding-gemma \
   -m <model>
 ```
@@ -138,7 +138,7 @@ The callback receives `SearchFunctionParameters` and returns `Vec<SearchResult>`
 
 ```rust
 use std::sync::Arc;
-use mistralrs::{ModelBuilder, SearchFunctionParameters, SearchResult};
+use inference::{ModelBuilder, SearchFunctionParameters, SearchResult};
 
 let model = ModelBuilder::new("Qwen/Qwen3-4B")
     .with_search_callback(Arc::new(|params: &SearchFunctionParameters| {

@@ -10,7 +10,7 @@ sidebar:
 HTTP code-execution approval flow.
 
 Start the server:
-    mistralrs serve --agent -p 1234 -m Qwen/Qwen3-4B
+    inference serve --agent -p 1234 -m Qwen/Qwen3-4B
 
 Then run:
     python examples/server/code_execution_approval.py
@@ -25,7 +25,7 @@ shows Python code, asks for approval locally, and resolves it with the approval 
 HTTP code-execution approval flow.
 
 Start the server:
-    mistralrs serve --agent -p 1234 -m Qwen/Qwen3-4B
+    inference serve --agent -p 1234 -m Qwen/Qwen3-4B
 
 Then run:
     python examples/server/code_execution_approval.py

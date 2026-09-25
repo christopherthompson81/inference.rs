@@ -9,15 +9,15 @@ sidebar:
 
 Log model output to a file using the tracing framework.
 
-Run with: `cargo run --release --example file_logging -p mistralrs`
+Run with: `cargo run --release --example file_logging -p inference`
 
 ```rust
 //! Log model output to a file using the tracing framework.
 //!
-//! Run with: `cargo run --release --example file_logging -p mistralrs`
+//! Run with: `cargo run --release --example file_logging -p inference`
 
 use anyhow::Result;
-use mistralrs::{IsqBits, ModelBuilder, TextMessageRole, TextMessages};
+use inference::{IsqBits, ModelBuilder, TextMessageRole, TextMessages};
 use std::fs;
 use std::fs::OpenOptions;
 use tracing::info;
@@ -40,7 +40,7 @@ fn init_logging(log_file: &str) {
     let filter = EnvFilter::builder()
         .with_default_directive(LevelFilter::INFO.into())
         .from_env_lossy()
-        .add_directive("mistralrs_core=debug".parse().unwrap());
+        .add_directive("inference_core=debug".parse().unwrap());
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -78,10 +78,10 @@ async fn main() -> Result<()> {
     info!("Completed inference run.");
 
     let captured_logs = fs::read_to_string(LOG_FILE)?;
-    println!("\n--- Captured mistral.rs logs ---\n{captured_logs}");
+    println!("\n--- Captured inference.rs logs ---\n{captured_logs}");
 
     Ok(())
 }
 ```
 
-Source: [`mistralrs/examples/advanced/file_logging/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/file_logging/main.rs)
+Source: [`inference/examples/advanced/file_logging/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/file_logging/main.rs)

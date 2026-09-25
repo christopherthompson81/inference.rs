@@ -19,7 +19,7 @@ Configuration and tokenizer assets are discovered automatically. Set `tok_model_
 override that choice or when the source cannot be identified.
 """
 
-from mistralrs import Runner, Which, ChatCompletionRequest
+from inference_rs import Runner, Which, ChatCompletionRequest
 
 runner = Runner(
     which=Which.GGUF(

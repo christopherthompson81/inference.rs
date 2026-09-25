@@ -1,5 +1,5 @@
 """
-Example demonstrating multi-model usage with mistral.rs server HTTP API.
+Example demonstrating multi-model usage with inference.rs server HTTP API.
 
 This example shows how to:
 1. List available models from the server
@@ -9,7 +9,7 @@ This example shows how to:
 
 Prerequisites:
 - Start the server in multi-model mode:
-  mistralrs serve -p 1234 --multi-model-config example-multi-model-config.json
+  inference_rs serve -p 1234 --multi-model-config example-multi-model-config.json
 """
 
 import requests
@@ -265,7 +265,7 @@ if __name__ == "__main__":
         print("Error: Could not connect to server.")
         print("Please start the server with:")
         print(
-            "  mistralrs serve -p 1234 --multi-model-config example-multi-model-config.json"
+            "  inference_rs serve -p 1234 --multi-model-config example-multi-model-config.json"
         )
         exit(1)
 

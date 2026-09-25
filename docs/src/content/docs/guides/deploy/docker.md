@@ -1,9 +1,9 @@
 ---
-title: Run mistralrs in Docker
+title: Run inference in Docker
 description: Pull or build the container images and run the unified CLI, with and without CUDA.
 ---
 
-The published images ship the unified `mistralrs` binary as their entrypoint, so any CLI subcommand works directly: `serve`, `run`, `bench`, `quantize`. Running a container with no arguments prints the CLI help.
+The published images ship the unified `inference` binary as their entrypoint, so any CLI subcommand works directly: `serve`, `run`, `bench`, `quantize`. Running a container with no arguments prints the CLI help.
 
 ```bash
 docker run --rm -p 1234:1234 -v hf-cache:/data -e HF_TOKEN=<token> \
@@ -63,8 +63,8 @@ For production, pin a version or sha tag rather than `*-latest`. Model ids also 
 
 ## Image contract
 
-- Entrypoint is the `mistralrs` binary; pass a subcommand and its flags as the container command.
-- `mistralrs serve` listens on port 1234 by default (the image's `EXPOSE`d port). To change it, change the flag and the mapping together: `serve -p 8080` with `-p 8080:8080`. There is no `PORT` environment variable.
+- Entrypoint is the `inference` binary; pass a subcommand and its flags as the container command.
+- `inference serve` listens on port 1234 by default (the image's `EXPOSE`d port). To change it, change the flag and the mapping together: `serve -p 8080` with `-p 8080:8080`. There is no `PORT` environment variable.
 - `HF_HOME=/data` is set in the image: mount a volume at `/data` to persist downloaded weights (they land in `/data/hub`). HF authentication for gated models: `-e HF_TOKEN=<token>`.
 - Chat templates ship at `/chat_templates` for models that need one: `--chat-template /chat_templates/<file>.json`.
 
@@ -94,10 +94,10 @@ From a repository checkout:
 
 ```bash
 # CPU
-docker build -t mistralrs:latest -f Dockerfile .
+docker build -t inference:latest -f Dockerfile .
 
 # CUDA source build (set the compute capability for your GPU)
-docker build -t mistralrs:cuda -f Dockerfile.cuda-13.0-ubi9 \
+docker build -t inference:cuda -f Dockerfile.cuda-13.0-ubi9 \
   --build-arg CUDA_COMPUTE_CAP=89 \
   --build-arg WITH_FEATURES=cuda,cudnn,flash-attn .
 ```
@@ -138,4 +138,4 @@ There is no official Helm chart. Contributions welcome.
 ## See also
 
 - [Production checklist](/guides/deploy/production-checklist/): operational concerns regardless of container layer.
-- [Serve flag reference](/reference/cli/serve/): all `mistralrs serve` options.
+- [Serve flag reference](/reference/cli/serve/): all `inference serve` options.

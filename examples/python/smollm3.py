@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 """
-Example of using SmolLM3 model with mistral.rs
+Example of using SmolLM3 model with inference.rs
 """
 
-from mistralrs import Runner, Which, ChatCompletionRequest, Architecture
+from inference_rs import Runner, Which, ChatCompletionRequest, Architecture
 
 # Create a SmolLM3 model runner
 runner = Runner(

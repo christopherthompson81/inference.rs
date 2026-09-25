@@ -1,20 +1,20 @@
 ---
 title: Python API
-description: "The mistralrs Python package."
+description: "The inference Python package."
 sidebar:
   order: 6
 ---
 
-The `mistralrs` Python package exposes the same engine that powers the `mistralrs` CLI.
+The `inference` Python package exposes the same engine that powers the `inference` CLI.
 
 ## Install
 
-`pip install mistralrs` covers CPU (Linux, Windows) and Metal (macOS arm64). CUDA wheels are GitHub release assets with `+cudaNNN.smNN` versions. See [Python SDK getting started](/guides/python/getting-started/#installing) for install commands and [hardware support](/reference/hardware-support/) for compute capabilities.
+`pip install inference-rs` covers CPU (Linux, Windows) and Metal (macOS arm64). CUDA wheels are GitHub release assets with `+cudaNNN.smNN` versions. See [Python SDK getting started](/guides/python/getting-started/#installing) for install commands and [hardware support](/reference/hardware-support/) for compute capabilities.
 
 ```bash
-pip install mistralrs                                   # CPU / Metal (PyPI)
+pip install inference-rs                                   # CPU / Metal (PyPI)
 # NVIDIA (replace version, CUDA level, and SM)
-pip install "mistralrs==0.9.2+cuda128.sm89" \
+pip install "inference-rs==0.9.2+cuda128.sm89" \
   --find-links https://github.com/EricLBuehler/mistral.rs/releases/expanded_assets/v0.9.2
 ```
 
@@ -39,4 +39,4 @@ See [Python getting started](/guides/python/getting-started/) for a walkthrough 
 
 ---
 
-<small>Generated from [`mistralrs-pyo3/mistralrs.pyi`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs-pyo3/mistralrs.pyi).</small>
+<small>Generated from [`inference-pyo3/inference_rs.pyi`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs-pyo3/mistralrs.pyi).</small>

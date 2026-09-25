@@ -3,7 +3,7 @@ title: Sandbox
 description: OS-level sandbox applied to model-generated code and shell execution.
 ---
 
-mistral.rs can run model-generated Python code and shell commands in persistent subprocesses. To keep those subprocesses from doing damage, the spawned process is hardened with an OS-level sandbox.
+inference.rs can run model-generated Python code and shell commands in persistent subprocesses. To keep those subprocesses from doing damage, the spawned process is hardened with an OS-level sandbox.
 
 This is only supported on macOS and Linux environments.
 
@@ -26,7 +26,7 @@ The sandbox targets **model misbehavior**: a confused or jailbroken model genera
 - attach to host processes via `ptrace`
 - load kernel modules, manipulate mounts, etc.
 
-It is not a substitute for OS-level isolation against a determined attacker who can choose arbitrary code or commands. For high-assurance deployments (multi-tenant, untrusted prompts, regulated data), also isolate the mistral.rs process itself with a container or VM, a dedicated low-privilege user, and constrained network egress. `--tool-dispatch-url` is the alternative when execution should leave the mistral.rs host entirely.
+It is not a substitute for OS-level isolation against a determined attacker who can choose arbitrary code or commands. For high-assurance deployments (multi-tenant, untrusted prompts, regulated data), also isolate the inference.rs process itself with a container or VM, a dedicated low-privilege user, and constrained network egress. `--tool-dispatch-url` is the alternative when execution should leave the inference.rs host entirely.
 
 ## Defaults
 
@@ -41,7 +41,7 @@ The sandbox profile controls the filesystem and environment allowlist inside tha
 - `developer` - default when agent, code execution, or shell execution is enabled. It keeps writes limited to the session workdir, but allows reads from common local toolchain roots such as Conda/venv, pyenv, rustup, nvm, Homebrew, Nix, Java, Bun, Deno, and selected compiler/library search paths. Its default network mode is `full`.
 - `restricted` - for tighter deployments. It allows system/runtime reads plus the session workdir and explicitly configured paths. Its default network mode is `loopback`.
 
-The programmatic surfaces behave differently: `CodeExecutionConfig` and `ShellConfig` in the Python and Rust SDKs default to **no sandbox**. Omitting `sandbox_policy` (or passing `None`) is equivalent to `--sandbox off`; the sandbox engages only when a `SandboxPolicy` is constructed and attached. An application embedding mistral.rs as a library does not inherit the safer CLI default and is responsible for choosing a policy.
+The programmatic surfaces behave differently: `CodeExecutionConfig` and `ShellConfig` in the Python and Rust SDKs default to **no sandbox**. Omitting `sandbox_policy` (or passing `None`) is equivalent to `--sandbox off`; the sandbox engages only when a `SandboxPolicy` is constructed and attached. An application embedding inference.rs as a library does not inherit the safer CLI default and is responsible for choosing a policy.
 
 The restricted profile default policy:
 
@@ -60,7 +60,7 @@ On macOS, the resource cap fields are accepted for configuration compatibility b
 
 ## Choosing a profile
 
-The examples below are TOML configuration snippets for `mistralrs from-config -f <path>`. See the full [TOML configuration reference](/reference/cli-toml-config/) for where these sections fit in a complete config file.
+The examples below are TOML configuration snippets for `inference from-config -f <path>`. See the full [TOML configuration reference](/reference/cli-toml-config/) for where these sections fit in a complete config file.
 
 For local agent use, start with `developer`:
 
@@ -109,9 +109,9 @@ The profile does not change the basic write rule: generated code and shell comma
 
 ## Configuration
 
-CLI flags (`--sandbox`, `--sandbox-profile`, `--sb-max-memory-mb`, `--sb-max-cpu-secs`, `--sb-max-procs`, `--sandbox-network`) and the `[sandbox]` TOML table expose the common controls: mode, profile, memory, CPU, process count, and network. The programmatic `SandboxPolicy` also exposes open-file and written-file-size caps. Schemas: [TOML configuration](/reference/cli-toml-config/#sandbox-section), [generated CLI reference](/reference/cli/serve/). Worked `mistralrs serve` examples are in [enable code execution](/guides/agents/enable-code-execution/) and [enable shell execution](/guides/agents/enable-shell/).
+CLI flags (`--sandbox`, `--sandbox-profile`, `--sb-max-memory-mb`, `--sb-max-cpu-secs`, `--sb-max-procs`, `--sandbox-network`) and the `[sandbox]` TOML table expose the common controls: mode, profile, memory, CPU, process count, and network. The programmatic `SandboxPolicy` also exposes open-file and written-file-size caps. Schemas: [TOML configuration](/reference/cli-toml-config/#sandbox-section), [generated CLI reference](/reference/cli/serve/). Worked `inference serve` examples are in [enable code execution](/guides/agents/enable-code-execution/) and [enable shell execution](/guides/agents/enable-shell/).
 
-The `MISTRALRS_SANDBOX={auto|on|off}` env var overrides only the mode. It has lower precedence than an explicit CLI/TOML mode and higher precedence than the default `auto`. It does not choose the profile or network policy.
+The `INFERENCE_RS_SANDBOX={auto|on|off}` env var overrides only the mode. It has lower precedence than an explicit CLI/TOML mode and higher precedence than the default `auto`. It does not choose the profile or network policy.
 
 A working directory chosen with `--code-exec-workdir` or `--shell-workdir` is made writable inside the sandbox and shared across sessions: anything written there persists and is visible to subsequent sessions.
 
@@ -158,13 +158,13 @@ The profile also allows native startup operations that Python and shell commands
 
 Network follows the configured policy: `none` emits no network rules, `loopback` allows localhost endpoints, and `full` allows `network*`.
 
-Resource rlimits are not applied on macOS. Applying them from the server requires a `pre_exec` hook, which forces a fork path from an already-running multithreaded process before the subprocess starts. mistral.rs keeps the Seatbelt sandbox for filesystem and network isolation; use a container or VM when macOS deployments need hard memory, CPU, or process-count caps.
+Resource rlimits are not applied on macOS. Applying them from the server requires a `pre_exec` hook, which forces a fork path from an already-running multithreaded process before the subprocess starts. inference.rs keeps the Seatbelt sandbox for filesystem and network isolation; use a container or VM when macOS deployments need hard memory, CPU, or process-count caps.
 
 ## Disabling
 
-Set `mode = "off"` in the TOML, `--sandbox off` on the CLI, or `MISTRALRS_SANDBOX=off` in the env.
+Set `mode = "off"` in the TOML, `--sandbox off` on the CLI, or `INFERENCE_RS_SANDBOX=off` in the env.
 
-A startup warning is logged. With all sandbox layers off, model-generated code and commands have full filesystem, network, and subprocess access as the mistralrs user.
+A startup warning is logged. With all sandbox layers off, model-generated code and commands have full filesystem, network, and subprocess access as the inference user.
 
 ## Programmatic use
 

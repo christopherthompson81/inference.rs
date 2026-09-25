@@ -12,7 +12,7 @@ Runnable Python SDK example `qwen3_5`.
 <!-- needs-header -->
 
 ```python
-from mistralrs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
+from inference_rs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
 
 # Dense variant
 MODEL_ID = "Qwen/Qwen3.5-27B"

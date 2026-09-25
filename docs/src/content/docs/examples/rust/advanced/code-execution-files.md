@@ -13,7 +13,7 @@ Declare required output files via `RequestBuilder::require_file`. The
 engine surfaces them in `response.files`, including an error placeholder
 if the model never wrote one.
 
-Run with: `cargo run --release --features code-execution --example code_execution_files -p mistralrs`
+Run with: `cargo run --release --features code-execution --example code_execution_files -p inference`
 
 ```rust
 //! Code execution producing first-class output files.
@@ -22,10 +22,10 @@ Run with: `cargo run --release --features code-execution --example code_executio
 //! engine surfaces them in `response.files`, including an error placeholder
 //! if the model never wrote one.
 //!
-//! Run with: `cargo run --release --features code-execution --example code_execution_files -p mistralrs`
+//! Run with: `cargo run --release --features code-execution --example code_execution_files -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     CodeExecutionConfig, IsqBits, ModelBuilder, RequestBuilder, SandboxPolicy, TextMessageRole,
     TextMessages,
 };
@@ -81,4 +81,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/code_execution_files/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/code_execution_files/main.rs)
+Source: [`inference/examples/advanced/code_execution_files/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/code_execution_files/main.rs)

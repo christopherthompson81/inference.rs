@@ -3,7 +3,7 @@
 Start the server with:
 
 ```bash
-mistralrs serve -m unsloth/gemma-4-E4B-it-GGUF --quant 4
+inference_rs serve -m unsloth/gemma-4-E4B-it-GGUF --quant 4
 ```
 """
 

@@ -9,15 +9,15 @@ sidebar:
 
 Web-search-augmented generation using OpenAI-compatible web_search_options.
 
-Run with: `cargo run --release --example web_search -p mistralrs`
+Run with: `cargo run --release --example web_search -p inference`
 
 ```rust
 //! Web-search-augmented generation using OpenAI-compatible web_search_options.
 //!
-//! Run with: `cargo run --release --example web_search -p mistralrs`
+//! Run with: `cargo run --release --example web_search -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     IsqBits, ModelBuilder, RequestBuilder, SearchEmbeddingModel, TextMessageRole, TextMessages,
     WebSearchOptions,
 };
@@ -51,4 +51,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/web_search/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/web_search/main.rs)
+Source: [`inference/examples/advanced/web_search/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/web_search/main.rs)

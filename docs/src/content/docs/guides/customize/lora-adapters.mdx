@@ -5,11 +5,11 @@ description: Preload, route, and hot-swap multiple LoRA adapters on one base mod
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-LoRA (Low-Rank Adaptation) adds fine-tuned weights around a base model without modifying its weights. mistral.rs can keep multiple LoRA adapters loaded, select one independently for every request, and replace an adapter alias without interrupting in-flight requests. Dynamic LoRA supports compatible language-model adapters for text and multimodal models, including GGUF. Vision, audio, and projector adapters are not supported.
+LoRA (Low-Rank Adaptation) adds fine-tuned weights around a base model without modifying its weights. inference.rs can keep multiple LoRA adapters loaded, select one independently for every request, and replace an adapter alias without interrupting in-flight requests. Dynamic LoRA supports compatible language-model adapters for text and multimodal models, including GGUF. Vision, audio, and projector adapters are not supported.
 
 X-LoRA is a separate adapter mode that mixes several adapters per token rather than selecting one adapter for a request.
 
-If you are upgrading from mistral.rs 0.9.0 or older, see [the migration table](#migrating-from-mistralrs-090-and-older).
+If you are upgrading from inference.rs 0.9.0 or older, see [the migration table](#migrating-from-inference-090-and-older).
 
 | Mode | Base model support | Request behavior | Live updates |
 |---|---|---|---|
@@ -24,7 +24,7 @@ For GGUF file and projector selection, see [Run GGUF models](/guides/models/run-
 Give every preloaded adapter an explicit alias with `--lora ALIAS=SOURCE`. `SOURCE` can be a Hugging Face repository ID or local adapter directory. Repeat the option to preload more than one adapter:
 
 ```bash
-mistralrs serve -m <base-model> \
+inference serve -m <base-model> \
   --lora code=<code-lora-repo> \
   --lora math=./math-adapter
 ```
@@ -34,7 +34,7 @@ The vLLM-compatible alias also accepts several modules after one option: `--lora
 Dynamic LoRA is also available for supported GGUF language models:
 
 ```bash
-mistralrs serve \
+inference serve \
   -m Qwen/Qwen2.5-0.5B-Instruct-GGUF \
   --quant 4 \
   --lora philosophy=closestfriend/brie-qwen2.5-0.5b
@@ -48,7 +48,7 @@ Aliases are trimmed, case-sensitive, nonempty UTF-8 strings of at most 256 bytes
 Preloading enables the dynamic LoRA runtime automatically. To start without an adapter and load one later, use `--enable-lora`:
 
 ```bash
-mistralrs serve -m <base-model> --enable-lora
+inference serve -m <base-model> --enable-lora
 ```
 
 For multimodal models, the adapter applies only to the language model. Vision, audio, and projector adapters are not supported.
@@ -77,7 +77,7 @@ Python exposes these limits on `Which.Lora` and `Which.GGUF`. Rust uses
 <TabItem label="CLI">
 
 ```bash
-mistralrs run -m <base-model> \
+inference run -m <base-model> \
   --lora code=<code-lora-repo> \
   --adapter code
 ```
@@ -86,7 +86,7 @@ mistralrs run -m <base-model> \
 <TabItem label="Python">
 
 ```python
-from mistralrs import ChatCompletionRequest, LoraAdapter, Runner, Which
+from inference_rs import ChatCompletionRequest, LoraAdapter, Runner, Which
 
 runner = Runner(
     which=Which.Lora(
@@ -114,7 +114,7 @@ response = runner.send_chat_completion_request(
 <TabItem label="Rust">
 
 ```rust
-use mistralrs::{LoraModelBuilder, RequestBuilder, TextMessageRole, TextModelBuilder};
+use inference::{LoraModelBuilder, RequestBuilder, TextMessageRole, TextModelBuilder};
 
 let model = LoraModelBuilder::from_text_model_builder(
     TextModelBuilder::new("<base-model>"),
@@ -142,7 +142,7 @@ Python and Rust require an exact GGUF filename. The
 <TabItem label="Python">
 
 ```python
-from mistralrs import LoraAdapter, Runner, Which
+from inference_rs import LoraAdapter, Runner, Which
 
 runner = Runner(
     which=Which.GGUF(
@@ -157,7 +157,7 @@ runner = Runner(
 <TabItem label="Rust">
 
 ```rust
-use mistralrs::GgufModelBuilder;
+use inference::GgufModelBuilder;
 
 let model = GgufModelBuilder::new("<gguf-repo>", vec!["<model.gguf>"])
     .with_lora_adapter("code", "<code-lora-repo>")
@@ -180,7 +180,7 @@ Routed-expert adapters use the aliases, per-request selection, preload limits, a
 described above.
 
 ```bash
-mistralrs serve -m Qwen/Qwen3-30B-A3B \
+inference serve -m Qwen/Qwen3-30B-A3B \
   --lora domain=<moe-lora-repo>
 ```
 
@@ -206,7 +206,7 @@ Multimodal text, image, audio, and video requests may select a compatible langua
 For example, this starts Qwen3.6 MoE with a public compatible adapter:
 
 ```bash
-mistralrs serve -m Qwen/Qwen3.6-35B-A3B \
+inference serve -m Qwen/Qwen3.6-35B-A3B \
   --lora domain=jeeejeee/qwen36-35ba3b-moe-all-linear-poken-lora
 ```
 
@@ -226,7 +226,7 @@ curl http://localhost:1234/v1/chat/completions \
   }'
 ```
 
-The adapter model card identifies its base model through `parent`, exposes its current immutable `adapter_generation`, and uses the public adapter alias in `root` rather than a local filesystem path. The explicit mistral.rs `adapter` extension is useful when model and adapter routing should remain separate, especially in a multi-model server:
+The adapter model card identifies its base model through `parent`, exposes its current immutable `adapter_generation`, and uses the public adapter alias in `root` rather than a local filesystem path. The explicit inference.rs `adapter` extension is useful when model and adapter routing should remain separate, especially in a multi-model server:
 
 ```json
 {
@@ -250,7 +250,7 @@ Sending `adapter` to a model without a dynamic LoRA runtime returns an error. An
 
 ## Hot-load, list, and unload
 
-The Rust and Python SDKs can load an adapter directory while a single-process model is serving requests. The directory must contain `adapter_config.json` and one `adapter_model.safetensors` file. The adapter must target the loaded base model; mistral.rs checks compatibility but cannot prove that an adapter was trained from the correct base weights.
+The Rust and Python SDKs can load an adapter directory while a single-process model is serving requests. The directory must contain `adapter_config.json` and one `adapter_model.safetensors` file. The adapter must target the loaded base model; inference.rs checks compatibility but cannot prove that an adapter was trained from the correct base weights.
 
 Python lifecycle failures raise `LoraAdapterError`, a `ValueError` subclass with a stable `code` attribute. Core lifecycle failures share their codes with HTTP, so callers can branch on `error.code` without parsing message text. Python reports a malformed generation argument as `invalid_lora_generation`; HTTP rejects the same malformed JSON field as `invalid_request_body`.
 
@@ -271,7 +271,7 @@ runner.unload_lora_adapter("production")
 <TabItem label="Rust">
 
 ```rust
-use mistralrs::LoraAdapterLoadPolicy;
+use inference::LoraAdapterLoadPolicy;
 
 let loaded = model
     .load_lora_adapter("production", "./production-adapter")
@@ -350,16 +350,16 @@ Tensor-parallel deployments support preloaded adapters but not live load or unlo
 
 ### Enable HTTP mutation
 
-The read-only list route does not require mutation to be enabled. Runtime load and unload are available only when `MISTRALRS_ALLOW_RUNTIME_LORA_UPDATING` is enabled. `MISTRALRS_LORA_ADAPTER_ROOT` restricts `lora_path` to a canonical directory tree:
+The read-only list route does not require mutation to be enabled. Runtime load and unload are available only when `INFERENCE_RS_ALLOW_RUNTIME_LORA_UPDATING` is enabled. `INFERENCE_RS_LORA_ADAPTER_ROOT` restricts `lora_path` to a canonical directory tree:
 
 ```bash
-MISTRALRS_ALLOW_RUNTIME_LORA_UPDATING=1 \
-MISTRALRS_LORA_ADAPTER_ROOT=/srv/adapters \
-mistralrs serve -m <base-model> --enable-lora
+INFERENCE_RS_ALLOW_RUNTIME_LORA_UPDATING=1 \
+INFERENCE_RS_LORA_ADAPTER_ROOT=/srv/adapters \
+inference serve -m <base-model> --enable-lora
 ```
 
 :::caution[Runtime loading reads local files]
-The load endpoint reads paths from the server filesystem and consumes server memory. Set `MISTRALRS_LORA_ADAPTER_ROOT` in production and place authentication or an authenticated reverse proxy in front of load and unload. Relative `lora_path` values resolve beneath that root; without a root they resolve from the server working directory. The root, its ancestors, and its adapter directories must be operator-owned and not writable by API clients or other untrusted local users. Publish each complete adapter atomically at a new, content-versioned directory path, then leave that directory and its files unchanged while it may be loaded. Do not replace a selected directory path or modify its config or weights in place. Without an adapter root, an authorized client can request any readable adapter directory. Symlinks that resolve outside the configured root are rejected.
+The load endpoint reads paths from the server filesystem and consumes server memory. Set `INFERENCE_RS_LORA_ADAPTER_ROOT` in production and place authentication or an authenticated reverse proxy in front of load and unload. Relative `lora_path` values resolve beneath that root; without a root they resolve from the server working directory. The root, its ancestors, and its adapter directories must be operator-owned and not writable by API clients or other untrusted local users. Publish each complete adapter atomically at a new, content-versioned directory path, then leave that directory and its files unchanged while it may be loaded. Do not replace a selected directory path or modify its config or weights in place. Without an adapter root, an authorized client can request any readable adapter directory. Symlinks that resolve outside the configured root are rejected.
 :::
 
 ## Production rollout and recovery
@@ -399,9 +399,9 @@ The default rank admission limit is 256. Change it with `--lora-max-rank`. Base 
 Use the same preload and benchmark shape to measure isolated adapter overhead against the base model:
 
 ```bash
-mistralrs bench -m <base-model> --lora code=<adapter-repo> \
+inference bench -m <base-model> --lora code=<adapter-repo> \
   --prompt-len 128,512 --gen-len 128 --iterations 5
-mistralrs bench -m <base-model> --lora code=<adapter-repo> --adapter code \
+inference bench -m <base-model> --lora code=<adapter-repo> --adapter code \
   --prompt-len 128,512 --gen-len 128 --iterations 5
 ```
 
@@ -409,11 +409,11 @@ The CLI benchmark reports TTFT and TPOT for one sequence. Its numbers do not cha
 
 Full examples: [lora](/examples/python/lora/) (Python), [lora](/examples/rust/advanced/lora/) (Rust), and [adapter-chat](/examples/server/adapter-chat/) (HTTP).
 
-## Migrating from mistral.rs 0.9.0 and older
+## Migrating from inference.rs 0.9.0 and older
 
-Dynamic LoRA replaces the ordinary-LoRA API from mistral.rs 0.9.0 and older. The previous path loaded one or more adapters as one static stack; the current path assigns every adapter an alias and selects zero or one adapter for each request.
+Dynamic LoRA replaces the ordinary-LoRA API from inference.rs 0.9.0 and older. The previous path loaded one or more adapters as one static stack; the current path assigns every adapter an alias and selects zero or one adapter for each request.
 
-| mistral.rs 0.9.0 and older | Current API |
+| inference.rs 0.9.0 and older | Current API |
 |---|---|
 | Plain/safetensors `--lora "repo-a;repo-b"` | Repeat `--lora alias=repo` and select one alias with `--adapter`, the request `adapter` field, or an adapter model ID. |
 | Raw GGUF/GGML `--lora <source>` | For GGUF, use `--lora alias=source` and select the alias dynamically. For GGML or a compatible static GGUF configuration, use `--legacy-lora <source> --legacy-lora-order <ordering-file.json>`; the [ordering JSON](#legacy-raw-lora) is required. |
@@ -429,12 +429,12 @@ There is no direct dynamic-LoRA replacement for composing several ordinary adapt
 
 The lifecycle endpoint names and core `lora_name`/`lora_path` fields match vLLM, but response bodies, error envelopes, status codes, and extension fields are not wire-compatible. Regenerate or adapt clients instead of treating the lifecycle API as a drop-in replacement. The main mappings are:
 
-| vLLM | mistral.rs |
+| vLLM | inference.rs |
 |---|---|
-| `vllm serve BASE --enable-lora --lora-modules code=SOURCE` | `mistralrs serve -m BASE --lora-modules code=SOURCE`; `--lora` is the canonical spelling |
+| `vllm serve BASE --enable-lora --lora-modules code=SOURCE` | `inference serve -m BASE --lora-modules code=SOURCE`; `--lora` is the canonical spelling |
 | `--enable-lora` with no preload | `--enable-lora` |
 | `--max-lora-rank N` | Same spelling is accepted; `--lora-max-rank` is canonical |
-| `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True` | `MISTRALRS_ALLOW_RUNTIME_LORA_UPDATING=1` |
+| `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True` | `INFERENCE_RS_ALLOW_RUNTIME_LORA_UPDATING=1` |
 | Request with `"model":"code"` | A unique short alias works. For unambiguous routing, use the qualified model ID returned by `GET /v1/models`. |
 | `load_inplace: true` | Same; add `expected_generation` for compare-and-set safety |
 | Adapter discovery through `/v1/models` | `/v1/models` model cards plus detailed `GET /v1/lora_adapters` status |
@@ -457,7 +457,7 @@ Common HTTP lifecycle errors use a stable `error.code`:
 | Code | Recovery |
 |---|---|
 | `lora_load_busy` | Retry with bounded exponential backoff and jitter. |
-| `lora_runtime_unavailable` | Target a model with a dynamic LoRA runtime. For `mistralrs serve`, use a preload or `--enable-lora`; also check tensor-parallel restrictions. |
+| `lora_runtime_unavailable` | Target a model with a dynamic LoRA runtime. For `inference serve`, use a preload or `--enable-lora`; also check tensor-parallel restrictions. |
 | `invalid_lora_name` | Send a nonempty alias no longer than 256 bytes. |
 | `lora_adapter_already_loaded` | Inspect the current generation, then retry with `load_inplace: true` if replacement is intended. |
 | `lora_adapter_not_found` | Refresh `/v1/lora_adapters`; an exact generation may already have left residency. |
@@ -471,7 +471,7 @@ Common HTTP lifecycle errors use a stable `error.code`:
 | `request_body_too_large` | Reduce the JSON request size. Embedded servers can raise their body limit for trusted clients. |
 | `invalid_lora_adapter` | Check the PEFT format, supported features, and base-model compatibility. |
 | `invalid_lora_load_policy` | Send `expected_generation` only together with `load_inplace: true`. |
-| `adapter_path_forbidden` or `adapter_file_forbidden` | Move the immutable directory below `MISTRALRS_LORA_ADAPTER_ROOT` and fix its permissions. |
+| `adapter_path_forbidden` or `adapter_file_forbidden` | Move the immutable directory below `INFERENCE_RS_LORA_ADAPTER_ROOT` and fix its permissions. |
 | `adapter_path_not_found`, `adapter_file_not_found`, `invalid_adapter_path`, `invalid_adapter_file`, or `model_not_found` | Correct the path or model ID before retrying. |
 | `malformed_json`, `invalid_request_body`, `invalid_content_type`, or `invalid_query` | Correct the request encoding before retrying. |
 | `adapter_storage_unavailable`, `lora_storage_unavailable`, or `lora_device_load_failed` | Recover storage or device capacity before retrying. |
@@ -505,7 +505,7 @@ The ordering file defines the adapter order.
 <TabItem label="CLI">
 
 ```bash
-mistralrs run \
+inference run \
   -m <base-model> \
   --xlora <xlora-repo> \
   --xlora-order <ordering-file.json>
@@ -517,7 +517,7 @@ mistralrs run \
 <TabItem label="Python">
 
 ```python
-from mistralrs import Runner, Which
+from inference_rs import Runner, Which
 
 runner = Runner(
     which=Which.XLora(
@@ -533,7 +533,7 @@ runner = Runner(
 
 ```rust
 use std::fs::File;
-use mistralrs::{TextModelBuilder, XLoraModelBuilder};
+use inference::{TextModelBuilder, XLoraModelBuilder};
 
 let model = XLoraModelBuilder::from_text_model_builder(
     TextModelBuilder::new("<base-model>"),

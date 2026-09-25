@@ -12,7 +12,7 @@ Send image and audio input to a Gemma 4 GGUF model.
 Start the server with:
 
 ```bash
-mistralrs serve -m unsloth/gemma-4-E4B-it-GGUF --quant 4
+inference serve -m unsloth/gemma-4-E4B-it-GGUF --quant 4
 ```
 
 ````python
@@ -21,7 +21,7 @@ mistralrs serve -m unsloth/gemma-4-E4B-it-GGUF --quant 4
 Start the server with:
 
 ```bash
-mistralrs serve -m unsloth/gemma-4-E4B-it-GGUF --quant 4
+inference serve -m unsloth/gemma-4-E4B-it-GGUF --quant 4
 ```
 """
 

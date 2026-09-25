@@ -1,11 +1,11 @@
 ---
 title: Serve multiple models from one process
-description: Load several models into one mistralrs server. Route requests by the model field, unload models to free memory, reload them on demand.
+description: Load several models into one inference server. Route requests by the model field, unload models to free memory, reload them on demand.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
 
-`mistralrs serve -m <model>` loads exactly one model. To host multiple models in one server, use a TOML config and `mistralrs from-config`.
+`inference serve -m <model>` loads exactly one model. To host multiple models in one server, use a TOML config and `inference from-config`.
 
 ## Starting a multi-model server
 
@@ -40,7 +40,7 @@ repository. For other repositories, it prefers a prebuilt UQFF and falls back to
 Start with `from-config`:
 
 ```bash
-mistralrs from-config -f models.toml
+inference from-config -f models.toml
 ```
 
 Routing rules:
@@ -122,7 +122,7 @@ Each entry includes `id`, `object`, `created`, `owned_by`, plus optional `status
 In-process multi-model loading is Rust-only (`MultiModelBuilder`); the Python `Runner` and CLI load a single model. Route per request with the `_with_model` methods shown above.
 
 ```rust
-use mistralrs::{IsqType, MultiModelBuilder, TextModelBuilder, MultimodalModelBuilder};
+use inference::{IsqType, MultiModelBuilder, TextModelBuilder, MultimodalModelBuilder};
 
 let model = MultiModelBuilder::new()
     .add_model(TextModelBuilder::new("Qwen/Qwen3-4B").with_isq(IsqType::Q4K))

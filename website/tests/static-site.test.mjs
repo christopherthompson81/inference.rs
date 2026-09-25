@@ -22,8 +22,8 @@ test("builds the focused landing page", async () => {
   assert.match(html, /mistral<span>\.rs<\/span>/);
   assert.ok(html.includes("Fast, flexible LLM inference"));
   assert.ok(html.includes("Go from install to inference in one command."));
-  assert.ok(html.includes("mistralrs serve -m Qwen/Qwen3.8-27B --quant 4"));
-  assert.ok(html.includes("mistralrs run -m google/gemma-4-E4B-it --quant 4"));
+  assert.ok(html.includes("inference serve -m Qwen/Qwen3.8-27B --quant 4"));
+  assert.ok(html.includes("inference run -m google/gemma-4-E4B-it --quant 4"));
   assert.ok(html.includes("50+ model architectures"));
   assert.ok(html.includes("https://docs.mistralrs.dev/quickstart/"));
   assert.ok(html.includes("install from source"));
@@ -33,7 +33,7 @@ test("builds the focused landing page", async () => {
   assert.ok(styles.includes("SFMono-Regular"));
   assert.ok(styles.includes("overflow-x:hidden"));
   assert.doesNotMatch(`${html}\n${scripts}\n${styles}`, /Geist|fonts\.googleapis\.com/);
-  assert.doesNotMatch(`${html}\n${scripts}`, /mistralrs\.(?:sh|ps1)/);
+  assert.doesNotMatch(`${html}\n${scripts}`, /inference\.(?:sh|ps1)/);
 });
 
 test("copies the root installers into the Cloudflare Pages output", async () => {

@@ -9,17 +9,17 @@ sidebar:
 
 Text-to-speech synthesis using a speech model.
 
-Run with: `cargo run --release --example speech -p mistralrs`
+Run with: `cargo run --release --example speech -p inference`
 
 ```rust
 //! Text-to-speech synthesis using a speech model.
 //!
-//! Run with: `cargo run --release --example speech -p mistralrs`
+//! Run with: `cargo run --release --example speech -p inference`
 
 use std::time::Instant;
 
 use anyhow::Result;
-use mistralrs::{speech_utils, SpeechLoaderType, SpeechModelBuilder};
+use inference::{speech_utils, SpeechLoaderType, SpeechModelBuilder};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -49,4 +49,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/models/speech/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/speech/main.rs)
+Source: [`inference/examples/models/speech/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/models/speech/main.rs)

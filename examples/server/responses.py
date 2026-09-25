@@ -2,7 +2,7 @@
 Basic Responses API request and follow-up.
 
 Start the server:
-    mistralrs serve -p 1234 -m Qwen/Qwen3-4B
+    inference_rs serve -p 1234 -m Qwen/Qwen3-4B
 
 Then run this script:
     python examples/server/responses.py

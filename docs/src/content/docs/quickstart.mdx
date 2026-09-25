@@ -1,11 +1,11 @@
 ---
 title: Quickstart
-description: Install the mistralrs CLI, chat with a model in your terminal, and serve an OpenAI-compatible API.
+description: Install the inference CLI, chat with a model in your terminal, and serve an OpenAI-compatible API.
 ---
 
 import { Tabs, TabItem, Aside } from '@astrojs/starlight/components';
 
-mistral.rs is a single binary: `mistralrs run` chats with a model in your terminal, `mistralrs serve` exposes the same model over OpenAI-compatible and Anthropic-compatible HTTP APIs. This page covers both, plus in-process inference from Python and Rust.
+inference.rs is a single binary: `inference run` chats with a model in your terminal, `inference serve` exposes the same model over OpenAI-compatible and Anthropic-compatible HTTP APIs. This page covers both, plus in-process inference from Python and Rust.
 
 <Aside type="tip" title="Fast path">
 
@@ -17,10 +17,10 @@ mistral.rs is a single binary: `mistralrs run` chats with a model in your termin
 curl -fsSL https://mistralrs.dev/install.sh | sh
 
 # 2. Chat: downloads the weights on first run
-mistralrs run --quant 4 -m Qwen/Qwen3-4B
+inference run --quant 4 -m Qwen/Qwen3-4B
 
 # 3. Or serve the same model over an OpenAI-compatible API on port 1234
-mistralrs serve --quant 4 -m Qwen/Qwen3-4B
+inference serve --quant 4 -m Qwen/Qwen3-4B
 ```
 
 </TabItem>
@@ -31,10 +31,10 @@ mistralrs serve --quant 4 -m Qwen/Qwen3-4B
 irm https://mistralrs.dev/install.ps1 | iex
 
 # 2. Chat: downloads the weights on first run
-mistralrs run --quant 4 -m Qwen/Qwen3-4B
+inference run --quant 4 -m Qwen/Qwen3-4B
 
 # 3. Or serve the same model over an OpenAI-compatible API on port 1234
-mistralrs serve --quant 4 -m Qwen/Qwen3-4B
+inference serve --quant 4 -m Qwen/Qwen3-4B
 ```
 
 </TabItem>
@@ -51,7 +51,7 @@ The install script detects your platform and downloads a matching prebuilt binar
 <details>
 <summary>Install locations, per-platform binaries, and environment variables</summary>
 
-Prebuilt binaries do not require Rust or a CUDA toolkit for standard acceleration. Installer-managed binaries install to `~/.mistralrs`, with `mistralrs` symlinked into `~/.local/bin` on Unix and launched from `%USERPROFILE%\.local\bin` on Windows. If needed, the installer adds that directory to your shell environment. Optional cuTile acceleration requires NVIDIA's separately installed `tileiras` tool. See [cuTile setup](/developer/moe-backends/) for the official package commands.
+Prebuilt binaries do not require Rust or a CUDA toolkit for standard acceleration. Installer-managed binaries install to `~/.inference-rs`, with `inference` symlinked into `~/.local/bin` on Unix and launched from `%USERPROFILE%\.local\bin` on Windows. If needed, the installer adds that directory to your shell environment. Optional cuTile acceleration requires NVIDIA's separately installed `tileiras` tool. See [cuTile setup](/developer/moe-backends/) for the official package commands.
 
 Source builds install to the same managed location.
 
@@ -82,10 +82,10 @@ If no artifact matches the GPU or driver, the installer builds from source. See 
 
 Install-time environment variables:
 
-- `MISTRALRS_INSTALL_TAG=v0.9.2` installs a specific release instead of the latest (downloads that release's prebuilt, or builds that git tag from source).
-- `MISTRALRS_INSTALL_FROM_SOURCE=1` skips the prebuilt download and builds the latest `master` (bleeding edge) from source. The prebuilt path tracks the latest stable release.
-- `MISTRALRS_INSTALL_NO_NCCL=1` (source builds) skips the `nccl` feature.
-- `MISTRALRS_INSTALL_ALLOW_CUDA_MISMATCH=1` lets a source build continue when local `nvcc` is newer than the CUDA version reported by the NVIDIA driver.
+- `INFERENCE_RS_INSTALL_TAG=v0.9.2` installs a specific release instead of the latest (downloads that release's prebuilt, or builds that git tag from source).
+- `INFERENCE_RS_INSTALL_FROM_SOURCE=1` skips the prebuilt download and builds the latest `master` (bleeding edge) from source. The prebuilt path tracks the latest stable release.
+- `INFERENCE_RS_INSTALL_NO_NCCL=1` (source builds) skips the `nccl` feature.
+- `INFERENCE_RS_INSTALL_ALLOW_CUDA_MISMATCH=1` lets a source build continue when local `nvcc` is newer than the CUDA version reported by the NVIDIA driver.
 
 At runtime, `HF_HOME` controls where models are cached (see [environment variables](/reference/environment-variables/)).
 
@@ -120,8 +120,8 @@ Need a source build instead - to track bleeding-edge `master`, pin a commit, or 
 ## Verify the install
 
 ```bash
-mistralrs --version
-mistralrs doctor
+inference --version
+inference doctor
 ```
 
 `doctor` reports detected hardware, compiled accelerator features, and Hugging Face cache and connectivity checks:
@@ -136,12 +136,12 @@ If your accelerator is missing from build features, rebuild with the right `--fe
 ## Run your first model
 
 ```bash
-mistralrs run --quant 4 -m Qwen/Qwen3-4B
+inference run --quant 4 -m Qwen/Qwen3-4B
 ```
 
-The first run downloads the weights from Hugging Face into the local cache, then loads the model onto the detected accelerator. `mistralrs` infers the architecture, chat template, and target device from the repository; every inferred choice can be overridden with a flag.
+The first run downloads the weights from Hugging Face into the local cache, then loads the model onto the detected accelerator. `inference` infers the architecture, chat template, and target device from the repository; every inferred choice can be overridden with a flag.
 
-`--quant 4` prefers a prebuilt [UQFF (Universal Quantized File Format)](/reference/uqff-format/) quantization from `mistralrs-community` when one is published, otherwise quantizes the weights as they load (in-situ). Omit it to load native precision (BF16 for Qwen3-4B, about 8 GB). See [Quantization](/guides/quantization/quantize-a-model/) for the decision guide.
+`--quant 4` prefers a prebuilt [UQFF (Universal Quantized File Format)](/reference/uqff-format/) quantization from `inference-community` when one is published, otherwise quantizes the weights as they load (in-situ). Omit it to load native precision (BF16 for Qwen3-4B, about 8 GB). See [Quantization](/guides/quantization/quantize-a-model/) for the decision guide.
 
 The model is ready when an empty prompt appears. Type a message and press Enter; the response streams a token at a time.
 
@@ -165,11 +165,11 @@ With multimodal models, include image, audio, or video paths or URLs directly in
 Load an exact local file for chat, or select a published quantization from a Hugging Face repository:
 
 ```bash
-mistralrs run -f /path/to/model.gguf
-mistralrs serve -m unsloth/Qwen3.5-4B-GGUF --quant 4
+inference run -f /path/to/model.gguf
+inference serve -m unsloth/Qwen3.5-4B-GGUF --quant 4
 ```
 
-The `.gguf` filename selects the format. mistral.rs uses embedded tokenizer and chat-template
+The `.gguf` filename selects the format. inference.rs uses embedded tokenizer and chat-template
 metadata when present, and discovers configuration and multimodal projector files when the
 repository identifies them unambiguously. See [Run GGUF models](/guides/models/run-gguf/)
 for loading and serving workflows, or [GGUF support](/reference/gguf-support/) for the
@@ -178,13 +178,13 @@ compatibility matrix.
 ## Serve an API
 
 ```bash
-mistralrs serve --quant 4 -m Qwen/Qwen3-4B
+inference serve --quant 4 -m Qwen/Qwen3-4B
 ```
 
 When loading completes:
 
 ```
-2026-06-13T12:00:00.000000Z  INFO mistralrs_cli::commands::serve: Server listening on http://0.0.0.0:1234
+2026-06-13T12:00:00.000000Z  INFO inference_cli::commands::serve: Server listening on http://0.0.0.0:1234
 ```
 
 The server binds `0.0.0.0` by default, reachable from any host on the network; pass `--host 127.0.0.1` to restrict it and `--port` to change the port.
@@ -200,7 +200,7 @@ curl http://localhost:1234/v1/chat/completions \
   -d '{
     "model": "default",
     "messages": [
-      {"role": "user", "content": "In one sentence, what is mistral.rs?"}
+      {"role": "user", "content": "In one sentence, what is inference.rs?"}
     ]
   }'
 ```
@@ -252,7 +252,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
-To run inference in-process without a server, use the `mistralrs` crate directly (see [Embed in Rust](#embed-in-rust) below).
+To run inference in-process without a server, use the `inference` crate directly (see [Embed in Rust](#embed-in-rust) below).
 
 </TabItem>
 </Tabs>
@@ -273,24 +273,24 @@ Some models (Gemma, Llama, and others) require accepting a license before downlo
 
 1. Open the model page on Hugging Face, sign in, and accept the license at the top.
 2. Create a read-only access token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens).
-3. Pass the token to mistral.rs:
+3. Pass the token to inference.rs:
 
 ```bash
-mistralrs login
+inference login
 ```
 
 `login` prompts for the token (or accepts `--token hf_...` non-interactively) and saves it to the Hugging Face token file (`$HF_HOME/token`, default `~/.cache/huggingface/token`). If you have already logged in via `huggingface-cli`, skip this step: both tools read the same file. Then run or serve the gated model as usual:
 
 ```bash
-mistralrs serve --quant 4 -m google/gemma-4-E4B-it
+inference serve --quant 4 -m google/gemma-4-E4B-it
 ```
 
 ## Embed in Rust
 
-Run inference in-process, without a server, using the `mistralrs` crate. Add `mistralrs` and `tokio` to `Cargo.toml` (build with the same accelerator features as the CLI, e.g. `--features metal` or `--features cuda`):
+Run inference in-process, without a server, using the `inference` crate. Add `inference` and `tokio` to `Cargo.toml` (build with the same accelerator features as the CLI, e.g. `--features metal` or `--features cuda`):
 
 ```rust
-use mistralrs::{IsqBits, ModelBuilder, TextMessageRole, TextMessages};
+use inference::{IsqBits, ModelBuilder, TextMessageRole, TextMessages};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

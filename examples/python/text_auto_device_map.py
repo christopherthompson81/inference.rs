@@ -1,4 +1,4 @@
-from mistralrs import Runner, Which, ChatCompletionRequest, TextAutoMapParams
+from inference_rs import Runner, Which, ChatCompletionRequest, TextAutoMapParams
 
 runner = Runner(
     which=Which.Plain(

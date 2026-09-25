@@ -1,16 +1,16 @@
 ---
-title: "mistralrs doctor"
+title: "inference doctor"
 description: "Run system diagnostics and environment checks"
 sidebar:
   order: 7
 ---
 
-<!-- Generated from clap definitions by mistralrs-cli docgen. Do not edit. -->
+<!-- Generated from clap definitions by inference-cli docgen. Do not edit. -->
 
 Run system diagnostics and environment checks
 
 ```
-mistralrs doctor [OPTIONS]
+inference doctor [OPTIONS]
 ```
 
 | Option | Default | Description |

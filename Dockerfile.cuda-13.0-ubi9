@@ -5,7 +5,7 @@ RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
 ENV PATH="/root/.cargo/bin:${PATH}"
 RUN rustup update nightly && rustup default nightly
 
-WORKDIR /mistralrs
+WORKDIR /inference
 COPY . .
 
 # Rayon threads are limited to minimize memory requirements in CI, avoiding OOM
@@ -15,19 +15,19 @@ ARG RAYON_NUM_THREADS=4
 ARG RUST_NUM_THREADS=4
 ARG RUSTFLAGS="-Z threads=${RUST_NUM_THREADS}"
 ARG WITH_FEATURES="cuda,cudnn"
-RUN cargo build --release -p mistralrs-cli --features "${WITH_FEATURES}"
+RUN cargo build --release -p inference-cli --features "${WITH_FEATURES}"
 
 FROM nvidia/cuda:13.0.2-cudnn-runtime-ubi9
 
-COPY --chmod=755 --from=builder /mistralrs/target/release/mistralrs /usr/local/bin/mistralrs
+COPY --chmod=755 --from=builder /inference/target/release/inference /usr/local/bin/inference
 # Chat templates for models that ship without one
-COPY --from=builder /mistralrs/chat_templates /chat_templates
+COPY --from=builder /inference/chat_templates /chat_templates
 
 # hf-hub reads HF_HOME; mount a volume at /data to persist downloaded models
 ENV HF_HOME=/data
 
-# Default port of `mistralrs serve`
+# Default port of `inference serve`
 EXPOSE 1234
 
-ENTRYPOINT ["mistralrs"]
+ENTRYPOINT ["inference"]
 CMD ["--help"]

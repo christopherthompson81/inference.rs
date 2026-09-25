@@ -1,9 +1,9 @@
 ---
 title: TOML configuration
-description: Schema for the config file mistralrs from-config reads, with the CLI flag each key maps to.
+description: Schema for the config file inference from-config reads, with the CLI flag each key maps to.
 ---
 
-`mistralrs from-config -f <path>` reads a TOML file. The top-level `command` field selects `serve` or `run`. Every key maps to a CLI flag of the same subcommand; the mapping is listed per table below. For per-flag semantics, see the [generated CLI reference](/reference/cli/).
+`inference from-config -f <path>` reads a TOML file. The top-level `command` field selects `serve` or `run`. Every key maps to a CLI flag of the same subcommand; the mapping is listed per table below. For per-flag semantics, see the [generated CLI reference](/reference/cli/).
 
 ## Minimal example
 
@@ -21,7 +21,7 @@ model_id = "Qwen/Qwen3-4B"
 quant = "4"
 ```
 
-`mistralrs from-config -f this.toml` runs the server.
+`inference from-config -f this.toml` runs the server.
 
 ## Top-level fields
 
@@ -29,7 +29,7 @@ quant = "4"
 |---|---|---|---|
 | `command` | string | both | `"serve"` or `"run"`. |
 | `default_model_id` | string | serve | Model id treated as the default. Must match one of the `[[models]]` entries. |
-| `thinking` | bool | run | Legacy thinking toggle (alias: `enable_thinking`). If both reasoning controls are omitted, thinking defaults on. Maps to `--thinking` on `mistralrs run`. |
+| `thinking` | bool | run | Legacy thinking toggle (alias: `enable_thinking`). If both reasoning controls are omitted, thinking defaults on. Maps to `--thinking` on `inference run`. |
 | `reasoning_effort` | string | run | `off`, `low`, `medium`, `high`, or `xhigh`; `none` aliases `off`. Omit to leave effort unspecified. Maps to `--reasoning-effort`. |
 
 ## `[global]` section
@@ -253,7 +253,7 @@ Invalid configs abort startup with a message identifying the problem:
 
 Flag interactions that hold on the command line and as TOML keys:
 
-- `quant` (CLI `--quant`, TOML key `quant`) selects a matching GGUF or [UQFF (Universal Quantized File Format)](/reference/uqff-format/) artifact when available. Source checkpoints without a matching UQFF use [ISQ (in-situ quantization)](/reference/quantization-types/). It conflicts with `isq` (`--isq`, the explicit ISQ level) and `from_uqff` (`--from-uqff`). `mistralrs tune` evaluates explicit levels and rejects `quant = "auto"` (`--quant auto`).
+- `quant` (CLI `--quant`, TOML key `quant`) selects a matching GGUF or [UQFF (Universal Quantized File Format)](/reference/uqff-format/) artifact when available. Source checkpoints without a matching UQFF use [ISQ (in-situ quantization)](/reference/quantization-types/). It conflicts with `isq` (`--isq`, the explicit ISQ level) and `from_uqff` (`--from-uqff`). `inference tune` evaluates explicit levels and rejects `quant = "auto"` (`--quant auto`).
 - `--calibration-file` conflicts with `--imatrix`.
 - Multimodal GGUF repositories select a projector when one compatible candidate can be identified.
   Use `mmproj` (`--mmproj`) to choose explicitly and `tok_model_id` (`--tok-model-id`) to override
@@ -262,15 +262,15 @@ Flag interactions that hold on the command line and as TOML keys:
   X-LoRA cannot be combined with a multimodal projector.
 - Dynamic LoRA (`enable_lora` or `lora`), legacy GGUF/GGML LoRA (`legacy_lora` with `legacy_lora_order`), and X-LoRA (`xlora` with `xlora_order`) are mutually exclusive. Dynamic `lora` entries require unique, nonempty aliases and sources. Supported GGUF uses dynamic LoRA; GGML uses legacy mode, and legacy static GGUF mode remains available for Phi3. `tgt_non_granular_index` requires `xlora`.
 - `--matformer-slice-name` requires `--matformer-config-path`.
-- `mistralrs run`: `--image`, `--video`, and `--audio` require `-i`/`--input`.
-- `mistralrs bench`: `--prompt-len` and `--depth` accept comma-separated values for sweeps.
+- `inference run`: `--image`, `--video`, and `--audio` require `-i`/`--input`.
+- `inference bench`: `--prompt-len` and `--depth` accept comma-separated values for sweeps.
   - Each `--prompt-len` value produces a prefill measurement at that prompt length.
   - Each `--depth` value produces a decode measurement that prefills `depth` tokens and then generates `--gen-len` tokens.
   - `--depth` must be greater than 0 when `--gen-len` is greater than 0.
 
 ## Server behavior notes
 
-- **CORS and body limit.** Not exposed as CLI flags or TOML keys. Defaults: any origin; methods `GET`, `POST`, `PUT`, `DELETE`; allowed headers `Content-Type`, `Authorization`, `x-api-key`, `anthropic-version`, `anthropic-beta`, `x-request-id`; exposed headers `x-request-id`; 50 MB request body limit. Configure programmatically through `MistralRsServerRouterBuilder` in `mistralrs-server-core`.
-- **Authentication.** mistral.rs does not implement authentication. Put a reverse proxy (nginx, Caddy, Traefik) in front for auth and TLS. OpenAI-protocol clients always send `Authorization: Bearer ...` because the OpenAI SDK requires an API key; mistral.rs does not validate the header.
+- **CORS and body limit.** Not exposed as CLI flags or TOML keys. Defaults: any origin; methods `GET`, `POST`, `PUT`, `DELETE`; allowed headers `Content-Type`, `Authorization`, `x-api-key`, `anthropic-version`, `anthropic-beta`, `x-request-id`; exposed headers `x-request-id`; 50 MB request body limit. Configure programmatically through `InferenceRsServerRouterBuilder` in `inference-server-core`.
+- **Authentication.** inference.rs does not implement authentication. Put a reverse proxy (nginx, Caddy, Traefik) in front for auth and TLS. OpenAI-protocol clients always send `Authorization: Bearer ...` because the OpenAI SDK requires an API key; inference.rs does not validate the header.
 - **Logging and metrics.** Access logs are written to normal server stdout/stderr by default, with request ids and route/status/latency metadata. `GET /metrics` exposes Prometheus HTTP metrics by default. See [observability](/guides/deploy/observability/).
-- **Payload logging.** `-v` enables debug detail and `-vv` trace-level file/cache internals; `RUST_LOG` module filters (e.g. `RUST_LOG=mistralrs_core=debug,tower_http=info`) override both. `-l <path>` logs all requests and responses to a file.
+- **Payload logging.** `-v` enables debug detail and `-vv` trace-level file/cache internals; `RUST_LOG` module filters (e.g. `RUST_LOG=inference_core=debug,tower_http=info`) override both. `-l <path>` logs all requests and responses to a file.

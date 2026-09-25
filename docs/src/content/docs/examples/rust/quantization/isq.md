@@ -9,15 +9,15 @@ sidebar:
 
 In-situ quantization (ISQ) with explicit and automatic type selection.
 
-Run with: `cargo run --release --example isq -p mistralrs`
+Run with: `cargo run --release --example isq -p inference`
 
 ```rust
 //! In-situ quantization (ISQ) with explicit and automatic type selection.
 //!
-//! Run with: `cargo run --release --example isq -p mistralrs`
+//! Run with: `cargo run --release --example isq -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     IsqBits, IsqType, ModelBuilder, PagedAttentionMetaBuilder, TextMessageRole, TextMessages,
 };
 
@@ -65,4 +65,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/quantization/isq/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/quantization/isq/main.rs)
+Source: [`inference/examples/quantization/isq/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/quantization/isq/main.rs)

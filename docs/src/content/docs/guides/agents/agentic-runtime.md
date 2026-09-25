@@ -3,7 +3,7 @@ title: Agentic runtime for apps
 description: Build a local agent app around model output, tool execution, generated media, and sessions.
 ---
 
-mistral.rs can act as a local-first runtime for agent applications. A single runtime request can include:
+inference.rs can act as a local-first runtime for agent applications. A single runtime request can include:
 
 - Model generation (chat-completion responses and chunks).
 - Server-side tool execution.
@@ -15,9 +15,9 @@ mistral.rs can act as a local-first runtime for agent applications. A single run
 - Generated images or video frames from tools.
 - Persistent session state.
 
-The most complete app-facing event stream today is `/v1/chat/completions` with `stream: true`. It emits normal OpenAI-compatible chunks plus mistral.rs `agentic_tool_call_progress` Server-Sent Events (SSE).
+The most complete app-facing event stream today is `/v1/chat/completions` with `stream: true`. It emits normal OpenAI-compatible chunks plus inference.rs `agentic_tool_call_progress` Server-Sent Events (SSE).
 
-| Runtime part | What mistral.rs provides |
+| Runtime part | What inference.rs provides |
 |---|---|
 | Model output | Chat-completion responses and streaming chunks. |
 | Tool execution | Built-in search, code execution, shell, OpenAI-compatible Skills, [MCP (Model Context Protocol)](/guides/agents/connect-mcp-server/) tools, callbacks, or HTTP tool dispatch. |
@@ -56,7 +56,7 @@ The cap and dispatch URL are configured on the [tool calling page](/guides/agent
 Start a server with the tools your app is allowed to use:
 
 ```bash
-mistralrs serve --agent -m google/gemma-4-E4B-it
+inference serve --agent -m google/gemma-4-E4B-it
 ```
 
 (`--agent` enables search, code execution, and shell; see [build an agent](/guides/agents/build-an-agent/).)
@@ -125,7 +125,7 @@ Behavior worth designing around:
 
 - Inline vs fetched: bodies up to **8 MB** are inlined (`text` or `data_base64`); larger bodies are elided from the wire and fetched via `GET /v1/files/{id}/content`. `is_truncated()` on the SDK `File` reports an elided body.
 - Context preview: input files expose decoded text previews of up to **4096 chars per file** and **32768 chars per request**. Agent-produced text outputs expose a **1024-byte** preview. Agentic runs can inspect more text when the relevant file-access tool is available.
-- Undeclared outputs: the Python executor and shell tools accept an `outputs` parameter for files the model wrote but the request did not declare. Shell also advertises `mistralrs_surface_outputs`, which lets the model surface files created in earlier shell calls. Files declared via `request.files` are surfaced regardless; missing declared files come back as error placeholders. Files written but not named in `outputs`, `mistralrs_surface_outputs`, or `request.files` remain internal to the session.
+- Undeclared outputs: the Python executor and shell tools accept an `outputs` parameter for files the model wrote but the request did not declare. Shell also advertises `inference_surface_outputs`, which lets the model surface files created in earlier shell calls. Files declared via `request.files` are surfaced regardless; missing declared files come back as error placeholders. Files written but not named in `outputs`, `inference_surface_outputs`, or `request.files` remain internal to the session.
 
 The exact file schema, metadata endpoint, and content-endpoint status codes are in the [HTTP API reference](/reference/http-api/).
 
@@ -146,4 +146,4 @@ Full examples: [Rust file inputs](/examples/rust/advanced/file-inputs/), [Python
 
 ## Security
 
-Code and shell execution run with the permissions of the configured subprocess, inside the [sandbox](/reference/sandbox/) where enabled. Agent mode defaults to the `developer` sandbox profile, which keeps writes scoped to the session workdir while allowing common local toolchains to run. For untrusted workloads, set `profile = "restricted"` and tighter `network` settings in the [TOML config](/reference/cli-toml-config/#sandbox-section), or use the matching CLI flags. Use `agent_permission: "ask"` or `"deny"` when an app needs tighter control over server-executed actions; a server-wide `ask` or `deny` cannot be loosened by the request (see [permissions and approvals](/guides/agents/permissions-and-approvals/)). For untrusted users, run mistral.rs in a container or VM, use a low-privilege user, and constrain network access.
+Code and shell execution run with the permissions of the configured subprocess, inside the [sandbox](/reference/sandbox/) where enabled. Agent mode defaults to the `developer` sandbox profile, which keeps writes scoped to the session workdir while allowing common local toolchains to run. For untrusted workloads, set `profile = "restricted"` and tighter `network` settings in the [TOML config](/reference/cli-toml-config/#sandbox-section), or use the matching CLI flags. Use `agent_permission: "ask"` or `"deny"` when an app needs tighter control over server-executed actions; a server-wide `ask` or `deny` cannot be loosened by the request (see [permissions and approvals](/guides/agents/permissions-and-approvals/)). For untrusted users, run inference.rs in a container or VM, use a low-privilege user, and constrain network access.

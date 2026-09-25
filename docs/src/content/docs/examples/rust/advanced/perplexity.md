@@ -9,20 +9,20 @@ sidebar:
 
 Compute perplexity of a text file using a loaded model.
 
-Run with: `cargo run --release --example perplexity -p mistralrs`
+Run with: `cargo run --release --example perplexity -p inference`
 
 ```rust
 //! Compute perplexity of a text file using a loaded model.
 //!
-//! Run with: `cargo run --release --example perplexity -p mistralrs`
+//! Run with: `cargo run --release --example perplexity -p inference`
 
 use std::{fs::read_to_string, path::PathBuf, time::Instant};
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use either::Either;
-use mistralrs::{
-    cross_entropy_loss, parse_isq_value, Constraint, DType, Device, MistralRs, ModelBuilder,
+use inference::{
+    cross_entropy_loss, parse_isq_value, Constraint, DType, Device, InferenceRs, ModelBuilder,
     NormalRequest, Request, ResponseOk, SamplingParams, Tensor,
 };
 use tokio::sync::mpsc::channel;
@@ -48,11 +48,11 @@ struct Args {
     calibration_file: Option<PathBuf>,
 }
 
-async fn process_chunk(runner: &MistralRs, chunk: Vec<u32>) -> anyhow::Result<(Tensor, Vec<u32>)> {
+async fn process_chunk(runner: &InferenceRs, chunk: Vec<u32>) -> anyhow::Result<(Tensor, Vec<u32>)> {
     let (tx, mut rx) = channel(1);
 
     let request = Request::Normal(Box::new(NormalRequest {
-        messages: mistralrs::RequestMessage::CompletionTokens(chunk),
+        messages: inference::RequestMessage::CompletionTokens(chunk),
         sampling_params: SamplingParams {
             max_len: Some(0),
             ..SamplingParams::deterministic()
@@ -183,4 +183,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/perplexity/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/perplexity/main.rs)
+Source: [`inference/examples/advanced/perplexity/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/perplexity/main.rs)

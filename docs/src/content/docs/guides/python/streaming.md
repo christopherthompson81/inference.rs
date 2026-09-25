@@ -11,7 +11,7 @@ The SDK does not expose a native async iterator. Wrap the synchronous iterator i
 
 ```python
 import asyncio
-from mistralrs import Runner, Which, ChatCompletionRequest
+from inference_rs import Runner, Which, ChatCompletionRequest
 
 runner = Runner(Which.Plain(model_id="Qwen/Qwen3-4B"))
 
@@ -49,7 +49,7 @@ For FastAPI, the same pattern works as a response generator:
 ```python
 from fastapi import FastAPI
 from fastapi.responses import StreamingResponse
-from mistralrs import Runner, Which, ChatCompletionRequest
+from inference_rs import Runner, Which, ChatCompletionRequest
 
 app = FastAPI()
 runner = Runner(Which.Plain(model_id="Qwen/Qwen3-4B"))
@@ -72,7 +72,7 @@ async def stream(prompt: str):
     return StreamingResponse(iter(), media_type="text/plain")
 ```
 
-For production, run mistralrs as an HTTP server and call it with the OpenAI Python client rather than loading the model in the web app process. The HTTP server's streaming is more robust under load; see the [OpenAI-compatible API guide](/guides/serve/openai-compatible-apis/).
+For production, run inference as an HTTP server and call it with the OpenAI Python client rather than loading the model in the web app process. The HTTP server's streaming is more robust under load; see the [OpenAI-compatible API guide](/guides/serve/openai-compatible-apis/).
 
 ## Catching errors during streaming
 

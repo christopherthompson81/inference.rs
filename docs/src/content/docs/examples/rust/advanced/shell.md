@@ -12,7 +12,7 @@ Shell execution example.
 The model is given a shell tool and can run commands in a per-session
 working directory.
 
-Run with: `cargo run --release --features code-execution --example shell -p mistralrs`
+Run with: `cargo run --release --features code-execution --example shell -p inference`
 
 ```rust
 //! Shell execution example.
@@ -20,10 +20,10 @@ Run with: `cargo run --release --features code-execution --example shell -p mist
 //! The model is given a shell tool and can run commands in a per-session
 //! working directory.
 //!
-//! Run with: `cargo run --release --features code-execution --example shell -p mistralrs`
+//! Run with: `cargo run --release --features code-execution --example shell -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     IsqBits, ModelBuilder, NetworkMode, RequestBuilder, SandboxPolicy, ShellConfig,
     TextMessageRole, TextMessages,
 };
@@ -62,4 +62,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/shell/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/shell/main.rs)
+Source: [`inference/examples/advanced/shell/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/shell/main.rs)

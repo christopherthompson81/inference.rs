@@ -9,15 +9,15 @@ sidebar:
 
 JSON schema-constrained generation for typed structured output.
 
-Run with: `cargo run --release --example json_schema -p mistralrs`
+Run with: `cargo run --release --example json_schema -p inference`
 
 ```rust
 //! JSON schema-constrained generation for typed structured output.
 //!
-//! Run with: `cargo run --release --example json_schema -p mistralrs`
+//! Run with: `cargo run --release --example json_schema -p inference`
 
 use anyhow::Result;
-use mistralrs::{
+use inference::{
     IsqBits, ModelBuilder, PagedAttentionMetaBuilder, RequestBuilder, TextMessageRole,
 };
 use serde_json::json;
@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
         .await?;
 
     let request = RequestBuilder::new()
-        .set_constraint(mistralrs::Constraint::JsonSchema(json!(
+        .set_constraint(inference::Constraint::JsonSchema(json!(
             {
                 "type": "object",
                 "properties": {
@@ -56,4 +56,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`mistralrs/examples/advanced/json_schema/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/json_schema/main.rs)
+Source: [`inference/examples/advanced/json_schema/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/json_schema/main.rs)

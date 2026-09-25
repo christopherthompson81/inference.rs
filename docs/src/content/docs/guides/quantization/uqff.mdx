@@ -1,6 +1,6 @@
 ---
 title: Use pre-quantized UQFF models
-description: Create mistral.rs UQFF files and load them without runtime conversion.
+description: Create inference.rs UQFF files and load them without runtime conversion.
 ---
 
 import { Tabs, TabItem } from '@astrojs/starlight/components';
@@ -9,8 +9,8 @@ UQFF (Universal Quantized File Format) stores pre-quantized weights and loads di
 runtime conversion.
 
 :::caution
-UQFF files produced by pre-1.0 mistral.rs releases are not loadable by current builds and fail
-with a clear error. Regenerate them with `mistralrs quantize`.
+UQFF files produced by pre-1.0 inference.rs releases are not loadable by current builds and fail
+with a clear error. Regenerate them with `inference quantize`.
 :::
 
 ## Using a UQFF model
@@ -19,7 +19,7 @@ with a clear error. Regenerate them with `mistralrs quantize`.
 <TabItem label="CLI">
 
 ```bash
-mistralrs run -m <repo> --from-uqff q4k-0.uqff
+inference run -m <repo> --from-uqff q4k-0.uqff
 ```
 
 `-m <repo>` is required for tokenizer/base resolution. `--from-uqff` accepts a numeric shorthand
@@ -34,7 +34,7 @@ For locally-stored UQFF files, `-m` can be the local directory and `--from-uqff`
 `from_uqff` on `Which` takes the shard filename (or a list of shard filenames):
 
 ```python
-from mistralrs import Runner, Which
+from inference_rs import Runner, Which
 
 runner = Runner(
     which=Which.Plain(
@@ -50,7 +50,7 @@ runner = Runner(
 `UqffTextModelBuilder` takes the base repo and the first shard:
 
 ```rust
-use mistralrs::UqffTextModelBuilder;
+use inference::UqffTextModelBuilder;
 
 let model = UqffTextModelBuilder::new("<repo>", vec!["q4k-0.uqff".into()])
     .build()
@@ -76,7 +76,7 @@ Full example: [Rust](/examples/rust/quantization/uqff/),
 The `quantize` subcommand converts a supported model source to UQFF:
 
 ```bash
-mistralrs quantize \
+inference quantize \
   -m google/gemma-4-E4B-it \
   --isq q4k \
   -o gemma-q4k.uqff
@@ -88,7 +88,7 @@ GGUF inputs use the same file selection as `run`. For a local file, `-f` infers 
 `-m` optional:
 
 ```bash
-mistralrs quantize \
+inference quantize \
   -f /path/model-BF16.gguf \
   --isq q4k \
   -o model-q4k.uqff
@@ -98,7 +98,7 @@ For a GGUF repository, `--quant` selects the input artifact and `--isq` selects 
 format:
 
 ```bash
-mistralrs quantize \
+inference quantize \
   -m <gguf-repo> \
   --quant 8 \
   --isq q4k \
@@ -141,16 +141,16 @@ UQFF repositories remain loadable without a report. A report can be generated fo
 artifacts by scanning them:
 
 ```bash
-mistralrs uqff report -m gemma4_26b_a4b/ \
+inference uqff report -m gemma4_26b_a4b/ \
   --write \
   --base-model google/gemma-4-26B-A4B-it \
-  --repo-id mistralrs-community/gemma-4-26B-A4B-it
+  --repo-id inference-community/gemma-4-26B-A4B-it
 ```
 
 For Hugging Face repos, use the same model-id form and select a group with `--quant` when desired:
 
 ```bash
-mistralrs uqff report -m mistralrs-community/gemma-4-26B-A4B-it --quant afq3 --json
+inference uqff report -m inference-community/gemma-4-26B-A4B-it --quant afq3 --json
 ```
 
 The `uqff report`, `uqff verify`, and `uqff inspect` commands are metadata-only. For local paths or
@@ -161,13 +161,13 @@ metadata tensors, so they do not download the full model weights.
 Before publishing, validate the structure:
 
 ```bash
-mistralrs uqff verify -m gemma4_26b_a4b/
+inference uqff verify -m gemma4_26b_a4b/
 ```
 
 To browse tensors interactively:
 
 ```bash
-mistralrs uqff inspect -m mistralrs-community/gemma-4-26B-A4B-it --quant afq3
+inference uqff inspect -m inference-community/gemma-4-26B-A4B-it --quant afq3
 ```
 
 K-quant output quality can be improved with an importance matrix: pass `--imatrix <file>`
