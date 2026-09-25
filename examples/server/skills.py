@@ -2,7 +2,7 @@
 OpenAI-compatible Skills with upload.
 
 Start the server:
-    inference_rs serve --agent -p 1234 -m Qwen/Qwen3-4B
+    inference serve --agent -p 1234 -m Qwen/Qwen3-4B
 
 Skills require the shell executor, so --enable-shell is the minimum flag.
 Use --agent when you want the full agent runtime.

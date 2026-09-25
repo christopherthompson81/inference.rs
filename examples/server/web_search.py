@@ -2,7 +2,7 @@
 Chat Completions web search with the HTTP API.
 
 Start the server:
-    inference_rs serve --agent -p 1234 -m Qwen/Qwen3-4B
+    inference serve --agent -p 1234 -m Qwen/Qwen3-4B
 
 Then run this script:
     python examples/server/web_search.py

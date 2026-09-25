@@ -57,7 +57,7 @@ def generate(runner: Runner, label: str, adapter=None):
 
 runner = Runner(which=Which.Lora(model_id=BASE_MODEL))
 
-with TemporaryDirectory(prefix="inference_rs-lora-") as directory:
+with TemporaryDirectory(prefix="inference-lora-") as directory:
     adapter_dir = Path(directory) / "initial"
     replacement_dir = Path(directory) / "replacement"
     adapter_dir.mkdir()

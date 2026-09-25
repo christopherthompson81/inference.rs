@@ -2,7 +2,7 @@
 Anthropic-compatible Skills with upload.
 
 Start the server with shell execution enabled:
-    inference_rs serve --agent -p 1234 -m Qwen/Qwen3-4B
+    inference serve --agent -p 1234 -m Qwen/Qwen3-4B
 
 Then run:
     python3 examples/server/anthropic_skills.py
@@ -97,7 +97,7 @@ def request_json(path: str, payload: dict) -> dict:
 
 
 def upload_skill(zip_path: Path) -> dict:
-    boundary = f"----inference_rs-{uuid.uuid4().hex}"
+    boundary = f"----inference-{uuid.uuid4().hex}"
     body = b"".join(
         [
             f"--{boundary}\r\n".encode("utf-8"),

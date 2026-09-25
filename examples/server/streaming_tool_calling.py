@@ -7,7 +7,7 @@ with finish_reason="tool_calls".
 
 Usage:
 ```
-inference_rs serve --quant q4k -p 1234 -m meta-llama/Meta-Llama-3.1-8B-Instruct
+inference serve --quant q4k -p 1234 -m meta-llama/Meta-Llama-3.1-8B-Instruct
 ```
 
 And then:

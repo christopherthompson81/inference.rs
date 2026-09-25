@@ -1,7 +1,7 @@
 """
 inference.rs Python code executor.
 
-This script is embedded into the inference_rs-code-exec Rust crate and runs as a
+This script is embedded into the inference-code-exec Rust crate and runs as a
 persistent subprocess. It communicates with the Rust host via line-delimited
 JSON over stdin/stdout.
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Render inference_rs-pyo3/inference_rs.pyi as Starlight Markdown pages.
+Render inference-pyo3/inference_rs.pyi as Starlight Markdown pages.
 
 The .pyi file is the single source of truth for the Python API. This script
 parses it with `ast` and writes one Markdown file per logical group into
@@ -23,9 +23,9 @@ from textwrap import dedent
 SCRIPT_DIR = Path(__file__).resolve().parent
 WEBSITE_DIR = SCRIPT_DIR.parent
 REPO_DIR = WEBSITE_DIR.parent
-PYI_PATH = REPO_DIR / "inference_rs-pyo3" / "inference_rs.pyi"
+PYI_PATH = REPO_DIR / "inference-pyo3" / "inference_rs.pyi"
 OUT_DIR = WEBSITE_DIR / "src" / "content" / "docs" / "reference" / "python"
-STUB_REL = "inference_rs-pyo3/inference_rs.pyi"
+STUB_REL = "inference-pyo3/inference_rs.pyi"
 
 # (title, slug, description, [class names to include])
 GROUPS = [
@@ -541,7 +541,7 @@ def _render_index() -> str:
         "  order: 6",
         "---",
         "",
-        "The `inference_rs` Python package exposes the same engine that powers the `inference_rs` CLI.",
+        "The `inference_rs` Python package exposes the same engine that powers the `inference` CLI.",
         "",
         "## Install",
         "",

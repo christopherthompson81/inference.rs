@@ -7,7 +7,7 @@ back to the model automatically.
 
 Usage:
 1. Start the inference.rs server with tool dispatch URL:
-   inference_rs serve -p 1234 --tool-dispatch-url http://localhost:8787/tools --max-tool-rounds 5 -m Qwen/Qwen3-4B
+   inference serve -p 1234 --tool-dispatch-url http://localhost:8787/tools --max-tool-rounds 5 -m Qwen/Qwen3-4B
 
 2. Then run this script (it starts a local tool server and sends a chat request):
    python examples/server/tool_dispatch.py
@@ -144,7 +144,7 @@ def main():
         print()
         print("Make sure the server is running with tool dispatch URL:")
         print(
-            f"inference_rs serve -p 1234 --tool-dispatch-url http://localhost:{TOOL_SERVER_PORT}/tools "
+            f"inference serve -p 1234 --tool-dispatch-url http://localhost:{TOOL_SERVER_PORT}/tools "
             "--max-tool-rounds 5 -m Qwen/Qwen3-4B"
         )
 
