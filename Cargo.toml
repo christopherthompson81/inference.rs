@@ -7,6 +7,7 @@ members = [
     "inference",
     "inference-vision",
     "inference-layout",
+    "inference-ffi",
     "inference-quant",
     "inference-paged-attn",
     "inference-metal-compile",

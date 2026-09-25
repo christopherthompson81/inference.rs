@@ -1,7 +1,7 @@
 [package]
 name = "inference-layout"
 readme = "../README.md"
-authors = ["Eric Buehler"]
+authors = ["Chris Thompson"]
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

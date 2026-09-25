@@ -3154,6 +3154,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-ffi"
+version = "0.9.3"
+dependencies = [
+ "candle-core",
+ "image",
+ "inference-layout",
+]
+
+[[package]]
 name = "inference-flash-attn"
 version = "0.9.3"
 dependencies = [

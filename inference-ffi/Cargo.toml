@@ -1,0 +1,27 @@
+[package]
+name = "inference-ffi"
+readme = "README.md"
+authors = ["Chris Thompson"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "C ABI for inference.rs (libinference_ffi)."
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[lib]
+name = "inference_ffi"
+# rlib so the Rust integration tests can call the exported functions directly
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+candle-core.workspace = true
+image.workspace = true
+inference-layout = { path = "../inference-layout" }
+
+[features]
+cuda = ["candle-core/cuda", "inference-layout/cuda"]
+metal = ["candle-core/metal", "inference-layout/metal"]
