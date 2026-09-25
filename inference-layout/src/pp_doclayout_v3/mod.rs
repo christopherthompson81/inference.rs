@@ -52,6 +52,7 @@ pub struct PPDocLayoutV3Detector {
     preprocessor: Preprocessor,
     device: Device,
     pool: Option<Pool>,
+    labels: Vec<String>,
 }
 
 enum Pool {
@@ -76,6 +77,7 @@ impl PPDocLayoutV3Detector {
                 device,
             )?
         };
+        let labels = cfg.labels();
         let model = PPDocLayoutV3::new(cfg, (preprocessor.height, preprocessor.width), vb)?;
         let pool = if device.is_cpu() {
             cpu_pool().map(Pool::Shared)
@@ -87,7 +89,13 @@ impl PPDocLayoutV3Detector {
             preprocessor,
             device: device.clone(),
             pool,
+            labels,
         })
+    }
+
+    /// Class names by id, as used in `LayoutDetection::label`.
+    pub fn labels(&self) -> &[String] {
+        &self.labels
     }
 
     /// Gives this detector its own `threads`-thread CPU pool instead of the shared physical-core one; no-op off CPU.
@@ -156,6 +164,7 @@ impl PPDocLayoutV3Detector {
             .map(|(i, im)| {
                 let args = PostprocessArgs {
                     threshold,
+                    labels: &self.labels,
                     orig_size: im.dimensions(),
                 };
                 postprocess::postprocess(&logits.get(i)?, &boxes.get(i)?, &order.get(i)?, &args)

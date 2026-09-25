@@ -18,8 +18,8 @@ cargo build --release -p inference-ffi                   # CPU
 cargo build --release -p inference-ffi --features cuda   # adds the "cuda" backend
 ```
 
-The library is written to `target/release/`. On Linux, a linker version script (`inference.map`) keeps the export
-surface to the `inference_*` functions.
+The library is written to `target/release/`. rustc exports only the crate's `#[no_mangle]` functions, and
+`tests/export_surface.py` checks that they match the header exactly.
 
 ## Versioning
 

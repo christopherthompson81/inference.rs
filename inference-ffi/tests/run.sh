@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# Builds libinference_ffi, checks its export surface, runs the Rust ABI tests and the C99 consumer, and compares the
-# C consumer's detections with the Rust detect example on the same page.
-#   usage: tests/run.sh [--features cuda] [--backend cuda] [model_dir image]
+# Usage: tests/run.sh [--features cuda] [--backend cpu|cuda] [model_dir image]  (C consumer vs Rust detector parity)
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 crate="$(dirname "$here")"
@@ -15,6 +13,11 @@ while [[ $# -gt 0 && $1 == --* ]]; do
         *) echo "unknown option $1" >&2; exit 2 ;;
     esac
 done
+if [[ $backend != cpu && $backend != cuda ]]; then
+    # the Rust detect example used for parity only selects CPU or CUDA
+    echo "parity runs on cpu or cuda, not $backend" >&2
+    exit 2
+fi
 model=${1:-${INFERENCE_TEST_LAYOUT_MODEL:-}}
 image=${2:-${INFERENCE_TEST_LAYOUT_IMAGE:-}}
 
@@ -41,12 +44,4 @@ convert "$image" -depth 8 "ppm:$work/page.ppm"
 
 cargo run --release -q -p inference-layout "${features[@]}" --example pp_doclayout_v3_detect -- \
     --model "$model" $([[ $backend == cpu ]] && echo --cpu) "$work/page.ppm" > "$work/rust.jsonl"
-python3 - "$work/rust.jsonl" > "$work/rust.txt" <<'EOF'
-import json, sys
-for line in open(sys.argv[1]):
-    for i, d in enumerate(json.loads(line)["detections"]):
-        x1, y1, x2, y2 = d["bbox"]
-        print(f"parity: {i} {d['class_id']} {d['label']} {d['score']:.4f} {x1:.1f} {y1:.1f} {x2:.1f} {y2:.1f}")
-EOF
-diff "$work/rust.txt" "$work/c.txt"
-echo "C consumer matches the Rust detector: $(wc -l < "$work/c.txt") detections"
+python3 "$here/compare_parity.py" "$work/rust.jsonl" "$work/c.txt"

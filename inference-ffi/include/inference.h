@@ -4,21 +4,22 @@
  * Contract
  *   - Only opaque handles cross the boundary. No Rust panic ever unwinds into the caller: every entry point catches it
  *     and returns INFERENCE_ERR_INTERNAL.
- *   - Every call that can fail returns an inference_status. On failure, inference_last_error() describes it; that string
- *     is thread-local, never NULL, and valid until the next inference_* call on the same thread.
+ *   - Every call that can fail returns an inference_status. inference_last_error() holds the detail of the most recent
+ *     such call on the calling thread ("" if it succeeded); it is thread-local, never NULL, and valid until the next
+ *     inference_* call on that thread.
  *   - Inputs (strings, pixel buffers, config structs) are copied during the call; the caller may free them afterwards.
  *   - Output pointers (const char*, arrays) are BORROWED from the handle that produced them and stay valid until that
- *     handle is freed. Label strings are static and stay valid for the life of the process.
+ *     handle is freed. A result's label strings stay valid until the result is freed, even after its model is freed.
  *   - Freeing NULL is a no-op. Results do not reference their model, so handles may be freed in any order.
  *   - A model handle may be used from several threads at once. Result handles are immutable.
- *   - Optional out-parameters may be NULL.
+ *   - Optional out-parameters may be NULL. Count functions return 0 for a NULL handle.
  *
  * Versioning
  *   inference_abi_version() returns (major << 16) | (minor << 8) | patch. A different major version must not be used.
  *   Minor versions only add entry points (callers may require a minimum); patch versions change behaviour only.
  *
  * Symbol surface
- *   The shared library exports exactly the inference_* functions declared here.
+ *   The shared library exports exactly the inference_* functions declared here (tests/export_surface.py checks it).
  */
 #ifndef INFERENCE_H
 #define INFERENCE_H
@@ -68,7 +69,7 @@ typedef enum inference_status {
 INFERENCE_API uint32_t inference_abi_version(void);
 /* Human-readable build identification, e.g. "inference.rs 0.9.3 (cuda)". Static. */
 INFERENCE_API const char *inference_build_version(void);
-/* Detail for the last failed call on this thread; "" if none. Never NULL. */
+/* Detail of the most recent failing inference_* call on this thread; "" after a success. Never NULL. */
 INFERENCE_API const char *inference_last_error(void);
 /* Static name of a status code, e.g. "INFERENCE_ERR_LOAD_FAILED". */
 INFERENCE_API const char *inference_status_string(inference_status status);
@@ -79,7 +80,8 @@ typedef struct inference_backend_config {
     const char *backend;
     /* Device ordinal for "cuda"/"metal". */
     int32_t device;
-    /* CPU worker threads; <= 0 uses one per physical core (hyperthreads slow the conv kernels). */
+    /* CPU worker threads, at most 1024. <= 0 is the process default: one per physical core (hyperthreads slow the conv
+     * kernels), or rayon's global pool when RAYON_NUM_THREADS is set or the CPU lacks AVX2+FMA. */
     int32_t threads;
 } inference_backend_config;
 
@@ -92,7 +94,7 @@ typedef enum inference_pixel_format {
     INFERENCE_PIXEL_GRAY8 = 4
 } inference_pixel_format;
 
-/* An 8-bit image in caller memory; copied during the call. */
+/* An 8-bit image in caller memory; copied during the call. At most 2^28 pixels. */
 typedef struct inference_image {
     const uint8_t *pixels;
     uint32_t width;
@@ -103,7 +105,7 @@ typedef struct inference_image {
     int32_t format;
 } inference_image;
 
-/* ---- Document layout detection (PP-DocLayoutV3) ---------------------------------------------------------------- */
+/* Document layout detection (PP-DocLayoutV3). */
 
 typedef struct inference_layout_model inference_layout_model;
 typedef struct inference_layout_result inference_layout_result;
@@ -117,12 +119,13 @@ INFERENCE_API inference_status inference_layout_model_load(const char *model_dir
                                                           inference_layout_model **out_model);
 INFERENCE_API void inference_layout_model_free(inference_layout_model *model);
 
-/* The model's class labels, indexed by class id. */
+/* The model's class labels, indexed by class id (from its config; the Paddle names for the stock 25-class model). */
 INFERENCE_API size_t inference_layout_model_label_count(const inference_layout_model *model);
 INFERENCE_API inference_status inference_layout_model_label(const inference_layout_model *model, size_t index,
                                                            const char **out_label);
 
-/* Detects layout regions; `threshold` in [0, 1], or INFERENCE_LAYOUT_DEFAULT_THRESHOLD. */
+/* Detects layout regions; `threshold` in [0, 1], or exactly INFERENCE_LAYOUT_DEFAULT_THRESHOLD (anything else is
+ * INFERENCE_ERR_INVALID_ARGUMENT, including NaN). */
 INFERENCE_API inference_status inference_layout_detect(const inference_layout_model *model,
                                                       const inference_image *image, float threshold,
                                                       inference_layout_result **out_result);

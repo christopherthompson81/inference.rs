@@ -1,6 +1,0 @@
-INFERENCE_0 {
-  global:
-    inference_*;
-  local:
-    *;
-};

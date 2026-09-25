@@ -14,6 +14,9 @@ pub const ABI_VERSION_MAJOR: u32 = 0;
 pub const ABI_VERSION_MINOR: u32 = 1;
 pub const ABI_VERSION_PATCH: u32 = 0;
 
+/// Upper bound on `inference_backend_config.threads`; anything larger is a caller bug, not a pool size.
+pub const MAX_CPU_THREADS: i32 = 1024;
+
 const BACKEND_TAG: &str = if cfg!(feature = "cuda") {
     "cuda"
 } else if cfg!(feature = "metal") {
@@ -68,7 +71,8 @@ thread_local! {
 fn set_last_error(message: &str) {
     // interior NULs would truncate the C string anyway; drop them rather than fail
     let clean = CString::new(message.replace('\0', "")).unwrap_or_default();
-    LAST_ERROR.with(|e| *e.borrow_mut() = clean);
+    // try_with: during thread teardown the TLS slot is gone, and `with` would panic outside any catch_unwind
+    let _ = LAST_ERROR.try_with(|e| *e.borrow_mut() = clean);
 }
 
 /// Runs an entry point: clears the thread's last error, maps failures to status codes and stops panics at the boundary.
@@ -172,6 +176,11 @@ pub(crate) unsafe fn backend_from(config: *const inference_backend_config) -> Ff
             )))
         }
     };
+    if threads > MAX_CPU_THREADS {
+        return Err(Failure::invalid(format!(
+            "threads {threads} exceeds {MAX_CPU_THREADS}"
+        )));
+    }
     Ok(Backend {
         device,
         cpu_threads: usize::try_from(threads).ok().filter(|&t| t > 0),
@@ -199,7 +208,9 @@ pub extern "C" fn inference_build_version() -> *const c_char {
 #[no_mangle]
 pub extern "C" fn inference_last_error() -> *const c_char {
     // the CString lives in the thread-local until the next call on this thread replaces it
-    LAST_ERROR.with(|e| e.borrow().as_ptr())
+    LAST_ERROR
+        .try_with(|e| e.borrow().as_ptr())
+        .unwrap_or(c"".as_ptr())
 }
 
 #[no_mangle]

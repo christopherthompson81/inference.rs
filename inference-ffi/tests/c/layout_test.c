@@ -1,6 +1,4 @@
-/* C99 consumer of inference.h: ABI/version checks, error handling, and detections printed as `parity:` lines.
- * Usage: layout_test <model_dir> <image.ppm> [backend]   (binary PPM, P6, maxval 255)
- * Exit codes: 0 pass, 1 fail, 77 skip (no model/image given). */
+/* C99 consumer of inference.h; usage: layout_test <model_dir> <image.ppm (P6)> [backend]; exits 0/1, 77 = skip. */
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>

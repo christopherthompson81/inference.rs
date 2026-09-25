@@ -1,9 +1,9 @@
 use std::ffi::{c_char, CString};
-use std::sync::OnceLock;
+use std::sync::Arc;
 
 use image::RgbImage;
 use inference_layout::pp_doclayout_v3::{
-    LayoutDetection, PPDocLayoutV3Detector, DEFAULT_THRESHOLD, LABELS,
+    LayoutDetection, PPDocLayoutV3Detector, DEFAULT_THRESHOLD,
 };
 
 use crate::inference_status::*;
@@ -19,7 +19,8 @@ const _: () = {
     assert_send_sync::<PPDocLayoutV3Detector>();
 };
 
-const UNKNOWN_LABEL: &std::ffi::CStr = c"unknown";
+/// Largest accepted image, in pixels (a 600-dpi A0 page is ~70M); bigger inputs are rejected instead of allocated.
+pub const MAX_IMAGE_PIXELS: usize = 1 << 28;
 
 /// Mirrors the `inference.h` constants of the same names.
 pub const INFERENCE_LAYOUT_DEFAULT_THRESHOLD: f32 = -1.0;
@@ -33,12 +34,15 @@ pub const INFERENCE_PIXEL_GRAY8: i32 = 4;
 #[allow(non_camel_case_types)]
 pub struct inference_layout_model {
     detector: PPDocLayoutV3Detector,
+    /// NUL-terminated class names by id, shared with every result so labels outlive the model.
+    labels: Arc<[CString]>,
 }
 
 /// Opaque `inference_layout_result`; detections in reading order.
 #[allow(non_camel_case_types)]
 pub struct inference_layout_result {
     detections: Vec<LayoutDetection>,
+    labels: Arc<[CString]>,
 }
 
 /// Mirrors `inference_image`.
@@ -51,23 +55,6 @@ pub struct inference_image {
     pub height: u32,
     pub stride: u32,
     pub format: i32,
-}
-
-/// Static NUL-terminated copies of `LABELS`, indexed by class id.
-fn label_cstrs() -> &'static [CString] {
-    static LABEL_CSTRS: OnceLock<Vec<CString>> = OnceLock::new();
-    LABEL_CSTRS.get_or_init(|| {
-        LABELS
-            .iter()
-            .map(|l| CString::new(*l).expect("labels have no interior NUL"))
-            .collect()
-    })
-}
-
-fn label_ptr(class_id: usize) -> *const c_char {
-    label_cstrs()
-        .get(class_id)
-        .map_or(UNKNOWN_LABEL.as_ptr(), |l| l.as_ptr())
 }
 
 /// `(bytes per pixel, R/G/B byte offsets)` for an `inference_pixel_format` value.
@@ -108,7 +95,20 @@ unsafe fn to_rgb(img: &inference_image) -> FfiResult<RgbImage> {
             "stride {stride} is smaller than a {row_bytes}-byte row"
         )));
     }
-    let mut out = vec![0u8; w * h * 3];
+    let pixels = w
+        .checked_mul(h)
+        .filter(|&n| n <= MAX_IMAGE_PIXELS)
+        .ok_or_else(|| {
+            Failure::invalid(format!("image {w}x{h} exceeds {MAX_IMAGE_PIXELS} pixels"))
+        })?;
+    let mut out = Vec::new();
+    out.try_reserve_exact(pixels * 3).map_err(|_| {
+        Failure::new(
+            INFERENCE_ERR_RUNTIME,
+            format!("out of memory for a {w}x{h} image"),
+        )
+    })?;
+    out.resize(pixels * 3, 0u8);
     for (y, dst) in out.chunks_exact_mut(w * 3).enumerate() {
         let src = std::slice::from_raw_parts(img.pixels.add(y * stride), row_bytes);
         for (px, d) in src.chunks_exact(bpp).zip(dst.as_chunks_mut::<3>().0) {
@@ -120,12 +120,12 @@ unsafe fn to_rgb(img: &inference_image) -> FfiResult<RgbImage> {
 }
 
 fn threshold_arg(threshold: f32) -> FfiResult<f32> {
-    if threshold.is_nan() || threshold < 0. {
+    if threshold == INFERENCE_LAYOUT_DEFAULT_THRESHOLD {
         return Ok(DEFAULT_THRESHOLD);
     }
-    if threshold > 1. {
+    if !(0. ..=1.).contains(&threshold) {
         return Err(Failure::invalid(format!(
-            "threshold {threshold} is above 1"
+            "threshold {threshold} is outside [0, 1] (pass INFERENCE_LAYOUT_DEFAULT_THRESHOLD for the default)"
         )));
     }
     Ok(threshold)
@@ -152,7 +152,15 @@ pub unsafe extern "C" fn inference_layout_model_load(
         if let Some(threads) = backend.cpu_threads {
             detector = detector.with_cpu_threads(threads).map_err(load_failed)?;
         }
-        out_model.write(Box::into_raw(Box::new(inference_layout_model { detector })));
+        let labels = detector
+            .labels()
+            .iter()
+            .map(|l| CString::new(l.replace('\0', "")).unwrap_or_default())
+            .collect();
+        out_model.write(Box::into_raw(Box::new(inference_layout_model {
+            detector,
+            labels,
+        })));
         Ok(())
     })
 }
@@ -165,11 +173,12 @@ pub unsafe extern "C" fn inference_layout_model_free(model: *mut inference_layou
     }
 }
 
+/// Safety: `model` is NULL or a live handle.
 #[no_mangle]
-pub extern "C" fn inference_layout_model_label_count(
-    _model: *const inference_layout_model,
+pub unsafe extern "C" fn inference_layout_model_label_count(
+    model: *const inference_layout_model,
 ) -> usize {
-    LABELS.len()
+    guard_value(0, || model.as_ref().map_or(0, |m| m.labels.len()))
 }
 
 /// Safety: `out_label` is NULL or valid for a write.
@@ -180,13 +189,13 @@ pub unsafe extern "C" fn inference_layout_model_label(
     out_label: *mut *const c_char,
 ) -> inference_status {
     guard(|| {
-        if model.is_null() {
-            return Err(Failure::invalid("model is NULL"));
-        }
-        let label = label_cstrs().get(index).ok_or_else(|| {
+        let model = model
+            .as_ref()
+            .ok_or_else(|| Failure::invalid("model is NULL"))?;
+        let label = model.labels.get(index).ok_or_else(|| {
             Failure::new(
                 INFERENCE_ERR_OUT_OF_RANGE,
-                format!("label {index} of {}", LABELS.len()),
+                format!("label {index} of {}", model.labels.len()),
             )
         })?;
         write_opt(out_label, label.as_ptr());
@@ -223,6 +232,7 @@ unsafe fn detect_into(
         out.add(i)
             .write(Box::into_raw(Box::new(inference_layout_result {
                 detections,
+                labels: model.labels.clone(),
             })));
     }
     Ok(())
@@ -306,7 +316,7 @@ pub unsafe extern "C" fn inference_layout_result_detection(
             )
         })?;
         write_opt(out_class_id, d.class_id as i32);
-        write_opt(out_label, label_ptr(d.class_id));
+        write_opt(out_label, result.labels[d.class_id].as_ptr());
         write_opt(out_score, d.score);
         if !out_bbox.is_null() {
             std::ptr::copy_nonoverlapping(d.bbox.as_ptr(), out_bbox, 4);
