@@ -333,3 +333,24 @@ a big part. Both resize passes now run parallel over rows, and `detect_batch` pr
 
 Parity after every step: pred_boxes max_abs <= 1.8e-5 vs HF; the six-page end-to-end comparison is identical to Run 5
 on CPU and CUDA.
+
+## Run 17 - 2026-09-25 00:10
+
+Question: why is ORT faster on CPU (0.62 s vs our 0.87 s)? Is it MKL?
+
+Commands: onnxruntime 1.30 CPU (`get_build_info`, `get_available_providers`), `SessionOptions.enable_profiling`,
+per-op-type kernel time averaged over 4 runs; CUDA EP re-measured with IO binding (all tensors on device).
+
+Findings:
+- Not MKL: plain pip build, CPU EP only, so it uses MLAS. The optimized graph contains `ReorderInput`/`ReorderOutput`:
+  convs run in MLAS's blocked NCHWc layout as direct convolutions with fused bias/activation (no im2col).
+- ORT per-run kernel time 505 ms: Conv 206.5 ms (118 convs, incl. pointwise/depthwise and fused activations);
+  everything else ~300 ms (Add 67, Where 47, Cast 31, Expand 21, Concat 20, MatMul/FusedMatMul 39, GridSample 7).
+- Ours at 8 threads: convs ~697 ms (dense 412 + pointwise 174 + depthwise 76 + activations 35), everything else
+  ~180 ms. So ORT's convs are ~3.4x ours; the non-conv rest of our model is already faster than ORT's graph.
+- CUDA with IO binding (fair, no host copies): ORT fp32 34.3 ms, TF32 31.4 ms, vs ours 26.4 ms fp32 (1.30x / 1.19x).
+  The earlier 39.4 / 36.5 ms ORT numbers included ~5 ms of host transfers.
+
+Implication: MKL only accelerates the GEMM inside our conv path (est. ~697 -> ~450 ms) and cannot reach MLAS. The CPU
+lever is the conv algorithm: an NCHWc-style direct conv with fused bias+activation (or oneDNN as an optional dep).
+Cheap side win: depthwise is 76 ms for 0.6 GFLOP (naive scalar loop; vectorize over width). ORT TensorRT EP not measured.
