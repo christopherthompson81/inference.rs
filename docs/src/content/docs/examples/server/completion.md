@@ -63,4 +63,4 @@ while True:
     print(resp)
 ```
 
-Source: [`examples/server/completion.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/completion.py)
+Source: [`examples/server/completion.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/completion.py)

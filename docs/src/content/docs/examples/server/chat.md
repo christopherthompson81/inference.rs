@@ -71,4 +71,4 @@ while True:
     messages.append({"role": "assistant", "content": resp})
 ```
 
-Source: [`examples/server/chat.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/chat.py)
+Source: [`examples/server/chat.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/chat.py)

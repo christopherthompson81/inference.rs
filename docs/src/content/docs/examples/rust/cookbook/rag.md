@@ -104,4 +104,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/cookbook/rag/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/cookbook/rag/main.rs)
+Source: [`inference/examples/cookbook/rag/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/cookbook/rag/main.rs)

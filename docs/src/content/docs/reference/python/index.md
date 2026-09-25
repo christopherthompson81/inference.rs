@@ -1,11 +1,11 @@
 ---
 title: Python API
-description: "The inference Python package."
+description: "The inference_rs Python package."
 sidebar:
   order: 6
 ---
 
-The `inference` Python package exposes the same engine that powers the `inference` CLI.
+The `inference_rs` Python package exposes the same engine that powers the `inference` CLI.
 
 ## Install
 
@@ -39,4 +39,4 @@ See [Python getting started](/guides/python/getting-started/) for a walkthrough 
 
 ---
 
-<small>Generated from [`inference-pyo3/inference_rs.pyi`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs-pyo3/mistralrs.pyi).</small>
+<small>Generated from [`inference-pyo3/inference_rs.pyi`](https://github.com/EricLBuehler/mistral.rs/blob/master/inference-pyo3/inference_rs.pyi).</small>

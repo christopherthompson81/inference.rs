@@ -238,4 +238,4 @@ if __name__ == "__main__":
     example_multi_model_setup()
 ```
 
-Source: [`examples/python/multi_model_example.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/multi_model_example.py)
+Source: [`examples/python/multi_model_example.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/multi_model_example.py)

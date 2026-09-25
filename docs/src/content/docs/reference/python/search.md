@@ -36,4 +36,4 @@ approximate(
 
 ---
 
-<small>Generated from [`inference-pyo3/inference_rs.pyi`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs-pyo3/mistralrs.pyi).</small>
+<small>Generated from [`inference-pyo3/inference_rs.pyi`](https://github.com/EricLBuehler/mistral.rs/blob/master/inference-pyo3/inference_rs.pyi).</small>

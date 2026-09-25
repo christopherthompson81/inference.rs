@@ -51,4 +51,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/web_search/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/web_search/main.rs)
+Source: [`inference/examples/advanced/web_search/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/web_search/main.rs)

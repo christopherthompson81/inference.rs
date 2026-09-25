@@ -41,4 +41,4 @@ print(res.choices[0].message.content)
 print(res.usage)
 ```
 
-Source: [`examples/python/xlora_zephyr.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/xlora_zephyr.py)
+Source: [`examples/python/xlora_zephyr.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/xlora_zephyr.py)

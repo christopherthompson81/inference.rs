@@ -76,4 +76,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/anymoe/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/anymoe/main.rs)
+Source: [`inference/examples/advanced/anymoe/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/anymoe/main.rs)

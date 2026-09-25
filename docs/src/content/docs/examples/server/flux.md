@@ -24,4 +24,4 @@ result = client.images.generate(
 print(result.data[0].url)
 ```
 
-Source: [`examples/server/flux.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/flux.py)
+Source: [`examples/server/flux.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/flux.py)

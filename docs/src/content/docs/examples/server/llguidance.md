@@ -58,4 +58,4 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
-Source: [`examples/server/llguidance.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/llguidance.py)
+Source: [`examples/server/llguidance.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/llguidance.py)

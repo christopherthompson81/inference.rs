@@ -33,4 +33,4 @@ res = runner.generate_image(
 print(res.data[0].url)
 ```
 
-Source: [`examples/python/flux.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/flux.py)
+Source: [`examples/python/flux.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/flux.py)

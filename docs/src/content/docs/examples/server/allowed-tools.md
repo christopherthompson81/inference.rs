@@ -80,4 +80,4 @@ print(f"Model called: {tool_call.function.name}")
 print(f"Arguments: {tool_call.function.arguments}")
 ```
 
-Source: [`examples/server/allowed_tools.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/allowed_tools.py)
+Source: [`examples/server/allowed_tools.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/allowed_tools.py)

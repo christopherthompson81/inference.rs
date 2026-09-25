@@ -275,4 +275,4 @@ if __name__ == "__main__":
         sys.exit(1)
 ```
 
-Source: [`examples/python/test_multi_model.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/test_multi_model.py)
+Source: [`examples/python/test_multi_model.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/test_multi_model.py)

@@ -53,4 +53,4 @@ print(res.choices[0].message.content)
 print(res.usage)
 ```
 
-Source: [`examples/python/minicpmo_2_6.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/minicpmo_2_6.py)
+Source: [`examples/python/minicpmo_2_6.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/minicpmo_2_6.py)

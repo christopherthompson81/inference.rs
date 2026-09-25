@@ -9,8 +9,7 @@ sidebar:
 
 PaddleOCR-VL document OCR: recognize one image region and print the text.
 
-The model is task-prompted. `OCR:` reads text, `Table Recognition:` returns OTSL `<fcel>`/`<nl>`
-markup, `Formula Recognition:` returns LaTeX. Pass the prompt as the second argument to switch.
+Task prompts: `OCR:` (text), `Table Recognition:` (OTSL markup), `Formula Recognition:` (LaTeX).
 
 Run with:
 `cargo run --release --example paddleocr_vl_recognize -p inference -- <image> ["Table Recognition:"]`
@@ -18,8 +17,7 @@ Run with:
 ```rust
 //! PaddleOCR-VL document OCR: recognize one image region and print the text.
 //!
-//! The model is task-prompted. `OCR:` reads text, `Table Recognition:` returns OTSL `<fcel>`/`<nl>`
-//! markup, `Formula Recognition:` returns LaTeX. Pass the prompt as the second argument to switch.
+//! Task prompts: `OCR:` (text), `Table Recognition:` (OTSL markup), `Formula Recognition:` (LaTeX).
 //!
 //! Run with:
 //! `cargo run --release --example paddleocr_vl_recognize -p inference -- <image> ["Table Recognition:"]`
@@ -27,7 +25,7 @@ Run with:
 use anyhow::{bail, Result};
 use inference::{MultimodalMessages, MultimodalModelBuilder, RequestBuilder, TextMessageRole};
 
-/// Cap generation so a pathological region cannot run away; real crops stop on EOS well under this.
+// Real crops stop on EOS well under this; the cap only stops a pathological region running away.
 const MAX_NEW_TOKENS: usize = 2048;
 
 #[tokio::main]
@@ -39,7 +37,7 @@ async fn main() -> Result<()> {
         .nth(2)
         .unwrap_or_else(|| "OCR:".to_string());
 
-    let model = MultimodalModelBuilder::new("PaddlePaddle/PaddleOCR-VL-1.5")
+    let model = MultimodalModelBuilder::new("PaddlePaddle/PaddleOCR-VL-1.6")
         .with_logging()
         .build()
         .await?;

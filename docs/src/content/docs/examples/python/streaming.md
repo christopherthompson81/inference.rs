@@ -39,4 +39,4 @@ for chunk in res:
     print(chunk.choices[0].delta.content, end="", flush=True)
 ```
 
-Source: [`examples/python/streaming.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/streaming.py)
+Source: [`examples/python/streaming.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/streaming.py)

@@ -51,4 +51,4 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
-Source: [`examples/server/phi4mm_audio.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/phi4mm_audio.py)
+Source: [`examples/server/phi4mm_audio.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/phi4mm_audio.py)

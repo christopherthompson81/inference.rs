@@ -29,4 +29,4 @@ output_path.write_bytes(response.read())
 print(f"WAV audio written to {output_path.resolve()}")
 ```
 
-Source: [`examples/server/dia.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/dia.py)
+Source: [`examples/server/dia.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/dia.py)

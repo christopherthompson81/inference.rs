@@ -51,4 +51,4 @@ print(res.choices[0].message.content)
 print(res.usage)
 ```
 
-Source: [`examples/python/llava_next.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/llava_next.py)
+Source: [`examples/python/llava_next.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/llava_next.py)

@@ -92,4 +92,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/allowed_tools/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/allowed_tools/main.rs)
+Source: [`inference/examples/advanced/allowed_tools/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/allowed_tools/main.rs)

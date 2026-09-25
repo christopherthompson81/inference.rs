@@ -308,4 +308,4 @@ if __name__ == "__main__":
     # interactive_model_selection()
 ```
 
-Source: [`examples/server/multi_model_chat.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/multi_model_chat.py)
+Source: [`examples/server/multi_model_chat.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/multi_model_chat.py)

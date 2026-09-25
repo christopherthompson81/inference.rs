@@ -63,4 +63,4 @@ if __name__ == "__main__":
     run()
 ```
 
-Source: [`examples/server/stream_completion_bench.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/stream_completion_bench.py)
+Source: [`examples/server/stream_completion_bench.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/stream_completion_bench.py)

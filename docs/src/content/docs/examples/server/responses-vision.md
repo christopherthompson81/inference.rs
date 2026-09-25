@@ -82,4 +82,4 @@ print(resp2.output_text)
 print(resp2.reasoning)
 ```
 
-Source: [`examples/server/responses_vision.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/responses_vision.py)
+Source: [`examples/server/responses_vision.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/responses_vision.py)

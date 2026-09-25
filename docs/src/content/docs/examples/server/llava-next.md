@@ -77,4 +77,4 @@ resp = completion.choices[0].message.content
 print(resp)
 ```
 
-Source: [`examples/server/llava_next.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/llava_next.py)
+Source: [`examples/server/llava_next.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/llava_next.py)

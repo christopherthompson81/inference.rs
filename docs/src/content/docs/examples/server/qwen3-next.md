@@ -42,4 +42,4 @@ while True:
     messages.append({"role": "assistant", "content": resp})
 ```
 
-Source: [`examples/server/qwen3_next.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/qwen3_next.py)
+Source: [`examples/server/qwen3_next.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/qwen3_next.py)

@@ -132,4 +132,4 @@ with TemporaryDirectory(prefix="inference-lora-") as directory:
     print(f"Unloaded {unloaded.alias} with generation CAS")
 ```
 
-Source: [`examples/python/lora.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/lora.py)
+Source: [`examples/python/lora.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/lora.py)

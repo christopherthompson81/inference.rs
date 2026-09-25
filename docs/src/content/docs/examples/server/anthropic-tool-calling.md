@@ -124,4 +124,4 @@ for block in second["content"]:
         print(block["text"])
 ```
 
-Source: [`examples/server/anthropic_tool_calling.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/anthropic_tool_calling.py)
+Source: [`examples/server/anthropic_tool_calling.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/anthropic_tool_calling.py)

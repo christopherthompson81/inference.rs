@@ -41,4 +41,4 @@ if __name__ == "__main__":
     main()
 ```
 
-Source: [`examples/python/embedding_gemma.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/embedding_gemma.py)
+Source: [`examples/python/embedding_gemma.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/embedding_gemma.py)

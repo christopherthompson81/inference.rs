@@ -77,4 +77,4 @@ resp = completion.choices[0].message.content
 print(resp)
 ```
 
-Source: [`examples/server/phi3v.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/phi3v.py)
+Source: [`examples/server/phi3v.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/phi3v.py)

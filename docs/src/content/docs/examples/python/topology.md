@@ -39,4 +39,4 @@ print(res.choices[0].message.content)
 print(res.usage)
 ```
 
-Source: [`examples/python/topology.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/topology.py)
+Source: [`examples/python/topology.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/topology.py)

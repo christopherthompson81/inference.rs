@@ -10,14 +10,14 @@ sidebar:
 PaddleOCR-VL document OCR through the OpenAI-compatible HTTP API.
 
 Start the server:
-    inference serve -p 1234 -m PaddlePaddle/PaddleOCR-VL-1.5
+    inference serve -p 1234 -m PaddlePaddle/PaddleOCR-VL-1.6
 
 ```python
 """
 PaddleOCR-VL document OCR through the OpenAI-compatible HTTP API.
 
 Start the server:
-    inference serve -p 1234 -m PaddlePaddle/PaddleOCR-VL-1.5
+    inference serve -p 1234 -m PaddlePaddle/PaddleOCR-VL-1.6
 """
 
 from openai import OpenAI
@@ -51,4 +51,4 @@ completion = client.chat.completions.create(
 print(completion.choices[0].message.content)
 ```
 
-Source: [`examples/server/paddleocr_vl.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/paddleocr_vl.py)
+Source: [`examples/server/paddleocr_vl.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/paddleocr_vl.py)

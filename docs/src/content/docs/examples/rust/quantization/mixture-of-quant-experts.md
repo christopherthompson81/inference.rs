@@ -53,4 +53,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/quantization/mixture_of_quant_experts/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/quantization/mixture_of_quant_experts/main.rs)
+Source: [`inference/examples/quantization/mixture_of_quant_experts/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/quantization/mixture_of_quant_experts/main.rs)

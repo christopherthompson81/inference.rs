@@ -257,4 +257,4 @@ if __name__ == "__main__":
     main()
 ````
 
-Source: [`examples/server/streaming_tool_calling.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/streaming_tool_calling.py)
+Source: [`examples/server/streaming_tool_calling.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/streaming_tool_calling.py)

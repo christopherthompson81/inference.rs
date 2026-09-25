@@ -72,4 +72,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/auto_device_map/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/auto_device_map/main.rs)
+Source: [`inference/examples/advanced/auto_device_map/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/auto_device_map/main.rs)

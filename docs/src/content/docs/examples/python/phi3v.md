@@ -51,4 +51,4 @@ print(res.choices[0].message.content)
 print(res.usage)
 ```
 
-Source: [`examples/python/phi3v.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/phi3v.py)
+Source: [`examples/python/phi3v.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/phi3v.py)

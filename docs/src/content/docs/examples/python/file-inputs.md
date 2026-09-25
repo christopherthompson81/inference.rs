@@ -64,4 +64,4 @@ if __name__ == "__main__":
     main()
 ```
 
-Source: [`examples/python/file_inputs.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/file_inputs.py)
+Source: [`examples/python/file_inputs.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/file_inputs.py)

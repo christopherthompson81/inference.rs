@@ -63,4 +63,4 @@ event = completion.choices[0].message.parsed
 print(event)
 ```
 
-Source: [`examples/server/openai_response_format.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/openai_response_format.py)
+Source: [`examples/server/openai_response_format.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/openai_response_format.py)

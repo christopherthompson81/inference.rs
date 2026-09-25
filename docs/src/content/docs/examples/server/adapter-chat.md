@@ -124,4 +124,4 @@ while True:
     history.append({"role": "assistant", "content": response})
 ```
 
-Source: [`examples/server/adapter_chat.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/adapter_chat.py)
+Source: [`examples/server/adapter_chat.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/adapter_chat.py)

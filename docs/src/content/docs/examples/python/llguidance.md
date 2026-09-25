@@ -63,4 +63,4 @@ print(res.choices[0].message.content)
 print(res.usage)
 ```
 
-Source: [`examples/python/llguidance.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/llguidance.py)
+Source: [`examples/python/llguidance.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/llguidance.py)

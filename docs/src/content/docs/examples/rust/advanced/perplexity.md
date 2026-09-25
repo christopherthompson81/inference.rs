@@ -48,7 +48,10 @@ struct Args {
     calibration_file: Option<PathBuf>,
 }
 
-async fn process_chunk(runner: &InferenceRs, chunk: Vec<u32>) -> anyhow::Result<(Tensor, Vec<u32>)> {
+async fn process_chunk(
+    runner: &InferenceRs,
+    chunk: Vec<u32>,
+) -> anyhow::Result<(Tensor, Vec<u32>)> {
     let (tx, mut rx) = channel(1);
 
     let request = Request::Normal(Box::new(NormalRequest {
@@ -183,4 +186,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/perplexity/main.rs`](https://github.com/EricLBuehler/mistral.rs/blob/master/mistralrs/examples/advanced/perplexity/main.rs)
+Source: [`inference/examples/advanced/perplexity/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/perplexity/main.rs)

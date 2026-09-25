@@ -98,4 +98,4 @@ if __name__ == "__main__":
     main()
 ```
 
-Source: [`examples/server/agentic_tool_rounds.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/server/agentic_tool_rounds.py)
+Source: [`examples/server/agentic_tool_rounds.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server/agentic_tool_rounds.py)

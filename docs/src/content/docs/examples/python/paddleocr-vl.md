@@ -18,7 +18,7 @@ from inference_rs import ChatCompletionRequest, MultimodalArchitecture, Runner, 
 
 runner = Runner(
     which=Which.MultimodalPlain(
-        model_id="PaddlePaddle/PaddleOCR-VL-1.5",
+        model_id="PaddlePaddle/PaddleOCR-VL-1.6",
         arch=MultimodalArchitecture.PaddleOcrVl,
     ),
 )
@@ -53,4 +53,4 @@ print(res.choices[0].message.content)
 print(res.usage)
 ```
 
-Source: [`examples/python/paddleocr_vl.py`](https://github.com/EricLBuehler/mistral.rs/blob/master/examples/python/paddleocr_vl.py)
+Source: [`examples/python/paddleocr_vl.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/paddleocr_vl.py)
