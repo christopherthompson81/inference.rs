@@ -23,7 +23,8 @@ use axum::{
 };
 use either::Either;
 use inference_core::{
-    AgenticToolCallData, AgenticToolCallPhase, ChatCompletionResponse, InferenceRs, Request, Response,
+    AgenticToolCallData, AgenticToolCallPhase, ChatCompletionResponse, InferenceRs, Request,
+    Response,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

@@ -21,10 +21,10 @@ use crate::{
     sequence::{SeqStepType, StopReason},
     tools, SchedulerConfig, DEBUG,
 };
+use inference_quant::RingConfig;
 use interprocess::local_socket::{traits::Listener, ListenerOptions};
 use llguidance::ParserFactory;
 pub use logger::IntervalLogger;
-use inference_quant::RingConfig;
 use rand::SeedableRng;
 use rand_isaac::Isaac64Rng;
 use serde::{Deserialize, Serialize};
@@ -814,7 +814,9 @@ impl Engine {
                         .unwrap_or_else(|| "default".to_string()),
                 })
             })?;
-        selection.pin(&runtime).map_err(crate::InferenceRsError::from)
+        selection
+            .pin(&runtime)
+            .map_err(crate::InferenceRsError::from)
     }
 
     async fn prepare_request_for_dispatch(&self, mut request: Request) -> Option<Request> {

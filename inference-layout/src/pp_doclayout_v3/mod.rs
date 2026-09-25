@@ -77,7 +77,11 @@ impl PPDocLayoutV3Detector {
             )?
         };
         let model = PPDocLayoutV3::new(cfg, (preprocessor.height, preprocessor.width), vb)?;
-        let pool = if device.is_cpu() { cpu_pool().map(Pool::Shared) } else { None };
+        let pool = if device.is_cpu() {
+            cpu_pool().map(Pool::Shared)
+        } else {
+            None
+        };
         Ok(Self {
             model,
             preprocessor,

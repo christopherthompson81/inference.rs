@@ -5,9 +5,9 @@ use either::Either;
 use indexmap::IndexMap;
 use inference_core::{
     speech_utils, AdapterSelection, AgentPermission, AgentToolKind, Constraint,
-    DiffusionGenerationParams, DrySamplingParams, ImageGenerationResponseFormat, MessageContent,
-    InferenceRs, ModelCategory, NormalRequest, ReasoningEffort, Request, RequestMessage, Response,
-    ResponseOk, SamplingParams, Usage, WebSearchOptions, TERMINATE_ALL_NEXT_STEP,
+    DiffusionGenerationParams, DrySamplingParams, ImageGenerationResponseFormat, InferenceRs,
+    MessageContent, ModelCategory, NormalRequest, ReasoningEffort, Request, RequestMessage,
+    Response, ResponseOk, SamplingParams, Usage, WebSearchOptions, TERMINATE_ALL_NEXT_STEP,
 };
 use regex::Regex;
 use rustyline::{error::ReadlineError, history::History, DefaultEditor, Editor, Helper};

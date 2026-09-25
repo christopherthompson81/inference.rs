@@ -54,7 +54,8 @@ const CUDA_GRAPH_SPEC_STATE_BUDGET_FLOOR_PERCENT: usize = 4;
 const CUDA_GRAPH_SPEC_STATE_BUDGET_CEILING_PERCENT: usize = 8;
 // C128 buckets plus one extra max-batch context graph require just under ten largest entries.
 const CUDA_GRAPH_SPEC_STATE_WORKING_SET_MULTIPLIER: usize = 10;
-const CUDA_GRAPH_SPEC_STATE_BUDGET_BYTES_ENV: &str = "INFERENCE_RS_CUDA_GRAPH_SPEC_STATE_BUDGET_BYTES";
+const CUDA_GRAPH_SPEC_STATE_BUDGET_BYTES_ENV: &str =
+    "INFERENCE_RS_CUDA_GRAPH_SPEC_STATE_BUDGET_BYTES";
 const CUDA_PHASE_TIMINGS_ENV: &str = "INFERENCE_RS_CUDA_PHASE_TIMINGS";
 const CUDA_GRAPH_EVENTS_METRIC: &str = "inference_cuda_graph_events_total";
 const CUDA_GRAPH_DISPATCH_METRIC: &str = "inference_cuda_graph_dispatch_total";

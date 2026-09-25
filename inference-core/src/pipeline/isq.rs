@@ -1338,7 +1338,10 @@ fn write_uqff_chat_metadata(
 
 fn uqff_safetensors_metadata() -> HashMap<String, String> {
     HashMap::from([
-        (UQFF_METADATA_PRODUCER.to_string(), "inference.rs".to_string()),
+        (
+            UQFF_METADATA_PRODUCER.to_string(),
+            "inference.rs".to_string(),
+        ),
         (
             UQFF_METADATA_VERSION.to_string(),
             format!(

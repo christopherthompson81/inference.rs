@@ -15,8 +15,8 @@ use axum::{
     response::IntoResponse,
 };
 use http_body::{Body as HttpBody, Frame};
-use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use inference_core::REQUEST_QUEUE_DURATION_METRIC;
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use std::error::Error as _;
 use std::pin::Pin;
 use std::sync::OnceLock;
@@ -26,11 +26,11 @@ use tracing::{debug, info};
 
 use crate::{
     handler_core::{openai_error_response, ApiError, ApiErrorKind, ResponseErrorMessage},
+    inference_server_router_builder::DEFAULT_MAX_BODY_LIMIT,
     lora_adapters::{
         is_resolvable_lora_adapter_model, lifecycle_body_too_large_response,
         list_lora_adapter_models,
     },
-    inference_server_router_builder::DEFAULT_MAX_BODY_LIMIT,
     streaming::{StreamOutcome, StreamOutcomeHandle},
     types::SharedInferenceRsState,
 };

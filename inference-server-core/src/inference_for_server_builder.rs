@@ -8,7 +8,7 @@ use inference_core::{
     get_auto_device_map_params, get_model_dtype, get_tgt_non_granular_index, paged_attn_supported,
     parse_isq_value, plan_paged_kv, reserve_external_mtp_memory_with_runtime, AutoDeviceMapParams,
     DefaultSchedulerMethod, DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting,
-    HfConfigOverrides, Loader, LoaderBuilder, McpClientConfig, MemoryGpuConfig, InferenceRsBuilder,
+    HfConfigOverrides, InferenceRsBuilder, Loader, LoaderBuilder, McpClientConfig, MemoryGpuConfig,
     ModelLoaderConfig, ModelSelected, MtpConfig, MtpRuntimeConfig, PagedAttentionConfig,
     PagedCacheType, PagedKvModelRequest, SchedulerConfig, SearchCallback, SearchEmbeddingModel,
     TokenSource,

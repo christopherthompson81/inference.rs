@@ -442,7 +442,9 @@ fn resolve_anthropic_thinking(
 
     if let (Some(native), Some(extension)) = (native, enable_thinking) {
         if native != extension {
-            anyhow::bail!("Anthropic `thinking.type` conflicts with inference.rs `enable_thinking`.");
+            anyhow::bail!(
+                "Anthropic `thinking.type` conflicts with inference.rs `enable_thinking`."
+            );
         }
     }
 

@@ -765,7 +765,8 @@ mod tests {
             StatusCode::CONFLICT
         );
         assert_eq!(
-            unload_model_result("model".to_string(), Err(InferenceRsError::EnginePoisoned),).status(),
+            unload_model_result("model".to_string(), Err(InferenceRsError::EnginePoisoned),)
+                .status(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
     }
@@ -818,7 +819,9 @@ mod tests {
     async fn internal_model_errors_do_not_expose_details() {
         let response = reload_model_result(
             "model".to_string(),
-            Err(InferenceRsError::ReloadFailed("private failure".to_string())),
+            Err(InferenceRsError::ReloadFailed(
+                "private failure".to_string(),
+            )),
         );
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 

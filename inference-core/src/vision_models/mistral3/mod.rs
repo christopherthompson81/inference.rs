@@ -24,8 +24,8 @@ use crate::{
 use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::{Linear, Module};
 pub use config::Mistral3Config;
-pub use inputs_processor::Mistral3Processor;
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
+pub use inputs_processor::Mistral3Processor;
 use models::mistral::Model as Mistral;
 use vision::Mistral3VisionModel;
 

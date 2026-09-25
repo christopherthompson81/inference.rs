@@ -253,7 +253,10 @@ impl McpCallError {
     }
 }
 
-async fn call_chat_tool(state: &SharedInferenceRsState, args: Value) -> Result<Value, McpCallError> {
+async fn call_chat_tool(
+    state: &SharedInferenceRsState,
+    args: Value,
+) -> Result<Value, McpCallError> {
     let chat_req: ChatCompletionRequest = serde_json::from_value(args)
         .map_err(|error| McpCallError::InvalidParams(error.to_string()))?;
 

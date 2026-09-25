@@ -5,8 +5,8 @@ use std::{
 
 use candle_core::{quantized::QMatMul, Tensor};
 use candle_nn::{Conv2d, Embedding, LayerNorm, Linear};
-use itertools::Itertools;
 use inference_quant::QuantMethod;
+use itertools::Itertools;
 
 use crate::layers::{F32RmsNorm, GemmaRmsNorm, QLinear, RmsNorm, ScaledEmbedding};
 

@@ -17,14 +17,14 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use either::Either;
 use image::DynamicImage;
 use indexmap::IndexMap;
-use itertools::Itertools;
 use inference_core::{
     resolve_reasoning_controls, AgentPermission, AgentToolApprovalHandler,
     AgentToolApprovalNotifier, AgenticToolCallData, AgenticToolCallPhase, AgenticToolCallRecord,
-    ChatCompletionChunkResponse, ChatCompletionResponse, Constraint, MessageContent, InferenceRs,
+    ChatCompletionChunkResponse, ChatCompletionResponse, Constraint, InferenceRs, MessageContent,
     ModelCategory, NormalRequest, ReasoningEffort, Request, RequestMessage, Response,
     SamplingParams,
 };
+use itertools::Itertools;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -38,9 +38,9 @@ use crate::{
         openai_error_response, request_model_override, send_request_with_model, ApiError,
         ApiErrorKind, JsonError, ModelErrorMessage,
     },
+    inference_server_router_builder::AgenticDefaults,
     input_files::{resolve_input_file, InputFileSpec},
     lora_adapters::resolve_lora_adapter_model,
-    inference_server_router_builder::AgenticDefaults,
     openai::{
         normalize_chat_completion_tools, normalize_responses_tools, validate_openai_tool_choice,
         ChatCompletionChunkResponseBody, ChatCompletionRequest, ChatCompletionResponseBody,
@@ -1334,7 +1334,10 @@ async fn process_non_streaming_response_with_model(
 }
 
 /// Matches and processes different types of model responses into appropriate chat completion responses.
-pub fn match_responses(state: SharedInferenceRsState, response: Response) -> ChatCompletionResponder {
+pub fn match_responses(
+    state: SharedInferenceRsState,
+    response: Response,
+) -> ChatCompletionResponder {
     match response {
         Response::InternalError(e) => {
             InferenceRs::maybe_log_error(state, &*e);

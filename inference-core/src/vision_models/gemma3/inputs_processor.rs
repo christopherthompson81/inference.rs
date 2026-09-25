@@ -10,8 +10,8 @@ use std::{
 
 use candle_core::{Device, Result, Tensor};
 use image::{DynamicImage, GenericImageView};
-use itertools::Itertools;
 use inference_vision::{ApplyTransforms, Normalize, Rescale, ToTensorNoNorm, Transforms};
+use itertools::Itertools;
 use regex::Regex;
 use tokenizers::Tokenizer;
 
