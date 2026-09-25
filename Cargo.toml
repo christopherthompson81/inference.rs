@@ -1,4 +1,5 @@
 [workspace]
+exclude = ["third_party/cudaforge"]
 members = [
     "inference-server-core",
     "inference-cli",
@@ -222,3 +223,7 @@ debug = true
 [profile.dev]
 debug = true
 opt-level = 3
+
+# cudaforge with cargo jobserver support, so kernel crates building in parallel share `cargo -j`; see third_party/cudaforge/README.md
+[patch.crates-io]
+cudaforge = { path = "third_party/cudaforge" }
