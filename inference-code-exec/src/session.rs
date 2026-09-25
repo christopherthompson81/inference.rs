@@ -14,6 +14,7 @@ use crate::output::CodeExecResult;
 use crate::protocol::{ExecuteOutputSpec, ExecuteResponse, ExecutorRequest, ResetResponse};
 
 /// After SIGINT, wait this long for the child to return before SIGKILL.
+#[cfg(unix)]
 const SIGINT_GRACE_WAIT: Duration = Duration::from_secs(3);
 const STDERR_DRAIN_WAIT: Duration = Duration::from_millis(20);
 const STDERR_TAIL_LINES: usize = 32;

@@ -1,6 +1,8 @@
 //! Self-management commands for `update` and `uninstall`.
 
-use anyhow::{bail, Context, Result};
+#[cfg(unix)]
+use anyhow::Context;
+use anyhow::{bail, Result};
 use std::path::PathBuf;
 
 #[cfg(unix)]
@@ -14,6 +16,7 @@ fn managed_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".inference-rs"))
 }
 
+#[cfg(unix)]
 fn bin_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".local").join("bin"))
 }

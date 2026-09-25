@@ -374,6 +374,7 @@ fn adapter_task_error(action: &str, error: tokio::task::JoinError) -> LoraAdapte
     )
 }
 
+#[cfg_attr(not(unix), allow(unused_variables))]
 fn verify_open_file(file: &File, path: &Path, filename: &str) -> Result<(), LoraAdapterApiError> {
     let opened = file
         .metadata()

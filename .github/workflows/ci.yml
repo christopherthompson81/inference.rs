@@ -1,20 +1,22 @@
-on: 
+on:
   schedule:
       - cron: '0 0 * * 1'
   push:
-    branches: 
+    branches:
       - master
   pull_request:
-    branches: 
+    branches:
       - master
   workflow_dispatch:
 
 name: Continuous integration
 
-# Suppress .cargo/config.toml target-cpu=native: ring asserts baseline aes/sha2 on aarch64-apple-darwin, native in runner VMs drops them
+# Overriding RUSTFLAGS also drops .cargo/config.toml target-cpu=native, which breaks ring on runner VMs
 env:
-  RUSTFLAGS: ""
+  RUSTFLAGS: "-D warnings"
 
+# Caches are saved from master only, so PRs restore master's and do not churn the repo cache limit
+# Test Suite runs from tests.yml on demand, and Docs runs locally via scripts/local_ci.sh; both are too slow per PR
 jobs:
   check:
     name: Check
@@ -22,113 +24,58 @@ jobs:
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macOS-latest]
-        rust: [stable]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          profile: minimal
-          toolchain: ${{ matrix.rust }}
-          override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: check
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - run: cargo check
 
   check-metal:
     name: Check (metal)
     runs-on: macOS-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: check
-          args: --workspace --features metal
-
-  test:
-    name: Test Suite
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, windows-latest, macOS-latest]
-        rust: [stable]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: ${{ matrix.rust }}
-          override: true
-      - uses: actions-rs/cargo@v1
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      # iOS/tvOS metallibs triple the shader work; macOS alone still catches shader compile errors
+      - run: cargo check --workspace --features metal
         env:
-          TESTS_HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        with:
-          command: test
-          args: -p inference-core -p inference-quant -p inference-vision
+          INFERENCE_RS_METAL_PLATFORMS: macos
 
   fmt:
     name: Rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - run: rustup component add rustfmt
-      - uses: actions-rs/cargo@v1
-        with:
-          command: fmt
-          args: --all -- --check
+          components: rustfmt
+      - run: cargo fmt --all -- --check
 
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - run: rustup component add clippy
-      - uses: actions-rs/cargo@v1
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
         with:
-          command: clippy
-          args: --workspace --tests --examples -- -D warnings
-
-  docs:
-    name: Docs
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
-      - uses: actions-rs/cargo@v1
-        with:
-          command: doc
-          args: --workspace
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - run: cargo clippy --workspace --tests --examples -- -D warnings
 
   typos:
     name: Typos
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions-rs/toolchain@v1
-        with:
-          profile: minimal
-          toolchain: stable
-          override: true
+      - uses: actions/checkout@v5
       - name: Typos check with custom config file
-        uses: crate-ci/typos@master
+        uses: crate-ci/typos@v1.50.2
         with:
           config: .typos.toml
 
@@ -136,7 +83,7 @@ jobs:
     name: Doc Links
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Check for docs/*.md links outside docs/
         run: |
           if grep -rn '(docs/[^)]*\.md' --include='*.md' --exclude-dir=docs .; then
@@ -147,10 +94,3 @@ jobs:
   # No pinned-MSRV job: CI and release always build with the latest stable toolchain. The MSRV is
   # declared in Cargo.toml (rust-version) and docs, and enforced for source installs by install.sh /
   # install.ps1, which update Rust to meet it.
-
-  # run `mlc` (`cargo install mlc`)
-  # markdown-link-check:
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v4
-  #     - uses: gaurav-nelson/github-action-markdown-link-check@v1
