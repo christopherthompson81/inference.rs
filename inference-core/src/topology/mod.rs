@@ -2,8 +2,8 @@ use std::{fs, io::Read, ops::Range, path::Path};
 
 use candle_core::Device;
 use indexmap::IndexMap;
-use itertools::Itertools;
 use inference_quant::{ImmediateIsqOverride, IsqType};
+use itertools::Itertools;
 use regex::Regex;
 use serde::Deserialize;
 

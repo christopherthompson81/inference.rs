@@ -9,11 +9,11 @@ use std::{
 
 use candle_core::{Context, DType, Device, Result, Tensor};
 use image::{imageops::FilterType, DynamicImage};
-use itertools::Itertools;
 use inference_vision::{
     ApplyTensorTransforms, ApplyTransforms, Normalize, Rescale, TensorTransforms, ToTensorNoNorm,
     Transforms,
 };
+use itertools::Itertools;
 use tokenizers::Tokenizer;
 
 use crate::{

@@ -744,7 +744,9 @@ impl Model {
         let dtype = vb_m.dtype();
 
         if !cfg.mlp_only_layers.is_empty() {
-            candle_core::bail!("Qwen3Next `mlp_only_layers` is not implemented yet in inference.rs.");
+            candle_core::bail!(
+                "Qwen3Next `mlp_only_layers` is not implemented yet in inference.rs."
+            );
         }
 
         let embed_tokens = embedding_with_legacy_tied_uqff(

@@ -6,8 +6,8 @@ use std::{
 
 use candle_core::{DType, Device, Result, Tensor};
 pub use config::MiniCpmOConfig;
-pub use inputs_processor::MiniCpmOProcessor;
 use inference_quant::ShardedVarBuilder;
+pub use inputs_processor::MiniCpmOProcessor;
 use resampler::Resampler;
 
 use crate::attention::AttentionMask;

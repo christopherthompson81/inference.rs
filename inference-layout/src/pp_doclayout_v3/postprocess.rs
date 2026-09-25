@@ -1,12 +1,10 @@
 use candle_core::{DType, Result, Tensor};
 use serde::Serialize;
 
-use super::config::LABELS;
-
 #[derive(Debug, Clone, Serialize)]
 pub struct LayoutDetection {
     pub class_id: usize,
-    pub label: &'static str,
+    pub label: String,
     pub score: f32,
     /// `[x1, y1, x2, y2]` in original image pixels.
     pub bbox: [f32; 4],
@@ -38,8 +36,10 @@ pub fn order_ranks(order_logits: &[Vec<f32>]) -> Vec<usize> {
     rank
 }
 
-pub struct PostprocessArgs {
+pub struct PostprocessArgs<'a> {
     pub threshold: f32,
+    /// Class names by id; one per logit column.
+    pub labels: &'a [String],
     /// `(width, height)` of the source image.
     pub orig_size: (u32, u32),
 }
@@ -49,7 +49,7 @@ pub fn postprocess(
     logits: &Tensor,
     boxes: &Tensor,
     order_logits: &Tensor,
-    args: &PostprocessArgs,
+    args: &PostprocessArgs<'_>,
 ) -> Result<Vec<LayoutDetection>> {
     let logits = logits.to_dtype(DType::F32)?.to_vec2::<f32>()?;
     let boxes = boxes.to_dtype(DType::F32)?.to_vec2::<f32>()?;
@@ -81,7 +81,7 @@ pub fn postprocess(
             ];
             let det = LayoutDetection {
                 class_id,
-                label: LABELS.get(class_id).copied().unwrap_or("unknown"),
+                label: args.labels[class_id].clone(),
                 score,
                 bbox,
                 reading_order: 0,

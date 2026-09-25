@@ -5,8 +5,8 @@ use std::{any::Any, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
 use image::{imageops::FilterType, DynamicImage, GenericImage, GenericImageView, Rgba};
-use itertools::Itertools;
 use inference_vision::{ApplyTransforms, Normalize, ToTensor, Transforms};
+use itertools::Itertools;
 use regex_automata::meta::Regex;
 use tokenizers::Tokenizer;
 

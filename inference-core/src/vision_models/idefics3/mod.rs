@@ -11,8 +11,8 @@ use std::{
 
 use candle_core::{DType, Device, Result, Tensor, D};
 pub use config::Idefics3Config;
-pub use inputs_processor::Idefics3Processor;
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
+pub use inputs_processor::Idefics3Processor;
 use vision::{Idefics3Connector, Idefics3VisionTransformer};
 
 use crate::attention::AttentionMask;

@@ -8,7 +8,8 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use inference_core::{
-    File as CoreFile, FileContent, FileSource, InferenceRs, InferenceRsError, FILE_PURPOSE_USER_DATA,
+    File as CoreFile, FileContent, FileSource, InferenceRs, InferenceRsError,
+    FILE_PURPOSE_USER_DATA,
 };
 use serde::Serialize;
 use utoipa::ToSchema;

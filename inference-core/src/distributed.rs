@@ -1,11 +1,11 @@
 use anyhow::Context;
 use candle_core::{DType, Device};
 use core::ffi::c_char;
+pub use inference_quant::distributed::{use_nccl, use_ring};
+use inference_quant::{RingConfig, ShardedVarBuilder};
 use interprocess::local_socket::traits::{Listener, Stream};
 use interprocess::local_socket::{GenericNamespaced, Name, ToNsName};
 use interprocess::local_socket::{ListenerOptions, Stream as LocalStream};
-pub use inference_quant::distributed::{use_nccl, use_ring};
-use inference_quant::{RingConfig, ShardedVarBuilder};
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 use std::env;
@@ -711,7 +711,9 @@ pub(crate) fn prepare_distributed_mapper<T: DeviceMappedModelLoader + IsqModelLo
             let n_nodes = usize::from_str(&n_nodes).context("INFERENCE_RS_MN_HEAD_NUM_WORKERS")?;
             info!("Head node managing {n_nodes} workers.");
             let Ok(port) = env::var("INFERENCE_RS_MN_HEAD_PORT") else {
-                anyhow::bail!("Got INFERENCE_RS_MN_HEAD_NUM_WORKERS, expected INFERENCE_RS_MN_HEAD_PORT");
+                anyhow::bail!(
+                    "Got INFERENCE_RS_MN_HEAD_NUM_WORKERS, expected INFERENCE_RS_MN_HEAD_PORT"
+                );
             };
             info!("Head node initializing connection on {port}.");
             let server = inference_quant::Server::new(
@@ -731,7 +733,9 @@ pub(crate) fn prepare_distributed_mapper<T: DeviceMappedModelLoader + IsqModelLo
 
     let rank_offset = if env::var("INFERENCE_RS_MN_WORKER_SERVER_ADDR").is_ok() {
         let Ok(node_id) = env::var("INFERENCE_RS_MN_WORKER_ID") else {
-            anyhow::bail!("Got INFERENCE_RS_MN_WORKER_SERVER_ADDR, expected INFERENCE_RS_MN_WORKER_ID");
+            anyhow::bail!(
+                "Got INFERENCE_RS_MN_WORKER_SERVER_ADDR, expected INFERENCE_RS_MN_WORKER_ID"
+            );
         };
         let node_id = usize::from_str(&node_id).context("INFERENCE_RS_MN_WORKER_ID")?;
         info!("Worker ID is {node_id}.");

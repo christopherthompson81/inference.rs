@@ -34,7 +34,10 @@ struct Args {
     calibration_file: Option<PathBuf>,
 }
 
-async fn process_chunk(runner: &InferenceRs, chunk: Vec<u32>) -> anyhow::Result<(Tensor, Vec<u32>)> {
+async fn process_chunk(
+    runner: &InferenceRs,
+    chunk: Vec<u32>,
+) -> anyhow::Result<(Tensor, Vec<u32>)> {
     let (tx, mut rx) = channel(1);
 
     let request = Request::Normal(Box::new(NormalRequest {

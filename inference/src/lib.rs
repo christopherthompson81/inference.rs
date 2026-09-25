@@ -237,11 +237,6 @@ pub use embedding_model::{EmbeddingModelBuilder, UqffEmbeddingModelBuilder};
 pub use gguf::GgufModelBuilder;
 pub use gguf_lora_model::GgufLoraModelBuilder;
 pub use gguf_xlora_model::GgufXLoraModelBuilder;
-pub use lora_model::LoraModelBuilder;
-pub use messages::{
-    EmbeddingRequest, EmbeddingRequestBuilder, EmbeddingRequestInput, InputFile,
-    MultimodalMessages, RequestBuilder, RequestLike, TextMessageRole, TextMessages,
-};
 pub use inference_core::{
     AdapterGenerationId, AdapterSelection, LoraAdapterError, LoraAdapterInfo,
     LoraAdapterLoadPolicy, LoraAdapterRoute, LoraAdapterSpec, LoraResidentGenerationInfo,
@@ -269,6 +264,11 @@ pub use inference_core::{
 };
 pub use inference_core::{SerializedSession, SerializedVideo};
 pub use inference_core::{INFERENCE_RS_GIT_REVISION, INFERENCE_RS_VERSION};
+pub use lora_model::LoraModelBuilder;
+pub use messages::{
+    EmbeddingRequest, EmbeddingRequestBuilder, EmbeddingRequestInput, InputFile,
+    MultimodalMessages, RequestBuilder, RequestLike, TextMessageRole, TextMessages,
+};
 pub use model::{best_device, Model};
 pub use model_builder_trait::{AnyModelBuilder, MultiModelBuilder};
 pub use multimodal_model::{MultimodalModelBuilder, UqffMultimodalModelBuilder};
@@ -307,7 +307,7 @@ pub use inference_core::{
 
 // ========== Config Types ==========
 pub use inference_core::{
-    DefaultSchedulerMethod, IsqType, MemoryGpuConfig, InferenceRsConfig, ModelDType,
+    DefaultSchedulerMethod, InferenceRsConfig, IsqType, MemoryGpuConfig, ModelDType,
     PagedAttentionConfig, PagedCacheType, SchedulerConfig, WebSearchOptions,
 };
 
@@ -353,7 +353,7 @@ pub use inference_core::{MultimodalLoaderType, NormalLoaderType};
 pub use inference_core::TokenSource;
 
 // ========== Engine (Advanced) ==========
-pub use inference_core::{IntervalLogger, InferenceRs, RequestMessage, ResponseOk};
+pub use inference_core::{InferenceRs, IntervalLogger, RequestMessage, ResponseOk};
 
 // ========== Utilities ==========
 pub use inference_core::{initialize_logging, paged_attn_supported, parse_isq_value};

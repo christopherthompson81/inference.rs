@@ -6,9 +6,9 @@ use tracing::info;
 
 use inference_core::initialize_logging;
 use inference_server_core::{
-    metrics::{install_prometheus_recorder, observe_http, ObservabilityState},
     inference_for_server_builder::{InferenceRsForServerBuilder, ModelConfig},
     inference_server_router_builder::{InferenceRsServerRouterBuilder, DEFAULT_MAX_BODY_LIMIT},
+    metrics::{install_prometheus_recorder, observe_http, ObservabilityState},
 };
 
 use crate::args::{MatformerSelection, RuntimeOptions};

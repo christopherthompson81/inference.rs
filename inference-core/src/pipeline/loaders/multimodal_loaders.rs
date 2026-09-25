@@ -8,9 +8,9 @@ use anyhow::Result;
 use candle_core::{DType, Device, Tensor, D};
 use candle_nn::Conv2dConfig;
 use image::{ColorType, DynamicImage};
-use itertools::Itertools;
 use inference_quant::log::once_log_debug;
 use inference_quant::ShardedVarBuilder;
+use itertools::Itertools;
 
 #[cfg(feature = "pyo3_macros")]
 use pyo3::pyclass;

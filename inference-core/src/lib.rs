@@ -219,8 +219,8 @@ pub use tools::{
 };
 pub use topology::{LayerTopology, Topology};
 pub use utils::debug::{
-    default_inference_filter, initialize_logging, initialize_logging_with_filter,
-    initialize_inference_logging, LogVerbosity,
+    default_inference_filter, initialize_inference_logging, initialize_logging,
+    initialize_logging_with_filter, LogVerbosity,
 };
 pub use utils::memory_usage::MemoryUsage;
 pub use utils::normal::{ModelDType, TryIntoDType};
@@ -2026,7 +2026,10 @@ impl InferenceRs {
     }
 
     /// All stored session IDs. SDK-only, not exposed via HTTP.
-    pub fn list_session_ids(&self, model_id: Option<&str>) -> Result<Vec<String>, InferenceRsError> {
+    pub fn list_session_ids(
+        &self,
+        model_id: Option<&str>,
+    ) -> Result<Vec<String>, InferenceRsError> {
         let store = self.get_session_store(model_id)?;
         let guard = store.lock().map_err(|_| InferenceRsError::EnginePoisoned)?;
         Ok(guard.list_ids())
@@ -2887,7 +2890,10 @@ impl InferenceRs {
     }
 
     /// Get the status of a model, or None if not found
-    pub fn get_model_status(&self, model_id: &str) -> Result<Option<ModelStatus>, InferenceRsError> {
+    pub fn get_model_status(
+        &self,
+        model_id: &str,
+    ) -> Result<Option<ModelStatus>, InferenceRsError> {
         let resolved_model_id = self.resolve_alias(model_id)?;
         // Check if reloading
         {

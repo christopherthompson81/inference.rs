@@ -91,6 +91,21 @@ impl PPDocLayoutV3Config {
     pub fn num_labels(&self) -> usize {
         self.id2label.len()
     }
+
+    /// Class names by id: the Paddle names for the stock 25-class head, otherwise the config's `id2label`.
+    pub fn labels(&self) -> Vec<String> {
+        if self.num_labels() == LABELS.len() {
+            return LABELS.iter().map(|l| l.to_string()).collect();
+        }
+        (0..self.num_labels())
+            .map(|i| {
+                self.id2label
+                    .get(&i.to_string())
+                    .cloned()
+                    .unwrap_or_else(|| format!("class_{i}"))
+            })
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

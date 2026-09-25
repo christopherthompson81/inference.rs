@@ -136,6 +136,7 @@ fn main() -> Result<()> {
             &out.order_logits.get(0)?,
             &PostprocessArgs {
                 threshold: DEFAULT_THRESHOLD,
+                labels: det.labels(),
                 orig_size: (w, h),
             },
         )?;

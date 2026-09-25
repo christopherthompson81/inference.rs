@@ -51,8 +51,15 @@ pub struct PPDocLayoutV3Detector {
     model: PPDocLayoutV3,
     preprocessor: Preprocessor,
     device: Device,
-    /// CPU only: the shared physical-core pool from `cpu_pool`.
-    pool: Option<&'static rayon::ThreadPool>,
+    pool: Option<Pool>,
+    labels: Vec<String>,
+}
+
+enum Pool {
+    /// The process-wide physical-core pool from `cpu_pool`.
+    Shared(&'static rayon::ThreadPool),
+    /// Set by `with_cpu_threads`.
+    Owned(rayon::ThreadPool),
 }
 
 impl PPDocLayoutV3Detector {
@@ -70,20 +77,44 @@ impl PPDocLayoutV3Detector {
                 device,
             )?
         };
+        let labels = cfg.labels();
         let model = PPDocLayoutV3::new(cfg, (preprocessor.height, preprocessor.width), vb)?;
-        let pool = if device.is_cpu() { cpu_pool() } else { None };
+        let pool = if device.is_cpu() {
+            cpu_pool().map(Pool::Shared)
+        } else {
+            None
+        };
         Ok(Self {
             model,
             preprocessor,
             device: device.clone(),
             pool,
+            labels,
         })
+    }
+
+    /// Class names by id, as used in `LayoutDetection::label`.
+    pub fn labels(&self) -> &[String] {
+        &self.labels
+    }
+
+    /// Gives this detector its own `threads`-thread CPU pool instead of the shared physical-core one; no-op off CPU.
+    pub fn with_cpu_threads(mut self, threads: usize) -> Result<Self> {
+        if self.device.is_cpu() {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads.max(1))
+                .build()
+                .map_err(candle_core::Error::wrap)?;
+            self.pool = Some(Pool::Owned(pool));
+        }
+        Ok(self)
     }
 
     /// Runs `f` on the detector's CPU pool; wrap direct `model()` calls in this to get the same threading as `detect`.
     pub fn install<R: Send>(&self, f: impl FnOnce() -> R + Send) -> R {
         match &self.pool {
-            Some(pool) => pool.install(f),
+            Some(Pool::Shared(pool)) => pool.install(f),
+            Some(Pool::Owned(pool)) => pool.install(f),
             None => f(),
         }
     }
@@ -133,6 +164,7 @@ impl PPDocLayoutV3Detector {
             .map(|(i, im)| {
                 let args = PostprocessArgs {
                     threshold,
+                    labels: &self.labels,
                     orig_size: im.dimensions(),
                 };
                 postprocess::postprocess(&logits.get(i)?, &boxes.get(i)?, &order.get(i)?, &args)

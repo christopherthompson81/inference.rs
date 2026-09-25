@@ -7,7 +7,7 @@ use axum::{
     response::IntoResponse,
 };
 use inference_core::{
-    LoraAdapterError, InferenceRsError, Request, Response, ServiceUnavailableError,
+    InferenceRsError, LoraAdapterError, Request, Response, ServiceUnavailableError,
 };
 use serde::Serialize;
 use tokio::sync::mpsc::{channel, Receiver, Sender};

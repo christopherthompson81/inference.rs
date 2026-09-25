@@ -3396,8 +3396,10 @@ mod tests {
             },
         ];
 
-        let warmup =
-            blockwise_fp8_bench_iterations("INFERENCE_RS_BLOCKWISE_FP8_BENCH_WARMUP", DEFAULT_WARMUP)?;
+        let warmup = blockwise_fp8_bench_iterations(
+            "INFERENCE_RS_BLOCKWISE_FP8_BENCH_WARMUP",
+            DEFAULT_WARMUP,
+        )?;
         let iterations = blockwise_fp8_bench_iterations(
             "INFERENCE_RS_BLOCKWISE_FP8_BENCH_ITERATIONS",
             DEFAULT_ITERATIONS,
@@ -3497,8 +3499,10 @@ mod tests {
             },
         ];
 
-        let warmup =
-            blockwise_fp8_bench_iterations("INFERENCE_RS_BLOCKWISE_FP8_BENCH_WARMUP", DEFAULT_WARMUP)?;
+        let warmup = blockwise_fp8_bench_iterations(
+            "INFERENCE_RS_BLOCKWISE_FP8_BENCH_WARMUP",
+            DEFAULT_WARMUP,
+        )?;
         let iterations = blockwise_fp8_bench_iterations(
             "INFERENCE_RS_BLOCKWISE_FP8_BENCH_ITERATIONS",
             DEFAULT_ITERATIONS,
@@ -3590,8 +3594,10 @@ mod tests {
             },
         ];
 
-        let warmup =
-            blockwise_fp8_bench_iterations("INFERENCE_RS_BLOCKWISE_FP8_BENCH_WARMUP", DEFAULT_WARMUP)?;
+        let warmup = blockwise_fp8_bench_iterations(
+            "INFERENCE_RS_BLOCKWISE_FP8_BENCH_WARMUP",
+            DEFAULT_WARMUP,
+        )?;
         let iterations = blockwise_fp8_bench_iterations(
             "INFERENCE_RS_BLOCKWISE_FP8_BENCH_ITERATIONS",
             DEFAULT_ITERATIONS,

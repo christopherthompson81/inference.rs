@@ -79,6 +79,8 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `inference-paged-attn/` - PagedAttention implementation
 - `inference-audio/` - Audio processing
 - `inference-mcp/` - Model Context Protocol client
+- `inference-layout/` - Document layout detection (PP-DocLayoutV3) with custom CPU/CUDA kernels
+- `inference-ffi/` - C ABI (`libinference_ffi`, header `include/inference.h`) for bindings in other languages
 
 ### Key Design Patterns
 

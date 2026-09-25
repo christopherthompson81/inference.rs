@@ -15,8 +15,8 @@ use axum::{
     Extension, Json,
 };
 use inference_core::{
-    LoraAdapterError, LoraAdapterFiles, LoraAdapterInfo, LoraAdapterLoadPolicy, LoraAdapterRoute,
-    InferenceRs, InferenceRsError, MAX_LORA_ALIAS_BYTES,
+    InferenceRs, InferenceRsError, LoraAdapterError, LoraAdapterFiles, LoraAdapterInfo,
+    LoraAdapterLoadPolicy, LoraAdapterRoute, MAX_LORA_ALIAS_BYTES,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
