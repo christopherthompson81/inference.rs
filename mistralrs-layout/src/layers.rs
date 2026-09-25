@@ -2,6 +2,8 @@ use candle_core::{Module, Result, Tensor};
 use candle_nn::{Activation, Conv2d, Conv2dConfig, Linear, VarBuilder};
 
 const BN_EPS: f64 = 1e-5;
+/// The AVX2 direct conv tiles output channels in groups of this size.
+const DIRECT_OC_MULTIPLE: usize = 4;
 /// Below this many input channels per-tap CPU GEMMs are too thin and im2col + one GEMM wins (stem conv).
 const IMPLICIT_MIN_IN_C: usize = 16;
 
@@ -101,6 +103,8 @@ impl Depthwise {
 struct Pointwise {
     /// `(out_c, in_c)`
     w: Tensor,
+    /// `cpu_direct::pack_weights` layout, when the AVX2 CPU kernel can run this conv.
+    cpu_packed: Option<Tensor>,
     /// `(1, out_c, 1)`
     b: Tensor,
 }
@@ -122,6 +126,8 @@ struct Dense {
     conv: Conv2d,
     /// `(out_c, in_c*k*k + 1)`: the last column is the bias, matched by im2col's ones row.
     w2d: Tensor,
+    /// `cpu_direct::pack_weights` layout, when the AVX2 CPU kernel can run this conv.
+    cpu_packed: Option<Tensor>,
     kernel: usize,
     stride: usize,
     padding: usize,
@@ -141,9 +147,18 @@ impl Dense {
             groups: 1,
             cudnn_fwd_algo: None,
         };
+        let cpu_packed = if w.device().is_cpu()
+            && crate::cpu_direct::available()
+            && o.is_multiple_of(DIRECT_OC_MULTIPLE)
+        {
+            Some(crate::cpu_direct::pack_weights(&w)?)
+        } else {
+            None
+        };
         Ok(Self {
             conv: Conv2d::new(w, Some(b), cfg),
             w2d,
+            cpu_packed,
             kernel,
             stride,
             padding,
@@ -193,8 +208,45 @@ pub struct ConvNorm {
     act: Option<Activation>,
 }
 
+impl ConvNorm {
+    /// The AVX2 CPU kernels fuse bias + activation; returns `None` when this conv/device has no fused path.
+    fn forward_fused_cpu(&self, xs: &Tensor) -> Result<Option<Tensor>> {
+        use crate::cpu_direct::{self, Act};
+        if !xs.device().is_cpu() || !cpu_direct::available() {
+            return Ok(None);
+        }
+        let Some(act) = Act::from_candle(self.act) else {
+            return Ok(None);
+        };
+        match &self.conv {
+            Conv::Dense(Dense {
+                cpu_packed: Some(packed),
+                conv,
+                stride,
+                padding,
+                ..
+            }) => {
+                let bias = conv.bias().expect("dense conv is built with a folded bias");
+                cpu_direct::conv2d(xs, packed, bias, *stride, *padding, act).map(Some)
+            }
+            Conv::Depthwise(c) => {
+                cpu_direct::depthwise(xs, &c.w, &c.b, c.stride, c.padding, act).map(Some)
+            }
+            Conv::Pointwise(Pointwise {
+                cpu_packed: Some(packed),
+                b,
+                ..
+            }) => cpu_direct::pointwise(xs, packed, &b.flatten_all()?, act).map(Some),
+            _ => Ok(None),
+        }
+    }
+}
+
 impl Module for ConvNorm {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        if let Some(y) = self.forward_fused_cpu(xs)? {
+            return Ok(y);
+        }
         let xs = match &self.conv {
             Conv::Dense(c) => c.forward(xs)?,
             Conv::Depthwise(c) => c.forward(xs)?,
@@ -322,9 +374,18 @@ impl ConvNormSpec {
                 self.padding,
             )?)
         } else if self.kernel == 1 && self.stride == 1 && self.groups == 1 && self.padding == 0 {
+            let cpu_packed = if w.device().is_cpu()
+                && crate::cpu_direct::available()
+                && self.out_c.is_multiple_of(DIRECT_OC_MULTIPLE)
+            {
+                Some(crate::cpu_direct::pack_weights(&w)?)
+            } else {
+                None
+            };
             Conv::Pointwise(Pointwise {
                 w: w.reshape((self.out_c, self.in_c))?,
                 b: b.reshape((1, self.out_c, 1))?,
+                cpu_packed,
             })
         } else if self.groups == 1 {
             Conv::Dense(Dense::new(w, b, self.kernel, self.stride, self.padding)?)
@@ -419,6 +480,7 @@ mod tests {
         let got = Pointwise {
             w: wt.reshape((3, 5))?,
             b: b.reshape((1, 3, 1))?,
+            cpu_packed: None,
         }
         .forward(&x)?;
         let err = (got - want)?

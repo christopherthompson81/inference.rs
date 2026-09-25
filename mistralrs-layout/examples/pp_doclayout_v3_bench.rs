@@ -33,7 +33,7 @@ fn main() -> Result<()> {
 
     let run = || -> Result<f64> {
         let t0 = std::time::Instant::now();
-        let out = det.model().forward(&pv, false)?;
+        let out = det.install(|| det.model().forward(&pv, false))?;
         out.logits.to_dtype(DType::F32)?.to_device(&Device::Cpu)?;
         Ok(t0.elapsed().as_secs_f64() * 1e3)
     };

@@ -19,6 +19,7 @@ pub use postprocess::{LayoutDetection, PostprocessArgs};
 pub use preprocess::Preprocessor;
 
 pub const DEFAULT_THRESHOLD: f32 = 0.5;
+const RAYON_THREADS_ENV: &str = "RAYON_NUM_THREADS";
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     let s = std::fs::read_to_string(path).map_err(candle_core::Error::wrap)?;
@@ -30,6 +31,8 @@ pub struct PPDocLayoutV3Detector {
     model: PPDocLayoutV3,
     preprocessor: Preprocessor,
     device: Device,
+    /// CPU only: physical-core pool; hyperthreads slow the FMA-bound conv kernels (16 -> 8 threads: 0.78 -> 0.63 s).
+    pool: Option<rayon::ThreadPool>,
 }
 
 impl PPDocLayoutV3Detector {
@@ -48,11 +51,30 @@ impl PPDocLayoutV3Detector {
             )?
         };
         let model = PPDocLayoutV3::new(cfg, (preprocessor.height, preprocessor.width), vb)?;
+        let pool = if device.is_cpu() && std::env::var_os(RAYON_THREADS_ENV).is_none() {
+            Some(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(num_cpus::get_physical())
+                    .build()
+                    .map_err(candle_core::Error::wrap)?,
+            )
+        } else {
+            None
+        };
         Ok(Self {
             model,
             preprocessor,
             device: device.clone(),
+            pool,
         })
+    }
+
+    /// Runs `f` on the detector's CPU thread pool (or inline on other devices / when `RAYON_NUM_THREADS` is set).
+    pub fn install<R: Send>(&self, f: impl FnOnce() -> R + Send) -> R {
+        match &self.pool {
+            Some(pool) => pool.install(f),
+            None => f(),
+        }
     }
 
     pub fn model(&self) -> &PPDocLayoutV3 {
@@ -77,6 +99,14 @@ impl PPDocLayoutV3Detector {
         if images.is_empty() {
             return Ok(Vec::new());
         }
+        self.install(|| self.detect_batch_inner(images, threshold))
+    }
+
+    fn detect_batch_inner(
+        &self,
+        images: &[RgbImage],
+        threshold: f32,
+    ) -> Result<Vec<Vec<LayoutDetection>>> {
         let pixels = images
             .par_iter()
             .map(|im| self.preprocessor.preprocess(im, &self.device))

@@ -3774,6 +3774,7 @@ dependencies = [
  "clap",
  "gemm",
  "image",
+ "num_cpus",
  "rayon",
  "serde",
  "serde_json",

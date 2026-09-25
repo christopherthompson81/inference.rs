@@ -1,6 +1,7 @@
 //! Document layout detection models built on candle.
 
 mod cpu_conv;
+mod cpu_direct;
 #[cfg(feature = "cuda")]
 mod cuda_kernels;
 mod depthwise;

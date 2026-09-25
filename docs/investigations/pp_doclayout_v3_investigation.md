@@ -354,3 +354,71 @@ Findings:
 Implication: MKL only accelerates the GEMM inside our conv path (est. ~697 -> ~450 ms) and cannot reach MLAS. The CPU
 lever is the conv algorithm: an NCHWc-style direct conv with fused bias+activation (or oneDNN as an optional dep).
 Cheap side win: depthwise is 76 ms for 0.6 GFLOP (naive scalar loop; vectorize over width). ORT TensorRT EP not measured.
+
+# CPU conv investigation (reproducing MLAS)
+
+Target from Run 17: ORT/MLAS convs 207 ms vs ours ~697 ms (8 threads). Plan: AVX2+FMA direct conv in NCHW with
+register blocking (4 output channels x up to 3 vectors of 8 pixels = 12 ymm accumulators; per input channel and tap:
+<= 3 input loads + 4 weight broadcasts for 12 FMAs), input padded + stride-phase split once so every tap is a unit-stride
+vector load, bias preloaded into the accumulators and ReLU/SiLU applied before the store. Then an AVX2 depthwise kernel.
+Runtime feature detection; the implicit-GEMM path stays as the non-AVX2 fallback.
+
+## Run 18 - 2026-09-25 01:10
+
+Question: does the AVX2 direct conv (NCHW, 4 oc x 3 pixel vectors, fused bias/act) beat implicit GEMM, and why not more?
+
+Findings, in order (throwaway `zz_direct` micro-benchmark, 8 threads; GFLOP/s):
+- First version: wins on 48-96 channel layers (x2) and the 3-channel stem (x5), loses on 256ch@100 (306 vs 424).
+- Cause 1, cache footprint: each (tile, row) task swept all 256 channels x 3 rows x 9 taps (~98 KB input + 36 KB weights).
+  Fix: input-channel blocks sized from the real footprint (distinct phase rows x 48-px segment vs a 24 KB L1 budget),
+  resuming partial sums from the output row. 256ch@100: 306 -> 451.
+- Checked for register spills via objdump: the XV=1 inner loop keeps accumulators in ymm5-8; capping tiles at 2 vectors
+  (11 live registers) did not help, so spills were not the limit.
+- Cause 2, work outside the kernel (timers inside the op): weight packing 4.4 ms per call on 256ch layers (single-threaded,
+  div/mod per element), phase planes up to 4.7 ms. Fix: pack once at model load; range-based phase copy.
+- Cause 3, no input reuse across output-channel tiles: tasks now own a group of tiles sized so the group's weights fit
+  ~128 KB of L2, reusing each L1-resident input block across the group. 256ch@50: 263 -> 397; 256ch@100 s2: 168 -> 264.
+- Dead end: glibc mmap threshold (page-fault hypothesis for the 41 MB phase buffers) made no difference.
+- Row alignment: rounding the phase-plane row stride to 8 floats: 256ch@50 397 -> 507, 64ch@200 373 -> 461,
+  256ch@100 s2 264 -> 335. Unaligned 32-byte loads that straddle cache lines cost a lot; most taps are still unaligned
+  (kx shifts by 1-2 floats).
+
+## Run 19 - 2026-09-25 01:30
+
+Question: pointwise and depthwise with the same machinery; thread count.
+
+Findings:
+- AVX2 depthwise (fused bias/act): 76 -> 21 ms/forward.
+- Pointwise through the direct kernel reading the input in place (only the final partial vector of a plane goes through a
+  `c x 8` scratch, so no full padded copy): vs candle GEMM + bias + relu, 336->64@200 14.6 -> 5.3 ms, 64->128@200
+  11.8 -> 2.6 ms, 256->512@100 13.1 -> 5.7 ms, 512->192@50 1.35 -> 1.04 ms. An earlier version padded-copied the
+  whole input when `h*w % 8 != 0` and lost on 50x50 maps (16 MB copies); replaced by the tail scratch.
+- 16 vs 8 threads on the full model: 0.78 vs 0.63 s. Hyperthreads hurt the FMA-bound kernels. `PPDocLayoutV3Detector`
+  now runs CPU work in its own physical-core rayon pool unless `RAYON_NUM_THREADS` is set (host's global pool untouched).
+- Correction: re-measured ORT CPU with 2 warmups + 15 iterations: **449 ms mean / 437 ms min**. The 0.62 s from Run 17
+  came from a 3-run sample including warm-up effects. The machine is a loaded desktop (load avg ~4, powersave governor);
+  whole-model numbers vary by +-50 ms run to run, so compare mins over 15 iterations.
+- Status: ours 0.65 s mean / 0.61 s min (default threads). Stages: backbone ~285 ms (was 547), encoder ~250 (was 415),
+  decoder ~105 (was 120). ORT is still ~1.4x ahead.
+
+## Run 20 - 2026-09-25 02:00
+
+Question: does vectorizing over output channels (MLAS-style: broadcast input scalars, two aligned weight vectors per step,
+no split loads) beat the pixel-vectorized kernel inside NCHW?
+
+Change (reverted): 16 oc x 6 px tile (12 accumulators + 2 weights + 1 broadcast = 15 ymm), 64-byte-aligned packed weights,
+no channel blocking (a tile's input, 256 ch x 3 rows x 8 px = 24 KB, fits L1), transposed store once per tile.
+
+Finding: correct, but slower where it matters: 256ch@100 324 vs 504 GFLOP/s, 256ch@50 335 vs 469, 256->64 310 vs 473;
+equal on small-channel layers. Without channel blocking every 6-pixel tile streams its full 147 KB of weights from L2,
+which costs more than the split loads it removes. Making this formulation pay needs MLAS's NCHWc activation layout
+(weights and inputs both blocked by 8 channels) end to end, not just inside one conv. **Dead end within NCHW.**
+
+Final state of the CPU pass (default threads = physical-core pool; loaded desktop, 2 warmups + 15 iterations):
+- Model forward: 0.67 s mean / 0.63 s min (Run 15 end: 0.97 s at 16 threads / 0.87 s at 8). ORT CPU: 0.45 s mean.
+- Six pages end to end on CPU (decode + preprocess + batch-6 forward + post-process): 6.1 -> 4.5 s.
+- Parity: six-page HF comparison identical on CPU (batched) and CUDA; CUDA forward unchanged at 26.0 ms.
+- Remaining gap to ORT (~1.5x) is kernel efficiency: our best direct-conv shapes reach ~500 GFLOP/s (~40% of the ~1.2
+  TFLOP/s AVX2 peak), MLAS NCHWc ~65-70%. Levers not pursued: NCHWc layout end to end (conv + add + cat + upsample
+  custom ops), avoiding the `Tensor::cat` copies in HGNetV2 blocks by writing layer outputs into the concat buffer,
+  and the stride-2 phase-plane build (8 ms on the stem conv).
