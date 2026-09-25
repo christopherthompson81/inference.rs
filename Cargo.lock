@@ -3765,6 +3765,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "mistralrs-layout"
+version = "0.9.3"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "candle-nn",
+ "clap",
+ "image",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mistralrs-macros"
 version = "0.9.3"
 dependencies = [
