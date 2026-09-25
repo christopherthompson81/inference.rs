@@ -214,3 +214,5 @@ mod flash_attn;
 pub use flash_attn::*;
 mod rmsnorm;
 pub use rmsnorm::*;
+mod logits;
+pub use logits::*;
