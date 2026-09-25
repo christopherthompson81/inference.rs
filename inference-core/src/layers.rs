@@ -4156,8 +4156,8 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     #[test]
-    #[ignore = "requires CUDA"]
     fn qwen_cuda_text_rope_matches_repeated_mrope() -> candle_core::Result<()> {
+        skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         let rope = Qwen3VLRotaryEmbedding::new_yarn(
             &YarnRopeConfig {

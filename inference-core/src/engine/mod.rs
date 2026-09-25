@@ -2238,6 +2238,8 @@ impl Engine {
             #[cfg(not(feature = "cuda"))]
             self.free_finished_scheduler_sequences(&mut *scheduler);
         }
+        // Free decode graphs on this thread: they capture its cuTile modules, which die with it.
+        get_mut_arcmutex!(self.pipeline).cleanup_cuda_graphs();
     }
 
     fn build_sequence_recognizer(

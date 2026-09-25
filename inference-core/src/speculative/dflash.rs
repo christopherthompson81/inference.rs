@@ -4278,8 +4278,8 @@ mod tests {
 
     #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
     #[test]
-    #[ignore = "requires a CUDA device"]
     fn graph_release_waits_for_detached_output_copies() -> anyhow::Result<()> {
+        skip_without_cuda!();
         use candle_core::{cuda_backend::cudarc::driver::sys, Var};
 
         use crate::pipeline::cuda_graph::{
@@ -4483,8 +4483,8 @@ mod tests {
 
     #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
     #[test]
-    #[ignore = "requires a CUDA device"]
     fn graph_rope_replays_mixed_long_positions_on_cuda() -> anyhow::Result<()> {
+        skip_without_cuda!();
         use candle_core::{cuda_backend::cudarc::driver::sys, Var};
 
         use crate::pipeline::cuda_graph::{

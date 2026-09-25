@@ -45,7 +45,28 @@ pub const INFERENCE_RS_GIT_REVISION: &str = match option_env!("INFERENCE_RS_GIT_
 };
 pub const INFERENCE_RS_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_ENGINE_REQUEST_QUEUE_CAPACITY: usize = 10_000;
+// Bounded so a wedged engine cannot hang drop forever; normal termination takes milliseconds.
+const ENGINE_DROP_JOIN_TIMEOUT: Duration = Duration::from_secs(10);
+const ENGINE_DROP_POLL_INTERVAL: Duration = Duration::from_millis(5);
 pub const REQUEST_QUEUE_DURATION_METRIC: &str = "inference_request_queue_duration_seconds";
+
+// GPU tests share one device and process-global CUDA state (memory pools, graph scopes), so they run one at a time.
+#[cfg(all(test, feature = "cuda"))]
+static CUDA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+// GPU tests run by default under `--features cuda`, skip without a device, and hold the lock for the test's lifetime.
+#[cfg(all(test, feature = "cuda"))]
+macro_rules! skip_without_cuda {
+    () => {
+        let _cuda_test_guard = crate::CUDA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if candle_core::Device::new_cuda(0).is_err() {
+            eprintln!("SKIP {}: no CUDA device", module_path!());
+            return Ok(());
+        }
+    };
+}
 
 mod adapter;
 mod agent_approval;
@@ -393,7 +414,7 @@ struct EngineInstance {
 
 impl Drop for EngineInstance {
     fn drop(&mut self) {
-        // Free decode graphs (they capture the engine thread's cuTile modules) before it exits when `sender` drops.
+        // The engine frees its own graphs on exit; this covers an engine that never ran its loop.
         if let Ok(pipeline) = self.reboot_state.pipeline.try_lock() {
             pipeline.cleanup_cuda_graphs();
         }
@@ -417,6 +438,17 @@ impl EngineInstance {
                 warn!("Engine thread panicked during shutdown.");
             }
         }
+    }
+
+    fn join_until(&mut self, deadline: Instant) {
+        while !self.is_finished() {
+            if Instant::now() >= deadline {
+                warn!("Engine thread did not stop within {ENGINE_DROP_JOIN_TIMEOUT:?}; not waiting for it.");
+                return;
+            }
+            std::thread::sleep(ENGINE_DROP_POLL_INTERVAL);
+        }
+        self.join();
     }
 }
 
@@ -705,12 +737,18 @@ impl InferenceRsBuilder {
 
 impl Drop for InferenceRs {
     fn drop(&mut self) {
-        // Terminate all engines
-        if let Ok(engines) = self.engines.read() {
-            for engine in engines.values() {
-                // Use try_send instead of blocking_send to avoid runtime panics
-                engine.terminate();
-            }
+        // Engine threads still inside CUDA when the process exits race the context teardown and segfault, so wait.
+        let engines = self
+            .engines
+            .get_mut()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for engine in engines.values() {
+            // try_send rather than blocking_send, which panics inside a runtime
+            engine.terminate();
+        }
+        let deadline = Instant::now() + ENGINE_DROP_JOIN_TIMEOUT;
+        for engine in engines.values_mut() {
+            engine.join_until(deadline);
         }
     }
 }

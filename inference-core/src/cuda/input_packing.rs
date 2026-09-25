@@ -219,8 +219,8 @@ mod tests {
     use candle_core::{Device, IndexOp};
 
     #[test]
-    #[ignore = "requires CUDA"]
     fn packs_current_and_staged_tokens_in_one_launch() -> Result<()> {
+        skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         for batch in [1usize, 64, 65] {
             let host_values = (0..(batch + 2) * 2)
@@ -244,8 +244,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires CUDA"]
     fn pads_decode_input_by_aliasing_row_zero_values() -> Result<()> {
+        skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         let input = Tensor::new(&[[8u32, 9], [1, 2], [3, 4]], &device)?.narrow(0, 1, 2)?;
         let padded = pad_decode_input(&input, 4)?;

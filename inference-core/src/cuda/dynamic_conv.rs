@@ -183,8 +183,8 @@ mod tests {
     use candle_core::{Device, IndexOp};
 
     #[test]
-    #[ignore = "requires CUDA"]
     fn matches_reference() -> Result<()> {
+        skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         let hidden = Tensor::arange(0f32, 128f32, &device)?
             .reshape((2, 4, 16))?

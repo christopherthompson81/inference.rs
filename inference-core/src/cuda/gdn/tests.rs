@@ -61,8 +61,8 @@ fn assert_close(label: &str, lhs: &[f32], rhs: &[f32], tol: f32) {
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn packed_ragged_cuda_transforms_match_cpu_reference() -> Result<()> {
+    skip_without_cuda!();
     const BATCH_SIZE: usize = 3;
     const PADDED_LEN: usize = 5;
     const WIDTH: usize = 6;
@@ -334,8 +334,8 @@ fn run_case(case: RecurrenceCase, dev: &Device) -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn warp_recurrence_matches_scalar_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     for case in [
         RecurrenceCase {
@@ -447,8 +447,8 @@ fn run_low_dtype_sequential_recurrence_case(
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn low_dtype_recurrence_matches_sequential_rounding_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     for state_dtype in [DType::BF16, DType::F16] {
         for kernel in [
@@ -482,8 +482,8 @@ fn low_dtype_recurrence_matches_sequential_rounding_cuda() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn value_major_prefill_kernels_match_scalar_with_shuffled_slots() -> Result<()> {
+    skip_without_cuda!();
     const BATCH_SIZE: usize = 2;
     const NUM_HEADS: usize = 4;
     const SEQ_LEN: usize = 129;
@@ -573,8 +573,8 @@ fn value_major_prefill_kernels_match_scalar_with_shuffled_slots() -> Result<()> 
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn value_major_grouped_prefill_matches_warp_at_sequence_boundaries() -> Result<()> {
+    skip_without_cuda!();
     const BH: usize = 48;
     const HEAD_DIM: usize = 128;
 
@@ -648,8 +648,8 @@ fn value_major_grouped_prefill_matches_warp_at_sequence_boundaries() -> Result<(
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn value_major_grouped_prefill_preserves_pooled_padding() -> Result<()> {
+    skip_without_cuda!();
     const BATCH_SIZE: usize = 3;
     const NUM_HEADS: usize = 48;
     const CAPACITY: usize = 5;
@@ -1064,7 +1064,7 @@ fn flashinfer_sm90_prefill_matches_sequential_recurrence() -> Result<()> {
 
 #[cfg(feature = "cutile")]
 #[test]
-#[ignore = "requires a CUDA device"]
+#[ignore = "requires a CUDA device with cuTile support"]
 fn cutile_prefill_matches_sequential_recurrence() -> Result<()> {
     let dev = Device::new_cuda(0)?;
     for case in [
@@ -1216,8 +1216,8 @@ fn run_value_major_decode_case(dev: &Device, case: ValueMajorDecodeCase) -> Resu
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn value_major_decode_repeats_with_shuffled_slots() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     for case in [
         ValueMajorDecodeCase {
@@ -1449,8 +1449,8 @@ fn run_fused_decode_case(
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn fused_decode_recurrence_matches_decomposed_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     for state_dtype in [DType::BF16, DType::F16] {
         run_fused_decode_state_case(
@@ -1708,8 +1708,8 @@ fn run_speculative_state_commit_case(
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn speculative_state_commit_matches_prefix_replay_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     for state_dtype in [DType::F32, DType::BF16, DType::F16] {
         run_speculative_state_commit_case(&dev, RecurrentStateLayout::GdnKeyMajor, state_dtype)?;
@@ -1719,8 +1719,8 @@ fn speculative_state_commit_matches_prefix_replay_cuda() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn speculative_checkpoint_kernels_match_serial_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     let batch_size = 3;
     let seq_len = 8;
@@ -2752,8 +2752,8 @@ fn run_speculative_transition_commit_case(
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn speculative_transition_commit_matches_prefix_replay_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     for seq_len in [4, 8] {
         for activation_dtype in [DType::F16, DType::BF16] {
@@ -3058,8 +3058,8 @@ fn run_speculative_transition_stage_case(
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn speculative_transition_stage_is_slot_indexed_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     for seq_len in [4, 8] {
         for activation_dtype in [DType::F16, DType::BF16] {
@@ -3070,8 +3070,8 @@ fn speculative_transition_stage_is_slot_indexed_cuda() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn pending_transition_publish_is_slot_indexed_cuda() -> Result<()> {
+    skip_without_cuda!();
     const CAPACITY: usize = 6;
     const MAX_ROWS: usize = 8;
 
@@ -3142,8 +3142,8 @@ fn pending_transition_publish_is_slot_indexed_cuda() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn fused_decode_kernel_variants_match_decomposed_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     run_fused_decode_case(
         &dev,
@@ -3187,8 +3187,8 @@ fn fused_decode_kernel_variants_match_decomposed_cuda() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn causal_conv1d_width4_update_matches_full_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     let batch_size = 3;
     let conv_dim = 257;
@@ -3246,8 +3246,8 @@ fn causal_conv1d_width4_update_matches_full_cuda() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn causal_conv1d_full_continuation_matches_one_shot_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     let batch_size = 2;
     let conv_dim = 19;
@@ -3355,8 +3355,8 @@ fn causal_conv_reference(
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn causal_conv1d_strided_nonzero_offset_matches_reference_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     let batch_size = 3;
     let conv_dim = 19;
@@ -3435,8 +3435,8 @@ fn causal_conv1d_strided_nonzero_offset_matches_reference_cuda() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn rmsnorm_gated_strided_nonzero_offset_matches_reference_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     let (batch_size, seq_len, heads, hidden_dim) = (3, 2, 5, 17);
     let x_physical_dim = hidden_dim + 7;
@@ -3497,8 +3497,8 @@ fn rmsnorm_gated_strided_nonzero_offset_matches_reference_cuda() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn rmsnorm_gated_hidden128_matches_reference_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     let (batch_size, rows, hidden_dim) = (1, 1027, 128);
     for dtype in [DType::BF16, DType::F16] {
@@ -3632,8 +3632,8 @@ fn assert_gdn_quantized_matches_bf16(
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn rmsnorm_gated_quantized_matches_bf16_rounding_cuda() -> Result<()> {
+    skip_without_cuda!();
     use std::num::NonZeroUsize;
 
     const BATCH_SIZE: usize = 1;
@@ -3714,8 +3714,8 @@ fn rmsnorm_gated_quantized_matches_bf16_rounding_cuda() -> Result<()> {
 // Pooled kernels addressed through a permuted slot table must match the gathered kernels on
 // the same rows and leave every other pool row untouched.
 #[test]
-#[ignore = "requires a CUDA device"]
 fn pooled_state_kernels_match_gathered_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     let capacity = 6usize;
     let batch = 3usize;
@@ -3859,8 +3859,8 @@ fn assert_zero(label: &str, tensor: &Tensor) -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn pooled_causal_conv_padding_rows_are_zero_and_stateless_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     let capacity = 5usize;
     let batch = 3usize;
@@ -3950,8 +3950,8 @@ fn pooled_causal_conv_padding_rows_are_zero_and_stateless_cuda() -> Result<()> {
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn pooled_decomposed_recurrence_padding_rows_are_zero_and_stateless_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     let capacity = 5usize;
     let batch = 3usize;
@@ -4227,8 +4227,8 @@ fn run_fused_decode_padding_case(
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn fused_decode_dispatches_zero_padding_without_touching_state_cuda() -> Result<()> {
+    skip_without_cuda!();
     let dev = Device::new_cuda(0)?;
     run_fused_decode_padding_case(
         &dev,
@@ -4284,8 +4284,8 @@ fn fused_decode_dispatches_zero_padding_without_touching_state_cuda() -> Result<
 }
 
 #[test]
-#[ignore = "requires a CUDA device"]
 fn deferred_decode_matches_eager_across_wrap_and_flush_cuda() -> Result<()> {
+    skip_without_cuda!();
     const BATCH_SIZE: usize = 3;
     const CAPACITY: usize = 5;
     const NUM_K_HEADS: usize = 1;

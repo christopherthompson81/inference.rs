@@ -183,6 +183,10 @@ mod tests {
     fn test_cublaslt_matmul() -> Result<()> {
         use crate::cublaslt::{maybe_init_cublas_lt_wrapper, CUBLASLT_CONTROLLER};
         let dev = Device::new_cuda(0)?;
+        if !crate::fp8_tensor_cores(&dev) {
+            eprintln!("SKIP: FP8 tensor cores need sm_89+");
+            return Ok(());
+        }
 
         // Use 128x128 matrices for FP8 tensor core compatibility across GPU architectures
         let w = Tensor::rand(0., 1., (1, 128, 128), &dev)?

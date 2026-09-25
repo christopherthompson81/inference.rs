@@ -1,13 +1,6 @@
-use std::{
-    collections::HashMap,
-    ffi::CStr,
-    sync::{LazyLock, Mutex},
-};
+use std::ffi::CStr;
 
-use candle_core::{
-    cuda::cudarc::driver::sys::CUdevice_attribute, CudaDevice, CudaStorage, DType, Device, Result,
-    Shape, Storage, Tensor,
-};
+use candle_core::{CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor};
 use float8::F8E4M3;
 use half::bf16;
 
@@ -17,26 +10,8 @@ use crate::{utils::slice_ptr, ActivationScaleLayout};
 pub(super) const MMA_GEMV_MAX_ROWS: usize = 32;
 pub(super) const GROUP_SIZE: usize = 128;
 const TILE_ROWS: usize = 16;
-const MIN_COMPUTE_CAPABILITY: i32 = 89;
-
-static DEVICE_SUPPORT: LazyLock<Mutex<HashMap<candle_core::cuda::DeviceId, bool>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
 pub(super) fn device_supported(dev: &CudaDevice) -> bool {
-    if let Some(supported) = DEVICE_SUPPORT.lock().unwrap().get(&dev.id()) {
-        return *supported;
-    }
-    let stream = dev.cuda_stream();
-    let context = stream.context();
-    let major = context
-        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MAJOR)
-        .unwrap_or(0);
-    let minor = context
-        .attribute(CUdevice_attribute::CU_DEVICE_ATTRIBUTE_COMPUTE_CAPABILITY_MINOR)
-        .unwrap_or(0);
-    let supported = major * 10 + minor >= MIN_COMPUTE_CAPABILITY;
-    DEVICE_SUPPORT.lock().unwrap().insert(dev.id(), supported);
-    supported
+    crate::fp8_tensor_cores(&Device::Cuda(dev.clone()))
 }
 
 pub(super) fn weight_supported(weight: &Tensor, scales: &Tensor, block_size: &[usize]) -> bool {
@@ -305,11 +280,18 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a CUDA device"]
     fn tensor_core_gemv_matches_dequantized_reference() -> Result<()> {
+        if candle_core::Device::new_cuda(0).is_err() {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        }
         const N: usize = 272;
         const K: usize = 1024;
         let dev = Device::new_cuda(0)?;
+        if !crate::fp8_tensor_cores(&dev) {
+            eprintln!("SKIP: FP8 tensor cores need sm_89+");
+            return Ok(());
+        }
         let weight =
             Tensor::from_vec(patterned(N * K, 3, 2.0, 0.1), (N, K), &dev)?.to_dtype(DType::BF16)?;
         let (weight, weight_scales) =

@@ -386,8 +386,8 @@ mod tests {
     use super::{context_keys, pack_taps};
 
     #[test]
-    #[ignore = "requires CUDA"]
     fn packed_taps_match_cuda_reference() -> Result<()> {
+        skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         for indices in [vec![2u32, 3, 4], vec![4u32, 1, 5]] {
             let first = Tensor::arange(0f32, 48f32, &device)?
@@ -411,8 +411,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires CUDA"]
     fn context_keys_match_layerwise_reference() -> Result<()> {
+        skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         let layers = 3;
         let heads = 2;

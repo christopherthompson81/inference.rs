@@ -1077,11 +1077,16 @@ mod tests {
         let model = workspace_model(Some(PrefixPrefillAttentionFeatures::default()));
         let query_lens = [129, 129];
         let context_lens = [1_000, 8_000];
+        // Too long for FA3 on every build; the gather is packed varlen with flash-attn and padded without it.
         assert_eq!(
             prompt_prefill_workspace(Some(&model), workspace_input(&query_lens, &context_lens))
                 .unwrap()
                 .bytes,
-            38_977_536
+            if crate::using_flash_attn() {
+                38_977_536
+            } else {
+                742_821_536
+            }
         );
 
         let model = workspace_model(Some(PrefixPrefillAttentionFeatures {
@@ -1106,16 +1111,23 @@ mod tests {
         let workspace =
             prompt_prefill_workspace(Some(&model), workspace_input(&query_lens, &context_lens))
                 .unwrap();
-        assert_eq!(
-            workspace.bytes,
-            if inference_paged_attn::USE_FA3_FP8_PAGED {
+        if inference_paged_attn::USE_FA3_FP8_PAGED {
+            assert_eq!(
+                workspace.bytes,
                 crate::flashinfer::fa3_prefill_workspace_bytes(2, 128, 16, 4, 256, 250, 132)
                     .unwrap()
+            );
+            assert_eq!(workspace.gather_workspace_bytes, 0);
+        } else {
+            // Without FA3 the largest layer's gather is the whole workspace (packed with flash-attn, padded without).
+            let gather = if crate::using_flash_attn() {
+                38_961_152
             } else {
-                77_922_304
-            }
-        );
-        assert_eq!(workspace.gather_workspace_bytes, 0);
+                739_889_152
+            };
+            assert_eq!(workspace.bytes, gather);
+            assert_eq!(workspace.gather_workspace_bytes, gather);
+        }
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]

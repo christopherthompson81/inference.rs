@@ -1,0 +1,16 @@
+# cargo-nextest runs each test in its own process, so CUDA tests no longer share a context or memory pools.
+# Test groups admit tests only while the group has a free slot; everything else keeps running in parallel.
+
+[test-groups]
+# Model-backed tests peak at ~2.5 GB of VRAM each (measured with nvidia-smi); 6 of them fit a 24 GB card with ~6 GB
+# left for the kernel tests and the desktop. Size this to the card: (VRAM - idle - headroom) / 2.5 GB.
+gpu-model = { max-threads = 6 }
+
+[[profile.default.overrides]]
+filter = 'binary(paddleocr_vl) | (package(inference-ffi) & test(detections))'
+test-group = 'gpu-model'
+
+# RLIMIT_NPROC counts every thread the concurrently running test processes spawn, so this one runs alone.
+[[profile.default.overrides]]
+filter = 'package(inference-sandbox) & test(rlimit_nproc_caps_processes)'
+threads-required = 'num-test-threads'
