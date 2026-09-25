@@ -107,8 +107,21 @@ fn replace_first_occurrence(text: &str, to_replace: &str, replacement: &str) -> 
     }
 }
 
-// The i-th placeholder takes the i-th grid.
-fn expand_placeholders(text: &str, grids: &[(usize, usize, usize)], merge: usize) -> String {
+// The i-th placeholder takes the i-th grid; a prompt can carry a literal placeholder, so counts must match.
+fn expand_placeholders(
+    text: &str,
+    grids: &[(usize, usize, usize)],
+    merge: usize,
+) -> anyhow::Result<String> {
+    let placeholders = text
+        .matches(PaddleOcrVlProcessor::IMAGE_PLACEHOLDER)
+        .count();
+    if placeholders != grids.len() {
+        anyhow::bail!(
+            "prompt has {placeholders} image placeholders for {} images",
+            grids.len()
+        );
+    }
     let merge_length = merge * merge;
     let mut out = text.to_string();
     let mut index = 0;
@@ -122,14 +135,13 @@ fn expand_placeholders(text: &str, grids: &[(usize, usize, usize)], merge: usize
         );
         index += 1;
     }
-    out.replace(
+    Ok(out.replace(
         PaddleOcrVlProcessor::EXPAND_MARKER,
         PaddleOcrVlProcessor::IMAGE_PLACEHOLDER,
-    )
+    ))
 }
 
-// Placeholders share one token id, so without the image hash on the span, same-shape images collide in
-// the prefix cache. It also keeps a hit off mid-span, where `Merger::forward` would miscount image slots.
+// Placeholders share one id; the span's image hash keeps same-shape images apart and prefix hits off mid-span.
 fn register_image_span(seq: &mut Sequence, ids: &[u32], tokenizer: &Tokenizer) {
     if !seq.mm_features().is_empty() {
         return;
@@ -189,9 +201,7 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
         let config = other_config.expect("Need a PreProcessorConfig config.");
         let config: &PreProcessorConfig = config.downcast_ref().expect("Downcast failed.");
 
-        // Decided per row since rows can sit at different prefill chunks. `has_images` is window-scoped
-        // once mm_features are set, so later chunks keep the grid but skip the tower. A grid is only
-        // attached once the window holds its image tokens, else get_rope_index emits phantom positions.
+        // Per row, as rows sit at different chunks; a grid attaches once the window has its tokens, else phantom rope.
         let image_pad_id = tokenizer.token_to_id(PaddleOcrVlProcessor::IMAGE_PLACEHOLDER);
         let mut grids: Vec<Vec<(usize, usize, usize)>> = Vec::with_capacity(input_seqs.len());
         let mut hashes: Vec<Vec<u64>> = Vec::with_capacity(input_seqs.len());
@@ -239,7 +249,7 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
                 let detok = tokenizer
                     .decode(seq.get_toks(), false)
                     .expect("Detokenization failed!");
-                let detok = expand_placeholders(&detok, &row_grids, MERGE);
+                let detok = expand_placeholders(&detok, &row_grids, MERGE)?;
                 let ids = tokenizer
                     .encode_fast(detok.clone(), false)
                     .expect("Tokenization failed!")
@@ -253,7 +263,13 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
             }
 
             grids.push(row_grids);
-            hashes.push(seq.image_hashes().map(<[u64]>::to_vec).unwrap_or_default());
+            // Full list, not the window-scoped one: the model pairs hash i with grid i.
+            hashes.push(
+                seq.multimodal
+                    .image_hashes()
+                    .map(<[u64]>::to_vec)
+                    .unwrap_or_default(),
+            );
             if is_prompt {
                 pixel_values_accum.push(pixel_values);
                 vision_rows.push(row);
@@ -435,15 +451,11 @@ mod tests {
         let b = compute_block_hashes(&ids, BLOCK, &feats(0xBBBB_BBBB), &[]);
         assert!(!a.is_empty(), "prompt must span at least one full block");
         assert_ne!(a, b, "different images hashed to the same blocks");
-        // without the span the streams do collide, so the assert above isn't vacuous
-        assert_eq!(
-            compute_block_hashes(&ids, BLOCK, &[], &[]),
-            compute_block_hashes(&ids, BLOCK, &[], &[])
-        );
+        // the span is what separates them: without it both images hash like the bare token stream
+        assert_ne!(a, compute_block_hashes(&ids, BLOCK, &[], &[]));
     }
 
-    // A hit inside the span would leave `input_ids` with fewer image slots than the connector emits
-    // rows, and `Merger::forward` counts slots from the start of `input_ids`.
+    // A hit inside the span leaves fewer image slots than connector rows; `Merger::forward` counts from the start.
     #[test]
     fn prefix_cache_hit_cannot_land_inside_image_span() {
         let ids = expanded_ids(161);
@@ -506,7 +518,7 @@ mod tests {
             PaddleOcrVlProcessor::IMAGE_PLACEHOLDER,
             PaddleOcrVlProcessor::IMAGE_END,
         );
-        let expanded = expand_placeholders(&text, &[(1, 14, 46)], MERGE);
+        let expanded = expand_placeholders(&text, &[(1, 14, 46)], MERGE).unwrap();
         let count = expanded
             .matches(PaddleOcrVlProcessor::IMAGE_PLACEHOLDER)
             .count();
@@ -514,5 +526,14 @@ mod tests {
         assert!(!expanded.contains(PaddleOcrVlProcessor::EXPAND_MARKER));
         assert!(expanded.contains(PaddleOcrVlProcessor::IMAGE_START));
         assert!(expanded.contains("OCR:"));
+    }
+
+    #[test]
+    fn literal_placeholder_in_user_text_is_an_error() {
+        let text = format!(
+            "User: {p}{p}OCR:",
+            p = PaddleOcrVlProcessor::IMAGE_PLACEHOLDER
+        );
+        assert!(expand_placeholders(&text, &[(1, 14, 46)], MERGE).is_err());
     }
 }

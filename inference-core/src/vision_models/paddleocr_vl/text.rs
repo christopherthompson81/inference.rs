@@ -392,6 +392,8 @@ pub struct ErnieTextModel {
     lm_head: Arc<dyn QuantMethod>,
     inv_freq: Tensor,
     cfg: TextConfig,
+    mapper: Box<dyn DeviceMapper + Send + Sync>,
+    device: Device,
 }
 
 impl ErnieTextModel {
@@ -399,7 +401,8 @@ impl ErnieTextModel {
     pub fn load(
         vb: ShardedVarBuilder,
         cfg: &TextConfig,
-        mapper: &dyn DeviceMapper,
+        mapper: Box<dyn DeviceMapper + Send + Sync>,
+        device: Device,
         loading_isq: bool,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
@@ -417,7 +420,7 @@ impl ErnieTextModel {
             layers.push(DecoderLayer::load(
                 vm.pp("layers").pp(i),
                 cfg,
-                mapper,
+                &*mapper,
                 i,
                 loading_isq,
                 paged_attn,
@@ -436,13 +439,16 @@ impl ErnieTextModel {
             false,
             mapper.set_nm_device(vb.pp("lm_head"), loading_isq),
         )?;
-        let inv_freq = rope_inv_freq(cfg.head_dim, cfg.rope_theta, vb.device())?;
+        // Built on the compute device: under ISQ `vb` stages on cpu, which would copy this every step.
+        let inv_freq = rope_inv_freq(cfg.head_dim, cfg.rope_theta, &device)?;
         Ok(Self {
             layers,
             norm,
             lm_head,
             inv_freq,
             cfg: cfg.clone(),
+            mapper,
+            device,
         })
     }
 
@@ -469,10 +475,28 @@ impl ErnieTextModel {
         let (cos, sin) = (cos.to_dtype(dtype)?, sin.to_dtype(dtype)?);
 
         let mut h = inputs_embeds.clone();
+        let (mut cos, mut sin, mut mask) = (cos, sin, mask.clone());
         for (i, layer) in self.layers.iter().enumerate() {
+            h = self.mapper.map(h, i)?;
+            if !cos.device().same_device(h.device()) {
+                cos = cos.to_device(h.device())?;
+                sin = sin.to_device(h.device())?;
+                if let AttentionMask::Custom(m) = &mask {
+                    mask = AttentionMask::Custom(m.to_device(h.device())?);
+                }
+            }
             let metadata = paged.map(|(kv, meta)| (kv[i].clone(), meta));
-            h = layer.forward(&h, &cos, &sin, mask, &mut caches[i], metadata, flash_params)?;
+            h = layer.forward(
+                &h,
+                &cos,
+                &sin,
+                &mask,
+                &mut caches[i],
+                metadata,
+                flash_params,
+            )?;
         }
+        let h = h.to_device(&self.device)?;
         let normed = self.norm.forward(&h)?;
         let logits = self.lm_head.forward(&normed)?;
         Ok(TextOutput { logits })
@@ -614,7 +638,15 @@ mod tests {
         let mapper = crate::device_map::DeviceMapSetting::dummy()
             .into_mapper(cfg.num_hidden_layers, dev, None, std::slice::from_ref(dev))
             .unwrap();
-        ErnieTextModel::load(vb, cfg, &*mapper, false, AttentionImplementation::Eager).unwrap()
+        ErnieTextModel::load(
+            vb,
+            cfg,
+            mapper,
+            dev.clone(),
+            false,
+            AttentionImplementation::Eager,
+        )
+        .unwrap()
     }
 
     // Both paths round K/V through the same cache dtype, so 1e-5 holds even with cpu_kv_f16.

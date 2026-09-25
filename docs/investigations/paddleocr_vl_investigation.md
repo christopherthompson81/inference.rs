@@ -107,7 +107,7 @@ Implication: bring in #2356 + #2319 rather than start from scratch. Before mergi
 
 GGUF (`PaddleOCR-VL-1.6-GGUF`, the format llama.cpp-based OCR pipelines consume) is not covered by the PR.
 
-## Run 4 - 2026-09-25 09:40
+## Run 4 - 2026-09-25 08:55
 
 Question: can the port's tests run from committed data, and do the goldens hold on 1.6?
 
@@ -142,7 +142,7 @@ Other fixes found while regenerating the docs:
 - Regenerating `supported-models.md` also dropped a stale Voxtral row that the docs-table conflict resolution had
   carried in from the PR's older copy.
 
-## Run 5 - 2026-09-25 10:05
+## Run 5 - 2026-09-25 09:15
 
 Question: do paged attention, the prefix cacher and ISQ work on this fork?
 
@@ -154,8 +154,47 @@ Finding: **7/7 pass** in 461 s, including the first CUDA build after the cudafor
 
 - `prefix_cache_does_not_serve_one_image_for_another`: with paged attention and prefix cache 16 in bf16, the two
   same-size pages give their own exact golden text, and page_00 again after page_01 is unchanged.
-- `mixed_text_and_image_batch_makes_progress`: passes on this fork's scheduler, which confirms that dropping the PR's
-  scheduler change (Run 2) is safe.
+- `mixed_text_and_image_batch_makes_progress`: passes on this fork's scheduler. That is consistent with dropping the PR's
+  scheduler change (Run 2), but `tokio::join!` does not guarantee the two requests share a batch. The real evidence is
+  the code: `scheduler.rs` sends a media-incompatible sequence to `_preempt`, which queues it on `waiting`.
 - `isq_q8_0_keeps_ocr_text`: exact text under Q8_0.
 
 Implication: every item from Run 3 is done except GGUF, which stays out of scope for this PR.
+
+## Run 6 - 2026-09-25 09:45
+
+Question: what did the PR #7 review find, and are the fixes right?
+
+The review found two bugs inherited from #2356 (the adaptation matched upstream code exactly apart from comments), one
+panic, and several smaller issues.
+
+- **Multi-image windows.** `Merger::forward` fills image slots from row 0 of the embeddings, and the processor passed
+  every image's pixels and grids but window-scoped hashes. A chunked re-prefill, or a prefix hit ending between two
+  images, therefore gave image 2's slots image 1's embeddings and cached image 1's under image 2's hash.
+  - Fix: `window_images` counts the image tokens in this pass's `input_ids`, walks the full prompt's placeholder runs
+    from the window offset (`seqlen_offsets`), and embeds only those images, at their own pixel offsets. It errors if
+    the tokens don't line up with whole images. The processor now passes the full hash list.
+  - A unit test covers the whole prompt, a window after image 0, a text-only window, and misalignment.
+- **Device mapping.** The ERNIE decoder never called `mapper.map`, so any multi-GPU or offload split failed. It now
+  keeps the mapper, maps `h` per layer, moves the rope tables and a custom mask only when the device changes, and
+  returns to the model device for the final norm and lm_head. The rope `inv_freq` is built on the compute device
+  (under ISQ, `vb` stages on CPU, which copied it every step).
+- **Panic.** A user prompt containing the literal image placeholder indexed past `grids`. `expand_placeholders` now
+  errors when the placeholder count differs from the image count, with a unit test.
+- **Degenerate images.** `smart_resize` now errors on a zero dimension or an aspect ratio above 200, like
+  `image_processing_paddleocr_vl.py`. Before, 1x10000 produced a zero-height grid. A test also checks that 80x520
+  scales up to (140, 868), which matches the reference formula with min_pixels 112896.
+- **Tests.**
+  - The block-hash guard asserted a value equal to itself. It now asserts that the span changes the hashes.
+  - The mixed-batch test has a 120 s timeout.
+  - Fixture paths use `CARGO_MANIFEST_DIR`.
+  - The GPU module is renamed `gpu`, since the ISQ test isn't paged.
+- **Fixtures.** `make_fixtures.py` now resolves paths from its own location and takes a font override. It reproduces
+  the committed PNGs byte for byte with Pillow 12.3. The reviewer's `table.png` difference came from Pillow 10.2 glyph
+  rasterization, and the goldens belong to the committed PNGs. `make_goldens.py` (committed) regenerates every golden
+  in the tests exactly.
+- **Docs and examples.**
+  - `render_pyi.py` source links now point at this repo.
+  - Its install block no longer points at upstream's PyPI and release wheels; it builds from a checkout.
+  - The Python examples use a task prompt and a committed fixture, sent as a data URL, instead of a free-form prompt
+    and a third-party template image.

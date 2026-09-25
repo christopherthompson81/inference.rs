@@ -2,8 +2,7 @@
 
 use candle_core::{DType, Device, Result, Tensor};
 
-// `image_grids` are pre-merge patch grids, each matching a contiguous run of t*(h/m)*(w/m) placeholders.
-// The returned delta is what decode adds to the cache position to continue the text cursor.
+// Grids are pre-merge, one per run of t*(h/m)*(w/m) placeholders; decode adds the returned delta to its position.
 pub fn get_rope_index(
     input_ids: &[i64],
     image_grids: &[(usize, usize, usize)],

@@ -7,8 +7,8 @@ use inference::{
 };
 
 const MODEL_ENV: &str = "INFERENCE_TEST_PADDLEOCR_VL_MODEL";
-// Synthetic images from make_fixtures.py; goldens are transformers 5.17 greedy on PaddleOCR-VL-1.6, same in f32 and bf16.
-const FIXTURES: &str = "tests/fixtures/paddleocr_vl";
+// Synthetic images from make_fixtures.py; goldens from make_goldens.py on 1.6 (same in f32 and bf16).
+const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/paddleocr_vl");
 const OCR_PROMPT: &str = "OCR:";
 const TABLE_PROMPT: &str = "Table Recognition:";
 const EOS: u32 = 2;
@@ -170,8 +170,11 @@ async fn two_images_in_one_message_match_transformers() -> anyhow::Result<()> {
 }
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
-mod paged {
+mod gpu {
     use super::*;
+
+    // A scheduler spin never completes either request, so the mixed-batch test fails on this instead of hanging.
+    const MIXED_BATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
     // Same-size pages give byte-identical prompts, so only the registered image span keeps their KV blocks apart.
     #[tokio::test]
@@ -219,14 +222,17 @@ mod paged {
         let model = build(true).await?;
         let image = image_request(vec![fixture("page_00.png")?], OCR_PROMPT, MAX_LEN);
         let alone = text(&model.send_chat_request(image.clone()).await?);
-        let (batched, text_only) = tokio::join!(
-            model.send_chat_request(image),
-            model.send_chat_request(
-                RequestBuilder::new()
-                    .add_message(TextMessageRole::User, TEXT_ONLY_PROMPT)
-                    .set_sampler_max_len(8)
+        let (batched, text_only) = tokio::time::timeout(MIXED_BATCH_TIMEOUT, async {
+            tokio::join!(
+                model.send_chat_request(image),
+                model.send_chat_request(
+                    RequestBuilder::new()
+                        .add_message(TextMessageRole::User, TEXT_ONLY_PROMPT)
+                        .set_sampler_max_len(8)
+                )
             )
-        );
+        })
+        .await?;
         text_only?;
         assert_eq!(
             alone,

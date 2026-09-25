@@ -9,13 +9,11 @@ The `inference_rs` Python package exposes the same engine that powers the `infer
 
 ## Install
 
-`pip install inference-rs` covers CPU (Linux, Windows) and Metal (macOS arm64). CUDA wheels are GitHub release assets with `+cudaNNN.smNN` versions. See [Python SDK getting started](/guides/python/getting-started/#installing) for install commands and [hardware support](/reference/hardware-support/) for compute capabilities.
+inference.rs does not publish wheels yet; build the package from a checkout (add `--features cuda` or `metal` through `MATURIN_PEP517_ARGS`). See [Python SDK getting started](/guides/python/getting-started/#installing) and [hardware support](/reference/hardware-support/).
 
 ```bash
-pip install inference-rs                                   # CPU / Metal (PyPI)
-# NVIDIA (replace version, CUDA level, and SM)
-pip install "inference-rs==0.9.2+cuda128.sm89" \
-  --find-links https://github.com/EricLBuehler/mistral.rs/releases/expanded_assets/v0.9.2
+pip install ./inference-pyo3                              # CPU
+MATURIN_PEP517_ARGS="--features cuda" pip install ./inference-pyo3
 ```
 
 ## Pages
@@ -39,4 +37,4 @@ See [Python getting started](/guides/python/getting-started/) for a walkthrough 
 
 ---
 
-<small>Generated from [`inference-pyo3/inference_rs.pyi`](https://github.com/EricLBuehler/mistral.rs/blob/master/inference-pyo3/inference_rs.pyi).</small>
+<small>Generated from [`inference-pyo3/inference_rs.pyi`](https://github.com/christopherthompson81/inference.rs/blob/master/inference-pyo3/inference_rs.pyi).</small>

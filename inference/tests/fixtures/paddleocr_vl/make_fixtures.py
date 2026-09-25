@@ -1,7 +1,12 @@
-"""Renders the synthetic PaddleOCR-VL test images (text is made up; font: Noto Sans, OFL). Run from this directory."""
+"""Renders the synthetic PaddleOCR-VL test images (made-up text, Noto Sans, OFL); rendered with Pillow 12.3."""
+import os
+from pathlib import Path
+
 from PIL import Image, ImageDraw, ImageFont
 
-FONT = "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf"
+# Glyph rasterization differs slightly across Pillow/FreeType versions; the goldens belong to the committed PNGs.
+FONT = os.environ.get("PADDLEOCR_VL_FIXTURE_FONT", "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf")
+HERE = Path(__file__).parent
 PAGE_SIZE = (640, 360)
 
 
@@ -29,8 +34,8 @@ def table_image(path, rows, col_width=150, row_height=44, font_size=24, margin=1
     image.save(path)
 
 
-text_image("ocr.png", (520, 80), ["The quick brown fox jumps 42 times."])
+text_image(HERE / "ocr.png", (520, 80), ["The quick brown fox jumps 42 times."])
 # Same size on purpose: the prefix-cache test needs byte-identical prompts that differ only in pixels.
-text_image("page_00.png", PAGE_SIZE, ["Weekly garden notes", "Tomatoes are ripening early.", "Water the beans twice."])
-text_image("page_01.png", PAGE_SIZE, ["Library opening hours", "Monday to Friday: 9 to 5.", "Closed on public holidays."])
-table_image("table.png", [["Fruit", "Colour", "Count"], ["Apple", "Red", "12"], ["Lemon", "Yellow", "7"]])
+text_image(HERE / "page_00.png", PAGE_SIZE, ["Weekly garden notes", "Tomatoes are ripening early.", "Water the beans twice."])
+text_image(HERE / "page_01.png", PAGE_SIZE, ["Library opening hours", "Monday to Friday: 9 to 5.", "Closed on public holidays."])
+table_image(HERE / "table.png", [["Fruit", "Colour", "Count"], ["Apple", "Red", "12"], ["Lemon", "Yellow", "7"]])

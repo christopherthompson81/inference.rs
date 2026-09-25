@@ -10269,7 +10269,7 @@ async def production_mode(
     await writer.emit("production_telemetry_preflight", **preflight)
     if not preflight["passed"]:
         raise RuntimeError(
-            "production telemetry preflight requires a live inference_rs --server-pid, "
+            "production telemetry preflight requires a live inference --server-pid, "
             "readable host/process CPU and process RSS, and process-scoped nvidia-smi "
             "GPU data"
         )

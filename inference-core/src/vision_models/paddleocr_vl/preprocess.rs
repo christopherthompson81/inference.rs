@@ -9,11 +9,12 @@ pub const MERGE: usize = 2;
 pub const FACTOR: usize = PATCH * MERGE; // H and W snap to multiples of this
 pub const MIN_PIXELS: usize = 144 * 28 * 28; // preprocessor_config.json
 pub const MAX_PIXELS: usize = 1280 * 28 * 28;
+const MAX_ASPECT_RATIO: f64 = 200.0; // image_processing_paddleocr_vl.py raises past this
 const RESCALE: f64 = 0.00392156862745098; // exact 1/255 from config
 const MEAN: f64 = 0.5;
 const STD: f64 = 0.5;
 
-pub fn smart_resize(height: usize, width: usize) -> (usize, usize) {
+pub fn smart_resize(height: usize, width: usize) -> Result<(usize, usize)> {
     smart_resize_bounded(height, width, MIN_PIXELS, MAX_PIXELS)
 }
 
@@ -23,7 +24,10 @@ pub fn smart_resize_bounded(
     width: usize,
     min_pixels: usize,
     max_pixels: usize,
-) -> (usize, usize) {
+) -> Result<(usize, usize)> {
+    if height == 0 || width == 0 {
+        candle_core::bail!("image has a zero dimension ({width}x{height})");
+    }
     let f = FACTOR as f64;
     let (mut h, mut w) = (height as f64, width as f64);
     if h < f {
@@ -33,6 +37,9 @@ pub fn smart_resize_bounded(
     if w < f {
         h = (h * f / w).round_ties_even();
         w = f;
+    }
+    if h.max(w) / h.min(w) > MAX_ASPECT_RATIO {
+        candle_core::bail!("image aspect ratio {width}x{height} exceeds {MAX_ASPECT_RATIO}");
     }
     let mut h_bar = (h / f).round_ties_even() * f;
     let mut w_bar = (w / f).round_ties_even() * f;
@@ -46,11 +53,10 @@ pub fn smart_resize_bounded(
         h_bar = (h * beta / f).ceil() * f;
         w_bar = (w * beta / f).ceil() * f;
     }
-    (h_bar as usize, w_bar as usize)
+    Ok((h_bar as usize, w_bar as usize))
 }
 
-// `resized` is f32 `[3, H, W]` in 0..255. Two affines keep torch's rescale-then-normalize rounding.
-// The permute matches the HF processor's `permute(0,1,4,6,3,2,5,7)` minus the singleton dims.
+// f32 [3, H, W] in 0..255; two affines keep torch's rescale-then-normalize rounding; permute is HF's minus unit dims.
 pub fn normalize_patchify(resized: &Tensor) -> Result<Tensor> {
     let (c, h, w) = resized.dims3()?;
     let (gh, gw) = (h / PATCH, w / PATCH);
@@ -69,7 +75,7 @@ pub fn preprocess_decoded(
     dev: &Device,
 ) -> Result<(Tensor, (usize, usize, usize))> {
     let (w0, h0) = img.dimensions();
-    let (h_bar, w_bar) = smart_resize(h0 as usize, w0 as usize);
+    let (h_bar, w_bar) = smart_resize(h0 as usize, w0 as usize)?;
     let resized = img
         .resize_exact(w_bar as u32, h_bar as u32, FilterType::CatmullRom)
         .to_rgb8();
@@ -79,4 +85,19 @@ pub fn preprocess_decoded(
         .contiguous()?;
     let px = normalize_patchify(&chw)?;
     Ok((px, (1, h_bar / PATCH, w_bar / PATCH)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn smart_resize_rejects_degenerate_images() -> Result<()> {
+        // below min_pixels, so scaled up like the reference: ceil(80*beta/28)*28 by ceil(520*beta/28)*28
+        assert_eq!(smart_resize(80, 520)?, (140, 868));
+        assert!(smart_resize(0, 640).is_err());
+        // 1x10000 used to produce a zero-height grid and an empty vision tower input
+        assert!(smart_resize(1, 10000).is_err());
+        Ok(())
+    }
 }

@@ -88,7 +88,8 @@ impl PaddleOcrVlModel {
         let text = ErnieTextModel::load(
             vb,
             &tcfg,
-            &*normal_loading_metadata.mapper,
+            normal_loading_metadata.mapper,
+            device.clone(),
             normal_loading_metadata.loading_isq,
             attention_mechanism,
         )?;
@@ -149,6 +150,43 @@ pub(crate) struct PaddleOcrVlVisionSpecificArgs {
     pub vision_rows: Vec<usize>,
 }
 
+// Images whose placeholder runs this pass embeds: a prefix hit or a later prefill chunk can start past the first image.
+fn window_images(
+    full_ids: &[u32],
+    offset: usize,
+    window_image_tokens: usize,
+    image_token_id: u32,
+) -> Result<std::ops::Range<usize>> {
+    let mut runs = Vec::new();
+    let mut i = 0;
+    while i < full_ids.len() {
+        if full_ids[i] != image_token_id {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < full_ids.len() && full_ids[i] == image_token_id {
+            i += 1;
+        }
+        runs.push((start, i - start));
+    }
+    let first = runs
+        .iter()
+        .position(|&(start, _)| start >= offset)
+        .unwrap_or(runs.len());
+    let (mut tokens, mut end) = (0, first);
+    while tokens < window_image_tokens && end < runs.len() {
+        tokens += runs[end].1;
+        end += 1;
+    }
+    if tokens != window_image_tokens {
+        candle_core::bail!(
+            "{window_image_tokens} image tokens in this pass do not line up with whole images after position {offset}"
+        );
+    }
+    Ok(first..end)
+}
+
 impl MultimodalModel for PaddleOcrVlModel {
     fn forward(
         &self,
@@ -195,10 +233,43 @@ impl MultimodalModel for PaddleOcrVlModel {
             let mut rows = (0..batch)
                 .map(|b| text.narrow(0, b, 1)?.squeeze(0))
                 .collect::<Result<Vec<_>>>()?;
-            let mut offset = 0;
+            let mut row_start = 0;
             for &b in &vision_rows {
-                let mut embeds_per_image = Vec::with_capacity(image_grid_thw[b].len());
-                for (i, &(t, h, w)) in image_grid_thw[b].iter().enumerate() {
+                let row_grids = &image_grid_thw[b];
+                let row_ids = input_ids.narrow(0, b, 1)?.flatten_all()?;
+                let window_image_tokens = row_ids
+                    .to_vec1::<u32>()?
+                    .iter()
+                    .filter(|&&id| id as i64 == image_token_id)
+                    .count();
+                let full_ids = input_ids_full
+                    .narrow(0, b, 1)?
+                    .flatten_all()?
+                    .to_vec1::<u32>()?;
+                let offset_in_prompt = seqlen_offsets.get(b).copied().unwrap_or(0);
+                let active = window_images(
+                    &full_ids,
+                    offset_in_prompt,
+                    window_image_tokens,
+                    image_token_id as u32,
+                )?;
+                let patches_of = |&(t, h, w): &(usize, usize, usize)| t * h * w;
+                let mut offset = row_start
+                    + row_grids[..active.start]
+                        .iter()
+                        .map(patches_of)
+                        .sum::<usize>();
+                row_start += row_grids.iter().map(patches_of).sum::<usize>();
+                if active.is_empty() {
+                    continue;
+                }
+                let mut embeds_per_image = Vec::with_capacity(active.len());
+                for (i, &(t, h, w)) in row_grids
+                    .iter()
+                    .enumerate()
+                    .skip(active.start)
+                    .take(active.len())
+                {
                     let key = image_hashes.get(b).and_then(|hs| hs.get(i)).copied();
                     let hit = key.and_then(|k| {
                         let mut guard = self.encoder_cache.lock().expect("encoder cache poisoned");
@@ -226,7 +297,6 @@ impl MultimodalModel for PaddleOcrVlModel {
                     embeds_per_image.push(embeds);
                 }
                 let image_embeds = Tensor::cat(&embeds_per_image, 0)?;
-                let row_ids = input_ids.narrow(0, b, 1)?.flatten_all()?;
                 rows[b] = self.merger.forward(&row_ids, &image_embeds)?;
             }
             Tensor::stack(&rows, 0)?
@@ -238,8 +308,7 @@ impl MultimodalModel for PaddleOcrVlModel {
             embeds.dtype(),
             &CausalMaskConfig::default(),
         )?;
-        // Don't force `AttentionMask::None` on later prompt chunks: paged's prefix gather path reads
-        // causality off this mask, and without it attends non-causally within the chunk.
+        // Keep the mask on later prompt chunks: paged prefix gather reads causality from it, else attends non-causally.
 
         let mut guard = self.cache.normal();
         let paged = ctx.paged_metadata();
@@ -283,5 +352,24 @@ impl MultimodalModel for PaddleOcrVlModel {
             image_hashes: Vec::new(),
             vision_rows: Vec::new(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::window_images;
+
+    const IMG: u32 = 9;
+    // text, image 0 (3 tokens), text, text, image 1 (2 tokens), text
+    const FULL: &[u32] = &[5, IMG, IMG, IMG, 6, 5, IMG, IMG, 6];
+
+    #[test]
+    fn window_images_follow_the_window_offset() -> candle_core::Result<()> {
+        assert_eq!(window_images(FULL, 0, 5, IMG)?, 0..2);
+        // prefix hit or later chunk starting after image 0 must embed image 1, not image 0
+        assert_eq!(window_images(FULL, 5, 2, IMG)?, 1..2);
+        assert!(window_images(FULL, 5, 0, IMG)?.is_empty());
+        assert!(window_images(FULL, 0, 4, IMG).is_err());
+        Ok(())
     }
 }

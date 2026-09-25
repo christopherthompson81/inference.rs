@@ -139,6 +139,7 @@ impl Config {
             hidden_size: v.hidden_size,
             num_hidden_layers: v.num_hidden_layers,
             num_attention_heads: v.num_attention_heads,
+            // config.json has no vision head_dim (and a null rope_theta), so both come from hidden size and defaults
             head_dim: v.hidden_size / v.num_attention_heads,
             intermediate_size: v.intermediate_size,
             patch_size: v.patch_size,
