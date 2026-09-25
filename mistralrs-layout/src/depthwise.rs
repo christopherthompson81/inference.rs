@@ -71,12 +71,7 @@ impl CustomOp3 for DepthwiseConv {
         lb: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
         let g = self.geom(lx, lw)?;
-        let (CpuStorage::F32(x), CpuStorage::F32(wt), CpuStorage::F32(bias)) = (sx, sw, sb) else {
-            candle_core::bail!("depthwise conv CPU path is f32 only");
-        };
-        let x = &x[lx.start_offset()..];
-        let wt = &wt[lw.start_offset()..];
-        let bias = &bias[lb.start_offset()..];
+        let [x, wt, bias] = crate::cpu_direct::f32_slices([(sx, lx), (sw, lw), (sb, lb)])?;
         let (s, p) = (self.stride as isize, self.padding as isize);
         let mut out = vec![0f32; g.b * g.c * g.ho * g.wo];
         out.par_chunks_mut(g.ho * g.wo)

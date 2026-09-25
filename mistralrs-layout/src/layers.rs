@@ -2,8 +2,6 @@ use candle_core::{Module, Result, Tensor};
 use candle_nn::{Activation, Conv2d, Conv2dConfig, Linear, VarBuilder};
 
 const BN_EPS: f64 = 1e-5;
-/// The AVX2 direct conv tiles output channels in groups of this size.
-const DIRECT_OC_MULTIPLE: usize = 4;
 /// Below this many input channels per-tap CPU GEMMs are too thin and im2col + one GEMM wins (stem conv).
 const IMPLICIT_MIN_IN_C: usize = 16;
 
@@ -23,16 +21,17 @@ struct Depthwise {
     kernel: usize,
     stride: usize,
     padding: usize,
+    act: Option<Activation>,
 }
 
 impl Depthwise {
     fn new(
         w: &Tensor,
         bias: &Tensor,
-        kernel: usize,
-        stride: usize,
-        padding: usize,
+        geom: (usize, usize, usize),
+        act: Option<Activation>,
     ) -> Result<Self> {
+        let (kernel, stride, padding) = geom;
         let c = w.dim(0)?;
         let mut taps = Vec::with_capacity(kernel * kernel);
         for ky in 0..kernel {
@@ -53,20 +52,29 @@ impl Depthwise {
             kernel,
             stride,
             padding,
+            act,
         })
     }
-}
 
-impl Module for Depthwise {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        if xs.device().is_metal() {
-            return self.forward_taps(xs);
+        if let Some(act) = cpu_fused(xs.device(), self.act) {
+            return crate::cpu_direct::depthwise(
+                xs,
+                &self.w,
+                &self.b,
+                self.stride,
+                self.padding,
+                act,
+            );
         }
-        crate::depthwise::depthwise_conv2d(xs, &self.w, &self.b, self.stride, self.padding)
+        let y = if xs.device().is_metal() {
+            self.forward_taps(xs)?
+        } else {
+            crate::depthwise::depthwise_conv2d(xs, &self.w, &self.b, self.stride, self.padding)?
+        };
+        activate(y, self.act)
     }
-}
 
-impl Depthwise {
     /// Sum of k*k shifted taps; strided taps are a phase select after padding to a stride multiple.
     fn forward_taps(&self, xs: &Tensor) -> Result<Tensor> {
         let (b, c, h, w) = xs.dims4()?;
@@ -98,48 +106,107 @@ impl Depthwise {
     }
 }
 
-/// 1x1 stride-1 conv as a matmul; candle's conv2d would im2col (copy) the whole input first.
-#[derive(Debug, Clone)]
-struct Pointwise {
-    /// `(out_c, in_c)`
-    w: Tensor,
-    /// `cpu_direct::pack_weights` layout, when the AVX2 CPU kernel can run this conv.
-    cpu_packed: Option<Tensor>,
-    /// `(1, out_c, 1)`
-    b: Tensor,
-}
-
-impl Module for Pointwise {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let (b, c, h, w) = xs.dims4()?;
-        let out = self
-            .w
-            .broadcast_matmul(&xs.contiguous()?.reshape((b, c, h * w))?)?
-            .broadcast_add(&self.b)?;
-        out.reshape((b, self.w.dim(0)?, h, w))
+/// Applies `act` unless the kernel already fused it.
+fn activate(xs: Tensor, act: Option<Activation>) -> Result<Tensor> {
+    match act {
+        Some(act) => act.forward(&xs),
+        None => Ok(xs),
     }
 }
 
-/// Dense k*k conv as cols-last im2col + matmul, avoiding candle's uncoalesced im2col and output transpose.
+/// `Some(act)` when the AVX2 CPU kernels can fuse this activation on this device.
+fn cpu_fused(dev: &candle_core::Device, act: Option<Activation>) -> Option<crate::cpu_direct::Act> {
+    if dev.is_cpu() && crate::cpu_direct::available() {
+        crate::cpu_direct::Act::from_candle(act)
+    } else {
+        None
+    }
+}
+
+/// 1x1 stride-1 conv as a matmul; candle's conv2d would im2col (copy) the whole input first.
+#[derive(Debug, Clone)]
+struct Pointwise {
+    /// `(out_c, in_c)` for the GEMM path; `None` when the AVX2 kernel owns this conv.
+    w: Option<Tensor>,
+    /// `cpu_direct::pack_weights` layout for the AVX2 kernel.
+    cpu_packed: Option<Tensor>,
+    /// `(out_c,)`
+    b: Tensor,
+    act: Option<Activation>,
+}
+
+impl Pointwise {
+    fn new(w: &Tensor, b: &Tensor, act: Option<Activation>) -> Result<Self> {
+        let (o, c, _, _) = w.dims4()?;
+        let fused =
+            cpu_fused(w.device(), act).is_some() && o.is_multiple_of(crate::cpu_direct::OC_T);
+        Ok(Self {
+            w: (!fused).then(|| w.reshape((o, c))).transpose()?,
+            cpu_packed: fused
+                .then(|| crate::cpu_direct::pack_weights(w))
+                .transpose()?,
+            b: b.clone(),
+            act,
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        if let (Some(packed), Some(act)) = (&self.cpu_packed, cpu_fused(xs.device(), self.act)) {
+            return crate::cpu_direct::pointwise(xs, packed, &self.b, act);
+        }
+        let w = self
+            .w
+            .as_ref()
+            .expect("pointwise keeps GEMM weights unless the AVX2 kernel owns it");
+        let (b, c, h, hw) = xs.dims4()?;
+        let o = w.dim(0)?;
+        let out = w
+            .broadcast_matmul(&xs.contiguous()?.reshape((b, c, h * hw))?)?
+            .broadcast_add(&self.b.reshape((1, o, 1))?)?;
+        activate(out.reshape((b, o, h, hw))?, self.act)
+    }
+}
+
+/// Dense k*k conv. Each device keeps only the weight layout its backend uses.
 #[derive(Debug, Clone)]
 struct Dense {
-    conv: Conv2d,
-    /// `(out_c, in_c*k*k + 1)`: the last column is the bias, matched by im2col's ones row.
-    w2d: Tensor,
-    /// `cpu_direct::pack_weights` layout, when the AVX2 CPU kernel can run this conv.
+    /// Metal, and CPU without the AVX2 kernel (implicit GEMM).
+    conv: Option<Conv2d>,
+    /// `(out_c, in_c*k*k + 1)`, the last column being the bias matched by im2col's ones row: CUDA, and thin CPU inputs.
+    w2d: Option<Tensor>,
+    /// `cpu_direct::pack_weights` layout for the AVX2 kernel.
     cpu_packed: Option<Tensor>,
+    b: Tensor,
     kernel: usize,
     stride: usize,
     padding: usize,
+    act: Option<Activation>,
 }
 
 impl Dense {
-    fn new(w: Tensor, b: Tensor, kernel: usize, stride: usize, padding: usize) -> Result<Self> {
+    fn new(
+        w: Tensor,
+        b: Tensor,
+        geom: (usize, usize, usize),
+        act: Option<Activation>,
+    ) -> Result<Self> {
+        let (kernel, stride, padding) = geom;
         let (o, i, _, _) = w.dims4()?;
-        let w2d = Tensor::cat(
-            &[w.reshape((o, i * kernel * kernel))?, b.reshape((o, 1))?],
-            1,
-        )?;
+        let dev = w.device().clone();
+        let fused = cpu_fused(&dev, act).is_some() && o.is_multiple_of(crate::cpu_direct::OC_T);
+        let cpu_packed = fused
+            .then(|| crate::cpu_direct::pack_weights(&w))
+            .transpose()?;
+        let needs_w2d = !fused && (dev.is_cuda() || (dev.is_cpu() && i < IMPLICIT_MIN_IN_C));
+        let w2d = needs_w2d
+            .then(|| {
+                Tensor::cat(
+                    &[w.reshape((o, i * kernel * kernel))?, b.reshape((o, 1))?],
+                    1,
+                )
+            })
+            .transpose()?;
+        let needs_conv = !fused && (dev.is_metal() || (dev.is_cpu() && i >= IMPLICIT_MIN_IN_C));
         let cfg = Conv2dConfig {
             padding,
             stride,
@@ -147,50 +214,43 @@ impl Dense {
             groups: 1,
             cudnn_fwd_algo: None,
         };
-        let cpu_packed = if w.device().is_cpu()
-            && crate::cpu_direct::available()
-            && o.is_multiple_of(DIRECT_OC_MULTIPLE)
-        {
-            Some(crate::cpu_direct::pack_weights(&w)?)
-        } else {
-            None
-        };
         Ok(Self {
-            conv: Conv2d::new(w, Some(b), cfg),
+            conv: needs_conv.then(|| Conv2d::new(w, Some(b.clone()), cfg)),
             w2d,
             cpu_packed,
+            b,
             kernel,
             stride,
             padding,
+            act,
         })
     }
-}
 
-impl Module for Dense {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        if xs.device().is_metal() {
-            return self.conv.forward(xs);
+        if let (Some(packed), Some(act)) = (&self.cpu_packed, cpu_fused(xs.device(), self.act)) {
+            return crate::cpu_direct::conv2d(xs, packed, &self.b, self.stride, self.padding, act);
         }
-        if xs.device().is_cpu() && xs.dim(1)? >= IMPLICIT_MIN_IN_C {
-            let bias = self
-                .conv
-                .bias()
-                .expect("dense conv is built with a folded bias");
-            return crate::cpu_conv::conv2d(
-                xs,
-                self.conv.weight(),
-                bias,
-                self.stride,
-                self.padding,
-            );
+        if let Some(conv) = &self.conv {
+            let y = if xs.device().is_cpu() {
+                crate::cpu_conv::conv2d(xs, conv.weight(), &self.b, self.stride, self.padding)?
+            } else {
+                conv.forward(xs)?
+            };
+            return activate(y, self.act);
         }
+        let w2d = self
+            .w2d
+            .as_ref()
+            .expect("dense conv keeps a weight layout for its device");
         let (b, _, h, w) = xs.dims4()?;
         let ho = (h + 2 * self.padding - self.kernel) / self.stride + 1;
         let wo = (w + 2 * self.padding - self.kernel) / self.stride + 1;
         let cols = crate::im2col::im2col(xs, self.kernel, self.stride, self.padding)?;
-        self.w2d
-            .broadcast_matmul(&cols)?
-            .reshape((b, self.w2d.dim(0)?, ho, wo))
+        activate(
+            w2d.broadcast_matmul(&cols)?
+                .reshape((b, w2d.dim(0)?, ho, wo))?,
+            self.act,
+        )
     }
 }
 
@@ -201,60 +261,19 @@ enum Conv {
     Pointwise(Pointwise),
 }
 
-/// Conv2d with an inference-mode BatchNorm folded into its weight and bias at load time.
+/// Conv2d with an inference-mode BatchNorm folded into its weight and bias at load time; the activation lives in the
+/// conv variant so each backend can fuse it.
 #[derive(Debug, Clone)]
 pub struct ConvNorm {
     conv: Conv,
-    act: Option<Activation>,
-}
-
-impl ConvNorm {
-    /// The AVX2 CPU kernels fuse bias + activation; returns `None` when this conv/device has no fused path.
-    fn forward_fused_cpu(&self, xs: &Tensor) -> Result<Option<Tensor>> {
-        use crate::cpu_direct::{self, Act};
-        if !xs.device().is_cpu() || !cpu_direct::available() {
-            return Ok(None);
-        }
-        let Some(act) = Act::from_candle(self.act) else {
-            return Ok(None);
-        };
-        match &self.conv {
-            Conv::Dense(Dense {
-                cpu_packed: Some(packed),
-                conv,
-                stride,
-                padding,
-                ..
-            }) => {
-                let bias = conv.bias().expect("dense conv is built with a folded bias");
-                cpu_direct::conv2d(xs, packed, bias, *stride, *padding, act).map(Some)
-            }
-            Conv::Depthwise(c) => {
-                cpu_direct::depthwise(xs, &c.w, &c.b, c.stride, c.padding, act).map(Some)
-            }
-            Conv::Pointwise(Pointwise {
-                cpu_packed: Some(packed),
-                b,
-                ..
-            }) => cpu_direct::pointwise(xs, packed, &b.flatten_all()?, act).map(Some),
-            _ => Ok(None),
-        }
-    }
 }
 
 impl Module for ConvNorm {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        if let Some(y) = self.forward_fused_cpu(xs)? {
-            return Ok(y);
-        }
-        let xs = match &self.conv {
-            Conv::Dense(c) => c.forward(xs)?,
-            Conv::Depthwise(c) => c.forward(xs)?,
-            Conv::Pointwise(c) => c.forward(xs)?,
-        };
-        match self.act {
-            Some(act) => act.forward(&xs),
-            None => Ok(xs),
+        match &self.conv {
+            Conv::Dense(c) => c.forward(xs),
+            Conv::Depthwise(c) => c.forward(xs),
+            Conv::Pointwise(c) => c.forward(xs),
         }
     }
 }
@@ -365,37 +384,17 @@ impl ConvNormSpec {
     }
 
     fn build(self, w: Tensor, b: Tensor) -> Result<ConvNorm> {
+        let geom = (self.kernel, self.stride, self.padding);
         let conv = if self.groups > 1 && self.groups == self.in_c && self.in_c == self.out_c {
-            Conv::Depthwise(Depthwise::new(
-                &w,
-                &b,
-                self.kernel,
-                self.stride,
-                self.padding,
-            )?)
+            Conv::Depthwise(Depthwise::new(&w, &b, geom, self.act)?)
         } else if self.kernel == 1 && self.stride == 1 && self.groups == 1 && self.padding == 0 {
-            let cpu_packed = if w.device().is_cpu()
-                && crate::cpu_direct::available()
-                && self.out_c.is_multiple_of(DIRECT_OC_MULTIPLE)
-            {
-                Some(crate::cpu_direct::pack_weights(&w)?)
-            } else {
-                None
-            };
-            Conv::Pointwise(Pointwise {
-                w: w.reshape((self.out_c, self.in_c))?,
-                b: b.reshape((1, self.out_c, 1))?,
-                cpu_packed,
-            })
+            Conv::Pointwise(Pointwise::new(&w, &b, self.act)?)
         } else if self.groups == 1 {
-            Conv::Dense(Dense::new(w, b, self.kernel, self.stride, self.padding)?)
+            Conv::Dense(Dense::new(w, b, geom, self.act)?)
         } else {
             candle_core::bail!("grouped conv with groups={} is not supported", self.groups);
         };
-        Ok(ConvNorm {
-            conv,
-            act: self.act,
-        })
+        Ok(ConvNorm { conv })
     }
 }
 
@@ -443,58 +442,101 @@ mod tests {
     use super::*;
     use candle_core::{Device, D};
 
+    // GELU has no fused kernel, so it exercises each variant's unfused path next to the fused ones
+    const ACTS: [Option<Activation>; 4] = [
+        None,
+        Some(Activation::Relu),
+        Some(Activation::Silu),
+        Some(Activation::Gelu),
+    ];
+
+    fn devices() -> Result<Vec<Device>> {
+        std::iter::once(Ok(Device::Cpu))
+            .chain(cfg!(feature = "cuda").then(|| Device::new_cuda(0)))
+            .collect()
+    }
+
+    fn reference(
+        x: &Tensor,
+        w: &Tensor,
+        b: &Tensor,
+        conv: (usize, usize, usize),
+        act: Option<Activation>,
+    ) -> Result<Tensor> {
+        let (s, p, groups) = conv;
+        let o = w.dim(0)?;
+        activate(
+            x.conv2d(w, p, s, 1, groups)?
+                .broadcast_add(&b.reshape((1, o, 1, 1))?)?,
+            act,
+        )
+    }
+
+    fn rel_err(a: &Tensor, b: &Tensor) -> Result<f32> {
+        let a = a.to_device(&Device::Cpu)?;
+        let scale = b
+            .abs()?
+            .flatten_all()?
+            .max(D::Minus1)?
+            .to_scalar::<f32>()?
+            .max(1e-6);
+        Ok((a - b)?
+            .abs()?
+            .flatten_all()?
+            .max(D::Minus1)?
+            .to_scalar::<f32>()?
+            / scale)
+    }
+
     #[test]
-    fn dense_matches_conv() -> Result<()> {
-        let dev = Device::Cpu;
-        for (k, s, p, h, w) in [(3, 1, 1, 9, 7), (3, 2, 1, 10, 11), (2, 1, 0, 6, 5)] {
-            let x = Tensor::randn(0f32, 1., (2, 4, h, w), &dev)?;
-            let wt = Tensor::randn(0f32, 1., (3, 4, k, k), &dev)?;
-            let b = Tensor::randn(0f32, 1., 3, &dev)?;
-            let want = x
-                .conv2d(&wt, p, s, 1, 1)?
-                .broadcast_add(&b.reshape((1, 3, 1, 1))?)?;
-            let mk = |d: &Device| Dense::new(wt.to_device(d)?, b.to_device(d)?, k, s, p);
-            let got = mk(&dev)?.forward(&x)?;
-            let err = max_abs(&got, &want)?;
-            assert!(err < 1e-4, "k={k} s={s} err={err}");
-            #[cfg(feature = "cuda")]
-            {
-                let cuda = Device::new_cuda(0)?;
-                let got = mk(&cuda)?.forward(&x.to_device(&cuda)?)?.to_device(&dev)?;
-                let err = max_abs(&got, &want)?;
-                assert!(err < 1e-4, "cuda k={k} s={s} err={err}");
+    fn dense_dispatch_matches_conv() -> Result<()> {
+        let cpu = Device::Cpu;
+        // (out, in): 8 outputs take the fused AVX2 kernel; 3 fall back to implicit GEMM (in >= 16) or im2col (in < 16)
+        for (o, i) in [(8, 4), (8, 20), (3, 4), (3, 20)] {
+            for (k, s, p, h, w) in [(3, 1, 1, 9, 7), (3, 2, 1, 10, 11), (2, 1, 0, 6, 5)] {
+                let x = Tensor::randn(0f32, 1., (2, i, h, w), &cpu)?;
+                let wt = Tensor::randn(0f32, 1., (o, i, k, k), &cpu)?;
+                let b = Tensor::randn(0f32, 1., o, &cpu)?;
+                for act in ACTS {
+                    let want = reference(&x, &wt, &b, (s, p, 1), act)?;
+                    for dev in devices()? {
+                        let conv =
+                            Dense::new(wt.to_device(&dev)?, b.to_device(&dev)?, (k, s, p), act)?;
+                        let err = rel_err(&conv.forward(&x.to_device(&dev)?)?, &want)?;
+                        assert!(
+                            err < 1e-5,
+                            "{dev:?} o={o} i={i} k={k} s={s} {act:?} rel err={err}"
+                        );
+                    }
+                }
             }
         }
         Ok(())
     }
 
     #[test]
-    fn pointwise_matches_conv() -> Result<()> {
-        let dev = Device::Cpu;
-        let x = Tensor::randn(0f32, 1., (2, 5, 7, 9), &dev)?;
-        let wt = Tensor::randn(0f32, 1., (3, 5, 1, 1), &dev)?;
-        let b = Tensor::randn(0f32, 1., 3, &dev)?;
-        let want = x
-            .conv2d(&wt, 0, 1, 1, 1)?
-            .broadcast_add(&b.reshape((1, 3, 1, 1))?)?;
-        let got = Pointwise {
-            w: wt.reshape((3, 5))?,
-            b: b.reshape((1, 3, 1))?,
-            cpu_packed: None,
+    fn pointwise_dispatch_matches_conv() -> Result<()> {
+        let cpu = Device::Cpu;
+        for o in [8, 3] {
+            let x = Tensor::randn(0f32, 1., (2, 5, 7, 9), &cpu)?;
+            let wt = Tensor::randn(0f32, 1., (o, 5, 1, 1), &cpu)?;
+            let b = Tensor::randn(0f32, 1., o, &cpu)?;
+            for act in ACTS {
+                let want = reference(&x, &wt, &b, (1, 0, 1), act)?;
+                for dev in devices()? {
+                    let conv = Pointwise::new(&wt.to_device(&dev)?, &b.to_device(&dev)?, act)?;
+                    let err = rel_err(&conv.forward(&x.to_device(&dev)?)?, &want)?;
+                    assert!(err < 1e-5, "{dev:?} o={o} {act:?} rel err={err}");
+                }
+            }
         }
-        .forward(&x)?;
-        let err = (got - want)?
-            .abs()?
-            .flatten_all()?
-            .max(D::Minus1)?
-            .to_scalar::<f32>()?;
-        assert!(err < 1e-4, "err={err}");
         Ok(())
     }
 
     #[test]
-    fn depthwise_matches_grouped_conv() -> Result<()> {
-        let dev = Device::Cpu;
+    fn depthwise_dispatch_matches_grouped_conv() -> Result<()> {
+        let cpu = Device::Cpu;
+        let c = 6;
         for (k, s, h, w) in [
             (3, 1, 9, 7),
             (3, 2, 10, 10),
@@ -502,37 +544,30 @@ mod tests {
             (5, 1, 8, 13),
             (5, 2, 7, 7),
         ] {
-            let c = 6;
-            let x = Tensor::randn(0f32, 1., (2, c, h, w), &dev)?;
-            let wt = Tensor::randn(0f32, 1., (c, 1, k, k), &dev)?;
-            let b = Tensor::randn(0f32, 1., c, &dev)?;
             let p = (k - 1) / 2;
-            let want = x
-                .conv2d(&wt, p, s, 1, c)?
-                .broadcast_add(&b.reshape((1, c, 1, 1))?)?;
-            let dw = Depthwise::new(&wt, &b, k, s, p)?;
-            for (name, got) in [("op", dw.forward(&x)?), ("taps", dw.forward_taps(&x)?)] {
-                assert_eq!(got.dims(), want.dims(), "{name} k={k} s={s} {h}x{w}");
-                let err = max_abs(&got, &want)?;
-                assert!(err < 1e-4, "{name} k={k} s={s} {h}x{w} err={err}");
+            let x = Tensor::randn(0f32, 1., (2, c, h, w), &cpu)?;
+            let wt = Tensor::randn(0f32, 1., (c, 1, k, k), &cpu)?;
+            let b = Tensor::randn(0f32, 1., c, &cpu)?;
+            for act in ACTS {
+                let want = reference(&x, &wt, &b, (s, p, c), act)?;
+                for dev in devices()? {
+                    let conv =
+                        Depthwise::new(&wt.to_device(&dev)?, &b.to_device(&dev)?, (k, s, p), act)?;
+                    let err = rel_err(&conv.forward(&x.to_device(&dev)?)?, &want)?;
+                    assert!(
+                        err < 1e-5,
+                        "{dev:?} k={k} s={s} {h}x{w} {act:?} rel err={err}"
+                    );
+                }
             }
-            #[cfg(feature = "cuda")]
-            {
-                let cuda = Device::new_cuda(0)?;
-                let dw = Depthwise::new(&wt.to_device(&cuda)?, &b.to_device(&cuda)?, k, s, p)?;
-                let got = dw.forward(&x.to_device(&cuda)?)?.to_device(&dev)?;
-                let err = max_abs(&got, &want)?;
-                assert!(err < 1e-4, "cuda k={k} s={s} {h}x{w} err={err}");
-            }
+            // the Metal fallback, checked on CPU
+            let conv = Depthwise::new(&wt, &b, (k, s, p), None)?;
+            let err = rel_err(
+                &conv.forward_taps(&x)?,
+                &reference(&x, &wt, &b, (s, p, c), None)?,
+            )?;
+            assert!(err < 1e-5, "taps k={k} s={s} {h}x{w} rel err={err}");
         }
         Ok(())
-    }
-
-    fn max_abs(a: &Tensor, b: &Tensor) -> Result<f32> {
-        (a - b)?
-            .abs()?
-            .flatten_all()?
-            .max(D::Minus1)?
-            .to_scalar::<f32>()
     }
 }

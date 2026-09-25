@@ -7,6 +7,7 @@ pub mod postprocess;
 pub mod preprocess;
 
 use std::path::Path;
+use std::sync::OnceLock;
 
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::VarBuilder;
@@ -26,13 +27,32 @@ fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_str(&s).map_err(candle_core::Error::wrap)
 }
 
+static CPU_POOL: OnceLock<Option<rayon::ThreadPool>> = OnceLock::new();
+
+/// Process-wide pool for the AVX2 kernels: hyperthreads slow them (16 -> 8 threads: 0.78 -> 0.63 s), so use physical
+/// cores, capped by the CPUs this process may run on (affinity, cgroup quota). `None` defers to rayon's global pool.
+fn cpu_pool() -> Option<&'static rayon::ThreadPool> {
+    CPU_POOL
+        .get_or_init(|| {
+            if std::env::var_os(RAYON_THREADS_ENV).is_some() || !crate::cpu_direct::available() {
+                return None;
+            }
+            let allowed = std::thread::available_parallelism().map_or(1, |n| n.get());
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(num_cpus::get_physical().min(allowed))
+                .build()
+                .ok()
+        })
+        .as_ref()
+}
+
 /// Loads an HF-format `PP-DocLayoutV3_safetensors` directory and runs detection end to end.
 pub struct PPDocLayoutV3Detector {
     model: PPDocLayoutV3,
     preprocessor: Preprocessor,
     device: Device,
-    /// CPU only: physical-core pool; hyperthreads slow the FMA-bound conv kernels (16 -> 8 threads: 0.78 -> 0.63 s).
-    pool: Option<rayon::ThreadPool>,
+    /// CPU only: the shared physical-core pool from `cpu_pool`.
+    pool: Option<&'static rayon::ThreadPool>,
 }
 
 impl PPDocLayoutV3Detector {
@@ -51,16 +71,7 @@ impl PPDocLayoutV3Detector {
             )?
         };
         let model = PPDocLayoutV3::new(cfg, (preprocessor.height, preprocessor.width), vb)?;
-        let pool = if device.is_cpu() && std::env::var_os(RAYON_THREADS_ENV).is_none() {
-            Some(
-                rayon::ThreadPoolBuilder::new()
-                    .num_threads(num_cpus::get_physical())
-                    .build()
-                    .map_err(candle_core::Error::wrap)?,
-            )
-        } else {
-            None
-        };
+        let pool = if device.is_cpu() { cpu_pool() } else { None };
         Ok(Self {
             model,
             preprocessor,
@@ -69,7 +80,7 @@ impl PPDocLayoutV3Detector {
         })
     }
 
-    /// Runs `f` on the detector's CPU thread pool (or inline on other devices / when `RAYON_NUM_THREADS` is set).
+    /// Runs `f` on the detector's CPU pool; wrap direct `model()` calls in this to get the same threading as `detect`.
     pub fn install<R: Send>(&self, f: impl FnOnce() -> R + Send) -> R {
         match &self.pool {
             Some(pool) => pool.install(f),

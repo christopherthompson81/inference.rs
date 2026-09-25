@@ -2,7 +2,7 @@ use candle_core::{CpuStorage, CustomOp3, Layout, Result, Shape, Tensor};
 use rayon::prelude::*;
 
 /// Output channels per register tile.
-const OC_T: usize = 4;
+pub const OC_T: usize = 4;
 const LANES: usize = 8;
 /// Pixel vectors per register tile: `OC_T * MAX_XV` = 12 of the 16 ymm registers hold accumulators.
 const MAX_XV: usize = 3;
@@ -13,6 +13,8 @@ const SEG_W: usize = 2 * MAX_XV * LANES;
 /// Input floats one channel block may touch per segment (~24 KB of the 32 KB L1).
 const L1_INPUT_FLOATS: usize = 6144;
 const MIN_IC_BLOCK: usize = 4;
+/// Pixels per parallel task of the pointwise kernel.
+const PW_CHUNK: usize = 4 * SEG_W;
 /// Weight floats one task's group of output-channel tiles may use (~128 KB of L2).
 const L2_WEIGHT_FLOATS: usize = 32768;
 
@@ -193,11 +195,11 @@ struct DirectConv {
     act: Act,
 }
 
-fn f32_slices<'a>(items: [(&'a CpuStorage, &Layout); 3]) -> Result<[&'a [f32]; 3]> {
+pub(crate) fn f32_slices<'a>(items: [(&'a CpuStorage, &Layout); 3]) -> Result<[&'a [f32]; 3]> {
     let mut out: [&[f32]; 3] = [&[]; 3];
     for (o, (s, l)) in out.iter_mut().zip(items) {
         let CpuStorage::F32(v) = s else {
-            candle_core::bail!("direct conv is f32 only");
+            candle_core::bail!("layout CPU kernels are f32 only");
         };
         *o = &v[l.start_offset()..];
     }
@@ -265,6 +267,8 @@ impl CustomOp3 for DirectConv {
                                 taps: &taps,
                                 w: packed[t * tile_floats..].as_ptr(),
                                 bias: std::array::from_fn(|j| bias[t * OC_T + j]),
+                                act,
+                                blk,
                             };
                             let mut x0 = seg;
                             while x0 < seg_end {
@@ -275,9 +279,9 @@ impl CustomOp3 for DirectConv {
                                 });
                                 unsafe {
                                     match n.div_ceil(LANES) {
-                                        1 => conv_tile::<1>(&geo, x0, n, dst, act, blk),
-                                        2 => conv_tile::<2>(&geo, x0, n, dst, act, blk),
-                                        _ => conv_tile::<3>(&geo, x0, n, dst, act, blk),
+                                        1 => conv_tile::<1>(&geo, x0, n, dst),
+                                        2 => conv_tile::<2>(&geo, x0, n, dst),
+                                        _ => conv_tile::<3>(&geo, x0, n, dst),
                                     }
                                 }
                                 x0 += n;
@@ -297,9 +301,6 @@ struct IcBlock {
     start: usize,
     end: usize,
 }
-
-/// Pixels per parallel task of the pointwise kernel.
-const PW_CHUNK: usize = 4 * SEG_W;
 
 struct DirectPointwise {
     act: Act,
@@ -363,6 +364,8 @@ impl CustomOp3 for DirectPointwise {
                                 taps: &taps,
                                 w: packed[t * tile_floats..].as_ptr(),
                                 bias: std::array::from_fn(|j| bias[t * OC_T + j]),
+                                act,
+                                blk,
                             };
                             let mut x0 = seg;
                             while x0 < seg_end {
@@ -373,9 +376,9 @@ impl CustomOp3 for DirectPointwise {
                                 });
                                 unsafe {
                                     match n.div_ceil(LANES) {
-                                        1 => conv_tile::<1>(&geo, x0, n, dst, act, blk),
-                                        2 => conv_tile::<2>(&geo, x0, n, dst, act, blk),
-                                        _ => conv_tile::<3>(&geo, x0, n, dst, act, blk),
+                                        1 => conv_tile::<1>(&geo, x0, n, dst),
+                                        2 => conv_tile::<2>(&geo, x0, n, dst),
+                                        _ => conv_tile::<3>(&geo, x0, n, dst),
                                     }
                                 }
                                 x0 += n;
@@ -399,12 +402,14 @@ impl CustomOp3 for DirectPointwise {
                         taps: &taps,
                         w: packed[t * tile_floats..].as_ptr(),
                         bias: std::array::from_fn(|j| bias[t * OC_T + j]),
+                        act: self.act,
+                        blk,
                     };
                     // SAFETY: the tail pixels of planes t*OC_T+j belong to this task only.
                     let dst: [*mut f32; OC_T] = std::array::from_fn(|j| unsafe {
                         ob.get().add((t * OC_T + j) * hw + body)
                     });
-                    unsafe { conv_tile::<1>(&geo, 0, tail, dst, self.act, blk) };
+                    unsafe { conv_tile::<1>(&geo, 0, tail, dst) };
                 });
             }
         }
@@ -422,6 +427,9 @@ struct RowGeom<'a> {
     /// Packed weights of this output-channel tile.
     w: *const f32,
     bias: [f32; OC_T],
+    /// Applied only after the final channel block.
+    act: Act,
+    blk: IcBlock,
 }
 
 // SAFETY: raw pointers are only read; the owning buffers outlive the parallel loop.
@@ -430,15 +438,9 @@ unsafe impl Sync for RowGeom<'_> {}
 /// One `OC_T x n` output tile (`n <= XV * LANES`) of one output row.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn conv_tile<const XV: usize>(
-    g: &RowGeom,
-    x0: usize,
-    n: usize,
-    dst: [*mut f32; OC_T],
-    act: Act,
-    blk: IcBlock,
-) {
+unsafe fn conv_tile<const XV: usize>(g: &RowGeom, x0: usize, n: usize, dst: [*mut f32; OC_T]) {
     use std::arch::x86_64::*;
+    let (act, blk) = (g.act, g.blk);
     let mut acc = [[_mm256_setzero_ps(); XV]; OC_T];
     for (j, row) in acc.iter_mut().enumerate() {
         if blk.start == 0 {
@@ -497,15 +499,16 @@ unsafe fn conv_tile<const XV: usize>(
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-unsafe fn conv_tile<const XV: usize>(
-    _: &RowGeom,
-    _: usize,
-    _: usize,
-    _: [*mut f32; OC_T],
-    _: Act,
-    _: IcBlock,
-) {
+unsafe fn conv_tile<const XV: usize>(_: &RowGeom, _: usize, _: usize, _: [*mut f32; OC_T]) {
     unreachable!("direct conv requires x86_64 AVX2")
+}
+
+/// Per-channel invariants of one depthwise output plane.
+struct DwChannel<'a> {
+    taps: &'a [usize],
+    w: &'a [f32],
+    bias: f32,
+    act: Act,
 }
 
 struct DirectDepthwise {
@@ -551,19 +554,15 @@ impl CustomOp3 for DirectDepthwise {
                 .enumerate()
                 .for_each(|(ch, dst)| {
                     let xc = planes.data[ch * plane..].as_ptr();
-                    let wk = &wt[ch * k * k..(ch + 1) * k * k];
+                    let dw = DwChannel {
+                        taps: &taps,
+                        w: &wt[ch * k * k..(ch + 1) * k * k],
+                        bias: bias[ch],
+                        act: self.act,
+                    };
                     for (oy, row) in dst.chunks_mut(wo).enumerate() {
                         // SAFETY: loads stay inside the phase planes plus SLACK; stores are bounded by `row`.
-                        unsafe {
-                            depthwise_row(
-                                xc.add(oy * planes.ws),
-                                &taps,
-                                wk,
-                                bias[ch],
-                                row,
-                                self.act,
-                            )
-                        };
+                        unsafe { depthwise_row(xc.add(oy * planes.ws), &dw, row) };
                     }
                 });
         }
@@ -573,15 +572,9 @@ impl CustomOp3 for DirectDepthwise {
 
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
-unsafe fn depthwise_row(
-    x: *const f32,
-    taps: &[usize],
-    wk: &[f32],
-    bias: f32,
-    row: &mut [f32],
-    act: Act,
-) {
+unsafe fn depthwise_row(x: *const f32, dw: &DwChannel, row: &mut [f32]) {
     use std::arch::x86_64::*;
+    let (taps, wk, bias, act) = (dw.taps, dw.w, dw.bias, dw.act);
     let zero = _mm256_setzero_ps();
     let mut x0 = 0;
     while x0 < row.len() {
@@ -604,7 +597,7 @@ unsafe fn depthwise_row(
 }
 
 #[cfg(not(target_arch = "x86_64"))]
-unsafe fn depthwise_row(_: *const f32, _: &[usize], _: &[f32], _: f32, _: &mut [f32], _: Act) {
+unsafe fn depthwise_row(_: *const f32, _: &DwChannel, _: &mut [f32]) {
     unreachable!("direct depthwise requires x86_64 AVX2")
 }
 
@@ -675,8 +668,14 @@ mod tests {
             return Ok(());
         }
         let dev = Device::Cpu;
-        // 50x50 and 5x5 exercise the padded-copy path (planes not a multiple of 8 floats); 300 channels span blocks
-        for (c, h, w) in [(7, 8, 8), (300, 5, 5), (45, 50, 50), (20, 17, 31)] {
+        // planes not a multiple of 8 floats take the tail scratch; 2x3 has no whole vector at all; 300 channels span blocks
+        for (c, h, w) in [
+            (7, 8, 8),
+            (300, 5, 5),
+            (45, 50, 50),
+            (20, 17, 31),
+            (9, 2, 3),
+        ] {
             for act in [Act::None, Act::Relu, Act::Silu] {
                 let x = Tensor::randn(0f32, 1., (2, c, h, w), &dev)?;
                 let wt = Tensor::randn(0f32, 1., (12, c, 1, 1), &dev)?;

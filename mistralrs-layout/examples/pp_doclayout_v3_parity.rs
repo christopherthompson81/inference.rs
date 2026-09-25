@@ -82,7 +82,7 @@ fn main() -> Result<()> {
 
     let pv = r["pixel_values"].to_device(&dev)?;
     let t0 = std::time::Instant::now();
-    let (out, inter) = det.model().forward_with_intermediates(&pv)?;
+    let (out, inter) = det.install(|| det.model().forward_with_intermediates(&pv))?;
     println!("forward (with intermediates) {:?}", t0.elapsed());
 
     for (i, t) in inter.backbone.iter().enumerate() {
@@ -123,7 +123,7 @@ fn main() -> Result<()> {
 
     for _ in 0..3 {
         let t0 = std::time::Instant::now();
-        let o = det.model().forward(&pv, false)?;
+        let o = det.install(|| det.model().forward(&pv, false))?;
         o.logits.to_device(&Device::Cpu)?;
         println!("forward {:?}", t0.elapsed());
     }

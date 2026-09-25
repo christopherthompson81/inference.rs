@@ -2,6 +2,8 @@ use candle_core::{CpuStorage, CustomOp3, Layout, Result, Shape, Tensor};
 use gemm::Parallelism;
 use rayon::prelude::*;
 
+use crate::cpu_direct::{f32_slices, PhasePlanes};
+
 /// CPU dense conv as one accumulating GEMM per kernel tap over shifted views of the padded input (no im2col buffer).
 pub fn conv2d(
     xs: &Tensor,
@@ -36,14 +38,7 @@ impl CustomOp3 for ImplicitConv {
         sb: &CpuStorage,
         lb: &Layout,
     ) -> Result<(CpuStorage, Shape)> {
-        let (CpuStorage::F32(x), CpuStorage::F32(wt), CpuStorage::F32(bias)) = (sx, sw, sb) else {
-            candle_core::bail!("implicit conv is f32 only");
-        };
-        let (x, wt, bias) = (
-            &x[lx.start_offset()..],
-            &wt[lw.start_offset()..],
-            &bias[lb.start_offset()..],
-        );
+        let [x, wt, bias] = f32_slices([(sx, lx), (sw, lw), (sb, lb)])?;
         let (bn, c, h, w) = lx.shape().dims4()?;
         let (o, ci, k, k2) = lw.shape().dims4()?;
         if ci != c || k != k2 {
@@ -56,37 +51,15 @@ impl CustomOp3 for ImplicitConv {
         let (s, p) = (self.stride, self.padding);
         let ho = (h + 2 * p - k) / s + 1;
         let wo = (w + 2 * p - k) / s + 1;
-        // padded extent rounded up to a stride multiple, split into s*s phase planes of (hs, ws)
-        let hs = (h + 2 * p).div_ceil(s);
-        let ws = (w + 2 * p).div_ceil(s);
-        let plane = hs * ws;
-        let n = ho * ws;
         let par = Parallelism::Rayon(candle_core::utils::get_num_threads());
         let mut out = vec![0f32; bn * o * ho * wo];
-        // the last tap's view runs up to k/s elements past its plane; the slack keeps that read in bounds
-        let mut phases = vec![0f32; s * s * c * plane + k];
-        let mut full = vec![0f32; o * n];
+        let mut full = Vec::new();
         for bi in 0..bn {
-            let xb = &x[bi * c * h * w..(bi + 1) * c * h * w];
-            phases[..s * s * c * plane]
-                .par_chunks_mut(plane)
-                .enumerate()
-                .for_each(|(pc, dst)| {
-                    let (ph, ch) = (pc / c, pc % c);
-                    let (py, px) = (ph / s, ph % s);
-                    let src = &xb[ch * h * w..(ch + 1) * h * w];
-                    for (r, row) in dst.chunks_mut(ws).enumerate() {
-                        let iy = (r * s + py) as isize - p as isize;
-                        for (col, v) in row.iter_mut().enumerate() {
-                            let ix = (col * s + px) as isize - p as isize;
-                            *v = if iy >= 0 && ix >= 0 && (iy as usize) < h && (ix as usize) < w {
-                                src[iy as usize * w + ix as usize]
-                            } else {
-                                0.
-                            };
-                        }
-                    }
-                });
+            // the last tap's view runs up to k/s elements past its plane; PhasePlanes' slack covers that
+            let planes = PhasePlanes::new(&x[bi * c * h * w..(bi + 1) * c * h * w], c, h, w, s, p);
+            let (ws, plane) = (planes.ws, planes.hs * planes.ws);
+            let n = ho * ws;
+            full.resize(o * n, 0.);
             for ky in 0..k {
                 for kx in 0..k {
                     let first = ky == 0 && kx == 0;
@@ -105,7 +78,7 @@ impl CustomOp3 for ImplicitConv {
                             wt.as_ptr().add(ky * k + kx),
                             (k * k) as isize,
                             (c * k * k) as isize,
-                            phases.as_ptr().add(rhs),
+                            planes.data.as_ptr().add(rhs),
                             1,
                             plane as isize,
                             1.,
