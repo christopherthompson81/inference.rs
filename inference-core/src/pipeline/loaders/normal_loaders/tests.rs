@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn loading_metadata(rope_pairing: Option<RopePairing>) -> NormalLoadingMetadata {
