@@ -6,6 +6,7 @@ members = [
     "mistralrs-pyo3",
     "mistralrs",
     "mistralrs-vision",
+    "mistralrs-layout",
     "mistralrs-quant",
     "mistralrs-paged-attn",
     "mistralrs-metal-compile",
