@@ -1,21 +1,18 @@
 use candle_core::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{LayerNorm, Linear, VarBuilder};
+use candle_nn::{LayerNorm, VarBuilder};
 
 use super::backbone::HGNetV2Backbone;
 use super::config::PPDocLayoutV3Config;
 use super::decoder::{inverse_sigmoid, DecodeCtx, DecoderLayer, LevelGeom};
 use super::encoder::HybridEncoder;
-use crate::layers::{ConvNorm, ConvNormSpec, MlpHead};
+use crate::layers::{linear, ConvNorm, ConvNormSpec, Linear, MlpHead};
 
 const SEQ_CONV: (&str, &str) = ("0", "1");
 const ANCHOR_EPS: f32 = 1e-2;
 const ANCHOR_GRID: f32 = 0.05;
-const MASK_MIN_FILL: f64 = 1e9;
 const GP_MASK_FILL: f64 = -1e4;
-/// Deformable-attention sample indices are built in f32 before the cast to u32.
+/// The tensor-op deformable-attention sampler builds sample indices in f32 before the cast to u32.
 const MAX_EXACT_F32_INDEX: usize = 1 << 24;
-/// Backbone stride of the x4 feature map that the mask prototypes live on.
-const MASK_STRIDE: usize = 4;
 
 pub struct RawOutputs {
     /// `(b, q, num_labels)` class logits.
@@ -56,10 +53,6 @@ pub struct PPDocLayoutV3 {
     input_hw: (usize, usize),
     /// `(1, S, 1)` 1.0 where the level anchor lies strictly inside the image.
     anchor_valid: Tensor,
-    /// `(1, 1, Hm*Wm)` pixel column / row indices of the mask grid.
-    mask_x: Tensor,
-    mask_y: Tensor,
-    mask_norm: Tensor,
     gp_keep: Tensor,
     gp_fill: Tensor,
 }
@@ -87,6 +80,10 @@ fn anchor_valid_mask(geom: &LevelGeom, dev: &Device) -> Result<Tensor> {
 impl PPDocLayoutV3 {
     /// The model is shape-specialized to `input_hw` so all positional/anchor tensors are built once here.
     pub fn new(cfg: PPDocLayoutV3Config, input_hw: (usize, usize), vb: VarBuilder) -> Result<Self> {
+        // the custom kernels are f32-only, and TF32-level error already flips the encoder's top-k query selection
+        if vb.dtype() != DType::F32 {
+            candle_core::bail!("PP-DocLayoutV3 runs in f32 only, got {:?}", vb.dtype());
+        }
         if cfg.backbone_config.arch != "L" {
             candle_core::bail!("unsupported HGNetV2 arch {}", cfg.backbone_config.arch);
         }
@@ -144,14 +141,15 @@ impl PPDocLayoutV3 {
             .map(|i| DecoderLayer::new(&cfg, vbm.pp("decoder").pp("layers").pp(i)))
             .collect::<Result<Vec<_>>>()?;
         // only the final decoder layer's order head feeds the output
-        let order_head = candle_nn::linear(
+        let order_head = linear(
             d,
             d,
             vbm.pp("decoder_order_head").pp(cfg.decoder_layers - 1),
         )?;
 
         let geom = LevelGeom::new(shapes);
-        if geom.total < cfg.num_queries || geom.total > MAX_EXACT_F32_INDEX {
+        let fallback_sampler = !crate::has_kernels(&dev);
+        if geom.total < cfg.num_queries || (fallback_sampler && geom.total > MAX_EXACT_F32_INDEX) {
             candle_core::bail!(
                 "input {input_hw:?} gives {} memory tokens; need {}..={MAX_EXACT_F32_INDEX}",
                 geom.total,
@@ -159,21 +157,6 @@ impl PPDocLayoutV3 {
             );
         }
         let anchor_valid = anchor_valid_mask(&geom, &dev)?;
-
-        let (mh, mw) = (ih / MASK_STRIDE, iw / MASK_STRIDE);
-        let mask_x = Tensor::arange(0u32, mw as u32, &dev)?
-            .to_dtype(DType::F32)?
-            .reshape((1, mw))?
-            .broadcast_as((mh, mw))?
-            .contiguous()?
-            .reshape((1, 1, mh * mw))?;
-        let mask_y = Tensor::arange(0u32, mh as u32, &dev)?
-            .to_dtype(DType::F32)?
-            .reshape((mh, 1))?
-            .broadcast_as((mh, mw))?
-            .contiguous()?
-            .reshape((1, 1, mh * mw))?;
-        let mask_norm = Tensor::new(&[mw as f32, mh as f32, mw as f32, mh as f32], &dev)?;
 
         let q = cfg.num_queries;
         // reference masks the lower triangle incl. the diagonal
@@ -187,16 +170,16 @@ impl PPDocLayoutV3 {
             encoder,
             decoder_input_proj,
             enc_output: (
-                candle_nn::linear(d, d, vbm.pp("enc_output").pp(0))?,
+                linear(d, d, vbm.pp("enc_output").pp(0))?,
                 candle_nn::layer_norm(d, eps, vbm.pp("enc_output").pp(1))?,
             ),
             // decoder.class_embed / bbox_embed are tied to these in the checkpoint
-            enc_score_head: candle_nn::linear(d, nl, vbm.pp("enc_score_head"))?,
+            enc_score_head: linear(d, nl, vbm.pp("enc_score_head"))?,
             enc_bbox_head: MlpHead::new(d, d, 4, 3, vbm.pp("enc_bbox_head"))?,
             layers,
             query_pos_head: MlpHead::new(4, 2 * d, d, 2, vbm.pp("decoder").pp("query_pos_head"))?,
             order_head,
-            global_pointer: candle_nn::linear(
+            global_pointer: linear(
                 d,
                 cfg.global_pointer_head_size * 2,
                 vbm.pp("decoder_global_pointer").pp("dense"),
@@ -206,9 +189,6 @@ impl PPDocLayoutV3 {
             geom,
             input_hw,
             anchor_valid,
-            mask_x,
-            mask_y,
-            mask_norm,
             gp_keep,
             gp_fill,
             cfg,
@@ -234,36 +214,6 @@ impl PPDocLayoutV3 {
         let mut inter = None;
         let out = self.forward_inner(pixel_values, true, Some(&mut inter))?;
         Ok((out, inter.expect("intermediates recorded")))
-    }
-
-    /// `(b, q, Hm*Wm)` mask logits -> `(b, q, 4)` normalized cxcywh of each mask's `> 0` bounding box.
-    fn mask_to_box(&self, masks: &Tensor) -> Result<Tensor> {
-        let m = masks.gt(0.)?.to_dtype(DType::F32)?;
-        let not_m = m.affine(-1., 1.)?;
-        let mx = m.broadcast_mul(&self.mask_x)?;
-        let my = m.broadcast_mul(&self.mask_y)?;
-        let fill = (not_m * MASK_MIN_FILL)?;
-        let x_max = (mx.max_keepdim(D::Minus1)? + 1.)?;
-        let y_max = (my.max_keepdim(D::Minus1)? + 1.)?;
-        let x_min = (mx + &fill)?.min_keepdim(D::Minus1)?;
-        let y_min = (my + fill)?.min_keepdim(D::Minus1)?;
-        let non_empty = m.max_keepdim(D::Minus1)?;
-        let xyxy = Tensor::cat(&[x_min, y_min, x_max, y_max], D::Minus1)?
-            .broadcast_mul(&non_empty)?
-            .broadcast_div(&self.mask_norm)?;
-        let x0 = xyxy.narrow(D::Minus1, 0, 1)?;
-        let y0 = xyxy.narrow(D::Minus1, 1, 1)?;
-        let x1 = xyxy.narrow(D::Minus1, 2, 1)?;
-        let y1 = xyxy.narrow(D::Minus1, 3, 1)?;
-        Tensor::cat(
-            &[
-                ((&x0 + &x1)? / 2.)?,
-                ((&y0 + &y1)? / 2.)?,
-                (x1 - x0)?,
-                (y1 - y0)?,
-            ],
-            D::Minus1,
-        )
     }
 
     /// Top-k over `S` runs on the host: candle's CUDA arg-sort keeps a whole row in shared memory.
@@ -305,10 +255,8 @@ impl PPDocLayoutV3 {
         if (h, w) != self.input_hw {
             candle_core::bail!("expected {:?} input, got {:?}", self.input_hw, (h, w));
         }
-        let dev = pixel_values.device();
         let d = self.cfg.d_model;
         let q = self.cfg.num_queries;
-        let heads = self.cfg.decoder_attention_heads;
 
         let mut feats = self.backbone.forward(pixel_values)?;
         let backbone_feats = inter.is_some().then(|| feats.clone());
@@ -348,15 +296,22 @@ impl PPDocLayoutV3 {
             .mask_query_head
             .forward(&self.decoder_norm.forward(&target)?)?;
         let enc_masks = mask_embed.matmul(&mask_feat)?;
-        let init_ref = inverse_sigmoid(&self.mask_to_box(&enc_masks)?)?;
+        let init_ref = inverse_sigmoid(&crate::mask_box::mask_to_box(&enc_masks, mh, mw)?)?;
 
-        let bh_offset = Tensor::arange(0u32, (b * heads) as u32, dev)?
-            .affine(s as f64, 0.)?
-            .reshape((b * heads, 1))?;
+        let bh_offset = if crate::has_kernels(pixel_values.device()) {
+            None
+        } else {
+            let bh = b * self.cfg.decoder_attention_heads;
+            Some(
+                Tensor::arange(0u32, bh as u32, pixel_values.device())?
+                    .affine(s as f64, 0.)?
+                    .reshape((bh, 1))?,
+            )
+        };
         let ctx = DecodeCtx {
             memory: &memory,
             geom: &self.geom,
-            bh_offset: &bh_offset,
+            bh_offset,
         };
 
         let mut hs = target;
@@ -403,5 +358,97 @@ impl PPDocLayoutV3 {
             order_logits,
             masks,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use candle_core::Shape;
+    use candle_nn::var_builder::SimpleBackend;
+
+    const TEST_INPUT: usize = 160;
+
+    /// Random weights for every requested tensor; BatchNorm variances kept positive.
+    struct RandomWeights;
+
+    impl SimpleBackend for RandomWeights {
+        fn get(
+            &self,
+            s: Shape,
+            name: &str,
+            _: candle_nn::Init,
+            dtype: DType,
+            dev: &Device,
+        ) -> Result<Tensor> {
+            // fan-in scaled weights and ~1 BN gammas so the signal survives the depth of the backbone
+            let dims = s.dims().to_vec();
+            let is_bn = [".norm.", ".normalization.", "input_proj."]
+                .iter()
+                .any(|k| name.contains(k))
+                && dims.len() == 1;
+            let t = if name.ends_with("running_var") || (is_bn && name.ends_with(".weight")) {
+                Tensor::rand(0.8f32, 1.2, s, dev)?
+            } else if dims.len() >= 2 {
+                let fan_in: usize = dims[1..].iter().product();
+                (Tensor::randn(0f32, 1., s, dev)? / (fan_in as f64).sqrt())?
+            } else {
+                (Tensor::randn(0f32, 1., s, dev)? * 0.05)?
+            };
+            t.to_dtype(dtype)
+        }
+
+        fn get_unchecked(&self, name: &str, _: DType, _: &Device) -> Result<Tensor> {
+            candle_core::bail!("no shape for {name}")
+        }
+
+        fn contains_tensor(&self, _: &str) -> bool {
+            true
+        }
+    }
+
+    fn test_config() -> PPDocLayoutV3Config {
+        serde_json::from_value(serde_json::json!({
+            "backbone_config": { "arch": "L" },
+            "d_model": 256, "encoder_hidden_dim": 256, "encoder_in_channels": [512, 1024, 2048],
+            "feature_strides": [8, 16, 32], "encoder_layers": 1, "encoder_ffn_dim": 1024,
+            "encoder_attention_heads": 8, "encode_proj_layers": [2], "positional_encoding_temperature": 10000,
+            "encoder_activation_function": "gelu", "activation_function": "silu", "hidden_expansion": 1.0,
+            "decoder_layers": 2, "decoder_ffn_dim": 1024, "decoder_attention_heads": 8, "decoder_n_points": 4,
+            "decoder_activation_function": "relu", "decoder_in_channels": [256, 256, 256], "num_feature_levels": 3,
+            "num_queries": 300, "layer_norm_eps": 1e-5, "batch_norm_eps": 1e-5, "mask_feature_channels": [64, 64],
+            "x4_feat_dim": 128, "global_pointer_head_size": 64,
+            "id2label": { "0": "a", "1": "b", "2": "c" }
+        }))
+        .expect("test config")
+    }
+
+    #[test]
+    fn batched_forward_matches_single() -> Result<()> {
+        for dev in crate::test_util::devices()? {
+            let vb = VarBuilder::from_backend(Box::new(RandomWeights), DType::F32, dev.clone());
+            let model = PPDocLayoutV3::new(test_config(), (TEST_INPUT, TEST_INPUT), vb)?;
+            let px = Tensor::rand(0f32, 1., (2, 3, TEST_INPUT, TEST_INPUT), &dev)?;
+            let both = model.forward(&px, true)?;
+            let second = model.forward(&px.narrow(0, 1, 1)?, true)?;
+            let pairs = [
+                ("logits", &both.logits, &second.logits),
+                ("pred_boxes", &both.pred_boxes, &second.pred_boxes),
+                ("order_logits", &both.order_logits, &second.order_logits),
+                (
+                    "masks",
+                    both.masks.as_ref().unwrap(),
+                    second.masks.as_ref().unwrap(),
+                ),
+            ];
+            for (name, b, s) in pairs {
+                let err = crate::test_util::rel_err(&b.narrow(0, 1, 1)?, s)?;
+                assert!(
+                    err < 1e-4,
+                    "{dev:?} {name}: batch item 1 differs, rel err {err}"
+                );
+            }
+        }
+        Ok(())
     }
 }
