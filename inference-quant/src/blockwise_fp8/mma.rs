@@ -305,8 +305,11 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a CUDA device"]
     fn tensor_core_gemv_matches_dequantized_reference() -> Result<()> {
+        if candle_core::Device::new_cuda(0).is_err() {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        }
         const N: usize = 272;
         const K: usize = 1024;
         let dev = Device::new_cuda(0)?;

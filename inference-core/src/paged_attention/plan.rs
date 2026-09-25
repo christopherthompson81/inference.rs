@@ -1074,6 +1074,12 @@ mod tests {
 
     #[test]
     fn prompt_workspace_falls_back_for_ineligible_known_attention() {
+        // Expectations assume the SM90 FA3 FP8 paged build; other CUDA builds size the prefill differently.
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        if !inference_paged_attn::USE_FA3_FP8_PAGED {
+            eprintln!("SKIP: needs the SM90 FA3 FP8 paged build");
+            return;
+        }
         let model = workspace_model(Some(PrefixPrefillAttentionFeatures::default()));
         let query_lens = [129, 129];
         let context_lens = [1_000, 8_000];
@@ -1100,6 +1106,12 @@ mod tests {
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     #[test]
     fn prompt_workspace_matches_direct_fa3_availability() {
+        // Expectations assume the SM90 FA3 FP8 paged build; other CUDA builds size the prefill differently.
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        if !inference_paged_attn::USE_FA3_FP8_PAGED {
+            eprintln!("SKIP: needs the SM90 FA3 FP8 paged build");
+            return;
+        }
         let model = workspace_model(Some(PrefixPrefillAttentionFeatures::default()));
         let query_lens = [128, 128];
         let context_lens = [1_000, 8_000];

@@ -1832,8 +1832,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires CUDA"]
     fn dense_rows_require_shared_ordered_tight_backing() -> Result<()> {
+        skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         let packed = Tensor::from_vec((0..24u32).collect(), (4, 3, 2), &device)?;
         let rows = (0..4)
@@ -1872,8 +1872,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires CUDA"]
     fn dense_rows_match_packed_inputs_and_survive_owner_drop() -> Result<()> {
+        skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         for bounded_topk in [false, true] {
             let mut case = deterministic_workspace_case(4, 3);
@@ -1962,8 +1962,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires CUDA"]
     fn workspace_reuses_grows_and_supports_deterministic_proposals() -> Result<()> {
+        skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         let mut workspace = None;
         let first = deterministic_workspace_case(2, 2);
@@ -1999,8 +1999,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires CUDA"]
     fn workspace_accepts_device_drafts_and_materializes_with_outcomes() -> Result<()> {
+        skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         let case = deterministic_workspace_case(3, 4);
         let tensors = case.to_device(&device)?;
@@ -2033,8 +2033,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires CUDA"]
     fn workspace_reuses_bounded_topk_scratch_and_row_temperatures() -> Result<()> {
+        skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         let mut workspace = None;
         let mut case = deterministic_workspace_case(2, 2);
@@ -2062,8 +2062,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires CUDA"]
     fn workspace_rejects_overlap_and_stale_completion() -> Result<()> {
+        skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         let case = deterministic_workspace_case(2, 2);
         let tensors = case.to_device(&device)?;
@@ -2099,8 +2099,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires CUDA"]
     fn categorical_matches_cpu_reference() -> Result<()> {
+        skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         let target_logits = logits(&[
             [0.05, 0.20, 0.20, 0.30, 0.25],
@@ -2146,8 +2146,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires CUDA"]
     fn bounded_topk_matches_cpu_reference() -> Result<()> {
+        skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         let case = HostCase {
             batch: 2,
@@ -2208,8 +2208,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires CUDA"]
     fn ranked_topk_20_32_matches_cpu_reference_with_ties_and_top_p() -> Result<()> {
+        skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         for max_top_k in [20, 32] {
             let batch = 2;
@@ -2247,8 +2247,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires CUDA"]
     fn reports_per_row_fallback_and_validation_status() -> Result<()> {
+        skip_without_cuda!();
         let device = Device::new_cuda(0)?;
         let mut q_probs = vec![0.5f32; 8];
         q_probs[2] = -1.0;

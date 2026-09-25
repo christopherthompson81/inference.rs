@@ -47,6 +47,24 @@ pub const INFERENCE_RS_VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const DEFAULT_ENGINE_REQUEST_QUEUE_CAPACITY: usize = 10_000;
 pub const REQUEST_QUEUE_DURATION_METRIC: &str = "inference_request_queue_duration_seconds";
 
+// GPU tests share one device and process-global CUDA state (memory pools, graph scopes), so they run one at a time.
+#[cfg(all(test, feature = "cuda"))]
+static CUDA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+// GPU tests run by default under `--features cuda`, skip without a device, and hold the lock for the test's lifetime.
+#[cfg(all(test, feature = "cuda"))]
+macro_rules! skip_without_cuda {
+    () => {
+        let _cuda_test_guard = crate::CUDA_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if candle_core::Device::new_cuda(0).is_err() {
+            eprintln!("SKIP {}: no CUDA device", module_path!());
+            return Ok(());
+        }
+    };
+}
+
 mod adapter;
 mod agent_approval;
 mod cuda;

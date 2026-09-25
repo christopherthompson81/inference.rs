@@ -1,22 +1,41 @@
 #!/usr/bin/env bash
-# Slow CI checks run locally instead of on hosted runners; usage: scripts/local_ci.sh [--docs] [--tests] (default: --docs)
+# The canonical local checks; usage: scripts/local_ci.sh [--lint] [--tests] [--cuda] [--docs] (default: --lint --tests)
+# Each mode always builds the same package and feature set, so cargo reuses its artifacts between runs instead of
+# rebuilding for a new combination. Keep CC/CXX/NVCC and the INFERENCE_TEST_* model paths in ~/.cargo/config.toml
+# [env] rather than on the command line: build scripts track them, and changing one rebuilds everything above ring.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-docs=0
+lint=0
 tests=0
-[[ $# -eq 0 ]] && docs=1
+cuda=0
+docs=0
+[[ $# -eq 0 ]] && lint=1 && tests=1
 for arg in "$@"; do
     case $arg in
-        --docs) docs=1 ;;
+        --lint) lint=1 ;;
         --tests) tests=1 ;;
+        --cuda) cuda=1 ;;
+        --docs) docs=1 ;;
         *) echo "unknown option $arg" >&2; exit 2 ;;
     esac
 done
 
+if [[ $lint -eq 1 ]]; then
+    cargo fmt --all -- --check
+    cargo clippy --workspace --tests --examples -- -D warnings
+fi
+# Examples are compile-checked by clippy --examples; linking ~200 of them here costs minutes and tens of GB.
+TEST_TARGETS=(--no-fail-fast --lib --bins --tests)
+if [[ $tests -eq 1 ]]; then
+    cargo test --workspace "${TEST_TARGETS[@]}"
+    cargo test --workspace --no-fail-fast --doc
+fi
+if [[ $cuda -eq 1 ]]; then
+    # GPU tests skip themselves without a device; model-backed tests run when their INFERENCE_TEST_* path is set
+    cargo clippy --workspace --features cuda --tests --examples -- -D warnings
+    cargo test --workspace --features cuda "${TEST_TARGETS[@]}"
+fi
 if [[ $docs -eq 1 ]]; then
     RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -D warnings" cargo doc --workspace --no-deps
-fi
-if [[ $tests -eq 1 ]]; then
-    cargo test -p inference-core -p inference-quant -p inference-vision
 fi

@@ -3306,6 +3306,11 @@ mod mtp_reservation_tests {
             None,
             &path,
         )?;
+        // Any non-DFlash architecture takes the plain external-MTP path this test covers.
+        std::fs::write(
+            dir.path().join("config.json"),
+            r#"{"architectures": ["Qwen3ForCausalLM"]}"#,
+        )?;
         let mtp_config = MtpConfig::new(dir.path().to_string_lossy().into_owned(), None);
         let cache_config = PagedAttentionConfig::new(
             None,

@@ -1206,8 +1206,8 @@ fn cuda_batched_topk_low_precision_inputs_match_f32() -> candle_core::Result<()>
 
 #[cfg(feature = "cuda")]
 #[test]
-#[ignore = "requires CUDA"]
 fn cuda_batched_topk_workspace_reuses_and_grows() -> candle_core::Result<()> {
+    skip_without_cuda!();
     const ROWS: usize = 4;
     const VOCAB: usize = 4097;
 
@@ -1476,8 +1476,8 @@ fn cuda_ranked_topk_cooperative_boundaries_and_fallback_match_cpu() -> candle_co
 
 #[cfg(feature = "cuda")]
 #[test]
-#[ignore = "requires CUDA"]
 fn cuda_dflash_selector_matches_reference_with_bf16_codebooks() -> candle_core::Result<()> {
+    skip_without_cuda!();
     const BATCH: usize = 2;
     const POSITIONS: usize = 3;
     const K: usize = 4;
@@ -1537,8 +1537,8 @@ fn cuda_dflash_selector_matches_reference_with_bf16_codebooks() -> candle_core::
 
 #[cfg(feature = "cuda")]
 #[test]
-#[ignore = "requires CUDA"]
 fn cuda_dflash_selector_supports_max_k_and_stable_ties() -> candle_core::Result<()> {
+    skip_without_cuda!();
     const POSITIONS: usize = 2;
     const K: usize = super::CUDA_DFLASH_SELECTOR_MAX_K;
     const RANK: usize = 3;
@@ -1573,8 +1573,8 @@ fn cuda_dflash_selector_supports_max_k_and_stable_ties() -> candle_core::Result<
 
 #[cfg(feature = "cuda")]
 #[test]
-#[ignore = "requires CUDA"]
 fn cuda_dflash_sample_selector_matches_sequential_reference() -> candle_core::Result<()> {
+    skip_without_cuda!();
     const BATCH: usize = 2;
     const POSITIONS: usize = 3;
     const K: usize = 3;
@@ -1662,8 +1662,8 @@ fn cuda_dflash_sample_selector_matches_sequential_reference() -> candle_core::Re
 
 #[cfg(feature = "cuda")]
 #[test]
-#[ignore = "requires CUDA"]
 fn cuda_dflash_sample_selector_marks_invalid_sampling_params() -> candle_core::Result<()> {
+    skip_without_cuda!();
     const K: usize = 2;
     const VOCAB: usize = 2;
     const PACKED_WIDTH: usize = 2 * K;
