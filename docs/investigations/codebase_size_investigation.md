@@ -454,3 +454,27 @@ Change: loading-path step 1, core helpers and fixes in `selection/model_loader.r
 Result: green, with 2142 CPU and 2461 CUDA tests (+5). 3 files, +361 / -222. The net line count rises here, because
 the shared struct and the tests outweigh the copies removed. The TOML and SDK steps are where this pays off, since
 they reuse these helpers instead of their own copies.
+
+## Run 14 - 2026-09-26 05:30
+
+Question: before converting the legacy TOML selector into `ModelSelected` (loading-path step 2), is it reachable?
+
+Finding: no.
+- Its only entry point is `ModelSelected::Toml { file }`. The CLI, server, SDK and pyo3 never construct it.
+- The CLI parses its own `ModelType` subcommands, not `ModelSelected`.
+- Nothing deserializes `ModelSelected` from user input; the server only builds `ModelSelected::Run` in code.
+- The docs mention the selector's format only in migration notes pointing to `from-config`, a separate, live TOML
+  format with its own parser in `inference-cli`.
+- Upstream superseded it without deleting it.
+
+Decision (owner): delete it rather than convert it.
+
+Change:
+- `ModelSelected::Toml` and its match arms (`model_loader.rs`, `tuning.rs`, the CLI `tune.rs`) are removed.
+- `selection/toml_selector.rs` (1626 lines), its public re-exports (`get_toml_selected_model_dtype`,
+  `get_toml_selected_model_device_map_params`) and `configs/toml-selectors/` are removed.
+- inference-core no longer depends on the `toml` crate. `from-config` is untouched.
+
+The Run 13 TOML-MTP fix went with it, since the path it fixed no longer exists.
+
+Result: 15 files, +4 / -1748.

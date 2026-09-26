@@ -1,22 +1,17 @@
-use std::{
-    fs::{self, File},
-    path::PathBuf,
-};
+use std::{fs::File, path::PathBuf};
 
 use anyhow::Context;
 
 use crate::{
-    get_toml_selected_model_dtype,
     pipeline::{
         AutoLoaderBuilder, DiffusionLoaderBuilder, GGMLLoaderBuilder, GGMLSpecificConfig,
         GGUFLoaderBuilder, GGUFSpecificConfig, HfConfigOverrides, IsqOrganization,
         MultimodalLoaderBuilder, MultimodalSpecificConfig, NormalLoaderBuilder,
         NormalSpecificConfig, UqffWriteConfig,
     },
-    selection::toml_selector::get_toml_selected_model_device_map_params,
     AutoDeviceMapParams, EmbeddingLoaderBuilder, EmbeddingSpecificConfig, Loader, ModelDType,
-    ModelSelected, Ordering, SpeechLoader, TomlLoaderArgs, TomlSelector, Topology,
-    GGUF_MULTI_FILE_DELIMITER, UQFF_MULTI_FILE_DELIMITER,
+    ModelSelected, Ordering, SpeechLoader, Topology, GGUF_MULTI_FILE_DELIMITER,
+    UQFF_MULTI_FILE_DELIMITER,
 };
 
 /// A builder for a loader using the selected model.
@@ -189,7 +184,6 @@ pub fn get_tgt_non_granular_index(model: &ModelSelected) -> Option<usize> {
         | ModelSelected::LoraGGUF { .. }
         | ModelSelected::GGML { .. }
         | ModelSelected::LoraGGML { .. }
-        | ModelSelected::Toml { .. }
         | ModelSelected::MultimodalPlain { .. }
         | ModelSelected::DiffusionPlain { .. }
         | ModelSelected::Speech { .. }
@@ -228,13 +222,6 @@ pub fn get_model_dtype(model: &ModelSelected) -> anyhow::Result<ModelDType> {
         | ModelSelected::Run { dtype, .. }
         | ModelSelected::Speech { dtype, .. }
         | ModelSelected::Embedding { dtype, .. } => Ok(*dtype),
-        ModelSelected::Toml { file } => {
-            let selector: TomlSelector = toml::from_str(
-                &fs::read_to_string(file.clone())
-                    .unwrap_or_else(|_| panic!("Could not load toml selector file at {file}")),
-            )?;
-            Ok(get_toml_selected_model_dtype(&selector))
-        }
         ModelSelected::MultiModel { .. } => {
             anyhow::bail!("MultiModel variant should not be used in model loading functions")
         }
@@ -370,13 +357,6 @@ pub fn get_auto_device_map_params(model: &ModelSelected) -> anyhow::Result<AutoD
         ModelSelected::DiffusionPlain { .. }
         | ModelSelected::Speech { .. }
         | ModelSelected::Embedding { .. } => Ok(AutoDeviceMapParams::default_text()),
-        ModelSelected::Toml { file } => {
-            let selector: TomlSelector = toml::from_str(
-                &fs::read_to_string(file.clone())
-                    .unwrap_or_else(|_| panic!("Could not load toml selector file at {file}")),
-            )?;
-            get_toml_selected_model_device_map_params(&selector)
-        }
         ModelSelected::MultiModel { .. } => {
             anyhow::bail!("MultiModel variant should not be used in model loading functions")
         }
@@ -394,7 +374,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             | ModelSelected::Lora { .. }
             | ModelSelected::XLora { .. }
             | ModelSelected::MultimodalPlain { .. }
-            | ModelSelected::Toml { .. }
     );
     if args.hf_config_overrides.is_some() && !supports_hf_config_overrides {
         anyhow::bail!("HF config overrides are supported only for text and multimodal models");
@@ -408,22 +387,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
 
     let base = SafetensorsOptions::from_args(&args);
     let loader: Box<dyn Loader> = match args.model {
-        ModelSelected::Toml { file } => {
-            let selector: TomlSelector = toml::from_str(
-                &fs::read_to_string(file.clone())
-                    .unwrap_or_else(|_| panic!("Could not load toml selector file at {file}")),
-            )?;
-            let args = TomlLoaderArgs {
-                chat_template: args.chat_template,
-                no_kv_cache: args.no_kv_cache,
-                jinja_explicit: args.jinja_explicit,
-                encoder_cache_memory_bytes: args.encoder_cache_memory_bytes,
-                max_model_len: args.max_model_len,
-                hf_config_overrides: args.hf_config_overrides,
-                mtp: args.mtp,
-            };
-            (selector, args).try_into()?
-        }
         ModelSelected::Plain {
             model_id,
             tokenizer_json,

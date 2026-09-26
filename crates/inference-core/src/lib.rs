@@ -91,9 +91,6 @@ mod kv_cache;
 mod search;
 
 pub use selection::model_selected::ModelSelected;
-pub use selection::toml_selector::{
-    get_toml_selected_model_device_map_params, get_toml_selected_model_dtype,
-};
 
 mod amoe;
 mod attention;
@@ -221,7 +218,6 @@ pub use scheduler::{
     DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_PREFILL_CHUNK_TOKENS,
 };
 pub use search::{SearchCallback, SearchFunctionParameters, SearchResult};
-use selection::toml_selector::{TomlLoaderArgs, TomlSelector};
 use serde::Serialize;
 pub use speculative::{
     reserve_external_mtp_memory, reserve_external_mtp_memory_with_runtime, MtpConfig,

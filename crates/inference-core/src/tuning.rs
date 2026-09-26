@@ -207,7 +207,6 @@ fn model_id_from_selected(model: &ModelSelected) -> String {
         } => quantized_model_id.clone(),
         ModelSelected::DiffusionPlain { model_id, .. } => model_id.clone(),
         ModelSelected::Speech { model_id, .. } => model_id.clone(),
-        ModelSelected::Toml { file } => file.clone(),
         ModelSelected::MultiModel { .. } => "multi-model".to_string(),
         _ => "unknown".to_string(),
     }

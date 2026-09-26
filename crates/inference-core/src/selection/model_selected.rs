@@ -49,13 +49,6 @@ fn parse_model_dtype(x: &str) -> Result<ModelDType, String> {
 
 #[derive(Debug, Clone, Subcommand, serde::Deserialize, serde::Serialize)]
 pub enum ModelSelected {
-    /// Select the model from a toml file
-    Toml {
-        /// .toml file containing the selector configuration.
-        #[arg(short, long)]
-        file: String,
-    },
-
     /// Select a model for running via auto loader
     Run {
         /// Model ID to load from. May be a HF hub repo or a local path.

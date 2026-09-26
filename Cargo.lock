@@ -3137,7 +3137,6 @@ dependencies = [
  "tokio-tungstenite",
  "toktrie",
  "toktrie_hf_tokenizers",
- "toml 0.9.11+spec-1.1.0",
  "tqdm",
  "tracing",
  "tracing-subscriber",
