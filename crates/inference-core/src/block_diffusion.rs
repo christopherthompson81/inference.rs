@@ -1,7 +1,8 @@
 //! Block-diffusion text generation support (e.g. DiffusionGemma): models that commit a
 //! whole denoised block of tokens per engine step instead of sampling one token from logits.
 
-pub use crate::model::BlockDiffusionMixin;
+use crate::model::BlockDenoisingProgressSink;
+pub use crate::model::{BlockDenoisingProgressEmitter, BlockDiffusionMixin};
 use std::sync::Arc;
 
 use tokenizers::Tokenizer;
@@ -9,16 +10,14 @@ use tokio::sync::mpsc::Sender;
 
 use crate::{response::BlockDenoisingProgress, sequence::Sequence, Response};
 
-#[derive(Clone)]
-pub(crate) struct BlockDenoisingProgressEmitter {
-    batch_index: usize,
+struct ResponseProgressSink {
     response_index: usize,
     tokenizer: Arc<Tokenizer>,
     response: Sender<Response>,
 }
 
-impl BlockDenoisingProgressEmitter {
-    pub(crate) fn emit(
+impl BlockDenoisingProgressSink for ResponseProgressSink {
+    fn emit(
         &self,
         step: usize,
         total_steps: usize,
@@ -43,10 +42,6 @@ impl BlockDenoisingProgressEmitter {
                 final_block,
             }));
     }
-
-    pub(crate) fn batch_index(&self) -> usize {
-        self.batch_index
-    }
 }
 
 pub(crate) fn block_denoising_progress_emitters(
@@ -67,12 +62,14 @@ pub(crate) fn block_denoising_progress_emitters(
             if !seq.get_mut_group().is_streaming {
                 return None;
             }
-            Some(BlockDenoisingProgressEmitter {
+            Some(BlockDenoisingProgressEmitter::new(
                 batch_index,
-                response_index: seq.get_response_index(),
-                tokenizer: tokenizer.clone(),
-                response: seq.responder(),
-            })
+                Arc::new(ResponseProgressSink {
+                    response_index: seq.get_response_index(),
+                    tokenizer: tokenizer.clone(),
+                    response: seq.responder(),
+                }),
+            ))
         })
         .collect::<Vec<_>>();
     (!emitters.is_empty()).then_some(emitters)
