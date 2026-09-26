@@ -812,7 +812,7 @@ pub async fn build_multimodal_pipeline(
             .is_some_and(MtpConfig::is_builtin),
     )
     .with_encoder_cache_memory_bytes(builder.encoder_cache_memory_bytes)
-    .build(builder.loader_type.clone());
+    .build(builder.loader_type.clone())?;
 
     let device = resolve_device(builder.force_cpu, None)?;
     builder.paged_attn_cfg = reserve_external_mtp_memory_with_runtime(

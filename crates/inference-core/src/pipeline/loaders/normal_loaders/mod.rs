@@ -125,7 +125,8 @@ macro_rules! normal_loader_types {
         cli: $cli:literal,
         hf: $hf:literal,
         model_type: $model_type:literal,
-        loader: $loader:ident $(,)?
+        loader: $loader:ident
+        $(, feature: $feature:literal)? $(,)?
     }),* $(,)?) => {
         #[cfg_attr(feature = "pyo3_macros", pyclass(eq, eq_int))]
         #[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
@@ -159,9 +160,20 @@ macro_rules! normal_loader_types {
                 }
             }
 
-            pub(crate) fn loader(&self) -> Box<dyn NormalModelLoader> {
+            pub(crate) fn loader(&self) -> Result<Box<dyn NormalModelLoader>> {
                 match self {
-                    $(Self::$variant => Box::new($loader),)*
+                    $(
+                        $(#[cfg(feature = $feature)])?
+                        Self::$variant => Ok(Box::new($loader)),
+                        $(
+                            #[cfg(not(feature = $feature))]
+                            Self::$variant => anyhow::bail!(
+                                "architecture `{}` is not built in; enable the `{}` feature",
+                                $cli,
+                                $feature
+                            ),
+                        )?
+                    )*
                 }
             }
         }

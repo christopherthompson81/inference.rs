@@ -519,7 +519,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             )
             .with_mtp(args.mtp)
             .with_encoder_cache_memory_bytes(args.encoder_cache_memory_bytes)
-            .build(arch)
+            .build(arch)?
         }
         ModelSelected::DiffusionPlain {
             model_id,

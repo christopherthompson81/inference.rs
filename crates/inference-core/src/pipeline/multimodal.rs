@@ -363,13 +363,13 @@ impl MultimodalLoaderBuilder {
         self,
         loader: Option<MultimodalLoaderType>,
         prepared_source: Option<PreparedMultimodalSource>,
-    ) -> Box<dyn Loader> {
+    ) -> anyhow::Result<Box<dyn Loader>> {
         let loader_type = loader.clone();
         let loader: Box<dyn MultimodalModelLoader> = match loader {
-            Some(tp) => tp.loader(),
+            Some(tp) => tp.loader()?,
             None => Box::new(AutoMultimodalLoader),
         };
-        Box::new(MultimodalLoader {
+        Ok(Box::new(MultimodalLoader {
             inner: loader,
             model_id: self.model_id.unwrap(),
             config: self.config,
@@ -387,10 +387,10 @@ impl MultimodalLoaderBuilder {
             prepared_source,
             mtp: self.mtp,
             encoder_cache_memory_bytes: self.encoder_cache_memory_bytes,
-        })
+        }))
     }
 
-    pub fn build(self, loader: Option<MultimodalLoaderType>) -> Box<dyn Loader> {
+    pub fn build(self, loader: Option<MultimodalLoaderType>) -> anyhow::Result<Box<dyn Loader>> {
         self.build_inner(loader, None)
     }
 
@@ -399,7 +399,7 @@ impl MultimodalLoaderBuilder {
         loader: MultimodalLoaderType,
         source: PreparedMultimodalSource,
         kind: ModelKind,
-    ) -> Box<dyn Loader> {
+    ) -> anyhow::Result<Box<dyn Loader>> {
         self.kind = kind;
         self.build_inner(Some(loader), Some(source))
     }

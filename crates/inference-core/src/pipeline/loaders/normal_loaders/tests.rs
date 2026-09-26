@@ -969,7 +969,7 @@ fn every_architecture_round_trips_through_its_names() {
 #[test]
 fn safetensors_granite_experts_participate_in_immediate_isq() -> anyhow::Result<()> {
     const PREFIX: &str = "model.layers.0.block_sparse_moe.input_linear";
-    let loader = NormalLoaderType::GraniteMoeHybrid.loader();
+    let loader = NormalLoaderType::GraniteMoeHybrid.loader()?;
     for predicates in [
         loader.immediate_isq_predicates("")?,
         loader.immediate_isq_predicates_moqe("")?,

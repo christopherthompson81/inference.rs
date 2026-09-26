@@ -211,7 +211,8 @@ macro_rules! multimodal_loader_types {
     ($($variant:ident {
         cli: $cli:literal $(| $cli_alias:literal)*,
         hf: $hf:literal $(| $hf_alias:literal)*,
-        loader: $loader:ident $(,)?
+        loader: $loader:ident
+        $(, feature: $feature:literal)? $(,)?
     }),* $(,)?) => {
         #[cfg_attr(feature = "pyo3_macros", pyclass(eq, eq_int))]
         #[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
@@ -239,9 +240,20 @@ macro_rules! multimodal_loader_types {
                 }
             }
 
-            pub(crate) fn loader(&self) -> Box<dyn MultimodalModelLoader> {
+            pub(crate) fn loader(&self) -> Result<Box<dyn MultimodalModelLoader>> {
                 match self {
-                    $(Self::$variant => Box::new($loader),)*
+                    $(
+                        $(#[cfg(feature = $feature)])?
+                        Self::$variant => Ok(Box::new($loader)),
+                        $(
+                            #[cfg(not(feature = $feature))]
+                            Self::$variant => anyhow::bail!(
+                                "architecture `{}` is not built in; enable the `{}` feature",
+                                $cli,
+                                $feature
+                            ),
+                        )?
+                    )*
                 }
             }
         }

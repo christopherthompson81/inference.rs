@@ -21,7 +21,7 @@ impl AutoNormalLoader {
 
         once_log_debug(format!("Automatic loader type determined to be `{tp}`"));
 
-        Ok(tp.loader())
+        tp.loader()
     }
 }
 
