@@ -1,8 +1,6 @@
 //! ## Chat Completions functionality and route handler.
 
-use std::{
-    collections::HashMap, io::Cursor, ops::Deref, pin::Pin, sync::Arc, task::Poll, time::Duration,
-};
+use std::{collections::HashMap, ops::Deref, pin::Pin, sync::Arc, task::Poll, time::Duration};
 
 use anyhow::{Context, Result};
 use axum::{
@@ -15,7 +13,7 @@ use axum::{
 };
 use base64::{engine::general_purpose::STANDARD, Engine};
 use either::Either;
-use image::DynamicImage;
+use image::{codecs::png::PngEncoder, DynamicImage};
 use indexmap::IndexMap;
 use inference_core::{
     resolve_reasoning_controls, AgentPermission, AgentToolApprovalHandler,
@@ -113,7 +111,7 @@ fn encode_agentic_tool_images(images: &[DynamicImage]) -> Vec<String> {
         .iter()
         .filter_map(|image| {
             let mut buffer = Vec::new();
-            match image.write_to(&mut Cursor::new(&mut buffer), image::ImageFormat::Png) {
+            match image.write_with_encoder(PngEncoder::new(&mut buffer)) {
                 Ok(()) => Some(STANDARD.encode(buffer)),
                 Err(e) => {
                     tracing::warn!("failed to encode agentic tool image: {e}");
