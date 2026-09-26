@@ -370,3 +370,87 @@ lists names in table order (gemma4 and muse_glimmer moved after voxtral); nothin
 
 Still hand-written outside the tables, for later: the multimodal family subsets in `pipeline/auto.rs:685-703` and
 `pipeline/gguf.rs:1665-1678`, which could become a table column, and the GGUF schema registry.
+
+## Run 12 - 2026-09-26 03:40
+
+Question: how do the model-loading front ends differ, and can they share one loading path?
+
+Method: a read-only survey of `ModelSelected` and `model_loader.rs`, the TOML selector, the SDK builders, the server
+builder, the CLI conversion, pyo3 and the FFI.
+
+Inventory, by lines of loader-building code:
+
+| front end | code | lines |
+|---|---|---|
+| core | `loader_from_model_selected` plus helpers | ~830 |
+| TOML | `loader_from_selected` plus helpers | ~590 |
+| SDK | 7 `build_*_pipeline` fns plus 5 wrappers | ~1300 |
+| server | single-model and multi-model build (the latter twice over) | ~520 |
+| CLI | `convert_to_model_selected` (serve, plus a quantize copy) | ~720 |
+| pyo3 | `parse_which` (retiring, #19) | 473 |
+
+Duplication: UQFF path splitting (13 copies), `Topology::from_option_path` (36), hand-built `NormalSpecificConfig`
+(13) and `GGUFSpecificConfig` (15), ordering-file loading (15), and `load_model_from_hf` plus MTP attach (13).
+`ModelSelected::Toml` and `::MultiModel` are never constructed. About 1,700 lines are removable, not counting pyo3.
+
+Bugs found:
+- **SDK reload does not rebuild what the first load built.** LoRA, X-LoRA, AnyMoE, GGUF-LoRA and GGUF-X-LoRA store
+  `loader_config: None`, so they cannot reload at all. Embedding reload drops imatrix and calibration. Speech reload
+  drops its `cfg`. An MTP draft head is ISQ'd on reload but not on first load. An inline `with_topology(Topology)`
+  is lost on reload.
+- **SDK first load:** `with_device` is ignored for text, multimodal, diffusion and speech (`resolve_device(force_cpu,
+  None)`). Built-in MTP is never enabled on the LoRA, X-LoRA and AnyMoE paths. Multimodal drops its MCP and
+  code-execution configs and hard-codes `no_kv_cache = false`.
+- **core:** `max_model_len` is silently dropped for X-LoRA GGUF and legacy-LoRA GGUF (`GGUFSpecificConfig {
+  topology, ..Default::default() }`), and `ModelSelected::Toml` drops `mtp`.
+- **server:** `hf_revision` is always `None`, and additional models in multi-model mode skip MTP.
+- **TOML:** matformer is not settable; Lora and X-LoRA lack organization, imatrix and calibration; Embedding ignores
+  the top-level `tokenizer_json`.
+
+Test coverage is thin. There are none for `model_loader.rs` or the server builder, the TOML tests only parse, and no
+test checks that a reload equals the first load.
+
+Design proposal:
+- **Intermediate:** keep `ModelSelected` as the "which weights" enum. Drop `Toml` and `MultiModel`, and add an
+  optional AnyMoE spec plus the missing fields.
+- **Load spec:** promote `ModelLoaderConfig` to the single load spec, `{ model, overrides (inline topology /
+  ordering / speech cfg), runtime }`.
+- **Builders:** `build_loader(&ModelLoaderConfig)` and `load_pipeline(&ModelLoaderConfig)` in `selection/`. Reload
+  becomes `load_pipeline(stored)`, so it matches the first load by construction.
+
+Migration, one PR per step:
+1. Core helpers, the `max_model_len` and TOML-MTP fixes, and `LoaderBuilder` tests (~-300).
+2. TOML converts into `ModelSelected` (~-390).
+3. `load_pipeline`, with reload and the server on it (~-300).
+4. The SDK builders produce a `ModelLoaderConfig` and use `load_pipeline`. This fixes the device and reload bugs and
+   adds a reload-equals-first-load test per builder (~-700).
+5. The FFI engine surface builds on it (#19).
+
+## Run 13 - 2026-09-26 04:30
+
+Change: loading-path step 1, core helpers and fixes in `selection/model_loader.rs`.
+
+- `uqff_paths`, `gguf_files` and `load_ordering` replace 8, 5 and 4 inline copies. A missing ordering file now
+  returns an error naming the path instead of panicking.
+- `SafetensorsOptions { .. }.normal() / .multimodal(max_edge) / .embedding()` builds the per-kind configs from one
+  place. The `Run` and auto-`Lora` arms used to write the same eight fields out three times.
+- Fixes:
+  - **`--max-model-len` on text GGUF was silently ignored.** The native GGUF text path built its
+    `NormalSpecificConfig` with `..Default::default()`, so the value never reached `runtime_config`. It now passes
+    through. `max_model_len` is a per-architecture capability: only `qwen3_5_text` implements `runtime_config`, and
+    every other text loader refuses it ("not supported by this model loader"). Text GGUF now behaves like safetensors
+    text: honored where the architecture supports it, an explicit error otherwise. End-to-end, a Qwen2.5 GGUF served
+    with `--max-model-len 256` now fails at startup with that error, where master ignored the flag.
+  - **X-LoRA GGUF and legacy-LoRA GGUF can never honor it.** Their legacy adapter pipeline takes its length from the
+    model and never reads the config. Validation now rejects `max_model_len` for them in the core and TOML paths,
+    instead of accepting and dropping it. The first attempt passed the value into their `GGUFSpecificConfig`, which
+    nothing reads on that path; review caught that it was a no-op.
+  - **The TOML path never enabled MTP.** `TomlLoaderArgs` gains `mtp`, and TOML Plain and Multimodal call
+    `with_mtp`, as core does.
+- First tests for `LoaderBuilder` (4): the multi-file splitting, the ordering-file error, a Plain build (`get_id`),
+  and `max_model_len` validation. That covers 0 rejected, Embedding rejected, and X-LoRA GGUF rejected; the last one
+  fails on master, which accepted it.
+
+Result: green, with 2142 CPU and 2461 CUDA tests (+5). 3 files, +361 / -222. The net line count rises here, because
+the shared struct and the tests outweigh the copies removed. The TOML and SDK steps are where this pays off, since
+they reuse these helpers instead of their own copies.

@@ -690,6 +690,7 @@ struct TomlLoaderInnerParams {
     encoder_cache_memory_bytes: Option<usize>,
     max_model_len: Option<usize>,
     hf_config_overrides: Option<crate::HfConfigOverrides>,
+    mtp: bool,
 }
 
 pub struct TomlLoaderArgs {
@@ -699,6 +700,7 @@ pub struct TomlLoaderArgs {
     pub encoder_cache_memory_bytes: Option<usize>,
     pub max_model_len: Option<usize>,
     pub hf_config_overrides: Option<crate::HfConfigOverrides>,
+    pub mtp: bool,
 }
 
 pub fn get_toml_selected_model_dtype(model: &TomlSelector) -> ModelDType {
@@ -819,13 +821,9 @@ fn loader_from_selected(
     if args.hf_config_overrides.is_some() && !supports_hf_config_overrides {
         anyhow::bail!("HF config overrides are supported only for text and multimodal models");
     }
-    let supports_max_model_len = supports_hf_config_overrides
-        || matches!(
-            &model,
-            TomlModelSelected::GGUF { .. }
-                | TomlModelSelected::LoraGGUF { .. }
-                | TomlModelSelected::XLoraGGUF { .. }
-        );
+    // the legacy X-LoRA / LoRA GGUF pipelines take their length from the model and cannot cap it
+    let supports_max_model_len =
+        supports_hf_config_overrides || matches!(&model, TomlModelSelected::GGUF { .. });
     if args.max_model_len.is_some() && !supports_max_model_len {
         anyhow::bail!("max_model_len is not supported by this model format");
     }
@@ -869,6 +867,7 @@ fn loader_from_selected(
             args.no_kv_cache,
             args.jinja_explicit,
         )
+        .with_mtp(args.mtp)
         .build(arch)?,
         TomlModelSelected::XLora {
             model_id,
@@ -1215,6 +1214,7 @@ fn loader_from_selected(
             args.jinja_explicit,
         )
         .with_encoder_cache_memory_bytes(args.encoder_cache_memory_bytes)
+        .with_mtp(args.mtp)
         .build(arch),
         TomlModelSelected::Embedding {
             model_id,
@@ -1259,6 +1259,7 @@ impl TryInto<Box<dyn Loader>> for (TomlSelector, TomlLoaderArgs) {
             encoder_cache_memory_bytes: args.encoder_cache_memory_bytes,
             max_model_len: args.max_model_len,
             hf_config_overrides: args.hf_config_overrides,
+            mtp: args.mtp,
         };
         if selector.speculative.is_some() {
             anyhow::bail!(
@@ -1611,6 +1612,7 @@ mod tests {
                 encoder_cache_memory_bytes: None,
                 max_model_len: None,
                 hf_config_overrides: None,
+                mtp: false,
             },
         )
             .try_into();
