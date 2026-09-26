@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use std::{collections::HashMap, sync::Arc};
 
@@ -16,10 +17,7 @@ use crate::{
     lora::{linear_b, linear_no_bias, LinearLayerLike, LoraConfig},
     models::gemma2::Config,
     paged_attention::ModelConfigMetadata,
-    pipeline::{
-        extract_logits, text_models_inputs_processor::FlashParams, Cache, EitherCache, IsqModel,
-        NormalLoadingMetadata, NormalModel,
-    },
+    pipeline::{extract_logits, Cache, EitherCache, IsqModel, NormalLoadingMetadata, NormalModel},
     utils::progress::NiceProgressBar,
     Ordering,
 };

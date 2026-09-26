@@ -1,3 +1,4 @@
+use crate::attention::FlashParams;
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -14,10 +15,7 @@ use crate::{
     device_map::DeviceMapper,
     lora::{LoraConfig, Ordering},
     paged_attention::{AttentionImplementation, ModelConfigLike, ModelConfigMetadata},
-    pipeline::{
-        isq::IsqModelLoader, text_models_inputs_processor::FlashParams, EitherCache, IsqModel,
-        ModelForwardContext,
-    },
+    pipeline::{isq::IsqModelLoader, EitherCache, IsqModel, ModelForwardContext},
     utils::varbuilder_utils::DeviceForLoadTensor,
     xlora_models::NonGranularState,
 };

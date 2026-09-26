@@ -1,12 +1,12 @@
+use crate::attention::FlashParams;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
 use candle_core::{Result, Tensor};
 use rand_isaac::Isaac64Rng;
 
-use crate::pipeline::text_models_inputs_processor::{
-    FlashParams, PagedAttentionInputMetadata, PagedAttentionMeta,
-};
+use crate::pipeline::text_models_inputs_processor::PagedAttentionMeta;
 use crate::sequence::Sequence;
 
 pub type TargetTokenEmbedder<'a> = dyn Fn(&Tensor) -> Result<Tensor> + 'a;

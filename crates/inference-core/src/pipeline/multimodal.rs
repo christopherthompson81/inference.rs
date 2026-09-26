@@ -17,7 +17,7 @@ use crate::device_map::{self, DeviceMapper};
 use crate::distributed::{self, WorkerTransferData};
 #[cfg(feature = "cuda")]
 use crate::kv_cache::RecurrentCheckpointStateSnapshot;
-use crate::kv_cache::{FullCacheManager, HybridCacheManager, NormalCacheManager};
+use crate::pipeline::cache_manager::{FullCacheManager, HybridCacheManager, NormalCacheManager};
 
 #[cfg(feature = "cuda")]
 type SeqRecurrentCheckpointSnapshots = Vec<(usize, RecurrentCheckpointStateSnapshot)>;
@@ -143,7 +143,9 @@ mod speculative_graph_tensor_metadata_tests {
         .is_err());
     }
 }
-use crate::kv_cache::prefix_cacher::PrefixCacheManagerV2;
+use crate::attention::FlashParams;
+use crate::gdn::RecurrentBatchKind;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use crate::paged_attention::{calculate_cache_config, AttentionImplementation, CacheEngine};
 use crate::pipeline::chat_template::{
     calculate_eos_tokens, BeginEndUnkPadTok, ChatTemplateValue, GenerationConfig,
@@ -164,15 +166,14 @@ use crate::pipeline::llg::build_llg_factory;
 use crate::pipeline::loaders::auto_device_map;
 use crate::pipeline::loaders::{AutoDeviceMapQuantization, QuantizationConfigShim};
 use crate::pipeline::sampling::{sample_and_add_toks, sample_and_add_toks_batched};
-use crate::pipeline::text_models_inputs_processor::FlashParams;
 use crate::pipeline::text_models_inputs_processor::InputMetadata;
-use crate::pipeline::text_models_inputs_processor::PagedAttentionInputMetadata;
+use crate::pipeline::tokenizer::get_tokenizer;
 use crate::pipeline::{
     get_chat_template, hf::build_api, ChatTemplate, IsqOrganization, LocalModelPaths,
-    ModelForwardContext, RecurrentBatchKind, RecurrentMetadata,
+    ModelForwardContext, RecurrentMetadata,
 };
+use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
-use crate::utils::tokenizer::get_tokenizer;
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
 use crate::utils::{
     progress::{new_multi_progress, ProgressScopeGuard},
@@ -2566,9 +2567,7 @@ impl Pipeline for MultimodalPipeline {
         &mut self,
         sequence_id: usize,
         cached_tokens: usize,
-    ) -> candle_core::Result<
-        Option<Arc<dyn crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState>>,
-    > {
+    ) -> candle_core::Result<Option<Arc<dyn crate::kv_cache::PagedAuxiliaryPrefixState>>> {
         self.model
             .capture_paged_auxiliary_prefix_state(sequence_id, cached_tokens)
     }
@@ -2577,7 +2576,7 @@ impl Pipeline for MultimodalPipeline {
         &mut self,
         sequence_id: usize,
         cached_tokens: usize,
-        state: &dyn crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState,
+        state: &dyn crate::kv_cache::PagedAuxiliaryPrefixState,
     ) -> candle_core::Result<()> {
         self.model
             .restore_paged_auxiliary_prefix_state(sequence_id, cached_tokens, state)

@@ -10,7 +10,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-pub(crate) use config::{MLlamaConfig, MLlamaRopeScaling, MLlamaRopeType, MLlamaTextConfig};
+pub(crate) use config::MLlamaConfig;
 use config::{MLlamaVisionConfig, VisionActivation};
 pub(crate) use inputs_processor::MLlamaProcessor;
 use text::MLlamaTextModel;

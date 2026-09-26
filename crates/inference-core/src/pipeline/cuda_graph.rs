@@ -1,3 +1,7 @@
+use crate::attention::flash_params::make_flash_params;
+use crate::attention::FlashParams;
+use crate::paged_attention::input_metadata::DecodePagedRows;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{
     collections::HashMap,
     fmt,
@@ -13,6 +17,7 @@ use candle_core::cuda_backend::cudarc::driver::{
 };
 use candle_core::{DType, Device, DeviceLocation, Storage, Tensor, Var};
 
+use crate::gdn::RecurrentBatchKind;
 #[cfg(target_family = "unix")]
 use crate::paged_attention::plan::DecodePlan;
 use crate::{
@@ -25,17 +30,14 @@ use crate::{
     },
 };
 
+use crate::cuda::phase_timer::CudaPhaseTimer;
 use crate::device_map::DeviceMapper;
 use crate::kv_cache::HybridCache;
-use crate::paged_attention::_PAD_SLOT_ID;
-use crate::pipeline::{
-    decode_positions_tensor,
-    text_models_inputs_processor::{
-        make_flash_params, DecodePagedRows, DecodePagedRowsGraphKey, FlashParams,
-        PagedAttentionInputMetadata, PagedDecodeMetadataRequirements,
-    },
-    DecodeGraphPrecaptureCtx, RecurrentBatchKind,
+use crate::paged_attention::input_metadata::{
+    DecodePagedRowsGraphKey, PagedDecodeMetadataRequirements,
 };
+use crate::paged_attention::_PAD_SLOT_ID;
+use crate::pipeline::{decode_positions_tensor, DecodeGraphPrecaptureCtx};
 use crate::speculative::SpeculativeGraphState;
 
 const CUDA_GRAPH_INSTANTIATE_FLAGS: u64 =
@@ -56,7 +58,6 @@ const CUDA_GRAPH_SPEC_STATE_BUDGET_CEILING_PERCENT: usize = 8;
 const CUDA_GRAPH_SPEC_STATE_WORKING_SET_MULTIPLIER: usize = 10;
 const CUDA_GRAPH_SPEC_STATE_BUDGET_BYTES_ENV: &str =
     "INFERENCE_RS_CUDA_GRAPH_SPEC_STATE_BUDGET_BYTES";
-const CUDA_PHASE_TIMINGS_ENV: &str = "INFERENCE_RS_CUDA_PHASE_TIMINGS";
 const CUDA_GRAPH_EVENTS_METRIC: &str = "inference_cuda_graph_events_total";
 const CUDA_GRAPH_DISPATCH_METRIC: &str = "inference_cuda_graph_dispatch_total";
 const CUDA_GRAPH_EVICTIONS_METRIC: &str = "inference_cuda_graph_evictions_total";
@@ -64,55 +65,6 @@ const CUDA_GRAPH_RESIDENT_ENTRIES_METRIC: &str = "inference_cuda_graph_resident_
 static NEXT_CUDA_DECODE_GRAPH_GENERATION: AtomicU64 = AtomicU64::new(1);
 static CUDA_GRAPH_MEMORY_POOL_SCOPES: OnceLock<Mutex<HashMap<usize, MemoryPoolScopeState>>> =
     OnceLock::new();
-static CUDA_PHASE_TIMINGS_ENABLED: OnceLock<bool> = OnceLock::new();
-
-pub(crate) struct CudaPhaseTimer {
-    start: CudaEvent,
-    stream: Arc<CudaStream>,
-}
-
-impl CudaPhaseTimer {
-    pub(crate) fn start(stream: &Arc<CudaStream>) -> candle_core::Result<Option<Self>> {
-        let enabled = *CUDA_PHASE_TIMINGS_ENABLED.get_or_init(|| {
-            std::env::var(CUDA_PHASE_TIMINGS_ENV)
-                .ok()
-                .is_some_and(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-        });
-        if !enabled {
-            return Ok(None);
-        }
-        let capture_status = stream.capture_status().map_err(candle_core::Error::wrap)?;
-        if capture_status != sys::CUstreamCaptureStatus::CU_STREAM_CAPTURE_STATUS_NONE {
-            return Ok(None);
-        }
-        let start = stream
-            .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
-            .map_err(candle_core::Error::wrap)?;
-        Ok(Some(Self {
-            start,
-            stream: stream.clone(),
-        }))
-    }
-
-    pub(crate) fn finish(
-        self,
-        component: &'static str,
-        batch: usize,
-        rows: usize,
-    ) -> candle_core::Result<()> {
-        let end = self
-            .stream
-            .record_event(Some(sys::CUevent_flags::CU_EVENT_DEFAULT))
-            .map_err(candle_core::Error::wrap)?;
-        end.synchronize().map_err(candle_core::Error::wrap)?;
-        let latency_ms = self
-            .start
-            .elapsed_ms(&end)
-            .map_err(candle_core::Error::wrap)?;
-        tracing::info!(component, batch, rows, latency_ms, "CUDA phase timing");
-        Ok(())
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum CudaGraphComponent {

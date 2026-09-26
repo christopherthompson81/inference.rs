@@ -4,12 +4,12 @@ use std::sync::Arc;
 use candle_core::{Result, Tensor};
 use rand_isaac::Isaac64Rng;
 
-use crate::kv_cache::prefix_cacher::PrefixCacheManagerV2;
 use crate::pipeline::sampling::{
     cache_finished_sequence, finish_or_add_toks_to_seq, sample_sequence,
 };
 use crate::pipeline::text_models_inputs_processor::InputMetadata;
 use crate::pipeline::Pipeline;
+use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::{Sequence, SequenceState};
 use crate::IntervalLogger;
 

@@ -1,12 +1,12 @@
+use crate::attention::FlashParams;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::collections::HashMap;
 
 use candle_core::{Device, Result, Tensor};
 
 use crate::device_map::DeviceMapper;
 use crate::paged_attention::CacheEngine;
-use crate::pipeline::text_models_inputs_processor::{
-    FlashParams, InputMetadata, PagedAttentionInputMetadata, PagedAttentionMeta,
-};
+use crate::pipeline::text_models_inputs_processor::{InputMetadata, PagedAttentionMeta};
 use crate::sequence::Sequence;
 
 use super::proposer::SpeculativeKvCache;

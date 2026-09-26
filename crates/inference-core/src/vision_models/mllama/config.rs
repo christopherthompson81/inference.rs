@@ -1,8 +1,11 @@
-use candle_core::{Result, Tensor};
+use candle_core::{Context, Result, Tensor};
 use candle_nn::Module;
 use inference_quant::QuantizedConfig;
 
-use crate::serde_default_fn;
+use crate::{
+    layers::{Llama3RopeConfig, Llama3RopeType},
+    serde_default_fn,
+};
 
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
 pub(crate) enum VisionActivation {
@@ -105,6 +108,37 @@ pub struct MLlamaTextConfig {
 }
 
 impl MLlamaTextConfig {
+    pub(crate) fn llama3_rope_scaling(&self) -> Result<Option<Llama3RopeConfig>> {
+        match &self.rope_scaling {
+            None
+            | Some(MLlamaRopeScaling {
+                rope_type: MLlamaRopeType::Default,
+                ..
+            }) => Ok(None),
+            Some(MLlamaRopeScaling {
+                rope_type: MLlamaRopeType::Llama3,
+                factor,
+                original_max_position_embeddings,
+                low_freq_factor,
+                high_freq_factor,
+                ..
+            }) => Ok(Some(Llama3RopeConfig {
+                factor: factor.context("MLlama Llama3 RoPE needs `factor` parameter.")?,
+                low_freq_factor: *low_freq_factor,
+                high_freq_factor: *high_freq_factor,
+                original_max_position_embeddings: Some(*original_max_position_embeddings),
+                rope_type: Llama3RopeType::Llama3,
+            })),
+            Some(MLlamaRopeScaling {
+                rope_type: other, ..
+            }) => {
+                candle_core::bail!(
+                    "MLlama doesn't support any other RoPE type than `llama3`, got {other:?}"
+                )
+            }
+        }
+    }
+
     pub(crate) fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads
     }

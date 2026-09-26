@@ -1,3 +1,4 @@
+use crate::attention::FlashParams;
 use std::sync::Arc;
 
 use candle_core::{DType, Device, Module, Result, Tensor, D};
@@ -10,7 +11,6 @@ use super::config::{Config, VisionAttentionType, VisionConfig};
 use crate::{
     attention::{AttentionMask, SdpaParams},
     layers::{self, Activation, Sdpa},
-    pipeline::text_models_inputs_processor::FlashParams,
     utils::unvarbuilder::UnVarBuilder,
 };
 

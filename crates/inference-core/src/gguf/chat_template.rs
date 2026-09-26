@@ -4,7 +4,7 @@ use anyhow::Result;
 use candle_core::quantized::gguf_file::Value;
 use tracing::info;
 
-use crate::utils::gguf_metadata::ContentMetadata;
+use crate::gguf::metadata::ContentMetadata;
 
 use super::Content;
 

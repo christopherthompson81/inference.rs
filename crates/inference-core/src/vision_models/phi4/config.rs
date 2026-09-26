@@ -3,10 +3,9 @@ use std::collections::HashMap;
 use inference_quant::{QuantizedConfig, StaticLoraConfig};
 use serde::{Deserialize, Serialize};
 
-use crate::{
-    layers::{Activation, Phi4MMRopeScalingConfig},
-    vision_models::conformer::config::ConformerEncoderConfig,
-};
+use super::rope::Phi4MMRopeScalingConfig;
+
+use crate::{layers::Activation, vision_models::conformer::config::ConformerEncoderConfig};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Phi4MMImageEmbedConfig {

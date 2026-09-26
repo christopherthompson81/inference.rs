@@ -1,3 +1,5 @@
+use crate::attention::FlashParams;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::layers::masker::CausalMaskConfig;
@@ -16,7 +18,7 @@ use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
         self, dense_embedding, embedding, embedding_with_legacy_tied_uqff, Activation,
-        CausalMasker, Gemma3nRotaryEmbedding, RmsNorm, RotaryEmbedding, ScaledEmbedding, Sdpa,
+        CausalMasker, Gemma3RotaryEmbedding, RmsNorm, RotaryEmbedding, ScaledEmbedding, Sdpa,
     },
     matformer::MatformerSliceConfig,
     paged_attention::{
@@ -24,10 +26,8 @@ use crate::{
         PagedAttention,
     },
     pipeline::{
-        extract_logits,
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, KvCache, ModelForwardContext, MultimodalModel, NormalCache,
-        NormalCacheType, NormalLoadingMetadata,
+        extract_logits, EitherCache, IsqModel, KvCache, ModelForwardContext, MultimodalModel,
+        NormalCache, NormalCacheType, NormalLoadingMetadata,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -288,7 +288,7 @@ struct Attention {
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    rotary_emb_global: Arc<Gemma3nRotaryEmbedding>,
+    rotary_emb_global: Arc<Gemma3RotaryEmbedding>,
     rotary_emb_local: Arc<RotaryEmbedding>,
     use_sliding_window: bool,
     paged_attn: Option<PagedAttention>,
@@ -303,7 +303,7 @@ struct Attention {
 impl Attention {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        rotary_emb_global: Arc<Gemma3nRotaryEmbedding>,
+        rotary_emb_global: Arc<Gemma3RotaryEmbedding>,
         rotary_emb_local: Arc<RotaryEmbedding>,
         cfg: &Gemma3nTextConfig,
         layer_idx: usize,
@@ -837,7 +837,7 @@ struct DecoderLayer {
 impl DecoderLayer {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        rotary_emb_global: Arc<Gemma3nRotaryEmbedding>,
+        rotary_emb_global: Arc<Gemma3RotaryEmbedding>,
         rotary_emb_local: Arc<RotaryEmbedding>,
         cfg: &Gemma3nTextConfig,
         vb: ShardedVarBuilder,
@@ -1376,10 +1376,10 @@ impl TextModel {
                 .unwrap_or(&normal_loading_metadata.real_device);
             global_ropes.insert(
                 device.location(),
-                Arc::new(Gemma3nRotaryEmbedding::new(
+                Arc::new(Gemma3RotaryEmbedding::new(
                     is_gptx,
                     vb.dtype(),
-                    cfg,
+                    cfg.rope_spec(),
                     device,
                 )?),
             );

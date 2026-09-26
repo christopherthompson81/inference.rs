@@ -7,9 +7,11 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use candle_core::{Device, Tensor};
+use candle_core::Tensor;
 use indicatif::{ProgressBar, ProgressStyle};
-use inference_quant::{IsqBits, IsqType, TrackedModule, UqffOutputReport, UqffReport, UqffTensor};
+use inference_quant::{
+    parse_isq_value, IsqBits, IsqType, TrackedModule, UqffOutputReport, UqffReport, UqffTensor,
+};
 use regex::Regex;
 use serde::Deserialize;
 use tokenizers::Tokenizer;
@@ -295,114 +297,6 @@ pub(crate) fn format_isq_types(types: &[IsqType]) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-/// Parse ISQ value.
-///
-/// If the provided value is a valid integer (one of 2,3,4,5,6,8), the best quantization type will be chosen.
-/// Note that the fallback is always a Q/K quantization but on Metal 2,3,4,6,8 uses the fast AFQ.
-///
-/// One of:
-/// - `Q4_0`
-/// - `Q4_1`
-/// - `Q5_0`
-/// - `Q5_1`
-/// - `Q8_0`
-/// - `Q8_1`
-/// - `Q2K`
-/// - `Q3K`
-/// - `Q4K`
-/// - `Q5K`
-/// - `Q6K`
-/// - `Q8K`
-/// - `HQQ1`
-/// - `HQQ2`
-/// - `HQQ3`
-/// - `HQQ4`
-/// - `HQQ8`
-/// - `AFQ2`
-/// - `AFQ3`
-/// - `AFQ4`
-/// - `AFQ6`
-/// - `AFQ8`
-pub fn parse_isq_value(s: &str, device: Option<&Device>) -> Result<IsqType, String> {
-    let lowered = s.to_lowercase();
-
-    // Numeric shorthands resolve via IsqBits
-    if let Ok(bits) = IsqBits::try_from(lowered.as_str()) {
-        let tp = match device {
-            Some(dev) => bits.resolve(dev),
-            None => bits.resolve(&Device::Cpu),
-        };
-        #[cfg(feature = "cuda")]
-        {
-            // All IsqBits resolutions are CUDA-safe, so no extra check needed.
-        }
-        return Ok(tp);
-    }
-
-    let tp = match lowered.as_str() {
-        "q4_0" => IsqType::Q4_0,
-        "q4_1" => IsqType::Q4_1,
-        "q5_0" => IsqType::Q5_0,
-        "q5_1" => IsqType::Q5_1,
-        "q8_0" => IsqType::Q8_0,
-        "q8_1" => IsqType::Q8_1,
-        "q2k" => IsqType::Q2K,
-        "q3k" => IsqType::Q3K,
-        "q4k" => IsqType::Q4K,
-        "q5k" => IsqType::Q5K,
-        "q6k" => IsqType::Q6K,
-        "q8k" => IsqType::Q8K,
-        "hqq8" => IsqType::HQQ8,
-        "hqq4" => IsqType::HQQ4,
-        "fp8" => IsqType::F8E4M3,
-        "afq8" => IsqType::AFQ8,
-        "afq6" => IsqType::AFQ6,
-        "afq4" => IsqType::AFQ4,
-        "afq3" => IsqType::AFQ3,
-        "afq2" => IsqType::AFQ2,
-        "f8q8" => IsqType::F8Q8,
-        "mxfp4" => IsqType::MXFP4,
-        // "hqq3" => IsqType::HQQ3,
-        // "hqq2" => IsqType::HQQ2,
-        // "hqq1" => IsqType::HQQ1,
-        _ => return Err(format!("ISQ type {s} unknown, choose one of `2`, `3`, `4`, `5`, `6`, `8`, `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q8_1`, `Q2K`, `Q3K`, `Q4K`, `Q5K`, `Q6K`, `Q8K`, `HQQ8`, `HQQ4`, `FP8`, `AFQ8`, `AFQ6`, `AFQ4`, `AFQ3`, `AFQ2`, `F8Q8`, `MXFP4`.")),
-    };
-    if tp == IsqType::F8Q8 && device.is_some_and(|device| !device.is_cpu()) {
-        return Err("F8Q8 is CPU-only; choose `fp8` or another accelerator ISQ type.".to_string());
-    }
-    #[cfg(feature = "cuda")]
-    {
-        if !matches!(
-            tp,
-            IsqType::Q4_0
-                | IsqType::Q4_1
-                | IsqType::Q5_0
-                | IsqType::Q5_1
-                | IsqType::Q8_0
-                | IsqType::Q2K
-                | IsqType::Q3K
-                | IsqType::Q4K
-                | IsqType::Q5K
-                | IsqType::Q6K
-                | IsqType::HQQ8
-                | IsqType::HQQ4
-                | IsqType::F8E4M3
-                | IsqType::AFQ2
-                | IsqType::AFQ3
-                | IsqType::AFQ4
-                | IsqType::AFQ6
-                | IsqType::AFQ8
-                | IsqType::F8Q8
-                | IsqType::MXFP4 // | IsqType::HQQ3
-                                 // | IsqType::HQQ2
-                                 // | IsqType::HQQ1
-        ) {
-            return Err("ISQ type on CUDA must be one of `Q4_0`, `Q4_1`, `Q5_0`, `Q5_1`, `Q8_0`, `Q2K`, `Q3K`, `Q4K`, `Q5K`, `Q6K`, `HQQ8`, `HQQ4`, `FP8`, `AFQ8`, `AFQ6`, `AFQ4`, `AFQ3`, `AFQ2`, `F8Q8`, `MXFP4`".to_string());
-        }
-    }
-    Ok(tp)
 }
 
 /// Expand an ISQ specifier into concrete `IsqType` variants.
@@ -1574,7 +1468,7 @@ pub(crate) fn load_imatrix_map(
 mod tests {
     use super::*;
     use crate::pipeline::{get_chat_template, AdapterPaths, LocalModelPaths};
-    use candle_core::DType;
+    use candle_core::{DType, Device};
     use candle_nn::Linear;
     use inference_quant::{
         pending_isq_channel, PendingIsqLayer, QuantMethod, QuantMethodConfig, QuantizeOntoGuard,

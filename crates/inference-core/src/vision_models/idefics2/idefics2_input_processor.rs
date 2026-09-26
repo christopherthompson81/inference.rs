@@ -657,9 +657,9 @@ impl InputsProcessor for Idefics2ImageProcessor {
             paged_attn_meta,
             flash_meta,
             recurrent_batch_kind: if is_prompt {
-                crate::pipeline::RecurrentBatchKind::Prefill
+                crate::gdn::RecurrentBatchKind::Prefill
             } else {
-                crate::pipeline::RecurrentBatchKind::Decode
+                crate::gdn::RecurrentBatchKind::Decode
             },
             adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
         });

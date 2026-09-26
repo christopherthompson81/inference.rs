@@ -1,5 +1,7 @@
 mod amoe;
 mod auto;
+pub(crate) mod cache_manager;
+pub use cache_manager::CacheManager;
 pub mod chat_template;
 #[cfg(feature = "cuda")]
 pub(crate) mod cuda_graph;
@@ -20,6 +22,7 @@ pub use isq_flow::CalibrationStatus;
 pub(crate) mod llg;
 mod loaders;
 mod macros;
+pub(crate) mod model_config;
 mod multimodal;
 mod normal;
 mod paths;
@@ -28,16 +31,23 @@ pub(crate) mod prompt_chunks;
 mod response;
 pub(crate) mod sampling;
 mod speech;
+mod tiktoken;
+pub(crate) mod tokenizer;
+mod tokens;
 
 pub use super::diffusion_models::DiffusionGenerationParams;
 use crate::amoe::{AnyMoeConfig, AnyMoeExpertType, AnyMoeTrainingInputs, AnyMoeTrainingResult};
+use crate::attention::FlashParams;
 use crate::device_map::DeviceMapper;
-use crate::kv_cache::prefix_cacher::{PagedAuxiliaryPrefixState, PrefixCacheManagerV2};
+use crate::gdn::RecurrentBatchKind;
+use crate::kv_cache::PagedAuxiliaryPrefixState;
 use crate::layers::masker::PastKvLenCache;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use crate::paged_attention::{
     AttentionBackendKind, CacheConfig, CacheEngine, CacheMemoryReservations, MemoryGpuConfig,
     ModelConfigLike,
 };
+use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::IntervalLogger;
 use crate::PagedAttentionConfig;
 pub use amoe::{AnyMoeLoader, AnyMoePipeline};
@@ -55,9 +65,8 @@ use image::DynamicImage;
 pub use inputs_processor::InputProcessorOutput;
 pub(crate) use isq::IsqModelLoader;
 pub use isq::{
-    expand_isq_value, expand_uqff_shards, parse_isq_value, parse_uqff_shard,
-    resolve_uqff_report_output, resolve_uqff_shorthand, IsqModel, IsqOrganization, UqffWriteConfig,
-    UQFF_MULTI_FILE_DELIMITER,
+    expand_isq_value, expand_uqff_shards, parse_uqff_shard, resolve_uqff_report_output,
+    resolve_uqff_shorthand, IsqModel, IsqOrganization, UqffWriteConfig, UQFF_MULTI_FILE_DELIMITER,
 };
 use llguidance::toktrie::TokEnv;
 pub(crate) use loaders::checkpoint_runtime_size;
@@ -175,9 +184,7 @@ pub(crate) use self::inputs_processor::{
 pub use self::inputs_processor::{
     text_models_inputs_processor, InputsProcessor, InputsProcessorType,
 };
-use self::text_models_inputs_processor::{
-    FlashParams, PagedAttentionInputMetadata, PagedAttentionMeta,
-};
+use self::text_models_inputs_processor::PagedAttentionMeta;
 
 #[cfg(feature = "cuda")]
 pub(crate) fn synchronize_cuda_contexts(primary: &Device, mapper: &dyn DeviceMapper) -> Result<()> {
@@ -308,9 +315,7 @@ pub(crate) fn validate_lora_loader_config(
     Ok(())
 }
 
-pub use crate::kv_cache::{
-    Cache, CacheManager, EitherCache, KvCache, LayerCaches, NormalCache, NormalCacheType,
-};
+pub use crate::kv_cache::{Cache, EitherCache, KvCache, LayerCaches, NormalCache, NormalCacheType};
 
 pub(crate) const RECURRENT_GRAPH_PAD_SLOTS: usize = 1;
 const AUTO_RECURRENT_KV_FLOOR_FRACTION: f64 = 0.05;
@@ -714,13 +719,6 @@ pub(crate) enum ForwardPositions<'a> {
 pub(crate) enum ForwardMaskCache<'a> {
     Normal(&'a [KvCache]),
     Paged(&'a [usize]),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RecurrentBatchKind {
-    Prefill,
-    Decode,
-    SpeculativeDecode,
 }
 
 pub(crate) fn recurrent_batch_kind_for_input(
@@ -2992,13 +2990,14 @@ mod tests {
         ModelForwardContext, RecurrentBatchKind, RecurrentCheckpointBudget,
     };
     use crate::{
+        attention::FlashParams,
         kv_cache::{
             EitherCache, HybridCache, HybridCacheConfig, HybridLayerType, RecurrentLayerConfig,
             RecurrentStateSpec,
         },
         paged_attention::block_hash::MultimodalAttentionPolicy,
+        paged_attention::PagedAttentionInputMetadata,
         pipeline::prompt_chunks::PromptChunkPlan,
-        pipeline::text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
         MemoryGpuConfig, MessageContent, PagedAttentionConfig, PagedCacheType,
     };
     use candle_core::{Device, DeviceLocation, Tensor};

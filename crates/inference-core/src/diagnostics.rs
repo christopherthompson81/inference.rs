@@ -127,8 +127,8 @@ fn build_info() -> BuildInfo {
         accelerate: cfg!(feature = "accelerate"),
         mkl: cfg!(feature = "mkl"),
         git_revision: crate::INFERENCE_RS_GIT_REVISION.to_string(),
-        cuda_toolkit_version: option_env!("INFERENCE_RS_BUILD_CUDA_VERSION").map(str::to_string),
-        cuda_toolkit_version_code: option_env!("INFERENCE_RS_BUILD_CUDA_VERSION_CODE")
+        cuda_toolkit_version: inference_nn::BUILD_CUDA_VERSION.map(str::to_string),
+        cuda_toolkit_version_code: inference_nn::BUILD_CUDA_VERSION_CODE
             .and_then(|s| s.parse().ok()),
     }
 }

@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::Module;
@@ -15,13 +16,13 @@ use crate::{
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
-        embedding_with_legacy_tied_uqff, Activation, CausalMasker, Mlp, RmsNorm, SmolLm3RopeConfig,
-        SmolLm3RotaryEmbedding,
+        embedding_with_legacy_tied_uqff, Activation, CausalMasker, Llama3RopeConfig,
+        Llama3RopeSpec, Llama3RotaryEmbedding, Mlp, RmsNorm,
     },
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
-        text_models_inputs_processor::FlashParams, EitherCache, IsqModel, KvCache,
-        ModelForwardContext, NormalCache, NormalLoadingMetadata, NormalModel,
+        EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalLoadingMetadata,
+        NormalModel,
     },
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
@@ -41,7 +42,7 @@ pub struct Config {
     pub rms_norm_eps: f64,
     pub rope_theta: f32,
     pub max_position_embeddings: usize,
-    pub rope_scaling: Option<SmolLm3RopeConfig>,
+    pub rope_scaling: Option<Llama3RopeConfig>,
     pub quantization_config: Option<QuantizedConfig>,
     #[serde(default = "word_emb_default")]
     pub tie_word_embeddings: bool,
@@ -50,6 +51,15 @@ pub struct Config {
 }
 
 impl Config {
+    pub fn rope_spec(&self) -> Llama3RopeSpec<'_> {
+        Llama3RopeSpec {
+            rope_theta: self.rope_theta,
+            head_dim: self.hidden_size / self.num_attention_heads,
+            max_position_embeddings: self.max_position_embeddings,
+            scaling: self.rope_scaling.as_ref(),
+        }
+    }
+
     fn no_rope_layers(&self) -> Vec<bool> {
         self.no_rope_layers
             .as_ref()
@@ -71,7 +81,7 @@ struct CausalSelfAttention {
     num_attention_heads: usize,
     num_key_value_heads: usize,
     head_dim: usize,
-    rotary_emb: Option<Arc<SmolLm3RotaryEmbedding>>,
+    rotary_emb: Option<Arc<Llama3RotaryEmbedding>>,
     max_seq_len: usize,
     paged_attn: Option<PagedAttention>,
     sdpa_params: SdpaParams,
@@ -137,7 +147,7 @@ impl CausalSelfAttention {
     fn load(
         vb: ShardedVarBuilder,
         cfg: &Config,
-        rope: Option<Arc<SmolLm3RotaryEmbedding>>,
+        rope: Option<Arc<Llama3RotaryEmbedding>>,
         paged_attn: Option<PagedAttention>,
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
@@ -243,7 +253,7 @@ impl Block {
         mapper: &dyn DeviceMapper,
         layer_idx: usize,
         loading_isq: bool,
-        rope: Option<Arc<SmolLm3RotaryEmbedding>>,
+        rope: Option<Arc<Llama3RotaryEmbedding>>,
         paged_attn: Option<PagedAttention>,
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
@@ -377,9 +387,9 @@ impl SmolLm3 {
             };
             ropes.insert(
                 location,
-                Arc::new(SmolLm3RotaryEmbedding::new_llama3_with_factors(
+                Arc::new(Llama3RotaryEmbedding::new(
                     vb_m.dtype(),
-                    cfg,
+                    cfg.rope_spec(),
                     device,
                     is_gptx,
                     freq_factors.as_ref(),

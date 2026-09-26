@@ -23,7 +23,7 @@ use std::{
     fs::OpenOptions,
     io::Write,
     path::PathBuf,
-    sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, RwLock},
     thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -68,16 +68,17 @@ macro_rules! skip_without_cuda {
     };
 }
 
+pub use inference_nn::metal::warmup_metal_kernels;
+use inference_nn::{
+    amoe, attention, cuda, device_map, flashinfer, gdn, kv_cache, lora, metal, mla, moe, ops,
+    paged_attention, perf_flags, topology, utils,
+};
+use inference_nn::{get_delta_from_lora_ab, get_mut_arcmutex, serde_default_fn};
+pub use inference_nn::{layers, matformer};
+
 mod adapter;
 mod agent_approval;
-mod cuda;
-mod device_map;
 mod engine;
-mod lora;
-mod metal;
-pub use metal::warmup_metal_kernels;
-mod moe;
-mod ops;
 mod video_input;
 pub use selection::model_loader::{
     get_auto_device_map_params, get_model_dtype, get_tgt_non_granular_index, LoaderBuilder,
@@ -86,28 +87,19 @@ pub use video_input::{
     sample_frame_indices, VideoFrameSampling, VideoInput, DEFAULT_VIDEO_FRAME_LIMIT,
 };
 mod embedding_models;
-mod flashinfer;
-mod kv_cache;
 mod search;
 
 pub use selection::model_selected::ModelSelected;
 
-mod amoe;
-mod attention;
 mod block_diffusion;
 mod diagnostics;
 mod diffusion_models;
 pub mod distributed;
 pub mod files;
-mod gdn;
 mod gguf;
-pub mod layers;
-pub mod matformer;
-mod mla;
 mod models;
-mod paged_attention;
-mod perf_flags;
 mod pipeline;
+mod prefix_cacher;
 pub mod reasoning_parsers;
 pub mod remote_fetch;
 mod request;
@@ -117,11 +109,10 @@ mod sampler;
 mod scheduler;
 pub mod selection;
 mod sequence;
+mod sequence_macros;
 pub mod speculative;
 mod speech_models;
 mod tools;
-mod topology;
-mod utils;
 mod vision_models;
 mod xlora_models;
 
@@ -172,6 +163,7 @@ pub use inference_mcp::{
 pub use inference_mcp::{
     McpClient, McpClientConfig, McpServerConfig, McpServerSource, McpToolInfo,
 };
+pub use inference_quant::parse_isq_value;
 pub use inference_quant::{IsqBits, IsqType};
 pub use inference_sandbox::{NetworkMode, SandboxPolicy};
 pub use paged_attention::{MemoryGpuConfig, PagedAttentionConfig, PagedCacheType};
@@ -182,9 +174,9 @@ pub use pipeline::hf::{
 };
 pub use pipeline::{
     chat_template::{is_chat_template_request_error, ChatTemplate},
-    expand_isq_value, expand_uqff_shards, parse_isq_value, parse_uqff_shard,
-    resolve_uqff_report_output, resolve_uqff_shorthand, AdapterPaths, AnyMoeLoader, AnyMoePipeline,
-    AutoDeviceMapParams, AutoLoader, AutoLoaderBuilder, DiffusionGenerationParams, DiffusionLoader,
+    expand_isq_value, expand_uqff_shards, parse_uqff_shard, resolve_uqff_report_output,
+    resolve_uqff_shorthand, AdapterPaths, AnyMoeLoader, AnyMoePipeline, AutoDeviceMapParams,
+    AutoLoader, AutoLoaderBuilder, DiffusionGenerationParams, DiffusionLoader,
     DiffusionLoaderBuilder, DiffusionLoaderType, EmbeddingLoader, EmbeddingLoaderBuilder,
     EmbeddingLoaderType, EmbeddingModelPaths, EmbeddingSpecificConfig, GGMLLoader,
     GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig,
@@ -242,8 +234,6 @@ pub use utils::{paged_attn_supported, using_flash_attn};
 // re-export llguidance for easier LlguidanceGrammar construction
 pub use llguidance;
 
-/// `true` if `INFERENCE_RS_DEBUG=1`
-pub(crate) static DEBUG: AtomicBool = AtomicBool::new(false);
 pub static GLOBAL_HF_CACHE: OnceLock<Cache> = OnceLock::new();
 
 /// Set the process-wide Hugging Face cache path before model discovery.

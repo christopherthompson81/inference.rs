@@ -8,6 +8,7 @@ mod gguf_tokenizer;
 pub(crate) mod idefics3_bindings;
 mod lfm2_vl_bindings;
 pub(crate) mod llama4_bindings;
+pub(crate) mod metadata;
 mod mistral3_bindings;
 mod multimodal_binding_utils;
 pub(crate) mod multimodal_bindings;

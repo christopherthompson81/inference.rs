@@ -1,6 +1,9 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashKMeta;
+use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::Module;
 use inference_quant::{
@@ -17,7 +20,6 @@ use crate::{
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
-        text_models_inputs_processor::{FlashKMeta, FlashParams, PagedAttentionInputMetadata},
         EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalLoadingMetadata,
         NormalModel,
     },
@@ -832,7 +834,9 @@ impl TextModel {
             &*mapper,
             cfg.num_hidden_layers,
             &normal_loading_metadata.real_device,
-            |device| Llama3RotaryEmbedding::new_llama4(vb_m.dtype(), cfg, device, is_gptx),
+            |device| {
+                Llama3RotaryEmbedding::new(vb_m.dtype(), cfg.rope_spec(), device, is_gptx, None)
+            },
         )?;
         let blocks = NiceProgressBar::<_, 'b'>(
             0..cfg.num_hidden_layers,

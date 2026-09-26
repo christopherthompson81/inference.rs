@@ -1,3 +1,4 @@
+use crate::attention::FlashParams;
 use std::f64;
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
@@ -7,7 +8,6 @@ use inference_quant::{QuantizedConfig, ShardedVarBuilder};
 use crate::{
     attention::{AttentionMask, SdpaParams},
     layers::{self, Activation, Conv3dConfig, Conv3dNoBias, Sdpa},
-    pipeline::text_models_inputs_processor::FlashParams,
     utils::unvarbuilder::UnVarBuilder,
 };
 

@@ -4,6 +4,7 @@ members = [
     "crates/inference-server-core",
     "crates/inference-cli",
     "crates/inference-core",
+    "crates/inference-nn",
     "crates/inference-pyo3",
     "crates/inference",
     "crates/inference-vision",
@@ -26,6 +27,7 @@ default-members = [
     "crates/inference-server-core",
     "crates/inference-cli",
     "crates/inference-core",
+    "crates/inference-nn",
     "crates/inference-pyo3",
     "crates/inference",
     "crates/inference-vision",
@@ -219,6 +221,7 @@ itoa = "1.0.18"
 cutile = "=0.3.1"
 
 inference-core = { path = "crates/inference-core", version = "0.9.3" }
+inference-nn = { path = "crates/inference-nn", version = "0.9.3" }
 inference-paged-attn = { path = "crates/inference-paged-attn", version = "0.9.3" }
 inference-metal-compile = { path = "crates/inference-metal-compile", version = "0.9.3" }
 inference-flash-attn = { path = "crates/inference-flash-attn", version = "0.9.3" }

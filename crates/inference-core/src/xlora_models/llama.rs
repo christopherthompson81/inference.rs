@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -7,7 +8,7 @@ use crate::{
     layers::{Llama3RotaryEmbedding, Sdpa},
     lora::{linear_no_bias as linear, LinearLayerLike, LoraConfig, Ordering},
     paged_attention::ModelConfigMetadata,
-    pipeline::{text_models_inputs_processor::FlashParams, EitherCache, IsqModel},
+    pipeline::{EitherCache, IsqModel},
     utils::progress::NiceProgressBar,
 };
 use candle_core::{DType, Device, Result, Tensor};
@@ -571,7 +572,7 @@ impl XLoraLlama {
             &*mapper,
             cfg.num_hidden_layers,
             &normal_loading_metadata.real_device,
-            |device| Llama3RotaryEmbedding::new_llama3(vb.dtype(), cfg, device, is_gptx),
+            |device| Llama3RotaryEmbedding::new(vb.dtype(), cfg.rope_spec(), device, is_gptx, None),
         )?;
         let mut blocks: Vec<_> = NiceProgressBar::<_, 'b'>(
             0..cfg.num_hidden_layers,

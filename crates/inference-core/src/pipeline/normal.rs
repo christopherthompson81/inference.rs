@@ -38,10 +38,14 @@ struct CudaDecodeGraphForwardInput<'a> {
     flash_meta: &'a FlashParams,
     recurrent_batch_kind: RecurrentBatchKind,
 }
-use crate::kv_cache::prefix_cacher::PrefixCacheManagerV2;
-use crate::kv_cache::{FullCacheManager, HybridCacheManager, NormalCacheManager};
+#[cfg(feature = "cuda")]
+use crate::attention::FlashParams;
+use crate::gdn::RecurrentBatchKind;
 use crate::lora::Ordering;
+#[cfg(feature = "cuda")]
+use crate::paged_attention::PagedAttentionInputMetadata;
 use crate::paged_attention::{calculate_cache_config, AttentionImplementation, CacheEngine};
+use crate::pipeline::cache_manager::{FullCacheManager, HybridCacheManager, NormalCacheManager};
 use crate::pipeline::chat_template::{calculate_eos_tokens, BeginEndUnkPadTok, GenerationConfig};
 #[cfg(feature = "cuda")]
 use crate::pipeline::cuda_graph::{
@@ -62,15 +66,14 @@ use crate::pipeline::loaders::auto_device_map;
 use crate::pipeline::loaders::{AutoDeviceMapQuantization, QuantizationConfigShim};
 use crate::pipeline::sampling::{sample_and_add_toks, sample_and_add_toks_batched};
 use crate::pipeline::text_models_inputs_processor::InputMetadata;
-#[cfg(feature = "cuda")]
-use crate::pipeline::text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata};
+use crate::pipeline::tokenizer::get_tokenizer;
 use crate::pipeline::{
-    get_chat_template, hf::build_api, Modalities, ModelForwardContext, RecurrentBatchKind,
-    RecurrentMetadata, SupportedModality,
+    get_chat_template, hf::build_api, Modalities, ModelForwardContext, RecurrentMetadata,
+    SupportedModality,
 };
 use crate::pipeline::{ChatTemplate, LocalModelPaths};
+use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
-use crate::utils::tokenizer::get_tokenizer;
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
 use crate::utils::{
     progress::{new_multi_progress, ProgressScopeGuard},
@@ -2282,9 +2285,7 @@ impl Pipeline for NormalPipeline {
         &mut self,
         sequence_id: usize,
         cached_tokens: usize,
-    ) -> candle_core::Result<
-        Option<Arc<dyn crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState>>,
-    > {
+    ) -> candle_core::Result<Option<Arc<dyn crate::kv_cache::PagedAuxiliaryPrefixState>>> {
         self.model
             .capture_paged_auxiliary_prefix_state(sequence_id, cached_tokens)
     }
@@ -2293,7 +2294,7 @@ impl Pipeline for NormalPipeline {
         &mut self,
         sequence_id: usize,
         cached_tokens: usize,
-        state: &dyn crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState,
+        state: &dyn crate::kv_cache::PagedAuxiliaryPrefixState,
     ) -> candle_core::Result<()> {
         self.model
             .restore_paged_auxiliary_prefix_state(sequence_id, cached_tokens, state)

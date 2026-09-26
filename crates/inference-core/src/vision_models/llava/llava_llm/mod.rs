@@ -63,7 +63,8 @@ pub use mistral::Model as Mistral;
 mod tests {
     use std::collections::HashMap;
 
-    use crate::pipeline::text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata};
+    use crate::attention::FlashParams;
+    use crate::paged_attention::PagedAttentionInputMetadata;
 
     use super::*;
 

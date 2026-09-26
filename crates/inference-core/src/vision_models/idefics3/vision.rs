@@ -1,3 +1,4 @@
+use crate::attention::FlashParams;
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::{Conv2d, Conv2dConfig, Embedding, LayerNorm, Linear, Module};
 use inference_quant::{Convolution, QuantMethod, ShardedVarBuilder};
@@ -6,7 +7,6 @@ use std::{ops::Mul, sync::Arc};
 use crate::{
     attention::{AttentionMask, SdpaParams},
     layers::{self, conv2d, dense_embedding, layer_norm, Activation, CausalMasker, Sdpa},
-    pipeline::text_models_inputs_processor::FlashParams,
     utils::unvarbuilder::UnVarBuilder,
 };
 

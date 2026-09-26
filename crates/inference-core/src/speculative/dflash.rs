@@ -22,11 +22,13 @@ use inference_quant::{
 };
 use serde::Deserialize;
 
-use crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState;
+use crate::kv_cache::PagedAuxiliaryPrefixState;
 use crate::layers::{yarn_inv_freq_and_attention_factor, RmsNorm, YarnRopeConfig};
 use crate::speculative::{MtpConfig, MtpDraftSamplingMethod, SpeculativePrefixReplay};
 use crate::utils::varbuilder_utils::{from_mmaped_safetensors, DeviceForLoadTensor};
 
+#[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
+use crate::cuda::phase_timer::CudaPhaseTimer;
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
 use crate::paged_attention::windowed_pool::{
     WindowedKvBatch, WindowedKvBatchTensors, WindowedKvCheckpoint, WindowedKvPool,
@@ -37,7 +39,6 @@ use crate::pipeline::cuda_graph::{
     record_cuda_graph_dispatch, record_cuda_graph_evictions, record_cuda_graph_resident_entries,
     take_cuda_graph_capacity_eviction, CudaGraphComponent, CudaGraphDispatchMode,
     CudaGraphDispatchReason, CudaGraphEvent, CudaGraphEventGuard, CudaGraphEvictionReason,
-    CudaPhaseTimer,
 };
 
 const DEFAULT_BLOCK_SIZE: usize = 16;
@@ -2260,7 +2261,7 @@ impl DFlashDraftModel {
         let isq = match std::env::var("INFERENCE_RS_DFLASH_ISQ").ok().as_deref() {
             Some("none" | "bf16") => None,
             Some(name) => Some(
-                crate::pipeline::parse_isq_value(name, Some(device))
+                inference_quant::parse_isq_value(name, Some(device))
                     .map_err(candle_core::Error::Msg)?,
             ),
             None => config.draft_lm_head_isq,

@@ -2,6 +2,7 @@
 //! query with its own context length (one row per sequence for decode-style drafting, or several rows
 //! per sequence when refreshing a drafter over accepted tokens).
 
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{collections::HashMap, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
@@ -13,7 +14,7 @@ use crate::{
     },
     get_mut_arcmutex,
     paged_attention::block_table_rows::{BlockTableRanges, BlockTableRows, BlockTableSnapshot},
-    pipeline::text_models_inputs_processor::{PagedAttentionInputMetadata, PagedAttentionMeta},
+    pipeline::text_models_inputs_processor::PagedAttentionMeta,
 };
 
 /// `seq_ids[i]` may repeat; `context_lens[i]` is the row's position plus one, and the row's K/V

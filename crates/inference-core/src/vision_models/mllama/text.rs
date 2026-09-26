@@ -1,6 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use crate::layers::masker::CausalMaskConfig;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{ops::Range, sync::Arc};
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
@@ -13,11 +14,13 @@ use crate::{
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::masker::PastKvLenCache,
-    layers::{embedding_with_legacy_tied_uqff, CausalMasker, Llama3RotaryEmbedding, RmsNorm, Sdpa},
+    layers::{
+        embedding_with_legacy_tied_uqff, CausalMasker, Llama3RopeSpec, Llama3RotaryEmbedding,
+        RmsNorm, Sdpa,
+    },
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
-        text_models_inputs_processor::PagedAttentionInputMetadata, EitherCache, IsqModel, KvCache,
-        ModelForwardContext, NormalCache, NormalLoadingMetadata,
+        EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalLoadingMetadata,
     },
     utils::unvarbuilder::UnVarBuilder,
 };
@@ -790,11 +793,18 @@ impl MLlamaTextModel {
             mapper.set_nm_device(vb.pp("norm"), false),
         )?;
 
+        let rope_scaling = cfg.llama3_rope_scaling()?;
+        let rope_spec = Llama3RopeSpec {
+            rope_theta: cfg.rope_theta,
+            head_dim: cfg.head_dim(),
+            max_position_embeddings: cfg.max_position_embeddings,
+            scaling: rope_scaling.as_ref(),
+        };
         let ropes = crate::device_map::per_layer_device(
             &*mapper,
             cfg.num_hidden_layers,
             &normal_loading_metadata.real_device,
-            |device| Llama3RotaryEmbedding::new_mllama3(vb.dtype(), cfg, device, is_gptx),
+            |device| Llama3RotaryEmbedding::new(vb.dtype(), rope_spec, device, is_gptx, None),
         )?;
 
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);

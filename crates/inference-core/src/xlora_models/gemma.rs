@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use std::{collections::HashMap, sync::Arc};
 
@@ -9,9 +10,7 @@ use crate::{
     layers::{self, Activation, GemmaRmsNorm, RotaryEmbedding, Sdpa},
     lora::{linear_b as linear, LinearLayerLike, LoraConfig, Ordering},
     paged_attention::ModelConfigMetadata,
-    pipeline::{
-        text_models_inputs_processor::FlashParams, EitherCache, IsqModel, NormalLoadingMetadata,
-    },
+    pipeline::{EitherCache, IsqModel, NormalLoadingMetadata},
     utils::progress::NiceProgressBar,
 };
 use candle_core::{DType, Device, Module, Result, Tensor};

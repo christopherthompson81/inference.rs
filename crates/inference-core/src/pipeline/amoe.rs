@@ -21,7 +21,7 @@ use crate::{
     amoe::{AnyMoeConfig, AnyMoeTrainingInputRow, AnyMoeTrainingInputs, AnyMoeTrainingResult},
     device_map::DeviceMapper,
     get_mut_arcmutex,
-    kv_cache::prefix_cacher::PrefixCacheManagerV2,
+    prefix_cacher::PrefixCacheManagerV2,
     sampler::Sampler,
     sequence::{SeqStepType, Sequence, SequenceGroup, SequenceRecognizer},
     utils::progress::{new_multi_progress, NiceProgressBar, ProgressScopeGuard},
@@ -350,7 +350,7 @@ impl Pipeline for AnyMoePipeline {
         sequence_id: usize,
         cached_tokens: usize,
     ) -> Result<
-        Option<std::sync::Arc<dyn crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState>>,
+        Option<std::sync::Arc<dyn crate::kv_cache::PagedAuxiliaryPrefixState>>,
         candle_core::Error,
     > {
         get_mut_arcmutex!(self.target)
@@ -361,7 +361,7 @@ impl Pipeline for AnyMoePipeline {
         &mut self,
         sequence_id: usize,
         cached_tokens: usize,
-        state: &dyn crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState,
+        state: &dyn crate::kv_cache::PagedAuxiliaryPrefixState,
     ) -> Result<(), candle_core::Error> {
         get_mut_arcmutex!(self.target).restore_paged_auxiliary_prefix_state(
             sequence_id,

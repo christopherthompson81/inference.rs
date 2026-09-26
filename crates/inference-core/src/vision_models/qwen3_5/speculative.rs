@@ -5,6 +5,7 @@
 //! own paged KV for those positions and yields the first draft; further drafts are chained from the
 //! drafter's own hidden state at consecutive positions.
 
+use crate::attention::FlashParams;
 use std::sync::{atomic::Ordering, Arc};
 
 use candle_core::{IndexOp, Result, Tensor};
@@ -17,7 +18,6 @@ use crate::{
     get_mut_arcmutex,
     layers::masker::CausalMaskConfig,
     layers::CausalMasker,
-    pipeline::text_models_inputs_processor::FlashParams,
     speculative::{
         dflash::{
             CtxAppend, DFlashDraftModel, DFlashGraphProposalInputs, DFlashLoadTarget,
@@ -1067,7 +1067,7 @@ impl SpeculativeTargetMixin for Qwen3_5Model {
         &mut self,
         sequence_id: usize,
         cached_tokens: usize,
-    ) -> Result<Option<Arc<dyn crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState>>> {
+    ) -> Result<Option<Arc<dyn crate::kv_cache::PagedAuxiliaryPrefixState>>> {
         let Some(drafter) = self
             .dflash
             .lock()
@@ -1084,7 +1084,7 @@ impl SpeculativeTargetMixin for Qwen3_5Model {
         &mut self,
         sequence_id: usize,
         cached_tokens: usize,
-        state: &dyn crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState,
+        state: &dyn crate::kv_cache::PagedAuxiliaryPrefixState,
     ) -> Result<()> {
         let drafter = self
             .dflash

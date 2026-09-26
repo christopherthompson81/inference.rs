@@ -1,6 +1,8 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::sync::Arc;
 
 use candle_core::{DType, Device, Result, Tensor, D};
@@ -28,7 +30,6 @@ use crate::{
     ops::{SplitOp, TopKLastDimOp, TopKOutput},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
         EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalLoadingMetadata,
         NormalModel,
     },

@@ -5,6 +5,8 @@
 //! `lm_head`. Unlike the Gemma 4 assistant it keeps its own paged KV cache, addressed through the
 //! sequence's block table as the layer right after the main stack.
 
+use crate::attention::FlashParams;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::sync::Arc;
 
 use candle_core::{DType, Device, Module, Result, Tensor, D};
@@ -15,10 +17,7 @@ use crate::{
     device_map::DeviceMapper,
     layers::{GemmaRmsNorm, Qwen3VLRotaryEmbedding},
     paged_attention::{load_fp8_attention_scales, AttentionImplementation, PagedAttention},
-    pipeline::{
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        NormalLoadingMetadata,
-    },
+    pipeline::NormalLoadingMetadata,
     utils::unvarbuilder::UnVarBuilder,
 };
 

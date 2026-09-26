@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -7,9 +8,7 @@ use crate::{
     layers::{self, RotaryEmbedding, Sdpa},
     lora::{linear_no_bias, LinearLayerLike, LoraConfig, Ordering},
     paged_attention::ModelConfigMetadata,
-    pipeline::{
-        text_models_inputs_processor::FlashParams, EitherCache, IsqModel, NormalLoadingMetadata,
-    },
+    pipeline::{EitherCache, IsqModel, NormalLoadingMetadata},
     utils::progress::NiceProgressBar,
 };
 /// Mistral LLM, https://github.com/mistralai/mistral-src

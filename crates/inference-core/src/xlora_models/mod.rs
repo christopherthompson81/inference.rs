@@ -11,12 +11,10 @@ mod quantized_llama;
 mod quantized_phi3;
 mod starcoder2;
 
+use crate::attention::FlashParams;
 use std::sync::Arc;
 
-use crate::{
-    lora::Ordering,
-    pipeline::{text_models_inputs_processor::FlashParams, EitherCache},
-};
+use crate::{lora::Ordering, pipeline::EitherCache};
 use candle_core::{DType, Device, Result, Tensor};
 pub(crate) use config::XLoraConfig;
 pub(crate) use gemma::XLoraModel as XLoraGemma;

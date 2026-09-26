@@ -1,5 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashParams;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{
@@ -20,6 +22,7 @@ use super::{
     mtp::Qwen3_5MtpHead,
     packed_gdn::{forward_packed_gdn, packed_gdn_layout},
 };
+use crate::gdn::RecurrentBatchKind;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, SdpaParams},
@@ -38,9 +41,8 @@ use crate::{
         load_fp8_attention_scales, AttentionImplementation, ModelConfigMetadata, PagedAttention,
     },
     pipeline::{
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
         EitherCache, ForwardMaskCache, IsqModel, KvCache, ModelForwardContext,
-        NormalLoadingMetadata, NormalModel, RecurrentBatchKind,
+        NormalLoadingMetadata, NormalModel,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -2844,9 +2846,9 @@ mod tests {
         SpecGraphState,
     };
     use crate::{
+        gdn::RecurrentBatchKind,
         gdn::{GdnForwardStash, GdnTransitionStash},
         kv_cache::RecurrentStateLayout,
-        pipeline::RecurrentBatchKind,
         speculative::SpeculativeGraphState,
     };
 

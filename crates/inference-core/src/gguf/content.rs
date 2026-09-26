@@ -11,7 +11,7 @@ use candle_core::{
 use indexmap::IndexMap;
 use tracing::{debug, info};
 
-use crate::DEBUG;
+use crate::utils::debug::DEBUG;
 
 use super::GGUFArchitecture;
 

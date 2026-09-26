@@ -1,5 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::flash_params::make_flash_params;
+use crate::attention::FlashParams;
 use std::{any::Any, fmt::Debug, sync::Arc};
 
 use anyhow::Result;
@@ -9,8 +11,8 @@ use tokenizers::Tokenizer;
 use crate::{
     device_map::DeviceMapper,
     pipeline::{
-        text_models_inputs_processor::{make_flash_params, FlashParams, PagedAttentionMeta},
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, MessagesAction, Processor,
+        text_models_inputs_processor::PagedAttentionMeta, InputProcessorOutput, InputsProcessor,
+        InputsProcessorType, MessagesAction, Processor,
     },
     sequence::Sequence,
 };

@@ -1,3 +1,5 @@
+use crate::attention::FlashParams;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::sync::Arc;
 
 use candle_core::{DType, Device, Module, Result, Tensor};
@@ -18,7 +20,6 @@ use crate::{
         PagedAttention,
     },
     pipeline::{
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
         EitherCache, IsqModel, KvCache, ModelForwardContext, MultimodalModel, NormalCache,
         NormalCacheType, NormalLoadingMetadata,
     },
@@ -456,7 +457,7 @@ impl TextModel {
             &*mapper,
             cfg.num_hidden_layers,
             &normal_loading_metadata.real_device,
-            |device| Gemma3RotaryEmbedding::new(is_gptx, vb.dtype(), cfg, device),
+            |device| Gemma3RotaryEmbedding::new(is_gptx, vb.dtype(), cfg.rope_spec(), device),
         )?;
 
         let local_ropes = crate::device_map::per_layer_device(
