@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::Module;
@@ -417,21 +417,19 @@ impl Qwen2_5VLTextModel {
         )?;
         let head_dim = cfg.hidden_size / cfg.num_attention_heads;
 
-        let mut ropes = HashMap::new();
-        for layer_idx in 0..cfg.num_hidden_layers {
-            let device = mapper
-                .device_for(layer_idx, false)
-                .unwrap_or(&normal_loading_metadata.real_device);
-            ropes.insert(
-                device.location(),
-                Arc::new(Qwen2_5VLRotaryEmbedding::new(
+        let ropes = crate::device_map::per_layer_device(
+            &*mapper,
+            cfg.num_hidden_layers,
+            &normal_loading_metadata.real_device,
+            |device| {
+                Qwen2_5VLRotaryEmbedding::new(
                     cfg.rope_theta as f32,
                     head_dim,
                     device,
                     cfg.rope_scaling.mrope_section.clone(),
-                )?),
-            );
-        }
+                )
+            },
+        )?;
         let vb_l = vb_m.pp("layers");
         let layer_sliding_windows = cfg.layer_sliding_windows()?;
         let layers = NiceProgressBar::<_, 'b'>(

@@ -603,23 +603,21 @@ impl VoxtralModel {
 
         // Decoder layers
         let head_dim = cfg.head_dim;
-        let mut ropes = HashMap::new();
-        for layer_idx in 0..cfg.n_layers {
-            let device = mapper
-                .device_for(layer_idx, false)
-                .unwrap_or(&normal_loading_metadata.real_device);
-            ropes.insert(
-                device.location(),
-                Arc::new(RotaryEmbedding::new(
+        let ropes = crate::device_map::per_layer_device(
+            &*mapper,
+            cfg.n_layers,
+            &normal_loading_metadata.real_device,
+            |device| {
+                RotaryEmbedding::new(
                     cfg.rope_theta as f32,
                     head_dim,
                     cfg.model_max_length,
                     device,
                     false, // !is_gptx: consolidated.safetensors stores Q/K in interleaved layout
                     vb.dtype(),
-                )?),
-            );
-        }
+                )
+            },
+        )?;
 
         let vb_layers = vb.pp("layers");
         let layers: Vec<DecoderLayer> = NiceProgressBar::<_, 'b'>(

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::Module;
@@ -408,21 +408,19 @@ impl Qwen3VLTextModel {
             &cfg.quantization_config,
         )?;
 
-        let mut ropes = HashMap::new();
-        for layer_idx in 0..cfg.num_hidden_layers {
-            let device = mapper
-                .device_for(layer_idx, false)
-                .unwrap_or(&normal_loading_metadata.real_device);
-            ropes.insert(
-                device.location(),
-                Arc::new(Qwen3VLRotaryEmbedding::new(
+        let ropes = crate::device_map::per_layer_device(
+            &*mapper,
+            cfg.num_hidden_layers,
+            &normal_loading_metadata.real_device,
+            |device| {
+                Qwen3VLRotaryEmbedding::new(
                     cfg.rope_theta as f32,
                     cfg.head_dim,
                     device,
                     cfg.rope_scaling.mrope_section.clone(),
-                )?),
-            );
-        }
+                )
+            },
+        )?;
         let vb_l = vb_m.pp("layers");
         let layers = NiceProgressBar::<_, 'b'>(
             0..cfg.num_hidden_layers,

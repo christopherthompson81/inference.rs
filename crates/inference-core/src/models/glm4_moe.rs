@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use crate::layers::masker::CausalMaskConfig;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use inference_quant::{
@@ -708,14 +708,12 @@ impl Glm4Moe {
         )?;
 
         let head_dim = cfg.head_dim();
-        let mut ropes = HashMap::new();
-        for i in 0..cfg.num_hidden_layers {
-            let device = mapper
-                .device_for(i, false)
-                .unwrap_or(&normal_loading_metadata.real_device);
-            ropes.insert(
-                device.location(),
-                Arc::new(RotaryEmbedding::new(
+        let ropes = crate::device_map::per_layer_device(
+            &*mapper,
+            cfg.num_hidden_layers,
+            &normal_loading_metadata.real_device,
+            |device| {
+                RotaryEmbedding::new(
                     cfg.rope_theta as f32,
                     cfg.partial_rotary_factor,
                     head_dim,
@@ -723,9 +721,9 @@ impl Glm4Moe {
                     device,
                     vb.dtype(),
                     is_gptx,
-                )?),
-            );
-        }
+                )
+            },
+        )?;
 
         let vb_l = vb_m.pp("layers");
         let layers: Vec<DecoderLayer> = NiceProgressBar::<_, 'b'>(

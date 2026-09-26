@@ -7,7 +7,7 @@ use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, RowParallelLayer, ShardedVarBuilder,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, MlpLayer},
@@ -348,23 +348,21 @@ impl Model {
         )?;
 
         let head_dim = cfg.head_dim();
-        let mut ropes = HashMap::new();
-        for layer_idx in 0..cfg.num_hidden_layers {
-            let device = mapper
-                .device_for(layer_idx, false)
-                .unwrap_or(&normal_loading_metadata.real_device);
-            ropes.insert(
-                device.location(),
-                Arc::new(RotaryEmbedding::new(
+        let ropes = crate::device_map::per_layer_device(
+            &*mapper,
+            cfg.num_hidden_layers,
+            &normal_loading_metadata.real_device,
+            |device| {
+                RotaryEmbedding::new(
                     cfg.rope_theta as f32,
                     head_dim,
                     cfg.max_position_embeddings,
                     device,
                     is_gptx,
                     vb_m.dtype(),
-                )?),
-            );
-        }
+                )
+            },
+        )?;
 
         let vb_l = vb_m.pp("layers");
         let layers = NiceProgressBar::<_, 'b'>(
