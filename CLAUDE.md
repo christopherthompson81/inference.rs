@@ -30,7 +30,7 @@ cargo install --path crates/inference-cli --features <features>
 ### Testing & Quality
 ```bash
 # Run core tests
-cargo test -p inference-core -p inference-nn -p inference-quant -p inference-vision
+cargo test -p inference-core -p inference-nn -p inference-models-llama -p inference-models-qwen -p inference-models-gemma -p inference-models-phi -p inference-models-other -p inference-quant -p inference-vision
 
 # Format code (uses rustfmt, ruff, clang-format)
 make fmt
