@@ -318,7 +318,7 @@ Review follow-ups:
 - Implication: a split is warranted. The win comes from sibling crates that compile in parallel after a shared base,
   not from a serial base -> core chain, and from splitting the 179 s lib-test build.
 
-## Run 14 - 2026-09-26 13:00
+## Run 14 - 2026-09-26 12:00
 
 - Question: after moving the base modules (layers, attention, caches, GDN, MoE, CUDA/Metal, utils; ~78k lines) into
   `inference-nn`, where is the single-threaded stretch?
