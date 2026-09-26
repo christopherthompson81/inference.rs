@@ -318,7 +318,7 @@ Review follow-ups:
 - Implication: a split is warranted. The win comes from sibling crates that compile in parallel after a shared base,
   not from a serial base -> core chain, and from splitting the 179 s lib-test build.
 
-## Run 14 - 2026-09-26 13:00
+## Run 14 - 2026-09-26 12:00
 
 - Question: after moving the base modules (layers, attention, caches, GDN, MoE, CUDA/Metal, utils; ~78k lines) into
   `inference-nn`, where is the single-threaded stretch?
@@ -359,3 +359,39 @@ Review follow-ups:
   and metadata for generic code. Since removing the base modules did not move these numbers, the cost is
   concentrated in core's own code. Next: `cargo llvm-lines` on core to find the generic functions that dominate IR,
   and `-Z self-profile` for typeck/borrowck by item, before choosing where to cut.
+
+## Run 17 - 2026-09-26 12:40
+
+- Question: which code makes up inference-core's LLVM IR (the 36 s serial IR generation, 14 s monomorphization and
+  43 s of LLVM passes in Run 16)?
+- Command: `cargo llvm-lines -p inference-core --lib --features cuda` (scratch target).
+- Result: 7.91M lines, 126k function copies. No single hot function (largest is `Engine::run` at 0.5%).
+  - By crate of origin: inference_core 40.1%, core 13.6%, rustfft 10.3%, alloc 9.1%, serde_json 4.0%, rav1e 2.4%,
+    std 2.3%, inference_nn 2.0%, candle_core 1.9%, hashbrown 1.7%, tokio 1.5%, tokenizers 1.3%.
+  - rustfft (818k lines): `FftPlanner::<f32>` in the Gemma 3n and Gemma 4 audio processors and `FftPlanner::<f64>` in
+    Phi-4-MM's instantiate every SIMD butterfly inside core, for both float types.
+  - rav1e (192k lines, the AVIF encoder): `DynamicImage::write_to(&mut Cursor, ImageFormat::Png)` in
+    `engine/agentic_session.rs` and `pipeline/response.rs` is generic over the writer and dispatches on the format
+    at runtime, so every enabled encoder is instantiated in core. `image`'s default features (including avif) come
+    in through openai-harmony.
+  - serde ~588k lines, almost all `serde_json` `StrRead` visitors for ~186 config structs; one deserializer path, so
+    it only shrinks by moving the configs out with their models.
+  - Trait default methods monomorphized per model: `create_anymoe_layers` x63 (80k lines), and
+    `load_tensors_from_path` x96 (64k).
+  - The rest is broad: model `forward` 5.0%, constructors 4.7%, iterator adapters and drop glue.
+- Implication: ~13% of core's IR (rustfft, rav1e) can go with local fixes: FFT planning behind non-generic
+  functions in inference-audio, and a direct `PngEncoder`. `create_anymoe_layers` can delegate to one non-generic
+  body. The remaining bulk is spread across the models and their configs, which is what family crates split.
+
+## Run 18 - 2026-09-26 12:50
+
+- Change: FFT planning moves behind `inference_audio::fft::plan_forward_{f32,f64}` (non-generic, so rustfft's
+  kernels instantiate in inference-audio); the Gemma 3n, Gemma 4, Voxtral and Phi-4-MM audio processors call those.
+  The three PNG encodes (`write_to(Cursor, Png)` twice, `save_with_format(path, Png)`) use `PngEncoder` directly.
+- Command: `cargo llvm-lines` and `-Z time-passes` as in Runs 16 and 17, quiet machine (load ~2).
+- Result: core IR 7.91M -> 6.33M lines (-20%), 126k -> 104k copies. rustfft and rav1e/ravif are gone from core;
+  dropping `save_with_format` also removed the other image encoders it instantiated.
+  - `-Z time-passes`: total 94.0 -> 84.7 s. codegen_to_LLVM_IR 35.7 -> 27.7 s, monomorphization 14.3 -> 12.2 s,
+    generate_crate_metadata 17.3 -> 14.9 s, LLVM_passes 43.5 -> 37.0 s. Typeck (11.1 s) and borrowck (13.9 s) are
+    unchanged, as expected.
+- Implication: ~12 s less single-threaded time per build of core, and the lib-test build gets the same cut.

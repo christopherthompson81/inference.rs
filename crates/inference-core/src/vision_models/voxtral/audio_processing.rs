@@ -2,9 +2,9 @@
 
 use anyhow::Result;
 use candle_core::{Device, Tensor};
+use inference_audio::fft::{plan_forward_f32, Complex32};
 use inference_audio::AudioInput;
 use rubato::Resampler;
-use rustfft::{num_complex::Complex32, FftPlanner};
 
 use super::config::AudioEncodingArgs;
 
@@ -145,8 +145,7 @@ impl VoxtralAudioProcessor {
 
         let mel_filters = self.create_mel_filterbank(n_fft)?;
 
-        let mut planner = FftPlanner::<f32>::new();
-        let fft = planner.plan_fft_forward(n_fft);
+        let fft = plan_forward_f32(n_fft);
 
         let mut mel_features = Vec::with_capacity(num_frames);
         let log_mel_floor = self.global_log_mel_max - 8.0;

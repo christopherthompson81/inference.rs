@@ -2977,6 +2977,7 @@ dependencies = [
  "anyhow",
  "apodize",
  "hound",
+ "rustfft",
  "symphonia",
 ]
 
@@ -3111,7 +3112,6 @@ dependencies = [
  "rubato",
  "rust-mcp-schema",
  "rustc-hash 2.1.1",
- "rustfft",
  "safetensors",
  "schemars 1.2.0",
  "scraper",

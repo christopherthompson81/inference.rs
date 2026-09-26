@@ -1,8 +1,8 @@
-use std::{io::Cursor, sync::Arc};
+use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD, Engine};
 use candle_core::Tensor;
-use image::DynamicImage;
+use image::{codecs::png::PngEncoder, DynamicImage};
 use uuid::Uuid;
 
 use crate::{
@@ -32,8 +32,9 @@ pub async fn send_image_responses(
                     Some(path) => path.to_string_lossy().into_owned(),
                     None => format!("image-generation-{}.png", Uuid::new_v4()),
                 };
+                let file = std::io::BufWriter::new(std::fs::File::create(&saved_file)?);
                 image
-                    .save_with_format(&saved_file, image::ImageFormat::Png)
+                    .write_with_encoder(PngEncoder::new(file))
                     .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
                 ImageChoice {
                     url: Some(saved_file),
@@ -43,7 +44,7 @@ pub async fn send_image_responses(
             ImageGenerationResponseFormat::B64Json => {
                 let mut buffer = Vec::new();
                 image
-                    .write_to(&mut Cursor::new(&mut buffer), image::ImageFormat::Png)
+                    .write_with_encoder(PngEncoder::new(&mut buffer))
                     .expect("Failed to encode image");
                 let encoded = STANDARD.encode(&buffer);
                 let serialized_b64 = format!("data:image/png;base64,{encoded}");

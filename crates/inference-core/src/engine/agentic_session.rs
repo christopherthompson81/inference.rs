@@ -1,11 +1,10 @@
 use std::collections::HashMap;
-use std::io::Cursor;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
 use either::Either;
-use image::{DynamicImage, ImageFormat};
+use image::{codecs::png::PngEncoder, DynamicImage};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
@@ -400,7 +399,7 @@ impl SerializedVideo {
 
 fn encode_png_base64(img: &DynamicImage) -> Result<String> {
     let mut buf = Vec::new();
-    img.write_to(&mut Cursor::new(&mut buf), ImageFormat::Png)
+    img.write_with_encoder(PngEncoder::new(&mut buf))
         .context("encoding image as PNG")?;
     Ok(BASE64.encode(&buf))
 }
