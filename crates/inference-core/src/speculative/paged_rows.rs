@@ -7,6 +7,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
 
+use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     flashinfer::{
         FlashInferMetadata, FlashInferPagedAttentionView, FlashInferPagedAttentionViews,
@@ -14,7 +15,6 @@ use crate::{
     },
     get_mut_arcmutex,
     paged_attention::block_table_rows::{BlockTableRanges, BlockTableRows, BlockTableSnapshot},
-    pipeline::text_models_inputs_processor::PagedAttentionMeta,
 };
 
 /// `seq_ids[i]` may repeat; `context_lens[i]` is the row's position plus one, and the row's K/V

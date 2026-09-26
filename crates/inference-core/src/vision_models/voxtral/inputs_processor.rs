@@ -5,13 +5,12 @@ use std::{any::Any, sync::Arc};
 use candle_core::{Device, Tensor};
 use tokenizers::Tokenizer;
 
+use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     device_map::DeviceMapper,
     paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
     pipeline::{
-        text_models_inputs_processor::{
-            self, get_completion_input, get_prompt_input, PagedAttentionMeta,
-        },
+        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
         InputProcessorOutput, InputsProcessor, InputsProcessorType, MessagesAction, Processor,
     },
     sequence::Sequence,

@@ -8,11 +8,11 @@ use anyhow::Result;
 use candle_core::{Device, Tensor, WithDType};
 use tokenizers::Tokenizer;
 
+use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     device_map::DeviceMapper,
     pipeline::{
-        text_models_inputs_processor::PagedAttentionMeta, InputProcessorOutput, InputsProcessor,
-        InputsProcessorType, MessagesAction, Processor,
+        InputProcessorOutput, InputsProcessor, InputsProcessorType, MessagesAction, Processor,
     },
     sequence::Sequence,
 };

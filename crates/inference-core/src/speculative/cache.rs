@@ -6,7 +6,8 @@ use candle_core::{Device, Result, Tensor};
 
 use crate::device_map::DeviceMapper;
 use crate::paged_attention::CacheEngine;
-use crate::pipeline::text_models_inputs_processor::{InputMetadata, PagedAttentionMeta};
+use crate::paged_attention::PagedAttentionMeta;
+use crate::pipeline::text_models_inputs_processor::InputMetadata;
 use crate::sequence::Sequence;
 
 use super::proposer::SpeculativeKvCache;

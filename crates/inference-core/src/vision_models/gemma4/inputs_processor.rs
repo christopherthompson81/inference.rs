@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::pipeline::text_models_inputs_processor::NoncausalMmContext;
 use std::{any::Any, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
@@ -7,6 +8,7 @@ use image::{imageops, DynamicImage, GenericImageView, Rgba, RgbaImage};
 use inference_vision::{ApplyTransforms, Rescale, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
+use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     block_diffusion::block_denoising_progress_emitters,
     device_map::DeviceMapper,
@@ -15,7 +17,6 @@ use crate::{
         recurrent_batch_kind_for_input,
         text_models_inputs_processor::{
             self, get_completion_input, get_completion_input_windowed, get_prompt_input,
-            PagedAttentionMeta,
         },
         InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
         MessagesAction, Processor,

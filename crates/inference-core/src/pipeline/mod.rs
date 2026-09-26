@@ -47,6 +47,7 @@ use crate::paged_attention::{
     AttentionBackendKind, CacheConfig, CacheEngine, CacheMemoryReservations, MemoryGpuConfig,
     ModelConfigLike,
 };
+use crate::pipeline::text_models_inputs_processor::NoncausalMmContext;
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::IntervalLogger;
 use crate::PagedAttentionConfig;
@@ -184,7 +185,7 @@ pub(crate) use self::inputs_processor::{
 pub use self::inputs_processor::{
     text_models_inputs_processor, InputsProcessor, InputsProcessorType,
 };
-use self::text_models_inputs_processor::PagedAttentionMeta;
+use crate::paged_attention::PagedAttentionMeta;
 
 #[cfg(feature = "cuda")]
 pub(crate) fn synchronize_cuda_contexts(primary: &Device, mapper: &dyn DeviceMapper) -> Result<()> {

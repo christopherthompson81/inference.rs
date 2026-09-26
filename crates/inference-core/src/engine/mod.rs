@@ -1,3 +1,4 @@
+use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     distributed,
     paged_attention::{
@@ -8,7 +9,6 @@ use crate::{
         execution::StepSubmissionKind,
         llg::{constraint_from_llg_grammar, llg_grammar_from_constraint},
         prompt_chunks::effective_recurrent_prefix_boundary,
-        text_models_inputs_processor::PagedAttentionMeta,
         CacheBackendMetadata, CacheInstruction, DecodeGraphPrecaptureCtx, StepLookahead,
         StepSubmission, RECURRENT_GRAPH_PAD_SLOTS,
     },

@@ -1,4 +1,3 @@
-use super::text_models_inputs_processor::PagedAttentionMeta;
 use super::{
     AdapterPaths, AnyMoePipelineMixin, Cache, CacheManagerMixin, EitherCache, ForwardInputsResult,
     GeneralMetadata, InputProcessorOutput, InputsProcessor, InputsProcessorType, IsqPipelineMixin,
@@ -7,6 +6,7 @@ use super::{
 };
 use crate::device_map::{self, DeviceMapper};
 use crate::distributed::{use_ring, WorkerTransferData};
+use crate::paged_attention::PagedAttentionMeta;
 use crate::pipeline::tokens::get_token;
 use crate::pipeline::{ChatTemplate, EmbeddingModulePaths, Modalities, SupportedModality};
 use crate::prefix_cacher::PrefixCacheManagerV2;

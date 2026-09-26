@@ -2,9 +2,9 @@
 
 use std::{any::Any, sync::Arc};
 
+use crate::paged_attention::PagedAttentionMeta;
 use anyhow::Result;
 use candle_core::Device;
-use text_models_inputs_processor::PagedAttentionMeta;
 use tokenizers::Tokenizer;
 
 use crate::{device_map::DeviceMapper, sequence::Sequence};
@@ -114,7 +114,7 @@ pub mod text_models_inputs_processor {
             block_hash::{noncausal_mm_ranges, MultimodalAttentionPolicy},
             block_table_rows::BlockTableSnapshot,
             input_metadata::{_make_tensor_with_pad, DecodePagedRows},
-            AttentionBackendKind, KVCacheManager, PagedAttentionInputMetadata, _PAD_SLOT_ID,
+            AttentionBackendKind, PagedAttentionInputMetadata, PagedAttentionMeta, _PAD_SLOT_ID,
         },
         pipeline::recurrent_batch_kind_for_input,
         sequence::Sequence,
@@ -123,39 +123,21 @@ pub mod text_models_inputs_processor {
 
     use super::{InputProcessorOutput, InputsProcessor, InputsProcessorType};
 
-    #[derive(Clone)]
-    pub struct PagedAttentionMeta {
-        pub sliding_window: Option<usize>,
-        pub block_size: usize,
-        pub max_paged_context_len: usize,
-        pub attention_backend: AttentionBackendKind,
-        pub has_flashinfer_decode_layers: bool,
-        pub prefill_attention_heads: usize,
-        pub prefill_key_value_heads: usize,
-        pub prefill_head_dim: usize,
-        pub kv_cache_manager: Arc<tokio::sync::Mutex<KVCacheManager>>,
-        pub prompt_chunk_size: Option<usize>,
-        pub(crate) scheduled_prompt_chunks:
-            Option<Vec<crate::pipeline::prompt_chunks::PromptChunkPlan>>,
-        pub prompt_chunk_attention_policy: MultimodalAttentionPolicy,
-        pub has_noncausal_mm_context: bool,
-        pub prefix_gather_workspace_limit: Option<usize>,
-        pub mm_prefix_ranges_by_seq_id: HashMap<usize, Vec<(usize, usize)>>,
-        pub full_mm_prefix_ranges_by_seq_id: HashMap<usize, Vec<(usize, usize)>>,
-        pub(crate) enable_packed_prefill: bool,
-        /// False only for non-final chunks of a chunked prompt; block-diffusion models skip
-        /// canvas generation until the prompt is fully encoded.
-        pub is_final_prompt_chunk: bool,
-        /// False when the pipeline discards this forward's logits, so models skip the lm_head.
-        pub needs_logits: bool,
+    pub(crate) trait NoncausalMmContext {
+        fn set_noncausal_mm_context(&mut self, input_seqs: &[&mut Sequence]);
+        fn set_noncausal_mm_context_views(
+            &mut self,
+            input_seqs: &[&mut Sequence],
+            include_full_attention: bool,
+        );
     }
 
-    impl PagedAttentionMeta {
-        pub(crate) fn set_noncausal_mm_context(&mut self, input_seqs: &[&mut Sequence]) {
+    impl NoncausalMmContext for PagedAttentionMeta {
+        fn set_noncausal_mm_context(&mut self, input_seqs: &[&mut Sequence]) {
             self.set_noncausal_mm_context_views(input_seqs, true);
         }
 
-        pub(crate) fn set_noncausal_mm_context_views(
+        fn set_noncausal_mm_context_views(
             &mut self,
             input_seqs: &[&mut Sequence],
             include_full_attention: bool,

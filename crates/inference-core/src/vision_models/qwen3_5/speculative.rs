@@ -176,7 +176,7 @@ impl Qwen3_5Model {
         rows: &[DraftRow],
         target_hidden: &Tensor,
         kv_cache: &(Tensor, Tensor),
-        paged_meta: &crate::pipeline::text_models_inputs_processor::PagedAttentionMeta,
+        paged_meta: &crate::paged_attention::PagedAttentionMeta,
     ) -> Result<Tensor> {
         let device = head.device();
         let n = rows.len();

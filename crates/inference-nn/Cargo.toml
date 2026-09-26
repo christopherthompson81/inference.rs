@@ -41,6 +41,7 @@ serde-saphyr.workspace = true
 sha2.workspace = true
 sysinfo.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
 tokenizers = { workspace = true, features = ["fancy-regex"] }
 tqdm.workspace = true
 tracing.workspace = true

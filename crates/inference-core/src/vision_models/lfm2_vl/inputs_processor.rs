@@ -7,13 +7,12 @@ use image::{imageops, DynamicImage, RgbImage};
 use itertools::Itertools;
 use tokenizers::Tokenizer;
 
+use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     device_map::DeviceMapper,
     paged_attention::block_hash::MultimodalKind,
     pipeline::{
-        text_models_inputs_processor::{
-            self, get_completion_input, get_prompt_input, PagedAttentionMeta,
-        },
+        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
         InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
         MessagesAction, Processor,
     },

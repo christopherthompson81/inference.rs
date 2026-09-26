@@ -746,10 +746,7 @@ impl Sampler {
     }
 
     #[cfg(feature = "cuda")]
-    pub fn cuda_batch_sampling_plan(
-        &self,
-        return_logprobs: bool,
-    ) -> Option<CudaBatchSamplingPlan> {
+    pub fn cuda_batch_sampling_plan(&self, return_logprobs: bool) -> Option<CudaBatchSamplingPlan> {
         let has_penalties = self.frequency_penalty.unwrap_or(0.0) != 0.0
             || self.presence_penalty.unwrap_or(0.0) != 0.0
             || self.repetition_penalty.unwrap_or(1.0) != 1.0;
@@ -1064,10 +1061,7 @@ impl Sampler {
     }
 
     #[cfg(feature = "cuda")]
-    pub fn submit_cuda_top1_batch_owned(
-        &self,
-        logits: &Tensor,
-    ) -> Result<CudaTop1BatchSubmission> {
+    pub fn submit_cuda_top1_batch_owned(&self, logits: &Tensor) -> Result<CudaTop1BatchSubmission> {
         self.submit_cuda_top1_batch(logits, false)
     }
 
