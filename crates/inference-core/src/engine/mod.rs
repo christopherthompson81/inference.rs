@@ -56,9 +56,6 @@ use crate::{
     get_mut_arcmutex, handle_pipeline_forward_error,
     pipeline::{ModelCategory, Pipeline},
     request::Request,
-    response::{
-        ChatCompletionResponse, Choice, CompletionChoice, CompletionResponse, ResponseMessage,
-    },
     sequence::{SequenceRecognizer, SequenceState},
     Constraint,
 };
