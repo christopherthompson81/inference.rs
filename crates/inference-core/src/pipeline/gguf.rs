@@ -799,7 +799,7 @@ impl GGUFLoader {
             loader = loader.with_lora(dynamic_lora.adapters.clone(), dynamic_lora.runtime);
         }
         let loader =
-            loader.build_with_source(MultimodalLoaderType::Gemma3, source, self.kind.clone());
+            loader.build_with_source(MultimodalLoaderType::Gemma3, source, self.kind.clone())?;
         loader.load_model_from_path(
             paths,
             dtype,
@@ -930,7 +930,7 @@ impl GGUFLoader {
         if let Some(dynamic_lora) = self.dynamic_lora.as_ref() {
             loader = loader.with_lora(dynamic_lora.adapters.clone(), dynamic_lora.runtime);
         }
-        let loader = loader.build_with_source(loader_type, source, self.kind.clone());
+        let loader = loader.build_with_source(loader_type, source, self.kind.clone())?;
         loader.load_model_from_path(
             paths,
             dtype,

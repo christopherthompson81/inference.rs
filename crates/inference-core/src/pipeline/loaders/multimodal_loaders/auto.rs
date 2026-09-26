@@ -23,7 +23,7 @@ impl AutoMultimodalLoader {
         once_log_debug(format!("Automatic loader type determined to be `{tp}`"));
 
         // Delegate to the concrete loader
-        Ok(tp.loader())
+        tp.loader()
     }
 }
 

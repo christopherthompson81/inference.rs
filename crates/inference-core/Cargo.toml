@@ -70,11 +70,11 @@ bytemuck_derive.workspace = true
 inference-paged-attn = { workspace = true, optional = true }
 inference-quant.workspace = true
 inference-nn.workspace = true
-inference-models-gemma.workspace = true
-inference-models-llama.workspace = true
-inference-models-other.workspace = true
-inference-models-phi.workspace = true
-inference-models-qwen.workspace = true
+inference-models-gemma = { workspace = true, optional = true }
+inference-models-llama = { workspace = true, optional = true }
+inference-models-other = { workspace = true, optional = true }
+inference-models-phi = { workspace = true, optional = true }
+inference-models-qwen = { workspace = true, optional = true }
 uuid = { workspace = true, features = ["v4"] }
 utoipa = { workspace = true, optional = true }
 schemars.workspace = true
@@ -117,6 +117,13 @@ objc = { workspace = true, optional = true }
 candle-metal-kernels = { workspace = true, optional = true }
 
 [features]
+default = ["all-models"]
+all-models = ["models-gemma", "models-llama", "models-other", "models-phi", "models-qwen"]
+models-gemma = ["dep:inference-models-gemma"]
+models-llama = ["dep:inference-models-llama"]
+models-other = ["dep:inference-models-other"]
+models-phi = ["dep:inference-models-phi"]
+models-qwen = ["dep:inference-models-qwen"]
 pyo3_macros = ["pyo3", "inference-mcp/pyo3_macros", "inference-nn/pyo3_macros"]
 cuda = [
     "candle-core/cuda",
@@ -125,11 +132,11 @@ cuda = [
     "dep:inference-paged-attn",
     "inference-paged-attn/cuda",
     "inference-nn/cuda",
-    "inference-models-gemma/cuda",
-    "inference-models-llama/cuda",
-    "inference-models-other/cuda",
-    "inference-models-phi/cuda",
-    "inference-models-qwen/cuda",
+    "inference-models-gemma?/cuda",
+    "inference-models-llama?/cuda",
+    "inference-models-other?/cuda",
+    "inference-models-phi?/cuda",
+    "inference-models-qwen?/cuda",
 ]
 cudnn = ["candle-core/cudnn"]
 cutile = ["cuda", "inference-quant/cutile", "inference-nn/cutile"]
@@ -142,13 +149,13 @@ metal = [
     "dep:inference-paged-attn",
     "inference-paged-attn/metal",
     "inference-nn/metal",
-    "inference-models-gemma/metal",
-    "inference-models-llama/metal",
-    "inference-models-other/metal",
-    "inference-models-phi/metal",
-    "inference-models-qwen/metal",
+    "inference-models-gemma?/metal",
+    "inference-models-llama?/metal",
+    "inference-models-other?/metal",
+    "inference-models-phi?/metal",
+    "inference-models-qwen?/metal",
 ]
-flash-attn = ["cuda", "dep:inference-flash-attn", "inference-flash-attn/cuda", "inference-nn/flash-attn", "inference-models-gemma/flash-attn", "inference-models-llama/flash-attn", "inference-models-other/flash-attn", "inference-models-phi/flash-attn", "inference-models-qwen/flash-attn"]
+flash-attn = ["cuda", "dep:inference-flash-attn", "inference-flash-attn/cuda", "inference-nn/flash-attn", "inference-models-gemma?/flash-attn", "inference-models-llama?/flash-attn", "inference-models-other?/flash-attn", "inference-models-phi?/flash-attn", "inference-models-qwen?/flash-attn"]
 flash-attn-v3 = ["cuda", "dep:candle-flash-attn-v3", "inference-nn/flash-attn-v3"]
 accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "inference-quant/accelerate", "inference-nn/accelerate"]
 mkl = ["candle-core/mkl", "candle-nn/mkl"]

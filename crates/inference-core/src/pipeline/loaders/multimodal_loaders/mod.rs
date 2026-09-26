@@ -17,6 +17,7 @@ use pyo3::pyclass;
 use regex::Regex;
 use serde::Deserialize;
 
+#[cfg(feature = "models-qwen")]
 use self::minicpmo::{MiniCpmOConfig, MiniCpmOModel, MiniCpmOProcessor};
 
 use super::{DeviceMappedModelLoader, NonMappedSubModel, NormalLoadingMetadata};
@@ -40,6 +41,7 @@ use crate::pipeline::{
     Modalities, MultimodalPromptPrefixer, Processor, ProcessorCreator, SupportedModality,
 };
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
+#[cfg(any(feature = "models-llama", feature = "models-phi"))]
 use crate::vision_models::clip::ClipConfig;
 use crate::vision_models::diffusion_gemma::{DiffusionGemmaConfig, DiffusionGemmaModel};
 use crate::vision_models::gemma3::config::Gemma3Config;
@@ -48,20 +50,32 @@ use crate::vision_models::gemma3n::config::{Gemma3nConfig, IntermediateSize};
 use crate::vision_models::gemma3n::{Gemma3nModel, Gemma3nProcessor};
 use crate::vision_models::gemma4::config::Gemma4Config;
 use crate::vision_models::gemma4::{Gemma4Model, Gemma4Processor, Gemma4ProcessorSettings};
+#[cfg(feature = "models-llama")]
 use crate::vision_models::idefics2::{Config as Idefics2Config, Idefics2};
+#[cfg(feature = "models-llama")]
 use crate::vision_models::idefics2_input_processor::Idefics2Processor;
+#[cfg(feature = "models-llama")]
 use crate::vision_models::idefics3::{Idefics3Config, Idefics3Model, Idefics3Processor};
 use crate::vision_models::image_processor::ImagePreProcessor;
 use crate::vision_models::inputs_processor::Phi4MMProcessor;
+#[cfg(feature = "models-other")]
 use crate::vision_models::lfm2_vl::{Config as Lfm2VlConfig, Lfm2VlModel, Lfm2VlProcessor};
 use crate::vision_models::llama4::{
     self, Llama4Config, Llama4ImageProcessor, Llama4Model, Llama4Processor,
 };
+#[cfg(feature = "models-llama")]
 use crate::vision_models::llava::config::Config as LLaVAConfig;
+#[cfg(feature = "models-llama")]
 use crate::vision_models::llava15::Model as LLaVA;
+#[cfg(feature = "models-llama")]
 use crate::vision_models::llava_inputs_processor::{self, LLaVAProcessor};
+#[cfg(feature = "models-llama")]
 use crate::vision_models::llava_next::Model as LLaVANext;
+#[cfg(feature = "models-llama")]
 use crate::vision_models::llava_next_inputs_processor::{self, LLaVANextProcessor};
+#[cfg(feature = "models-qwen")]
+use crate::vision_models::minicpmo;
+#[cfg(feature = "models-llama")]
 use crate::vision_models::mistral3::{Mistral3Config, Mistral3Model, Mistral3Processor};
 use crate::vision_models::mllama::{MLlamaConfig, MLlamaModel, MLlamaProcessor};
 use crate::vision_models::muse_glimmer::{
@@ -71,8 +85,11 @@ use crate::vision_models::paddleocr_vl::config::Config as PaddleOcrVlConfig;
 use crate::vision_models::paddleocr_vl::{
     inputs_processor::PaddleOcrVlProcessor, PaddleOcrVlModel,
 };
+#[cfg(feature = "models-phi")]
 use crate::vision_models::phi3::{Config as Phi3Config, Model as Phi3, PHI3V_CLIP_CONFIG};
+#[cfg(feature = "models-phi")]
 use crate::vision_models::phi3_inputs_processor::Phi3Processor;
+use crate::vision_models::phi4;
 use crate::vision_models::phi4::{Phi4MMConfig, Phi4MMModel, PHI4_MM_VISION_CFG};
 use crate::vision_models::preprocessor_config::PreProcessorConfig;
 use crate::vision_models::processor_config::ProcessorConfig;
@@ -90,7 +107,6 @@ use crate::vision_models::qwen3_vl_moe::{
 };
 use crate::vision_models::voxtral::config::VoxtralConfig;
 use crate::vision_models::voxtral::{VoxtralModel, VoxtralProcessor};
-use crate::vision_models::{minicpmo, phi4};
 
 // HF Qwen3VLVideoProcessor sampling defaults, shared by the Qwen3-VL/3.5 family.
 const QWEN3_VIDEO_SAMPLING: crate::VideoFrameSampling = crate::VideoFrameSampling::Fps {
@@ -211,7 +227,8 @@ macro_rules! multimodal_loader_types {
     ($($variant:ident {
         cli: $cli:literal $(| $cli_alias:literal)*,
         hf: $hf:literal $(| $hf_alias:literal)*,
-        loader: $loader:ident $(,)?
+        loader: $loader:ident
+        $(, feature: $feature:literal)? $(,)?
     }),* $(,)?) => {
         #[cfg_attr(feature = "pyo3_macros", pyclass(eq, eq_int))]
         #[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
@@ -239,9 +256,20 @@ macro_rules! multimodal_loader_types {
                 }
             }
 
-            pub(crate) fn loader(&self) -> Box<dyn MultimodalModelLoader> {
+            pub(crate) fn loader(&self) -> Result<Box<dyn MultimodalModelLoader>> {
                 match self {
-                    $(Self::$variant => Box::new($loader),)*
+                    $(
+                        $(#[cfg(feature = $feature)])?
+                        Self::$variant => Ok(Box::new($loader)),
+                        $(
+                            #[cfg(not(feature = $feature))]
+                            Self::$variant => anyhow::bail!(
+                                "architecture `{}` is not built in; enable the `{}` feature",
+                                $cli,
+                                $feature
+                            ),
+                        )?
+                    )*
                 }
             }
         }
@@ -270,19 +298,19 @@ macro_rules! multimodal_loader_types {
 }
 
 multimodal_loader_types! {
-    Phi3V { cli: "phi3v", hf: "Phi3VForCausalLM", loader: Phi3VLoader },
-    Idefics2 { cli: "idefics2", hf: "Idefics2ForConditionalGeneration", loader: Idefics2Loader },
-    LLaVANext { cli: "llava_next", hf: "LlavaNextForConditionalGeneration", loader: LLaVANextLoader },
-    LLaVA { cli: "llava", hf: "LlavaForConditionalGeneration", loader: LLaVALoader },
-    Lfm2Vl { cli: "lfm2vl" | "lfm2_vl", hf: "Lfm2VlForConditionalGeneration", loader: Lfm2VlLoader },
+    Phi3V { cli: "phi3v", hf: "Phi3VForCausalLM", loader: Phi3VLoader, feature: "models-phi" },
+    Idefics2 { cli: "idefics2", hf: "Idefics2ForConditionalGeneration", loader: Idefics2Loader, feature: "models-llama" },
+    LLaVANext { cli: "llava_next", hf: "LlavaNextForConditionalGeneration", loader: LLaVANextLoader, feature: "models-llama" },
+    LLaVA { cli: "llava", hf: "LlavaForConditionalGeneration", loader: LLaVALoader, feature: "models-llama" },
+    Lfm2Vl { cli: "lfm2vl" | "lfm2_vl", hf: "Lfm2VlForConditionalGeneration", loader: Lfm2VlLoader, feature: "models-other" },
     VLlama { cli: "vllama", hf: "MllamaForConditionalGeneration", loader: VLlamaLoader },
     Qwen2VL { cli: "qwen2vl", hf: "Qwen2VLForConditionalGeneration", loader: Qwen2VLLoader },
-    Idefics3 { cli: "idefics3", hf: "Idefics3ForConditionalGeneration", loader: Idefics3Loader },
-    MiniCpmO { cli: "minicpmo", hf: "MiniCPMO", loader: MiniCpmOLoader },
+    Idefics3 { cli: "idefics3", hf: "Idefics3ForConditionalGeneration", loader: Idefics3Loader, feature: "models-llama" },
+    MiniCpmO { cli: "minicpmo", hf: "MiniCPMO", loader: MiniCpmOLoader, feature: "models-qwen" },
     Phi4MM { cli: "phi4mm", hf: "Phi4MMForCausalLM", loader: Phi4MMLoader },
     Qwen2_5VL { cli: "qwen2_5vl", hf: "Qwen2_5_VLForConditionalGeneration", loader: Qwen2_5VLLoader },
     Gemma3 { cli: "gemma3", hf: "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM", loader: Gemma3Loader },
-    Mistral3 { cli: "mistral3", hf: "Mistral3ForConditionalGeneration", loader: Mistral3Loader },
+    Mistral3 { cli: "mistral3", hf: "Mistral3ForConditionalGeneration", loader: Mistral3Loader, feature: "models-llama" },
     Llama4 { cli: "llama4", hf: "Llama4ForConditionalGeneration", loader: VLlama4Loader },
     Gemma3n { cli: "gemma3n", hf: "Gemma3nForConditionalGeneration", loader: Gemma3nLoader },
     Qwen3VL { cli: "qwen3vl", hf: "Qwen3VLForConditionalGeneration", loader: Qwen3VLLoader },
@@ -317,6 +345,7 @@ macro_rules! bias_if {
     };
 }
 
+#[cfg(any(feature = "models-llama", feature = "models-phi"))]
 fn get_clip_vit_num_elems(cfg: &ClipConfig) -> usize {
     let pre_layer_norm = cfg.hidden_size;
     let final_layer_norm = cfg.hidden_size;
@@ -375,21 +404,33 @@ fn supports_gemma4_incremental_cache(config: &str) -> bool {
 
 mod auto;
 pub use auto::*;
+#[cfg(feature = "models-phi")]
 mod phi3v;
+#[cfg(feature = "models-phi")]
 pub use phi3v::*;
+#[cfg(feature = "models-llama")]
 mod idefics2;
+#[cfg(feature = "models-llama")]
 pub use idefics2::*;
+#[cfg(feature = "models-llama")]
 mod llava_next;
+#[cfg(feature = "models-llama")]
 pub use llava_next::*;
+#[cfg(feature = "models-llama")]
 mod llava;
+#[cfg(feature = "models-llama")]
 pub use llava::*;
 mod vllama;
 pub use vllama::*;
 mod qwen2vl;
 pub use qwen2vl::*;
+#[cfg(feature = "models-llama")]
 mod idefics3;
+#[cfg(feature = "models-llama")]
 pub use idefics3::*;
+#[cfg(feature = "models-qwen")]
 mod minicpm_o;
+#[cfg(feature = "models-qwen")]
 pub use minicpm_o::*;
 mod phi4mm;
 pub use phi4mm::*;
@@ -397,7 +438,9 @@ mod qwen2_5vl;
 pub use qwen2_5vl::*;
 mod gemma3;
 pub use gemma3::*;
+#[cfg(feature = "models-llama")]
 mod mistral3;
+#[cfg(feature = "models-llama")]
 pub use mistral3::*;
 mod vllama4;
 pub use vllama4::*;
@@ -419,10 +462,19 @@ mod gemma4;
 pub use gemma4::*;
 mod muse_glimmer;
 pub use muse_glimmer::*;
+#[cfg(feature = "models-other")]
 mod lfm2vl;
+#[cfg(feature = "models-other")]
 pub use lfm2vl::*;
 mod diffusion_gemma;
 pub use diffusion_gemma::*;
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "models-gemma",
+    feature = "models-llama",
+    feature = "models-other",
+    feature = "models-phi",
+    feature = "models-qwen"
+))]
 mod tests;

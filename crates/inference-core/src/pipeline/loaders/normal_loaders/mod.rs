@@ -27,17 +27,35 @@ use pyo3::pyclass;
 use regex::Regex;
 use serde::Deserialize;
 
-use crate::{
-    models,
-    xlora_models::{self, XLoraConfig},
-};
+#[cfg(any(
+    feature = "models-gemma",
+    feature = "models-llama",
+    feature = "models-other",
+    feature = "models-phi",
+    feature = "models-qwen"
+))]
+use crate::models;
+#[cfg(any(
+    feature = "models-gemma",
+    feature = "models-llama",
+    feature = "models-other",
+    feature = "models-phi"
+))]
+use crate::xlora_models;
+use crate::xlora_models::XLoraConfig;
 
 use super::{AutoDeviceMapParams, DeviceMappedModelLoader};
 // Loaders call these as `super::X`; they live one level up, in `loaders`.
-use super::{
-    language_model_pack_factors, language_model_pack_factors_with_aliases,
-    tied_promoted_tensor_pack_factor, AutoDeviceMapQuantization,
-};
+#[cfg(any(
+    feature = "models-llama",
+    feature = "models-other",
+    feature = "models-phi",
+    feature = "models-qwen"
+))]
+use super::language_model_pack_factors;
+#[cfg(any(feature = "models-gemma", feature = "models-other"))]
+use super::tied_promoted_tensor_pack_factor;
+use super::{language_model_pack_factors_with_aliases, AutoDeviceMapQuantization};
 
 use crate::gguf::normal_registry::RopePairing;
 
@@ -70,7 +88,27 @@ pub trait NormalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoa
         }
         Ok(Cow::Borrowed(config))
     }
+    #[cfg_attr(
+        not(any(
+            feature = "models-gemma",
+            feature = "models-llama",
+            feature = "models-other",
+            feature = "models-phi",
+            feature = "models-qwen"
+        )),
+        allow(dead_code)
+    )]
     fn is_gptx(&self, config: &str) -> Result<bool>;
+    #[cfg_attr(
+        not(any(
+            feature = "models-gemma",
+            feature = "models-llama",
+            feature = "models-other",
+            feature = "models-phi",
+            feature = "models-qwen"
+        )),
+        allow(dead_code)
+    )]
     fn is_gptx_for(
         &self,
         config: &str,
@@ -125,7 +163,8 @@ macro_rules! normal_loader_types {
         cli: $cli:literal,
         hf: $hf:literal,
         model_type: $model_type:literal,
-        loader: $loader:ident $(,)?
+        loader: $loader:ident
+        $(, feature: $feature:literal)? $(,)?
     }),* $(,)?) => {
         #[cfg_attr(feature = "pyo3_macros", pyclass(eq, eq_int))]
         #[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
@@ -159,9 +198,20 @@ macro_rules! normal_loader_types {
                 }
             }
 
-            pub(crate) fn loader(&self) -> Box<dyn NormalModelLoader> {
+            pub(crate) fn loader(&self) -> Result<Box<dyn NormalModelLoader>> {
                 match self {
-                    $(Self::$variant => Box::new($loader),)*
+                    $(
+                        $(#[cfg(feature = $feature)])?
+                        Self::$variant => Ok(Box::new($loader)),
+                        $(
+                            #[cfg(not(feature = $feature))]
+                            Self::$variant => anyhow::bail!(
+                                "architecture `{}` is not built in; enable the `{}` feature",
+                                $cli,
+                                $feature
+                            ),
+                        )?
+                    )*
                 }
             }
         }
@@ -190,64 +240,69 @@ macro_rules! normal_loader_types {
 }
 
 normal_loader_types! {
-    Mistral { cli: "mistral", hf: "MistralForCausalLM", model_type: "mistral", loader: MistralLoader },
-    Gemma { cli: "gemma", hf: "GemmaForCausalLM", model_type: "gemma", loader: GemmaLoader },
-    Mixtral { cli: "mixtral", hf: "MixtralForCausalLM", model_type: "mixtral", loader: MixtralLoader },
-    Llama { cli: "llama", hf: "LlamaForCausalLM", model_type: "llama", loader: LlamaLoader },
-    Phi2 { cli: "phi2", hf: "PhiForCausalLM", model_type: "phi", loader: Phi2Loader },
-    Phi3 { cli: "phi3", hf: "Phi3ForCausalLM", model_type: "phi3", loader: Phi3Loader },
-    Qwen2 { cli: "qwen2", hf: "Qwen2ForCausalLM", model_type: "qwen2", loader: Qwen2Loader },
-    Gemma2 { cli: "gemma2", hf: "Gemma2ForCausalLM", model_type: "gemma2", loader: Gemma2Loader },
-    Starcoder2 { cli: "starcoder2", hf: "Starcoder2ForCausalLM", model_type: "starcoder2", loader: Starcoder2Loader },
-    Phi3_5MoE { cli: "phi3.5moe", hf: "PhiMoEForCausalLM", model_type: "phimoe", loader: Phi3_5MoELoader },
+    Mistral { cli: "mistral", hf: "MistralForCausalLM", model_type: "mistral", loader: MistralLoader, feature: "models-llama" },
+    Gemma { cli: "gemma", hf: "GemmaForCausalLM", model_type: "gemma", loader: GemmaLoader, feature: "models-gemma" },
+    Mixtral { cli: "mixtral", hf: "MixtralForCausalLM", model_type: "mixtral", loader: MixtralLoader, feature: "models-llama" },
+    Llama { cli: "llama", hf: "LlamaForCausalLM", model_type: "llama", loader: LlamaLoader, feature: "models-llama" },
+    Phi2 { cli: "phi2", hf: "PhiForCausalLM", model_type: "phi", loader: Phi2Loader, feature: "models-phi" },
+    Phi3 { cli: "phi3", hf: "Phi3ForCausalLM", model_type: "phi3", loader: Phi3Loader, feature: "models-phi" },
+    Qwen2 { cli: "qwen2", hf: "Qwen2ForCausalLM", model_type: "qwen2", loader: Qwen2Loader, feature: "models-qwen" },
+    Gemma2 { cli: "gemma2", hf: "Gemma2ForCausalLM", model_type: "gemma2", loader: Gemma2Loader, feature: "models-gemma" },
+    Starcoder2 { cli: "starcoder2", hf: "Starcoder2ForCausalLM", model_type: "starcoder2", loader: Starcoder2Loader, feature: "models-other" },
+    Phi3_5MoE { cli: "phi3.5moe", hf: "PhiMoEForCausalLM", model_type: "phimoe", loader: Phi3_5MoELoader, feature: "models-phi" },
     DeepSeekV2 {
         cli: "deepseekv2",
         hf: "DeepseekV2ForCausalLM",
         model_type: "deepseek_v2",
-        loader: DeepSeekV2Loader,
+        loader: DeepSeekV2Loader, feature: "models-other",
     },
     DeepSeekV3 {
         cli: "deepseekv3",
         hf: "DeepseekV3ForCausalLM",
         model_type: "deepseek_v3",
-        loader: DeepSeekV3Loader,
+        loader: DeepSeekV3Loader, feature: "models-other",
     },
-    Qwen3 { cli: "qwen3", hf: "Qwen3ForCausalLM", model_type: "qwen3", loader: Qwen3Loader },
-    GLM4 { cli: "glm4", hf: "Glm4ForCausalLM", model_type: "glm4", loader: GLM4Loader },
+    Qwen3 { cli: "qwen3", hf: "Qwen3ForCausalLM", model_type: "qwen3", loader: Qwen3Loader, feature: "models-qwen" },
+    GLM4 { cli: "glm4", hf: "Glm4ForCausalLM", model_type: "glm4", loader: GLM4Loader, feature: "models-other" },
     GLM4MoeLite {
         cli: "glm4moelite",
         hf: "Glm4MoeLiteForCausalLM",
         model_type: "glm4_moe_lite",
-        loader: GLM4MoeLiteLoader,
+        loader: GLM4MoeLiteLoader, feature: "models-other",
     },
-    GLM4Moe { cli: "glm4moe", hf: "Glm4MoeForCausalLM", model_type: "glm4_moe", loader: GLM4MoeLoader },
-    Qwen3Moe { cli: "qwen3moe", hf: "Qwen3MoeForCausalLM", model_type: "qwen3_moe", loader: Qwen3MoELoader },
-    SmolLm3 { cli: "smollm3", hf: "SmolLM3ForCausalLM", model_type: "smollm3", loader: SmolLm3Loader },
+    GLM4Moe { cli: "glm4moe", hf: "Glm4MoeForCausalLM", model_type: "glm4_moe", loader: GLM4MoeLoader, feature: "models-other" },
+    Qwen3Moe { cli: "qwen3moe", hf: "Qwen3MoeForCausalLM", model_type: "qwen3_moe", loader: Qwen3MoELoader, feature: "models-qwen" },
+    SmolLm3 { cli: "smollm3", hf: "SmolLM3ForCausalLM", model_type: "smollm3", loader: SmolLm3Loader, feature: "models-llama" },
     GraniteMoeHybrid {
         cli: "granitemoehybrid",
         hf: "GraniteMoeHybridForCausalLM",
         model_type: "granitemoehybrid",
-        loader: GraniteMoeHybridLoader,
+        loader: GraniteMoeHybridLoader, feature: "models-other",
     },
-    GptOss { cli: "gpt_oss", hf: "GptOssForCausalLM", model_type: "gpt_oss", loader: GptOssLoader },
+    GptOss { cli: "gpt_oss", hf: "GptOssForCausalLM", model_type: "gpt_oss", loader: GptOssLoader, feature: "models-other" },
     HunYuanDenseV1 {
         cli: "hunyuanv1dense",
         hf: "HunYuanDenseV1ForCausalLM",
         model_type: "hunyuan_v1_dense",
-        loader: HunYuanDenseV1Loader,
+        loader: HunYuanDenseV1Loader, feature: "models-other",
     },
     HunYuanMoEV1 {
         cli: "hunyuanv1moe",
         hf: "HunYuanMoEV1ForCausalLM",
         model_type: "hunyuan_v1_moe",
-        loader: HunYuanMoEV1Loader,
+        loader: HunYuanMoEV1Loader, feature: "models-other",
     },
-    Qwen3Next { cli: "qwen3next", hf: "Qwen3NextForCausalLM", model_type: "qwen3_next", loader: Qwen3NextLoader },
+    Qwen3Next { cli: "qwen3next", hf: "Qwen3NextForCausalLM", model_type: "qwen3_next", loader: Qwen3NextLoader, feature: "models-qwen" },
     Qwen3_5 { cli: "qwen3_5", hf: "Qwen3_5ForCausalLM", model_type: "qwen3_5_text", loader: Qwen3_5TextLoader },
-    Lfm2 { cli: "lfm2", hf: "Lfm2ForCausalLM", model_type: "lfm2", loader: Lfm2Loader },
-    Lfm2Moe { cli: "lfm2_moe", hf: "Lfm2MoeForCausalLM", model_type: "lfm2_moe", loader: Lfm2Loader },
+    Lfm2 { cli: "lfm2", hf: "Lfm2ForCausalLM", model_type: "lfm2", loader: Lfm2Loader, feature: "models-other" },
+    Lfm2Moe { cli: "lfm2_moe", hf: "Lfm2MoeForCausalLM", model_type: "lfm2_moe", loader: Lfm2Loader, feature: "models-other" },
 }
 
+#[cfg(any(
+    feature = "models-gemma",
+    feature = "models-other",
+    feature = "models-phi"
+))]
 macro_rules! bias_if {
     ($cond:expr, $size:expr) => {
         if $cond {
@@ -260,56 +315,111 @@ macro_rules! bias_if {
 
 mod auto;
 pub use auto::*;
+#[cfg(feature = "models-llama")]
 mod mistral;
+#[cfg(feature = "models-llama")]
 pub use mistral::*;
+#[cfg(feature = "models-gemma")]
 mod gemma;
+#[cfg(feature = "models-gemma")]
 pub use gemma::*;
+#[cfg(feature = "models-llama")]
 mod llama;
+#[cfg(feature = "models-llama")]
 pub use llama::*;
+#[cfg(feature = "models-llama")]
 mod mixtral;
+#[cfg(feature = "models-llama")]
 pub use mixtral::*;
+#[cfg(feature = "models-phi")]
 mod phi2;
+#[cfg(feature = "models-phi")]
 pub use phi2::*;
+#[cfg(feature = "models-phi")]
 mod phi3;
+#[cfg(feature = "models-phi")]
 pub use phi3::*;
+#[cfg(feature = "models-qwen")]
 mod qwen2;
+#[cfg(feature = "models-qwen")]
 pub use qwen2::*;
+#[cfg(feature = "models-gemma")]
 mod gemma2;
+#[cfg(feature = "models-gemma")]
 pub use gemma2::*;
+#[cfg(feature = "models-other")]
 mod starcoder2;
+#[cfg(feature = "models-other")]
 pub use starcoder2::*;
+#[cfg(feature = "models-phi")]
 mod phi3_5_moe;
+#[cfg(feature = "models-phi")]
 pub use phi3_5_moe::*;
+#[cfg(feature = "models-other")]
 mod deepseek2;
+#[cfg(feature = "models-other")]
 pub use deepseek2::*;
+#[cfg(feature = "models-other")]
 mod deepseek3;
+#[cfg(feature = "models-other")]
 pub use deepseek3::*;
+#[cfg(feature = "models-qwen")]
 mod qwen3;
+#[cfg(feature = "models-qwen")]
 pub use qwen3::*;
+#[cfg(feature = "models-other")]
 mod hunyuan_v1_dense;
+#[cfg(feature = "models-other")]
 pub use hunyuan_v1_dense::*;
+#[cfg(feature = "models-other")]
 mod hunyuan_v1_moe;
+#[cfg(feature = "models-other")]
 pub use hunyuan_v1_moe::*;
+#[cfg(feature = "models-other")]
 mod glm4;
+#[cfg(feature = "models-other")]
 pub use glm4::*;
+#[cfg(feature = "models-other")]
 mod glm4_moe_lite;
+#[cfg(feature = "models-other")]
 pub use glm4_moe_lite::*;
+#[cfg(feature = "models-other")]
 mod glm4_moe;
+#[cfg(feature = "models-other")]
 pub use glm4_moe::*;
+#[cfg(feature = "models-qwen")]
 mod qwen3_moe;
+#[cfg(feature = "models-qwen")]
 pub use qwen3_moe::*;
+#[cfg(feature = "models-llama")]
 mod smollm3;
+#[cfg(feature = "models-llama")]
 pub use smollm3::*;
+#[cfg(feature = "models-other")]
 mod granite;
+#[cfg(feature = "models-other")]
 pub use granite::*;
+#[cfg(feature = "models-other")]
 mod gpt_oss;
+#[cfg(feature = "models-other")]
 pub use gpt_oss::*;
+#[cfg(feature = "models-qwen")]
 mod qwen3_next;
+#[cfg(feature = "models-qwen")]
 pub use qwen3_next::*;
 mod qwen3_5_text;
 pub use qwen3_5_text::*;
+#[cfg(feature = "models-other")]
 mod lfm2;
+#[cfg(feature = "models-other")]
 pub use lfm2::*;
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "models-gemma",
+    feature = "models-llama",
+    feature = "models-other",
+    feature = "models-phi",
+    feature = "models-qwen"
+))]
 mod tests;

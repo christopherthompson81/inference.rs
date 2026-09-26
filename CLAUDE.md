@@ -43,7 +43,7 @@ cargo clippy --workspace --tests --examples -- -D warnings
 
 # Canonical local checks (default: --lint --tests). Use these rather than ad-hoc cargo invocations: each mode always
 # builds the same package/feature set, so artifacts are reused instead of rebuilt per combination.
-scripts/local_ci.sh [--lint] [--tests] [--cuda] [--models] [--docs]
+scripts/local_ci.sh [--lint] [--tests] [--cuda] [--models] [--slim] [--docs]
 
 # Same, then delete target/debug artifacts the selected modes don't use (including on-request example builds).
 scripts/local_ci.sh --lint --tests --cuda --sweep
@@ -77,7 +77,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 
 ### Workspace Structure
 - `crates/inference-core/` - Core inference engine, model implementations, pipelines
-- `crates/inference-models-{llama,qwen,gemma,phi,other}/` - Text model families (one crate per family, built on `inference-nn`)
+- `crates/inference-models-{llama,qwen,gemma,phi,other}/` - Text model families (one crate per family, built on `inference-nn`), each behind an `inference-core` feature (`models-llama`, ...; all on by default). Vision models that reuse a family's text stack are gated with it; `--slim` checks core with each family alone
 - `crates/inference-nn/` - Model-facing building blocks: layers, attention and its metadata, KV/paged caches, GDN, MoE, device mapping, and the CUDA/Metal kernels behind them
 - `crates/inference-cli/` - Unified CLI binary (commands: run, serve, bench, from-config)
 - `crates/inference-server-core/` - HTTP server routing, OpenAI API implementation

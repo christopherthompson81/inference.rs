@@ -504,7 +504,7 @@ impl NormalLoaderBuilder {
             self.lora_runtime_config,
         )?;
         let loader: Box<dyn NormalModelLoader> = match loader_tp {
-            Some(tp) => tp.loader(),
+            Some(tp) => tp.loader()?,
             None => Box::new(AutoNormalLoader),
         };
         Ok(NormalLoader {

@@ -1,14 +1,22 @@
 mod classifier;
 mod config;
+#[cfg(feature = "models-gemma")]
 mod gemma;
+#[cfg(feature = "models-gemma")]
 mod gemma2;
+#[cfg(feature = "models-llama")]
 mod llama;
+#[cfg(feature = "models-llama")]
 mod mistral;
+#[cfg(feature = "models-llama")]
 mod mixtral;
+#[cfg(feature = "models-phi")]
 mod phi2;
+#[cfg(feature = "models-phi")]
 mod phi3;
 mod quantized_llama;
 mod quantized_phi3;
+#[cfg(feature = "models-other")]
 mod starcoder2;
 
 use crate::attention::FlashParams;
@@ -17,15 +25,23 @@ pub use crate::model::NonGranularState;
 use crate::{lora::Ordering, pipeline::EitherCache};
 use candle_core::{DType, Device, Result, Tensor};
 pub(crate) use config::XLoraConfig;
+#[cfg(feature = "models-gemma")]
 pub(crate) use gemma::XLoraModel as XLoraGemma;
+#[cfg(feature = "models-gemma")]
 pub(crate) use gemma2::Model as XLoraGemma2;
+#[cfg(feature = "models-llama")]
 pub(crate) use llama::XLoraLlama;
+#[cfg(feature = "models-llama")]
 pub(crate) use mistral::XLoraModel as XLoraMistral;
+#[cfg(feature = "models-llama")]
 pub(crate) use mixtral::XLoraModel as XLoraMixtral;
+#[cfg(feature = "models-phi")]
 pub(crate) use phi2::Model as XLoraPhi2;
+#[cfg(feature = "models-phi")]
 pub(crate) use phi3::Model as XLoraPhi3;
 pub(crate) use quantized_llama::ModelWeights as XLoraQLlama;
 pub(crate) use quantized_phi3::ModelWeights as XLoraQPhi3;
+#[cfg(feature = "models-other")]
 pub(crate) use starcoder2::Model as XLoraStarcoder2;
 
 use crate::{get_mut_arcmutex, pipeline::Cache};

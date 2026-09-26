@@ -8,7 +8,7 @@ publish = false
 autoexamples = false
 
 [dependencies]
-inference = { workspace = true }
+inference = { workspace = true, features = ["all-models"] }
 anyhow.workspace = true
 tokio.workspace = true
 serde.workspace = true

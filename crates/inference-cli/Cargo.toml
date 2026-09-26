@@ -57,7 +57,14 @@ crossterm = "0.28"
 fuzzy-matcher = "0.3"
 
 [features]
-default = ["code-execution"]
+default = ["code-execution", "swagger-ui", "all-models"]
+swagger-ui = ["inference-server-core/swagger-ui"]
+all-models = ["inference-core/all-models", "inference-server-core/all-models", "inference/all-models"]
+models-gemma = ["inference-core/models-gemma", "inference-server-core/models-gemma", "inference/models-gemma"]
+models-llama = ["inference-core/models-llama", "inference-server-core/models-llama", "inference/models-llama"]
+models-other = ["inference-core/models-other", "inference-server-core/models-other", "inference/models-other"]
+models-phi = ["inference-core/models-phi", "inference-server-core/models-phi", "inference/models-phi"]
+models-qwen = ["inference-core/models-qwen", "inference-server-core/models-qwen", "inference/models-qwen"]
 cuda = ["inference-core/cuda", "inference-server-core/cuda"]
 cutile = ["cuda", "inference-core/cutile"]
 nccl = ["inference-core/nccl", "inference-server-core/nccl"]

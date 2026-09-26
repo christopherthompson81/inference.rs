@@ -495,7 +495,7 @@ impl AutoLoader {
                     .unwrap()
                     .take()
                     .expect("builder taken");
-                let loader = builder.build(Some(tp));
+                let loader = builder.build(Some(tp))?;
                 *guard = Some(loader);
             }
             Detected::Embedding(tp) => {

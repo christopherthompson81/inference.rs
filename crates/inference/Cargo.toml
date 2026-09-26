@@ -35,6 +35,13 @@ tracing.workspace = true
 no-default-features = true
 
 [features]
+default = ["all-models"]
+all-models = ["inference-core/all-models"]
+models-gemma = ["inference-core/models-gemma"]
+models-llama = ["inference-core/models-llama"]
+models-other = ["inference-core/models-other"]
+models-phi = ["inference-core/models-phi"]
+models-qwen = ["inference-core/models-qwen"]
 # NVIDIA CUDA GPU support
 cuda = ["inference-core/cuda"]
 cutile = ["cuda", "inference-core/cutile"]

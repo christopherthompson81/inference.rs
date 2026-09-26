@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Canonical local checks with fixed package/feature sets: scripts/local_ci.sh [--lint] [--tests] [--cuda] [--models]
-# [--docs]; --models runs the real-checkpoint parity tests on CPU (they always run under --cuda).
+# [--slim] [--docs]; --models runs the real-checkpoint parity tests on CPU (they always run under --cuda).
+# --slim lints inference-core with no model families and with each family alone, so feature gates stay intact.
 # --sweep then deletes target/debug artifacts the selected modes no longer use (stale variants pile up otherwise).
 # Build env (CC/CXX/NVCC) and INFERENCE_TEST_* paths belong in ~/.cargo/config.toml [env]; changing one rebuilds deps.
 set -euo pipefail
@@ -10,6 +11,7 @@ lint=0
 tests=0
 cuda=0
 models=0
+slim=0
 docs=0
 sweep=0
 for arg in "$@"; do
@@ -18,12 +20,13 @@ for arg in "$@"; do
         --tests) tests=1 ;;
         --cuda) cuda=1 ;;
         --models) models=1 ;;
+        --slim) slim=1 ;;
         --docs) docs=1 ;;
         --sweep) sweep=1 ;;
         *) echo "unknown option $arg" >&2; exit 2 ;;
     esac
 done
-[[ $((lint + tests + cuda + models + docs)) -eq 0 ]] && lint=1 && tests=1
+[[ $((lint + tests + cuda + models + slim + docs)) -eq 0 ]] && lint=1 && tests=1
 
 # Examples are compile-checked by clippy --examples; the test modes only link the smoke set below.
 CLIPPY=(clippy --workspace --tests --examples)
@@ -31,6 +34,8 @@ TEST_TARGETS=(--workspace --lib --bins --tests)
 # The rest of examples/rust is built on request (`-p inference-examples --example <name>`).
 # --workspace keeps the same feature unification as the tests, so no second copy of the crates gets built.
 SMOKE=(build --workspace --example text_generation --example streaming --example multimodal_basic)
+SLIM_FAMILIES=("" models-gemma models-llama models-other models-phi models-qwen)
+slim_clippy() { cargo clippy -p inference-core --lib --tests --no-default-features ${1:+--features $1} "${@:2}"; }
 
 if [[ $lint -eq 1 ]]; then
     cargo fmt --all -- --check
@@ -55,6 +60,9 @@ if [[ $cuda -eq 1 ]]; then
     cargo "${CLIPPY[@]}" --features cuda -- -D warnings
     cargo nextest run --no-fail-fast --profile cuda --features cuda "${TEST_TARGETS[@]}"
 fi
+if [[ $slim -eq 1 ]]; then
+    for family in "${SLIM_FAMILIES[@]}"; do slim_clippy "$family" -- -D warnings; done
+fi
 doc_build() { RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -D warnings" cargo doc --workspace --no-deps "$@"; }
 if [[ $docs -eq 1 ]]; then
     doc_build
@@ -73,6 +81,11 @@ if [[ $sweep -eq 1 ]]; then
     if [[ $cuda -eq 1 ]]; then
         lint_replay --features cuda
         replay test --no-run --features cuda "${TEST_TARGETS[@]}"
+    fi
+    if [[ $slim -eq 1 ]]; then
+        for family in "${SLIM_FAMILIES[@]}"; do
+            slim_clippy "$family" --message-format=json -- -D warnings >> "$live"
+        done
     fi
     if [[ $docs -eq 1 ]]; then doc_build --message-format=json >> "$live"; fi
     scripts/sweep_target.py target/debug < "$live"

@@ -46,7 +46,13 @@ safetensors.workspace = true
 tempfile.workspace = true
 
 [features]
-default = []
+default = ["all-models"]
+all-models = ["inference-core/all-models"]
+models-gemma = ["inference-core/models-gemma"]
+models-llama = ["inference-core/models-llama"]
+models-other = ["inference-core/models-other"]
+models-phi = ["inference-core/models-phi"]
+models-qwen = ["inference-core/models-qwen"]
 cuda = ["candle-core/cuda", "inference-core/cuda"]
 cutile = ["cuda", "inference-core/cutile"]
 cudnn = ["candle-core/cudnn", "inference-core/cudnn"]

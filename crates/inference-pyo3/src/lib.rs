@@ -882,7 +882,7 @@ fn parse_which(
             jinja_explicit,
         )
         .with_encoder_cache_memory_bytes(encoder_cache_memory_bytes)
-        .build(arch.map(Into::into)),
+        .build(arch.map(Into::into))?,
         Which::DiffusionPlain {
             model_id,
             arch,
