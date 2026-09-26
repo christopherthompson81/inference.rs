@@ -11,14 +11,14 @@ Local shell skill mount example.
 
 The request mounts a local skill directory under `skills/invoice-auditor/`.
 
-Run with: `cargo run --release --features code-execution --example shell_skills -p inference`
+Run with: `cargo run --release --features code-execution --example shell_skills -p inference-examples`
 
 ```rust
 //! Local shell skill mount example.
 //!
 //! The request mounts a local skill directory under `skills/invoice-auditor/`.
 //!
-//! Run with: `cargo run --release --features code-execution --example shell_skills -p inference`
+//! Run with: `cargo run --release --features code-execution --example shell_skills -p inference-examples`
 
 use std::{env, fs, path::PathBuf};
 
@@ -99,4 +99,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/shell_skills/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/shell_skills/main.rs)
+Source: [`examples/rust/advanced/shell_skills/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/shell_skills/main.rs)

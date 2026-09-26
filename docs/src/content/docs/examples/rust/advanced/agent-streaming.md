@@ -18,7 +18,7 @@ This example shows how to:
 
 For non-streaming output, see the `agent` example.
 
-Run with: `cargo run --release --example agent_streaming -p inference`
+Run with: `cargo run --release --example agent_streaming -p inference-examples`
 
 ```rust
 //! Example demonstrating the agentic loop with streaming output
@@ -32,7 +32,7 @@ Run with: `cargo run --release --example agent_streaming -p inference`
 //!
 //! For non-streaming output, see the `agent` example.
 //!
-//! Run with: `cargo run --release --example agent_streaming -p inference`
+//! Run with: `cargo run --release --example agent_streaming -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -223,4 +223,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/agent_streaming/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/agent_streaming/main.rs)
+Source: [`examples/rust/advanced/agent_streaming/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/agent_streaming/main.rs)

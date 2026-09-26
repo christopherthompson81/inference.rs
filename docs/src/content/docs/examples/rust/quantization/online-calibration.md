@@ -10,13 +10,13 @@ sidebar:
 Online calibration: serve an ISQ model, collect activation statistics from real traffic,
 then requantize from the source weights and hot-swap the layers, all without a restart.
 
-Run with: `cargo run --release --example online_calibration -p inference`
+Run with: `cargo run --release --example online_calibration -p inference-examples`
 
 ```rust
 //! Online calibration: serve an ISQ model, collect activation statistics from real traffic,
 //! then requantize from the source weights and hot-swap the layers, all without a restart.
 //!
-//! Run with: `cargo run --release --example online_calibration -p inference`
+//! Run with: `cargo run --release --example online_calibration -p inference-examples`
 
 use anyhow::Result;
 use inference::{IsqBits, ModelBuilder, TextMessageRole, TextMessages};
@@ -59,4 +59,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/quantization/online_calibration/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/quantization/online_calibration/main.rs)
+Source: [`examples/rust/quantization/online_calibration/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/quantization/online_calibration/main.rs)

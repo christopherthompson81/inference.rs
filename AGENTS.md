@@ -74,6 +74,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
   ```bash
   export HF_TOKEN=<your_token>  # or TESTS_HF_TOKEN for CI parity
   scripts/local_ci.sh --tests   # or --cuda; runs the suite under cargo-nextest
+  scripts/local_ci.sh --lint --tests --cuda --sweep   # then deletes artifacts those modes no longer use
   ```
 - Run all tests across workspace (may skip some crates without tests):
   ```bash
@@ -107,7 +108,7 @@ Avoid returning TODOs.
 
 ## Examples
 
-- Rust examples: `inference/examples/`
+- Rust examples: `examples/rust/` (package `inference-examples`)
 - Python examples: `examples/python/`
 - Server samples: `examples/server/`
 - Run Python scripts:

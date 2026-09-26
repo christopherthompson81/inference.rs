@@ -291,8 +291,86 @@ impl KernelBuilder {
 
     /// Build a static library from all kernel sources
     pub fn build_lib<P: Into<PathBuf>>(&self, out_file: P) -> Result<()> {
-        crate::jobserver::init();
         let out_file = out_file.into();
+        let Some((toolkit, objects)) = self.compile_objects(&out_file)? else {
+            return Ok(());
+        };
+        let mut command = Command::new(&toolkit.nvcc_path);
+        command.arg("--lib").arg("-o").arg(&out_file).args(&objects);
+        run_link(command)
+    }
+
+    /// Build kernel library `name` and emit its cargo link directives: shared in dev builds on Linux, else `archive`.
+    pub fn build_and_link(self, name: &str, archive: PathBuf) -> Result<()> {
+        if dev_shared_libs() {
+            // an archive left in OUT_DIR by an earlier static build would compete with the .so for `-l{name}`
+            match std::fs::remove_file(&archive) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
+            return self.build_shared_lib(name);
+        }
+        self.build_lib(&archive)?;
+        if let Some(dir) = archive.parent() {
+            println!("cargo:rustc-link-search={}", dir.display());
+        }
+        println!("cargo:rustc-link-lib={name}");
+        Ok(())
+    }
+
+    /// Build `lib{name}.so` under `<target>/<profile>/cuda-kernels`, keyed by compile inputs so every cargo variant
+    /// shares one copy and binaries map it instead of embedding the fatbin. SONAME is the absolute path (no rpath).
+    pub fn build_shared_lib(mut self, name: &str) -> Result<()> {
+        let root = shared_lib_root()?;
+        let toolkit = match self.toolkit.take() {
+            Some(t) => t,
+            None => CudaToolkit::detect()?,
+        };
+        let mut key = DefaultHasher::new();
+        name.hash(&mut key);
+        self.extra_args.hash(&mut key);
+        format!("{:?}", self.dependencies).hash(&mut key);
+        // the object cache does not track the compiler, so a toolkit switch must land in a fresh dir
+        toolkit.nvcc_path.hash(&mut key);
+        toolkit.version.hash(&mut key);
+        std::env::var("NVCC_CCBIN").ok().hash(&mut key);
+        self.toolkit = Some(toolkit);
+        for file in self.sources.resolve()? {
+            let filename = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            // absolute, so worktrees sharing a target dir never share a dir
+            file.canonicalize()?.hash(&mut key);
+            self.compute_cap.get_for_file(filename)?.to_nvcc_arch().hash(&mut key);
+        }
+        let dir = root.join(format!("{name}-{:016x}", key.finish()));
+        std::fs::create_dir_all(&dir)?;
+        let lock = std::fs::File::create(dir.join(".lock"))?;
+        lock.lock()?;
+
+        self.out_dir = dir.clone();
+        let out_file = dir.join(format!("lib{name}.so"));
+        if let Some((toolkit, objects)) = self.compile_objects(&out_file)? {
+            // Link aside and rename, so binaries that already map the old library keep working.
+            let tmp = dir.join(format!("lib{name}.so.tmp"));
+            let mut command = Command::new(&toolkit.nvcc_path);
+            command
+                .arg("-shared")
+                .args(["--cudart", "shared"])
+                .arg("-o")
+                .arg(&tmp)
+                .arg(format!("-Xlinker=-soname={}", out_file.display()))
+                .arg("-Xlinker=--no-undefined")
+                .args(&objects);
+            run_link(command)?;
+            std::fs::rename(&tmp, &out_file)?;
+        }
+        println!("cargo:rustc-link-search=native={}", dir.display());
+        println!("cargo:rustc-link-lib=dylib={name}");
+        Ok(())
+    }
+
+    /// Compile every out-of-date kernel into `out_dir`. Returns `None` when `out_file` is already current.
+    fn compile_objects(&self, out_file: &Path) -> Result<Option<(CudaToolkit, Vec<PathBuf>)>> {
+        crate::jobserver::init();
 
         // Detect toolkit if not set
         let toolkit = match &self.toolkit {
@@ -315,7 +393,7 @@ impl KernelBuilder {
         let kernel_files = self.sources.resolve()?;
         if kernel_files.is_empty() {
             println!("cargo:warning=No kernel files found");
-            return Ok(());
+            return Ok(None);
         }
 
         // Emit cargo:rerun-if-changed directives
@@ -379,7 +457,12 @@ impl KernelBuilder {
 
         if compile_jobs.is_empty() && out_file.exists() {
             println!("cargo:warning=All library kernels up-to-date, skipping compilation");
-            return Ok(());
+            return Ok(None);
+        }
+        // the cache is saved before linking, so a failed link must not leave the old library looking current
+        match std::fs::remove_file(out_file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
         }
 
         println!(
@@ -495,29 +578,7 @@ impl KernelBuilder {
             cache.save(&self.out_dir)?;
         }
 
-        // Link into static library
-        let mut command = Command::new(&toolkit.nvcc_path);
-        command
-            .arg("--lib")
-            .arg("-o")
-            .arg(&out_file)
-            .args(&all_obj_files);
-
-        let output = command
-            .spawn()
-            .map_err(|e| Error::NvccNotFound(format!("Failed to spawn nvcc for linking: {}", e)))?
-            .wait_with_output()
-            .map_err(|e| Error::LinkingFailed(e.to_string()))?;
-
-        if !output.status.success() {
-            return Err(Error::LinkingFailed(format!(
-                "nvcc linking error:\n{}\n{}",
-                String::from_utf8_lossy(&output.stdout),
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-
-        Ok(())
+        Ok(Some((toolkit, all_obj_files)))
     }
 
     /// Build PTX files from all kernel sources
@@ -702,6 +763,39 @@ impl KernelBuilder {
 
         self.out_dir.join(format!("{}-{:x}.o", stem, hash))
     }
+}
+
+fn run_link(mut command: Command) -> Result<()> {
+    let output = command
+        .spawn()
+        .map_err(|e| Error::NvccNotFound(format!("Failed to spawn nvcc for linking: {}", e)))?
+        .wait_with_output()
+        .map_err(|e| Error::LinkingFailed(e.to_string()))?;
+    if !output.status.success() {
+        return Err(Error::LinkingFailed(format!(
+            "nvcc linking error:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(())
+}
+
+// Dev builds rebuild kernels per cargo variant and link them into many test binaries; release stays self-contained.
+fn dev_shared_libs() -> bool {
+    std::env::var("PROFILE").is_ok_and(|p| p == "debug")
+        && std::env::var("TARGET").is_ok_and(|t| t.contains("linux"))
+}
+
+/// `<target>/<profile>/cuda-kernels`, derived from `OUT_DIR = <target>/<profile>/build/<pkg>-<hash>/out`.
+fn shared_lib_root() -> Result<PathBuf> {
+    let out_dir = std::env::var("OUT_DIR").map_err(|_| Error::LinkingFailed("OUT_DIR not set".into()))?;
+    let out_dir = PathBuf::from(out_dir);
+    let profile_dir = out_dir
+        .ancestors()
+        .nth(3)
+        .ok_or_else(|| Error::LinkingFailed(format!("unexpected OUT_DIR layout: {}", out_dir.display())))?;
+    Ok(profile_dir.join("cuda-kernels"))
 }
 
 /// Output from PTX compilation

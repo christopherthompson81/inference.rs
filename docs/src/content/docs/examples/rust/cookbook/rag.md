@@ -19,7 +19,7 @@ Runnable Rust SDK example `rag`.
 /// 2. Computing cosine similarity to find the most relevant document
 /// 3. Sending the retrieved context + query to a text model
 ///
-/// Run with: `cargo run --release --example cookbook_rag -p inference`
+/// Run with: `cargo run --release --example cookbook_rag -p inference-examples`
 use anyhow::Result;
 use inference::{
     EmbeddingModelBuilder, EmbeddingRequest, IsqBits, ModelBuilder, TextMessageRole, TextMessages,
@@ -104,4 +104,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/cookbook/rag/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/cookbook/rag/main.rs)
+Source: [`examples/rust/cookbook/rag/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/cookbook/rag/main.rs)

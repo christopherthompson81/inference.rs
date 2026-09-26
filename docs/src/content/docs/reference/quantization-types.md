@@ -167,7 +167,7 @@ The model config selects NVFP4 automatically; omit `--quant` and `--isq`. See
 The Rust API and Python source builds also expose the `cutile` feature. Run the Rust example with:
 
 ```bash
-cargo run --release -p inference --example nvfp4 --features cuda,cutile
+cargo run --release -p inference-examples --example nvfp4 --features cuda,cutile
 ```
 
 For a [Python source build](/developer/from-source/#python-wheels), run

@@ -12,7 +12,7 @@ Load a GGUF model from Hugging Face.
 Configuration and tokenizer assets are discovered automatically. Use `with_tok_model_id`
 only to override that choice or when the source cannot be identified.
 
-Run with: `cargo run --release --example gguf -p inference`
+Run with: `cargo run --release --example gguf -p inference-examples`
 
 ```rust
 //! Load a GGUF model from Hugging Face.
@@ -20,7 +20,7 @@ Run with: `cargo run --release --example gguf -p inference`
 //! Configuration and tokenizer assets are discovered automatically. Use `with_tok_model_id`
 //! only to override that choice or when the source cannot be identified.
 //!
-//! Run with: `cargo run --release --example gguf -p inference`
+//! Run with: `cargo run --release --example gguf -p inference-examples`
 
 use anyhow::Result;
 use inference::{GgufModelBuilder, TextMessageRole, TextMessages};
@@ -54,4 +54,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/getting_started/gguf/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/getting_started/gguf/main.rs)
+Source: [`examples/rust/getting_started/gguf/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/getting_started/gguf/main.rs)

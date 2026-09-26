@@ -19,7 +19,7 @@ Runnable Rust SDK example `agent`.
 /// - Building an agent that can call the tool
 /// - Running the agent loop for a code review task
 ///
-/// Run with: `cargo run --release --example cookbook_agent -p inference`
+/// Run with: `cargo run --release --example cookbook_agent -p inference-examples`
 use anyhow::Result;
 use inference::{tool, AgentBuilder, IsqBits, ModelBuilder, PagedAttentionMetaBuilder};
 use schemars::JsonSchema;
@@ -91,4 +91,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/cookbook/agent/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/cookbook/agent/main.rs)
+Source: [`examples/rust/cookbook/agent/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/cookbook/agent/main.rs)

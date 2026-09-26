@@ -153,7 +153,7 @@ fn main() -> Result<()> {
         out_dir.join("libinferencepagedattention.a")
     };
     builder
-        .build_lib(prepare_cuda_archive(out_file))
+        .build_and_link("inferencepagedattention", prepare_cuda_archive(out_file))
         .expect("Build paged attention lib failed!");
 
     let using_fa3_fp8_paged = compute_cap == 90;
@@ -210,11 +210,10 @@ fn main() -> Result<()> {
             .expect("Build FA3 FP8 paged attention lib failed!");
     }
 
-    println!("cargo:rustc-link-search={}", out_dir.display());
-    println!("cargo:rustc-link-lib=inferencepagedattention");
     println!("cargo:rustc-link-lib=dylib=cudart");
 
     if using_fa3_fp8_paged {
+        println!("cargo:rustc-link-search={}", out_dir.display());
         println!("cargo:rustc-link-lib=inferencefa3paged");
         println!("cargo:rustc-link-lib=dylib=stdc++");
         println!("cargo:rustc-cfg=has_fa3_fp8_paged");

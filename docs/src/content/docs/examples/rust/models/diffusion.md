@@ -9,12 +9,12 @@ sidebar:
 
 Image generation using a diffusion model.
 
-Run with: `cargo run --release --example diffusion -p inference`
+Run with: `cargo run --release --example diffusion -p inference-examples`
 
 ```rust
 //! Image generation using a diffusion model.
 //!
-//! Run with: `cargo run --release --example diffusion -p inference`
+//! Run with: `cargo run --release --example diffusion -p inference-examples`
 
 use std::time::Instant;
 
@@ -57,4 +57,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/models/diffusion/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/models/diffusion/main.rs)
+Source: [`examples/rust/models/diffusion/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/models/diffusion/main.rs)

@@ -9,12 +9,12 @@ sidebar:
 
 Load a pre-quantized UQFF text model.
 
-Run with: `cargo run --release --example uqff -p inference`
+Run with: `cargo run --release --example uqff -p inference-examples`
 
 ```rust
 //! Load a pre-quantized UQFF text model.
 //!
-//! Run with: `cargo run --release --example uqff -p inference`
+//! Run with: `cargo run --release --example uqff -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -74,4 +74,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/quantization/uqff/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/quantization/uqff/main.rs)
+Source: [`examples/rust/quantization/uqff/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/quantization/uqff/main.rs)

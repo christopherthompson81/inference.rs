@@ -9,12 +9,12 @@ sidebar:
 
 Streaming text generation with token-by-token output.
 
-Run with: `cargo run --release --example streaming -p inference`
+Run with: `cargo run --release --example streaming -p inference-examples`
 
 ```rust
 //! Streaming text generation with token-by-token output.
 //!
-//! Run with: `cargo run --release --example streaming -p inference`
+//! Run with: `cargo run --release --example streaming -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -83,4 +83,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/getting_started/streaming/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/getting_started/streaming/main.rs)
+Source: [`examples/rust/getting_started/streaming/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/getting_started/streaming/main.rs)

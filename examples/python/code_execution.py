@@ -1,7 +1,7 @@
 """
 Python code execution with the OS-level sandbox enabled.
 
-Equivalent of `inference/examples/advanced/code_execution/main.rs` for the
+Equivalent of `examples/rust/advanced/code_execution/main.rs` for the
 Python SDK. The model is given the `execute_python` tool and runs Python
 inside a per-session subprocess that is hardened with rlimits + seccomp +
 namespaces + Landlock on Linux (Seatbelt + rlimits on macOS).

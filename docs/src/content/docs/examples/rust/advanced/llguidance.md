@@ -9,12 +9,12 @@ sidebar:
 
 Constrained generation using an llguidance grammar.
 
-Run with: `cargo run --release --example llguidance -p inference`
+Run with: `cargo run --release --example llguidance -p inference-examples`
 
 ```rust
 //! Constrained generation using an llguidance grammar.
 //!
-//! Run with: `cargo run --release --example llguidance -p inference`
+//! Run with: `cargo run --release --example llguidance -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -66,4 +66,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/llguidance/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/llguidance/main.rs)
+Source: [`examples/rust/advanced/llguidance/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/llguidance/main.rs)

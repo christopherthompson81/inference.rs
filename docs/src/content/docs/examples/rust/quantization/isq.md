@@ -9,12 +9,12 @@ sidebar:
 
 In-situ quantization (ISQ) with explicit and automatic type selection.
 
-Run with: `cargo run --release --example isq -p inference`
+Run with: `cargo run --release --example isq -p inference-examples`
 
 ```rust
 //! In-situ quantization (ISQ) with explicit and automatic type selection.
 //!
-//! Run with: `cargo run --release --example isq -p inference`
+//! Run with: `cargo run --release --example isq -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -65,4 +65,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/quantization/isq/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/quantization/isq/main.rs)
+Source: [`examples/rust/quantization/isq/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/quantization/isq/main.rs)

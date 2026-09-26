@@ -12,7 +12,7 @@ PaddleOCR-VL document OCR: recognize one image region and print the text.
 Task prompts: `OCR:` (text), `Table Recognition:` (OTSL markup), `Formula Recognition:` (LaTeX).
 
 Run with:
-`cargo run --release --example paddleocr_vl_recognize -p inference -- <image> ["Table Recognition:"]`
+`cargo run --release --example paddleocr_vl_recognize -p inference-examples -- <image> ["Table Recognition:"]`
 
 ```rust
 //! PaddleOCR-VL document OCR: recognize one image region and print the text.
@@ -20,7 +20,7 @@ Run with:
 //! Task prompts: `OCR:` (text), `Table Recognition:` (OTSL markup), `Formula Recognition:` (LaTeX).
 //!
 //! Run with:
-//! `cargo run --release --example paddleocr_vl_recognize -p inference -- <image> ["Table Recognition:"]`
+//! `cargo run --release --example paddleocr_vl_recognize -p inference-examples -- <image> ["Table Recognition:"]`
 
 use anyhow::{bail, Result};
 use inference::{MultimodalMessages, MultimodalModelBuilder, RequestBuilder, TextMessageRole};
@@ -57,4 +57,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/models/paddleocr_vl_recognize/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/models/paddleocr_vl_recognize/main.rs)
+Source: [`examples/rust/models/paddleocr_vl_recognize/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/models/paddleocr_vl_recognize/main.rs)

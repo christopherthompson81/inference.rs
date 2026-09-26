@@ -9,12 +9,12 @@ sidebar:
 
 Tool callbacks for automatic server-side tool execution.
 
-Run with: `cargo run --release --example tool_callback -p inference`
+Run with: `cargo run --release --example tool_callback -p inference-examples`
 
 ```rust
 //! Tool callbacks for automatic server-side tool execution.
 //!
-//! Run with: `cargo run --release --example tool_callback -p inference`
+//! Run with: `cargo run --release --example tool_callback -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -93,4 +93,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/tool_callback/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/tool_callback/main.rs)
+Source: [`examples/rust/advanced/tool_callback/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/tool_callback/main.rs)

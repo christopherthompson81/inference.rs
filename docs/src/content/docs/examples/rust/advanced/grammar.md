@@ -9,12 +9,12 @@ sidebar:
 
 Constrained generation using a GBNF grammar.
 
-Run with: `cargo run --release --example grammar -p inference`
+Run with: `cargo run --release --example grammar -p inference-examples`
 
 ```rust
 //! Constrained generation using a GBNF grammar.
 //!
-//! Run with: `cargo run --release --example grammar -p inference`
+//! Run with: `cargo run --release --example grammar -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -45,4 +45,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/grammar/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/grammar/main.rs)
+Source: [`examples/rust/advanced/grammar/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/grammar/main.rs)

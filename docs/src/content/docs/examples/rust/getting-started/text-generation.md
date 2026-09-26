@@ -9,12 +9,12 @@ sidebar:
 
 Basic text generation with ISQ quantization and chat.
 
-Run with: `cargo run --release --example text_generation -p inference`
+Run with: `cargo run --release --example text_generation -p inference-examples`
 
 ```rust
 //! Basic text generation with ISQ quantization and chat.
 //!
-//! Run with: `cargo run --release --example text_generation -p inference`
+//! Run with: `cargo run --release --example text_generation -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -71,4 +71,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/getting_started/text_generation/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/getting_started/text_generation/main.rs)
+Source: [`examples/rust/getting_started/text_generation/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/getting_started/text_generation/main.rs)

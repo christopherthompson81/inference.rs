@@ -9,12 +9,12 @@ sidebar:
 
 X-LoRA: load a model with X-LoRA adapter mixing.
 
-Run with: `cargo run --release --example xlora -p inference`
+Run with: `cargo run --release --example xlora -p inference-examples`
 
 ```rust
 //! X-LoRA: load a model with X-LoRA adapter mixing.
 //!
-//! Run with: `cargo run --release --example xlora -p inference`
+//! Run with: `cargo run --release --example xlora -p inference-examples`
 
 use std::fs::File;
 
@@ -49,4 +49,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/xlora/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/xlora/main.rs)
+Source: [`examples/rust/advanced/xlora/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/xlora/main.rs)

@@ -13,7 +13,7 @@ Declare required output files via `RequestBuilder::require_file`. The
 engine surfaces them in `response.files`, including an error placeholder
 if the model never wrote one.
 
-Run with: `cargo run --release --features code-execution --example code_execution_files -p inference`
+Run with: `cargo run --release --features code-execution --example code_execution_files -p inference-examples`
 
 ```rust
 //! Code execution producing first-class output files.
@@ -22,7 +22,7 @@ Run with: `cargo run --release --features code-execution --example code_executio
 //! engine surfaces them in `response.files`, including an error placeholder
 //! if the model never wrote one.
 //!
-//! Run with: `cargo run --release --features code-execution --example code_execution_files -p inference`
+//! Run with: `cargo run --release --features code-execution --example code_execution_files -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -81,4 +81,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/code_execution_files/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/code_execution_files/main.rs)
+Source: [`examples/rust/advanced/code_execution_files/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/code_execution_files/main.rs)

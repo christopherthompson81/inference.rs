@@ -9,12 +9,12 @@ sidebar:
 
 Text-to-speech synthesis using a speech model.
 
-Run with: `cargo run --release --example speech -p inference`
+Run with: `cargo run --release --example speech -p inference-examples`
 
 ```rust
 //! Text-to-speech synthesis using a speech model.
 //!
-//! Run with: `cargo run --release --example speech -p inference`
+//! Run with: `cargo run --release --example speech -p inference-examples`
 
 use std::time::Instant;
 
@@ -49,4 +49,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/models/speech/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/models/speech/main.rs)
+Source: [`examples/rust/models/speech/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/models/speech/main.rs)

@@ -44,6 +44,9 @@ cargo clippy --workspace --tests --examples -- -D warnings
 # Canonical local checks (default: --lint --tests). Use these rather than ad-hoc cargo invocations: each mode always
 # builds the same package/feature set, so artifacts are reused instead of rebuilt per combination.
 scripts/local_ci.sh [--lint] [--tests] [--cuda] [--docs]
+
+# Same, then delete target/debug artifacts the selected modes don't use (including on-request example builds).
+scripts/local_ci.sh --lint --tests --cuda --sweep
 ```
 
 ### Running Models
@@ -116,7 +119,7 @@ When adding new quantization methods:
 - `inference-core/src/pipeline/mod.rs` - Pipeline trait and common logic
 - `inference-server-core/src/routes.rs` - HTTP API endpoints
 - `inference-pyo3/src/lib.rs` - Python SDK entry point
-- `inference/examples/` - Usage examples for Rust SDK
+- `examples/rust/` - Rust SDK examples (`inference-examples`, not a default member: build with `-p inference-examples --example <name>`)
 
 ### Pull Requests
 
@@ -148,6 +151,7 @@ Avoid returning TODOs.
 - Unit tests are colocated with source files
 - Integration tests in `tests/` directories
 - `scripts/local_ci.sh --tests` (CPU) and `--cuda` (GPU) run the whole workspace suite. Narrow with a test-name filter only for quick iteration, and keep the same features.
+- In dev builds on Linux the always-built CUDA kernel sets are shared libraries under `target/debug/cuda-kernels` (one copy for every variant and test binary, loaded by absolute SONAME), so a dev binary only runs from this checkout. Release builds link static archives.
 - Put build env (CC/CXX/NVCC) and model paths (INFERENCE_TEST_*) in `~/.cargo/config.toml` `[env]`, not on the command line: build scripts track them, and changing one rebuilds the dependency tree.
 - Tests run under cargo-nextest (one process per test; see `.config/nextest.toml` for the GPU group sized by VRAM). It is required for `--features cuda`: plain `cargo test` shares one CUDA context across a binary's tests, so the memory-pool tests interfere. Install: `curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin`.
 - GPU tests use `skip_without_cuda!()` instead of `#[ignore]`, so `--features cuda` runs them wherever a device exists. Keep `#[ignore]` for hardware this suite can't assume (SM90, SM121, cuTile), benchmarks, and tests that write files.

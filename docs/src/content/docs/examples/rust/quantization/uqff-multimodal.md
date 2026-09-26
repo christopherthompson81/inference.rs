@@ -9,12 +9,12 @@ sidebar:
 
 Load a pre-quantized UQFF multimodal model.
 
-Run with: `cargo run --release --example uqff_multimodal -p inference`
+Run with: `cargo run --release --example uqff_multimodal -p inference-examples`
 
 ```rust
 //! Load a pre-quantized UQFF multimodal model.
 //!
-//! Run with: `cargo run --release --example uqff_multimodal -p inference`
+//! Run with: `cargo run --release --example uqff_multimodal -p inference-examples`
 
 use anyhow::Result;
 use inference::{IsqBits, MultimodalMessages, TextMessageRole, UqffMultimodalModelBuilder};
@@ -57,4 +57,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/quantization/uqff_multimodal/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/quantization/uqff_multimodal/main.rs)
+Source: [`examples/rust/quantization/uqff_multimodal/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/quantization/uqff_multimodal/main.rs)

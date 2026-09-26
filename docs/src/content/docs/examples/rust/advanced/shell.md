@@ -12,7 +12,7 @@ Shell execution example.
 The model is given a shell tool and can run commands in a per-session
 working directory.
 
-Run with: `cargo run --release --features code-execution --example shell -p inference`
+Run with: `cargo run --release --features code-execution --example shell -p inference-examples`
 
 ```rust
 //! Shell execution example.
@@ -20,7 +20,7 @@ Run with: `cargo run --release --features code-execution --example shell -p infe
 //! The model is given a shell tool and can run commands in a per-session
 //! working directory.
 //!
-//! Run with: `cargo run --release --features code-execution --example shell -p inference`
+//! Run with: `cargo run --release --features code-execution --example shell -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -62,4 +62,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/advanced/shell/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/advanced/shell/main.rs)
+Source: [`examples/rust/advanced/shell/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/advanced/shell/main.rs)

@@ -9,12 +9,12 @@ sidebar:
 
 Per-layer quantization control using a Topology.
 
-Run with: `cargo run --release --example topology -p inference`
+Run with: `cargo run --release --example topology -p inference-examples`
 
 ```rust
 //! Per-layer quantization control using a Topology.
 //!
-//! Run with: `cargo run --release --example topology -p inference`
+//! Run with: `cargo run --release --example topology -p inference-examples`
 
 use anyhow::Result;
 use inference::{
@@ -84,4 +84,4 @@ async fn main() -> Result<()> {
 }
 ```
 
-Source: [`inference/examples/quantization/topology/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/inference/examples/quantization/topology/main.rs)
+Source: [`examples/rust/quantization/topology/main.rs`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust/quantization/topology/main.rs)
