@@ -1,8 +1,8 @@
 use anyhow::Result;
 use candle_core::{Device, Tensor};
+use inference_audio::fft::{plan_forward_f32, Complex32};
 use inference_audio::AudioInput;
 use rubato::Resampler;
-use rustfft::{num_complex::Complex32, FftPlanner};
 
 use crate::vision_models::preprocessor_config::PreProcessorConfig;
 
@@ -174,9 +174,7 @@ impl AudioProcessor {
             n_fft *= 2;
         }
 
-        // Create FFT planner
-        let mut planner = FftPlanner::<f32>::new();
-        let fft = planner.plan_fft_forward(n_fft);
+        let fft = plan_forward_f32(n_fft);
 
         // === Hann window (same formulation as the reference implementation) ===
         let window: Vec<f64> = (0..frame_length)

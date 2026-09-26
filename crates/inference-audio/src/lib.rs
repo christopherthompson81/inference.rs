@@ -4,6 +4,8 @@
 //! functionality such as reading audio data, resampling and computing
 //! mel spectrogram features.
 
+pub mod fft;
+
 use anyhow::Result;
 use symphonia::core::{
     audio::SampleBuffer, codecs::DecoderOptions, formats::FormatOptions, io::MediaSourceStream,

@@ -15,12 +15,9 @@ use inference_vision::{ApplyTransforms, Normalize, ToTensor, Transforms};
 use regex::Regex;
 use tokenizers::Tokenizer;
 
+use inference_audio::fft::{plan_forward_f64, Complex32, Complex64};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
-};
-use rustfft::{
-    num_complex::{Complex32, Complex64},
-    FftPlanner,
 };
 
 use crate::{
@@ -1149,8 +1146,7 @@ impl Phi4MMInputsProcessor {
             );
         }
 
-        let mut planner = FftPlanner::<f64>::new();
-        let fft = planner.plan_fft_forward(n_fft);
+        let fft = plan_forward_f64(n_fft);
         let window = (0..win_length)
             .map(|index| {
                 HAMMING_ALPHA

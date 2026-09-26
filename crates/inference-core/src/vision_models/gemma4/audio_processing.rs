@@ -1,8 +1,8 @@
 use anyhow::Result;
 use candle_core::{Device, Tensor};
+use inference_audio::fft::{plan_forward_f32, Complex32};
 use inference_audio::AudioInput;
 use rubato::Resampler;
-use rustfft::{num_complex::Complex32, FftPlanner};
 
 use crate::vision_models::preprocessor_config::PreProcessorConfig;
 
@@ -255,8 +255,7 @@ impl AudioProcessor {
         }
 
         let num_frames = (waveform.len() - frame_size_for_unfold) / self.hop_length + 1;
-        let mut planner = FftPlanner::<f32>::new();
-        let fft = planner.plan_fft_forward(self.fft_length);
+        let fft = plan_forward_f32(self.fft_length);
         let mut mel_features = Vec::with_capacity(num_frames);
         let mut valid_mask = Vec::with_capacity(num_frames);
 
