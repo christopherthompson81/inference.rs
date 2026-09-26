@@ -11,6 +11,13 @@ use inference_quant::{
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
+use crate::kv_cache::EitherCache;
+use crate::kv_cache::KvCache;
+use crate::kv_cache::NormalCache;
+use crate::model::IsqModel;
+use crate::model::ModelForwardContext;
+use crate::model::NormalLoadingMetadata;
+use crate::model::NormalModel;
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
@@ -20,10 +27,6 @@ use crate::{
         Llama3RopeSpec, Llama3RotaryEmbedding, Mlp, RmsNorm,
     },
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
-    pipeline::{
-        EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalLoadingMetadata,
-        NormalModel,
-    },
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -283,7 +286,7 @@ pub struct Llama {
     ln_f: RmsNorm,
     lm_head: Arc<dyn QuantMethod>,
     dtype: DType,
-    kv_cache: crate::pipeline::EitherCache,
+    kv_cache: crate::kv_cache::EitherCache,
     device: Device,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
     cfg: ModelConfigMetadata,
@@ -448,7 +451,7 @@ impl Llama {
     pub fn forward(
         &self,
         input_ids: &Tensor,
-        ctx: &mut crate::pipeline::ModelForwardContext<'_>,
+        ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         self.forward_embeds(
             input_ids,
@@ -517,7 +520,7 @@ impl NormalModel for Llama {
     fn forward(
         &self,
         input_ids: &Tensor,
-        ctx: &mut crate::pipeline::ModelForwardContext<'_>,
+        ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         self.forward(input_ids, ctx)
     }
@@ -528,7 +531,7 @@ impl NormalModel for Llama {
         _seqlen_offsets: &[usize],
         _seqlen_offsets_full: &[usize],
         _no_kv_cache: bool,
-        _non_granular_state: &Option<crate::xlora_models::NonGranularState>,
+        _non_granular_state: &Option<crate::model::NonGranularState>,
         _context_lens: Vec<(usize, usize)>,
         _position_ids: Vec<usize>,
         _flash_params: &FlashParams,
@@ -536,7 +539,7 @@ impl NormalModel for Llama {
     ) -> Result<Tensor> {
         unimplemented!()
     }
-    fn cache(&self) -> &crate::pipeline::EitherCache {
+    fn cache(&self) -> &crate::kv_cache::EitherCache {
         &self.kv_cache
     }
     fn device(&self) -> &Device {

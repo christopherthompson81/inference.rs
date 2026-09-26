@@ -13,6 +13,13 @@ use inference_quant::{
 };
 use serde::Deserialize;
 
+use crate::kv_cache::EitherCache;
+use crate::kv_cache::KvCache;
+use crate::kv_cache::NormalCache;
+use crate::model::IsqModel;
+use crate::model::ModelForwardContext;
+use crate::model::NormalLoadingMetadata;
+use crate::model::NormalModel;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, SdpaParams},
@@ -29,10 +36,6 @@ use crate::{
     moe::{MoEExperts, MoEExpertsConfig},
     ops::{SplitOp, TopKLastDimOp, TopKOutput},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
-    pipeline::{
-        EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalLoadingMetadata,
-        NormalModel,
-    },
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -1137,7 +1140,7 @@ impl NormalModel for DeepSeekV3 {
     fn forward(
         &self,
         input_ids: &Tensor,
-        ctx: &mut crate::pipeline::ModelForwardContext<'_>,
+        ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         self.forward(input_ids, ctx)
     }
@@ -1148,7 +1151,7 @@ impl NormalModel for DeepSeekV3 {
         _seqlen_offsets: &[usize],
         _seqlen_offsets_full: &[usize],
         _no_kv_cache: bool,
-        _non_granular_state: &Option<crate::xlora_models::NonGranularState>,
+        _non_granular_state: &Option<crate::model::NonGranularState>,
         _context_lens: Vec<(usize, usize)>,
         _position_ids: Vec<usize>,
         _flash_params: &FlashParams,

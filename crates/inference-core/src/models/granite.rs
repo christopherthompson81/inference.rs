@@ -16,6 +16,13 @@ use std::{
 };
 
 use crate::gdn::RecurrentBatchKind;
+use crate::kv_cache::EitherCache;
+use crate::kv_cache::KvCache;
+use crate::model::ForwardMaskCache;
+use crate::model::IsqModel;
+use crate::model::ModelForwardContext;
+use crate::model::NormalLoadingMetadata;
+use crate::model::NormalModel;
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeConfig, AnyMoeExpertType, MlpLayer, MoeMlp},
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
@@ -26,10 +33,6 @@ use crate::{
     layers::masker::PastKvLenCache,
     layers::{embedding_with_legacy_tied_uqff, CausalMasker, RmsNorm, RotaryEmbedding},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
-    pipeline::{
-        EitherCache, ForwardMaskCache, IsqModel, KvCache, ModelForwardContext,
-        NormalLoadingMetadata, NormalModel,
-    },
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -352,13 +355,13 @@ enum GraniteParallelExpertWeights {
     Quantized(Arc<dyn QuantMethod>),
 }
 
-struct GraniteParallelExperts {
+pub struct GraniteParallelExperts {
     weights: GraniteParallelExpertWeights,
     output_size: usize,
 }
 
 impl GraniteParallelExperts {
-    fn new(
+    pub fn new(
         num_experts: usize,
         input_size: usize,
         output_size: usize,
@@ -400,7 +403,7 @@ impl GraniteParallelExperts {
         })
     }
 
-    fn quantized(&self) -> Option<&Arc<dyn QuantMethod>> {
+    pub fn quantized(&self) -> Option<&Arc<dyn QuantMethod>> {
         match &self.weights {
             GraniteParallelExpertWeights::Dense(_) => None,
             GraniteParallelExpertWeights::Quantized(weight) => Some(weight),
@@ -2357,7 +2360,7 @@ impl NormalModel for GraniteMoeHybrid {
         _seqlen_offsets: &[usize],
         _seqlen_offsets_full: &[usize],
         _no_kv_cache: bool,
-        _non_granular_state: &Option<crate::xlora_models::NonGranularState>,
+        _non_granular_state: &Option<crate::model::NonGranularState>,
         _context_lens: Vec<(usize, usize)>,
         _position_ids: Vec<usize>,
         _flash_params: &FlashParams,
@@ -2365,7 +2368,7 @@ impl NormalModel for GraniteMoeHybrid {
     ) -> Result<Tensor> {
         candle_core::bail!("GraniteMoeHybrid does not support X-LoRA forward")
     }
-    fn cache(&self) -> &crate::pipeline::EitherCache {
+    fn cache(&self) -> &crate::kv_cache::EitherCache {
         &self.kv_cache
     }
     fn device(&self) -> &Device {
@@ -2662,36 +2665,6 @@ mod tests {
             "out_proj.bias",
         ] {
             assert!(names.contains(name), "missing Mamba residual tensor {name}");
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn safetensors_granite_experts_participate_in_immediate_isq() -> anyhow::Result<()> {
-        const PREFIX: &str = "model.layers.0.block_sparse_moe.input_linear";
-        let loader = crate::pipeline::NormalLoaderType::GraniteMoeHybrid.loader();
-        for predicates in [
-            loader.immediate_isq_predicates("")?,
-            loader.immediate_isq_predicates_moqe("")?,
-        ] {
-            let weight = Tensor::ones((2, 4, 3), DType::F32, &Device::Cpu)?;
-            let vb = inference_quant::ShardedSafeTensors::wrap(
-                HashMap::from([(format!("{PREFIX}.weight"), weight)]),
-                DType::F32,
-                Device::Cpu,
-            );
-            let tracker = vb.tracker().clone();
-            inference_quant::set_immediate_isq(
-                Some(inference_quant::IsqType::Q8_0),
-                predicates,
-                inference_quant::IsqCaptureMode::CaptureMatches,
-            );
-            let experts = GraniteParallelExperts::new(2, 3, 4, vb.pp(PREFIX));
-            inference_quant::clear_immediate_isq();
-
-            assert!(experts?.quantized().is_some());
-            assert_eq!(tracker.get().len(), 1);
-            assert_eq!(tracker.get()[0].key, PREFIX);
         }
         Ok(())
     }

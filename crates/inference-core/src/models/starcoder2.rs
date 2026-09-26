@@ -10,16 +10,19 @@ use inference_quant::{
 };
 use std::sync::Arc;
 
+use crate::kv_cache::EitherCache;
+use crate::kv_cache::KvCache;
+use crate::kv_cache::NormalCache;
+use crate::model::IsqModel;
+use crate::model::ModelForwardContext;
+use crate::model::NormalLoadingMetadata;
+use crate::model::NormalModel;
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, AnyMoeTrainableLayer, MlpLayer},
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{embedding, layer_norm, Activation, CausalMasker, RotaryEmbedding},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
-    pipeline::{
-        EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalLoadingMetadata,
-        NormalModel,
-    },
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -482,7 +485,7 @@ impl Model {
     pub fn forward(
         &self,
         input_ids: &Tensor,
-        ctx: &mut crate::pipeline::ModelForwardContext<'_>,
+        ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         let mut xs = self.embed_tokens.embedding_forward(input_ids, self.dtype)?;
 
@@ -540,7 +543,7 @@ impl NormalModel for Model {
     fn forward(
         &self,
         input_ids: &Tensor,
-        ctx: &mut crate::pipeline::ModelForwardContext<'_>,
+        ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         self.forward(input_ids, ctx)
     }
@@ -551,7 +554,7 @@ impl NormalModel for Model {
         _seqlen_offsets: &[usize],
         _seqlen_offsets_full: &[usize],
         _no_kv_cache: bool,
-        _non_granular_state: &Option<crate::xlora_models::NonGranularState>,
+        _non_granular_state: &Option<crate::model::NonGranularState>,
         _context_lens: Vec<(usize, usize)>,
         _position_ids: Vec<usize>,
         _flash_params: &FlashParams,

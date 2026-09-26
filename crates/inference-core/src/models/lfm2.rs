@@ -17,6 +17,13 @@ use inference_quant::{
 use serde::{Deserialize, Serialize};
 
 use crate::gdn::RecurrentBatchKind;
+use crate::kv_cache::EitherCache;
+use crate::kv_cache::KvCache;
+use crate::model::ForwardMaskCache;
+use crate::model::IsqModel;
+use crate::model::ModelForwardContext;
+use crate::model::NormalLoadingMetadata;
+use crate::model::NormalModel;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, SdpaParams},
@@ -31,10 +38,6 @@ use crate::{
     },
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
-    pipeline::{
-        EitherCache, ForwardMaskCache, IsqModel, KvCache, ModelForwardContext,
-        NormalLoadingMetadata, NormalModel,
-    },
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -1410,7 +1413,7 @@ impl NormalModel for Model {
         _seqlen_offsets: &[usize],
         _seqlen_offsets_full: &[usize],
         _no_kv_cache: bool,
-        _non_granular_state: &Option<crate::xlora_models::NonGranularState>,
+        _non_granular_state: &Option<crate::model::NonGranularState>,
         _context_lens: Vec<(usize, usize)>,
         _position_ids: Vec<usize>,
         _flash_params: &FlashParams,

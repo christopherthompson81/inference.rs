@@ -20,6 +20,13 @@ use crate::gdn::{
     try_forward_grouped_packed_gdn, GatedDeltaNet, GdnConfig, GdnInputProjectionKind,
     GdnLayerCache, GdnStateDType, GdnVHeadLayout, PackedGdnLayout,
 };
+use crate::kv_cache::EitherCache;
+use crate::kv_cache::KvCache;
+use crate::model::ForwardMaskCache;
+use crate::model::IsqModel;
+use crate::model::ModelForwardContext;
+use crate::model::NormalLoadingMetadata;
+use crate::model::NormalModel;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
@@ -34,10 +41,6 @@ use crate::{
     },
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
-    pipeline::{
-        EitherCache, ForwardMaskCache, IsqModel, KvCache, ModelForwardContext,
-        NormalLoadingMetadata, NormalModel,
-    },
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -936,7 +939,7 @@ impl Model {
     pub fn forward(
         &self,
         input_ids: &Tensor,
-        ctx: &mut crate::pipeline::ModelForwardContext<'_>,
+        ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         let mut x = self.embed_tokens.embedding_forward(input_ids, self.dtype)?;
 
@@ -1154,7 +1157,7 @@ impl NormalModel for Model {
     fn forward(
         &self,
         input_ids: &Tensor,
-        ctx: &mut crate::pipeline::ModelForwardContext<'_>,
+        ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         self.forward(input_ids, ctx)
     }
@@ -1165,7 +1168,7 @@ impl NormalModel for Model {
         _seqlen_offsets: &[usize],
         _seqlen_offsets_full: &[usize],
         _no_kv_cache: bool,
-        _non_granular_state: &Option<crate::xlora_models::NonGranularState>,
+        _non_granular_state: &Option<crate::model::NonGranularState>,
         _context_lens: Vec<(usize, usize)>,
         _position_ids: Vec<usize>,
         _flash_params: &FlashParams,

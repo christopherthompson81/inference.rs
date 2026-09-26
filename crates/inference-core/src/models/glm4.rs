@@ -1,7 +1,15 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use crate::attention::FlashParams;
+use crate::kv_cache::EitherCache;
+use crate::kv_cache::KvCache;
+use crate::kv_cache::NormalCache;
+use crate::kv_cache::NormalCacheType;
 use crate::layers::masker::CausalMaskConfig;
+use crate::model::IsqModel;
+use crate::model::ModelForwardContext;
+use crate::model::NormalLoadingMetadata;
+use crate::model::NormalModel;
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
@@ -10,10 +18,6 @@ use crate::{
         apply_rotary_q, embedding_with_legacy_tied_uqff, Activation, CausalMasker, Mlp, RmsNorm,
     },
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
-    pipeline::{
-        EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalCacheType,
-        NormalLoadingMetadata, NormalModel,
-    },
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -601,7 +605,7 @@ impl NormalModel for Model {
         _seqlen_offsets: &[usize],
         _seqlen_offsets_full: &[usize],
         _no_kv_cache: bool,
-        _non_granular_state: &Option<crate::xlora_models::NonGranularState>,
+        _non_granular_state: &Option<crate::model::NonGranularState>,
         _context_lens: Vec<(usize, usize)>,
         _position_ids: Vec<usize>,
         _flash_params: &FlashParams,
