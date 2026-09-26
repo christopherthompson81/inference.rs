@@ -30,7 +30,7 @@ use crate::{
     AdapterGenerationId, Response, TERMINATE_ALL_NEXT_STEP,
 };
 
-use super::CacheConfig;
+use crate::paged_attention::CacheConfig;
 
 /// Bucket key: (sequence length bucket, cached prefix, raw request, media, token offset)
 type BucketKey = (usize, usize, Option<usize>, u8, usize);
@@ -968,7 +968,7 @@ impl PagedAttentionScheduler {
             let mut computed = if self.prefix_caching_enabled && !return_raw_logits {
                 kv_mgr.get_computed_blocks(block_hashes, num_tokens)
             } else {
-                super::kv_cache_manager::ComputedBlocks {
+                crate::paged_attention::kv_cache_manager::ComputedBlocks {
                     block_ids: Vec::new(),
                     num_computed_tokens: 0,
                 }

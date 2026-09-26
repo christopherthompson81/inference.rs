@@ -1,6 +1,8 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::sync::Arc;
 
 /// Mistral LLM, https://github.com/mistralai/mistral-src
@@ -18,7 +20,6 @@ use crate::{
     layers::{self, Activation, CausalMasker, MatMul, RmsNorm, Sdpa},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
         Cache, EitherCache, IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},

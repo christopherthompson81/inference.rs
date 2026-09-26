@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use candle_nn::Module;
@@ -14,6 +15,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::gdn::RecurrentBatchKind;
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeConfig, AnyMoeExpertType, MlpLayer, MoeMlp},
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
@@ -25,8 +27,8 @@ use crate::{
     layers::{embedding_with_legacy_tied_uqff, CausalMasker, RmsNorm, RotaryEmbedding},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
-        text_models_inputs_processor::FlashParams, EitherCache, ForwardMaskCache, IsqModel,
-        KvCache, ModelForwardContext, NormalLoadingMetadata, NormalModel, RecurrentBatchKind,
+        EitherCache, ForwardMaskCache, IsqModel, KvCache, ModelForwardContext,
+        NormalLoadingMetadata, NormalModel,
     },
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},

@@ -3,10 +3,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use crate::attention::FlashParams;
 use crate::attention::{AttentionMask, SdpaParams};
 use crate::gguf::Content;
 use crate::lora::{get_lora_cfg, LinearLayerLike, LoraConfig, Merge, Ordering, QLoraLinear};
-use crate::pipeline::text_models_inputs_processor::FlashParams;
 use crate::utils::progress::{new_multi_progress, NiceProgressBar};
 use candle_core::quantized::ggml_file;
 use candle_core::quantized::QMatMul;
@@ -22,8 +22,8 @@ use crate::pipeline::{extract_logits, Cache, EitherCache};
 
 use super::classifier::XLoraClassifier;
 use super::{verify_sanity_adapters, NonGranularState, ScalingsMaker, XLoraConfig};
+use crate::gguf::metadata::ContentMetadata;
 use crate::models::quantized_llama::PropsGGUF;
-use crate::utils::gguf_metadata::ContentMetadata;
 use crate::utils::model_config as ModelConfig;
 
 const DEFAULT_MAX_SEQ_LEN: u32 = 4096;

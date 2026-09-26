@@ -1,11 +1,11 @@
 use candle_core::{Device, Result};
 use indexmap::IndexMap;
 use itertools::Itertools;
-use std::{any::Any, collections::HashSet, sync::Arc};
+use std::{collections::HashSet, sync::Arc};
 use tracing::info;
 
 use crate::{
-    kv_cache::RecurrentStateSnapshot,
+    kv_cache::{PagedAuxiliaryPrefixState, RecurrentStateSnapshot},
     paged_attention::{
         block_hash::{BlockHash, MultiModalFeature, MultimodalKind},
         block_pool::{PrefixBlockRetention, PrefixBlockRetentionLease},
@@ -185,11 +185,6 @@ pub struct PrefixCacheManagerV2 {
     n_on_device: usize,
     no_prefix_cache: bool,
     has_paged_attention: bool,
-}
-
-pub trait PagedAuxiliaryPrefixState: Any + Send + Sync {
-    fn as_any(&self) -> &dyn Any;
-    fn bytes(&self) -> usize;
 }
 
 #[derive(Clone)]

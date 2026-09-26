@@ -1,7 +1,10 @@
+use std::sync::atomic::AtomicBool;
+
 use candle_core::{Device, DeviceLocation};
 use tracing_subscriber::EnvFilter;
 
-use crate::DEBUG;
+/// `true` if `INFERENCE_RS_DEBUG=1`
+pub(crate) static DEBUG: AtomicBool = AtomicBool::new(false);
 
 static LOGGER: std::sync::OnceLock<()> = std::sync::OnceLock::new();
 

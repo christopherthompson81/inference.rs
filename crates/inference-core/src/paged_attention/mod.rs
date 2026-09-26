@@ -11,6 +11,7 @@ mod cache_engine;
 mod config;
 /// Encoder output cache for multimodal models (vision/audio encoder outputs).
 pub mod encoder_cache;
+pub(crate) mod input_metadata;
 /// KV Cache Manager: high-level block allocation, prefix cache lookups, per-request tracking.
 pub mod kv_cache_manager;
 mod layers;
@@ -18,7 +19,6 @@ pub(crate) mod mm_prefix;
 #[cfg(any(all(feature = "cuda", target_family = "unix"), feature = "metal"))]
 pub(crate) mod plan;
 mod scales;
-mod scheduler;
 #[cfg(any(
     test,
     all(feature = "cuda", feature = "flash-attn", target_family = "unix")
@@ -32,12 +32,10 @@ use candle_core::{DType, Device};
 pub use config::{
     HybridPagedKvCacheConfig, KvCacheLayout, KvCacheTopology, ModelConfigLike, ModelConfigMetadata,
 };
+pub use input_metadata::PagedAttentionInputMetadata;
 pub use kv_cache_manager::KVCacheManager;
 pub use layers::PagedAttention;
 pub use scales::{load_fp8_attention_scales, Fp8AttentionScales};
-pub use scheduler::{
-    PagedAttentionScheduler, PagedAttentionSchedulerConfig, PagedAttentionSchedulerOutput,
-};
 
 use crate::MemoryUsage;
 use tracing::info;

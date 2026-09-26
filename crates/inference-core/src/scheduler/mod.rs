@@ -1,16 +1,19 @@
 mod default_scheduler;
+mod paged_scheduler;
 
 use std::sync::Arc;
 
 pub use default_scheduler::{DefaultScheduler, DefaultSchedulerMethod, DefaultSchedulerOutput};
+pub use paged_scheduler::{
+    PagedAttentionScheduler, PagedAttentionSchedulerConfig, PagedAttentionSchedulerOutput,
+};
 use tokio::sync::Mutex;
 
 use crate::{
     engine::IntervalLogger,
     paged_attention::{
         block_hash::{BlockHash, MultimodalKind},
-        CacheConfig, KVCacheManager, PagedAttentionScheduler, PagedAttentionSchedulerConfig,
-        PagedAttentionSchedulerOutput,
+        CacheConfig, KVCacheManager,
     },
     sequence::Sequence,
     speculative::SpeculativePrefixCheckpointPolicy,

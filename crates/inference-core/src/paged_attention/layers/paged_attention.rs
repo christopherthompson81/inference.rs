@@ -1,3 +1,6 @@
+use crate::attention::FlashKMeta;
+use crate::attention::FlashParams;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{collections::HashMap, sync::Once};
 
 use candle_core::{DType, Device, DeviceLocation, Result, Tensor};
@@ -26,9 +29,6 @@ use crate::{
             GatherPrefillWorkspaceRequest, PrefixPrefillPlan, PrefixPrefillPlanInput,
         },
         AttentionBackendKind, Fp8AttentionScales, _PAD_SLOT_ID,
-    },
-    pipeline::text_models_inputs_processor::{
-        FlashKMeta, FlashParams, PagedAttentionInputMetadata,
     },
 };
 

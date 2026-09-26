@@ -22,11 +22,13 @@ use inference_quant::{
 };
 use serde::Deserialize;
 
-use crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState;
+use crate::kv_cache::PagedAuxiliaryPrefixState;
 use crate::layers::{yarn_inv_freq_and_attention_factor, RmsNorm, YarnRopeConfig};
 use crate::speculative::{MtpConfig, MtpDraftSamplingMethod, SpeculativePrefixReplay};
 use crate::utils::varbuilder_utils::{from_mmaped_safetensors, DeviceForLoadTensor};
 
+#[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
+use crate::cuda::phase_timer::CudaPhaseTimer;
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
 use crate::paged_attention::windowed_pool::{
     WindowedKvBatch, WindowedKvBatchTensors, WindowedKvCheckpoint, WindowedKvPool,
@@ -37,7 +39,6 @@ use crate::pipeline::cuda_graph::{
     record_cuda_graph_dispatch, record_cuda_graph_evictions, record_cuda_graph_resident_entries,
     take_cuda_graph_capacity_eviction, CudaGraphComponent, CudaGraphDispatchMode,
     CudaGraphDispatchReason, CudaGraphEvent, CudaGraphEventGuard, CudaGraphEvictionReason,
-    CudaPhaseTimer,
 };
 
 const DEFAULT_BLOCK_SIZE: usize = 16;

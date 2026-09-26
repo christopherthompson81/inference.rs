@@ -3,8 +3,8 @@ use candle_core::{Result, Tensor};
 #[cfg(any(feature = "flash-attn", feature = "flash-attn-v3"))]
 use crate::attention::sliding_window_left;
 #[cfg(any(feature = "flash-attn", feature = "flash-attn-v3"))]
-use crate::pipeline::text_models_inputs_processor::FlashKMeta;
-use crate::{attention::SdpaParams, pipeline::text_models_inputs_processor::FlashParams};
+use crate::attention::FlashKMeta;
+use crate::attention::{FlashParams, SdpaParams};
 
 pub(crate) fn flash_backend_supports(head_dim: usize, has_softcap: bool) -> bool {
     let head_dim_supported = if cfg!(feature = "flash-attn") {

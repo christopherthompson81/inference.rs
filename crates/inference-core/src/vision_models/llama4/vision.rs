@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashParams;
 use std::sync::Arc;
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
@@ -11,7 +12,7 @@ use crate::{
     attention::{AttentionMask, SdpaParams},
     layers::{layer_norm, linear_no_bias, Activation, Sdpa},
     ops::RepeatInterleaveOp,
-    pipeline::{text_models_inputs_processor::FlashParams, IsqModel},
+    pipeline::IsqModel,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 

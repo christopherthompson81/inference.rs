@@ -1,6 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use crate::layers::masker::CausalMaskConfig;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{ops::Range, sync::Arc};
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
@@ -13,11 +14,13 @@ use crate::{
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::masker::PastKvLenCache,
-    layers::{embedding_with_legacy_tied_uqff, CausalMasker, Llama3RopeSpec, Llama3RotaryEmbedding, RmsNorm, Sdpa},
+    layers::{
+        embedding_with_legacy_tied_uqff, CausalMasker, Llama3RopeSpec, Llama3RotaryEmbedding,
+        RmsNorm, Sdpa,
+    },
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
-        text_models_inputs_processor::PagedAttentionInputMetadata, EitherCache, IsqModel, KvCache,
-        ModelForwardContext, NormalCache, NormalLoadingMetadata,
+        EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalLoadingMetadata,
     },
     utils::unvarbuilder::UnVarBuilder,
 };

@@ -19,7 +19,7 @@ use hf_hub::{
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{trace, warn};
 
-use crate::utils::tokens::get_token;
+use crate::pipeline::tokens::get_token;
 
 /// Env variable that, when set to a truthy value, disables all network calls
 /// to the Hugging Face Hub. Only cached files are used.

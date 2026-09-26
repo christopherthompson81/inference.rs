@@ -1,12 +1,11 @@
+use crate::attention::FlashParams;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use candle_core::{Result, Tensor};
 
 use crate::{
     attention::{AttentionMask, Sdpa, SdpaParams},
     paged_attention::PagedAttention,
-    pipeline::{
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        KvCache,
-    },
+    pipeline::KvCache,
 };
 
 /// Per-layer attention routing: paged attention when the model has it, else SDPA over the layer's KV cache.

@@ -1,5 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashParams;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -13,6 +15,7 @@ use inference_quant::{
 };
 
 use super::config::{LayerType, TextConfig};
+use crate::gdn::RecurrentBatchKind;
 use crate::{
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
@@ -28,11 +31,7 @@ use crate::{
     paged_attention::{
         load_fp8_attention_scales, AttentionImplementation, ModelConfigMetadata, PagedAttention,
     },
-    pipeline::{
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, KvCache, ModelForwardContext, NormalLoadingMetadata,
-        RecurrentBatchKind,
-    },
+    pipeline::{EitherCache, IsqModel, KvCache, ModelForwardContext, NormalLoadingMetadata},
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
     vision_models::qwen3_5::packed_gdn::{forward_packed_gdn, packed_gdn_layout},
 };

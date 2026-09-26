@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashParams;
 use std::{ops::Mul, sync::Arc};
 
 use candle_core::{DType, Device, Result, Tensor, D};
@@ -11,7 +12,7 @@ use inference_quant::{
 use crate::{
     attention::{AttentionMask, SdpaParams},
     layers::{conv2d_no_bias, dense_embedding, layer_norm, GetFloatInfo, Sdpa},
-    pipeline::{text_models_inputs_processor::FlashParams, IsqModel},
+    pipeline::IsqModel,
     utils::unvarbuilder::UnVarBuilder,
 };
 

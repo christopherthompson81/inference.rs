@@ -1,3 +1,4 @@
+use crate::attention::FlashParams;
 use std::{
     fmt::{self, Debug, Display},
     path::PathBuf,
@@ -19,7 +20,7 @@ use crate::{
     amoe::AnyMoeBaseModelMixin,
     device_map::DeviceMapper,
     paged_attention::{AttentionImplementation, ModelConfigLike, ModelConfigMetadata},
-    pipeline::{isq::IsqModelLoader, text_models_inputs_processor::FlashParams, IsqModel},
+    pipeline::{isq::IsqModelLoader, IsqModel},
     utils::varbuilder_utils::DeviceForLoadTensor,
 };
 use anyhow::Result;

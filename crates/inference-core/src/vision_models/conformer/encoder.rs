@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashParams;
 use std::sync::Arc;
 
 use candle_core::{DType, IndexOp, Result, Tensor, D};
@@ -9,7 +10,6 @@ use inference_quant::{Convolution, QuantMethod, ShardedVarBuilder};
 use crate::{
     attention::{AttentionMask, SdpaParams},
     layers::{self, Activation, Sdpa},
-    pipeline::text_models_inputs_processor::FlashParams,
     vision_models::conformer::{
         nemo::NemoConvSubsampling,
         pos_embed::{AbsolutePositionalEncoding, T5RelativeAttentionLogitBias},

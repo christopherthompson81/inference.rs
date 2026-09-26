@@ -2,6 +2,7 @@
 
 // This implementation is based on:
 // https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/blob/main/modeling_phi3.py
+use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -9,9 +10,7 @@ use crate::{
     layers::{self, Activation, Sdpa},
     lora::{linear_no_bias, LinearLayerLike, LoraConfig, Ordering},
     paged_attention::ModelConfigMetadata,
-    pipeline::{
-        text_models_inputs_processor::FlashParams, EitherCache, IsqModel, NormalLoadingMetadata,
-    },
+    pipeline::{EitherCache, IsqModel, NormalLoadingMetadata},
     utils::progress::NiceProgressBar,
 };
 use candle_core::{DType, Device, Module, Result, Tensor, D};

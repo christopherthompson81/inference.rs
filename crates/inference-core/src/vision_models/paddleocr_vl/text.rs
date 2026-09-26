@@ -1,12 +1,13 @@
 //! ERNIE-4.5-0.3B decoder (transformers `PaddleOCR*` text classes) with chunked 3D mrope.
 
+use crate::attention::FlashParams;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::sync::Arc;
 
 use super::config::TextConfig;
 use crate::attention::{AttentionMask, Sdpa, SdpaParams};
 use crate::device_map::DeviceMapper;
 use crate::paged_attention::{AttentionImplementation, PagedAttention};
-use crate::pipeline::text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata};
 use crate::pipeline::KvCache as EngineKvCache;
 use crate::utils::unvarbuilder::UnVarBuilder;
 use candle_core::{DType, Device, Result, Tensor, D};

@@ -4617,7 +4617,7 @@ pub fn speculative_transition_commit_batched_cuda(
         }
 
         let cuda_stream = device.as_cuda_device()?.cuda_stream();
-        let phase_timer = crate::pipeline::cuda_graph::CudaPhaseTimer::start(&cuda_stream)?;
+        let phase_timer = crate::cuda::phase_timer::CudaPhaseTimer::start(&cuda_stream)?;
         let mut pointer_segments = (0..6)
             .map(|_| Vec::with_capacity(layers.len()))
             .collect::<Vec<_>>();
@@ -4995,7 +4995,7 @@ pub fn speculative_transition_stage_batched_cuda(
             &cuda_stream,
             "destination_slots",
         )?;
-        let phase_timer = crate::pipeline::cuda_graph::CudaPhaseTimer::start(&cuda_stream)?;
+        let phase_timer = crate::cuda::phase_timer::CudaPhaseTimer::start(&cuda_stream)?;
         unsafe {
             crate::cuda::ffi::gdn_speculative_transition_stage_batched(
                 pointer_table_ptr as *const u64,
@@ -5433,7 +5433,7 @@ pub fn pending_transition_apply_batched_cuda(apply: GdnPendingTransitionApply<'_
             &cuda_stream,
             "active_slots",
         )?;
-        let phase_timer = crate::pipeline::cuda_graph::CudaPhaseTimer::start(&cuda_stream)?;
+        let phase_timer = crate::cuda::phase_timer::CudaPhaseTimer::start(&cuda_stream)?;
         unsafe {
             crate::cuda::ffi::gdn_pending_transition_apply_batched(
                 pointer_table_ptr as *const u64,

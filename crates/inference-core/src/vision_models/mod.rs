@@ -1,3 +1,5 @@
+use crate::attention::FlashParams;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{any::Any, sync::Arc};
 
 use candle_core::{Result, Tensor};
@@ -40,10 +42,7 @@ pub(crate) mod qwen3_vl_moe;
 pub(crate) mod siglip;
 pub(crate) mod voxtral;
 
-use crate::pipeline::{
-    text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-    RecurrentBatchKind,
-};
+use crate::gdn::RecurrentBatchKind;
 
 pub struct ModelInputs {
     pub input_ids: Tensor,
@@ -210,9 +209,7 @@ pub(crate) fn text_decode_position_ids_from_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::{
-        text_models_inputs_processor::FlashParams, ForwardCache, ModelForwardContext,
-    };
+    use crate::pipeline::{ForwardCache, ModelForwardContext};
     use candle_core::IndexOp;
 
     #[test]

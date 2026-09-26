@@ -1,3 +1,5 @@
+use crate::attention::FlashParams;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{
     fs,
     path::Path,
@@ -15,7 +17,6 @@ use crate::{
     device_map::DeviceMapper,
     layers::{Activation, RotaryEmbedding},
     paged_attention::PagedAttention,
-    pipeline::text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
     sequence::Sequence,
     speculative::{
         MtpConfig, SpeculativeKvCache, SpeculativeProposal, SpeculativeProposalBatch,

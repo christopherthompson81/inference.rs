@@ -15,6 +15,8 @@ pub(crate) mod indexed_copy;
 pub(crate) mod input_packing;
 pub mod moe;
 #[cfg(feature = "cuda")]
+pub(crate) mod phase_timer;
+#[cfg(feature = "cuda")]
 pub(crate) mod preload;
 #[cfg(feature = "cuda")]
 pub(crate) mod speculative_rejection;

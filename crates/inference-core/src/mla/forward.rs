@@ -1,13 +1,12 @@
 //! MLA forward pass functions for decode and cache operations.
 
+use crate::attention::FlashParams;
+use crate::paged_attention::PagedAttentionInputMetadata;
 #[cfg(any(all(feature = "cuda", target_family = "unix"), test))]
 use candle_core::D;
 use candle_core::{Device, Result, Tensor};
 
-use crate::{
-    attention::{AttentionMask, SdpaParams},
-    pipeline::text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-};
+use crate::attention::{AttentionMask, SdpaParams};
 
 use super::{MlaKvBProjection, MlaWeights};
 

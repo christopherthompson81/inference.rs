@@ -1,3 +1,5 @@
+use crate::attention::FlashParams;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::layers::masker::CausalMaskConfig;
@@ -24,10 +26,8 @@ use crate::{
         PagedAttention,
     },
     pipeline::{
-        extract_logits,
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, KvCache, ModelForwardContext, MultimodalModel, NormalCache,
-        NormalCacheType, NormalLoadingMetadata,
+        extract_logits, EitherCache, IsqModel, KvCache, ModelForwardContext, MultimodalModel,
+        NormalCache, NormalCacheType, NormalLoadingMetadata,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };

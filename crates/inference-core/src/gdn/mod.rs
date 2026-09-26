@@ -20,3 +20,10 @@ pub use layer::{
 };
 pub(crate) use packed::{try_forward_grouped_packed_gdn, PackedGdnLayout};
 pub use weights::GdnInputProjectionKind;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RecurrentBatchKind {
+    Prefill,
+    Decode,
+    SpeculativeDecode,
+}

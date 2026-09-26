@@ -1,6 +1,8 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashParams;
 use crate::layers::masker::{BidirectionalMasker, CausalMaskConfig};
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{
     collections::HashMap,
     sync::{
@@ -30,10 +32,8 @@ use crate::{
         KvCacheLayout, KvCacheTopology, ModelConfigLike, ModelConfigMetadata, PagedAttention,
     },
     pipeline::{
-        extract_logits,
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, KvCache, ModelForwardContext, MultimodalModel, NormalCache,
-        NormalCacheType, NormalLoadingMetadata,
+        extract_logits, EitherCache, IsqModel, KvCache, ModelForwardContext, MultimodalModel,
+        NormalCache, NormalCacheType, NormalLoadingMetadata,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };

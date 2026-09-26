@@ -1,0 +1,255 @@
+#[doc(hidden)]
+#[macro_export]
+macro_rules! handle_seq_error {
+    ($fallible:expr, $response:expr) => {
+        match $fallible {
+            Ok(v) => v,
+            Err(e) => {
+                use $crate::response::Response;
+                if let Err(_) = $response.send(Response::InternalError(e.into())).await {
+                    tracing::warn!("Receiver disconnected");
+                }
+                return;
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! handle_request_error {
+    ($fallible:expr, $response:expr) => {
+        match $fallible {
+            Ok(v) => v,
+            Err(e) => {
+                use $crate::response::Response;
+                if $response
+                    .send(Response::ValidationError(e.into()))
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Receiver disconnected");
+                }
+                return;
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! handle_seq_error_ok {
+    ($fallible:expr, $response:expr) => {
+        match $fallible {
+            Ok(v) => v,
+            Err(e) => {
+                use $crate::response::Response;
+                if let Err(_) = $response.send(Response::InternalError(e.into())).await {
+                    tracing::warn!("Receiver disconnected");
+                }
+                return Ok(());
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! handle_seq_error_stateaware_ok {
+    ($fallible:expr, $seq:expr) => {
+        match $fallible {
+            Ok(v) => v,
+            Err(e) => {
+                use $crate::response::Response;
+                use $crate::sequence::SequenceState;
+                if let Err(_) = $seq
+                    .responder()
+                    .send(Response::InternalError(e.into()))
+                    .await
+                {
+                    tracing::warn!("Receiver disconnected");
+                }
+                $seq.set_state(SequenceState::Error);
+                return Ok(());
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! handle_pipeline_forward_error {
+    ($stage: tt, $fallible:expr, $seq_slice:expr, $pipeline:expr, $label:tt, $prefix_cacher:expr) => {
+        match $fallible {
+            Ok(v) => v,
+            Err(e) => {
+                // Auto-retry on iOS Metal background GPU error: when the iOS app
+                // goes to background, Metal rejects command buffers. We detect this,
+                // reset cache, sleep, and let the engine loop retry. Sequences stay
+                // in the scheduler (still in Running state) and are re-scheduled.
+                #[cfg(feature = "metal")]
+                {
+                    let err_str = e.to_string();
+                    if err_str.contains("Insufficient Permission")
+                        || err_str.contains("BackgroundExecutionNotPermitted")
+                    {
+                        tracing::warn!(
+                            "Metal GPU background error detected (iOS app likely in background). \
+                             Pausing 1s before retry..."
+                        );
+                        {
+                            let p = get_mut_arcmutex!($pipeline);
+                            if let Err(reset_err) =
+                                p.set_none_cache($seq_slice, true, true, false)
+                            {
+                                tracing::error!("Failed to reset model cache: {reset_err}");
+                            }
+                        }
+                        get_mut_arcmutex!($prefix_cacher).evict_all_caches().unwrap();
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                        continue $label;
+                    }
+                }
+
+                let (tokenizer, pipeline_name) = {
+                    let pipeline = get_mut_arcmutex!($pipeline);
+                    let pipeline_name = pipeline.name();
+                    let tokenizer = pipeline.tokenizer();
+                    (tokenizer, pipeline_name)
+                };
+                use $crate::response::Response;
+                use $crate::sequence::SequenceState;
+                use $crate::response::SYSTEM_FINGERPRINT;
+                use tracing::error;
+                error!("{} - Model failed with error: {:?}", $stage, &e);
+                for seq in $seq_slice.iter_mut() {
+                    // Step 1: Add all choices to groups
+                    let start = seq.prompt_tokens().min(seq.get_toks().len());
+                    let res = match &tokenizer {
+                        Some(tok) => match tok.decode(&seq.get_toks()[start..], false) {
+                            Ok(t) => t,
+                            Err(_) => "".to_string(),
+                        },
+                        None => "".to_string(),
+                    };
+
+                    if seq.get_mut_group().is_chat {
+                        let choice = Choice {
+                            finish_reason: "error".to_string(),
+                            stop_sequence: None,
+                            index: seq.get_response_index(),
+                            message: ResponseMessage {
+                                content: Some(res),
+                                role: "assistant".to_string(),
+                                tool_calls: None,
+                                reasoning_content: None,
+                            },
+                            logprobs: None,
+                        };
+                        seq.add_choice_to_group(choice);
+                    } else {
+                        let choice = CompletionChoice {
+                            finish_reason: "error".to_string(),
+                            index: seq.get_response_index(),
+                            text: res,
+                            logprobs: None,
+                        };
+                        seq.add_completion_choice_to_group(choice);
+                    }
+                }
+                for seq in $seq_slice.iter_mut() {
+                    // Step 2: Respond with all groups
+                    let group = seq.get_mut_group();
+
+                    if group.is_chat {
+                        let partial_completion_response = ChatCompletionResponse {
+                            id: seq.id().to_string(),
+                            choices: group.get_choices().to_vec(),
+                            created: seq.creation_time(),
+                            model: pipeline_name.clone(),
+                            system_fingerprint: SYSTEM_FINGERPRINT.to_string(),
+                            object: "chat.completion".to_string(),
+                            usage: group.get_usage(),
+                            adapter_generation: seq
+                                .adapter_generation()
+                                .map(|generation| generation.to_string()),
+                            agentic_tool_calls: None,
+                            files: None,
+                            session_id: None,
+                        };
+
+                        if let Err(send_err) = seq.responder()
+                            .send(Response::ModelError(
+                                e.to_string(),
+                                partial_completion_response,
+                            ))
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to send chat model error to client for seq {}: {} (client likely disconnected)",
+                                seq.id(),
+                                send_err
+                            );
+                        }
+                    } else {
+                        let partial_completion_response = CompletionResponse {
+                            id: seq.id().to_string(),
+                            choices: group.get_completion_choices().to_vec(),
+                            created: seq.creation_time(),
+                            model: pipeline_name.clone(),
+                            system_fingerprint: SYSTEM_FINGERPRINT.to_string(),
+                            object: "text_completion".to_string(),
+                            usage: group.get_usage(),
+                            adapter_generation: seq
+                                .adapter_generation()
+                                .map(|generation| generation.to_string()),
+                        };
+
+                        if let Err(send_err) = seq.responder()
+                            .send(Response::CompletionModelError(
+                                e.to_string(),
+                                partial_completion_response,
+                            ))
+                            .await
+                        {
+                            tracing::warn!(
+                                "Failed to send completion model error to client for seq {}: {} (client likely disconnected)",
+                                seq.id(),
+                                send_err
+                            );
+                        }
+                    }
+                }
+                for seq in $seq_slice.iter_mut() {
+                    // Step 3: Set state - This cannot be done in Step 2 as `group` is locking the refcell
+                    seq.set_state(SequenceState::Error);
+                }
+
+                let p = get_mut_arcmutex!($pipeline);
+                // Also reset non granular state because:
+                // - The sequence is gone
+                // - We should reset the state then, including draft.
+                if let Err(reset_err) = p.set_none_cache($seq_slice, true, true, false) {
+                    tracing::error!("Failed to reset model cache: {reset_err}");
+                }
+                get_mut_arcmutex!($prefix_cacher).evict_all_caches().unwrap();
+
+                continue $label;
+            }
+        }
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! get_mut_group {
+    ($this:expr) => {
+        loop {
+            if let Ok(inner) = $this.group.try_lock() {
+                break inner;
+            }
+            // Yield to allow other threads to make progress and release the lock.
+            std::thread::yield_now();
+        }
+    };
+}

@@ -1819,7 +1819,6 @@ impl Gemma3RotaryEmbedding {
         self.0.get_cos_sin()
     }
 
-
     pub fn forward(&self, q: &Tensor, k: &Tensor, positions: &Tensor) -> Result<(Tensor, Tensor)> {
         self.0.forward(q, k, positions)
     }

@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashParams;
 use std::sync::Arc;
 
 use candle_core::{DType, Device, Module, Result, Tensor};
@@ -14,9 +15,7 @@ use crate::{
     layers::masker::BidirectionalMasker,
     layers::{embedding, Gemma3RotaryEmbedding, GemmaRmsNorm, Mlp, RotaryEmbedding, Sdpa},
     paged_attention::AttentionImplementation,
-    pipeline::{
-        text_models_inputs_processor::FlashParams, EmbeddingModel, IsqModel, NormalLoadingMetadata,
-    },
+    pipeline::{EmbeddingModel, IsqModel, NormalLoadingMetadata},
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 use inference_quant::QuantizedConfig;

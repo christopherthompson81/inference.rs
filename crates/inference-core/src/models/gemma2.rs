@@ -1,6 +1,8 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
+use crate::paged_attention::PagedAttentionInputMetadata;
 use std::sync::Arc;
 
 use crate::serde_default_fn;
@@ -17,7 +19,6 @@ use crate::{
     layers::{embedding, Activation, CausalMasker, GemmaRmsNorm, Mlp, RotaryEmbedding, Sdpa},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
         EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalCacheType,
         NormalLoadingMetadata, NormalModel,
     },

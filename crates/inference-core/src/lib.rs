@@ -23,7 +23,7 @@ use std::{
     fs::OpenOptions,
     io::Write,
     path::PathBuf,
-    sync::{atomic::AtomicBool, Arc, Mutex, RwLock},
+    sync::{Arc, Mutex, RwLock},
     thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -108,6 +108,7 @@ mod models;
 mod paged_attention;
 mod perf_flags;
 mod pipeline;
+mod prefix_cacher;
 pub mod reasoning_parsers;
 pub mod remote_fetch;
 mod request;
@@ -117,6 +118,7 @@ mod sampler;
 mod scheduler;
 pub mod selection;
 mod sequence;
+mod sequence_macros;
 pub mod speculative;
 mod speech_models;
 mod tools;
@@ -242,8 +244,6 @@ pub use utils::{paged_attn_supported, using_flash_attn};
 // re-export llguidance for easier LlguidanceGrammar construction
 pub use llguidance;
 
-/// `true` if `INFERENCE_RS_DEBUG=1`
-pub(crate) static DEBUG: AtomicBool = AtomicBool::new(false);
 pub static GLOBAL_HF_CACHE: OnceLock<Cache> = OnceLock::new();
 
 /// Set the process-wide Hugging Face cache path before model discovery.

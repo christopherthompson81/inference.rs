@@ -5,10 +5,7 @@ use serde::{Deserialize, Serialize};
 
 use super::rope::Phi4MMRopeScalingConfig;
 
-use crate::{
-    layers::Activation,
-    vision_models::conformer::config::ConformerEncoderConfig,
-};
+use crate::{layers::Activation, vision_models::conformer::config::ConformerEncoderConfig};
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct Phi4MMImageEmbedConfig {

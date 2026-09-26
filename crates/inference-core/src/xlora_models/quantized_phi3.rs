@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 
+use crate::attention::FlashParams;
 use crate::attention::{AttentionMask, SdpaParams};
 use crate::device_map::{DeviceMappedMask, DeviceMapper};
 use crate::gguf::Content;
@@ -15,7 +16,6 @@ use crate::lora::Merge;
 use crate::lora::Ordering;
 use crate::lora::QLoraLinear;
 use crate::pipeline::extract_logits;
-use crate::pipeline::text_models_inputs_processor::FlashParams;
 use crate::pipeline::EitherCache;
 use crate::utils::progress::{new_multi_progress, NiceProgressBar};
 use candle_core::quantized::QMatMul;
@@ -32,7 +32,7 @@ use super::Cache;
 use super::NonGranularState;
 use super::ScalingsMaker;
 use super::XLoraConfig;
-use crate::utils::gguf_metadata::ContentMetadata;
+use crate::gguf::metadata::ContentMetadata;
 use crate::utils::model_config as ModelConfig;
 
 const SUPPORTED_LAYERS: [&str; 5] = [

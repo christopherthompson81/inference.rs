@@ -9,8 +9,8 @@ use std::{
 use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::Module;
 use inference_quant::{QuantMethod, ReplicatedLayer, ShardedVarBuilder};
-use rope::Phi4MMRotaryEmbedding;
 use mm_embedding::{InputMode, Phi4MMImageAudioEmbedding, Phi4MMPackedInputs};
+use rope::Phi4MMRotaryEmbedding;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
@@ -31,10 +31,10 @@ use crate::{
 
 mod audio_embedding;
 mod config;
-mod rope;
 mod image_embedding;
 pub(crate) mod inputs_processor;
 mod mm_embedding;
+mod rope;
 
 pub(crate) use config::Phi4MMConfig;
 pub(crate) use image_embedding::PHI4_MM_VISION_CFG;

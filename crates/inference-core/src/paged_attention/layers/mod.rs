@@ -7,12 +7,9 @@ pub use paged_attention::PagedAttention;
 pub mod paged_attention {
     use candle_core::{Device, Result, Tensor};
 
+    use crate::attention::{AttentionMask, FlashParams, SdpaParams};
     use crate::paged_attention::Fp8AttentionScales;
-    use crate::pipeline::text_models_inputs_processor::PagedAttentionInputMetadata;
-    use crate::{
-        attention::{AttentionMask, SdpaParams},
-        pipeline::text_models_inputs_processor::FlashParams,
-    };
+    use crate::paged_attention::PagedAttentionInputMetadata;
 
     #[allow(dead_code)]
     pub struct PagedAttention {

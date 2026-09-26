@@ -8,8 +8,8 @@ use crate::cuda::gdn::{
     FusedDecodeRecurrence, FusedPrefillOutput, FusedPrefillRecurrence, GdnStateSlots,
     RecurrenceInputs,
 };
+use crate::gdn::RecurrentBatchKind;
 use crate::kv_cache::RecurrentStateLayout;
-use crate::pipeline::RecurrentBatchKind;
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
 const RECURRENCE_CHUNK_THRESHOLD: usize = 64;

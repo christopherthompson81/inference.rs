@@ -1,3 +1,4 @@
+use crate::attention::FlashParams;
 use std::sync::Arc;
 
 use candle_core::{DType, Device, Result, Tensor};
@@ -7,7 +8,6 @@ use inference_quant::{QuantMethod, ShardedVarBuilder};
 use crate::{
     attention::{AttentionMask, SdpaParams},
     layers::{dense_embedding, layer_norm, linear, Activation, CausalMasker, Sdpa},
-    pipeline::text_models_inputs_processor::FlashParams,
     utils::unvarbuilder::UnVarBuilder,
 };
 

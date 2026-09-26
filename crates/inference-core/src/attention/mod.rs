@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::{attention::backends::cpu, pipeline::text_models_inputs_processor::FlashParams};
+use crate::attention::backends::cpu;
 
 use candle_core::{DType, Device, Result, Tensor};
 
@@ -49,6 +49,9 @@ impl AttentionMask {
 
 mod backends;
 mod dispatch;
+pub(crate) mod flash_params;
+
+pub use flash_params::{FlashKMeta, FlashParams};
 
 pub(crate) use dispatch::AttentionDispatch;
 

@@ -2,7 +2,7 @@ use std::{collections::HashMap, ops::Range};
 
 use candle_core::{DType, Device, DeviceLocation, Result, Tensor};
 
-use crate::pipeline::RecurrentBatchKind;
+use crate::gdn::RecurrentBatchKind;
 
 use super::{GatedDeltaNet, GdnLayerCache};
 

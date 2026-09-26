@@ -4,9 +4,9 @@ use candle_core::{DType, Result, Tensor};
 use rand::Rng;
 use rand_isaac::Isaac64Rng;
 
-use crate::kv_cache::prefix_cacher::PrefixCacheManagerV2;
 use crate::pipeline::sampling::{finish_or_add_toks_to_seq, sample_sequence};
 use crate::pipeline::Pipeline;
+use crate::prefix_cacher::PrefixCacheManagerV2;
 #[cfg(feature = "cuda")]
 use crate::sampler::CudaSpeculativeSamplingPlan;
 use crate::sampler::{Logprobs, Sampler};

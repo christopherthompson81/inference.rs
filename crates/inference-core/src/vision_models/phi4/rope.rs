@@ -158,4 +158,3 @@ impl Phi4MMRotaryEmbedding {
         apply_rotary_qk(q, k, cos, sin, positions, true)
     }
 }
-

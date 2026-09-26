@@ -9,6 +9,7 @@ use super::{
 };
 use crate::device_map::{self, DeviceMapper};
 use crate::distributed::WorkerTransferData;
+use crate::gguf::metadata::{ContentConfig, GgufDeviceMapLoaderInner};
 use crate::gguf::{
     base_model::infer_hf_base_model_id,
     convert_gguf_metadata_to_hf_tokenizer,
@@ -34,9 +35,8 @@ use crate::gguf::{
     validate_external_gguf_tokenizer, GgufTokenizerConversion,
 };
 use crate::gguf::{Content, GGUFArchitecture};
-use crate::kv_cache::prefix_cacher::PrefixCacheManagerV2;
-use crate::kv_cache::FullCacheManager;
 use crate::lora::Ordering;
+use crate::pipeline::cache_manager::FullCacheManager;
 use crate::pipeline::chat_template::{calculate_eos_tokens, BeginEndUnkPadTok, GenerationConfig};
 use crate::pipeline::hf::{build_api, get_file, list_repo_files};
 use crate::pipeline::loaders::{stamp_qk_rope_layout, DeviceMappedModelLoader};
@@ -45,13 +45,13 @@ use crate::pipeline::multimodal::{
 };
 use crate::pipeline::normal::{NormalLoaderBuilder, NormalSpecificConfig, PreparedNormalSource};
 use crate::pipeline::sampling::sample_and_add_toks;
+use crate::pipeline::tokenizer::get_tokenizer;
 use crate::pipeline::ChatTemplate;
 use crate::pipeline::{get_chat_template, Modalities, SupportedModality};
+use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
-use crate::utils::gguf_metadata::{ContentConfig, GgufDeviceMapLoaderInner};
 use crate::utils::model_config as ModelConfig;
 use crate::utils::progress::ProgressScopeGuard;
-use crate::utils::tokenizer::get_tokenizer;
 use crate::xlora_models::NonGranularState;
 use crate::xlora_models::{XLoraQLlama, XLoraQPhi3};
 use crate::{

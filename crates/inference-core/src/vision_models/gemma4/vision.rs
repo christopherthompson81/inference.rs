@@ -1,6 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use crate::attention::AttentionMask;
+use crate::attention::FlashParams;
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
 use candle_nn::{LayerNorm, LayerNormConfig, Module};
 use inference_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
@@ -9,7 +10,6 @@ use std::sync::Arc;
 use crate::{
     attention::{Sdpa, SdpaParams},
     layers::{Activation, RmsNorm},
-    pipeline::text_models_inputs_processor::FlashParams,
     utils::unvarbuilder::UnVarBuilder,
 };
 

@@ -2,9 +2,9 @@
 //! Uses both an interpolated learned pos table and 2D axial RoPE; the pooling `head.*` is unused.
 
 use super::config::VisionConfig;
+use crate::attention::FlashParams;
 use crate::attention::{AttentionMask, SdpaParams};
 use crate::layers::{layer_norm, linear, Sdpa};
-use crate::pipeline::text_models_inputs_processor::FlashParams;
 use crate::utils::unvarbuilder::UnVarBuilder;
 use candle_core::{Device, Result, Tensor, D};
 use candle_nn::{LayerNorm, Linear, Module};

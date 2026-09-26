@@ -3,8 +3,9 @@ use std::ops::Range;
 use candle_core::{Result, Tensor};
 
 use crate::{
+    gdn::RecurrentBatchKind,
     gdn::{try_forward_grouped_packed_gdn, GatedDeltaNet, GdnLayerCache, PackedGdnLayout},
-    pipeline::{ModelForwardContext, RecurrentBatchKind},
+    pipeline::ModelForwardContext,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

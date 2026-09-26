@@ -2,8 +2,8 @@
 
 use std::{collections::HashMap, sync::atomic::Ordering};
 
-use crate::utils::gguf_metadata::ContentMetadata;
-use crate::DEBUG;
+use crate::gguf::metadata::ContentMetadata;
+use crate::utils::debug::DEBUG;
 use ahash::AHashMap;
 use anyhow::Result;
 use candle_core::quantized::gguf_file::Value;

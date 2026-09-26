@@ -2,6 +2,7 @@
 
 mod text;
 
+use crate::attention::FlashParams;
 use std::sync::{Arc, Mutex};
 
 use candle_core::{DType, Device, Result, Tensor, D};
@@ -19,8 +20,8 @@ use crate::{
         AttentionImplementation, ModelConfigMetadata,
     },
     pipeline::{
-        text_models_inputs_processor::FlashParams, EitherCache, IsqModel, ModelForwardContext,
-        MultimodalModel, NormalLoadingMetadata, NormalModel,
+        EitherCache, IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata,
+        NormalModel,
     },
     utils::unvarbuilder::UnVarBuilder,
     vision_models::multimodal_layout::{

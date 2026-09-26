@@ -3,9 +3,9 @@ use inference_quant::{Comm, QuantMethod, Shard, ShardedVarBuilder};
 use std::sync::Arc;
 
 use crate::device_map::DeviceMapper;
+use crate::gdn::RecurrentBatchKind;
 use crate::kv_cache::{GdnDeferredStateSpec, GdnPendingTransitionSpec};
 use crate::kv_cache::{RecurrentStateLayout, RecurrentStatePool};
-use crate::pipeline::RecurrentBatchKind;
 
 use super::backend;
 use super::cache::GdnLayerCache;
@@ -1106,8 +1106,8 @@ mod tests {
         index_select_rows, shard_out_proj_input, speculative_checkpoint_dims_supported,
         speculative_state_commit_dims_supported, GatedDeltaNet, GdnDims,
     };
+    use crate::gdn::RecurrentBatchKind;
     use crate::kv_cache::RecurrentStateLayout;
-    use crate::pipeline::RecurrentBatchKind;
 
     const PACKED_ASSERT_EPS: f32 = 1e-6;
 
