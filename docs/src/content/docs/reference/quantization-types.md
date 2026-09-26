@@ -157,7 +157,7 @@ and a binary built with `cuda,cutile`. Use BF16 or F16 model dtype. With CUDA 13
 build and runtime environment, load [NVIDIA's Qwen3-14B-NVFP4 checkpoint](https://huggingface.co/nvidia/Qwen3-14B-NVFP4):
 
 ```bash
-cargo install --path inference-cli --features cuda,cutile
+cargo install --path crates/inference-cli --features cuda,cutile
 inference run -m nvidia/Qwen3-14B-NVFP4 --dtype bf16
 ```
 
@@ -171,7 +171,7 @@ cargo run --release -p inference-examples --example nvfp4 --features cuda,cutile
 ```
 
 For a [Python source build](/developer/from-source/#python-wheels), run
-`maturin develop --release --features cuda,cutile` from `inference-pyo3`.
+`maturin develop --release --features cuda,cutile` from `crates/inference-pyo3`.
 
 Dense and MoE projections are supported. Experts within each projection must share a quantization
 scheme, and input-dimension shards must align to 16 weights. NVFP4 creation through ISQ, NVFP4 UQFF

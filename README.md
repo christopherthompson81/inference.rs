@@ -179,7 +179,7 @@ inference doctor
 <details open>
   <summary><b>UI Demo</b></summary>
   <br>
-  <img src="https://raw.githubusercontent.com/EricLBuehler/mistral.rs/master/res/ui.gif" alt="UI Demo" />
+  <img src="docs/assets/ui.gif" alt="UI Demo" />
 </details>
 
 ## What Makes It Fast

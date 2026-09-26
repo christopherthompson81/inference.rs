@@ -51,4 +51,4 @@ async fn main() -> anyhow::Result<()> {
 }
 ```
 
-See the [MCP Client documentation](../docs/MCP/README.md) for more details.
+See the [MCP Client documentation](../../docs/src/content/docs/guides/agents/connect-mcp-server.mdx) for more details.

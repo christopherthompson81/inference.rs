@@ -1,5 +1,5 @@
 docs
 examples
-orderings
+!examples/rust
 scripts
 target

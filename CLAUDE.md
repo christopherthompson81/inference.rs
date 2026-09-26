@@ -24,7 +24,7 @@ cargo build --release --features "cuda flash-attn cudnn"
 cargo build --release --features metal
 
 # Install CLI binary
-cargo install --path inference-cli --features <features>
+cargo install --path crates/inference-cli --features <features>
 ```
 
 ### Testing & Quality

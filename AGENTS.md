@@ -59,7 +59,7 @@ Mistral.rs supports multiple model types and advanced features via dedicated cra
 4. Or build/install only the CLI binary:
    ```bash
    cargo build --release --package inference-cli --features "<features>"
-   cargo install --path inference-cli --features "<features>"
+   cargo install --path crates/inference-cli --features "<features>"
    ```
 
 ## Models

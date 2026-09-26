@@ -49,7 +49,7 @@ cargo install inference-cli --features "cuda nccl flash-attn cudnn"
 From a source checkout:
 
 ```bash
-cargo install --path inference-cli --features "cuda nccl flash-attn cudnn"
+cargo install --path crates/inference-cli --features "cuda nccl flash-attn cudnn"
 ```
 
 In a consumer crate depending on `inference`:

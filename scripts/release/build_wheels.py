@@ -31,8 +31,8 @@ from typing import Optional
 
 SCRIPT_DIR = Path(__file__).parent.resolve()
 REPO_ROOT = SCRIPT_DIR.parent.parent
-PYPROJECT_PATH = REPO_ROOT / "inference-pyo3" / "pyproject.toml"
-CARGO_MANIFEST = REPO_ROOT / "inference-pyo3" / "Cargo.toml"
+PYPROJECT_PATH = REPO_ROOT / "crates" / "inference-pyo3" / "pyproject.toml"
+CARGO_MANIFEST = REPO_ROOT / "crates" / "inference-pyo3" / "Cargo.toml"
 DOCKERFILE_PATH = REPO_ROOT / "docker" / "Dockerfile.manylinux"
 
 # Releases now publish a single `inference_rs` package (CPU on linux/windows, Metal on macOS) via
