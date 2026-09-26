@@ -5,7 +5,7 @@
     clippy::too_many_arguments
 )]
 
-use crate::layers_masker::CausalMaskConfig;
+use crate::layers::masker::CausalMaskConfig;
 use std::sync::Arc;
 
 use candle_core::{DType, Device, Result, Tensor};
@@ -19,8 +19,8 @@ use crate::{
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     get_delta_from_lora_ab,
+    layers::masker::PastKvLenCache,
     layers::{embedding, Activation, CausalMasker, MatMul, RmsNorm, Sdpa},
-    layers_masker::PastKvLenCache,
     models::llama::Config,
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{

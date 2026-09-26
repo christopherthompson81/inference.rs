@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::layers_masker::CausalMaskConfig;
+use crate::layers::masker::CausalMaskConfig;
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::Linear;
 use inference_quant::{
@@ -25,11 +25,11 @@ use crate::{
     kv_cache::{
         HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, RecurrentLayerConfig,
     },
+    layers::masker::PastKvLenCache,
     layers::{
         contains_tensor_or_weight_source, embedding_with_legacy_tied_uqff, linear_no_bias,
         CausalMasker, GemmaRmsNorm, RotaryEmbedding, Sdpa,
     },
-    layers_masker::PastKvLenCache,
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{

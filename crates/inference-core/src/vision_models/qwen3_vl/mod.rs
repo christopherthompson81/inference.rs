@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use crate::attention::AttentionMask;
-use crate::layers_masker::CausalMaskConfig;
+use crate::layers::masker::CausalMaskConfig;
 use std::{
     any::Any,
     collections::HashMap,
@@ -16,8 +16,8 @@ use vision::Qwen3VLVisionModel;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
+    layers::masker::PastKvLenCache,
     layers::CausalMasker,
-    layers_masker::PastKvLenCache,
     paged_attention::{
         block_hash::MultimodalKind,
         encoder_cache::{CacheModality, EncoderCacheBatchLookup, EncoderCacheManager},

@@ -11,7 +11,7 @@ use candle_core::{DType, Device, DeviceLocation, IndexOp, Result, Tensor};
 use std::collections::{HashMap, HashSet};
 
 use super::KvCache;
-use crate::layers_masker::PastKvLenCache;
+use crate::layers::masker::PastKvLenCache;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RecurrentStateSpec {

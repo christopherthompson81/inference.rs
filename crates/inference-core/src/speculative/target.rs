@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use candle_core::{Result, Tensor};
 
-use crate::prefix_cacher::PagedAuxiliaryPrefixState;
+use crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState;
 
 use super::{
     logging::log_attach, SpeculativeAttachInfo, SpeculativeBatchObservation, SpeculativeBatchPlan,

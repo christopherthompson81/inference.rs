@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::layers_masker::CausalMaskConfig;
+use crate::layers::masker::CausalMaskConfig;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -9,8 +9,8 @@ use inference_quant::{QuantMethod, ShardedVarBuilder};
 
 use crate::{
     attention::{AttentionMask, SdpaParams},
+    layers::masker::PastKvLenCache,
     layers::{CausalMasker, RmsNorm, RotaryEmbedding, Sdpa},
-    layers_masker::PastKvLenCache,
     pipeline::{KvCache, NormalCache},
 };
 

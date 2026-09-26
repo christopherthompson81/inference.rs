@@ -11,6 +11,7 @@ use crate::{
 
 mod full_cache;
 mod hybrid_cache;
+pub(crate) mod prefix_cacher;
 mod rotating_cache;
 mod single_cache;
 

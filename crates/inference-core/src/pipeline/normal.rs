@@ -45,6 +45,7 @@ struct CudaDecodeGraphForwardInput<'a> {
     flash_meta: &'a FlashParams,
     recurrent_batch_kind: RecurrentBatchKind,
 }
+use crate::kv_cache::prefix_cacher::PrefixCacheManagerV2;
 use crate::kv_cache::{FullCacheManager, HybridCacheManager, NormalCacheManager};
 use crate::lora::Ordering;
 use crate::paged_attention::{calculate_cache_config, AttentionImplementation, CacheEngine};
@@ -75,7 +76,6 @@ use crate::pipeline::{
     RecurrentMetadata, SupportedModality,
 };
 use crate::pipeline::{ChatTemplate, LocalModelPaths};
-use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::tokenizer::get_tokenizer;
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
@@ -2314,7 +2314,9 @@ impl Pipeline for NormalPipeline {
         &mut self,
         sequence_id: usize,
         cached_tokens: usize,
-    ) -> candle_core::Result<Option<Arc<dyn crate::prefix_cacher::PagedAuxiliaryPrefixState>>> {
+    ) -> candle_core::Result<
+        Option<Arc<dyn crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState>>,
+    > {
         self.model
             .capture_paged_auxiliary_prefix_state(sequence_id, cached_tokens)
     }
@@ -2323,7 +2325,7 @@ impl Pipeline for NormalPipeline {
         &mut self,
         sequence_id: usize,
         cached_tokens: usize,
-        state: &dyn crate::prefix_cacher::PagedAuxiliaryPrefixState,
+        state: &dyn crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState,
     ) -> candle_core::Result<()> {
         self.model
             .restore_paged_auxiliary_prefix_state(sequence_id, cached_tokens, state)

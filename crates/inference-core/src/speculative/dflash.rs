@@ -22,8 +22,8 @@ use inference_quant::{
 };
 use serde::Deserialize;
 
+use crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState;
 use crate::layers::{yarn_inv_freq_and_attention_factor, RmsNorm, YarnRopeConfig};
-use crate::prefix_cacher::PagedAuxiliaryPrefixState;
 use crate::speculative::{MtpConfig, MtpDraftSamplingMethod, SpeculativePrefixReplay};
 use crate::utils::varbuilder_utils::{from_mmaped_safetensors, DeviceForLoadTensor};
 

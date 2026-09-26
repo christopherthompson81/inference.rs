@@ -7,8 +7,8 @@ use super::{
 };
 use crate::device_map::{self, DeviceMapper};
 use crate::distributed::{use_ring, WorkerTransferData};
+use crate::kv_cache::prefix_cacher::PrefixCacheManagerV2;
 use crate::pipeline::{ChatTemplate, EmbeddingModulePaths, Modalities, SupportedModality};
-use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::speech_models::{DiaConfig, DiaPipeline, SpeechGenerationOutput, SpeechLoaderType};
 use crate::utils::progress::ProgressScopeGuard;

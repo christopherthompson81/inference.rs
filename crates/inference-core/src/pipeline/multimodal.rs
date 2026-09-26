@@ -149,6 +149,7 @@ mod speculative_graph_tensor_metadata_tests {
         .is_err());
     }
 }
+use crate::kv_cache::prefix_cacher::PrefixCacheManagerV2;
 use crate::paged_attention::{calculate_cache_config, AttentionImplementation, CacheEngine};
 use crate::pipeline::chat_template::{
     calculate_eos_tokens, BeginEndUnkPadTok, ChatTemplateValue, GenerationConfig,
@@ -176,7 +177,6 @@ use crate::pipeline::{
     get_chat_template, hf::build_api, ChatTemplate, IsqOrganization, LocalModelPaths,
     ModelForwardContext, RecurrentBatchKind, RecurrentMetadata,
 };
-use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::tokenizer::get_tokenizer;
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
@@ -2595,7 +2595,9 @@ impl Pipeline for MultimodalPipeline {
         &mut self,
         sequence_id: usize,
         cached_tokens: usize,
-    ) -> candle_core::Result<Option<Arc<dyn crate::prefix_cacher::PagedAuxiliaryPrefixState>>> {
+    ) -> candle_core::Result<
+        Option<Arc<dyn crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState>>,
+    > {
         self.model
             .capture_paged_auxiliary_prefix_state(sequence_id, cached_tokens)
     }
@@ -2604,7 +2606,7 @@ impl Pipeline for MultimodalPipeline {
         &mut self,
         sequence_id: usize,
         cached_tokens: usize,
-        state: &dyn crate::prefix_cacher::PagedAuxiliaryPrefixState,
+        state: &dyn crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState,
     ) -> candle_core::Result<()> {
         self.model
             .restore_paged_auxiliary_prefix_state(sequence_id, cached_tokens, state)

@@ -23,8 +23,8 @@ use inference_quant::ShardedVarBuilder;
 use crate::attention::AttentionMask;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
+    layers::masker::masked_fill,
     layers::{linear, GetFloatInfo},
-    layers_masker::masked_fill,
     ops::RepeatInterleaveOp,
     paged_attention::{
         encoder_cache::{CacheModality, EncoderCacheManager},

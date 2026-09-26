@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::layers_masker::{BidirectionalMasker, CausalMaskConfig};
+use crate::layers::masker::{BidirectionalMasker, CausalMaskConfig};
 use std::{
     collections::HashMap,
     sync::{

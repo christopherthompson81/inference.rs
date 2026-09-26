@@ -11,8 +11,8 @@ use crate::{
     amoe::{AnyMoeBaseModelMixin, MlpLayer},
     attention::{AttentionMask, SdpaParams},
     device_map::DeviceMapper,
+    layers::masker::BidirectionalMasker,
     layers::{embedding, Gemma3RotaryEmbedding, GemmaRmsNorm, Mlp, RotaryEmbedding, Sdpa},
-    layers_masker::BidirectionalMasker,
     paged_attention::AttentionImplementation,
     pipeline::{
         text_models_inputs_processor::FlashParams, EmbeddingModel, IsqModel, NormalLoadingMetadata,

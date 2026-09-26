@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use crate::attention::AttentionMask;
-use crate::layers_masker::CausalMaskConfig;
+use crate::layers::masker::CausalMaskConfig;
 use std::{
     any::Any,
     sync::{Arc, Mutex},
@@ -13,8 +13,8 @@ use text::Qwen3_5MoeTextModel;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
+    layers::masker::PastKvLenCache,
     layers::CausalMasker,
-    layers_masker::PastKvLenCache,
     paged_attention::{
         encoder_cache::{CacheModality, EncoderCacheManager},
         AttentionImplementation, HybridPagedKvCacheConfig, ModelConfigLike, ModelConfigMetadata,

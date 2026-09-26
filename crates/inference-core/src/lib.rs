@@ -76,11 +76,10 @@ mod engine;
 mod lora;
 mod metal;
 pub use metal::warmup_metal_kernels;
-mod model_loader;
 mod moe;
 mod ops;
 mod video_input;
-pub use model_loader::{
+pub use selection::model_loader::{
     get_auto_device_map_params, get_model_dtype, get_tgt_non_granular_index, LoaderBuilder,
 };
 pub use video_input::{
@@ -91,9 +90,10 @@ mod flashinfer;
 mod kv_cache;
 mod search;
 
-mod model_selected;
-pub use model_selected::ModelSelected;
-pub use toml_selector::{get_toml_selected_model_device_map_params, get_toml_selected_model_dtype};
+pub use selection::model_selected::ModelSelected;
+pub use selection::toml_selector::{
+    get_toml_selected_model_device_map_params, get_toml_selected_model_dtype,
+};
 
 mod amoe;
 mod attention;
@@ -105,16 +105,12 @@ pub mod files;
 mod gdn;
 mod gguf;
 pub mod layers;
-mod layers_masker;
-mod layers_utils;
 pub mod matformer;
 mod mla;
-pub mod model_metadata;
 mod models;
 mod paged_attention;
 mod perf_flags;
 mod pipeline;
-mod prefix_cacher;
 pub mod reasoning_parsers;
 pub mod remote_fetch;
 mod request;
@@ -122,10 +118,10 @@ pub mod resource_plan;
 mod response;
 mod sampler;
 mod scheduler;
+pub mod selection;
 mod sequence;
 pub mod speculative;
 mod speech_models;
-mod toml_selector;
 mod tools;
 mod topology;
 mod utils;
@@ -225,6 +221,7 @@ pub use scheduler::{
     DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_PREFILL_CHUNK_TOKENS,
 };
 pub use search::{SearchCallback, SearchFunctionParameters, SearchResult};
+use selection::toml_selector::{TomlLoaderArgs, TomlSelector};
 use serde::Serialize;
 pub use speculative::{
     reserve_external_mtp_memory, reserve_external_mtp_memory_with_runtime, MtpConfig,
@@ -232,7 +229,6 @@ pub use speculative::{
 };
 pub use speech_models::{utils as speech_utils, SpeechGenerationConfig, SpeechLoaderType};
 use tokio::runtime::Runtime;
-use toml_selector::{TomlLoaderArgs, TomlSelector};
 pub use tools::{
     AllowedToolChoice, AllowedToolsMode, AllowedToolsToolChoice, AllowedToolsToolChoiceType,
     BuiltinToolChoice, BuiltinToolChoiceType, NamedFunctionToolChoice, ToolCallResponse,
@@ -2767,7 +2763,7 @@ impl InferenceRs {
         model_id: &str,
         unloaded_state: UnloadedModelState,
     ) -> Result<(), InferenceRsError> {
-        use crate::model_loader::LoaderBuilder;
+        use crate::selection::model_loader::LoaderBuilder;
 
         info!("Reloading model: {}", model_id);
 

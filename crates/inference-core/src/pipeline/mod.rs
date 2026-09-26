@@ -32,12 +32,12 @@ mod speech;
 pub use super::diffusion_models::DiffusionGenerationParams;
 use crate::amoe::{AnyMoeConfig, AnyMoeExpertType, AnyMoeTrainingInputs, AnyMoeTrainingResult};
 use crate::device_map::DeviceMapper;
-use crate::layers_masker::PastKvLenCache;
+use crate::kv_cache::prefix_cacher::{PagedAuxiliaryPrefixState, PrefixCacheManagerV2};
+use crate::layers::masker::PastKvLenCache;
 use crate::paged_attention::{
     AttentionBackendKind, CacheConfig, CacheEngine, CacheMemoryReservations, MemoryGpuConfig,
     ModelConfigLike,
 };
-use crate::prefix_cacher::{PagedAuxiliaryPrefixState, PrefixCacheManagerV2};
 use crate::IntervalLogger;
 use crate::PagedAttentionConfig;
 pub use amoe::{AnyMoeLoader, AnyMoePipeline};

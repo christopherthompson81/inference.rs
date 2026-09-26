@@ -6,13 +6,13 @@ use hf_hub::{api::sync::ApiRepo, Cache, Repo, RepoType};
 use serde::{Deserialize, Serialize};
 
 use crate::device_map::{DeviceLayerMapMetadata, DeviceMapMetadata};
-use crate::model_loader::{get_auto_device_map_params, get_model_dtype};
 use crate::pipeline::hf::build_api_with_cache;
 use crate::pipeline::{
     AutoDeviceMapParams, AutoDeviceMapQuantization, AutoEmbeddingLoader, AutoMultimodalLoader,
     AutoNormalLoader, DeviceMappedModelLoader, EmbeddingLoaderType, MultimodalLoaderType,
     NormalLoaderType, TokenSource,
 };
+use crate::selection::model_loader::{get_auto_device_map_params, get_model_dtype};
 use crate::{
     paged_attn_supported, IsqType, ModelSelected, Topology, TryIntoDType, GLOBAL_HF_CACHE,
 };
