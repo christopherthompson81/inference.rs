@@ -105,7 +105,7 @@
 //!         .await
 //!         .unwrap();
 //!
-//!     let inference_base_path = "/api/mistral";
+//!     let inference_base_path = "/api/inference";
 //!
 //!     let inference_routes = InferenceRsServerRouterBuilder::new()
 //!         .with_inference(shared_inference.clone())

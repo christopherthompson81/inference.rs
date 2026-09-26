@@ -104,10 +104,10 @@ use inference_core::{
 /// )]
 /// struct ApiDoc;
 ///
-/// let mistral_base_path = "/api/mistral";
-/// let mistral_doc = get_openapi_doc(Some(mistral_base_path));
+/// let inference_base_path = "/api/inference";
+/// let inference_doc = get_openapi_doc(Some(inference_base_path));
 /// let mut api_docs = ApiDoc::openapi();
-/// api_docs.merge(mistral_doc);
+/// api_docs.merge(inference_doc);
 ///
 /// let app = Router::new()
 ///   .route("/", get(root))
