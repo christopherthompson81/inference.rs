@@ -1,5 +1,12 @@
 use super::normal_registry::{schema_for, CanonicalGgufArchitecture, GgufDescriptor};
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "models-gemma",
+    feature = "models-llama",
+    feature = "models-other",
+    feature = "models-phi",
+    feature = "models-qwen"
+))]
 use super::normal_registry::{NativeModelAdapter, NORMAL_MODEL_ADAPTERS};
 use crate::{gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY, NormalLoaderType};
 use candle_core::quantized::gguf_file::Value as GgufValue;
@@ -966,14 +973,28 @@ fn transformer_block_count(metadata: &MetadataView<'_>) -> SynthesisResult<usize
     })
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "models-gemma",
+    feature = "models-llama",
+    feature = "models-other",
+    feature = "models-phi",
+    feature = "models-qwen"
+))]
 fn builder_for(loader: &NormalLoaderType) -> Option<&'static NormalConfigBuilder> {
     NORMAL_CONFIG_BUILDERS
         .iter()
         .find(|builder| &builder.loader == loader)
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "models-gemma",
+    feature = "models-llama",
+    feature = "models-other",
+    feature = "models-phi",
+    feature = "models-qwen"
+))]
 fn registry_adapter(loader: &NormalLoaderType) -> Option<&'static NativeModelAdapter> {
     NORMAL_MODEL_ADAPTERS
         .iter()
@@ -2490,7 +2511,14 @@ fn ratio_f64(
     Ok(f64::from(numerator) / f64::from(denominator))
 }
 
-#[cfg(test)]
+#[cfg(all(
+    test,
+    feature = "models-gemma",
+    feature = "models-llama",
+    feature = "models-other",
+    feature = "models-phi",
+    feature = "models-qwen"
+))]
 mod tests {
     use super::*;
     use crate::models;

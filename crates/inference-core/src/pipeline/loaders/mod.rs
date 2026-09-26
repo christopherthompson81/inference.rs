@@ -22,16 +22,27 @@ use inference_quant::{IsqType, QuantizedConfig, QuantizedWeightSource};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
+#[cfg(feature = "models-gemma")]
+pub use normal_loaders::GemmaLoader;
+#[cfg(feature = "models-qwen")]
+pub use normal_loaders::Qwen2Loader;
+#[cfg(feature = "models-other")]
+pub use normal_loaders::Starcoder2Loader;
 pub use normal_loaders::{
-    AutoNormalLoader, GemmaLoader, LlamaLoader, MistralLoader, MixtralLoader, NormalLoaderType,
-    NormalLoadingMetadata, NormalModel, NormalModelLoader, Phi2Loader, Phi3Loader, Qwen2Loader,
-    Starcoder2Loader,
+    AutoNormalLoader, NormalLoaderType, NormalLoadingMetadata, NormalModel, NormalModelLoader,
 };
+#[cfg(feature = "models-llama")]
+pub use normal_loaders::{LlamaLoader, MistralLoader, MixtralLoader};
+#[cfg(feature = "models-phi")]
+pub use normal_loaders::{Phi2Loader, Phi3Loader};
 
+#[cfg(feature = "models-phi")]
+pub use multimodal_loaders::Phi3VLoader;
 pub use multimodal_loaders::{
-    AutoMultimodalLoader, Idefics2Loader, LLaVALoader, LLaVANextLoader, MultimodalLoaderType,
-    MultimodalModel, MultimodalModelLoader, Phi3VLoader,
+    AutoMultimodalLoader, MultimodalLoaderType, MultimodalModel, MultimodalModelLoader,
 };
+#[cfg(feature = "models-llama")]
+pub use multimodal_loaders::{Idefics2Loader, LLaVALoader, LLaVANextLoader};
 
 pub use embedding_loaders::{
     AutoEmbeddingLoader, EmbeddingGemmaLoader, EmbeddingLoaderType, EmbeddingModel,

@@ -74,18 +74,28 @@ pub use isq::{
 };
 use llguidance::toktrie::TokEnv;
 pub(crate) use loaders::checkpoint_runtime_size;
+#[cfg(feature = "models-gemma")]
+pub use loaders::GemmaLoader;
+#[cfg(feature = "models-qwen")]
+pub use loaders::Qwen2Loader;
+#[cfg(feature = "models-other")]
+pub use loaders::Starcoder2Loader;
 pub use loaders::{
     AdapterKind, AutoDeviceMapParams, AutoDeviceMapQuantization, AutoEmbeddingLoader,
     AutoMultimodalLoader, AutoNormalLoader, DeviceMappedModelLoader, DiffusionLoaderType,
     DiffusionModel, DiffusionModelLoader, EmbeddingGemmaLoader, EmbeddingLoaderType,
     EmbeddingModel, EmbeddingModelLoader, EmbeddingModelPaths, EmbeddingModule,
-    EmbeddingModulePaths, EmbeddingModuleType, FluxLoader, GemmaLoader, Idefics2Loader,
-    LLaVALoader, LLaVANextLoader, LlamaLoader, Loader, LocalModelPaths, MistralLoader,
-    MixtralLoader, ModelKind, ModelPaths, MultimodalLoaderType, MultimodalModel,
-    MultimodalModelLoader, NormalLoaderType, NormalLoadingMetadata, NormalModel, NormalModelLoader,
-    Phi2Loader, Phi3Loader, Phi3VLoader, PrettyName, QuantizationKind, Qwen2Loader,
-    Qwen3EmbeddingLoader, Starcoder2Loader, TokenSource,
+    EmbeddingModulePaths, EmbeddingModuleType, FluxLoader, Loader, LocalModelPaths, ModelKind,
+    ModelPaths, MultimodalLoaderType, MultimodalModel, MultimodalModelLoader, NormalLoaderType,
+    NormalLoadingMetadata, NormalModel, NormalModelLoader, PrettyName, QuantizationKind,
+    Qwen3EmbeddingLoader, TokenSource,
 };
+#[cfg(feature = "models-llama")]
+pub use loaders::{
+    Idefics2Loader, LLaVALoader, LLaVANextLoader, LlamaLoader, MistralLoader, MixtralLoader,
+};
+#[cfg(feature = "models-phi")]
+pub use loaders::{Phi2Loader, Phi3Loader, Phi3VLoader};
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn get_device_layers_for_loader(
     loader: &dyn loaders::DeviceMappedModelLoader,
@@ -155,9 +165,9 @@ pub(crate) use paths::{
     get_adapter_paths, get_chat_template, get_model_paths, AdapterPathOptions, XLoraPreload,
 };
 pub use paths::{AdapterPaths, ResolvedLoraAdapter};
-pub(crate) use processing::{
-    apply_chat_template, BasicProcessor, MessagesAction, Processor, ProcessorCreator,
-};
+#[cfg(feature = "models-llama")]
+pub(crate) use processing::apply_chat_template;
+pub(crate) use processing::{BasicProcessor, MessagesAction, Processor, ProcessorCreator};
 use rand_isaac::Isaac64Rng;
 pub use speech::{SpeechLoader, SpeechPipeline};
 use std::any::Any;

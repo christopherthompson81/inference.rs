@@ -68,12 +68,14 @@ macro_rules! skip_without_cuda {
     };
 }
 
+#[cfg(feature = "models-llama")]
+use inference_nn::get_delta_from_lora_ab;
 pub use inference_nn::metal::warmup_metal_kernels;
 use inference_nn::{
     amoe, attention, cuda, device_map, flashinfer, gdn, kv_cache, lora, model, moe, ops,
     paged_attention, perf_flags, sampler, topology, utils,
 };
-use inference_nn::{get_delta_from_lora_ab, get_mut_arcmutex, serde_default_fn};
+use inference_nn::{get_mut_arcmutex, serde_default_fn};
 pub use inference_nn::{layers, matformer};
 
 mod adapter;
@@ -171,6 +173,12 @@ pub use pipeline::hf::{
     list_model_files, probe_hf_repo_files, read_model_file_range, try_get_model_file,
     HF_HUB_OFFLINE_ENV,
 };
+#[cfg(feature = "models-gemma")]
+pub use pipeline::GemmaLoader;
+#[cfg(feature = "models-qwen")]
+pub use pipeline::Qwen2Loader;
+#[cfg(feature = "models-other")]
+pub use pipeline::Starcoder2Loader;
 pub use pipeline::{
     chat_template::{is_chat_template_request_error, ChatTemplate},
     expand_isq_value, expand_uqff_shards, parse_uqff_shard, resolve_uqff_report_output,
@@ -179,14 +187,18 @@ pub use pipeline::{
     DiffusionLoaderBuilder, DiffusionLoaderType, EmbeddingLoader, EmbeddingLoaderBuilder,
     EmbeddingLoaderType, EmbeddingModelPaths, EmbeddingSpecificConfig, GGMLLoader,
     GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig,
-    GemmaLoader, HfConfigOverrides, Idefics2Loader, IsqOrganization, LLaVALoader, LLaVANextLoader,
-    LlamaLoader, Loader, LocalModelPaths, MistralLoader, MixtralLoader, Modalities, ModelKind,
-    ModelPaths, MultimodalLoader, MultimodalLoaderBuilder, MultimodalLoaderType,
-    MultimodalPromptPrefixer, MultimodalSpecificConfig, NormalLoader, NormalLoaderBuilder,
-    NormalLoaderType, NormalSpecificConfig, Phi2Loader, Phi3Loader, Phi3VLoader, Qwen2Loader,
-    ResolvedLoraAdapter, SpeechLoader, SpeechPipeline, Starcoder2Loader, SupportedModality,
+    HfConfigOverrides, IsqOrganization, Loader, LocalModelPaths, Modalities, ModelKind, ModelPaths,
+    MultimodalLoader, MultimodalLoaderBuilder, MultimodalLoaderType, MultimodalPromptPrefixer,
+    MultimodalSpecificConfig, NormalLoader, NormalLoaderBuilder, NormalLoaderType,
+    NormalSpecificConfig, ResolvedLoraAdapter, SpeechLoader, SpeechPipeline, SupportedModality,
     TokenSource, UqffWriteConfig, UQFF_MULTI_FILE_DELIMITER,
 };
+#[cfg(feature = "models-llama")]
+pub use pipeline::{
+    Idefics2Loader, LLaVALoader, LLaVANextLoader, LlamaLoader, MistralLoader, MixtralLoader,
+};
+#[cfg(feature = "models-phi")]
+pub use pipeline::{Phi2Loader, Phi3Loader, Phi3VLoader};
 pub use request::{
     resolve_reasoning_controls, ApproximateUserLocation, CalibrationAction, CalibrationRequest,
     Constraint, DetokenizationRequest, ImageGenerationResponseFormat, LlguidanceGrammar,

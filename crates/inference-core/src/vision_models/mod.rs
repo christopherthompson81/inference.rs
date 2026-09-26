@@ -4,25 +4,37 @@ use std::{any::Any, sync::Arc};
 
 use candle_core::{Result, Tensor};
 
+#[cfg(any(feature = "models-llama", feature = "models-phi"))]
 pub(crate) mod clip;
 pub(crate) mod conformer;
+#[cfg(feature = "models-llama")]
 pub(crate) mod idefics2;
+#[cfg(feature = "models-llama")]
 pub(crate) use idefics2::idefics2_input_processor;
 pub(crate) mod image_processor;
+#[cfg(feature = "models-llama")]
 pub(crate) mod llava;
 pub(crate) mod mllama;
 pub(crate) mod paddleocr_vl;
+#[cfg(feature = "models-phi")]
 pub(crate) mod phi3;
+#[cfg(feature = "models-phi")]
 pub(crate) use phi3::phi3_inputs_processor;
 pub(crate) mod preprocessor_config;
 pub(crate) mod processor_config;
 pub(crate) mod qwen2_5_vl;
 pub(crate) mod qwen2vl;
+#[cfg(feature = "models-llama")]
 pub(crate) use llava::llava15;
+#[cfg(feature = "models-llama")]
 pub(crate) use llava::llava_inputs_processor;
+#[cfg(feature = "models-llama")]
 pub(crate) use llava::llava_next;
+#[cfg(feature = "models-llama")]
 pub(crate) use llava::llava_next_inputs_processor;
+#[cfg(feature = "models-llama")]
 pub(crate) mod idefics3;
+#[cfg(feature = "models-qwen")]
 pub(crate) mod minicpmo;
 pub(crate) mod phi4;
 pub(crate) use phi4::inputs_processor;
@@ -30,8 +42,10 @@ pub(crate) mod diffusion_gemma;
 pub(crate) mod gemma3;
 pub(crate) mod gemma3n;
 pub(crate) mod gemma4;
+#[cfg(feature = "models-other")]
 pub(crate) mod lfm2_vl;
 pub(crate) mod llama4;
+#[cfg(feature = "models-llama")]
 pub(crate) mod mistral3;
 pub(crate) mod multimodal_layout;
 pub(crate) mod muse_glimmer;
