@@ -477,4 +477,5 @@ Change:
 
 The Run 13 TOML-MTP fix went with it, since the path it fixed no longer exists.
 
-Result: 15 files, +4 / -1748.
+Result: green, with 2129 CPU and 2448 CUDA tests, down 12 each from 2141 / 2460: the selector's own parsing tests.
+15 code files, +4 / -1748.
