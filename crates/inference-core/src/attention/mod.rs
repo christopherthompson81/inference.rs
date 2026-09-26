@@ -48,6 +48,9 @@ impl AttentionMask {
 }
 
 mod backends;
+mod dispatch;
+
+pub(crate) use dispatch::AttentionDispatch;
 
 #[allow(unused)]
 pub(crate) use backends::cpu::fast_exp;
