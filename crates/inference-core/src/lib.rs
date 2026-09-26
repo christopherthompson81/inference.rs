@@ -71,9 +71,11 @@ macro_rules! skip_without_cuda {
 #[cfg(feature = "models-llama")]
 use inference_nn::get_delta_from_lora_ab;
 pub use inference_nn::metal::warmup_metal_kernels;
+#[cfg(feature = "cuda")]
+use inference_nn::perf_flags;
 use inference_nn::{
     amoe, attention, cuda, device_map, flashinfer, gdn, kv_cache, lora, model, moe, ops,
-    paged_attention, perf_flags, sampler, topology, utils,
+    paged_attention, sampler, topology, utils,
 };
 use inference_nn::{get_mut_arcmutex, serde_default_fn};
 pub use inference_nn::{layers, matformer};

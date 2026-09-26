@@ -215,3 +215,44 @@ impl DiffusionGenerationParams {
         format!("{self:#?}")
     }
 }
+
+/// Receives a block-diffusion model's per-step progress for one sequence.
+pub trait BlockDenoisingProgressSink: Send + Sync {
+    fn emit(
+        &self,
+        step: usize,
+        total_steps: usize,
+        tokens: &[u32],
+        finished: bool,
+        final_block: bool,
+    );
+}
+
+/// Routes one batch row's denoising progress to the engine while the model runs its loop.
+#[derive(Clone)]
+pub struct BlockDenoisingProgressEmitter {
+    batch_index: usize,
+    sink: Arc<dyn BlockDenoisingProgressSink>,
+}
+
+impl BlockDenoisingProgressEmitter {
+    pub fn new(batch_index: usize, sink: Arc<dyn BlockDenoisingProgressSink>) -> Self {
+        Self { batch_index, sink }
+    }
+
+    pub fn emit(
+        &self,
+        step: usize,
+        total_steps: usize,
+        tokens: &[u32],
+        finished: bool,
+        final_block: bool,
+    ) {
+        self.sink
+            .emit(step, total_steps, tokens, finished, final_block);
+    }
+
+    pub fn batch_index(&self) -> usize {
+        self.batch_index
+    }
+}

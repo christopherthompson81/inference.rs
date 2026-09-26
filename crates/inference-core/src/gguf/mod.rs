@@ -1,8 +1,11 @@
 pub(crate) mod base_model;
 mod chat_template;
 mod content;
+#[cfg(feature = "models-gemma")]
 pub(crate) mod gemma3_bindings;
+#[cfg(feature = "models-gemma")]
 pub(crate) mod gemma3_config;
+#[cfg(feature = "models-gemma")]
 pub(crate) mod gemma3n_bindings;
 mod gguf_tokenizer;
 pub(crate) mod idefics3_bindings;

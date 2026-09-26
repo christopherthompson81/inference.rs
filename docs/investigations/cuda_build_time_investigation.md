@@ -410,3 +410,18 @@ Review follow-ups:
   (~58k) and loaders; the vision families are the next split.
 - Side finding: target/debug reached 103 GB (71 GB of it incremental caches) after checking each family crate
   alone with and without CUDA; `local_ci.sh --sweep` brings it back to 21 GB.
+
+## Run 20 - 2026-09-26 16:20
+
+- Question: after moving the Gemma vision models (Gemma 3, 3n, 4, DiffusionGemma; ~21k lines) into the Gemma family
+  crate, does core's single-threaded stretch shrink?
+- Command: same cold build as Run 13, load average ~3-6.
+- Result: 277 s (Run 19: 275 s). 88 s of the build have 3 or fewer units active.
+  - `inference-models-gemma` lib 15.3 s (frontend 5.4 s), in parallel after inference-nn.
+  - `inference-core` lib 98.0 s (frontend 56.6 s, was 57.3 s); lib test 129.7 s (was 142 s).
+  - `inference-server-core` lib 82.9 s still follows core.
+- Negative result: moving ~21k lines of model code took under 1 s off core's frontend. What remains in core
+  (pipeline, loaders, engine, request/response and the input processors) and the generic instantiations it drives
+  are what make it slow, not the model code. The family moves still pay off for modularity and core's lib-test
+  build; for the critical path the next lever is inside core itself (a pass-level profile of what's left) and
+  inference-server-core, which starts only after core.

@@ -18,8 +18,8 @@ pub struct Gemma3nCumulativeGroupNorm {
     num_channels: usize,
     feature_dims: Vec<usize>,
     eps: f64,
-    pub(crate) weight: Option<Tensor>,
-    pub(crate) bias: Option<Tensor>,
+    pub weight: Option<Tensor>,
+    pub bias: Option<Tensor>,
     reduction_axes: Vec<usize>,
 }
 
@@ -171,7 +171,7 @@ impl Gemma3nCumulativeGroupNorm {
 pub struct Gemma3nAudioRelativePositionEmbedding {
     num_heads: usize,
     head_dim: usize,
-    pub(crate) pos_proj: Arc<dyn QuantMethod>,
+    pub pos_proj: Arc<dyn QuantMethod>,
     inv_timescales: Tensor,
     pos_indices: Tensor,
 }
@@ -416,11 +416,11 @@ pub struct Gemma3nAudioAttention {
     max_future_horizon: usize,
     max_past_horizon: usize,
     context_size: usize,
-    pub(crate) relative_position_embedding: Gemma3nAudioRelativePositionEmbedding,
+    pub relative_position_embedding: Gemma3nAudioRelativePositionEmbedding,
     _per_dim_scale: Tensor,
-    pub(crate) q_proj: Arc<dyn QuantMethod>,
-    pub(crate) k_proj: Arc<dyn QuantMethod>,
-    pub(crate) v_proj: Arc<dyn QuantMethod>,
+    pub q_proj: Arc<dyn QuantMethod>,
+    pub k_proj: Arc<dyn QuantMethod>,
+    pub v_proj: Arc<dyn QuantMethod>,
     q_scale: f64,
     local_causal_valid_mask: Tensor,
     softcap: f64,
@@ -846,8 +846,8 @@ impl Gemma3nAudioAttention {
 
 /// SSCP Convolution Block
 pub struct Gemma3nAudioSSCPConvBlock {
-    pub(crate) conv: Conv2d,
-    pub(crate) norm: Gemma3nCumulativeGroupNorm,
+    pub conv: Conv2d,
+    pub norm: Gemma3nCumulativeGroupNorm,
     manual_padding: (usize, usize, usize, usize),
 }
 
@@ -930,9 +930,9 @@ impl Gemma3nAudioSSCPConvBlock {
 
 /// Sub-sample Convolution Projection
 pub struct Gemma3nAudioSubSampleConvProjection {
-    pub(crate) conv_0: Gemma3nAudioSSCPConvBlock,
-    pub(crate) conv_1: Gemma3nAudioSSCPConvBlock,
-    pub(crate) input_proj_linear: Arc<dyn QuantMethod>,
+    pub conv_0: Gemma3nAudioSSCPConvBlock,
+    pub conv_1: Gemma3nAudioSSCPConvBlock,
+    pub input_proj_linear: Arc<dyn QuantMethod>,
 }
 
 impl Gemma3nAudioSubSampleConvProjection {
@@ -1023,10 +1023,10 @@ impl Gemma3nAudioSubSampleConvProjection {
 
 /// Conformer Attention Module
 pub struct Gemma3nAudioConformerAttention {
-    pub(crate) pre_attn_norm: RmsNorm,
-    pub(crate) attn: Gemma3nAudioAttention,
-    pub(crate) post: Arc<dyn QuantMethod>,
-    pub(crate) post_norm: RmsNorm,
+    pub pre_attn_norm: RmsNorm,
+    pub attn: Gemma3nAudioAttention,
+    pub post: Arc<dyn QuantMethod>,
+    pub post_norm: RmsNorm,
     hidden_size: usize, // Cache for reshape operations
 }
 
@@ -1082,10 +1082,10 @@ impl Gemma3nAudioConformerAttention {
 /// Conformer Feed-Forward Module
 pub struct Gemma3nAudioConformerFeedForward {
     scale: f64,
-    pub(crate) pre_layer_norm: RmsNorm,
-    pub(crate) ffw_layer_1: Arc<dyn QuantMethod>,
-    pub(crate) ffw_layer_2: Arc<dyn QuantMethod>,
-    pub(crate) post_layer_norm: RmsNorm,
+    pub pre_layer_norm: RmsNorm,
+    pub ffw_layer_1: Arc<dyn QuantMethod>,
+    pub ffw_layer_2: Arc<dyn QuantMethod>,
+    pub post_layer_norm: RmsNorm,
 }
 
 impl Gemma3nAudioConformerFeedForward {
@@ -1138,11 +1138,11 @@ impl Gemma3nAudioConformerFeedForward {
 
 /// Lightweight 1D Convolution Module
 pub struct Gemma3nAudioConformerLightConv1d {
-    pub(crate) pre_layer_norm: RmsNorm,
-    pub(crate) linear_start: Arc<dyn QuantMethod>,
-    pub(crate) depthwise_conv1d: Conv1d,
-    pub(crate) conv_norm: RmsNorm,
-    pub(crate) linear_end: Arc<dyn QuantMethod>,
+    pub pre_layer_norm: RmsNorm,
+    pub linear_start: Arc<dyn QuantMethod>,
+    pub depthwise_conv1d: Conv1d,
+    pub conv_norm: RmsNorm,
+    pub linear_end: Arc<dyn QuantMethod>,
     causal_padding: usize,
 }
 
@@ -1234,11 +1234,11 @@ impl Gemma3nAudioConformerLightConv1d {
 
 /// Conformer Block
 pub struct Gemma3nAudioConformerBlock {
-    pub(crate) ffw_layer_start: Gemma3nAudioConformerFeedForward,
-    pub(crate) attention: Gemma3nAudioConformerAttention,
-    pub(crate) lconv1d: Gemma3nAudioConformerLightConv1d,
-    pub(crate) ffw_layer_end: Gemma3nAudioConformerFeedForward,
-    pub(crate) norm: RmsNorm,
+    pub ffw_layer_start: Gemma3nAudioConformerFeedForward,
+    pub attention: Gemma3nAudioConformerAttention,
+    pub lconv1d: Gemma3nAudioConformerLightConv1d,
+    pub ffw_layer_end: Gemma3nAudioConformerFeedForward,
+    pub norm: RmsNorm,
 }
 
 impl Gemma3nAudioConformerBlock {
@@ -1281,8 +1281,8 @@ impl Gemma3nAudioConformerBlock {
 
 /// Main Audio Model
 pub struct AudioModel {
-    pub(crate) subsample_conv_projection: Gemma3nAudioSubSampleConvProjection,
-    pub(crate) conformer: Vec<Gemma3nAudioConformerBlock>,
+    pub subsample_conv_projection: Gemma3nAudioSubSampleConvProjection,
+    pub conformer: Vec<Gemma3nAudioConformerBlock>,
     sscp_conv_stride_size: Vec<Vec<usize>>,
     conf_reduction_factor: usize,
 }

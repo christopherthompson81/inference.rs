@@ -3,9 +3,9 @@ use inference_quant::{GgufArchive, GgufBindingMap};
 
 use crate::MultimodalLoaderType;
 
+#[cfg(feature = "models-gemma")]
+use super::{gemma3_bindings::build_gemma3_bindings, gemma3n_bindings::build_gemma3n_bindings};
 use super::{
-    gemma3_bindings::build_gemma3_bindings,
-    gemma3n_bindings::build_gemma3n_bindings,
     idefics3_bindings::build_idefics3_bindings,
     lfm2_vl_bindings::build_lfm2_vl_bindings,
     llama4_bindings::build_llama4_bindings,
@@ -71,8 +71,14 @@ impl NativeMultimodalGgufFamily {
 
     fn build_bindings(self, archive: &GgufArchive) -> Result<GgufBindingMap> {
         match self {
+            #[cfg(feature = "models-gemma")]
             Self::Gemma3 => build_gemma3_bindings(archive),
+            #[cfg(feature = "models-gemma")]
             Self::Gemma3n => build_gemma3n_bindings(archive),
+            #[cfg(not(feature = "models-gemma"))]
+            Self::Gemma3 | Self::Gemma3n => {
+                bail!("GGUF Gemma 3 models are not built in; enable the `models-gemma` feature")
+            }
             Self::Idefics3 => build_idefics3_bindings(archive),
             Self::Mistral3 => build_mistral3_bindings(archive),
             Self::Llama4 => build_llama4_bindings(archive),

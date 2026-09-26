@@ -3,7 +3,7 @@ use inference_quant::QuantizedConfig;
 use crate::{
     layers::{Activation, Gemma3RopeScalingConfig, Gemma3RopeSpec},
     serde_default_fn,
-    vision_models::siglip::SiglipVisionConfig,
+    vision::siglip::SiglipVisionConfig,
 };
 
 serde_default_fn!(bool, attention_bias, false);
@@ -23,7 +23,7 @@ serde_default_fn!(usize, num_key_value_heads, 4);
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct Gemma3TextConfig {
     #[serde(default, rename = "_inference_use_language_model_prefix")]
-    pub(crate) use_language_model_prefix: bool,
+    pub use_language_model_prefix: bool,
     #[serde(default = "attention_bias")]
     pub attention_bias: bool,
     #[serde(default = "head_dim")]

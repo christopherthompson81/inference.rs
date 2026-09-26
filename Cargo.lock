@@ -3248,9 +3248,14 @@ name = "inference-models-gemma"
 version = "0.9.3"
 dependencies = [
  "candle-core",
+ "candle-nn",
  "inference-nn",
  "inference-quant",
+ "rand_isaac",
+ "safetensors",
  "serde",
+ "serde_json",
+ "statrs",
  "tempfile",
  "tracing",
 ]

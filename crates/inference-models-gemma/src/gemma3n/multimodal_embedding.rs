@@ -9,15 +9,15 @@ use super::config::Gemma3nTextConfig;
 /// Multimodal embedder for Gemma3n that handles both text tokens and vision embeddings
 pub struct Gemma3nMultimodalEmbedder {
     /// Embedding layer for vocabulary tokens
-    pub(crate) embedding: ScaledEmbedding,
+    pub embedding: ScaledEmbedding,
     /// RMS normalization for hard embeddings (text tokens)
-    pub(crate) hard_embedding_norm: RmsNorm,
+    pub hard_embedding_norm: RmsNorm,
     /// RMS normalization for soft embeddings (vision features)
-    pub(crate) soft_embedding_norm: RmsNorm,
+    pub soft_embedding_norm: RmsNorm,
     /// Linear projection from multimodal hidden size to text hidden size
-    pub(crate) embedding_projection: Arc<dyn QuantMethod>,
+    pub embedding_projection: Arc<dyn QuantMethod>,
     /// Post-projection normalization (without scale)
-    pub(crate) embedding_post_projection_norm: RmsNorm,
+    pub embedding_post_projection_norm: RmsNorm,
     /// The vocabulary offset to subtract from input IDs
     vocab_offset: i64,
 }

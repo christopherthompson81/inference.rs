@@ -105,7 +105,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 ### Adding New Features
 
 When adding new model architectures:
-1. Implement a text model in its family crate, `crates/inference-models-<family>/` (vision models still live in `crates/inference-core/src/vision_models/`), and re-export it from `crates/inference-core/src/models/mod.rs`
+1. Implement the model in its family crate, `crates/inference-models-<family>/` (families still in core live in `crates/inference-core/src/vision_models/`), keep request preprocessing (`inputs_processor.rs`) in core beside it, and re-export the model from core
 2. Add its loader in `crates/inference-core/src/pipeline/loaders/normal_loaders/` (or `multimodal_loaders/`)
 3. Add one row to `normal_loader_types!` (or `multimodal_loader_types!`) in that directory's `mod.rs`. The row gives
    the CLI name, the HF class, the `model_type` (text only) and the loader, and the enum variant, parsing, display, HF detection and loader

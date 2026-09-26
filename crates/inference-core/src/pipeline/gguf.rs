@@ -12,13 +12,8 @@ use crate::distributed::WorkerTransferData;
 use crate::gguf::metadata::{ContentConfig, GgufDeviceMapLoaderInner};
 use crate::gguf::{
     base_model::infer_hf_base_model_id,
-    convert_gguf_metadata_to_hf_tokenizer,
-    gemma3_bindings::build_gemma3_text_bindings,
-    gemma3_config::{
-        ensure_gemma3_vision_config, gemma3_text_uses_language_model_prefix,
-        prepare_gemma3_text_config,
-    },
-    get_gguf_chat_template, get_gguf_chat_template_from_metadata,
+    convert_gguf_metadata_to_hf_tokenizer, get_gguf_chat_template,
+    get_gguf_chat_template_from_metadata,
     multimodal_bindings::build_gemma4_bindings,
     multimodal_vision_registry::resolve_native_multimodal_gguf,
     muse_glimmer_bindings::normalize_muse_glimmer_config,
@@ -33,6 +28,14 @@ use crate::gguf::{
         qwen_multimodal_loader_type,
     },
     validate_external_gguf_tokenizer, GgufTokenizerConversion,
+};
+#[cfg(feature = "models-gemma")]
+use crate::gguf::{
+    gemma3_bindings::build_gemma3_text_bindings,
+    gemma3_config::{
+        ensure_gemma3_vision_config, gemma3_text_uses_language_model_prefix,
+        prepare_gemma3_text_config,
+    },
 };
 use crate::gguf::{Content, GGUFArchitecture};
 use crate::lora::Ordering;
@@ -586,6 +589,11 @@ impl GGUFLoader {
             }
             None => bail!("GGUF metadata is missing `general.architecture`"),
         };
+        #[cfg(not(feature = "models-gemma"))]
+        if architecture.eq_ignore_ascii_case("gemma3") {
+            bail!("GGUF Gemma 3 models are not built in; enable the `models-gemma` feature");
+        }
+        #[cfg(feature = "models-gemma")]
         if architecture.eq_ignore_ascii_case("gemma3") {
             return self.load_native_gemma3_text(
                 archive,
@@ -730,6 +738,7 @@ impl GGUFLoader {
         )
     }
 
+    #[cfg(feature = "models-gemma")]
     fn load_native_gemma3_text(
         &self,
         archive: Arc<inference_quant::GgufArchive>,
@@ -875,6 +884,7 @@ impl GGUFLoader {
             &fs::read_to_string(paths.get_config_filename())?,
         )?;
         let config = stamp_qk_rope_layout(&config, rope_pairing)?;
+        #[cfg(feature = "models-gemma")]
         if architecture == "gemma3" {
             ensure_gemma3_vision_config(&config)?;
         }

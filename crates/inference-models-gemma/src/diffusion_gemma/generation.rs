@@ -2,7 +2,8 @@ use candle_core::{DType, Device, Result, Tensor, D};
 use serde::Deserialize;
 
 use super::DiffusionGemmaModel;
-use crate::{block_diffusion::BlockDenoisingProgressEmitter, pipeline::text_positions_tensor};
+use crate::model::text_positions_tensor;
+use crate::model::BlockDenoisingProgressEmitter;
 
 const DEFAULT_MAX_DENOISING_STEPS: usize = 48;
 const DEFAULT_ENTROPY_BOUND: f64 = 0.1;

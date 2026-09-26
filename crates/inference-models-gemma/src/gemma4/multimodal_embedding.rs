@@ -11,8 +11,8 @@ use crate::{layers::RmsNorm, utils::unvarbuilder::UnVarBuilder};
 /// Unlike Gemma3n's embedder, this does NOT have an embedding table, hard/soft norms.
 /// It's simply: linear projection + RMSNorm (no learnable scale).
 pub struct Gemma4MultimodalEmbedder {
-    pub(crate) embedding_projection: Arc<dyn QuantMethod>,
-    pub(crate) embedding_pre_projection_norm: RmsNorm,
+    pub embedding_projection: Arc<dyn QuantMethod>,
+    pub embedding_pre_projection_norm: RmsNorm,
 }
 
 impl Gemma4MultimodalEmbedder {

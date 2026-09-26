@@ -8,15 +8,15 @@ use candle_core::{DType, Device, Result, Tensor};
 use crate::paged_attention::block_hash::{MultimodalAttentionPolicy, MultimodalKind};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct MultimodalEncoderKey {
+pub struct MultimodalEncoderKey {
     pub kind: MultimodalKind,
     pub hash: u64,
 }
 
-pub(crate) type MultimodalEncoderOutputs = HashMap<MultimodalEncoderKey, Vec<Tensor>>;
+pub type MultimodalEncoderOutputs = HashMap<MultimodalEncoderKey, Vec<Tensor>>;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct MultimodalEmbeddingMap {
+pub struct MultimodalEmbeddingMap {
     destination_positions: Vec<usize>,
     source_positions: Vec<usize>,
     source_output: usize,
@@ -24,7 +24,7 @@ pub(crate) struct MultimodalEmbeddingMap {
 }
 
 impl MultimodalEmbeddingMap {
-    pub(crate) fn new(
+    pub fn new(
         destination_positions: Vec<usize>,
         source_positions: Vec<usize>,
         source_output: usize,
@@ -32,7 +32,7 @@ impl MultimodalEmbeddingMap {
         Self::new_for_output(destination_positions, source_positions, source_output, 0)
     }
 
-    pub(crate) fn new_for_output(
+    pub fn new_for_output(
         destination_positions: Vec<usize>,
         source_positions: Vec<usize>,
         source_output: usize,
@@ -60,7 +60,7 @@ impl MultimodalEmbeddingMap {
         })
     }
 
-    pub(crate) fn contiguous(
+    pub fn contiguous(
         destination: Range<usize>,
         source_start: usize,
         source_output: usize,
@@ -84,7 +84,7 @@ impl MultimodalEmbeddingMap {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct MultimodalItemLayout {
+pub struct MultimodalItemLayout {
     pub key: MultimodalEncoderKey,
     pub item_index: usize,
     pub placeholder: Range<usize>,
@@ -93,7 +93,7 @@ pub(crate) struct MultimodalItemLayout {
 }
 
 impl MultimodalItemLayout {
-    pub(crate) fn new(
+    pub fn new(
         key: MultimodalEncoderKey,
         item_index: usize,
         placeholder: Range<usize>,
@@ -131,7 +131,7 @@ impl MultimodalItemLayout {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct RequestMultimodalLayout {
+pub struct RequestMultimodalLayout {
     pub sequence_id: usize,
     pub query: Range<usize>,
     pub items: Vec<MultimodalItemLayout>,
@@ -147,13 +147,13 @@ struct PackedEmbeddingCopy {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct PackedMultimodalLayout {
+pub struct PackedMultimodalLayout {
     token_count: usize,
     copies: Vec<PackedEmbeddingCopy>,
 }
 
 impl PackedMultimodalLayout {
-    pub(crate) fn new(requests: &[RequestMultimodalLayout]) -> Result<Self> {
+    pub fn new(requests: &[RequestMultimodalLayout]) -> Result<Self> {
         let mut packed_offset = 0usize;
         let mut copies = Vec::new();
         let mut packed_destinations = HashSet::new();
@@ -224,11 +224,11 @@ impl PackedMultimodalLayout {
         })
     }
 
-    pub(crate) fn token_count(&self) -> usize {
+    pub fn token_count(&self) -> usize {
         self.token_count
     }
 
-    pub(crate) fn splice_embeddings(
+    pub fn splice_embeddings(
         &self,
         text_embeddings: &Tensor,
         encoder_outputs: &MultimodalEncoderOutputs,
@@ -236,7 +236,7 @@ impl PackedMultimodalLayout {
         self.splice_output_embeddings(0, text_embeddings, encoder_outputs)
     }
 
-    pub(crate) fn destination_positions(&self, target_output: usize) -> Vec<usize> {
+    pub fn destination_positions(&self, target_output: usize) -> Vec<usize> {
         let mut destinations = self
             .copies
             .iter()
@@ -247,7 +247,7 @@ impl PackedMultimodalLayout {
         destinations
     }
 
-    pub(crate) fn gather_output_embeddings(
+    pub fn gather_output_embeddings(
         &self,
         target_output: usize,
         reference: &Tensor,
@@ -313,7 +313,7 @@ impl PackedMultimodalLayout {
         }
     }
 
-    pub(crate) fn splice_output_embeddings(
+    pub fn splice_output_embeddings(
         &self,
         target_output: usize,
         text_embeddings: &Tensor,
@@ -349,12 +349,12 @@ impl PackedMultimodalLayout {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct MropePositionSource {
+pub struct MropePositionSource {
     pub position_ids: Tensor,
     pub delta: i64,
 }
 
-pub(crate) fn gather_packed_mrope_positions(
+pub fn gather_packed_mrope_positions(
     sources: &[MropePositionSource],
     query_ranges: &[Range<usize>],
     device: &Device,
