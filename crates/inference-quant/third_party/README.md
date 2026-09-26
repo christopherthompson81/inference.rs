@@ -21,5 +21,3 @@ maintained in-tree lives in `kernels/`; this table records where it came from.
 Original to this project: `kernels/cuda/` `afq`, `scalar_fp8`, `blockwise_fp8` (non-CUTLASS), `lora`, `mxfp4`,
 `nvfp4_cutlass`, `cutlass_moe/grouped_mm_2x.cu`, `hqq_bitpack`, `moe_grouped`, `ops` (inspired by PyTorch
 `Nonzero.cu`), the `*_dummy.cu` stubs, and the remaining `kernels/metal/` files.
-
-The MLX-derived `.metal` headers say "Apache License 2.0"; MLX is MIT-licensed, so those headers need checking.

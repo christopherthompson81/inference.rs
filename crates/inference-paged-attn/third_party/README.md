@@ -15,7 +15,5 @@ maintained in-tree lives in `kernels/`; this table records where it came from.
 | `kernels/cuda/update_kvscales.cu` | [guoqingbao/attention.rs](https://github.com/guoqingbao/attention.rs) (reference implementation; license unconfirmed) | not recorded | unconfirmed | adapted |
 | `kernels/metal/{copy_blocks,reshape_and_cache,gather_kv_cache,kv_scale_update,float8}.metal` | Metal ports of vLLM cache kernels (unconfirmed) | not recorded | Apache-2.0 | adapted |
 
-The MLX-derived `.metal` headers say "Apache License 2.0"; MLX is MIT-licensed, so those headers need checking.
-
 Original to this project: `kernels/cuda/fa3/`, the FlashInfer decode wrappers (`flashinfer_decode*`,
 `flashinfer_mla_decode.cu`), and `flash_attn_sinks.cu`.
