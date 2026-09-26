@@ -706,6 +706,7 @@ impl GGUFLoader {
                 hf_cache_path: self.config.hf_cache_path.clone(),
                 matformer_config_path: self.config.matformer_config_path.clone(),
                 matformer_slice_name: self.config.matformer_slice_name.clone(),
+                max_model_len: self.config.max_model_len,
                 ..Default::default()
             },
             None,

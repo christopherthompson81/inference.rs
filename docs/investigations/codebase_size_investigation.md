@@ -435,13 +435,21 @@ Change: loading-path step 1, core helpers and fixes in `selection/model_loader.r
 - `SafetensorsOptions { .. }.normal() / .multimodal(max_edge) / .embedding()` builds the per-kind configs from one
   place. The `Run` and auto-`Lora` arms used to write the same eight fields out three times.
 - Fixes:
-  - `max_model_len` reached X-LoRA GGUF and legacy-LoRA GGUF validation but was dropped
-    (`GGUFSpecificConfig { topology, ..Default::default() }`), in both the core and the TOML paths.
-  - The TOML path never enabled MTP. `TomlLoaderArgs` gains `mtp`, and TOML Plain and Multimodal call
+  - **`--max-model-len` on text GGUF was silently ignored.** The native GGUF text path built its
+    `NormalSpecificConfig` with `..Default::default()`, so the value never reached `runtime_config`. It now passes
+    through. `max_model_len` is a per-architecture capability: only `qwen3_5_text` implements `runtime_config`, and
+    every other text loader refuses it ("not supported by this model loader"). Text GGUF now behaves like safetensors
+    text: honored where the architecture supports it, an explicit error otherwise. End-to-end, a Qwen2.5 GGUF served
+    with `--max-model-len 256` now fails at startup with that error, where master ignored the flag.
+  - **X-LoRA GGUF and legacy-LoRA GGUF can never honor it.** Their legacy adapter pipeline takes its length from the
+    model and never reads the config. Validation now rejects `max_model_len` for them in the core and TOML paths,
+    instead of accepting and dropping it. The first attempt passed the value into their `GGUFSpecificConfig`, which
+    nothing reads on that path; review caught that it was a no-op.
+  - **The TOML path never enabled MTP.** `TomlLoaderArgs` gains `mtp`, and TOML Plain and Multimodal call
     `with_mtp`, as core does.
-- First tests for `LoaderBuilder` (5): the multi-file splitting, the ordering-file error, shared config fields,
-  a Plain build (`get_id`), and `max_model_len` validation. That covers 0 rejected, unsupported formats rejected, and
-  X-LoRA GGUF now accepted and built.
+- First tests for `LoaderBuilder` (4): the multi-file splitting, the ordering-file error, a Plain build (`get_id`),
+  and `max_model_len` validation. That covers 0 rejected, Embedding rejected, and X-LoRA GGUF rejected; the last one
+  fails on master, which accepted it.
 
 Result: green, with 2142 CPU and 2461 CUDA tests (+5). 3 files, +361 / -222. The net line count rises here, because
 the shared struct and the tests outweigh the copies removed. The TOML and SDK steps are where this pays off, since

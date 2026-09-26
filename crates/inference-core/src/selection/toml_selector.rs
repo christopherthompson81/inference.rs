@@ -821,13 +821,9 @@ fn loader_from_selected(
     if args.hf_config_overrides.is_some() && !supports_hf_config_overrides {
         anyhow::bail!("HF config overrides are supported only for text and multimodal models");
     }
-    let supports_max_model_len = supports_hf_config_overrides
-        || matches!(
-            &model,
-            TomlModelSelected::GGUF { .. }
-                | TomlModelSelected::LoraGGUF { .. }
-                | TomlModelSelected::XLoraGGUF { .. }
-        );
+    // the legacy X-LoRA / LoRA GGUF pipelines take their length from the model and cannot cap it
+    let supports_max_model_len =
+        supports_hf_config_overrides || matches!(&model, TomlModelSelected::GGUF { .. });
     if args.max_model_len.is_some() && !supports_max_model_len {
         anyhow::bail!("max_model_len is not supported by this model format");
     }
@@ -1038,7 +1034,6 @@ fn loader_from_selected(
                 .collect::<Vec<_>>(),
             GGUFSpecificConfig {
                 topology: Topology::from_option_path(topology)?,
-                max_model_len: args.max_model_len,
                 ..Default::default()
             },
             args.no_kv_cache,
@@ -1073,7 +1068,6 @@ fn loader_from_selected(
                 .collect::<Vec<_>>(),
             GGUFSpecificConfig {
                 topology: Topology::from_option_path(topology)?,
-                max_model_len: args.max_model_len,
                 ..Default::default()
             },
             args.no_kv_cache,

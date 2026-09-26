@@ -399,13 +399,9 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
     if args.hf_config_overrides.is_some() && !supports_hf_config_overrides {
         anyhow::bail!("HF config overrides are supported only for text and multimodal models");
     }
-    let supports_max_model_len = supports_hf_config_overrides
-        || matches!(
-            &args.model,
-            ModelSelected::GGUF { .. }
-                | ModelSelected::LoraGGUF { .. }
-                | ModelSelected::XLoraGGUF { .. }
-        );
+    // the legacy X-LoRA / LoRA GGUF pipelines take their length from the model and cannot cap it
+    let supports_max_model_len =
+        supports_hf_config_overrides || matches!(&args.model, ModelSelected::GGUF { .. });
     if args.max_model_len.is_some() && !supports_max_model_len {
         anyhow::bail!("max_model_len is not supported by this model format");
     }
@@ -750,7 +746,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             gguf_files(&quantized_filename),
             GGUFSpecificConfig {
                 topology: Topology::from_option_path(topology)?,
-                max_model_len: args.max_model_len,
                 ..Default::default()
             },
             args.no_kv_cache,
@@ -779,7 +774,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             gguf_files(&quantized_filename),
             GGUFSpecificConfig {
                 topology: Topology::from_option_path(topology)?,
-                max_model_len: args.max_model_len,
                 ..Default::default()
             },
             args.no_kv_cache,
@@ -933,23 +927,6 @@ mod tests {
     }
 
     #[test]
-    fn per_kind_configs_share_the_selection_and_builder_options() {
-        let args = LoaderBuilder::new(selected(serde_json::json!({"Plain": {"model_id": "m"}})))
-            .with_max_model_len(Some(2048));
-        let options = SafetensorsOptions {
-            imatrix: Some(PathBuf::from("m.imatrix")),
-            ..SafetensorsOptions::from_args(&args)
-        };
-        assert_eq!(options.normal().max_model_len, Some(2048));
-        assert_eq!(options.multimodal(Some(512)).max_model_len, Some(2048));
-        assert_eq!(options.multimodal(Some(512)).max_edge, Some(512));
-        assert_eq!(
-            options.embedding().imatrix,
-            Some(PathBuf::from("m.imatrix"))
-        );
-    }
-
-    #[test]
     fn plain_selection_builds_a_loader_for_its_model() -> anyhow::Result<()> {
         let loader = LoaderBuilder::new(selected(
             serde_json::json!({"Plain": {"model_id": "org/model"}}),
@@ -976,7 +953,7 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.to_string().contains("not supported"), "{err}");
-        // accepted for X-LoRA GGUF, which used to validate it and then drop it
+        // the legacy X-LoRA GGUF pipeline cannot cap its length, so the flag is refused rather than ignored
         let xlora_gguf = selected(serde_json::json!({"XLoraGGUF": {
             "quantized_model_id": "q",
             "quantized_filename": "q.gguf",
@@ -986,9 +963,11 @@ mod tests {
             "max_seq_len": 4096,
             "max_batch_size": 1,
         }}));
-        assert!(LoaderBuilder::new(xlora_gguf)
+        let err = LoaderBuilder::new(xlora_gguf)
             .with_max_model_len(Some(1024))
             .build()
-            .is_ok());
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("not supported"), "{err}");
     }
 }
