@@ -70,8 +70,8 @@ macro_rules! skip_without_cuda {
 
 pub use inference_nn::metal::warmup_metal_kernels;
 use inference_nn::{
-    amoe, attention, cuda, device_map, flashinfer, gdn, kv_cache, lora, metal, mla, moe, ops,
-    paged_attention, perf_flags, sampler, topology, utils,
+    amoe, attention, cuda, device_map, flashinfer, gdn, kv_cache, lora, metal, mla, model, moe,
+    ops, paged_attention, perf_flags, sampler, topology, utils,
 };
 use inference_nn::{get_delta_from_lora_ab, get_mut_arcmutex, serde_default_fn};
 pub use inference_nn::{layers, matformer};
