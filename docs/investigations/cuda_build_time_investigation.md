@@ -360,7 +360,7 @@ Review follow-ups:
   concentrated in core's own code. Next: `cargo llvm-lines` on core to find the generic functions that dominate IR,
   and `-Z self-profile` for typeck/borrowck by item, before choosing where to cut.
 
-## Run 17 - 2026-09-26 13:10
+## Run 17 - 2026-09-26 12:40
 
 - Question: which code makes up inference-core's LLVM IR (the 36 s serial IR generation, 14 s monomorphization and
   43 s of LLVM passes in Run 16)?
