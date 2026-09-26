@@ -15,7 +15,7 @@ use crate::{
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
-        embedding_with_legacy_tied_uqff, Activation, CausalMasker, Llama3RopeConfig,
+        embedding_with_legacy_tied_uqff, Activation, CausalMasker, Llama3RopeConfig, Llama3RopeSpec,
         Llama3RotaryEmbedding, Mlp, RmsNorm,
     },
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
@@ -45,6 +45,17 @@ pub struct Config {
     pub quantization_config: Option<QuantizedConfig>,
     #[serde(default = "word_emb_default")]
     pub tie_word_embeddings: bool,
+}
+
+impl Config {
+    pub fn rope_spec(&self) -> Llama3RopeSpec<'_> {
+        Llama3RopeSpec {
+            rope_theta: self.rope_theta,
+            head_dim: self.hidden_size / self.num_attention_heads,
+            max_position_embeddings: self.max_position_embeddings,
+            scaling: self.rope_scaling.as_ref(),
+        }
+    }
 }
 
 struct CausalSelfAttention {
@@ -361,9 +372,9 @@ impl Llama {
             };
             ropes.insert(
                 location,
-                Arc::new(Llama3RotaryEmbedding::new_llama3_with_factors(
+                Arc::new(Llama3RotaryEmbedding::new(
                     vb_m.dtype(),
-                    cfg,
+                    cfg.rope_spec(),
                     device,
                     is_gptx,
                     freq_factors.as_ref(),

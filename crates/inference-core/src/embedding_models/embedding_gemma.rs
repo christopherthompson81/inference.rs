@@ -22,7 +22,7 @@ use crate::{
 use inference_quant::QuantizedConfig;
 
 use crate::{
-    layers::{Activation, Gemma3RopeScalingConfig},
+    layers::{Activation, Gemma3RopeScalingConfig, Gemma3RopeSpec},
     serde_default_fn,
 };
 
@@ -73,7 +73,17 @@ pub struct EmbeddingGemmaConfig {
     #[serde(default = "sliding_window_pattern")]
     pub sliding_window_pattern: usize,
     pub rope_scaling: Option<Gemma3RopeScalingConfig>,
-    pub use_bidirectional_attention: bool,
+}
+
+impl EmbeddingGemmaConfig {
+    pub fn rope_spec(&self) -> Gemma3RopeSpec<'_> {
+        Gemma3RopeSpec {
+            rope_theta: self.rope_theta,
+            head_dim: self.head_dim,
+            max_position_embeddings: self.max_position_embeddings,
+            scaling: self.rope_scaling.as_ref(),
+        }
+    }
 }
 
 macro_rules! is_sliding {
@@ -397,7 +407,7 @@ impl EmbeddingGemma {
             &*mapper,
             cfg.num_hidden_layers,
             &normal_loading_metadata.real_device,
-            |device| Gemma3RotaryEmbedding::new_embedding_gemma(is_gptx, vb.dtype(), cfg, device),
+            |device| Gemma3RotaryEmbedding::new(is_gptx, vb.dtype(), cfg.rope_spec(), device),
         )?;
 
         let local_ropes = crate::device_map::per_layer_device(

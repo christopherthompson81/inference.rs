@@ -9,13 +9,14 @@ use std::{
 use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::Module;
 use inference_quant::{QuantMethod, ReplicatedLayer, ShardedVarBuilder};
+use rope::Phi4MMRotaryEmbedding;
 use mm_embedding::{InputMode, Phi4MMImageAudioEmbedding, Phi4MMPackedInputs};
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
-    layers::{self, Activation, CausalMasker, Phi4MMRotaryEmbedding, RmsNorm},
+    layers::{self, Activation, CausalMasker, RmsNorm},
     paged_attention::{
         encoder_cache::EncoderCacheManager, AttentionImplementation, ModelConfigMetadata,
         PagedAttention,
@@ -30,6 +31,7 @@ use crate::{
 
 mod audio_embedding;
 mod config;
+mod rope;
 mod image_embedding;
 pub(crate) mod inputs_processor;
 mod mm_embedding;

@@ -1,7 +1,7 @@
 use inference_quant::QuantizedConfig;
 
 use crate::{
-    layers::{Activation, Gemma3RopeScalingConfig},
+    layers::{Activation, Gemma3RopeScalingConfig, Gemma3RopeSpec},
     serde_default_fn,
 };
 
@@ -14,7 +14,6 @@ serde_default_fn!(usize, vocab_size, 262208);
 serde_default_fn!(bool, tie_word_embeddings, true);
 serde_default_fn!(usize, max_position_embeddings, 131072);
 serde_default_fn!(f64, rope_local_base_freq, 10000.);
-serde_default_fn!(usize, sliding_window_pattern, 6);
 serde_default_fn!(usize, num_attention_heads, 8);
 serde_default_fn!(usize, num_key_value_heads, 4);
 
@@ -77,8 +76,6 @@ pub struct Gemma3nTextConfig {
     pub tie_word_embeddings: bool,
     #[serde(default = "rope_local_base_freq")]
     pub rope_local_base_freq: f64,
-    #[serde(default = "sliding_window_pattern")]
-    pub sliding_window_pattern: usize,
     pub rope_scaling: Option<Gemma3RopeScalingConfig>,
     pub vocab_size_per_layer_input: usize,
     pub hidden_size_per_layer_input: usize,
@@ -90,6 +87,17 @@ pub struct Gemma3nTextConfig {
     pub altup_correct_scale: bool,
     pub activation_sparsity_pattern: Vec<f64>,
     pub final_logit_softcapping: Option<f64>,
+}
+
+impl Gemma3nTextConfig {
+    pub fn rope_spec(&self) -> Gemma3RopeSpec<'_> {
+        Gemma3RopeSpec {
+            rope_theta: self.rope_theta,
+            head_dim: self.head_dim,
+            max_position_embeddings: self.max_position_embeddings,
+            scaling: self.rope_scaling.as_ref(),
+        }
+    }
 }
 
 serde_default_fn!(usize, vision_hidden_size, 2048);

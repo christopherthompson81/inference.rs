@@ -32,7 +32,7 @@ mod config;
 mod inputs_processor;
 mod vision;
 
-pub(crate) use config::{Llama4Config, TextConfig};
+pub(crate) use config::Llama4Config;
 pub(crate) use inputs_processor::{Llama4ImageProcessor, Llama4Processor, IMAGE_TOKEN};
 
 struct Llama4MultiModalProjector {

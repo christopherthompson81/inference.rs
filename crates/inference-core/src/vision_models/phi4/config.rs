@@ -3,8 +3,10 @@ use std::collections::HashMap;
 use inference_quant::{QuantizedConfig, StaticLoraConfig};
 use serde::{Deserialize, Serialize};
 
+use super::rope::Phi4MMRopeScalingConfig;
+
 use crate::{
-    layers::{Activation, Phi4MMRopeScalingConfig},
+    layers::Activation,
     vision_models::conformer::config::ConformerEncoderConfig,
 };
 

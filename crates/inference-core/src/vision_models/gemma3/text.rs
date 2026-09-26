@@ -456,7 +456,7 @@ impl TextModel {
             &*mapper,
             cfg.num_hidden_layers,
             &normal_loading_metadata.real_device,
-            |device| Gemma3RotaryEmbedding::new(is_gptx, vb.dtype(), cfg, device),
+            |device| Gemma3RotaryEmbedding::new(is_gptx, vb.dtype(), cfg.rope_spec(), device),
         )?;
 
         let local_ropes = crate::device_map::per_layer_device(

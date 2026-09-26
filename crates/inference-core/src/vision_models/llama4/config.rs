@@ -2,7 +2,7 @@ use inference_quant::QuantizedConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    layers::{Activation, Llama3RopeConfig},
+    layers::{Activation, Llama3RopeConfig, Llama3RopeSpec},
     serde_default_fn,
 };
 
@@ -43,6 +43,15 @@ pub struct TextConfig {
 }
 
 impl TextConfig {
+    pub fn rope_spec(&self) -> Llama3RopeSpec<'_> {
+        Llama3RopeSpec {
+            rope_theta: self.rope_theta,
+            head_dim: self.hidden_size / self.num_attention_heads,
+            max_position_embeddings: self.max_position_embeddings,
+            scaling: self.rope_scaling.as_ref(),
+        }
+    }
+
     pub fn moe_layers(&self) -> Vec<usize> {
         self.moe_layers.clone().unwrap_or(
             (self.interleave_moe_layer_step - 1..self.num_hidden_layers)

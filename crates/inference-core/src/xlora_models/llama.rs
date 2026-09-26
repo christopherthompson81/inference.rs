@@ -571,7 +571,7 @@ impl XLoraLlama {
             &*mapper,
             cfg.num_hidden_layers,
             &normal_loading_metadata.real_device,
-            |device| Llama3RotaryEmbedding::new_llama3(vb.dtype(), cfg, device, is_gptx),
+            |device| Llama3RotaryEmbedding::new(vb.dtype(), cfg.rope_spec(), device, is_gptx, None),
         )?;
         let mut blocks: Vec<_> = NiceProgressBar::<_, 'b'>(
             0..cfg.num_hidden_layers,
