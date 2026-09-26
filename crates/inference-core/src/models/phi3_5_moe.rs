@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::layers_masker::CausalMaskConfig;
+use crate::layers::masker::CausalMaskConfig;
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::LayerNorm;
 use inference_quant::{
@@ -13,11 +13,11 @@ use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
+    layers::masker::masked_fill,
     layers::{
         self, embedding, layer_norm, Activation, CausalMasker, PhiRopeConfig, PhiRopeScalingConfig,
         PhiRotaryEmbedding, Sdpa,
     },
-    layers_masker::masked_fill,
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{

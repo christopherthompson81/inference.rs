@@ -32,8 +32,8 @@ use crate::{
     kv_cache::{
         HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, RecurrentLayerConfig,
     },
+    layers::masker::{CausalMaskConfig, PastKvLenCache},
     layers::{self, CausalMasker, GemmaRmsNorm, Mlp, Qwen3VLRotaryEmbedding, Sdpa, YarnRopeConfig},
-    layers_masker::{CausalMaskConfig, PastKvLenCache},
     paged_attention::{
         load_fp8_attention_scales, AttentionImplementation, ModelConfigMetadata, PagedAttention,
     },

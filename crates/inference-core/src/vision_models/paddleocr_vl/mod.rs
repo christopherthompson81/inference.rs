@@ -21,8 +21,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::amoe::AnyMoeBaseModelMixin;
+use crate::layers::masker::{CausalMaskConfig, PastKvLenCache};
 use crate::layers::CausalMasker;
-use crate::layers_masker::{CausalMaskConfig, PastKvLenCache};
 use crate::paged_attention::encoder_cache::{CacheModality, EncoderCacheManager};
 use crate::paged_attention::{AttentionImplementation, KvCacheLayout, ModelConfigMetadata};
 use crate::pipeline::{

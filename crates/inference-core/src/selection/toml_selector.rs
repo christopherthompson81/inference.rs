@@ -1303,7 +1303,7 @@ mod tests {
     #[test]
     fn dynamic_lora_example_selects_lora() {
         let selector: TomlSelector =
-            toml::from_str(include_str!("../../../configs/toml-selectors/lora.toml")).unwrap();
+            toml::from_str(include_str!("../../../../configs/toml-selectors/lora.toml")).unwrap();
 
         let TomlModelSelected::Lora {
             model_id,
@@ -1593,12 +1593,12 @@ mod tests {
 
     #[test]
     fn dynamic_lora_and_anymoe_are_rejected_together() {
-        let (_, anymoe) = include_str!("../../../configs/toml-selectors/anymoe_lora.toml")
+        let (_, anymoe) = include_str!("../../../../configs/toml-selectors/anymoe_lora.toml")
             .split_once("[anymoe]")
             .unwrap();
         let source = format!(
             "{}\n[anymoe]{}",
-            include_str!("../../../configs/toml-selectors/lora.toml"),
+            include_str!("../../../../configs/toml-selectors/lora.toml"),
             anymoe
         );
         let selector: TomlSelector = toml::from_str(&source).unwrap();

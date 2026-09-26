@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::layers_masker::CausalMaskConfig;
+use crate::layers::masker::CausalMaskConfig;
 use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
@@ -12,8 +12,8 @@ use inference_quant::{
 use crate::{
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
+    layers::masker::PastKvLenCache,
     layers::{embedding_with_legacy_tied_uqff, CausalMasker, Llama3RotaryEmbedding, RmsNorm, Sdpa},
-    layers_masker::PastKvLenCache,
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
         text_models_inputs_processor::PagedAttentionInputMetadata, EitherCache, IsqModel, KvCache,

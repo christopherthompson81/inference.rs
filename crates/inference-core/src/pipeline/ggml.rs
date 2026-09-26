@@ -9,13 +9,13 @@ use super::{
 };
 use crate::attention::ATTENTION_CHUNK_SIZE;
 use crate::device_map::DeviceMapper;
+use crate::kv_cache::prefix_cacher::PrefixCacheManagerV2;
 use crate::kv_cache::FullCacheManager;
 use crate::lora::Ordering;
 use crate::pipeline::chat_template::{calculate_eos_tokens, GenerationConfig};
 use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::{get_chat_template, Modalities, SupportedModality};
 use crate::pipeline::{ChatTemplate, LocalModelPaths};
-use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::debug::DeviceRepr;
 use crate::utils::model_config as ModelConfig;

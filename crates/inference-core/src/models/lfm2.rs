@@ -21,11 +21,11 @@ use crate::{
     kv_cache::{
         HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, RecurrentLayerConfig,
     },
+    layers::masker::{CausalMaskConfig, PastKvLenCache},
     layers::{
         self, embedding_with_legacy_tied_uqff, Activation, CausalMasker, RmsNorm, RotaryEmbedding,
         Sdpa,
     },
-    layers_masker::{CausalMaskConfig, PastKvLenCache},
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{

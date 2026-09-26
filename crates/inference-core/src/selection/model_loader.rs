@@ -11,7 +11,7 @@ use crate::{
         GGUFLoaderBuilder, GGUFSpecificConfig, HfConfigOverrides, MultimodalLoaderBuilder,
         MultimodalSpecificConfig, NormalLoaderBuilder, NormalSpecificConfig,
     },
-    toml_selector::get_toml_selected_model_device_map_params,
+    selection::toml_selector::get_toml_selected_model_device_map_params,
     AutoDeviceMapParams, EmbeddingLoaderBuilder, EmbeddingSpecificConfig, Loader, ModelDType,
     ModelSelected, SpeechLoader, TomlLoaderArgs, TomlSelector, Topology, GGUF_MULTI_FILE_DELIMITER,
     UQFF_MULTI_FILE_DELIMITER,

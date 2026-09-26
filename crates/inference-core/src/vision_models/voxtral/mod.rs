@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::layers_masker::CausalMaskConfig;
+use crate::layers::masker::CausalMaskConfig;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
@@ -12,8 +12,8 @@ use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
+    layers::masker::PastKvLenCache,
     layers::{embedding, CausalMasker, RmsNorm, RotaryEmbedding, Sdpa},
-    layers_masker::PastKvLenCache,
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
         text_models_inputs_processor::PagedAttentionInputMetadata, EitherCache, IsqModel, KvCache,

@@ -1,5 +1,8 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+pub(crate) mod masker;
+pub(crate) mod utils;
+
 use std::{f32::consts::PI, ops::Mul, str::FromStr, sync::Arc};
 
 use candle_core::{
@@ -20,8 +23,8 @@ use inference_quant::{
 use serde::{Deserialize, Serialize};
 
 pub use crate::attention::Sdpa;
-pub use crate::layers_masker::{CausalMaskConfig, CausalMasker};
-pub use crate::layers_utils::repeat_kv;
+pub use crate::layers::masker::{CausalMaskConfig, CausalMasker};
+pub use crate::layers::utils::repeat_kv;
 use crate::{
     amoe::{AnyMoeTrainableLayer, MlpLayer},
     embedding_models::embedding_gemma::EmbeddingGemmaConfig,

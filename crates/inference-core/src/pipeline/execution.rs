@@ -12,7 +12,7 @@ use candle_core::cuda_backend::cudarc::driver::CudaStream;
 use rand_isaac::Isaac64Rng;
 
 #[cfg(feature = "cuda")]
-use crate::{prefix_cacher::PrefixCacheManagerV2, sequence::Sequence};
+use crate::{kv_cache::prefix_cacher::PrefixCacheManagerV2, sequence::Sequence};
 
 #[cfg(feature = "cuda")]
 use super::{

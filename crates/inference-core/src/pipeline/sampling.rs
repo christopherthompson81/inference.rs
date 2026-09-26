@@ -11,7 +11,7 @@ use crate::sampler::{
     Sampler,
 };
 use crate::{
-    prefix_cacher::PrefixCacheManagerV2,
+    kv_cache::prefix_cacher::PrefixCacheManagerV2,
     sampler::Logprobs,
     sequence::{Sequence, SequenceRecognizer, SequenceState, StopReason, StreamingEmission},
     tools::ToolCallState,

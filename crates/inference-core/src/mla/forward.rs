@@ -613,7 +613,7 @@ pub fn mla_cache_forward(
                 let mask = Tensor::from_slice(&mask, (cur_len, offset), q.device())?
                     .to_dtype(DType::U8)?;
                 let zero = Tensor::new(0.0f32, q.device())?;
-                let mask = crate::layers_masker::masked_fill(
+                let mask = crate::layers::masker::masked_fill(
                     &zero.to_dtype(q.dtype())?.broadcast_as(mask.shape())?,
                     &mask,
                     f32::NEG_INFINITY,

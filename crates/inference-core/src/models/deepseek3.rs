@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::layers_masker::CausalMaskConfig;
+use crate::layers::masker::CausalMaskConfig;
 use std::{collections::HashMap, sync::Arc};
 
 use candle_core::{DType, Device, Result, Tensor, D};
@@ -15,11 +15,11 @@ use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
+    layers::masker::masked_fill,
     layers::{
         embedding_with_legacy_tied_uqff, Activation, CausalMasker, DeepSeekV2RopeConfig,
         DeepSeekV2RopeScaling, DeepSeekV2RotaryEmbedding, Mlp, RmsNorm, Sdpa,
     },
-    layers_masker::masked_fill,
     mla::{
         mla_cache_forward, mla_decode_forward, should_use_mla_cache, should_use_mla_decode,
         MlaKvBProjection, MlaWeights,

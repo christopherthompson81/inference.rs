@@ -15,8 +15,8 @@ use crate::pipeline::cuda_graph::{CudaGraphComponent, CudaGraphEvent, CudaGraphE
 use crate::{
     attention::AttentionMask,
     get_mut_arcmutex,
+    layers::masker::CausalMaskConfig,
     layers::CausalMasker,
-    layers_masker::CausalMaskConfig,
     pipeline::text_models_inputs_processor::FlashParams,
     speculative::{
         dflash::{
@@ -1067,7 +1067,7 @@ impl SpeculativeTargetMixin for Qwen3_5Model {
         &mut self,
         sequence_id: usize,
         cached_tokens: usize,
-    ) -> Result<Option<Arc<dyn crate::prefix_cacher::PagedAuxiliaryPrefixState>>> {
+    ) -> Result<Option<Arc<dyn crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState>>> {
         let Some(drafter) = self
             .dflash
             .lock()
@@ -1084,7 +1084,7 @@ impl SpeculativeTargetMixin for Qwen3_5Model {
         &mut self,
         sequence_id: usize,
         cached_tokens: usize,
-        state: &dyn crate::prefix_cacher::PagedAuxiliaryPrefixState,
+        state: &dyn crate::kv_cache::prefix_cacher::PagedAuxiliaryPrefixState,
     ) -> Result<()> {
         let drafter = self
             .dflash

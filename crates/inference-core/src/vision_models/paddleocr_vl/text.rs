@@ -525,8 +525,8 @@ impl ErnieTextModel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::layers::masker::{CausalMaskConfig, PastKvLenCache};
     use crate::layers::CausalMasker;
-    use crate::layers_masker::{CausalMaskConfig, PastKvLenCache};
     use candle_core::Var;
     use candle_nn::VarMap;
     use inference_quant::ShardedSafeTensors;

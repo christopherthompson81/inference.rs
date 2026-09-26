@@ -7,8 +7,8 @@ use candle_nn::{LayerNorm, Linear};
 use inference_quant::{MatMul, ShardedVarBuilder};
 
 use crate::{
+    layers::masker::masked_fill,
     layers::{self, layer_norm, GetFloatInfo},
-    layers_masker::masked_fill,
     utils::unvarbuilder::UnVarBuilder,
 };
 

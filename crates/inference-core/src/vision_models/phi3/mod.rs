@@ -4,7 +4,7 @@ pub(crate) mod phi3_inputs_processor;
 
 // This implementation is based on:
 // https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/blob/main/modeling_phi3.py
-use crate::layers_masker::CausalMaskConfig;
+use crate::layers::masker::CausalMaskConfig;
 use candle_core::{
     shape::ShapeWithOneHole, DType, Device, IndexOp, Module, Result, Shape, Tensor, D,
 };

@@ -1,5 +1,6 @@
 use crate::{
     distributed,
+    kv_cache::prefix_cacher::{PagedPrefixCheckpoint, PrefixCacheManagerV2},
     paged_attention::{
         block_hash::{adapter_generation_key, compute_block_hashes, BlockHash},
         block_pool::PrefixBlockRetentionRevocationMonitor,
@@ -12,7 +13,6 @@ use crate::{
         CacheBackendMetadata, CacheInstruction, DecodeGraphPrecaptureCtx, StepLookahead,
         StepSubmission, RECURRENT_GRAPH_PAD_SLOTS,
     },
-    prefix_cacher::{PagedPrefixCheckpoint, PrefixCacheManagerV2},
     scheduler::{
         modality_signature, DefaultSchedulerMethod, PagedPrefixCacheValidation,
         PagedPrefixCacheValidator, Scheduler, SchedulerOutput,

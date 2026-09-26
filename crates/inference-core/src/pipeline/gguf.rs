@@ -34,6 +34,7 @@ use crate::gguf::{
     validate_external_gguf_tokenizer, GgufTokenizerConversion,
 };
 use crate::gguf::{Content, GGUFArchitecture};
+use crate::kv_cache::prefix_cacher::PrefixCacheManagerV2;
 use crate::kv_cache::FullCacheManager;
 use crate::lora::Ordering;
 use crate::pipeline::chat_template::{calculate_eos_tokens, BeginEndUnkPadTok, GenerationConfig};
@@ -46,7 +47,6 @@ use crate::pipeline::normal::{NormalLoaderBuilder, NormalSpecificConfig, Prepare
 use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::ChatTemplate;
 use crate::pipeline::{get_chat_template, Modalities, SupportedModality};
-use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::gguf_metadata::{ContentConfig, GgufDeviceMapLoaderInner};
 use crate::utils::model_config as ModelConfig;

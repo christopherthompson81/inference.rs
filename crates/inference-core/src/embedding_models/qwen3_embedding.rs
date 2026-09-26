@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 /// Mistral LLM, https://github.com/mistralai/mistral-src
-use crate::layers_masker::CausalMaskConfig;
+use crate::layers::masker::CausalMaskConfig;
 use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, RowParallelLayer, ShardedVarBuilder,
@@ -13,8 +13,8 @@ use crate::{
     amoe::{AnyMoeBaseModelMixin, MlpLayer},
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
+    layers::masker::NotACache,
     layers::{embedding, Activation, CausalMasker, Mlp, RmsNorm, RotaryEmbedding, Sdpa},
-    layers_masker::NotACache,
     paged_attention::{AttentionImplementation, ModelConfigMetadata},
     pipeline::{
         text_models_inputs_processor::FlashParams, EmbeddingModel, IsqModel, NormalLoadingMetadata,

@@ -205,3 +205,27 @@ set the finish alone. Ordering jobs by expected cost (previous time or source si
 heaviest units tightens it further. What would: fewer instantiations (head dims and dtypes nothing
 uses), cheaper templates, or checking why concurrency sits at 10-13 instead of 16 after the first ~4 min. Before
 trusting the concurrency numbers, fix the sampler's `ptxas` matching.
+
+## Run 7 - 2026-09-25 23:59
+
+Change: regroup inference-core root modules that are sub-parts of one concept.
+
+- `layers.rs` becomes `layers/mod.rs`, with `layers_masker` and `layers_utils` as `layers::{masker,utils}`.
+- `model_selected`, `toml_selector`, `model_loader` and `model_metadata` move to `selection/`.
+- `prefix_cacher` moves to `kv_cache/`.
+
+Not moved: `request`/`response`/`sequence` (`sequence` is scheduler state, not part of the request), `sampler` (a
+group of one), and the small standalone files. The planned `request/` and `sampling/` groups would be churn without
+clarity.
+
+Method: a script rewrote `crate::old`, `$crate::old`, `inference_core::old`, root-level `super::old`, and old names
+inside `use crate::{...}` groups (brace-aware). Moved files' own `super::` paths were meant to become `crate::`, but
+every hit was a `mod tests { use super::*; }`, which must stay `super`, so those were reverted.
+
+Fallout found by the compiler:
+- the new `mod` lines were placed above an inner attribute;
+- `include_str!` needed one more `../`;
+- clippy flagged dead code because `model_metadata` (docs-check helpers, public before) had gone private. `selection`
+  is `pub mod`, and its other submodules stay `pub(crate)`.
+
+Result: green, with 2131 CPU and 2449 CUDA tests (unchanged counts).
