@@ -61,11 +61,11 @@ impl Default for SiglipVisionConfig {
     }
 }
 
-pub(super) struct VisionEmbeddings {
+pub struct VisionEmbeddings {
     patch_size: usize,
     patch_embedding: Conv2d,
     num_patches_per_side: usize,
-    pub(super) position_embedding: Embedding,
+    pub position_embedding: Embedding,
 }
 
 /// torch.bucketize with right=True
@@ -443,7 +443,7 @@ impl Encoder {
 }
 
 pub struct SiglipVisionTransformer {
-    pub(super) embeddings: VisionEmbeddings,
+    pub embeddings: VisionEmbeddings,
     encoder: Encoder,
     post_layernorm: LayerNorm,
     config: SiglipVisionConfig,

@@ -47,14 +47,14 @@ pub(crate) mod lfm2_vl;
 pub(crate) mod llama4;
 #[cfg(feature = "models-llama")]
 pub(crate) mod mistral3;
-pub(crate) mod multimodal_layout;
 pub(crate) mod muse_glimmer;
 pub(crate) mod qwen3_5;
 pub(crate) mod qwen3_5_moe;
 pub(crate) mod qwen3_vl;
 pub(crate) mod qwen3_vl_moe;
-pub(crate) mod siglip;
 pub(crate) mod voxtral;
+
+pub(crate) use inference_nn::vision::{multimodal_layout, siglip};
 
 use crate::gdn::RecurrentBatchKind;
 

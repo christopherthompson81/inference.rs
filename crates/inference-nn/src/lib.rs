@@ -40,6 +40,7 @@ pub mod sampler;
 pub mod speculative;
 pub mod topology;
 pub mod utils;
+pub mod vision;
 
 /// CUDA toolkit this crate's kernels were built with, as `major.minor`.
 pub const BUILD_CUDA_VERSION: Option<&str> = option_env!("INFERENCE_RS_BUILD_CUDA_VERSION");
