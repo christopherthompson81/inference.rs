@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use crate::layers::masker::CausalMaskConfig;
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{ops::Range, sync::Arc};
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{Activation, Module};
@@ -790,21 +790,12 @@ impl MLlamaTextModel {
             mapper.set_nm_device(vb.pp("norm"), false),
         )?;
 
-        let mut ropes = HashMap::new();
-        for layer_idx in 0..cfg.num_hidden_layers {
-            let device = mapper
-                .device_for(layer_idx, false)
-                .unwrap_or(&normal_loading_metadata.real_device);
-            ropes.insert(
-                device.location(),
-                Arc::new(Llama3RotaryEmbedding::new_mllama3(
-                    vb.dtype(),
-                    cfg,
-                    device,
-                    is_gptx,
-                )?),
-            );
-        }
+        let ropes = crate::device_map::per_layer_device(
+            &*mapper,
+            cfg.num_hidden_layers,
+            &normal_loading_metadata.real_device,
+            |device| Llama3RotaryEmbedding::new_mllama3(vb.dtype(), cfg, device, is_gptx),
+        )?;
 
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         for i in 0..cfg.num_hidden_layers {

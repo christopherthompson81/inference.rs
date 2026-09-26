@@ -512,21 +512,9 @@ impl ModelConfig::FromAdapterGGUF for ModelWeights {
         let mut layers = Vec::with_capacity(block_count);
         let mut count = 0;
 
-        let mut ropes = HashMap::new();
-        for layer_idx in 0..block_count {
-            let device = mapper.device_for(layer_idx, false).unwrap_or(device);
-            ropes.insert(
-                device.location(),
-                Arc::new(RotaryEmbedding::new(
-                    rope_freq_base,
-                    rope_dim,
-                    max_seq_len,
-                    device,
-                    false,
-                    dtype,
-                )?),
-            );
-        }
+        let ropes = crate::device_map::per_layer_device(&*mapper, block_count, device, |device| {
+            RotaryEmbedding::new(rope_freq_base, rope_dim, max_seq_len, device, false, dtype)
+        })?;
 
         for layer_idx in NiceProgressBar::<_, 'b'>(
             0..block_count,

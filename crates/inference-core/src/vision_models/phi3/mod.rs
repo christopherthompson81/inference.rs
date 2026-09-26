@@ -14,7 +14,6 @@ use inference_quant::{
 };
 use std::{
     any::Any,
-    collections::HashMap,
     fmt::Debug,
     sync::{Arc, Mutex},
 };
@@ -1190,16 +1189,12 @@ impl Model {
             mapper.set_nm_device(vb_m.pp("vision_embed_tokens"), false),
         )?;
         let vb_l = vb_m.pp("layers");
-        let mut ropes = HashMap::new();
-        for layer_idx in 0..cfg.num_hidden_layers {
-            let device = mapper
-                .device_for(layer_idx, false)
-                .unwrap_or(&normal_loading_metadata.real_device);
-            ropes.insert(
-                device.location(),
-                Arc::new(PhiRotaryEmbedding::new(vb.dtype(), cfg.clone(), device)?),
-            );
-        }
+        let ropes = crate::device_map::per_layer_device(
+            &*mapper,
+            cfg.num_hidden_layers,
+            &normal_loading_metadata.real_device,
+            |device| PhiRotaryEmbedding::new(vb.dtype(), cfg.clone(), device),
+        )?;
         let layers = NiceProgressBar::<_, 'b'>(
             0..cfg.num_hidden_layers,
             "Loading repeating layers",

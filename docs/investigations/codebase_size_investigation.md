@@ -315,3 +315,28 @@ Review follow-ups: repeated layer ids are deduplicated (`[0, 0]` would have nest
 target table is a module constant with a test that pins its PEFT shapes, and phi3-vision reuses it.
 
 Result: green, with 2133 CPU and 2451 CUDA tests (+2 each). Net about -830 lines.
+
+## Run 10 - 2026-09-26 01:40
+
+Change: `device_map::per_layer_device(mapper, num_layers, fallback, make)` builds one value per distinct device that
+layers map to, with unmapped layers using `fallback`. It replaces the plain RoPE-per-device loops.
+
+Survey: 51 `for layer in 0..n { let device = mapper.device_for(layer, false)... }` loops.
+- 36 are the plain form: `ropes.insert(device.location(), Arc::new(ctor))`, rebuilding the RoPE for every layer and
+  overwriting per device. These are rewritten.
+- 7 already build once per device, with `contains_key`/`entry` skips around large model-specific bodies (llama,
+  mistral, phi3, phi3_5_moe, smollm3, granite, gemma4 x2). They would save a few lines at more risk, so they are left.
+- Also left: gpt_oss (picks a RoPE type in the loop), the two phi2 copies (inline comment, matcher declined), and
+  four loops that collect per-layer device lists.
+
+The rewrite skipped any site whose constructor used the layer index; there were none. `mapper.get_unique_devices()`
+is not equivalent, because it ignores the `real_device` fallback for unmapped layers.
+
+Verification:
+- Green, with 2134 CPU and 2452 CUDA tests.
+- Qwen2.5-Coder-3B GGUF (`models/qwen2.rs`, a converted site): greedy outputs are byte-identical to master with
+  `--paged-attn off` and `on`.
+- Server ready time is unchanged (1.378 s / 1.588 s before and after). Building a RoPE per layer instead of per device
+  was not a measurable load cost at this size, so the change is line count and clarity only.
+
+Result: 35 files, about -125 lines.

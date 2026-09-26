@@ -828,21 +828,12 @@ impl TextModel {
             mapper.set_nm_device(vb_m.pp("norm"), false),
         )?;
         let head_dim = cfg.hidden_size / cfg.num_attention_heads;
-        let mut ropes = HashMap::new();
-        for i in 0..cfg.num_hidden_layers {
-            let device = mapper
-                .device_for(i, false)
-                .unwrap_or(&normal_loading_metadata.real_device);
-            ropes.insert(
-                device.location(),
-                Arc::new(Llama3RotaryEmbedding::new_llama4(
-                    vb_m.dtype(),
-                    cfg,
-                    device,
-                    is_gptx,
-                )?),
-            );
-        }
+        let ropes = crate::device_map::per_layer_device(
+            &*mapper,
+            cfg.num_hidden_layers,
+            &normal_loading_metadata.real_device,
+            |device| Llama3RotaryEmbedding::new_llama4(vb_m.dtype(), cfg, device, is_gptx),
+        )?;
         let blocks = NiceProgressBar::<_, 'b'>(
             0..cfg.num_hidden_layers,
             "Loading text repeating layers",

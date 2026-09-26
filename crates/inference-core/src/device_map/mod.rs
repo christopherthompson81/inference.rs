@@ -7,7 +7,7 @@ pub use mappers::NcclPipelineParallelMapper;
 pub use mappers::{DeviceMapper, DummyDeviceMapper, LayerDeviceMapper, NcclDeviceMapper};
 pub use mask::DeviceMappedMask;
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use crate::{pipeline::AutoDeviceMapParams, utils::debug::DeviceRepr, MemoryUsage, Topology};
 use candle_core::{Device, DeviceLocation, Result};
@@ -306,6 +306,23 @@ fn log_layer_mapping_range(start_index: usize, end_index: usize, device: &Device
 }
 
 /// Get all devices on the same device type but different ordinals
+/// One `make(device)` per distinct device that layers `0..num_layers` map to; unmapped layers use `fallback`.
+pub(crate) fn per_layer_device<T>(
+    mapper: &(impl DeviceMapper + ?Sized),
+    num_layers: usize,
+    fallback: &Device,
+    mut make: impl FnMut(&Device) -> Result<T>,
+) -> Result<HashMap<DeviceLocation, Arc<T>>> {
+    let mut out = HashMap::new();
+    for layer in 0..num_layers {
+        let device = mapper.device_for(layer, false).unwrap_or(fallback);
+        if let std::collections::hash_map::Entry::Vacant(e) = out.entry(device.location()) {
+            e.insert(Arc::new(make(device)?));
+        }
+    }
+    Ok(out)
+}
+
 pub fn get_all_similar_devices(base: &Device) -> Result<Vec<Device>> {
     let mut devices = Vec::new();
     match base {

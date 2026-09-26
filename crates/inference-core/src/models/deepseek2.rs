@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use crate::layers::masker::CausalMaskConfig;
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::Module;
@@ -843,26 +843,18 @@ impl DeepSeekV2 {
             mapper.set_nm_device(vb_m.pp("norm"), false),
         )?;
 
-        let mut ropes = HashMap::new();
         let rope_cfg = DeepSeekV2RopeConfig {
             rope_scaling: cfg.rope_scaling.clone(),
             max_position_embeddings: cfg.max_position_embeddings,
             rope_theta: cfg.rope_theta,
             qk_rope_head_dim: cfg.qk_rope_head_dim,
         };
-        for i in 0..cfg.num_hidden_layers {
-            let device = mapper
-                .device_for(i, false)
-                .unwrap_or(&normal_loading_metadata.real_device);
-            ropes.insert(
-                device.location(),
-                Arc::new(DeepSeekV2RotaryEmbedding::new(
-                    &rope_cfg,
-                    vb.dtype(),
-                    device,
-                )?),
-            );
-        }
+        let ropes = crate::device_map::per_layer_device(
+            &*mapper,
+            cfg.num_hidden_layers,
+            &normal_loading_metadata.real_device,
+            |device| DeepSeekV2RotaryEmbedding::new(&rope_cfg, vb.dtype(), device),
+        )?;
 
         let vb_l = vb_m.pp("layers");
         let layers: Vec<DecoderLayer> = NiceProgressBar::<_, 'b'>(

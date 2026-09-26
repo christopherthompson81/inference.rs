@@ -22,7 +22,7 @@ use inference_quant::{
     ShardedVarBuilder,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 serde_default_fn!(bool, tie_word_embeddings, false);
 serde_default_fn!(usize, max_position_embeddings, 32768);
@@ -415,14 +415,12 @@ impl Model {
         )?;
 
         let head_dim = cfg.head_dim();
-        let mut ropes = HashMap::new();
-        for layer_idx in 0..cfg.num_hidden_layers {
-            let device = mapper
-                .device_for(layer_idx, false)
-                .unwrap_or(&normal_loading_metadata.real_device);
-            ropes.insert(
-                device.location(),
-                Arc::new(RotaryEmbedding::new(
+        let ropes = crate::device_map::per_layer_device(
+            &*mapper,
+            cfg.num_hidden_layers,
+            &normal_loading_metadata.real_device,
+            |device| {
+                RotaryEmbedding::new(
                     cfg.rope_theta as f32,
                     cfg.partial_rotary_factor,
                     head_dim,
@@ -433,9 +431,9 @@ impl Model {
                     } else {
                         vb_m.dtype()
                     },
-                )?),
-            );
-        }
+                )
+            },
+        )?;
 
         let vb_l = vb_m.pp("layers");
         let layers = NiceProgressBar::<_, 'b'>(
