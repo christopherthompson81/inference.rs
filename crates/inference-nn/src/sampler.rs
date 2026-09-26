@@ -269,7 +269,7 @@ impl DrySamplingParamsInner {
 /// # Example
 /// ```rust
 /// use std::{sync::Arc, ops::Mul};
-/// use inference_core::CustomLogitsProcessor;
+/// use inference_nn::sampler::CustomLogitsProcessor;
 /// use candle_core::{Result, Tensor};
 ///
 /// struct ThresholdLogitsProcessor;
