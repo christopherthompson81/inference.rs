@@ -333,3 +333,29 @@ Review follow-ups:
   84k, pipeline 58k, models 23k) and in core's lib-test build, which compiles all of it a second time. Splitting the
   models into sibling family crates (step 3) is where the tail breaks up; step 1 only enables it. Cold numbers to
   follow for a like-for-like comparison with Run 13.
+
+## Run 15 - 2026-09-26 12:15
+
+- Question: cold, like-for-like with Run 13, does moving the base modules into `inference-nn` shorten the build?
+- Command: same as Run 13 (`CARGO_TARGET_DIR=<scratch> cargo test --no-run --features cuda --workspace --lib --bins
+  --tests --timings`), load average ~17 on 16 cores during the run (browsers open), so +-10% noise.
+- Result: 321 s (Run 13: 297 s). Total 2358 unit-seconds (was 2157).
+  - `inference-nn` lib t=114-142 s, 28 s (frontend 10.9 s); its lib test 28 s runs in parallel with core.
+  - `inference-core` lib t=125-257 s, 132 s (frontend 72.8 s, was 68 s); lib test 179 s, still ends the build.
+  - 2-4 units active from t=160 s to the end again.
+- Negative result: taking 78k lines out of core did not shrink core's frontend, and nn adds ~11 s of serial frontend
+  ahead of it.
+
+## Run 16 - 2026-09-26 12:25
+
+- Question: what does inference-core's single-threaded compile time go to?
+- Command: `RUSTC_BOOTSTRAP=1 cargo rustc -p inference-core --lib --features cuda -- -Z time-passes` (scratch
+  target, only core rebuilt, quiet machine).
+- Result: 94 s total. Serial passes: type_check_crate 10.7 s, MIR_borrow_checking 13.8 s,
+  monomorphization_collector 14.3 s, generate_crate_metadata 17.3 s, macro expansion 2.6 s, coherence 2.7 s,
+  resolve ~2 s (~65 s together). codegen_to_LLVM_IR 35.7 s is also generated on the main thread; only
+  LLVM_passes (43.5 s wall) fans out across codegen units.
+- Implication: ~100 s of core's build is single-threaded, and a third of it is monomorphization, IR generation
+  and metadata for generic code. Since removing the base modules did not move these numbers, the cost is
+  concentrated in core's own code. Next: `cargo llvm-lines` on core to find the generic functions that dominate IR,
+  and `-Z self-profile` for typeck/borrowck by item, before choosing where to cut.
