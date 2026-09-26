@@ -280,7 +280,7 @@ fn main() -> Result<(), String> {
             out_dir.join("libinferencequant.a")
         };
         builder
-            .build_lib(prepare_cuda_archive(out_file))
+            .build_and_link("inferencequant", prepare_cuda_archive(out_file))
             .expect("Build mistral quant lib failed!");
         if deepgemm_fp8_sm90 {
             let deepgemm_source_hash_arg =
@@ -339,7 +339,6 @@ fn main() -> Result<(), String> {
             println!("cargo:rustc-link-lib=inferencenvfp4");
         }
         println!("cargo:rustc-link-search={}", out_dir.display());
-        println!("cargo:rustc-link-lib=inferencequant");
         println!("cargo:rustc-link-lib=dylib=cudart");
         if deepgemm_fp8_sm90 {
             println!("cargo:rustc-link-lib=inferencedeepgemm");

@@ -247,6 +247,12 @@ debug = true
 debug = "line-tables-only"
 split-debuginfo = "unpacked"
 opt-level = 3
+# `false` still runs thin local LTO at opt-level 3: edit rebuilds 28 s -> 11 s and no pre-LTO bitcode per session.
+lto = "off"
+
+# Its CPU conv kernels need cross-CGU inlining, which `lto = "off"` drops: the layout ABI test ran 42 s instead of 8 s.
+[profile.dev.package.inference-layout]
+codegen-units = 1
 
 # Full debug info for a debugger session: `cargo build --profile debugging`.
 [profile.debugging]

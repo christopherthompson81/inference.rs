@@ -194,10 +194,7 @@ mod cuda_build {
         }
 
         let out_file = out_dir.join("libflashattention.a");
-        builder.build_lib(prepare_cuda_archive(out_file))?;
-
-        println!("cargo::rustc-link-search={}", out_dir.display());
-        println!("cargo::rustc-link-lib=flashattention");
+        builder.build_and_link("flashattention", prepare_cuda_archive(out_file))?;
         println!("cargo::rustc-link-lib=dylib=cudart");
         if !is_target_msvc {
             println!("cargo::rustc-link-lib=dylib=stdc++");

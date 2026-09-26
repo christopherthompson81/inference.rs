@@ -152,10 +152,8 @@ fn main() {
         };
 
         builder
-            .build_lib(prepare_cuda_archive(out_file))
+            .build_and_link("inferencecuda", prepare_cuda_archive(out_file))
             .expect("Build mistral-core failed!");
-        println!("cargo:rustc-link-search={}", out_dir.display());
-        println!("cargo:rustc-link-lib=inferencecuda");
         println!("cargo:rustc-link-lib=dylib=cudart");
 
         if compute_cap == 90
@@ -204,6 +202,7 @@ fn main() {
                     out_dir.join("libinferenceflashinfergdn.a"),
                 ))
                 .expect("Build FlashInfer GDN provider failed!");
+            println!("cargo:rustc-link-search={}", out_dir.display());
             println!("cargo:rustc-link-lib=inferenceflashinfergdn");
         } else if compute_cap == 90
             && target.contains("linux")
