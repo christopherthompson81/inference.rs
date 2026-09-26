@@ -1,21 +1,28 @@
 //! Block-diffusion text generation support (e.g. DiffusionGemma): models that commit a
 //! whole denoised block of tokens per engine step instead of sampling one token from logits.
 
-use crate::model::BlockDenoisingProgressSink;
-pub use crate::model::{BlockDenoisingProgressEmitter, BlockDiffusionMixin};
-use std::sync::Arc;
+#[cfg(feature = "models-gemma")]
+pub use crate::model::BlockDenoisingProgressEmitter;
+pub use crate::model::BlockDiffusionMixin;
+#[cfg(feature = "models-gemma")]
+use {
+    crate::{
+        model::BlockDenoisingProgressSink, response::BlockDenoisingProgress, sequence::Sequence,
+        Response,
+    },
+    std::sync::Arc,
+    tokenizers::Tokenizer,
+    tokio::sync::mpsc::Sender,
+};
 
-use tokenizers::Tokenizer;
-use tokio::sync::mpsc::Sender;
-
-use crate::{response::BlockDenoisingProgress, sequence::Sequence, Response};
-
+#[cfg(feature = "models-gemma")]
 struct ResponseProgressSink {
     response_index: usize,
     tokenizer: Arc<Tokenizer>,
     response: Sender<Response>,
 }
 
+#[cfg(feature = "models-gemma")]
 impl BlockDenoisingProgressSink for ResponseProgressSink {
     fn emit(
         &self,
@@ -44,6 +51,7 @@ impl BlockDenoisingProgressSink for ResponseProgressSink {
     }
 }
 
+#[cfg(feature = "models-gemma")]
 pub(crate) fn block_denoising_progress_emitters(
     tokenizer: Option<Arc<Tokenizer>>,
     input_seqs: &[&mut Sequence],

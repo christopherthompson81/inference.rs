@@ -38,9 +38,13 @@ pub(crate) mod idefics3;
 pub(crate) mod minicpmo;
 pub(crate) mod phi4;
 pub(crate) use phi4::inputs_processor;
+#[cfg(feature = "models-gemma")]
 pub(crate) mod diffusion_gemma;
+#[cfg(feature = "models-gemma")]
 pub(crate) mod gemma3;
+#[cfg(feature = "models-gemma")]
 pub(crate) mod gemma3n;
+#[cfg(feature = "models-gemma")]
 pub(crate) mod gemma4;
 #[cfg(feature = "models-other")]
 pub(crate) mod lfm2_vl;

@@ -21,7 +21,7 @@ use super::config::Gemma4AudioConfig;
 pub struct Gemma4AudioRelativePositionEmbedding {
     num_heads: usize,
     head_dim: usize,
-    pub(crate) pos_proj: Arc<dyn QuantMethod>,
+    pub pos_proj: Arc<dyn QuantMethod>,
     inv_timescales: Tensor,
     pos_indices: Tensor,
 }
@@ -485,11 +485,7 @@ impl Gemma4AudioSubSampleConvProjection {
         })
     }
 
-    pub(crate) fn forward(
-        &self,
-        audio_mel: &Tensor,
-        audio_mel_mask: &Tensor,
-    ) -> Result<(Tensor, Tensor)> {
+    pub fn forward(&self, audio_mel: &Tensor, audio_mel_mask: &Tensor) -> Result<(Tensor, Tensor)> {
         let x = audio_mel.unsqueeze(1)?;
         let (x, mask) = self.conv_0.forward(&x, audio_mel_mask)?;
         let (x, mask) = self.conv_1.forward(&x, &mask)?;
@@ -510,7 +506,7 @@ pub struct Gemma4AudioAttention {
     max_future_horizon: usize,
     max_past_horizon: usize,
     context_size: usize,
-    pub(crate) relative_position_embedding: Gemma4AudioRelativePositionEmbedding,
+    pub relative_position_embedding: Gemma4AudioRelativePositionEmbedding,
     _per_dim_scale: Tensor,
     q_proj: ClippableLinear,
     k_proj: ClippableLinear,
@@ -984,11 +980,11 @@ impl Gemma4AudioConformerLightConv1d {
 }
 
 pub struct Gemma4AudioConformerBlock {
-    pub(crate) ffw_layer_start: Gemma4AudioConformerFeedForward,
-    pub(crate) attention: Gemma4AudioConformerAttention,
-    pub(crate) lconv1d: Gemma4AudioConformerLightConv1d,
-    pub(crate) ffw_layer_end: Gemma4AudioConformerFeedForward,
-    pub(crate) norm: RmsNorm,
+    pub ffw_layer_start: Gemma4AudioConformerFeedForward,
+    pub attention: Gemma4AudioConformerAttention,
+    pub lconv1d: Gemma4AudioConformerLightConv1d,
+    pub ffw_layer_end: Gemma4AudioConformerFeedForward,
+    pub norm: RmsNorm,
     gradient_clipping: f64,
 }
 
@@ -1009,11 +1005,7 @@ impl Gemma4AudioConformerBlock {
         })
     }
 
-    pub(crate) fn forward(
-        &self,
-        audio_encodings: &Tensor,
-        audio_mel_mask: &Tensor,
-    ) -> Result<Tensor> {
+    pub fn forward(&self, audio_encodings: &Tensor, audio_mel_mask: &Tensor) -> Result<Tensor> {
         let audio_encodings = self.ffw_layer_start.forward(audio_encodings)?;
         let audio_encodings = self.attention.forward(&audio_encodings, audio_mel_mask)?;
         let audio_encodings = self.lconv1d.forward(&audio_encodings)?;
@@ -1026,10 +1018,10 @@ impl Gemma4AudioConformerBlock {
 }
 
 pub struct AudioModel {
-    pub(crate) subsample_conv_projection: Gemma4AudioSubSampleConvProjection,
-    pub(crate) conformer: Vec<Gemma4AudioConformerBlock>,
+    pub subsample_conv_projection: Gemma4AudioSubSampleConvProjection,
+    pub conformer: Vec<Gemma4AudioConformerBlock>,
     conf_reduction_factor: usize,
-    pub(crate) output_proj: Option<Arc<dyn QuantMethod>>,
+    pub output_proj: Option<Arc<dyn QuantMethod>>,
 }
 
 impl AudioModel {

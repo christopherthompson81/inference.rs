@@ -59,7 +59,7 @@ macro_rules! is_sliding {
     };
 }
 
-pub(super) fn first_kv_shared_layer_idx(cfg: &Gemma4TextConfig) -> usize {
+pub fn first_kv_shared_layer_idx(cfg: &Gemma4TextConfig) -> usize {
     cfg.num_hidden_layers
         .saturating_sub(cfg.num_kv_shared_layers)
 }
@@ -103,14 +103,14 @@ fn select_paged_mm_prefix_path(
 /// with zeros. The result: cos=1, sin=0 for non-rotated positions, so the
 /// standard rotary formula `x*cos + rotate_half(x)*sin` acts as identity
 /// for those dims.
-pub(super) struct ProportionalRotaryEmbedding {
+pub struct ProportionalRotaryEmbedding {
     cos: Tensor,
     sin: Tensor,
     is_gpt_neox: bool,
 }
 
 impl ProportionalRotaryEmbedding {
-    pub(super) fn new(
+    pub fn new(
         base: f32,
         head_dim: usize,
         partial_rotary_factor: f64,
@@ -197,7 +197,7 @@ impl ProportionalRotaryEmbedding {
         )
     }
 
-    pub(super) fn forward_q(&self, q: &Tensor, positions: &Tensor) -> Result<Tensor> {
+    pub fn forward_q(&self, q: &Tensor, positions: &Tensor) -> Result<Tensor> {
         crate::layers::apply_rotary_q(q, &self.cos, &self.sin, positions, self.is_gpt_neox)
     }
 }
@@ -797,7 +797,7 @@ impl Attention {
     /// sequences with EQUAL context length (scheduler buckets guarantee it), so queries are
     /// [N, heads, q_len, hd] and `cached_kv` is one batched [N, kv_heads, ctx, hd] snapshot.
     /// One flash call, causal=false; the cache is read but never written.
-    pub(in crate::vision_models) fn forward_canvas(
+    pub fn forward_canvas(
         &self,
         xs: &Tensor,
         rope_positions: &Tensor,
@@ -1209,7 +1209,7 @@ impl DecoderLayer {
 
     /// Block-diffusion canvas pass: bidirectional attention reading the KV cache without
     /// writing it, then the standard FFN/MoE flow.
-    pub(in crate::vision_models) fn forward_canvas(
+    pub fn forward_canvas(
         &self,
         xs: &Tensor,
         rope_positions: &Tensor,
@@ -2098,7 +2098,7 @@ impl TextModel {
     /// `forward_embeds` with per-layer scalar overrides, used by DiffusionGemma's encoder
     /// mode (the shared backbone holds the decoder's scalars; the encoder has its own).
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::vision_models) fn forward_embeds_scaled(
+    pub fn forward_embeds_scaled(
         &self,
         input_ids: &Tensor,
         ple_input_ids: &Tensor,
@@ -2483,7 +2483,7 @@ impl TextModel {
     /// Block-diffusion canvas pass over already-embedded (and self-conditioned) canvas
     /// inputs. Bidirectional attention over [cached context + canvas], cache read-only.
     /// Returns softcapped logits for every canvas position.
-    pub(in crate::vision_models) fn forward_canvas_embeds(
+    pub fn forward_canvas_embeds(
         &self,
         mut xs: Tensor,
         rope_positions: &Tensor,
@@ -2503,18 +2503,18 @@ impl TextModel {
         Ok(logits)
     }
 
-    pub(in crate::vision_models) fn embedding_weight(&self) -> Result<Tensor> {
+    pub fn embedding_weight(&self) -> Result<Tensor> {
         self.embed_tokens.dequantize_w()
     }
 
-    pub(in crate::vision_models) fn embedding_dtype(&self) -> DType {
+    pub fn embedding_dtype(&self) -> DType {
         self.embed_tokens.dtype_and_device().0
     }
 
     /// Snapshot the frozen encoder cache for a batch of sequences with EQUAL context
     /// length: one contiguous [N, kv_heads, kv_len, head_size] pair per layer. Paged caches
     /// gather all sequences in a single kernel call per layer.
-    pub(in crate::vision_models) fn gather_canvas_kv(
+    pub fn gather_canvas_kv(
         &self,
         ctx: &mut ModelForwardContext<'_>,
         num_seqs: usize,

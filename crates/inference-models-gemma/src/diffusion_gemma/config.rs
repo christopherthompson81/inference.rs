@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
+use crate::gemma4::config::{Gemma4TextConfig, Gemma4VisionConfig};
 use crate::serde_default_fn;
-use crate::vision_models::gemma4::config::{Gemma4TextConfig, Gemma4VisionConfig};
 
 pub const DEFAULT_CANVAS_LENGTH: usize = 256;
 

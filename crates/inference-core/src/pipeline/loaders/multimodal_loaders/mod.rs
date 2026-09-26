@@ -22,9 +22,11 @@ use self::minicpmo::{MiniCpmOConfig, MiniCpmOModel, MiniCpmOProcessor};
 
 use super::{DeviceMappedModelLoader, NonMappedSubModel, NormalLoadingMetadata};
 // Loaders call these as `super::X`; they live one level up, in `loaders`.
+#[cfg(any(feature = "models-gemma", feature = "models-llama"))]
+use super::promoted_tensor_pack_factor;
 use super::{
     language_model_pack_factors, language_model_pack_factors_with_aliases,
-    promoted_tensor_pack_factor, AutoDeviceMapQuantization,
+    AutoDeviceMapQuantization,
 };
 
 use crate::attention::ATTENTION_CHUNK_SIZE;
@@ -43,12 +45,19 @@ use crate::pipeline::{
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
 #[cfg(any(feature = "models-llama", feature = "models-phi"))]
 use crate::vision_models::clip::ClipConfig;
+#[cfg(feature = "models-gemma")]
 use crate::vision_models::diffusion_gemma::{DiffusionGemmaConfig, DiffusionGemmaModel};
+#[cfg(feature = "models-gemma")]
 use crate::vision_models::gemma3::config::Gemma3Config;
+#[cfg(feature = "models-gemma")]
 use crate::vision_models::gemma3::{Gemma3Model, Gemma3Processor};
+#[cfg(feature = "models-gemma")]
 use crate::vision_models::gemma3n::config::{Gemma3nConfig, IntermediateSize};
+#[cfg(feature = "models-gemma")]
 use crate::vision_models::gemma3n::{Gemma3nModel, Gemma3nProcessor};
+#[cfg(feature = "models-gemma")]
 use crate::vision_models::gemma4::config::Gemma4Config;
+#[cfg(feature = "models-gemma")]
 use crate::vision_models::gemma4::{Gemma4Model, Gemma4Processor, Gemma4ProcessorSettings};
 #[cfg(feature = "models-llama")]
 use crate::vision_models::idefics2::{Config as Idefics2Config, Idefics2};
@@ -309,10 +318,10 @@ multimodal_loader_types! {
     MiniCpmO { cli: "minicpmo", hf: "MiniCPMO", loader: MiniCpmOLoader, feature: "models-qwen" },
     Phi4MM { cli: "phi4mm", hf: "Phi4MMForCausalLM", loader: Phi4MMLoader },
     Qwen2_5VL { cli: "qwen2_5vl", hf: "Qwen2_5_VLForConditionalGeneration", loader: Qwen2_5VLLoader },
-    Gemma3 { cli: "gemma3", hf: "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM", loader: Gemma3Loader },
+    Gemma3 { cli: "gemma3", hf: "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM", loader: Gemma3Loader, feature: "models-gemma" },
     Mistral3 { cli: "mistral3", hf: "Mistral3ForConditionalGeneration", loader: Mistral3Loader, feature: "models-llama" },
     Llama4 { cli: "llama4", hf: "Llama4ForConditionalGeneration", loader: VLlama4Loader },
-    Gemma3n { cli: "gemma3n", hf: "Gemma3nForConditionalGeneration", loader: Gemma3nLoader },
+    Gemma3n { cli: "gemma3n", hf: "Gemma3nForConditionalGeneration", loader: Gemma3nLoader, feature: "models-gemma" },
     Qwen3VL { cli: "qwen3vl", hf: "Qwen3VLForConditionalGeneration", loader: Qwen3VLLoader },
     Qwen3VLMoE { cli: "qwen3vlmoe", hf: "Qwen3VLMoeForConditionalGeneration", loader: Qwen3VLMoELoader },
     Qwen3_5 { cli: "qwen3_5", hf: "Qwen3_5ForConditionalGeneration", loader: Qwen3_5Loader },
@@ -324,14 +333,14 @@ multimodal_loader_types! {
             | "Gemma4ForCausalLM"
             | "Gemma4UnifiedForConditionalGeneration"
             | "Gemma4UnifiedForCausalLM",
-        loader: Gemma4Loader,
+        loader: Gemma4Loader, feature: "models-gemma",
     },
     MuseGlimmer {
         cli: "muse_glimmer" | "museglimmer",
         hf: "MuseGlimmerForConditionalGeneration",
         loader: MuseGlimmerLoader,
     },
-    DiffusionGemma { cli: "diffusiongemma", hf: "DiffusionGemmaForBlockDiffusion", loader: DiffusionGemmaLoader },
+    DiffusionGemma { cli: "diffusiongemma", hf: "DiffusionGemmaForBlockDiffusion", loader: DiffusionGemmaLoader, feature: "models-gemma" },
     PaddleOcrVl { cli: "paddleocr_vl", hf: "PaddleOCRVLForConditionalGeneration", loader: PaddleOcrVlLoader },
 }
 
@@ -389,6 +398,7 @@ fn get_clip_vit_num_elems(cfg: &ClipConfig) -> usize {
         + cfg.num_hidden_layers * encoder_layer_elems
 }
 
+#[cfg(feature = "models-gemma")]
 fn supports_gemma4_incremental_cache(config: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(config)
         .ok()
@@ -436,7 +446,9 @@ mod phi4mm;
 pub use phi4mm::*;
 mod qwen2_5vl;
 pub use qwen2_5vl::*;
+#[cfg(feature = "models-gemma")]
 mod gemma3;
+#[cfg(feature = "models-gemma")]
 pub use gemma3::*;
 #[cfg(feature = "models-llama")]
 mod mistral3;
@@ -444,7 +456,9 @@ mod mistral3;
 pub use mistral3::*;
 mod vllama4;
 pub use vllama4::*;
+#[cfg(feature = "models-gemma")]
 mod gemma3n;
+#[cfg(feature = "models-gemma")]
 pub use gemma3n::*;
 mod paddleocr_vl;
 pub use paddleocr_vl::*;
@@ -458,7 +472,9 @@ mod qwen3_5_moe;
 pub use qwen3_5_moe::*;
 mod voxtral;
 pub use voxtral::*;
+#[cfg(feature = "models-gemma")]
 mod gemma4;
+#[cfg(feature = "models-gemma")]
 pub use gemma4::*;
 mod muse_glimmer;
 pub use muse_glimmer::*;
@@ -466,7 +482,9 @@ pub use muse_glimmer::*;
 mod lfm2vl;
 #[cfg(feature = "models-other")]
 pub use lfm2vl::*;
+#[cfg(feature = "models-gemma")]
 mod diffusion_gemma;
+#[cfg(feature = "models-gemma")]
 pub use diffusion_gemma::*;
 
 #[cfg(all(

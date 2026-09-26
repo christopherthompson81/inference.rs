@@ -1096,6 +1096,7 @@ pub mod text_models_inputs_processor {
         })
     }
 
+    #[cfg(feature = "models-gemma")]
     #[allow(clippy::too_many_arguments)]
     fn make_completion_prefill_chunk<T: WithDType + std::fmt::Debug>(
         toks: Vec<&[T]>,
@@ -1208,6 +1209,7 @@ pub mod text_models_inputs_processor {
 
     /// `get_completion_input` for models that consume more than one new token per decode step
     /// (e.g. block diffusion, where each step feeds the last committed canvas to the encoder).
+    #[cfg(feature = "models-gemma")]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn get_completion_input_windowed<
         T: WithDType + std::fmt::Debug + From<u32> + Clone,
