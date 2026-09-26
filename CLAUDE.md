@@ -30,7 +30,7 @@ cargo install --path crates/inference-cli --features <features>
 ### Testing & Quality
 ```bash
 # Run core tests
-cargo test -p inference-core -p inference-nn -p inference-quant -p inference-vision
+cargo test -p inference-core -p inference-nn -p inference-models-llama -p inference-models-qwen -p inference-models-gemma -p inference-models-phi -p inference-models-other -p inference-quant -p inference-vision
 
 # Format code (uses rustfmt, ruff, clang-format)
 make fmt
@@ -77,6 +77,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 
 ### Workspace Structure
 - `crates/inference-core/` - Core inference engine, model implementations, pipelines
+- `crates/inference-models-{llama,qwen,gemma,phi,other}/` - Text model families (one crate per family, built on `inference-nn`)
 - `crates/inference-nn/` - Model-facing building blocks: layers, attention and its metadata, KV/paged caches, GDN, MoE, device mapping, and the CUDA/Metal kernels behind them
 - `crates/inference-cli/` - Unified CLI binary (commands: run, serve, bench, from-config)
 - `crates/inference-server-core/` - HTTP server routing, OpenAI API implementation
@@ -104,7 +105,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 ### Adding New Features
 
 When adding new model architectures:
-1. Implement the model in `crates/inference-core/src/models/` (or `vision_models/`)
+1. Implement a text model in its family crate, `crates/inference-models-<family>/` (vision models still live in `crates/inference-core/src/vision_models/`), and re-export it from `crates/inference-core/src/models/mod.rs`
 2. Add its loader in `crates/inference-core/src/pipeline/loaders/normal_loaders/` (or `multimodal_loaders/`)
 3. Add one row to `normal_loader_types!` (or `multimodal_loader_types!`) in that directory's `mod.rs`. The row gives
    the CLI name, the HF class, the `model_type` (text only) and the loader, and the enum variant, parsing, display, HF detection and loader

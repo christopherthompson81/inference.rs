@@ -1,26 +1,10 @@
-pub(crate) mod deepseek2;
-pub(crate) mod deepseek3;
-pub(crate) mod gemma;
-pub(crate) mod gemma2;
-pub(crate) mod glm4;
-pub(crate) mod glm4_moe;
-pub(crate) mod glm4_moe_lite;
-pub(crate) mod gpt_oss;
-pub(crate) mod granite;
-mod hunyuan_rope;
-pub(crate) mod hunyuan_v1_dense;
-pub(crate) mod hunyuan_v1_moe;
-pub(crate) mod lfm2;
-pub(crate) mod llama;
-pub(crate) mod mistral;
-pub(crate) mod mixtral;
-pub(crate) mod phi2;
-pub(crate) mod phi3;
-pub(crate) mod phi3_5_moe;
+pub(crate) use inference_models_gemma::{gemma, gemma2};
+pub(crate) use inference_models_llama::{llama, mistral, mixtral, smollm3};
+pub(crate) use inference_models_other::{
+    deepseek2, deepseek3, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite, hunyuan_v1_dense,
+    hunyuan_v1_moe, lfm2, starcoder2,
+};
+pub(crate) use inference_models_phi::{phi2, phi3, phi3_5_moe};
+pub(crate) use inference_models_qwen::{qwen2, qwen3, qwen3_moe, qwen3_next};
+
 pub(crate) mod quantized_llama;
-pub(crate) mod qwen2;
-pub(crate) mod qwen3;
-pub(crate) mod qwen3_moe;
-pub(crate) mod qwen3_next;
-pub(crate) mod smollm3;
-pub(crate) mod starcoder2;

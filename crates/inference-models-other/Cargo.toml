@@ -1,0 +1,32 @@
+[package]
+name = "inference-models-other"
+readme = "README.md"
+authors = ["Eric Buehler"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+candle-core.workspace = true
+candle-nn.workspace = true
+inference-nn.workspace = true
+inference-quant.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+indicatif.workspace = true
+safetensors.workspace = true
+tempfile.workspace = true
+
+[features]
+cuda = ["candle-core/cuda", "candle-nn/cuda", "inference-quant/cuda", "inference-nn/cuda"]
+metal = ["candle-core/metal", "candle-nn/metal", "inference-quant/metal", "inference-nn/metal"]
+flash-attn = ["cuda", "inference-nn/flash-attn"]

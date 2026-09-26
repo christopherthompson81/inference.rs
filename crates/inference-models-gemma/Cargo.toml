@@ -1,0 +1,28 @@
+[package]
+name = "inference-models-gemma"
+readme = "README.md"
+authors = ["Eric Buehler"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+candle-core.workspace = true
+inference-nn.workspace = true
+inference-quant.workspace = true
+serde.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[features]
+cuda = ["candle-core/cuda", "inference-quant/cuda", "inference-nn/cuda"]
+metal = ["candle-core/metal", "inference-quant/metal", "inference-nn/metal"]
+flash-attn = ["cuda", "inference-nn/flash-attn"]

@@ -395,3 +395,18 @@ Review follow-ups:
     generate_crate_metadata 17.3 -> 14.9 s, LLVM_passes 43.5 -> 37.0 s. Typeck (11.1 s) and borrowck (13.9 s) are
     unchanged, as expected.
 - Implication: ~12 s less single-threaded time per build of core, and the lib-test build gets the same cut.
+
+## Run 19 - 2026-09-26 14:30
+
+- Question: cold, like-for-like with Runs 13 and 15, after the codegen trim (Run 18), the model interface move and
+  the five text-model family crates?
+- Command: same as Run 13 (`CARGO_TARGET_DIR=<scratch> cargo test --no-run --features cuda --workspace --lib --bins
+  --tests --timings`), load average ~7.5 during the run.
+- Result: 275 s (Run 13: 297 s, Run 15: 321 s). 2147 unit-seconds.
+  - Family crates start together at t=117 s once inference-nn's metadata is out and take 1.2-8.3 s each.
+  - `inference-core` lib t=121-220 s, 99.5 s (frontend 57.3 s, was 72.8 s); lib test 142 s (was 179 s).
+  - 2-3 units active from t=150 s to t=230 s: core lib, core lib test, inference-server-core.
+- Implication: core is still the critical path. What remains in it is the vision models (~84k lines), the pipeline
+  (~58k) and loaders; the vision families are the next split.
+- Side finding: target/debug reached 103 GB (71 GB of it incremental caches) after checking each family crate
+  alone with and without CUDA; `local_ci.sh --sweep` brings it back to 21 GB.

@@ -5,6 +5,11 @@ members = [
     "crates/inference-cli",
     "crates/inference-core",
     "crates/inference-nn",
+    "crates/inference-models-gemma",
+    "crates/inference-models-llama",
+    "crates/inference-models-other",
+    "crates/inference-models-phi",
+    "crates/inference-models-qwen",
     "crates/inference-pyo3",
     "crates/inference",
     "crates/inference-vision",
@@ -28,6 +33,11 @@ default-members = [
     "crates/inference-cli",
     "crates/inference-core",
     "crates/inference-nn",
+    "crates/inference-models-gemma",
+    "crates/inference-models-llama",
+    "crates/inference-models-other",
+    "crates/inference-models-phi",
+    "crates/inference-models-qwen",
     "crates/inference-pyo3",
     "crates/inference",
     "crates/inference-vision",
@@ -222,6 +232,11 @@ cutile = "=0.3.1"
 
 inference-core = { path = "crates/inference-core", version = "0.9.3" }
 inference-nn = { path = "crates/inference-nn", version = "0.9.3" }
+inference-models-gemma = { path = "crates/inference-models-gemma", version = "0.9.3" }
+inference-models-llama = { path = "crates/inference-models-llama", version = "0.9.3" }
+inference-models-other = { path = "crates/inference-models-other", version = "0.9.3" }
+inference-models-phi = { path = "crates/inference-models-phi", version = "0.9.3" }
+inference-models-qwen = { path = "crates/inference-models-qwen", version = "0.9.3" }
 inference-paged-attn = { path = "crates/inference-paged-attn", version = "0.9.3" }
 inference-metal-compile = { path = "crates/inference-metal-compile", version = "0.9.3" }
 inference-flash-attn = { path = "crates/inference-flash-attn", version = "0.9.3" }

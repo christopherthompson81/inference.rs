@@ -20,6 +20,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/master' }}
-      - run: cargo test -p inference-core -p inference-nn -p inference-quant -p inference-vision
+      - run: cargo test -p inference-core -p inference-nn -p inference-models-llama -p inference-models-qwen -p inference-models-gemma -p inference-models-phi -p inference-models-other -p inference-quant -p inference-vision
         env:
           TESTS_HF_TOKEN: ${{ secrets.HF_TOKEN }}

@@ -1,5 +1,6 @@
 use super::*;
-use candle_core::Device;
+use candle_core::{DType, Device, Tensor};
+use std::collections::HashMap;
 
 fn loading_metadata(rope_pairing: Option<RopePairing>) -> NormalLoadingMetadata {
     NormalLoadingMetadata {
@@ -963,4 +964,34 @@ fn every_architecture_round_trips_through_its_names() {
         err.contains("`mistral`") && err.contains("`lfm2_moe`"),
         "{err}"
     );
+}
+
+#[test]
+fn safetensors_granite_experts_participate_in_immediate_isq() -> anyhow::Result<()> {
+    const PREFIX: &str = "model.layers.0.block_sparse_moe.input_linear";
+    let loader = NormalLoaderType::GraniteMoeHybrid.loader();
+    for predicates in [
+        loader.immediate_isq_predicates("")?,
+        loader.immediate_isq_predicates_moqe("")?,
+    ] {
+        let weight = Tensor::ones((2, 4, 3), DType::F32, &Device::Cpu)?;
+        let vb = inference_quant::ShardedSafeTensors::wrap(
+            HashMap::from([(format!("{PREFIX}.weight"), weight)]),
+            DType::F32,
+            Device::Cpu,
+        );
+        let tracker = vb.tracker().clone();
+        inference_quant::set_immediate_isq(
+            Some(inference_quant::IsqType::Q8_0),
+            predicates,
+            inference_quant::IsqCaptureMode::CaptureMatches,
+        );
+        let experts = crate::models::granite::GraniteParallelExperts::new(2, 3, 4, vb.pp(PREFIX));
+        inference_quant::clear_immediate_isq();
+
+        assert!(experts?.quantized().is_some());
+        assert_eq!(tracker.get().len(), 1);
+        assert_eq!(tracker.get()[0].key, PREFIX);
+    }
+    Ok(())
 }
