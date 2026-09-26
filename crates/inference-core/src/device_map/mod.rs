@@ -7,7 +7,10 @@ pub use mappers::NcclPipelineParallelMapper;
 pub use mappers::{DeviceMapper, DummyDeviceMapper, LayerDeviceMapper, NcclDeviceMapper};
 pub use mask::DeviceMappedMask;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+    collections::{hash_map::Entry, HashMap},
+    sync::Arc,
+};
 
 use crate::{pipeline::AutoDeviceMapParams, utils::debug::DeviceRepr, MemoryUsage, Topology};
 use candle_core::{Device, DeviceLocation, Result};
@@ -305,7 +308,6 @@ fn log_layer_mapping_range(start_index: usize, end_index: usize, device: &Device
     Ok(())
 }
 
-/// Get all devices on the same device type but different ordinals
 /// One `make(device)` per distinct device that layers `0..num_layers` map to; unmapped layers use `fallback`.
 pub(crate) fn per_layer_device<T>(
     mapper: &(impl DeviceMapper + ?Sized),
@@ -316,13 +318,14 @@ pub(crate) fn per_layer_device<T>(
     let mut out = HashMap::new();
     for layer in 0..num_layers {
         let device = mapper.device_for(layer, false).unwrap_or(fallback);
-        if let std::collections::hash_map::Entry::Vacant(e) = out.entry(device.location()) {
+        if let Entry::Vacant(e) = out.entry(device.location()) {
             e.insert(Arc::new(make(device)?));
         }
     }
     Ok(out)
 }
 
+/// Get all devices on the same device type but different ordinals
 pub fn get_all_similar_devices(base: &Device) -> Result<Vec<Device>> {
     let mut devices = Vec::new();
     match base {
@@ -380,4 +383,50 @@ pub fn get_all_similar_devices(base: &Device) -> Result<Vec<Device>> {
         }
     }
     Ok(devices)
+}
+
+#[cfg(test)]
+mod tests {
+    use candle_core::{Device, DeviceLocation};
+
+    use super::{peer::CudaPeerAccess, per_layer_device, LayerDeviceMapper};
+
+    #[test]
+    fn unmapped_layers_fall_back_and_devices_build_once() -> candle_core::Result<()> {
+        let mapper = LayerDeviceMapper::new(
+            vec![Device::Cpu, Device::Cpu],
+            Device::Cpu,
+            CudaPeerAccess::new(&[])?,
+        );
+        let mut built = 0;
+        let map = per_layer_device(&mapper, 3, &Device::Cpu, |_| {
+            built += 1;
+            Ok(built)
+        })?;
+        assert_eq!(built, 1);
+        assert_eq!(map.len(), 1);
+        assert_eq!(*map[&DeviceLocation::Cpu], 1);
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn one_value_per_distinct_device() -> candle_core::Result<()> {
+        skip_without_cuda!();
+        let cuda = Device::new_cuda(0)?;
+        let mapper = LayerDeviceMapper::new(
+            vec![Device::Cpu, cuda.clone()],
+            Device::Cpu,
+            CudaPeerAccess::new(std::slice::from_ref(&cuda))?,
+        );
+        let mut seen = Vec::new();
+        // layer 2 is unmapped, so it lands on the CPU fallback that layer 0 already built
+        let map = per_layer_device(&mapper, 3, &Device::Cpu, |device| {
+            seen.push(device.location());
+            Ok(())
+        })?;
+        assert_eq!(seen, vec![DeviceLocation::Cpu, cuda.location()]);
+        assert_eq!(map.len(), 2);
+        Ok(())
+    }
 }
