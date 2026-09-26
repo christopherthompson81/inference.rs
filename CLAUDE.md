@@ -43,7 +43,7 @@ cargo clippy --workspace --tests --examples -- -D warnings
 
 # Canonical local checks (default: --lint --tests). Use these rather than ad-hoc cargo invocations: each mode always
 # builds the same package/feature set, so artifacts are reused instead of rebuilt per combination.
-scripts/local_ci.sh [--lint] [--tests] [--cuda] [--docs]
+scripts/local_ci.sh [--lint] [--tests] [--cuda] [--models] [--docs]
 
 # Same, then delete target/debug artifacts the selected modes don't use (including on-request example builds).
 scripts/local_ci.sh --lint --tests --cuda --sweep
@@ -156,6 +156,7 @@ Avoid returning TODOs.
 - In dev builds on Linux the always-built CUDA kernel sets are shared libraries under `target/debug/cuda-kernels` (one copy for every variant and test binary, loaded by absolute SONAME), so a dev binary only runs from this checkout. Release builds link static archives.
 - Put build env (CC/CXX/NVCC) and model paths (INFERENCE_TEST_*) in `~/.cargo/config.toml` `[env]`, not on the command line: build scripts track them, and changing one rebuilds the dependency tree.
 - Tests run under cargo-nextest (one process per test; see `.config/nextest.toml` for the GPU group sized by VRAM). It is required for `--features cuda`: plain `cargo test` shares one CUDA context across a binary's tests, so the memory-pool tests interfere. Install: `curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin`.
+- Real-checkpoint parity tests are left out of `--tests`; they run under `--cuda` and in `--models` (CPU).
 - GPU tests use `skip_without_cuda!()` instead of `#[ignore]`, so `--features cuda` runs them wherever a device exists. Keep `#[ignore]` for hardware this suite can't assume (SM90, SM121, cuTile), benchmarks, and tests that write files.
 - A check worth running by hand is a test worth committing.
 - Python tests require building and installing the package first
