@@ -1,9 +1,8 @@
-mod generation;
 mod registry;
 mod runtime;
 mod selection;
 
-pub use generation::{
+pub use crate::lora::generation::{
     AdapterGenerationId, AdapterGenerationParseError, LoraAdapterInfo, LoraAdapterRoute,
     LoraAdapterSpec, LoraAdapterSpecParseError, LoraResidentGenerationInfo,
 };

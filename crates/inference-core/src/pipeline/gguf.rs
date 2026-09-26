@@ -40,6 +40,7 @@ use crate::pipeline::cache_manager::FullCacheManager;
 use crate::pipeline::chat_template::{calculate_eos_tokens, BeginEndUnkPadTok, GenerationConfig};
 use crate::pipeline::hf::{build_api, get_file, list_repo_files};
 use crate::pipeline::loaders::{stamp_qk_rope_layout, DeviceMappedModelLoader};
+use crate::pipeline::model_config as ModelConfig;
 use crate::pipeline::multimodal::{
     MultimodalLoaderBuilder, MultimodalSpecificConfig, PreparedMultimodalSource,
 };
@@ -50,7 +51,6 @@ use crate::pipeline::ChatTemplate;
 use crate::pipeline::{get_chat_template, Modalities, SupportedModality};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
-use crate::utils::model_config as ModelConfig;
 use crate::utils::progress::ProgressScopeGuard;
 use crate::xlora_models::NonGranularState;
 use crate::xlora_models::{XLoraQLlama, XLoraQPhi3};

@@ -1,6 +1,4 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-use crate::attention::FlashParams;
-use crate::paged_attention::PagedAttentionInputMetadata;
 use candle_core::{DType, Device, Result, Tensor};
 
 use crate::pipeline::{IsqModel, ModelForwardContext, NormalModel};
@@ -64,6 +62,9 @@ pub use mistral::Model as Mistral;
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    use crate::attention::FlashParams;
+    use crate::paged_attention::PagedAttentionInputMetadata;
 
     use super::*;
 

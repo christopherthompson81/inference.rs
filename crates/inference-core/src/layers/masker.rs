@@ -4,7 +4,7 @@ use std::ops::Add;
 
 use candle_core::{DType, Device, Result, Tensor, WithDType};
 
-use crate::pipeline::KvCache;
+use crate::kv_cache::KvCache;
 
 // https://github.com/huggingface/transformers/blob/main/src/transformers/modeling_attn_mask_utils.py
 pub struct CausalMasker;
@@ -204,7 +204,7 @@ impl CausalMasker {
             return Ok(crate::attention::AttentionMask::None);
         }
 
-        if !cfg.force_custom && crate::using_flash_attn() && input_ids.device().is_cuda() {
+        if !cfg.force_custom && crate::utils::using_flash_attn() && input_ids.device().is_cuda() {
             return Ok(crate::attention::AttentionMask::CausalFlash);
         }
 

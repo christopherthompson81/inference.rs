@@ -15,10 +15,10 @@ use crate::layers::{CausalMaskConfig, CausalMasker, QRmsNorm, RotaryEmbedding, S
 use crate::paged_attention::PagedAttention;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use crate::pipeline::extract_logits;
+use crate::pipeline::model_config as ModelConfig;
 use crate::pipeline::EitherCache;
 use crate::pipeline::KvCache;
 use crate::pipeline::NormalCache;
-use crate::utils::model_config as ModelConfig;
 use crate::utils::progress::{new_multi_progress, NiceProgressBar};
 // Default fallback for models that don't specify context_length
 const DEFAULT_MAX_SEQ_LEN: u32 = 4096;

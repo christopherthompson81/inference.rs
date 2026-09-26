@@ -24,7 +24,7 @@ use super::classifier::XLoraClassifier;
 use super::{verify_sanity_adapters, NonGranularState, ScalingsMaker, XLoraConfig};
 use crate::gguf::metadata::ContentMetadata;
 use crate::models::quantized_llama::PropsGGUF;
-use crate::utils::model_config as ModelConfig;
+use crate::pipeline::model_config as ModelConfig;
 
 const DEFAULT_MAX_SEQ_LEN: u32 = 4096;
 const SUPPORTED_LAYERS: [&str; 8] = [

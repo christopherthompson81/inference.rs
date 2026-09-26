@@ -14,7 +14,7 @@ use std::{
     ops::Range,
 };
 
-use crate::AdapterGenerationId;
+use crate::lora::generation::AdapterGenerationId;
 
 /// A hash that uniquely identifies a KV cache block by its content and position.
 ///

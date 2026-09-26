@@ -8,10 +8,10 @@ use std::fs;
 use tracing::warn;
 
 use crate::attention::ATTENTION_CHUNK_SIZE;
+use crate::device_map::AutoDeviceMapParams;
 use crate::gguf::Content;
 use crate::matformer::MatformerSliceConfig;
 use crate::paged_attention::ModelConfigLike;
-use crate::pipeline::AutoDeviceMapParams;
 use crate::pipeline::DeviceMappedModelLoader;
 use crate::GGUFArchitecture;
 

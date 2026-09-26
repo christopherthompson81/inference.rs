@@ -12,6 +12,7 @@ use crate::device_map::DeviceMapper;
 use crate::lora::Ordering;
 use crate::pipeline::cache_manager::FullCacheManager;
 use crate::pipeline::chat_template::{calculate_eos_tokens, GenerationConfig};
+use crate::pipeline::model_config as ModelConfig;
 use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::tokenizer::get_tokenizer;
 use crate::pipeline::{get_chat_template, Modalities, SupportedModality};
@@ -20,7 +21,6 @@ use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::debug::DeviceRepr;
 use crate::utils::debug::DEBUG;
-use crate::utils::model_config as ModelConfig;
 use crate::utils::progress::ProgressScopeGuard;
 use crate::xlora_models::NonGranularState;
 use crate::{

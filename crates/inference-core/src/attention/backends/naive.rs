@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::MemoryUsage;
+use crate::utils::memory_usage::MemoryUsage;
 
 use candle_core::{Device, Result, Tensor};
 use inference_quant::MatMul;

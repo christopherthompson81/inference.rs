@@ -2,12 +2,10 @@ use std::{fs, io::Read, ops::Range, path::Path};
 
 use candle_core::Device;
 use indexmap::IndexMap;
-use inference_quant::{ImmediateIsqOverride, IsqType};
+use inference_quant::{parse_isq_value, ImmediateIsqOverride, IsqType};
 use itertools::Itertools;
 use regex::Regex;
 use serde::Deserialize;
-
-use crate::parse_isq_value;
 
 const DEVICE_PATTERN: &str = r"^(cpu|cuda\[(\d+)\]|metal\[(\d+)\])$";
 

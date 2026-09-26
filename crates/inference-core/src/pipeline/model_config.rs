@@ -1,4 +1,4 @@
-use super::varbuilder_utils::{
+use crate::utils::varbuilder_utils::{
     from_mmaped_safetensors, load_preload_adapters, DeviceForLoadTensor,
 };
 use anyhow::Result;

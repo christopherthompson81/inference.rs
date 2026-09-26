@@ -33,7 +33,7 @@ use super::NonGranularState;
 use super::ScalingsMaker;
 use super::XLoraConfig;
 use crate::gguf::metadata::ContentMetadata;
-use crate::utils::model_config as ModelConfig;
+use crate::pipeline::model_config as ModelConfig;
 
 const SUPPORTED_LAYERS: [&str; 5] = [
     "self_attn.qkv_proj",

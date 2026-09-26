@@ -414,7 +414,7 @@ pub(crate) fn gather_prefill_workspace_for_lengths(
 
 fn gather_prefill_uses_packed_varlen(input: PrefixPrefillPlanInput) -> bool {
     input.device_is_cuda
-        && crate::using_flash_attn()
+        && crate::utils::using_flash_attn()
         && matches!(input.dtype, DType::F16 | DType::BF16)
         && !input.has_alibi
         && !input.has_sinks
@@ -1082,7 +1082,7 @@ mod tests {
             prompt_prefill_workspace(Some(&model), workspace_input(&query_lens, &context_lens))
                 .unwrap()
                 .bytes,
-            if crate::using_flash_attn() {
+            if crate::utils::using_flash_attn() {
                 38_977_536
             } else {
                 742_821_536
@@ -1120,7 +1120,7 @@ mod tests {
             assert_eq!(workspace.gather_workspace_bytes, 0);
         } else {
             // Without FA3 the largest layer's gather is the whole workspace (packed with flash-attn, padded without).
-            let gather = if crate::using_flash_attn() {
+            let gather = if crate::utils::using_flash_attn() {
                 38_961_152
             } else {
                 739_889_152

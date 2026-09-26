@@ -9,6 +9,7 @@ use loralinear::LoraLinear;
 pub use qloralinear::QLoraLinear;
 use serde::Deserialize;
 
+pub mod generation;
 mod loralinear;
 mod qloralinear;
 

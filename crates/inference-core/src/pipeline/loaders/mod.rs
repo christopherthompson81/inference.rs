@@ -4,7 +4,7 @@ mod diffusion_loaders;
 mod embedding_loaders;
 mod multimodal_loaders;
 mod normal_loaders;
-pub use auto_device_map::AutoDeviceMapParams;
+pub use crate::device_map::AutoDeviceMapParams;
 use auto_device_map::NonMappedSubModel;
 pub(crate) use checkpoint_inventory::{checkpoint_device_map_sizes, checkpoint_runtime_size};
 

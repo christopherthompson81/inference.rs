@@ -97,7 +97,7 @@ pub mod text_models_inputs_processor {
 
     use crate::{
         attention::{
-            flash_params::{make_flash_params, packed_rope_positions, sliding_k_lengths},
+            flash_params::{make_flash_params, packed_rope_positions},
             FlashParams,
         },
         device_map::DeviceMapper,
@@ -112,11 +112,8 @@ pub mod text_models_inputs_processor {
         paged_attention::{
             block_aligned_sliding_window_start,
             block_hash::{noncausal_mm_ranges, MultimodalAttentionPolicy},
-            block_table_rows::{BlockTableRows, BlockTableSnapshot},
-            input_metadata::{
-                _make_tensor_with_pad, cuda_graph_block_table_len_with_cap, DecodePagedRows,
-                PagedDecodeMetadataRequirements,
-            },
+            block_table_rows::BlockTableSnapshot,
+            input_metadata::{_make_tensor_with_pad, DecodePagedRows},
             AttentionBackendKind, KVCacheManager, PagedAttentionInputMetadata, _PAD_SLOT_ID,
         },
         pipeline::recurrent_batch_kind_for_input,
@@ -1549,6 +1546,11 @@ pub mod text_models_inputs_processor {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::attention::flash_params::sliding_k_lengths;
+        use crate::paged_attention::block_table_rows::BlockTableRows;
+        use crate::paged_attention::input_metadata::{
+            cuda_graph_block_table_len_with_cap, PagedDecodeMetadataRequirements,
+        };
 
         fn assert_zero_padded_rows(rows: &[Vec<u32>], prefixes: &[&[u32]]) {
             assert_eq!(rows.len(), prefixes.len());

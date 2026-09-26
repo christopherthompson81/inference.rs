@@ -12,7 +12,7 @@ use std::{
     sync::Arc,
 };
 
-use crate::{pipeline::AutoDeviceMapParams, utils::debug::DeviceRepr, MemoryUsage, Topology};
+use crate::{topology::Topology, utils::debug::DeviceRepr, utils::memory_usage::MemoryUsage};
 use candle_core::{Device, DeviceLocation, Result};
 use inference_quant::log::once_log_info;
 use serde::{Deserialize, Serialize};
@@ -383,6 +383,114 @@ pub fn get_all_similar_devices(base: &Device) -> Result<Vec<Device>> {
         }
     }
     Ok(devices)
+}
+
+#[derive(Debug, Clone)]
+pub enum AutoDeviceMapParams {
+    Text {
+        max_seq_len: usize,
+        max_batch_size: usize,
+    },
+    Multimodal {
+        max_seq_len: usize,
+        max_batch_size: usize,
+        max_image_shape: (usize, usize),
+        max_num_images: usize,
+    },
+}
+
+impl AutoDeviceMapParams {
+    pub fn maybe_promote_to_multimodal(&self) -> Self {
+        match *self {
+            Self::Text {
+                max_seq_len,
+                max_batch_size,
+            } => Self::Multimodal {
+                max_seq_len,
+                max_batch_size,
+                max_image_shape: (
+                    Self::DEFAULT_MAX_IMAGE_LENGTH,
+                    Self::DEFAULT_MAX_IMAGE_LENGTH,
+                ),
+                max_num_images: Self::DEFAULT_MAX_NUM_IMAGES,
+            },
+            Self::Multimodal {
+                max_seq_len,
+                max_batch_size,
+                max_image_shape,
+                max_num_images,
+            } => Self::Multimodal {
+                max_seq_len,
+                max_batch_size,
+                max_image_shape,
+                max_num_images,
+            },
+        }
+    }
+
+    pub fn max_seq_len(&self) -> usize {
+        match self {
+            Self::Text { max_seq_len, .. } | Self::Multimodal { max_seq_len, .. } => *max_seq_len,
+        }
+    }
+
+    pub fn max_batch_size(&self) -> usize {
+        match self {
+            Self::Text { max_batch_size, .. } | Self::Multimodal { max_batch_size, .. } => {
+                *max_batch_size
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for AutoDeviceMapParams {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Text {
+                max_seq_len,
+                max_batch_size,
+            } => write!(
+                f,
+                "text[max_seq_len: {max_seq_len}, max_batch_size: {max_batch_size}]"
+            ),
+            Self::Multimodal {
+                max_seq_len,
+                max_batch_size,
+                max_image_shape,
+                max_num_images,
+            } => write!(
+                f,
+                "multimodal[max_seq_len: {max_seq_len}, max_batch_size: {max_batch_size}, max_image_shape: {max_image_shape:?}, max_num_images: {max_num_images}]"
+            ),
+        }
+    }
+}
+
+impl AutoDeviceMapParams {
+    // Default max sequence length for memory estimation when not specified
+    pub const DEFAULT_MAX_SEQ_LEN: usize = 4 * 1024;
+    pub const DEFAULT_MAX_BATCH_SIZE: usize = 1;
+    pub const DEFAULT_MAX_NUM_IMAGES: usize = 1;
+    pub const DEFAULT_MAX_IMAGE_LENGTH: usize = 1024;
+
+    pub fn default_text() -> Self {
+        Self::Text {
+            max_seq_len: Self::DEFAULT_MAX_SEQ_LEN,
+            max_batch_size: Self::DEFAULT_MAX_BATCH_SIZE,
+        }
+    }
+
+    pub fn default_multimodal() -> Self {
+        Self::Multimodal {
+            max_seq_len: Self::DEFAULT_MAX_SEQ_LEN,
+            max_batch_size: Self::DEFAULT_MAX_BATCH_SIZE,
+            max_num_images: Self::DEFAULT_MAX_NUM_IMAGES,
+            max_image_shape: (
+                Self::DEFAULT_MAX_IMAGE_LENGTH,
+                Self::DEFAULT_MAX_IMAGE_LENGTH,
+            ),
+        }
+    }
 }
 
 #[cfg(test)]

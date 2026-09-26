@@ -174,6 +174,7 @@ pub use inference_mcp::{
 pub use inference_mcp::{
     McpClient, McpClientConfig, McpServerConfig, McpServerSource, McpToolInfo,
 };
+pub use inference_quant::parse_isq_value;
 pub use inference_quant::{IsqBits, IsqType};
 pub use inference_sandbox::{NetworkMode, SandboxPolicy};
 pub use paged_attention::{MemoryGpuConfig, PagedAttentionConfig, PagedCacheType};
@@ -184,9 +185,9 @@ pub use pipeline::hf::{
 };
 pub use pipeline::{
     chat_template::{is_chat_template_request_error, ChatTemplate},
-    expand_isq_value, expand_uqff_shards, parse_isq_value, parse_uqff_shard,
-    resolve_uqff_report_output, resolve_uqff_shorthand, AdapterPaths, AnyMoeLoader, AnyMoePipeline,
-    AutoDeviceMapParams, AutoLoader, AutoLoaderBuilder, DiffusionGenerationParams, DiffusionLoader,
+    expand_isq_value, expand_uqff_shards, parse_uqff_shard, resolve_uqff_report_output,
+    resolve_uqff_shorthand, AdapterPaths, AnyMoeLoader, AnyMoePipeline, AutoDeviceMapParams,
+    AutoLoader, AutoLoaderBuilder, DiffusionGenerationParams, DiffusionLoader,
     DiffusionLoaderBuilder, DiffusionLoaderType, EmbeddingLoader, EmbeddingLoaderBuilder,
     EmbeddingLoaderType, EmbeddingModelPaths, EmbeddingSpecificConfig, GGMLLoader,
     GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig,

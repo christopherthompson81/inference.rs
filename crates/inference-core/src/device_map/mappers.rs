@@ -1,6 +1,6 @@
 use std::{fmt::Debug, sync::Arc};
 
-use crate::TryIntoDType;
+use crate::utils::normal::TryIntoDType;
 use candle_core::{DType, Device, Result, Tensor};
 use inference_quant::ShardedVarBuilder;
 

@@ -667,7 +667,7 @@ fn packed_varlen_flash_is_usable(
 fn supports_packed_varlen_sdpa(query: &Tensor, head_size: usize, sdpa_params: &SdpaParams) -> bool {
     packed_varlen_flash_is_usable(
         query.device().is_cuda(),
-        crate::using_flash_attn(),
+        crate::utils::using_flash_attn(),
         query.dtype(),
         head_size,
         sdpa_params.softcap.is_some(),
@@ -2102,7 +2102,7 @@ impl PagedAttention {
                 || sdpa_params.sliding_window.is_some()
                 || !matches!(attention_mask, AttentionMask::CausalFlash)
                 || !query.device().is_cuda()
-                || !crate::using_flash_attn()
+                || !crate::utils::using_flash_attn()
                 || query.dtype() == DType::F32
                 || ctx.dims.batch_size != 1
                 || ctx.dims.seq_len != token_count

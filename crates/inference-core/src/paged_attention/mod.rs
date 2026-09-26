@@ -37,7 +37,7 @@ pub use kv_cache_manager::KVCacheManager;
 pub use layers::PagedAttention;
 pub use scales::{load_fp8_attention_scales, Fp8AttentionScales};
 
-use crate::MemoryUsage;
+use crate::utils::memory_usage::MemoryUsage;
 use tracing::info;
 
 pub const DEFAULT_PAGED_ATTENTION_BLOCK_SIZE: usize = 32;

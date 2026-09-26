@@ -224,7 +224,7 @@ fn packed_attention_backend_is_available(q: &Tensor, sdpa_params: &SdpaParams) -
         return Ok(q.dim(0)? > 1 && sinks_backend_is_available(q, head_dim));
     }
     Ok(q.device().is_cuda()
-        && crate::using_flash_attn()
+        && crate::utils::using_flash_attn()
         && matches!(q.dtype(), DType::F16 | DType::BF16)
         && flash_backend_supports_sdpa(
             head_dim,
@@ -300,11 +300,11 @@ impl Sdpa {
 
         // CausalFlash or None: try flash attention, fall back to eager
         let can_use_flash = q.device().is_cpu()
-            || q.device().is_cuda() && crate::using_flash_attn() && q.dtype() != DType::F32;
+            || q.device().is_cuda() && crate::utils::using_flash_attn() && q.dtype() != DType::F32;
 
         if can_use_flash {
             let expanded_kv = if q.device().is_cuda()
-                && crate::using_flash_attn()
+                && crate::utils::using_flash_attn()
                 && q.dtype() != DType::F32
                 && sdpa_params.n_kv_groups > FLASH_ATTN_NATIVE_MAX_GQA_GROUP
             {

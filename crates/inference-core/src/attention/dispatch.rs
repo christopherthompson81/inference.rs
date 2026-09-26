@@ -4,8 +4,8 @@ use candle_core::{Result, Tensor};
 
 use crate::{
     attention::{AttentionMask, Sdpa, SdpaParams},
+    kv_cache::KvCache,
     paged_attention::PagedAttention,
-    pipeline::KvCache,
 };
 
 /// Per-layer attention routing: paged attention when the model has it, else SDPA over the layer's KV cache.

@@ -2261,7 +2261,7 @@ impl DFlashDraftModel {
         let isq = match std::env::var("INFERENCE_RS_DFLASH_ISQ").ok().as_deref() {
             Some("none" | "bf16") => None,
             Some(name) => Some(
-                crate::pipeline::parse_isq_value(name, Some(device))
+                inference_quant::parse_isq_value(name, Some(device))
                     .map_err(candle_core::Error::Msg)?,
             ),
             None => config.draft_lm_head_isq,
