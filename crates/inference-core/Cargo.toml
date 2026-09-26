@@ -117,7 +117,8 @@ objc = { workspace = true, optional = true }
 candle-metal-kernels = { workspace = true, optional = true }
 
 [features]
-default = ["models-gemma", "models-llama", "models-other", "models-phi", "models-qwen"]
+default = ["all-models"]
+all-models = ["models-gemma", "models-llama", "models-other", "models-phi", "models-qwen"]
 models-gemma = ["dep:inference-models-gemma"]
 models-llama = ["dep:inference-models-llama"]
 models-other = ["dep:inference-models-other"]
