@@ -33,6 +33,12 @@ flash-attn = ["inference/flash-attn"]
 accelerate = ["inference/accelerate"]
 mkl = ["inference/mkl"]
 nccl = ["inference/nccl"]
+ring = ["inference/ring"]
+code-execution = ["inference/code-execution"]
+
+[[example]]
+name = "diffusion_gemma"
+path = "models/diffusion_gemma/main.rs"
 
 [[example]]
 name = "text_generation"

@@ -7,6 +7,7 @@ cargo does not report, so each crate keeps its newest N, N being its live unit c
 
 import argparse
 import collections
+import fcntl
 import json
 import re
 import shutil
@@ -56,6 +57,13 @@ def main():
         for f in (root / sub).glob("*"):
             if f.is_file() and f.stat().st_ino in live_inodes and (h := artifact_hash(f.name)):
                 live_hashes.add(h)
+
+    # cargo holds this for every build, so nothing can write the dir while it is swept
+    lock = open(root / ".cargo-lock", "a")
+    try:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        sys.exit(f"sweep: {root} is in use by another cargo process (rust-analyzer?), not sweeping")
 
     stale = []
     for sub in ("deps", "examples"):

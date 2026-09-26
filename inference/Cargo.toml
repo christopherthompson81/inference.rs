@@ -29,13 +29,7 @@ indexmap.workspace = true
 either.workspace = true
 futures.workspace = true
 reqwest.workspace = true
-rand.workspace = true
-clap.workspace = true
-walkdir.workspace = true
 tracing.workspace = true
-tracing-subscriber.workspace = true
-
-# ========== Getting Started ==========
 
 [package.metadata.docs.rs]
 no-default-features = true

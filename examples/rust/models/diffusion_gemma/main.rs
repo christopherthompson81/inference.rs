@@ -30,10 +30,11 @@ async fn main() -> Result<()> {
     while let Some(chunk) = stream.next().await {
         if let Response::Chunk(ChatCompletionChunkResponse { choices, .. }) = chunk {
             if let Some(ChunkChoice {
-                delta: Delta {
-                    content: Some(content),
-                    ..
-                },
+                delta:
+                    Delta {
+                        content: Some(content),
+                        ..
+                    },
                 ..
             }) = choices.first()
             {

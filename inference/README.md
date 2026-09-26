@@ -27,19 +27,19 @@ async fn main() -> inference::error::Result<()> {
 
 | Capability | Builder | Example |
 |---|---|---|
-| Any model (auto-detect) | `ModelBuilder` | `examples/getting_started/text_generation/` |
-| Text generation | `TextModelBuilder` | `examples/getting_started/text_generation/` |
-| Multimodal (image+text) | `MultimodalModelBuilder` | `examples/getting_started/multimodal/` |
-| GGUF quantized models | `GgufModelBuilder` | `examples/getting_started/gguf/` |
-| Image generation | `DiffusionModelBuilder` | `examples/models/diffusion/` |
-| Speech synthesis | `SpeechModelBuilder` | `examples/models/speech/` |
-| Embeddings | `EmbeddingModelBuilder` | `examples/getting_started/embedding/` |
-| Structured output | `Model::generate_structured` | `examples/advanced/json_schema/` |
-| Tool calling | `Tool`, `ToolChoice` | `examples/advanced/tools/` |
-| Agents | `AgentBuilder` | `examples/advanced/agent/` |
-| LoRA / X-LoRA | `LoraModelBuilder`, `XLoraModelBuilder` | `examples/advanced/lora/` |
-| AnyMoE | `AnyMoeModelBuilder` | `examples/advanced/anymoe/` |
-| MCP client | `McpClientConfig` | `examples/advanced/mcp_client/` |
+| Any model (auto-detect) | `ModelBuilder` | `examples/rust/getting_started/text_generation/` |
+| Text generation | `TextModelBuilder` | `examples/rust/getting_started/text_generation/` |
+| Multimodal (image+text) | `MultimodalModelBuilder` | `examples/rust/getting_started/multimodal/` |
+| GGUF quantized models | `GgufModelBuilder` | `examples/rust/getting_started/gguf/` |
+| Image generation | `DiffusionModelBuilder` | `examples/rust/models/diffusion/` |
+| Speech synthesis | `SpeechModelBuilder` | `examples/rust/models/speech/` |
+| Embeddings | `EmbeddingModelBuilder` | `examples/rust/getting_started/embedding/` |
+| Structured output | `Model::generate_structured` | `examples/rust/advanced/json_schema/` |
+| Tool calling | `Tool`, `ToolChoice` | `examples/rust/advanced/tools/` |
+| Agents | `AgentBuilder` | `examples/rust/advanced/agent/` |
+| LoRA / X-LoRA | `LoraModelBuilder`, `XLoraModelBuilder` | `examples/rust/advanced/lora/` |
+| AnyMoE | `AnyMoeModelBuilder` | `examples/rust/advanced/anymoe/` |
+| MCP client | `McpClientConfig` | `examples/rust/advanced/mcp_client/` |
 
 ## Choosing a Request Type
 

@@ -49,8 +49,9 @@ if [[ $cuda -eq 1 ]]; then
     cargo "${CLIPPY[@]}" --features cuda -- -D warnings
     cargo nextest run --no-fail-fast --features cuda "${TEST_TARGETS[@]}"
 fi
+doc_build() { RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -D warnings" cargo doc --workspace --no-deps "$@"; }
 if [[ $docs -eq 1 ]]; then
-    RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -D warnings" cargo doc --workspace --no-deps
+    doc_build
 fi
 if [[ $sweep -eq 1 ]]; then
     # No-op rebuilds of exactly what the modes above built; their JSON names every live artifact. A failed replay
@@ -69,5 +70,6 @@ if [[ $sweep -eq 1 ]]; then
         lint_replay --features cuda
         replay test --no-run --features cuda "${TEST_TARGETS[@]}"
     fi
+    if [[ $docs -eq 1 ]]; then doc_build --message-format=json >> "$live"; fi
     scripts/sweep_target.py target/debug < "$live"
 fi

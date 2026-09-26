@@ -303,6 +303,11 @@ impl KernelBuilder {
     /// Build kernel library `name` and emit its cargo link directives: shared in dev builds on Linux, else `archive`.
     pub fn build_and_link(self, name: &str, archive: PathBuf) -> Result<()> {
         if dev_shared_libs() {
+            // an archive left in OUT_DIR by an earlier static build would compete with the .so for `-l{name}`
+            match std::fs::remove_file(&archive) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+                _ => {}
+            }
             return self.build_shared_lib(name);
         }
         self.build_lib(&archive)?;
@@ -317,13 +322,23 @@ impl KernelBuilder {
     /// shares one copy and binaries map it instead of embedding the fatbin. SONAME is the absolute path (no rpath).
     pub fn build_shared_lib(mut self, name: &str) -> Result<()> {
         let root = shared_lib_root()?;
+        let toolkit = match self.toolkit.take() {
+            Some(t) => t,
+            None => CudaToolkit::detect()?,
+        };
         let mut key = DefaultHasher::new();
         name.hash(&mut key);
         self.extra_args.hash(&mut key);
         format!("{:?}", self.dependencies).hash(&mut key);
+        // the object cache does not track the compiler, so a toolkit switch must land in a fresh dir
+        toolkit.nvcc_path.hash(&mut key);
+        toolkit.version.hash(&mut key);
+        std::env::var("NVCC_CCBIN").ok().hash(&mut key);
+        self.toolkit = Some(toolkit);
         for file in self.sources.resolve()? {
             let filename = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            file.hash(&mut key);
+            // absolute, so worktrees sharing a target dir never share a dir
+            file.canonicalize()?.hash(&mut key);
             self.compute_cap.get_for_file(filename)?.to_nvcc_arch().hash(&mut key);
         }
         let dir = root.join(format!("{name}-{:016x}", key.finish()));
@@ -443,6 +458,11 @@ impl KernelBuilder {
         if compile_jobs.is_empty() && out_file.exists() {
             println!("cargo:warning=All library kernels up-to-date, skipping compilation");
             return Ok(None);
+        }
+        // the cache is saved before linking, so a failed link must not leave the old library looking current
+        match std::fs::remove_file(out_file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e.into()),
+            _ => {}
         }
 
         println!(

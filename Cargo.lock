@@ -2955,14 +2955,12 @@ dependencies = [
  "anyhow",
  "candle-core",
  "candle-nn",
- "clap",
  "either",
  "futures",
  "image",
  "indexmap 2.13.0",
  "inference-core",
  "inference-macros",
- "rand 0.9.4",
  "reqwest 0.13.1",
  "schemars 1.2.0",
  "serde",
@@ -2970,8 +2968,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "tracing-subscriber",
- "walkdir",
 ]
 
 [[package]]
