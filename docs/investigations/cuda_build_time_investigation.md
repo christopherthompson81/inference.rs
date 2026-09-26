@@ -296,3 +296,40 @@ Review follow-ups:
 - The git-revision watch now also covers a packed branch ref (the nearest existing ref directory plus
   `packed-refs`, only in that case), so the first commit after `git gc` or a fresh clone is picked up. Verified in a
   scratch repo: `pack-refs --all`, then a commit writes the loose ref under the watched directory.
+
+## Run 13 - 2026-09-26 11:00
+
+- Question: after the reorg, where does a cold build run on few threads, and is an inference-core split warranted?
+- Command: `CARGO_TARGET_DIR=<scratch> cargo test --no-run --features cuda --workspace --lib --bins --tests --timings`
+  (nvcc through ccache, so CUDA TUs were mostly cache hits; rustc was cold).
+- Result: 297 s, 870 units. 16 active units until ~t=85 s, then 2-4 active from t=130 s to the end (170 s). The tail
+  holds 579 unit-seconds over 167 s (~3.5 average on 16 cores). Total 2157 unit-seconds, so ~135 s ideal.
+- Critical path, all inference-core:
+  - `inference-core` lib: t=104-231 s (126 s: frontend 68 s single-threaded, codegen 58 s).
+  - `inference-core` lib test: t=118-297 s (179 s). It ends the build.
+  - `inference-server-core` lib waits on core's rmeta (t=172, 80 s), then its lib test (t=231, 66 s).
+  - candle-core (36 s) and inference-quant/layout (~20 s) sit just before core.
+- inference-core is 322k lines: vision_models 84k, pipeline 58k, models 23k, paged_attention 17k, cuda 16k,
+  gguf 14k, speculative 10k, ops/xlora/kv_cache ~8k each. 1609 unit tests.
+- Coupling: the model trees import model-facing pipeline items (`ModelForwardContext`, `EitherCache`, `IsqModel`,
+  `NormalLoadingMetadata`, `text_models_inputs_processor`), `speculative` mixins, `layers`, `ops`, `paged_attention`,
+  and `attention`. Vision models also carry their input processors (`Processor`, chat-template use). Reverse deps
+  into vision_models come from loaders (15 files), gguf (3) and pipeline (2).
+- Implication: a split is warranted. The win comes from sibling crates that compile in parallel after a shared base,
+  not from a serial base -> core chain, and from splitting the 179 s lib-test build.
+
+## Run 14 - 2026-09-26 13:00
+
+- Question: after moving the base modules (layers, attention, caches, GDN, MoE, CUDA/Metal, utils; ~78k lines) into
+  `inference-nn`, where is the single-threaded stretch?
+- Command: `cargo test --no-run --features cuda --workspace --lib --bins --tests --timings` after a one-line change
+  in inference-nn (incremental rebuild of nn and everything above it, not cold).
+- Result: 186 s. From t=20 s to t=70 s only two units run, `inference-core` lib and `inference-core` lib test (rustc
+  frontend is single-threaded, so this is the one-thread stretch seen in htop).
+  - `inference-nn` lib 12.3 s (frontend 6.2 s), lib test 16.9 s.
+  - `inference-core` lib 113.8 s (frontend 54.7 s, was 68 s), lib test 167.4 s and still ends the build.
+  - `inference-server-core` lib 86.9 s, lib test 61.3 s, both waiting on core.
+- Implication: the base layers were a small share of core's compile. The time sits in what remains (vision_models
+  84k, pipeline 58k, models 23k) and in core's lib-test build, which compiles all of it a second time. Splitting the
+  models into sibling family crates (step 3) is where the tail breaks up; step 1 only enables it. Cold numbers to
+  follow for a like-for-like comparison with Run 13.

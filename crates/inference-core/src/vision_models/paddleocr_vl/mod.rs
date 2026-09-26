@@ -1,5 +1,5 @@
 //! PaddleOCR-VL: SigLIP/NaViT tower + `mlp_AR` connector + ERNIE-4.5-0.3B LM.
-//! Apache-2.0 PaddleOCR-VL (https://github.com/PaddlePaddle/PaddleOCR); spec: transformers `modeling_paddleocr_vl`.
+//! Apache-2.0 PaddleOCR-VL (<https://github.com/PaddlePaddle/PaddleOCR>); spec: transformers `modeling_paddleocr_vl`.
 
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 

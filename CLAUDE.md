@@ -30,7 +30,7 @@ cargo install --path crates/inference-cli --features <features>
 ### Testing & Quality
 ```bash
 # Run core tests
-cargo test -p inference-core -p inference-quant -p inference-vision
+cargo test -p inference-core -p inference-nn -p inference-quant -p inference-vision
 
 # Format code (uses rustfmt, ruff, clang-format)
 make fmt
@@ -77,6 +77,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 
 ### Workspace Structure
 - `crates/inference-core/` - Core inference engine, model implementations, pipelines
+- `crates/inference-nn/` - Model-facing building blocks: layers, attention and its metadata, KV/paged caches, GDN, MoE, device mapping, and the CUDA/Metal kernels behind them
 - `crates/inference-cli/` - Unified CLI binary (commands: run, serve, bench, from-config)
 - `crates/inference-server-core/` - HTTP server routing, OpenAI API implementation
 - `crates/inference-pyo3/` - Python SDK (PyO3 bindings)
@@ -98,7 +99,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 
 3. **Request Handling**: The server uses message passing with `InferenceRs` struct managing a background thread pool. Requests flow through `crates/inference-core/src/engine/mod.rs`.
 
-4. **Device Management**: Automatic and manual device mapping for multi-GPU setups handled in `crates/inference-core/src/device_map.rs`.
+4. **Device Management**: Automatic and manual device mapping for multi-GPU setups handled in `crates/inference-nn/src/device_map/`.
 
 ### Adding New Features
 

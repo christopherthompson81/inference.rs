@@ -12,8 +12,8 @@ on:
       - 'crates/inference-quant/src/metal_kernels/source_set.rs'
       - 'crates/inference-paged-attn/build.rs'
       - 'crates/inference-paged-attn/src/metal/kernels/source_set.rs'
-      - 'crates/inference-core/src/metal/gdn.rs'
-      - 'crates/inference-core/src/metal/ssm.rs'
+      - 'crates/inference-nn/src/metal/gdn.rs'
+      - 'crates/inference-nn/src/metal/ssm.rs'
       - '.github/workflows/metal_shaders.yml'
   push:
     branches:
@@ -25,8 +25,8 @@ on:
       - 'crates/inference-quant/src/metal_kernels/source_set.rs'
       - 'crates/inference-paged-attn/build.rs'
       - 'crates/inference-paged-attn/src/metal/kernels/source_set.rs'
-      - 'crates/inference-core/src/metal/gdn.rs'
-      - 'crates/inference-core/src/metal/ssm.rs'
+      - 'crates/inference-nn/src/metal/gdn.rs'
+      - 'crates/inference-nn/src/metal/ssm.rs'
       - '.github/workflows/metal_shaders.yml'
   schedule:
       - cron: '0 0 * * 1'
@@ -49,5 +49,5 @@ jobs:
       - run: cargo check -p inference-quant -p inference-paged-attn --features metal
       # core compiles these from source at runtime; match its MTLCompileOptions (gdn: Metal 3.1, both: fast math)
       - run: |
-          xcrun -sdk macosx metal -std=metal3.1 -ffast-math -c crates/inference-core/kernels/metal/gdn.metal -o "$RUNNER_TEMP/gdn.air"
-          xcrun -sdk macosx metal -ffast-math -c crates/inference-core/kernels/metal/ssm.metal -o "$RUNNER_TEMP/ssm.air"
+          xcrun -sdk macosx metal -std=metal3.1 -ffast-math -c crates/inference-nn/kernels/metal/gdn.metal -o "$RUNNER_TEMP/gdn.air"
+          xcrun -sdk macosx metal -ffast-math -c crates/inference-nn/kernels/metal/ssm.metal -o "$RUNNER_TEMP/ssm.air"

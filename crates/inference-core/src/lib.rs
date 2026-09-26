@@ -68,16 +68,17 @@ macro_rules! skip_without_cuda {
     };
 }
 
+pub use inference_nn::metal::warmup_metal_kernels;
+use inference_nn::{
+    amoe, attention, cuda, device_map, flashinfer, gdn, kv_cache, lora, metal, mla, moe, ops,
+    paged_attention, perf_flags, topology, utils,
+};
+use inference_nn::{get_delta_from_lora_ab, get_mut_arcmutex, serde_default_fn};
+pub use inference_nn::{layers, matformer};
+
 mod adapter;
 mod agent_approval;
-mod cuda;
-mod device_map;
 mod engine;
-mod lora;
-mod metal;
-pub use metal::warmup_metal_kernels;
-mod moe;
-mod ops;
 mod video_input;
 pub use selection::model_loader::{
     get_auto_device_map_params, get_model_dtype, get_tgt_non_granular_index, LoaderBuilder,
@@ -86,27 +87,17 @@ pub use video_input::{
     sample_frame_indices, VideoFrameSampling, VideoInput, DEFAULT_VIDEO_FRAME_LIMIT,
 };
 mod embedding_models;
-mod flashinfer;
-mod kv_cache;
 mod search;
 
 pub use selection::model_selected::ModelSelected;
 
-mod amoe;
-mod attention;
 mod block_diffusion;
 mod diagnostics;
 mod diffusion_models;
 pub mod distributed;
 pub mod files;
-mod gdn;
 mod gguf;
-pub mod layers;
-pub mod matformer;
-mod mla;
 mod models;
-mod paged_attention;
-mod perf_flags;
 mod pipeline;
 mod prefix_cacher;
 pub mod reasoning_parsers;
@@ -122,8 +113,6 @@ mod sequence_macros;
 pub mod speculative;
 mod speech_models;
 mod tools;
-mod topology;
-mod utils;
 mod vision_models;
 mod xlora_models;
 
