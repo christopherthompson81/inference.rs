@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::AttentionDispatch;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -23,7 +24,7 @@ use crate::{
     kv_cache::{
         HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, RecurrentLayerConfig,
     },
-    layers::{self, GemmaRmsNorm, Qwen3VLRotaryEmbedding, Sdpa},
+    layers::{self, GemmaRmsNorm, Qwen3VLRotaryEmbedding},
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{
         load_fp8_attention_scales, AttentionImplementation, ModelConfigMetadata, PagedAttention,
@@ -226,47 +227,14 @@ impl FullAttention {
         )?;
 
         // Standard attention
-        let mut y = match &self.paged_attn {
-            Some(paged_attn) => match metadata {
-                Some(((key_cache, value_cache), input_metadata)) => paged_attn.forward(
-                    &q,
-                    &k,
-                    &v,
-                    attention_mask,
-                    Some(key_cache),
-                    Some(value_cache),
-                    input_metadata,
-                    &self.sdpa_params,
-                    Some(flash_params),
-                )?,
-                None => {
-                    let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
-                    assert!(!matches!(attention_mask, AttentionMask::None));
-                    paged_attn.forward(
-                        &q,
-                        &k,
-                        &v,
-                        attention_mask,
-                        None,
-                        None,
-                        &input_metadata,
-                        &self.sdpa_params,
-                        Some(flash_params),
-                    )?
-                }
-            },
-            None => {
-                let (cache_k, cache_v) = kv_cache.append(&k, &v)?;
-                Sdpa.run_attention(
-                    &q,
-                    &cache_k,
-                    &cache_v,
-                    attention_mask,
-                    Some(flash_params),
-                    &self.sdpa_params,
-                )?
-            }
-        };
+        let mut y = AttentionDispatch {
+            paged_attn: self.paged_attn.as_ref(),
+            paged_layer: metadata,
+            kv_cache,
+            sdpa_params: &self.sdpa_params,
+            flash_params,
+        }
+        .run(&q, &k, &v, attention_mask)?;
 
         y = if !matches!(attention_mask, AttentionMask::None) {
             y.transpose(1, 2)?.reshape((b_sz, seq_len, ()))?

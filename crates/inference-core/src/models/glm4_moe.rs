@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::AttentionDispatch;
 use crate::layers::masker::CausalMaskConfig;
 use std::{collections::HashMap, sync::Arc};
 
@@ -16,15 +17,13 @@ use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
         apply_rotary_q, embedding_with_legacy_tied_uqff, Activation, CausalMasker, Mlp, RmsNorm,
-        Sdpa,
     },
     moe::{MoEExperts, MoEExpertsConfig},
     ops::TopKLastDimOp,
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
-        text_models_inputs_processor::{FlashParams, PagedAttentionInputMetadata},
-        EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalLoadingMetadata,
-        NormalModel,
+        text_models_inputs_processor::FlashParams, EitherCache, IsqModel, KvCache,
+        ModelForwardContext, NormalCache, NormalLoadingMetadata, NormalModel,
     },
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
@@ -308,48 +307,14 @@ impl Attention {
 
         let metadata = ctx.paged_layer(layer_idx);
         let flash_params = ctx.flash_params();
-        let mut attn_output = match &self.paged_attn {
-            Some(paged_attn) => match metadata {
-                Some(((key_cache, value_cache), input_metadata)) => paged_attn.forward(
-                    &q,
-                    &k,
-                    &v,
-                    attention_mask,
-                    Some(key_cache),
-                    Some(value_cache),
-                    input_metadata,
-                    &self.sdpa_params,
-                    Some(flash_params),
-                )?,
-                None => {
-                    let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
-                    assert!(!matches!(attention_mask, AttentionMask::None));
-                    paged_attn.forward(
-                        &q,
-                        &k,
-                        &v,
-                        attention_mask,
-                        None,
-                        None,
-                        &input_metadata,
-                        &self.sdpa_params,
-                        Some(flash_params),
-                    )?
-                }
-            },
-            None => {
-                let (k, v) = kv_cache.append(&k, &v)?;
-
-                Sdpa.run_attention(
-                    &q,
-                    &k,
-                    &v,
-                    attention_mask,
-                    Some(flash_params),
-                    &self.sdpa_params,
-                )?
-            }
-        };
+        let mut attn_output = AttentionDispatch {
+            paged_attn: self.paged_attn.as_ref(),
+            paged_layer: metadata,
+            kv_cache,
+            sdpa_params: &self.sdpa_params,
+            flash_params,
+        }
+        .run(&q, &k, &v, attention_mask)?;
 
         attn_output = if !matches!(attention_mask, AttentionMask::None) {
             attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?

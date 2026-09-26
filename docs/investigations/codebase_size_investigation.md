@@ -229,3 +229,47 @@ Fallout found by the compiler:
   is `pub mod`, and its other submodules stay `pub(crate)`.
 
 Result: green, with 2131 CPU and 2449 CUDA tests (unchanged counts).
+
+## Run 8 - 2026-09-25 22:20
+
+Change: first consolidation. `attention::AttentionDispatch` replaces the hand-written paged/SDPA dispatch in models
+whose copy matches it exactly.
+
+Survey: 42 model-side copies of the `match &self.paged_attn { ... dummy ... }` block, in 25 normalized shapes.
+Token-diffing each against llama's copy sorted them into two groups.
+
+Cosmetic differences, safe to share:
+- a local `flash_params` instead of `ctx.flash_params()`;
+- `mask` instead of `attention_mask`;
+- `is_none()` instead of `matches!`;
+- `_ =>` instead of `None =>`;
+- `cache_k` names;
+- `.contiguous()` on k/v in the paged branch. That is free when the tensor is already contiguous, so those callers
+  keep passing it.
+
+Real differences, left bespoke:
+- MLA pad and narrow (deepseek2/3, glm4_moe_lite);
+- Gemma 3/3n/4 sliding-window and shared-KV paths;
+- gemma2's separate SDPA mask;
+- Qwen2-VL/2.5-VL f32 masks;
+- PaddleOCR dtype casts;
+- qwen3_5's optional cache;
+- llava's copied LLMs;
+- lfm2, which has no mask check;
+- SDPA on a forced-contiguous KV cache (llama4, muse_glimmer, qwen3_vl, qwen3_vl_moe, mllama). Sharing that would
+  copy the whole cache every step for the other models.
+
+A script rewrote a site only if both paged calls agreed, the SDPA branch was exactly append-then-run with the same q,
+mask, flash and sdpa arguments, and the dummy path checked the mask. 23 sites were rewritten; every other site was
+reported and left alone. The one behavior change is that a missing mask on the metadata-less path now returns an
+error instead of panicking; mllama and voxtral already did this.
+
+Verification:
+- `local_ci.sh --lint --tests --cuda` is green (2131 CPU, 2449 CUDA).
+- The unit suite barely exercises these models' forward paths, so there was also an end-to-end check.
+  Qwen2.5-Coder-3B Q4_K_M GGUF runs through `models/qwen2.rs`. The CUDA CLI was built from master and from the
+  branch, served, and given two prompts at temperature 0 with 96 tokens, with `--paged-attn off` and `on`. All four
+  outputs were byte-identical before and after. Paged on vs off differ from each other, as expected from different
+  kernels.
+
+Result: 24 files, +275 / -1102 lines.

@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::attention::AttentionDispatch;
 use crate::layers::masker::CausalMaskConfig;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -13,11 +14,11 @@ use crate::{
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::masker::PastKvLenCache,
-    layers::{embedding, CausalMasker, RmsNorm, RotaryEmbedding, Sdpa},
+    layers::{embedding, CausalMasker, RmsNorm, RotaryEmbedding},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
-        text_models_inputs_processor::PagedAttentionInputMetadata, EitherCache, IsqModel, KvCache,
-        ModelForwardContext, MultimodalModel, NormalCache, NormalLoadingMetadata,
+        EitherCache, IsqModel, KvCache, ModelForwardContext, MultimodalModel, NormalCache,
+        NormalLoadingMetadata,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -154,49 +155,14 @@ impl DecoderAttention {
         let (q, k) = self.rotary_emb.forward(&q, &k, &positions)?;
 
         let metadata = ctx.paged_layer(layer_idx);
-        let mut attn_output = match &self.paged_attn {
-            Some(paged_attn) => match metadata {
-                Some(((key_cache, value_cache), input_metadata)) => paged_attn.forward(
-                    &q,
-                    &k,
-                    &v,
-                    attention_mask,
-                    Some(key_cache),
-                    Some(value_cache),
-                    input_metadata,
-                    &self.sdpa_params,
-                    Some(ctx.flash_params()),
-                )?,
-                None => {
-                    let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
-                    if matches!(attention_mask, AttentionMask::None) {
-                        candle_core::bail!("Voxtral paged attention requires metadata for decode");
-                    }
-                    paged_attn.forward(
-                        &q,
-                        &k,
-                        &v,
-                        attention_mask,
-                        None,
-                        None,
-                        &input_metadata,
-                        &self.sdpa_params,
-                        Some(ctx.flash_params()),
-                    )?
-                }
-            },
-            None => {
-                let (k, v) = kv_cache.append(&k, &v)?;
-                Sdpa.run_attention(
-                    &q,
-                    &k,
-                    &v,
-                    attention_mask,
-                    Some(ctx.flash_params()),
-                    &self.sdpa_params,
-                )?
-            }
-        };
+        let mut attn_output = AttentionDispatch {
+            paged_attn: self.paged_attn.as_ref(),
+            paged_layer: metadata,
+            kv_cache,
+            sdpa_params: &self.sdpa_params,
+            flash_params: ctx.flash_params(),
+        }
+        .run(&q, &k, &v, attention_mask)?;
 
         attn_output = if !matches!(attention_mask, AttentionMask::None) {
             attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?
