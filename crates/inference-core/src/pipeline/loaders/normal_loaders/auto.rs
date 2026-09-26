@@ -21,34 +21,7 @@ impl AutoNormalLoader {
 
         once_log_debug(format!("Automatic loader type determined to be `{tp}`"));
 
-        match tp {
-            NormalLoaderType::Mistral => Ok(Box::new(MistralLoader)),
-            NormalLoaderType::Gemma => Ok(Box::new(GemmaLoader)),
-            NormalLoaderType::Llama => Ok(Box::new(LlamaLoader)),
-            NormalLoaderType::Mixtral => Ok(Box::new(MixtralLoader)),
-            NormalLoaderType::Phi2 => Ok(Box::new(Phi2Loader)),
-            NormalLoaderType::Phi3 => Ok(Box::new(Phi3Loader)),
-            NormalLoaderType::Qwen2 => Ok(Box::new(Qwen2Loader)),
-            NormalLoaderType::Gemma2 => Ok(Box::new(Gemma2Loader)),
-            NormalLoaderType::Starcoder2 => Ok(Box::new(Starcoder2Loader)),
-            NormalLoaderType::Phi3_5MoE => Ok(Box::new(Phi3_5MoELoader)),
-            NormalLoaderType::DeepSeekV2 => Ok(Box::new(DeepSeekV2Loader)),
-            NormalLoaderType::DeepSeekV3 => Ok(Box::new(DeepSeekV3Loader)),
-            NormalLoaderType::Qwen3 => Ok(Box::new(Qwen3Loader)),
-            NormalLoaderType::GLM4 => Ok(Box::new(GLM4Loader)),
-            NormalLoaderType::GLM4MoeLite => Ok(Box::new(GLM4MoeLiteLoader)),
-            NormalLoaderType::GLM4Moe => Ok(Box::new(GLM4MoeLoader)),
-            NormalLoaderType::Qwen3Moe => Ok(Box::new(Qwen3MoELoader)),
-            NormalLoaderType::SmolLm3 => Ok(Box::new(SmolLm3Loader)),
-            NormalLoaderType::GraniteMoeHybrid => Ok(Box::new(GraniteMoeHybridLoader)),
-            NormalLoaderType::GptOss => Ok(Box::new(GptOssLoader)),
-            NormalLoaderType::HunYuanDenseV1 => Ok(Box::new(HunYuanDenseV1Loader)),
-            NormalLoaderType::HunYuanMoEV1 => Ok(Box::new(HunYuanMoEV1Loader)),
-            NormalLoaderType::Qwen3Next => Ok(Box::new(Qwen3NextLoader)),
-            NormalLoaderType::Qwen3_5 => Ok(Box::new(Qwen3_5TextLoader)),
-            NormalLoaderType::Lfm2 => Ok(Box::new(Lfm2Loader)),
-            NormalLoaderType::Lfm2Moe => Ok(Box::new(Lfm2Loader)),
-        }
+        Ok(tp.loader())
     }
 }
 

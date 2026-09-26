@@ -23,32 +23,7 @@ impl AutoMultimodalLoader {
         once_log_debug(format!("Automatic loader type determined to be `{tp}`"));
 
         // Delegate to the concrete loader
-        Ok(match tp {
-            MultimodalLoaderType::Phi3V => Box::new(Phi3VLoader),
-            MultimodalLoaderType::Idefics2 => Box::new(Idefics2Loader),
-            MultimodalLoaderType::LLaVANext => Box::new(LLaVANextLoader),
-            MultimodalLoaderType::LLaVA => Box::new(LLaVALoader),
-            MultimodalLoaderType::Lfm2Vl => Box::new(Lfm2VlLoader),
-            MultimodalLoaderType::VLlama => Box::new(VLlamaLoader),
-            MultimodalLoaderType::Qwen2VL => Box::new(Qwen2VLLoader),
-            MultimodalLoaderType::Idefics3 => Box::new(Idefics3Loader),
-            MultimodalLoaderType::MiniCpmO => Box::new(MiniCpmOLoader),
-            MultimodalLoaderType::Phi4MM => Box::new(Phi4MMLoader),
-            MultimodalLoaderType::Qwen2_5VL => Box::new(Qwen2_5VLLoader),
-            MultimodalLoaderType::Gemma3 => Box::new(Gemma3Loader),
-            MultimodalLoaderType::Mistral3 => Box::new(Mistral3Loader),
-            MultimodalLoaderType::Llama4 => Box::new(VLlama4Loader),
-            MultimodalLoaderType::Gemma3n => Box::new(Gemma3nLoader),
-            MultimodalLoaderType::Qwen3VL => Box::new(Qwen3VLLoader),
-            MultimodalLoaderType::Qwen3VLMoE => Box::new(Qwen3VLMoELoader),
-            MultimodalLoaderType::Qwen3_5 => Box::new(Qwen3_5Loader),
-            MultimodalLoaderType::Qwen3_5Moe => Box::new(Qwen3_5MoeLoader),
-            MultimodalLoaderType::Voxtral => Box::new(VoxtralLoader),
-            MultimodalLoaderType::Gemma4 => Box::new(Gemma4Loader),
-            MultimodalLoaderType::MuseGlimmer => Box::new(MuseGlimmerLoader),
-            MultimodalLoaderType::DiffusionGemma => Box::new(DiffusionGemmaLoader),
-            MultimodalLoaderType::PaddleOcrVl => Box::new(PaddleOcrVlLoader),
-        })
+        Ok(tp.loader())
     }
 }
 

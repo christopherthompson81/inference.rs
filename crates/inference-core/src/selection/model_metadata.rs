@@ -390,65 +390,13 @@ impl SpeechLoaderType {
 // (enforced by `config_archs_round_trip`).
 impl NormalLoaderType {
     pub fn config_arch(&self) -> &'static str {
-        match self {
-            Self::Mistral => "MistralForCausalLM",
-            Self::Gemma => "GemmaForCausalLM",
-            Self::Mixtral => "MixtralForCausalLM",
-            Self::Llama => "LlamaForCausalLM",
-            Self::Phi2 => "PhiForCausalLM",
-            Self::Phi3 => "Phi3ForCausalLM",
-            Self::Qwen2 => "Qwen2ForCausalLM",
-            Self::Gemma2 => "Gemma2ForCausalLM",
-            Self::Starcoder2 => "Starcoder2ForCausalLM",
-            Self::Phi3_5MoE => "PhiMoEForCausalLM",
-            Self::DeepSeekV2 => "DeepseekV2ForCausalLM",
-            Self::DeepSeekV3 => "DeepseekV3ForCausalLM",
-            Self::Qwen3 => "Qwen3ForCausalLM",
-            Self::GLM4 => "Glm4ForCausalLM",
-            Self::GLM4MoeLite => "Glm4MoeLiteForCausalLM",
-            Self::GLM4Moe => "Glm4MoeForCausalLM",
-            Self::Qwen3Moe => "Qwen3MoeForCausalLM",
-            Self::SmolLm3 => "SmolLM3ForCausalLM",
-            Self::GraniteMoeHybrid => "GraniteMoeHybridForCausalLM",
-            Self::GptOss => "GptOssForCausalLM",
-            Self::HunYuanDenseV1 => "HunYuanDenseV1ForCausalLM",
-            Self::HunYuanMoEV1 => "HunYuanMoEV1ForCausalLM",
-            Self::Qwen3Next => "Qwen3NextForCausalLM",
-            Self::Qwen3_5 => "Qwen3_5ForCausalLM",
-            Self::Lfm2 => "Lfm2ForCausalLM",
-            Self::Lfm2Moe => "Lfm2MoeForCausalLM",
-        }
+        self.causal_lm_name()
     }
 }
 
 impl MultimodalLoaderType {
     pub fn config_arch(&self) -> &'static str {
-        match self {
-            Self::Phi3V => "Phi3VForCausalLM",
-            Self::Idefics2 => "Idefics2ForConditionalGeneration",
-            Self::LLaVANext => "LlavaNextForConditionalGeneration",
-            Self::LLaVA => "LlavaForConditionalGeneration",
-            Self::Lfm2Vl => "Lfm2VlForConditionalGeneration",
-            Self::VLlama => "MllamaForConditionalGeneration",
-            Self::Qwen2VL => "Qwen2VLForConditionalGeneration",
-            Self::Idefics3 => "Idefics3ForConditionalGeneration",
-            Self::MiniCpmO => "MiniCPMO",
-            Self::Phi4MM => "Phi4MMForCausalLM",
-            Self::Qwen2_5VL => "Qwen2_5_VLForConditionalGeneration",
-            Self::Gemma3 => "Gemma3ForConditionalGeneration",
-            Self::Mistral3 => "Mistral3ForConditionalGeneration",
-            Self::Llama4 => "Llama4ForConditionalGeneration",
-            Self::Gemma3n => "Gemma3nForConditionalGeneration",
-            Self::Qwen3VL => "Qwen3VLForConditionalGeneration",
-            Self::Qwen3VLMoE => "Qwen3VLMoeForConditionalGeneration",
-            Self::Qwen3_5 => "Qwen3_5ForConditionalGeneration",
-            Self::Qwen3_5Moe => "Qwen3_5MoeForConditionalGeneration",
-            Self::Voxtral => "VoxtralRealtimeForConditionalGeneration",
-            Self::Gemma4 => "Gemma4ForConditionalGeneration",
-            Self::MuseGlimmer => "MuseGlimmerForConditionalGeneration",
-            Self::DiffusionGemma => "DiffusionGemmaForBlockDiffusion",
-            Self::PaddleOcrVl => "PaddleOCRVLForConditionalGeneration",
-        }
+        self.causal_lm_name()
     }
 }
 

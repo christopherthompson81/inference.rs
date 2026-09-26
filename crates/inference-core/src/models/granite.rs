@@ -2544,7 +2544,6 @@ impl AnyMoeBaseModelMixin for GraniteMoeHybrid {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::IsqModelLoader;
 
     const HIDDEN_SIZE: usize = 4;
     const INTERMEDIATE_SIZE: usize = 4;
@@ -2668,7 +2667,7 @@ mod tests {
     #[test]
     fn safetensors_granite_experts_participate_in_immediate_isq() -> anyhow::Result<()> {
         const PREFIX: &str = "model.layers.0.block_sparse_moe.input_linear";
-        let loader = crate::pipeline::GraniteMoeHybridLoader;
+        let loader = crate::pipeline::NormalLoaderType::GraniteMoeHybrid.loader();
         for predicates in [
             loader.immediate_isq_predicates("")?,
             loader.immediate_isq_predicates_moqe("")?,

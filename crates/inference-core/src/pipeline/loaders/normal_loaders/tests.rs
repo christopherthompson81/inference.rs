@@ -933,3 +933,33 @@ fn gpt_oss_estimates_split_and_mxfp4_experts() {
         .unwrap();
     assert_eq!(mxfp4, vec![1816]);
 }
+
+#[test]
+fn every_architecture_round_trips_through_its_names() {
+    use std::collections::HashSet;
+    use strum::IntoEnumIterator;
+
+    let (mut cli, mut hf) = (HashSet::new(), HashSet::new());
+    for arch in NormalLoaderType::iter() {
+        let name = arch.to_string();
+        assert_eq!(
+            name.parse::<NormalLoaderType>().unwrap(),
+            arch,
+            "cli name `{name}`"
+        );
+        assert_eq!(
+            NormalLoaderType::from_causal_lm_name(arch.causal_lm_name()).unwrap(),
+            arch
+        );
+        assert!(cli.insert(name), "duplicate cli name for {arch:?}");
+        assert!(
+            hf.insert(arch.causal_lm_name()),
+            "duplicate HF class for {arch:?}"
+        );
+    }
+    let err = "nope".parse::<NormalLoaderType>().unwrap_err();
+    assert!(
+        err.contains("`mistral`") && err.contains("`lfm2_moe`"),
+        "{err}"
+    );
+}

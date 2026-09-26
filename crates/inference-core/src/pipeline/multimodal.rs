@@ -2,19 +2,13 @@ use super::isq::{
     write_uqff_artifacts, UqffFullSer, UqffWriteConfig, UqffWriteRequest, WeightLoadingMode,
     WeightLoadingState,
 };
+use super::MultimodalLoaderType;
 use super::{
     get_model_paths, paged_attention_memory_reservations, reserve_recurrent_serving_capacity,
     AdapterKind, AnyMoePipelineMixin, AutoMultimodalLoader, CacheManager, CacheManagerMixin,
-    DecodeGraphPrecaptureCtx, EitherCache, ForwardInputsResult, ForwardStepResult, Gemma3Loader,
-    GeneralMetadata, IsqPipelineMixin, Loader, MetadataMixin, MiniCpmOLoader, ModelCategory,
-    ModelKind, ModelPaths, MultimodalModel, MultimodalModelLoader, MultimodalPromptPrefixer,
-    Phi4MMLoader, PreProcessingMixin, Processor, Qwen2VLLoader, Qwen3VLLoader, Qwen3VLMoELoader,
-    Qwen3_5Loader, Qwen3_5MoeLoader, TokenSource, VLlama4Loader, VLlamaLoader,
-};
-use super::{
-    DiffusionGemmaLoader, Gemma3nLoader, Gemma4Loader, Idefics2Loader, Idefics3Loader, LLaVALoader,
-    LLaVANextLoader, Lfm2VlLoader, Mistral3Loader, MultimodalLoaderType, MuseGlimmerLoader,
-    PaddleOcrVlLoader, Phi3VLoader, Qwen2_5VLLoader, VoxtralLoader,
+    DecodeGraphPrecaptureCtx, EitherCache, ForwardInputsResult, ForwardStepResult, GeneralMetadata,
+    IsqPipelineMixin, Loader, MetadataMixin, ModelCategory, ModelKind, ModelPaths, MultimodalModel,
+    MultimodalModelLoader, MultimodalPromptPrefixer, PreProcessingMixin, Processor, TokenSource,
 };
 use crate::attention::ATTENTION_CHUNK_SIZE;
 #[cfg(feature = "cuda")]
@@ -371,30 +365,7 @@ impl MultimodalLoaderBuilder {
     ) -> Box<dyn Loader> {
         let loader_type = loader.clone();
         let loader: Box<dyn MultimodalModelLoader> = match loader {
-            Some(MultimodalLoaderType::Phi3V) => Box::new(Phi3VLoader),
-            Some(MultimodalLoaderType::Idefics2) => Box::new(Idefics2Loader),
-            Some(MultimodalLoaderType::LLaVANext) => Box::new(LLaVANextLoader),
-            Some(MultimodalLoaderType::LLaVA) => Box::new(LLaVALoader),
-            Some(MultimodalLoaderType::Lfm2Vl) => Box::new(Lfm2VlLoader),
-            Some(MultimodalLoaderType::VLlama) => Box::new(VLlamaLoader),
-            Some(MultimodalLoaderType::Qwen2VL) => Box::new(Qwen2VLLoader),
-            Some(MultimodalLoaderType::Idefics3) => Box::new(Idefics3Loader),
-            Some(MultimodalLoaderType::MiniCpmO) => Box::new(MiniCpmOLoader),
-            Some(MultimodalLoaderType::Phi4MM) => Box::new(Phi4MMLoader),
-            Some(MultimodalLoaderType::Qwen2_5VL) => Box::new(Qwen2_5VLLoader),
-            Some(MultimodalLoaderType::Gemma3) => Box::new(Gemma3Loader),
-            Some(MultimodalLoaderType::Mistral3) => Box::new(Mistral3Loader),
-            Some(MultimodalLoaderType::Llama4) => Box::new(VLlama4Loader),
-            Some(MultimodalLoaderType::Gemma3n) => Box::new(Gemma3nLoader),
-            Some(MultimodalLoaderType::Qwen3VL) => Box::new(Qwen3VLLoader),
-            Some(MultimodalLoaderType::Qwen3VLMoE) => Box::new(Qwen3VLMoELoader),
-            Some(MultimodalLoaderType::Qwen3_5) => Box::new(Qwen3_5Loader),
-            Some(MultimodalLoaderType::Qwen3_5Moe) => Box::new(Qwen3_5MoeLoader),
-            Some(MultimodalLoaderType::Voxtral) => Box::new(VoxtralLoader),
-            Some(MultimodalLoaderType::Gemma4) => Box::new(Gemma4Loader),
-            Some(MultimodalLoaderType::MuseGlimmer) => Box::new(MuseGlimmerLoader),
-            Some(MultimodalLoaderType::DiffusionGemma) => Box::new(DiffusionGemmaLoader),
-            Some(MultimodalLoaderType::PaddleOcrVl) => Box::new(PaddleOcrVlLoader),
+            Some(tp) => tp.loader(),
             None => Box::new(AutoMultimodalLoader),
         };
         Box::new(MultimodalLoader {
