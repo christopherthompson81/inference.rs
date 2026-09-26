@@ -16,10 +16,31 @@ pub use inputs::{AnyMoeTrainingInputRow, AnyMoeTrainingInputs, AnyMoeTrainingRes
 use tracing::info;
 
 use crate::{
-    layers::{linear, Activation},
+    layers::{linear, Activation, MatMul},
     ops::{TopKLastDimOp, TopKOutput},
     serde_default_fn,
 };
+
+/// One LoRA-targetable MLP projection: its tensor name and its delta shape from the base (hidden, intermediate).
+pub struct AnyMoeLoraTarget {
+    pub name: &'static str,
+    pub shape: fn(usize, usize) -> (usize, usize),
+}
+
+impl AnyMoeLoraTarget {
+    pub const fn up(name: &'static str) -> Self {
+        Self {
+            name,
+            shape: |hidden, intermediate| (hidden, intermediate),
+        }
+    }
+    pub const fn down(name: &'static str) -> Self {
+        Self {
+            name,
+            shape: |hidden, intermediate| (intermediate, hidden),
+        }
+    }
+}
 
 /// Implemented by the base model of an AnyMoe.
 pub trait AnyMoeBaseModelMixin {
@@ -69,17 +90,91 @@ pub trait AnyMoeBaseModelMixin {
             .collect::<Vec<_>>()
     }
 
-    #[allow(clippy::too_many_arguments)]
+    /// LoRA-adapter experts: the projections a delta can target, in `MlpLayer::new_added_delta` order.
+    fn amoe_lora_targets(&self) -> &'static [AnyMoeLoraTarget] {
+        &[]
+    }
+    /// A fine-tuned expert for `layer`, loaded from `vb` (already scoped to the layer's MLP) like `base`.
+    fn amoe_fine_tuned_expert(
+        &self,
+        _layer: usize,
+        _base: &dyn MlpLayer,
+        _vb: ShardedVarBuilder,
+    ) -> Result<Box<dyn MlpLayer>> {
+        candle_core::bail!("Model does not support AnyMoE layers");
+    }
+    // get_delta_from_lora_ab! scales by `rank as f64`; LoRA ranks are tiny
+    #[allow(clippy::too_many_arguments, clippy::cast_precision_loss)]
     fn create_anymoe_layers(
         &mut self,
-        _additional_vbs: Vec<ShardedVarBuilder>,
-        _config: AnyMoeConfig,
-        (_prefix, _mlp): (String, String),
-        _layers: Vec<usize>,
-        _expert_type: AnyMoeExpertType,
-        _gate_vb: Option<ShardedVarBuilder>,
+        additional_vbs: Vec<ShardedVarBuilder>,
+        config: AnyMoeConfig,
+        (prefix, mlp): (String, String),
+        mut layers: Vec<usize>,
+        expert_type: AnyMoeExpertType,
+        gate_vb: Option<ShardedVarBuilder>,
     ) -> Result<()> {
-        candle_core::bail!("Model does not support AnyMoE layers");
+        if !self.amoe_supported() {
+            candle_core::bail!("Model does not support AnyMoE layers");
+        }
+        if layers.is_empty() {
+            layers = (0..self.get_mlps().len()).collect();
+        }
+        let mut experts: Vec<Vec<Box<dyn MlpLayer>>> = layers.iter().map(|_| Vec::new()).collect();
+        {
+            let mlps = self.get_mlps();
+            for vb in additional_vbs {
+                let vb = vb.pp(&prefix);
+                for (row, &layer) in experts.iter_mut().zip(&layers) {
+                    let base = mlps[layer];
+                    let vb_mlp = vb.pp(layer).pp(&mlp);
+                    match expert_type {
+                        AnyMoeExpertType::FineTuned => {
+                            row.push(self.amoe_fine_tuned_expert(layer, base, vb_mlp)?)
+                        }
+                        AnyMoeExpertType::LoraAdapter {
+                            rank,
+                            alpha,
+                            ref target_modules,
+                        } => {
+                            let (hidden, intermediate) =
+                                (base.get_params()[0], base.get_params()[1]);
+                            let mut deltas = Vec::new();
+                            for target in self.amoe_lora_targets() {
+                                deltas.push(if target_modules.iter().any(|m| m == target.name) {
+                                    let (in_d, out_d) = (target.shape)(hidden, intermediate);
+                                    Some(crate::get_delta_from_lora_ab!(
+                                        vb_mlp,
+                                        rank,
+                                        alpha,
+                                        (in_d, out_d),
+                                        target.name
+                                    ))
+                                } else {
+                                    None
+                                });
+                            }
+                            row.push(base.new_added_delta(deltas)?);
+                        }
+                    }
+                }
+            }
+        }
+        let mut mlps = self.get_mlps_mut();
+        for (layer, expert) in layers.into_iter().zip(experts) {
+            let mut experts_all = vec![MlpLayer::clone(&**mlps[layer])];
+            experts_all.extend(expert);
+            let (dtype, device) = mlps[layer].dtype_device();
+            *mlps[layer] = Box::new(MoeMlp::new(
+                experts_all,
+                config.clone(),
+                dtype,
+                &device,
+                layer,
+                gate_vb.as_ref(),
+            )?);
+        }
+        Ok(())
     }
     fn get_mlps(&self) -> Vec<&dyn MlpLayer> {
         panic!("Model does not support AnyMoE layers");
@@ -319,5 +414,180 @@ impl MlpLayer for MoeMlp {
             self.gate.lin.weight().dtype(),
             self.gate.lin.weight().device().clone(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Mutex;
+
+    use super::*;
+
+    // per new_added_delta call: each target's delta shape, or None when not targeted
+    type SeenDeltas = Arc<Mutex<Vec<Vec<Option<Vec<usize>>>>>>;
+
+    const HIDDEN: usize = 4;
+    const INTERMEDIATE: usize = 6;
+
+    struct FakeMlp {
+        params: [usize; 2],
+        seen_deltas: SeenDeltas,
+    }
+
+    impl AnyMoeTrainableLayer for FakeMlp {}
+
+    impl MlpLayer for FakeMlp {
+        fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+            Ok(xs.clone())
+        }
+        fn clone(&self) -> Box<dyn MlpLayer> {
+            Box::new(FakeMlp {
+                params: self.params,
+                seen_deltas: self.seen_deltas.clone(),
+            })
+        }
+        fn get_params(&self) -> &[usize] {
+            &self.params
+        }
+        fn hidden_act(&self) -> Activation {
+            Activation::Silu
+        }
+        fn new_added_delta(&self, deltas: Vec<Option<Tensor>>) -> Result<Box<dyn MlpLayer>> {
+            let shapes = deltas
+                .iter()
+                .map(|d| d.as_ref().map(|t| t.dims().to_vec()))
+                .collect();
+            self.seen_deltas.lock().unwrap().push(shapes);
+            Ok(MlpLayer::clone(self))
+        }
+        fn dtype_device(&self) -> (DType, Device) {
+            (DType::F32, Device::Cpu)
+        }
+    }
+
+    struct FakeModel {
+        mlps: Vec<Box<dyn MlpLayer>>,
+        fine_tuned_layers: Mutex<Vec<usize>>,
+    }
+
+    impl FakeModel {
+        fn new(n_layers: usize, seen: &SeenDeltas) -> Self {
+            let mlps = (0..n_layers)
+                .map(|_| {
+                    Box::new(FakeMlp {
+                        params: [HIDDEN, INTERMEDIATE],
+                        seen_deltas: seen.clone(),
+                    }) as Box<dyn MlpLayer>
+                })
+                .collect();
+            Self {
+                mlps,
+                fine_tuned_layers: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    impl AnyMoeBaseModelMixin for FakeModel {
+        fn get_mlps(&self) -> Vec<&dyn MlpLayer> {
+            self.mlps.iter().map(|m| &**m).collect()
+        }
+        fn get_mlps_mut(&mut self) -> Vec<&mut Box<dyn MlpLayer>> {
+            self.mlps.iter_mut().collect()
+        }
+        fn amoe_supported(&self) -> bool {
+            true
+        }
+        fn amoe_lora_targets(&self) -> &'static [AnyMoeLoraTarget] {
+            const TARGETS: &[AnyMoeLoraTarget] = &[
+                AnyMoeLoraTarget::up("gate_proj"),
+                AnyMoeLoraTarget::down("down_proj"),
+            ];
+            TARGETS
+        }
+        fn amoe_fine_tuned_expert(
+            &self,
+            layer: usize,
+            base: &dyn MlpLayer,
+            _vb: ShardedVarBuilder,
+        ) -> Result<Box<dyn MlpLayer>> {
+            self.fine_tuned_layers.lock().unwrap().push(layer);
+            Ok(MlpLayer::clone(base))
+        }
+    }
+
+    fn config(expert_type: AnyMoeExpertType) -> AnyMoeConfig {
+        AnyMoeConfig {
+            hidden_size: HIDDEN,
+            lr: 1e-3,
+            epochs: 1,
+            batch_size: 1,
+            expert_type,
+            gate_model_id: None,
+            training: true,
+            loss_csv_path: None,
+        }
+    }
+
+    fn empty_vb() -> ShardedVarBuilder {
+        ShardedSafeTensors::wrap(HashMap::<String, Tensor>::new(), DType::F32, Device::Cpu)
+    }
+
+    #[test]
+    fn explicit_layer_subset_gets_experts_only_there() -> Result<()> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut model = FakeModel::new(3, &seen);
+        model.create_anymoe_layers(
+            vec![empty_vb(), empty_vb()],
+            config(AnyMoeExpertType::FineTuned),
+            ("model.layers".to_string(), "mlp".to_string()),
+            vec![1],
+            AnyMoeExpertType::FineTuned,
+            None,
+        )?;
+        assert_eq!(*model.fine_tuned_layers.lock().unwrap(), vec![1, 1]);
+        let moe: Vec<bool> = model.get_mlps().iter().map(|m| m.is_moe_layer()).collect();
+        assert_eq!(moe, vec![false, true, false]);
+        Ok(())
+    }
+
+    #[test]
+    fn lora_targets_are_filtered_ordered_and_shaped() -> Result<()> {
+        let (rank, layer) = (2, 0);
+        let mut tensors = HashMap::new();
+        for (name, (in_d, out_d)) in [
+            ("gate_proj", (HIDDEN, INTERMEDIATE)),
+            ("down_proj", (INTERMEDIATE, HIDDEN)),
+        ] {
+            let base = format!("adapter.{layer}.mlp.{name}");
+            tensors.insert(
+                format!("{base}.lora_A.weight"),
+                Tensor::ones((rank, in_d), DType::F32, &Device::Cpu)?,
+            );
+            tensors.insert(
+                format!("{base}.lora_B.weight"),
+                Tensor::ones((out_d, rank), DType::F32, &Device::Cpu)?,
+            );
+        }
+        let vb = ShardedSafeTensors::wrap(tensors, DType::F32, Device::Cpu);
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut model = FakeModel::new(1, &seen);
+        let lora = |targets: &[&str]| AnyMoeExpertType::LoraAdapter {
+            rank,
+            alpha: 1.0,
+            target_modules: targets.iter().map(|t| t.to_string()).collect(),
+        };
+        model.create_anymoe_layers(
+            vec![vb],
+            config(lora(&["down_proj"])),
+            ("adapter".to_string(), "mlp".to_string()),
+            vec![],
+            lora(&["down_proj"]),
+            None,
+        )?;
+        assert_eq!(
+            *seen.lock().unwrap(),
+            vec![vec![None, Some(vec![HIDDEN, INTERMEDIATE])]]
+        );
+        Ok(())
     }
 }

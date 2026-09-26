@@ -1,14 +1,13 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use crate::amoe::AnyMoeLoraTarget;
 use crate::layers::masker::CausalMaskConfig;
 use crate::{
-    amoe::{AnyMoeBaseModelMixin, AnyMoeConfig, AnyMoeExpertType, MlpLayer, MoeMlp},
+    amoe::{AnyMoeBaseModelMixin, MlpLayer},
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
-    get_delta_from_lora_ab,
     layers::{
-        apply_rotary_q, embedding_with_legacy_tied_uqff, Activation, CausalMasker, MatMul, Mlp,
-        RmsNorm,
+        apply_rotary_q, embedding_with_legacy_tied_uqff, Activation, CausalMasker, Mlp, RmsNorm,
     },
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     pipeline::{
@@ -651,105 +650,27 @@ impl AnyMoeBaseModelMixin for Model {
         }
         mlps
     }
-    fn create_anymoe_layers(
-        &mut self,
-        additional_vbs: Vec<ShardedVarBuilder>,
-        config: AnyMoeConfig,
-        (prefix, mlp): (String, String),
-        mut layers: Vec<usize>,
-        expert_type: AnyMoeExpertType,
-        gate_vb: Option<ShardedVarBuilder>,
-    ) -> Result<()> {
-        let mut experts: Vec<Vec<Box<dyn MlpLayer>>> = Vec::new();
-        if layers.is_empty() {
-            layers = (0..self.layers.len()).collect::<Vec<_>>();
-        }
-        for _ in 0..layers.len() {
-            experts.push(Vec::new());
-        }
-        for vb in additional_vbs {
-            let vb = vb.pp(&prefix);
-            for (layer, row) in experts.iter_mut().enumerate() {
-                if !layers.contains(&layer) {
-                    continue;
-                }
-
-                let intermediate_size = self.layers[layer].mlp.get_params()[1];
-                let hidden_size = self.layers[layer].mlp.get_params()[0];
-                match expert_type {
-                    AnyMoeExpertType::FineTuned => {
-                        let (dtype, device) = self.layers[layer].mlp.dtype_device();
-                        row.push(Box::new(Mlp::replicate(
-                            self.layers[layer].mlp.get_params(),
-                            vb.pp(layer).pp(&mlp).set_dtype(dtype).set_device(device),
-                            self.layers[layer].mlp.hidden_act(),
-                            &self.mapper.get_comm_for(layer)?,
-                        )?));
-                    }
-                    AnyMoeExpertType::LoraAdapter {
-                        rank,
-                        alpha,
-                        ref target_modules,
-                    } => {
-                        let vb_mlp = vb.pp(layer).pp(&mlp);
-
-                        let gate_proj_delta = if target_modules.contains(&"gate_proj".to_string()) {
-                            Some(get_delta_from_lora_ab!(
-                                vb_mlp,
-                                rank,
-                                alpha,
-                                (hidden_size, intermediate_size),
-                                "gate_proj"
-                            ))
-                        } else {
-                            None
-                        };
-                        let up_proj_delta = if target_modules.contains(&"up_proj".to_string()) {
-                            Some(get_delta_from_lora_ab!(
-                                vb_mlp,
-                                rank,
-                                alpha,
-                                (hidden_size, intermediate_size),
-                                "up_proj"
-                            ))
-                        } else {
-                            None
-                        };
-                        let down_proj_delta = if target_modules.contains(&"down_proj".to_string()) {
-                            Some(get_delta_from_lora_ab!(
-                                vb_mlp,
-                                rank,
-                                alpha,
-                                (intermediate_size, hidden_size),
-                                "down_proj"
-                            ))
-                        } else {
-                            None
-                        };
-
-                        row.push(self.layers[layer].mlp.new_added_delta(vec![
-                            gate_proj_delta,
-                            up_proj_delta,
-                            down_proj_delta,
-                        ])?);
-                    }
-                }
-            }
-        }
-        for (layer, expert) in layers.into_iter().zip(experts) {
-            let mut experts_all = vec![self.layers[layer].mlp.clone()];
-            experts_all.extend(expert);
-            let (dtype, device) = self.layers[layer].mlp.dtype_device();
-            self.layers[layer].mlp = Box::new(MoeMlp::new(
-                experts_all,
-                config.clone(),
-                dtype,
-                &device,
-                layer,
-                gate_vb.as_ref(),
-            )?);
-        }
-        Ok(())
+    fn amoe_lora_targets(&self) -> &'static [AnyMoeLoraTarget] {
+        const TARGETS: &[AnyMoeLoraTarget] = &[
+            AnyMoeLoraTarget::up("gate_proj"),
+            AnyMoeLoraTarget::up("up_proj"),
+            AnyMoeLoraTarget::down("down_proj"),
+        ];
+        TARGETS
+    }
+    fn amoe_fine_tuned_expert(
+        &self,
+        layer: usize,
+        base: &dyn MlpLayer,
+        vb: ShardedVarBuilder,
+    ) -> Result<Box<dyn MlpLayer>> {
+        let (dtype, device) = base.dtype_device();
+        Ok(Box::new(Mlp::replicate(
+            base.get_params(),
+            vb.set_dtype(dtype).set_device(device),
+            base.hidden_act(),
+            &self.mapper.get_comm_for(layer)?,
+        )?))
     }
     fn amoe_supported(&self) -> bool {
         true

@@ -275,3 +275,38 @@ Verification:
   kernels.
 
 Result: 24 files, +275 / -1102 lines.
+
+## Run 9 - 2026-09-26 00:40
+
+Change: `AnyMoeBaseModelMixin::create_anymoe_layers` becomes a shared default, replacing 15 per-model copies (~91-99
+lines each).
+
+The default builds experts read-only from `get_mlps()`, then swaps in `MoeMlp` layers through `get_mlps_mut()`.
+Each model supplies two hooks:
+- `amoe_lora_targets()`: the LoRA-targetable projections as `AnyMoeLoraTarget::{up,down}`, or a custom shape;
+- `amoe_fine_tuned_expert()`: its original expert constructor (`Mlp::replicate`, `MLP::new(&Config{..})`, or
+  phi3's `Mlp::new`).
+
+Survey: 27 impls. Of those, 17 are dense builders, 7 are multimodal wrappers that forward to their text model, and
+2 are stubs that bail. The dense builders differ only in field names, the expert constructor and the LoRA target
+table. Converted: gemma, gemma2, glm4, hunyuan_v1_dense, llama, mistral, qwen2, qwen3, smollm3, phi2, starcoder2,
+phi3, gemma3 text, muse_glimmer text and phi3 vision. Left bespoke: granite (custom `GraniteMlp` and `get_mlp`), and
+llava's copied LLMs, which will be deleted when llava reuses the base models.
+
+Two upstream bugs are fixed:
+- **Explicit layer lists got no experts.** `experts` had one row per selected layer, but the loop tested
+  `layers.contains(&row_index)`. With `layers = [5, 6]`, no row matched, and layers 5 and 6 became MoE layers holding
+  only the base MLP. `layers = []` ("all") was unaffected. muse_glimmer's copy already had the fix (`zip(&layers)`),
+  and the shared default uses it.
+- **phi3's `down_proj` LoRA shape.** phi3 (text and vision) loaded it as `(hidden, intermediate)`. PEFT builds
+  `lora_A = nn.Linear(in_features, r)` (see huggingface/peft `tuners/lora/layer.py`), and `down_proj`'s input is the
+  intermediate size. The old shape expected `lora_A` of `(rank, hidden)` and produced an `(intermediate, hidden)`
+  delta for a `(hidden, intermediate)` weight, so phi3 LoRA-adapter AnyMoE could not load a real adapter. It now
+  uses `down("down_proj")`, like every other model.
+
+Tests: AnyMoE had none. Two unit tests with a fake model are added:
+- an explicit subset `[1]` of 3 layers builds experts only for layer 1, one per extra VarBuilder, and only layer 1
+  becomes MoE;
+- LoRA targets are filtered by name, delivered in target order, and shaped as B*A.
+
+Result: green, with 2133 CPU and 2451 CUDA tests (+2 each). Net about -1000 lines.
