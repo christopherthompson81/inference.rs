@@ -1,6 +1,6 @@
 # FlashInfer GDN attribution
 
-The cooperative and pipelined K-major GDN decode kernels in `src/cuda/gdn_decode.cu` are adapted from:
+The cooperative and pipelined K-major GDN decode kernels in `kernels/cuda/gdn_decode.cu` are adapted from:
 
 - Repository: https://github.com/flashinfer-ai/flashinfer
 - Revision: `4927c0e15cb63a2abb6df09019c39a172222f0eb`

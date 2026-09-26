@@ -1,7 +1,7 @@
 inference_metal_compile::metal_source_set! {
     pub const PAGED_ATTENTION_METAL_SOURCE_SET;
     library_name: "inference_paged_attention",
-    source_dir: "src/metal/kernels",
+    source_dir: "kernels/metal",
     metal_sources: [
         "copy_blocks",
         "pagedattention",

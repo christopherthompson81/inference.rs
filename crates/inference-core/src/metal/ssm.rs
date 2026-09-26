@@ -34,7 +34,7 @@ type Pipelines = HashMap<String, ComputePipeline>;
 static SSM_PIPELINES: OnceLock<RwLock<Pipelines>> = OnceLock::new();
 
 #[cfg(feature = "metal")]
-const SSM_METAL_SOURCE: &str = include_str!("kernels/ssm.metal");
+const SSM_METAL_SOURCE: &str = include_str!("../../kernels/metal/ssm.metal");
 
 #[cfg(feature = "metal")]
 fn load_ssm_library(device: &MetalRawDevice) -> Result<Library> {

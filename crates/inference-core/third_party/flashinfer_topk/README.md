@@ -1,6 +1,6 @@
 # FlashInfer radix top-k attribution
 
-The multi-CTA radix top-k implementation in `src/cuda/radix_topk.cuh` is adapted from:
+The multi-CTA radix top-k implementation in `kernels/cuda/radix_topk.cuh` is adapted from:
 
 - Repository: https://github.com/flashinfer-ai/flashinfer
 - Revision: `a0a6b019b9b27d49d209f85d028a1ae5a9b347d7`
