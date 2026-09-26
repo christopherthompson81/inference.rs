@@ -103,11 +103,12 @@ You should also look for a model.safetensors.index.json file for the model at ha
 ### Adding New Features
 
 When adding new model architectures:
-1. Implement the model in `crates/inference-core/src/models/`
-2. Add pipeline support in `crates/inference-core/src/pipeline/`
-3. Update model detection in `crates/inference-core/src/pipeline/normal.rs`
-4. Add architecture enum variant in `crates/inference-core/src/lib.rs`
-5. Update CLI args in `crates/inference-cli/src/main.rs`
+1. Implement the model in `crates/inference-core/src/models/` (or `vision_models/`)
+2. Add its loader in `crates/inference-core/src/pipeline/loaders/normal_loaders/` (or `multimodal_loaders/`)
+3. Add one row to `normal_loader_types!` (or `multimodal_loader_types!`) in that directory's `mod.rs`. The row gives
+   the CLI name, the HF class, the `model_type` (text only) and the loader, and the enum variant, parsing, display, HF detection and loader
+   dispatch are all generated from it.
+4. Add the GGUF bindings in `crates/inference-core/src/gguf/` if the model loads from GGUF
 
 When adding new quantization methods:
 1. Implement in `crates/inference-quant/src/`

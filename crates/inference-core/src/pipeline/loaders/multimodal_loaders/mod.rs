@@ -272,161 +272,105 @@ pub trait MultimodalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedMode
     }
 }
 
-#[cfg_attr(feature = "pyo3_macros", pyclass(eq, eq_int))]
-#[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
-/// The architecture to load the multimodal model as.
-pub enum MultimodalLoaderType {
-    #[serde(rename = "phi3v")]
-    Phi3V,
-    #[serde(rename = "idefics2")]
-    Idefics2,
-    #[serde(rename = "llava_next")]
-    LLaVANext,
-    #[serde(rename = "llava")]
-    LLaVA,
-    #[serde(rename = "lfm2vl")]
-    Lfm2Vl,
-    #[serde(rename = "vllama")]
-    VLlama,
-    #[serde(rename = "qwen2vl")]
-    Qwen2VL,
-    #[serde(rename = "idefics3")]
-    Idefics3,
-    #[serde(rename = "minicpmo")]
-    MiniCpmO,
-    #[serde(rename = "phi4mm")]
-    Phi4MM,
-    #[serde(rename = "qwen2_5vl")]
-    Qwen2_5VL,
-    #[serde(rename = "gemma3")]
-    Gemma3,
-    #[serde(rename = "mistral3")]
-    Mistral3,
-    #[serde(rename = "llama4")]
-    Llama4,
-    #[serde(rename = "gemma3n")]
-    Gemma3n,
-    #[serde(rename = "qwen3vl")]
-    Qwen3VL,
-    #[serde(rename = "qwen3vlmoe")]
-    Qwen3VLMoE,
-    #[serde(rename = "qwen3_5")]
-    Qwen3_5,
-    #[serde(rename = "qwen3_5moe")]
-    Qwen3_5Moe,
-    #[serde(rename = "voxtral")]
-    Voxtral,
-    #[serde(rename = "gemma4")]
-    Gemma4,
-    #[serde(rename = "muse_glimmer")]
-    MuseGlimmer,
-    #[serde(rename = "diffusiongemma")]
-    DiffusionGemma,
-    #[serde(rename = "paddleocr_vl")]
-    PaddleOcrVl,
+// One row per multimodal architecture; the first `cli` name is canonical, the rest are accepted aliases.
+macro_rules! multimodal_loader_types {
+    ($($variant:ident {
+        cli: $cli:literal $(| $cli_alias:literal)*,
+        hf: $hf:literal $(| $hf_alias:literal)*,
+        loader: $loader:ident $(,)?
+    }),* $(,)?) => {
+        #[cfg_attr(feature = "pyo3_macros", pyclass(eq, eq_int))]
+        #[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
+        /// The architecture to load the multimodal model as.
+        pub enum MultimodalLoaderType {
+            $(#[serde(rename = $cli)] $variant,)*
+        }
+
+        // https://github.com/huggingface/transformers/blob/cff06aac6fad28019930be03f5d467055bf62177/src/transformers/models/auto/modeling_auto.py#L448
+        impl MultimodalLoaderType {
+            const CLI_NAMES: &'static [&'static str] = &[$($cli),*];
+
+            pub(crate) fn causal_lm_name(&self) -> &'static str {
+                match self {
+                    $(Self::$variant => $hf,)*
+                }
+            }
+
+            pub fn from_causal_lm_name(name: &str) -> Result<Self> {
+                match name {
+                    $($hf $(| $hf_alias)* => Ok(Self::$variant),)*
+                    other => anyhow::bail!(
+                        "Unsupported Hugging Face Transformers -CausalLM model class `{other}`. Please raise an issue."
+                    ),
+                }
+            }
+
+            pub(crate) fn loader(&self) -> Box<dyn MultimodalModelLoader> {
+                match self {
+                    $(Self::$variant => Box::new($loader),)*
+                }
+            }
+        }
+
+        impl FromStr for MultimodalLoaderType {
+            type Err = String;
+            fn from_str(s: &str) -> Result<Self, Self::Err> {
+                match s {
+                    $($cli $(| $cli_alias)* => Ok(Self::$variant),)*
+                    a => Err(format!(
+                        "Unknown architecture `{a}`. Possible architectures: {}.",
+                        Self::CLI_NAMES.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")
+                    )),
+                }
+            }
+        }
+
+        impl std::fmt::Display for MultimodalLoaderType {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                match self {
+                    $(Self::$variant => f.write_str($cli),)*
+                }
+            }
+        }
+    };
 }
 
-// https://github.com/huggingface/transformers/blob/cff06aac6fad28019930be03f5d467055bf62177/src/transformers/models/auto/modeling_auto.py#L448
-impl MultimodalLoaderType {
-    pub fn from_causal_lm_name(name: &str) -> Result<Self> {
-        match name {
-            "Phi3VForCausalLM" => Ok(Self::Phi3V),
-            "Idefics2ForConditionalGeneration" => Ok(Self::Idefics2),
-            "LlavaNextForConditionalGeneration" => Ok(Self::LLaVANext),
-            "LlavaForConditionalGeneration" => Ok(Self::LLaVA),
-            "Lfm2VlForConditionalGeneration" => Ok(Self::Lfm2Vl),
-            "MllamaForConditionalGeneration" => Ok(Self::VLlama),
-            "Qwen2VLForConditionalGeneration" => Ok(Self::Qwen2VL),
-            "Idefics3ForConditionalGeneration" => Ok(Self::Idefics3),
-            "MiniCPMO" => Ok(Self::MiniCpmO),
-            "Phi4MMForCausalLM" => Ok(Self::Phi4MM),
-            "Qwen2_5_VLForConditionalGeneration" => Ok(Self::Qwen2_5VL),
-            "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM" => Ok(Self::Gemma3),
-            "Mistral3ForConditionalGeneration" => Ok(Self::Mistral3),
-            "Llama4ForConditionalGeneration" => Ok(Self::Llama4),
-            "Gemma3nForConditionalGeneration" => Ok(Self::Gemma3n),
-            "Gemma4ForConditionalGeneration"
+multimodal_loader_types! {
+    Phi3V { cli: "phi3v", hf: "Phi3VForCausalLM", loader: Phi3VLoader },
+    Idefics2 { cli: "idefics2", hf: "Idefics2ForConditionalGeneration", loader: Idefics2Loader },
+    LLaVANext { cli: "llava_next", hf: "LlavaNextForConditionalGeneration", loader: LLaVANextLoader },
+    LLaVA { cli: "llava", hf: "LlavaForConditionalGeneration", loader: LLaVALoader },
+    Lfm2Vl { cli: "lfm2vl" | "lfm2_vl", hf: "Lfm2VlForConditionalGeneration", loader: Lfm2VlLoader },
+    VLlama { cli: "vllama", hf: "MllamaForConditionalGeneration", loader: VLlamaLoader },
+    Qwen2VL { cli: "qwen2vl", hf: "Qwen2VLForConditionalGeneration", loader: Qwen2VLLoader },
+    Idefics3 { cli: "idefics3", hf: "Idefics3ForConditionalGeneration", loader: Idefics3Loader },
+    MiniCpmO { cli: "minicpmo", hf: "MiniCPMO", loader: MiniCpmOLoader },
+    Phi4MM { cli: "phi4mm", hf: "Phi4MMForCausalLM", loader: Phi4MMLoader },
+    Qwen2_5VL { cli: "qwen2_5vl", hf: "Qwen2_5_VLForConditionalGeneration", loader: Qwen2_5VLLoader },
+    Gemma3 { cli: "gemma3", hf: "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM", loader: Gemma3Loader },
+    Mistral3 { cli: "mistral3", hf: "Mistral3ForConditionalGeneration", loader: Mistral3Loader },
+    Llama4 { cli: "llama4", hf: "Llama4ForConditionalGeneration", loader: VLlama4Loader },
+    Gemma3n { cli: "gemma3n", hf: "Gemma3nForConditionalGeneration", loader: Gemma3nLoader },
+    Qwen3VL { cli: "qwen3vl", hf: "Qwen3VLForConditionalGeneration", loader: Qwen3VLLoader },
+    Qwen3VLMoE { cli: "qwen3vlmoe", hf: "Qwen3VLMoeForConditionalGeneration", loader: Qwen3VLMoELoader },
+    Qwen3_5 { cli: "qwen3_5", hf: "Qwen3_5ForConditionalGeneration", loader: Qwen3_5Loader },
+    Qwen3_5Moe { cli: "qwen3_5moe", hf: "Qwen3_5MoeForConditionalGeneration", loader: Qwen3_5MoeLoader },
+    Voxtral { cli: "voxtral", hf: "VoxtralRealtimeForConditionalGeneration", loader: VoxtralLoader },
+    Gemma4 {
+        cli: "gemma4",
+        hf: "Gemma4ForConditionalGeneration"
             | "Gemma4ForCausalLM"
             | "Gemma4UnifiedForConditionalGeneration"
-            | "Gemma4UnifiedForCausalLM" => Ok(Self::Gemma4),
-            "MuseGlimmerForConditionalGeneration" => Ok(Self::MuseGlimmer),
-            "DiffusionGemmaForBlockDiffusion" => Ok(Self::DiffusionGemma),
-            "PaddleOCRVLForConditionalGeneration" => Ok(Self::PaddleOcrVl),
-            "Qwen3VLForConditionalGeneration" => Ok(Self::Qwen3VL),
-            "Qwen3VLMoeForConditionalGeneration" => Ok(Self::Qwen3VLMoE),
-            "Qwen3_5ForConditionalGeneration" => Ok(Self::Qwen3_5),
-            "Qwen3_5MoeForConditionalGeneration" => Ok(Self::Qwen3_5Moe),
-            "VoxtralRealtimeForConditionalGeneration" => Ok(Self::Voxtral),
-            other => anyhow::bail!(
-                "Unsupported Hugging Face Transformers -CausalLM model class `{other}`. Please raise an issue."
-            ),
-        }
-    }
-}
-
-impl FromStr for MultimodalLoaderType {
-    type Err = String;
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "phi3v" => Ok(Self::Phi3V),
-            "idefics2" => Ok(Self::Idefics2),
-            "llava_next" => Ok(Self::LLaVANext),
-            "llava" => Ok(Self::LLaVA),
-            "lfm2vl" | "lfm2_vl" => Ok(Self::Lfm2Vl),
-            "vllama" => Ok(Self::VLlama),
-            "qwen2vl" => Ok(Self::Qwen2VL),
-            "idefics3" => Ok(Self::Idefics3),
-            "minicpmo" => Ok(Self::MiniCpmO),
-            "phi4mm" => Ok(Self::Phi4MM),
-            "qwen2_5vl" => Ok(Self::Qwen2_5VL),
-            "gemma3" => Ok(Self::Gemma3),
-            "mistral3" => Ok(Self::Mistral3),
-            "llama4" => Ok(Self::Llama4),
-            "gemma3n" => Ok(Self::Gemma3n),
-            "gemma4" => Ok(Self::Gemma4),
-            "muse_glimmer" | "museglimmer" => Ok(Self::MuseGlimmer),
-            "diffusiongemma" => Ok(Self::DiffusionGemma),
-            "paddleocr_vl" => Ok(Self::PaddleOcrVl),
-            "qwen3vl" => Ok(Self::Qwen3VL),
-            "qwen3vlmoe" => Ok(Self::Qwen3VLMoE),
-            "qwen3_5" => Ok(Self::Qwen3_5),
-            "qwen3_5moe" => Ok(Self::Qwen3_5Moe),
-            "voxtral" => Ok(Self::Voxtral),
-            a => Err(format!("Unknown architecture `{a}`. Possible architectures: `phi3v`, `idefics2`, `llava_next`, `llava`, `lfm2vl`, `vllama`, `qwen2vl`, `idefics3`, `minicpmo`, `phi4mm`, `qwen2_5vl`, `gemma3`, `mistral3`, `llama4`, `gemma3n`, `gemma4`, `muse_glimmer`, `qwen3vl`, `qwen3vlmoe`, `qwen3_5`, `qwen3_5moe`, `voxtral`, `diffusiongemma`, `paddleocr_vl`.")),
-        }
-    }
-}
-
-impl std::fmt::Display for MultimodalLoaderType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let name = match self {
-            MultimodalLoaderType::Phi3V => "phi3v",
-            MultimodalLoaderType::Idefics2 => "idefics2",
-            MultimodalLoaderType::LLaVANext => "llava_next",
-            MultimodalLoaderType::LLaVA => "llava",
-            MultimodalLoaderType::Lfm2Vl => "lfm2vl",
-            MultimodalLoaderType::VLlama => "vllama",
-            MultimodalLoaderType::Qwen2VL => "qwen2vl",
-            MultimodalLoaderType::Idefics3 => "idefics3",
-            MultimodalLoaderType::MiniCpmO => "minicpmo",
-            MultimodalLoaderType::Phi4MM => "phi4mm",
-            MultimodalLoaderType::Qwen2_5VL => "qwen2_5vl",
-            MultimodalLoaderType::Gemma3 => "gemma3",
-            MultimodalLoaderType::Mistral3 => "mistral3",
-            MultimodalLoaderType::Llama4 => "llama4",
-            MultimodalLoaderType::Gemma3n => "gemma3n",
-            MultimodalLoaderType::Qwen3VL => "qwen3vl",
-            MultimodalLoaderType::Qwen3VLMoE => "qwen3vlmoe",
-            MultimodalLoaderType::Qwen3_5 => "qwen3_5",
-            MultimodalLoaderType::Qwen3_5Moe => "qwen3_5moe",
-            MultimodalLoaderType::Voxtral => "voxtral",
-            MultimodalLoaderType::Gemma4 => "gemma4",
-            MultimodalLoaderType::MuseGlimmer => "muse_glimmer",
-            MultimodalLoaderType::DiffusionGemma => "diffusiongemma",
-            MultimodalLoaderType::PaddleOcrVl => "paddleocr_vl",
-        };
-        write!(f, "{name}")
-    }
+            | "Gemma4UnifiedForCausalLM",
+        loader: Gemma4Loader,
+    },
+    MuseGlimmer {
+        cli: "muse_glimmer" | "museglimmer",
+        hf: "MuseGlimmerForConditionalGeneration",
+        loader: MuseGlimmerLoader,
+    },
+    DiffusionGemma { cli: "diffusiongemma", hf: "DiffusionGemmaForBlockDiffusion", loader: DiffusionGemmaLoader },
+    PaddleOcrVl { cli: "paddleocr_vl", hf: "PaddleOCRVLForConditionalGeneration", loader: PaddleOcrVlLoader },
 }
 
 macro_rules! bias_if {

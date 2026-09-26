@@ -340,3 +340,33 @@ Verification:
   was not a measurable load cost at this size, so the change is line count and clarity only.
 
 Result: 35 files, about -125 lines.
+
+## Run 11 - 2026-09-26 03:00
+
+Change: one table per model kind generates everything that names an architecture.
+
+- `normal_loader_types!` rows: `Variant { cli, hf, model_type, loader }`.
+- `multimodal_loader_types!` rows: `Variant { cli | aliases, hf | aliases, loader }`.
+
+Generated from the rows: the enum with its serde renames, `causal_lm_name`, `model_type_name`, `from_causal_lm_name`,
+`FromStr` (the error lists every CLI name), `Display`, and a new `loader()`. `loader()` replaces the two identical
+dispatch matches per kind (`normal.rs`/`auto.rs`, `multimodal.rs`/`multimodal_loaders/auto.rs`), and
+`model_metadata::config_arch` delegates to `causal_lm_name`.
+
+Method: before emitting the tables, a script parsed all seven existing sources per kind and asserted they agreed.
+All 26 text and 24 multimodal architectures did. Aliases (lfm2_vl, museglimmer, the Gemma3/Gemma4 HF classes) became
+alias lists. Two new tests check the round trip for every variant (CLI name and HF class), name uniqueness, and the
+aliases.
+
+Adding a text architecture used to mean touching 11 places. It is now one row, plus the model, its loader and any
+GGUF bindings. CLAUDE.md's "adding a model" steps say so.
+
+Not in scope: the pyo3 duplicate enums (`Architecture` misses `Qwen3_5`; the `.pyi` misses HunYuan and misnames
+gpt_oss). Python is moving onto the C ABI and pyo3 will be retired (issue #19), so they are left alone. The GGUF
+registry is a separate schema table.
+
+Result: green, with 2137 CPU and 2456 CUDA tests (+2). 12 code files, +300 / -569. The multimodal FromStr error now
+lists names in table order (gemma4 and muse_glimmer moved after voxtral); nothing parses that message.
+
+Still hand-written outside the tables, for later: the multimodal family subsets in `pipeline/auto.rs:685-703` and
+`pipeline/gguf.rs:1665-1678`, which could become a table column, and the GGUF schema registry.

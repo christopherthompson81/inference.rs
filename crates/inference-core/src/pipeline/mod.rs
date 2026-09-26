@@ -63,22 +63,15 @@ use llguidance::toktrie::TokEnv;
 pub(crate) use loaders::checkpoint_runtime_size;
 pub use loaders::{
     AdapterKind, AutoDeviceMapParams, AutoDeviceMapQuantization, AutoEmbeddingLoader,
-    AutoMultimodalLoader, AutoNormalLoader, DeepSeekV2Loader, DeepSeekV3Loader,
-    DeviceMappedModelLoader, DiffusionGemmaLoader, DiffusionLoaderType, DiffusionModel,
-    DiffusionModelLoader, EmbeddingGemmaLoader, EmbeddingLoaderType, EmbeddingModel,
-    EmbeddingModelLoader, EmbeddingModelPaths, EmbeddingModule, EmbeddingModulePaths,
-    EmbeddingModuleType, FluxLoader, GLM4Loader, GLM4MoeLiteLoader, GLM4MoeLoader, Gemma2Loader,
-    Gemma3Loader, Gemma3nLoader, Gemma4Loader, GemmaLoader, GptOssLoader, GraniteMoeHybridLoader,
-    HunYuanDenseV1Loader, HunYuanMoEV1Loader, Idefics2Loader, Idefics3Loader, LLaVALoader,
-    LLaVANextLoader, Lfm2Loader, Lfm2VlLoader, LlamaLoader, Loader, LocalModelPaths,
-    MiniCpmOLoader, Mistral3Loader, MistralLoader, MixtralLoader, ModelKind, ModelPaths,
-    MultimodalLoaderType, MultimodalModel, MultimodalModelLoader, MuseGlimmerLoader,
-    NormalLoaderType, NormalLoadingMetadata, NormalModel, NormalModelLoader, PaddleOcrVlLoader,
-    Phi2Loader, Phi3Loader, Phi3VLoader, Phi3_5MoELoader, Phi4MMLoader, PrettyName,
-    QuantizationKind, Qwen2Loader, Qwen2VLLoader, Qwen2_5VLLoader, Qwen3EmbeddingLoader,
-    Qwen3Loader, Qwen3MoELoader, Qwen3NextLoader, Qwen3VLLoader, Qwen3VLMoELoader, Qwen3_5Loader,
-    Qwen3_5MoeLoader, Qwen3_5TextLoader, SmolLm3Loader, Starcoder2Loader, TokenSource,
-    VLlama4Loader, VLlamaLoader, VoxtralLoader,
+    AutoMultimodalLoader, AutoNormalLoader, DeviceMappedModelLoader, DiffusionLoaderType,
+    DiffusionModel, DiffusionModelLoader, EmbeddingGemmaLoader, EmbeddingLoaderType,
+    EmbeddingModel, EmbeddingModelLoader, EmbeddingModelPaths, EmbeddingModule,
+    EmbeddingModulePaths, EmbeddingModuleType, FluxLoader, GemmaLoader, Idefics2Loader,
+    LLaVALoader, LLaVANextLoader, LlamaLoader, Loader, LocalModelPaths, MistralLoader,
+    MixtralLoader, ModelKind, ModelPaths, MultimodalLoaderType, MultimodalModel,
+    MultimodalModelLoader, NormalLoaderType, NormalLoadingMetadata, NormalModel, NormalModelLoader,
+    Phi2Loader, Phi3Loader, Phi3VLoader, PrettyName, QuantizationKind, Qwen2Loader,
+    Qwen3EmbeddingLoader, Starcoder2Loader, TokenSource,
 };
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn get_device_layers_for_loader(

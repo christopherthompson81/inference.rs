@@ -1474,3 +1474,39 @@ fn paddleocr_vl_loader_config_and_isq() -> Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn every_multimodal_architecture_round_trips_and_aliases_resolve() {
+    use std::collections::HashSet;
+    use strum::IntoEnumIterator;
+
+    let mut cli = HashSet::new();
+    for arch in MultimodalLoaderType::iter() {
+        let name = arch.to_string();
+        assert_eq!(
+            name.parse::<MultimodalLoaderType>().unwrap(),
+            arch,
+            "cli name `{name}`"
+        );
+        assert!(cli.insert(name), "duplicate cli name for {arch:?}");
+    }
+    for (alias, arch) in [
+        ("lfm2_vl", MultimodalLoaderType::Lfm2Vl),
+        ("museglimmer", MultimodalLoaderType::MuseGlimmer),
+    ] {
+        assert_eq!(alias.parse::<MultimodalLoaderType>().unwrap(), arch);
+    }
+    for (class, arch) in [
+        ("Gemma3ForCausalLM", MultimodalLoaderType::Gemma3),
+        ("Gemma4UnifiedForCausalLM", MultimodalLoaderType::Gemma4),
+        (
+            "Qwen3_5MoeForConditionalGeneration",
+            MultimodalLoaderType::Qwen3_5Moe,
+        ),
+    ] {
+        assert_eq!(
+            MultimodalLoaderType::from_causal_lm_name(class).unwrap(),
+            arch
+        );
+    }
+}
