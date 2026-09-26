@@ -23,6 +23,7 @@ members = [
 ]
 # Everything but the examples, so a bare `cargo build`/`cargo test` at the root never links them.
 default-members = [
+    "inference-server-core",
     "inference-cli",
     "inference-core",
     "inference-pyo3",

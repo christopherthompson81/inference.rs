@@ -82,9 +82,10 @@ from a loader.
 | GGML legacy | ~0.6k + variants | 0 | |
 | web search | 0.8k | 1 | |
 
-Vestigial files: `speculative.toml` and `toml-selectors/speculative-*.toml` (draft-model mode is gone), `website/`
-(upstream landing page), `releases/` (upstream notes), `ring_configs/`, `/api/mistral` in server docs, a duplicate
-`inference-server-core` workspace member, and `scripts/production_soak.py` (14k lines, with a 4.6k test file).
+Vestigial files: `speculative.toml` and `toml-selectors/speculative-*.toml` (the draft-model mode is gone, and the
+selector rejects them) and `/api/mistral` in server docs. `website/` (upstream landing page) and `releases/`
+(upstream notes) are for the owner to decide. `ring_configs/` documents the ring backend, and
+`scripts/production_soak.py` (14k lines) is the DFlash serving harness, so both stay.
 
 Vendored code inside first-party crates, not labelled as such: FlashAttention-2 kernels, FlashInfer/vLLM paged
 kernels, MLX-derived Metal kernels, exllamav2 GPTQ/Marlin, llama.cpp mmq/mmvq, vLLM cutlass MoE. That code is not
