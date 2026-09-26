@@ -48,7 +48,6 @@ mod scalar_fp8;
 mod unquantized;
 mod uqff;
 mod utils;
-mod vector_fp8;
 
 use gptq::gptq_linear;
 use regex::Regex;
@@ -262,7 +261,6 @@ pub use utils::softcap;
 pub use utils::softmax_with_sinks;
 pub use utils::{fused_glu, fused_split_glu, GluActivationType};
 pub use utils::{log, BitWiseOp, CumSumOp, LeftshiftOp, NonZeroOp, SortOp};
-pub use vector_fp8::{fp8_vector_dequantize, fp8_vector_quantize};
 
 use candle_nn::{Conv1d, Conv2d, Linear, Module};
 use serde::{Deserialize, Deserializer, Serialize};
