@@ -109,6 +109,7 @@ statrs.workspace = true
 openai-harmony = "0.0.8"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))'.dependencies]
+objc = { workspace = true, optional = true }
 candle-metal-kernels = { workspace = true, optional = true }
 
 [features]
@@ -128,6 +129,7 @@ metal = [
     "candle-nn/metal",
     "inference-quant/metal",
     "dep:candle-metal-kernels",
+    "dep:objc",
     "dep:inference-paged-attn",
     "inference-paged-attn/metal",
     "inference-nn/metal",
