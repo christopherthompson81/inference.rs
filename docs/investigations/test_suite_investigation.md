@@ -78,3 +78,25 @@ Finding:
 - Result: `--cuda` runs 2453 tests in 62 s, green twice. Total work is 940 test-seconds (58 s ideal), so the machine
   is saturated. The slowest single test is 15 s, and there is no single-core tail left.
 - `--tests` (CPU) runs 2133 tests in 64 s, plus 56 doctests.
+
+## Run 5 - 2026-09-26
+
+- Question: the CPU suite still has a long tail at 1-2 running tests. Is it scheduling or test length?
+- Timeline (junit timestamps), before: the `gpu-model` group (max 6, sized for VRAM) also throttled CPU runs, so two
+  PaddleOCR f32 tests waited for a slot and `two_images_in_one_message_match_transformers` ran alone for the last ~15 s.
+- Change: moved the group override to a `cuda` nextest profile (`local_ci.sh --cuda` passes `--profile cuda`), and
+  gave the PaddleOCR, layout ABI and tiktoken tests `priority = 100` in the default profile.
+- Result: `cargo nextest run --workspace --lib --bins --tests` = 59.8 s (was 60 s). All 9 long tests now start at
+  t=0, but the run is bounded by the longest one: two_images 59 s, page_01 50 s, page_00 49 s, ffi detections 33 s.
+- Alone, the same tests take 6.2 s (text_only), 17.9 s (page_00) and 28.6 s (two_images). With 8 f32 model tests
+  plus the rest sharing 16 cores, each runs ~2-3x slower, so the pole is CPU oversubscription, not order.
+- Implication: scheduling can't beat ~max(single-test time under load). The CPU f32 decodes check the same goldens
+  as the bf16 CUDA run, so the real lever is whether CPU `--tests` should run model-backed tests at all.
+
+## Run 6 - 2026-09-26
+
+- Change: nextest `default-filter` on the default profile leaves out the real-checkpoint tests (paddleocr_vl binary,
+  ffi `detections_through_the_abi`). A `models` profile runs only those, and the `cuda` profile runs everything with the
+  VRAM group. New `local_ci.sh --models` runs the model tier on CPU.
+- Result (warm): `--lint --tests` = 23 s end to end (2122 tests plus doctests and smoke; was ~80 s). `--models` = 57 s
+  for 8 tests (the CPU f32 pole, now opt-in). `--cuda` = 58 s, 2449 tests, green.
