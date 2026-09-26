@@ -4,7 +4,6 @@ pub(crate) mod phi3_inputs_processor;
 
 // This implementation is based on:
 // https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/blob/main/modeling_phi3.py
-use crate::amoe::AnyMoeLoraTarget;
 use crate::layers::masker::CausalMaskConfig;
 use candle_core::{
     shape::ShapeWithOneHole, DType, Device, IndexOp, Module, Result, Shape, Tensor, D,
@@ -21,7 +20,7 @@ use std::{
 };
 
 use crate::{
-    amoe::{AnyMoeBaseModelMixin, AnyMoeTrainableLayer, MlpLayer},
+    amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, AnyMoeTrainableLayer, MlpLayer},
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
@@ -1444,14 +1443,7 @@ impl AnyMoeBaseModelMixin for Model {
         mlps
     }
     fn amoe_lora_targets(&self) -> &'static [AnyMoeLoraTarget] {
-        const TARGETS: &[AnyMoeLoraTarget] = &[
-            AnyMoeLoraTarget {
-                name: "gate_up_proj",
-                shape: |hidden, intermediate| (hidden, 2 * intermediate),
-            },
-            AnyMoeLoraTarget::down("down_proj"),
-        ];
-        TARGETS
+        crate::models::phi3::ANYMOE_LORA_TARGETS
     }
     fn amoe_fine_tuned_expert(
         &self,

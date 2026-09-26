@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::amoe::AnyMoeLoraTarget;
 use crate::layers::masker::CausalMaskConfig;
 use std::{collections::HashMap, sync::Arc};
 
@@ -12,7 +11,7 @@ use inference_quant::{
 };
 
 use crate::{
-    amoe::{AnyMoeBaseModelMixin, MlpLayer},
+    amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
     attention::{flash_backend_supports, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{embedding, Activation, CausalMasker, GemmaRmsNorm, Mlp, RotaryEmbedding, Sdpa},

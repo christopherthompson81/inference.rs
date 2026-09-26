@@ -2,14 +2,13 @@
 
 // This implementation is based on:
 // https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/blob/main/modeling_phi3.py
-use crate::amoe::AnyMoeLoraTarget;
 use crate::layers::masker::CausalMaskConfig;
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use inference_quant::{QuantMethod, QuantizedConfig, ReplicatedLayer, ShardedVarBuilder};
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    amoe::{AnyMoeBaseModelMixin, AnyMoeTrainableLayer, MlpLayer},
+    amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, AnyMoeTrainableLayer, MlpLayer},
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
@@ -25,6 +24,14 @@ use crate::{
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 
+/// phi3 fuses gate and up into one projection; `new_added_delta` takes [gate_up_proj, down_proj].
+pub(crate) const ANYMOE_LORA_TARGETS: &[AnyMoeLoraTarget] = &[
+    AnyMoeLoraTarget {
+        name: "gate_up_proj",
+        shape: |hidden, intermediate| (hidden, 2 * intermediate),
+    },
+    AnyMoeLoraTarget::down("down_proj"),
+];
 serde_default_fn!(bool, word_emb_default, false);
 
 // https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/blob/main/config.json
@@ -604,14 +611,7 @@ impl AnyMoeBaseModelMixin for Model {
         mlps
     }
     fn amoe_lora_targets(&self) -> &'static [AnyMoeLoraTarget] {
-        const TARGETS: &[AnyMoeLoraTarget] = &[
-            AnyMoeLoraTarget {
-                name: "gate_up_proj",
-                shape: |hidden, intermediate| (hidden, 2 * intermediate),
-            },
-            AnyMoeLoraTarget::down("down_proj"),
-        ];
-        TARGETS
+        ANYMOE_LORA_TARGETS
     }
     fn amoe_fine_tuned_expert(
         &self,
@@ -631,5 +631,24 @@ impl AnyMoeBaseModelMixin for Model {
     }
     fn amoe_supported(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod anymoe_tests {
+    use super::ANYMOE_LORA_TARGETS;
+
+    #[test]
+    fn lora_delta_shapes_follow_peft_in_out_features() {
+        let (hidden, intermediate) = (3, 5);
+        let shapes: Vec<_> = ANYMOE_LORA_TARGETS
+            .iter()
+            .map(|t| (t.name, (t.shape)(hidden, intermediate)))
+            .collect();
+        // (in_features, out_features): gate_up maps hidden -> 2 * intermediate, down maps intermediate -> hidden
+        assert_eq!(
+            shapes,
+            vec![("gate_up_proj", (3, 10)), ("down_proj", (5, 3))]
+        );
     }
 }

@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::amoe::AnyMoeLoraTarget;
 use crate::layers::masker::CausalMaskConfig;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::Module;
@@ -12,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    amoe::{AnyMoeBaseModelMixin, MlpLayer},
+    amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{

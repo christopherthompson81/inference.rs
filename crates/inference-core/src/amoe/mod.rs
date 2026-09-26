@@ -120,6 +120,9 @@ pub trait AnyMoeBaseModelMixin {
         if layers.is_empty() {
             layers = (0..self.get_mlps().len()).collect();
         }
+        // a repeated layer id would wrap an MoE layer in another one
+        layers.sort_unstable();
+        layers.dedup();
         let mut experts: Vec<Vec<Box<dyn MlpLayer>>> = layers.iter().map(|_| Vec::new()).collect();
         {
             let mlps = self.get_mlps();

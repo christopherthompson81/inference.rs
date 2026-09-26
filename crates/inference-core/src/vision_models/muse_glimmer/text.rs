@@ -1,6 +1,5 @@
 use std::{collections::HashMap, sync::Arc};
 
-use crate::amoe::AnyMoeLoraTarget;
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use inference_quant::{
     softcap, ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
@@ -8,7 +7,7 @@ use inference_quant::{
 
 use super::config::{TextAttentionType, TextConfig};
 use crate::{
-    amoe::{AnyMoeBaseModelMixin, MlpLayer},
+    amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
     attention::{flash_backend_supports, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{

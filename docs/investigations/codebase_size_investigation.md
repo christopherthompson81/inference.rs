@@ -287,16 +287,18 @@ Each model supplies two hooks:
 - `amoe_fine_tuned_expert()`: its original expert constructor (`Mlp::replicate`, `MLP::new(&Config{..})`, or
   phi3's `Mlp::new`).
 
-Survey: 27 impls. Of those, 17 are dense builders, 7 are multimodal wrappers that forward to their text model, and
+Survey: 26 impls. Of those, 17 are dense builders, 7 are multimodal wrappers that forward to their text model, and
 2 are stubs that bail. The dense builders differ only in field names, the expert constructor and the LoRA target
 table. Converted: gemma, gemma2, glm4, hunyuan_v1_dense, llama, mistral, qwen2, qwen3, smollm3, phi2, starcoder2,
 phi3, gemma3 text, muse_glimmer text and phi3 vision. Left bespoke: granite (custom `GraniteMlp` and `get_mlp`), and
 llava's copied LLMs, which will be deleted when llava reuses the base models.
 
 Two upstream bugs are fixed:
-- **Explicit layer lists got no experts.** `experts` had one row per selected layer, but the loop tested
-  `layers.contains(&row_index)`. With `layers = [5, 6]`, no row matched, and layers 5 and 6 became MoE layers holding
-  only the base MLP. `layers = []` ("all") was unaffected. muse_glimmer's copy already had the fix (`zip(&layers)`),
+- **Explicit layer lists got the wrong experts, or none.** `experts` had one row per selected layer, but the loop
+  tested `layers.contains(&row_index)`, and the final zip paired rows with layer ids.
+  - With `layers = [5, 6]`, no row matched, and layers 5 and 6 became MoE layers holding only the base MLP.
+  - With `[1, 2]`, row 1 built layer 1's experts and the zip gave them to layer 2.
+  - `layers = []` ("all") was unaffected. muse_glimmer's copy already had the fix (`zip(&layers)`),
   and the shared default uses it.
 - **phi3's `down_proj` LoRA shape.** phi3 (text and vision) loaded it as `(hidden, intermediate)`. PEFT builds
   `lora_A = nn.Linear(in_features, r)` (see huggingface/peft `tuners/lora/layer.py`), and `down_proj`'s input is the
@@ -309,4 +311,7 @@ Tests: AnyMoE had none. Two unit tests with a fake model are added:
   becomes MoE;
 - LoRA targets are filtered by name, delivered in target order, and shaped as B*A.
 
-Result: green, with 2133 CPU and 2451 CUDA tests (+2 each). Net about -1000 lines.
+Review follow-ups: repeated layer ids are deduplicated (`[0, 0]` would have nested an MoE layer inside another). phi3's
+target table is a module constant with a test that pins its PEFT shapes, and phi3-vision reuses it.
+
+Result: green, with 2133 CPU and 2451 CUDA tests (+2 each). Net about -830 lines.

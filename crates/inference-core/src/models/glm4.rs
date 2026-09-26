@@ -1,9 +1,8 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::amoe::AnyMoeLoraTarget;
 use crate::layers::masker::CausalMaskConfig;
 use crate::{
-    amoe::{AnyMoeBaseModelMixin, MlpLayer},
+    amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
