@@ -9,7 +9,7 @@ const CUDA_NVCC_FLAGS: Option<&'static str> = option_env!("CUDA_NVCC_FLAGS");
 const FA3_CUTLASS_COMMIT: &str = "62750a2b75c802660e4894434dc55e839f322277";
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 const FA3_SOURCES: [&str; 4] = [
-    "src/cuda/fa3/fa3_decode_api.cu",
+    "kernels/cuda/fa3/fa3_decode_api.cu",
     "third_party/flash-attention/hopper/instantiations/flash_fwd_hdim256_e4m3_paged_split_sm90.cu",
     "third_party/flash-attention/hopper/flash_fwd_combine.cu",
     "third_party/flash-attention/hopper/flash_prepare_scheduler.cu",
@@ -106,13 +106,13 @@ fn main() -> Result<()> {
 
     let header_hash_arg = format!(
         "-DINFERENCE_RS_CUDA_HEADER_HASH={:016x}",
-        cuda_header_hash("src/cuda", &["src/cuda/fa3"])?
+        cuda_header_hash("kernels/cuda", &["kernels/cuda/fa3"])?
     );
 
     let mut builder = cudaforge::KernelBuilder::new()
-        .source_glob("src/cuda/*.cu")
-        .source_glob("src/cuda/flashinfer_decode/*.cu")
-        .watch(["src/cuda"])
+        .source_glob("kernels/cuda/*.cu")
+        .source_glob("kernels/cuda/flashinfer_decode/*.cu")
+        .watch(["kernels/cuda"])
         .out_dir(&kernel_build_dir)
         .arg("-std=c++17")
         .arg("-O3")
@@ -160,7 +160,7 @@ fn main() -> Result<()> {
     if using_fa3_fp8_paged {
         let fa3_header_hash = cuda_header_hash("third_party/flash-attention", &[])?
             .wrapping_mul(0x100000001b3)
-            ^ cuda_header_hash("src/cuda/fa3", &[])?;
+            ^ cuda_header_hash("kernels/cuda/fa3", &[])?;
         let fa3_header_hash_arg = format!("-DINFERENCE_RS_FA3_HEADER_HASH={fa3_header_hash:016x}");
         let fa3_build_dir = cuda_build_dir(&out_dir, "fa3");
         let mut fa3_builder = cudaforge::KernelBuilder::new()
@@ -168,9 +168,9 @@ fn main() -> Result<()> {
             .out_dir(&fa3_build_dir)
             .compute_cap_arch("90a")
             .with_cutlass(Some(FA3_CUTLASS_COMMIT))
-            .include_path("src/cuda/fa3")
+            .include_path("kernels/cuda/fa3")
             .include_path("third_party/flash-attention/hopper")
-            .watch(["src/cuda/fa3", "third_party/flash-attention"])
+            .watch(["kernels/cuda/fa3", "third_party/flash-attention"])
             .arg("-std=c++17")
             .arg("-O3")
             .arg("--expt-relaxed-constexpr")

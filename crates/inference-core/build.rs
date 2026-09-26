@@ -90,7 +90,6 @@ fn main() {
             println!("cargo:rustc-cfg=has_gdn_fp8_producer");
         }
         println!("cargo:rerun-if-changed=build.rs");
-        println!("cargo:rerun-if-changed=src/cuda");
         println!("cargo:rerun-if-env-changed=CUDA_NVCC_FLAGS");
         println!("cargo:rerun-if-env-changed=NVCC");
         println!("cargo:rerun-if-env-changed=CUDA_HOME");
@@ -99,14 +98,14 @@ fn main() {
         let build_dir = cuda_build_dir(&out_dir, "kernels");
         let header_hash_arg = format!(
             "-DINFERENCE_RS_CORE_CUDA_HEADER_HASH=0x{:016x}",
-            cuda_header_hash(std::path::Path::new("src/cuda"))
+            cuda_header_hash(std::path::Path::new("kernels/cuda"))
                 .expect("failed to hash CUDA headers")
         );
 
         let mut builder = cudaforge::KernelBuilder::new()
-            .source_glob("src/cuda/*.cu")
-            .source_glob("src/cuda/gdn_chunked/*.cu")
-            .watch(["src/cuda"])
+            .source_glob("kernels/cuda/*.cu")
+            .source_glob("kernels/cuda/gdn_chunked/*.cu")
+            .watch(["kernels/cuda"])
             .out_dir(&build_dir)
             .arg("-std=c++17")
             .arg("-O3")

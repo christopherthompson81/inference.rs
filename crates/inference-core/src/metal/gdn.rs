@@ -33,7 +33,7 @@ type Pipelines = HashMap<String, ComputePipeline>;
 static GDN_PIPELINES: OnceLock<RwLock<Pipelines>> = OnceLock::new();
 
 #[cfg(feature = "metal")]
-const GDN_METAL_SOURCE: &str = include_str!("kernels/gdn.metal");
+const GDN_METAL_SOURCE: &str = include_str!("../../kernels/metal/gdn.metal");
 
 #[cfg(feature = "metal")]
 fn load_gdn_library(device: &MetalRawDevice) -> Result<Library> {

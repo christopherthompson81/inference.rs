@@ -1,6 +1,6 @@
 // Portions of this file are adapted from Apple's MLX framework
 // (https://github.com/ml-explore/mlx)
-// Licensed under the Apache License 2.0
+// Licensed under the MIT License
 // Copyright © 2023 Apple Inc.
 
 #include <metal_common>

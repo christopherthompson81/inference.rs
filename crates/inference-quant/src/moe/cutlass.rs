@@ -1,4 +1,4 @@
-//! CUTLASS 2.x grouped-GEMM MoE fallback (kernels in `kernels/cutlass_moe/*.cu`).
+//! CUTLASS 2.x grouped-GEMM MoE fallback (kernels in `kernels/cuda/cutlass_moe/*.cu`).
 //! Universal bf16 path for sm_80+: expert-sorted grouped GEMMs with device-resident problem
 //! sizes, so the forward never syncs to host.
 

@@ -49,5 +49,5 @@ jobs:
       - run: cargo check -p inference-quant -p inference-paged-attn --features metal
       # core compiles these from source at runtime; match its MTLCompileOptions (gdn: Metal 3.1, both: fast math)
       - run: |
-          xcrun -sdk macosx metal -std=metal3.1 -ffast-math -c crates/inference-core/src/metal/kernels/gdn.metal -o "$RUNNER_TEMP/gdn.air"
-          xcrun -sdk macosx metal -ffast-math -c crates/inference-core/src/metal/kernels/ssm.metal -o "$RUNNER_TEMP/ssm.air"
+          xcrun -sdk macosx metal -std=metal3.1 -ffast-math -c crates/inference-core/kernels/metal/gdn.metal -o "$RUNNER_TEMP/gdn.air"
+          xcrun -sdk macosx metal -ffast-math -c crates/inference-core/kernels/metal/ssm.metal -o "$RUNNER_TEMP/ssm.air"

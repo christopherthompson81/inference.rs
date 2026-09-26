@@ -1,4 +1,4 @@
-//! Plain-CUDA MoE ops (kernels in `kernels/moe/*.cu`): token alignment, fused GeLU-tanh + multiply, and cross-expert sum.
+//! Plain-CUDA MoE ops (kernels in `kernels/cuda/moe/*.cu`): token alignment, fused GeLU-tanh + multiply, and cross-expert sum.
 
 use candle_core::cuda::cudarc::driver::CudaSlice;
 use candle_core::{CudaDevice, DType, Result, Storage, Tensor};

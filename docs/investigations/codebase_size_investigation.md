@@ -151,3 +151,57 @@ showed two things:
 - The long TUs are FA2 `flash_fwd_*_hdim{192,256,512}` / `splitkv` and the FlashInfer FP8 decode TUs, 4-5 min of
   cicc each. Next: time every TU from a cold build and split the worst, as was done for gdn.cu and
   flashinfer_decode.cu.
+
+## Run 5 - 2026-09-25 23:00
+
+Change: kernel layout and provenance, as renames only.
+
+- Every kernel source moves to `<crate>/kernels/{cuda,metal}/`: flash-attn `kernels/`, quant `kernels/<group>` and
+  `src/metal_kernels/*.metal`, paged-attn and core `src/cuda` kernel files and `src/metal/kernels/*.metal`. That is
+  276 renames, all 100% similar. The Rust bindings stay in `src/`.
+- Build globs, watches, header hashes, FA3 include paths, the Metal `source_dir`s, core's two Metal `include_str!`
+  and the Metal CI `xcrun` paths are updated.
+- The quant and flash-attn watches narrow to `kernels/cuda`, which keeps Metal edits out of the CUDA build now that
+  quant's shaders sit under `kernels/`.
+
+Provenance: a survey of copyright headers, attribution comments, identifiers and first-add commits traced every
+kernel directory to an upstream. The sources are FA2 via candle, FA3 via vLLM's fork, vLLM (paged attention, cache,
+fp8, MoE, marlin, rotary), FlashInfer, exllamav2, IST-DASLab marlin, llama.cpp (mmq/mmvq/ssm, Metal flash-attn),
+MLX Metal, HQQ, bitsandbytes, candle, attention.rs and DeepGEMM. The rest is original.
+
+Deviation from the Run 3 plan: code that is adapted and maintained in-tree stays in `kernels/`, and only pristine
+drops live wholly in `third_party/`. This follows core's existing convention of `third_party/<upstream>/` holding
+the attribution for adapted in-tree files. Moving adapted code into `third_party/` would signal "do not edit", yet
+this fork edits it (mmq templating, the FlashInfer decode split). Each kernel crate gets a `third_party/README.md`
+index: upstream, in-tree paths, revision where recorded, license, and status. Guesses are marked unconfirmed:
+vLLM MLA cache kernels, paged-attn Metal cache ports, exllamav2 `qdq_3.cuh`, the attention.rs license, and the
+FlashInfer revision.
+
+Gaps: most adapted code has no pinned upstream revision, and the MIT/BSD components have no verbatim license text in
+the tree, only per-file headers.
+
+## Run 6 - 2026-09-25 23:45
+
+Question: which kernel TUs dominate a cold CUDA build? The Run 5 moves forced one.
+
+Command: `scripts/local_ci.sh --lint --tests --cuda --sweep` (2133 s, green), with a `ps` sampler every 2 s logging
+each `cicc`/`ptxas` process and its compile unit. Unit time is the sample span per PID.
+
+Finding:
+
+- The kernel phase was 31.8 min wall for 135 units and 320 unit-minutes of `cicc`. The sampler missed `ptxas`,
+  whose arguments are quoted, so the totals are lower bounds. At 16-way parallelism, 320 unit-minutes needs 20 min.
+- Sampled concurrency by 2-min bucket: 16 16 13 12 12 13 13 13 11 13 12 11 12 11 10 8, undercounted for the same
+  reason.
+- The slowest units are 5-6.4 min each: FA2 `flash_fwd_splitkv_hdim256_{fp16,bf16}` (382 s, 378 s),
+  `flash_fwd_hdim{160,224,256,128}_*` (300-367 s), gdn `{f16,f32,bf16}_bk128_vmajor` (~320 s), and the FlashInfer FP8
+  decode `*_fp8_hd{64,128,256,512}` (286-310 s).
+
+Implication: no single TU dominates, and FA2 alone is 53 units of 4-6 min. Splitting is not meant to shrink the total.
+It shortens the tail: wall time is about max(total work / threads, the chain of long units still running at the end).
+With 5-6 min units starting late, concurrency tapers (8 in the last bucket) rather than dropping to zero at once. The
+complement is longest-first scheduling. cudaforge compiles in source-glob order, so a 6-min unit can start last and
+set the finish alone. Ordering jobs by expected cost (previous time or source size) packs the tail, and splitting the
+heaviest units tightens it further. What would: fewer instantiations (head dims and dtypes nothing
+uses), cheaper templates, or checking why concurrency sits at 10-13 instead of 16 after the first ~4 min. Before
+trusting the concurrency numbers, fix the sampler's `ptxas` matching.

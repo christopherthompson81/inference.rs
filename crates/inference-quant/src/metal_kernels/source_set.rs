@@ -1,7 +1,7 @@
 inference_metal_compile::metal_source_set! {
     pub const QUANT_METAL_SOURCE_SET;
     library_name: "inference_quant",
-    source_dir: "src/metal_kernels",
+    source_dir: "kernels/metal",
     metal_sources: [
         "bitwise",
         "blockwise_fp8",

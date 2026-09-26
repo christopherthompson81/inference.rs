@@ -168,7 +168,8 @@ fn main() -> Result<(), String> {
             .map_err(|e| e.to_string())?;
         let deepgemm_generator_hash =
             cuda_headers::hash(&deepgemm_headers).map_err(|e| e.to_string())?;
-        let header_files = cuda_headers::find(Path::new("kernels")).map_err(|e| e.to_string())?;
+        let header_files =
+            cuda_headers::find(Path::new("kernels/cuda")).map_err(|e| e.to_string())?;
         for header_file in &header_files {
             println!("cargo:rerun-if-changed={}", header_file.display());
         }
@@ -181,8 +182,8 @@ fn main() -> Result<(), String> {
         );
         let kernel_build_dir = cuda_build_dir(&out_dir, "kernels");
         let mut builder = cuda_kernel_builder(&kernel_build_dir)
-            .source_glob("kernels/*/*.cu")
-            .watch(["kernels"])
+            .source_glob("kernels/cuda/*/*.cu")
+            .watch(["kernels/cuda"])
             .arg(&header_hash_arg);
 
         let compute_cap = builder.get_compute_cap().unwrap_or(80);
@@ -312,8 +313,8 @@ fn main() -> Result<(), String> {
                 .unwrap_or_else(|_| NVFP4_CUTLASS_COMMIT.to_string());
             let mut nvfp4_builder = cudaforge::KernelBuilder::new()
                 .out_dir(&nvfp4_build_dir)
-                .source_files(["kernels/nvfp4_cutlass/nvfp4_cutlass.cu"])
-                .watch(["kernels/nvfp4_cutlass"])
+                .source_files(["kernels/cuda/nvfp4_cutlass/nvfp4_cutlass.cu"])
+                .watch(["kernels/cuda/nvfp4_cutlass"])
                 .compute_cap_arch("121a")
                 .with_compute_override_arch("nvfp4_cutlass.cu", "121a")
                 .arg("-std=c++17")
