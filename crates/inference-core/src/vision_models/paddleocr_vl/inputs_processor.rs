@@ -10,14 +10,13 @@ use indexmap::IndexMap;
 use serde_json::Value;
 use tokenizers::Tokenizer;
 
+use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     device_map::DeviceMapper,
     paged_attention::block_hash::MultimodalKind,
     pipeline::{
         processing::default_process,
-        text_models_inputs_processor::{
-            self, get_completion_input, get_prompt_input, PagedAttentionMeta,
-        },
+        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
         InputProcessorOutput, InputsProcessor, InputsProcessorType, MessagesAction, Processor,
     },
     request::ReasoningEffort,

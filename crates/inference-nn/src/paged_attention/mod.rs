@@ -32,7 +32,7 @@ use candle_core::{DType, Device};
 pub use config::{
     HybridPagedKvCacheConfig, KvCacheLayout, KvCacheTopology, ModelConfigLike, ModelConfigMetadata,
 };
-pub use input_metadata::PagedAttentionInputMetadata;
+pub use input_metadata::{PagedAttentionInputMetadata, PagedAttentionMeta};
 pub use kv_cache_manager::KVCacheManager;
 pub use layers::PagedAttention;
 pub use scales::{load_fp8_attention_scales, Fp8AttentionScales};

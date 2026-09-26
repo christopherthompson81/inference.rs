@@ -2792,6 +2792,7 @@ impl Pipeline for MultimodalPipeline {
             self.cleanup_cuda_graphs();
             self.model.disable_recurrent_decode_deferred_storage()?;
         }
+        let config = crate::speculative::resolve_speculative_model(config)?;
         if let Some(info) = self
             .model
             .attach_speculative_with_runtime(config, runtime)?
@@ -2816,7 +2817,7 @@ impl Pipeline for MultimodalPipeline {
         &mut self,
         seqs: &[&mut Sequence],
         chunk: &crate::pipeline::SpeculativePromptChunk,
-        metadata: &crate::pipeline::text_models_inputs_processor::PagedAttentionMeta,
+        metadata: &crate::paged_attention::PagedAttentionMeta,
     ) -> candle_core::Result<()> {
         if !self.model.has_speculative_proposer() {
             return Ok(());
@@ -2872,7 +2873,7 @@ impl Pipeline for MultimodalPipeline {
         prefix_cacher: &mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-        metadata: Option<crate::pipeline::text_models_inputs_processor::PagedAttentionMeta>,
+        metadata: Option<crate::paged_attention::PagedAttentionMeta>,
         logger: &crate::IntervalLogger,
     ) -> candle_core::Result<bool> {
         if !self.model.has_speculative_proposer() {

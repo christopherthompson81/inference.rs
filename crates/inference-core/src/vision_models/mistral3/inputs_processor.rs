@@ -8,12 +8,11 @@ use image::{DynamicImage, GenericImageView};
 use inference_vision::{ApplyTransforms, Normalize, Rescale, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
+use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     device_map::DeviceMapper,
     pipeline::{
-        text_models_inputs_processor::{
-            self, get_completion_input, get_prompt_input, PagedAttentionMeta,
-        },
+        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
         InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
         MessagesAction, Processor,
     },

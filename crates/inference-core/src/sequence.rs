@@ -1,7 +1,8 @@
+use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     get_mut_arcmutex, get_mut_group,
     paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
-    pipeline::{text_models_inputs_processor::PagedAttentionMeta, LayerCaches},
+    pipeline::LayerCaches,
     reasoning_parsers::{ReasoningMode, ReasoningParser},
     response::{ChatCompletionChunkResponse, Choice, ChunkChoice, Response, SYSTEM_FINGERPRINT},
     sampler::{Logprobs, Sampler},

@@ -17,14 +17,13 @@ use inference_vision::{
 };
 use tokenizers::Tokenizer;
 
+use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     attention::AttentionMask,
     device_map::DeviceMapper,
     pipeline::{
         recurrent_batch_kind_for_input,
-        text_models_inputs_processor::{
-            self, get_completion_input, get_prompt_input, PagedAttentionMeta,
-        },
+        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
         InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
         MessagesAction, Processor,
     },

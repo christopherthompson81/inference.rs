@@ -1,3 +1,4 @@
+pub use crate::model::IsqModel;
 use std::{
     borrow::Cow,
     collections::{BTreeSet, HashMap, HashSet},
@@ -1254,14 +1255,6 @@ fn uqff_safetensors_metadata() -> HashMap<String, String> {
             crate::INFERENCE_RS_GIT_REVISION.to_string(),
         ),
     ])
-}
-
-pub trait IsqModel {
-    fn residual_tensors(&self) -> Vec<(String, Tensor)>;
-
-    fn residual_tensors_moe_experts_only(&self) -> Option<Vec<(String, Tensor)>> {
-        None
-    }
 }
 
 /// Trait for loading models with ISQ.

@@ -1,14 +1,8 @@
+pub(crate) use crate::paged_attention::input_metadata::PromptChunkPlan;
 use crate::{
     paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy},
     speculative::{target::clamp_speculative_prefix_cache_hit, SpeculativePrefixReplay},
 };
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct PromptChunkPlan {
-    pub(crate) start: usize,
-    pub(crate) end: usize,
-    pub(crate) attention_policy: MultimodalAttentionPolicy,
-}
 
 pub(crate) fn next_prompt_chunk_group(
     plan_indices: &[usize],

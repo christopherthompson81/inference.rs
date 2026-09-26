@@ -31,10 +31,13 @@ pub mod lora;
 pub mod matformer;
 pub mod metal;
 pub mod mla;
+pub mod model;
 pub mod moe;
 pub mod ops;
 pub mod paged_attention;
 pub mod perf_flags;
+pub mod sampler;
+pub mod speculative;
 pub mod topology;
 pub mod utils;
 

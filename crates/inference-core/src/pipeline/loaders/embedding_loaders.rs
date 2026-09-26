@@ -1,4 +1,4 @@
-use crate::attention::FlashParams;
+pub use crate::model::EmbeddingModel;
 use std::{
     fmt::{self, Debug, Display},
     path::PathBuf,
@@ -17,14 +17,13 @@ use crate::{
 };
 
 use crate::{
-    amoe::AnyMoeBaseModelMixin,
     device_map::DeviceMapper,
     paged_attention::{AttentionImplementation, ModelConfigLike, ModelConfigMetadata},
-    pipeline::{isq::IsqModelLoader, IsqModel},
+    pipeline::isq::IsqModelLoader,
     utils::varbuilder_utils::DeviceForLoadTensor,
 };
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
+use candle_core::DType;
 use inference_quant::log::once_log_debug;
 
 use inference_quant::ShardedVarBuilder;
@@ -35,16 +34,6 @@ use regex::Regex;
 use serde::{de::Visitor, Deserialize, Deserializer, Serialize};
 
 use super::{AutoDeviceMapParams, DeviceMappedModelLoader};
-
-pub trait EmbeddingModel: IsqModel + AnyMoeBaseModelMixin {
-    #[allow(clippy::too_many_arguments)]
-    fn forward(
-        &self,
-        input_ids: &Tensor,
-        flash_params: &FlashParams,
-    ) -> candle_core::Result<Tensor>;
-    fn device(&self) -> &Device;
-}
 
 pub trait EmbeddingModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoader {
     fn load(

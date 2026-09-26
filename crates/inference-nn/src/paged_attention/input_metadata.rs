@@ -16,7 +16,7 @@ use crate::{
     paged_attention::{
         block_hash::MultimodalAttentionPolicy,
         block_table_rows::{BlockTableRanges, BlockTableRows, BlockTableSnapshot},
-        _PAD_SLOT_ID,
+        AttentionBackendKind, KVCacheManager, _PAD_SLOT_ID,
     },
 };
 
@@ -1095,4 +1095,37 @@ impl DecodePagedRows {
             decode_rows: Some(self.clone()),
         })
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PromptChunkPlan {
+    pub start: usize,
+    pub end: usize,
+    pub attention_policy: MultimodalAttentionPolicy,
+}
+
+#[derive(Clone)]
+pub struct PagedAttentionMeta {
+    pub sliding_window: Option<usize>,
+    pub block_size: usize,
+    pub max_paged_context_len: usize,
+    pub attention_backend: AttentionBackendKind,
+    pub has_flashinfer_decode_layers: bool,
+    pub prefill_attention_heads: usize,
+    pub prefill_key_value_heads: usize,
+    pub prefill_head_dim: usize,
+    pub kv_cache_manager: Arc<tokio::sync::Mutex<KVCacheManager>>,
+    pub prompt_chunk_size: Option<usize>,
+    pub scheduled_prompt_chunks: Option<Vec<PromptChunkPlan>>,
+    pub prompt_chunk_attention_policy: MultimodalAttentionPolicy,
+    pub has_noncausal_mm_context: bool,
+    pub prefix_gather_workspace_limit: Option<usize>,
+    pub mm_prefix_ranges_by_seq_id: HashMap<usize, Vec<(usize, usize)>>,
+    pub full_mm_prefix_ranges_by_seq_id: HashMap<usize, Vec<(usize, usize)>>,
+    pub enable_packed_prefill: bool,
+    /// False only for non-final chunks of a chunked prompt; block-diffusion models skip
+    /// canvas generation until the prompt is fully encoded.
+    pub is_final_prompt_chunk: bool,
+    /// False when the pipeline discards this forward's logits, so models skip the lm_head.
+    pub needs_logits: bool,
 }

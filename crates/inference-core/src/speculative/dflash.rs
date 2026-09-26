@@ -2056,7 +2056,7 @@ fn linear_from_weight(
 
 /// Reads only the drafter's config when it identifies a DFlash checkpoint.
 pub fn peek_config(config: &MtpConfig) -> Result<Option<DFlashConfig>> {
-    let path = config.resolve_path()?;
+    let path = crate::speculative::config::resolve_mtp_path(config)?;
     let raw = fs::read_to_string(path.join("config.json"))
         .map_err(|e| candle_core::Error::Msg(format!("failed to read MTP model config: {e}")))?;
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
@@ -2095,7 +2095,7 @@ pub(crate) fn windowed_kv_cache_size_in_bytes(
     retained_prefixes: usize,
     page_size: usize,
 ) -> Result<usize> {
-    let path = config.resolve_path()?;
+    let path = crate::speculative::config::resolve_mtp_path(config)?;
     let raw = fs::read_to_string(path.join("config.json"))
         .map_err(|err| candle_core::Error::msg(format!("failed to read MTP config: {err}")))?;
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
@@ -2184,7 +2184,7 @@ impl DFlashDraftModel {
             device,
             dtype,
         } = target;
-        let path = config.resolve_path()?;
+        let path = crate::speculative::config::resolve_mtp_path(config)?;
         let raw = fs::read_to_string(path.join("config.json"))
             .map_err(|e| candle_core::Error::Msg(format!("failed to read DFlash config: {e}")))?;
         let cfg: DFlashConfig = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;

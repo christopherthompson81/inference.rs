@@ -269,7 +269,7 @@ impl DrySamplingParamsInner {
 /// # Example
 /// ```rust
 /// use std::{sync::Arc, ops::Mul};
-/// use inference_core::CustomLogitsProcessor;
+/// use inference_nn::sampler::CustomLogitsProcessor;
 /// use candle_core::{Result, Tensor};
 ///
 /// struct ThresholdLogitsProcessor;
@@ -317,34 +317,34 @@ pub struct Sampler {
 
 #[cfg(feature = "cuda")]
 #[derive(Clone, Copy, Debug)]
-pub(crate) enum CudaBatchSamplingKind {
+pub enum CudaBatchSamplingKind {
     Greedy,
     TopK { k: usize },
     Categorical,
 }
 
 #[cfg(feature = "cuda")]
-pub(crate) struct CudaTop1BatchCompletion {
-    pub(crate) token_ids: Vec<u32>,
-    pub(crate) packed: Option<Vec<[f32; crate::ops::CUDA_TOP1_PACKED_WIDTH]>>,
+pub struct CudaTop1BatchCompletion {
+    pub token_ids: Vec<u32>,
+    pub packed: Option<Vec<[f32; crate::ops::CUDA_TOP1_PACKED_WIDTH]>>,
 }
 
 #[cfg(feature = "cuda")]
-pub(crate) struct CudaTop1BatchSubmission {
+pub struct CudaTop1BatchSubmission {
     cache: Arc<Mutex<Option<crate::ops::CudaTop1LogitsWorkspace>>>,
     submission: Option<crate::ops::CudaTop1Submission>,
 }
 
 #[cfg(feature = "cuda")]
 impl CudaTop1BatchSubmission {
-    pub(crate) fn batch_size(&self) -> usize {
+    pub fn batch_size(&self) -> usize {
         self.submission
             .as_ref()
             .expect("CUDA top-1 submission was already completed")
             .batch_size()
     }
 
-    pub(crate) fn wait_on(
+    pub fn wait_on(
         &self,
         stream: &Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
     ) -> Result<()> {
@@ -360,7 +360,7 @@ impl CudaTop1BatchSubmission {
         )
     }
 
-    pub(crate) fn release_after(
+    pub fn release_after(
         &self,
         stream: &Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
     ) -> Result<()> {
@@ -376,7 +376,7 @@ impl CudaTop1BatchSubmission {
         )
     }
 
-    pub(crate) fn complete(mut self) -> Result<CudaTop1BatchCompletion> {
+    pub fn complete(mut self) -> Result<CudaTop1BatchCompletion> {
         let submission = self
             .submission
             .as_ref()
@@ -427,21 +427,21 @@ impl Drop for CudaTop1BatchSubmission {
 }
 
 #[cfg(feature = "cuda")]
-pub(crate) struct CudaTopKBatchSubmission {
+pub struct CudaTopKBatchSubmission {
     cache: Arc<Mutex<Option<crate::ops::CudaTopKSamplingWorkspace>>>,
     submission: Option<crate::ops::CudaTopKSamplingSubmission>,
 }
 
 #[cfg(feature = "cuda")]
 impl CudaTopKBatchSubmission {
-    pub(crate) fn batch_size(&self) -> usize {
+    pub fn batch_size(&self) -> usize {
         self.submission
             .as_ref()
             .expect("CUDA top-k submission was already completed")
             .batch_size()
     }
 
-    pub(crate) fn wait_on(
+    pub fn wait_on(
         &self,
         stream: &Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
     ) -> Result<()> {
@@ -457,7 +457,7 @@ impl CudaTopKBatchSubmission {
         )
     }
 
-    pub(crate) fn release_after(
+    pub fn release_after(
         &self,
         stream: &Arc<candle_core::cuda_backend::cudarc::driver::CudaStream>,
     ) -> Result<()> {
@@ -473,7 +473,7 @@ impl CudaTopKBatchSubmission {
         )
     }
 
-    pub(crate) fn complete(mut self) -> Result<Vec<u32>> {
+    pub fn complete(mut self) -> Result<Vec<u32>> {
         let submission = self
             .submission
             .as_ref()
@@ -514,27 +514,27 @@ impl Drop for CudaTopKBatchSubmission {
 
 #[cfg(feature = "cuda")]
 impl CudaBatchSamplingKind {
-    pub(crate) fn is_argmax(self) -> bool {
+    pub fn is_argmax(self) -> bool {
         matches!(self, Self::Greedy | Self::TopK { k: 1 })
     }
 }
 
 #[cfg(feature = "cuda")]
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct CudaBatchSamplingPlan {
-    pub(crate) kind: CudaBatchSamplingKind,
-    pub(crate) inverse_temperature: f32,
-    pub(crate) top_p: f32,
-    pub(crate) min_p: f32,
+pub struct CudaBatchSamplingPlan {
+    pub kind: CudaBatchSamplingKind,
+    pub inverse_temperature: f32,
+    pub top_p: f32,
+    pub min_p: f32,
 }
 
 #[cfg(feature = "cuda")]
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct CudaSpeculativeSamplingPlan {
-    pub(crate) inverse_temperature: f32,
-    pub(crate) top_k: usize,
-    pub(crate) top_p: f32,
-    pub(crate) min_p: f32,
+pub struct CudaSpeculativeSamplingPlan {
+    pub inverse_temperature: f32,
+    pub top_k: usize,
+    pub top_p: f32,
+    pub min_p: f32,
 }
 
 #[cfg_attr(feature = "pyo3_macros", pyclass)]
@@ -555,7 +555,7 @@ pub struct Logprobs {
     pub top_logprobs: Option<Vec<TopLogprob>>,
 }
 
-pub(crate) struct SpeculativeProbs {
+pub struct SpeculativeProbs {
     pub sampling: Vec<f32>,
     pub reporting: Vec<f32>,
 }
@@ -741,15 +741,12 @@ impl Sampler {
         self.temperature.is_none()
     }
 
-    pub(crate) fn temperature(&self) -> Option<f64> {
+    pub fn temperature(&self) -> Option<f64> {
         self.temperature
     }
 
     #[cfg(feature = "cuda")]
-    pub(crate) fn cuda_batch_sampling_plan(
-        &self,
-        return_logprobs: bool,
-    ) -> Option<CudaBatchSamplingPlan> {
+    pub fn cuda_batch_sampling_plan(&self, return_logprobs: bool) -> Option<CudaBatchSamplingPlan> {
         let has_penalties = self.frequency_penalty.unwrap_or(0.0) != 0.0
             || self.presence_penalty.unwrap_or(0.0) != 0.0
             || self.repetition_penalty.unwrap_or(1.0) != 1.0;
@@ -803,7 +800,7 @@ impl Sampler {
     }
 
     #[cfg(feature = "cuda")]
-    pub(crate) fn cuda_speculative_sampling_plan(
+    pub fn cuda_speculative_sampling_plan(
         &self,
         return_logprobs: bool,
     ) -> Option<CudaSpeculativeSamplingPlan> {
@@ -827,7 +824,7 @@ impl Sampler {
     }
 
     #[cfg(feature = "cuda")]
-    pub(crate) fn cuda_resident_sampling_plan(
+    pub fn cuda_resident_sampling_plan(
         &self,
         return_logprobs: bool,
     ) -> Option<CudaBatchSamplingPlan> {
@@ -842,7 +839,7 @@ impl Sampler {
     }
 
     #[cfg(feature = "cuda")]
-    pub(crate) fn draw_cuda_resident_uniform(rng: &mut Isaac64Rng) -> f32 {
+    pub fn draw_cuda_resident_uniform(rng: &mut Isaac64Rng) -> f32 {
         use rand::distr::Uniform;
 
         Uniform::new(0.0f32, 1.0f32)
@@ -851,7 +848,7 @@ impl Sampler {
     }
 
     #[cfg(feature = "cuda")]
-    pub(crate) fn sample_cuda_topk_packed_row(
+    pub fn sample_cuda_topk_packed_row(
         &self,
         packed: &[f32],
         packed_k: usize,
@@ -896,7 +893,7 @@ impl Sampler {
     }
 
     #[cfg(feature = "cuda")]
-    pub(crate) fn sample_cuda_ranked_topk_packed_row(
+    pub fn sample_cuda_ranked_topk_packed_row(
         &self,
         packed: &[f32],
         packed_k: usize,
@@ -996,7 +993,7 @@ impl Sampler {
     }
 
     #[cfg(feature = "cuda")]
-    pub(crate) fn sample_cuda_categorical_row(&self, packed: &[f32]) -> Result<Logprobs> {
+    pub fn sample_cuda_categorical_row(&self, packed: &[f32]) -> Result<Logprobs> {
         if packed.len() != crate::ops::CUDA_CATEGORICAL_PACKED_WIDTH {
             candle_core::bail!(
                 "invalid batched CUDA categorical row length {}, expected {}",
@@ -1019,7 +1016,7 @@ impl Sampler {
     }
 
     #[cfg(feature = "cuda")]
-    pub(crate) fn sample_cuda_top1_row(&self, packed: &[f32]) -> Result<Logprobs> {
+    pub fn sample_cuda_top1_row(&self, packed: &[f32]) -> Result<Logprobs> {
         if packed.len() != crate::ops::CUDA_TOP1_PACKED_WIDTH {
             candle_core::bail!(
                 "invalid batched CUDA top-1 row length {}, expected {}",
@@ -1036,7 +1033,7 @@ impl Sampler {
     }
 
     #[cfg(feature = "cuda")]
-    pub(crate) fn sample_cuda_top1_batch(&self, logits: &Tensor) -> Result<Vec<[f32; 2]>> {
+    pub fn sample_cuda_top1_batch(&self, logits: &Tensor) -> Result<Vec<[f32; 2]>> {
         self.submit_cuda_top1_batch(logits, true)?
             .complete()?
             .packed
@@ -1064,15 +1061,12 @@ impl Sampler {
     }
 
     #[cfg(feature = "cuda")]
-    pub(crate) fn submit_cuda_top1_batch_owned(
-        &self,
-        logits: &Tensor,
-    ) -> Result<CudaTop1BatchSubmission> {
+    pub fn submit_cuda_top1_batch_owned(&self, logits: &Tensor) -> Result<CudaTop1BatchSubmission> {
         self.submit_cuda_top1_batch(logits, false)
     }
 
     #[cfg(feature = "cuda")]
-    pub(crate) fn submit_cuda_top1_batch_into(
+    pub fn submit_cuda_top1_batch_into(
         &self,
         logits: &Tensor,
         token_ids_dst: &Tensor,
@@ -1088,7 +1082,7 @@ impl Sampler {
     }
 
     #[cfg(feature = "cuda")]
-    pub(crate) fn submit_cuda_topk_batch_owned(
+    pub fn submit_cuda_topk_batch_owned(
         &self,
         logits: &Tensor,
         params: &[crate::ops::CudaTopKSamplingParams],
@@ -1104,7 +1098,7 @@ impl Sampler {
     }
 
     #[cfg(feature = "cuda")]
-    pub(crate) fn submit_cuda_topk_batch_into(
+    pub fn submit_cuda_topk_batch_into(
         &self,
         logits: &Tensor,
         token_ids_dst: &Tensor,
@@ -1791,7 +1785,7 @@ impl Sampler {
         Ok(())
     }
 
-    pub(crate) fn speculative_target_probs(
+    pub fn speculative_target_probs(
         &self,
         logits: Tensor,
         context: &[u32],
@@ -1800,7 +1794,7 @@ impl Sampler {
         self.speculative_probs(logits, context, prompt_len)
     }
 
-    pub(crate) fn speculative_candidate_probs(
+    pub fn speculative_candidate_probs(
         &self,
         logits: Tensor,
         context: &[u32],
@@ -1850,7 +1844,7 @@ impl Sampler {
         })
     }
 
-    pub(crate) fn logprobs_from_probs(
+    pub fn logprobs_from_probs(
         &self,
         token: u32,
         probs: &[f32],
@@ -1884,7 +1878,7 @@ impl Sampler {
         })
     }
 
-    pub(crate) fn sample_from_probs(
+    pub fn sample_from_probs(
         &self,
         sampling_probs: &[f32],
         reporting_probs: &[f32],

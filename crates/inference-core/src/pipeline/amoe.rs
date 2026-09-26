@@ -374,7 +374,7 @@ impl Pipeline for AnyMoePipeline {
         &mut self,
         seqs: &[&mut Sequence],
         chunk: &crate::pipeline::SpeculativePromptChunk,
-        metadata: &crate::pipeline::text_models_inputs_processor::PagedAttentionMeta,
+        metadata: &crate::paged_attention::PagedAttentionMeta,
     ) -> Result<(), candle_core::Error> {
         get_mut_arcmutex!(self.target).speculative_prompt_chunk(seqs, chunk, metadata)
     }
@@ -387,7 +387,7 @@ impl Pipeline for AnyMoePipeline {
         prefix_cacher: &mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-        metadata: Option<crate::pipeline::text_models_inputs_processor::PagedAttentionMeta>,
+        metadata: Option<crate::paged_attention::PagedAttentionMeta>,
         logger: &crate::IntervalLogger,
     ) -> Result<bool, candle_core::Error> {
         get_mut_arcmutex!(self.target)

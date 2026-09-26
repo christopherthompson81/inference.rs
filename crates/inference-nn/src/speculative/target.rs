@@ -60,7 +60,7 @@ impl SpeculativePrefixCheckpointPolicy {
     }
 }
 
-pub(crate) fn clamp_speculative_prefix_cache_hit(
+pub fn clamp_speculative_prefix_cache_hit(
     cached_tokens: usize,
     block_size: usize,
     replay: SpeculativePrefixReplay,

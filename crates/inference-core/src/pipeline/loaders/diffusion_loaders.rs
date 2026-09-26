@@ -1,3 +1,4 @@
+pub use crate::model::DiffusionModel;
 use std::{
     fmt::Debug,
     path::{Path, PathBuf},
@@ -5,7 +6,6 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use candle_core::{Device, Tensor};
 
 use hf_hub::api::sync::ApiRepo;
 use inference_quant::ShardedVarBuilder;
@@ -18,27 +18,13 @@ use serde::Deserialize;
 use super::{ModelPaths, NormalLoadingMetadata};
 use crate::{
     api_dir_list, api_get_file,
-    diffusion_models::{
-        flux::{
-            self,
-            stepper::{FluxStepper, FluxStepperConfig},
-        },
-        DiffusionGenerationParams,
+    diffusion_models::flux::{
+        self,
+        stepper::{FluxStepper, FluxStepperConfig},
     },
     paged_attention::AttentionImplementation,
     pipeline::{paths::AdapterPaths, EmbeddingModulePaths},
 };
-
-pub trait DiffusionModel {
-    /// This returns a tensor of shape (bs, c, h, w), with values in [0, 255].
-    fn forward(
-        &mut self,
-        prompts: Vec<String>,
-        params: DiffusionGenerationParams,
-    ) -> candle_core::Result<Tensor>;
-    fn device(&self) -> &Device;
-    fn max_seq_len(&self) -> usize;
-}
 
 pub trait DiffusionModelLoader: Send + Sync {
     /// If the model is being loaded with `load_model_from_hf` (so manual paths not provided), this will be called.

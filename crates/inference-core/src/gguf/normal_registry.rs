@@ -1,3 +1,4 @@
+pub(crate) use crate::model::RopePairing;
 use crate::NormalLoaderType;
 use std::{error::Error, fmt, str::FromStr};
 
@@ -109,12 +110,6 @@ impl FromStr for CanonicalGgufArchitecture {
             )),
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RopePairing {
-    Adjacent,
-    HalfSplit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

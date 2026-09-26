@@ -1,4 +1,4 @@
-use crate::attention::FlashParams;
+pub use crate::model::{NormalLoadingMetadata, NormalModel};
 use std::{
     borrow::Cow,
     collections::HashMap,
@@ -9,21 +9,17 @@ use std::{
 
 use crate::{attention::ATTENTION_CHUNK_SIZE, matformer::MatformerSliceConfig};
 
-use crate::speculative::SpeculativeTargetMixin;
 use crate::{
-    amoe::AnyMoeBaseModelMixin,
     device_map::DeviceMapper,
     lora::{LoraConfig, Ordering},
     paged_attention::{AttentionImplementation, ModelConfigLike, ModelConfigMetadata},
-    pipeline::{isq::IsqModelLoader, EitherCache, IsqModel, ModelForwardContext},
+    pipeline::isq::IsqModelLoader,
     utils::varbuilder_utils::DeviceForLoadTensor,
-    xlora_models::NonGranularState,
 };
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor};
+use candle_core::DType;
 use inference_quant::log::once_log_debug;
 
-use indicatif::MultiProgress;
 use inference_quant::ShardedVarBuilder;
 #[cfg(feature = "pyo3_macros")]
 use pyo3::pyclass;
@@ -44,59 +40,6 @@ use super::{
 };
 
 use crate::gguf::normal_registry::RopePairing;
-
-pub trait NormalModel: IsqModel + AnyMoeBaseModelMixin + SpeculativeTargetMixin {
-    fn forward(
-        &self,
-        input_ids: &Tensor,
-        ctx: &mut ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor>;
-    #[allow(clippy::too_many_arguments)]
-    fn xlora_forward(
-        &self,
-        input_ids: &Tensor,
-        input_ids_full: &Tensor,
-        seqlen_offsets: &[usize],
-        seqlen_offsets_full: &[usize],
-        no_kv_cache: bool,
-        non_granular_state: &Option<NonGranularState>,
-        context_lens: Vec<(usize, usize)>,
-        position_ids: Vec<usize>,
-        flash_params: &FlashParams,
-        flash_params_full: &FlashParams,
-    ) -> candle_core::Result<Tensor>;
-    fn is_xlora(&self) -> bool;
-    fn device(&self) -> &Device;
-    fn cache(&self) -> &EitherCache;
-    fn max_seq_len(&self) -> usize;
-    fn config(&self) -> &ModelConfigMetadata;
-    /// True only when the full forward handles packed prompts and never treats physical rows as logical requests.
-    fn supports_packed_prefill(&self) -> bool {
-        false
-    }
-    #[cfg(feature = "cuda")]
-    fn supports_cuda_decode_graphs(&self) -> bool {
-        false
-    }
-    fn model_config(&self) -> Arc<dyn ModelConfigLike + Send + Sync> {
-        Arc::new(self.config().clone())
-    }
-}
-
-/// Metadata for loading a model with ISQ or device mapping.
-pub struct NormalLoadingMetadata {
-    // Device mapping metadata which can be used to construct a concrete device mapper
-    pub mapper: Box<dyn DeviceMapper + Send + Sync>,
-    // Flag to check if loading in ISQ
-    pub loading_isq: bool,
-    // Device mapping target device (the one that is not the cpu)
-    pub real_device: Device,
-    // MultiProgress support for parallelized loading
-    pub multi_progress: Arc<MultiProgress>,
-    // Optional Matryoshka Transformer slicing configuration
-    pub matformer_slicing_config: Option<MatformerSliceConfig>,
-    pub(crate) rope_pairing: Option<RopePairing>,
-}
 
 pub trait NormalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoader {
     fn load(

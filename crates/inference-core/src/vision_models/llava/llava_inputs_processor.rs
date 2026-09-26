@@ -15,9 +15,8 @@ use tokenizers::Tokenizer;
 use super::llava15::LLaVAVisionSpecificArgs;
 use super::utils::{expand2square, LLaVAImageProcessor};
 use crate::device_map::DeviceMapper;
-use crate::pipeline::text_models_inputs_processor::{
-    get_completion_input, get_prompt_input, PagedAttentionMeta,
-};
+use crate::paged_attention::PagedAttentionMeta;
+use crate::pipeline::text_models_inputs_processor::{get_completion_input, get_prompt_input};
 use crate::pipeline::{
     text_models_inputs_processor, InputProcessorOutput, InputsProcessor, InputsProcessorType,
     InputsProcessorValidationError, MessagesAction, Processor,
