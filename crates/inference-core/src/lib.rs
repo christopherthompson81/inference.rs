@@ -371,6 +371,50 @@ pub struct ModelLoaderConfig {
     pub encoder_cache_memory_bytes: Option<usize>,
 }
 
+impl ModelLoaderConfig {
+    /// The loader this config describes. `no_kv_cache` is an engine setting, so it is passed in.
+    pub fn build_loader(&self, no_kv_cache: bool) -> anyhow::Result<Box<dyn Loader>> {
+        selection::model_loader::LoaderBuilder::new(self.model_selected.clone())
+            .with_no_kv_cache(no_kv_cache)
+            .with_chat_template(self.chat_template.clone())
+            .with_jinja_explicit(self.jinja_explicit.clone())
+            .with_max_model_len(self.max_model_len)
+            .with_hf_config_overrides(self.hf_config_overrides.clone())
+            .with_mtp(self.mtp_config.as_ref().is_some_and(MtpConfig::is_builtin))
+            .with_encoder_cache_memory_bytes(self.encoder_cache_memory_bytes)
+            .build()
+    }
+
+    /// Load `loader` with this config, attaching MTP speculative decoding when configured.
+    pub async fn load(
+        &self,
+        loader: &dyn Loader,
+        mtp_runtime: MtpRuntimeConfig,
+    ) -> anyhow::Result<Arc<tokio::sync::Mutex<dyn Pipeline + Send + Sync>>> {
+        let pipeline = loader.load_model_from_hf(
+            self.hf_revision.clone(),
+            self.token_source.clone(),
+            &self.dtype,
+            &self.device,
+            self.silent,
+            self.device_map_setting.clone(),
+            self.isq,
+            self.paged_attn_config,
+        )?;
+        if let Some(mtp_config) = self.mtp_config.clone() {
+            pipeline
+                .lock()
+                .await
+                .attach_speculative_with_runtime(
+                    SpeculativeConfig::Mtp(mtp_config.with_draft_lm_head_isq(self.isq)),
+                    mtp_runtime,
+                )
+                .map_err(|e| anyhow::anyhow!("Failed to attach MTP speculative decoding: {e}"))?;
+        }
+        Ok(pipeline)
+    }
+}
+
 /// State preserved when a model is unloaded.
 /// This contains all the information needed to reload the model on demand.
 #[derive(Clone)]
@@ -2759,66 +2803,23 @@ impl InferenceRs {
         model_id: &str,
         unloaded_state: UnloadedModelState,
     ) -> Result<(), InferenceRsError> {
-        use crate::selection::model_loader::LoaderBuilder;
-
         info!("Reloading model: {}", model_id);
 
         let loader_config = &unloaded_state.loader_config;
 
-        // Build the loader from the stored config
-        let loader = LoaderBuilder::new(loader_config.model_selected.clone())
-            .with_chat_template(loader_config.chat_template.clone())
-            .with_jinja_explicit(loader_config.jinja_explicit.clone())
-            .with_max_model_len(loader_config.max_model_len)
-            .with_hf_config_overrides(loader_config.hf_config_overrides.clone())
-            .with_no_kv_cache(unloaded_state.engine_config.no_kv_cache)
-            .with_mtp(
-                loader_config
-                    .mtp_config
-                    .as_ref()
-                    .is_some_and(MtpConfig::is_builtin),
-            )
-            .with_encoder_cache_memory_bytes(loader_config.encoder_cache_memory_bytes)
-            .build()
+        let loader = loader_config
+            .build_loader(unloaded_state.engine_config.no_kv_cache)
             .map_err(|e| InferenceRsError::ReloadFailed(format!("Failed to build loader: {e}")))?;
-
-        // Load the model
-        let pipeline = loader
-            .load_model_from_hf(
-                loader_config.hf_revision.clone(),
-                loader_config.token_source.clone(),
-                &loader_config.dtype,
-                &loader_config.device,
-                loader_config.silent,
-                loader_config.device_map_setting.clone(),
-                loader_config.isq,
-                loader_config.paged_attn_config,
-            )
-            .map_err(|e| InferenceRsError::ReloadFailed(format!("Failed to load model: {e}")))?;
-
-        let realized_cache_config = {
-            let mut pipeline = pipeline.lock().await;
-            if let Some(mtp_config) = loader_config.mtp_config.clone() {
-                let prefix_cache_capacity = if unloaded_state.engine_config.no_prefix_cache {
-                    0
-                } else {
-                    unloaded_state.engine_config.prefix_cache_n
-                };
-                pipeline
-                    .attach_speculative_with_runtime(
-                        SpeculativeConfig::Mtp(
-                            mtp_config.with_draft_lm_head_isq(loader_config.isq),
-                        ),
-                        MtpRuntimeConfig::new(prefix_cache_capacity),
-                    )
-                    .map_err(|e| {
-                        InferenceRsError::ReloadFailed(format!(
-                            "Failed to attach MTP speculative decoding: {e}"
-                        ))
-                    })?;
-            }
-            pipeline.get_metadata().cache_config.clone()
+        let prefix_cache_capacity = if unloaded_state.engine_config.no_prefix_cache {
+            0
+        } else {
+            unloaded_state.engine_config.prefix_cache_n
         };
+        let pipeline = loader_config
+            .load(&*loader, MtpRuntimeConfig::new(prefix_cache_capacity))
+            .await
+            .map_err(|e| InferenceRsError::ReloadFailed(format!("Failed to load model: {e}")))?;
+        let realized_cache_config = pipeline.lock().await.get_metadata().cache_config.clone();
         let mut scheduler_config = unloaded_state.scheduler_config;
         scheduler_config
             .refresh_paged_cache_config(realized_cache_config)

@@ -899,6 +899,45 @@ mod tests {
         Ok(())
     }
 
+    fn loader_config(
+        model: ModelSelected,
+        max_model_len: Option<usize>,
+    ) -> crate::ModelLoaderConfig {
+        crate::ModelLoaderConfig {
+            model_selected: model,
+            token_source: crate::TokenSource::None,
+            hf_revision: None,
+            dtype: ModelDType::Auto,
+            device: candle_core::Device::Cpu,
+            device_map_setting: crate::DeviceMapSetting::dummy(),
+            isq: None,
+            paged_attn_config: None,
+            silent: true,
+            chat_template: None,
+            jinja_explicit: None,
+            max_model_len,
+            hf_config_overrides: None,
+            mtp_config: None,
+            encoder_cache_memory_bytes: None,
+        }
+    }
+
+    #[test]
+    fn a_stored_loader_config_rebuilds_its_loader() -> anyhow::Result<()> {
+        let plain = || selected(serde_json::json!({"Plain": {"model_id": "org/model"}}));
+        assert_eq!(
+            loader_config(plain(), None).build_loader(false)?.get_id(),
+            "org/model"
+        );
+        // the config's options reach the builder, so reload validates exactly like the first load did
+        let err = loader_config(plain(), Some(0))
+            .build_loader(false)
+            .err()
+            .unwrap();
+        assert!(err.to_string().contains("greater than zero"), "{err}");
+        Ok(())
+    }
+
     #[test]
     fn max_model_len_is_validated_per_format() {
         let plain = || selected(serde_json::json!({"Plain": {"model_id": "m"}}));

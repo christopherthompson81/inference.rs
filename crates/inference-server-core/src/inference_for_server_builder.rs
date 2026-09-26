@@ -8,7 +8,7 @@ use inference_core::{
     get_auto_device_map_params, get_model_dtype, get_tgt_non_granular_index, paged_attn_supported,
     parse_isq_value, plan_paged_kv, reserve_external_mtp_memory_with_runtime, AutoDeviceMapParams,
     DefaultSchedulerMethod, DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting,
-    HfConfigOverrides, InferenceRsBuilder, Loader, LoaderBuilder, McpClientConfig, MemoryGpuConfig,
+    HfConfigOverrides, InferenceRsBuilder, Loader, McpClientConfig, MemoryGpuConfig,
     ModelLoaderConfig, ModelSelected, MtpConfig, MtpRuntimeConfig, PagedAttentionConfig,
     PagedCacheType, PagedKvModelRequest, SchedulerConfig, SearchCallback, SearchEmbeddingModel,
     TokenSource,
@@ -852,51 +852,33 @@ impl InferenceRsForServerBuilder {
             &device,
         )?;
 
-        // Clone values needed for loader config before they're moved
-        let model_for_config = model.clone();
-        let token_source_for_config = self.token_source.clone();
-        let mapper_for_config = mapper.clone();
-        let chat_template_for_config = self.chat_template.clone();
-        let jinja_explicit_for_config = self.jinja_explicit.clone();
-        let hf_config_overrides_for_config = self.hf_config_overrides.clone();
-
-        // Configure this last to prevent arg moves
-        let loader: Box<dyn Loader> = LoaderBuilder::new(model)
-            .with_no_kv_cache(self.no_kv_cache)
-            .with_chat_template(self.chat_template)
-            .with_jinja_explicit(self.jinja_explicit)
-            .with_max_model_len(self.max_model_len)
-            .with_hf_config_overrides(self.hf_config_overrides)
-            .with_mtp(self.mtp_config.as_ref().is_some_and(MtpConfig::is_builtin))
-            .with_encoder_cache_memory_bytes(self.encoder_cache_memory_bytes)
-            .build()?;
-
-        inference_instance_info(&*loader);
-
         let isq = self
             .in_situ_quant
             .as_ref()
             .map(|isq| parse_isq_value(isq, Some(&device)).map_err(|e| anyhow::anyhow!("{e}")))
             .transpose()?;
 
-        let pipeline: LoadedPipeline = loader.load_model_from_hf(
-            None,
-            self.token_source,
-            &dtype,
-            &device,
-            false,
-            mapper,
+        let loader_config = ModelLoaderConfig {
+            model_selected: model,
+            token_source: self.token_source,
+            hf_revision: None,
+            dtype,
+            device: device.clone(),
+            device_map_setting: mapper,
             isq,
-            cache_config,
-        )?;
+            paged_attn_config: cache_config,
+            silent: false,
+            chat_template: self.chat_template,
+            jinja_explicit: self.jinja_explicit,
+            max_model_len: self.max_model_len,
+            hf_config_overrides: self.hf_config_overrides,
+            mtp_config: self.mtp_config.clone(),
+            encoder_cache_memory_bytes: self.encoder_cache_memory_bytes,
+        };
+        let loader = loader_config.build_loader(self.no_kv_cache)?;
+        inference_instance_info(&*loader);
+        let pipeline: LoadedPipeline = loader_config.load(&*loader, mtp_runtime).await?;
         info!("Model loaded.");
-
-        if let Some(mtp_config) = self.mtp_config.clone() {
-            pipeline.lock().await.attach_speculative_with_runtime(
-                inference_core::SpeculativeConfig::Mtp(mtp_config.with_draft_lm_head_isq(isq)),
-                mtp_runtime,
-            )?;
-        }
 
         let scheduler_config = init_scheduler_config(
             &cache_config,
@@ -910,25 +892,6 @@ impl InferenceRsForServerBuilder {
 
         let search_embedding_model =
             get_search_embedding_model(self.enable_search, self.search_embedding_model);
-
-        // Create loader config for unload/reload support
-        let loader_config = ModelLoaderConfig {
-            model_selected: model_for_config,
-            token_source: token_source_for_config,
-            hf_revision: None,
-            dtype,
-            device: device.clone(),
-            device_map_setting: mapper_for_config,
-            isq,
-            paged_attn_config: cache_config,
-            silent: false,
-            chat_template: chat_template_for_config,
-            jinja_explicit: jinja_explicit_for_config,
-            max_model_len: self.max_model_len,
-            hf_config_overrides: hf_config_overrides_for_config,
-            mtp_config: self.mtp_config.clone(),
-            encoder_cache_memory_bytes: self.encoder_cache_memory_bytes,
-        };
 
         let mut builder = InferenceRsBuilder::new(
             pipeline,
@@ -975,7 +938,6 @@ impl InferenceRsForServerBuilder {
         // Use the first model as the base configuration
         let first_model = &self.models[0];
         let model = first_model.model.clone();
-        let model_for_config = model.clone();
         let first_chat_template = first_model
             .chat_template
             .clone()
@@ -1009,18 +971,6 @@ impl InferenceRsForServerBuilder {
             .encoder_cache_memory_bytes
             .map(NonZeroUsize::get)
             .or(self.encoder_cache_memory_bytes);
-        let loader: Box<dyn Loader> = LoaderBuilder::new(model)
-            .with_no_kv_cache(self.no_kv_cache)
-            .with_chat_template(first_chat_template.clone())
-            .with_jinja_explicit(first_jinja_explicit.clone())
-            .with_max_model_len(first_max_model_len)
-            .with_hf_config_overrides(first_hf_config_overrides.clone())
-            .with_mtp(self.mtp_config.as_ref().is_some_and(MtpConfig::is_builtin))
-            .with_encoder_cache_memory_bytes(first_encoder_cache_memory_bytes)
-            .build()?;
-
-        inference_instance_info(&*loader);
-
         let mapper = init_mapper(
             &first_model
                 .num_device_layers
@@ -1028,7 +978,6 @@ impl InferenceRsForServerBuilder {
                 .or(self.num_device_layers.clone()),
             &auto_device_map_params,
         );
-        let mapper_for_config = mapper.clone();
         let paged_attn = configure_paged_attn(&device, self.paged_attn);
 
         let requested_cache_config = init_cache_config(
@@ -1074,22 +1023,26 @@ impl InferenceRsForServerBuilder {
         let mut loaded_model_ids = Vec::new();
         let mut registered_ids = HashSet::new();
 
-        let pipeline: LoadedPipeline = loader.load_model_from_hf(
-            None,
-            self.token_source.clone(),
-            &dtype,
-            &device,
-            false,
-            mapper,
+        let first_loader_config = ModelLoaderConfig {
+            model_selected: model,
+            token_source: self.token_source.clone(),
+            hf_revision: None,
+            dtype,
+            device: device.clone(),
+            device_map_setting: mapper,
             isq,
-            first_cache_config,
-        )?;
-        if let Some(mtp_config) = self.mtp_config.clone() {
-            pipeline.lock().await.attach_speculative_with_runtime(
-                inference_core::SpeculativeConfig::Mtp(mtp_config.with_draft_lm_head_isq(isq)),
-                mtp_runtime,
-            )?;
-        }
+            paged_attn_config: first_cache_config,
+            silent: false,
+            chat_template: first_chat_template,
+            jinja_explicit: first_jinja_explicit,
+            max_model_len: first_max_model_len,
+            hf_config_overrides: first_hf_config_overrides,
+            mtp_config: self.mtp_config.clone(),
+            encoder_cache_memory_bytes: first_encoder_cache_memory_bytes,
+        };
+        let loader = first_loader_config.build_loader(self.no_kv_cache)?;
+        inference_instance_info(&*loader);
+        let pipeline: LoadedPipeline = first_loader_config.load(&*loader, mtp_runtime).await?;
         let first_pipeline_name = pipeline.lock().await.name();
         let first_primary_id = first_model
             .alias
@@ -1128,24 +1081,6 @@ impl InferenceRsForServerBuilder {
         .await;
         let search_embedding_model =
             get_search_embedding_model(self.enable_search, self.search_embedding_model);
-        let first_loader_config = ModelLoaderConfig {
-            model_selected: model_for_config,
-            token_source: self.token_source.clone(),
-            hf_revision: None,
-            dtype,
-            device: device.clone(),
-            device_map_setting: mapper_for_config,
-            isq,
-            paged_attn_config: first_cache_config,
-            silent: false,
-            chat_template: first_chat_template,
-            jinja_explicit: first_jinja_explicit,
-            max_model_len: first_max_model_len,
-            hf_config_overrides: first_hf_config_overrides,
-            mtp_config: self.mtp_config.clone(),
-            encoder_cache_memory_bytes: first_encoder_cache_memory_bytes,
-        };
-
         // Create the first InferenceRs instance with the first model
         let mut builder = InferenceRsBuilder::new(
             pipeline,
@@ -1193,7 +1128,6 @@ impl InferenceRsForServerBuilder {
             );
 
             let model = model_config.model.clone();
-            let model_for_config = model.clone();
             let dtype = get_model_dtype(&model)?;
             let auto_device_map_params = get_auto_device_map_params(&model)?;
             let chat_template = model_config
@@ -1210,20 +1144,6 @@ impl InferenceRsForServerBuilder {
                 .clone()
                 .or(self.hf_config_overrides.clone());
 
-            let loader: Box<dyn Loader> = LoaderBuilder::new(model)
-                .with_no_kv_cache(self.no_kv_cache)
-                .with_chat_template(chat_template.clone())
-                .with_jinja_explicit(jinja_explicit.clone())
-                .with_max_model_len(max_model_len)
-                .with_hf_config_overrides(hf_config_overrides.clone())
-                .with_encoder_cache_memory_bytes(
-                    model_config
-                        .encoder_cache_memory_bytes
-                        .map(NonZeroUsize::get)
-                        .or(self.encoder_cache_memory_bytes),
-                )
-                .build()?;
-
             let mapper = init_mapper(
                 &model_config
                     .num_device_layers
@@ -1231,7 +1151,6 @@ impl InferenceRsForServerBuilder {
                     .or(self.num_device_layers.clone()),
                 &auto_device_map_params,
             );
-            let mapper_for_config = mapper.clone();
 
             let isq = model_config
                 .in_situ_quant
@@ -1241,16 +1160,29 @@ impl InferenceRsForServerBuilder {
                 .transpose()?;
 
             let paged_attn_config = paged_kv_plan.paged_attn[model_index];
-            let pipeline: LoadedPipeline = loader.load_model_from_hf(
-                None,
-                self.token_source.clone(),
-                &dtype,
-                &device,
-                false,
-                mapper,
+            // the global MTP setting and its memory reservation belong to the first model only
+            let loader_config = ModelLoaderConfig {
+                model_selected: model,
+                token_source: self.token_source.clone(),
+                hf_revision: None,
+                dtype,
+                device: device.clone(),
+                device_map_setting: mapper,
                 isq,
                 paged_attn_config,
-            )?;
+                silent: false,
+                chat_template,
+                jinja_explicit,
+                max_model_len,
+                hf_config_overrides,
+                mtp_config: None,
+                encoder_cache_memory_bytes: model_config
+                    .encoder_cache_memory_bytes
+                    .map(NonZeroUsize::get)
+                    .or(self.encoder_cache_memory_bytes),
+            };
+            let loader = loader_config.build_loader(self.no_kv_cache)?;
+            let pipeline: LoadedPipeline = loader_config.load(&*loader, mtp_runtime).await?;
 
             // Each model gets its own scheduler
             let scheduler_config = init_scheduler_config(
@@ -1290,26 +1222,6 @@ impl InferenceRsForServerBuilder {
                 tool_callbacks: HashMap::new(),
             };
 
-            let loader_config = ModelLoaderConfig {
-                model_selected: model_for_config,
-                token_source: self.token_source.clone(),
-                hf_revision: None,
-                dtype,
-                device: device.clone(),
-                device_map_setting: mapper_for_config,
-                isq,
-                paged_attn_config,
-                silent: false,
-                chat_template,
-                jinja_explicit,
-                max_model_len,
-                hf_config_overrides,
-                mtp_config: None,
-                encoder_cache_memory_bytes: model_config
-                    .encoder_cache_memory_bytes
-                    .map(NonZeroUsize::get)
-                    .or(self.encoder_cache_memory_bytes),
-            };
             let mut add_model_config = inference_core::AddModelConfig::new(engine_config)
                 .with_loader_config(loader_config);
             if let Some(mcp_config) = self.mcp_client_config.clone() {
