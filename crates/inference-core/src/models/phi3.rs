@@ -8,15 +8,11 @@ use inference_quant::{QuantMethod, QuantizedConfig, ReplicatedLayer, ShardedVarB
 use std::{collections::HashMap, sync::Arc};
 
 use crate::{
-    amoe::{
-        AnyMoeBaseModelMixin, AnyMoeConfig, AnyMoeExpertType, AnyMoeTrainableLayer, MlpLayer,
-        MoeMlp,
-    },
+    amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, AnyMoeTrainableLayer, MlpLayer},
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
-    get_delta_from_lora_ab,
     layers::{
-        embedding_with_legacy_tied_uqff, Activation, CausalMasker, MatMul, PhiRopeConfig,
+        embedding_with_legacy_tied_uqff, Activation, CausalMasker, PhiRopeConfig,
         PhiRopeScalingConfig, PhiRotaryEmbedding, RmsNorm,
     },
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
@@ -28,6 +24,14 @@ use crate::{
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 
+/// phi3 fuses gate and up into one projection; `new_added_delta` takes [gate_up_proj, down_proj].
+pub(crate) const ANYMOE_LORA_TARGETS: &[AnyMoeLoraTarget] = &[
+    AnyMoeLoraTarget {
+        name: "gate_up_proj",
+        shape: |hidden, intermediate| (hidden, 2 * intermediate),
+    },
+    AnyMoeLoraTarget::down("down_proj"),
+];
 serde_default_fn!(bool, word_emb_default, false);
 
 // https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/blob/main/config.json
@@ -606,99 +610,45 @@ impl AnyMoeBaseModelMixin for Model {
         }
         mlps
     }
-    fn create_anymoe_layers(
-        &mut self,
-        additional_vbs: Vec<ShardedVarBuilder>,
-        config: AnyMoeConfig,
-        (prefix, mlp): (String, String),
-        mut layers: Vec<usize>,
-        expert_type: AnyMoeExpertType,
-        gate_vb: Option<ShardedVarBuilder>,
-    ) -> Result<()> {
-        let mut experts: Vec<Vec<Box<dyn MlpLayer>>> = Vec::new();
-        if layers.is_empty() {
-            layers = (0..self.layers.len()).collect::<Vec<_>>();
-        }
-        for _ in 0..layers.len() {
-            experts.push(Vec::new());
-        }
-        for vb in additional_vbs {
-            let vb = vb.pp(&prefix);
-            for (layer, row) in experts.iter_mut().enumerate() {
-                if !layers.contains(&layer) {
-                    continue;
-                }
-
-                let intermediate_size = self.layers[layer].mlp.get_params()[1];
-                let hidden_size = self.layers[layer].mlp.get_params()[0];
-                match expert_type {
-                    AnyMoeExpertType::FineTuned => {
-                        let (dtype, device) = self.layers[layer].mlp.dtype_device();
-                        row.push(Box::new(Mlp::new(
-                            &Config {
-                                intermediate_size: self.layers[layer].mlp.get_params()[1],
-                                hidden_size: self.layers[layer].mlp.get_params()[0],
-                                ..Default::default()
-                            },
-                            vb.pp(layer).pp(&mlp).set_dtype(dtype).set_device(device),
-                        )?));
-                    }
-                    AnyMoeExpertType::LoraAdapter {
-                        rank,
-                        alpha,
-                        ref target_modules,
-                    } => {
-                        let vb_mlp = vb.pp(layer).pp(&mlp);
-
-                        let gate_up_proj_delta =
-                            if target_modules.contains(&"gate_up_proj".to_string()) {
-                                Some(get_delta_from_lora_ab!(
-                                    vb_mlp,
-                                    rank,
-                                    alpha,
-                                    (hidden_size, 2 * intermediate_size),
-                                    "gate_up_proj"
-                                ))
-                            } else {
-                                None
-                            };
-                        let down_proj_delta = if target_modules.contains(&"down_proj".to_string()) {
-                            Some(get_delta_from_lora_ab!(
-                                vb_mlp,
-                                rank,
-                                alpha,
-                                (hidden_size, intermediate_size),
-                                "down_proj"
-                            ))
-                        } else {
-                            None
-                        };
-
-                        row.push(
-                            self.layers[layer]
-                                .mlp
-                                .new_added_delta(vec![gate_up_proj_delta, down_proj_delta])?,
-                        );
-                    }
-                }
-            }
-        }
-        for (layer, expert) in layers.into_iter().zip(experts) {
-            let mut experts_all = vec![self.layers[layer].mlp.clone()];
-            experts_all.extend(expert);
-            let (dtype, device) = self.layers[layer].mlp.dtype_device();
-            self.layers[layer].mlp = Box::new(MoeMlp::new(
-                experts_all,
-                config.clone(),
-                dtype,
-                &device,
-                layer,
-                gate_vb.as_ref(),
-            )?);
-        }
-        Ok(())
+    fn amoe_lora_targets(&self) -> &'static [AnyMoeLoraTarget] {
+        ANYMOE_LORA_TARGETS
+    }
+    fn amoe_fine_tuned_expert(
+        &self,
+        _layer: usize,
+        base: &dyn MlpLayer,
+        vb: ShardedVarBuilder,
+    ) -> Result<Box<dyn MlpLayer>> {
+        let (dtype, device) = base.dtype_device();
+        Ok(Box::new(Mlp::new(
+            &Config {
+                intermediate_size: base.get_params()[1],
+                hidden_size: base.get_params()[0],
+                ..Default::default()
+            },
+            vb.set_dtype(dtype).set_device(device),
+        )?))
     }
     fn amoe_supported(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod anymoe_tests {
+    use super::ANYMOE_LORA_TARGETS;
+
+    #[test]
+    fn lora_delta_shapes_follow_peft_in_out_features() {
+        let (hidden, intermediate) = (3, 5);
+        let shapes: Vec<_> = ANYMOE_LORA_TARGETS
+            .iter()
+            .map(|t| (t.name, (t.shape)(hidden, intermediate)))
+            .collect();
+        // (in_features, out_features): gate_up maps hidden -> 2 * intermediate, down maps intermediate -> hidden
+        assert_eq!(
+            shapes,
+            vec![("gate_up_proj", (3, 10)), ("down_proj", (5, 3))]
+        );
     }
 }
