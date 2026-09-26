@@ -1,8 +1,8 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 /// Mixtral Model
-/// https://github.com/huggingface/transformers/blob/main/src/transformers/models/mixtral/modeling_mixtral.py
-/// https://mistral.ai/news/mixtral-of-experts/
+/// <https://github.com/huggingface/transformers/blob/main/src/transformers/models/mixtral/modeling_mixtral.py>
+/// <https://mistral.ai/news/mixtral-of-experts/>
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use candle_core::{DType, Device, Module, Result, Tensor};
@@ -33,7 +33,7 @@ use crate::{
 
 serde_default_fn!(bool, word_emb_default, false);
 
-/// https://github.com/huggingface/transformers/blob/1a585c1222a56bcaecc070966d558d4a9d862e83/src/transformers/models/mixtral/configuration_mixtral.py#L113
+/// <https://github.com/huggingface/transformers/blob/1a585c1222a56bcaecc070966d558d4a9d862e83/src/transformers/models/mixtral/configuration_mixtral.py#L113>
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub vocab_size: usize,

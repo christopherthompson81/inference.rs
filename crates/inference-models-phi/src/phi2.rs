@@ -5,9 +5,9 @@ use crate::layers::masker::CausalMaskConfig;
 use std::{collections::HashMap, sync::Arc};
 
 /// Phi model.
-/// https://huggingface.co/microsoft/phi-2
+/// <https://huggingface.co/microsoft/phi-2>
 /// This corresponds to the model update made with the following commit:
-/// https://huggingface.co/microsoft/phi-2/commit/cb2f4533604d8b67de604e7df03bfe6f3ca22869
+/// <https://huggingface.co/microsoft/phi-2/commit/cb2f4533604d8b67de604e7df03bfe6f3ca22869>
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::LayerNorm;
 use inference_quant::{
