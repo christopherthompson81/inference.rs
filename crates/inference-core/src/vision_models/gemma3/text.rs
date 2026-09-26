@@ -7,6 +7,14 @@ use inference_quant::{
     softcap, ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
 };
 
+use crate::kv_cache::EitherCache;
+use crate::kv_cache::KvCache;
+use crate::kv_cache::NormalCache;
+use crate::kv_cache::NormalCacheType;
+use crate::model::IsqModel;
+use crate::model::ModelForwardContext;
+use crate::model::MultimodalModel;
+use crate::model::NormalLoadingMetadata;
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
     attention::{flash_backend_supports, AttentionMask, SdpaParams},
@@ -18,10 +26,6 @@ use crate::{
     paged_attention::{
         block_hash::MultimodalAttentionPolicy, AttentionImplementation, ModelConfigMetadata,
         PagedAttention,
-    },
-    pipeline::{
-        EitherCache, IsqModel, KvCache, ModelForwardContext, MultimodalModel, NormalCache,
-        NormalCacheType, NormalLoadingMetadata,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -860,7 +864,7 @@ impl IsqModel for TextModel {
 
 impl crate::speculative::SpeculativeTargetMixin for TextModel {}
 
-impl crate::block_diffusion::BlockDiffusionMixin for TextModel {}
+impl crate::model::BlockDiffusionMixin for TextModel {}
 
 impl MultimodalModel for TextModel {
     fn forward(
@@ -868,7 +872,7 @@ impl MultimodalModel for TextModel {
         _input_ids: &Tensor,
         _pixel_values: Option<Tensor>,
         _model_specific_args: Box<dyn std::any::Any>, // pixel attention mask, or image sizes, or anything else
-        _ctx: &mut crate::pipeline::ModelForwardContext<'_>,
+        _ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> candle_core::Result<Tensor> {
         unreachable!()
     }

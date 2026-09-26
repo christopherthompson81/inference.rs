@@ -73,7 +73,7 @@ use inference_nn::get_delta_from_lora_ab;
 pub use inference_nn::metal::warmup_metal_kernels;
 use inference_nn::{
     amoe, attention, cuda, device_map, flashinfer, gdn, kv_cache, lora, model, moe, ops,
-    paged_attention, perf_flags, sampler, topology, utils,
+    paged_attention, perf_flags, sampler, topology, utils, vision,
 };
 use inference_nn::{get_mut_arcmutex, serde_default_fn};
 pub use inference_nn::{layers, matformer};

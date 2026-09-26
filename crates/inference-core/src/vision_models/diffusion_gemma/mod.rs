@@ -8,10 +8,11 @@ use std::sync::Arc;
 use candle_core::{DType, Module, Result, Tensor, D};
 use inference_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
 
+use crate::model::ModelForwardContext;
+use crate::model::NormalLoadingMetadata;
 use crate::{
     layers::{Activation, RmsNorm},
     paged_attention::AttentionImplementation,
-    pipeline::{ModelForwardContext, NormalLoadingMetadata},
     vision_models::gemma4::{
         multimodal_embedding::Gemma4MultimodalEmbedder, text::TextModel, vision::VisionTower,
     },
@@ -299,7 +300,7 @@ impl DiffusionGemmaModel {
     }
 }
 
-impl crate::pipeline::IsqModel for DiffusionGemmaModel {
+impl crate::model::IsqModel for DiffusionGemmaModel {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let mut tensors: Vec<(String, Tensor)> = self
             .text
@@ -348,7 +349,7 @@ impl crate::pipeline::IsqModel for DiffusionGemmaModel {
 impl crate::amoe::AnyMoeBaseModelMixin for DiffusionGemmaModel {}
 impl crate::speculative::SpeculativeTargetMixin for DiffusionGemmaModel {}
 
-impl crate::pipeline::MultimodalModel for DiffusionGemmaModel {
+impl crate::model::MultimodalModel for DiffusionGemmaModel {
     fn forward(
         &self,
         input_ids: &Tensor,
@@ -430,20 +431,20 @@ impl crate::pipeline::MultimodalModel for DiffusionGemmaModel {
         Box::new(crate::vision_models::gemma4::Gemma4SpecificArgs::default())
     }
 
-    fn cache(&self) -> &crate::pipeline::EitherCache {
-        crate::pipeline::MultimodalModel::cache(&self.text)
+    fn cache(&self) -> &crate::kv_cache::EitherCache {
+        crate::model::MultimodalModel::cache(&self.text)
     }
 
     fn device(&self) -> &candle_core::Device {
-        crate::pipeline::MultimodalModel::device(&self.text)
+        crate::model::MultimodalModel::device(&self.text)
     }
 
     fn max_seq_len(&self) -> usize {
-        crate::pipeline::MultimodalModel::max_seq_len(&self.text)
+        crate::model::MultimodalModel::max_seq_len(&self.text)
     }
 
     fn config(&self) -> &crate::paged_attention::ModelConfigMetadata {
-        crate::pipeline::MultimodalModel::config(&self.text)
+        crate::model::MultimodalModel::config(&self.text)
     }
 
     fn model_config(&self) -> Arc<dyn crate::paged_attention::ModelConfigLike + Send + Sync> {
@@ -451,7 +452,7 @@ impl crate::pipeline::MultimodalModel for DiffusionGemmaModel {
     }
 }
 
-impl crate::block_diffusion::BlockDiffusionMixin for DiffusionGemmaModel {
+impl crate::model::BlockDiffusionMixin for DiffusionGemmaModel {
     fn is_block_diffusion(&self) -> bool {
         true
     }

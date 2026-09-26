@@ -18,6 +18,15 @@ use inference_quant::{
     RowParallelLayer, ShardedVarBuilder, UnquantLinear,
 };
 
+use crate::kv_cache::EitherCache;
+use crate::kv_cache::KvCache;
+use crate::kv_cache::NormalCache;
+use crate::kv_cache::NormalCacheType;
+use crate::model::extract_logits;
+use crate::model::IsqModel;
+use crate::model::ModelForwardContext;
+use crate::model::MultimodalModel;
+use crate::model::NormalLoadingMetadata;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{flash_backend_supports, AttentionMask, SdpaParams},
@@ -30,10 +39,6 @@ use crate::{
     paged_attention::{
         block_hash::MultimodalAttentionPolicy, AttentionBackendKind, AttentionImplementation,
         KvCacheLayout, KvCacheTopology, ModelConfigLike, ModelConfigMetadata, PagedAttention,
-    },
-    pipeline::{
-        extract_logits, EitherCache, IsqModel, KvCache, ModelForwardContext, MultimodalModel,
-        NormalCache, NormalCacheType, NormalLoadingMetadata,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -2338,7 +2343,7 @@ impl TextModel {
                     .as_ref()
                     .expect("missing active fast prefill plan");
                 if let Some(metadata) = plan.paged_metadata.as_ref() {
-                    crate::pipeline::metadata_rope_positions(metadata, xs.device())
+                    crate::model::metadata_rope_positions(metadata, xs.device())
                         .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?
                         .clone()
                 } else {
@@ -2642,7 +2647,7 @@ impl IsqModel for TextModel {
 
 impl crate::speculative::SpeculativeTargetMixin for TextModel {}
 
-impl crate::block_diffusion::BlockDiffusionMixin for TextModel {}
+impl crate::model::BlockDiffusionMixin for TextModel {}
 
 impl MultimodalModel for TextModel {
     fn forward(

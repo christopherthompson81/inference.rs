@@ -7,21 +7,23 @@ use config::Gemma4Config;
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
 use text::TextModel;
 
+use crate::kv_cache::EitherCache;
+use crate::model::IsqModel;
+use crate::model::ModelForwardContext;
+use crate::model::MultimodalModel;
+use crate::model::NormalLoadingMetadata;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     paged_attention::{
         encoder_cache::{CacheModality, EncoderCacheManager},
         AttentionImplementation, ModelConfigLike, ModelConfigMetadata,
     },
-    pipeline::{
-        EitherCache, IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata,
-    },
     speculative::{
         SpeculativeAttachInfo, SpeculativeBatchPlan, SpeculativeConfig, SpeculativeGraphState,
         SpeculativeProposalBatch, SpeculativeProposeBatchCtx, SpeculativeProposer,
     },
     utils::unvarbuilder::UnVarBuilder,
-    vision_models::multimodal_layout::{
+    vision::multimodal_layout::{
         MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
     },
 };
@@ -57,8 +59,7 @@ pub struct Gemma4SpecificArgs {
     pub video_cached_tokens: Vec<usize>,
     pub video_sizes: Vec<(u32, u32)>,
     pub(crate) packed_layout: Option<PackedMultimodalLayout>,
-    pub(crate) block_denoising_progress:
-        Option<Vec<crate::block_diffusion::BlockDenoisingProgressEmitter>>,
+    pub(crate) block_denoising_progress: Option<Vec<crate::model::BlockDenoisingProgressEmitter>>,
 }
 
 enum Gemma4VisionPath {
@@ -967,7 +968,7 @@ impl IsqModel for Gemma4Model {
     }
 }
 
-impl crate::block_diffusion::BlockDiffusionMixin for Gemma4Model {}
+impl crate::model::BlockDiffusionMixin for Gemma4Model {}
 
 impl MultimodalModel for Gemma4Model {
     fn supports_packed_prefill(&self) -> bool {

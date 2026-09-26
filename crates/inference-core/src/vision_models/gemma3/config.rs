@@ -3,7 +3,7 @@ use inference_quant::QuantizedConfig;
 use crate::{
     layers::{Activation, Gemma3RopeScalingConfig, Gemma3RopeSpec},
     serde_default_fn,
-    vision_models::siglip::SiglipVisionConfig,
+    vision::siglip::SiglipVisionConfig,
 };
 
 serde_default_fn!(bool, attention_bias, false);

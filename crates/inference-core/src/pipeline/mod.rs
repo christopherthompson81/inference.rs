@@ -2,9 +2,8 @@ mod amoe;
 mod auto;
 pub(crate) mod cache_manager;
 pub(crate) use crate::model::{
-    decode_positions_tensor, extract_logits, metadata_rope_positions,
-    recurrent_batch_kind_for_input, text_positions_tensor, ForwardMaskCache, ModelForwardContext,
-    RecurrentMetadata,
+    decode_positions_tensor, extract_logits, recurrent_batch_kind_for_input, text_positions_tensor,
+    ForwardMaskCache, ModelForwardContext, RecurrentMetadata,
 };
 pub use cache_manager::CacheManager;
 pub mod chat_template;

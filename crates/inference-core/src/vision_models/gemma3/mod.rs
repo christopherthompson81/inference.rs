@@ -9,17 +9,19 @@ use inference_quant::{NonZeroOp, ShardedVarBuilder};
 use mmproj::Gemma3MultiModalProjector;
 use text::TextModel;
 
+use crate::kv_cache::EitherCache;
+use crate::model::IsqModel;
+use crate::model::ModelForwardContext;
+use crate::model::MultimodalModel;
+use crate::model::NormalLoadingMetadata;
 use crate::{
     amoe::{AnyMoeBaseModelMixin, MlpLayer},
     paged_attention::{
         encoder_cache::{cached_encode_images, CacheModality, EncoderCacheManager},
         AttentionImplementation, ModelConfigMetadata,
     },
-    pipeline::{
-        EitherCache, IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata,
-    },
     utils::unvarbuilder::UnVarBuilder,
-    vision_models::multimodal_layout::{
+    vision::multimodal_layout::{
         MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
     },
     AnyMoeConfig, AnyMoeExpertType,
@@ -230,7 +232,7 @@ pub struct Gemma3SpecificArgs {
 
 impl crate::speculative::SpeculativeTargetMixin for Gemma3Model {}
 
-impl crate::block_diffusion::BlockDiffusionMixin for Gemma3Model {}
+impl crate::model::BlockDiffusionMixin for Gemma3Model {}
 
 impl MultimodalModel for Gemma3Model {
     fn supports_packed_prefill(&self) -> bool {
