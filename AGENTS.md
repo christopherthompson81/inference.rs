@@ -5,14 +5,14 @@ This file provides instructions for AI agents to understand the layout of the `i
 
 ## Repository Structure
 
-- `/inference/`           : Main Rust crate (text & multimodal inference API)
-- `/inference-core/`      : Core inference logic and tensor operations (text models)
-- `/inference-vision/`    : Image processing utilities (resizing, preprocessing for multimodal models)
-- `/inference-quant/`     : Quantization support (ISQ, GGUF, GPTQ, AWQ, FP8, HQQ, etc.)
-- `/inference-paged-attn/`: PagedAttention implementation
-- `/inference-pyo3/`      : Python bindings (PyO3)
-- `/inference-cli/`       : Unified CLI binary (commands: run, serve, bench, from-config)
-- `/inference-server-core/`: Shared server core logic
+- `crates/inference/`           : Main Rust crate (text & multimodal inference API)
+- `crates/inference-core/`      : Core inference logic and tensor operations (text models)
+- `crates/inference-vision/`    : Image processing utilities (resizing, preprocessing for multimodal models)
+- `crates/inference-quant/`     : Quantization support (ISQ, GGUF, GPTQ, AWQ, FP8, HQQ, etc.)
+- `crates/inference-paged-attn/`: PagedAttention implementation
+- `crates/inference-pyo3/`      : Python bindings (PyO3)
+- `crates/inference-cli/`       : Unified CLI binary (commands: run, serve, bench, from-config)
+- `crates/inference-server-core/`: Shared server core logic
 - `/docs/`             : Astro/Starlight documentation site (deployed at https://docs.mistralrs.dev)
 - `/examples/`            : Usage examples (Rust, Python, server samples, notebooks)
 - `/chat_templates/`      : Chat formatting templates (JSON/Jinja)
@@ -39,7 +39,7 @@ Mistral.rs supports multiple model types and advanced features via dedicated cra
 - **Quantization & ISQ**
   - Crate: `inference-quant`
   - Docs: `docs/src/content/docs/reference/quantization-types.md`, `docs/src/content/docs/explanation/quantization-tradeoffs.md`
-  - Conversion Script: `scripts/convert_awq_marlin.py`
+  - Conversion Script: `scripts/convert/convert_awq_marlin.py`
 - **Paged Attention**
   - Crate: `inference-paged-attn`
   - Docs: `docs/src/content/docs/explanation/paged-attention.md`, `docs/src/content/docs/guides/perf/use-paged-attention.md`
@@ -59,7 +59,7 @@ Mistral.rs supports multiple model types and advanced features via dedicated cra
 4. Or build/install only the CLI binary:
    ```bash
    cargo build --release --package inference-cli --features "<features>"
-   cargo install --path inference-cli --features "<features>"
+   cargo install --path crates/inference-cli --features "<features>"
    ```
 
 ## Models

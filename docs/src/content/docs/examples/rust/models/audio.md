@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
         .build()
         .await?;
 
-    let audio_bytes = std::fs::read("sample_speech.wav")?;
+    let audio_bytes = std::fs::read("examples/assets/sample_speech.wav")?;
     let audio = AudioInput::from_bytes(&audio_bytes)?;
 
     let messages = MultimodalMessages::new().add_audio_message(

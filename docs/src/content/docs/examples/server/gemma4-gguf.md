@@ -31,7 +31,7 @@ from openai import OpenAI
 client = OpenAI(api_key="foobar", base_url="http://localhost:1234/v1/")
 
 IMAGE_URL = (
-    "https://raw.githubusercontent.com/EricLBuehler/mistral.rs/master/res/banner.png"
+    "https://raw.githubusercontent.com/christopherthompson81/inference.rs/master/docs/assets/banner.png"
 )
 AUDIO_URL = "https://raw.githubusercontent.com/google-gemma/cookbook/refs/heads/main/apps/sample-data/journal1.wav"
 

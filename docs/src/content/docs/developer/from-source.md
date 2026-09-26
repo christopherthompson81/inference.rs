@@ -29,7 +29,7 @@ The CLI binary is in the `inference-cli` crate:
 cargo build --release --locked --features "cuda nccl flash-attn cudnn" -p inference-cli
 
 # Or install globally from the checkout
-cargo install --path inference-cli --locked --features "cuda nccl flash-attn cudnn"
+cargo install --path crates/inference-cli --locked --features "cuda nccl flash-attn cudnn"
 ```
 
 The flags above target CUDA. On macOS use `--features metal`; on CPU omit `--features` entirely. See the [cargo features reference](/reference/cargo-features/) for the full list.
@@ -69,7 +69,7 @@ Building the Python SDK from source requires `maturin`:
 
 ```bash
 pip install maturin[patchelf]
-cd inference-pyo3
+cd crates/inference-pyo3
 maturin develop --release --features "cuda nccl flash-attn cudnn"
 ```
 

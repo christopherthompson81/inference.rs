@@ -24,7 +24,7 @@ cargo build --release --features "cuda flash-attn cudnn"
 cargo build --release --features metal
 
 # Install CLI binary
-cargo install --path inference-cli --features <features>
+cargo install --path crates/inference-cli --features <features>
 ```
 
 ### Testing & Quality
@@ -76,49 +76,49 @@ You should also look for a model.safetensors.index.json file for the model at ha
 ## Architecture Overview
 
 ### Workspace Structure
-- `inference-core/` - Core inference engine, model implementations, pipelines
-- `inference-cli/` - Unified CLI binary (commands: run, serve, bench, from-config)
-- `inference-server-core/` - HTTP server routing, OpenAI API implementation
-- `inference-pyo3/` - Python SDK (PyO3 bindings)
-- `inference/` - Rust SDK (high-level crate)
-- `inference-vision/` - Image processing utilities
-- `inference-quant/` - Quantization implementations (ISQ, GGUF, GPTQ, etc.)
-- `inference-paged-attn/` - PagedAttention implementation
-- `inference-audio/` - Audio processing
-- `inference-mcp/` - Model Context Protocol client
-- `inference-layout/` - Document layout detection (PP-DocLayoutV3) with custom CPU/CUDA kernels
-- `inference-ffi/` - C ABI (`libinference_ffi`, header `include/inference.h`) for bindings in other languages
+- `crates/inference-core/` - Core inference engine, model implementations, pipelines
+- `crates/inference-cli/` - Unified CLI binary (commands: run, serve, bench, from-config)
+- `crates/inference-server-core/` - HTTP server routing, OpenAI API implementation
+- `crates/inference-pyo3/` - Python SDK (PyO3 bindings)
+- `crates/inference/` - Rust SDK (high-level crate)
+- `crates/inference-vision/` - Image processing utilities
+- `crates/inference-quant/` - Quantization implementations (ISQ, GGUF, GPTQ, etc.)
+- `crates/inference-paged-attn/` - PagedAttention implementation
+- `crates/inference-audio/` - Audio processing
+- `crates/inference-mcp/` - Model Context Protocol client
+- `crates/inference-layout/` - Document layout detection (PP-DocLayoutV3) with custom CPU/CUDA kernels
+- `crates/inference-ffi/` - C ABI (`libinference_ffi`, header `include/inference.h`) for bindings in other languages
 
 ### Key Design Patterns
 
-1. **Pipeline Architecture**: All models implement the `Pipeline` trait in `inference-core/src/pipeline/mod.rs`. Different model types (Plain, GGUF, GGML, Multimodal) have their own pipeline implementations.
+1. **Pipeline Architecture**: All models implement the `Pipeline` trait in `crates/inference-core/src/pipeline/mod.rs`. Different model types (Plain, GGUF, GGML, Multimodal) have their own pipeline implementations.
 
-2. **Model Loading**: Models are loaded through `Loader` traits that handle different formats and quantizations. See `inference-core/src/loader.rs`.
+2. **Model Loading**: Models are loaded through `Loader` traits that handle different formats and quantizations. See `crates/inference-core/src/loader.rs`.
 
-3. **Request Handling**: The server uses message passing with `InferenceRs` struct managing a background thread pool. Requests flow through `inference-core/src/engine/mod.rs`.
+3. **Request Handling**: The server uses message passing with `InferenceRs` struct managing a background thread pool. Requests flow through `crates/inference-core/src/engine/mod.rs`.
 
-4. **Device Management**: Automatic and manual device mapping for multi-GPU setups handled in `inference-core/src/device_map.rs`.
+4. **Device Management**: Automatic and manual device mapping for multi-GPU setups handled in `crates/inference-core/src/device_map.rs`.
 
 ### Adding New Features
 
 When adding new model architectures:
-1. Implement the model in `inference-core/src/models/`
-2. Add pipeline support in `inference-core/src/pipeline/`
-3. Update model detection in `inference-core/src/pipeline/normal.rs`
-4. Add architecture enum variant in `inference-core/src/lib.rs`
-5. Update CLI args in `inference-cli/src/main.rs`
+1. Implement the model in `crates/inference-core/src/models/`
+2. Add pipeline support in `crates/inference-core/src/pipeline/`
+3. Update model detection in `crates/inference-core/src/pipeline/normal.rs`
+4. Add architecture enum variant in `crates/inference-core/src/lib.rs`
+5. Update CLI args in `crates/inference-cli/src/main.rs`
 
 When adding new quantization methods:
-1. Implement in `inference-quant/src/`
+1. Implement in `crates/inference-quant/src/`
 2. Add to quantization loading logic in pipelines
 3. Update documentation in `docs/src/content/docs/reference/quantization-types.md`
 
 ### Important Files to Know
 
-- `inference-core/src/engine/mod.rs` - Main engine orchestration
-- `inference-core/src/pipeline/mod.rs` - Pipeline trait and common logic
-- `inference-server-core/src/routes.rs` - HTTP API endpoints
-- `inference-pyo3/src/lib.rs` - Python SDK entry point
+- `crates/inference-core/src/engine/mod.rs` - Main engine orchestration
+- `crates/inference-core/src/pipeline/mod.rs` - Pipeline trait and common logic
+- `crates/inference-server-core/src/routes.rs` - HTTP API endpoints
+- `crates/inference-pyo3/src/lib.rs` - Python SDK entry point
 - `examples/rust/` - Rust SDK examples (`inference-examples`, not a default member: build with `-p inference-examples --example <name>`)
 
 ### Pull Requests

@@ -13,7 +13,7 @@ from pathlib import Path
 
 from openai import OpenAI
 
-IMAGE = Path("inference/tests/fixtures/paddleocr_vl/table.png")
+IMAGE = Path("crates/inference/tests/fixtures/paddleocr_vl/table.png")
 image_url = "data:image/png;base64," + base64.b64encode(IMAGE.read_bytes()).decode()
 
 client = OpenAI(api_key="foobar", base_url="http://localhost:1234/v1/")

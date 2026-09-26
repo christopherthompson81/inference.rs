@@ -7,9 +7,9 @@
 
 <div align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="res/banner-dark.gif">
-    <source media="(prefers-color-scheme: light)" srcset="res/banner-light.gif">
-    <img src="res/banner-dark.png" alt="inference.rs - Fast, flexible LLM inference." width="100%" style="max-width: 800px;">
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.gif">
+    <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-light.gif">
+    <img src="docs/assets/banner-dark.png" alt="inference.rs - Fast, flexible LLM inference." width="100%" style="max-width: 800px;">
   </picture>
 </div>
 
@@ -179,7 +179,7 @@ inference doctor
 <details open>
   <summary><b>UI Demo</b></summary>
   <br>
-  <img src="https://raw.githubusercontent.com/EricLBuehler/mistral.rs/master/res/ui.gif" alt="UI Demo" />
+  <img src="docs/assets/ui.gif" alt="UI Demo" />
 </details>
 
 ## What Makes It Fast
