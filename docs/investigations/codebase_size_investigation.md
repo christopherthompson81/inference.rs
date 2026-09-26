@@ -479,3 +479,33 @@ The Run 13 TOML-MTP fix went with it, since the path it fixed no longer exists.
 
 Result: green, with 2129 CPU and 2448 CUDA tests, down 12 each from 2141 / 2460: the selector's own parsing tests.
 15 code files, +4 / -1748.
+
+## Run 15 - 2026-09-26 11:00
+
+Change: loading-path step 3. `ModelLoaderConfig::build_loader(no_kv_cache)` and
+`ModelLoaderConfig::load(&loader, mtp_runtime)` replace the four copies of the load sequence: server single-model,
+server multi-model first model, server multi-model additional models, and `InferenceRs::reload`. The sequence is
+build the loader, `load_model_from_hf`, then attach MTP with the draft-head ISQ.
+
+The server now builds the `ModelLoaderConfig` first and loads from it. What reload rebuilds is the same value that
+was loaded, instead of a second set of `*_for_config` clones assembled afterwards.
+
+Survey corrections (Run 12 claimed two server bugs):
+- **Additional multi-model models skip MTP.** This is by design. The server's MTP setting is global, an external MTP
+  checkpoint belongs to one model, and the paged-KV plan reserves MTP memory for the first model only. It stays that
+  way, with a comment.
+- **`hf_revision` is always `None` in the server.** This is not a dropped value: `serve` has no revision option (the
+  CLI's `--revision` exists only on the UQFF inspection commands). It is a missing feature, left as is.
+
+Verification (Qwen2.5-Coder-3B GGUF on CUDA, `--paged-attn off`, greedy, 96 tokens):
+- The branch's first load is byte-identical to master's output for the same prompt (from Run 10).
+- After `POST /v1/models/unload` then `/v1/models/reload` (200 / 200, status `loaded`), the output is byte-identical
+  to the first load.
+- The first harness attempt used the `default` alias as the model id. Unload and reload returned 404, and the "same
+  output" was a model that never left memory. The id must be the real one, not the alias. The harness now fails fast
+  if the server dies.
+
+A new unit test checks that a stored `ModelLoaderConfig` rebuilds its loader, and that its options reach the builder,
+so reload validates like the first load.
+
+Result: green, with 2130 CPU and 2449 CUDA tests (+1). 4 files, +182 / -202, including this entry.
