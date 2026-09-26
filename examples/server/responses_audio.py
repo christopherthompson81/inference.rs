@@ -45,7 +45,7 @@ resp1 = client.responses.create(
             "content": [
                 {
                     "type": "audio_url",
-                    "audio_url": {"url": "sample_speech.wav"},
+                    "audio_url": {"url": "examples/assets/sample_speech.wav"},
                 },
                 {
                     "type": "text",

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from inference_rs import ChatCompletionRequest, MultimodalArchitecture, Runner, Which
 
-IMAGE = Path("inference/tests/fixtures/paddleocr_vl/table.png")
+IMAGE = Path("crates/inference/tests/fixtures/paddleocr_vl/table.png")
 image_url = "data:image/png;base64," + base64.b64encode(IMAGE.read_bytes()).decode()
 
 runner = Runner(

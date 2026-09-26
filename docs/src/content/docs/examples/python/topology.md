@@ -18,7 +18,7 @@ runner = Runner(
     which=Which.Plain(
         model_id="mistralai/Mistral-7B-Instruct-v0.1",
         arch=Architecture.Mistral,
-        topology="topologies/isq.yml",
+        topology="configs/topologies/isq.yml",
     ),
     in_situ_quant="Q4K",
 )

@@ -6,7 +6,7 @@ runner = Runner(
         quantized_model_id="TheBloke/zephyr-7B-beta-GGUF",
         quantized_filename="zephyr-7b-beta.Q4_0.gguf",
         xlora_model_id="lamm-mit/x-lora",
-        order="orderings/xlora-paper-ordering.json",
+        order="configs/orderings/xlora-paper-ordering.json",
         tgt_non_granular_index=None,
     )
 )

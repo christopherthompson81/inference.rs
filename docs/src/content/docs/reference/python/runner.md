@@ -623,4 +623,4 @@ Loaded aliases, resident generations, active leases, and capacity limits.
 
 ---
 
-<small>Generated from [`inference-pyo3/inference_rs.pyi`](https://github.com/christopherthompson81/inference.rs/blob/master/inference-pyo3/inference_rs.pyi).</small>
+<small>Generated from [`crates/inference-pyo3/inference_rs.pyi`](https://github.com/christopherthompson81/inference.rs/blob/master/crates/inference-pyo3/inference_rs.pyi).</small>

@@ -4,7 +4,7 @@ runner = Runner(
     which=Which.XLora(
         model_id=None,  # Automatically determine from ordering file
         xlora_model_id="lamm-mit/x-lora-gemma-7b",
-        order="orderings/xlora-gemma-paper-ordering.json",
+        order="configs/orderings/xlora-gemma-paper-ordering.json",
         tgt_non_granular_index=None,
         arch=Architecture.Mistral,
     )

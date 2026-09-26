@@ -1,46 +1,46 @@
 [workspace]
 exclude = ["third_party/cudaforge"]
 members = [
-    "inference-server-core",
-    "inference-cli",
-    "inference-core",
-    "inference-pyo3",
-    "inference",
-    "inference-vision",
-    "inference-layout",
-    "inference-ffi",
-    "inference-quant",
-    "inference-paged-attn",
-    "inference-metal-compile",
-    "inference-flash-attn",
+    "crates/inference-server-core",
+    "crates/inference-cli",
+    "crates/inference-core",
+    "crates/inference-pyo3",
+    "crates/inference",
+    "crates/inference-vision",
+    "crates/inference-layout",
+    "crates/inference-ffi",
+    "crates/inference-quant",
+    "crates/inference-paged-attn",
+    "crates/inference-metal-compile",
+    "crates/inference-flash-attn",
 
-    "inference-audio",
-    "inference-mcp",
-    "inference-macros",
-    "inference-code-exec",
-    "inference-sandbox",
+    "crates/inference-audio",
+    "crates/inference-mcp",
+    "crates/inference-macros",
+    "crates/inference-code-exec",
+    "crates/inference-sandbox",
     "examples/rust",
 ]
 # Everything but the examples, so a bare `cargo build`/`cargo test` at the root never links them.
 default-members = [
-    "inference-server-core",
-    "inference-cli",
-    "inference-core",
-    "inference-pyo3",
-    "inference",
-    "inference-vision",
-    "inference-layout",
-    "inference-ffi",
-    "inference-quant",
-    "inference-paged-attn",
-    "inference-metal-compile",
-    "inference-flash-attn",
+    "crates/inference-server-core",
+    "crates/inference-cli",
+    "crates/inference-core",
+    "crates/inference-pyo3",
+    "crates/inference",
+    "crates/inference-vision",
+    "crates/inference-layout",
+    "crates/inference-ffi",
+    "crates/inference-quant",
+    "crates/inference-paged-attn",
+    "crates/inference-metal-compile",
+    "crates/inference-flash-attn",
 
-    "inference-audio",
-    "inference-mcp",
-    "inference-macros",
-    "inference-code-exec",
-    "inference-sandbox",
+    "crates/inference-audio",
+    "crates/inference-mcp",
+    "crates/inference-macros",
+    "crates/inference-code-exec",
+    "crates/inference-sandbox",
 ]
 resolver = "2"
 
@@ -218,19 +218,19 @@ nix = { version = "0.31.3", default-features = false }
 itoa = "1.0.18"
 cutile = "=0.3.1"
 
-inference-core = { path = "inference-core", version = "0.9.3" }
-inference-paged-attn = { path = "inference-paged-attn", version = "0.9.3" }
-inference-metal-compile = { path = "inference-metal-compile", version = "0.9.3" }
-inference-flash-attn = { path = "inference-flash-attn", version = "0.9.3" }
-inference-quant = { path = "inference-quant", version = "0.9.3" }
-inference-vision = { path = "inference-vision", version = "0.9.3" }
-inference-server-core = { path = "inference-server-core", version = "0.9.3" }
-inference = { path = "inference", version = "0.9.3" }
-inference-audio = { path = "inference-audio", version = "0.9.3" }
-inference-mcp = { path = "inference-mcp", version = "0.9.3" }
-inference-macros = { path = "inference-macros", version = "0.9.3" }
-inference-code-exec = { path = "inference-code-exec", version = "0.9.3" }
-inference-sandbox = { path = "inference-sandbox", version = "0.9.3" }
+inference-core = { path = "crates/inference-core", version = "0.9.3" }
+inference-paged-attn = { path = "crates/inference-paged-attn", version = "0.9.3" }
+inference-metal-compile = { path = "crates/inference-metal-compile", version = "0.9.3" }
+inference-flash-attn = { path = "crates/inference-flash-attn", version = "0.9.3" }
+inference-quant = { path = "crates/inference-quant", version = "0.9.3" }
+inference-vision = { path = "crates/inference-vision", version = "0.9.3" }
+inference-server-core = { path = "crates/inference-server-core", version = "0.9.3" }
+inference = { path = "crates/inference", version = "0.9.3" }
+inference-audio = { path = "crates/inference-audio", version = "0.9.3" }
+inference-mcp = { path = "crates/inference-mcp", version = "0.9.3" }
+inference-macros = { path = "crates/inference-macros", version = "0.9.3" }
+inference-code-exec = { path = "crates/inference-code-exec", version = "0.9.3" }
+inference-sandbox = { path = "crates/inference-sandbox", version = "0.9.3" }
 
 [profile.release-with-debug]
 inherits = "release"

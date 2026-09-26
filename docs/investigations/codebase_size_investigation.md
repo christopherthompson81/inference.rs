@@ -116,3 +116,38 @@ Plan: `crates/`, `configs/`, `docker/`; each crate's `third_party/` with provena
 `models/{text,vision,audio,diffusion,embedding,common}`, `adapters/`, `attention/{sdpa,paged,flashinfer,mla,gdn}`.
 Do these as pure-rename PRs separate from logic changes, with each core regroup landing just before the
 consolidation of that area.
+
+## Run 4 - 2026-09-25 22:00
+
+Change: top-level layout, as pure renames.
+
+- The 17 crates move to `crates/`.
+- `toml-selectors/`, `topologies/`, `orderings/`, `matformer_configs/` and `ring_configs/` move to `configs/`.
+- The Dockerfiles move to `docker/` (the build context stays the root).
+- `res/` moves to `docs/assets/`, and `sample_speech.wav` to `examples/assets/`.
+- `scripts/` gets `bench/`, `release/`, `convert/` and `testgen/`. `local_ci.sh` and `sweep_target.py` stay at the top.
+- `chat_templates/` and `calibration_data/` stay at the root. They are documented paths that users type and that
+  Docker copies.
+
+What had to change besides the moves:
+
+- Root manifest members, default-members and path deps.
+- Crate `readme = "../../README.md"`.
+- Three `CARGO_MANIFEST_DIR` + `/../docs` paths (openapi, CLI reference, supported models) and the `include_str!`
+  of the TOML selectors.
+- CI path filters (docs, metal shaders), the Makefile clang-format `find`, `.gitignore`, `.gitattributes` and
+  `.typos.toml`.
+- `render_pyi.py` (a `Path` join the text rewrite could not see), `build_wheels.py` repo-root math, and the soak
+  test's package import.
+- Docs and examples that name moved paths.
+
+The crate-path rewrite was token-based: `inference/cuda` is a feature and `distributed-inference/` is a docs slug,
+so a blanket replace would have broken both. Manifests only had their `path =` values rewritten.
+
+Follow-up (after the reorganization): the layout move forced a cold CUDA workspace build (~25 min of kernels). It
+showed two things:
+- `inference-flash-attn/build.rs` capped itself at `.thread_percentage(0.5)` (upstream). Under the jobserver that
+  only bites when FA2 is the last crate compiling, which is the tail of every cold CUDA build. The cap is removed.
+- The long TUs are FA2 `flash_fwd_*_hdim{192,256,512}` / `splitkv` and the FlashInfer FP8 decode TUs, 4-5 min of
+  cicc each. Next: time every TU from a cold build and split the worst, as was done for gdn.cu and
+  flashinfer_decode.cu.

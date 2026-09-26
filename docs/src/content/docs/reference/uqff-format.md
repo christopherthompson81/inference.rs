@@ -56,7 +56,7 @@ Shards store full tensors; under tensor parallelism each rank slices its portion
 
 ## Reference implementation
 
-Canonical implementations: `inference-quant/src/uqff` (reader, tensor encoding) and `inference-core/src/pipeline/isq.rs` (writer).
+Canonical implementations: `crates/inference-quant/src/uqff` (reader, tensor encoding) and `crates/inference-core/src/pipeline/isq.rs` (writer).
 
 ## Caveats
 

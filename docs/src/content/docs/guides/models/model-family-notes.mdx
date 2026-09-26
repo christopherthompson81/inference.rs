@@ -162,11 +162,11 @@ MatFormer-trained models encode multiple model sizes in one checkpoint; the desi
 - `matformer_config_path`: path to the slice config file (CSV or JSON) shipped with the model card.
 - `matformer_slice_name`: the named slice within that file.
 
-Without these, the default (full) configuration loads. Gemma 3n (`google/gemma-3n-E4B-it`) is the MatFormer model in the supported list; the bundled `matformer_configs/gemma3n.csv` contains the full E4B configuration, the official E2B slice, and intermediate E1.96B-E3.79B slices:
+Without these, the default (full) configuration loads. Gemma 3n (`google/gemma-3n-E4B-it`) is the MatFormer model in the supported list; the bundled `configs/matformer_configs/gemma3n.csv` contains the full E4B configuration, the official E2B slice, and intermediate E1.96B-E3.79B slices:
 
 ```bash
 inference run -m google/gemma-3n-E4B-it \
-  --matformer-config-path matformer_configs/gemma3n.csv \
+  --matformer-config-path configs/matformer_configs/gemma3n.csv \
   --matformer-slice-name "Config for E2.49B (block-level)"
 ```
 

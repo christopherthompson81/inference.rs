@@ -9,9 +9,9 @@ on:
       - "docs/**"
       - "examples/**"
       - "examples/rust/**"
-      - "inference-cli/**"
-      - "inference-pyo3/**"
-      - "inference-server-core/**"
+      - "crates/inference-cli/**"
+      - "crates/inference-pyo3/**"
+      - "crates/inference-server-core/**"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
@@ -20,9 +20,9 @@ on:
       - "docs/**"
       - "examples/**"
       - "examples/rust/**"
-      - "inference-cli/**"
-      - "inference-pyo3/**"
-      - "inference-server-core/**"
+      - "crates/inference-cli/**"
+      - "crates/inference-pyo3/**"
+      - "crates/inference-server-core/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 

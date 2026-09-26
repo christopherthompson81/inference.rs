@@ -94,16 +94,16 @@ From a repository checkout:
 
 ```bash
 # CPU
-docker build -t inference:latest -f Dockerfile .
+docker build -t inference:latest -f docker/Dockerfile .
 
 # CUDA source build (set the compute capability for your GPU)
-docker build -t inference:cuda -f Dockerfile.cuda-13.0-ubi9 \
+docker build -t inference:cuda -f docker/Dockerfile.cuda-13.0-ubi9 \
   --build-arg CUDA_COMPUTE_CAP=89 \
   --build-arg WITH_FEATURES=cuda,cudnn,flash-attn .
 ```
 
-- `Dockerfile.cuda-13.0-ubi9` builds from source on Red Hat UBI 9 and accepts `CUDA_COMPUTE_CAP` and `WITH_FEATURES`.
-- `Dockerfile.cuda-all` is not a source-build Dockerfile.
+- `docker/Dockerfile.cuda-13.0-ubi9` builds from source on Red Hat UBI 9 and accepts `CUDA_COMPUTE_CAP` and `WITH_FEATURES`.
+- `docker/Dockerfile.cuda-all` is not a source-build Dockerfile.
 - Release images are cuTile-capable on supported CUDA/SM pairs. NVIDIA's `tileiras` tool is not redistributed in the image. Supply an official installation as described in [cuTile setup](/developer/moe-backends/) to activate cuTile.
 - Building with `flash-attn` is slow the first time; later builds use the layer cache.
 

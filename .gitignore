@@ -7,7 +7,7 @@ __pycache__/
 .idea
 inference.rs/
 
-inference-cli/webui/node_modules/
+crates/inference-cli/webui/node_modules/
 
 # mdbook output
 docs/book/
