@@ -90,7 +90,6 @@ fn main() {
             println!("cargo:rustc-cfg=has_gdn_fp8_producer");
         }
         println!("cargo:rerun-if-changed=build.rs");
-        println!("cargo:rerun-if-changed=src/cuda");
         println!("cargo:rerun-if-env-changed=CUDA_NVCC_FLAGS");
         println!("cargo:rerun-if-env-changed=NVCC");
         println!("cargo:rerun-if-env-changed=CUDA_HOME");

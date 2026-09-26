@@ -88,7 +88,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-mcp/` - Model Context Protocol client
 - `crates/inference-layout/` - Document layout detection (PP-DocLayoutV3) with custom CPU/CUDA kernels
 - `crates/inference-ffi/` - C ABI (`libinference_ffi`, header `include/inference.h`) for bindings in other languages
-- Kernel sources live in `<crate>/kernels/{cuda,metal}/`; each kernel crate's `third_party/README.md` records upstream provenance and license.
+- Kernel sources live in `<crate>/kernels/{cuda,metal}/` (inference-layout compiles inline sources with NVRTC); each kernel crate's `third_party/README.md` records upstream provenance and license.
 
 ### Key Design Patterns
 

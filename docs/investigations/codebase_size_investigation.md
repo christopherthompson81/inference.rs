@@ -158,11 +158,11 @@ Change: kernel layout and provenance, as renames only.
 
 - Every kernel source moves to `<crate>/kernels/{cuda,metal}/`: flash-attn `kernels/`, quant `kernels/<group>` and
   `src/metal_kernels/*.metal`, paged-attn and core `src/cuda` kernel files and `src/metal/kernels/*.metal`. That is
-  226 moves. The Rust bindings stay in `src/`.
+  276 renames, all 100% similar. The Rust bindings stay in `src/`.
 - Build globs, watches, header hashes, FA3 include paths, the Metal `source_dir`s, core's two Metal `include_str!`
   and the Metal CI `xcrun` paths are updated.
-- The quant and flash-attn watches narrow to `kernels/cuda`, so editing a Metal shader no longer reruns the CUDA
-  build.
+- The quant and flash-attn watches narrow to `kernels/cuda`, which keeps Metal edits out of the CUDA build now that
+  quant's shaders sit under `kernels/`.
 
 Provenance: a survey of copyright headers, attribution comments, identifiers and first-add commits traced every
 kernel directory to an upstream. The sources are FA2 via candle, FA3 via vLLM's fork, vLLM (paged attention, cache,
@@ -180,7 +180,7 @@ FlashInfer revision.
 Gaps: most adapted code has no pinned upstream revision, and the MIT/BSD components have no verbatim license text in
 the tree, only per-file headers.
 
-## Run 6 - 2026-09-26 00:00
+## Run 6 - 2026-09-25 23:45
 
 Question: which kernel TUs dominate a cold CUDA build? The Run 5 moves forced one.
 
@@ -197,7 +197,11 @@ Finding:
   `flash_fwd_hdim{160,224,256,128}_*` (300-367 s), gdn `{f16,f32,bf16}_bk128_vmajor` (~320 s), and the FlashInfer FP8
   decode `*_fp8_hd{64,128,256,512}` (286-310 s).
 
-Implication: no single TU dominates. The cost is the volume of template instantiations, and FA2 alone is 53 units of
-4-6 min. Splitting more will not shrink the total. What would: fewer instantiations (head dims and dtypes nothing
+Implication: no single TU dominates, and FA2 alone is 53 units of 4-6 min. Splitting is not meant to shrink the total.
+It shortens the tail: wall time is about max(total work / threads, the chain of long units still running at the end).
+With 5-6 min units starting late, concurrency tapers (8 in the last bucket) rather than dropping to zero at once. The
+complement is longest-first scheduling. cudaforge compiles in source-glob order, so a 6-min unit can start last and
+set the finish alone. Ordering jobs by expected cost (previous time or source size) packs the tail, and splitting the
+heaviest units tightens it further. What would: fewer instantiations (head dims and dtypes nothing
 uses), cheaper templates, or checking why concurrency sits at 10-13 instead of 16 after the first ~4 min. Before
 trusting the concurrency numbers, fix the sampler's `ptxas` matching.

@@ -47,6 +47,8 @@ extend-ignore-re = [
 ]
 
 [default.extend-words]
+# IST-DASLab, the Marlin authors' GitHub org
+"IST" = "IST"
 "Ba" = "Ba"
 "hel" = "hel"
 shll = "shll"
