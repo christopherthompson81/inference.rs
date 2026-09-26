@@ -30,7 +30,7 @@ use crate::{
     },
 };
 
-use super::Gemma3nSpecificArgs;
+use super::{Gemma3nSpecificArgs, AUDIO_TOKEN_ID, IMAGE_TOKEN_ID};
 
 struct Gemma3nImageProcessor {
     supports_images: bool,
@@ -69,12 +69,10 @@ impl Gemma3nImageProcessor {
 const IMAGE_TOKEN: &str = "<image_soft_token>";
 const BOI_TOKEN: &str = "<start_of_image>";
 const EOI_TOKEN: &str = "<end_of_image>";
-pub const IMAGE_TOKEN_ID: u32 = 262145;
 
 const AUDIO_TOKEN: &str = "<audio_soft_token>";
 const BOA_TOKEN: &str = "<start_of_audio>";
 const EOA_TOKEN: &str = "<end_of_audio>";
-pub const AUDIO_TOKEN_ID: u32 = 262273; // audio_vocab_offset + 1
 
 fn gemma3n_active_items(
     features: &[MultiModalFeature],

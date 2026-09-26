@@ -2140,7 +2140,7 @@ impl TextModel {
             active_bidirectional_attention == Gemma4BidirectionalAttention::Vision,
             ctx.is_paged(),
             xs.device().is_cuda(),
-            crate::using_flash_attn(),
+            crate::utils::using_flash_attn(),
             ctx.flash_params().packed,
             has_range_metadata,
         )?;

@@ -36,6 +36,9 @@ pub(crate) mod text;
 pub mod vision;
 pub(crate) use inputs_processor::Gemma3nProcessor;
 
+pub const IMAGE_TOKEN_ID: u32 = 262145;
+pub const AUDIO_TOKEN_ID: u32 = 262273; // audio_vocab_offset + 1
+
 fn select_encoder_rows(outputs: &[Tensor], ranges: &[Range<usize>]) -> Result<Tensor> {
     if outputs.len() != ranges.len() || outputs.is_empty() {
         candle_core::bail!("Gemma 3n encoder output metadata length mismatch");
@@ -393,7 +396,7 @@ impl Gemma3nModel {
                 input_embeds = scatter_soft_embeddings(
                     input_ids,
                     &input_embeds,
-                    inputs_processor::IMAGE_TOKEN_ID,
+                    IMAGE_TOKEN_ID,
                     &outputs,
                     image_source_ranges,
                 )?;
@@ -434,7 +437,7 @@ impl Gemma3nModel {
                     input_embeds = scatter_soft_embeddings(
                         input_ids,
                         &input_embeds,
-                        inputs_processor::AUDIO_TOKEN_ID,
+                        AUDIO_TOKEN_ID,
                         &outputs,
                         audio_source_ranges,
                     )?;
