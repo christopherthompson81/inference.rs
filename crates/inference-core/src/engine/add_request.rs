@@ -81,7 +81,7 @@ impl Engine {
                     && !in_agentic_loop
                     && (has_search || has_tooling || has_agentic || has_input_files)
                 {
-                    agentic_loop::agentic_loop(self.clone(), *request).await;
+                    Box::pin(agentic_loop::agentic_loop(self.clone(), *request)).await;
                 } else if request.files.as_ref().is_some_and(|f| !f.is_empty()) {
                     // `request.files` is set but nothing would produce them. Reject rather than silently degrading to a plain chat.
                     let _ = request
@@ -98,7 +98,7 @@ impl Engine {
                     if is_chat && !request.input_files.is_empty() {
                         agentic_loop::inject_input_files_message(&mut request);
                     }
-                    self.add_request(*request).await;
+                    Box::pin(self.add_request(*request)).await;
                 }
             }
             Request::ReIsq(level) => {

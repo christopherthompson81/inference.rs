@@ -453,3 +453,15 @@ Review follow-ups:
   Also large: serde (serialize/visit_map ~13%) and utoipa's OpenAPI generation (`compose`, `operation`, `schemas`
   ~8%).
 - Change: encode with `PngEncoder` directly. Result: 2.10M -> 1.48M lines (-29%), rav1e gone.
+
+## Run 23 - 2026-09-26 17:10
+
+- Question: does boxing the request-handling futures shrink the engine's big async functions?
+- Change: `dispatch_prepared_request` awaits `Box::pin(handle_request(..))`, and `handle_request` boxes its
+  `agentic_loop` and `add_request` calls, so `Engine::run` no longer carries request handling in its state machine.
+- Result (self-profile, per item): `add_request` mir_borrowck 319 -> 149 ms; `agentic_loop` 201 -> 179 ms (plus
+  136 ms of coroutine obligations of its own); `Engine::run` 202 -> 192 ms (its cost is its own 1134-line body).
+  Whole-crate `-Z time-passes` moved within noise (73.3/66.1 s before vs 70.7 s after, load average 8-10).
+- Implication: sub-second. Splitting `add_request` validation into a sync function would take another ~0.1 s and
+  is worth doing for readability, not build time. The larger serial phases left in core are
+  generate_crate_metadata (~12 s) and the type/borrow checking spread over many items.

@@ -906,7 +906,8 @@ impl Engine {
         if matches!(request, Request::Terminate) {
             return false;
         }
-        self.clone().handle_request(request).await;
+        // Boxed so the scheduler loop does not carry request handling (and the agentic loop) in its state machine.
+        Box::pin(self.clone().handle_request(request)).await;
         true
     }
 
