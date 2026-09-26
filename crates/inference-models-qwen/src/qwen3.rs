@@ -9,11 +9,12 @@ use inference_quant::{
     ShardedVarBuilder,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use crate::kv_cache::EitherCache;
 use crate::kv_cache::KvCache;
 use crate::kv_cache::NormalCache;
+use crate::kv_cache::NormalCacheType;
 use crate::model::IsqModel;
 use crate::model::ModelForwardContext;
 use crate::model::NormalLoadingMetadata;
@@ -24,87 +25,52 @@ use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
         embedding_with_legacy_tied_uqff, Activation, CausalMasker, Mlp, RmsNorm, RotaryEmbedding,
-        YarnRopeConfig,
     },
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 
+macro_rules! sliding_window {
+    ($layer_idx:expr, $cfg:expr) => {
+        if !($cfg.sliding_window.is_some()
+            && $cfg.use_sliding_window
+            && $layer_idx >= $cfg.max_window_layers)
+        {
+            None
+        } else {
+            $cfg.sliding_window
+        }
+    };
+}
+
 serde_default_fn!(bool, tie_word_embeddings, false);
-serde_default_fn!(f64, default_rope_theta, 10000.0);
-
-/// RoPE type for Mistral models
-#[derive(Debug, Clone, Deserialize, Serialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum MistralRopeType {
-    #[default]
-    #[serde(rename = "default")]
-    Default,
-    #[serde(rename = "yarn")]
-    Yarn,
-}
-
-/// RoPE parameters for Mistral models, supporting YARN scaling
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct MistralRopeParameters {
-    pub rope_theta: f64,
-    #[serde(default)]
-    pub rope_type: MistralRopeType,
-    // YARN parameters (optional)
-    pub factor: Option<f32>,
-    pub beta_fast: Option<f32>,
-    pub beta_slow: Option<f32>,
-    pub mscale: Option<f32>,
-    pub mscale_all_dim: Option<f32>,
-    pub original_max_position_embeddings: Option<usize>,
-    #[serde(default)]
-    pub llama_4_scaling_beta: Option<f32>,
-}
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
-    pub(crate) vocab_size: usize,
-    pub(crate) hidden_size: usize,
-    pub(crate) intermediate_size: usize,
-    pub(crate) num_hidden_layers: usize,
-    pub(crate) num_attention_heads: usize,
-    pub(crate) num_key_value_heads: usize,
-    pub(crate) hidden_act: Activation,
-    pub(crate) max_position_embeddings: usize,
-    pub(crate) rms_norm_eps: f64,
-    // Support both flat rope_theta and nested rope_parameters
-    #[serde(default = "default_rope_theta")]
-    pub(crate) rope_theta: f64,
-    #[serde(default)]
-    pub(crate) rope_parameters: Option<MistralRopeParameters>,
-    pub(crate) sliding_window: Option<usize>,
-    pub(crate) head_dim: Option<usize>,
-    pub(crate) quantization_config: Option<QuantizedConfig>,
+    pub vocab_size: usize,
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+    pub num_hidden_layers: usize,
+    pub num_attention_heads: usize,
+    pub num_key_value_heads: usize,
+    pub hidden_act: Activation,
+    pub max_position_embeddings: usize,
+    pub rms_norm_eps: f64,
+    pub rope_theta: f64,
+    pub sliding_window: Option<usize>,
+    pub head_dim: Option<usize>,
+    pub quantization_config: Option<QuantizedConfig>,
     #[serde(default = "tie_word_embeddings")]
-    pub(crate) tie_word_embeddings: bool,
+    pub tie_word_embeddings: bool,
+    pub max_window_layers: usize,
+    pub use_sliding_window: bool,
 }
 
 impl Config {
-    pub(crate) fn head_dim(&self) -> usize {
+    pub fn head_dim(&self) -> usize {
         self.head_dim
             .unwrap_or(self.hidden_size / self.num_attention_heads)
-    }
-
-    /// Get rope_theta from either flat field or rope_parameters
-    pub(crate) fn get_rope_theta(&self) -> f64 {
-        self.rope_parameters
-            .as_ref()
-            .map(|p| p.rope_theta)
-            .unwrap_or(self.rope_theta)
-    }
-
-    fn attention_temperature(&self) -> Option<(f32, usize)> {
-        let rope = self.rope_parameters.as_ref()?;
-        Some((
-            rope.llama_4_scaling_beta?,
-            rope.original_max_position_embeddings?,
-        ))
     }
 }
 
@@ -113,20 +79,25 @@ struct Attention {
     k_proj: Arc<dyn QuantMethod>,
     v_proj: Arc<dyn QuantMethod>,
     o_proj: Arc<dyn QuantMethod>,
+    q_norm: RmsNorm,
+    k_norm: RmsNorm,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
     rotary_emb: Arc<RotaryEmbedding>,
     paged_attn: Option<PagedAttention>,
     sdpa_params: SdpaParams,
-    attention_temperature: Option<(f32, usize)>,
 }
 
 impl Attention {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         rotary_emb: Arc<RotaryEmbedding>,
         cfg: &Config,
         vb: ShardedVarBuilder,
+        mapper: &dyn DeviceMapper,
+        layer_idx: usize,
+        loading_isq: bool,
         paged_attn: Option<PagedAttention>,
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
@@ -140,7 +111,7 @@ impl Attention {
             &cfg.quantization_config,
             false,
             comm,
-            vb.pp("q_proj"),
+            mapper.set_device(layer_idx, vb.pp("q_proj"), loading_isq),
         )?;
         let kv_shard = inference_quant::compute_kv_shard(
             cfg.num_key_value_heads,
@@ -154,7 +125,7 @@ impl Attention {
             false,
             comm,
             kv_shard,
-            vb.pp("k_proj"),
+            mapper.set_device(layer_idx, vb.pp("k_proj"), loading_isq),
         )?;
         let v_proj = ColumnParallelLayer::new_with_shard(
             hidden_sz,
@@ -163,7 +134,7 @@ impl Attention {
             false,
             comm,
             kv_shard,
-            vb.pp("v_proj"),
+            mapper.set_device(layer_idx, vb.pp("v_proj"), loading_isq),
         )?;
         let o_proj = RowParallelLayer::new(
             num_heads * head_dim,
@@ -171,19 +142,31 @@ impl Attention {
             &cfg.quantization_config,
             false,
             comm,
-            vb.pp("o_proj"),
+            mapper.set_device(layer_idx, vb.pp("o_proj"), loading_isq),
+        )?;
+        let sliding_window = sliding_window!(layer_idx, cfg);
+        let q_norm = RmsNorm::new(
+            cfg.head_dim(),
+            cfg.rms_norm_eps,
+            mapper.set_device(layer_idx, vb.pp("q_norm"), false),
+        )?;
+        let k_norm = RmsNorm::new(
+            cfg.head_dim(),
+            cfg.rms_norm_eps,
+            mapper.set_device(layer_idx, vb.pp("k_norm"), false),
         )?;
         Ok(Self {
             q_proj,
             k_proj,
             v_proj,
             o_proj,
+            q_norm,
+            k_norm,
             num_heads: num_heads / comm.world_size(),
             num_kv_heads: (num_kv_heads / comm.world_size()).max(1),
             head_dim,
             rotary_emb,
             paged_attn,
-            attention_temperature: cfg.attention_temperature(),
             sdpa_params: SdpaParams {
                 n_kv_groups: inference_quant::compute_n_kv_groups(
                     cfg.num_key_value_heads,
@@ -192,7 +175,7 @@ impl Attention {
                 )?,
                 softcap: None,
                 softmax_scale: 1.0 / (head_dim as f32).sqrt(),
-                sliding_window: cfg.sliding_window,
+                sliding_window,
                 sinks: None,
             },
         })
@@ -208,9 +191,9 @@ impl Attention {
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
 
-        let (q, k, v) =
+        let (mut q, mut k, mut v) =
             crate::ops::qkv_projections(xs, &*self.q_proj, &*self.k_proj, &*self.v_proj)?;
-        let (q, k, v) = if q_len != 1 {
+        (q, k, v) = if q_len != 1 {
             let q = q
                 .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
                 .transpose(1, 2)?;
@@ -231,16 +214,15 @@ impl Attention {
         let rope_positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
             .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
-        let (mut q, k) = self.rotary_emb.forward(&q, &k, rope_positions)?;
-        if let Some((scale, floor_scale)) = self.attention_temperature {
-            let floor = (rope_positions.to_dtype(DType::F32)? / floor_scale as f64)?.floor()?;
-            let scales =
-                ((((floor + 1.)?.log()? * scale as f64)? + 1.)?).reshape((b_sz, 1, q_len, 1))?;
-            q = q
-                .to_dtype(DType::F32)?
-                .broadcast_mul(&scales)?
-                .to_dtype(q.dtype())?;
-        }
+        (q, k) = self.rotary_emb.forward_qk_norm(
+            &q,
+            &k,
+            self.q_norm.weight(),
+            self.k_norm.weight(),
+            self.q_norm.eps(),
+            self.k_norm.eps(),
+            rope_positions,
+        )?;
         let metadata = ctx.paged_layer(layer_idx);
 
         let mut attn_output = AttentionDispatch {
@@ -285,6 +267,9 @@ impl DecoderLayer {
             rotary_emb,
             cfg,
             mapper.set_device(layer_idx, vb.pp("self_attn"), loading_isq),
+            mapper,
+            layer_idx,
+            loading_isq,
             paged_attn,
             comm,
         )?;
@@ -344,7 +329,7 @@ pub struct Model {
     dtype: DType,
     sliding_window: Option<usize>,
     device: Device,
-    pub(crate) cache: EitherCache,
+    cache: EitherCache,
     max_seq_len: usize,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
     cfg: ModelConfigMetadata,
@@ -399,66 +384,29 @@ impl Model {
         )?;
 
         let head_dim = cfg.head_dim();
-        let mut ropes = HashMap::new();
-        for layer_idx in 0..cfg.num_hidden_layers {
-            let device = mapper
-                .device_for(layer_idx, false)
-                .unwrap_or(&normal_loading_metadata.real_device);
-            let location = device.location();
-            if ropes.contains_key(&location) {
-                continue;
-            }
-            let rotary = match cfg.rope_parameters.as_ref() {
-                Some(rope) if matches!(rope.rope_type, MistralRopeType::Yarn) => {
-                    RotaryEmbedding::new_yarn(
-                        &YarnRopeConfig {
-                            base: rope.rope_theta as f32,
-                            head_dim,
-                            max_position_embeddings: cfg.max_position_embeddings,
-                            original_max_position_embeddings: rope
-                                .original_max_position_embeddings
-                                .ok_or_else(|| {
-                                    candle_core::Error::msg(
-                                        "YARN original context length is required",
-                                    )
-                                })?,
-                            factor: rope.factor.ok_or_else(|| {
-                                candle_core::Error::msg("YARN factor is required")
-                            })?,
-                            beta_fast: rope.beta_fast.ok_or_else(|| {
-                                candle_core::Error::msg("YARN beta_fast is required")
-                            })?,
-                            beta_slow: rope.beta_slow.ok_or_else(|| {
-                                candle_core::Error::msg("YARN beta_slow is required")
-                            })?,
-                            mscale: rope.mscale.unwrap_or(1.),
-                            mscale_all_dim: rope.mscale_all_dim.unwrap_or(0.),
-                            attention_factor: None,
-                        },
-                        device,
-                        is_gptx,
-                        vb_m.dtype(),
-                    )?
-                }
-                _ => RotaryEmbedding::new(
-                    cfg.get_rope_theta() as f32,
+        let ropes = crate::device_map::per_layer_device(
+            &*mapper,
+            cfg.num_hidden_layers,
+            &normal_loading_metadata.real_device,
+            |device| {
+                RotaryEmbedding::new(
+                    cfg.rope_theta as f32,
                     head_dim,
                     cfg.max_position_embeddings,
                     device,
                     is_gptx,
                     vb_m.dtype(),
-                )?,
-            };
-            ropes.insert(location, Arc::new(rotary));
-        }
+                )
+            },
+        )?;
 
         let vb_l = vb_m.pp("layers");
-        let layers: Vec<DecoderLayer> = NiceProgressBar::<_, 'b'>(
+        let layers = NiceProgressBar::<_, 'b'>(
             0..cfg.num_hidden_layers,
             "Loading repeating layers",
             &normal_loading_metadata.multi_progress,
         )
-        .par_iter_if_isq(|layer_idx| {
+        .par_iter_if_isq(|layer_idx| -> Result<DecoderLayer> {
             let device = mapper
                 .device_for(layer_idx, false)
                 .unwrap_or(&normal_loading_metadata.real_device);
@@ -500,6 +448,15 @@ impl Model {
         } else {
             embed_tokens.clone()
         };
+        let cache_types = (0..cfg.num_hidden_layers)
+            .map(|layer_idx| {
+                sliding_window!(layer_idx, cfg)
+                    .map(|window| NormalCacheType::SlidingWindow { window })
+                    .unwrap_or(NormalCacheType::Normal {
+                        max_seq_len: cfg.max_position_embeddings,
+                    })
+            })
+            .collect::<Vec<_>>();
         Ok(Self {
             embed_tokens,
             layers,
@@ -508,11 +465,7 @@ impl Model {
             dtype,
             sliding_window: cfg.sliding_window,
             device: normal_loading_metadata.real_device,
-            cache: EitherCache::Normal(NormalCache::new_sliding(
-                cfg.num_hidden_layers,
-                cfg.max_position_embeddings,
-                cfg.sliding_window,
-            )),
+            cache: EitherCache::Normal(NormalCache::from_types(cache_types)),
             max_seq_len: cfg.max_position_embeddings,
             cfg: ModelConfigMetadata {
                 max_seq_len: cfg.max_position_embeddings,
@@ -528,10 +481,6 @@ impl Model {
             },
             mapper,
         })
-    }
-
-    pub fn get_input_embeddings(&self, input_ids: &Tensor) -> Result<Tensor> {
-        self.embed_tokens.embedding_forward(input_ids, self.dtype)
     }
 
     pub fn forward(
@@ -596,6 +545,14 @@ impl IsqModel for Model {
             uvb_l
                 .pp("post_attention_layernorm")
                 .add(&layer.post_attention_layernorm);
+            uvb_l
+                .pp("self_attn")
+                .pp("q_norm")
+                .add(&layer.self_attn.q_norm);
+            uvb_l
+                .pp("self_attn")
+                .pp("k_norm")
+                .add(&layer.self_attn.k_norm);
         }
 
         uvb.to_safetensors()

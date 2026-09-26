@@ -34,28 +34,28 @@ serde_default_fn!(usize, max_position_embeddings, 32768);
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
-    pub(crate) vocab_size: usize,
-    pub(crate) hidden_size: usize,
-    pub(crate) intermediate_size: usize,
-    pub(crate) num_hidden_layers: usize,
-    pub(crate) num_attention_heads: usize,
-    pub(crate) num_key_value_heads: usize,
-    pub(crate) hidden_act: Activation,
-    pub(crate) rms_norm_eps: f64,
-    pub(crate) rope_theta: f64,
-    pub(crate) sliding_window: Option<usize>,
-    pub(crate) partial_rotary_factor: Option<f32>,
+    pub vocab_size: usize,
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+    pub num_hidden_layers: usize,
+    pub num_attention_heads: usize,
+    pub num_key_value_heads: usize,
+    pub hidden_act: Activation,
+    pub rms_norm_eps: f64,
+    pub rope_theta: f64,
+    pub sliding_window: Option<usize>,
+    pub partial_rotary_factor: Option<f32>,
     #[serde(default = "max_position_embeddings")]
-    pub(crate) max_position_embeddings: usize,
-    pub(crate) attention_bias: Option<bool>,
-    pub(crate) head_dim: Option<usize>,
-    pub(crate) quantization_config: Option<QuantizedConfig>,
+    pub max_position_embeddings: usize,
+    pub attention_bias: Option<bool>,
+    pub head_dim: Option<usize>,
+    pub quantization_config: Option<QuantizedConfig>,
     #[serde(default = "tie_word_embeddings")]
-    pub(crate) tie_word_embeddings: bool,
+    pub tie_word_embeddings: bool,
 }
 
 impl Config {
-    pub(crate) fn head_dim(&self) -> usize {
+    pub fn head_dim(&self) -> usize {
         self.head_dim
             .unwrap_or(self.hidden_size / self.num_attention_heads)
     }

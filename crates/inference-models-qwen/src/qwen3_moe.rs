@@ -3,129 +3,81 @@
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use candle_core::{DType, Device, Module, Result, Tensor};
-use candle_nn::LayerNorm;
+use candle_nn::Linear;
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
 };
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 use crate::kv_cache::EitherCache;
 use crate::kv_cache::KvCache;
 use crate::kv_cache::NormalCache;
+use crate::kv_cache::NormalCacheType;
 use crate::model::IsqModel;
 use crate::model::ModelForwardContext;
 use crate::model::NormalLoadingMetadata;
 use crate::model::NormalModel;
+use crate::moe::{MoEExperts, MoEExpertsConfig};
 use crate::{
-    amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, AnyMoeTrainableLayer, MlpLayer},
+    amoe::AnyMoeBaseModelMixin,
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
-    layers::{embedding, layer_norm, Activation, CausalMasker, RotaryEmbedding},
+    layers::{
+        self, embedding_with_legacy_tied_uqff, Activation, CausalMasker, RmsNorm, RotaryEmbedding,
+    },
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 
-serde_default_fn!(bool, word_emb_default, false);
+macro_rules! sliding_window {
+    ($layer_idx:expr, $cfg:expr) => {
+        if !($cfg.sliding_window.is_some()
+            && $cfg.use_sliding_window
+            && $layer_idx >= $cfg.max_window_layers)
+        {
+            None
+        } else {
+            $cfg.sliding_window
+        }
+    };
+}
 
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize, Default)]
+serde_default_fn!(bool, tie_word_embeddings, false);
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Config {
-    pub(crate) vocab_size: usize,
-    pub(crate) hidden_size: usize,
-    pub(crate) intermediate_size: usize,
-    pub(crate) num_hidden_layers: usize,
-    pub(crate) num_attention_heads: usize,
-    pub(crate) num_key_value_heads: usize,
-    pub(crate) hidden_act: Activation,
-    pub(crate) max_position_embeddings: usize,
-    pub(crate) norm_epsilon: f64,
-    pub(crate) rope_theta: f64,
-    pub(crate) use_bias: bool,
-    pub(crate) sliding_window: Option<usize>,
-    pub(crate) quantization_config: Option<QuantizedConfig>,
-    #[serde(default = "word_emb_default")]
-    pub(crate) tie_word_embeddings: bool,
+    pub vocab_size: usize,
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+    pub num_hidden_layers: usize,
+    pub num_attention_heads: usize,
+    pub num_key_value_heads: usize,
+    pub hidden_act: Activation,
+    pub max_position_embeddings: usize,
+    pub rms_norm_eps: f64,
+    pub rope_theta: f64,
+    pub sliding_window: Option<usize>,
+    pub head_dim: Option<usize>,
+    pub quantization_config: Option<QuantizedConfig>,
+    #[serde(default = "tie_word_embeddings")]
+    pub tie_word_embeddings: bool,
+    pub max_window_layers: usize,
+    pub use_sliding_window: bool,
+    pub moe_intermediate_size: usize,
+    pub num_experts: usize,
+    pub mlp_only_layers: Vec<usize>,
+    pub decoder_sparse_step: usize,
+    pub norm_topk_prob: bool,
+    pub num_experts_per_tok: usize,
 }
 
-#[derive(Clone)]
-#[allow(clippy::upper_case_acronyms)]
-struct MLP {
-    c_fc: Arc<dyn QuantMethod>,
-    c_proj: Arc<dyn QuantMethod>,
-    act: Activation,
-    params: Vec<usize>,
-}
-
-impl MLP {
-    fn new(cfg: &Config, vb: ShardedVarBuilder, comm: &Arc<inference_quant::Comm>) -> Result<Self> {
-        let (h_size, i_size) = (cfg.hidden_size, cfg.intermediate_size);
-        let c_fc = ColumnParallelLayer::new(
-            h_size,
-            i_size,
-            &cfg.quantization_config,
-            cfg.use_bias,
-            comm,
-            vb.pp("c_fc"),
-        )?;
-        let c_proj = RowParallelLayer::new(
-            i_size,
-            h_size,
-            &cfg.quantization_config,
-            cfg.use_bias,
-            comm,
-            vb.pp("c_proj"),
-        )?;
-        Ok(Self {
-            c_fc,
-            c_proj,
-            act: cfg.hidden_act,
-            params: vec![h_size, i_size],
-        })
-    }
-}
-
-impl AnyMoeTrainableLayer for MLP {}
-
-impl MlpLayer for MLP {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let res = self
-            .c_proj
-            .forward(&self.c_fc.forward(xs)?.apply(&self.act)?)?;
-        Ok(res)
-    }
-    fn clone(&self) -> Box<dyn MlpLayer> {
-        Box::new(Clone::clone(self))
-    }
-    fn get_params(&self) -> &[usize] {
-        &self.params
-    }
-    fn hidden_act(&self) -> Activation {
-        self.act
-    }
-    // c_fc, c_proj
-    fn new_added_delta(&self, deltas: Vec<Option<Tensor>>) -> Result<Box<dyn MlpLayer>> {
-        let new_c_fc = if let Some(ref delta) = deltas[0] {
-            self.c_fc.add_delta_w(delta)?
-        } else {
-            self.c_fc.clone()
-        };
-        let new_c_proj = if let Some(ref delta) = deltas[1] {
-            self.c_proj.add_delta_w(delta)?
-        } else {
-            self.c_proj.clone()
-        };
-
-        Ok(Box::new(Self {
-            c_fc: new_c_fc,
-            c_proj: new_c_proj,
-            act: self.act,
-            params: self.params.clone(),
-        }))
-    }
-
-    fn dtype_device(&self) -> (DType, Device) {
-        self.c_fc.dtype_and_device()
+impl Config {
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
+            .unwrap_or(self.hidden_size / self.num_attention_heads)
     }
 }
 
@@ -134,6 +86,8 @@ struct Attention {
     k_proj: Arc<dyn QuantMethod>,
     v_proj: Arc<dyn QuantMethod>,
     o_proj: Arc<dyn QuantMethod>,
+    q_norm: RmsNorm,
+    k_norm: RmsNorm,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
@@ -143,25 +97,28 @@ struct Attention {
 }
 
 impl Attention {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         rotary_emb: Arc<RotaryEmbedding>,
         cfg: &Config,
         vb: ShardedVarBuilder,
+        mapper: &dyn DeviceMapper,
+        layer_idx: usize,
+        loading_isq: bool,
         paged_attn: Option<PagedAttention>,
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
         let hidden_sz = cfg.hidden_size;
         let num_heads = cfg.num_attention_heads;
         let num_kv_heads = cfg.num_key_value_heads;
-        let head_dim = hidden_sz / num_heads;
-        let b = cfg.use_bias;
+        let head_dim = cfg.head_dim();
         let q_proj = ColumnParallelLayer::new(
             hidden_sz,
             num_heads * head_dim,
             &cfg.quantization_config,
-            b,
+            false,
             comm,
-            vb.pp("q_proj"),
+            mapper.set_device(layer_idx, vb.pp("q_proj"), loading_isq),
         )?;
         let kv_shard = inference_quant::compute_kv_shard(
             cfg.num_key_value_heads,
@@ -172,33 +129,46 @@ impl Attention {
             hidden_sz,
             num_kv_heads * head_dim,
             &cfg.quantization_config,
-            b,
+            false,
             comm,
             kv_shard,
-            vb.pp("k_proj"),
+            mapper.set_device(layer_idx, vb.pp("k_proj"), loading_isq),
         )?;
         let v_proj = ColumnParallelLayer::new_with_shard(
             hidden_sz,
             num_kv_heads * head_dim,
             &cfg.quantization_config,
-            b,
+            false,
             comm,
             kv_shard,
-            vb.pp("v_proj"),
+            mapper.set_device(layer_idx, vb.pp("v_proj"), loading_isq),
         )?;
         let o_proj = RowParallelLayer::new(
             num_heads * head_dim,
             hidden_sz,
             &cfg.quantization_config,
-            b,
+            false,
             comm,
-            vb.pp("o_proj"),
+            mapper.set_device(layer_idx, vb.pp("o_proj"), loading_isq),
+        )?;
+        let sliding_window = sliding_window!(layer_idx, cfg);
+        let q_norm = RmsNorm::new(
+            cfg.head_dim(),
+            cfg.rms_norm_eps,
+            mapper.set_device(layer_idx, vb.pp("q_norm"), false),
+        )?;
+        let k_norm = RmsNorm::new(
+            cfg.head_dim(),
+            cfg.rms_norm_eps,
+            mapper.set_device(layer_idx, vb.pp("k_norm"), false),
         )?;
         Ok(Self {
             q_proj,
             k_proj,
             v_proj,
             o_proj,
+            q_norm,
+            k_norm,
             num_heads: num_heads / comm.world_size(),
             num_kv_heads: (num_kv_heads / comm.world_size()).max(1),
             head_dim,
@@ -212,7 +182,7 @@ impl Attention {
                 )?,
                 softcap: None,
                 softmax_scale: 1.0 / (head_dim as f32).sqrt(),
-                sliding_window: cfg.sliding_window,
+                sliding_window,
                 sinks: None,
             },
         })
@@ -228,9 +198,9 @@ impl Attention {
     ) -> Result<Tensor> {
         let (b_sz, q_len, _) = xs.dims3()?;
 
-        let (q, k, v) =
+        let (mut q, mut k, mut v) =
             crate::ops::qkv_projections(xs, &*self.q_proj, &*self.k_proj, &*self.v_proj)?;
-        let (q, k, v) = if q_len != 1 {
+        (q, k, v) = if q_len != 1 {
             let q = q
                 .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
                 .transpose(1, 2)?;
@@ -251,7 +221,15 @@ impl Attention {
         let rope_positions = ctx
             .text_positions(q.device(), q.dim(2)?)?
             .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
-        let (q, k) = self.rotary_emb.forward(&q, &k, rope_positions)?;
+        (q, k) = self.rotary_emb.forward_qk_norm(
+            &q,
+            &k,
+            self.q_norm.weight(),
+            self.k_norm.weight(),
+            self.q_norm.eps(),
+            self.k_norm.eps(),
+            rope_positions,
+        )?;
         let metadata = ctx.paged_layer(layer_idx);
 
         let mut attn_output = AttentionDispatch {
@@ -273,11 +251,170 @@ impl Attention {
     }
 }
 
+#[derive(Clone)]
+struct Mlp {
+    gate_proj: Arc<dyn QuantMethod>,
+    up_proj: Arc<dyn QuantMethod>,
+    down_proj: Arc<dyn QuantMethod>,
+    act_fn: Activation,
+}
+
+impl Mlp {
+    fn new(
+        cfg: &Config,
+        vb: ShardedVarBuilder,
+        comm: &Arc<inference_quant::Comm>,
+        i_size: usize,
+    ) -> Result<Self> {
+        let hidden_size = cfg.hidden_size;
+
+        let gate_proj = ColumnParallelLayer::new(
+            hidden_size,
+            i_size,
+            &cfg.quantization_config,
+            false,
+            comm,
+            vb.pp("gate_proj"),
+        )?;
+        let up_proj = RowParallelLayer::new(
+            hidden_size,
+            i_size,
+            &cfg.quantization_config,
+            false,
+            comm,
+            vb.pp("up_proj"),
+        )?;
+        let down_proj = ColumnParallelLayer::new(
+            i_size,
+            hidden_size,
+            &cfg.quantization_config,
+            false,
+            comm,
+            vb.pp("down_proj"),
+        )?;
+
+        Ok(Self {
+            gate_proj,
+            up_proj,
+            down_proj,
+            act_fn: cfg.hidden_act,
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let gate_out = self.gate_proj.forward(xs)?;
+        let up_out = self.up_proj.forward(xs)?;
+        let current_hidden_states = crate::ops::mul_and_act(&gate_out, &up_out, self.act_fn)?;
+        let res = self.down_proj.forward(&current_hidden_states)?;
+        Ok(res)
+    }
+}
+
+/// MoE MLP layer for Qwen3 MoE
+struct MoeMlp {
+    gate: Linear,
+    gate_lora: Option<Arc<inference_quant::LoraSiteHandle>>,
+    experts: MoEExperts,
+    num_experts_per_tok: usize,
+    norm_topk_prob: bool,
+}
+
+impl MoeMlp {
+    fn new(
+        cfg: &Config,
+        vb: ShardedVarBuilder,
+        layer_device: Device,
+        comm: &Arc<inference_quant::Comm>,
+        loading_isq: bool,
+    ) -> Result<Self> {
+        let gate_vb = vb.pp("gate").set_device(layer_device.clone());
+        let gate = layers::linear_no_bias(cfg.hidden_size, cfg.num_experts, gate_vb.clone())?;
+        let gate_lora = inference_quant::register_dynamic_lora_site(
+            &gate_vb,
+            inference_quant::LoraLinearSpec::replicated(cfg.hidden_size, cfg.num_experts),
+        )?;
+
+        let moe_cfg = MoEExpertsConfig {
+            num_experts: cfg.num_experts,
+            num_experts_per_tok: cfg.num_experts_per_tok,
+            hidden_size: cfg.hidden_size,
+            moe_intermediate_size: cfg.moe_intermediate_size,
+            expert_proj_names: crate::moe::ExpertProjNames::DEFAULT,
+        };
+
+        // Load experts with automatic backend selection
+        let experts = MoEExperts::new(
+            &moe_cfg,
+            vb,
+            layer_device,
+            comm,
+            loading_isq,
+            &cfg.quantization_config,
+            cfg.hidden_act,
+        )?;
+
+        Ok(Self {
+            gate,
+            gate_lora,
+            experts,
+            num_experts_per_tok: cfg.num_experts_per_tok,
+            norm_topk_prob: cfg.norm_topk_prob,
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let (b_size, seq_len, hidden_dim) = xs.dims3()?;
+        let xs_flat = xs.reshape(((), hidden_dim))?;
+
+        let router_logits = self.gate.forward(&xs_flat)?;
+        let router_logits = match &self.gate_lora {
+            Some(site) => inference_quant::apply_dynamic_lora_delta(site, &xs_flat, router_logits)?,
+            None => router_logits,
+        };
+        let topk = crate::ops::moe_router_topk(
+            &router_logits,
+            crate::ops::MoeRouterTopKConfig {
+                top_k: self.num_experts_per_tok,
+                score_function: crate::ops::MoeRouterScoreFunction::Softmax,
+                selected_weight: crate::ops::MoeRouterSelectedWeight::Score,
+                renormalize: self.norm_topk_prob,
+                norm_min: 0.0,
+                output_scale: 1.0,
+                logit_clip: None,
+            },
+            None,
+            None,
+        )?;
+
+        let ys = self.experts.forward(xs, topk.values, &topk.indices)?;
+
+        ys.reshape((b_size, seq_len, hidden_dim))
+    }
+
+    fn gate(&self) -> &Linear {
+        &self.gate
+    }
+}
+
+enum MoeOrMlp {
+    Moe(MoeMlp),
+    Mlp(Mlp),
+}
+
+impl MoeOrMlp {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Mlp(m) => m.forward(xs),
+            Self::Moe(m) => m.forward(xs),
+        }
+    }
+}
+
 struct DecoderLayer {
     self_attn: Attention,
-    mlp: Box<dyn MlpLayer>,
-    input_layernorm: LayerNorm,
-    post_attention_layernorm: LayerNorm,
+    mlp: MoeOrMlp,
+    input_layernorm: RmsNorm,
+    post_attention_layernorm: RmsNorm,
 }
 
 impl DecoderLayer {
@@ -290,33 +427,51 @@ impl DecoderLayer {
         layer_idx: usize,
         loading_isq: bool,
         paged_attn: Option<PagedAttention>,
+        real_device: Device,
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
         let self_attn = Attention::new(
             rotary_emb,
             cfg,
             mapper.set_device(layer_idx, vb.pp("self_attn"), loading_isq),
+            mapper,
+            layer_idx,
+            loading_isq,
             paged_attn,
             comm,
         )?;
-        let mlp = MLP::new(
-            cfg,
-            mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq),
-            comm,
-        )?;
-        let input_layernorm = layer_norm(
+
+        let mlp = if !cfg.mlp_only_layers.contains(&layer_idx)
+            && (cfg.num_experts > 0 && (layer_idx + 1).is_multiple_of(cfg.decoder_sparse_step))
+        {
+            let vb = mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq);
+            let layer_device = mapper
+                .device_for(layer_idx, false)
+                .cloned()
+                .unwrap_or(real_device);
+
+            MoeOrMlp::Moe(MoeMlp::new(cfg, vb, layer_device, comm, loading_isq)?)
+        } else {
+            MoeOrMlp::Mlp(Mlp::new(
+                cfg,
+                mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq),
+                comm,
+                cfg.intermediate_size,
+            )?)
+        };
+        let input_layernorm = RmsNorm::new(
             cfg.hidden_size,
-            cfg.norm_epsilon,
+            cfg.rms_norm_eps,
             mapper.set_device(layer_idx, vb.pp("input_layernorm"), false),
         )?;
-        let post_attention_layernorm = layer_norm(
+        let post_attention_layernorm = RmsNorm::new(
             cfg.hidden_size,
-            cfg.norm_epsilon,
+            cfg.rms_norm_eps,
             mapper.set_device(layer_idx, vb.pp("post_attention_layernorm"), false),
         )?;
         Ok(Self {
             self_attn,
-            mlp: Box::new(mlp),
+            mlp,
             input_layernorm,
             post_attention_layernorm,
         })
@@ -347,7 +502,7 @@ impl DecoderLayer {
 pub struct Model {
     embed_tokens: Arc<dyn QuantMethod>,
     layers: Vec<DecoderLayer>,
-    norm: LayerNorm,
+    norm: RmsNorm,
     lm_head: Arc<dyn QuantMethod>,
     dtype: DType,
     sliding_window: Option<usize>,
@@ -366,26 +521,47 @@ impl Model {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
+        let vb_m = vb.pp("model");
+        let vb_lm_head = vb.pp("lm_head");
+        Self::new_inner(
+            cfg,
+            vb_m,
+            vb_lm_head,
+            is_gptx,
+            normal_loading_metadata,
+            attention_mechanism,
+        )
+    }
+
+    pub fn new_inner(
+        cfg: &Config,
+        vb_m: ShardedVarBuilder,
+        vb_lm_head: ShardedVarBuilder,
+        is_gptx: bool,
+        normal_loading_metadata: NormalLoadingMetadata,
+        attention_mechanism: AttentionImplementation,
+    ) -> Result<Self> {
         if let Some(ref quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),
-                quant_cfg.get_bits_name(&vb)
+                quant_cfg.get_bits_name(&vb_m)
             );
         }
         let mapper = normal_loading_metadata.mapper;
-        let vb_m = vb.pp("model");
         let dtype = vb_m.dtype();
 
-        let embed_tokens = embedding(
+        let embed_tokens = embedding_with_legacy_tied_uqff(
             cfg.vocab_size,
             cfg.hidden_size,
             mapper.set_nm_device(vb_m.pp("embed_tokens"), normal_loading_metadata.loading_isq),
+            cfg.tie_word_embeddings.then(|| {
+                mapper.set_nm_device(vb_lm_head.clone(), normal_loading_metadata.loading_isq)
+            }),
             &cfg.quantization_config,
         )?;
-        let vb_l = vb_m.pp("layers");
-        let head_dim = cfg.hidden_size / cfg.num_attention_heads;
 
+        let head_dim = cfg.head_dim();
         let ropes = crate::device_map::per_layer_device(
             &*mapper,
             cfg.num_hidden_layers,
@@ -402,12 +578,15 @@ impl Model {
             },
         )?;
 
+        let load_in_parallel =
+            !(normal_loading_metadata.real_device.is_metal() && cfg.quantization_config.is_none());
+        let vb_l = vb_m.pp("layers");
         let layers: Vec<DecoderLayer> = NiceProgressBar::<_, 'b'>(
             0..cfg.num_hidden_layers,
             "Loading repeating layers",
             &normal_loading_metadata.multi_progress,
         )
-        .par_iter_if_isq(|layer_idx| {
+        .run(load_in_parallel, |layer_idx| {
             let device = mapper
                 .device_for(layer_idx, false)
                 .unwrap_or(&normal_loading_metadata.real_device);
@@ -433,25 +612,35 @@ impl Model {
                 layer_idx,
                 normal_loading_metadata.loading_isq,
                 paged_attn,
+                normal_loading_metadata.real_device.clone(),
                 &comm,
             )
         })?;
-        let norm = layer_norm(
+        let norm = RmsNorm::new(
             cfg.hidden_size,
-            cfg.norm_epsilon,
+            cfg.rms_norm_eps,
             mapper.set_nm_device(vb_m.pp("norm"), false),
         )?;
-        let lm_head = if cfg.tie_word_embeddings {
-            embed_tokens.clone()
-        } else {
+        let lm_head = if !cfg.tie_word_embeddings {
             ReplicatedLayer::new(
                 cfg.hidden_size,
                 cfg.vocab_size,
                 &cfg.quantization_config,
                 false,
-                mapper.set_nm_device(vb.pp("lm_head"), normal_loading_metadata.loading_isq),
+                mapper.set_nm_device(vb_lm_head, normal_loading_metadata.loading_isq),
             )?
+        } else {
+            embed_tokens.clone()
         };
+        let cache_types = (0..cfg.num_hidden_layers)
+            .map(|layer_idx| {
+                sliding_window!(layer_idx, cfg)
+                    .map(|window| NormalCacheType::SlidingWindow { window })
+                    .unwrap_or(NormalCacheType::Normal {
+                        max_seq_len: cfg.max_position_embeddings,
+                    })
+            })
+            .collect::<Vec<_>>();
         Ok(Self {
             embed_tokens,
             layers,
@@ -460,22 +649,18 @@ impl Model {
             dtype,
             sliding_window: cfg.sliding_window,
             device: normal_loading_metadata.real_device,
-            cache: EitherCache::Normal(NormalCache::new_sliding(
-                cfg.num_hidden_layers,
-                cfg.max_position_embeddings,
-                cfg.sliding_window,
-            )),
+            cache: EitherCache::Normal(NormalCache::from_types(cache_types)),
             max_seq_len: cfg.max_position_embeddings,
             cfg: ModelConfigMetadata {
                 max_seq_len: cfg.max_position_embeddings,
                 num_layers: cfg.num_hidden_layers,
                 hidden_size: cfg.hidden_size,
-                num_attn_heads: cfg.num_attention_heads / mapper.get_comm_for(0)?.world_size(),
                 num_kv_heads: (cfg.num_key_value_heads / mapper.get_comm_for(0)?.world_size())
                     .max(1),
+                num_attn_heads: cfg.num_attention_heads / mapper.get_comm_for(0)?.world_size(),
                 sliding_window: cfg.sliding_window,
-                k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
-                v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+                k_head_dim: cfg.head_dim(),
+                v_head_dim: cfg.head_dim(),
                 kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
             },
             mapper,
@@ -487,8 +672,20 @@ impl Model {
         input_ids: &Tensor,
         ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
-        let mut xs = self.embed_tokens.embedding_forward(input_ids, self.dtype)?;
+        self.forward_embeds(
+            input_ids,
+            self.embed_tokens.embedding_forward(input_ids, self.dtype)?,
+            ctx,
+        )
+    }
 
+    pub fn forward_embeds(
+        &self,
+        input_ids: &Tensor,
+        input_embeds: Tensor,
+        ctx: &mut ModelForwardContext<'_>,
+    ) -> Result<Tensor> {
+        let mut xs = input_embeds;
         let cache = &mut self.cache.normal().0;
         let mask_cache = ctx.mask_cache(cache);
         let attention_mask = CausalMasker.make_causal_mask(
@@ -500,18 +697,20 @@ impl Model {
                 ..Default::default()
             },
         )?;
+        // PagedAttention prompt chunking
         let attention_mask = if ctx.is_first_prompt_chunk() {
             attention_mask
         } else {
             AttentionMask::None
         };
         let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
-
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
-            xs = layer.forward(&xs, &attention_mask.get(xs.device()), &mut cache[i], ctx, i)?
+            xs = layer.forward(&xs, &attention_mask.get(xs.device()), &mut cache[i], ctx, i)?;
+            // dbg!(&i);
         }
-        let xs = xs.to_device(&self.device)?.apply(&self.norm)?;
+        let xs = xs.to_device(&self.device)?;
+        let xs = xs.apply(&self.norm)?;
         let xs = ctx.logits(&xs)?;
         ctx.lm_head(&*self.lm_head, &xs)
     }
@@ -531,6 +730,17 @@ impl IsqModel for Model {
             uvb_l
                 .pp("post_attention_layernorm")
                 .add(&layer.post_attention_layernorm);
+            uvb_l
+                .pp("self_attn")
+                .pp("q_norm")
+                .add(&layer.self_attn.q_norm);
+            uvb_l
+                .pp("self_attn")
+                .pp("k_norm")
+                .add(&layer.self_attn.k_norm);
+            if let MoeOrMlp::Moe(moe) = &layer.mlp {
+                uvb_l.pp("mlp").pp("gate").add(moe.gate());
+            }
         }
 
         uvb.to_safetensors()
@@ -586,46 +796,4 @@ impl NormalModel for Model {
     }
 }
 
-impl AnyMoeBaseModelMixin for Model {
-    fn get_mlps(&self) -> Vec<&dyn MlpLayer> {
-        let mut mlps = Vec::new();
-        for layer in &self.layers {
-            mlps.push(&*layer.mlp);
-        }
-        mlps
-    }
-    fn get_mlps_mut(&mut self) -> Vec<&mut Box<dyn MlpLayer>> {
-        let mut mlps = Vec::new();
-        for layer in &mut self.layers {
-            mlps.push(&mut layer.mlp);
-        }
-        mlps
-    }
-    fn amoe_lora_targets(&self) -> &'static [AnyMoeLoraTarget] {
-        const TARGETS: &[AnyMoeLoraTarget] = &[
-            AnyMoeLoraTarget::up("c_fc"),
-            AnyMoeLoraTarget::down("c_proj"),
-        ];
-        TARGETS
-    }
-    fn amoe_fine_tuned_expert(
-        &self,
-        layer: usize,
-        base: &dyn MlpLayer,
-        vb: ShardedVarBuilder,
-    ) -> Result<Box<dyn MlpLayer>> {
-        let (dtype, device) = base.dtype_device();
-        Ok(Box::new(MLP::new(
-            &Config {
-                intermediate_size: base.get_params()[1],
-                hidden_size: base.get_params()[0],
-                ..Default::default()
-            },
-            vb.set_dtype(dtype).set_device(device),
-            &self.mapper.get_comm_for(layer)?,
-        )?))
-    }
-    fn amoe_supported(&self) -> bool {
-        true
-    }
-}
+impl AnyMoeBaseModelMixin for Model {}

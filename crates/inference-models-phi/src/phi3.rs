@@ -29,7 +29,7 @@ use crate::{
 };
 
 /// phi3 fuses gate and up into one projection; `new_added_delta` takes [gate_up_proj, down_proj].
-pub(crate) const ANYMOE_LORA_TARGETS: &[AnyMoeLoraTarget] = &[
+pub const ANYMOE_LORA_TARGETS: &[AnyMoeLoraTarget] = &[
     AnyMoeLoraTarget {
         name: "gate_up_proj",
         shape: |hidden, intermediate| (hidden, 2 * intermediate),

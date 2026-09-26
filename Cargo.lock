@@ -3080,6 +3080,11 @@ dependencies = [
  "inference-code-exec",
  "inference-flash-attn",
  "inference-mcp",
+ "inference-models-gemma",
+ "inference-models-llama",
+ "inference-models-other",
+ "inference-models-phi",
+ "inference-models-qwen",
  "inference-nn",
  "inference-paged-attn",
  "inference-quant",
@@ -3236,6 +3241,73 @@ version = "0.9.3"
 dependencies = [
  "candle-metal-kernels",
  "objc2-metal",
+]
+
+[[package]]
+name = "inference-models-gemma"
+version = "0.9.3"
+dependencies = [
+ "candle-core",
+ "inference-nn",
+ "inference-quant",
+ "serde",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "inference-models-llama"
+version = "0.9.3"
+dependencies = [
+ "candle-core",
+ "candle-nn",
+ "inference-nn",
+ "inference-quant",
+ "serde",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "inference-models-other"
+version = "0.9.3"
+dependencies = [
+ "candle-core",
+ "candle-nn",
+ "indicatif 0.18.3",
+ "inference-nn",
+ "inference-quant",
+ "safetensors",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "inference-models-phi"
+version = "0.9.3"
+dependencies = [
+ "candle-core",
+ "candle-nn",
+ "inference-nn",
+ "inference-quant",
+ "serde",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "inference-models-qwen"
+version = "0.9.3"
+dependencies = [
+ "candle-core",
+ "candle-nn",
+ "inference-nn",
+ "inference-quant",
+ "serde",
+ "tempfile",
+ "tracing",
 ]
 
 [[package]]

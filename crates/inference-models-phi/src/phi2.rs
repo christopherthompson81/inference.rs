@@ -38,29 +38,29 @@ serde_default_fn!(bool, word_emb_default, false);
 // https://huggingface.co/microsoft/phi-2/blob/main/configuration_phi.py
 #[derive(Debug, Clone, Deserialize, Default, Serialize)]
 pub struct Config {
-    pub(crate) vocab_size: usize,
-    pub(crate) hidden_size: usize,
-    pub(crate) intermediate_size: usize,
-    pub(crate) num_hidden_layers: usize,
-    pub(crate) num_attention_heads: usize,
-    pub(crate) num_key_value_heads: Option<usize>,
-    pub(crate) hidden_act: Activation,
-    pub(crate) max_position_embeddings: usize,
-    pub(crate) layer_norm_eps: f64,
-    pub(crate) rope_theta: f32,
-    pub(crate) partial_rotary_factor: f64,
-    pub(crate) qk_layernorm: bool,
-    pub(crate) quantization_config: Option<QuantizedConfig>,
+    pub vocab_size: usize,
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+    pub num_hidden_layers: usize,
+    pub num_attention_heads: usize,
+    pub num_key_value_heads: Option<usize>,
+    pub hidden_act: Activation,
+    pub max_position_embeddings: usize,
+    pub layer_norm_eps: f64,
+    pub rope_theta: f32,
+    pub partial_rotary_factor: f64,
+    pub qk_layernorm: bool,
+    pub quantization_config: Option<QuantizedConfig>,
     #[serde(default = "word_emb_default")]
-    pub(crate) tie_word_embeddings: bool,
+    pub tie_word_embeddings: bool,
 }
 
 impl Config {
-    pub(crate) fn num_key_value_heads(&self) -> usize {
+    pub fn num_key_value_heads(&self) -> usize {
         self.num_key_value_heads.unwrap_or(self.num_attention_heads)
     }
 
-    pub(crate) fn head_dim(&self) -> usize {
+    pub fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads
     }
 }

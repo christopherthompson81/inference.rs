@@ -36,22 +36,22 @@ serde_default_fn!(bool, word_emb_default, false);
 /// https://github.com/huggingface/transformers/blob/1a585c1222a56bcaecc070966d558d4a9d862e83/src/transformers/models/mixtral/configuration_mixtral.py#L113
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    pub(crate) vocab_size: usize,
-    pub(crate) hidden_size: usize,
-    pub(crate) intermediate_size: usize,
-    pub(crate) num_hidden_layers: usize,
-    pub(crate) num_attention_heads: usize,
-    pub(crate) num_key_value_heads: usize,
-    pub(crate) hidden_act: Activation,
-    pub(crate) max_position_embeddings: usize,
-    pub(crate) rms_norm_eps: f64,
-    pub(crate) rope_theta: f64,
-    pub(crate) sliding_window: Option<usize>,
-    pub(crate) num_experts_per_tok: usize,
-    pub(crate) num_local_experts: usize,
-    pub(crate) quantization_config: Option<QuantizedConfig>,
+    pub vocab_size: usize,
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+    pub num_hidden_layers: usize,
+    pub num_attention_heads: usize,
+    pub num_key_value_heads: usize,
+    pub hidden_act: Activation,
+    pub max_position_embeddings: usize,
+    pub rms_norm_eps: f64,
+    pub rope_theta: f64,
+    pub sliding_window: Option<usize>,
+    pub num_experts_per_tok: usize,
+    pub num_local_experts: usize,
+    pub quantization_config: Option<QuantizedConfig>,
     #[serde(default = "word_emb_default")]
-    pub(crate) tie_word_embeddings: bool,
+    pub tie_word_embeddings: bool,
 }
 
 struct Attention {

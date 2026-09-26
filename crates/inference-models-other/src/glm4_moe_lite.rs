@@ -24,109 +24,79 @@ use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
-    layers::masker::masked_fill,
     layers::{
         embedding_with_legacy_tied_uqff, Activation, CausalMasker, DeepSeekV2RopeConfig,
-        DeepSeekV2RopeScaling, DeepSeekV2RotaryEmbedding, Mlp, RmsNorm, Sdpa,
+        DeepSeekV2RotaryEmbedding, Mlp, RmsNorm, Sdpa,
     },
     mla::{
         mla_cache_forward, mla_decode_forward, should_use_mla_cache, should_use_mla_decode,
         MlaKvBProjection, MlaWeights,
     },
     moe::{MoEExperts, MoEExpertsConfig},
-    ops::{SplitOp, TopKLastDimOp, TopKOutput},
+    ops::{SplitOp, TopKLastDimOp},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
+
 serde_default_fn!(f64, routed_scaling_factor, 1.0);
-serde_default_fn!(TopkMethod, topk_method, TopkMethod::Greedy);
 serde_default_fn!(usize, moe_layer_freq, 1);
 serde_default_fn!(usize, first_k_dense_replace, 0);
-serde_default_fn!(bool, norm_topk_prob, false);
-serde_default_fn!(ScoringFunc, scoring_func, ScoringFunc::Softmax);
 serde_default_fn!(Activation, hidden_act, Activation::Silu);
 serde_default_fn!(bool, tie_word_embeddings, false);
+serde_default_fn!(usize, n_group, 1);
+serde_default_fn!(usize, topk_group, 1);
 
 #[derive(Deserialize, Clone, Debug)]
-enum TopkMethod {
-    #[serde(rename = "greedy")]
-    Greedy,
-    #[serde(rename = "group_limited_greedy")]
-    GroupLimitedGreedy,
-}
-
-#[derive(Deserialize, Clone, Debug)]
-enum ScoringFunc {
-    #[serde(rename = "softmax")]
-    Softmax,
-}
-
-#[derive(Deserialize, Clone, Debug)]
-pub struct DeepSeekV2Config {
-    pub(crate) vocab_size: usize,
-    pub(crate) hidden_size: usize,
-    pub(crate) intermediate_size: usize,
-    pub(crate) moe_intermediate_size: usize,
-    pub(crate) num_hidden_layers: usize,
-    pub(crate) num_attention_heads: usize,
-    pub(crate) n_shared_experts: Option<usize>,
-    pub(crate) n_routed_experts: Option<usize>,
-    #[serde(default = "routed_scaling_factor")]
-    pub(crate) routed_scaling_factor: f64,
-    #[serde(default = "topk_method")]
-    topk_method: TopkMethod,
-    pub(crate) num_experts_per_tok: Option<usize>,
-    #[serde(default = "moe_layer_freq")]
-    pub(crate) moe_layer_freq: usize,
+pub struct Glm4MoeLiteConfig {
+    pub vocab_size: usize,
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+    pub moe_intermediate_size: usize,
+    pub num_hidden_layers: usize,
+    pub num_attention_heads: usize,
+    #[allow(dead_code)]
+    pub num_key_value_heads: usize,
+    pub q_lora_rank: usize,
+    pub kv_lora_rank: usize,
+    pub qk_nope_head_dim: usize,
+    pub qk_rope_head_dim: usize,
+    pub v_head_dim: usize,
+    pub n_routed_experts: usize,
+    pub n_shared_experts: usize,
+    pub num_experts_per_tok: usize,
     #[serde(default = "first_k_dense_replace")]
-    pub(crate) first_k_dense_replace: usize,
-    // k dense layers
-    #[serde(default = "norm_topk_prob")]
-    pub(crate) norm_topk_prob: bool,
-    #[serde(default = "scoring_func")]
-    scoring_func: ScoringFunc,
+    pub first_k_dense_replace: usize,
+    #[serde(default = "routed_scaling_factor")]
+    pub routed_scaling_factor: f64,
+    #[serde(default = "n_group")]
+    pub n_group: usize,
+    #[serde(default = "topk_group")]
+    pub topk_group: usize,
+    #[serde(default = "moe_layer_freq")]
+    pub moe_layer_freq: usize,
+    pub rms_norm_eps: f64,
+    pub rope_theta: f32,
+    pub max_position_embeddings: usize,
     #[serde(default = "hidden_act")]
-    pub(crate) hidden_act: Activation,
-    pub(crate) max_position_embeddings: usize,
-    pub(crate) rms_norm_eps: f64,
+    pub hidden_act: Activation,
     #[serde(default = "tie_word_embeddings")]
-    pub(crate) tie_word_embeddings: bool,
-    pub(crate) rope_theta: f32,
-    pub(crate) rope_scaling: Option<DeepSeekV2RopeScaling>,
-    pub(crate) attention_bias: bool,
-    pub(crate) q_lora_rank: Option<usize>,
-    pub(crate) qk_rope_head_dim: usize,
-    pub(crate) kv_lora_rank: usize,
-    pub(crate) v_head_dim: usize,
-    pub(crate) qk_nope_head_dim: usize,
-    pub(crate) quantization_config: Option<QuantizedConfig>,
-    pub(crate) n_group: usize,
-    pub(crate) topk_group: usize,
+    pub tie_word_embeddings: bool,
+    #[serde(alias = "quantization")]
+    pub quantization_config: Option<QuantizedConfig>,
 }
 
-impl DeepSeekV2Config {
-    pub(crate) fn q_head_dim(&self) -> usize {
+impl Glm4MoeLiteConfig {
+    pub fn q_head_dim(&self) -> usize {
         self.qk_rope_head_dim + self.qk_nope_head_dim
     }
 
     fn softmax_scale(&self) -> f32 {
-        let mut softmax_scale = 1.0 / (self.q_head_dim() as f32).sqrt();
-        if let Some(DeepSeekV2RopeScaling::Yarn {
-            mscale_all_dim,
-            factor,
-            ..
-        }) = self.rope_scaling
-        {
-            let mscale = DeepSeekV2RotaryEmbedding::yarn_get_mscale(factor, mscale_all_dim);
-            softmax_scale = softmax_scale * mscale * mscale;
-        }
-        softmax_scale
+        1.0 / (self.q_head_dim() as f32).sqrt()
     }
 }
 
 enum QProj {
-    Plain(Arc<dyn QuantMethod>),
     Lora {
         a: Arc<dyn QuantMethod>,
         norm: RmsNorm,
@@ -138,7 +108,6 @@ impl QProj {
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         match self {
             Self::Lora { a, norm, b } => b.forward(&norm.forward(&a.forward(xs)?)?),
-            Self::Plain(lin) => lin.forward(xs),
         }
     }
 }
@@ -150,7 +119,7 @@ struct Attention {
     kv_b_proj: MlaKvBProjection,
     o_proj: Arc<dyn QuantMethod>,
     rotary_emb: Arc<DeepSeekV2RotaryEmbedding>,
-    cfg: DeepSeekV2Config,
+    cfg: Glm4MoeLiteConfig,
     q_head_dim: usize,
     paged_attn: Option<PagedAttention>,
     sdpa_params: SdpaParams,
@@ -162,7 +131,7 @@ impl Attention {
     #[allow(clippy::too_many_arguments)]
     fn new(
         rotary_emb: Arc<DeepSeekV2RotaryEmbedding>,
-        cfg: &DeepSeekV2Config,
+        cfg: &Glm4MoeLiteConfig,
         vb: ShardedVarBuilder,
         mapper: &dyn DeviceMapper,
         layer_idx: usize,
@@ -171,45 +140,37 @@ impl Attention {
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
         let q_head_dim = cfg.q_head_dim();
-        let q = match cfg.q_lora_rank {
-            Some(lora_rank) => {
-                let a = ReplicatedLayer::new(
-                    cfg.hidden_size,
-                    lora_rank,
-                    &cfg.quantization_config,
-                    cfg.attention_bias,
-                    mapper.set_device(layer_idx, vb.pp("q_a_proj"), loading_isq),
-                )?;
-                let norm = RmsNorm::new(
-                    lora_rank,
-                    cfg.rms_norm_eps,
-                    mapper.set_device(layer_idx, vb.pp("q_a_layernorm"), false),
-                )?;
-                let b = ColumnParallelLayer::new(
-                    lora_rank,
-                    cfg.num_attention_heads * q_head_dim,
-                    &cfg.quantization_config,
-                    false,
-                    comm,
-                    mapper.set_device(layer_idx, vb.pp("q_b_proj"), loading_isq),
-                )?;
-                QProj::Lora { a, norm, b }
-            }
-            None => QProj::Plain(ColumnParallelLayer::new(
+
+        // GLM4MoeLite always uses LoRA for Q projection
+        let q = {
+            let a = ReplicatedLayer::new(
                 cfg.hidden_size,
+                cfg.q_lora_rank,
+                &cfg.quantization_config,
+                false,
+                mapper.set_device(layer_idx, vb.pp("q_a_proj"), loading_isq),
+            )?;
+            let norm = RmsNorm::new(
+                cfg.q_lora_rank,
+                cfg.rms_norm_eps,
+                mapper.set_device(layer_idx, vb.pp("q_a_layernorm"), false),
+            )?;
+            let b = ColumnParallelLayer::new(
+                cfg.q_lora_rank,
                 cfg.num_attention_heads * q_head_dim,
                 &cfg.quantization_config,
                 false,
                 comm,
-                mapper.set_device(layer_idx, vb.pp("q_proj"), loading_isq),
-            )?),
+                mapper.set_device(layer_idx, vb.pp("q_b_proj"), loading_isq),
+            )?;
+            QProj::Lora { a, norm, b }
         };
 
         let kv_a_proj_with_mqa = ReplicatedLayer::new(
             cfg.hidden_size,
             cfg.kv_lora_rank + cfg.qk_rope_head_dim,
             &cfg.quantization_config,
-            cfg.attention_bias,
+            false,
             mapper.set_device(layer_idx, vb.pp("kv_a_proj_with_mqa"), loading_isq),
         )?;
         let kv_a_layernorm = RmsNorm::new(
@@ -249,14 +210,14 @@ impl Attention {
                 comm,
                 mapper.set_device(layer_idx, vb.pp("kv_b_proj"), loading_isq),
             )?),
-            _ => candle_core::bail!("DeepSeek layer {layer_idx} has incomplete split MLA weights"),
+            _ => candle_core::bail!("GLM4 MoE layer {layer_idx} has incomplete split MLA weights"),
         };
 
         let o_proj = RowParallelLayer::new(
             cfg.num_attention_heads * cfg.v_head_dim,
             cfg.hidden_size,
             &cfg.quantization_config,
-            cfg.attention_bias,
+            false,
             comm,
             mapper.set_device(layer_idx, vb.pp("o_proj"), loading_isq),
         )?;
@@ -322,12 +283,15 @@ impl Attention {
 
         let ckv = self.kv_a_layernorm.forward(&compressed_kv)?;
 
-        let rope_positions = ctx
-            .text_positions(q_pe.device(), q_pe.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
-        (q_pe, k_pe) = self.rotary_emb.forward(&q_pe, &k_pe, rope_positions)?;
-        let metadata = ctx.paged_layer(layer_idx);
+        {
+            let positions = ctx
+                .text_positions(q_pe.device(), q_pe.dim(2)?)?
+                .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
+            (q_pe, k_pe) = self.rotary_emb.forward(&q_pe, &k_pe, positions)?;
+        }
 
+        let metadata = ctx.paged_layer(layer_idx);
+        let flash_params = ctx.flash_params();
         let use_mla_decode = should_use_mla_decode(
             attention_mask,
             seq_len,
@@ -385,6 +349,7 @@ impl Attention {
                 should_use_mla_cache(self.paged_attn.is_some(), q.device(), &self.kv_b_proj);
 
             if use_mla_cache {
+                let seqlen_offsets = ctx.seqlen_offsets();
                 mla_cache_forward(
                     &q,
                     &k,
@@ -392,9 +357,9 @@ impl Attention {
                     &ckv,
                     &k_pe,
                     attention_mask,
-                    ctx.seqlen_offsets(),
+                    seqlen_offsets,
                     &metadata,
-                    ctx.flash_params(),
+                    flash_params,
                     &self.kv_b_proj,
                     &self.sdpa_params,
                     self.num_attention_heads,
@@ -430,7 +395,7 @@ impl Attention {
                                     Some(value_cache),
                                     input_metadata,
                                     &self.sdpa_params,
-                                    Some(ctx.flash_params()),
+                                    Some(flash_params),
                                 )?
                                 .narrow(D::Minus1, 0, self.cfg.v_head_dim)?
                         }
@@ -439,7 +404,7 @@ impl Attention {
                             // Generating the dummy metadata with the assumption that we are not generating text (only processing prompts).
                             let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
                             // Sanity check.
-                            assert!(!attention_mask.is_none());
+                            assert!(!matches!(attention_mask, AttentionMask::None));
                             let v = v
                                 .pad_with_zeros(
                                     D::Minus1,
@@ -457,7 +422,7 @@ impl Attention {
                                     None,
                                     &input_metadata,
                                     &self.sdpa_params,
-                                    Some(ctx.flash_params()),
+                                    Some(flash_params),
                                 )?
                                 .narrow(D::Minus1, 0, self.cfg.v_head_dim)?
                         }
@@ -470,7 +435,7 @@ impl Attention {
                             &k,
                             &v,
                             attention_mask,
-                            Some(ctx.flash_params()),
+                            Some(flash_params),
                             &self.sdpa_params,
                         )?
                     }
@@ -493,27 +458,93 @@ impl Attention {
     }
 }
 
+struct Expert {
+    gate: Arc<dyn QuantMethod>,
+    up: Arc<dyn QuantMethod>,
+    down: Arc<dyn QuantMethod>,
+    act: Activation,
+}
+
+impl Expert {
+    fn new(
+        cfg: &Glm4MoeLiteConfig,
+        vb: ShardedVarBuilder,
+        hidden_size: Option<usize>,
+        intermediate_size: Option<usize>,
+    ) -> Result<Self> {
+        let hidden_size = hidden_size.unwrap_or(cfg.hidden_size);
+        let intermediate_size = intermediate_size.unwrap_or(cfg.intermediate_size);
+
+        Ok(Self {
+            gate: ReplicatedLayer::new(
+                hidden_size,
+                intermediate_size,
+                &cfg.quantization_config,
+                false,
+                vb.pp("gate_proj"),
+            )?,
+            up: ReplicatedLayer::new(
+                hidden_size,
+                intermediate_size,
+                &cfg.quantization_config,
+                false,
+                vb.pp("up_proj"),
+            )?,
+            down: ReplicatedLayer::new(
+                intermediate_size,
+                hidden_size,
+                &cfg.quantization_config,
+                false,
+                vb.pp("down_proj"),
+            )?,
+            act: cfg.hidden_act,
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let lhs = self.gate.forward(xs)?;
+        let rhs = self.up.forward(xs)?;
+        let res = self
+            .down
+            .forward(&crate::ops::mul_and_act(&lhs, &rhs, self.act)?)?;
+        Ok(res)
+    }
+}
+
 struct MoeGate {
     weight: Tensor,
     lora_site: Option<Arc<inference_quant::LoraSiteHandle>>,
-    cfg: DeepSeekV2Config,
+    cfg: Glm4MoeLiteConfig,
     top_k: usize,
     n_routed_experts: usize,
+    e_score_correction_bias: Tensor,
 }
 
 impl MoeGate {
-    fn new(cfg: &DeepSeekV2Config, vb: ShardedVarBuilder, n_routed_experts: usize) -> Result<Self> {
+    fn new(
+        cfg: &Glm4MoeLiteConfig,
+        vb: ShardedVarBuilder,
+        n_routed_experts: usize,
+    ) -> Result<Self> {
         let weight = vb.get((n_routed_experts, cfg.hidden_size), "weight")?;
         let lora_site = inference_quant::register_dynamic_lora_site(
-            &vb.set_dtype(DType::F32),
+            &vb.clone().set_dtype(DType::F32),
             inference_quant::LoraLinearSpec::replicated(cfg.hidden_size, n_routed_experts),
+        )?;
+        // GLM4MoeLite uses NoAuxTc routing with e_score_correction_bias
+        let e_score_correction_bias = vb.get_with_hints_dtype(
+            n_routed_experts,
+            "e_score_correction_bias",
+            Default::default(),
+            DType::F32,
         )?;
         Ok(Self {
             weight,
             lora_site,
             cfg: cfg.clone(),
-            top_k: cfg.num_experts_per_tok.unwrap(),
+            top_k: cfg.num_experts_per_tok,
             n_routed_experts,
+            e_score_correction_bias,
         })
     }
 
@@ -527,92 +558,70 @@ impl MoeGate {
             Some(site) => inference_quant::apply_dynamic_lora_delta(site, &xs, logits)?,
             None => logits,
         };
-        if matches!(self.cfg.topk_method, TopkMethod::Greedy) {
-            let renormalize = self.top_k > 1 && self.cfg.norm_topk_prob;
-            let topk = crate::ops::moe_router_topk(
-                &logits,
-                crate::ops::MoeRouterTopKConfig {
-                    top_k: self.top_k,
-                    score_function: crate::ops::MoeRouterScoreFunction::Softmax,
-                    selected_weight: crate::ops::MoeRouterSelectedWeight::Score,
-                    renormalize,
-                    norm_min: 1e-20,
-                    output_scale: if renormalize {
-                        1.0
-                    } else {
-                        self.cfg.routed_scaling_factor as f32
-                    },
-                    logit_clip: None,
-                },
-                None,
-                None,
-            )?;
-            return Ok((topk.indices, topk.values));
-        }
-        let scores = match self.cfg.scoring_func {
-            ScoringFunc::Softmax => candle_nn::ops::softmax_last_dim(&logits)?,
-        };
+        // GLM4MoeLite uses sigmoid scoring
+        let scores = candle_nn::ops::sigmoid(&logits)?;
 
-        // Select top-k experts
-        let (mut topk_weight, topk_idx) = match self.cfg.topk_method {
-            TopkMethod::Greedy => unreachable!(),
-            TopkMethod::GroupLimitedGreedy => {
-                // (n, n_group)
-                let group_scores = scores
-                    .reshape((bs * seq_len, self.cfg.n_group, ()))?
-                    .max(D::Minus1)?;
-                // (n, topk_group)
-                let group_idx = group_scores.topk_unsorted(self.cfg.topk_group)?.indices;
-                // (n, n_group)
-                let mut group_mask = group_scores.zeros_like()?;
-                // (n, n_group)
-                group_mask = group_mask.scatter_add(
-                    &group_idx,
-                    &group_idx.ones_like()?.to_dtype(group_mask.dtype())?,
-                    1,
-                )?;
-                // (n, e)
-                let score_mask = group_mask
-                    .unsqueeze(D::Minus1)?
-                    .expand((
-                        bs * seq_len,
-                        self.cfg.n_group,
-                        self.n_routed_experts / self.cfg.n_group,
-                    ))?
-                    .reshape((bs * seq_len, ()))?;
-                // (n, e)
-                // Invert the mask
-                let tmp_scores = masked_fill(&score_mask, &(1. - &score_mask.ne(0.)?)?, 0.)?;
-                let TopKOutput { values, indices } = tmp_scores.topk_unsorted(self.top_k)?;
-                (values, indices)
-            }
-        };
+        // NoAuxTc routing with e_score_correction_bias
+        let scores_for_choice = scores
+            .reshape((bs * seq_len, ()))?
+            .broadcast_add(&self.e_score_correction_bias.unsqueeze(0)?)?;
+        // (n, n_group)
+        let group_scores = scores_for_choice
+            .reshape((bs * seq_len, self.cfg.n_group, ()))?
+            .topk(2)?
+            .values
+            .sum(D::Minus1)?;
+        // (n, topk_group)
+        let group_idx = group_scores.topk(self.cfg.topk_group)?.indices;
+        // (n, n_group)
+        let mut group_mask = group_scores.zeros_like()?;
+        // (n, n_group)
+        group_mask = group_mask.scatter_add(
+            &group_idx,
+            &group_idx.ones_like()?.to_dtype(group_mask.dtype())?,
+            1,
+        )?;
+        // (n, e)
+        let score_mask = group_mask
+            .unsqueeze(D::Minus1)?
+            .expand((
+                bs * seq_len,
+                self.cfg.n_group,
+                self.n_routed_experts / self.cfg.n_group,
+            ))?
+            .reshape((bs * seq_len, ()))?;
+        // (n, e)
+        // Invert the mask
+        let tmp_scores = scores_for_choice.broadcast_mul(&score_mask)?;
+        let topk_idx = tmp_scores.topk(self.top_k)?.indices;
+        let mut topk_weight = scores.gather(&topk_idx, 1)?;
 
-        if self.top_k > 1 && self.cfg.norm_topk_prob {
-            let denmoninator = (topk_weight.sum_keepdim(D::Minus1)? + 1e-20)?;
-            topk_weight = (topk_weight / denmoninator)?;
-        } else {
-            topk_weight = (topk_weight * self.cfg.routed_scaling_factor)?;
-        }
+        // Normalize with sigmoid
+        let denominator = (topk_weight.sum_keepdim(D::Minus1)? + 1e-20)?;
+        topk_weight = topk_weight.broadcast_div(&denominator)?;
+
+        // Must multiply the scaling factor
+        topk_weight = (topk_weight * self.cfg.routed_scaling_factor)?;
+
         Ok((topk_idx, topk_weight))
     }
 }
 
 struct Moe {
     experts: MoEExperts,
-    shared_experts: Option<Mlp>,
+    shared_experts: Option<Expert>,
     gate: MoeGate,
 }
 
 impl Moe {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        cfg: &DeepSeekV2Config,
+        cfg: &Glm4MoeLiteConfig,
         vb: ShardedVarBuilder,
         mapper: &dyn DeviceMapper,
         layer_idx: usize,
         loading_isq: bool,
-        n_shared_experts: Option<usize>,
+        n_shared_experts: usize,
         n_routed_experts: usize,
         comm: &Arc<inference_quant::Comm>,
         real_device: Device,
@@ -624,7 +633,7 @@ impl Moe {
 
         let moe_cfg = MoEExpertsConfig {
             num_experts: n_routed_experts,
-            num_experts_per_tok: cfg.num_experts_per_tok.unwrap(),
+            num_experts_per_tok: cfg.num_experts_per_tok,
             hidden_size: cfg.hidden_size,
             moe_intermediate_size: cfg.moe_intermediate_size,
             expert_proj_names: crate::moe::ExpertProjNames::DEFAULT,
@@ -641,24 +650,24 @@ impl Moe {
             cfg.hidden_act,
         )?;
 
-        let shared_experts = if let Some(n_shared_experts) = n_shared_experts {
-            let intermediate_size = cfg.moe_intermediate_size * n_shared_experts;
-            Some(Mlp::new(
+        // Shared experts are handled separately
+        let shared_experts = if n_shared_experts > 0 {
+            Some(Expert::new(
+                cfg,
                 mapper.set_device(layer_idx, vb.pp("shared_experts"), loading_isq),
-                cfg.hidden_size,
-                intermediate_size,
-                &cfg.quantization_config,
-                cfg.hidden_act,
-                comm,
+                None,
+                Some(cfg.moe_intermediate_size),
             )?)
         } else {
             None
         };
+
         let gate = MoeGate::new(
             cfg,
             mapper.set_device(layer_idx, vb.pp("gate"), false),
             n_routed_experts,
         )?;
+
         Ok(Self {
             experts,
             shared_experts,
@@ -670,7 +679,7 @@ impl Moe {
         let identity = xs.clone();
         let (b_size, seq_len, hidden_dim) = xs.dims3()?;
 
-        // Get routing weights from gate
+        // Get routing weights from custom gate (NoAuxTc with e_score_correction_bias)
         let (topk_idx, topk_weight) = self.gate.forward(xs)?;
 
         // Forward through routed experts using optimized MoEExperts
@@ -711,7 +720,7 @@ impl DecoderLayer {
     #[allow(clippy::too_many_arguments)]
     fn new(
         rotary_emb: Arc<DeepSeekV2RotaryEmbedding>,
-        cfg: &DeepSeekV2Config,
+        cfg: &Glm4MoeLiteConfig,
         vb: ShardedVarBuilder,
         mapper: &dyn DeviceMapper,
         layer_idx: usize,
@@ -740,9 +749,10 @@ impl DecoderLayer {
             cfg.rms_norm_eps,
             mapper.set_device(layer_idx, vb.pp("post_attention_layernorm"), false),
         )?;
-        let moe_or_mlp = if let Some(n_routed_experts) = cfg.n_routed_experts.filter(|_| {
-            layer_idx >= cfg.first_k_dense_replace && layer_idx.is_multiple_of(cfg.moe_layer_freq)
-        }) {
+        // Layer 0 uses dense MLP (first_k_dense_replace=1 by default), other layers use MoE
+        let moe_or_mlp = if layer_idx >= cfg.first_k_dense_replace
+            && layer_idx.is_multiple_of(cfg.moe_layer_freq)
+        {
             MoeOrMlp::Moe(Box::new(Moe::new(
                 cfg,
                 vb.pp("mlp"),
@@ -750,7 +760,7 @@ impl DecoderLayer {
                 layer_idx,
                 loading_isq,
                 cfg.n_shared_experts,
-                n_routed_experts,
+                cfg.n_routed_experts,
                 comm,
                 real_device,
             )?))
@@ -795,7 +805,7 @@ impl DecoderLayer {
     }
 }
 
-pub struct DeepSeekV2 {
+pub struct Glm4MoeLite {
     lm_head: Arc<dyn QuantMethod>,
     embed_tokens: Arc<dyn QuantMethod>,
     dtype: DType,
@@ -808,9 +818,9 @@ pub struct DeepSeekV2 {
     mapper: Box<dyn DeviceMapper + Send + Sync>,
 }
 
-impl DeepSeekV2 {
+impl Glm4MoeLite {
     pub fn new(
-        cfg: &DeepSeekV2Config,
+        cfg: &Glm4MoeLiteConfig,
         vb: ShardedVarBuilder,
         _is_gptx: bool,
         normal_loading_metadata: NormalLoadingMetadata,
@@ -848,7 +858,7 @@ impl DeepSeekV2 {
         )?;
 
         let rope_cfg = DeepSeekV2RopeConfig {
-            rope_scaling: cfg.rope_scaling.clone(),
+            rope_scaling: None,
             max_position_embeddings: cfg.max_position_embeddings,
             rope_theta: cfg.rope_theta,
             qk_rope_head_dim: cfg.qk_rope_head_dim,
@@ -925,11 +935,19 @@ impl DeepSeekV2 {
                 } else {
                     cfg.v_head_dim
                 },
-                #[cfg(all(feature = "cuda", target_family = "unix"))]
                 kv_cache_layout: if matches!(
                     attention_mechanism,
                     AttentionImplementation::PagedAttention
-                ) {
+                ) && {
+                    #[cfg(all(feature = "cuda", target_family = "unix"))]
+                    {
+                        matches!(normal_loading_metadata.real_device, Device::Cuda(_))
+                    }
+                    #[cfg(not(all(feature = "cuda", target_family = "unix")))]
+                    {
+                        false
+                    }
+                } {
                     crate::paged_attention::KvCacheLayout::Mla {
                         kv_lora_rank: cfg.kv_lora_rank,
                         kpe_head_dim: cfg.qk_rope_head_dim,
@@ -937,8 +955,6 @@ impl DeepSeekV2 {
                 } else {
                     crate::paged_attention::KvCacheLayout::Standard
                 },
-                #[cfg(not(all(feature = "cuda", target_family = "unix")))]
-                kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
             },
             mapper,
         })
@@ -954,7 +970,6 @@ impl DeepSeekV2 {
             xs.dtype(),
             &CausalMaskConfig::default(),
         )?;
-        // PagedAttention prompt chunking
         let attention_mask = if ctx.is_first_prompt_chunk() {
             attention_mask
         } else {
@@ -972,7 +987,7 @@ impl DeepSeekV2 {
     }
 }
 
-impl IsqModel for DeepSeekV2 {
+impl IsqModel for Glm4MoeLite {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
 
@@ -998,12 +1013,15 @@ impl IsqModel for DeepSeekV2 {
                         .pp("mlp")
                         .pp("gate")
                         .add_tensor("weight", moe.gate.weight.clone());
+                    uvb_l.pp("mlp").pp("gate").add_tensor(
+                        "e_score_correction_bias",
+                        moe.gate.e_score_correction_bias.clone(),
+                    );
                 }
                 MoeOrMlp::Mlp(_) => (),
             }
 
             match &layer.attn.q {
-                QProj::Plain(_) => (),
                 QProj::Lora { a: _, norm, b: _ } => {
                     uvb_l.pp("self_attn").pp("q_a_layernorm").add(norm);
                 }
@@ -1038,14 +1056,15 @@ impl IsqModel for DeepSeekV2 {
                         .pp("mlp")
                         .pp("gate")
                         .add_tensor("weight", moe.gate.weight.clone());
+                    uvb_l.pp("mlp").pp("gate").add_tensor(
+                        "e_score_correction_bias",
+                        moe.gate.e_score_correction_bias.clone(),
+                    );
                 }
                 MoeOrMlp::Mlp(_) => (),
             }
 
             match &layer.attn.q {
-                QProj::Plain(q) => {
-                    uvb_l.pp("self_attn").pp("q_proj").add(q);
-                }
                 QProj::Lora { a, norm, b } => {
                     uvb_l.pp("self_attn").pp("q_a_proj").add(a);
                     uvb_l.pp("self_attn").pp("q_a_layernorm").add(norm);
@@ -1069,14 +1088,10 @@ impl IsqModel for DeepSeekV2 {
     }
 }
 
-impl crate::speculative::SpeculativeTargetMixin for DeepSeekV2 {}
+impl crate::speculative::SpeculativeTargetMixin for Glm4MoeLite {}
 
-impl NormalModel for DeepSeekV2 {
-    fn forward(
-        &self,
-        input_ids: &Tensor,
-        ctx: &mut crate::model::ModelForwardContext<'_>,
-    ) -> Result<Tensor> {
+impl NormalModel for Glm4MoeLite {
+    fn forward(&self, input_ids: &Tensor, ctx: &mut ModelForwardContext<'_>) -> Result<Tensor> {
         self.forward(input_ids, ctx)
     }
     fn xlora_forward(
@@ -1114,4 +1129,4 @@ impl NormalModel for DeepSeekV2 {
     }
 }
 
-impl AnyMoeBaseModelMixin for DeepSeekV2 {}
+impl AnyMoeBaseModelMixin for Glm4MoeLite {}

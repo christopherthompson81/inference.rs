@@ -44,45 +44,45 @@ serde_default_fn!(bool, attention_bias, false);
 
 #[derive(Deserialize, Clone, Debug)]
 pub struct Glm4MoeConfig {
-    pub(crate) vocab_size: usize,
-    pub(crate) hidden_size: usize,
-    pub(crate) intermediate_size: usize,
-    pub(crate) moe_intermediate_size: usize,
-    pub(crate) num_hidden_layers: usize,
-    pub(crate) num_attention_heads: usize,
-    pub(crate) num_key_value_heads: usize,
-    pub(crate) partial_rotary_factor: f32,
+    pub vocab_size: usize,
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+    pub moe_intermediate_size: usize,
+    pub num_hidden_layers: usize,
+    pub num_attention_heads: usize,
+    pub num_key_value_heads: usize,
+    pub partial_rotary_factor: f32,
     #[serde(default = "use_qk_norm")]
-    pub(crate) use_qk_norm: bool,
+    pub use_qk_norm: bool,
     #[serde(default = "attention_bias")]
-    pub(crate) attention_bias: bool,
-    pub(crate) n_routed_experts: usize,
-    pub(crate) n_shared_experts: usize,
-    pub(crate) num_experts_per_tok: usize,
+    pub attention_bias: bool,
+    pub n_routed_experts: usize,
+    pub n_shared_experts: usize,
+    pub num_experts_per_tok: usize,
     #[serde(default = "first_k_dense_replace")]
-    pub(crate) first_k_dense_replace: usize,
+    pub first_k_dense_replace: usize,
     #[serde(default = "routed_scaling_factor")]
-    pub(crate) routed_scaling_factor: f64,
+    pub routed_scaling_factor: f64,
     #[serde(default = "n_group")]
-    pub(crate) n_group: usize,
+    pub n_group: usize,
     #[serde(default = "topk_group")]
-    pub(crate) topk_group: usize,
+    pub topk_group: usize,
     #[serde(default = "norm_topk_prob")]
-    pub(crate) norm_topk_prob: bool,
-    pub(crate) rms_norm_eps: f64,
-    pub(crate) rope_theta: f64,
-    pub(crate) max_position_embeddings: usize,
+    pub norm_topk_prob: bool,
+    pub rms_norm_eps: f64,
+    pub rope_theta: f64,
+    pub max_position_embeddings: usize,
     #[serde(default = "hidden_act")]
-    pub(crate) hidden_act: Activation,
+    pub hidden_act: Activation,
     #[serde(default = "tie_word_embeddings")]
-    pub(crate) tie_word_embeddings: bool,
-    pub(crate) head_dim: Option<usize>,
+    pub tie_word_embeddings: bool,
+    pub head_dim: Option<usize>,
     #[serde(alias = "quantization")]
-    pub(crate) quantization_config: Option<QuantizedConfig>,
+    pub quantization_config: Option<QuantizedConfig>,
 }
 
 impl Glm4MoeConfig {
-    pub(crate) fn head_dim(&self) -> usize {
+    pub fn head_dim(&self) -> usize {
         self.head_dim
             .unwrap_or(self.hidden_size / self.num_attention_heads)
     }

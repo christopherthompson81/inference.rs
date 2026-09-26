@@ -193,7 +193,7 @@ impl Config {
         effective_rope_theta(self.rope_theta, self.head_dim(), self.rope_scaling.as_ref())
     }
 
-    pub(crate) fn uses_moe(&self) -> bool {
+    pub fn uses_moe(&self) -> bool {
         DecoderMlpKind::for_num_experts(self.num_experts) == DecoderMlpKind::Moe
     }
 

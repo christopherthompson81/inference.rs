@@ -43,14 +43,13 @@ serde_default_fn!(f64, routed_scaling_factor, 1.0);
 serde_default_fn!(TopkMethod, topk_method, TopkMethod::Greedy);
 serde_default_fn!(usize, moe_layer_freq, 1);
 serde_default_fn!(usize, first_k_dense_replace, 0);
+serde_default_fn!(bool, norm_topk_prob, false);
 serde_default_fn!(ScoringFunc, scoring_func, ScoringFunc::Softmax);
 serde_default_fn!(Activation, hidden_act, Activation::Silu);
 serde_default_fn!(bool, tie_word_embeddings, false);
 
 #[derive(Deserialize, Clone, Debug)]
 enum TopkMethod {
-    #[serde(rename = "noaux_tc")]
-    NoAuxTc,
     #[serde(rename = "greedy")]
     Greedy,
     #[serde(rename = "group_limited_greedy")]
@@ -61,53 +60,53 @@ enum TopkMethod {
 enum ScoringFunc {
     #[serde(rename = "softmax")]
     Softmax,
-    #[serde(rename = "sigmoid")]
-    Sigmoid,
 }
 
 #[derive(Deserialize, Clone, Debug)]
-pub struct DeepSeekV3Config {
-    pub(crate) vocab_size: usize,
-    pub(crate) hidden_size: usize,
-    pub(crate) intermediate_size: usize,
-    pub(crate) moe_intermediate_size: usize,
-    pub(crate) num_hidden_layers: usize,
-    pub(crate) num_attention_heads: usize,
-    pub(crate) n_shared_experts: Option<usize>,
-    pub(crate) n_routed_experts: Option<usize>,
+pub struct DeepSeekV2Config {
+    pub vocab_size: usize,
+    pub hidden_size: usize,
+    pub intermediate_size: usize,
+    pub moe_intermediate_size: usize,
+    pub num_hidden_layers: usize,
+    pub num_attention_heads: usize,
+    pub n_shared_experts: Option<usize>,
+    pub n_routed_experts: Option<usize>,
     #[serde(default = "routed_scaling_factor")]
-    pub(crate) routed_scaling_factor: f64,
+    pub routed_scaling_factor: f64,
     #[serde(default = "topk_method")]
     topk_method: TopkMethod,
-    pub(crate) num_experts_per_tok: Option<usize>,
+    pub num_experts_per_tok: Option<usize>,
     #[serde(default = "moe_layer_freq")]
-    pub(crate) moe_layer_freq: usize,
+    pub moe_layer_freq: usize,
     #[serde(default = "first_k_dense_replace")]
-    pub(crate) first_k_dense_replace: usize,
+    pub first_k_dense_replace: usize,
+    // k dense layers
+    #[serde(default = "norm_topk_prob")]
+    pub norm_topk_prob: bool,
     #[serde(default = "scoring_func")]
     scoring_func: ScoringFunc,
     #[serde(default = "hidden_act")]
-    pub(crate) hidden_act: Activation,
-    pub(crate) max_position_embeddings: usize,
-    pub(crate) rms_norm_eps: f64,
+    pub hidden_act: Activation,
+    pub max_position_embeddings: usize,
+    pub rms_norm_eps: f64,
     #[serde(default = "tie_word_embeddings")]
-    pub(crate) tie_word_embeddings: bool,
-    pub(crate) rope_theta: f32,
-    pub(crate) rope_scaling: Option<DeepSeekV2RopeScaling>,
-    pub(crate) attention_bias: bool,
-    pub(crate) q_lora_rank: Option<usize>,
-    pub(crate) qk_rope_head_dim: usize,
-    pub(crate) kv_lora_rank: usize,
-    pub(crate) v_head_dim: usize,
-    pub(crate) qk_nope_head_dim: usize,
-    #[serde(alias = "quantization")]
-    pub(crate) quantization_config: Option<QuantizedConfig>,
-    pub(crate) n_group: usize,
-    pub(crate) topk_group: usize,
+    pub tie_word_embeddings: bool,
+    pub rope_theta: f32,
+    pub rope_scaling: Option<DeepSeekV2RopeScaling>,
+    pub attention_bias: bool,
+    pub q_lora_rank: Option<usize>,
+    pub qk_rope_head_dim: usize,
+    pub kv_lora_rank: usize,
+    pub v_head_dim: usize,
+    pub qk_nope_head_dim: usize,
+    pub quantization_config: Option<QuantizedConfig>,
+    pub n_group: usize,
+    pub topk_group: usize,
 }
 
-impl DeepSeekV3Config {
-    pub(crate) fn q_head_dim(&self) -> usize {
+impl DeepSeekV2Config {
+    pub fn q_head_dim(&self) -> usize {
         self.qk_rope_head_dim + self.qk_nope_head_dim
     }
 
@@ -151,7 +150,7 @@ struct Attention {
     kv_b_proj: MlaKvBProjection,
     o_proj: Arc<dyn QuantMethod>,
     rotary_emb: Arc<DeepSeekV2RotaryEmbedding>,
-    cfg: DeepSeekV3Config,
+    cfg: DeepSeekV2Config,
     q_head_dim: usize,
     paged_attn: Option<PagedAttention>,
     sdpa_params: SdpaParams,
@@ -163,7 +162,7 @@ impl Attention {
     #[allow(clippy::too_many_arguments)]
     fn new(
         rotary_emb: Arc<DeepSeekV2RotaryEmbedding>,
-        cfg: &DeepSeekV3Config,
+        cfg: &DeepSeekV2Config,
         vb: ShardedVarBuilder,
         mapper: &dyn DeviceMapper,
         layer_idx: usize,
@@ -497,36 +496,24 @@ impl Attention {
 struct MoeGate {
     weight: Tensor,
     lora_site: Option<Arc<inference_quant::LoraSiteHandle>>,
-    cfg: DeepSeekV3Config,
+    cfg: DeepSeekV2Config,
     top_k: usize,
     n_routed_experts: usize,
-    e_score_correction_bias: Option<Tensor>,
 }
 
 impl MoeGate {
-    fn new(cfg: &DeepSeekV3Config, vb: ShardedVarBuilder, n_routed_experts: usize) -> Result<Self> {
+    fn new(cfg: &DeepSeekV2Config, vb: ShardedVarBuilder, n_routed_experts: usize) -> Result<Self> {
         let weight = vb.get((n_routed_experts, cfg.hidden_size), "weight")?;
         let lora_site = inference_quant::register_dynamic_lora_site(
-            &vb.clone().set_dtype(DType::F32),
+            &vb.set_dtype(DType::F32),
             inference_quant::LoraLinearSpec::replicated(cfg.hidden_size, n_routed_experts),
         )?;
-        let e_score_correction_bias = if matches!(cfg.topk_method, TopkMethod::NoAuxTc) {
-            Some(vb.get_with_hints_dtype(
-                n_routed_experts,
-                "e_score_correction_bias",
-                Default::default(),
-                DType::F32,
-            )?)
-        } else {
-            None
-        };
         Ok(Self {
             weight,
             lora_site,
             cfg: cfg.clone(),
             top_k: cfg.num_experts_per_tok.unwrap(),
             n_routed_experts,
-            e_score_correction_bias,
         })
     }
 
@@ -541,18 +528,20 @@ impl MoeGate {
             None => logits,
         };
         if matches!(self.cfg.topk_method, TopkMethod::Greedy) {
+            let renormalize = self.top_k > 1 && self.cfg.norm_topk_prob;
             let topk = crate::ops::moe_router_topk(
                 &logits,
                 crate::ops::MoeRouterTopKConfig {
                     top_k: self.top_k,
-                    score_function: match self.cfg.scoring_func {
-                        ScoringFunc::Softmax => crate::ops::MoeRouterScoreFunction::Softmax,
-                        ScoringFunc::Sigmoid => crate::ops::MoeRouterScoreFunction::Sigmoid,
-                    },
+                    score_function: crate::ops::MoeRouterScoreFunction::Softmax,
                     selected_weight: crate::ops::MoeRouterSelectedWeight::Score,
-                    renormalize: matches!(self.cfg.scoring_func, ScoringFunc::Sigmoid),
+                    renormalize,
                     norm_min: 1e-20,
-                    output_scale: self.cfg.routed_scaling_factor as f32,
+                    output_scale: if renormalize {
+                        1.0
+                    } else {
+                        self.cfg.routed_scaling_factor as f32
+                    },
                     logit_clip: None,
                 },
                 None,
@@ -562,50 +551,11 @@ impl MoeGate {
         }
         let scores = match self.cfg.scoring_func {
             ScoringFunc::Softmax => candle_nn::ops::softmax_last_dim(&logits)?,
-            ScoringFunc::Sigmoid => candle_nn::ops::sigmoid(&logits)?,
         };
 
         // Select top-k experts
         let (mut topk_weight, topk_idx) = match self.cfg.topk_method {
             TopkMethod::Greedy => unreachable!(),
-            TopkMethod::NoAuxTc => {
-                let Some(e_score_correction_bias) = &self.e_score_correction_bias else {
-                    candle_core::bail!("Expected e_score_correction_bias")
-                };
-                let scores_for_choice = scores
-                    .reshape((bs * seq_len, ()))?
-                    .broadcast_add(&e_score_correction_bias.unsqueeze(0)?)?;
-                // (n, n_group)
-                let group_scores = scores_for_choice
-                    .reshape((bs * seq_len, self.cfg.n_group, ()))?
-                    .topk(2)?
-                    .values
-                    .sum(D::Minus1)?;
-                // (n, topk_group)
-                let group_idx = group_scores.topk(self.cfg.topk_group)?.indices;
-                // (n, n_group)
-                let mut group_mask = group_scores.zeros_like()?;
-                // (n, n_group)
-                group_mask = group_mask.scatter_add(
-                    &group_idx,
-                    &group_idx.ones_like()?.to_dtype(group_mask.dtype())?,
-                    1,
-                )?;
-                // (n, e)
-                let score_mask = group_mask
-                    .unsqueeze(D::Minus1)?
-                    .expand((
-                        bs * seq_len,
-                        self.cfg.n_group,
-                        self.n_routed_experts / self.cfg.n_group,
-                    ))?
-                    .reshape((bs * seq_len, ()))?;
-                // (n, e)
-                // Invert the mask
-                let tmp_scores = scores_for_choice.broadcast_mul(&score_mask)?;
-                let topk_idx = tmp_scores.topk(self.top_k)?.indices;
-                (scores.gather(&topk_idx, 1)?, topk_idx)
-            }
             TopkMethod::GroupLimitedGreedy => {
                 // (n, n_group)
                 let group_scores = scores
@@ -638,26 +588,13 @@ impl MoeGate {
             }
         };
 
-        if matches!(self.cfg.scoring_func, ScoringFunc::Sigmoid) {
+        if self.top_k > 1 && self.cfg.norm_topk_prob {
             let denmoninator = (topk_weight.sum_keepdim(D::Minus1)? + 1e-20)?;
-            topk_weight = topk_weight.broadcast_div(&denmoninator)?;
+            topk_weight = (topk_weight / denmoninator)?;
+        } else {
+            topk_weight = (topk_weight * self.cfg.routed_scaling_factor)?;
         }
-
-        // Must multiply the scaling factor
-        topk_weight = (topk_weight * self.cfg.routed_scaling_factor)?;
-
         Ok((topk_idx, topk_weight))
-    }
-}
-
-fn add_moe_gate_residual_tensors(
-    uvb: &UnVarBuilder,
-    weight: &Tensor,
-    correction_bias: Option<&Tensor>,
-) {
-    uvb.add_tensor("weight", weight.clone());
-    if let Some(bias) = correction_bias {
-        uvb.add_tensor("e_score_correction_bias", bias.clone());
     }
 }
 
@@ -670,7 +607,7 @@ struct Moe {
 impl Moe {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        cfg: &DeepSeekV3Config,
+        cfg: &DeepSeekV2Config,
         vb: ShardedVarBuilder,
         mapper: &dyn DeviceMapper,
         layer_idx: usize,
@@ -774,7 +711,7 @@ impl DecoderLayer {
     #[allow(clippy::too_many_arguments)]
     fn new(
         rotary_emb: Arc<DeepSeekV2RotaryEmbedding>,
-        cfg: &DeepSeekV3Config,
+        cfg: &DeepSeekV2Config,
         vb: ShardedVarBuilder,
         mapper: &dyn DeviceMapper,
         layer_idx: usize,
@@ -858,7 +795,7 @@ impl DecoderLayer {
     }
 }
 
-pub struct DeepSeekV3 {
+pub struct DeepSeekV2 {
     lm_head: Arc<dyn QuantMethod>,
     embed_tokens: Arc<dyn QuantMethod>,
     dtype: DType,
@@ -871,9 +808,9 @@ pub struct DeepSeekV3 {
     mapper: Box<dyn DeviceMapper + Send + Sync>,
 }
 
-impl DeepSeekV3 {
+impl DeepSeekV2 {
     pub fn new(
-        cfg: &DeepSeekV3Config,
+        cfg: &DeepSeekV2Config,
         vb: ShardedVarBuilder,
         _is_gptx: bool,
         normal_loading_metadata: NormalLoadingMetadata,
@@ -1035,7 +972,7 @@ impl DeepSeekV3 {
     }
 }
 
-impl IsqModel for DeepSeekV3 {
+impl IsqModel for DeepSeekV2 {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
 
@@ -1057,11 +994,10 @@ impl IsqModel for DeepSeekV3 {
 
             match &layer.moe_or_mlp {
                 MoeOrMlp::Moe(moe) => {
-                    add_moe_gate_residual_tensors(
-                        &uvb_l.pp("mlp").pp("gate"),
-                        &moe.gate.weight,
-                        moe.gate.e_score_correction_bias.as_ref(),
-                    );
+                    uvb_l
+                        .pp("mlp")
+                        .pp("gate")
+                        .add_tensor("weight", moe.gate.weight.clone());
                 }
                 MoeOrMlp::Mlp(_) => (),
             }
@@ -1098,11 +1034,10 @@ impl IsqModel for DeepSeekV3 {
 
             match &layer.moe_or_mlp {
                 MoeOrMlp::Moe(moe) => {
-                    add_moe_gate_residual_tensors(
-                        &uvb_l.pp("mlp").pp("gate"),
-                        &moe.gate.weight,
-                        moe.gate.e_score_correction_bias.as_ref(),
-                    );
+                    uvb_l
+                        .pp("mlp")
+                        .pp("gate")
+                        .add_tensor("weight", moe.gate.weight.clone());
                 }
                 MoeOrMlp::Mlp(_) => (),
             }
@@ -1134,9 +1069,9 @@ impl IsqModel for DeepSeekV3 {
     }
 }
 
-impl crate::speculative::SpeculativeTargetMixin for DeepSeekV3 {}
+impl crate::speculative::SpeculativeTargetMixin for DeepSeekV2 {}
 
-impl NormalModel for DeepSeekV3 {
+impl NormalModel for DeepSeekV2 {
     fn forward(
         &self,
         input_ids: &Tensor,
@@ -1179,35 +1114,4 @@ impl NormalModel for DeepSeekV3 {
     }
 }
 
-impl AnyMoeBaseModelMixin for DeepSeekV3 {}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn residual_names(correction_bias: Option<Tensor>) -> Result<Vec<String>> {
-        let weight = Tensor::zeros((2, 4), DType::F32, &Device::Cpu)?;
-        let uvb = UnVarBuilder::new().pp("model.layers.0.mlp.gate");
-        add_moe_gate_residual_tensors(&uvb, &weight, correction_bias.as_ref());
-        let mut names = uvb
-            .to_safetensors()
-            .into_iter()
-            .map(|(name, _)| name)
-            .collect::<Vec<_>>();
-        names.sort();
-        Ok(names)
-    }
-
-    #[test]
-    fn moe_gate_residual_includes_optional_correction_bias() -> Result<()> {
-        assert_eq!(
-            residual_names(Some(Tensor::zeros(2, DType::F32, &Device::Cpu)?))?,
-            [
-                "model.layers.0.mlp.gate.e_score_correction_bias",
-                "model.layers.0.mlp.gate.weight",
-            ]
-        );
-        assert_eq!(residual_names(None)?, ["model.layers.0.mlp.gate.weight"]);
-        Ok(())
-    }
-}
+impl AnyMoeBaseModelMixin for DeepSeekV2 {}
