@@ -3,8 +3,8 @@ mod auto;
 pub(crate) mod cache_manager;
 pub(crate) use crate::model::{
     decode_positions_tensor, extract_logits, metadata_rope_positions,
-    recurrent_batch_kind_for_input, text_positions_tensor, ForwardCache, ForwardMaskCache,
-    LogitsSelection, ModelForwardContext, RecurrentMetadata,
+    recurrent_batch_kind_for_input, text_positions_tensor, ForwardMaskCache, ModelForwardContext,
+    RecurrentMetadata,
 };
 pub use cache_manager::CacheManager;
 pub mod chat_template;
@@ -44,7 +44,6 @@ pub use super::diffusion_models::DiffusionGenerationParams;
 use crate::amoe::{AnyMoeConfig, AnyMoeExpertType, AnyMoeTrainingInputs, AnyMoeTrainingResult};
 use crate::attention::FlashParams;
 use crate::device_map::DeviceMapper;
-use crate::gdn::RecurrentBatchKind;
 use crate::kv_cache::PagedAuxiliaryPrefixState;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use crate::paged_attention::{
@@ -2348,9 +2347,11 @@ mod tests {
         next_pipeline_prompt_chunk_group, paged_attention_memory_reservations,
         prompt_chunk_is_final, recurrent_batch_kind_for_input, recurrent_kv_floor_bytes,
         reserve_recurrent_serving_capacity, resolve_lora_execution, should_sample_step,
-        should_try_speculative_sampling, CacheMemoryReservations, ForwardCache, LogitsSelection,
-        ModelForwardContext, RecurrentBatchKind, RecurrentCheckpointBudget,
+        should_try_speculative_sampling, CacheMemoryReservations, ModelForwardContext,
+        RecurrentCheckpointBudget,
     };
+    use crate::gdn::RecurrentBatchKind;
+    use crate::model::{ForwardCache, LogitsSelection};
     use crate::{
         attention::FlashParams,
         kv_cache::{

@@ -209,7 +209,7 @@ pub(crate) fn text_decode_position_ids_from_context(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::{ForwardCache, ModelForwardContext};
+    use crate::model::{ForwardCache, ModelForwardContext};
     use candle_core::IndexOp;
 
     #[test]

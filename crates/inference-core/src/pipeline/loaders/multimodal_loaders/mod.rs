@@ -1,11 +1,10 @@
-use std::any::Any;
+pub use crate::model::MultimodalModel;
 use std::borrow::Cow;
-use std::sync::atomic::AtomicUsize;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::{fmt::Debug, str::FromStr};
 
 use anyhow::Result;
-use candle_core::{DType, Device, Tensor, D};
+use candle_core::{DType, Device, D};
 use candle_nn::Conv2dConfig;
 use image::{ColorType, DynamicImage};
 use inference_quant::log::once_log_debug;
@@ -27,24 +26,19 @@ use super::{
     promoted_tensor_pack_factor, AutoDeviceMapQuantization,
 };
 
-use crate::amoe::AnyMoeBaseModelMixin;
 use crate::attention::ATTENTION_CHUNK_SIZE;
-use crate::block_diffusion::BlockDiffusionMixin;
 use crate::device_map::DeviceMapper;
 use crate::gguf::normal_registry::RopePairing;
 use crate::layers::Conv3dConfig;
 use crate::matformer::MatformerSliceConfig;
 use crate::paged_attention::{
-    encoder_cache::EncoderCacheManager, AttentionImplementation, HybridPagedKvCacheConfig,
-    ModelConfigLike, ModelConfigMetadata,
+    AttentionImplementation, HybridPagedKvCacheConfig, ModelConfigLike, ModelConfigMetadata,
 };
 use crate::pipeline::isq::IsqModelLoader;
 use crate::pipeline::loaders::AutoDeviceMapParams;
 use crate::pipeline::{
-    EitherCache, IsqModel, Modalities, ModelForwardContext, MultimodalPromptPrefixer, Processor,
-    ProcessorCreator, SupportedModality,
+    Modalities, MultimodalPromptPrefixer, Processor, ProcessorCreator, SupportedModality,
 };
-use crate::speculative::SpeculativeTargetMixin;
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
 use crate::vision_models::clip::ClipConfig;
 use crate::vision_models::diffusion_gemma::{DiffusionGemmaConfig, DiffusionGemmaModel};
@@ -104,66 +98,6 @@ const QWEN3_VIDEO_SAMPLING: crate::VideoFrameSampling = crate::VideoFrameSamplin
     min_frames: 4,
     max_frames: 768,
 };
-
-pub trait MultimodalModel:
-    IsqModel + AnyMoeBaseModelMixin + SpeculativeTargetMixin + BlockDiffusionMixin
-{
-    // pixel_values and pixel_attention_mask only specified for prompt seqs
-    fn forward(
-        &self,
-        input_ids: &Tensor,
-        pixel_values: Option<Tensor>,
-        model_specific_args: Box<dyn Any>, // pixel attention mask, or image sizes, or anything else
-        ctx: &mut ModelForwardContext<'_>,
-    ) -> candle_core::Result<Tensor>;
-    #[cfg(feature = "cuda")]
-    fn supports_cuda_decode_graphs(&self) -> bool {
-        false
-    }
-    #[cfg(feature = "cuda")]
-    fn supports_cuda_decode_graphs_for_args(&self, _model_specific_args: &dyn Any) -> bool {
-        self.supports_cuda_decode_graphs()
-    }
-    fn requires_uniform_completion_batch(&self) -> bool {
-        self.is_block_diffusion()
-    }
-    fn supports_packed_prefill(&self) -> bool {
-        false
-    }
-    fn supports_mixed_media_batches(&self) -> bool {
-        false
-    }
-    fn device(&self) -> &Device;
-    fn cache(&self) -> &EitherCache;
-    fn max_seq_len(&self) -> usize;
-    fn config(&self) -> &ModelConfigMetadata;
-    fn model_config(&self) -> Arc<dyn ModelConfigLike + Send + Sync> {
-        Arc::new(self.config().clone())
-    }
-    /// For a prompt without images. Requires batch size of 1!
-    fn default_model_specific_args(&self, input_ids: &Tensor) -> Box<dyn Any>;
-    fn encoder_cache(&self) -> Option<&Mutex<EncoderCacheManager>> {
-        None
-    }
-    fn configure_encoder_cache_memory_bytes(&self, max_bytes: usize) -> bool {
-        let Some(cache) = self.encoder_cache() else {
-            return false;
-        };
-        cache
-            .lock()
-            .expect("encoder cache poisoned")
-            .set_max_logical_bytes(max_bytes);
-        true
-    }
-    fn encoder_cache_counters(&self) -> Option<(Arc<AtomicUsize>, Arc<AtomicUsize>)> {
-        self.encoder_cache()
-            .map(|cache| cache.lock().expect("encoder cache poisoned").counters())
-    }
-    fn reset_model_specific_state(&self) {}
-    fn reset_model_specific_state_for_sequences(&self, _sequence_ids: &[usize]) {
-        self.reset_model_specific_state();
-    }
-}
 
 pub trait MultimodalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoader {
     fn load(

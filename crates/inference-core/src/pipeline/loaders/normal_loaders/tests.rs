@@ -1,4 +1,5 @@
 use super::*;
+use candle_core::Device;
 
 fn loading_metadata(rope_pairing: Option<RopePairing>) -> NormalLoadingMetadata {
     NormalLoadingMetadata {
