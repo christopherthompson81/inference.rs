@@ -7,9 +7,20 @@ use candle_core::{Result, Tensor};
 use rand_isaac::Isaac64Rng;
 
 use crate::paged_attention::PagedAttentionMeta;
-use crate::sequence::Sequence;
+use crate::sampler::Sampler;
 
 pub type TargetTokenEmbedder<'a> = dyn Fn(&Tensor) -> Result<Tensor> + 'a;
+
+/// What a draft proposer reads from a running sequence.
+pub trait DraftSequence {
+    fn id(&self) -> usize;
+    fn sampler(&self) -> Arc<Sampler>;
+    fn sampling_rng(&self, fallback: &Arc<Mutex<Isaac64Rng>>) -> Arc<Mutex<Isaac64Rng>>;
+    fn prompt_tokens(&self) -> usize;
+    fn get_toks(&self) -> &[u32];
+    /// False when constrained decoding or tool-call parsing makes rejection sampling unsound.
+    fn stochastic_verification_allowed(&self) -> bool;
+}
 
 pub trait SpeculativeProposePreparation: Any + Send {
     fn as_any(&self) -> &dyn Any;
@@ -40,7 +51,7 @@ pub struct SpeculativeProposeBatchCtx<'a> {
     pub sampled_tokens_emitted: bool,
     pub seq_ids: &'a [usize],
     pub base_lens: &'a [usize],
-    pub sequences: &'a [&'a Sequence],
+    pub sequences: &'a [&'a dyn DraftSequence],
     pub cache: SpeculativeKvCache<'a>,
     pub target_hiddens: Option<Tensor>,
     /// Per active sequence: its row in the last target forward's batch and how many leading rows of
@@ -61,32 +72,32 @@ pub struct SpeculativeCommitRow {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum SpeculativePrefillCaptureLayout {
+pub enum SpeculativePrefillCaptureLayout {
     Dense,
     Packed,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct SpeculativeTapSpan {
+pub struct SpeculativeTapSpan {
     capture_batch_idx: usize,
     capture_row_start: usize,
     rows: usize,
 }
 
 impl SpeculativeTapSpan {
-    pub(crate) fn rows(&self) -> usize {
+    pub fn rows(&self) -> usize {
         self.rows
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct SpeculativeTapRouting {
+pub struct SpeculativeTapRouting {
     spans: Vec<SpeculativeTapSpan>,
     capture_rows: usize,
 }
 
 impl SpeculativeTapRouting {
-    pub(crate) fn new(
+    pub fn new(
         layout: SpeculativePrefillCaptureLayout,
         capture_batch: usize,
         capture_rows: usize,
@@ -176,11 +187,11 @@ impl SpeculativeTapRouting {
         })
     }
 
-    pub(crate) fn spans(&self) -> &[SpeculativeTapSpan] {
+    pub fn spans(&self) -> &[SpeculativeTapSpan] {
         &self.spans
     }
 
-    pub(crate) fn flat_row_indices(&self) -> Result<Vec<u32>> {
+    pub fn flat_row_indices(&self) -> Result<Vec<u32>> {
         let total_rows = self.spans.iter().try_fold(0usize, |total, span| {
             total.checked_add(span.rows).ok_or_else(|| {
                 candle_core::Error::msg("speculative tap routing row count overflow")
@@ -224,7 +235,7 @@ pub struct TargetAttentionInputs<'a> {
 }
 
 impl SpeculativePrefillCtx<'_> {
-    pub(crate) fn capture_layout(&self) -> SpeculativePrefillCaptureLayout {
+    pub fn capture_layout(&self) -> SpeculativePrefillCaptureLayout {
         self.target_attention
             .map_or(SpeculativePrefillCaptureLayout::Dense, |target| {
                 if target.flash_params.packed {
@@ -454,7 +465,7 @@ pub trait SpeculativeProposer {
 /// Sample one draft token per row of `logits` (`[rows, vocab]`) with each row's own sampler.
 pub fn sample_draft_rows(
     logits: &Tensor,
-    sequences: &[&Sequence],
+    sequences: &[&dyn DraftSequence],
     contexts: &mut [Vec<u32>],
     rng: &Arc<Mutex<Isaac64Rng>>,
 ) -> Result<Vec<u32>> {

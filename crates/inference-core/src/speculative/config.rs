@@ -15,117 +15,59 @@ use crate::{
     utils::normal::TryIntoDType,
 };
 
-#[derive(Clone, Debug)]
-pub enum SpeculativeConfig {
-    Off,
-    Mtp(MtpConfig),
-}
+pub use inference_nn::speculative::config::*;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum MtpDraftSamplingMethod {
-    #[default]
-    Auto,
-    Greedy,
-    Probabilistic,
-}
-
-/// MTP proposer configuration; `model: None` uses the head built into the target checkpoint.
-#[derive(Clone, Debug)]
-pub struct MtpConfig {
-    pub model: Option<String>,
-    pub n_predict: Option<usize>,
-    pub draft_sampling_method: MtpDraftSamplingMethod,
-    /// ISQ type for a draft-only copy of `lm_head`, so drafting skips the promoted (wider)
-    /// sensitive-tensor type; the target still verifies with the promoted head.
-    pub draft_lm_head_isq: Option<crate::IsqType>,
-}
-
-#[doc(hidden)]
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct MtpRuntimeConfig {
-    prefix_cache_capacity: usize,
-}
-
-impl MtpRuntimeConfig {
-    pub fn new(prefix_cache_capacity: usize) -> Self {
-        Self {
-            prefix_cache_capacity,
-        }
-    }
-
-    pub fn prefix_cache_capacity(self) -> usize {
-        self.prefix_cache_capacity
+/// The assistant checkpoint directory, downloading a hub id's config and weights first.
+pub fn resolve_mtp_path(config: &MtpConfig) -> candle_core::Result<PathBuf> {
+    let Some(model) = &config.model else {
+        return config.resolve_path();
+    };
+    let path = PathBuf::from(model);
+    if path.exists() || model.starts_with('.') || model.starts_with('/') {
+        Ok(path)
+    } else {
+        resolve_hf_mtp_path(model)
     }
 }
 
-impl MtpConfig {
-    pub fn new(model: impl Into<String>, n_predict: Option<usize>) -> Self {
-        Self {
-            model: Some(model.into()),
-            n_predict,
-            draft_sampling_method: MtpDraftSamplingMethod::default(),
-            draft_lm_head_isq: None,
+/// Swap an MTP assistant hub id for its local snapshot, so model code only ever sees a directory.
+pub fn resolve_speculative_model(
+    config: SpeculativeConfig,
+) -> candle_core::Result<SpeculativeConfig> {
+    match config {
+        SpeculativeConfig::Mtp(mut mtp) if mtp.model.is_some() => {
+            mtp.model = Some(resolve_mtp_path(&mtp)?.to_string_lossy().into_owned());
+            Ok(SpeculativeConfig::Mtp(mtp))
         }
+        other => Ok(other),
     }
+}
 
-    pub fn builtin(n_predict: Option<usize>) -> Self {
-        Self {
-            model: None,
-            n_predict,
-            draft_sampling_method: MtpDraftSamplingMethod::default(),
-            draft_lm_head_isq: None,
-        }
+/// Returns a conservative runtime weight footprint for an external assistant checkpoint.
+pub fn external_weight_size_in_bytes(
+    config: &MtpConfig,
+    target_dtype: DType,
+) -> candle_core::Result<usize> {
+    if config.is_builtin() {
+        return Ok(0);
     }
-
-    pub fn with_draft_sampling_method(mut self, method: MtpDraftSamplingMethod) -> Self {
-        self.draft_sampling_method = method;
-        self
-    }
-
-    pub fn with_draft_lm_head_isq(mut self, isq: Option<crate::IsqType>) -> Self {
-        self.draft_lm_head_isq = isq;
-        self
-    }
-
-    pub fn is_builtin(&self) -> bool {
-        self.model.is_none()
-    }
-
-    pub fn resolve_path(&self) -> candle_core::Result<PathBuf> {
-        let Some(model) = &self.model else {
-            candle_core::bail!("this MTP proposer requires a separate assistant model (`--mtp-model`), not the built-in head");
-        };
-        let path = PathBuf::from(model);
-        if path.exists() || model.starts_with('.') || model.starts_with('/') {
-            Ok(path)
-        } else {
-            resolve_hf_mtp_path(model)
-        }
-    }
-
-    /// Returns a conservative runtime weight footprint for an external assistant checkpoint.
-    pub fn external_weight_size_in_bytes(&self, target_dtype: DType) -> candle_core::Result<usize> {
-        if self.is_builtin() {
-            return Ok(0);
-        }
-        let path = self.resolve_path()?;
-        let mut weight_paths = fs::read_dir(&path)
-            .map_err(|err| {
-                candle_core::Error::msg(format!("failed to list {}: {err}", path.display()))
-            })?
-            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-            .filter(|path| path.extension().is_some_and(|ext| ext == "safetensors"))
-            .collect::<Vec<_>>();
-        weight_paths.sort();
-        crate::pipeline::checkpoint_runtime_size(&weight_paths, target_dtype)
-            .map_err(candle_core::Error::msg)?
-            .ok_or_else(|| {
-                candle_core::Error::msg(format!(
-                    "MTP model directory {} has no safetensors weights",
-                    path.display()
-                ))
-            })
-    }
+    let path = resolve_mtp_path(config)?;
+    let mut weight_paths = fs::read_dir(&path)
+        .map_err(|err| {
+            candle_core::Error::msg(format!("failed to list {}: {err}", path.display()))
+        })?
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.extension().is_some_and(|ext| ext == "safetensors"))
+        .collect::<Vec<_>>();
+    weight_paths.sort();
+    crate::pipeline::checkpoint_runtime_size(&weight_paths, target_dtype)
+        .map_err(candle_core::Error::msg)?
+        .ok_or_else(|| {
+            candle_core::Error::msg(format!(
+                "MTP model directory {} has no safetensors weights",
+                path.display()
+            ))
+        })
 }
 
 /// Adds an external assistant's runtime weight footprint to a paged-cache memory reservation.
@@ -178,7 +120,7 @@ pub fn reserve_external_mtp_memory_with_runtime(
         cache_config = cache_config.with_recurrent_checkpoint_lanes(drafts + 1)?;
         cache_config.recurrent_checkpoint_lanes_auto = mtp_config.n_predict.is_none();
     }
-    let bytes = mtp_config.external_weight_size_in_bytes(dtype)?;
+    let bytes = external_weight_size_in_bytes(mtp_config, dtype)?;
     #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
     let bytes = if device.is_cuda() {
         if let Some(serving_capacity) = cache_config.serving_capacity {
@@ -272,7 +214,7 @@ mod tests {
         let dir = external_checkpoint(r#"{"architectures":["GenericMtpModel"]}"#)?;
         let config = MtpConfig::new(dir.path().to_string_lossy().into_owned(), None);
 
-        assert_eq!(config.external_weight_size_in_bytes(DType::F32)?, 16);
+        assert_eq!(external_weight_size_in_bytes(&config, DType::F32)?, 16);
         let cache_config = crate::PagedAttentionConfig::new(
             None,
             crate::MemoryGpuConfig::Utilization(0.9),

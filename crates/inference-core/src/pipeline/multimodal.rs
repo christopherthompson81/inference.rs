@@ -2792,6 +2792,7 @@ impl Pipeline for MultimodalPipeline {
             self.cleanup_cuda_graphs();
             self.model.disable_recurrent_decode_deferred_storage()?;
         }
+        let config = crate::speculative::resolve_speculative_model(config)?;
         if let Some(info) = self
             .model
             .attach_speculative_with_runtime(config, runtime)?

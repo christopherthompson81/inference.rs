@@ -544,9 +544,7 @@ impl Qwen3_5Model {
             let probabilistic_rows = ctx
                 .sequences
                 .iter()
-                .map(|seq| {
-                    crate::speculative::verifier::stochastic_verification_allowed_for_sequence(seq)
-                })
+                .map(|seq| seq.stochastic_verification_allowed())
                 .collect::<Vec<_>>();
             if probabilistic_rows.iter().any(|eligible| *eligible) {
                 let mut inverse_temperatures = Vec::with_capacity(batch);
@@ -728,7 +726,7 @@ impl Qwen3_5Model {
                     toks.len()
                 );
             }
-            if let Some(tail) = pending_tails.remove(seq.id()) {
+            if let Some(tail) = pending_tails.remove(&seq.id()) {
                 if tail.position + 1 < toks.len() {
                     rows.push(DraftRow {
                         seq_id: ctx.seq_ids[i],

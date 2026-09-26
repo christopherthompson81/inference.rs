@@ -1,3 +1,4 @@
+use crate::speculative::DraftSequence;
 use std::any::Any;
 use std::sync::Arc;
 
@@ -702,6 +703,10 @@ where
             .iter()
             .map(|idx| &*seqs[*idx] as &Sequence)
             .collect::<Vec<_>>();
+        let draft_sequences = sequences
+            .iter()
+            .map(|seq| *seq as &dyn DraftSequence)
+            .collect::<Vec<_>>();
         let target_rows = hidden_rows
             .iter()
             .map(|(batch_idx, accepted)| (*batch_idx, accepted + 1))
@@ -712,7 +717,7 @@ where
             sampled_tokens_emitted: true,
             seq_ids: &seq_ids,
             base_lens,
-            sequences: &sequences,
+            sequences: &draft_sequences,
             cache: cache.proposer_cache(&sequences)?,
             target_hiddens,
             target_rows: &target_rows,

@@ -36,6 +36,7 @@ pub mod ops;
 pub mod paged_attention;
 pub mod perf_flags;
 pub mod sampler;
+pub mod speculative;
 pub mod topology;
 pub mod utils;
 

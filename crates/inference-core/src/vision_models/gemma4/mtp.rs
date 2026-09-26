@@ -17,7 +17,7 @@ use crate::{
     device_map::DeviceMapper,
     layers::{Activation, RotaryEmbedding},
     paged_attention::PagedAttention,
-    sequence::Sequence,
+    speculative::DraftSequence,
     speculative::{
         MtpConfig, SpeculativeKvCache, SpeculativeProposal, SpeculativeProposalBatch,
         SpeculativeProposeBatchCtx, SpeculativeProposer, TargetTokenEmbedder,
@@ -164,7 +164,7 @@ impl Gemma4MtpRuntime {
         target_hiddens: Tensor,
         seq_ids: &[usize],
         base_lens: &[usize],
-        sequences: &[&Sequence],
+        sequences: &[&dyn DraftSequence],
         rng: Arc<Mutex<Isaac64Rng>>,
         cache: SpeculativeKvCache<'_>,
     ) -> Result<Vec<SpeculativeProposal>> {
@@ -223,7 +223,7 @@ impl Gemma4MtpRuntime {
         target_embedder: &TargetTokenEmbedder<'_>,
         target_hiddens: Tensor,
         base_lens: &[usize],
-        sequences: &[&Sequence],
+        sequences: &[&dyn DraftSequence],
         rng: Arc<Mutex<Isaac64Rng>>,
         cache: &Gemma4MtpStepCache<'_>,
     ) -> Result<Vec<SpeculativeProposal>> {
@@ -272,7 +272,7 @@ impl Gemma4MtpRuntime {
 
 fn sample_draft_tokens(
     logits: &Tensor,
-    sequences: &[&Sequence],
+    sequences: &[&dyn DraftSequence],
     contexts: &mut [Vec<u32>],
     rng: &Arc<Mutex<Isaac64Rng>>,
 ) -> Result<Tensor> {

@@ -1,3 +1,4 @@
+use crate::speculative::DraftSequence;
 use std::sync::Arc;
 
 use candle_core::{DType, Result, Tensor};
@@ -1047,6 +1048,30 @@ fn stochastic_verification_allowed(
     has_tool_call_state: bool,
 ) -> bool {
     !is_argmax && !has_constraint && !has_tool_call_state
+}
+
+impl DraftSequence for Sequence {
+    fn id(&self) -> usize {
+        *Sequence::id(self)
+    }
+    fn sampler(&self) -> Arc<Sampler> {
+        Sequence::sampler(self)
+    }
+    fn sampling_rng(
+        &self,
+        fallback: &Arc<std::sync::Mutex<Isaac64Rng>>,
+    ) -> Arc<std::sync::Mutex<Isaac64Rng>> {
+        Sequence::sampling_rng(self, fallback)
+    }
+    fn prompt_tokens(&self) -> usize {
+        Sequence::prompt_tokens(self)
+    }
+    fn get_toks(&self) -> &[u32] {
+        Sequence::get_toks(self)
+    }
+    fn stochastic_verification_allowed(&self) -> bool {
+        stochastic_verification_allowed_for_sequence(self)
+    }
 }
 
 pub(crate) fn stochastic_verification_allowed_for_sequence(seq: &Sequence) -> bool {
