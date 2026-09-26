@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::attention::AttentionDispatch;
 use crate::layers::masker::CausalMaskConfig;
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::Linear;
@@ -14,7 +13,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
-    attention::{sinks_backend_supports, AttentionMask, SdpaParams},
+    attention::{sinks_backend_supports, AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
         self, embedding_with_legacy_tied_uqff, CausalMasker, GptOssRotaryEmbedding, RmsNorm,

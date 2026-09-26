@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::attention::AttentionDispatch;
 use crate::layers::masker::CausalMaskConfig;
 use std::{collections::HashMap, sync::Arc};
 
@@ -13,7 +12,7 @@ use serde::Deserialize;
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
-    attention::{AttentionMask, SdpaParams},
+    attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
         apply_rotary_q, embedding_with_legacy_tied_uqff, Activation, CausalMasker, Mlp, RmsNorm,

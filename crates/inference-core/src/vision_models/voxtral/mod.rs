@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::attention::AttentionDispatch;
 use crate::layers::masker::CausalMaskConfig;
 use std::any::Any;
 use std::collections::{HashMap, HashSet};
@@ -11,7 +10,7 @@ use inference_quant::{QuantMethod, ShardedVarBuilder};
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
-    attention::{AttentionMask, SdpaParams},
+    attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::masker::PastKvLenCache,
     layers::{embedding, CausalMasker, RmsNorm, RotaryEmbedding},

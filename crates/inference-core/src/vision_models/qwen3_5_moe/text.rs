@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::attention::AttentionDispatch;
 use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
@@ -15,7 +14,7 @@ use inference_quant::{
 
 use super::config::{LayerType, TextConfig};
 use crate::{
-    attention::{AttentionMask, SdpaParams},
+    attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     gdn::{
         GatedDeltaNet, GdnConfig, GdnInputProjectionKind, GdnLayerCache, GdnVHeadLayout,

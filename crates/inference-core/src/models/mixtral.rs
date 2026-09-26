@@ -3,7 +3,6 @@
 /// Mixtral Model
 /// https://github.com/huggingface/transformers/blob/main/src/transformers/models/mixtral/modeling_mixtral.py
 /// https://mistral.ai/news/mixtral-of-experts/
-use crate::attention::AttentionDispatch;
 use crate::layers::masker::CausalMaskConfig;
 use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
@@ -15,7 +14,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
-    attention::{AttentionMask, SdpaParams},
+    attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{embedding_with_legacy_tied_uqff, Activation, CausalMasker, RmsNorm, RotaryEmbedding},
     moe::{MoEExperts, MoEExpertsConfig},

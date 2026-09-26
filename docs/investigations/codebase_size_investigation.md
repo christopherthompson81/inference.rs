@@ -244,8 +244,10 @@ Cosmetic differences, safe to share:
 - `is_none()` instead of `matches!`;
 - `_ =>` instead of `None =>`;
 - `cache_k` names;
-- `.contiguous()` on k/v in the paged branch. That is free when the tensor is already contiguous, so those callers
-  keep passing it.
+- `.contiguous()` on k/v in the paged branch (phi3, phi3-vision, phi4). Those callers keep passing it, so the SDPA
+  append now gets contiguous k/v too. Values are unchanged. On CPU/CUDA the cost is the same, because
+  `KvCache::append` already made them contiguous. On Metal these three now take the fused append kernel that every
+  other model already uses.
 
 Real differences, left bespoke:
 - MLA pad and narrow (deepseek2/3, glm4_moe_lite);

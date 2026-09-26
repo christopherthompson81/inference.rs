@@ -1,7 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use super::hunyuan_rope::{effective_rope_theta, RopeScalingConfig};
-use crate::attention::AttentionDispatch;
 use crate::layers::masker::CausalMaskConfig;
 use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
@@ -13,7 +12,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeConfig, AnyMoeExpertType, MlpLayer},
-    attention::{AttentionMask, SdpaParams},
+    attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{embedding_with_legacy_tied_uqff, Activation, CausalMasker, RmsNorm, RotaryEmbedding},
     moe::{MoEExperts, MoEExpertsConfig},

@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::attention::AttentionDispatch;
 use crate::layers::masker::CausalMaskConfig;
 use std::{
     any::Any,
@@ -15,7 +14,7 @@ use mm_embedding::{InputMode, Phi4MMImageAudioEmbedding, Phi4MMPackedInputs};
 
 use crate::{
     amoe::AnyMoeBaseModelMixin,
-    attention::{AttentionMask, SdpaParams},
+    attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{self, Activation, CausalMasker, Phi4MMRotaryEmbedding, RmsNorm},
     paged_attention::{
