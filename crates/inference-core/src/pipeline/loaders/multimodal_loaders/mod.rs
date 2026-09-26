@@ -358,7 +358,10 @@ multimodal_loader_types! {
     Voxtral { cli: "voxtral", hf: "VoxtralRealtimeForConditionalGeneration", loader: VoxtralLoader },
     Gemma4 {
         cli: "gemma4",
-        hf: "Gemma4ForConditionalGeneration" | "Gemma4ForCausalLM" | "Gemma4UnifiedForConditionalGeneration" | "Gemma4UnifiedForCausalLM",
+        hf: "Gemma4ForConditionalGeneration"
+            | "Gemma4ForCausalLM"
+            | "Gemma4UnifiedForConditionalGeneration"
+            | "Gemma4UnifiedForCausalLM",
         loader: Gemma4Loader,
     },
     MuseGlimmer {

@@ -385,9 +385,7 @@ impl SpeechLoaderType {
     }
 }
 
-// The canonical HF `config.json` `architectures` string for each loader, so the table's
-// leftmost column is the value users Ctrl-F. Must round-trip through `from_causal_lm_name`
-// (enforced by `config_archs_round_trip`).
+// the HF `config.json` `architectures` string, so the supported-models table's first column is what users search for
 impl NormalLoaderType {
     pub fn config_arch(&self) -> &'static str {
         self.causal_lm_name()

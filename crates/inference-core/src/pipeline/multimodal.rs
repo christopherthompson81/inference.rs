@@ -2,13 +2,13 @@ use super::isq::{
     write_uqff_artifacts, UqffFullSer, UqffWriteConfig, UqffWriteRequest, WeightLoadingMode,
     WeightLoadingState,
 };
-use super::MultimodalLoaderType;
 use super::{
     get_model_paths, paged_attention_memory_reservations, reserve_recurrent_serving_capacity,
     AdapterKind, AnyMoePipelineMixin, AutoMultimodalLoader, CacheManager, CacheManagerMixin,
     DecodeGraphPrecaptureCtx, EitherCache, ForwardInputsResult, ForwardStepResult, GeneralMetadata,
-    IsqPipelineMixin, Loader, MetadataMixin, ModelCategory, ModelKind, ModelPaths, MultimodalModel,
-    MultimodalModelLoader, MultimodalPromptPrefixer, PreProcessingMixin, Processor, TokenSource,
+    IsqPipelineMixin, Loader, MetadataMixin, ModelCategory, ModelKind, ModelPaths,
+    MultimodalLoaderType, MultimodalModel, MultimodalModelLoader, MultimodalPromptPrefixer,
+    PreProcessingMixin, Processor, TokenSource,
 };
 use crate::attention::ATTENTION_CHUNK_SIZE;
 #[cfg(feature = "cuda")]

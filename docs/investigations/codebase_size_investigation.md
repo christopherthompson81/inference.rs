@@ -365,4 +365,8 @@ Not in scope: the pyo3 duplicate enums (`Architecture` misses `Qwen3_5`; the `.p
 gpt_oss). Python is moving onto the C ABI and pyo3 will be retired (issue #19), so they are left alone. The GGUF
 registry is a separate schema table.
 
-Result: green, with 2137 CPU and 2456 CUDA tests (+2). 12 files, +300 / -569.
+Result: green, with 2137 CPU and 2456 CUDA tests (+2). 12 code files, +300 / -569. The multimodal FromStr error now
+lists names in table order (gemma4 and muse_glimmer moved after voxtral); nothing parses that message.
+
+Still hand-written outside the tables, for later: the multimodal family subsets in `pipeline/auto.rs:685-703` and
+`pipeline/gguf.rs:1665-1678`, which could become a table column, and the GGUF schema registry.

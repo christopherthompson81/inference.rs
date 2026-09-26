@@ -106,7 +106,7 @@ When adding new model architectures:
 1. Implement the model in `crates/inference-core/src/models/` (or `vision_models/`)
 2. Add its loader in `crates/inference-core/src/pipeline/loaders/normal_loaders/` (or `multimodal_loaders/`)
 3. Add one row to `normal_loader_types!` (or `multimodal_loader_types!`) in that directory's `mod.rs`. The row gives
-   the CLI name, the HF class and the loader, and the enum variant, parsing, display, HF detection and loader
+   the CLI name, the HF class, the `model_type` (text only) and the loader, and the enum variant, parsing, display, HF detection and loader
    dispatch are all generated from it.
 4. Add the GGUF bindings in `crates/inference-core/src/gguf/` if the model loads from GGUF
 
