@@ -1,4 +1,5 @@
 use crate::speculative::DraftSequence;
+use futures::future::BoxFuture;
 use std::any::Any;
 use std::sync::Arc;
 
@@ -142,8 +143,39 @@ pub(crate) fn clear_staged_speculative_tokens(seqs: &mut [&mut Sequence]) {
     }
 }
 
+// Boxed so the pipeline wrappers that await it stay small; see `sample_and_add_toks`.
 #[allow(clippy::too_many_arguments)]
-pub async fn try_sample_speculative_causal_gen<P, C>(
+pub fn try_sample_speculative_causal_gen<'a, 'b: 'a, P, C>(
+    target: &'a mut P,
+    seqs: &'a mut [&'b mut Sequence],
+    logits: &'a [Tensor],
+    batched_logits: Option<&'a Tensor>,
+    prefix_cacher: &'a mut PrefixCacheManagerV2,
+    disable_eos_stop: bool,
+    rng: Arc<std::sync::Mutex<Isaac64Rng>>,
+    cache: &'a C,
+    logger: &'a IntervalLogger,
+) -> BoxFuture<'a, Result<bool>>
+where
+    P: SpeculativePipelineExt + Send,
+    C: SpeculativeCacheAccess + Sync,
+    C::Guard: Send,
+{
+    Box::pin(try_sample_speculative_causal_gen_impl(
+        target,
+        seqs,
+        logits,
+        batched_logits,
+        prefix_cacher,
+        disable_eos_stop,
+        rng,
+        cache,
+        logger,
+    ))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn try_sample_speculative_causal_gen_impl<P, C>(
     target: &mut P,
     seqs: &mut [&mut Sequence],
     logits: &[Tensor],
@@ -155,8 +187,9 @@ pub async fn try_sample_speculative_causal_gen<P, C>(
     logger: &IntervalLogger,
 ) -> Result<bool>
 where
-    P: SpeculativePipelineExt,
-    C: SpeculativeCacheAccess,
+    P: SpeculativePipelineExt + Send,
+    C: SpeculativeCacheAccess + Sync,
+    C::Guard: Send,
 {
     #[cfg(not(feature = "cuda"))]
     let _ = batched_logits;

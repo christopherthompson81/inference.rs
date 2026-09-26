@@ -1,3 +1,4 @@
+use futures::future::BoxFuture;
 use std::sync::Arc;
 
 use candle_core::{DType, IndexOp, Result, Tensor};
@@ -683,7 +684,25 @@ pub(crate) async fn finish_or_add_toks_to_seq(
 /// sequence, running the standard per-token finalize path (EOS/length stop, tool parsing,
 /// streaming, prefix caching) for every token. Stops consuming a block once its sequence
 /// finishes.
-pub(crate) async fn finalize_block_gen(
+pub(crate) fn finalize_block_gen<'a, 'b: 'a>(
+    this: &'a dyn Pipeline,
+    seqs: &'a mut [&'b mut Sequence],
+    token_blocks: Vec<Vec<u32>>,
+    denoise_times: Vec<std::time::Duration>,
+    prefix_cacher: &'a mut PrefixCacheManagerV2,
+    disable_eos_stop: bool,
+) -> BoxFuture<'a, Result<()>> {
+    Box::pin(finalize_block_gen_impl(
+        this,
+        seqs,
+        token_blocks,
+        denoise_times,
+        prefix_cacher,
+        disable_eos_stop,
+    ))
+}
+
+async fn finalize_block_gen_impl(
     this: &dyn Pipeline,
     seqs: &mut [&mut Sequence],
     token_blocks: Vec<Vec<u32>>,
@@ -717,42 +736,41 @@ pub(crate) async fn finalize_block_gen(
     Ok(())
 }
 
-pub async fn sample_and_add_toks(
-    this: &dyn Pipeline,
-    seqs: &mut [&mut Sequence],
+// Boxed so each pipeline's `sample_*` wrapper awaits a small future instead of re-checking this state machine.
+pub fn sample_and_add_toks<'a, 'b: 'a>(
+    this: &'a dyn Pipeline,
+    seqs: &'a mut [&'b mut Sequence],
     logits_seq: Vec<Tensor>,
-    prefix_cacher: &mut PrefixCacheManagerV2,
+    prefix_cacher: &'a mut PrefixCacheManagerV2,
     disable_eos_stop: bool,
     rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-) -> Result<()> {
-    sample_and_add_toks_inner(
+) -> BoxFuture<'a, Result<()>> {
+    Box::pin(sample_and_add_toks_inner(
         this,
         seqs,
         CausalLogitsBatch::PerSequence(logits_seq),
         prefix_cacher,
         disable_eos_stop,
         rng,
-    )
-    .await
+    ))
 }
 
-pub async fn sample_and_add_toks_batched(
-    this: &dyn Pipeline,
-    seqs: &mut [&mut Sequence],
+pub fn sample_and_add_toks_batched<'a, 'b: 'a>(
+    this: &'a dyn Pipeline,
+    seqs: &'a mut [&'b mut Sequence],
     logits: Tensor,
-    prefix_cacher: &mut PrefixCacheManagerV2,
+    prefix_cacher: &'a mut PrefixCacheManagerV2,
     disable_eos_stop: bool,
     rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-) -> Result<()> {
-    sample_and_add_toks_inner(
+) -> BoxFuture<'a, Result<()>> {
+    Box::pin(sample_and_add_toks_inner(
         this,
         seqs,
         CausalLogitsBatch::Batched(logits),
         prefix_cacher,
         disable_eos_stop,
         rng,
-    )
-    .await
+    ))
 }
 
 enum CausalLogitsBatch {

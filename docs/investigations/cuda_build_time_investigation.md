@@ -425,3 +425,31 @@ Review follow-ups:
   are what make it slow, not the model code. The family moves still pay off for modularity and core's lib-test
   build; for the critical path the next lever is inside core itself (a pass-level profile of what's left) and
   inference-server-core, which starts only after core.
+
+## Run 21 - 2026-09-26 16:45
+
+- Question: what dominates inference-core's serial frontend now that the model code is out of it?
+- Command: `RUSTC_BOOTSTRAP=1 cargo rustc -p inference-core --lib -- -Z self-profile -Z self-profile-events=default,args`,
+  events >= 5 ms exported with `crox --minimum-duration 5000` and grouped by query and item.
+- Result: the largest items are the async sampling wrappers every pipeline implements (`sample_causal_gen`,
+  `try_sample_causal_gen_batched`, `try_sample_speculative_causal_gen`, `sample_block_gen` in normal, multimodal,
+  ggml, gguf, embedding, speech, AnyMoE). Each costs ~200 ms in each of mir_borrowck, check_coroutine_obligations,
+  optimized_mir and items_of_instance, although its body is one call: awaiting `sample_and_add_toks` (already
+  `&dyn Pipeline`) embeds that function's whole state machine in every wrapper's coroutine, and rustc re-checks it
+  each time. Next largest: `Engine::add_request` (319 ms borrowck), `Engine::run`, `agentic_loop`.
+- Change: `sample_and_add_toks`, `sample_and_add_toks_batched`, `finalize_block_gen` and the speculative driver's
+  entry point return a `BoxFuture`, so the wrappers await a small boxed future (one allocation per sampling step).
+- Result (`-Z time-passes`, CUDA features, `CARGO_INCREMENTAL=0` for both): total 69.0 -> 64.6 s;
+  codegen_to_LLVM_IR 15.9 -> 14.2 s, generate_crate_metadata 12.0 -> 12.1 s, borrowck 9.0 -> 8.8 s.
+- Side finding: the same compile with incremental on (the dev default) takes ~85 s cold; incremental costs ~15 s on
+  a clean build of core but makes an edit rebuild ~28 s, so it stays.
+
+## Run 22 - 2026-09-26 16:55
+
+- Question: inference-server-core starts after core's metadata and spends ~65 s in codegen; what is in it?
+- Command: `cargo llvm-lines -p inference-server-core --lib`.
+- Result: 2.10M lines. rav1e (the AVIF encoder) is 9.1%: `encode_agentic_tool_images` in `chat_completion.rs`
+  used `DynamicImage::write_to(Cursor, Png)`, which instantiates every enabled encoder, as core's did in Run 17.
+  Also large: serde (serialize/visit_map ~13%) and utoipa's OpenAPI generation (`compose`, `operation`, `schemas`
+  ~8%).
+- Change: encode with `PngEncoder` directly. Result: 2.10M -> 1.48M lines (-29%), rav1e gone.
