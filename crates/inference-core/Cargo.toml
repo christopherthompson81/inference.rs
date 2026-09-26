@@ -109,8 +109,6 @@ statrs.workspace = true
 openai-harmony = "0.0.8"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))'.dependencies]
-objc = { workspace = true, optional = true }
-objc2-metal = { workspace = true, optional = true }
 candle-metal-kernels = { workspace = true, optional = true }
 
 [features]
@@ -130,10 +128,8 @@ metal = [
     "candle-nn/metal",
     "inference-quant/metal",
     "dep:candle-metal-kernels",
-    "dep:objc",
     "dep:inference-paged-attn",
     "inference-paged-attn/metal",
-    "dep:objc2-metal",
     "inference-nn/metal",
 ]
 flash-attn = ["cuda", "dep:inference-flash-attn", "inference-flash-attn/cuda", "inference-nn/flash-attn"]
