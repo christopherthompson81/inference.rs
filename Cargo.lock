@@ -1574,16 +1574,16 @@ dependencies = [
 
 [[package]]
 name = "derivre"
-version = "0.3.8"
+version = "0.3.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "786c7c65c4ef0c7deb05de3005e01991612a8f09fe0844fc0969c68b90468ba8"
+checksum = "a892ec3953f4ca893e8d2086ed03d4b58e19c77ffb864a574b332d7d40c175f3"
 dependencies = [
  "anyhow",
  "bytemuck",
  "bytemuck_derive",
- "hashbrown 0.15.5",
+ "hashbrown 0.17.1",
  "regex-syntax",
- "strum 0.27.2",
+ "strum 0.28.0",
 ]
 
 [[package]]
@@ -2485,6 +2485,12 @@ dependencies = [
  "serde",
  "serde_core",
 ]
+
+[[package]]
+name = "hashbrown"
+version = "0.17.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
 
 [[package]]
 name = "heck"
@@ -3802,9 +3808,9 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "llguidance"
-version = "1.4.0"
+version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebdf44cac6f32a127a275da89f542a358baad09938f8c01caa19241d8d26dcf7"
+checksum = "207e72ede15e79f1e7a7f0e2683387da031c1931f6de650020afb80c571efb67"
 dependencies = [
  "anyhow",
  "derivre",
@@ -6405,6 +6411,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "strum"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9628de9b8791db39ceda2b119bbe13134770b56c138ec1d3af810d045c04f9bd"
+dependencies = [
+ "strum_macros 0.28.0",
+]
+
+[[package]]
 name = "strum_macros"
 version = "0.26.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6422,6 +6437,18 @@ name = "strum_macros"
 version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7695ce3845ea4b33927c055a39dc438a45b059f7c1b3d91d38d10355fb8cbca7"
+dependencies = [
+ "heck",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.114",
+]
+
+[[package]]
+name = "strum_macros"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ab85eea0270ee17587ed4156089e10b9e6880ee688791d45a905f5b1ca36f664"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -6971,9 +6998,9 @@ dependencies = [
 
 [[package]]
 name = "toktrie"
-version = "1.4.0"
+version = "1.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dcfbe778b5bf5ffda8e2c5e79540bf40505ce1fb48ba31e8b43337fe55ca4c23"
+checksum = "16197572e4d4061591596b3629f587a1d7ac5858948c2097310cbb188da100b5"
 dependencies = [
  "anyhow",
  "bytemuck",
