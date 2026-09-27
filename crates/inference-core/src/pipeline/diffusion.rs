@@ -1,3 +1,4 @@
+use super::diffusion_processor::{DiffusionProcessor, ModelInputs};
 use super::loaders::{DiffusionModelPaths, DiffusionModelPathsInner};
 use super::{
     AnyMoePipelineMixin, Cache, CacheManagerMixin, DiffusionLoaderType, DiffusionModel,
@@ -6,7 +7,6 @@ use super::{
     PreProcessingMixin, Processor, TokenSource,
 };
 use crate::device_map::{self, DeviceMapper};
-use crate::diffusion_models::processor::{DiffusionProcessor, ModelInputs};
 use crate::distributed::{self, use_ring, WorkerTransferData};
 use crate::paged_attention::AttentionImplementation;
 use crate::pipeline::tokens::get_token;

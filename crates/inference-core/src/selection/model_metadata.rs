@@ -8,8 +8,8 @@ use std::fmt::Write as _;
 
 use strum::IntoEnumIterator;
 
+use crate::pipeline::SpeechLoaderType;
 use crate::pipeline::SupportedModality;
-use crate::speech_models::SpeechLoaderType;
 use crate::{DiffusionLoaderType, EmbeddingLoaderType, MultimodalLoaderType, NormalLoaderType};
 
 use SupportedModality::{Audio, Embedding, Text, Video, Vision};

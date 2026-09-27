@@ -30,7 +30,7 @@ cargo install --path crates/inference-cli --features <features>
 ### Testing & Quality
 ```bash
 # Run core tests
-cargo test -p inference-core -p inference-nn -p inference-models-llama -p inference-models-qwen -p inference-models-gemma -p inference-models-phi -p inference-models-other -p inference-quant -p inference-vision
+cargo test -p inference-core -p inference-nn -p inference-models-llama -p inference-models-qwen -p inference-models-gemma -p inference-models-phi -p inference-models-other -p inference-models-speech -p inference-models-diffusion -p inference-quant -p inference-vision
 
 # Format code (uses rustfmt, ruff, clang-format)
 make fmt
@@ -78,6 +78,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 ### Workspace Structure
 - `crates/inference-core/` - Core inference engine, model implementations, pipelines
 - `crates/inference-models-{llama,qwen,gemma,phi,other}/` - Model families (one crate per family, built on `inference-nn`): text models plus the vision models built on their text stacks, each behind an `inference-core` feature (`models-llama`, ...; all on by default). Preprocessing stays in core; `--slim` checks core with each family alone
+- `crates/inference-models-{speech,diffusion}/` - Speech (Dia) and image generation (FLUX) models, always built; their loaders, `SpeechLoaderType`/`DiffusionLoaderType` and request processors stay in core
 - `crates/inference-nn/` - Model-facing building blocks: layers, attention and its metadata, KV/paged caches, GDN, MoE, device mapping, and the CUDA/Metal kernels behind them
 - `crates/inference-cli/` - Unified CLI binary (commands: run, serve, bench, from-config)
 - `crates/inference-server-core/` - HTTP server routing, OpenAI API implementation

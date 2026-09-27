@@ -1,4 +1,4 @@
 pub mod autoencoder;
 pub mod model;
-pub mod sampling;
+mod sampling;
 pub mod stepper;

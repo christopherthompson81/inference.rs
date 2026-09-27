@@ -13,6 +13,7 @@ pub(crate) mod cuda_graph;
 #[doc(hidden)]
 pub use cuda_graph::CudaDecodeGraphLaunch;
 mod diffusion;
+mod diffusion_processor;
 mod embedding;
 pub(crate) mod execution;
 mod ggml;
@@ -40,11 +41,11 @@ mod tiktoken;
 pub(crate) mod tokenizer;
 mod tokens;
 
-pub use super::diffusion_models::DiffusionGenerationParams;
 use crate::amoe::{AnyMoeConfig, AnyMoeExpertType, AnyMoeTrainingInputs, AnyMoeTrainingResult};
 use crate::attention::FlashParams;
 use crate::device_map::DeviceMapper;
 use crate::kv_cache::PagedAuxiliaryPrefixState;
+pub use crate::model::DiffusionGenerationParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use crate::paged_attention::{
     AttentionBackendKind, CacheConfig, CacheEngine, CacheMemoryReservations, MemoryGpuConfig,
@@ -170,7 +171,7 @@ pub use paths::{AdapterPaths, ResolvedLoraAdapter};
 pub(crate) use processing::apply_chat_template;
 pub(crate) use processing::{BasicProcessor, MessagesAction, Processor};
 use rand_isaac::Isaac64Rng;
-pub use speech::{SpeechLoader, SpeechPipeline};
+pub use speech::{SpeechLoader, SpeechLoaderType, SpeechPipeline};
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;

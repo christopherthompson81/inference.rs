@@ -11,7 +11,6 @@ use crate::pipeline::tokens::get_token;
 use crate::pipeline::{ChatTemplate, EmbeddingModulePaths, Modalities, SupportedModality};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
-use crate::speech_models::{DiaConfig, DiaPipeline, SpeechGenerationOutput, SpeechLoaderType};
 use crate::utils::progress::ProgressScopeGuard;
 use crate::utils::varbuilder_utils::from_mmaped_safetensors;
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
@@ -24,15 +23,46 @@ use candle_core::{Device, Tensor};
 use candle_nn::VarBuilder;
 use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
 use indexmap::IndexMap;
+use inference_models_speech::{DiaConfig, DiaPipeline, SpeechGenerationOutput};
 use inference_quant::IsqType;
 use rand_isaac::Isaac64Rng;
 use regex::Regex;
+use serde::{Deserialize, Serialize};
 use std::any::Any;
 use std::env;
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, strum::EnumIter)]
+pub enum SpeechLoaderType {
+    #[serde(rename = "dia")]
+    Dia,
+}
+
+impl FromStr for SpeechLoaderType {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "dia" => Ok(Self::Dia),
+            a => Err(format!(
+                "Unknown architecture `{a}`. Possible architectures: `dia`."
+            )),
+        }
+    }
+}
+
+impl SpeechLoaderType {
+    /// Auto-detect speech loader type from a config.json string.
+    pub fn auto_detect_from_config(config: &str) -> Option<Self> {
+        if serde_json::from_str::<DiaConfig>(config).is_ok() {
+            return Some(Self::Dia);
+        }
+        None
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct SpeechModelPaths {
@@ -330,9 +360,9 @@ impl Loader for SpeechLoader {
                 loaded_for_uqff_write: false,
             }),
             dummy_cache: EitherCache::Full(Cache::new(0, false)),
-            cfg: self
-                .cfg
-                .unwrap_or_else(|| SpeechGenerationConfig::default(self.arch)),
+            cfg: self.cfg.unwrap_or_else(|| match self.arch {
+                SpeechLoaderType::Dia => SpeechGenerationConfig::dia_default(),
+            }),
         })))
     }
 
