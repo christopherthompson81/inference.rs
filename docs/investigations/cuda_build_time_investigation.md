@@ -639,3 +639,10 @@ Review follow-ups:
 - Result: layer_sizes_in_bytes 13.7k -> 3.3k, non_mapped_size_in_bytes 3.3k -> 1.0k; core 4.022M -> 4.009M on the
   pre-#59 base (-13k). The rest of gguf (~128k) is spread over 1-3k straight-line config builders and bindings with
   no single repeated construct, so it is left as is.
+
+## Run 35 - 2026-09-27 (evening)
+
+- Change (readability, not IR): `Engine::admit_request` (790 lines, 10.7k IR) split into step helpers: request-kind
+  validation, message extras, prompt rendering, context fitting, stop criteria, KV preallocation, reasoning setup,
+  multimodal prompt prep, recurrent slot assign/release, prefix-cache hit. admit_request is now 231 lines; a review
+  found no behavior change (validation order, error variants, lock scopes, early returns).
