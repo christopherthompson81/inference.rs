@@ -3,8 +3,8 @@
 
 use inference_nn::serde_default_fn;
 use inference_nn::{
-    amoe, attention, device_map, kv_cache, layers, model, moe, ops, paged_attention, speculative,
-    utils, vision,
+    amoe, attention, device_map, kv_cache, layers, lora, model, moe, ops, paged_attention,
+    speculative, utils, vision,
 };
 
 pub mod conformer;
@@ -13,5 +13,6 @@ pub mod phi3;
 pub mod phi3_5_moe;
 pub mod phi3_vision;
 pub mod phi4;
+pub mod xlora;
 
 inference_nn::json_config!(phi2::Config, phi3::Config, phi3_5_moe::Config);

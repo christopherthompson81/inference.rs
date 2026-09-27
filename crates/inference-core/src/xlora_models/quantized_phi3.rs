@@ -26,14 +26,14 @@ use inference_quant::ShardedVarBuilder;
 use tqdm::Iter;
 use tracing::info;
 
-use super::classifier::XLoraClassifier;
-use super::verify_sanity_adapters;
-use super::Cache;
-use super::NonGranularState;
-use super::ScalingsMaker;
-use super::XLoraConfig;
 use crate::gguf::metadata::ContentMetadata;
 use crate::pipeline::model_config as ModelConfig;
+use crate::pipeline::Cache;
+use inference_nn::xlora::verify_sanity_adapters;
+use inference_nn::xlora::NonGranularState;
+use inference_nn::xlora::ScalingsMaker;
+use inference_nn::xlora::XLoraClassifier;
+use inference_nn::xlora::XLoraConfig;
 
 const SUPPORTED_LAYERS: [&str; 5] = [
     "self_attn.qkv_proj",

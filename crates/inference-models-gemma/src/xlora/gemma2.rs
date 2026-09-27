@@ -13,16 +13,16 @@ use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
+    gemma2::Config,
+    kv_cache::{Cache, EitherCache},
     layers::{self, Activation, CausalMasker, GemmaRmsNorm, RotaryEmbedding, Sdpa},
-    lora::{linear_b, linear_no_bias, LinearLayerLike, LoraConfig},
-    models::gemma2::Config,
+    lora::{linear_b, linear_no_bias, LinearLayerLike, LoraConfig, Ordering},
+    model::{extract_logits, IsqModel, NormalLoadingMetadata, NormalModel},
     paged_attention::ModelConfigMetadata,
-    pipeline::{extract_logits, Cache, EitherCache, IsqModel, NormalLoadingMetadata, NormalModel},
     utils::progress::NiceProgressBar,
-    Ordering,
 };
 
-use super::{classifier::XLoraClassifier, NonGranularState, ScalingsMaker, XLoraConfig};
+use inference_nn::xlora::{NonGranularState, ScalingsMaker, XLoraClassifier, XLoraConfig};
 
 #[derive(Clone)]
 #[allow(clippy::upper_case_acronyms)]
@@ -753,7 +753,7 @@ impl NormalModel for Model {
     fn forward(
         &self,
         _input_ids: &Tensor,
-        _ctx: &mut crate::pipeline::ModelForwardContext<'_>,
+        _ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         unreachable!()
     }
@@ -764,7 +764,7 @@ impl NormalModel for Model {
         seqlen_offsets: &[usize],
         seqlen_offsets_full: &[usize],
         no_kv_cache: bool,
-        non_granular_state: &Option<crate::xlora_models::NonGranularState>,
+        non_granular_state: &Option<NonGranularState>,
         context_lens: Vec<(usize, usize)>,
         _position_ids: Vec<usize>,
         flash_params: &FlashParams,

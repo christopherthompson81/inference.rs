@@ -3,7 +3,7 @@
 
 use inference_nn::serde_default_fn;
 use inference_nn::{
-    amoe, attention, cuda, device_map, gdn, kv_cache, layers, metal, mla, model, moe, ops,
+    amoe, attention, cuda, device_map, gdn, kv_cache, layers, lora, metal, mla, model, moe, ops,
     paged_attention, speculative, utils, vision,
 };
 
@@ -21,6 +21,7 @@ pub mod lfm2;
 pub mod lfm2_vl;
 pub mod paddleocr_vl;
 pub mod starcoder2;
+pub mod xlora;
 
 inference_nn::json_config!(
     deepseek2::DeepSeekV2Config,
