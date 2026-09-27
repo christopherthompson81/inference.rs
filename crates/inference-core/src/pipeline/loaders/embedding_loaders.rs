@@ -30,6 +30,7 @@ use inference_quant::ShardedVarBuilder;
 #[cfg(feature = "pyo3_macros")]
 use pyo3::pyclass;
 
+use crate::pipeline::isq::isq_regexes;
 use regex::Regex;
 use serde::{de::Visitor, Deserialize, Deserializer, Serialize};
 
@@ -404,21 +405,21 @@ impl EmbeddingModelLoader for EmbeddingGemmaLoader {
 
 impl IsqModelLoader for EmbeddingGemmaLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![Regex::new(r"^embed_tokens\.weight$")?])
+        isq_regexes(&[r"^embed_tokens\.weight$"])
     }
 
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"lm_head\.(weight|bias)$")?,
+        isq_regexes(&[
+            r"lm_head\.(weight|bias)$",
             // Attention
-            Regex::new(r"layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$")?,
+            r"layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
             // MLP
-            Regex::new(r"layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$")?,
+            r"layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
@@ -596,21 +597,21 @@ impl EmbeddingModelLoader for Qwen3EmbeddingLoader {
 
 impl IsqModelLoader for Qwen3EmbeddingLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![Regex::new(r"^embed_tokens\.weight$")?])
+        isq_regexes(&[r"^embed_tokens\.weight$"])
     }
 
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"lm_head\.(weight|bias)$")?,
+        isq_regexes(&[
+            r"lm_head\.(weight|bias)$",
             // Attention
-            Regex::new(r"layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$")?,
+            r"layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
             // MLP
-            Regex::new(r"layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$")?,
+            r"layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {

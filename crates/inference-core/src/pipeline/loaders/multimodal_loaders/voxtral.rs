@@ -77,41 +77,41 @@ impl MultimodalModelLoader for VoxtralLoader {
 
 impl IsqModelLoader for VoxtralLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"^mm_streams_embeddings\.embedding_module\.tok_embeddings\.weight$")?,
-            Regex::new(r"^output\.(weight|bias)$")?,
+        isq_regexes(&[
+            r"^mm_streams_embeddings\.embedding_module\.tok_embeddings\.weight$",
+            r"^output\.(weight|bias)$",
         ])
     }
 
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
+        isq_regexes(&[
             // Output / lm_head (tied with tok_embeddings)
-            Regex::new(r"lm_head\.(weight|bias)$")?,
-            Regex::new(r"^output\.(weight|bias)$")?,
+            r"lm_head\.(weight|bias)$",
+            r"^output\.(weight|bias)$",
             // Decoder attention (Mistral-native naming)
-            Regex::new(r"layers\.(\d+)\.attention\.wq\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.attention\.wk\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.attention\.wv\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.attention\.wo\.(weight|bias)$")?,
+            r"layers\.(\d+)\.attention\.wq\.(weight|bias)$",
+            r"layers\.(\d+)\.attention\.wk\.(weight|bias)$",
+            r"layers\.(\d+)\.attention\.wv\.(weight|bias)$",
+            r"layers\.(\d+)\.attention\.wo\.(weight|bias)$",
             // Decoder MLP (Mistral-native naming)
-            Regex::new(r"layers\.(\d+)\.feed_forward\.w1\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.feed_forward\.w3\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.feed_forward\.w2\.(weight|bias)$")?,
+            r"layers\.(\d+)\.feed_forward\.w1\.(weight|bias)$",
+            r"layers\.(\d+)\.feed_forward\.w3\.(weight|bias)$",
+            r"layers\.(\d+)\.feed_forward\.w2\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"tok_embeddings\.(weight|bias)$")?,
-            Regex::new(r"^output\.(weight|bias)$")?,
+        isq_regexes(&[
+            r"tok_embeddings\.(weight|bias)$",
+            r"^output\.(weight|bias)$",
             // Decoder attention
-            Regex::new(r"layers\.(\d+)\.attention\.wq\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.attention\.wk\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.attention\.wv\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.attention\.wo\.(weight|bias)$")?,
+            r"layers\.(\d+)\.attention\.wq\.(weight|bias)$",
+            r"layers\.(\d+)\.attention\.wk\.(weight|bias)$",
+            r"layers\.(\d+)\.attention\.wv\.(weight|bias)$",
+            r"layers\.(\d+)\.attention\.wo\.(weight|bias)$",
             // Decoder MLP
-            Regex::new(r"layers\.(\d+)\.feed_forward\.w1\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.feed_forward\.w3\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.feed_forward\.w2\.(weight|bias)$")?,
+            r"layers\.(\d+)\.feed_forward\.w1\.(weight|bias)$",
+            r"layers\.(\d+)\.feed_forward\.w3\.(weight|bias)$",
+            r"layers\.(\d+)\.feed_forward\.w2\.(weight|bias)$",
         ])
     }
 }

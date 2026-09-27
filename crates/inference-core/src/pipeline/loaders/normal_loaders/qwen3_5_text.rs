@@ -70,26 +70,18 @@ impl NormalModelLoader for Qwen3_5TextLoader {
 
 impl IsqModelLoader for Qwen3_5TextLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(
-                r"^(model\.language_model|language_model\.model|model)\.embed_tokens\.weight$",
-            )?,
-            Regex::new(r"^lm_head\.(weight|bias)$")?,
+        isq_regexes(&[
+            r"^(model\.language_model|language_model\.model|model)\.embed_tokens\.weight$",
+            r"^lm_head\.(weight|bias)$",
         ])
     }
 
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"^lm_head\.(weight|bias)$")?,
-            Regex::new(
-                r"^(model\.language_model|language_model\.model|model)\.layers\.(\d+)\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"^(model\.language_model|language_model\.model|model)\.layers\.(\d+)\.linear_attn\.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"^(model\.language_model|language_model\.model|model)\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.(weight|bias)$",
-            )?,
+        isq_regexes(&[
+            r"^lm_head\.(weight|bias)$",
+            r"^(model\.language_model|language_model\.model|model)\.layers\.(\d+)\.self_attn\.(q_proj|k_proj|v_proj|o_proj)\.(weight|bias)$",
+            r"^(model\.language_model|language_model\.model|model)\.layers\.(\d+)\.linear_attn\.(in_proj_qkv|in_proj_z|in_proj_b|in_proj_a|out_proj)\.(weight|bias)$",
+            r"^(model\.language_model|language_model\.model|model)\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {

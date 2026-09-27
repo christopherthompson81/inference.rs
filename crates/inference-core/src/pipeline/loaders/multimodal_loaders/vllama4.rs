@@ -72,81 +72,57 @@ impl MultimodalModelLoader for VLlama4Loader {
 
 impl IsqModelLoader for VLlama4Loader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"^language_model\.model\.embed_tokens\.weight$")?,
-            Regex::new(r"^language_model\.lm_head\.(weight|bias)$")?,
+        isq_regexes(&[
+            r"^language_model\.model\.embed_tokens\.weight$",
+            r"^language_model\.lm_head\.(weight|bias)$",
         ])
     }
 
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"lm_head\.(weight|bias)$")?,
+        isq_regexes(&[
+            r"lm_head\.(weight|bias)$",
             // Attention
-            Regex::new(r"layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$")?,
+            r"layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
             // FF MoE
-            Regex::new(r"layers\.(\d+)\.feed_forward\.experts\.gate_up_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.feed_forward\.experts\.gate_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.feed_forward\.experts\.up_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.feed_forward\.experts\.down_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.feed_forward\.router\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.feed_forward\.shared_expert\.gate_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.feed_forward\.shared_expert\.up_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.feed_forward\.shared_expert\.down_proj\.(weight|bias)$")?,
+            r"layers\.(\d+)\.feed_forward\.experts\.gate_up_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.feed_forward\.experts\.gate_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.feed_forward\.experts\.up_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.feed_forward\.experts\.down_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.feed_forward\.router\.(weight|bias)$",
+            r"layers\.(\d+)\.feed_forward\.shared_expert\.gate_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.feed_forward\.shared_expert\.up_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.feed_forward\.shared_expert\.down_proj\.(weight|bias)$",
             // FF MLP
-            Regex::new(r"layers\.(\d+)\.feed_forward\.gate_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.feed_forward\.up_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.feed_forward\.down_proj\.(weight|bias)$")?,
+            r"layers\.(\d+)\.feed_forward\.gate_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.feed_forward\.up_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.feed_forward\.down_proj\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"lm_head\.(weight|bias)$")?,
+        isq_regexes(&[
+            r"lm_head\.(weight|bias)$",
             // Attention
-            Regex::new(r"language_model\.model\.layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$")?,
-            Regex::new(r"language_model\.model\.layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$")?,
-            Regex::new(r"language_model\.model\.layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$")?,
-            Regex::new(r"language_model\.model\.layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$")?,
+            r"language_model\.model\.layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
+            r"language_model\.model\.layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
+            r"language_model\.model\.layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
+            r"language_model\.model\.layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
             // FF MoE
-            Regex::new(
-                r"language_model\.model\.layers\.(\d+)\.feed_forward\.experts\.(\d+)\.gate_up_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"language_model\.model\.layers\.(\d+)\.feed_forward\.experts\.(\d+)\.gate_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"language_model\.model\.layers\.(\d+)\.feed_forward\.experts\.(\d+)\.up_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"language_model\.model\.layers\.(\d+)\.feed_forward\.experts\.(\d+)\.down_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"language_model\.model\.layers\.(\d+)\.feed_forward\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
-            )?,
-            Regex::new(
-                r"language_model\.model\.layers\.(\d+)\.feed_forward\.router\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"language_model\.model\.layers\.(\d+)\.feed_forward\.shared_expert\.gate_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"language_model\.model\.layers\.(\d+)\.feed_forward\.shared_expert\.up_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"language_model\.model\.layers\.(\d+)\.feed_forward\.shared_expert\.down_proj\.(weight|bias)$",
-            )?,
+            r"language_model\.model\.layers\.(\d+)\.feed_forward\.experts\.(\d+)\.gate_up_proj\.(weight|bias)$",
+            r"language_model\.model\.layers\.(\d+)\.feed_forward\.experts\.(\d+)\.gate_proj\.(weight|bias)$",
+            r"language_model\.model\.layers\.(\d+)\.feed_forward\.experts\.(\d+)\.up_proj\.(weight|bias)$",
+            r"language_model\.model\.layers\.(\d+)\.feed_forward\.experts\.(\d+)\.down_proj\.(weight|bias)$",
+            r"language_model\.model\.layers\.(\d+)\.feed_forward\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
+            r"language_model\.model\.layers\.(\d+)\.feed_forward\.router\.(weight|bias)$",
+            r"language_model\.model\.layers\.(\d+)\.feed_forward\.shared_expert\.gate_proj\.(weight|bias)$",
+            r"language_model\.model\.layers\.(\d+)\.feed_forward\.shared_expert\.up_proj\.(weight|bias)$",
+            r"language_model\.model\.layers\.(\d+)\.feed_forward\.shared_expert\.down_proj\.(weight|bias)$",
             // FF MLP
-            Regex::new(
-                r"language_model\.model\.layers\.(\d+)\.feed_forward\.gate_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"language_model\.model\.layers\.(\d+)\.feed_forward\.up_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"language_model\.model\.layers\.(\d+)\.feed_forward\.down_proj\.(weight|bias)$",
-            )?,
+            r"language_model\.model\.layers\.(\d+)\.feed_forward\.gate_proj\.(weight|bias)$",
+            r"language_model\.model\.layers\.(\d+)\.feed_forward\.up_proj\.(weight|bias)$",
+            r"language_model\.model\.layers\.(\d+)\.feed_forward\.down_proj\.(weight|bias)$",
         ])
     }
 }

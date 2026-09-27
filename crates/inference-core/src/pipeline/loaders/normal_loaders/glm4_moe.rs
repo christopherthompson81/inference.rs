@@ -45,64 +45,56 @@ impl NormalModelLoader for GLM4MoeLoader {
 
 impl IsqModelLoader for GLM4MoeLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"^model\.embed_tokens\.weight$")?,
-            Regex::new(r"^lm_head\.(weight|bias)$")?,
+        isq_regexes(&[
+            r"^model\.embed_tokens\.weight$",
+            r"^lm_head\.(weight|bias)$",
         ])
     }
     fn isq_layer_regexes(&self, config: &str) -> Result<Vec<Regex>> {
-        let mut data = vec![
-            Regex::new(r"lm_head\.(weight|bias)$")?,
+        let mut data = isq_regexes(&[
+            r"lm_head\.(weight|bias)$",
             // Attention (standard GQA)
-            Regex::new(r"layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$")?,
-        ];
+            r"layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
+        ])?;
         let cfg = crate::models::glm4_moe::Glm4MoeConfig::from_json(config)?;
         for layer_idx in 0..cfg.num_hidden_layers {
             if layer_idx >= cfg.first_k_dense_replace {
                 // MoE layer
                 for i in 0..cfg.n_routed_experts {
-                    data.extend(vec![
-                        Regex::new(&format!(
+                    data.extend(isq_regexes(&[
+                        format!(
                             r"layers\.{layer_idx}\.mlp\.experts\.{i}\.gate_proj\.(weight|bias)$"
-                        ))?,
-                        Regex::new(&format!(
-                            r"layers\.{layer_idx}\.mlp\.experts\.{i}\.up_proj\.(weight|bias)$"
-                        ))?,
-                        Regex::new(&format!(
+                        ),
+                        format!(r"layers\.{layer_idx}\.mlp\.experts\.{i}\.up_proj\.(weight|bias)$"),
+                        format!(
                             r"layers\.{layer_idx}\.mlp\.experts\.{i}\.down_proj\.(weight|bias)$"
-                        ))?,
-                    ]);
+                        ),
+                    ])?);
                 }
                 if cfg.n_shared_experts > 0 {
-                    data.extend(vec![
-                        Regex::new(&format!(
+                    data.extend(isq_regexes(&[
+                        format!(
                             r"layers\.{layer_idx}\.mlp\.shared_experts\.gate_proj\.(weight|bias)$"
-                        ))?,
-                        Regex::new(&format!(
+                        ),
+                        format!(
                             r"layers\.{layer_idx}\.mlp\.shared_experts\.up_proj\.(weight|bias)$"
-                        ))?,
-                        Regex::new(&format!(
+                        ),
+                        format!(
                             r"layers\.{layer_idx}\.mlp\.shared_experts\.down_proj\.(weight|bias)$"
-                        ))?,
-                    ]);
+                        ),
+                    ])?);
                 }
             } else {
                 // Dense MLP layer
-                data.extend(vec![
-                    Regex::new(&format!(
-                        r"layers\.{layer_idx}\.mlp\.gate_proj\.(weight|bias)$"
-                    ))?,
-                    Regex::new(&format!(
-                        r"layers\.{layer_idx}\.mlp\.up_proj\.(weight|bias)$"
-                    ))?,
-                    Regex::new(&format!(
-                        r"layers\.{layer_idx}\.mlp\.down_proj\.(weight|bias)$"
-                    ))?,
-                ]);
+                data.extend(isq_regexes(&[
+                    format!(r"layers\.{layer_idx}\.mlp\.gate_proj\.(weight|bias)$"),
+                    format!(r"layers\.{layer_idx}\.mlp\.up_proj\.(weight|bias)$"),
+                    format!(r"layers\.{layer_idx}\.mlp\.down_proj\.(weight|bias)$"),
+                ])?);
             };
         }
         Ok(data)
@@ -111,11 +103,9 @@ impl IsqModelLoader for GLM4MoeLoader {
         self.isq_layer_regexes(config)
     }
     fn isq_layer_regexes_moqe(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(
-                r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.(weight|bias)$",
-            )?,
-            Regex::new(r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$")?,
+        isq_regexes(&[
+            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
         ])
     }
     fn immediate_isq_predicates_moqe(&self, config: &str) -> Result<Vec<Regex>> {

@@ -122,21 +122,17 @@ impl MultimodalModelLoader for MuseGlimmerLoader {
 
 impl IsqModelLoader for MuseGlimmerLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"^model\.language_model\.embed_tokens\.weight$")?,
-            Regex::new(r"^lm_head\.(weight|bias)$")?,
+        isq_regexes(&[
+            r"^model\.language_model\.embed_tokens\.weight$",
+            r"^lm_head\.(weight|bias)$",
         ])
     }
 
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"^lm_head\.(weight|bias)$")?,
-            Regex::new(
-                r"^model\.language_model\.layers\.(\d+)\.self_attn\.(q_proj|k_proj|v_proj|o_proj|gate_proj)\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"^model\.language_model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.(weight|bias)$",
-            )?,
+        isq_regexes(&[
+            r"^lm_head\.(weight|bias)$",
+            r"^model\.language_model\.layers\.(\d+)\.self_attn\.(q_proj|k_proj|v_proj|o_proj|gate_proj)\.(weight|bias)$",
+            r"^model\.language_model\.layers\.(\d+)\.mlp\.(gate_proj|up_proj|down_proj)\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {

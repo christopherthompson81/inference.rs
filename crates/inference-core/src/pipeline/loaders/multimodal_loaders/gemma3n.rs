@@ -69,106 +69,82 @@ impl MultimodalModelLoader for Gemma3nLoader {
 
 impl IsqModelLoader for Gemma3nLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"^model\.language_model\.embed_tokens\.weight$")?,
-            Regex::new(r"^model\.language_model\.embed_tokens_per_layer\.weight$")?,
-            Regex::new(r"^model\.language_model\.lm_head\.(weight|bias)$")?,
+        isq_regexes(&[
+            r"^model\.language_model\.embed_tokens\.weight$",
+            r"^model\.language_model\.embed_tokens_per_layer\.weight$",
+            r"^model\.language_model\.lm_head\.(weight|bias)$",
         ])
     }
 
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"lm_head\.(weight|bias)$")?,
+        isq_regexes(&[
+            r"lm_head\.(weight|bias)$",
             // Language model attention
-            Regex::new(r"layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$")?,
+            r"layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
             // Language model MLP
-            Regex::new(r"layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$")?,
+            r"layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$",
             // Audio conformer attention layers
-            Regex::new(r"conformer\.(\d+)\.attention\.attn\.q_proj\.(weight|bias)$")?,
-            Regex::new(r"conformer\.(\d+)\.attention\.attn\.k_proj\.(weight|bias)$")?,
-            Regex::new(r"conformer\.(\d+)\.attention\.attn\.v_proj\.(weight|bias)$")?,
-            Regex::new(
-                r"conformer\.(\d+)\.attention\.attn\.relative_position_embedding\.pos_proj\.(weight|bias)$",
-            )?,
-            Regex::new(r"conformer\.(\d+)\.attention\.post\.(weight|bias)$")?,
+            r"conformer\.(\d+)\.attention\.attn\.q_proj\.(weight|bias)$",
+            r"conformer\.(\d+)\.attention\.attn\.k_proj\.(weight|bias)$",
+            r"conformer\.(\d+)\.attention\.attn\.v_proj\.(weight|bias)$",
+            r"conformer\.(\d+)\.attention\.attn\.relative_position_embedding\.pos_proj\.(weight|bias)$",
+            r"conformer\.(\d+)\.attention\.post\.(weight|bias)$",
             // Audio conformer FFW layers
-            Regex::new(r"conformer\.(\d+)\.ffw_layer_start\.ffw_layer_1\.(weight|bias)$")?,
-            Regex::new(r"conformer\.(\d+)\.ffw_layer_start\.ffw_layer_2\.(weight|bias)$")?,
-            Regex::new(r"conformer\.(\d+)\.ffw_layer_end\.ffw_layer_1\.(weight|bias)$")?,
-            Regex::new(r"conformer\.(\d+)\.ffw_layer_end\.ffw_layer_2\.(weight|bias)$")?,
+            r"conformer\.(\d+)\.ffw_layer_start\.ffw_layer_1\.(weight|bias)$",
+            r"conformer\.(\d+)\.ffw_layer_start\.ffw_layer_2\.(weight|bias)$",
+            r"conformer\.(\d+)\.ffw_layer_end\.ffw_layer_1\.(weight|bias)$",
+            r"conformer\.(\d+)\.ffw_layer_end\.ffw_layer_2\.(weight|bias)$",
             // Audio conformer conv1d layers
-            Regex::new(r"conformer\.(\d+)\.lconv1d\.linear_start\.(weight|bias)$")?,
-            Regex::new(r"conformer\.(\d+)\.lconv1d\.linear_end\.(weight|bias)$")?,
+            r"conformer\.(\d+)\.lconv1d\.linear_start\.(weight|bias)$",
+            r"conformer\.(\d+)\.lconv1d\.linear_end\.(weight|bias)$",
             // Audio subsample projection
-            Regex::new(r"subsample_conv_projection\.input_proj_linear\.(weight|bias)$")?,
+            r"subsample_conv_projection\.input_proj_linear\.(weight|bias)$",
             // Multimodal embedders
-            Regex::new(r"embed_vision\.embedding_projection\.(weight|bias)$")?,
-            Regex::new(r"embed_audio\.embedding_projection\.(weight|bias)$")?,
+            r"embed_vision\.embedding_projection\.(weight|bias)$",
+            r"embed_audio\.embedding_projection\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"model\.language_model\.embed_tokens_per_layer\.weight$")?,
-            Regex::new(r"lm_head\.(weight|bias)$")?,
+        isq_regexes(&[
+            r"model\.language_model\.embed_tokens_per_layer\.weight$",
+            r"lm_head\.(weight|bias)$",
             // Language model attention
-            Regex::new(r"model\.language_model\.layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$")?,
-            Regex::new(r"model\.language_model\.layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$")?,
-            Regex::new(r"model\.language_model\.layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$")?,
-            Regex::new(r"model\.language_model\.layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$")?,
+            r"model\.language_model\.layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
+            r"model\.language_model\.layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
+            r"model\.language_model\.layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
+            r"model\.language_model\.layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
             // Language model MLP
-            Regex::new(r"model\.language_model\.layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$")?,
-            Regex::new(r"model\.language_model\.layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$")?,
-            Regex::new(r"model\.language_model\.layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$")?,
+            r"model\.language_model\.layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$",
+            r"model\.language_model\.layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$",
+            r"model\.language_model\.layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$",
             // Projections
-            Regex::new(r"model\.language_model\.per_layer_model_projection\.(weight|bias)$")?,
-            Regex::new(r"model\.language_model\.altup_projections\.(\d+)\.(weight|bias)$")?,
-            Regex::new(r"model\.language_model\.altup_unembed_projections\.(\d+)\.(weight|bias)$")?,
+            r"model\.language_model\.per_layer_model_projection\.(weight|bias)$",
+            r"model\.language_model\.altup_projections\.(\d+)\.(weight|bias)$",
+            r"model\.language_model\.altup_unembed_projections\.(\d+)\.(weight|bias)$",
             // Audio conformer attention layers
-            Regex::new(
-                r"model\.audio_tower\.conformer\.(\d+)\.attention\.attn\.q_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"model\.audio_tower\.conformer\.(\d+)\.attention\.attn\.k_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"model\.audio_tower\.conformer\.(\d+)\.attention\.attn\.v_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"model\.audio_tower\.conformer\.(\d+)\.attention\.attn\.relative_position_embedding\.pos_proj\.(weight|bias)$",
-            )?,
-            Regex::new(r"model\.audio_tower\.conformer\.(\d+)\.attention\.post\.(weight|bias)$")?,
+            r"model\.audio_tower\.conformer\.(\d+)\.attention\.attn\.q_proj\.(weight|bias)$",
+            r"model\.audio_tower\.conformer\.(\d+)\.attention\.attn\.k_proj\.(weight|bias)$",
+            r"model\.audio_tower\.conformer\.(\d+)\.attention\.attn\.v_proj\.(weight|bias)$",
+            r"model\.audio_tower\.conformer\.(\d+)\.attention\.attn\.relative_position_embedding\.pos_proj\.(weight|bias)$",
+            r"model\.audio_tower\.conformer\.(\d+)\.attention\.post\.(weight|bias)$",
             // Audio conformer FFW layers
-            Regex::new(
-                r"model\.audio_tower\.conformer\.(\d+)\.ffw_layer_start\.ffw_layer_1\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"model\.audio_tower\.conformer\.(\d+)\.ffw_layer_start\.ffw_layer_2\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"model\.audio_tower\.conformer\.(\d+)\.ffw_layer_end\.ffw_layer_1\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"model\.audio_tower\.conformer\.(\d+)\.ffw_layer_end\.ffw_layer_2\.(weight|bias)$",
-            )?,
+            r"model\.audio_tower\.conformer\.(\d+)\.ffw_layer_start\.ffw_layer_1\.(weight|bias)$",
+            r"model\.audio_tower\.conformer\.(\d+)\.ffw_layer_start\.ffw_layer_2\.(weight|bias)$",
+            r"model\.audio_tower\.conformer\.(\d+)\.ffw_layer_end\.ffw_layer_1\.(weight|bias)$",
+            r"model\.audio_tower\.conformer\.(\d+)\.ffw_layer_end\.ffw_layer_2\.(weight|bias)$",
             // Audio conformer conv1d layers
-            Regex::new(
-                r"model\.audio_tower\.conformer\.(\d+)\.lconv1d\.linear_start\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"model\.audio_tower\.conformer\.(\d+)\.lconv1d\.linear_end\.(weight|bias)$",
-            )?,
+            r"model\.audio_tower\.conformer\.(\d+)\.lconv1d\.linear_start\.(weight|bias)$",
+            r"model\.audio_tower\.conformer\.(\d+)\.lconv1d\.linear_end\.(weight|bias)$",
             // Audio subsample projection
-            Regex::new(
-                r"model\.audio_tower\.subsample_conv_projection\.input_proj_linear\.(weight|bias)$",
-            )?,
+            r"model\.audio_tower\.subsample_conv_projection\.input_proj_linear\.(weight|bias)$",
             // Multimodal embedders
-            Regex::new(r"model\.embed_vision\.embedding_projection\.(weight|bias)$")?,
-            Regex::new(r"model\.embed_audio\.embedding_projection\.(weight|bias)$")?,
+            r"model\.embed_vision\.embedding_projection\.(weight|bias)$",
+            r"model\.embed_audio\.embedding_projection\.(weight|bias)$",
         ])
     }
 }

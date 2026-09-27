@@ -49,34 +49,32 @@ impl NormalModelLoader for GraniteMoeHybridLoader {
 
 impl IsqModelLoader for GraniteMoeHybridLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"^model\.embed_tokens\.weight$")?,
-            Regex::new(r"^lm_head\.(weight|bias)$")?,
+        isq_regexes(&[
+            r"^model\.embed_tokens\.weight$",
+            r"^lm_head\.(weight|bias)$",
         ])
     }
 
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"lm_head\.(weight|bias)$")?,
+        isq_regexes(&[
+            r"lm_head\.(weight|bias)$",
             // Attention
-            Regex::new(r"layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.mamba\.(in_proj|out_proj)\.(weight|bias)$")?,
+            r"layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mamba\.(in_proj|out_proj)\.(weight|bias)$",
             // MLP (GraniteMLP uses shared_mlp.input_linear and shared_mlp.output_linear)
-            Regex::new(r"layers\.(\d+)\.shared_mlp\.input_linear\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.shared_mlp\.output_linear\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.block_sparse_moe\.(input_linear|output_linear)\.weight$")?,
+            r"layers\.(\d+)\.shared_mlp\.input_linear\.(weight|bias)$",
+            r"layers\.(\d+)\.shared_mlp\.output_linear\.(weight|bias)$",
+            r"layers\.(\d+)\.block_sparse_moe\.(input_linear|output_linear)\.weight$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
         self.isq_layer_regexes(config)
     }
     fn isq_layer_regexes_moqe(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![Regex::new(
-            r"layers\.(\d+)\.block_sparse_moe\.(input_linear|output_linear)\.weight$",
-        )?])
+        isq_regexes(&[r"layers\.(\d+)\.block_sparse_moe\.(input_linear|output_linear)\.weight$"])
     }
     fn immediate_isq_predicates_moqe(&self, config: &str) -> Result<Vec<Regex>> {
         self.isq_layer_regexes_moqe(config)

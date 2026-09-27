@@ -617,3 +617,14 @@ Review follow-ups:
 - Change: Qwen3-VL (and Qwen3-VL-MoE, Qwen3.5, Qwen3.5-MoE, which reuse its processor) use the qwen2vl helpers and
   args struct; four duplicate tests removed.
 - Result: 4,021,774 lines, from 4,028,130: -6k. Small in IR; the gain is ~360 fewer lines to keep in sync.
+
+## Run 33 - 2026-09-27 (evening)
+
+- Question: the top-function list for engine/gguf/loaders showed dozens of `isq_layer_regexes` impls at 2.4-4.3k lines
+  each. What do they cost in total, and why so much?
+- Finding (before): isq_layer_regexes 72,435 + immediate_isq_predicates 20,770 + isq_layer_regexes_moqe 5,005 +
+  immediate_isq_predicates_moqe 327 = ~98.5k lines over ~54 loaders. Each list element was an inline
+  `Regex::new(..)?`, so every pattern carried its own error-conversion and drop path.
+- Change: `isq_regexes(&[..])` in pipeline/isq.rs builds the list; a script rewrote the 142 `vec![Regex::new(..)?, ..]`
+  lists in the loaders. A review re-extracted every pattern and comment per file in order: identical.
+- Result: 3,925,599 lines (78,435 copies), from ~4.028M: -102k, 2.5%. The same functions now total ~6.3k.
