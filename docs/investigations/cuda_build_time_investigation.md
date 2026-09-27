@@ -490,3 +490,27 @@ Review follow-ups:
   per-run spread (current's r1/r3 TinyLlama runs had +/-570 T/s within-run stddev, base's rounds span 200 T/s).
   Rounds drift down together for both binaries (thermal).
 - Implication: no measurable speed cost from the splits or the boxing. Nothing to chase. Release LTO stays off.
+
+## Run 25 - 2026-09-26 21:45
+
+- Question (user: "clippy-driver appears to exhibit low concurrency"): where is clippy serial, and does rustc's
+  parallel front end help?
+- Incremental: after a one-line edit in core, `cargo clippy --workspace --tests --examples --timings -- -D warnings`
+  takes 12 s, 8.8 s of it with <= 2 units active (core check-test 8.1 s, then server-core, pyo3, CLI). Serial by
+  dependency order, but short.
+- `--slim` (6 family sets of `cargo clippy -p inference-core`): ~5.2 s each warm, run one after another because they
+  shared `target/` and cargo locks a target dir per invocation. After a rebase each re-checks core cold, in series.
+- Cold `cargo clippy -p inference-core --lib` in a fresh target dir, serial vs `RUSTC_BOOTSTRAP=1 RUSTFLAGS=-Zthreads=8`:
+
+| | total | inference-core | aws-lc-sys build | syn |
+|---|---|---|---|---|
+| serial | 51 s | 18.4 s | 13.7 s | 5.5 s |
+| -Zthreads=8 | 40 s | 7.5 s | 11.2 s | 8.5 s |
+
+- Finding: core's cold check is 18.4 s now (the crate moves took the front end from ~53 s); the parallel front end
+  cuts it 2.5x. Each check-only target dir is 1.4 GB.
+- Implication: run the slim sets concurrently in their own target dirs (`target/slim/<family>`). `-Zthreads` needs
+  RUSTC_BOOTSTRAP on stable and applies to every build via RUSTFLAGS, so it is the user's call, not a script default.
+- Parallel `--slim` in per-set target dirs: first run 159 s (one-time dependency check into six new dirs), then
+  10 s after a one-line core edit (was ~31 s serial). The six dirs hold 11 GB.
+- Decision: rejected. 11 GB of extra target dirs is not worth ~21 s per slim run; `--slim` stays serial in `target/`.
