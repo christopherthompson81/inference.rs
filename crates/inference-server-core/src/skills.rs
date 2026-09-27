@@ -1,5 +1,9 @@
 use std::sync::Arc;
 
+use crate::anthropic::anthropic_error_response;
+use crate::handler_core::{
+    openai_error_response, ApiError, ApiErrorKind, SERVICE_UNAVAILABLE_MESSAGE,
+};
 use anyhow::Result;
 use axum::{
     extract::{
@@ -11,14 +15,6 @@ use axum::{
     response::IntoResponse,
     Extension, Json,
 };
-use serde::Serialize;
-
-use crate::handler_core::{
-    openai_error_response, ApiError, ApiErrorKind, ResponseErrorMessage,
-    SERVICE_UNAVAILABLE_MESSAGE,
-};
-
-const ANTHROPIC_OVERLOADED_STATUS: u16 = 529;
 
 use crate::skill_store::{
     invalid_skill_upload, skill_upload_too_large, ANTHROPIC_SKILL_SOURCE, CUSTOM_SKILL_SOURCE,
@@ -54,72 +50,14 @@ fn multipart_error(error: MultipartError) -> anyhow::Error {
     }
 }
 
-#[derive(Serialize)]
-struct AnthropicSkillErrorBody {
-    #[serde(rename = "type")]
-    tp: &'static str,
-    message: String,
-}
-
-#[derive(Serialize)]
-struct AnthropicSkillError {
-    #[serde(rename = "type")]
-    tp: &'static str,
-    error: AnthropicSkillErrorBody,
-}
-
-fn anthropic_skill_error_response(error: ApiError) -> axum::response::Response {
-    let status = match error.kind {
-        ApiErrorKind::InvalidRequest | ApiErrorKind::UnsupportedMediaType => {
-            StatusCode::BAD_REQUEST
-        }
-        ApiErrorKind::NotFound => StatusCode::NOT_FOUND,
-        ApiErrorKind::Conflict => StatusCode::CONFLICT,
-        ApiErrorKind::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
-        ApiErrorKind::RateLimited => StatusCode::TOO_MANY_REQUESTS,
-        ApiErrorKind::Unavailable | ApiErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-        ApiErrorKind::Overloaded => StatusCode::from_u16(ANTHROPIC_OVERLOADED_STATUS)
-            .expect("Anthropic overloaded status must be valid"),
-    };
-    let error_type = match error.kind {
-        ApiErrorKind::InvalidRequest | ApiErrorKind::UnsupportedMediaType => {
-            "invalid_request_error"
-        }
-        ApiErrorKind::NotFound => "not_found_error",
-        ApiErrorKind::Conflict => "conflict_error",
-        ApiErrorKind::PayloadTooLarge => "request_too_large",
-        ApiErrorKind::RateLimited => "rate_limit_error",
-        ApiErrorKind::Unavailable | ApiErrorKind::Internal => "api_error",
-        ApiErrorKind::Overloaded => "overloaded_error",
-    };
-    let message = if error.kind == ApiErrorKind::Overloaded {
-        SERVICE_UNAVAILABLE_MESSAGE.to_string()
-    } else {
-        error.message
-    };
-    let mut response = (
-        status,
-        Json(AnthropicSkillError {
-            tp: "error",
-            error: AnthropicSkillErrorBody {
-                tp: error_type,
-                message: message.clone(),
-            },
-        }),
-    )
-        .into_response();
-    response
-        .extensions_mut()
-        .insert(ResponseErrorMessage(message));
-    response
-}
-
-fn protocol_error_response(error: ApiError, anthropic: bool) -> axum::response::Response {
-    if anthropic {
-        anthropic_skill_error_response(error)
-    } else {
-        openai_error_response(error)
+fn protocol_error_response(mut error: ApiError, anthropic: bool) -> axum::response::Response {
+    if !anthropic {
+        return openai_error_response(error);
     }
+    if error.kind == ApiErrorKind::Overloaded {
+        error.message = SERVICE_UNAVAILABLE_MESSAGE.to_string();
+    }
+    anthropic_error_response(error)
 }
 
 fn skill_error(error: anyhow::Error, anthropic: bool) -> axum::response::Response {
@@ -503,12 +441,15 @@ mod tests {
 
     #[tokio::test]
     async fn anthropic_conflicts_preserve_the_conflict() {
-        let response = anthropic_skill_error_response(ApiError::new(
-            ApiErrorKind::Conflict,
-            "private conflict detail",
-            None,
-            None,
-        ));
+        let response = protocol_error_response(
+            ApiError::new(
+                ApiErrorKind::Conflict,
+                "private conflict detail",
+                None,
+                None,
+            ),
+            true,
+        );
         assert_eq!(response.status(), StatusCode::CONFLICT);
         let body = response_json(response).await;
         assert_eq!(body["error"]["type"], "conflict_error");

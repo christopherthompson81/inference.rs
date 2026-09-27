@@ -755,3 +755,97 @@ fn responses_stream_store_continue_and_run_in_the_background() {
 
     unsafe { inference_engine_free(engine) };
 }
+
+fn request_call(
+    call: ResponseIdCall,
+    engine: *const inference_engine,
+    request: &Value,
+) -> (inference_status, Value) {
+    by_id(call, engine, &request.to_string())
+}
+
+#[test]
+fn models_unload_reload_and_adapter_management_is_guarded() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let adapter_root = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let mut spec: Value = serde_json::from_str(&spec(dir.path())).unwrap();
+    spec["adapters"] = json!({"runtime_updates": true, "root": adapter_root.path()});
+    let (status, engine) = load(&spec.to_string());
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+
+    let mut response = null_mut();
+    assert_eq!(
+        unsafe { inference_models_list(engine, &mut response) },
+        INFERENCE_OK
+    );
+    let models: Value = serde_json::from_str(&take_string(response)).unwrap();
+    assert_eq!(models["object"], "list", "{models}");
+    assert_eq!(models["data"][0]["id"], "default", "{models}");
+    assert_eq!(models["data"][1]["status"], "loaded", "{models}");
+    let model_id = models["data"][1]["id"].as_str().unwrap().to_string();
+    let model = json!({"model_id": model_id});
+
+    for (call, expected) in [
+        (inference_model_status as ResponseIdCall, "loaded"),
+        (inference_model_unload, "unloaded"),
+        (inference_model_unload, "unloaded"),
+        (inference_model_status, "unloaded"),
+        (inference_model_reload, "loaded"),
+        (inference_model_reload, "loaded"),
+    ] {
+        let (status, response) = request_call(call, engine, &model);
+        assert_eq!(status, INFERENCE_OK, "expecting {expected}: {response}");
+        assert_eq!(response, json!({"model_id": model_id, "status": expected}));
+    }
+    let (status, _) = chat(engine, &chat_request(false));
+    assert_eq!(
+        status,
+        INFERENCE_OK,
+        "a reloaded model serves again: {}",
+        last_error()
+    );
+    let (status, error) = request_call(
+        inference_model_status,
+        engine,
+        &json!({"model_id": "no-such-model"}),
+    );
+    assert_eq!(status, INFERENCE_ERR_NOT_FOUND, "{error}");
+    assert_eq!(error["error"]["code"], "model_not_found", "{error}");
+
+    let load_adapter = |path: &str| {
+        request_call(
+            inference_lora_adapter_load,
+            engine,
+            &json!({"lora_name": "production", "lora_path": path}),
+        )
+    };
+    let (status, error) = load_adapter("missing");
+    assert_eq!(status, INFERENCE_ERR_NOT_FOUND, "{error}");
+    assert_eq!(error["error"]["code"], "adapter_path_not_found", "{error}");
+    let (status, error) = load_adapter(outside.path().to_str().unwrap());
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+    assert_eq!(error["error"]["code"], "adapter_path_forbidden", "{error}");
+    let (status, error) = request_call(inference_lora_adapters_list, engine, &json!({"model": 5}));
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+    unsafe { inference_engine_free(engine) };
+
+    // without runtime_updates in the spec, adapters can be listed but not changed
+    let (status, engine) = load(&self::spec(dir.path()));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    for (call, request) in [
+        (
+            inference_lora_adapter_load as ResponseIdCall,
+            json!({"lora_name": "production", "lora_path": "anywhere"}),
+        ),
+        (
+            inference_lora_adapter_unload,
+            json!({"lora_name": "production"}),
+        ),
+    ] {
+        let (status, error) = request_call(call, engine, &request);
+        assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+        assert_eq!(error["error"]["code"], "lora_updates_disabled", "{error}");
+    }
+    unsafe { inference_engine_free(engine) };
+}

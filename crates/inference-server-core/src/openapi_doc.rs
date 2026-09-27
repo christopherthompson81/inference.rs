@@ -34,8 +34,8 @@ use crate::{
     image_generation::__path_image_generation,
     lora_adapters::{
         __path_list_lora_adapters, __path_load_lora_adapter, __path_unload_lora_adapter,
-        LoadLoraAdapterRequest, LoraAdapterErrorBody, LoraAdapterErrorResponse,
-        LoraAdapterListResponse, LoraAdapterObject, UnloadLoraAdapterRequest,
+        LoadLoraAdapterRequest, LoraAdapterListResponse, LoraAdapterObject,
+        UnloadLoraAdapterRequest,
     },
     metrics::__path_metrics,
     openai::{
@@ -168,8 +168,6 @@ pub fn get_openapi_doc(base_path: Option<&str>) -> utoipa::openapi::OpenApi {
             Grammar,
             ImageGenerationRequest,
             LoadLoraAdapterRequest,
-            LoraAdapterErrorBody,
-            LoraAdapterErrorResponse,
             LoraAdapterListResponse,
             LoraAdapterObject,
             ImageGenerationResponseFormat,

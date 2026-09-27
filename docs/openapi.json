@@ -655,94 +655,31 @@
             }
           },
           "400": {
-            "description": "Invalid request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "Invalid request"
           },
           "403": {
-            "description": "Adapter path is not allowed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "Adapter path is not allowed"
           },
           "404": {
-            "description": "Model or adapter path was not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "Model or adapter path was not found"
           },
           "409": {
-            "description": "LoRA runtime is unavailable or at capacity",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "LoRA runtime is unavailable or at capacity"
           },
           "413": {
-            "description": "Adapter input files exceed the configured safety limit",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "Adapter input files exceed the configured safety limit"
           },
           "415": {
-            "description": "Request content type is not JSON",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "Request content type is not JSON"
           },
           "429": {
-            "description": "Another adapter load is already in progress",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "Another adapter load is already in progress"
           },
           "500": {
-            "description": "Adapter loading task failed",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "Adapter loading task failed"
           },
           "503": {
-            "description": "Adapter storage or model device is unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "Adapter storage or model device is unavailable"
           }
         }
       }
@@ -776,44 +713,16 @@
             }
           },
           "400": {
-            "description": "Invalid query",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "Invalid query"
           },
           "404": {
-            "description": "Model was not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "Model was not found"
           },
           "409": {
-            "description": "LoRA runtime is unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "LoRA runtime is unavailable"
           },
           "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "Internal server error"
           }
         }
       }
@@ -1428,64 +1337,22 @@
             }
           },
           "400": {
-            "description": "Invalid request",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "Invalid request"
           },
           "404": {
-            "description": "Model or adapter was not found",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "Model or adapter was not found"
           },
           "409": {
-            "description": "LoRA runtime is unavailable",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "LoRA runtime is unavailable"
           },
           "413": {
-            "description": "Request body exceeds the configured limit",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "Request body exceeds the configured limit"
           },
           "415": {
-            "description": "Request content type is not JSON",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "Request content type is not JSON"
           },
           "500": {
-            "description": "Internal server error",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/LoraAdapterErrorResponse"
-                }
-              }
-            }
+            "description": "Internal server error"
           }
         }
       }
@@ -4423,36 +4290,6 @@
         },
         "additionalProperties": false
       },
-      "LoraAdapterErrorBody": {
-        "type": "object",
-        "required": [
-          "message",
-          "type",
-          "code"
-        ],
-        "properties": {
-          "code": {
-            "type": "string"
-          },
-          "message": {
-            "type": "string"
-          },
-          "type": {
-            "type": "string"
-          }
-        }
-      },
-      "LoraAdapterErrorResponse": {
-        "type": "object",
-        "required": [
-          "error"
-        ],
-        "properties": {
-          "error": {
-            "$ref": "#/components/schemas/LoraAdapterErrorBody"
-          }
-        }
-      },
       "LoraAdapterListResponse": {
         "type": "object",
         "required": [
@@ -4772,7 +4609,7 @@
       },
       "ModelOperationRequest": {
         "type": "object",
-        "description": "Request for model operations (unload, reload, status)",
+        "description": "The body of an unload, reload or status request.",
         "required": [
           "model_id"
         ],
@@ -4785,7 +4622,6 @@
       },
       "ModelStatus": {
         "type": "string",
-        "description": "Model status enum",
         "enum": [
           "loaded",
           "unloaded",
@@ -4794,7 +4630,6 @@
       },
       "ModelStatusResponse": {
         "type": "object",
-        "description": "Response for model status operations",
         "required": [
           "model_id",
           "status"

@@ -19,10 +19,18 @@ use crate::{
     engine_completion::{collect_completion, prepare_completion, CompletionStream},
     engine_embeddings::{embed, EmbeddingError},
     inference_for_server_builder::InferenceRsForServerBuilder,
+    lora_adapters::{
+        list_adapters, load_adapter, unload_adapter, ListLoraAdaptersQuery, LoadLoraAdapterRequest,
+        LoraAdapterApiConfig, LoraAdapterListResponse, LoraAdapterObject, UnloadLoraAdapterRequest,
+    },
     media_source::MediaAttachments,
+    models::{
+        list_models, model_status, reload_model, unload_model, ModelOperationRequest,
+        ModelStatusResponse,
+    },
     openai::{
         ChatCompletionRequest, CompletionRequest, EmbeddingRequest, EmbeddingResponse,
-        OpenAiToolSurface,
+        ModelObjects, OpenAiToolSurface,
     },
     responses::{
         cancel_response, collect_response, delete_response, get_response, prepare_response,
@@ -51,6 +59,32 @@ pub struct EngineSpec {
     pub runtime: RuntimeSpec,
     #[serde(default)]
     pub agentic: AgenticSpec,
+    #[serde(default)]
+    pub adapters: AdapterSpec,
+}
+
+/// Runtime LoRA adapter management; listing adapters is always allowed.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AdapterSpec {
+    /// Allow loading and unloading adapters while the engine runs.
+    #[serde(default)]
+    pub runtime_updates: bool,
+    /// The directory adapters must load from; relative adapter paths resolve under it.
+    #[serde(default)]
+    pub root: Option<std::path::PathBuf>,
+}
+
+impl AdapterSpec {
+    fn into_config(self) -> Result<LoraAdapterApiConfig, EngineLoadError> {
+        let mut config = LoraAdapterApiConfig::default().with_enabled(self.runtime_updates);
+        if let Some(root) = self.root {
+            config = config.with_allowed_root(root);
+        }
+        config
+            .prepare()
+            .map_err(|error| EngineLoadError::InvalidSpec(format!("{error:#}")))
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -178,15 +212,17 @@ fn explicit_device(device: &str, seed: Option<u64>) -> Result<Device, EngineLoad
 #[derive(Clone)]
 pub struct Engine {
     chat: ChatEngine,
+    adapters: LoraAdapterApiConfig,
 }
 
 impl Engine {
-    /// Wraps an engine the caller already built, with its server-level chat policy.
-    pub fn new(chat: ChatEngine) -> Self {
-        Self { chat }
+    /// Wraps an engine the caller already built, with its server-level chat policy and adapter management policy.
+    pub fn new(chat: ChatEngine, adapters: LoraAdapterApiConfig) -> Self {
+        Self { chat, adapters }
     }
 
-    pub async fn load(spec: EngineSpec) -> Result<Self, EngineLoadError> {
+    pub async fn load(mut spec: EngineSpec) -> Result<Self, EngineLoadError> {
+        let adapters = std::mem::take(&mut spec.adapters).into_config()?;
         let agentic = AgenticDefaults {
             max_tool_rounds: spec.agentic.max_tool_rounds,
             tool_dispatch_url: spec.agentic.tool_dispatch_url.clone(),
@@ -198,11 +234,14 @@ impl Engine {
             .build()
             .await
             .map_err(EngineLoadError::Load)?;
-        Ok(Self::new(ChatEngine {
-            state,
-            agentic,
-            skill_store: None,
-        }))
+        Ok(Self::new(
+            ChatEngine {
+                state,
+                agentic,
+                skill_store: None,
+            },
+            adapters,
+        ))
     }
 
     pub async fn load_json(spec: &[u8]) -> Result<Self, EngineLoadError> {
@@ -484,6 +523,81 @@ impl Engine {
 
     pub fn cancel_response_json(&self, response_id: &str) -> Result<String, ApiError> {
         to_json(&self.cancel_response(response_id)?)
+    }
+
+    pub fn models(&self) -> Result<ModelObjects, ApiError> {
+        list_models(self.state())
+    }
+
+    pub fn unload_model(
+        &self,
+        request: ModelOperationRequest,
+    ) -> Result<ModelStatusResponse, ApiError> {
+        unload_model(self.state(), request)
+    }
+
+    pub async fn reload_model(
+        &self,
+        request: ModelOperationRequest,
+    ) -> Result<ModelStatusResponse, ApiError> {
+        reload_model(self.state(), request).await
+    }
+
+    pub fn model_status(
+        &self,
+        request: ModelOperationRequest,
+    ) -> Result<ModelStatusResponse, ApiError> {
+        model_status(self.state(), request)
+    }
+
+    pub async fn lora_adapters(
+        &self,
+        query: ListLoraAdaptersQuery,
+    ) -> Result<LoraAdapterListResponse, ApiError> {
+        list_adapters(self.state(), &self.adapters, query).await
+    }
+
+    /// Loads a LoRA adapter; the spec's `adapters.runtime_updates` must allow it.
+    pub async fn load_lora_adapter(
+        &self,
+        request: LoadLoraAdapterRequest,
+    ) -> Result<LoraAdapterObject, ApiError> {
+        load_adapter(self.state(), &self.adapters, request).await
+    }
+
+    pub async fn unload_lora_adapter(
+        &self,
+        request: UnloadLoraAdapterRequest,
+    ) -> Result<LoraAdapterObject, ApiError> {
+        unload_adapter(self.state(), &self.adapters, request).await
+    }
+
+    pub fn models_json(&self) -> Result<String, ApiError> {
+        to_json(&self.models()?)
+    }
+
+    pub fn unload_model_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.unload_model(parse_json(request)?)?)
+    }
+
+    pub async fn reload_model_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.reload_model(parse_json(request)?).await?)
+    }
+
+    pub fn model_status_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.model_status(parse_json(request)?)?)
+    }
+
+    pub async fn lora_adapters_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.lora_adapters(parse_json(request)?).await?)
+    }
+
+    pub async fn load_lora_adapter_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.load_lora_adapter(parse_json(request)?).await?)
+    }
+
+    pub async fn unload_lora_adapter_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.unload_lora_adapter(parse_json(request)?).await?)
     }
 
     /// Embeds every input of an embeddings request.

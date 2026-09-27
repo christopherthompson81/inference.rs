@@ -11,6 +11,7 @@ pub const SERVICE_UNAVAILABLE_MESSAGE: &str = "The service is temporarily unavai
 pub enum ApiErrorKind {
     InvalidRequest,
     NotFound,
+    Forbidden,
     Conflict,
     PayloadTooLarge,
     UnsupportedMediaType,
@@ -167,7 +168,31 @@ impl ApiError {
             LoraAdapterError::InvalidAlias | LoraAdapterError::AliasTooLong { .. } => {
                 (ApiErrorKind::InvalidRequest, "invalid_lora_name")
             }
+            LoraAdapterError::AliasLimit { .. } => {
+                (ApiErrorKind::Conflict, "lora_alias_limit_exceeded")
+            }
             LoraAdapterError::LoadBusy => (ApiErrorKind::RateLimited, "lora_load_busy"),
+            LoraAdapterError::AlreadyLoaded { .. } => {
+                (ApiErrorKind::Conflict, "lora_adapter_already_loaded")
+            }
+            LoraAdapterError::GenerationMismatch { .. } => {
+                (ApiErrorKind::Conflict, "lora_generation_mismatch")
+            }
+            LoraAdapterError::GenerationConflict { .. } => {
+                (ApiErrorKind::Conflict, "lora_generation_conflict")
+            }
+            LoraAdapterError::RankLimit { .. } => {
+                (ApiErrorKind::Conflict, "lora_rank_limit_exceeded")
+            }
+            LoraAdapterError::AdapterLimit { .. } => {
+                (ApiErrorKind::Conflict, "lora_adapter_limit_exceeded")
+            }
+            LoraAdapterError::ByteLimit { .. } => {
+                (ApiErrorKind::Conflict, "lora_byte_limit_exceeded")
+            }
+            LoraAdapterError::SlotExhausted => {
+                (ApiErrorKind::Conflict, "lora_slot_space_exhausted")
+            }
             LoraAdapterError::NotFound { .. } | LoraAdapterError::GenerationNotFound { .. } => {
                 (ApiErrorKind::NotFound, "lora_adapter_not_found")
             }
@@ -178,6 +203,11 @@ impl ApiError {
                 if source.kind() == std::io::ErrorKind::NotFound =>
             {
                 (ApiErrorKind::NotFound, "adapter_file_not_found")
+            }
+            LoraAdapterError::Io { source, .. }
+                if source.kind() == std::io::ErrorKind::PermissionDenied =>
+            {
+                (ApiErrorKind::Forbidden, "adapter_file_forbidden")
             }
             LoraAdapterError::Io { source, .. }
                 if matches!(
@@ -192,29 +222,19 @@ impl ApiError {
             LoraAdapterError::Io { .. } | LoraAdapterError::Load(_) => {
                 (ApiErrorKind::Internal, "internal_error")
             }
-            LoraAdapterError::Config { .. } | LoraAdapterError::Format(_) => {
+            LoraAdapterError::Config { .. }
+            | LoraAdapterError::Format(_)
+            | LoraAdapterError::SizeOverflow => {
                 (ApiErrorKind::InvalidRequest, "invalid_lora_adapter")
             }
-            LoraAdapterError::AlreadyLoaded { .. }
-            | LoraAdapterError::GenerationMismatch { .. }
-            | LoraAdapterError::GenerationConflict { .. }
-            | LoraAdapterError::AliasLimit { .. }
-            | LoraAdapterError::RankLimit { .. }
-            | LoraAdapterError::AdapterLimit { .. }
-            | LoraAdapterError::ByteLimit { .. }
-            | LoraAdapterError::SlotExhausted => (ApiErrorKind::Conflict, "lora_state_conflict"),
-            LoraAdapterError::SizeOverflow => {
-                (ApiErrorKind::InvalidRequest, "invalid_lora_adapter")
+            LoraAdapterError::InvalidRuntimeConfig(_) => {
+                (ApiErrorKind::Internal, "invalid_lora_runtime")
             }
-            LoraAdapterError::InvalidRuntimeConfig(_) | LoraAdapterError::Task(_) => {
-                (ApiErrorKind::Internal, "internal_error")
-            }
+            LoraAdapterError::Task(_) => (ApiErrorKind::Internal, "lora_load_task_failed"),
             _ => (ApiErrorKind::Internal, "internal_error"),
         };
         let message = if kind == ApiErrorKind::Internal {
             INTERNAL_ERROR_MESSAGE.to_string()
-        } else if matches!(kind, ApiErrorKind::Unavailable | ApiErrorKind::Overloaded) {
-            SERVICE_UNAVAILABLE_MESSAGE.to_string()
         } else {
             error.to_string()
         };
@@ -301,6 +321,34 @@ impl std::error::Error for ModelErrorMessage {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lora_errors_keep_their_specific_codes() {
+        let classify = |error| {
+            let error = ApiError::from_error(
+                &InferenceRsError::LoraAdapter(error),
+                ApiErrorKind::Internal,
+            );
+            (error.kind, error.code.unwrap())
+        };
+        assert_eq!(
+            classify(LoraAdapterError::RankLimit { rank: 64, max: 16 }),
+            (
+                ApiErrorKind::Conflict,
+                "lora_rank_limit_exceeded".to_string()
+            )
+        );
+        assert_eq!(
+            classify(LoraAdapterError::Io {
+                path: "adapter_model.safetensors".into(),
+                source: std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            }),
+            (
+                ApiErrorKind::Forbidden,
+                "adapter_file_forbidden".to_string()
+            )
+        );
+    }
 
     #[test]
     fn classifies_core_errors_without_losing_wrapped_sources() {

@@ -27,7 +27,6 @@ use tracing::{debug, info};
 use crate::{
     handler_core::{openai_error_response, ApiError, ApiErrorKind, ResponseErrorMessage},
     inference_server_router_builder::DEFAULT_MAX_BODY_LIMIT,
-    lora_adapters::lifecycle_body_too_large_response,
     lora_routing::{is_resolvable_lora_adapter_model, list_lora_adapter_models},
     streaming::{StreamOutcome, StreamOutcomeHandle},
     types::SharedInferenceRsState,
@@ -616,9 +615,7 @@ async fn extract_model(
 }
 
 fn body_too_large_response(route: &str, request_id: Option<&str>) -> Response {
-    if matches!(route, "/v1/load_lora_adapter" | "/v1/unload_lora_adapter") {
-        lifecycle_body_too_large_response()
-    } else if is_anthropic_route(route) {
+    if is_anthropic_route(route) {
         let mut response = Json(serde_json::json!({
             "type": "error",
             "error": {

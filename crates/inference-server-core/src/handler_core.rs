@@ -7,12 +7,15 @@ use axum::{
 };
 
 pub(crate) use crate::api_error::{
-    ApiError, ApiErrorKind, ModelErrorMessage, INTERNAL_ERROR_MESSAGE, SERVICE_UNAVAILABLE_MESSAGE,
+    ApiError, ApiErrorKind, ModelErrorMessage, SERVICE_UNAVAILABLE_MESSAGE,
 };
 pub(crate) use crate::dispatch::base_process_non_streaming_response;
 pub use crate::dispatch::{
     create_response_channel, send_request, send_request_with_model, DEFAULT_CHANNEL_BUFFER_SIZE,
 };
+
+// Rate-limited operations (a busy adapter load) clear within a request's time, so clients retry promptly.
+const RETRY_AFTER_SECS: &str = "1";
 
 /// Error message attached to a failed response so the access log can report it.
 #[derive(Clone, Debug)]
@@ -21,10 +24,25 @@ pub struct ResponseErrorMessage(pub String);
 pub(crate) fn openai_error_response(error: ApiError) -> axum::response::Response {
     let mut response = Json(error.to_openai_body()).into_response();
     *response.status_mut() = error.status();
+    if error.kind == ApiErrorKind::RateLimited {
+        response.headers_mut().insert(
+            axum::http::header::RETRY_AFTER,
+            axum::http::HeaderValue::from_static(RETRY_AFTER_SECS),
+        );
+    }
     response
         .extensions_mut()
         .insert(ResponseErrorMessage(error.message));
     response
+}
+
+pub(crate) fn json_response<T: serde::Serialize>(
+    result: Result<T, ApiError>,
+) -> axum::response::Response {
+    match result {
+        Ok(body) => Json(body).into_response(),
+        Err(error) => openai_error_response(error),
+    }
 }
 
 pub(crate) fn openai_error_from_error(
@@ -50,6 +68,9 @@ impl ApiErrorHttp for ApiError {
             }
             StatusCode::NOT_FOUND => {
                 Self::new(ApiErrorKind::NotFound, message, Some("not_found"), None)
+            }
+            StatusCode::FORBIDDEN => {
+                Self::new(ApiErrorKind::Forbidden, message, Some("forbidden"), None)
             }
             StatusCode::CONFLICT => {
                 Self::new(ApiErrorKind::Conflict, message, Some("conflict"), None)
@@ -103,6 +124,7 @@ impl ApiErrorHttp for ApiError {
         match self.kind {
             ApiErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
             ApiErrorKind::NotFound => StatusCode::NOT_FOUND,
+            ApiErrorKind::Forbidden => StatusCode::FORBIDDEN,
             ApiErrorKind::Conflict => StatusCode::CONFLICT,
             ApiErrorKind::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             ApiErrorKind::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -116,6 +138,7 @@ impl ApiErrorHttp for ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::api_error::INTERNAL_ERROR_MESSAGE;
     use axum::body::to_bytes;
 
     #[test]
@@ -123,6 +146,7 @@ mod tests {
         for (kind, status) in [
             (ApiErrorKind::InvalidRequest, StatusCode::BAD_REQUEST),
             (ApiErrorKind::NotFound, StatusCode::NOT_FOUND),
+            (ApiErrorKind::Forbidden, StatusCode::FORBIDDEN),
             (ApiErrorKind::Conflict, StatusCode::CONFLICT),
             (ApiErrorKind::PayloadTooLarge, StatusCode::PAYLOAD_TOO_LARGE),
             (
@@ -157,6 +181,21 @@ mod tests {
         assert_eq!(body["error"]["code"], "model_not_found");
         assert_eq!(body["error"]["param"], "model");
         assert_eq!(body["error"]["message"], "model `missing` was not found");
+    }
+
+    #[test]
+    fn rate_limited_errors_ask_clients_to_retry() {
+        let response = openai_error_response(ApiError::new(
+            ApiErrorKind::RateLimited,
+            "another LoRA adapter load is already in progress",
+            Some("lora_load_busy"),
+            None,
+        ));
+        assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response.headers().get(axum::http::header::RETRY_AFTER),
+            Some(&axum::http::HeaderValue::from_static(RETRY_AFTER_SECS))
+        );
     }
 
     #[tokio::test]

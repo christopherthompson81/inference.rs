@@ -14,10 +14,12 @@ pub mod engine_embeddings;
 pub mod inference_for_server_builder;
 #[doc(hidden)]
 pub mod input_files;
+pub mod lora_adapters;
 #[doc(hidden)]
 pub mod lora_routing;
 #[doc(hidden)]
 pub mod media_source;
+pub mod models;
 pub mod openai;
 pub mod responses;
 pub mod responses_types;
