@@ -44,7 +44,6 @@ vob.workspace = true
 cfgrammar.workspace = true
 lrtable.workspace = true
 galil-seiferas.workspace = true
-clap.workspace = true
 radix_trie.workspace = true
 bytemuck.workspace = true
 rayon.workspace = true

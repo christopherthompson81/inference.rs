@@ -3061,7 +3061,6 @@ dependencies = [
  "candle-nn",
  "cfgrammar",
  "chrono",
- "clap",
  "csv",
  "derive_more",
  "dirs",
