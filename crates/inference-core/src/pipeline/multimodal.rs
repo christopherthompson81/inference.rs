@@ -510,27 +510,15 @@ impl Loader for MultimodalLoader {
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let _progress_guard = ProgressScopeGuard::new(silent);
         self.validate_dynamic_lora()?;
-        let config = match self.prepared_source.as_ref() {
-            Some(source) => source.config.clone(),
-            None => super::loaders::load_model_config(
-                paths.get_config_filename(),
-                self.config.from_uqff.is_none(),
-            )?,
-        };
-        let config = if self.config.from_uqff.is_some() {
-            super::isq::sanitize_quantized_weight_source_config(&config)?
-        } else {
-            config
-        };
-        let config = match &self.config.hf_config_overrides {
-            Some(overrides) => overrides.apply(&config)?,
-            None => config,
-        };
-        let config = if self.mtp {
-            super::loaders::inject_mtp_config_flag(&config)?
-        } else {
-            config
-        };
+        let config = super::loading::prepare_model_config(
+            self.prepared_source
+                .as_ref()
+                .map(|source| source.config.as_str()),
+            paths.get_config_filename(),
+            self.config.from_uqff.is_some(),
+            self.config.hf_config_overrides.as_ref(),
+            self.mtp,
+        )?;
         super::loaders::validate_lora_qk_rope_layout(&config, self.lora_adapters.is_some())?;
         let modalities = self.inner.modalities(&config)?;
         let runtime_config = self

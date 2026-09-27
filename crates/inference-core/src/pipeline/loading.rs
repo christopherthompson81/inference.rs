@@ -1,5 +1,7 @@
 //! Load steps shared by the normal and multimodal pipeline loaders.
 
+use std::path::Path;
+
 use anyhow::Result;
 use candle_core::{DType, Device};
 use tracing::warn;
@@ -68,4 +70,32 @@ pub(crate) fn materialize_device_mapper(
         layer_devices,
         dtype,
     })
+}
+
+/// The prepared or on-disk config.json, sanitized for UQFF sources, with HF overrides and the MTP flag applied.
+pub(crate) fn prepare_model_config(
+    prepared_config: Option<&str>,
+    config_filename: &Path,
+    from_uqff: bool,
+    overrides: Option<&super::HfConfigOverrides>,
+    mtp: bool,
+) -> Result<String> {
+    let config = match prepared_config {
+        Some(config) => config.to_string(),
+        None => super::loaders::load_model_config(config_filename, !from_uqff)?,
+    };
+    let config = if from_uqff {
+        super::isq::sanitize_quantized_weight_source_config(&config)?
+    } else {
+        config
+    };
+    let config = match overrides {
+        Some(overrides) => overrides.apply(&config)?,
+        None => config,
+    };
+    if mtp {
+        super::loaders::inject_mtp_config_flag(&config)
+    } else {
+        Ok(config)
+    }
 }
