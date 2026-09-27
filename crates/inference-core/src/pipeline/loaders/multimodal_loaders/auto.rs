@@ -10,7 +10,7 @@ impl AutoMultimodalLoader {
         // Voxtral: params.json has `multimodal` but no `architectures`
         if auto_cfg.multimodal.is_some() && auto_cfg.architectures.is_empty() {
             once_log_debug("Automatic loader type determined to be `voxtral`");
-            return Ok(Box::new(VoxtralLoader));
+            return MultimodalLoaderType::Voxtral.loader();
         }
 
         if auto_cfg.architectures.len() != 1 {

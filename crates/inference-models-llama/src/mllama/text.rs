@@ -13,15 +13,14 @@ use inference_quant::{
 use crate::{
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
+    kv_cache::{EitherCache, KvCache, NormalCache},
     layers::masker::PastKvLenCache,
     layers::{
         embedding_with_legacy_tied_uqff, CausalMasker, Llama3RopeSpec, Llama3RotaryEmbedding,
         RmsNorm, Sdpa,
     },
+    model::{IsqModel, ModelForwardContext, NormalLoadingMetadata},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
-    pipeline::{
-        EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalLoadingMetadata,
-    },
     utils::unvarbuilder::UnVarBuilder,
 };
 
@@ -735,10 +734,10 @@ pub(super) struct MLlamaTextModel {
     norm: RmsNorm,
     layers: Vec<MLlamaDecoderLayer>,
     dtype: DType,
-    pub(crate) cfg: ModelConfigMetadata,
-    pub(crate) cache: EitherCache,
-    pub(crate) device: Device,
-    pub(crate) max_position_embeddings: usize,
+    pub cfg: ModelConfigMetadata,
+    pub cache: EitherCache,
+    pub device: Device,
+    pub max_position_embeddings: usize,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
 }
 

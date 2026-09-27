@@ -16,13 +16,11 @@ use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
+    kv_cache::{EitherCache, KvCache, NormalCache},
     layers::{embedding_with_legacy_tied_uqff, CausalMasker, Llama3RotaryEmbedding, RmsNorm, Sdpa},
+    model::{IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
-    pipeline::{
-        EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalLoadingMetadata,
-        NormalModel,
-    },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 
@@ -759,7 +757,7 @@ pub struct TextModel {
     ln_f: RmsNorm,
     lm_head: Arc<dyn QuantMethod>,
     dtype: DType,
-    kv_cache: crate::pipeline::EitherCache,
+    kv_cache: crate::kv_cache::EitherCache,
     device: Device,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
     cfg: ModelConfigMetadata,
@@ -1040,7 +1038,7 @@ impl NormalModel for TextModel {
         _seqlen_offsets: &[usize],
         _seqlen_offsets_full: &[usize],
         _no_kv_cache: bool,
-        _non_granular_state: &Option<crate::xlora_models::NonGranularState>,
+        _non_granular_state: &Option<crate::model::NonGranularState>,
         _context_lens: Vec<(usize, usize)>,
         _position_ids: Vec<usize>,
         _flash_params: &FlashParams,
@@ -1048,7 +1046,7 @@ impl NormalModel for TextModel {
     ) -> Result<Tensor> {
         unimplemented!()
     }
-    fn cache(&self) -> &crate::pipeline::EitherCache {
+    fn cache(&self) -> &crate::kv_cache::EitherCache {
         &self.kv_cache
     }
     fn device(&self) -> &Device {

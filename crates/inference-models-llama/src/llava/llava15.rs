@@ -10,30 +10,30 @@ use super::llava_llm::{LLaVALLM, Llama, Mistral};
 use crate::amoe::AnyMoeBaseModelMixin;
 use crate::amoe::MlpLayer;
 
+use crate::amoe::AnyMoeConfig;
+use crate::amoe::AnyMoeExpertType;
 use crate::layers;
+use crate::llava::config::Config;
+use crate::model::IsqModel;
+use crate::model::ModelForwardContext;
+use crate::model::MultimodalModel;
+use crate::model::NormalLoadingMetadata;
 use crate::paged_attention::block_hash::MultimodalKind;
 use crate::paged_attention::encoder_cache::{
     cached_encode_images, CacheModality, EncoderCacheManager,
 };
 use crate::paged_attention::{AttentionImplementation, ModelConfigMetadata};
-use crate::pipeline::IsqModel;
-use crate::pipeline::ModelForwardContext;
-use crate::pipeline::MultimodalModel;
-use crate::pipeline::NormalLoadingMetadata;
 use crate::utils::unvarbuilder::UnVarBuilder;
-use crate::vision_models::clip::{ClipConfig, ClipVisionTransformer};
-use crate::vision_models::llava::config::Config;
-use crate::vision_models::multimodal_layout::{
+use crate::vision::clip::{ClipConfig, ClipVisionTransformer};
+use crate::vision::multimodal_layout::{
     MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
 };
-use crate::AnyMoeConfig;
-use crate::AnyMoeExpertType;
 use candle_core::{bail, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{Activation, Linear};
 use inference_quant::NonZeroOp;
 use inference_quant::ShardedVarBuilder;
 
-pub(crate) struct LLaVAVisionSpecificArgs {
+pub struct LLaVAVisionSpecificArgs {
     pub image_hashes: Vec<u64>,
     pub packed_layout: Option<PackedMultimodalLayout>,
 }
@@ -337,7 +337,7 @@ impl IsqModel for Model {
 
 impl crate::speculative::SpeculativeTargetMixin for Model {}
 
-impl crate::block_diffusion::BlockDiffusionMixin for Model {}
+impl crate::model::BlockDiffusionMixin for Model {}
 
 impl MultimodalModel for Model {
     fn supports_packed_prefill(&self) -> bool {
@@ -353,7 +353,7 @@ impl MultimodalModel for Model {
         input_ids: &Tensor,
         pixel_values: Option<Tensor>,
         model_specific_args: Box<dyn std::any::Any>,
-        ctx: &mut crate::pipeline::ModelForwardContext<'_>,
+        ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> candle_core::Result<Tensor> {
         let LLaVAVisionSpecificArgs {
             image_hashes,
@@ -378,7 +378,7 @@ impl MultimodalModel for Model {
         &self.device
     }
 
-    fn cache(&self) -> &crate::pipeline::EitherCache {
+    fn cache(&self) -> &crate::kv_cache::EitherCache {
         self.llm.cache()
     }
     fn max_seq_len(&self) -> usize {

@@ -13,21 +13,20 @@ use inference_quant::{
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeTrainableLayer, MlpLayer, MoeMlp},
+    amoe::{AnyMoeConfig, AnyMoeExpertType},
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     get_delta_from_lora_ab,
+    kv_cache::{Cache, EitherCache},
     layers::masker::PastKvLenCache,
     layers::{self, Activation, CausalMasker, MatMul, RmsNorm, Sdpa},
+    model::{IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
-    pipeline::{
-        Cache, EitherCache, IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel,
-    },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
-    AnyMoeConfig, AnyMoeExpertType,
 };
 
 use super::{rope_positions, LLaVALLM, OrdinaryRoPE};
-use crate::models::mistral::Config;
+use crate::mistral::Config;
 
 #[derive(Clone)]
 #[allow(clippy::upper_case_acronyms)]
@@ -611,7 +610,7 @@ impl NormalModel for Model {
     fn forward(
         &self,
         input_ids: &Tensor,
-        ctx: &mut crate::pipeline::ModelForwardContext<'_>,
+        ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         self.forward(input_ids, ctx)
     }
@@ -622,7 +621,7 @@ impl NormalModel for Model {
         _seqlen_offsets: &[usize],
         _seqlen_offsets_full: &[usize],
         _no_kv_cache: bool,
-        _non_granular_state: &Option<crate::xlora_models::NonGranularState>,
+        _non_granular_state: &Option<crate::model::NonGranularState>,
         _context_lens: Vec<(usize, usize)>,
         _position_ids: Vec<usize>,
         _flash_params: &FlashParams,

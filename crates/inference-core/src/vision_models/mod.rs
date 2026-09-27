@@ -6,7 +6,6 @@ use candle_core::Tensor;
 
 #[cfg(any(feature = "models-llama", feature = "models-phi"))]
 pub(crate) use inference_nn::vision::clip;
-pub(crate) mod conformer;
 #[cfg(feature = "models-llama")]
 pub(crate) mod idefics2;
 #[cfg(feature = "models-llama")]
@@ -14,6 +13,7 @@ pub(crate) use idefics2::idefics2_input_processor;
 pub(crate) mod image_processor;
 #[cfg(feature = "models-llama")]
 pub(crate) mod llava;
+#[cfg(feature = "models-llama")]
 pub(crate) mod mllama;
 pub(crate) mod paddleocr_vl;
 #[cfg(feature = "models-phi")]
@@ -36,7 +36,9 @@ pub(crate) use llava::llava_next_inputs_processor;
 pub(crate) mod idefics3;
 #[cfg(feature = "models-qwen")]
 pub(crate) mod minicpmo;
+#[cfg(feature = "models-phi")]
 pub(crate) mod phi4;
+#[cfg(feature = "models-phi")]
 pub(crate) use phi4::inputs_processor;
 #[cfg(feature = "models-gemma")]
 pub(crate) mod diffusion_gemma;
@@ -48,6 +50,7 @@ pub(crate) mod gemma3n;
 pub(crate) mod gemma4;
 #[cfg(feature = "models-other")]
 pub(crate) mod lfm2_vl;
+#[cfg(feature = "models-llama")]
 pub(crate) mod llama4;
 #[cfg(feature = "models-llama")]
 pub(crate) mod mistral3;
@@ -56,9 +59,12 @@ pub(crate) mod qwen3_5;
 pub(crate) mod qwen3_5_moe;
 pub(crate) mod qwen3_vl;
 pub(crate) mod qwen3_vl_moe;
+#[cfg(feature = "models-llama")]
 pub(crate) mod voxtral;
 
-pub(crate) use inference_nn::vision::{multimodal_layout, siglip};
+pub(crate) use inference_nn::vision::multimodal_layout;
+#[cfg(feature = "models-qwen")]
+pub(crate) use inference_nn::vision::siglip;
 
 use crate::gdn::RecurrentBatchKind;
 

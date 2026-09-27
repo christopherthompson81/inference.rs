@@ -12,7 +12,7 @@ use inference_quant::{
 use crate::{
     attention::{AttentionMask, SdpaParams},
     layers::{conv2d_no_bias, dense_embedding, layer_norm, GetFloatInfo, Sdpa},
-    pipeline::IsqModel,
+    model::IsqModel,
     utils::unvarbuilder::UnVarBuilder,
 };
 

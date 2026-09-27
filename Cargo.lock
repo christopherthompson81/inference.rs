@@ -3265,9 +3265,11 @@ version = "0.9.3"
 dependencies = [
  "candle-core",
  "candle-nn",
+ "indicatif 0.18.3",
  "inference-nn",
  "inference-quant",
  "serde",
+ "serde_json",
  "tempfile",
  "tracing",
 ]
@@ -3294,9 +3296,11 @@ version = "0.9.3"
 dependencies = [
  "candle-core",
  "candle-nn",
+ "either",
  "inference-nn",
  "inference-quant",
  "serde",
+ "serde_json",
  "tempfile",
  "tracing",
 ]

@@ -12,15 +12,15 @@ use crate::{
     layers::{AvgPool2d, ReflectionPad2d},
     paged_attention::encoder_cache::{CacheModality, EncoderCacheManager},
     utils::unvarbuilder::UnVarBuilder,
-    vision_models::{
+    {
         phi4::config::Phi4MMImgProcessorConfig,
-        siglip::{SiglipVisionConfig, SiglipVisionTransformer},
+        vision::siglip::{SiglipVisionConfig, SiglipVisionTransformer},
     },
 };
 
 use super::{config::Phi4MMImageEmbedConfig, Phi4MMConfig};
 
-pub(super) const IMAGE_SPECIAL_TOKEN_ID: f64 = 200010.;
+pub const IMAGE_SPECIAL_TOKEN_ID: f64 = 200010.;
 
 trait ModuleWithMetadata: Module + Debug + Send + Sync {
     fn device(&self) -> Device;
@@ -88,7 +88,7 @@ impl Module for EmbeddingLayers {
     }
 }
 
-pub(crate) static PHI4_MM_VISION_CFG: LazyLock<SiglipVisionConfig> =
+pub static PHI4_MM_VISION_CFG: LazyLock<SiglipVisionConfig> =
     LazyLock::new(|| SiglipVisionConfig {
         hidden_size: 1152,
         image_size: 448,

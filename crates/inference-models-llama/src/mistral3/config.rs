@@ -1,7 +1,7 @@
 use inference_quant::QuantizedConfig;
 use serde::Deserialize;
 
-use crate::{layers::Activation, models::mistral};
+use crate::{layers::Activation, mistral};
 
 use super::vision;
 

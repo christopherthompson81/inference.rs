@@ -9,9 +9,9 @@ use inference_quant::{QuantMethod, ShardedVarBuilder};
 
 use crate::{
     attention::{AttentionMask, SdpaParams},
+    kv_cache::{KvCache, NormalCache},
     layers::masker::PastKvLenCache,
     layers::{CausalMasker, RmsNorm, RotaryEmbedding, Sdpa},
-    pipeline::{KvCache, NormalCache},
 };
 
 use super::config::WhisperEncoderArgs;

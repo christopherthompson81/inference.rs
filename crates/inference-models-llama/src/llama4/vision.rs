@@ -11,8 +11,8 @@ use inference_quant::{ColumnParallelLayer, QuantMethod, RowParallelLayer, Sharde
 use crate::{
     attention::{AttentionMask, SdpaParams},
     layers::{layer_norm, linear_no_bias, Activation, Sdpa},
+    model::IsqModel,
     ops::RepeatInterleaveOp,
-    pipeline::IsqModel,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 

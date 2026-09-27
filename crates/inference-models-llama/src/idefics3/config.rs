@@ -1,6 +1,6 @@
 use serde::Deserialize;
 
-use crate::{layers::Activation, models};
+use crate::layers::Activation;
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Idefics3VisionConfig {
@@ -19,6 +19,6 @@ pub struct Idefics3VisionConfig {
 pub struct Idefics3Config {
     pub image_token_id: usize,
     pub vision_config: Idefics3VisionConfig,
-    pub text_config: models::llama::Config,
+    pub text_config: crate::llama::Config,
     pub scale_factor: usize,
 }

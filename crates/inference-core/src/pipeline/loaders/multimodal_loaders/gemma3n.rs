@@ -1,4 +1,5 @@
 use super::*;
+use candle_core::Device;
 
 /// [`MultimodalLoader`] for an Gemma 3n model.
 ///

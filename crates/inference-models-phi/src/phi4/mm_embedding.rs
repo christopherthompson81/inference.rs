@@ -10,11 +10,11 @@ use inference_quant::{QuantMethod, ShardedVarBuilder};
 use crate::{
     paged_attention::encoder_cache::EncoderCacheManager,
     utils::unvarbuilder::UnVarBuilder,
-    vision_models::{
-        multimodal_layout::{
+    {
+        phi4::image_embedding::IMAGE_SPECIAL_TOKEN_ID,
+        vision::multimodal_layout::{
             MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
         },
-        phi4::image_embedding::IMAGE_SPECIAL_TOKEN_ID,
     },
 };
 
@@ -39,7 +39,7 @@ pub struct Phi4MMImageAudioEmbedding {
     dtype: DType,
 }
 
-pub(super) struct Phi4MMPackedInputs<'a> {
+pub struct Phi4MMPackedInputs<'a> {
     pub image_embeds: Option<&'a Tensor>,
     pub image_attention_mask: Option<&'a Tensor>,
     pub image_sizes: Option<&'a [(u32, u32)]>,

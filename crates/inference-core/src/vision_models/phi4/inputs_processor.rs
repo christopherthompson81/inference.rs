@@ -26,7 +26,7 @@ use crate::{
     pipeline::{
         text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
         InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
-        MessagesAction, Processor, ProcessorCreator,
+        MessagesAction, Processor,
     },
     sequence::{build_mm_features_from_ranges, Sequence},
 };
@@ -267,8 +267,8 @@ pub struct Phi4MMProcessor {
     inputs_processor: Arc<Phi4MMInputsProcessor>,
 }
 
-impl ProcessorCreator for Phi4MMProcessor {
-    fn new_processor(
+impl Phi4MMProcessor {
+    pub(crate) fn new_processor(
         _: Option<ProcessorConfig>,
         pre_processor_config: PreProcessorConfig,
     ) -> Arc<dyn Processor + Send + Sync> {
