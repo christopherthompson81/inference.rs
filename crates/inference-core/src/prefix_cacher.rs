@@ -746,7 +746,10 @@ impl PrefixCacheManagerV2 {
             {
                 continue;
             }
-            let match_len = toks.shared_prefix_len(&k.tokens);
+            // The forward needs at least one new token, so an exact repeat recomputes only its last one.
+            let match_len = toks
+                .shared_prefix_len(&k.tokens)
+                .min(toks.0.len().saturating_sub(1));
             if match_len == 0 {
                 continue;
             }
@@ -840,9 +843,6 @@ impl PrefixCacheManagerV2 {
 
         if let Some((match_len, cache_element)) = best_match {
             let new_toks = toks.0[match_len..].to_vec();
-            if new_toks.is_empty() {
-                return Ok(None);
-            }
 
             let mut cache = cache_element.clone();
             let images_to_keep = if let Some(input_hashes) = image_hashes {
@@ -1402,6 +1402,37 @@ mod tests {
         assert_eq!(drops.load(Ordering::Relaxed), 0);
         drop(checkpoint);
         assert_eq!(drops.load(Ordering::Relaxed), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn exact_repeat_recomputes_only_the_last_token() -> candle_core::Result<()> {
+        let mut prefix_cacher = PrefixCacheManagerV2::new(1, false, false);
+        prefix_cacher.caches.insert(
+            vec![1, 2, 3, 4, 5].into(),
+            CacheElement {
+                cache: vec![Some(make_normal_kv_cache(5)?)],
+                recurrent_snapshots: None,
+                audio_hashes: None,
+                image_hashes: None,
+                video_hashes: None,
+            },
+        );
+
+        match prefix_cacher.search_for_matching_cache(
+            &[1, 2, 3, 4, 5],
+            None,
+            &[],
+            None,
+            None,
+            None,
+        )? {
+            Some(MatchingCache::Normal { toks, offset, .. }) => {
+                assert_eq!(offset, 4);
+                assert_eq!(toks, vec![5]);
+            }
+            None => panic!("expected an exact repeat to hit all but its last token"),
+        }
         Ok(())
     }
 
