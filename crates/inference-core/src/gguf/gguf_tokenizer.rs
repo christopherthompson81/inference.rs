@@ -240,7 +240,9 @@ pub(crate) fn convert_gguf_metadata_to_hf_tokenizer(
     }
     let num_special_tokens = special.len();
     if !special.is_empty() {
-        tokenizer.add_special_tokens(&special);
+        tokenizer
+            .add_special_tokens(special)
+            .map_err(anyhow::Error::msg)?;
     }
 
     info!(
@@ -443,7 +445,9 @@ fn unigram_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind)> {
     // Add special tokens (bos, eos, unk):
     for v in [bos, Some(eos), Some(unk)].iter().flatten() {
         let tk = p.tokens[*v as usize].clone();
-        tokenizer.add_special_tokens(&[AddedToken::from(tk.to_string(), true)]);
+        tokenizer
+            .add_special_tokens([AddedToken::from(tk.to_string(), true)])
+            .map_err(anyhow::Error::msg)?;
     }
     Ok((tokenizer, TokenizerKind::Unigram))
 }
@@ -506,7 +510,9 @@ fn bpe_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind)> {
 
     for v in [bos, Some(eos), unk].iter().flatten() {
         let tk = p.tokens[*v as usize].clone();
-        tokenizer.add_special_tokens(&[AddedToken::from(tk.to_string(), true)]);
+        tokenizer
+            .add_special_tokens([AddedToken::from(tk.to_string(), true)])
+            .map_err(anyhow::Error::msg)?;
     }
 
     Ok((tokenizer, TokenizerKind::Bpe))
@@ -614,7 +620,9 @@ fn gemma4_tokenizer(p: &PropsGGUF) -> Result<(Tokenizer, TokenizerKind)> {
 
     for v in [p.bos, Some(p.eos), Some(unk)].iter().flatten() {
         let tk = p.tokens[*v as usize].clone();
-        tokenizer.add_special_tokens(&[AddedToken::from(tk.to_string(), true)]);
+        tokenizer
+            .add_special_tokens([AddedToken::from(tk.to_string(), true)])
+            .map_err(anyhow::Error::msg)?;
     }
 
     Ok((tokenizer, TokenizerKind::Bpe))
@@ -641,7 +649,9 @@ impl TokenizerX {
         }
         if let Some(normalizer) = normalizer {
             let n: NormalizerWrapper = NormalizerWrapper::try_from(normalizer)?;
-            tokenizer.with_normalizer(Some(n));
+            tokenizer
+                .with_normalizer(Some(n))
+                .map_err(anyhow::Error::msg)?;
         }
 
         Ok(tokenizer)
