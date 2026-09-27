@@ -262,6 +262,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "models-qwen")]
     fn external_dflash_records_auto_and_explicit_checkpoint_depth() -> anyhow::Result<()> {
         let dir = external_checkpoint(
             r#"{

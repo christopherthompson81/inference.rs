@@ -33,7 +33,6 @@ pub mod config;
 pub mod text;
 
 pub use config::Config;
-// Re-export the processor from qwen3_vl since the input processing is identical
 
 pub struct Qwen3_5MoeModel {
     text: Qwen3_5MoeTextModel,

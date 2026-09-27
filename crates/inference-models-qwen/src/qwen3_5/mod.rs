@@ -37,7 +37,6 @@ pub mod text;
 
 pub use config::{Config, TextConfig};
 use packed_visual::{PackedVisualEncoder, PackedVisualInput};
-// Re-export the processor from qwen3_vl since the input processing is identical
 
 pub struct Qwen3_5Model {
     pub(super) text: Qwen3_5TextModel,

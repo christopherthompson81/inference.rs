@@ -18,8 +18,8 @@ candle-nn.workspace = true
 inference-flash-attn = { workspace = true, optional = true }
 inference-nn.workspace = true
 inference-paged-attn = { workspace = true, optional = true }
-metrics.workspace = true
 inference-quant.workspace = true
+metrics.workspace = true
 rand.workspace = true
 serde.workspace = true
 serde_json.workspace = true

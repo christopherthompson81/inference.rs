@@ -3874,7 +3874,7 @@ fn repeat_kv(x: &Tensor, groups: usize) -> Result<Tensor> {
 #[cfg(test)]
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 mod tests {
-    #[cfg(feature = "cuda")]
+    #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
     use inference_nn::skip_without_cuda;
     use std::{collections::HashSet, sync::Arc};
 
