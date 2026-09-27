@@ -3,13 +3,17 @@
 use candle_core::Device;
 use futures::StreamExt;
 use inference_core::{
-    AgentPermission, ChatCompletionResponse, CompletionResponse, InferenceRs, ModelSelected,
-    Response, TokenSource,
+    AgentPermission, ChatCompletionResponse, CodeExecutionPermission, CompletionResponse,
+    InferenceRs, ModelSelected, Response, TokenSource,
 };
 use serde::Deserialize;
 
 use crate::{
     agentic::AgenticDefaults,
+    anthropic::{
+        collect_messages, prepare_messages, AnthropicMessageResponse, AnthropicMessagesRequest,
+        AnthropicStream, MessagesFailure,
+    },
     api_error::{ApiError, ApiErrorKind, ModelErrorMessage},
     engine_chat::{collect_chat, ChatEngine, ChatStream, ChatStreamEvent, DispatchError},
     engine_completion::{collect_completion, prepare_completion, CompletionStream},
@@ -278,18 +282,7 @@ impl Engine {
         request: ChatCompletionRequest,
         media: MediaAttachments,
     ) -> Result<crate::engine_chat::PreparedChat, ApiError> {
-        let asks = request
-            .agent_permission
-            .or_else(|| request.code_execution_permission.map(Into::into))
-            .is_some_and(|permission| permission == AgentPermission::Ask);
-        if asks {
-            return Err(ApiError::new(
-                ApiErrorKind::InvalidRequest,
-                ASK_UNAVAILABLE,
-                Some("unsupported_parameter"),
-                Some("agent_permission"),
-            ));
-        }
+        reject_ask(request.agent_permission, request.code_execution_permission)?;
         let state = self.state().clone();
         self.chat
             .prepare(request, OpenAiToolSurface::ChatCompletions, media)
@@ -360,6 +353,59 @@ impl Engine {
         self.completion_stream(parse_json(request)?).await
     }
 
+    /// Runs an Anthropic Messages request to its end.
+    pub async fn anthropic_messages(
+        &self,
+        mut request: AnthropicMessagesRequest,
+    ) -> Result<AnthropicMessageResponse, ApiError> {
+        request.stream = Some(false);
+        reject_ask(request.agent_permission, request.code_execution_permission)?;
+        let state = self.state().clone();
+        let prepared = prepare_messages(&self.chat, request)
+            .await
+            .map_err(|error| dispatch_error(state.clone(), error))?;
+        let (omit_thinking, model_override) =
+            (prepared.omit_thinking, prepared.chat.model_override);
+        let mut rx = prepared.chat.rx;
+        collect_messages(&mut rx, state, model_override.as_deref(), omit_thinking)
+            .await
+            .map_err(|failure| match failure {
+                MessagesFailure::Validation(error) => {
+                    ApiError::from_error(error.as_ref(), ApiErrorKind::InvalidRequest)
+                }
+                MessagesFailure::Internal(error) => {
+                    ApiError::from_error(error.as_ref(), ApiErrorKind::Internal)
+                }
+                MessagesFailure::Model(_) => ApiError::model_error(),
+            })
+    }
+
+    /// Starts a streaming Anthropic Messages request. Dropping the stream abandons the request.
+    pub async fn anthropic_messages_stream(
+        &self,
+        mut request: AnthropicMessagesRequest,
+    ) -> Result<AnthropicStream, ApiError> {
+        request.stream = Some(true);
+        reject_ask(request.agent_permission, request.code_execution_permission)?;
+        let state = self.state().clone();
+        let prepared = prepare_messages(&self.chat, request)
+            .await
+            .map_err(|error| dispatch_error(state.clone(), error))?;
+        Ok(AnthropicStream::new(prepared, state, None))
+    }
+
+    pub async fn anthropic_messages_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let response = self.anthropic_messages(parse_json(request)?).await?;
+        serde_json::to_string(&response).map_err(|_| ApiError::internal())
+    }
+
+    pub async fn anthropic_messages_stream_json(
+        &self,
+        request: &[u8],
+    ) -> Result<AnthropicStream, ApiError> {
+        self.anthropic_messages_stream(parse_json(request)?).await
+    }
+
     /// Embeds every input of an embeddings request.
     pub async fn embeddings(
         &self,
@@ -382,6 +428,25 @@ impl Engine {
         let response = self.embeddings(parse_json(request)?).await?;
         serde_json::to_string(&response).map_err(|_| ApiError::internal())
     }
+}
+
+// A request cannot ask for tool approvals this surface cannot answer.
+fn reject_ask(
+    agent_permission: Option<AgentPermission>,
+    code_execution_permission: Option<CodeExecutionPermission>,
+) -> Result<(), ApiError> {
+    let asks = agent_permission
+        .or_else(|| code_execution_permission.map(Into::into))
+        .is_some_and(|permission| permission == AgentPermission::Ask);
+    if asks {
+        return Err(ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            ASK_UNAVAILABLE,
+            Some("unsupported_parameter"),
+            Some("agent_permission"),
+        ));
+    }
+    Ok(())
 }
 
 fn dispatch_error(state: SharedInferenceRsState, error: DispatchError) -> ApiError {

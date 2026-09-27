@@ -422,3 +422,123 @@ fn completion_and_stream_agree_and_embeddings_need_an_embedding_model() {
 
     unsafe { inference_engine_free(engine) };
 }
+
+fn anthropic_request(stream: bool) -> String {
+    json!({
+        "model": "default",
+        "max_tokens": MAX_TOKENS,
+        "messages": [{"role": "user", "content": PROMPT}],
+        "temperature": 0.0,
+        "top_k": 1,
+        "stream": stream,
+    })
+    .to_string()
+}
+
+#[test]
+fn anthropic_messages_and_stream_agree_and_errors_use_the_anthropic_shape() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let (status, engine) = load(&spec(dir.path()));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+
+    let request = anthropic_request(false);
+    let mut response = null_mut();
+    let status = unsafe {
+        inference_anthropic_messages(
+            engine,
+            request.as_ptr().cast::<c_char>(),
+            request.len(),
+            &mut response,
+        )
+    };
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let response: Value = serde_json::from_str(&take_string(response)).unwrap();
+    assert_eq!(response["type"], "message", "{response}");
+    let text: String = response["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|block| block["type"] == "text")
+        .filter_map(|block| block["text"].as_str())
+        .collect();
+
+    let request = anthropic_request(true);
+    let mut stream = null_mut();
+    let status = unsafe {
+        inference_anthropic_messages_stream_open(
+            engine,
+            request.as_ptr().cast::<c_char>(),
+            request.len(),
+            &mut stream,
+        )
+    };
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let (mut names, mut streamed) = (Vec::new(), String::new());
+    loop {
+        let (mut event, mut done) = (null_mut(), 0);
+        let status =
+            unsafe { inference_stream_next(stream, POLL_TIMEOUT_MS, &mut event, &mut done) };
+        assert_eq!(status, INFERENCE_OK, "{}", last_error());
+        if done == 1 {
+            break;
+        }
+        assert!(!event.is_null(), "a {POLL_TIMEOUT_MS} ms poll timed out");
+        let event: Value = serde_json::from_str(&take_string(event)).unwrap();
+        let name = event["event"].as_str().unwrap().to_string();
+        if name == "content_block_delta" && event["data"]["delta"]["type"] == "text_delta" {
+            streamed.push_str(event["data"]["delta"]["text"].as_str().unwrap());
+        }
+        names.push(name);
+    }
+    unsafe { inference_stream_free(stream) };
+    assert_eq!(
+        names.first().map(String::as_str),
+        Some("message_start"),
+        "{names:?}"
+    );
+    assert_eq!(
+        names.last().map(String::as_str),
+        Some("message_stop"),
+        "{names:?}"
+    );
+    assert_eq!(streamed, text);
+
+    let request =
+        json!({"model": "default", "messages": [{"role": "user", "content": "hi"}]}).to_string();
+    let mut response = null_mut();
+    let status = unsafe {
+        inference_anthropic_messages(
+            engine,
+            request.as_ptr().cast::<c_char>(),
+            request.len(),
+            &mut response,
+        )
+    };
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{}", last_error());
+    let error: Value = serde_json::from_str(&last_error()).unwrap();
+    assert_eq!(error["type"], "error", "{error}");
+    assert_eq!(error["error"]["type"], "invalid_request_error", "{error}");
+
+    // a streamed request cannot ask for tool approvals this surface cannot answer
+    let ask = json!({
+        "model": "default",
+        "max_tokens": MAX_TOKENS,
+        "messages": [{"role": "user", "content": "hi"}],
+        "stream": true,
+        "agent_permission": "ask",
+    })
+    .to_string();
+    let mut stream = null_mut();
+    let status = unsafe {
+        inference_anthropic_messages_stream_open(
+            engine,
+            ask.as_ptr().cast::<c_char>(),
+            ask.len(),
+            &mut stream,
+        )
+    };
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{}", last_error());
+    assert!(stream.is_null());
+
+    unsafe { inference_engine_free(engine) };
+}

@@ -6,6 +6,7 @@ use std::{
 };
 
 use inference_api::{
+    anthropic::anthropic_error_body,
     api_error::{ApiError, ApiErrorKind},
     blocking::{BlockingEngine, BlockingStream, StreamPoll},
     media_source::{MediaAttachment, MediaAttachments},
@@ -57,15 +58,23 @@ const _: () = {
     assert_send::<BlockingStream>();
 };
 
-fn api_failure(error: ApiError) -> Failure {
-    let status = match error.kind {
+fn api_status(error: &ApiError) -> inference_status {
+    match error.kind {
         ApiErrorKind::Internal => INFERENCE_ERR_RUNTIME,
         ApiErrorKind::RateLimited | ApiErrorKind::Unavailable | ApiErrorKind::Overloaded => {
             INFERENCE_ERR_UNAVAILABLE
         }
         _ => INFERENCE_ERR_INVALID_REQUEST,
-    };
-    Failure::new(status, error.to_openai_body().to_string())
+    }
+}
+
+fn api_failure(error: ApiError) -> Failure {
+    Failure::new(api_status(&error), error.to_openai_body().to_string())
+}
+
+// Same statuses as `api_failure`, with the Anthropic error envelope, for calls made in the Anthropic protocol.
+fn anthropic_failure(error: ApiError) -> Failure {
+    Failure::new(api_status(&error), anthropic_error_body(&error).to_string())
 }
 
 fn load_failure(error: EngineLoadError) -> Failure {
@@ -316,6 +325,53 @@ pub unsafe extern "C" fn inference_embeddings(
         out_response,
         |engine, request| engine.embeddings_json(request).map_err(api_failure),
     )
+}
+
+/// Safety: as for `inference_chat`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_anthropic_messages(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| {
+            engine
+                .anthropic_messages_json(request)
+                .map_err(anthropic_failure)
+        },
+    )
+}
+
+/// Safety: as for `inference_chat_stream_open`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_anthropic_messages_stream_open(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_stream: *mut *mut inference_stream,
+) -> inference_status {
+    guard(|| {
+        out_arg(out_stream, "out_stream")?;
+        let engine = engine
+            .as_ref()
+            .ok_or_else(|| Failure::invalid("engine is NULL"))?;
+        let request = arg_bytes(request, request_len, "request")?;
+        let stream = engine
+            .engine
+            .anthropic_messages_stream_json(request)
+            .map_err(anthropic_failure)?;
+        out_stream.write(Box::into_raw(Box::new(inference_stream {
+            stream,
+            done: false,
+        })));
+        Ok(())
+    })
 }
 
 /// Safety: `stream` is a live handle not used concurrently; `out_event` and `out_done` are valid for writes.
