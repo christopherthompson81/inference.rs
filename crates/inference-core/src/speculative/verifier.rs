@@ -803,8 +803,8 @@ pub(crate) struct VerificationInput {
     pub(crate) device_verification: Option<DeviceVerification>,
 }
 
-pub(crate) async fn finish_verified_step<P: Pipeline>(
-    pipeline: &P,
+pub(crate) async fn finish_verified_step(
+    pipeline: &dyn Pipeline,
     seq: &mut Sequence,
     input: VerificationInput,
     prefix_cacher: &mut PrefixCacheManagerV2,
@@ -1257,8 +1257,8 @@ fn normalize_sparse_row(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn finish_verified_step_stochastic<P: Pipeline>(
-    pipeline: &P,
+async fn finish_verified_step_stochastic(
+    pipeline: &dyn Pipeline,
     seq: &mut Sequence,
     verify_logits: Tensor,
     proposal: Vec<u32>,

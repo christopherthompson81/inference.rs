@@ -88,7 +88,7 @@ fn complete_after_preparation<T, U>(
     }
 }
 
-fn commit_then_publish_verified_batch<T>(
+fn commit_then_publish_verified_batch<T: ?Sized>(
     target: &mut T,
     commit: impl FnOnce(&mut T) -> Result<()>,
     publish: impl FnOnce(&mut T) -> Result<()>,
@@ -145,8 +145,8 @@ pub(crate) fn clear_staged_speculative_tokens(seqs: &mut [&mut Sequence]) {
 
 // Boxed so the pipeline wrappers that await it stay small; see `sample_and_add_toks`.
 #[allow(clippy::too_many_arguments)]
-pub fn try_sample_speculative_causal_gen<'a, 'b: 'a, P, C>(
-    target: &'a mut P,
+pub fn try_sample_speculative_causal_gen<'a, 'b: 'a, C>(
+    target: &'a mut dyn SpeculativePipelineExt,
     seqs: &'a mut [&'b mut Sequence],
     logits: &'a [Tensor],
     batched_logits: Option<&'a Tensor>,
@@ -157,7 +157,6 @@ pub fn try_sample_speculative_causal_gen<'a, 'b: 'a, P, C>(
     logger: &'a IntervalLogger,
 ) -> BoxFuture<'a, Result<bool>>
 where
-    P: SpeculativePipelineExt + Send,
     C: SpeculativeCacheAccess + Sync,
     C::Guard: Send,
 {
@@ -175,8 +174,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn try_sample_speculative_causal_gen_impl<P, C>(
-    target: &mut P,
+async fn try_sample_speculative_causal_gen_impl<C>(
+    target: &mut dyn SpeculativePipelineExt,
     seqs: &mut [&mut Sequence],
     logits: &[Tensor],
     batched_logits: Option<&Tensor>,
@@ -187,7 +186,6 @@ async fn try_sample_speculative_causal_gen_impl<P, C>(
     logger: &IntervalLogger,
 ) -> Result<bool>
 where
-    P: SpeculativePipelineExt + Send,
     C: SpeculativeCacheAccess + Sync,
     C::Guard: Send,
 {
@@ -283,8 +281,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn bootstrap_staged_batch<P, C>(
-    target: &mut P,
+async fn bootstrap_staged_batch<C>(
+    target: &mut dyn SpeculativePipelineExt,
     seqs: &mut [&mut Sequence],
     logits: &[Tensor],
     prefix_cacher: &mut PrefixCacheManagerV2,
@@ -294,7 +292,6 @@ async fn bootstrap_staged_batch<P, C>(
     plan: SpeculativeBatchPlan,
 ) -> Result<()>
 where
-    P: SpeculativePipelineExt,
     C: SpeculativeCacheAccess,
 {
     let general_metadata = target.get_metadata();
@@ -347,8 +344,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn verify_staged_batch<P, C>(
-    target: &mut P,
+async fn verify_staged_batch<C>(
+    target: &mut dyn SpeculativePipelineExt,
     seqs: &mut [&mut Sequence],
     logits: &[Tensor],
     batched_logits: Option<&Tensor>,
@@ -360,7 +357,6 @@ async fn verify_staged_batch<P, C>(
     logger: &IntervalLogger,
 ) -> Result<()>
 where
-    P: SpeculativePipelineExt,
     C: SpeculativeCacheAccess,
 {
     #[cfg(not(feature = "cuda"))]
@@ -656,8 +652,8 @@ where
 }
 
 #[allow(clippy::too_many_arguments)]
-fn propose_and_stage_batch<P, C>(
-    target: &mut P,
+fn propose_and_stage_batch<C>(
+    target: &mut dyn SpeculativePipelineExt,
     seqs: &mut [&mut Sequence],
     active_indices: &[usize],
     sampled_tokens: &[u32],
@@ -669,7 +665,6 @@ fn propose_and_stage_batch<P, C>(
     plan: Option<SpeculativeBatchPlan>,
 ) -> Result<()>
 where
-    P: SpeculativePipelineExt,
     C: SpeculativeCacheAccess,
 {
     // Staging in one concrete sequence:
@@ -788,10 +783,10 @@ where
     Ok(())
 }
 
-fn mark_batch_bypassed<P>(target: &mut P, seqs: &[&mut Sequence]) -> Result<()>
-where
-    P: SpeculativePipelineExt,
-{
+fn mark_batch_bypassed(
+    target: &mut dyn SpeculativePipelineExt,
+    seqs: &[&mut Sequence],
+) -> Result<()> {
     let seq_ids = seqs.iter().map(|seq| *seq.id()).collect::<Vec<_>>();
     target.speculative_bypass(&seq_ids)
 }

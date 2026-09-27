@@ -814,7 +814,8 @@ impl Loader for MultimodalLoader {
                     from_uqff: self.config.from_uqff.is_some(),
                     write_uqff: self.config.write_uqff.is_some(),
                     organization: self.config.organization,
-                    model: &*self.inner,
+                    isq_loader: &*self.inner,
+                    mapped_loader: &*self.inner,
                     weights: distributed_weights,
                 })?;
             let sharded_vb = if let Some(reader) = uqff_reader.clone() {

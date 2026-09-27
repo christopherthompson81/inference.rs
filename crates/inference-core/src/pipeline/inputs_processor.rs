@@ -174,6 +174,63 @@ pub mod text_models_inputs_processor {
         pub seq_indices: Vec<usize>,
     }
 
+    /// Prompt token slices of either id type; Phi-3V uses negative placeholder ids, so it needs i64.
+    pub enum PromptTokens<'a> {
+        U32(Vec<&'a [u32]>),
+        I64(Vec<&'a [i64]>),
+    }
+
+    impl PromptTokens<'_> {
+        fn len(&self) -> usize {
+            match self {
+                Self::U32(toks) => toks.len(),
+                Self::I64(toks) => toks.len(),
+            }
+        }
+
+        fn seq_len(&self, i: usize) -> usize {
+            match self {
+                Self::U32(toks) => toks[i].len(),
+                Self::I64(toks) => toks[i].len(),
+            }
+        }
+
+        /// Sequence `i` from `start`, zero-padded to `len` tokens, as a 1-D tensor.
+        fn padded_tensor(
+            &self,
+            i: usize,
+            start: usize,
+            len: usize,
+            device: &Device,
+        ) -> Result<Tensor> {
+            fn pad<T: WithDType>(toks: &[T], len: usize, device: &Device) -> Result<Tensor> {
+                let mut ids = toks.to_vec();
+                ids.resize(len, T::zero());
+                Ok(Tensor::new(ids, device)?)
+            }
+            match self {
+                Self::U32(toks) => pad(&toks[i][start..], len, device),
+                Self::I64(toks) => pad(&toks[i][start..], len, device),
+            }
+        }
+    }
+
+    pub trait PromptToken: WithDType + Debug {
+        fn prompt_tokens(toks: Vec<&[Self]>) -> PromptTokens<'_>;
+    }
+
+    impl PromptToken for u32 {
+        fn prompt_tokens(toks: Vec<&[u32]>) -> PromptTokens<'_> {
+            PromptTokens::U32(toks)
+        }
+    }
+
+    impl PromptToken for i64 {
+        fn prompt_tokens(toks: Vec<&[i64]>) -> PromptTokens<'_> {
+            PromptTokens::I64(toks)
+        }
+    }
+
     // chunk_offset_toks is the number of tokens by which the tokens are offset,
     // chunk_offset_toks / prompt_chunksize = number of batches
     //
@@ -182,9 +239,39 @@ pub mod text_models_inputs_processor {
     // input tensor, and slot_mappings will only cover new token slots. Block tables still
     // cover the entire context so that context_attention_fwd can read cached blocks.
     #[allow(clippy::too_many_arguments)]
-    pub fn make_prompt_chunk<T: WithDType + Debug>(
+    pub fn make_prompt_chunk<T: PromptToken>(
         chunk_offset_toks: usize,
         toks: Vec<&[T]>,
+        seq_ids: &[usize],
+        device: &Device,
+        last_n_context_len: Option<(usize, usize)>,
+        return_raw_logits: bool,
+        paged_attn_metadata: Option<&mut PagedAttentionMeta>,
+        mapper: Option<&dyn DeviceMapper>,
+        prefix_cache_lens: Option<&[usize]>,
+        sliding_window: Option<usize>,
+        allow_packed_prefill: bool,
+    ) -> Result<InputMetadata> {
+        prompt_chunk_inputs(
+            chunk_offset_toks,
+            T::prompt_tokens(toks),
+            seq_ids,
+            device,
+            last_n_context_len,
+            return_raw_logits,
+            paged_attn_metadata,
+            mapper,
+            prefix_cache_lens,
+            sliding_window,
+            allow_packed_prefill,
+        )
+    }
+
+    // Not generic over the id type, so this one body is compiled once.
+    #[allow(clippy::too_many_arguments)]
+    fn prompt_chunk_inputs(
+        chunk_offset_toks: usize,
+        toks: PromptTokens<'_>,
         seq_ids: &[usize],
         device: &Device,
         last_n_context_len: Option<(usize, usize)>,
@@ -196,16 +283,13 @@ pub mod text_models_inputs_processor {
         allow_packed_prefill: bool,
     ) -> Result<InputMetadata> {
         // Determine effective tokens per sequence after prefix cache trimming
-        let effective_lens: Vec<usize> = toks
-            .iter()
-            .enumerate()
-            .map(|(i, seq)| {
+        let effective_lens: Vec<usize> = (0..toks.len())
+            .map(|i| {
                 let cached = prefix_cache_lens.map_or(0, |lens| lens[i]);
-                seq.len().saturating_sub(cached)
+                toks.seq_len(i).saturating_sub(cached)
             })
             .collect();
         let max_len = *effective_lens.iter().max().expect("No sequences");
-        let padding_tok = T::zero();
         let has_any_cache_hit = prefix_cache_lens.is_some_and(|lens| lens.iter().any(|&l| l > 0));
         let prompt_chunk_causal = paged_attn_metadata.as_ref().is_none_or(|metadata| {
             metadata.prompt_chunk_attention_policy == MultimodalAttentionPolicy::Causal
@@ -253,32 +337,29 @@ pub mod text_models_inputs_processor {
         let mut seqlens_k = if flash_attn { vec![0] } else { Vec::new() };
         let mut num_cached_tokens_vec: Vec<usize> = Vec::new();
         let mut query_lens_vec: Vec<usize> = Vec::new();
-        for (seq_idx, (seq_id, ctxt)) in seq_ids.iter().zip(&toks).enumerate() {
+        for (seq_idx, seq_id) in seq_ids.iter().enumerate().take(toks.len()) {
             let cached = prefix_cache_lens.map_or(0, |lens| lens[seq_idx]);
-            let full_prompt_len = ctxt.len();
+            let full_prompt_len = toks.seq_len(seq_idx);
             // The new (non-cached) tokens to process
-            let new_toks = &ctxt[cached..];
-            let new_len = new_toks.len();
+            let new_len = full_prompt_len - cached;
 
             let offset = last_n_context_len.unwrap_or_default();
             // seqlen_offset includes cached prefix so position IDs are correct
             seqlen_offsets.push(offset.1 + chunk_offset_toks + cached);
 
             position_ids.push(new_len + chunk_offset_toks + cached);
-            let mut input_toks = new_toks.to_vec();
-            if !packed_prefill {
-                input_toks.extend(std::iter::repeat_n(
-                    padding_tok,
-                    max_len.saturating_sub(input_toks.len()),
-                ));
-            }
+            let input_len = if packed_prefill {
+                new_len
+            } else {
+                new_len.max(max_len)
+            };
             // If we are returning raw logits, we want to not trim the logits at all.
             if return_raw_logits {
                 if last_n_context_len.is_some() {
                     anyhow::bail!("`return_raw_logits` is incompatible with `last_n_context_len`");
                 }
 
-                context_lens.push((0, input_toks.len()));
+                context_lens.push((0, input_len));
             } else {
                 context_lens.push((
                     new_len.saturating_sub(last_n_context_len.map(|(a, _)| a).unwrap_or(1)),
@@ -287,11 +368,14 @@ pub mod text_models_inputs_processor {
             }
 
             if flash_attn {
-                seqlens_q.push(input_toks.len() as u32);
-                seqlens_k.push((input_toks.len() + chunk_offset_toks + cached) as u32);
+                seqlens_q.push(input_len as u32);
+                seqlens_k.push((input_len + chunk_offset_toks + cached) as u32);
             }
 
-            seqs_tensors.push(Tensor::new(input_toks, device)?.unsqueeze(0)?);
+            seqs_tensors.push(
+                toks.padded_tensor(seq_idx, cached, input_len, device)?
+                    .unsqueeze(0)?,
+            );
 
             if has_any_cache_hit {
                 num_cached_tokens_vec.push(cached);
@@ -1098,7 +1182,7 @@ pub mod text_models_inputs_processor {
 
     #[cfg(feature = "models-gemma")]
     #[allow(clippy::too_many_arguments)]
-    fn make_completion_prefill_chunk<T: WithDType + std::fmt::Debug>(
+    fn make_completion_prefill_chunk<T: PromptToken>(
         toks: Vec<&[T]>,
         input_seqs: &[&mut Sequence],
         device: &Device,
@@ -1129,7 +1213,7 @@ pub mod text_models_inputs_processor {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn get_prompt_input<T: WithDType + std::fmt::Debug>(
+    pub(crate) fn get_prompt_input<T: PromptToken>(
         toks: Vec<&[T]>,
         input_seqs: &[&mut Sequence],
         device: &Device,
@@ -1168,7 +1252,7 @@ pub mod text_models_inputs_processor {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn get_completion_input<T: WithDType + std::fmt::Debug + From<u32> + Clone>(
+    pub(crate) fn get_completion_input<T: PromptToken + From<u32> + Clone>(
         toks: Vec<&[T]>,
         input_seqs: &[&mut Sequence],
         device: &Device,
@@ -1211,9 +1295,7 @@ pub mod text_models_inputs_processor {
     /// (e.g. block diffusion, where each step feeds the last committed canvas to the encoder).
     #[cfg(feature = "models-gemma")]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn get_completion_input_windowed<
-        T: WithDType + std::fmt::Debug + From<u32> + Clone,
-    >(
+    pub(crate) fn get_completion_input_windowed<T: PromptToken + From<u32> + Clone>(
         toks: Vec<&[T]>,
         input_seqs: &[&mut Sequence],
         device: &Device,
