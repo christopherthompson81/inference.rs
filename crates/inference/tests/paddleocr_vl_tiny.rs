@@ -26,6 +26,9 @@ const TINY: &str = concat!(
 );
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/paddleocr_vl");
 const OCR_PROMPT: &str = "OCR:";
+// Long enough that a shared prefix runs past the image into whole paged blocks; paged hits never end inside an image.
+const LONG_PROMPT: &str =
+    "OCR: transcribe every line of this page exactly, keeping the original line breaks and punctuation in place.";
 const TEXT_PROMPT: &str = "Reply with the single word: ok";
 const MAX_LEN: usize = 8;
 // Large enough that the image moves the logits, small enough to stay finite through two layers.
@@ -34,6 +37,8 @@ const WEIGHT_STD: f32 = 0.5;
 const WEIGHT_SEED: u64 = 0x0CE1_2024;
 // A scheduler spin never completes either request, so the mixed-batch test fails on this instead of hanging.
 const MIXED_BATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+// Cached KV comes from a different prefill than a full recompute, so logprobs match only to rounding.
+const LOGPROB_TOLERANCE: f32 = 1e-3;
 const ON_GPU: bool = cfg!(any(feature = "cuda", feature = "metal"));
 
 /// Hands out random tensors for whatever the model constructor asks for, and keeps them to write a checkpoint.
@@ -136,12 +141,20 @@ fn fixture(name: &str) -> anyhow::Result<image::DynamicImage> {
     Ok(image::open(PathBuf::from(FIXTURES).join(name))?)
 }
 
-fn image_request(name: &str) -> anyhow::Result<RequestBuilder> {
+fn image_request(names: &[&str]) -> anyhow::Result<RequestBuilder> {
+    prompted_image_request(names, OCR_PROMPT)
+}
+
+fn prompted_image_request(names: &[&str], prompt: &str) -> anyhow::Result<RequestBuilder> {
+    let images = names
+        .iter()
+        .map(|name| fixture(name))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(
         RequestBuilder::from(MultimodalMessages::new().add_image_message(
             TextMessageRole::User,
-            OCR_PROMPT,
-            vec![fixture(name)?],
+            prompt,
+            images,
         ))
         .set_sampler_max_len(MAX_LEN)
         .set_sampler_topk(1)
@@ -165,10 +178,10 @@ async fn mixed_text_and_image_batch_makes_progress() -> anyhow::Result<()> {
     let model = build(dir.path()).await?;
     let alone = greedy_ids(
         &model
-            .send_chat_request(image_request("page_00.png")?)
+            .send_chat_request(image_request(&["page_00.png"])?)
             .await?,
     );
-    let image = image_request("page_00.png")?;
+    let image = image_request(&["page_00.png"])?;
     let (batched, text_only) = tokio::time::timeout(MIXED_BATCH_TIMEOUT, async {
         tokio::join!(
             model.send_chat_request(image),
@@ -190,5 +203,108 @@ async fn mixed_text_and_image_batch_makes_progress() -> anyhow::Result<()> {
         greedy_ids(&batched?),
         "image output changed when a text-only request shared the batch"
     );
+    Ok(())
+}
+
+fn trace(resp: &inference::ChatCompletionResponse) -> Vec<(u32, f32)> {
+    resp.choices[0]
+        .logprobs
+        .as_ref()
+        .and_then(|lp| lp.content.as_ref())
+        .map(|toks| {
+            toks.iter()
+                .map(|t| (t.top_logprobs[0].token, t.top_logprobs[0].logprob))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn cached_tokens(resp: &inference::ChatCompletionResponse) -> usize {
+    resp.usage
+        .prompt_tokens_details
+        .as_ref()
+        .map_or(0, |details| details.cached_tokens)
+}
+
+fn same_decode(a: &[(u32, f32)], b: &[(u32, f32)]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| x.0 == y.0 && (x.1 - y.1).abs() < LOGPROB_TOLERANCE)
+}
+
+// Same-size pages give byte-identical prompts, so only the registered image span keeps their KV blocks apart.
+#[tokio::test]
+async fn prefix_cache_does_not_serve_one_image_for_another() -> anyhow::Result<()> {
+    let dir = tiny_checkpoint()?;
+    let repeat = format!("{LONG_PROMPT} Once more.");
+    let fresh = build(dir.path()).await?;
+    let fresh_page_01 = trace(
+        &fresh
+            .send_chat_request(prompted_image_request(&["page_01.png"], LONG_PROMPT)?)
+            .await?,
+    );
+    let fresh_repeat = trace(
+        &fresh
+            .send_chat_request(prompted_image_request(&["page_00.png"], &repeat)?)
+            .await?,
+    );
+
+    let model = build(dir.path()).await?;
+    model
+        .send_chat_request(prompted_image_request(&["page_00.png"], LONG_PROMPT)?)
+        .await?;
+    let page_01 = trace(
+        &model
+            .send_chat_request(prompted_image_request(&["page_01.png"], LONG_PROMPT)?)
+            .await?,
+    );
+    assert!(!page_01.is_empty());
+    assert!(
+        same_decode(&page_01, &fresh_page_01),
+        "page_01 was served page_00's cached blocks: {page_01:?}"
+    );
+    // Non-paged hits need a new token past the cached prompt, so the repeat extends the text.
+    let resp = model
+        .send_chat_request(prompted_image_request(&["page_00.png"], &repeat)?)
+        .await?;
+    assert!(
+        cached_tokens(&resp) > 0,
+        "page_00 was not served from the prefix cache"
+    );
+    let cached = trace(&resp);
+    assert!(
+        same_decode(&cached, &fresh_repeat),
+        "prefix cache reuse changed page_00: {fresh_repeat:?} vs {cached:?}"
+    );
+    Ok(())
+}
+
+// The second request reuses the shared first image's blocks and must still decode exactly as a fresh request.
+#[tokio::test]
+async fn partial_prefix_hit_matches_a_fresh_two_image_decode() -> anyhow::Result<()> {
+    let dir = tiny_checkpoint()?;
+    let both = ["page_00.png", "page_01.png"];
+    let fresh = trace(
+        &build(dir.path())
+            .await?
+            .send_chat_request(image_request(&both)?)
+            .await?,
+    );
+    assert!(!fresh.is_empty());
+    let warm = build(dir.path()).await?;
+    warm.send_chat_request(image_request(&["page_00.png"])?)
+        .await?;
+    let resp = warm.send_chat_request(image_request(&both)?).await?;
+    // Paged hits are whole blocks and the shared prefix ends at the first image's end token, so only the
+    // token-granular non-paged cacher can serve half of this prompt.
+    if !ON_GPU {
+        assert!(
+            cached_tokens(&resp) > 0,
+            "the shared first image was not served from the prefix cache"
+        );
+    }
+    let cached = trace(&resp);
+    assert!(same_decode(&cached, &fresh), "{fresh:?} vs {cached:?}");
     Ok(())
 }

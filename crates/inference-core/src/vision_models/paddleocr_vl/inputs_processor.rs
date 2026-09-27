@@ -32,6 +32,9 @@ use crate::{
 use super::preprocess::{preprocess_decoded, MERGE};
 use super::PaddleOcrVlVisionSpecificArgs;
 
+// One image grid row as (t, h, w) in patches.
+type ImageGrid = (usize, usize, usize);
+
 pub struct PaddleOcrVlProcessor;
 
 impl PaddleOcrVlProcessor {
@@ -83,6 +86,11 @@ impl Processor for PaddleOcrVlProcessor {
             tools,
         )
     }
+    // The model takes every image's patches and skips the cached ones itself, so a prefix hit must not drop them.
+    fn retain_prefix_cached_images(&self) -> bool {
+        true
+    }
+
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
         Arc::new(PaddleOcrVlImageProcessor)
     }
@@ -107,11 +115,7 @@ fn replace_first_occurrence(text: &str, to_replace: &str, replacement: &str) -> 
 }
 
 // The i-th placeholder takes the i-th grid; a prompt can carry a literal placeholder, so counts must match.
-fn expand_placeholders(
-    text: &str,
-    grids: &[(usize, usize, usize)],
-    merge: usize,
-) -> anyhow::Result<String> {
+fn expand_placeholders(text: &str, grids: &[ImageGrid], merge: usize) -> anyhow::Result<String> {
     let placeholders = text
         .matches(PaddleOcrVlProcessor::IMAGE_PLACEHOLDER)
         .count();
@@ -160,7 +164,14 @@ fn register_image_span(seq: &mut Sequence, ids: &[u32], tokenizer: &Tokenizer) {
     }
 }
 
-fn grid_rows(grid: &Tensor) -> Vec<(usize, usize, usize)> {
+fn placeholder_runs(ids: &[u32], placeholder: u32) -> usize {
+    ids.iter()
+        .zip(std::iter::once(&u32::MAX).chain(ids))
+        .filter(|&(&id, &prev)| id == placeholder && prev != placeholder)
+        .count()
+}
+
+fn grid_rows(grid: &Tensor) -> Vec<ImageGrid> {
     grid.to_vec2::<u32>()
         .unwrap()
         .into_iter()
@@ -168,9 +179,91 @@ fn grid_rows(grid: &Tensor) -> Vec<(usize, usize, usize)> {
         .collect()
 }
 
+impl PaddleOcrVlImageProcessor {
+    /// Preprocesses the sequence's images once and expands its placeholders to the grid, registering the image span.
+    fn expand_image_prompt(
+        &self,
+        seq: &mut Sequence,
+        tokenizer: &Tokenizer,
+        config: &PreProcessorConfig,
+        device: &Device,
+        paged_attn_metadata: Option<&mut PagedAttentionMeta>,
+    ) -> Result<(Tensor, Vec<ImageGrid>)> {
+        let (pixel_values, row_grids) = match &seq.multimodal.cached_pixel_values {
+            Some(cached) => (
+                cached.clone(),
+                grid_rows(seq.multimodal.cached_img_thw.as_ref().unwrap()),
+            ),
+            None => {
+                let PreprocessedImages {
+                    pixel_values,
+                    image_grid_thw,
+                    ..
+                } = self.preprocess(
+                    seq.clone_images().expect("Need images by this point."),
+                    vec![],
+                    config,
+                    device,
+                    (usize::MAX, usize::MAX),
+                )?;
+                seq.multimodal.cached_pixel_values = Some(pixel_values.clone());
+                seq.multimodal.cached_img_thw = image_grid_thw.clone();
+                (pixel_values, grid_rows(image_grid_thw.as_ref().unwrap()))
+            }
+        };
+
+        if !seq.multimodal.has_changed_prompt {
+            let detok = tokenizer
+                .decode(seq.get_toks(), false)
+                .expect("Detokenization failed!");
+            let detok = expand_placeholders(&detok, &row_grids, MERGE)?;
+            let ids = tokenizer
+                .encode_fast(detok.clone(), false)
+                .expect("Tokenization failed!")
+                .get_ids()
+                .to_vec();
+            seq.set_initial_prompt(detok);
+            // Before set_toks_and_reallocate: the block hashes it triggers must see the span.
+            register_image_span(seq, &ids, tokenizer);
+            seq.set_toks_and_reallocate(ids, paged_attn_metadata);
+            seq.multimodal.has_changed_prompt = true;
+        }
+        Ok((pixel_values, row_grids))
+    }
+}
+
 impl InputsProcessor for PaddleOcrVlImageProcessor {
     fn get_type(&self) -> InputsProcessorType {
         InputsProcessorType::Vision
+    }
+
+    // The scheduler looks up prefix-cache blocks before process_inputs runs, so it must see the expanded prompt.
+    fn prepare_for_paged_prompt_planning(
+        &self,
+        tokenizer: Option<Arc<Tokenizer>>,
+        input_seqs: &mut [&mut Sequence],
+        device: &Device,
+        other_config: Option<Arc<dyn Any>>,
+        mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
+    ) -> Result<()> {
+        if !input_seqs.iter().any(|seq| seq.has_images()) {
+            return Ok(());
+        }
+        let Some(tokenizer) = tokenizer else {
+            anyhow::bail!("PaddleOcrVlImageProcessor requires a specified tokenizer.");
+        };
+        let config = other_config.expect("Need a PreProcessorConfig config.");
+        let config: &PreProcessorConfig = config.downcast_ref().expect("Downcast failed.");
+        for seq in input_seqs.iter_mut().filter(|seq| seq.has_images()) {
+            self.expand_image_prompt(
+                seq,
+                &tokenizer,
+                config,
+                device,
+                paged_attn_metadata.as_deref_mut(),
+            )?;
+        }
+        Ok(())
     }
 
     fn process_inputs(
@@ -200,77 +293,55 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
         let config = other_config.expect("Need a PreProcessorConfig config.");
         let config: &PreProcessorConfig = config.downcast_ref().expect("Downcast failed.");
 
-        // Per row, as rows sit at different chunks; a grid attaches once the window has its tokens, else phantom rope.
+        // Per row, as rows sit at different chunks; a grid attaches once its image tokens are in, else phantom rope.
         let image_pad_id = tokenizer.token_to_id(PaddleOcrVlProcessor::IMAGE_PLACEHOLDER);
-        let mut grids: Vec<Vec<(usize, usize, usize)>> = Vec::with_capacity(input_seqs.len());
+        let mut grids: Vec<Vec<ImageGrid>> = Vec::with_capacity(input_seqs.len());
         let mut hashes: Vec<Vec<u64>> = Vec::with_capacity(input_seqs.len());
         let mut pixel_values_accum = Vec::new();
         let mut vision_rows: Vec<usize> = Vec::new();
 
         for (row, seq) in input_seqs.iter_mut().enumerate() {
-            let window_has_image_toks = image_pad_id.is_some_and(|id| seq.get_toks().contains(&id));
-            if !seq.has_images() {
-                grids.push(
-                    seq.multimodal
-                        .cached_img_thw
-                        .as_ref()
-                        .filter(|_| window_has_image_toks)
-                        .map(grid_rows)
-                        .unwrap_or_default(),
-                );
-                hashes.push(Vec::new());
-                continue;
-            }
-            let (pixel_values, row_grids) = match &seq.multimodal.cached_pixel_values {
-                Some(cached) => (
-                    cached.clone(),
-                    grid_rows(seq.multimodal.cached_img_thw.as_ref().unwrap()),
-                ),
-                None => {
-                    let PreprocessedImages {
-                        pixel_values,
-                        image_grid_thw,
-                        ..
-                    } = self.preprocess(
-                        seq.clone_images().expect("Need images by this point."),
-                        vec![],
-                        config,
-                        device,
-                        (usize::MAX, usize::MAX),
-                    )?;
-                    seq.multimodal.cached_pixel_values = Some(pixel_values.clone());
-                    seq.multimodal.cached_img_thw = image_grid_thw.clone();
-                    (pixel_values, grid_rows(image_grid_thw.as_ref().unwrap()))
-                }
+            let pixel_values = if seq.has_images() {
+                let (pixel_values, _) = self.expand_image_prompt(
+                    seq,
+                    &tokenizer,
+                    config,
+                    device,
+                    paged_attn_metadata.as_mut(),
+                )?;
+                Some(pixel_values)
+            } else {
+                None
             };
-
-            if !seq.multimodal.has_changed_prompt {
-                let detok = tokenizer
-                    .decode(seq.get_toks(), false)
-                    .expect("Detokenization failed!");
-                let detok = expand_placeholders(&detok, &row_grids, MERGE)?;
-                let ids = tokenizer
-                    .encode_fast(detok.clone(), false)
-                    .expect("Tokenization failed!")
-                    .get_ids()
-                    .to_vec();
-                seq.set_initial_prompt(detok);
-                // Before set_toks_and_reallocate: the block hashes it triggers must see the span.
-                register_image_span(seq, &ids, &tokenizer);
-                seq.set_toks_and_reallocate(ids, paged_attn_metadata.as_mut());
-                seq.multimodal.has_changed_prompt = true;
-            }
-
-            grids.push(row_grids);
+            // One grid per image whose placeholders the prompt so far holds: a prefill chunk can stop between images.
+            // After a prefix hit get_toks is only the suffix, so count over the whole prompt.
+            let images_seen = image_pad_id.map_or(0, |id| {
+                placeholder_runs(seq.prompt_position_source_toks(), id)
+            });
+            let mut row_grids = seq
+                .multimodal
+                .cached_img_thw
+                .as_ref()
+                .map(grid_rows)
+                .unwrap_or_default();
+            row_grids.truncate(images_seen);
             // Full list, not the window-scoped one: the model pairs hash i with grid i.
-            hashes.push(
+            hashes.push(if row_grids.is_empty() {
+                Vec::new()
+            } else {
                 seq.multimodal
                     .image_hashes()
                     .map(<[u64]>::to_vec)
-                    .unwrap_or_default(),
-            );
-            if is_prompt {
-                pixel_values_accum.push(pixel_values);
+                    .unwrap_or_default()
+            });
+            // The model walks rows by their grids, so a row contributes only the seen images' patches.
+            let seen_patches = row_grids.iter().map(|&(t, h, w)| t * h * w).sum::<usize>();
+            grids.push(row_grids);
+            let Some(pixel_values) = pixel_values else {
+                continue;
+            };
+            if is_prompt && seen_patches > 0 {
+                pixel_values_accum.push(pixel_values.narrow(0, 0, seen_patches)?);
                 vision_rows.push(row);
             }
         }
@@ -327,15 +398,15 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
             .unwrap()
         };
 
-        // mrope positions are recomputed from the full history, not just this pass's window.
+        // mrope positions are recomputed from the full history; after a prefix hit get_toks is only the suffix.
         let max_len = input_seqs
             .iter()
-            .map(|seq| seq.get_toks().len())
+            .map(|seq| seq.prompt_position_source_toks().len())
             .max()
             .unwrap_or(0);
         let mut rows = Vec::with_capacity(input_seqs.len());
         for seq in input_seqs.iter() {
-            let mut ids = seq.get_toks().to_vec();
+            let mut ids = seq.prompt_position_source_toks().to_vec();
             ids.resize(max_len, 0);
             rows.push(Tensor::new(ids, device).unwrap());
         }
