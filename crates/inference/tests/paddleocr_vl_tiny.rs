@@ -138,12 +138,16 @@ fn fixture(name: &str) -> anyhow::Result<image::DynamicImage> {
     Ok(image::open(PathBuf::from(FIXTURES).join(name))?)
 }
 
-fn image_request(name: &str) -> anyhow::Result<RequestBuilder> {
+fn image_request(names: &[&str]) -> anyhow::Result<RequestBuilder> {
+    let images = names
+        .iter()
+        .map(|name| fixture(name))
+        .collect::<anyhow::Result<Vec<_>>>()?;
     Ok(
         RequestBuilder::from(MultimodalMessages::new().add_image_message(
             TextMessageRole::User,
             OCR_PROMPT,
-            vec![fixture(name)?],
+            images,
         ))
         .set_sampler_max_len(MAX_LEN)
         .set_sampler_topk(1)
@@ -167,10 +171,10 @@ async fn mixed_text_and_image_batch_makes_progress() -> anyhow::Result<()> {
     let model = build(dir.path()).await?;
     let alone = greedy_ids(
         &model
-            .send_chat_request(image_request("page_00.png")?)
+            .send_chat_request(image_request(&["page_00.png"])?)
             .await?,
     );
-    let image = image_request("page_00.png")?;
+    let image = image_request(&["page_00.png"])?;
     let (batched, text_only) = tokio::time::timeout(MIXED_BATCH_TIMEOUT, async {
         tokio::join!(
             model.send_chat_request(image),
@@ -221,7 +225,9 @@ async fn prefix_cache_does_not_serve_one_image_for_another() -> anyhow::Result<(
     let dir = tiny_checkpoint()?;
     let model = build(dir.path()).await?;
     let run = async |name: &str| -> anyhow::Result<Vec<(u32, f32)>> {
-        Ok(trace(&model.send_chat_request(image_request(name)?).await?))
+        Ok(trace(
+            &model.send_chat_request(image_request(&[name])?).await?,
+        ))
     };
     let first = run("page_00.png").await?;
     assert!(!first.is_empty());
@@ -236,5 +242,25 @@ async fn prefix_cache_does_not_serve_one_image_for_another() -> anyhow::Result<(
         same_decode(&again, &first),
         "prefix cache reuse changed page_00: {first:?} vs {again:?}"
     );
+    Ok(())
+}
+
+// A hit on the shared first image drops it from the request, but its grid still places the second image's positions.
+#[tokio::test]
+async fn partial_prefix_hit_matches_a_fresh_two_image_decode() -> anyhow::Result<()> {
+    let dir = tiny_checkpoint()?;
+    let both = ["page_00.png", "page_01.png"];
+    let fresh = trace(
+        &build(dir.path())
+            .await?
+            .send_chat_request(image_request(&both)?)
+            .await?,
+    );
+    assert!(!fresh.is_empty());
+    let warm = build(dir.path()).await?;
+    warm.send_chat_request(image_request(&["page_00.png"])?)
+        .await?;
+    let cached = trace(&warm.send_chat_request(image_request(&both)?).await?);
+    assert!(same_decode(&cached, &fresh), "{fresh:?} vs {cached:?}");
     Ok(())
 }

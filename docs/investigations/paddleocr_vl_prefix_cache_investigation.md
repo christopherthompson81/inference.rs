@@ -55,3 +55,21 @@ test time from `crates/inference/tests/fixtures/paddleocr_vl/tiny`) raised wheth
     non-paged cacher compares per-image hashes instead.
   - media keys dropped from `search_for_matching_cache`: passes on CPU because the cached entry then has more images
     than the request and is skipped, so no wrong hit is served.
+
+## Run 5 - 2026-09-27 04:20
+
+- Review: with non-paged hits now reachable, `keep_num_images` drops the cached images and clears
+  `cached_img_thw`, but the model takes every image's patches for a vision row and skips cached ones itself
+  (`window_images`, the patch offset in `forward`), and mrope needs every image's grid.
+- New tiny test `partial_prefix_hit_matches_a_fresh_two_image_decode`: a fresh model decodes [page_00, page_01]; a
+  second model first serves [page_00], then [page_00, page_01] with a prefix hit over page_00; the decodes must match.
+- First result: CPU `narrow invalid args ... start: 1196, len: 1196` (patch offset past the kept image); CUDA panic in
+  `rope_index.rs` (position count != sequence length). A probe in `get_rope_index` on CUDA showed a 310-token first
+  prefill chunk holding one image's 299 placeholders but both images' grids: chunked paged prefill stops between the
+  images, and the processor attached every grid as soon as any placeholder was present. That predates this fix; the
+  real-weight two-image test only ran without paged attention.
+- Changes: `PaddleOcrVlProcessor::retain_prefix_cached_images` returns true (as mllama does), so a non-paged hit keeps
+  every image; each pass attaches one grid per placeholder run in the prompt so far, counted over
+  `prompt_position_source_toks`.
+- Result: all three tiny tests pass on CPU and CUDA (twice each). Mutation: retain set back to false fails the new
+  test on CPU (`cat expects at least one tensor`).
