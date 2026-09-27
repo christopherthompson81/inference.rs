@@ -68,8 +68,6 @@ macro_rules! skip_without_cuda {
     };
 }
 
-#[cfg(feature = "models-llama")]
-use inference_nn::get_delta_from_lora_ab;
 pub use inference_nn::metal::warmup_metal_kernels;
 #[cfg(feature = "cuda")]
 use inference_nn::perf_flags;

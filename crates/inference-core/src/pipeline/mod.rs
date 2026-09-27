@@ -2,8 +2,8 @@ mod amoe;
 mod auto;
 pub(crate) mod cache_manager;
 pub(crate) use crate::model::{
-    decode_positions_tensor, extract_logits, recurrent_batch_kind_for_input, text_positions_tensor,
-    ForwardMaskCache, ModelForwardContext, RecurrentMetadata,
+    extract_logits, recurrent_batch_kind_for_input, text_positions_tensor, ForwardMaskCache,
+    ModelForwardContext, RecurrentMetadata,
 };
 pub use cache_manager::CacheManager;
 pub mod chat_template;
@@ -167,7 +167,7 @@ pub(crate) use paths::{
 pub use paths::{AdapterPaths, ResolvedLoraAdapter};
 #[cfg(feature = "models-llama")]
 pub(crate) use processing::apply_chat_template;
-pub(crate) use processing::{BasicProcessor, MessagesAction, Processor, ProcessorCreator};
+pub(crate) use processing::{BasicProcessor, MessagesAction, Processor};
 use rand_isaac::Isaac64Rng;
 pub use speech::{SpeechLoader, SpeechPipeline};
 use std::any::Any;
@@ -2386,14 +2386,15 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
+    use crate::model::decode_positions_tensor;
+
     use super::{
         add_recurrent_prefix_memory_reservations, automatic_recurrent_checkpoint_lane_budget,
-        decode_positions_tensor, effective_recurrent_checkpoint_lanes,
-        next_pipeline_prompt_chunk_group, paged_attention_memory_reservations,
-        prompt_chunk_is_final, recurrent_batch_kind_for_input, recurrent_kv_floor_bytes,
-        reserve_recurrent_serving_capacity, resolve_lora_execution, should_sample_step,
-        should_try_speculative_sampling, CacheMemoryReservations, ModelForwardContext,
-        RecurrentCheckpointBudget,
+        effective_recurrent_checkpoint_lanes, next_pipeline_prompt_chunk_group,
+        paged_attention_memory_reservations, prompt_chunk_is_final, recurrent_batch_kind_for_input,
+        recurrent_kv_floor_bytes, reserve_recurrent_serving_capacity, resolve_lora_execution,
+        should_sample_step, should_try_speculative_sampling, CacheMemoryReservations,
+        ModelForwardContext, RecurrentCheckpointBudget,
     };
     use crate::gdn::RecurrentBatchKind;
     use crate::model::{ForwardCache, LogitsSelection};

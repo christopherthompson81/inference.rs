@@ -9,11 +9,11 @@ use inference_quant::{Convolution, QuantMethod, ShardedVarBuilder};
 
 use crate::{
     attention::{AttentionMask, SdpaParams},
-    layers::{self, Activation, Sdpa},
-    vision_models::conformer::{
+    conformer::{
         nemo::NemoConvSubsampling,
         pos_embed::{AbsolutePositionalEncoding, T5RelativeAttentionLogitBias},
     },
+    layers::{self, Activation, Sdpa},
 };
 
 use super::config::ConformerEncoderConfig;

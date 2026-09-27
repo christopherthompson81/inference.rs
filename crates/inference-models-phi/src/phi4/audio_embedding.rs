@@ -9,20 +9,18 @@ use candle_nn::Module;
 use inference_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
 
 use crate::{
+    conformer::encoder::ConformerEncoder,
     layers::{self, Activation},
     paged_attention::encoder_cache::{CacheModality, EncoderCacheManager},
-    vision_models::{
-        conformer::encoder::ConformerEncoder,
-        phi4::{
-            config::{Phi4MMAudioConfig, Phi4MMAudioEmbedConfig},
-            mm_embedding::InputMode,
-        },
+    phi4::{
+        config::{Phi4MMAudioConfig, Phi4MMAudioEmbedConfig},
+        mm_embedding::InputMode,
     },
 };
 
 use super::Phi4MMConfig;
 
-pub(super) const AUDIO_SPECIAL_TOKEN_ID: f64 = 200011.;
+pub const AUDIO_SPECIAL_TOKEN_ID: f64 = 200011.;
 
 pub struct AudioEmbedding {
     wte: Arc<dyn QuantMethod>,

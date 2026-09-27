@@ -12,26 +12,29 @@ use inference_quant::{NonZeroOp, ShardedVarBuilder};
 
 use crate::amoe::{AnyMoeBaseModelMixin, MlpLayer};
 
+use crate::model::IsqModel;
+use crate::model::ModelForwardContext;
+use crate::model::MultimodalModel;
+use crate::model::NormalLoadingMetadata;
 use crate::paged_attention::encoder_cache::{CacheModality, EncoderCacheManager};
 use crate::paged_attention::{AttentionImplementation, ModelConfigMetadata};
-use crate::pipeline::IsqModel;
-use crate::pipeline::ModelForwardContext;
-use crate::pipeline::MultimodalModel;
-use crate::pipeline::NormalLoadingMetadata;
 
+use crate::llava::anyres::get_anyres_image_grid_shape;
+use crate::llava::config::Config;
 use crate::utils::unvarbuilder::UnVarBuilder;
-use crate::vision_models::clip::{ClipConfig, ClipVisionTransformer};
-use crate::vision_models::llava::config::Config;
-use crate::vision_models::llava::utils::get_anyres_image_grid_shape;
-use crate::vision_models::multimodal_layout::{
+use crate::vision::clip::{ClipConfig, ClipVisionTransformer};
+use crate::vision::multimodal_layout::{
     MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
 };
-use crate::{layers, AnyMoeConfig, AnyMoeExpertType};
+use crate::{
+    amoe::{AnyMoeConfig, AnyMoeExpertType},
+    layers,
+};
 
 use super::llava_llm::{LLaVALLM, Llama, Mistral};
 
 #[derive(Default)]
-pub(crate) struct LLaVANextVisionSpecificArgs {
+pub struct LLaVANextVisionSpecificArgs {
     pub image_sizes: Option<Vec<(usize, usize)>>, // width, height
     pub num_image_tokens: Option<Vec<usize>>,     // number of image tokens for each image
     pub num_image_samples: Option<Vec<usize>>,    // number of image samples for each image
@@ -538,7 +541,7 @@ impl IsqModel for Model {
 
 impl crate::speculative::SpeculativeTargetMixin for Model {}
 
-impl crate::block_diffusion::BlockDiffusionMixin for Model {}
+impl crate::model::BlockDiffusionMixin for Model {}
 
 impl MultimodalModel for Model {
     fn supports_packed_prefill(&self) -> bool {
@@ -554,7 +557,7 @@ impl MultimodalModel for Model {
         input_ids: &Tensor,
         pixel_values: Option<Tensor>,
         model_specific_args: Box<dyn std::any::Any>, // pixel attention mask, or image sizes, or anything else
-        ctx: &mut crate::pipeline::ModelForwardContext<'_>,
+        ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> candle_core::Result<Tensor> {
         let LLaVANextVisionSpecificArgs {
             image_sizes,
@@ -587,7 +590,7 @@ impl MultimodalModel for Model {
         &self.device
     }
 
-    fn cache(&self) -> &crate::pipeline::EitherCache {
+    fn cache(&self) -> &crate::kv_cache::EitherCache {
         self.llm.cache()
     }
     fn max_seq_len(&self) -> usize {

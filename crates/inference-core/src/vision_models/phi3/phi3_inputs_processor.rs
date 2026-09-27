@@ -16,7 +16,7 @@ use crate::{
     pipeline::{
         text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
         InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
-        MessagesAction, Processor, ProcessorCreator,
+        MessagesAction, Processor,
     },
     sequence::{build_mm_features_from_ranges, Sequence},
 };
@@ -182,8 +182,8 @@ fn phi3_packed_layout(
     PackedMultimodalLayout::new(&requests)
 }
 
-impl ProcessorCreator for Phi3Processor {
-    fn new_processor(
+impl Phi3Processor {
+    pub(crate) fn new_processor(
         _: Option<ProcessorConfig>,
         _: PreProcessorConfig,
     ) -> Arc<dyn Processor + Send + Sync> {

@@ -18,16 +18,16 @@ use inference_quant::{
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeTrainableLayer, MlpLayer, MoeMlp},
+    amoe::{AnyMoeConfig, AnyMoeExpertType},
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     get_delta_from_lora_ab,
     layers::masker::PastKvLenCache,
     layers::{embedding, Activation, CausalMasker, MatMul, RmsNorm, Sdpa},
-    models::llama::Config,
+    llama::Config,
+    model::{IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
-    pipeline::{IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
-    AnyMoeConfig, AnyMoeExpertType,
 };
 
 use super::{rope_positions, LLaVALLM, OrdinaryRoPE};
@@ -52,7 +52,7 @@ impl CausalSelfAttention {
         attention_mask: &AttentionMask,
         ctx: &mut ModelForwardContext<'_>,
         block_idx: usize,
-        kv_cache: &mut crate::pipeline::LayerCaches,
+        kv_cache: &mut crate::kv_cache::LayerCaches,
         rope_parameter: (&Tensor, &Tensor),
     ) -> Result<Tensor> {
         let (b_sz, seq_len, _) = x.dims3()?;
@@ -108,7 +108,7 @@ impl CausalSelfAttention {
             },
             None => {
                 let (k, v) =
-                    crate::pipeline::Cache::update_kv_cache(&mut kv_cache[block_idx], k, v)?;
+                    crate::kv_cache::Cache::update_kv_cache(&mut kv_cache[block_idx], k, v)?;
 
                 Sdpa.run_attention(
                     &q,
@@ -316,7 +316,7 @@ impl Block {
         attention_mask: &AttentionMask,
         ctx: &mut ModelForwardContext<'_>,
         block_idx: usize,
-        kv_cache: &mut crate::pipeline::LayerCaches,
+        kv_cache: &mut crate::kv_cache::LayerCaches,
     ) -> Result<Tensor> {
         let residual = x;
         let mut x = self.rms_1.forward(x)?;
@@ -380,7 +380,7 @@ pub struct Llama {
     ln_f: RmsNorm,
     lm_head: Arc<dyn QuantMethod>,
     dtype: DType,
-    kv_cache: crate::pipeline::EitherCache,
+    kv_cache: crate::kv_cache::EitherCache,
     device: Device,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
     cfg: ModelConfigMetadata,
@@ -478,7 +478,7 @@ impl Llama {
             ln_f,
             lm_head,
             dtype,
-            kv_cache: crate::pipeline::EitherCache::Full(crate::pipeline::Cache::new(
+            kv_cache: crate::kv_cache::EitherCache::Full(crate::kv_cache::Cache::new(
                 cfg.num_hidden_layers,
                 false,
             )),
@@ -562,7 +562,7 @@ impl NormalModel for Llama {
     fn forward(
         &self,
         input_ids: &Tensor,
-        ctx: &mut crate::pipeline::ModelForwardContext<'_>,
+        ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         self.forward_input(input_ids, ctx)
     }
@@ -573,7 +573,7 @@ impl NormalModel for Llama {
         _seqlen_offsets: &[usize],
         _seqlen_offsets_full: &[usize],
         _no_kv_cache: bool,
-        _non_granular_state: &Option<crate::xlora_models::NonGranularState>,
+        _non_granular_state: &Option<crate::model::NonGranularState>,
         _context_lens: Vec<(usize, usize)>,
         _position_ids: Vec<usize>,
         _flash_params: &FlashParams,
@@ -581,7 +581,7 @@ impl NormalModel for Llama {
     ) -> Result<Tensor> {
         unimplemented!()
     }
-    fn cache(&self) -> &crate::pipeline::EitherCache {
+    fn cache(&self) -> &crate::kv_cache::EitherCache {
         &self.kv_cache
     }
     fn device(&self) -> &Device {

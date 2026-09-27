@@ -8,7 +8,7 @@ use crate::{
 };
 
 #[derive(Debug, Clone, Copy, serde::Deserialize)]
-pub(crate) enum VisionActivation {
+pub enum VisionActivation {
     QuickGelu,
     #[serde(alias = "gelu")]
     Gelu,
@@ -34,32 +34,32 @@ impl Module for VisionActivation {
 serde_default_fn!(usize, d_attn_heads, 16);
 
 #[derive(Debug, Clone, serde::Deserialize)]
-pub(crate) struct MLlamaVisionConfig {
-    pub(crate) hidden_size: usize,
-    pub(crate) hidden_act: VisionActivation,
-    pub(crate) num_hidden_layers: usize,
-    pub(crate) num_global_layers: usize,
+pub struct MLlamaVisionConfig {
+    pub hidden_size: usize,
+    pub hidden_act: VisionActivation,
+    pub num_hidden_layers: usize,
+    pub num_global_layers: usize,
     #[serde(default = "d_attn_heads", alias = "attention_heads")]
-    pub(crate) num_attention_heads: usize,
-    pub(crate) num_channels: usize,
-    pub(crate) intermediate_size: usize,
-    pub(crate) vision_output_dim: usize,
-    pub(crate) image_size: usize,
-    pub(crate) patch_size: usize,
-    pub(crate) norm_eps: f64,
-    pub(crate) max_num_tiles: usize,
-    pub(crate) intermediate_layers_indices: Vec<usize>,
-    pub(crate) supported_aspect_ratios: Vec<(usize, usize)>,
+    pub num_attention_heads: usize,
+    pub num_channels: usize,
+    pub intermediate_size: usize,
+    pub vision_output_dim: usize,
+    pub image_size: usize,
+    pub patch_size: usize,
+    pub norm_eps: f64,
+    pub max_num_tiles: usize,
+    pub intermediate_layers_indices: Vec<usize>,
+    pub supported_aspect_ratios: Vec<(usize, usize)>,
 }
 
 impl MLlamaVisionConfig {
-    pub(crate) fn max_aspect_ratio_id(&self) -> usize {
+    pub fn max_aspect_ratio_id(&self) -> usize {
         self.supported_aspect_ratios.len()
     }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-pub(crate) enum MLlamaRopeType {
+pub enum MLlamaRopeType {
     #[serde(rename = "default")]
     Default,
     #[serde(rename = "linear")]
@@ -76,39 +76,39 @@ pub(crate) enum MLlamaRopeType {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 #[allow(dead_code)]
-pub(crate) struct MLlamaRopeScaling {
-    pub(crate) rope_type: MLlamaRopeType,
-    pub(crate) factor: Option<f32>,
-    pub(crate) original_max_position_embeddings: usize,
-    pub(crate) attention_factor: Option<f32>,
-    pub(crate) beta_fast: Option<f32>,
-    pub(crate) beta_slow: Option<f32>,
-    pub(crate) short_factor: Option<Vec<f64>>,
-    pub(crate) long_factor: Option<Vec<f64>>,
-    pub(crate) low_freq_factor: Option<f32>,
-    pub(crate) high_freq_factor: Option<f32>,
+pub struct MLlamaRopeScaling {
+    pub rope_type: MLlamaRopeType,
+    pub factor: Option<f32>,
+    pub original_max_position_embeddings: usize,
+    pub attention_factor: Option<f32>,
+    pub beta_fast: Option<f32>,
+    pub beta_slow: Option<f32>,
+    pub short_factor: Option<Vec<f64>>,
+    pub long_factor: Option<Vec<f64>>,
+    pub low_freq_factor: Option<f32>,
+    pub high_freq_factor: Option<f32>,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct MLlamaTextConfig {
-    pub(crate) rope_scaling: Option<MLlamaRopeScaling>,
-    pub(crate) vocab_size: usize,
-    pub(crate) hidden_size: usize,
-    pub(crate) hidden_act: candle_nn::Activation,
-    pub(crate) num_hidden_layers: usize,
-    pub(crate) num_attention_heads: usize,
-    pub(crate) num_key_value_heads: usize,
-    pub(crate) intermediate_size: usize,
-    pub(crate) rope_theta: f32,
-    pub(crate) rms_norm_eps: f64,
-    pub(crate) max_position_embeddings: usize,
-    pub(crate) tie_word_embeddings: bool,
-    pub(crate) cross_attention_layers: Vec<usize>,
-    pub(crate) quantization_config: Option<QuantizedConfig>,
+    pub rope_scaling: Option<MLlamaRopeScaling>,
+    pub vocab_size: usize,
+    pub hidden_size: usize,
+    pub hidden_act: candle_nn::Activation,
+    pub num_hidden_layers: usize,
+    pub num_attention_heads: usize,
+    pub num_key_value_heads: usize,
+    pub intermediate_size: usize,
+    pub rope_theta: f32,
+    pub rms_norm_eps: f64,
+    pub max_position_embeddings: usize,
+    pub tie_word_embeddings: bool,
+    pub cross_attention_layers: Vec<usize>,
+    pub quantization_config: Option<QuantizedConfig>,
 }
 
 impl MLlamaTextConfig {
-    pub(crate) fn llama3_rope_scaling(&self) -> Result<Option<Llama3RopeConfig>> {
+    pub fn llama3_rope_scaling(&self) -> Result<Option<Llama3RopeConfig>> {
         match &self.rope_scaling {
             None
             | Some(MLlamaRopeScaling {
@@ -139,15 +139,15 @@ impl MLlamaTextConfig {
         }
     }
 
-    pub(crate) fn head_dim(&self) -> usize {
+    pub fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads
     }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-pub(crate) struct MLlamaConfig {
-    pub(crate) vision_config: MLlamaVisionConfig,
-    pub(crate) text_config: MLlamaTextConfig,
+pub struct MLlamaConfig {
+    pub vision_config: MLlamaVisionConfig,
+    pub text_config: MLlamaTextConfig,
 }
 
 #[cfg(test)]

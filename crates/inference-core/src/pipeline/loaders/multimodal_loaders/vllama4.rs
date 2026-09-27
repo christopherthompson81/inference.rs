@@ -1,4 +1,6 @@
 use super::*;
+use candle_core::{Device, D};
+use image::{ColorType, DynamicImage};
 
 /// [`MultimodalLoader`] for an Llama Vision model.
 ///

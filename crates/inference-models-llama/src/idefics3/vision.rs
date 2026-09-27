@@ -12,8 +12,8 @@ use crate::{
 
 use super::config::{Idefics3Config, Idefics3VisionConfig};
 
-pub(crate) struct Idefics3SimpleMLP {
-    pub(crate) proj: Linear,
+pub struct Idefics3SimpleMLP {
+    pub proj: Linear,
 }
 
 impl Idefics3SimpleMLP {
@@ -32,7 +32,7 @@ impl Idefics3SimpleMLP {
 
 pub struct Idefics3Connector {
     scale_factor: usize,
-    pub(crate) modality_projection: Idefics3SimpleMLP,
+    pub modality_projection: Idefics3SimpleMLP,
 }
 
 impl Idefics3Connector {

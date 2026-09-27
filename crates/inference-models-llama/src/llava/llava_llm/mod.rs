@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 use candle_core::{DType, Device, Result, Tensor};
 
-use crate::pipeline::{IsqModel, ModelForwardContext, NormalModel};
+use crate::model::{IsqModel, ModelForwardContext, NormalModel};
 
 fn rope_positions(
     ctx: &mut ModelForwardContext<'_>,
@@ -13,7 +13,7 @@ fn rope_positions(
         .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))
 }
 
-pub(crate) trait LLaVALLM: IsqModel + NormalModel + Sync + Send {
+pub trait LLaVALLM: IsqModel + NormalModel + Sync + Send {
     //Normal model without anymoe, but add embed and forward_input_embed. This is only a temporary solution. Finally when the rope problem solved for normal LLM models, we should refactor this.
     fn embed(&self, input_ids: &Tensor) -> Result<Tensor>;
     #[allow(clippy::too_many_arguments)]
@@ -26,7 +26,7 @@ pub(crate) trait LLaVALLM: IsqModel + NormalModel + Sync + Send {
 }
 
 #[derive(Debug)]
-pub(crate) struct OrdinaryRoPE;
+pub struct OrdinaryRoPE;
 
 impl OrdinaryRoPE {
     fn create_parameters(
@@ -53,8 +53,8 @@ impl OrdinaryRoPE {
         crate::layers::apply_rotary_q(x, cos, sin, positions, true)
     }
 }
-pub(crate) mod llama;
-pub(crate) mod mistral;
+pub mod llama;
+pub mod mistral;
 
 pub use llama::Llama;
 pub use mistral::Model as Mistral;

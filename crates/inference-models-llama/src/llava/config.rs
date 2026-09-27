@@ -4,9 +4,9 @@ use serde::Deserialize;
 use crate::layers::{Activation, Llama3RopeConfig};
 use crate::serde_default_fn;
 
-use crate::models::llama::Config as LLaMAConfig;
-use crate::models::mistral::Config as MistralConfig;
-use crate::vision_models::clip::{Activation as ClipActivation, ClipConfig};
+use crate::llama::Config as LLaMAConfig;
+use crate::mistral::Config as MistralConfig;
+use crate::vision::clip::{Activation as ClipActivation, ClipConfig};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {

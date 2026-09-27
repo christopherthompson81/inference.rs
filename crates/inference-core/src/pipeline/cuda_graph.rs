@@ -33,11 +33,12 @@ use crate::{
 use crate::cuda::phase_timer::CudaPhaseTimer;
 use crate::device_map::DeviceMapper;
 use crate::kv_cache::HybridCache;
+use crate::model::decode_positions_tensor;
 use crate::paged_attention::input_metadata::{
     DecodePagedRowsGraphKey, PagedDecodeMetadataRequirements,
 };
 use crate::paged_attention::_PAD_SLOT_ID;
-use crate::pipeline::{decode_positions_tensor, DecodeGraphPrecaptureCtx};
+use crate::pipeline::DecodeGraphPrecaptureCtx;
 use crate::speculative::SpeculativeGraphState;
 
 const CUDA_GRAPH_INSTANTIATE_FLAGS: u64 =

@@ -1,4 +1,5 @@
 use super::*;
+use itertools::Itertools;
 
 /// [`MultimodalLoader`] for a Phi 4MM Vision model.
 ///

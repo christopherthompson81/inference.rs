@@ -77,7 +77,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 
 ### Workspace Structure
 - `crates/inference-core/` - Core inference engine, model implementations, pipelines
-- `crates/inference-models-{llama,qwen,gemma,phi,other}/` - Text model families (one crate per family, built on `inference-nn`), each behind an `inference-core` feature (`models-llama`, ...; all on by default). Vision models that reuse a family's text stack are gated with it; `--slim` checks core with each family alone
+- `crates/inference-models-{llama,qwen,gemma,phi,other}/` - Model families (one crate per family, built on `inference-nn`): text models plus the vision models built on their text stacks, each behind an `inference-core` feature (`models-llama`, ...; all on by default). Preprocessing stays in core; `--slim` checks core with each family alone
 - `crates/inference-nn/` - Model-facing building blocks: layers, attention and its metadata, KV/paged caches, GDN, MoE, device mapping, and the CUDA/Metal kernels behind them
 - `crates/inference-cli/` - Unified CLI binary (commands: run, serve, bench, from-config)
 - `crates/inference-server-core/` - HTTP server routing, OpenAI API implementation

@@ -4,21 +4,9 @@ use anyhow::{Context, Result};
 use either::Either;
 use indexmap::IndexMap;
 
-use crate::{
-    request::ReasoningEffort,
-    vision_models::{preprocessor_config::PreProcessorConfig, processor_config::ProcessorConfig},
-    MessageContent, Pipeline, Tool,
-};
+use crate::{request::ReasoningEffort, MessageContent, Pipeline, Tool};
 
 use super::{chat_template::apply_chat_template_to, text_models_inputs_processor, InputsProcessor};
-
-/// Trait to create processors.
-pub trait ProcessorCreator {
-    fn new_processor(
-        _: Option<ProcessorConfig>,
-        _: PreProcessorConfig,
-    ) -> Arc<dyn Processor + Send + Sync>;
-}
 
 pub enum MessagesAction {
     // For idefics2, others which use the "new" openai format

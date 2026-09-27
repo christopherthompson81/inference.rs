@@ -1,14 +1,17 @@
-//! Phi text models: Phi-2, Phi-3 and Phi-3.5-MoE.
+//! Phi models: Phi-2, Phi-3 and Phi-3.5-MoE text, Phi-3V, and Phi-4 multimodal with its conformer audio encoder.
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use inference_nn::serde_default_fn;
 use inference_nn::{
     amoe, attention, device_map, kv_cache, layers, model, moe, ops, paged_attention, speculative,
-    utils,
+    utils, vision,
 };
 
+pub mod conformer;
 pub mod phi2;
 pub mod phi3;
 pub mod phi3_5_moe;
+pub mod phi3_vision;
+pub mod phi4;
 
 inference_nn::json_config!(phi2::Config, phi3::Config, phi3_5_moe::Config);

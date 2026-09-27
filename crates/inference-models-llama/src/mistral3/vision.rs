@@ -6,7 +6,7 @@ use inference_quant::{linear_b, Convolution, QuantMethod, ShardedVarBuilder};
 use crate::attention::AttentionMask;
 use crate::{
     layers::{self, GetFloatInfo, RmsNorm},
-    pipeline::NormalLoadingMetadata,
+    model::NormalLoadingMetadata,
     utils::unvarbuilder::UnVarBuilder,
 };
 

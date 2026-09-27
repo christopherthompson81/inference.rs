@@ -6,6 +6,7 @@ use crate::{
     device_map::DummyDeviceMapper,
     matformer::{MatformerConfig, MatformerSliceConfig, Slice},
 };
+use candle_core::Device;
 use inference_quant::IsqType;
 
 fn matches_any(regexes: &[Regex], name: &str) -> bool {
