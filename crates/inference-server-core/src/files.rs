@@ -14,6 +14,7 @@ use inference_core::{
 use serde::Serialize;
 use utoipa::ToSchema;
 
+use crate::handler_core::ApiErrorHttp;
 use crate::{
     handler_core::{openai_error_response, ApiError, ApiErrorKind},
     types::{ExtractedInferenceRsState, SharedInferenceRsState},

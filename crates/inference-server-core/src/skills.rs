@@ -961,6 +961,7 @@ pub async fn list_skill_versions(
 
 #[cfg(test)]
 mod tests {
+    use crate::handler_core::ApiErrorHttp;
     use axum::{
         body::Body,
         extract::FromRequest,

@@ -234,12 +234,14 @@
 //! ```
 
 pub mod anthropic;
+pub(crate) mod api_error;
 pub mod approvals;
 pub mod background_tasks;
 pub mod cached_responses;
 pub mod chat_completion;
 mod completion_core;
 pub mod completions;
+pub(crate) mod dispatch;
 pub mod embeddings;
 pub(crate) mod engine_chat;
 pub mod files;

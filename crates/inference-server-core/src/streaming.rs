@@ -10,7 +10,7 @@ use inference_core::{Response, Usage};
 use tokio::sync::mpsc::Receiver;
 
 use crate::{
-    handler_core::{ApiError, ApiErrorKind},
+    handler_core::ApiError,
     metrics::{ITL_METRIC, TTFT_METRIC},
     types::SharedInferenceRsState,
     util::sanitize_error_message,
@@ -104,22 +104,7 @@ pub(crate) fn observe_response(handle: &Option<StreamOutcomeHandle>, response: &
 
 /// OpenAI-style streaming error event; clients parse `data:` lines as JSON, so a raw text line is invisible to them.
 pub(crate) fn openai_error_event(error: ApiError) -> axum::response::sse::Event {
-    let error_type = match error.kind {
-        ApiErrorKind::RateLimited => "rate_limit_error",
-        ApiErrorKind::Unavailable | ApiErrorKind::Overloaded | ApiErrorKind::Internal => {
-            "server_error"
-        }
-        _ => "invalid_request_error",
-    };
-    let payload = serde_json::json!({
-        "error": {
-            "message": error.message,
-            "type": error_type,
-            "param": error.param,
-            "code": error.code,
-        }
-    });
-    axum::response::sse::Event::default().data(payload.to_string())
+    axum::response::sse::Event::default().data(error.to_openai_body().to_string())
 }
 
 /// Default keep-alive interval for Server-Sent Events (SSE) streams in milliseconds.

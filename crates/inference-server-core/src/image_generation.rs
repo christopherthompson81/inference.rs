@@ -13,6 +13,7 @@ use inference_core::{
 };
 use tokio::sync::mpsc::{Receiver, Sender};
 
+use crate::handler_core::ApiErrorHttp;
 use crate::{
     handler_core::{
         base_process_non_streaming_response, create_response_channel, openai_error_from_error,

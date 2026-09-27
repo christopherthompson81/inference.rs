@@ -134,3 +134,15 @@ text, `[DONE]` comes last with no error chunk, and non-streaming `ask` is a 400.
 logging order, collector and error mapping identical to master.
 
 Left for the move: `ApiError`, `JsonError` and the dispatch helpers still live in the axum-importing `handler_core`.
+
+## Run 4 - 2026-09-27 (night)
+
+Change: the last HTTP tie in the chat path's dependencies. `handler_core.rs` splits into `api_error.rs` (the error
+kinds, `ApiError` and its classification of core errors, `JsonError`, `ModelErrorMessage`, the stable messages, and a
+single OpenAI envelope, `to_openai_body()`, that the JSON responses and the SSE error events now share instead of
+each mapping the `type` themselves) and `dispatch.rs` (response channels, sending to a model, model override).
+`handler_core` keeps the HTTP views: `ApiErrorHttp { from_status, from_json_rejection, status }` for `ApiError`, and
+the response builders. `engine_chat.rs` now depends only on HTTP-free modules. Tests split with the code; a new test
+pins every error kind's HTTP status.
+
+Result: green, 2129 CPU / 2447 CUDA tests (+1). Next: move the HTTP-free modules into `inference-api`.
