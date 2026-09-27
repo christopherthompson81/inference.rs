@@ -89,3 +89,11 @@ test time from `crates/inference/tests/fixtures/paddleocr_vl/tiny`) raised wheth
 - The prefix test now shares a long prompt past the image and extends it for the repeat, and compares each cached
   decode with a fresh model instance; the two-image partial-hit test asserts the hit on CPU only.
 - Result: all three tiny tests pass on CPU and CUDA; the pixel-bytes hash collision mutation fails on both.
+
+## Run 7 - 2026-09-27 05:20
+
+- #51: `search_for_matching_cache` now caps each candidate's match at one token short of the prompt before the media
+  clamps, instead of returning no match when the whole prompt is cached; an exact repeat recomputes only its last
+  token. Rotating caches that cannot rewind and hybrid snapshots at a different boundary are still skipped.
+- The tiny prefix test's repeat is an exact repeat again and asserts a hit on CPU and CUDA; with the old
+  `prefix_cacher.rs` it fails on CPU ("page_00 was not served from the prefix cache").

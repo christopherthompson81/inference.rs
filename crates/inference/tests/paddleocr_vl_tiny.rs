@@ -237,16 +237,15 @@ fn same_decode(a: &[(u32, f32)], b: &[(u32, f32)]) -> bool {
 #[tokio::test]
 async fn prefix_cache_does_not_serve_one_image_for_another() -> anyhow::Result<()> {
     let dir = tiny_checkpoint()?;
-    let repeat = format!("{LONG_PROMPT} Once more.");
     let fresh = build(dir.path()).await?;
     let fresh_page_01 = trace(
         &fresh
             .send_chat_request(prompted_image_request(&["page_01.png"], LONG_PROMPT)?)
             .await?,
     );
-    let fresh_repeat = trace(
+    let fresh_page_00 = trace(
         &fresh
-            .send_chat_request(prompted_image_request(&["page_00.png"], &repeat)?)
+            .send_chat_request(prompted_image_request(&["page_00.png"], LONG_PROMPT)?)
             .await?,
     );
 
@@ -264,9 +263,8 @@ async fn prefix_cache_does_not_serve_one_image_for_another() -> anyhow::Result<(
         same_decode(&page_01, &fresh_page_01),
         "page_01 was served page_00's cached blocks: {page_01:?}"
     );
-    // Non-paged hits need a new token past the cached prompt, so the repeat extends the text.
     let resp = model
-        .send_chat_request(prompted_image_request(&["page_00.png"], &repeat)?)
+        .send_chat_request(prompted_image_request(&["page_00.png"], LONG_PROMPT)?)
         .await?;
     assert!(
         cached_tokens(&resp) > 0,
@@ -274,8 +272,8 @@ async fn prefix_cache_does_not_serve_one_image_for_another() -> anyhow::Result<(
     );
     let cached = trace(&resp);
     assert!(
-        same_decode(&cached, &fresh_repeat),
-        "prefix cache reuse changed page_00: {fresh_repeat:?} vs {cached:?}"
+        same_decode(&cached, &fresh_page_00),
+        "prefix cache reuse changed page_00: {fresh_page_00:?} vs {cached:?}"
     );
     Ok(())
 }
