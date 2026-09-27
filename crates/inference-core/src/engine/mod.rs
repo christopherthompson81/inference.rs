@@ -56,9 +56,6 @@ use crate::{
     get_mut_arcmutex, handle_pipeline_forward_error,
     pipeline::{ModelCategory, Pipeline},
     request::Request,
-    response::{
-        ChatCompletionResponse, Choice, CompletionChoice, CompletionResponse, ResponseMessage,
-    },
     sequence::{SequenceRecognizer, SequenceState},
     Constraint,
 };
@@ -198,6 +195,14 @@ pub fn reset_engine_terminate_flag() {
 pub static ENGINE_INSTRUCTIONS: LazyLock<
     std::sync::Mutex<HashMap<usize, Option<EngineInstruction>>>,
 > = LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
+
+#[cfg(feature = "cuda")]
+// Moved once per decode step, like the `Option` lease it wraps; boxing would allocate on the hot path.
+#[allow(clippy::large_enum_variant)]
+enum LeaseStep {
+    Failed,
+    Next(Option<CudaDecodeBatchLease>),
+}
 
 pub struct Engine {
     tx: Sender<Request>,
@@ -1109,6 +1114,223 @@ impl Engine {
         CudaDecodeBatchLease::new(rows, next_tail).map(Some)
     }
 
+    fn should_terminate(&self) -> bool {
+        matches!(
+            ENGINE_INSTRUCTIONS
+                .lock()
+                .expect("`ENGINE_INSTRUCTIONS` was poisoned")
+                .get(get_mut_arcmutex!(self.id).deref()),
+            Some(Some(EngineInstruction::Terminate))
+        )
+    }
+
+    /// Dispatches control requests, then admissible work, up to the per-step budget; false when the engine stops.
+    async fn dispatch_admitted(
+        self: &Arc<Self>,
+        pending: &mut admission::AdmissionQueue<Request>,
+        decode_batch_leased: bool,
+    ) -> bool {
+        let mut dispatches = 0;
+        while dispatches < pending.max_dispatches_per_step() {
+            let Some(request) = pending.take_bypass_control() else {
+                break;
+            };
+            if !self.dispatch_prepared_request(request).await {
+                return false;
+            }
+            dispatches += 1;
+        }
+
+        while dispatches < pending.max_dispatches_per_step() {
+            let active_sequences = {
+                let scheduler = get_mut_arcmutex!(self.scheduler);
+                scheduler.waiting_len() + scheduler.running_len()
+            };
+            let request = if decode_batch_leased {
+                pending.pop_admissible_workload(active_sequences)
+            } else {
+                pending.pop_admissible(active_sequences)
+            };
+            let Some(request) = request else {
+                break;
+            };
+            if !self.dispatch_prepared_request(request).await {
+                return false;
+            }
+            dispatches += 1;
+        }
+        true
+    }
+
+    /// Idle engine: blocks until a request arrives or a wake-up; false once the ingress channel closes.
+    async fn wait_for_work(&self, pending: &mut admission::AdmissionQueue<Request>) -> bool {
+        enum WaitEvent {
+            Request(Option<Request>),
+            Wake,
+        }
+        let wait_for_request = async {
+            let mut rx = self.rx.lock().await;
+            rx.recv().await
+        };
+        tokio::pin!(wait_for_request);
+        let wait_for_wake = self.pending_notify.notified();
+        tokio::pin!(wait_for_wake);
+
+        let event = select! {
+            res = &mut wait_for_request => WaitEvent::Request(res),
+            _ = &mut wait_for_wake => WaitEvent::Wake,
+        };
+
+        match event {
+            WaitEvent::Request(Some(request)) => {
+                if let Some(request) = self.prepare_request_for_dispatch(request).await {
+                    let class = Self::admission_class(&request);
+                    pending
+                        .push(request, class)
+                        .expect("idle admission queue must have capacity");
+                    // Give a concurrently submitted request wave one turn to reach the ingress channel.
+                    tokio::task::yield_now().await;
+                }
+                true
+            }
+            WaitEvent::Request(None) => false,
+            WaitEvent::Wake => true,
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn start_cuda_completion_worker(&self) -> Option<CudaDecodeCompletionWorker> {
+        if !self.cuda_decode_enabled {
+            return None;
+        }
+        match CudaDecodeCompletionWorker::new() {
+            Ok(worker) => Some(worker),
+            Err(err) => {
+                tracing::warn!("Failed to start the CUDA decode completion worker: {err}");
+                None
+            }
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn cuda_memory_pool_maintenance(&self) -> cuda_memory::CudaMemoryPoolMaintenance {
+        let pipeline = get_mut_arcmutex!(self.pipeline);
+        let devices = pipeline.execution_devices();
+        let mut unique_devices = Vec::new();
+        for device in devices {
+            if device.is_cuda()
+                && unique_devices
+                    .iter()
+                    .all(|existing: &candle_core::Device| !existing.same_device(&device))
+            {
+                unique_devices.push(device);
+            }
+        }
+        cuda_memory::CudaMemoryPoolMaintenance::new(unique_devices)
+    }
+
+    #[cfg(feature = "cuda")]
+    fn drain_cuda_decode_lease(&self, lease: Option<CudaDecodeBatchLease>) {
+        if let Some(lease) = lease {
+            if let Err(err) = self.drain_cuda_decode_batch(lease) {
+                tracing::warn!("Failed to drain the CUDA decode tail: {err}");
+            }
+        }
+    }
+
+    #[cfg(feature = "cuda")]
+    fn reclaim_idle_cuda_graph_memory(
+        &self,
+        cuda_memory_pool: &mut cuda_memory::CudaMemoryPoolMaintenance,
+    ) {
+        loop {
+            let reclaimed = get_mut_arcmutex!(self.pipeline)
+                .reclaim_cuda_graph_memory(cuda_memory::GRAPH_RECLAIM_BATCH_SIZE);
+            if reclaimed == 0 || !cuda_memory_pool.after_graph_reclaim(0).graph_pressure {
+                break;
+            }
+        }
+    }
+
+    /// Drains a leased decode batch for a terminate-all; false when the drain failed and was reported.
+    #[cfg(feature = "cuda")]
+    async fn cancel_cuda_decode_lease(&self, lease: CudaDecodeBatchLease) -> bool {
+        let leased_rows = lease.rows.clone();
+        let result = self.drain_cuda_decode_batch(lease);
+        let Err(e) = result else {
+            return true;
+        };
+        let mut guards = leased_rows
+            .iter()
+            .map(|seq| seq.lock().unwrap())
+            .collect::<Vec<_>>();
+        let mut guards_mut = guards.iter_mut().map(|seq| &mut **seq).collect::<Vec<_>>();
+        crate::sequence_macros::report_pipeline_forward_error(
+            "CUDA decode cancellation drain",
+            e.to_string(),
+            format!("{e:?}"),
+            &mut guards_mut,
+            &self.pipeline,
+            &self.prefix_cacher,
+        )
+        .await;
+        false
+    }
+
+    #[cfg(feature = "cuda")]
+    async fn step_cuda_decode_lease(
+        &self,
+        lease: CudaDecodeBatchLease,
+        worker: &CudaDecodeCompletionWorker,
+        allow_lookahead: bool,
+        rng: &Arc<std::sync::Mutex<Isaac64Rng>>,
+    ) -> LeaseStep {
+        let leased_rows = lease.rows.clone();
+        let result = self
+            .continue_cuda_decode_batch(lease, worker, allow_lookahead, rng)
+            .await;
+        match result {
+            Ok(next) => LeaseStep::Next(next),
+            Err(e) => {
+                let mut guards = leased_rows
+                    .iter()
+                    .map(|seq| seq.lock().unwrap())
+                    .collect::<Vec<_>>();
+                let mut guards_mut = guards.iter_mut().map(|seq| &mut **seq).collect::<Vec<_>>();
+                crate::sequence_macros::report_pipeline_forward_error(
+                    "resident CUDA decode step",
+                    e.to_string(),
+                    format!("{e:?}"),
+                    &mut guards_mut,
+                    &self.pipeline,
+                    &self.prefix_cacher,
+                )
+                .await;
+                LeaseStep::Failed
+            }
+        }
+    }
+
+    /// Whether the scheduler may preempt waiting prompts this step, given the pending prompt workspace.
+    #[cfg(feature = "cuda")]
+    fn waiting_prompt_preemption_enabled(
+        &self,
+        workspace: &mut Option<usize>,
+        cuda_memory_pool: &mut cuda_memory::CudaMemoryPoolMaintenance,
+    ) -> bool {
+        let Some(workspace_bytes) = *workspace else {
+            return true;
+        };
+        let memory_status = self.maintain_cuda_prompt_memory(cuda_memory_pool, workspace_bytes);
+        if !memory_status.insufficient_total_capacity
+            && (memory_status.maintenance_failed || memory_status.transient_pressure)
+        {
+            return false;
+        }
+        *workspace = None;
+        true
+    }
+
     pub async fn run(self: Arc<Self>) {
         if self.throughput_logging_enabled {
             self.logger.enable_logging();
@@ -1124,55 +1346,17 @@ impl Engine {
             admission::AdmissionPolicy::new(self.max_active_sequences, max_pending_requests);
         let mut pending = admission::AdmissionQueue::new(policy);
         #[cfg(feature = "cuda")]
-        let cuda_completion_worker = if self.cuda_decode_enabled {
-            match CudaDecodeCompletionWorker::new() {
-                Ok(worker) => Some(worker),
-                Err(err) => {
-                    tracing::warn!("Failed to start the CUDA decode completion worker: {err}");
-                    None
-                }
-            }
-        } else {
-            None
-        };
+        let cuda_completion_worker = self.start_cuda_completion_worker();
         #[cfg(feature = "cuda")]
         let mut cuda_decode_lease: Option<CudaDecodeBatchLease> = None;
         #[cfg(feature = "cuda")]
-        let mut cuda_memory_pool = {
-            let pipeline = get_mut_arcmutex!(self.pipeline);
-            let devices = pipeline.execution_devices();
-            let mut unique_devices = Vec::new();
-            for device in devices {
-                if device.is_cuda()
-                    && unique_devices
-                        .iter()
-                        .all(|existing: &candle_core::Device| !existing.same_device(&device))
-                {
-                    unique_devices.push(device);
-                }
-            }
-            cuda_memory::CudaMemoryPoolMaintenance::new(unique_devices)
-        };
+        let mut cuda_memory_pool = self.cuda_memory_pool_maintenance();
         #[cfg(feature = "cuda")]
         let mut cuda_prompt_preemption_workspace = None;
         'lp: loop {
-            let should_terminate = || {
-                matches!(
-                    ENGINE_INSTRUCTIONS
-                        .lock()
-                        .expect("`ENGINE_INSTRUCTIONS` was poisoned")
-                        .get(get_mut_arcmutex!(self.id).deref()),
-                    Some(Some(EngineInstruction::Terminate))
-                )
-            };
-
-            if should_terminate() {
+            if self.should_terminate() {
                 #[cfg(feature = "cuda")]
-                if let Some(lease) = cuda_decode_lease.take() {
-                    if let Err(err) = self.drain_cuda_decode_batch(lease) {
-                        tracing::warn!("Failed to drain the CUDA decode tail: {err}");
-                    }
-                }
+                self.drain_cuda_decode_lease(cuda_decode_lease.take());
                 self.replicate_request_to_daemons(&Request::Terminate);
                 break 'lp;
             }
@@ -1193,43 +1377,16 @@ impl Engine {
             }
             if let Some(request) = pending.take_shutdown() {
                 #[cfg(feature = "cuda")]
-                if let Some(lease) = cuda_decode_lease.take() {
-                    if let Err(err) = self.drain_cuda_decode_batch(lease) {
-                        tracing::warn!("Failed to drain the CUDA decode tail: {err}");
-                    }
-                }
+                self.drain_cuda_decode_lease(cuda_decode_lease.take());
                 self.replicate_request_to_daemons(&request);
                 break 'lp;
             }
 
-            let mut dispatches = 0;
-            while dispatches < pending.max_dispatches_per_step() {
-                let Some(request) = pending.take_bypass_control() else {
-                    break;
-                };
-                if !self.dispatch_prepared_request(request).await {
-                    break 'lp;
-                }
-                dispatches += 1;
-            }
-
-            while dispatches < pending.max_dispatches_per_step() {
-                let active_sequences = {
-                    let scheduler = get_mut_arcmutex!(self.scheduler);
-                    scheduler.waiting_len() + scheduler.running_len()
-                };
-                let request = if decode_batch_leased {
-                    pending.pop_admissible_workload(active_sequences)
-                } else {
-                    pending.pop_admissible(active_sequences)
-                };
-                let Some(request) = request else {
-                    break;
-                };
-                if !self.dispatch_prepared_request(request).await {
-                    break 'lp;
-                }
-                dispatches += 1;
+            if !self
+                .dispatch_admitted(&mut pending, decode_batch_leased)
+                .await
+            {
+                break 'lp;
             }
             let pending_metric = u32::try_from(pending.len()).unwrap_or(u32::MAX);
             metrics::gauge!("inference_requests_pending_admission").set(f64::from(pending_metric));
@@ -1247,114 +1404,47 @@ impl Engine {
                 #[cfg(feature = "cuda")]
                 if cuda_memory_pool.when_idle() {
                     debug_assert!(cuda_decode_lease.is_none());
-                    loop {
-                        let reclaimed = get_mut_arcmutex!(self.pipeline)
-                            .reclaim_cuda_graph_memory(cuda_memory::GRAPH_RECLAIM_BATCH_SIZE);
-                        if reclaimed == 0 || !cuda_memory_pool.after_graph_reclaim(0).graph_pressure
-                        {
-                            break;
-                        }
-                    }
+                    self.reclaim_idle_cuda_graph_memory(&mut cuda_memory_pool);
                 }
                 if channel_disconnected {
                     break 'lp;
                 }
-                if should_terminate() {
+                if self.should_terminate() {
                     self.replicate_request_to_daemons(&Request::Terminate);
                     break 'lp;
                 }
-                enum WaitEvent {
-                    Request(Option<Request>),
-                    Wake,
+                if !self.wait_for_work(&mut pending).await {
+                    break 'lp;
                 }
-                let wait_for_request = async {
-                    let mut rx = self.rx.lock().await;
-                    rx.recv().await
-                };
-                tokio::pin!(wait_for_request);
-                let wait_for_wake = self.pending_notify.notified();
-                tokio::pin!(wait_for_wake);
-
-                let event = select! {
-                    res = &mut wait_for_request => WaitEvent::Request(res),
-                    _ = &mut wait_for_wake => WaitEvent::Wake,
-                };
-
-                match event {
-                    WaitEvent::Request(Some(request)) => {
-                        let Some(request) = self.prepare_request_for_dispatch(request).await else {
-                            continue;
-                        };
-                        let class = Self::admission_class(&request);
-                        pending
-                            .push(request, class)
-                            .expect("idle admission queue must have capacity");
-                        // Give a concurrently submitted request wave one turn to reach the ingress channel.
-                        tokio::task::yield_now().await;
-                        continue;
-                    }
-                    WaitEvent::Request(None) => break 'lp,
-                    WaitEvent::Wake => {
-                        continue;
-                    }
-                }
+                continue;
             }
 
             if TERMINATE_ALL_NEXT_STEP.load(Ordering::SeqCst) {
                 self.replicate_request_to_daemons(&Request::TerminateAllSeqsNextStep);
                 #[cfg(feature = "cuda")]
                 if let Some(lease) = cuda_decode_lease.take() {
-                    let leased_rows = lease.rows.clone();
-                    let result = self.drain_cuda_decode_batch(lease);
-                    let mut guards = leased_rows
-                        .iter()
-                        .map(|seq| seq.lock().unwrap())
-                        .collect::<Vec<_>>();
-                    let mut guards_mut =
-                        guards.iter_mut().map(|seq| &mut **seq).collect::<Vec<_>>();
-                    handle_pipeline_forward_error!(
-                        "CUDA decode cancellation drain",
-                        result,
-                        &mut guards_mut,
-                        self.pipeline,
-                        'lp,
-                        self.prefix_cacher
-                    );
+                    if !self.cancel_cuda_decode_lease(lease).await {
+                        continue 'lp;
+                    }
                 }
             }
 
             #[cfg(feature = "cuda")]
             if let Some(lease) = cuda_decode_lease.take() {
-                let leased_rows = lease.rows.clone();
                 let allow_lookahead = !pending.blocks_decode_continuation() && {
                     let scheduler = get_mut_arcmutex!(self.scheduler);
                     scheduler.can_continue_decode_batch(&lease.sequence_ids)
                 };
-                let result = self
-                    .continue_cuda_decode_batch(
-                        lease,
-                        cuda_completion_worker
-                            .as_ref()
-                            .expect("CUDA decode lease requires a completion worker"),
-                        allow_lookahead,
-                        &rng,
-                    )
-                    .await;
-                let mut guards = leased_rows
-                    .iter()
-                    .map(|seq| seq.lock().unwrap())
-                    .collect::<Vec<_>>();
-                let mut guards_mut = guards.iter_mut().map(|seq| &mut **seq).collect::<Vec<_>>();
-                cuda_decode_lease = handle_pipeline_forward_error!(
-                    "resident CUDA decode step",
-                    result,
-                    &mut guards_mut,
-                    self.pipeline,
-                    'lp,
-                    self.prefix_cacher
-                );
-                drop(guards_mut);
-                drop(guards);
+                let worker = cuda_completion_worker
+                    .as_ref()
+                    .expect("CUDA decode lease requires a completion worker");
+                match self
+                    .step_cuda_decode_lease(lease, worker, allow_lookahead, &rng)
+                    .await
+                {
+                    LeaseStep::Failed => continue 'lp,
+                    LeaseStep::Next(next) => cuda_decode_lease = next,
+                }
                 if cuda_decode_lease.is_none() {
                     let mut scheduler = get_mut_arcmutex!(self.scheduler);
                     self.free_finished_scheduler_sequences(&mut *scheduler);
@@ -1376,23 +1466,15 @@ impl Engine {
                 .as_mut()
                 .map(|v| v as &mut dyn PagedPrefixCacheValidator);
             #[cfg(feature = "cuda")]
-            let waiting_prompt_preemption_enabled =
-                if let Some(workspace_bytes) = cuda_prompt_preemption_workspace {
-                    debug_assert!(cuda_decode_lease.is_none());
-                    let memory_status =
-                        self.maintain_cuda_prompt_memory(&mut cuda_memory_pool, workspace_bytes);
-                    if memory_status.insufficient_total_capacity {
-                        cuda_prompt_preemption_workspace = None;
-                        true
-                    } else if memory_status.maintenance_failed || memory_status.transient_pressure {
-                        false
-                    } else {
-                        cuda_prompt_preemption_workspace = None;
-                        true
-                    }
-                } else {
-                    true
-                };
+            let waiting_prompt_preemption_enabled = {
+                debug_assert!(
+                    cuda_prompt_preemption_workspace.is_none() || cuda_decode_lease.is_none()
+                );
+                self.waiting_prompt_preemption_enabled(
+                    &mut cuda_prompt_preemption_workspace,
+                    &mut cuda_memory_pool,
+                )
+            };
             let mut scheduler = get_mut_arcmutex!(self.scheduler);
             self.free_finished_scheduler_sequences(&mut *scheduler);
             #[cfg(feature = "cuda")]

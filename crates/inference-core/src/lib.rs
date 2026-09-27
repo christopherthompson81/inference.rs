@@ -112,7 +112,7 @@ mod response;
 mod scheduler;
 pub mod selection;
 mod sequence;
-mod sequence_macros;
+pub(crate) mod sequence_macros;
 pub mod speculative;
 mod speech_models;
 mod tools;
