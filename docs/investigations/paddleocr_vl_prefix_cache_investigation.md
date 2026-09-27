@@ -28,3 +28,30 @@ test time from `crates/inference/tests/fixtures/paddleocr_vl/tiny`) raised wheth
   - The real-weight test never exercised the prefix cache, so it could not catch the collision it is named for.
 - Implication: an image prefix-cache test only means something once image prompts can hit the cache.
 - Filed as #48; the image prefix-cache test returns on the tiny checkpoint once image prompts can hit.
+
+## Run 3 - 2026-09-27 03:30
+
+- Question: why do image prompts never hit (#48)?
+- Finding: `PaddleOcrVlImageProcessor` expanded the placeholder only in `process_inputs`, i.e. after the scheduler had
+  already looked up prefix blocks for the unexpanded prompt. Finished sequences register blocks under the expanded
+  prompt's hashes, so a repeat, looked up unexpanded, can never match. Other VL processors expand in
+  `prepare_for_paged_prompt_planning`, which `add_request` calls before the prefix lookup.
+- Change: the preprocess-and-expand step becomes `expand_image_prompt`, called from `prepare_for_paged_prompt_planning`
+  (and still from `process_inputs`, where it is then a no-op).
+- Result (paged, tiny checkpoint, probe): the scheduler now sees 326 tokens; page_00 and page_01 miss, the repeat of
+  page_00 hits 320 of 326 tokens.
+
+## Run 4 - 2026-09-27 03:45
+
+- The non-paged (CPU) path then failed: `299 image tokens in this pass do not line up with whole images after
+  position 9`. A probe in `window_images` showed `input_ids_full` holding only the 317-token suffix after the cached
+  prefix: after a non-paged prefix hit `get_toks()` is the suffix (`PrefillTokenView::SuffixOnly`). The processor now
+  builds `input_ids_full` from `prompt_position_source_toks()`, which is the whole prompt in that view. Before Run 3's
+  change this path was unreachable, since image prompts never matched.
+- The restored tiny test `prefix_cache_does_not_serve_one_image_for_another` compares greedy ids exactly and logprobs
+  within 1e-3 (a hit reuses KV from a different prefill, so logprobs match only to rounding). Mutation checks:
+  - pixel bytes dropped from `SequenceImages` hashing (same-size pages collide): fails on CPU and CUDA.
+  - image-span hash forced to 0 in `register_image_span`: fails on CUDA (paged block hashes); passes on CPU, where the
+    non-paged cacher compares per-image hashes instead.
+  - media keys dropped from `search_for_matching_cache`: passes on CPU because the cached entry then has more images
+    than the request and is skipped, so no wrong hit is served.

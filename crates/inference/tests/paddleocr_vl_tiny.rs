@@ -34,6 +34,8 @@ const WEIGHT_STD: f32 = 0.5;
 const WEIGHT_SEED: u64 = 0x0CE1_2024;
 // A scheduler spin never completes either request, so the mixed-batch test fails on this instead of hanging.
 const MIXED_BATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+// Cached KV comes from a different prefill than a full recompute, so logprobs match only to rounding.
+const LOGPROB_TOLERANCE: f32 = 1e-3;
 const ON_GPU: bool = cfg!(any(feature = "cuda", feature = "metal"));
 
 /// Hands out random tensors for whatever the model constructor asks for, and keeps them to write a checkpoint.
@@ -189,6 +191,50 @@ async fn mixed_text_and_image_batch_makes_progress() -> anyhow::Result<()> {
         alone,
         greedy_ids(&batched?),
         "image output changed when a text-only request shared the batch"
+    );
+    Ok(())
+}
+
+fn trace(resp: &inference::ChatCompletionResponse) -> Vec<(u32, f32)> {
+    resp.choices[0]
+        .logprobs
+        .as_ref()
+        .and_then(|lp| lp.content.as_ref())
+        .map(|toks| {
+            toks.iter()
+                .map(|t| (t.top_logprobs[0].token, t.top_logprobs[0].logprob))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn same_decode(a: &[(u32, f32)], b: &[(u32, f32)]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| x.0 == y.0 && (x.1 - y.1).abs() < LOGPROB_TOLERANCE)
+}
+
+// Same-size pages give byte-identical prompts, so only the registered image span keeps their KV blocks apart.
+#[tokio::test]
+async fn prefix_cache_does_not_serve_one_image_for_another() -> anyhow::Result<()> {
+    let dir = tiny_checkpoint()?;
+    let model = build(dir.path()).await?;
+    let run = async |name: &str| -> anyhow::Result<Vec<(u32, f32)>> {
+        Ok(trace(&model.send_chat_request(image_request(name)?).await?))
+    };
+    let first = run("page_00.png").await?;
+    assert!(!first.is_empty());
+    // Random weights often share an argmax across images; the logprobs still tell them apart.
+    let other = run("page_01.png").await?;
+    assert!(
+        !same_decode(&other, &first),
+        "page_01 was served page_00's cached blocks: {other:?}"
+    );
+    let again = run("page_00.png").await?;
+    assert!(
+        same_decode(&again, &first),
+        "prefix cache reuse changed page_00: {first:?} vs {again:?}"
     );
     Ok(())
 }

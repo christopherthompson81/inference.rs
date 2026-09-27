@@ -32,6 +32,9 @@ use crate::{
 use super::preprocess::{preprocess_decoded, MERGE};
 use super::PaddleOcrVlVisionSpecificArgs;
 
+// One image grid row as (t, h, w) in patches.
+type ImageGrid = (usize, usize, usize);
+
 pub struct PaddleOcrVlProcessor;
 
 impl PaddleOcrVlProcessor {
@@ -160,7 +163,7 @@ fn register_image_span(seq: &mut Sequence, ids: &[u32], tokenizer: &Tokenizer) {
     }
 }
 
-fn grid_rows(grid: &Tensor) -> Vec<(usize, usize, usize)> {
+fn grid_rows(grid: &Tensor) -> Vec<ImageGrid> {
     grid.to_vec2::<u32>()
         .unwrap()
         .into_iter()
@@ -168,9 +171,91 @@ fn grid_rows(grid: &Tensor) -> Vec<(usize, usize, usize)> {
         .collect()
 }
 
+impl PaddleOcrVlImageProcessor {
+    /// Preprocesses the sequence's images once and expands its placeholders to the grid, registering the image span.
+    fn expand_image_prompt(
+        &self,
+        seq: &mut Sequence,
+        tokenizer: &Tokenizer,
+        config: &PreProcessorConfig,
+        device: &Device,
+        paged_attn_metadata: Option<&mut PagedAttentionMeta>,
+    ) -> Result<(Tensor, Vec<ImageGrid>)> {
+        let (pixel_values, row_grids) = match &seq.multimodal.cached_pixel_values {
+            Some(cached) => (
+                cached.clone(),
+                grid_rows(seq.multimodal.cached_img_thw.as_ref().unwrap()),
+            ),
+            None => {
+                let PreprocessedImages {
+                    pixel_values,
+                    image_grid_thw,
+                    ..
+                } = self.preprocess(
+                    seq.clone_images().expect("Need images by this point."),
+                    vec![],
+                    config,
+                    device,
+                    (usize::MAX, usize::MAX),
+                )?;
+                seq.multimodal.cached_pixel_values = Some(pixel_values.clone());
+                seq.multimodal.cached_img_thw = image_grid_thw.clone();
+                (pixel_values, grid_rows(image_grid_thw.as_ref().unwrap()))
+            }
+        };
+
+        if !seq.multimodal.has_changed_prompt {
+            let detok = tokenizer
+                .decode(seq.get_toks(), false)
+                .expect("Detokenization failed!");
+            let detok = expand_placeholders(&detok, &row_grids, MERGE)?;
+            let ids = tokenizer
+                .encode_fast(detok.clone(), false)
+                .expect("Tokenization failed!")
+                .get_ids()
+                .to_vec();
+            seq.set_initial_prompt(detok);
+            // Before set_toks_and_reallocate: the block hashes it triggers must see the span.
+            register_image_span(seq, &ids, tokenizer);
+            seq.set_toks_and_reallocate(ids, paged_attn_metadata);
+            seq.multimodal.has_changed_prompt = true;
+        }
+        Ok((pixel_values, row_grids))
+    }
+}
+
 impl InputsProcessor for PaddleOcrVlImageProcessor {
     fn get_type(&self) -> InputsProcessorType {
         InputsProcessorType::Vision
+    }
+
+    // The scheduler looks up prefix-cache blocks before process_inputs runs, so it must see the expanded prompt.
+    fn prepare_for_paged_prompt_planning(
+        &self,
+        tokenizer: Option<Arc<Tokenizer>>,
+        input_seqs: &mut [&mut Sequence],
+        device: &Device,
+        other_config: Option<Arc<dyn Any>>,
+        mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
+    ) -> Result<()> {
+        if !input_seqs.iter().any(|seq| seq.has_images()) {
+            return Ok(());
+        }
+        let Some(tokenizer) = tokenizer else {
+            anyhow::bail!("PaddleOcrVlImageProcessor requires a specified tokenizer.");
+        };
+        let config = other_config.expect("Need a PreProcessorConfig config.");
+        let config: &PreProcessorConfig = config.downcast_ref().expect("Downcast failed.");
+        for seq in input_seqs.iter_mut().filter(|seq| seq.has_images()) {
+            self.expand_image_prompt(
+                seq,
+                &tokenizer,
+                config,
+                device,
+                paged_attn_metadata.as_deref_mut(),
+            )?;
+        }
+        Ok(())
     }
 
     fn process_inputs(
@@ -221,45 +306,13 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
                 hashes.push(Vec::new());
                 continue;
             }
-            let (pixel_values, row_grids) = match &seq.multimodal.cached_pixel_values {
-                Some(cached) => (
-                    cached.clone(),
-                    grid_rows(seq.multimodal.cached_img_thw.as_ref().unwrap()),
-                ),
-                None => {
-                    let PreprocessedImages {
-                        pixel_values,
-                        image_grid_thw,
-                        ..
-                    } = self.preprocess(
-                        seq.clone_images().expect("Need images by this point."),
-                        vec![],
-                        config,
-                        device,
-                        (usize::MAX, usize::MAX),
-                    )?;
-                    seq.multimodal.cached_pixel_values = Some(pixel_values.clone());
-                    seq.multimodal.cached_img_thw = image_grid_thw.clone();
-                    (pixel_values, grid_rows(image_grid_thw.as_ref().unwrap()))
-                }
-            };
-
-            if !seq.multimodal.has_changed_prompt {
-                let detok = tokenizer
-                    .decode(seq.get_toks(), false)
-                    .expect("Detokenization failed!");
-                let detok = expand_placeholders(&detok, &row_grids, MERGE)?;
-                let ids = tokenizer
-                    .encode_fast(detok.clone(), false)
-                    .expect("Tokenization failed!")
-                    .get_ids()
-                    .to_vec();
-                seq.set_initial_prompt(detok);
-                // Before set_toks_and_reallocate: the block hashes it triggers must see the span.
-                register_image_span(seq, &ids, &tokenizer);
-                seq.set_toks_and_reallocate(ids, paged_attn_metadata.as_mut());
-                seq.multimodal.has_changed_prompt = true;
-            }
+            let (pixel_values, row_grids) = self.expand_image_prompt(
+                seq,
+                &tokenizer,
+                config,
+                device,
+                paged_attn_metadata.as_mut(),
+            )?;
 
             grids.push(row_grids);
             // Full list, not the window-scoped one: the model pairs hash i with grid i.
@@ -327,15 +380,15 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
             .unwrap()
         };
 
-        // mrope positions are recomputed from the full history, not just this pass's window.
+        // mrope positions are recomputed from the full history; after a prefix hit get_toks is only the suffix.
         let max_len = input_seqs
             .iter()
-            .map(|seq| seq.get_toks().len())
+            .map(|seq| seq.prompt_position_source_toks().len())
             .max()
             .unwrap_or(0);
         let mut rows = Vec::with_capacity(input_seqs.len());
         for seq in input_seqs.iter() {
-            let mut ids = seq.get_toks().to_vec();
+            let mut ids = seq.prompt_position_source_toks().to_vec();
             ids.resize(max_len, 0);
             rows.push(Tensor::new(ids, device).unwrap());
         }
