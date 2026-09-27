@@ -199,32 +199,6 @@ async fn two_images_in_one_message_match_transformers() -> anyhow::Result<()> {
 mod gpu {
     use super::*;
 
-    // A scheduler spin never completes either request, so the mixed-batch test fails on this instead of hanging.
-    const MIXED_BATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-
-    // Same-size pages give byte-identical prompts, so only the registered image span keeps their KV blocks apart.
-    #[tokio::test]
-    async fn prefix_cache_does_not_serve_one_image_for_another() -> anyhow::Result<()> {
-        skip_unless_model!("paged prefix cache");
-        let model = build(true).await?;
-        let run = async |name: &str| -> anyhow::Result<String> {
-            Ok(text(
-                &model
-                    .send_chat_request(image_request(vec![fixture(name)?], OCR_PROMPT, MAX_LEN))
-                    .await?,
-            ))
-        };
-        let first = run("page_00.png").await?;
-        assert_eq!(first, golden("page_00.png").1);
-        assert_eq!(run("page_01.png").await?, golden("page_01.png").1);
-        assert_eq!(
-            run("page_00.png").await?,
-            first,
-            "prefix cache reuse changed page_00"
-        );
-        Ok(())
-    }
-
     #[tokio::test]
     async fn isq_q8_0_keeps_ocr_text() -> anyhow::Result<()> {
         skip_unless_model!("ISQ Q8_0");
@@ -240,32 +214,6 @@ mod gpu {
                 .await?;
             assert_eq!(text(&resp), golden, "{name}");
         }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn mixed_text_and_image_batch_makes_progress() -> anyhow::Result<()> {
-        skip_unless_model!("paged mixed batch");
-        let model = build(true).await?;
-        let image = image_request(vec![fixture("page_00.png")?], OCR_PROMPT, MAX_LEN);
-        let alone = text(&model.send_chat_request(image.clone()).await?);
-        let (batched, text_only) = tokio::time::timeout(MIXED_BATCH_TIMEOUT, async {
-            tokio::join!(
-                model.send_chat_request(image),
-                model.send_chat_request(
-                    RequestBuilder::new()
-                        .add_message(TextMessageRole::User, TEXT_ONLY_PROMPT)
-                        .set_sampler_max_len(8)
-                )
-            )
-        })
-        .await?;
-        text_only?;
-        assert_eq!(
-            alone,
-            text(&batched?),
-            "OCR output changed when a text-only request shared the batch"
-        );
         Ok(())
     }
 }

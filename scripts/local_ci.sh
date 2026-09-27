@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Canonical local checks with fixed package/feature sets: scripts/local_ci.sh [--lint] [--tests] [--cuda] [--models]
-# [--slim] [--docs]; --models runs the real-checkpoint parity tests on CPU (they always run under --cuda).
+# [--slim] [--docs]; --models runs the real-checkpoint parity tests on CPU (--cuda keeps one GPU parity check).
 # --slim lints inference-core with no model families and with each family alone, so feature gates stay intact.
 # With --cuda, the GPU-bound CUDA suite runs in the background while the CPU lint and tests run.
 # --sweep then deletes target/debug artifacts the selected modes no longer use (stale variants pile up otherwise).

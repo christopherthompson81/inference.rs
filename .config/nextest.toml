@@ -6,7 +6,7 @@
 # left for the kernel tests and the desktop. Size this to the card: (VRAM - idle - headroom) / 2.5 GB.
 gpu-model = { max-threads = 6 }
 
-# Real-checkpoint parity tests run under `--cuda` and on request (`local_ci.sh --models`), not in the CPU unit suite.
+# Real-checkpoint parity tests are integration tests: they run on request (`local_ci.sh --models`), not on every cycle.
 [profile.default]
 default-filter = 'not (binary(paddleocr_vl) | (package(inference-ffi) & test(detections)))'
 
@@ -23,10 +23,16 @@ priority = 100
 filter = 'package(inference-sandbox) & test(rlimit_nproc_caps_processes)'
 threads-required = 'num-test-threads'
 
-# CPU runs of the model tests don't touch VRAM, so only the CUDA suite is capped.
+# The CUDA suite keeps a greedy parity check and the real-weight ISQ check; the rest, and the CPU layout detection, run on request
+# with --models. Engine behavior runs on the tiny random-weight checkpoint in paddleocr_vl_tiny.
 [profile.cuda]
-default-filter = 'all()'
+default-filter = """
+not (
+    (binary(paddleocr_vl) & not (test(=greedy_ids_match_transformers) | test(=gpu::isq_q8_0_keeps_ocr_text)))
+    | (package(inference-ffi) & test(detections))
+)
+"""
 
 [[profile.cuda.overrides]]
-filter = 'binary(paddleocr_vl) | (package(inference-ffi) & test(detections))'
+filter = 'binary(paddleocr_vl)'
 test-group = 'gpu-model'
