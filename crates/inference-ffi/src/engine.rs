@@ -50,6 +50,13 @@ pub struct inference_string {
     text: CString,
 }
 
+/// Opaque; mirrors `inference_audio`.
+#[allow(non_camel_case_types)]
+pub struct inference_audio {
+    bytes: Vec<u8>,
+    mime_type: CString,
+}
+
 // The header promises engines may be shared across threads and streams moved between them.
 const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
@@ -249,22 +256,41 @@ unsafe fn stream_call(
     out_stream: *mut *mut inference_stream,
     open: impl FnOnce(&BlockingEngine, &[u8]) -> FfiResult<BlockingStream>,
 ) -> inference_status {
+    engine_call(
+        engine,
+        request,
+        request_len,
+        (out_stream, "out_stream"),
+        |engine, request| {
+            let stream = open(engine, request)?;
+            Ok(Box::into_raw(Box::new(inference_stream {
+                stream,
+                done: false,
+            })))
+        },
+    )
+}
+
+// Every blocking operation has the same shape: engine and request in, an owned handle out.
+unsafe fn engine_call<H>(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out: (*mut *mut H, &str),
+    call: impl FnOnce(&BlockingEngine, &[u8]) -> FfiResult<*mut H>,
+) -> inference_status {
+    let (out, out_name) = out;
     guard(|| {
-        out_arg(out_stream, "out_stream")?;
+        out_arg(out, out_name)?;
         let engine = engine
             .as_ref()
             .ok_or_else(|| Failure::invalid("engine is NULL"))?;
         let request = arg_bytes(request, request_len, "request")?;
-        let stream = open(&engine.engine, request)?;
-        out_stream.write(Box::into_raw(Box::new(inference_stream {
-            stream,
-            done: false,
-        })));
+        out.write(call(&engine.engine, request)?);
         Ok(())
     })
 }
 
-// Every blocking JSON operation has the same shape: engine and request in, an owned response string out.
 unsafe fn json_call(
     engine: *const inference_engine,
     request: *const c_char,
@@ -272,16 +298,13 @@ unsafe fn json_call(
     out_response: *mut *mut inference_string,
     call: impl FnOnce(&BlockingEngine, &[u8]) -> FfiResult<String>,
 ) -> inference_status {
-    guard(|| {
-        out_arg(out_response, "out_response")?;
-        let engine = engine
-            .as_ref()
-            .ok_or_else(|| Failure::invalid("engine is NULL"))?;
-        let request = arg_bytes(request, request_len, "request")?;
-        let response = call(&engine.engine, request)?;
-        out_response.write(string_handle(response));
-        Ok(())
-    })
+    engine_call(
+        engine,
+        request,
+        request_len,
+        (out_response, "out_response"),
+        |engine, request| call(engine, request).map(string_handle),
+    )
 }
 
 /// Safety: as for `inference_chat`.
@@ -616,6 +639,82 @@ pub unsafe extern "C" fn inference_lora_adapter_unload(
                 .map_err(api_failure)
         },
     )
+}
+
+/// Safety: as for `inference_chat`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_image_generation(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| engine.image_generation_json(request).map_err(api_failure),
+    )
+}
+
+/// Safety: `engine` is a live handle, `request` valid for `request_len` bytes, `out_audio` valid for a write.
+#[no_mangle]
+pub unsafe extern "C" fn inference_speech_generation(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_audio: *mut *mut inference_audio,
+) -> inference_status {
+    engine_call(
+        engine,
+        request,
+        request_len,
+        (out_audio, "out_audio"),
+        |engine, request| {
+            let audio = engine
+                .speech_generation_json(request)
+                .map_err(api_failure)?;
+            Ok(Box::into_raw(Box::new(inference_audio {
+                bytes: audio.bytes,
+                mime_type: CString::new(audio.content_type).expect("audio content types are ASCII"),
+            })))
+        },
+    )
+}
+
+/// Safety: `audio` is NULL or a live audio handle.
+#[no_mangle]
+pub unsafe extern "C" fn inference_audio_data(audio: *const inference_audio) -> *const u8 {
+    guard_value(std::ptr::null(), || {
+        audio
+            .as_ref()
+            .map_or(std::ptr::null(), |audio| audio.bytes.as_ptr())
+    })
+}
+
+/// Safety: `audio` is NULL or a live audio handle.
+#[no_mangle]
+pub unsafe extern "C" fn inference_audio_len(audio: *const inference_audio) -> usize {
+    guard_value(0, || audio.as_ref().map_or(0, |audio| audio.bytes.len()))
+}
+
+/// Safety: `audio` is NULL or a live audio handle.
+#[no_mangle]
+pub unsafe extern "C" fn inference_audio_mime_type(audio: *const inference_audio) -> *const c_char {
+    guard_value(c"".as_ptr(), || {
+        audio
+            .as_ref()
+            .map_or(c"".as_ptr(), |audio| audio.mime_type.as_ptr())
+    })
+}
+
+/// Safety: `audio` is NULL or an audio handle that is not used again.
+#[no_mangle]
+pub unsafe extern "C" fn inference_audio_free(audio: *mut inference_audio) {
+    if !audio.is_null() {
+        guard_value((), || drop(Box::from_raw(audio)));
+    }
 }
 
 /// Safety: `stream` is a live handle not used concurrently; `out_event` and `out_done` are valid for writes.

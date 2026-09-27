@@ -8,6 +8,7 @@ use tokio::runtime::Runtime;
 use crate::{
     api_error::ApiError,
     engine::{Engine, EngineLoadError},
+    generation::SpeechAudio,
     media_source::MediaAttachments,
 };
 
@@ -138,6 +139,18 @@ impl BlockingEngine {
     pub fn embeddings_json(&self, request: &[u8]) -> Result<String, ApiError> {
         self.call(request, |engine, request| async move {
             engine.embeddings_json(&request).await
+        })
+    }
+
+    pub fn image_generation_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.image_generation_json(&request).await
+        })
+    }
+
+    pub fn speech_generation_json(&self, request: &[u8]) -> Result<SpeechAudio, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.speech_generation_json(&request).await
         })
     }
 
