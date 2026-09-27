@@ -21,6 +21,14 @@ fn default_max_batch_size() -> usize {
     AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE
 }
 
+fn default_max_num_images() -> usize {
+    AutoDeviceMapParams::DEFAULT_MAX_NUM_IMAGES
+}
+
+fn default_max_image_length() -> usize {
+    AutoDeviceMapParams::DEFAULT_MAX_IMAGE_LENGTH
+}
+
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub enum ModelSelected {
     /// Select a model for running via auto loader
@@ -32,6 +40,7 @@ pub enum ModelSelected {
         tokenizer_json: Option<String>,
 
         /// Model data type. Defaults to `auto`.
+        #[serde(default = "default_model_dtype")]
         dtype: ModelDType,
 
         /// Path to a topology YAML file.
@@ -57,9 +66,11 @@ pub enum ModelSelected {
         max_edge: Option<u32>,
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_seq_len")]
         max_seq_len: usize,
 
         /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_batch_size")]
         max_batch_size: usize,
 
         /// Maximum prompt number of images to expect for this model. This affects automatic device mapping but is not a hard limit.
@@ -599,6 +610,7 @@ pub enum ModelSelected {
         arch: Option<MultimodalLoaderType>,
 
         /// Model data type. Defaults to `auto`.
+        #[serde(default = "default_model_dtype")]
         dtype: ModelDType,
 
         /// Path to a topology YAML file.
@@ -621,16 +633,20 @@ pub enum ModelSelected {
         imatrix: Option<PathBuf>,
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_seq_len")]
         max_seq_len: usize,
 
         /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_batch_size")]
         max_batch_size: usize,
 
         /// Maximum prompt number of images to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_num_images")]
         max_num_images: usize,
 
         /// Maximum expected image size will have this edge length on both edges.
         /// This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_image_length")]
         max_image_length: usize,
 
         /// Cache path for Hugging Face models downloaded locally

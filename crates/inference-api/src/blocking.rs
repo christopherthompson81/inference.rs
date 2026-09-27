@@ -1,0 +1,91 @@
+//! A synchronous face of [`Engine`] for callers without an async runtime, such as the C ABI.
+
+use std::{sync::OnceLock, time::Duration};
+
+use tokio::runtime::Runtime;
+
+use crate::{
+    api_error::ApiError,
+    engine::{Engine, EngineLoadError},
+    engine_chat::ChatStream,
+};
+
+static RUNTIME: OnceLock<Runtime> = OnceLock::new();
+
+// Multi-threaded because engine start-up uses `block_in_place`, which a current-thread runtime does not allow.
+fn runtime() -> &'static Runtime {
+    RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .thread_name("inference-api")
+            .build()
+            .expect("failed to start the inference-api runtime")
+    })
+}
+
+// Work runs on a runtime worker, never on the caller's thread, so `block_in_place` inside the engine is allowed.
+fn run<T: Send + 'static>(work: impl std::future::Future<Output = T> + Send + 'static) -> T {
+    let rt = runtime();
+    rt.block_on(rt.spawn(work))
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic.into_panic()))
+}
+
+/// A loaded engine behind blocking calls. Calling from inside a tokio runtime panics, as `Runtime::block_on` does.
+#[derive(Clone)]
+pub struct BlockingEngine {
+    engine: Engine,
+}
+
+impl BlockingEngine {
+    pub fn load_json(spec: &[u8]) -> Result<Self, EngineLoadError> {
+        let spec = spec.to_vec();
+        run(async move { Engine::load_json(&spec).await }).map(|engine| Self { engine })
+    }
+
+    pub fn engine(&self) -> &Engine {
+        &self.engine
+    }
+
+    pub fn chat_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let (engine, request) = (self.engine.clone(), request.to_vec());
+        run(async move { engine.chat_json(&request).await })
+    }
+
+    pub fn chat_stream_json(&self, request: &[u8]) -> Result<BlockingChatStream, ApiError> {
+        let (engine, request) = (self.engine.clone(), request.to_vec());
+        run(async move { engine.chat_stream_json(&request).await })
+            .map(|stream| BlockingChatStream { stream })
+    }
+}
+
+/// What one poll of a stream produced.
+pub enum StreamPoll {
+    /// One event, serialized as its JSON envelope.
+    Event(String),
+    /// Nothing arrived within the timeout; the stream is still live.
+    Timeout,
+    /// The stream has finished.
+    Done,
+}
+
+/// A streaming chat request behind blocking polls. Dropping it abandons the request.
+pub struct BlockingChatStream {
+    stream: ChatStream,
+}
+
+impl BlockingChatStream {
+    /// Waits up to `timeout` (forever when `None`) for the next event.
+    pub fn next(&mut self, timeout: Option<Duration>) -> StreamPoll {
+        let event = runtime().block_on(async {
+            match timeout {
+                Some(timeout) => tokio::time::timeout(timeout, self.stream.next_event()).await,
+                None => Ok(self.stream.next_event().await),
+            }
+        });
+        match event {
+            Ok(Some(event)) => StreamPoll::Event(event.to_json()),
+            Ok(None) => StreamPoll::Done,
+            Err(_) => StreamPoll::Timeout,
+        }
+    }
+}

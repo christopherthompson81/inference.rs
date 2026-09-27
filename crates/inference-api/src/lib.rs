@@ -1,8 +1,10 @@
-//! The inference.rs engine surface, free of HTTP: the HTTP server is built on it, and the C ABI is to expose it.
+//! The inference.rs engine surface, free of HTTP: the HTTP server is built on it and the C ABI exposes it.
 
 pub mod agentic;
 pub mod api_error;
+pub mod blocking;
 pub mod dispatch;
+pub mod engine;
 pub mod engine_chat;
 pub mod inference_for_server_builder;
 #[doc(hidden)]
@@ -18,3 +20,5 @@ pub mod skill_store;
 pub mod types;
 pub mod util;
 pub mod video;
+
+pub use engine::{Engine, EngineLoadError, EngineSpec};

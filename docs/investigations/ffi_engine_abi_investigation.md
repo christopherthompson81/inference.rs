@@ -168,3 +168,38 @@ Change: the crate move.
 Result: green, 2132 CPU / 2450 CUDA tests (+3 from the split tests). `docs/openapi.json` changed only in a doc
 example path (`inference_api::openai`).
 
+## Run 6 - 2026-09-28 (just after midnight)
+
+Change: the engine C ABI, first slice (ABI 0.2.0).
+- `inference-api`: `Engine` (load from an `EngineSpec` JSON over the server builder, so loading is the Run 15-17
+  path; `chat` / `chat_stream` and their JSON forms, with the HTTP route's error mapping and logging), and a
+  `blocking` module: one process-wide multi-thread runtime, and work runs on its workers because engine start-up
+  calls `block_in_place`. `ChatStreamEvent::to_json` is the stream envelope `{"event", "data"}`.
+- `inference-ffi` (shim only): `inference_engine_load/free`, `inference_chat`, `inference_chat_stream_open`,
+  `inference_stream_next(timeout_ms)` / `free`, `inference_string_data/len/free`; new statuses
+  `INFERENCE_ERR_INVALID_REQUEST` (7) and `INFERENCE_ERR_UNAVAILABLE` (8), with the OpenAI error JSON as
+  `inference_last_error`. The spec rejects `agent_permission: "ask"` until approvals are exposed.
+- `ModelSelected::MultimodalPlain` / `Run` gain serde defaults for dtype and device-map sizes (as `Plain` has), so a
+  spec can name just the model.
+
+Tests: `tests/engine_abi.rs` loads the tiny random-weight PaddleOCR-VL through the ABI: blocking and streamed chat
+decode the same text, a finished stream stays finished, malformed JSON and an unknown model are
+`INVALID_REQUEST` with an OpenAI error body, bad specs are `INVALID_ARGUMENT`, a missing model is `LOAD_FAILED`, NULL
+arguments are rejected. First run: the unknown-model assertion expected `param: "model"`, but that error comes from
+request validation with `param: null`, the same body HTTP returns today; the test now checks the message.
+`tests/header.rs`: the header declares exactly the `#[no_mangle]` exports, and compiles as strict C99 (the same
+checks `tests/run.sh` does against a release build, now in every test run).
+
+Measurement (the open question from Run 1): `ChatStreamEvent::to_json` plus a client-side `serde_json` parse costs
+5.6 us per chunk (288 bytes) in release (`inference-api/tests/json_cost.rs`, ignored benchmark). Against decode
+steps of milliseconds per token this is noise, so JSON stays the wire format.
+
+Result: green, 2137 CPU / 2455 CUDA tests.
+
+Review fixes: a request (not only the spec) asking `agent_permission: "ask"` is rejected on this surface, since a
+caller could not answer the approval and the request would wait out the broker's 300 s; `max_seqs` defaults to 32 as
+`inference serve` does (the builder's own default is 16); a device the build or machine lacks is
+`INFERENCE_ERR_NOT_AVAILABLE`; `inference_stream_next` requires `out_done`; a compile-time assert pins the header's
+thread-safety claims; the header documents the error JSON on RUNTIME, the up-to-10 s wait when the last handle is
+freed, and what the surface does not offer yet.
+
