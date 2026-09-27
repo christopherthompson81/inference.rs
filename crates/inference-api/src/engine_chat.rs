@@ -902,7 +902,7 @@ pub struct PreparedChat {
 }
 
 /// Why a chat request was not dispatched. Validation errors are the caller's; internal ones are the engine's.
-pub enum ChatDispatchError {
+pub enum DispatchError {
     Validation(Box<dyn std::error::Error + Send + Sync>),
     Internal(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -914,11 +914,11 @@ impl ChatEngine {
         mut oairequest: ChatCompletionRequest,
         tool_surface: OpenAiToolSurface,
         media: MediaAttachments,
-    ) -> Result<PreparedChat, ChatDispatchError> {
+    ) -> Result<PreparedChat, DispatchError> {
         let (tx, rx) = create_response_channel(None);
         let requested_model = oairequest.model.clone();
         resolve_lora_adapter_model(&self.state, &mut oairequest.model, &mut oairequest.adapter)
-            .map_err(|error| ChatDispatchError::Validation(Box::new(error)))?;
+            .map_err(|error| DispatchError::Validation(Box::new(error)))?;
         let model_override = request_model_override(requested_model, &oairequest.model);
 
         oairequest.max_tool_rounds = oairequest.max_tool_rounds.or(self.agentic.max_tool_rounds);
@@ -937,7 +937,7 @@ impl ChatEngine {
         let asks = matches!(oairequest.agent_permission, Some(AgentPermission::Ask));
         let is_streaming = oairequest.stream.unwrap_or(false);
         if asks && !is_streaming {
-            return Err(ChatDispatchError::Validation(Box::new(JsonError::new(
+            return Err(DispatchError::Validation(Box::new(JsonError::new(
                 ASK_REQUIRES_STREAMING.to_string(),
             ))));
         }
@@ -961,10 +961,10 @@ impl ChatEngine {
             },
         )
         .await
-        .map_err(|error| ChatDispatchError::Validation(error.into()))?;
+        .map_err(|error| DispatchError::Validation(error.into()))?;
         send_request_with_model(&self.state, request, model_id.as_deref())
             .await
-            .map_err(|error| ChatDispatchError::Internal(error.into()))?;
+            .map_err(|error| DispatchError::Internal(error.into()))?;
         Ok(PreparedChat {
             rx,
             is_streaming,

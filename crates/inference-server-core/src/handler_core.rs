@@ -5,17 +5,14 @@ use axum::{
     http::StatusCode,
     response::IntoResponse,
 };
-use inference_core::Response;
-use tokio::sync::mpsc::Receiver;
 
 pub(crate) use crate::api_error::{
     ApiError, ApiErrorKind, ModelErrorMessage, INTERNAL_ERROR_MESSAGE, SERVICE_UNAVAILABLE_MESSAGE,
 };
-pub(crate) use crate::dispatch::{apply_model_override, request_model_override};
+pub(crate) use crate::dispatch::{apply_model_override, base_process_non_streaming_response};
 pub use crate::dispatch::{
     create_response_channel, send_request, send_request_with_model, DEFAULT_CHANNEL_BUFFER_SIZE,
 };
-use crate::types::SharedInferenceRsState;
 
 /// Error message attached to a failed response so the access log can report it.
 #[derive(Clone, Debug)]
@@ -112,32 +109,6 @@ impl ApiErrorHttp for ApiError {
             ApiErrorKind::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             ApiErrorKind::Unavailable | ApiErrorKind::Overloaded => StatusCode::SERVICE_UNAVAILABLE,
             ApiErrorKind::Internal => StatusCode::INTERNAL_SERVER_ERROR,
-        }
-    }
-}
-
-/// Generic function to process non-streaming responses.
-pub(crate) async fn base_process_non_streaming_response<R, M, E>(
-    rx: &mut Receiver<Response>,
-    state: SharedInferenceRsState,
-    match_fn: M,
-    error_handler: E,
-) -> R
-where
-    M: FnOnce(SharedInferenceRsState, Response) -> R,
-    E: FnOnce(SharedInferenceRsState, Box<dyn std::error::Error + Send + Sync + 'static>) -> R,
-{
-    loop {
-        match rx.recv().await {
-            Some(Response::AgenticToolCallProgress { .. }) => continue,
-            Some(Response::BlockDenoisingProgress(_)) => continue,
-            Some(Response::AgenticToolApprovalRequired { .. }) => continue,
-            Some(Response::File(_)) => continue,
-            Some(response) => return match_fn(state, response),
-            None => {
-                let error = anyhow::Error::msg("No response received from the model.");
-                return error_handler(state, error.into());
-            }
         }
     }
 }
