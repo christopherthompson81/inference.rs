@@ -203,3 +203,30 @@ caller could not answer the approval and the request would wait out the broker's
 thread-safety claims; the header documents the error JSON on RUNTIME, the up-to-10 s wait when the last handle is
 freed, and what the surface does not offer yet.
 
+
+## Run 7 - 2026-09-28
+
+Change: media attachments by pointer.
+- `media_source::MediaAttachments`: a request's buffers, named from the JSON as `media://<index>` wherever an image,
+  audio or video URL goes. `MediaAttachments::load` resolves those and hands everything else to `load_media_source`,
+  so URL sources keep their parsers, policies and limits. Attachments skip the URL byte cap (`MAX_MEDIA_BYTES`): the
+  caller already holds the buffer in process, and the decode-side limits (GIF size, video frame sampling) still apply. `ChatCompletionParseContext` and `ChatEngine::prepare` carry the
+  table; HTTP passes an empty one.
+- `Engine::chat` / `chat_stream` (and their JSON and blocking forms) take the attachments.
+- ABI: `inference_media { data, len, mime_type }`, `inference_chat_with_media`,
+  `inference_chat_stream_open_with_media`; the existing calls are the zero-attachment case.
+
+Versioning (owner): "all of the ABI versions should be pre-0.x at this point. We haven't stabilized it." The ABI moves
+to 0.0.3 (after 0.1.0 for layout and 0.2.0 for the first engine slice): while it is 0.0.x every change bumps the
+patch number and may break callers, which should require an exact match; the add-only minor rule starts at 0.1.0.
+
+Tests: `attached_media_decodes_like_the_same_image_as_a_data_url` sends a fixture page as a base64 data URL and as an
+attachment and compares the decoded tokens (identical); a reference past the attachments is `INVALID_REQUEST`, and
+`media == NULL` with a nonzero count is `INVALID_ARGUMENT`. First run: the missing-attachment error surfaces as the
+parser's context ("Failed to parse image resource: media://1"), as every media error does over HTTP; the detail
+("names no attachment") is in the cause chain, so the test checks for the source.
+
+Review fixes: the header names the chat fields (`image_url` / `audio_url` / `video_url`) and requires non-NULL `data`;
+the version tests (Rust and C) assert the exact version, since 0.0.x callers must match exactly. The packed version
+goes down (0x000200 to 0x000003), so a binding that checked "minor >= 2" now rejects the library, as intended.
+

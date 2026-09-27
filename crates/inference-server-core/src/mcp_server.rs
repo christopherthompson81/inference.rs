@@ -271,6 +271,7 @@ async fn call_chat_tool(
             agent_approval_notifier: None,
             tool_surface: OpenAiToolSurface::ChatCompletions,
             skill_store: None,
+            media: Default::default(),
         },
     )
     .await

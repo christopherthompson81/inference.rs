@@ -28,8 +28,9 @@ The library is written to `target/release/`. rustc exports only the crate's `#[n
 ## Versioning
 
 `inference_abi_version()` returns `(major << 16) | (minor << 8) | patch`, matching the `INFERENCE_ABI_VERSION_*` macros
-in the header. A different major version is incompatible. Minor versions only add entry points, and patch versions
-change behaviour only.
+in the header. The ABI is not stable yet: while it is 0.0.x, every change bumps the patch number and may break
+callers, so bindings should require an exact match. Compatibility rules (minor versions add entry points, patch
+versions fix behaviour) start at 0.1.0.
 
 ## Tests
 

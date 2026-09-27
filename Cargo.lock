@@ -3210,6 +3210,7 @@ name = "inference-ffi"
 version = "0.9.3"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "candle-core",
  "candle-nn",
  "image",

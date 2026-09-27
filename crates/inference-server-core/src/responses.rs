@@ -2027,6 +2027,7 @@ async fn parse_openresponses_request(
             agent_approval_notifier: None,
             tool_surface: OpenAiToolSurface::Responses,
             skill_store: Some(skill_store),
+            media: Default::default(),
         },
     )
     .await?;

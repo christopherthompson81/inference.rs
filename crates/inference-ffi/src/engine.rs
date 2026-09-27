@@ -8,6 +8,7 @@ use std::{
 use inference_api::{
     api_error::{ApiError, ApiErrorKind},
     blocking::{BlockingChatStream, BlockingEngine, StreamPoll},
+    media_source::{MediaAttachment, MediaAttachments},
     EngineLoadError,
 };
 
@@ -19,6 +20,15 @@ use crate::{
     },
     Failure, FfiResult,
 };
+
+/// Mirrors `inference_media`.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct inference_media {
+    pub data: *const u8,
+    pub len: usize,
+    pub mime_type: *const c_char,
+}
 
 /// Opaque; mirrors `inference_engine`.
 #[allow(non_camel_case_types)]
@@ -84,6 +94,33 @@ unsafe fn out_arg<T>(out: *mut *mut T, name: &str) -> FfiResult<()> {
     Ok(())
 }
 
+/// Safety: `media` is NULL (rejected unless `count` is 0) or valid for `count` entries, each `data` valid for `len`
+/// bytes and each `mime_type` NULL or a C string.
+unsafe fn arg_media(media: *const inference_media, count: usize) -> FfiResult<MediaAttachments> {
+    if count == 0 {
+        return Ok(MediaAttachments::default());
+    }
+    if media.is_null() {
+        return Err(Failure::invalid("media is NULL but media_count is not 0"));
+    }
+    let attachments = std::slice::from_raw_parts(media, count)
+        .iter()
+        .enumerate()
+        .map(|(index, item)| {
+            let name = format!("media[{index}].data");
+            let bytes = arg_bytes(item.data.cast::<c_char>(), item.len, &name)?.to_vec();
+            let mime_type = (!item.mime_type.is_null())
+                .then(|| {
+                    crate::arg_str(item.mime_type, &format!("media[{index}].mime_type"))
+                        .map(str::to_string)
+                })
+                .transpose()?;
+            Ok(MediaAttachment { bytes, mime_type })
+        })
+        .collect::<FfiResult<Vec<_>>>()?;
+    Ok(MediaAttachments::new(attachments))
+}
+
 fn string_handle(text: String) -> *mut inference_string {
     // JSON text never contains NUL; dropping any keeps the C string intact rather than failing the call
     let text = CString::new(text.replace('\0', "")).unwrap_or_default();
@@ -122,13 +159,37 @@ pub unsafe extern "C" fn inference_chat(
     request_len: usize,
     out_response: *mut *mut inference_string,
 ) -> inference_status {
+    inference_chat_with_media(
+        engine,
+        request,
+        request_len,
+        std::ptr::null(),
+        0,
+        out_response,
+    )
+}
+
+/// Safety: as for `inference_chat`, with `media` valid for `media_count` entries.
+#[no_mangle]
+pub unsafe extern "C" fn inference_chat_with_media(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    media: *const inference_media,
+    media_count: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
     guard(|| {
         out_arg(out_response, "out_response")?;
         let engine = engine
             .as_ref()
             .ok_or_else(|| Failure::invalid("engine is NULL"))?;
         let request = arg_bytes(request, request_len, "request")?;
-        let response = engine.engine.chat_json(request).map_err(api_failure)?;
+        let media = arg_media(media, media_count)?;
+        let response = engine
+            .engine
+            .chat_json(request, media)
+            .map_err(api_failure)?;
         out_response.write(string_handle(response));
         Ok(())
     })
@@ -142,15 +203,36 @@ pub unsafe extern "C" fn inference_chat_stream_open(
     request_len: usize,
     out_stream: *mut *mut inference_stream,
 ) -> inference_status {
+    inference_chat_stream_open_with_media(
+        engine,
+        request,
+        request_len,
+        std::ptr::null(),
+        0,
+        out_stream,
+    )
+}
+
+/// Safety: as for `inference_chat_stream_open`, with `media` valid for `media_count` entries.
+#[no_mangle]
+pub unsafe extern "C" fn inference_chat_stream_open_with_media(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    media: *const inference_media,
+    media_count: usize,
+    out_stream: *mut *mut inference_stream,
+) -> inference_status {
     guard(|| {
         out_arg(out_stream, "out_stream")?;
         let engine = engine
             .as_ref()
             .ok_or_else(|| Failure::invalid("engine is NULL"))?;
         let request = arg_bytes(request, request_len, "request")?;
+        let media = arg_media(media, media_count)?;
         let stream = engine
             .engine
-            .chat_stream_json(request)
+            .chat_stream_json(request, media)
             .map_err(api_failure)?;
         out_stream.write(Box::into_raw(Box::new(inference_stream {
             stream,

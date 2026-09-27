@@ -33,8 +33,11 @@ fn backend(name: &str) -> (CString, inference_backend_config) {
 #[test]
 fn versions_and_status_strings() {
     let v = inference_abi_version();
-    assert_eq!(v >> 16, ABI_VERSION_MAJOR);
-    assert_eq!((v >> 8) & 0xff, ABI_VERSION_MINOR);
+    // an unstable 0.0.x ABI is only compatible with the exact version
+    assert_eq!(
+        v,
+        (ABI_VERSION_MAJOR << 16) | (ABI_VERSION_MINOR << 8) | ABI_VERSION_PATCH
+    );
     let build = unsafe { CStr::from_ptr(inference_build_version()) }
         .to_str()
         .unwrap();

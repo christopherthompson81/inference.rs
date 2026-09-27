@@ -3,6 +3,7 @@
 use std::ffi::{c_char, CStr};
 use std::ptr::{null, null_mut};
 
+use base64::Engine as _;
 use inference_ffi::engine::*;
 use inference_ffi::inference_status::{self, *};
 use inference_ffi::*;
@@ -241,4 +242,99 @@ fn null_arguments_are_rejected_without_crashing() {
         ))
     };
     assert_eq!(name.to_str().unwrap(), "INFERENCE_ERR_UNAVAILABLE");
+}
+
+fn image_request(url: &str) -> String {
+    json!({
+        "model": "default",
+        "messages": [{"role": "user", "content": [
+            {"type": "image_url", "image_url": {"url": url}},
+            {"type": "text", "text": "OCR:"},
+        ]}],
+        "max_tokens": MAX_TOKENS,
+        "temperature": 0.0,
+        "top_k": 1,
+        "logprobs": true,
+        "top_logprobs": 1,
+    })
+    .to_string()
+}
+
+fn chat_with_media(
+    engine: *const inference_engine,
+    request: &str,
+    media: &[inference_media],
+) -> (inference_status, Option<Value>) {
+    let mut response = null_mut();
+    let status = unsafe {
+        inference_chat_with_media(
+            engine,
+            request.as_ptr().cast::<c_char>(),
+            request.len(),
+            media.as_ptr(),
+            media.len(),
+            &mut response,
+        )
+    };
+    let response =
+        (!response.is_null()).then(|| serde_json::from_str(&take_string(response)).unwrap());
+    (status, response)
+}
+
+fn decoded_tokens(response: &Value) -> Vec<Value> {
+    response["choices"][0]["logprobs"]["content"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|token| token["top_logprobs"][0]["token"].clone())
+        .collect()
+}
+
+#[test]
+fn attached_media_decodes_like_the_same_image_as_a_data_url() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let (status, engine) = load(&spec(dir.path()));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let png = std::fs::read(std::path::Path::new(support::FIXTURES).join("page_00.png")).unwrap();
+
+    let data_url = format!(
+        "data:image/png;base64,{}",
+        base64::engine::general_purpose::STANDARD.encode(&png)
+    );
+    let (status, by_url) = chat_with_media(engine, &image_request(&data_url), &[]);
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let by_url = by_url.unwrap();
+    assert!(!decoded_tokens(&by_url).is_empty());
+
+    let media = [inference_media {
+        data: png.as_ptr(),
+        len: png.len(),
+        mime_type: c"image/png".as_ptr(),
+    }];
+    let (status, by_attachment) = chat_with_media(engine, &image_request("media://0"), &media);
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    assert_eq!(
+        decoded_tokens(&by_url),
+        decoded_tokens(&by_attachment.unwrap())
+    );
+
+    let (status, _) = chat_with_media(engine, &image_request("media://1"), &media);
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST);
+    assert!(last_error().contains("media://1"), "{}", last_error());
+
+    let mut response = null_mut();
+    let request = image_request("media://0");
+    let status = unsafe {
+        inference_chat_with_media(
+            engine,
+            request.as_ptr().cast::<c_char>(),
+            request.len(),
+            null(),
+            1,
+            &mut response,
+        )
+    };
+    assert_eq!(status, INFERENCE_ERR_INVALID_ARGUMENT);
+
+    unsafe { inference_engine_free(engine) };
 }

@@ -36,7 +36,9 @@ static unsigned char *read_ppm(const char *path, uint32_t *w, uint32_t *h) {
 
 int main(int argc, char **argv) {
     uint32_t abi = inference_abi_version();
-    CHECK((abi >> 16) == INFERENCE_ABI_VERSION_MAJOR, "ABI major %u, header %d", abi >> 16, INFERENCE_ABI_VERSION_MAJOR);
+    uint32_t header_abi = ((uint32_t)INFERENCE_ABI_VERSION_MAJOR << 16) | ((uint32_t)INFERENCE_ABI_VERSION_MINOR << 8) |
+                          (uint32_t)INFERENCE_ABI_VERSION_PATCH;
+    CHECK(abi == header_abi, "ABI %#x, header %#x", abi, header_abi);
     CHECK(strncmp(inference_build_version(), "inference.rs ", 13) == 0, "build version %s", inference_build_version());
     CHECK(strcmp(inference_status_string(INFERENCE_ERR_OUT_OF_RANGE), "INFERENCE_ERR_OUT_OF_RANGE") == 0, "status name");
 
