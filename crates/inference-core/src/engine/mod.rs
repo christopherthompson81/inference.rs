@@ -14,11 +14,11 @@ use crate::{
     },
     prefix_cacher::{PagedPrefixCheckpoint, PrefixCacheManagerV2},
     scheduler::{
-        modality_signature, DefaultSchedulerMethod, PagedPrefixCacheValidation,
-        PagedPrefixCacheValidator, Scheduler, SchedulerOutput,
+        modality_signature, DefaultSchedulerMethod, DefaultSchedulerOutput,
+        PagedPrefixCacheValidation, PagedPrefixCacheValidator, Scheduler, SchedulerOutput,
     },
     search::{self, rag::SearchPipeline},
-    sequence::{SeqStepType, StopReason},
+    sequence::{SeqStepType, Sequence, StopReason},
     tools,
     utils::debug::DEBUG,
     SchedulerConfig,
@@ -95,8 +95,6 @@ use crate::pipeline::execution::{
 };
 #[cfg(feature = "cuda")]
 use crate::response::Response;
-#[cfg(feature = "cuda")]
-use crate::sequence::Sequence;
 
 pub enum EngineInstruction {
     Terminate,
@@ -1114,6 +1112,209 @@ impl Engine {
         CudaDecodeBatchLease::new(rows, next_tail).map(Some)
     }
 
+    /// One step of the default (non-paged) scheduler; false when a forward failed and was reported.
+    async fn step_default(
+        &self,
+        mut scheduled: DefaultSchedulerOutput<'_>,
+        last_completion_ids: &mut Vec<usize>,
+        rng: &Arc<std::sync::Mutex<Isaac64Rng>>,
+        run_start: Instant,
+    ) -> bool {
+        if !scheduled.completion.is_empty() {
+            let current_completion_ids: Vec<usize> =
+                scheduled.completion.iter().map(|seq| *seq.id()).collect();
+            for seq in scheduled.completion.iter_mut() {
+                seq.start_completion_timing();
+            }
+            let res = {
+                let mut pipeline = get_mut_arcmutex!(self.pipeline);
+                let pre_op = if !self.no_kv_cache && *last_completion_ids != current_completion_ids
+                {
+                    CacheInstruction::In
+                } else {
+                    CacheInstruction::Nothing
+                };
+                let post_op = if !self.no_kv_cache {
+                    CacheInstruction::Out
+                } else {
+                    CacheInstruction::Reset {
+                        load_preallocated_cache: false,
+                        reset_non_granular: false,
+                    }
+                };
+
+                let return_raw_logits = scheduled.completion[0].return_raw_logits;
+                assert!(
+                    scheduled
+                        .completion
+                        .iter()
+                        .all(|seq| seq.return_raw_logits == return_raw_logits),
+                    "All sequences must either return raw logits, or not."
+                );
+
+                pipeline
+                    .step(
+                        &mut scheduled.completion,
+                        false,
+                        return_raw_logits,
+                        &mut *get_mut_arcmutex!(self.prefix_cacher),
+                        self.disable_eos_stop,
+                        rng.clone(),
+                        CacheBackendMetadata::DefaultInstructions { pre_op, post_op },
+                        self.logger.as_ref(),
+                    )
+                    .await
+            };
+
+            let completion_exec_time = match res {
+                Ok(v) => v,
+                Err(e) => {
+                    self.report_forward_error("completion step", e, &mut scheduled.completion)
+                        .await;
+                    return false;
+                }
+            };
+            for seq in scheduled.completion.iter_mut() {
+                seq.finish_completion_timing(completion_exec_time);
+            }
+
+            self.logger
+                .add_decode_tokens_processed(scheduled.completion.len());
+
+            *last_completion_ids = current_completion_ids;
+        }
+
+        if !scheduled.prompt.is_empty() {
+            for seq in scheduled.prompt.iter_mut() {
+                seq.start_prompt_timing();
+            }
+
+            let prompt_exec_time = {
+                let mut pipeline = get_mut_arcmutex!(self.pipeline);
+
+                // Run the prompt seqs
+                let post_op = if !self.no_kv_cache {
+                    CacheInstruction::Out
+                } else {
+                    CacheInstruction::Reset {
+                        load_preallocated_cache: false,
+                        reset_non_granular: false,
+                    }
+                };
+
+                let return_raw_logits = scheduled.prompt[0].return_raw_logits;
+                assert!(
+                    scheduled
+                        .prompt
+                        .iter()
+                        .all(|seq| seq.return_raw_logits == return_raw_logits),
+                    "All sequences must either return raw logits, or not."
+                );
+
+                // This comes from prefix caching
+                // The invariant where all token offsets are the same is handled by the scheduler
+                let pre_op = if scheduled.prompt[0].token_offset() != 0 {
+                    CacheInstruction::In
+                } else {
+                    CacheInstruction::Reset {
+                        load_preallocated_cache: true,
+                        reset_non_granular: false,
+                    }
+                };
+
+                pipeline
+                    .step(
+                        &mut scheduled.prompt,
+                        true,
+                        return_raw_logits,
+                        &mut *get_mut_arcmutex!(self.prefix_cacher),
+                        self.disable_eos_stop,
+                        rng.clone(),
+                        CacheBackendMetadata::DefaultInstructions { pre_op, post_op },
+                        self.logger.as_ref(),
+                    )
+                    .await
+            };
+
+            let prompt_exec_time = match prompt_exec_time {
+                Ok(v) => v,
+                Err(e) => {
+                    self.report_forward_error("prompt step", e, &mut scheduled.prompt)
+                        .await;
+                    return false;
+                }
+            };
+
+            let total_processed_tokens: usize = scheduled
+                .prompt
+                .iter()
+                .map(|seq| seq.get_toks().len())
+                .sum();
+            self.logger
+                .add_prefill_tokens_processed(total_processed_tokens);
+
+            for seq in scheduled.prompt.iter_mut() {
+                if !seq.is_finished_paged_attn() {
+                    match seq.sequence_stepping_type() {
+                        SeqStepType::OneShot => {
+                            seq.set_state(SequenceState::Done(StopReason::GeneratedImage))
+                        }
+                        SeqStepType::PromptAndDecode => {
+                            seq.set_state(SequenceState::RunningCompletion)
+                        }
+                    }
+                }
+                seq.finish_prompt_timing(prompt_exec_time);
+            }
+            last_completion_ids.clear();
+        }
+
+        if self.is_debug {
+            let ms_from_last_run = run_start.elapsed().as_secs_f64();
+            let total_len = scheduled.prompt.len() + scheduled.completion.len();
+            if total_len > 0 {
+                let prompt_lengths = scheduled
+                    .prompt
+                    .iter()
+                    .map(|seq| seq.len().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                let completion_lengths = scheduled
+                    .completion
+                    .iter()
+                    .map(|seq| seq.len().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+
+                tracing::info!(
+                    "Prompt[{}] Completion[{}] - {}ms",
+                    prompt_lengths,
+                    completion_lengths,
+                    ms_from_last_run * 1000.,
+                );
+            }
+        }
+        true
+    }
+
+    async fn report_forward_error(
+        &self,
+        stage: &'static str,
+        e: impl std::fmt::Display + std::fmt::Debug,
+        seqs: &mut [&mut Sequence],
+    ) {
+        crate::sequence_macros::report_pipeline_forward_error(
+            stage,
+            e.to_string(),
+            format!("{e:?}"),
+            seqs,
+            &self.pipeline,
+            &self.prefix_cacher,
+        )
+        .await;
+    }
+
     fn should_terminate(&self) -> bool {
         matches!(
             ENGINE_INSTRUCTIONS
@@ -1483,183 +1684,12 @@ impl Engine {
             self.prune_revoked_paged_recurrent_prefixes();
 
             match scheduled {
-                SchedulerOutput::DefaultScheduler {
-                    output: mut scheduled,
-                } => {
-                    if !scheduled.completion.is_empty() {
-                        let current_completion_ids: Vec<usize> =
-                            scheduled.completion.iter().map(|seq| *seq.id()).collect();
-                        for seq in scheduled.completion.iter_mut() {
-                            seq.start_completion_timing();
-                        }
-                        let res = {
-                            let mut pipeline = get_mut_arcmutex!(self.pipeline);
-                            let pre_op = if !self.no_kv_cache
-                                && last_completion_ids != current_completion_ids
-                            {
-                                CacheInstruction::In
-                            } else {
-                                CacheInstruction::Nothing
-                            };
-                            let post_op = if !self.no_kv_cache {
-                                CacheInstruction::Out
-                            } else {
-                                CacheInstruction::Reset {
-                                    load_preallocated_cache: false,
-                                    reset_non_granular: false,
-                                }
-                            };
-
-                            let return_raw_logits = scheduled.completion[0].return_raw_logits;
-                            assert!(
-                                scheduled
-                                    .completion
-                                    .iter()
-                                    .all(|seq| seq.return_raw_logits == return_raw_logits),
-                                "All sequences must either return raw logits, or not."
-                            );
-
-                            pipeline
-                                .step(
-                                    &mut scheduled.completion,
-                                    false,
-                                    return_raw_logits,
-                                    &mut *get_mut_arcmutex!(self.prefix_cacher),
-                                    self.disable_eos_stop,
-                                    rng.clone(),
-                                    CacheBackendMetadata::DefaultInstructions { pre_op, post_op },
-                                    self.logger.as_ref(),
-                                )
-                                .await
-                        };
-
-                        let completion_exec_time = handle_pipeline_forward_error!(
-                            "completion step",
-                            res,
-                            &mut scheduled.completion,
-                            self.pipeline,
-                            'lp,
-                            self.prefix_cacher
-                        );
-                        for seq in scheduled.completion.iter_mut() {
-                            seq.finish_completion_timing(completion_exec_time);
-                        }
-
-                        self.logger
-                            .add_decode_tokens_processed(scheduled.completion.len());
-
-                        last_completion_ids = current_completion_ids;
-                    }
-
-                    if !scheduled.prompt.is_empty() {
-                        for seq in scheduled.prompt.iter_mut() {
-                            seq.start_prompt_timing();
-                        }
-
-                        let prompt_exec_time = {
-                            let mut pipeline = get_mut_arcmutex!(self.pipeline);
-
-                            // Run the prompt seqs
-                            let post_op = if !self.no_kv_cache {
-                                CacheInstruction::Out
-                            } else {
-                                CacheInstruction::Reset {
-                                    load_preallocated_cache: false,
-                                    reset_non_granular: false,
-                                }
-                            };
-
-                            let return_raw_logits = scheduled.prompt[0].return_raw_logits;
-                            assert!(
-                                scheduled
-                                    .prompt
-                                    .iter()
-                                    .all(|seq| seq.return_raw_logits == return_raw_logits),
-                                "All sequences must either return raw logits, or not."
-                            );
-
-                            // This comes from prefix caching
-                            // The invariant where all token offsets are the same is handled by the scheduler
-                            let pre_op = if scheduled.prompt[0].token_offset() != 0 {
-                                CacheInstruction::In
-                            } else {
-                                CacheInstruction::Reset {
-                                    load_preallocated_cache: true,
-                                    reset_non_granular: false,
-                                }
-                            };
-
-                            pipeline
-                                .step(
-                                    &mut scheduled.prompt,
-                                    true,
-                                    return_raw_logits,
-                                    &mut *get_mut_arcmutex!(self.prefix_cacher),
-                                    self.disable_eos_stop,
-                                    rng.clone(),
-                                    CacheBackendMetadata::DefaultInstructions { pre_op, post_op },
-                                    self.logger.as_ref(),
-                                )
-                                .await
-                        };
-
-                        let prompt_exec_time = handle_pipeline_forward_error!(
-                            "prompt step",
-                            prompt_exec_time,
-                            &mut scheduled.prompt,
-                            self.pipeline,
-                            'lp,
-                            self.prefix_cacher
-                        );
-
-                        let total_processed_tokens: usize = scheduled
-                            .prompt
-                            .iter()
-                            .map(|seq| seq.get_toks().len())
-                            .sum();
-                        self.logger
-                            .add_prefill_tokens_processed(total_processed_tokens);
-
-                        for seq in scheduled.prompt.iter_mut() {
-                            if !seq.is_finished_paged_attn() {
-                                match seq.sequence_stepping_type() {
-                                    SeqStepType::OneShot => seq
-                                        .set_state(SequenceState::Done(StopReason::GeneratedImage)),
-                                    SeqStepType::PromptAndDecode => {
-                                        seq.set_state(SequenceState::RunningCompletion)
-                                    }
-                                }
-                            }
-                            seq.finish_prompt_timing(prompt_exec_time);
-                        }
-                        last_completion_ids = vec![];
-                    }
-
-                    if self.is_debug {
-                        let ms_from_last_run = run_start.elapsed().as_secs_f64();
-                        let total_len = scheduled.prompt.len() + scheduled.completion.len();
-                        if total_len > 0 {
-                            let prompt_lengths = scheduled
-                                .prompt
-                                .iter()
-                                .map(|seq| seq.len().to_string())
-                                .collect::<Vec<_>>()
-                                .join(", ");
-
-                            let completion_lengths = scheduled
-                                .completion
-                                .iter()
-                                .map(|seq| seq.len().to_string())
-                                .collect::<Vec<_>>()
-                                .join(", ");
-
-                            tracing::info!(
-                                "Prompt[{}] Completion[{}] - {}ms",
-                                prompt_lengths,
-                                completion_lengths,
-                                ms_from_last_run * 1000.,
-                            );
-                        }
+                SchedulerOutput::DefaultScheduler { output: scheduled } => {
+                    if !self
+                        .step_default(scheduled, &mut last_completion_ids, &rng, run_start)
+                        .await
+                    {
+                        continue 'lp;
                     }
                 }
                 SchedulerOutput::PagedAttention {
