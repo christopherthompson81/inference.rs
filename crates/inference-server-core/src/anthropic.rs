@@ -34,6 +34,7 @@ use tokio::{
 };
 use utoipa::ToSchema;
 
+use crate::handler_core::ApiErrorHttp;
 use crate::{
     chat_completion::{parse_request, ChatCompletionParseContext},
     engine_chat::{ChatDispatchError, ChatEngine, PreparedChat},
@@ -2204,7 +2205,7 @@ mod tests {
         let body = error_body(response).await;
         assert_eq!(
             body["error"]["message"],
-            crate::handler_core::MODEL_ERROR_MESSAGE
+            crate::api_error::MODEL_ERROR_MESSAGE
         );
         assert!(!body.to_string().contains("private model detail"));
     }

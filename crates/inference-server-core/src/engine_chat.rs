@@ -19,10 +19,11 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
+    api_error::{ApiError, ApiErrorKind, JsonError, ModelErrorMessage},
     completion_core::{convert_stop_tokens, get_dry_sampling_params},
-    handler_core::{
+    dispatch::{
         apply_model_override, create_response_channel, request_model_override,
-        send_request_with_model, ApiError, ApiErrorKind, JsonError, ModelErrorMessage,
+        send_request_with_model,
     },
     inference_server_router_builder::AgenticDefaults,
     input_files::{resolve_input_file, InputFileSpec},

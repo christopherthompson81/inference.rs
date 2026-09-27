@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc::Sender, oneshot};
 use utoipa::ToSchema;
 
+use crate::handler_core::ApiErrorHttp;
 use crate::handler_core::{openai_error_response, ApiError, ApiErrorKind};
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);

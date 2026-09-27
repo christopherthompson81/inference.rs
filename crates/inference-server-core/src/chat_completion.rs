@@ -16,6 +16,7 @@ use tokio::sync::mpsc::Receiver;
 pub use crate::engine_chat::{
     parse_request, serialize_agentic_progress, ChatCompletionParseContext,
 };
+use crate::handler_core::ApiErrorHttp;
 use crate::{
     completion_core::{
         handle_completion_error, handle_completion_validation_error, BaseCompletionResponder,

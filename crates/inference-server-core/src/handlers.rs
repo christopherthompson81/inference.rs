@@ -11,6 +11,7 @@ use inference_core::{
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::handler_core::ApiErrorHttp;
 use crate::{
     handler_core::{openai_error_from_error, openai_error_response, ApiError, ApiErrorKind},
     lora_adapters::list_lora_adapter_models,

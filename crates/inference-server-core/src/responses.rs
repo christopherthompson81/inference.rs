@@ -35,6 +35,7 @@ use utoipa::{
 };
 use uuid::Uuid;
 
+use crate::handler_core::ApiErrorHttp;
 use crate::{
     background_tasks::get_background_task_manager,
     cached_responses::get_response_cache,

@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use crate::handler_core::ApiErrorHttp;
 use crate::{
     completion_core::{
         convert_stop_tokens, get_dry_sampling_params, handle_completion_error,
