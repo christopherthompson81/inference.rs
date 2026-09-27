@@ -5,7 +5,18 @@ use candle_core::{DType, Device};
 use inference_quant::IsqType;
 use tracing::info;
 
-use crate::{device_map::DeviceMapper, TryIntoDType};
+use std::{path::PathBuf, sync::Arc};
+
+use inference_quant::QuantizedWeightSource;
+
+use crate::{
+    device_map::DeviceMapper,
+    matformer::MatformerSliceConfig,
+    pipeline::loaders::{
+        AutoDeviceMapQuantization, DeviceMappedModelLoader, QuantizationConfigShim,
+    },
+    Topology, TryIntoDType,
+};
 
 use super::super::isq::{format_isq_types, IsqModelLoader, IsqOrganization};
 
@@ -87,6 +98,174 @@ pub(crate) enum AutoDeviceMapSizing {
     Isq(IsqType),
     PreparedWeightSource,
     Checkpoint,
+}
+
+pub(crate) struct AutoDeviceMapSizingInputs<'a> {
+    pub loader: &'a dyn DeviceMappedModelLoader,
+    pub config: &'a str,
+    pub dtype: DType,
+    pub sizing: AutoDeviceMapSizing,
+    pub weight_source: Option<&'a Arc<dyn QuantizedWeightSource>>,
+    pub prepared_weight_source: Option<&'a Arc<dyn QuantizedWeightSource>>,
+    pub topology: Option<&'a Topology>,
+    pub organization: IsqOrganization,
+    pub weight_filenames: &'a [PathBuf],
+    pub has_lora: bool,
+    pub matformer: Option<&'a MatformerSliceConfig>,
+    // Multimodal towers are not in a prepared quantized source or an experts-only ISQ, so they size unpacked.
+    pub non_mapped_unpacked: bool,
+}
+
+pub(crate) struct AutoDeviceMapSizes {
+    pub layer_sizes_in_bytes: Vec<usize>,
+    pub non_mapped_size_in_bytes: usize,
+    pub total_model_size_in_bytes: usize,
+}
+
+fn packed_sizes(
+    inputs: &AutoDeviceMapSizingInputs<'_>,
+    weight_pack_factor: usize,
+    non_mapped_pack_factor: usize,
+    quantization: Option<&AutoDeviceMapQuantization<'_>>,
+) -> Result<AutoDeviceMapSizes> {
+    let layer_sizes_in_bytes = inputs.loader.layer_sizes_in_bytes(
+        inputs.config,
+        inputs.dtype,
+        weight_pack_factor,
+        inputs.matformer,
+    )?;
+    let non_mapped_size_in_bytes = inputs.loader.non_mapped_size_in_bytes(
+        inputs.config,
+        inputs.dtype,
+        non_mapped_pack_factor,
+        quantization,
+        inputs.matformer,
+    )?;
+    let total_model_size_in_bytes =
+        layer_sizes_in_bytes.iter().sum::<usize>() + non_mapped_size_in_bytes;
+    Ok(AutoDeviceMapSizes {
+        layer_sizes_in_bytes,
+        non_mapped_size_in_bytes,
+        total_model_size_in_bytes,
+    })
+}
+
+/// Per-layer and non-mapped weight sizes for automatic device mapping, following the weights that will be loaded.
+pub(crate) fn auto_device_map_sizes(
+    inputs: AutoDeviceMapSizingInputs<'_>,
+) -> Result<AutoDeviceMapSizes> {
+    let dtype = inputs.dtype;
+    match inputs.sizing {
+        sizing @ (AutoDeviceMapSizing::Uqff | AutoDeviceMapSizing::PreparedWeightSource) => {
+            let source = inputs
+                .weight_source
+                .expect("selected weight-source sizing requires a weight source");
+            let quantization = if matches!(sizing, AutoDeviceMapSizing::Uqff) {
+                AutoDeviceMapQuantization::weight_source(source.as_ref())
+            } else {
+                AutoDeviceMapQuantization::weight_source_with_topology(
+                    source.as_ref(),
+                    inputs.topology,
+                )
+            };
+            let weight_pack_factor =
+                quantization.conservative_pack_factor(dtype, source.pack_factor(dtype)?);
+            let non_mapped_pack_factor =
+                if inputs.non_mapped_unpacked && !matches!(sizing, AutoDeviceMapSizing::Uqff) {
+                    1
+                } else {
+                    weight_pack_factor
+                };
+            packed_sizes(
+                &inputs,
+                weight_pack_factor,
+                non_mapped_pack_factor,
+                Some(&quantization),
+            )
+        }
+        AutoDeviceMapSizing::Isq(isq) => {
+            let moqe = matches!(inputs.organization, IsqOrganization::MoeExpertsOnly);
+            let source_pack_factor = if let Some(source) = inputs.prepared_weight_source {
+                source.pack_factor(dtype)?
+            } else {
+                QuantizationConfigShim::get_quant_config_pack_factor(inputs.config, dtype)?
+            };
+            let target_pack_factor = isq.pack_factor(dtype);
+            let (weight_pack_factor, non_mapped_pack_factor, quantization) = if moqe {
+                let quantization = inputs.prepared_weight_source.map_or_else(
+                    || AutoDeviceMapQuantization::isq(None, inputs.topology),
+                    |source| {
+                        AutoDeviceMapQuantization::weight_source_with_topology(
+                            source.as_ref(),
+                            inputs.topology,
+                        )
+                    },
+                );
+                (
+                    quantization.conservative_moqe_pack_factor(dtype, source_pack_factor, isq),
+                    if inputs.non_mapped_unpacked {
+                        1
+                    } else {
+                        source_pack_factor
+                    },
+                    quantization,
+                )
+            } else {
+                let quantization = AutoDeviceMapQuantization::isq(Some(isq), inputs.topology);
+                (
+                    quantization.conservative_pack_factor(dtype, target_pack_factor),
+                    target_pack_factor,
+                    quantization,
+                )
+            };
+            packed_sizes(
+                &inputs,
+                weight_pack_factor,
+                non_mapped_pack_factor,
+                Some(&quantization),
+            )
+        }
+        AutoDeviceMapSizing::Checkpoint => {
+            let inventory =
+                if inputs.topology.is_none() && !inputs.has_lora && inputs.matformer.is_none() {
+                    let num_layers = inputs.loader.num_layers(inputs.config)?;
+                    crate::pipeline::loaders::checkpoint_device_map_sizes(
+                        inputs.weight_filenames,
+                        num_layers,
+                        dtype,
+                        |name| inputs.loader.checkpoint_layer_index(inputs.config, name),
+                    )?
+                } else {
+                    None
+                };
+            if let Some(inventory) = inventory {
+                info!(
+                    model_mib = inventory.total_model_size_in_bytes / (1024 * 1024),
+                    "Using checkpoint tensor inventory for automatic device mapping"
+                );
+                return Ok(AutoDeviceMapSizes {
+                    layer_sizes_in_bytes: inventory.layer_sizes_in_bytes,
+                    non_mapped_size_in_bytes: inventory.non_mapped_size_in_bytes,
+                    total_model_size_in_bytes: inventory.total_model_size_in_bytes,
+                });
+            }
+            // The checkpoint itself may be prequantized.
+            let weight_pack_factor =
+                QuantizationConfigShim::get_quant_config_pack_factor(inputs.config, dtype)?;
+            let quantization = inputs
+                .topology
+                .map(|topology| AutoDeviceMapQuantization::isq(None, Some(topology)));
+            let weight_pack_factor = quantization.as_ref().map_or(weight_pack_factor, |q| {
+                q.conservative_pack_factor(dtype, weight_pack_factor)
+            });
+            packed_sizes(
+                &inputs,
+                weight_pack_factor,
+                weight_pack_factor,
+                quantization.as_ref(),
+            )
+        }
+    }
 }
 
 pub(crate) fn resolve_auto_device_map_sizing(
