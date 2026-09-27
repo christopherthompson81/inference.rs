@@ -16,7 +16,7 @@ impl MultimodalModelLoader for DiffusionGemmaLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg: DiffusionGemmaConfig = serde_json::from_str(config)?;
+        let cfg = DiffusionGemmaConfig::from_json(config)?;
         Ok(Box::new(DiffusionGemmaModel::new(
             &cfg,
             vb,
@@ -29,7 +29,7 @@ impl MultimodalModelLoader for DiffusionGemmaLoader {
         true
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let config: DiffusionGemmaConfig = serde_json::from_str(config)?;
+        let config = DiffusionGemmaConfig::from_json(config)?;
         Ok(Box::new(config))
     }
     fn get_processor(
@@ -39,8 +39,8 @@ impl MultimodalModelLoader for DiffusionGemmaLoader {
         _preprocessor_config: PreProcessorConfig,
         _max_edge: Option<u32>,
     ) -> Arc<dyn Processor + Send + Sync> {
-        let cfg: DiffusionGemmaConfig =
-            serde_json::from_str(config).expect("Failed to parse DiffusionGemmaConfig");
+        let cfg =
+            DiffusionGemmaConfig::from_json(config).expect("Failed to parse DiffusionGemmaConfig");
         let (patch_size, pooling_kernel_size, default_output_length, supports_images) = cfg
             .vision_config
             .as_ref()
@@ -76,7 +76,7 @@ impl MultimodalModelLoader for DiffusionGemmaLoader {
         Arc::new(Gemma4Prefixer)
     }
     fn modalities(&self, config: &str) -> Result<Modalities> {
-        let cfg: DiffusionGemmaConfig = serde_json::from_str(config)?;
+        let cfg = DiffusionGemmaConfig::from_json(config)?;
         let mut input = vec![SupportedModality::Text];
         if cfg.vision_config.is_some() {
             input.push(SupportedModality::Vision);
@@ -146,7 +146,7 @@ impl DeviceMappedModelLoader for DiffusionGemmaLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: DiffusionGemmaConfig = serde_json::from_str(config)?;
+        let cfg = DiffusionGemmaConfig::from_json(config)?;
         let tc = &cfg.text_config;
 
         let vision_tokens_per_image = if cfg.vision_config.is_some() {
@@ -172,7 +172,7 @@ impl DeviceMappedModelLoader for DiffusionGemmaLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: DiffusionGemmaConfig = serde_json::from_str(config)?;
+        let cfg = DiffusionGemmaConfig::from_json(config)?;
         let (max_vision_attn, max_vision_hidden) =
             cfg.vision_config.as_ref().map_or((0, 0), |vc| {
                 let max_patches =
@@ -203,7 +203,7 @@ impl DeviceMappedModelLoader for DiffusionGemmaLoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: DiffusionGemmaConfig = serde_json::from_str(config)?;
+        let cfg = DiffusionGemmaConfig::from_json(config)?;
         let tc = &cfg.text_config;
         let text_elems = {
             let (resolved_embed_tokens_pack_factor, lm_head_pack_factor) =
@@ -263,7 +263,7 @@ impl DeviceMappedModelLoader for DiffusionGemmaLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: DiffusionGemmaConfig = serde_json::from_str(config)?;
+        let cfg = DiffusionGemmaConfig::from_json(config)?;
         let tc = &cfg.text_config;
         let sizes: Vec<usize> = (0..tc.num_hidden_layers)
             .map(|layer_idx| {
@@ -313,7 +313,7 @@ impl DeviceMappedModelLoader for DiffusionGemmaLoader {
         Ok(sizes)
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: DiffusionGemmaConfig = serde_json::from_str(config)?;
+        let cfg = DiffusionGemmaConfig::from_json(config)?;
         Ok(cfg.text_config.num_hidden_layers)
     }
 
@@ -321,7 +321,7 @@ impl DeviceMappedModelLoader for DiffusionGemmaLoader {
         Some(vec![NonMappedSubModel::Vision])
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: DiffusionGemmaConfig = serde_json::from_str(config)?;
+        let cfg = DiffusionGemmaConfig::from_json(config)?;
         let tc = &cfg.text_config;
 
         let cfg = ModelConfigMetadata {

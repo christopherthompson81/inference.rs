@@ -13,7 +13,7 @@ impl NormalModelLoader for GLM4MoeLiteLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg: crate::models::glm4_moe_lite::Glm4MoeLiteConfig = serde_json::from_str(config)?;
+        let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
         Ok(Box::new(models::glm4_moe_lite::Glm4MoeLite::new(
             &cfg,
             vb,
@@ -38,7 +38,7 @@ impl NormalModelLoader for GLM4MoeLiteLoader {
         Ok(true)
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg: crate::models::glm4_moe_lite::Glm4MoeLiteConfig = serde_json::from_str(config)?;
+        let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
         Ok(Box::new(cfg))
     }
 }
@@ -62,7 +62,7 @@ impl IsqModelLoader for GLM4MoeLiteLoader {
             Regex::new(r"layers\.(\d+)\.self_attn\.q_b_proj\.(weight|bias)$")?,
             Regex::new(r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$")?,
         ];
-        let cfg: crate::models::glm4_moe_lite::Glm4MoeLiteConfig = serde_json::from_str(config)?;
+        let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
         for layer_idx in 0..cfg.num_hidden_layers {
             if layer_idx >= cfg.first_k_dense_replace && layer_idx % cfg.moe_layer_freq == 0 {
                 // MoE layer
@@ -139,7 +139,7 @@ impl DeviceMappedModelLoader for GLM4MoeLiteLoader {
             anyhow::bail!("Expected text AutoDeviceMapParams for this model!")
         };
 
-        let cfg: crate::models::glm4_moe_lite::Glm4MoeLiteConfig = serde_json::from_str(config)?;
+        let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
 
         Ok(
             max_batch_size
@@ -163,7 +163,7 @@ impl DeviceMappedModelLoader for GLM4MoeLiteLoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: crate::models::glm4_moe_lite::Glm4MoeLiteConfig = serde_json::from_str(config)?;
+        let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
         let elems = {
             let (embed_tokens_pack_factor, lm_head_pack_factor) =
                 super::language_model_pack_factors(
@@ -192,7 +192,7 @@ impl DeviceMappedModelLoader for GLM4MoeLiteLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: crate::models::glm4_moe_lite::Glm4MoeLiteConfig = serde_json::from_str(config)?;
+        let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
         let mut per_layer_elems = Vec::new();
 
         for layer_idx in 0..cfg.num_hidden_layers {
@@ -274,11 +274,11 @@ impl DeviceMappedModelLoader for GLM4MoeLiteLoader {
             .collect())
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: crate::models::glm4_moe_lite::Glm4MoeLiteConfig = serde_json::from_str(config)?;
+        let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
         Ok(cfg.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: crate::models::glm4_moe_lite::Glm4MoeLiteConfig = serde_json::from_str(config)?;
+        let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

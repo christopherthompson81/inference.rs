@@ -13,7 +13,7 @@ impl NormalModelLoader for SmolLm3Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg: crate::models::smollm3::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::smollm3::Config::from_json(config)?;
 
         Ok(Box::new(models::smollm3::SmolLm3::new(
             &cfg,
@@ -39,7 +39,7 @@ impl NormalModelLoader for SmolLm3Loader {
         Ok(true)
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg: crate::models::smollm3::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::smollm3::Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
 }
@@ -85,7 +85,7 @@ impl DeviceMappedModelLoader for SmolLm3Loader {
             anyhow::bail!("Expected text AutoDeviceMapParams for this model!")
         };
 
-        let cfg: crate::models::smollm3::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::smollm3::Config::from_json(config)?;
 
         Ok(
             max_batch_size
@@ -109,7 +109,7 @@ impl DeviceMappedModelLoader for SmolLm3Loader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: crate::models::smollm3::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::smollm3::Config::from_json(config)?;
 
         let elems = {
             let (embed_tokens_pack_factor, lm_head_pack_factor) =
@@ -139,7 +139,7 @@ impl DeviceMappedModelLoader for SmolLm3Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: crate::models::smollm3::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::smollm3::Config::from_json(config)?;
 
         let per_layer_elems = {
             let input_layernorm = cfg.hidden_size;
@@ -175,12 +175,12 @@ impl DeviceMappedModelLoader for SmolLm3Loader {
         ])
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: crate::models::smollm3::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::smollm3::Config::from_json(config)?;
 
         Ok(cfg.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: crate::models::smollm3::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::smollm3::Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

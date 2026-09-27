@@ -10,3 +10,5 @@ use inference_nn::{
 pub mod phi2;
 pub mod phi3;
 pub mod phi3_5_moe;
+
+inference_nn::json_config!(phi2::Config, phi3::Config, phi3_5_moe::Config);

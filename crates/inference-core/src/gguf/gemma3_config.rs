@@ -39,7 +39,7 @@ pub(crate) fn prepare_gemma3_text_config(
     );
     object.insert("model_type".to_string(), json!(TEXT_MODEL_TYPE));
     let config = serde_json::to_string(&value)?;
-    let parsed: Gemma3Config = serde_json::from_str(&config)
+    let parsed = Gemma3Config::from_json(&config)
         .context("Gemma 3 text configuration is incompatible with the native loader")?;
     let Gemma3Config::Text(parsed) = parsed else {
         bail!("Projectorless Gemma 3 requires a text-only configuration");
@@ -49,7 +49,7 @@ pub(crate) fn prepare_gemma3_text_config(
 }
 
 pub(crate) fn ensure_gemma3_vision_config(config: &str) -> Result<()> {
-    let parsed: Gemma3Config = serde_json::from_str(config)
+    let parsed = Gemma3Config::from_json(config)
         .context("Gemma 3 multimodal configuration is incompatible with the native loader")?;
     anyhow::ensure!(
         matches!(parsed, Gemma3Config::WithVision { .. }),
@@ -59,7 +59,7 @@ pub(crate) fn ensure_gemma3_vision_config(config: &str) -> Result<()> {
 }
 
 pub(crate) fn gemma3_text_uses_language_model_prefix(config: &str) -> Result<bool> {
-    let parsed: Gemma3Config = serde_json::from_str(config)
+    let parsed = Gemma3Config::from_json(config)
         .context("Gemma 3 text configuration is incompatible with the native loader")?;
     let Gemma3Config::Text(parsed) = parsed else {
         bail!("Projectorless Gemma 3 requires a text-only configuration");

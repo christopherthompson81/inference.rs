@@ -11,3 +11,10 @@ pub mod llama;
 pub mod mistral;
 pub mod mixtral;
 pub mod smollm3;
+
+inference_nn::json_config!(
+    llama::Config,
+    mistral::Config,
+    mixtral::Config,
+    smollm3::Config,
+);

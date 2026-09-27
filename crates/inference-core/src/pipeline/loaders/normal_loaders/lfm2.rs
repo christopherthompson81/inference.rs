@@ -13,7 +13,7 @@ impl NormalModelLoader for Lfm2Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg: crate::models::lfm2::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::lfm2::Config::from_json(config)?;
 
         Ok(Box::new(models::lfm2::Model::new(
             &cfg,
@@ -40,7 +40,7 @@ impl NormalModelLoader for Lfm2Loader {
         Ok(true)
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg: crate::models::lfm2::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::lfm2::Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
     fn supports_paged_attention(&self, _config: &str) -> Result<bool> {
@@ -108,7 +108,7 @@ impl DeviceMappedModelLoader for Lfm2Loader {
             anyhow::bail!("Expected text AutoDeviceMapParams for this model!")
         };
 
-        let cfg: crate::models::lfm2::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::lfm2::Config::from_json(config)?;
 
         Ok(
             max_batch_size
@@ -132,7 +132,7 @@ impl DeviceMappedModelLoader for Lfm2Loader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: crate::models::lfm2::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::lfm2::Config::from_json(config)?;
         let tied = cfg.tie_word_embeddings();
         let (embed_tokens_pack_factor, lm_head_pack_factor) = super::language_model_pack_factors(
             _quantization,
@@ -158,7 +158,7 @@ impl DeviceMappedModelLoader for Lfm2Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: crate::models::lfm2::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::lfm2::Config::from_json(config)?;
         let head_dim = cfg.head_dim();
         let hidden = cfg.hidden_size;
         let intermediate = cfg.intermediate_size();
@@ -205,11 +205,11 @@ impl DeviceMappedModelLoader for Lfm2Loader {
         Ok(sizes)
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: crate::models::lfm2::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::lfm2::Config::from_json(config)?;
         Ok(cfg.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: crate::models::lfm2::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::lfm2::Config::from_json(config)?;
         let head_dim = cfg.head_dim();
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

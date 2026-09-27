@@ -47,3 +47,18 @@ pub const BUILD_CUDA_VERSION: Option<&str> = option_env!("INFERENCE_RS_BUILD_CUD
 /// Same as [`BUILD_CUDA_VERSION`], as `major * 100 + minor`.
 pub const BUILD_CUDA_VERSION_CODE: Option<&str> =
     option_env!("INFERENCE_RS_BUILD_CUDA_VERSION_CODE");
+
+#[doc(hidden)]
+pub use serde_json as __serde_json;
+
+/// Gives config types a non-generic `from_json`, so their serde code compiles in the crate that defines them.
+#[macro_export]
+macro_rules! json_config {
+    ($($ty:ty),+ $(,)?) => {$(
+        impl $ty {
+            pub fn from_json(json: &str) -> $crate::__serde_json::Result<Self> {
+                $crate::__serde_json::from_str(json)
+            }
+        }
+    )+};
+}

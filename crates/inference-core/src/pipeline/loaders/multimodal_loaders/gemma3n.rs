@@ -13,7 +13,7 @@ impl MultimodalModelLoader for Gemma3nLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg: Gemma3nConfig = serde_json::from_str(config)?;
+        let cfg = Gemma3nConfig::from_json(config)?;
         Ok(Box::new(Gemma3nModel::new(
             &cfg,
             vb,
@@ -26,7 +26,7 @@ impl MultimodalModelLoader for Gemma3nLoader {
         true
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let config: Gemma3nConfig = serde_json::from_str(config)?;
+        let config = Gemma3nConfig::from_json(config)?;
         Ok(Box::new(config))
     }
     fn get_processor(
@@ -188,7 +188,7 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Gemma3nConfig = serde_json::from_str(config)?;
+        let cfg = Gemma3nConfig::from_json(config)?;
         let text_cfg = &cfg.text_config;
 
         // Gemma3n is an "inject into the prompt" model, similar to Gemma3
@@ -234,7 +234,7 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Gemma3nConfig = serde_json::from_str(config)?;
+        let cfg = Gemma3nConfig::from_json(config)?;
 
         // Calculate max activation sizes for each modality
         let mut max_activation = 0;
@@ -339,7 +339,7 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: Gemma3nConfig = serde_json::from_str(config)?;
+        let cfg = Gemma3nConfig::from_json(config)?;
 
         // Apply matformer slicing if configured
         let text_cfg = if let Some(matformer_cfg) = matformer_config {
@@ -742,7 +742,7 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
         weight_pack_factor: usize,
         matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: Gemma3nConfig = serde_json::from_str(config)?;
+        let cfg = Gemma3nConfig::from_json(config)?;
 
         // Apply matformer slicing if configured
         let (text_cfg, _layer_rename_map, _layers_skipped) = if let Some(matformer_cfg) =
@@ -864,11 +864,11 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
         Ok(layer_sizes)
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: Gemma3nConfig = serde_json::from_str(config)?;
+        let cfg = Gemma3nConfig::from_json(config)?;
         Ok(cfg.text_config.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: Gemma3nConfig = serde_json::from_str(config)?;
+        let cfg = Gemma3nConfig::from_json(config)?;
         let cfg = cfg.text_config;
 
         let cfg = ModelConfigMetadata {

@@ -13,3 +13,12 @@ pub mod gemma2;
 pub mod gemma3;
 pub mod gemma3n;
 pub mod gemma4;
+
+inference_nn::json_config!(
+    gemma::Config,
+    gemma2::Config,
+    gemma3::config::Gemma3Config,
+    gemma3n::config::Gemma3nConfig,
+    gemma4::config::Gemma4Config,
+    diffusion_gemma::config::DiffusionGemmaConfig,
+);

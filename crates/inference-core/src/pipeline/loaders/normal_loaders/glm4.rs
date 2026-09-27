@@ -13,7 +13,7 @@ impl NormalModelLoader for GLM4Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg: crate::models::glm4::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::glm4::Config::from_json(config)?;
 
         Ok(Box::new(models::glm4::Model::new(
             &cfg,
@@ -39,7 +39,7 @@ impl NormalModelLoader for GLM4Loader {
         Ok(true)
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg: crate::models::glm4::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::glm4::Config::from_json(config)?;
 
         Ok(Box::new(cfg))
     }
@@ -85,7 +85,7 @@ impl DeviceMappedModelLoader for GLM4Loader {
             anyhow::bail!("Expected text AutoDeviceMapParams for this model!")
         };
 
-        let cfg: models::glm4::Config = serde_json::from_str(config)?;
+        let cfg = models::glm4::Config::from_json(config)?;
 
         Ok(
             max_batch_size
@@ -109,7 +109,7 @@ impl DeviceMappedModelLoader for GLM4Loader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: models::glm4::Config = serde_json::from_str(config)?;
+        let cfg = models::glm4::Config::from_json(config)?;
         let elems = {
             let (embed_tokens_pack_factor, lm_head_pack_factor) =
                 super::language_model_pack_factors(
@@ -138,7 +138,7 @@ impl DeviceMappedModelLoader for GLM4Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: models::glm4::Config = serde_json::from_str(config)?;
+        let cfg = models::glm4::Config::from_json(config)?;
         let per_layer_elems = {
             let input_layernorm = cfg.hidden_size;
             let post_attention_layernorm = cfg.hidden_size * 3; //+post_self_attn_layernorm and post_mlp_layernorm
@@ -173,11 +173,11 @@ impl DeviceMappedModelLoader for GLM4Loader {
         ])
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: models::glm4::Config = serde_json::from_str(config)?;
+        let cfg = models::glm4::Config::from_json(config)?;
         Ok(cfg.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: models::glm4::Config = serde_json::from_str(config)?;
+        let cfg = models::glm4::Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,
