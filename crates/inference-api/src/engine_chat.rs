@@ -27,6 +27,7 @@ use crate::{
     },
     input_files::{resolve_input_file, InputFileSpec},
     lora_routing::{resolve_lora_adapter_model, DEFAULT_MODEL_ID},
+    media_source::MediaAttachments,
     openai::{
         normalize_chat_completion_tools, normalize_responses_tools, validate_openai_tool_choice,
         ChatCompletionRequest, Grammar, JsonSchemaResponseFormat, Message, MessageInnerContent,
@@ -336,6 +337,8 @@ pub struct ChatCompletionParseContext {
     pub agent_approval_notifier: Option<Arc<AgentToolApprovalNotifier>>,
     pub tool_surface: OpenAiToolSurface,
     pub skill_store: Option<Arc<SkillStore>>,
+    /// Buffers the request's `media://N` sources name.
+    pub media: MediaAttachments,
 }
 
 /// Parses and validates a chat completion request.
@@ -354,6 +357,7 @@ pub async fn parse_request(
         agent_approval_notifier,
         tool_surface,
         skill_store,
+        media,
     } = ctx;
     let repr = serde_json::to_string(&oairequest)
         .context("Failed to serialize chat completion request for logging")?;
@@ -733,7 +737,7 @@ pub async fn parse_request(
                 // Parse images
                 let mut images = Vec::new();
                 for url_unparsed in image_urls {
-                    let image = parse_image_url_for_server(&url_unparsed)
+                    let image = parse_image_url_for_server(&url_unparsed, &media)
                         .await
                         .context(format!("Failed to parse image resource: {url_unparsed}"))?;
                     images.push(image);
@@ -742,7 +746,7 @@ pub async fn parse_request(
                 // Parse audios
                 let mut audios = Vec::new();
                 for url_unparsed in audio_urls {
-                    let audio = parse_audio_url_for_server(&url_unparsed)
+                    let audio = parse_audio_url_for_server(&url_unparsed, &media)
                         .await
                         .context(format!("Failed to parse audio resource: {url_unparsed}"))?;
                     audios.push(audio);
@@ -755,7 +759,7 @@ pub async fn parse_request(
                 };
                 let mut videos = Vec::new();
                 for url_unparsed in video_urls {
-                    let video = parse_video_url_for_server(&url_unparsed, video_sampling)
+                    let video = parse_video_url_for_server(&url_unparsed, video_sampling, &media)
                         .await
                         .context(format!("Failed to parse video resource: {url_unparsed}"))?;
                     videos.push(video);
@@ -909,6 +913,7 @@ impl ChatEngine {
         &self,
         mut oairequest: ChatCompletionRequest,
         tool_surface: OpenAiToolSurface,
+        media: MediaAttachments,
     ) -> Result<PreparedChat, ChatDispatchError> {
         let (tx, rx) = create_response_channel(None);
         let requested_model = oairequest.model.clone();
@@ -952,6 +957,7 @@ impl ChatEngine {
                 agent_approval_notifier,
                 tool_surface,
                 skill_store: self.skill_store.clone(),
+                media,
             },
         )
         .await

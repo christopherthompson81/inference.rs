@@ -216,7 +216,11 @@ pub async fn chatcompletions(
         skill_store: Some(skill_store),
     };
     let prepared = match engine
-        .prepare(oairequest, OpenAiToolSurface::ChatCompletions)
+        .prepare(
+            oairequest,
+            OpenAiToolSurface::ChatCompletions,
+            Default::default(),
+        )
         .await
     {
         Ok(prepared) => prepared,

@@ -12,6 +12,7 @@ use crate::{
     api_error::{ApiError, ApiErrorKind, ModelErrorMessage},
     engine_chat::{collect_chat, ChatDispatchError, ChatEngine, ChatStream, ChatStreamEvent},
     inference_for_server_builder::InferenceRsForServerBuilder,
+    media_source::MediaAttachments,
     openai::{ChatCompletionRequest, OpenAiToolSurface},
     types::SharedInferenceRsState,
 };
@@ -198,13 +199,14 @@ impl Engine {
         &self.chat.state
     }
 
-    /// Runs a chat completion to its end and returns the full response.
+    /// Runs a chat completion to its end; `media` holds the buffers its `media://N` sources name.
     pub async fn chat(
         &self,
         mut request: ChatCompletionRequest,
+        media: MediaAttachments,
     ) -> Result<ChatCompletionResponse, ApiError> {
         request.stream = Some(false);
-        let prepared = self.prepare(request).await?;
+        let prepared = self.prepare(request, media).await?;
         let mut rx = prepared.rx;
         let response = collect_chat(&mut rx, prepared.model_override.as_deref()).await;
         let state = self.state().clone();
@@ -234,9 +236,10 @@ impl Engine {
     pub async fn chat_stream(
         &self,
         mut request: ChatCompletionRequest,
+        media: MediaAttachments,
     ) -> Result<ChatStream, ApiError> {
         request.stream = Some(true);
-        let prepared = self.prepare(request).await?;
+        let prepared = self.prepare(request, media).await?;
         Ok(ChatStream::new(
             prepared.rx,
             self.state().clone(),
@@ -246,19 +249,28 @@ impl Engine {
     }
 
     /// [`Engine::chat`] over JSON: an OpenAI chat completion request in, the response out.
-    pub async fn chat_json(&self, request: &[u8]) -> Result<String, ApiError> {
-        let response = self.chat(parse_request(request)?).await?;
+    pub async fn chat_json(
+        &self,
+        request: &[u8],
+        media: MediaAttachments,
+    ) -> Result<String, ApiError> {
+        let response = self.chat(parse_request(request)?, media).await?;
         serde_json::to_string(&response).map_err(|_| ApiError::internal())
     }
 
     /// [`Engine::chat_stream`] over JSON; each event serializes with [`ChatStreamEvent::to_json`].
-    pub async fn chat_stream_json(&self, request: &[u8]) -> Result<ChatStream, ApiError> {
-        self.chat_stream(parse_request(request)?).await
+    pub async fn chat_stream_json(
+        &self,
+        request: &[u8],
+        media: MediaAttachments,
+    ) -> Result<ChatStream, ApiError> {
+        self.chat_stream(parse_request(request)?, media).await
     }
 
     async fn prepare(
         &self,
         request: ChatCompletionRequest,
+        media: MediaAttachments,
     ) -> Result<crate::engine_chat::PreparedChat, ApiError> {
         let asks = request
             .agent_permission
@@ -274,7 +286,7 @@ impl Engine {
         }
         let state = self.state().clone();
         self.chat
-            .prepare(request, OpenAiToolSurface::ChatCompletions)
+            .prepare(request, OpenAiToolSurface::ChatCompletions, media)
             .await
             .map_err(|error| match error {
                 ChatDispatchError::Validation(error) => {

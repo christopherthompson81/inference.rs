@@ -5,7 +5,7 @@ use inference_core::{AudioInput, InferenceRs, InferenceRsError};
 use std::error::Error;
 use std::sync::Arc;
 
-use crate::media_source::{load_media_source, MediaSourcePolicy};
+use crate::media_source::{MediaAttachments, MediaSourcePolicy};
 
 /// Parses and loads an image from a URL, file path, or data URL.
 ///
@@ -40,35 +40,43 @@ use crate::media_source::{load_media_source, MediaSourcePolicy};
 /// let image = parse_image_url("file:///home/user/picture.jpg").await?;
 /// ```
 pub async fn parse_image_url(url_unparsed: &str) -> Result<DynamicImage, anyhow::Error> {
-    parse_image_url_with_policy(url_unparsed, MediaSourcePolicy::Local).await
+    parse_image_url_with_policy(url_unparsed, MediaSourcePolicy::Local, &Default::default()).await
 }
 
-pub async fn parse_image_url_for_server(url_unparsed: &str) -> Result<DynamicImage, anyhow::Error> {
-    parse_image_url_with_policy(url_unparsed, MediaSourcePolicy::ServerRequest).await
+pub async fn parse_image_url_for_server(
+    url_unparsed: &str,
+    attachments: &MediaAttachments,
+) -> Result<DynamicImage, anyhow::Error> {
+    parse_image_url_with_policy(url_unparsed, MediaSourcePolicy::ServerRequest, attachments).await
 }
 
 async fn parse_image_url_with_policy(
     url_unparsed: &str,
     policy: MediaSourcePolicy,
+    attachments: &MediaAttachments,
 ) -> Result<DynamicImage, anyhow::Error> {
-    let media = load_media_source(url_unparsed, policy, "image").await?;
+    let media = attachments.load(url_unparsed, policy, "image").await?;
     Ok(image::load_from_memory(&media.bytes)?)
 }
 
 /// Parses and loads an audio file from a URL, file path, or data URL.
 pub async fn parse_audio_url(url_unparsed: &str) -> Result<AudioInput, anyhow::Error> {
-    parse_audio_url_with_policy(url_unparsed, MediaSourcePolicy::Local).await
+    parse_audio_url_with_policy(url_unparsed, MediaSourcePolicy::Local, &Default::default()).await
 }
 
-pub async fn parse_audio_url_for_server(url_unparsed: &str) -> Result<AudioInput, anyhow::Error> {
-    parse_audio_url_with_policy(url_unparsed, MediaSourcePolicy::ServerRequest).await
+pub async fn parse_audio_url_for_server(
+    url_unparsed: &str,
+    attachments: &MediaAttachments,
+) -> Result<AudioInput, anyhow::Error> {
+    parse_audio_url_with_policy(url_unparsed, MediaSourcePolicy::ServerRequest, attachments).await
 }
 
 async fn parse_audio_url_with_policy(
     url_unparsed: &str,
     policy: MediaSourcePolicy,
+    attachments: &MediaAttachments,
 ) -> Result<AudioInput, anyhow::Error> {
-    let media = load_media_source(url_unparsed, policy, "audio").await?;
+    let media = attachments.load(url_unparsed, policy, "audio").await?;
     AudioInput::from_bytes(&media.bytes)
 }
 
@@ -227,13 +235,20 @@ mod tests {
 
     #[tokio::test]
     async fn server_media_rejects_local_sources() {
-        assert!(parse_image_url_for_server("resources/rust-logo-32x32.png")
-            .await
-            .is_err());
+        assert!(parse_image_url_for_server(
+            "resources/rust-logo-32x32.png",
+            &MediaAttachments::default()
+        )
+        .await
+        .is_err());
 
         let absolute_path = std::path::absolute("resources/rust-logo-32x32.png").unwrap();
         let url = format!("file://{}", absolute_path.as_os_str().to_str().unwrap());
-        assert!(parse_image_url_for_server(&url).await.is_err());
+        assert!(
+            parse_image_url_for_server(&url, &MediaAttachments::default())
+                .await
+                .is_err()
+        );
     }
 
     #[test]

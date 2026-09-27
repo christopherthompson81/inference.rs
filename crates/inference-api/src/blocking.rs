@@ -8,6 +8,7 @@ use crate::{
     api_error::ApiError,
     engine::{Engine, EngineLoadError},
     engine_chat::ChatStream,
+    media_source::MediaAttachments,
 };
 
 static RUNTIME: OnceLock<Runtime> = OnceLock::new();
@@ -46,14 +47,18 @@ impl BlockingEngine {
         &self.engine
     }
 
-    pub fn chat_json(&self, request: &[u8]) -> Result<String, ApiError> {
+    pub fn chat_json(&self, request: &[u8], media: MediaAttachments) -> Result<String, ApiError> {
         let (engine, request) = (self.engine.clone(), request.to_vec());
-        run(async move { engine.chat_json(&request).await })
+        run(async move { engine.chat_json(&request, media).await })
     }
 
-    pub fn chat_stream_json(&self, request: &[u8]) -> Result<BlockingChatStream, ApiError> {
+    pub fn chat_stream_json(
+        &self,
+        request: &[u8],
+        media: MediaAttachments,
+    ) -> Result<BlockingChatStream, ApiError> {
         let (engine, request) = (self.engine.clone(), request.to_vec());
-        run(async move { engine.chat_stream_json(&request).await })
+        run(async move { engine.chat_stream_json(&request, media).await })
             .map(|stream| BlockingChatStream { stream })
     }
 }

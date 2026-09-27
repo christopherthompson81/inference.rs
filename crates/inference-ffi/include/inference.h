@@ -15,9 +15,9 @@
  *   - Optional out-parameters may be NULL. Count functions return 0 for a NULL handle.
  *
  * Versioning
- *   inference_abi_version() returns (major << 16) | (minor << 8) | patch. A different major version must not be used.
- *   Minor versions only add entry points and status codes (callers may require a minimum; treat an unknown status as
- *   an error); patch versions change behaviour only.
+ *   inference_abi_version() returns (major << 16) | (minor << 8) | patch. The ABI is unstable while it is 0.0.x: every
+ *   release that changes it bumps the patch number and may add, change or remove entry points, so require an exact
+ *   match. Compatibility rules (minor adds, patch fixes) start at 0.1.0.
  *
  * Symbol surface
  *   The shared library exports exactly the inference_* functions declared here (tests/export_surface.py checks it).
@@ -47,8 +47,8 @@ extern "C" {
 #endif
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
-#define INFERENCE_ABI_VERSION_MINOR 2
-#define INFERENCE_ABI_VERSION_PATCH 0
+#define INFERENCE_ABI_VERSION_MINOR 0
+#define INFERENCE_ABI_VERSION_PATCH 3
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -177,9 +177,28 @@ INFERENCE_API void inference_engine_free(inference_engine *engine);
 INFERENCE_API inference_status inference_chat(const inference_engine *engine, const char *request,
                                              size_t request_len, inference_string **out_response);
 
+/* A buffer passed with a request (image, audio or video bytes, copied during the call). The request names it by
+ * position: an image_url / audio_url / video_url of "media://0" is the first entry. data must not be NULL; mime_type
+ * may be. */
+typedef struct inference_media {
+    const uint8_t *data;
+    size_t len;
+    const char *mime_type;
+} inference_media;
+
+/* inference_chat with media attachments. media may be NULL when media_count is 0. */
+INFERENCE_API inference_status inference_chat_with_media(const inference_engine *engine, const char *request,
+                                                        size_t request_len, const inference_media *media,
+                                                        size_t media_count, inference_string **out_response);
+
 /* Starts a streaming chat completion. Poll it with inference_stream_next; freeing it abandons the request. */
 INFERENCE_API inference_status inference_chat_stream_open(const inference_engine *engine, const char *request,
                                                          size_t request_len, inference_stream **out_stream);
+/* inference_chat_stream_open with media attachments. */
+INFERENCE_API inference_status inference_chat_stream_open_with_media(const inference_engine *engine,
+                                                                    const char *request, size_t request_len,
+                                                                    const inference_media *media, size_t media_count,
+                                                                    inference_stream **out_stream);
 /* Waits up to timeout_ms (< 0 waits indefinitely, 0 polls) for the next event. On an event, out_event receives
  * {"event": "chunk" | "agentic_tool_call_progress" | "agentic_tool_approval_required" | "file_produced" | "error",
  * "data": ...}; a chunk's data is a chat.completion.chunk and an error's is the OpenAI error JSON. On a timeout

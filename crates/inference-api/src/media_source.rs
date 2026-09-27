@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::{
     path::{Path, PathBuf},
     sync::OnceLock,
@@ -27,6 +28,53 @@ static UI_UPLOAD_DIR: OnceLock<PathBuf> = OnceLock::new();
 pub enum MediaSourcePolicy {
     ServerRequest,
     Local,
+}
+
+/// A request names an attached buffer as `media://<index>`.
+pub const ATTACHMENT_PREFIX: &str = "media://";
+
+/// Media the caller passed alongside a request instead of by URL.
+#[derive(Clone, Debug)]
+pub struct MediaAttachment {
+    pub bytes: Vec<u8>,
+    pub mime_type: Option<String>,
+}
+
+/// The attachments of one request, indexed by position.
+#[derive(Clone, Debug, Default)]
+pub struct MediaAttachments(Arc<Vec<MediaAttachment>>);
+
+impl MediaAttachments {
+    pub fn new(attachments: Vec<MediaAttachment>) -> Self {
+        Self(Arc::new(attachments))
+    }
+
+    /// Loads `source` from the attachments when it names one, otherwise as a URL or path under `policy`.
+    pub async fn load(
+        &self,
+        source: &str,
+        policy: MediaSourcePolicy,
+        kind: &str,
+    ) -> Result<LoadedMedia> {
+        let Some(index) = source.strip_prefix(ATTACHMENT_PREFIX) else {
+            return load_media_source(source, policy, kind).await;
+        };
+        let attachment = index
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| self.0.get(index))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{kind} source `{source}` names no attachment ({} attached)",
+                    self.0.len()
+                )
+            })?;
+        Ok(LoadedMedia {
+            bytes: attachment.bytes.clone(),
+            mime_type: attachment.mime_type.clone(),
+            final_url: None,
+        })
+    }
 }
 
 pub struct LoadedMedia {

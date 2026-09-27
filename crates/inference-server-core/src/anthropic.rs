@@ -1862,7 +1862,11 @@ pub async fn anthropic_messages(
         is_streaming,
         model_override,
     } = match engine
-        .prepare(oairequest, OpenAiToolSurface::ChatCompletions)
+        .prepare(
+            oairequest,
+            OpenAiToolSurface::ChatCompletions,
+            Default::default(),
+        )
         .await
     {
         Ok(prepared) => prepared,
@@ -1933,6 +1937,7 @@ pub async fn anthropic_count_tokens(
             agent_approval_notifier: None,
             tool_surface: OpenAiToolSurface::ChatCompletions,
             skill_store: None,
+            media: Default::default(),
         },
     )
     .await

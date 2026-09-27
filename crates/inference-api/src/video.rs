@@ -25,7 +25,7 @@ use std::path::Path;
 use tokio::fs;
 
 use crate::media_source::{
-    load_media_source, LoadedMedia, MediaSourcePolicy, SERVER_VIDEO_FRAME_LIMIT,
+    LoadedMedia, MediaAttachments, MediaSourcePolicy, SERVER_VIDEO_FRAME_LIMIT,
 };
 
 /// Default frames-per-second assumed when metadata is unavailable (e.g. GIF).
@@ -59,17 +59,25 @@ pub async fn parse_video_url(
     url_unparsed: &str,
     sampling: Option<VideoFrameSampling>,
 ) -> Result<VideoInput> {
-    parse_video_url_with_policy(url_unparsed, sampling, MediaSourcePolicy::Local).await
+    parse_video_url_with_policy(
+        url_unparsed,
+        sampling,
+        MediaSourcePolicy::Local,
+        &Default::default(),
+    )
+    .await
 }
 
 pub async fn parse_video_url_for_server(
     url_unparsed: &str,
     sampling: Option<VideoFrameSampling>,
+    attachments: &MediaAttachments,
 ) -> Result<VideoInput> {
     parse_video_url_with_policy(
         url_unparsed,
         Some(sampling.unwrap_or_default()),
         MediaSourcePolicy::ServerRequest,
+        attachments,
     )
     .await
 }
@@ -78,8 +86,9 @@ async fn parse_video_url_with_policy(
     url_unparsed: &str,
     sampling: Option<VideoFrameSampling>,
     policy: MediaSourcePolicy,
+    attachments: &MediaAttachments,
 ) -> Result<VideoInput> {
-    let media = load_media_source(url_unparsed, policy, "video").await?;
+    let media = attachments.load(url_unparsed, policy, "video").await?;
 
     if is_gif_source(url_unparsed, &media) {
         decode_gif_frames(&media.bytes, sampling)
@@ -442,10 +451,12 @@ mod tests {
 
     #[tokio::test]
     async fn server_video_rejects_local_sources() {
-        assert!(
-            parse_video_url_for_server("resources/rust-logo-32x32.png", None)
-                .await
-                .is_err()
-        );
+        assert!(parse_video_url_for_server(
+            "resources/rust-logo-32x32.png",
+            None,
+            &MediaAttachments::default()
+        )
+        .await
+        .is_err());
     }
 }
