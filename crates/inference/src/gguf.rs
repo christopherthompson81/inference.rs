@@ -264,6 +264,7 @@ impl GgufModelBuilder {
 
     /// Cap a multimodal model's runtime context length.
     pub fn with_max_model_len(mut self, max_model_len: usize) -> Self {
+        assert!(max_model_len > 0, "maximum model length must be nonzero");
         self.max_model_len = Some(max_model_len);
         self
     }

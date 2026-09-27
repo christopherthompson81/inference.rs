@@ -509,3 +509,29 @@ A new unit test checks that a stored `ModelLoaderConfig` rebuilds its loader, an
 so reload validates like the first load.
 
 Result: green, with 2130 CPU and 2449 CUDA tests (+1). 4 files, +182 / -202, including this entry.
+
+## Run 16 - 2026-09-27 (evening)
+
+Change: loading-path step 4 (first part). The seven SDK builders (text, multimodal, gguf, diffusion, speech,
+embedding, auto) build their `ModelLoaderConfig` first and load through `build_loader` + `load`, the path the server
+and reload already use. `ModelLoaderConfig` gains `overrides: LoadOverrides { topology, speech_cfg }` for values
+`ModelSelected` cannot carry; `LoaderBuilder` prefers an inline topology over the path. LoRA, X-LoRA and AnyMoE
+(`build_pipeline_from_{text,gguf}_loader`) are left for the next part: they need an ordering override and an AnyMoE
+spec in the selection.
+
+Fixes that come with it (Run 12 list): `with_device` is honored for text and multimodal; the MTP draft head is ISQ'd
+on first load too; embedding reload keeps imatrix and calibration; speech reload keeps its cfg; an inline topology
+survives reload. A review compared every config field the old direct construction set against the LoaderBuilder
+arms: no unintended differences. `GgufModelBuilder::with_max_model_len(0)` now asserts like the other builders
+(LoaderBuilder would reject it at load).
+
+Tests:
+- `inline_topology_is_used_over_the_path` (core): a missing topology path fails the build, an inline topology wins.
+- `reload_decodes_like_the_first_load` (tiny PaddleOCR-VL), unload then reload then decode again:
+  - First run failed on CPU and CUDA with "model `default` was not found". Suspected the Run 15 alias pitfall and
+    switched the id to `list_models()`; it failed the same way, and `list_models()` itself held the one real id.
+  - Cause: a real bug. `unload_model` resets `default_engine_id` to the next engine, which is `None` when the model was
+    the only one, and `do_reload_model` never set it back. After unload/reload of a single model, every request that
+    names no model (the SDK's `send_chat_request`, a server request without `model`) fails with that error.
+  - Fix: `do_reload_model` restores the reloaded model as the default when there is none. The test now passes and
+    would fail on master, so it pins this fix as well as the round trip.

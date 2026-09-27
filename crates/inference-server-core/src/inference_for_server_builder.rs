@@ -874,6 +874,7 @@ impl InferenceRsForServerBuilder {
             hf_config_overrides: self.hf_config_overrides,
             mtp_config: self.mtp_config.clone(),
             encoder_cache_memory_bytes: self.encoder_cache_memory_bytes,
+            overrides: Default::default(),
         };
         let loader = loader_config.build_loader(self.no_kv_cache)?;
         inference_instance_info(&*loader);
@@ -1039,6 +1040,7 @@ impl InferenceRsForServerBuilder {
             hf_config_overrides: first_hf_config_overrides,
             mtp_config: self.mtp_config.clone(),
             encoder_cache_memory_bytes: first_encoder_cache_memory_bytes,
+            overrides: Default::default(),
         };
         let loader = first_loader_config.build_loader(self.no_kv_cache)?;
         inference_instance_info(&*loader);
@@ -1180,6 +1182,7 @@ impl InferenceRsForServerBuilder {
                     .encoder_cache_memory_bytes
                     .map(NonZeroUsize::get)
                     .or(self.encoder_cache_memory_bytes),
+                overrides: Default::default(),
             };
             let loader = loader_config.build_loader(self.no_kv_cache)?;
             let pipeline: LoadedPipeline = loader_config.load(&*loader, mtp_runtime).await?;

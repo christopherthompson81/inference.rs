@@ -306,3 +306,37 @@ async fn partial_prefix_hit_matches_a_fresh_two_image_decode() -> anyhow::Result
     assert!(same_decode(&cached, &fresh), "{fresh:?} vs {cached:?}");
     Ok(())
 }
+
+// Reload rebuilds from the config the SDK stored at first load, so it must decode exactly as the first load did.
+#[tokio::test]
+async fn reload_decodes_like_the_first_load() -> anyhow::Result<()> {
+    let dir = tiny_checkpoint()?;
+    let model = build(dir.path()).await?;
+    // Unload and reload take the real model id; the `default` alias is not registered for them.
+    let ids = model.list_models()?;
+    let [id] = ids.as_slice() else {
+        anyhow::bail!("expected exactly one model, got {ids:?}");
+    };
+    let first = trace(
+        &model
+            .send_chat_request(image_request(&["page_00.png"])?)
+            .await?,
+    );
+    assert!(!first.is_empty());
+
+    model.unload_model(id)?;
+    assert!(!model.is_model_loaded(id)?);
+    model.reload_model(id).await?;
+    assert!(model.is_model_loaded(id)?);
+
+    let reloaded = trace(
+        &model
+            .send_chat_request(image_request(&["page_00.png"])?)
+            .await?,
+    );
+    assert!(
+        same_decode(&first, &reloaded),
+        "reload decoded differently: {first:?} vs {reloaded:?}"
+    );
+    Ok(())
+}

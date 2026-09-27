@@ -377,6 +377,17 @@ pub struct ModelLoaderConfig {
     pub mtp_config: Option<MtpConfig>,
     /// Optional logical tensor byte budget for multimodal encoder outputs.
     pub encoder_cache_memory_bytes: Option<usize>,
+    /// Values given inline (not by path), which `model_selected` cannot carry.
+    pub overrides: LoadOverrides,
+}
+
+/// Inline load options that take precedence over their path-based `ModelSelected` counterparts.
+#[derive(Clone, Default)]
+pub struct LoadOverrides {
+    /// Used instead of loading `model_selected`'s topology path.
+    pub topology: Option<Topology>,
+    /// Generation config for speech models.
+    pub speech_cfg: Option<SpeechGenerationConfig>,
 }
 
 impl ModelLoaderConfig {
@@ -390,6 +401,7 @@ impl ModelLoaderConfig {
             .with_hf_config_overrides(self.hf_config_overrides.clone())
             .with_mtp(self.mtp_config.as_ref().is_some_and(MtpConfig::is_builtin))
             .with_encoder_cache_memory_bytes(self.encoder_cache_memory_bytes)
+            .with_overrides(self.overrides.clone())
             .build()
     }
 
@@ -2868,6 +2880,16 @@ impl InferenceRs {
                 .write()
                 .map_err(|_| InferenceRsError::EnginePoisoned)?;
             engines.insert(model_id.to_string(), engine_instance);
+        }
+        // Unloading the last model cleared the default; without this, requests naming no model fail after reload.
+        {
+            let mut default_lock = self
+                .default_engine_id
+                .write()
+                .map_err(|_| InferenceRsError::EnginePoisoned)?;
+            if default_lock.is_none() {
+                *default_lock = Some(model_id.to_string());
+            }
         }
 
         // Remove from unloaded map
