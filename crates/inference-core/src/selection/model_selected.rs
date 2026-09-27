@@ -187,6 +187,10 @@ pub enum ModelSelected {
 
         /// Cache path for Hugging Face models downloaded locally
         hf_cache_path: Option<PathBuf>,
+
+        /// ISQ organization: `default` or `moqe`.
+        #[serde(default)]
+        organization: Option<IsqOrganization>,
     },
 
     /// Select a LoRA architecture
@@ -374,6 +378,38 @@ pub enum ModelSelected {
 
         /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
         max_batch_size: usize,
+
+        /// Path to a local `tokenizer.json` file. If specified, it is used over any remote file.
+        #[serde(default)]
+        tokenizer_json: Option<String>,
+
+        /// ISQ organization: `default` or `moqe`.
+        #[serde(default)]
+        organization: Option<IsqOrganization>,
+
+        /// UQFF path and quantization types to write.
+        #[serde(default)]
+        write_uqff: Option<UqffWriteConfig>,
+
+        /// Imatrix file to use while requantizing the GGUF weights.
+        #[serde(default)]
+        imatrix: Option<PathBuf>,
+
+        /// Calibration file used to generate an imatrix while requantizing the GGUF weights.
+        #[serde(default)]
+        calibration_file: Option<PathBuf>,
+
+        /// Cache path for Hugging Face models downloaded locally.
+        #[serde(default)]
+        hf_cache_path: Option<PathBuf>,
+
+        /// Path to a local Matryoshka Transformer configuration CSV file.
+        #[serde(default)]
+        matformer_config_path: Option<PathBuf>,
+
+        /// Name of the Matryoshka Transformer slice to use.
+        #[serde(default)]
+        matformer_slice_name: Option<String>,
     },
 
     /// Select a GGUF model with LoRA.
@@ -408,6 +444,38 @@ pub enum ModelSelected {
 
         /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
         max_batch_size: usize,
+
+        /// Path to a local `tokenizer.json` file. If specified, it is used over any remote file.
+        #[serde(default)]
+        tokenizer_json: Option<String>,
+
+        /// ISQ organization: `default` or `moqe`.
+        #[serde(default)]
+        organization: Option<IsqOrganization>,
+
+        /// UQFF path and quantization types to write.
+        #[serde(default)]
+        write_uqff: Option<UqffWriteConfig>,
+
+        /// Imatrix file to use while requantizing the GGUF weights.
+        #[serde(default)]
+        imatrix: Option<PathBuf>,
+
+        /// Calibration file used to generate an imatrix while requantizing the GGUF weights.
+        #[serde(default)]
+        calibration_file: Option<PathBuf>,
+
+        /// Cache path for Hugging Face models downloaded locally.
+        #[serde(default)]
+        hf_cache_path: Option<PathBuf>,
+
+        /// Path to a local Matryoshka Transformer configuration CSV file.
+        #[serde(default)]
+        matformer_config_path: Option<PathBuf>,
+
+        /// Name of the Matryoshka Transformer slice to use.
+        #[serde(default)]
+        matformer_slice_name: Option<String>,
     },
 
     /// Select a GGML model.

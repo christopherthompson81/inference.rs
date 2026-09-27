@@ -1,9 +1,7 @@
-use inference_core::{GGUFLoaderBuilder, GGUFSpecificConfig, Ordering};
+use inference_core::{LoadOverrides, ModelSelected, Ordering, GGUF_MULTI_FILE_DELIMITER};
 
 use crate::{
-    model_builder_trait::{
-        build_model_from_pipeline, build_pipeline_from_gguf_loader, maybe_initialize_logging,
-    },
+    model_builder_trait::{build_gguf_pipeline_as, build_model_from_pipeline, GgufAutoMapDims},
     GgufModelBuilder, Model,
 };
 
@@ -47,45 +45,34 @@ impl GgufXLoraModelBuilder {
         if self.gguf_model.mmproj_files.is_some() {
             anyhow::bail!("Multimodal GGUF does not currently support X-LoRA adapters");
         }
-        let gguf_model = self.gguf_model.clone();
-        let config = GGUFSpecificConfig {
-            topology: self.gguf_model.topology,
-            organization: self.gguf_model.organization,
-            write_uqff: self.gguf_model.write_uqff,
-            imatrix: self.gguf_model.imatrix,
-            calibration_file: self.gguf_model.calibration_file,
-            max_edge: self.gguf_model.max_edge,
-            max_model_len: self.gguf_model.max_model_len,
-            hf_cache_path: self.gguf_model.hf_cache_path,
-            matformer_config_path: self.gguf_model.matformer_config_path,
-            matformer_slice_name: self.gguf_model.matformer_slice_name,
+        let xlora_model_id = self.xlora_model_id;
+        let tgt_non_granular_index = self.tgt_non_granular_index;
+        let select = |builder: &GgufModelBuilder, dims: GgufAutoMapDims| ModelSelected::XLoraGGUF {
+            tok_model_id: builder.tok_model_id.clone(),
+            quantized_model_id: builder.model_id.clone(),
+            quantized_filename: builder.files.join(GGUF_MULTI_FILE_DELIMITER),
+            xlora_model_id: xlora_model_id.clone(),
+            order: String::new(), // the inline ordering override is used instead
+            tgt_non_granular_index,
+            dtype: builder.dtype,
+            topology: builder.topology_path.clone(),
+            max_seq_len: dims.max_seq_len,
+            max_batch_size: dims.max_batch_size,
+            tokenizer_json: builder.tokenizer_json.clone(),
+            organization: Some(builder.organization),
+            write_uqff: builder.write_uqff.clone(),
+            imatrix: builder.imatrix.clone(),
+            calibration_file: builder.calibration_file.clone(),
+            hf_cache_path: builder.hf_cache_path.clone(),
+            matformer_config_path: builder.matformer_config_path.clone(),
+            matformer_slice_name: builder.matformer_slice_name.clone(),
         };
-
-        maybe_initialize_logging(self.gguf_model.with_logging);
-
-        let mut loader = GGUFLoaderBuilder::new(
-            self.gguf_model.chat_template,
-            self.gguf_model.tok_model_id,
-            self.gguf_model.model_id,
-            self.gguf_model.files,
-            config,
-            self.gguf_model.no_kv_cache,
-            self.gguf_model.jinja_explicit,
-        )
-        .with_xlora(
-            self.xlora_model_id,
-            self.ordering,
-            self.gguf_model.no_kv_cache,
-            self.tgt_non_granular_index,
-        );
-        if let Some(tokenizer_json) = self.gguf_model.tokenizer_json {
-            loader = loader.with_tokenizer_json(tokenizer_json);
-        }
-        let loader = loader.build();
-
+        let overrides = LoadOverrides {
+            ordering: Some(self.ordering),
+            ..Default::default()
+        };
         let (pipeline, scheduler_config, add_model_config) =
-            build_pipeline_from_gguf_loader(gguf_model, loader).await?;
-
+            build_gguf_pipeline_as(self.gguf_model, select, overrides).await?;
         Ok(build_model_from_pipeline(pipeline, scheduler_config, add_model_config).await)
     }
 }

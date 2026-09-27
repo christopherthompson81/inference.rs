@@ -1,11 +1,10 @@
 use inference_core::{
-    LoraAdapterSpec, LoraRuntimeConfig, NormalLoaderBuilder, NormalSpecificConfig,
+    AutoDeviceMapParams, LoraAdapterSpec, LoraRuntimeConfig, ModelSelected,
+    UQFF_MULTI_FILE_DELIMITER,
 };
 
 use crate::{
-    model_builder_trait::{
-        build_model_from_pipeline, build_pipeline_from_text_loader, maybe_initialize_logging,
-    },
+    model_builder_trait::{build_model_from_pipeline, build_text_pipeline_as, join_path_list},
     Model, TextModelBuilder,
 };
 
@@ -58,37 +57,31 @@ impl LoraModelBuilder {
 
     /// Build the base model and its dynamic LoRA runtime.
     pub async fn build(self) -> anyhow::Result<Model> {
-        let text_model = self.text_model.clone();
-        let config = NormalSpecificConfig {
-            topology: self.text_model.topology,
-            organization: self.text_model.organization,
-            write_uqff: self.text_model.write_uqff,
-            from_uqff: self.text_model.from_uqff,
-            imatrix: self.text_model.imatrix,
-            calibration_file: self.text_model.calibration_file,
-            hf_cache_path: self.text_model.hf_cache_path,
-            hf_config_overrides: self.text_model.hf_config_overrides,
-            max_model_len: self.text_model.max_model_len,
-            matformer_config_path: self.text_model.matformer_config_path,
-            matformer_slice_name: self.text_model.matformer_slice_name,
+        let builder = &self.text_model;
+        let model_selected = ModelSelected::Lora {
+            model_id: builder.model_id.clone(),
+            tokenizer_json: builder.tokenizer_json.clone(),
+            adapters: self.adapters,
+            runtime_config: self.runtime_config,
+            arch: builder.loader_type.clone(),
+            dtype: builder.dtype,
+            topology: builder.topology_path.clone(),
+            organization: Some(builder.organization),
+            write_uqff: builder.write_uqff.clone(),
+            from_uqff: join_path_list(builder.from_uqff.as_deref(), UQFF_MULTI_FILE_DELIMITER),
+            imatrix: builder.imatrix.clone(),
+            calibration_file: builder.calibration_file.clone(),
+            max_edge: None,
+            max_seq_len: AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
+            max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
+            max_num_images: None,
+            max_image_length: None,
+            hf_cache_path: builder.hf_cache_path.clone(),
+            matformer_config_path: builder.matformer_config_path.clone(),
+            matformer_slice_name: builder.matformer_slice_name.clone(),
         };
-
-        maybe_initialize_logging(self.text_model.with_logging);
-
-        let loader = NormalLoaderBuilder::new(
-            config,
-            self.text_model.chat_template,
-            self.text_model.tokenizer_json,
-            Some(self.text_model.model_id),
-            self.text_model.no_kv_cache,
-            self.text_model.jinja_explicit,
-        )
-        .with_lora(self.adapters, self.runtime_config)
-        .build(self.text_model.loader_type)?;
-
         let (pipeline, scheduler_config, add_model_config) =
-            build_pipeline_from_text_loader(text_model, loader).await?;
-
+            build_text_pipeline_as(self.text_model, model_selected, Default::default()).await?;
         Ok(build_model_from_pipeline(pipeline, scheduler_config, add_model_config).await)
     }
 }

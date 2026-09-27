@@ -535,3 +535,29 @@ Tests:
     names no model (the SDK's `send_chat_request`, a server request without `model`) fails with that error.
   - Fix: `do_reload_model` restores the reloaded model as the default when there is none. The test now passes and
     would fail on master, so it pins this fix as well as the round trip.
+
+## Run 17 - 2026-09-27 (night)
+
+Change: loading-path step 4 (second part). The adapter builders (LoRA, X-LoRA, GGUF LoRA, GGUF X-LoRA, AnyMoE) load
+through `ModelLoaderConfig` too, so all five can now reload (they stored `loader_config: None` before). The SDK text
+and GGUF pipelines split into a selection plus `build_{text,gguf}_pipeline_as(builder, selection, overrides)`; the
+loader-based helpers are gone.
+
+- `LoadOverrides` gains `ordering` (inline adapter ordering over the `order` path) and `anymoe` (`build_loader` wraps
+  the loader in `AnyMoeLoader`).
+- `ModelSelected::XLora` gains `organization`; `XLoraGGUF` / `LoraGGUF` gain tokenizer_json, organization, write_uqff,
+  imatrix, calibration_file, hf_cache_path and the matformer fields (serde defaults). Their LoaderBuilder arms used
+  `GGUFSpecificConfig { topology, ..Default::default() }` and dropped everything else; the CLI dropped the same
+  options for these paths.
+
+Behavior changes a review traced (none regress a working setup):
+- `LoraModelBuilder` without an arch now detects through `AutoLoaderBuilder` (as `serve --lora` does): text models
+  load the same, multimodal ones load instead of failing "Unknown architecture".
+- GGUF LoRA / X-LoRA with `max_model_len` now error; the legacy adapter path never read it (Run 13).
+- CLI `--imatrix` / `--calibration-file` with legacy LoRA/X-LoRA GGUF now reach the loader, which refuses them (ISQ
+  conversion is native-GGUF only) instead of silently dropping them.
+- The AnyMoE text base carries the builder's imatrix, calibration, matformer and built-in MTP settings. A reload with
+  `training: true` re-trains the gate.
+
+Tests: `inline_ordering_is_used_over_the_order_path` (an empty order path fails, the override builds) and
+`anymoe_override_wraps_the_stored_loader`.

@@ -1,12 +1,9 @@
-use inference_core::{
-    AnyMoeConfig, AnyMoeLoader, GGUFLoaderBuilder, GGUFSpecificConfig, Loader, NormalLoaderBuilder,
-    NormalSpecificConfig,
-};
+use inference_core::{AnyMoeConfig, AnyMoeSpec, LoadOverrides};
 
 use crate::{
     model_builder_trait::{
-        build_model_from_pipeline, build_pipeline_from_gguf_loader,
-        build_pipeline_from_text_loader, maybe_initialize_logging,
+        build_gguf_pipeline_as, build_model_from_pipeline, build_text_pipeline_as, gguf_selection,
+        plain_text_selection,
     },
     GgufModelBuilder, Model, TextModelBuilder,
 };
@@ -79,94 +76,28 @@ impl AnyMoeModelBuilder {
 
     /// Load the AnyMoE model and return a ready-to-use [`Model`].
     pub async fn build(self) -> anyhow::Result<Model> {
-        let (pipeline, scheduler_config, add_model_config) = match &self.base {
+        let overrides = LoadOverrides {
+            anymoe: Some(AnyMoeSpec {
+                config: self.config,
+                path: self.path,
+                prefix: self.prefix,
+                mlp: self.mlp,
+                model_ids: self.model_ids,
+                layers: self.layers,
+            }),
+            ..Default::default()
+        };
+        let (pipeline, scheduler_config, add_model_config) = match self.base {
             AnyMoeBase::Text(base) => {
-                let base = base.clone();
-                let builder = base.clone();
-                let config = NormalSpecificConfig {
-                    topology: base.topology,
-                    organization: base.organization,
-                    write_uqff: base.write_uqff,
-                    from_uqff: base.from_uqff,
-                    imatrix: None,
-                    calibration_file: None,
-                    hf_cache_path: base.hf_cache_path,
-                    hf_config_overrides: base.hf_config_overrides,
-                    max_model_len: base.max_model_len,
-                    matformer_config_path: None,
-                    matformer_slice_name: None,
-                };
-
-                maybe_initialize_logging(base.with_logging);
-
-                let loader = NormalLoaderBuilder::new(
-                    config,
-                    base.chat_template,
-                    base.tokenizer_json,
-                    Some(base.model_id),
-                    base.no_kv_cache,
-                    base.jinja_explicit,
-                )
-                .build(base.loader_type)?;
-
-                let loader = self.wrap_loader(loader);
-                build_pipeline_from_text_loader(builder, loader).await?
+                let model_selected = plain_text_selection(&base);
+                build_text_pipeline_as(base, model_selected, overrides).await?
             }
             AnyMoeBase::Gguf(base) => {
-                let base = base.clone();
-                let builder = base.clone();
-                let config = GGUFSpecificConfig {
-                    topology: base.topology.clone(),
-                    organization: base.organization,
-                    write_uqff: base.write_uqff.clone(),
-                    imatrix: base.imatrix.clone(),
-                    calibration_file: base.calibration_file.clone(),
-                    max_edge: base.max_edge,
-                    max_model_len: base.max_model_len,
-                    hf_cache_path: base.hf_cache_path.clone(),
-                    matformer_config_path: base.matformer_config_path.clone(),
-                    matformer_slice_name: base.matformer_slice_name.clone(),
-                };
-
-                maybe_initialize_logging(base.with_logging);
-
-                let mut loader = GGUFLoaderBuilder::new(
-                    base.chat_template.clone(),
-                    base.tok_model_id.clone(),
-                    base.model_id.clone(),
-                    base.files.clone(),
-                    config,
-                    base.no_kv_cache,
-                    base.jinja_explicit.clone(),
-                );
-                if let Some(mmproj_files) = base.mmproj_files.clone() {
-                    loader = loader.with_mmproj_files(mmproj_files);
-                }
-                if let Some(tokenizer_json) = base.tokenizer_json.clone() {
-                    loader = loader.with_tokenizer_json(tokenizer_json);
-                }
-                if let Some(adapters) = base.lora_adapters.clone() {
-                    loader = loader.with_dynamic_lora(adapters, base.lora_runtime_config);
-                }
-
-                let loader = self.wrap_loader(loader.build());
-                build_pipeline_from_gguf_loader(builder, loader).await?
+                build_gguf_pipeline_as(base, gguf_selection, overrides).await?
             }
         };
 
         Ok(build_model_from_pipeline(pipeline, scheduler_config, add_model_config).await)
-    }
-
-    fn wrap_loader(&self, target: Box<dyn Loader>) -> Box<dyn Loader> {
-        Box::new(AnyMoeLoader {
-            target,
-            config: self.config.clone(),
-            prefix: self.prefix.clone(),
-            mlp: self.mlp.clone(),
-            path: self.path.clone(),
-            model_ids: self.model_ids.clone(),
-            layers: self.layers.clone(),
-        })
     }
 }
 

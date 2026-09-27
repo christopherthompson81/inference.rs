@@ -388,12 +388,28 @@ pub struct LoadOverrides {
     pub topology: Option<Topology>,
     /// Generation config for speech models.
     pub speech_cfg: Option<SpeechGenerationConfig>,
+    /// Used instead of reading `model_selected`'s adapter ordering file.
+    pub ordering: Option<Ordering>,
+    /// Wraps the loaded model in an AnyMoE pipeline.
+    pub anymoe: Option<AnyMoeSpec>,
+}
+
+/// The AnyMoE layer to build on top of the loaded model.
+#[derive(Clone)]
+pub struct AnyMoeSpec {
+    pub config: AnyMoeConfig,
+    /// Training data (or gating weights) path.
+    pub path: String,
+    pub prefix: String,
+    pub mlp: String,
+    pub model_ids: Vec<String>,
+    pub layers: Vec<usize>,
 }
 
 impl ModelLoaderConfig {
     /// The loader this config describes. `no_kv_cache` is an engine setting, so it is passed in.
     pub fn build_loader(&self, no_kv_cache: bool) -> anyhow::Result<Box<dyn Loader>> {
-        selection::model_loader::LoaderBuilder::new(self.model_selected.clone())
+        let loader = selection::model_loader::LoaderBuilder::new(self.model_selected.clone())
             .with_no_kv_cache(no_kv_cache)
             .with_chat_template(self.chat_template.clone())
             .with_jinja_explicit(self.jinja_explicit.clone())
@@ -402,7 +418,19 @@ impl ModelLoaderConfig {
             .with_mtp(self.mtp_config.as_ref().is_some_and(MtpConfig::is_builtin))
             .with_encoder_cache_memory_bytes(self.encoder_cache_memory_bytes)
             .with_overrides(self.overrides.clone())
-            .build()
+            .build()?;
+        Ok(match self.overrides.anymoe.clone() {
+            Some(spec) => Box::new(AnyMoeLoader {
+                target: loader,
+                config: spec.config,
+                path: spec.path,
+                prefix: spec.prefix,
+                mlp: spec.mlp,
+                model_ids: spec.model_ids,
+                layers: spec.layers,
+            }),
+            None => loader,
+        })
     }
 
     /// Load `loader` with this config, attaching MTP speculative decoding when configured.

@@ -1,9 +1,9 @@
-use inference_core::{NormalLoaderBuilder, NormalSpecificConfig, Ordering};
+use inference_core::{
+    AutoDeviceMapParams, LoadOverrides, ModelSelected, Ordering, UQFF_MULTI_FILE_DELIMITER,
+};
 
 use crate::{
-    model_builder_trait::{
-        build_model_from_pipeline, build_pipeline_from_text_loader, maybe_initialize_logging,
-    },
+    model_builder_trait::{build_model_from_pipeline, build_text_pipeline_as, join_path_list},
     Model, TextModelBuilder,
 };
 
@@ -38,42 +38,29 @@ impl XLoraModelBuilder {
 
     /// Load the X-LoRA model and return a ready-to-use [`Model`].
     pub async fn build(self) -> anyhow::Result<Model> {
-        let text_model = self.text_model.clone();
-        let config = NormalSpecificConfig {
-            topology: self.text_model.topology,
-            organization: self.text_model.organization,
-            write_uqff: self.text_model.write_uqff,
-            from_uqff: self.text_model.from_uqff,
-            imatrix: None,
-            calibration_file: None,
-            hf_cache_path: self.text_model.hf_cache_path,
-            hf_config_overrides: self.text_model.hf_config_overrides,
-            max_model_len: self.text_model.max_model_len,
-            matformer_config_path: None,
-            matformer_slice_name: None,
+        let builder = &self.text_model;
+        let model_selected = ModelSelected::XLora {
+            model_id: Some(builder.model_id.clone()),
+            tokenizer_json: builder.tokenizer_json.clone(),
+            xlora_model_id: self.xlora_model_id,
+            order: String::new(), // the inline ordering override is used instead
+            tgt_non_granular_index: self.tgt_non_granular_index,
+            arch: builder.loader_type.clone(),
+            dtype: builder.dtype,
+            topology: builder.topology_path.clone(),
+            write_uqff: builder.write_uqff.clone(),
+            from_uqff: join_path_list(builder.from_uqff.as_deref(), UQFF_MULTI_FILE_DELIMITER),
+            max_seq_len: AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
+            max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
+            hf_cache_path: builder.hf_cache_path.clone(),
+            organization: Some(builder.organization),
         };
-
-        maybe_initialize_logging(self.text_model.with_logging);
-
-        let loader = NormalLoaderBuilder::new(
-            config,
-            self.text_model.chat_template,
-            self.text_model.tokenizer_json,
-            Some(self.text_model.model_id),
-            self.text_model.no_kv_cache,
-            self.text_model.jinja_explicit,
-        )
-        .with_xlora(
-            self.xlora_model_id,
-            self.ordering,
-            self.text_model.no_kv_cache,
-            self.tgt_non_granular_index,
-        )
-        .build(self.text_model.loader_type)?;
-
+        let overrides = LoadOverrides {
+            ordering: Some(self.ordering),
+            ..Default::default()
+        };
         let (pipeline, scheduler_config, add_model_config) =
-            build_pipeline_from_text_loader(text_model, loader).await?;
-
+            build_text_pipeline_as(self.text_model, model_selected, overrides).await?;
         Ok(build_model_from_pipeline(pipeline, scheduler_config, add_model_config).await)
     }
 }

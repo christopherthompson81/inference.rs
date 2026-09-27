@@ -100,6 +100,23 @@ fn resolve_topology(
     }
 }
 
+fn with_gguf_tokenizer(
+    builder: GGUFLoaderBuilder,
+    tokenizer_json: Option<String>,
+) -> GGUFLoaderBuilder {
+    match tokenizer_json {
+        Some(tokenizer_json) => builder.with_tokenizer_json(tokenizer_json),
+        None => builder,
+    }
+}
+
+fn resolve_ordering(inline: &Option<Ordering>, path: &str) -> anyhow::Result<Ordering> {
+    match inline {
+        Some(ordering) => Ok(ordering.clone()),
+        None => load_ordering(path),
+    }
+}
+
 fn uqff_paths(from_uqff: Option<String>) -> Option<Vec<PathBuf>> {
     from_uqff.map(|paths| {
         paths
@@ -404,6 +421,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
 
     let base = SafetensorsOptions::from_args(&args);
     let inline_topology = args.overrides.topology.clone();
+    let inline_ordering = args.overrides.ordering.clone();
     let loader: Box<dyn Loader> = match args.model {
         ModelSelected::Plain {
             model_id,
@@ -569,9 +587,11 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             max_seq_len: _,
             max_batch_size: _,
             hf_cache_path,
+            organization,
         } => {
             let options = SafetensorsOptions {
                 topology: resolve_topology(&inline_topology, topology)?,
+                organization: organization.unwrap_or_default(),
                 write_uqff,
                 from_uqff: uqff_paths(from_uqff),
                 hf_cache_path,
@@ -587,7 +607,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             )
             .with_xlora(
                 xlora_model_id,
-                load_ordering(&order)?,
+                resolve_ordering(&inline_ordering, &order)?,
                 args.no_kv_cache,
                 tgt_non_granular_index,
             )
@@ -719,27 +739,44 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             order,
             tgt_non_granular_index,
             topology,
+            tokenizer_json,
+            organization,
+            write_uqff,
+            imatrix,
+            calibration_file,
+            hf_cache_path,
+            matformer_config_path,
+            matformer_slice_name,
             ..
-        } => GGUFLoaderBuilder::new(
-            args.chat_template,
-            tok_model_id,
-            quantized_model_id,
-            gguf_files(&quantized_filename),
-            GGUFSpecificConfig {
-                topology: resolve_topology(&inline_topology, topology)?,
-                ..Default::default()
-            },
-            args.no_kv_cache,
-            args.jinja_explicit,
-        )
-        .with_encoder_cache_memory_bytes(args.encoder_cache_memory_bytes)
-        .with_xlora(
-            xlora_model_id,
-            load_ordering(&order)?,
-            args.no_kv_cache,
-            tgt_non_granular_index,
-        )
-        .build(),
+        } => {
+            let builder = GGUFLoaderBuilder::new(
+                args.chat_template,
+                tok_model_id,
+                quantized_model_id,
+                gguf_files(&quantized_filename),
+                GGUFSpecificConfig {
+                    topology: resolve_topology(&inline_topology, topology)?,
+                    organization: organization.unwrap_or_default(),
+                    write_uqff,
+                    imatrix,
+                    calibration_file,
+                    hf_cache_path,
+                    matformer_config_path,
+                    matformer_slice_name,
+                    ..Default::default()
+                },
+                args.no_kv_cache,
+                args.jinja_explicit,
+            )
+            .with_encoder_cache_memory_bytes(args.encoder_cache_memory_bytes)
+            .with_xlora(
+                xlora_model_id,
+                resolve_ordering(&inline_ordering, &order)?,
+                args.no_kv_cache,
+                tgt_non_granular_index,
+            );
+            with_gguf_tokenizer(builder, tokenizer_json).build()
+        }
         ModelSelected::LoraGGUF {
             tok_model_id,
             quantized_model_id,
@@ -747,22 +784,42 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             adapters_model_id,
             order,
             topology,
+            tokenizer_json,
+            organization,
+            write_uqff,
+            imatrix,
+            calibration_file,
+            hf_cache_path,
+            matformer_config_path,
+            matformer_slice_name,
             ..
-        } => GGUFLoaderBuilder::new(
-            args.chat_template,
-            tok_model_id,
-            quantized_model_id,
-            gguf_files(&quantized_filename),
-            GGUFSpecificConfig {
-                topology: resolve_topology(&inline_topology, topology)?,
-                ..Default::default()
-            },
-            args.no_kv_cache,
-            args.jinja_explicit,
-        )
-        .with_encoder_cache_memory_bytes(args.encoder_cache_memory_bytes)
-        .with_lora(adapters_model_id, load_ordering(&order)?)
-        .build(),
+        } => {
+            let builder = GGUFLoaderBuilder::new(
+                args.chat_template,
+                tok_model_id,
+                quantized_model_id,
+                gguf_files(&quantized_filename),
+                GGUFSpecificConfig {
+                    topology: resolve_topology(&inline_topology, topology)?,
+                    organization: organization.unwrap_or_default(),
+                    write_uqff,
+                    imatrix,
+                    calibration_file,
+                    hf_cache_path,
+                    matformer_config_path,
+                    matformer_slice_name,
+                    ..Default::default()
+                },
+                args.no_kv_cache,
+                args.jinja_explicit,
+            )
+            .with_encoder_cache_memory_bytes(args.encoder_cache_memory_bytes)
+            .with_lora(
+                adapters_model_id,
+                resolve_ordering(&inline_ordering, &order)?,
+            );
+            with_gguf_tokenizer(builder, tokenizer_json).build()
+        }
         ModelSelected::GGML {
             tok_model_id,
             tokenizer_json,
@@ -811,7 +868,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
         )
         .with_xlora(
             xlora_model_id,
-            load_ordering(&order)?,
+            resolve_ordering(&inline_ordering, &order)?,
             args.no_kv_cache,
             tgt_non_granular_index,
         )
@@ -839,7 +896,10 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             args.no_kv_cache,
             args.jinja_explicit,
         )
-        .with_lora(adapters_model_id, load_ordering(&order)?)
+        .with_lora(
+            adapters_model_id,
+            resolve_ordering(&inline_ordering, &order)?,
+        )
         .build(),
         ModelSelected::Embedding {
             model_id,
@@ -928,7 +988,7 @@ mod tests {
         LoaderBuilder::new(model())
             .with_overrides(LoadOverrides {
                 topology: Some(Topology::empty()),
-                speech_cfg: None,
+                ..Default::default()
             })
             .build()?;
         Ok(())
@@ -1007,5 +1067,58 @@ mod tests {
             .err()
             .unwrap();
         assert!(err.to_string().contains("not supported"), "{err}");
+    }
+
+    #[test]
+    fn inline_ordering_is_used_over_the_order_path() -> anyhow::Result<()> {
+        let xlora_gguf = || {
+            selected(serde_json::json!({"XLoraGGUF": {
+                "quantized_model_id": "q",
+                "quantized_filename": "q.gguf",
+                "xlora_model_id": "x",
+                "order": "",
+                "dtype": "auto",
+                "max_seq_len": 4096,
+                "max_batch_size": 1,
+            }}))
+        };
+        assert!(LoaderBuilder::new(xlora_gguf()).build().is_err());
+        LoaderBuilder::new(xlora_gguf())
+            .with_overrides(LoadOverrides {
+                ordering: Some(load_ordering(XLORA_ORDERING)?),
+                ..Default::default()
+            })
+            .build()?;
+        Ok(())
+    }
+
+    #[test]
+    fn anymoe_override_wraps_the_stored_loader() -> anyhow::Result<()> {
+        let mut config = loader_config(
+            selected(serde_json::json!({"Plain": {"model_id": "org/model"}})),
+            None,
+        );
+        config.overrides.anymoe = Some(crate::AnyMoeSpec {
+            config: crate::AnyMoeConfig {
+                hidden_size: 8,
+                lr: 1e-3,
+                epochs: 1,
+                batch_size: 1,
+                expert_type: crate::AnyMoeExpertType::FineTuned,
+                gate_model_id: None,
+                training: false,
+                loss_csv_path: None,
+            },
+            path: "gate".into(),
+            prefix: "model.layers".into(),
+            mlp: "mlp".into(),
+            model_ids: vec!["expert".into()],
+            layers: vec![0],
+        });
+        assert_eq!(
+            config.build_loader(false)?.get_id(),
+            "AnyMoE: tgt = `org/model`"
+        );
+        Ok(())
     }
 }

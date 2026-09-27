@@ -639,6 +639,7 @@ fn convert_text_model(
             max_seq_len: device.max_seq_len,
             max_batch_size: device.max_batch_size,
             hf_cache_path: device.hf_cache.clone(),
+            organization: quantization.isq_organization,
         }),
 
         // GGUF format - quantized_filename is required String
@@ -695,6 +696,17 @@ fn convert_text_model(
                 .map(|p| p.to_string_lossy().to_string()),
             max_seq_len: device.max_seq_len,
             max_batch_size: device.max_batch_size,
+            tokenizer_json: model
+                .tokenizer
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            organization: quantization.isq_organization,
+            write_uqff: None,
+            imatrix: quantization.imatrix.clone(),
+            calibration_file: quantization.calibration_file.clone(),
+            hf_cache_path: device.hf_cache.clone(),
+            matformer_config_path: matformer.config_path.clone(),
+            matformer_slice_name: matformer.slice_name.clone(),
         }),
 
         (ModelFormat::Gguf, false, false, true) => Ok(ModelSelected::XLoraGGUF {
@@ -718,6 +730,17 @@ fn convert_text_model(
                 .map(|p| p.to_string_lossy().to_string()),
             max_seq_len: device.max_seq_len,
             max_batch_size: device.max_batch_size,
+            tokenizer_json: model
+                .tokenizer
+                .as_ref()
+                .map(|path| path.to_string_lossy().to_string()),
+            organization: quantization.isq_organization,
+            write_uqff: None,
+            imatrix: quantization.imatrix.clone(),
+            calibration_file: quantization.calibration_file.clone(),
+            hf_cache_path: device.hf_cache.clone(),
+            matformer_config_path: matformer.config_path.clone(),
+            matformer_slice_name: matformer.slice_name.clone(),
         }),
 
         // GGML format
