@@ -22,8 +22,11 @@ use crate::{
         },
         preprocessor_config::{PreProcessorConfig, ToFilter},
         qwen2vl::{
-            expand_media_placeholders, replace_first_occurrence, validate_qwen_media_dimensions,
-            validated_mm_features,
+            apply_mrope_position_deltas, expand_media_placeholders, find_sequences,
+            media_data_cached_offset, qwen2_decode_args, replace_first_occurrence,
+            select_media_batch, select_media_view, shift_media_spans, split_media_pixels,
+            validate_qwen_media_dimensions, validated_mm_features, video_hashes,
+            Qwen2VLVisionSpecificArgs,
         },
         ModelInputs,
     },
@@ -34,16 +37,8 @@ use image::{imageops::FilterType, DynamicImage, GenericImageView};
 use inference_vision::{
     ApplyTensorTransforms, ApplyTransforms, Normalize, TensorTransforms, ToTensor, Transforms,
 };
-use std::{
-    any::Any,
-    collections::hash_map::DefaultHasher,
-    hash::{Hash, Hasher},
-    ops::Range,
-    sync::Arc,
-};
+use std::{any::Any, ops::Range, sync::Arc};
 use tokenizers::Tokenizer;
-
-use super::Qwen3VLVisionSpecificArgs;
 
 // Input processor
 struct Qwen3VLImageProcessor {
@@ -133,48 +128,6 @@ impl Processor for Qwen3VLProcessor {
     fn template_action(&self) -> MessagesAction {
         MessagesAction::Keep
     }
-}
-
-fn find_sequences(nums: &[u32], needle: u32) -> Vec<(usize, usize)> {
-    let mut sequences = Vec::new();
-    let mut start = None;
-
-    for (i, &num) in nums.iter().enumerate() {
-        if num == needle {
-            if start.is_none() {
-                start = Some(i);
-            }
-        } else if let Some(s) = start {
-            sequences.push((s, i));
-            start = None;
-        }
-    }
-
-    if let Some(s) = start {
-        sequences.push((s, nums.len()));
-    }
-
-    sequences
-}
-
-fn video_hashes(seq: &Sequence) -> Vec<u64> {
-    let hashes = seq
-        .clone_videos()
-        .unwrap_or_default()
-        .iter()
-        .map(|video| {
-            let mut hasher = DefaultHasher::new();
-            video.frame_hashes().hash(&mut hasher);
-            hasher.finish()
-        })
-        .collect::<Vec<_>>();
-    if !seq.is_chunked_prefill_view() {
-        return hashes;
-    }
-    seq.active_local_multimodal_item_range(MultimodalKind::Video, hashes.len())
-        .and_then(|range| hashes.get(range))
-        .unwrap_or_default()
-        .to_vec()
 }
 
 fn seq_videos_view(seq: &Sequence) -> Vec<VideoInput> {
@@ -347,190 +300,6 @@ fn shift_video_pad_runs(
     }
     *runs = kept;
     Ok((cached, current))
-}
-
-fn grid_patch_count(grid: Option<&Tensor>) -> Result<usize> {
-    Ok(grid
-        .map(Tensor::to_vec2::<u32>)
-        .transpose()?
-        .unwrap_or_default()
-        .iter()
-        .map(|row| row.iter().map(|value| *value as usize).product::<usize>())
-        .sum())
-}
-
-fn split_media_pixels(
-    pixel_values: &Tensor,
-    image_grid_thw: Option<&Tensor>,
-    video_grid_thw: Option<&Tensor>,
-) -> Result<(Option<Tensor>, Option<Tensor>)> {
-    let image_patches = grid_patch_count(image_grid_thw)?;
-    let video_patches = grid_patch_count(video_grid_thw)?;
-    if pixel_values.dim(0)? != image_patches + video_patches {
-        anyhow::bail!(
-            "Qwen media pixel rows {} do not match image/video grids {}",
-            pixel_values.dim(0)?,
-            image_patches + video_patches
-        );
-    }
-    let images = (image_patches != 0)
-        .then(|| pixel_values.narrow(0, 0, image_patches))
-        .transpose()?;
-    let videos = (video_patches != 0)
-        .then(|| pixel_values.narrow(0, image_patches, video_patches))
-        .transpose()?;
-    Ok((images, videos))
-}
-
-fn select_media_view(
-    seq: &Sequence,
-    kind: MultimodalKind,
-    pixel_values: Option<Tensor>,
-    grid_thw: Option<Tensor>,
-) -> Result<(Option<Tensor>, Option<Tensor>, usize)> {
-    let Some(grid_thw) = grid_thw else {
-        if pixel_values.is_some() {
-            anyhow::bail!("Qwen media pixels are missing grid metadata");
-        }
-        return Ok((None, None, 0));
-    };
-    let item_count = grid_thw.dim(0)?;
-    let range = if seq.is_chunked_prefill_view() {
-        seq.active_local_multimodal_item_range(kind, item_count)
-            .unwrap_or(0..0)
-    } else {
-        0..item_count
-    };
-    if range.end > item_count {
-        anyhow::bail!(
-            "Qwen {:?} media window {:?} exceeds {} grid rows",
-            kind,
-            range,
-            item_count
-        );
-    }
-    let grid_data = grid_thw.to_vec2::<u32>()?;
-    let patch_start = grid_data[..range.start]
-        .iter()
-        .map(|row| row.iter().map(|value| *value as usize).product::<usize>())
-        .sum::<usize>();
-    let patch_count = grid_data[range.clone()]
-        .iter()
-        .map(|row| row.iter().map(|value| *value as usize).product::<usize>())
-        .sum::<usize>();
-    let pixel_values = match (pixel_values, patch_count) {
-        (Some(pixel_values), 0) => {
-            if pixel_values.dim(0)? < patch_start {
-                anyhow::bail!("Qwen media pixel rows do not cover the selected window");
-            }
-            None
-        }
-        (Some(pixel_values), patch_count) => {
-            Some(pixel_values.narrow(0, patch_start, patch_count)?)
-        }
-        (None, 0) => None,
-        (None, _) => anyhow::bail!("Qwen media grid is missing pixel rows"),
-    };
-    let selected_count = range.len();
-    let grid_thw = (selected_count != 0)
-        .then(|| grid_thw.narrow(0, range.start, selected_count))
-        .transpose()?;
-    Ok((pixel_values, grid_thw, selected_count))
-}
-
-fn shift_media_spans(spans: &mut Vec<(usize, usize)>, prefix_len: usize) -> Result<usize> {
-    if prefix_len == 0 {
-        return Ok(0);
-    }
-    let mut cached = 0usize;
-    for &(start, end) in spans.iter() {
-        if end <= prefix_len {
-            cached += 1;
-        } else if start < prefix_len {
-            anyhow::bail!("Qwen prefix cache splits a multimodal item");
-        }
-    }
-    spans.retain(|(_, end)| *end > prefix_len);
-    for (start, end) in spans {
-        *start -= prefix_len;
-        *end -= prefix_len;
-    }
-    Ok(cached)
-}
-
-fn media_data_cached_offset(seq: &Sequence, cached_items: usize) -> usize {
-    if seq.is_chunked_prefill_view() {
-        0
-    } else {
-        cached_items
-    }
-}
-
-fn select_media_batch(
-    mut pixel_values: Option<Tensor>,
-    mut grid_thw: Option<Tensor>,
-    item_counts: &[usize],
-    cached_items: &[usize],
-    current_items: &[usize],
-) -> Result<(Option<Tensor>, Option<Tensor>)> {
-    if item_counts.len() != cached_items.len() || item_counts.len() != current_items.len() {
-        anyhow::bail!("Qwen per-sequence media metadata length mismatch");
-    }
-    let Some(grid) = grid_thw.as_ref() else {
-        if item_counts.iter().sum::<usize>() != 0 || pixel_values.is_some() {
-            anyhow::bail!("Qwen media selection is missing grid metadata");
-        }
-        return Ok((None, None));
-    };
-    if grid.dim(0)? != item_counts.iter().sum::<usize>() {
-        anyhow::bail!("Qwen media grid rows do not match per-sequence item counts");
-    }
-    let grid_data = grid.to_vec2::<u32>()?;
-    let mut selected_grids = Vec::new();
-    let mut selected_pixels = Vec::new();
-    let mut grid_offset = 0usize;
-    let mut pixel_offset = 0usize;
-    for ((&total, &cached), &current) in item_counts.iter().zip(cached_items).zip(current_items) {
-        let end = cached
-            .checked_add(current)
-            .ok_or_else(|| anyhow::Error::msg("Qwen media item range overflow"))?;
-        if end > total {
-            anyhow::bail!(
-                "Qwen media view requests items {cached}..{end} from a sequence with {total}"
-            );
-        }
-        let start_row = grid_offset + cached;
-        let patch_start = pixel_offset
-            + grid_data[grid_offset..start_row]
-                .iter()
-                .map(|row| row.iter().map(|value| *value as usize).product::<usize>())
-                .sum::<usize>();
-        let patch_count = grid_data[start_row..start_row + current]
-            .iter()
-            .map(|row| row.iter().map(|value| *value as usize).product::<usize>())
-            .sum::<usize>();
-        if current != 0 {
-            selected_grids.push(grid.narrow(0, start_row, current)?);
-        }
-        if patch_count != 0 {
-            let pixels = pixel_values
-                .as_ref()
-                .ok_or_else(|| anyhow::Error::msg("Qwen media grid is missing pixel rows"))?;
-            selected_pixels.push(pixels.narrow(0, patch_start, patch_count)?);
-        }
-        pixel_offset += grid_data[grid_offset..grid_offset + total]
-            .iter()
-            .map(|row| row.iter().map(|value| *value as usize).product::<usize>())
-            .sum::<usize>();
-        grid_offset += total;
-    }
-    grid_thw = (!selected_grids.is_empty())
-        .then(|| Tensor::cat(&selected_grids, 0))
-        .transpose()?;
-    pixel_values = (!selected_pixels.is_empty())
-        .then(|| Tensor::cat(&selected_pixels, 0))
-        .transpose()?;
-    Ok((pixel_values, grid_thw))
 }
 
 fn qwen3_packed_layout(
@@ -719,52 +488,6 @@ fn qwen3_prompt_mrope(
         rows.push(positions);
     }
     Ok(Tensor::stack(&rows, 1)?)
-}
-
-fn apply_mrope_position_deltas(
-    position_ids: Vec<usize>,
-    input_seqs: &[&mut Sequence],
-) -> Result<Vec<usize>> {
-    if position_ids.len() != input_seqs.len() {
-        anyhow::bail!(
-            "Qwen MRoPE position count {} does not match sequence count {}",
-            position_ids.len(),
-            input_seqs.len()
-        );
-    }
-    position_ids
-        .into_iter()
-        .zip(input_seqs)
-        .map(|(position, seq)| {
-            apply_mrope_position_delta(position, seq.multimodal.mrope_position_delta.unwrap_or(0))
-        })
-        .collect()
-}
-
-fn apply_mrope_position_delta(position: usize, delta: i64) -> Result<usize> {
-    let position = i64::try_from(position)?;
-    let position = position
-        .checked_add(delta)
-        .ok_or_else(|| anyhow::anyhow!("Qwen MRoPE position overflow"))?;
-    usize::try_from(position).map_err(anyhow::Error::from)
-}
-
-fn qwen3_decode_args(input_ids: &Tensor, seqlens: Vec<usize>) -> Qwen3VLVisionSpecificArgs {
-    Qwen3VLVisionSpecificArgs {
-        input_ids_full: input_ids.clone(),
-        pixel_values_videos: None,
-        image_grid_thw: None,
-        video_grid_thw: None,
-        rope_img_grid_thw: None,
-        rope_vid_grid_thw: None,
-        seqlens,
-        continuous_img_pad: Vec::new(),
-        continuous_vid_pad: Vec::new(),
-        image_hashes: Vec::new(),
-        video_hashes: Vec::new(),
-        packed_layout: None,
-        prompt_position_ids: None,
-    }
 }
 
 impl InputsProcessor for Qwen3VLImageProcessor {
@@ -1066,7 +789,7 @@ impl InputsProcessor for Qwen3VLImageProcessor {
             )
             .unwrap();
             let position_ids = apply_mrope_position_deltas(position_ids, input_seqs)?;
-            let args = qwen3_decode_args(&input, input_seqs.iter().map(|seq| seq.len()).collect());
+            let args = qwen2_decode_args(&input, input_seqs.iter().map(|seq| seq.len()).collect());
             let inputs: Box<dyn Any> = Box::new(ModelInputs {
                 input_ids: input,
                 seqlen_offsets: positions,
@@ -1636,7 +1359,7 @@ impl InputsProcessor for Qwen3VLImageProcessor {
             context_lens,
             position_ids,
             pixel_values,
-            model_specific_args: Box::new(Qwen3VLVisionSpecificArgs {
+            model_specific_args: Box::new(Qwen2VLVisionSpecificArgs {
                 input_ids_full,
                 pixel_values_videos,
                 image_grid_thw,
@@ -1977,50 +1700,7 @@ impl ImagePreProcessor for Qwen3VLImageProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn separates_flat_image_and_video_patch_rows() -> Result<()> {
-        let pixels = Tensor::new(&[[1u32], [2], [3], [4]], &Device::Cpu)?;
-        let image_grid = Tensor::new(&[[1u32, 1, 2]], &Device::Cpu)?;
-        let video_grid = Tensor::new(&[[2u32, 1, 1]], &Device::Cpu)?;
-        let (images, videos) = split_media_pixels(&pixels, Some(&image_grid), Some(&video_grid))?;
-
-        assert_eq!(images.unwrap().flatten_all()?.to_vec1::<u32>()?, vec![1, 2]);
-        assert_eq!(videos.unwrap().flatten_all()?.to_vec1::<u32>()?, vec![3, 4]);
-        Ok(())
-    }
-
-    #[test]
-    fn media_batch_selection_handles_heterogeneous_sequence_offsets() -> Result<()> {
-        let pixels = Tensor::arange(0f32, 15f32, &Device::Cpu)?.reshape((15, 1))?;
-        let grid = Tensor::new(
-            &[[1u32, 1, 1], [1, 1, 2], [1, 1, 3], [1, 1, 4], [1, 1, 5]],
-            &Device::Cpu,
-        )?;
-        let (pixels, grid) =
-            select_media_batch(Some(pixels), Some(grid), &[3, 2], &[1, 1], &[1, 1])?;
-
-        assert_eq!(
-            grid.unwrap().to_vec2::<u32>()?,
-            vec![vec![1, 1, 2], vec![1, 1, 5]]
-        );
-        assert_eq!(
-            pixels.unwrap().flatten_all()?.to_vec1::<f32>()?,
-            vec![1., 2., 10., 11., 12., 13., 14.]
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn media_span_shift_rejects_split_items() -> Result<()> {
-        let mut split = vec![(2, 5)];
-        assert!(shift_media_spans(&mut split, 3).is_err());
-
-        let mut spans = vec![(0, 2), (4, 7)];
-        assert_eq!(shift_media_spans(&mut spans, 2)?, 1);
-        assert_eq!(spans, vec![(2, 5)]);
-        Ok(())
-    }
+    use crate::vision_models::qwen2vl::inputs_processor::apply_mrope_position_delta;
 
     #[test]
     fn packed_text_only_mrope_restarts_each_logical_sequence() -> Result<()> {
@@ -2052,30 +1732,6 @@ mod tests {
         assert_eq!(apply_mrope_position_delta(100, 0)?, 100);
         assert_eq!(apply_mrope_position_delta(100, -48)?, 52);
         assert!(apply_mrope_position_delta(3, -4).is_err());
-        Ok(())
-    }
-
-    #[test]
-    fn decode_args_only_retain_current_tokens() -> Result<()> {
-        let input_ids = Tensor::new(&[[7u32], [9]], &Device::Cpu)?;
-        let args = qwen3_decode_args(&input_ids, vec![100, 200]);
-
-        assert_eq!(
-            args.input_ids_full.to_vec2::<u32>()?,
-            vec![vec![7], vec![9]]
-        );
-        assert_eq!(args.seqlens, vec![100, 200]);
-        assert!(args.pixel_values_videos.is_none());
-        assert!(args.image_grid_thw.is_none());
-        assert!(args.video_grid_thw.is_none());
-        assert!(args.rope_img_grid_thw.is_none());
-        assert!(args.rope_vid_grid_thw.is_none());
-        assert!(args.continuous_img_pad.is_empty());
-        assert!(args.continuous_vid_pad.is_empty());
-        assert!(args.image_hashes.is_empty());
-        assert!(args.video_hashes.is_empty());
-        assert!(args.packed_layout.is_none());
-        assert!(args.prompt_position_ids.is_none());
         Ok(())
     }
 

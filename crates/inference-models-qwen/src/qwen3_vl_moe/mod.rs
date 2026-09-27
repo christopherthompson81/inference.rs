@@ -8,6 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::qwen2vl::Qwen2VLVisionSpecificArgs;
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
 use text::Qwen3VLMoETextModel;
@@ -25,7 +26,7 @@ use crate::{
     },
     qwen3_vl::{
         concatenate_visual_items, insert_current_visual_outputs, vision::Qwen3VLVisionModel,
-        Qwen3VLVisionSpecificArgs, VisualEncoder,
+        VisualEncoder,
     },
     vision::multimodal_layout::{MultimodalEncoderOutputs, PackedMultimodalLayout},
 };
@@ -462,7 +463,7 @@ impl MultimodalModel for Qwen3VLMoEModel {
         model_specific_args: Box<dyn Any>,
         ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
-        let Qwen3VLVisionSpecificArgs {
+        let Qwen2VLVisionSpecificArgs {
             input_ids_full,
             pixel_values_videos,
             image_grid_thw,
@@ -478,7 +479,7 @@ impl MultimodalModel for Qwen3VLMoEModel {
             prompt_position_ids,
         } = *model_specific_args
             .downcast()
-            .expect("Cannot downcast into `Qwen3VLVisionSpecificArgs`");
+            .expect("Cannot downcast into `Qwen2VLVisionSpecificArgs`");
         let pixel_values_video = pixel_values_videos.or_else(|| {
             (image_grid_thw.is_none() && video_grid_thw.is_some())
                 .then(|| pixel_values.clone())
@@ -520,7 +521,7 @@ impl MultimodalModel for Qwen3VLMoEModel {
     }
     fn default_model_specific_args(&self, input_ids: &Tensor) -> Box<dyn Any> {
         assert_eq!(input_ids.dims()[0], 1);
-        Box::new(Qwen3VLVisionSpecificArgs {
+        Box::new(Qwen2VLVisionSpecificArgs {
             input_ids_full: input_ids.clone(),
             pixel_values_videos: None,
             image_grid_thw: None,
