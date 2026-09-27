@@ -23,7 +23,7 @@ use crate::{
         handle_completion_error, handle_completion_validation_error, BaseCompletionResponder,
     },
     engine_chat::{
-        collect_chat, ChatDispatchError, ChatEngine, ChatStream, ChatStreamEvent, ResponseTap,
+        collect_chat, ChatEngine, ChatStream, ChatStreamEvent, DispatchError, ResponseTap,
     },
     handler_core::{
         openai_error_from_error, openai_error_response, ApiError, ApiErrorKind, ModelErrorMessage,
@@ -224,10 +224,8 @@ pub async fn chatcompletions(
         .await
     {
         Ok(prepared) => prepared,
-        Err(ChatDispatchError::Validation(e)) => {
-            return handle_completion_validation_error(state, e)
-        }
-        Err(ChatDispatchError::Internal(e)) => return handle_error(state, e),
+        Err(DispatchError::Validation(e)) => return handle_completion_validation_error(state, e),
+        Err(DispatchError::Internal(e)) => return handle_error(state, e),
     };
 
     if prepared.is_streaming {

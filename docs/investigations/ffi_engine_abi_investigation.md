@@ -105,7 +105,6 @@ Revised PR sequence, each a vertical slice so the architecture is proven from th
 
 Measure on PR 1: JSON cost per request and per streamed chunk against token time, and the cdylib size.
 
-
 ## Run 3 - 2026-09-27 (night)
 
 Owner suggestion: disentangle chat first. Doing that inside `inference-server-core` before any crate move keeps each
@@ -168,7 +167,7 @@ Change: the crate move.
 Result: green, 2132 CPU / 2450 CUDA tests (+3 from the split tests). `docs/openapi.json` changed only in a doc
 example path (`inference_api::openai`).
 
-## Run 6 - 2026-09-28 (just after midnight)
+## Run 6 - 2026-09-27 (night)
 
 Change: the engine C ABI, first slice (ABI 0.2.0).
 - `inference-api`: `Engine` (load from an `EngineSpec` JSON over the server builder, so loading is the Run 15-17
@@ -203,8 +202,7 @@ caller could not answer the approval and the request would wait out the broker's
 thread-safety claims; the header documents the error JSON on RUNTIME, the up-to-10 s wait when the last handle is
 freed, and what the surface does not offer yet.
 
-
-## Run 7 - 2026-09-28
+## Run 7 - 2026-09-27 (night)
 
 Change: media attachments by pointer.
 - `media_source::MediaAttachments`: a request's buffers, named from the JSON as `media://<index>` wherever an image,
@@ -230,3 +228,26 @@ Review fixes: the header names the chat fields (`image_url` / `audio_url` / `vid
 the version tests (Rust and C) assert the exact version, since 0.0.x callers must match exactly. The packed version
 goes down (0x000200 to 0x000003), so a binding that checked "minor >= 2" now rejects the library, as intended.
 
+## Run 8 - 2026-09-27 (night)
+
+Change: completions and embeddings on the engine surface, the same split as chat.
+- `inference-api`: `engine_completion.rs` (`parse_request` moved; `prepare_completion` does LoRA routing, parse and
+  dispatch; `collect_completion`; `CompletionStream` of `CompletionStreamEvent` with the old SSE streamer's mapping
+  and logging) and `engine_embeddings.rs` (the embeddings handler minus HTTP: `embed(state, request)`).
+  `ChatDispatchError` becomes `DispatchError`, shared by chat and completions. The generic non-streaming collector
+  moves to `dispatch.rs`. `Engine` gains `completion` / `completion_stream` / `embeddings` and their JSON forms;
+  the blocking stream becomes `BlockingStream` over JSON events, so one `inference_stream` serves chat and
+  completions.
+- Server: the completions and embeddings routes only frame HTTP. `BaseStreamer` had no users left and is removed.
+- ABI 0.0.4: `inference_completion`, `inference_completion_stream_open`, `inference_embeddings`, sharing one
+  `json_call` helper with `inference_chat_with_media` (whose bad-media path already left `out_response` NULL; the test
+  now pins that).
+
+Tests: blocking and streamed completions decode the same text on the tiny checkpoint. An embeddings request to the
+(chat) tiny model is `INVALID_REQUEST`. First run returned `INFERENCE_ERR_RUNTIME` there: `embed` converted its
+`anyhow` errors into `Box<dyn Error>`, which hid the `ApiError` the engine had classified, so the ABI reported the
+engine's validation error as internal (HTTP, which kept the `anyhow` error, said 400). `embed` now returns
+`EmbeddingError` over `anyhow::Error`, and both callers classify from it. A positive embeddings test needs a tiny
+embedding checkpoint; not built yet.
+
+Result: green, 2139 CPU / 2457 CUDA tests.

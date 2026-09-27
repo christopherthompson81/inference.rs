@@ -2,12 +2,12 @@
 
 use std::{sync::OnceLock, time::Duration};
 
+use futures::{stream::BoxStream, Stream, StreamExt};
 use tokio::runtime::Runtime;
 
 use crate::{
     api_error::ApiError,
     engine::{Engine, EngineLoadError},
-    engine_chat::ChatStream,
     media_source::MediaAttachments,
 };
 
@@ -56,10 +56,26 @@ impl BlockingEngine {
         &self,
         request: &[u8],
         media: MediaAttachments,
-    ) -> Result<BlockingChatStream, ApiError> {
+    ) -> Result<BlockingStream, ApiError> {
         let (engine, request) = (self.engine.clone(), request.to_vec());
         run(async move { engine.chat_stream_json(&request, media).await })
-            .map(|stream| BlockingChatStream { stream })
+            .map(|stream| BlockingStream::new(stream.map(|event| event.to_json())))
+    }
+
+    pub fn completion_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let (engine, request) = (self.engine.clone(), request.to_vec());
+        run(async move { engine.completion_json(&request).await })
+    }
+
+    pub fn completion_stream_json(&self, request: &[u8]) -> Result<BlockingStream, ApiError> {
+        let (engine, request) = (self.engine.clone(), request.to_vec());
+        run(async move { engine.completion_stream_json(&request).await })
+            .map(|stream| BlockingStream::new(stream.map(|event| event.to_json())))
+    }
+
+    pub fn embeddings_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let (engine, request) = (self.engine.clone(), request.to_vec());
+        run(async move { engine.embeddings_json(&request).await })
     }
 }
 
@@ -73,22 +89,28 @@ pub enum StreamPoll {
     Done,
 }
 
-/// A streaming chat request behind blocking polls. Dropping it abandons the request.
-pub struct BlockingChatStream {
-    stream: ChatStream,
+/// A streaming request behind blocking polls; each event is its JSON envelope. Dropping it abandons the request.
+pub struct BlockingStream {
+    stream: BoxStream<'static, String>,
 }
 
-impl BlockingChatStream {
+impl BlockingStream {
+    fn new(stream: impl Stream<Item = String> + Send + 'static) -> Self {
+        Self {
+            stream: stream.boxed(),
+        }
+    }
+
     /// Waits up to `timeout` (forever when `None`) for the next event.
     pub fn next(&mut self, timeout: Option<Duration>) -> StreamPoll {
         let event = runtime().block_on(async {
             match timeout {
-                Some(timeout) => tokio::time::timeout(timeout, self.stream.next_event()).await,
-                None => Ok(self.stream.next_event().await),
+                Some(timeout) => tokio::time::timeout(timeout, self.stream.next()).await,
+                None => Ok(self.stream.next().await),
             }
         });
         match event {
-            Ok(Some(event)) => StreamPoll::Event(event.to_json()),
+            Ok(Some(event)) => StreamPoll::Event(event),
             Ok(None) => StreamPoll::Done,
             Err(_) => StreamPoll::Timeout,
         }

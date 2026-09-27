@@ -57,6 +57,32 @@ pub fn apply_model_override(model: &mut String, model_override: Option<&str>) {
     }
 }
 
+/// Generic function to process non-streaming responses.
+pub async fn base_process_non_streaming_response<R, M, E>(
+    rx: &mut Receiver<Response>,
+    state: SharedInferenceRsState,
+    match_fn: M,
+    error_handler: E,
+) -> R
+where
+    M: FnOnce(SharedInferenceRsState, Response) -> R,
+    E: FnOnce(SharedInferenceRsState, Box<dyn std::error::Error + Send + Sync + 'static>) -> R,
+{
+    loop {
+        match rx.recv().await {
+            Some(Response::AgenticToolCallProgress { .. }) => continue,
+            Some(Response::BlockDenoisingProgress(_)) => continue,
+            Some(Response::AgenticToolApprovalRequired { .. }) => continue,
+            Some(Response::File(_)) => continue,
+            Some(response) => return match_fn(state, response),
+            None => {
+                let error = anyhow::Error::msg("No response received from the model.");
+                return error_handler(state, error.into());
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

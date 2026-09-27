@@ -6,6 +6,8 @@ pub mod blocking;
 pub mod dispatch;
 pub mod engine;
 pub mod engine_chat;
+pub mod engine_completion;
+pub mod engine_embeddings;
 pub mod inference_for_server_builder;
 #[doc(hidden)]
 pub mod input_files;

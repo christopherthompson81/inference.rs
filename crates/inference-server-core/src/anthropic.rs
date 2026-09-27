@@ -38,7 +38,7 @@ use crate::handler_core::ApiErrorHttp;
 use crate::{
     agentic::AgenticDefaults,
     chat_completion::{parse_request, ChatCompletionParseContext},
-    engine_chat::{ChatDispatchError, ChatEngine, PreparedChat},
+    engine_chat::{ChatEngine, DispatchError, PreparedChat},
     handler_core::{
         apply_model_override, create_response_channel, send_request_with_model, ApiError,
         ApiErrorKind, ResponseErrorMessage, INTERNAL_ERROR_MESSAGE,
@@ -1870,10 +1870,8 @@ pub async fn anthropic_messages(
         .await
     {
         Ok(prepared) => prepared,
-        Err(ChatDispatchError::Validation(e)) => {
-            return AnthropicMessagesResponder::ValidationError(e)
-        }
-        Err(ChatDispatchError::Internal(e)) => return AnthropicMessagesResponder::InternalError(e),
+        Err(DispatchError::Validation(e)) => return AnthropicMessagesResponder::ValidationError(e),
+        Err(DispatchError::Internal(e)) => return AnthropicMessagesResponder::InternalError(e),
     };
 
     if is_streaming {

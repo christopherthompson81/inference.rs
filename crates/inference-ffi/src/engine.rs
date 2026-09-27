@@ -7,7 +7,7 @@ use std::{
 
 use inference_api::{
     api_error::{ApiError, ApiErrorKind},
-    blocking::{BlockingChatStream, BlockingEngine, StreamPoll},
+    blocking::{BlockingEngine, BlockingStream, StreamPoll},
     media_source::{MediaAttachment, MediaAttachments},
     EngineLoadError,
 };
@@ -39,7 +39,7 @@ pub struct inference_engine {
 /// Opaque; mirrors `inference_stream`.
 #[allow(non_camel_case_types)]
 pub struct inference_stream {
-    stream: BlockingChatStream,
+    stream: BlockingStream,
     done: bool,
 }
 
@@ -54,7 +54,7 @@ const _: () = {
     const fn assert_send_sync<T: Send + Sync>() {}
     const fn assert_send<T: Send>() {}
     assert_send_sync::<BlockingEngine>();
-    assert_send::<BlockingChatStream>();
+    assert_send::<BlockingStream>();
 };
 
 fn api_failure(error: ApiError) -> Failure {
@@ -179,20 +179,16 @@ pub unsafe extern "C" fn inference_chat_with_media(
     media_count: usize,
     out_response: *mut *mut inference_string,
 ) -> inference_status {
-    guard(|| {
-        out_arg(out_response, "out_response")?;
-        let engine = engine
-            .as_ref()
-            .ok_or_else(|| Failure::invalid("engine is NULL"))?;
-        let request = arg_bytes(request, request_len, "request")?;
-        let media = arg_media(media, media_count)?;
-        let response = engine
-            .engine
-            .chat_json(request, media)
-            .map_err(api_failure)?;
-        out_response.write(string_handle(response));
-        Ok(())
-    })
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| {
+            let media = arg_media(media, media_count)?;
+            engine.chat_json(request, media).map_err(api_failure)
+        },
+    )
 }
 
 /// Safety: as for `inference_chat`, with `out_stream` valid for a write.
@@ -240,6 +236,86 @@ pub unsafe extern "C" fn inference_chat_stream_open_with_media(
         })));
         Ok(())
     })
+}
+
+// Every blocking JSON operation has the same shape: engine and request in, an owned response string out.
+unsafe fn json_call(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+    call: impl FnOnce(&BlockingEngine, &[u8]) -> FfiResult<String>,
+) -> inference_status {
+    guard(|| {
+        out_arg(out_response, "out_response")?;
+        let engine = engine
+            .as_ref()
+            .ok_or_else(|| Failure::invalid("engine is NULL"))?;
+        let request = arg_bytes(request, request_len, "request")?;
+        let response = call(&engine.engine, request)?;
+        out_response.write(string_handle(response));
+        Ok(())
+    })
+}
+
+/// Safety: as for `inference_chat`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_completion(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| engine.completion_json(request).map_err(api_failure),
+    )
+}
+
+/// Safety: as for `inference_chat_stream_open`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_completion_stream_open(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_stream: *mut *mut inference_stream,
+) -> inference_status {
+    guard(|| {
+        out_arg(out_stream, "out_stream")?;
+        let engine = engine
+            .as_ref()
+            .ok_or_else(|| Failure::invalid("engine is NULL"))?;
+        let request = arg_bytes(request, request_len, "request")?;
+        let stream = engine
+            .engine
+            .completion_stream_json(request)
+            .map_err(api_failure)?;
+        out_stream.write(Box::into_raw(Box::new(inference_stream {
+            stream,
+            done: false,
+        })));
+        Ok(())
+    })
+}
+
+/// Safety: as for `inference_chat`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_embeddings(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| engine.embeddings_json(request).map_err(api_failure),
+    )
 }
 
 /// Safety: `stream` is a live handle not used concurrently; `out_event` and `out_done` are valid for writes.

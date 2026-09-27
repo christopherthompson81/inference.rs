@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 3
+#define INFERENCE_ABI_VERSION_PATCH 4
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -199,14 +199,27 @@ INFERENCE_API inference_status inference_chat_stream_open_with_media(const infer
                                                                     const char *request, size_t request_len,
                                                                     const inference_media *media, size_t media_count,
                                                                     inference_stream **out_stream);
-/* Waits up to timeout_ms (< 0 waits indefinitely, 0 polls) for the next event. On an event, out_event receives
- * {"event": "chunk" | "agentic_tool_call_progress" | "agentic_tool_approval_required" | "file_produced" | "error",
- * "data": ...}; a chunk's data is a chat.completion.chunk and an error's is the OpenAI error JSON. On a timeout
- * out_event is NULL and out_done 0. Once the stream has ended, out_event is NULL and out_done 1; an error event is
- * always the last event. out_event and out_done are required. */
+/* Waits up to timeout_ms (< 0 waits indefinitely, 0 polls) for the next event of a chat or completion stream. On an
+ * event, out_event receives {"event": <name>, "data": ...}. Chat streams emit "chunk" (data: a chat.completion.chunk),
+ * "agentic_tool_call_progress", "agentic_tool_approval_required", "file_produced" and "error"; completion streams emit
+ * "chunk" (data: a text_completion chunk) and "error". An error's data is the OpenAI error JSON, and an error event is
+ * always the last event. On a timeout out_event is NULL and out_done 0. Once the stream has ended, out_event is NULL
+ * and out_done 1. out_event and out_done are required. */
 INFERENCE_API inference_status inference_stream_next(inference_stream *stream, int64_t timeout_ms,
                                                     inference_string **out_event, int32_t *out_done);
 INFERENCE_API void inference_stream_free(inference_stream *stream);
+
+/* Runs a text completion (the POST /v1/completions body) to its end; out_response receives the text_completion JSON.
+ * "stream" in the request is ignored. */
+INFERENCE_API inference_status inference_completion(const inference_engine *engine, const char *request,
+                                                   size_t request_len, inference_string **out_response);
+/* Starts a streaming completion; poll it with inference_stream_next. Its events are "chunk" (a completion chunk) and
+ * "error". */
+INFERENCE_API inference_status inference_completion_stream_open(const inference_engine *engine, const char *request,
+                                                               size_t request_len, inference_stream **out_stream);
+/* Embeds every input of an embeddings request (the POST /v1/embeddings body); out_response receives the list JSON. */
+INFERENCE_API inference_status inference_embeddings(const inference_engine *engine, const char *request,
+                                                   size_t request_len, inference_string **out_response);
 
 /* The string's bytes, NUL-terminated; valid until the string is freed. "" for NULL. */
 INFERENCE_API const char *inference_string_data(const inference_string *string);

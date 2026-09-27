@@ -3,17 +3,23 @@
 use candle_core::Device;
 use futures::StreamExt;
 use inference_core::{
-    AgentPermission, ChatCompletionResponse, InferenceRs, ModelSelected, Response, TokenSource,
+    AgentPermission, ChatCompletionResponse, CompletionResponse, InferenceRs, ModelSelected,
+    Response, TokenSource,
 };
 use serde::Deserialize;
 
 use crate::{
     agentic::AgenticDefaults,
     api_error::{ApiError, ApiErrorKind, ModelErrorMessage},
-    engine_chat::{collect_chat, ChatDispatchError, ChatEngine, ChatStream, ChatStreamEvent},
+    engine_chat::{collect_chat, ChatEngine, ChatStream, ChatStreamEvent, DispatchError},
+    engine_completion::{collect_completion, prepare_completion, CompletionStream},
+    engine_embeddings::{embed, EmbeddingError},
     inference_for_server_builder::InferenceRsForServerBuilder,
     media_source::MediaAttachments,
-    openai::{ChatCompletionRequest, OpenAiToolSurface},
+    openai::{
+        ChatCompletionRequest, CompletionRequest, EmbeddingRequest, EmbeddingResponse,
+        OpenAiToolSurface,
+    },
     types::SharedInferenceRsState,
 };
 
@@ -288,28 +294,116 @@ impl Engine {
         self.chat
             .prepare(request, OpenAiToolSurface::ChatCompletions, media)
             .await
+            .map_err(|error| dispatch_error(state, error))
+    }
+
+    /// Runs a completion to its end.
+    pub async fn completion(
+        &self,
+        mut request: CompletionRequest,
+    ) -> Result<CompletionResponse, ApiError> {
+        request.stream = Some(false);
+        let state = self.state().clone();
+        let prepared = prepare_completion(&state, request)
+            .await
+            .map_err(|error| dispatch_error(state.clone(), error))?;
+        let mut rx = prepared.rx;
+        match collect_completion(&mut rx, prepared.model_override.as_deref()).await {
+            Response::CompletionDone(response) => {
+                InferenceRs::maybe_log_response(state, &response);
+                Ok(response)
+            }
+            Response::CompletionModelError(msg, response) => {
+                InferenceRs::maybe_log_error(state.clone(), &ModelErrorMessage(msg));
+                InferenceRs::maybe_log_response(state, &response);
+                Err(ApiError::model_error())
+            }
+            Response::ValidationError(error) => Err(ApiError::from_error(
+                error.as_ref(),
+                ApiErrorKind::InvalidRequest,
+            )),
+            Response::InternalError(error) => {
+                InferenceRs::maybe_log_error(state, &*error);
+                Err(ApiError::from_error(error.as_ref(), ApiErrorKind::Internal))
+            }
+            _ => Err(ApiError::internal()),
+        }
+    }
+
+    /// Starts a streaming completion. Dropping the stream abandons the request.
+    pub async fn completion_stream(
+        &self,
+        mut request: CompletionRequest,
+    ) -> Result<CompletionStream, ApiError> {
+        request.stream = Some(true);
+        let state = self.state().clone();
+        let prepared = prepare_completion(&state, request)
+            .await
+            .map_err(|error| dispatch_error(state.clone(), error))?;
+        Ok(CompletionStream::new(
+            prepared.rx,
+            state,
+            prepared.model_override,
+            None,
+        ))
+    }
+
+    pub async fn completion_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let response = self.completion(parse_json(request)?).await?;
+        serde_json::to_string(&response).map_err(|_| ApiError::internal())
+    }
+
+    pub async fn completion_stream_json(
+        &self,
+        request: &[u8],
+    ) -> Result<CompletionStream, ApiError> {
+        self.completion_stream(parse_json(request)?).await
+    }
+
+    /// Embeds every input of an embeddings request.
+    pub async fn embeddings(
+        &self,
+        request: EmbeddingRequest,
+    ) -> Result<EmbeddingResponse, ApiError> {
+        let state = self.state().clone();
+        embed(state.clone(), request)
+            .await
             .map_err(|error| match error {
-                ChatDispatchError::Validation(error) => {
-                    let api = ApiError::from_error(error.as_ref(), ApiErrorKind::InvalidRequest);
-                    if matches!(
-                        api.kind,
-                        ApiErrorKind::Internal
-                            | ApiErrorKind::Unavailable
-                            | ApiErrorKind::Overloaded
-                    ) {
-                        InferenceRs::maybe_log_error(state, error.as_ref());
-                    }
-                    api
+                EmbeddingError::Validation(error) => {
+                    ApiError::from_error(error.as_ref(), ApiErrorKind::InvalidRequest)
                 }
-                ChatDispatchError::Internal(error) => {
-                    InferenceRs::maybe_log_error(state, error.as_ref());
+                EmbeddingError::Internal(error) => {
                     ApiError::from_error(error.as_ref(), ApiErrorKind::Internal)
                 }
             })
     }
+
+    pub async fn embeddings_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let response = self.embeddings(parse_json(request)?).await?;
+        serde_json::to_string(&response).map_err(|_| ApiError::internal())
+    }
 }
 
-fn parse_request(request: &[u8]) -> Result<ChatCompletionRequest, ApiError> {
+fn dispatch_error(state: SharedInferenceRsState, error: DispatchError) -> ApiError {
+    match error {
+        DispatchError::Validation(error) => {
+            let api = ApiError::from_error(error.as_ref(), ApiErrorKind::InvalidRequest);
+            if matches!(
+                api.kind,
+                ApiErrorKind::Internal | ApiErrorKind::Unavailable | ApiErrorKind::Overloaded
+            ) {
+                InferenceRs::maybe_log_error(state, error.as_ref());
+            }
+            api
+        }
+        DispatchError::Internal(error) => {
+            InferenceRs::maybe_log_error(state, error.as_ref());
+            ApiError::from_error(error.as_ref(), ApiErrorKind::Internal)
+        }
+    }
+}
+
+fn parse_json<T: serde::de::DeserializeOwned>(request: &[u8]) -> Result<T, ApiError> {
     serde_json::from_slice(request).map_err(|error| {
         ApiError::new(
             ApiErrorKind::InvalidRequest,
@@ -318,6 +412,10 @@ fn parse_request(request: &[u8]) -> Result<ChatCompletionRequest, ApiError> {
             None,
         )
     })
+}
+
+fn parse_request(request: &[u8]) -> Result<ChatCompletionRequest, ApiError> {
+    parse_json(request)
 }
 
 impl ChatStreamEvent {

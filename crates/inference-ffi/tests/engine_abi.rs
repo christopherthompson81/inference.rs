@@ -335,6 +335,90 @@ fn attached_media_decodes_like_the_same_image_as_a_data_url() {
         )
     };
     assert_eq!(status, INFERENCE_ERR_INVALID_ARGUMENT);
+    assert!(response.is_null());
+
+    unsafe { inference_engine_free(engine) };
+}
+
+fn completion_request(stream: bool) -> String {
+    json!({
+        "model": "default",
+        "prompt": PROMPT,
+        "max_tokens": MAX_TOKENS,
+        "temperature": 0.0,
+        "top_k": 1,
+        "stream": stream,
+    })
+    .to_string()
+}
+
+#[test]
+fn completion_and_stream_agree_and_embeddings_need_an_embedding_model() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let (status, engine) = load(&spec(dir.path()));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+
+    let request = completion_request(false);
+    let mut response = null_mut();
+    let status = unsafe {
+        inference_completion(
+            engine,
+            request.as_ptr().cast::<c_char>(),
+            request.len(),
+            &mut response,
+        )
+    };
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let response: Value = serde_json::from_str(&take_string(response)).unwrap();
+    assert_eq!(response["object"], "text_completion");
+    let text = response["choices"][0]["text"].as_str().unwrap().to_string();
+
+    let request = completion_request(true);
+    let mut stream = null_mut();
+    let status = unsafe {
+        inference_completion_stream_open(
+            engine,
+            request.as_ptr().cast::<c_char>(),
+            request.len(),
+            &mut stream,
+        )
+    };
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let mut streamed = String::new();
+    loop {
+        let (mut event, mut done) = (null_mut(), 0);
+        let status =
+            unsafe { inference_stream_next(stream, POLL_TIMEOUT_MS, &mut event, &mut done) };
+        assert_eq!(status, INFERENCE_OK, "{}", last_error());
+        if done == 1 {
+            break;
+        }
+        assert!(!event.is_null(), "a {POLL_TIMEOUT_MS} ms poll timed out");
+        let event: Value = serde_json::from_str(&take_string(event)).unwrap();
+        assert_eq!(event["event"], "chunk", "{event}");
+        streamed.push_str(
+            event["data"]["choices"][0]["text"]
+                .as_str()
+                .unwrap_or_default(),
+        );
+    }
+    unsafe { inference_stream_free(stream) };
+    assert_eq!(streamed, text);
+
+    let request = json!({"model": "default", "input": "hello"}).to_string();
+    let mut response = null_mut();
+    let status = unsafe {
+        inference_embeddings(
+            engine,
+            request.as_ptr().cast::<c_char>(),
+            request.len(),
+            &mut response,
+        )
+    };
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{}", last_error());
+    assert!(response.is_null());
+    let error: Value = serde_json::from_str(&last_error()).unwrap();
+    assert_eq!(error["error"]["type"], "invalid_request_error", "{error}");
 
     unsafe { inference_engine_free(engine) };
 }
