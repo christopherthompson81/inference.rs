@@ -628,3 +628,14 @@ Review follow-ups:
 - Change: `isq_regexes(&[..])` in pipeline/isq.rs builds the list; a script rewrote the 142 `vec![Regex::new(..)?, ..]`
   lists in the loaders. A review re-extracted every pattern and comment per file in order: identical.
 - Result: 3,925,599 lines (78,435 copies), from ~4.028M: -102k, 2.5%. The same functions now total ~6.3k.
+
+## Run 34 - 2026-09-27 (evening)
+
+- Question: does the same inline-error-path pattern explain `GgufDeviceMapLoaderInner::layer_sizes_in_bytes` (13.7k)?
+- Finding: yes; 90 `tensor_info_size_in_bytes!(self.model.tensor_info(..)?)` sites, each expanding its own lookup and
+  error conversion.
+- Change: `tensor_bytes(name)` / `tensor_bytes_as(name, dtype)` methods replace the macro; a review matched all 90
+  sites in order (same name, same arm/dtype).
+- Result: layer_sizes_in_bytes 13.7k -> 3.3k, non_mapped_size_in_bytes 3.3k -> 1.0k; core 4.022M -> 4.009M on the
+  pre-#59 base (-13k). The rest of gguf (~128k) is spread over 1-3k straight-line config builders and bindings with
+  no single repeated construct, so it is left as is.
