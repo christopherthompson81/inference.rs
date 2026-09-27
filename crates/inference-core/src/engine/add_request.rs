@@ -19,7 +19,7 @@ use std::{
 use tracing::warn;
 
 use crate::{
-    get_mut_arcmutex, handle_request_error, handle_seq_error,
+    get_mut_arcmutex,
     request::Request,
     sampler::Sampler,
     sequence::{Sequence, SequenceGroup},
@@ -98,7 +98,7 @@ impl Engine {
                     if is_chat && !request.input_files.is_empty() {
                         agentic_loop::inject_input_files_message(&mut request);
                     }
-                    Box::pin(self.add_request(*request)).await;
+                    self.add_request(*request).await;
                 }
             }
             Request::ReIsq(level) => {
@@ -133,22 +133,27 @@ impl Engine {
         }
     }
 
-    pub(super) async fn add_request(&self, mut request: NormalRequest) {
+    pub(super) async fn add_request(&self, request: NormalRequest) {
+        let response = request.response.clone();
+        if let Err(rejection) = self.admit_request(request) {
+            response
+                .send(*rejection)
+                .await
+                .unwrap_or_else(|_| warn!("Receiver disconnected"));
+        }
+    }
+
+    fn admit_request(&self, mut request: NormalRequest) -> Result<(), Box<Response>> {
         if request.response.is_closed() {
-            return;
+            return Ok(());
         }
         let adapter_lease = match request.adapter.as_ref() {
             Some(selection) => match selection.lease() {
                 Some(lease) => Some(lease.clone()),
                 None => {
-                    request
-                        .response
-                        .send(Response::InternalError(
-                            "request adapter selection was not pinned before admission".into(),
-                        ))
-                        .await
-                        .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                    return;
+                    return Err(Box::new(Response::InternalError(
+                        "request adapter selection was not pinned before admission".into(),
+                    )));
                 }
             },
             None => None,
@@ -173,14 +178,9 @@ impl Engine {
                 | RequestMessage::MultimodalChat { .. }
         );
         if is_text_generation && request.sampling_params.max_len == Some(0) {
-            request
-                .response
-                .send(Response::ValidationError(
-                    "max_tokens must be at least 1.".into(),
-                ))
-                .await
-                .unwrap_or_else(|_| warn!("Receiver disconnected"));
-            return;
+            return Err(Box::new(Response::ValidationError(
+                "max_tokens must be at least 1.".into(),
+            )));
         }
 
         let best_of = match request.messages {
@@ -200,14 +200,9 @@ impl Engine {
                 .as_ref()
                 .is_some_and(|ch_t| ch_t.has_chat_template())
         {
-            request
-                    .response
-                    .send(Response::ValidationError(
+            return Err(Box::new(Response::ValidationError(
                         "Received messages for a model which does not have a chat template. Either use a different model or pass a single string as the prompt".into(),
-                    ))
-                    .await
-                    .unwrap_or_else(|_| warn!("Receiver disconnected"));
-            return;
+                    )));
         }
 
         // Verify the model's category matches the messages received.
@@ -229,14 +224,9 @@ impl Engine {
                 RequestMessage::Embedding { .. } | RequestMessage::EmbeddingTokens { .. },
             ) => (),
             _ => {
-                request
-                    .response
-                    .send(Response::ValidationError(
-                        "Received a request incompatible for this model's category.".into(),
-                    ))
-                    .await
-                    .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                return;
+                return Err(Box::new(Response::ValidationError(
+                    "Received a request incompatible for this model's category.".into(),
+                )));
             }
         }
 
@@ -343,32 +333,23 @@ impl Engine {
                         } else {
                             Response::InternalError(error.into())
                         };
-                        request
-                            .response
-                            .send(response)
-                            .await
-                            .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                        return;
+                        return Err(Box::new(response));
                     }
                 }
             }
             RequestMessage::Completion { text, .. }
             | RequestMessage::Embedding { prompt: text } => {
                 let Some(tokenizer) = &get_mut_arcmutex!(self.pipeline).tokenizer() else {
-                    request
-                        .response
-                        .send(Response::ValidationError(
-                            "Completion requests require the pipeline to have a tokenizer".into(),
-                        ))
-                        .await
-                        .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                    return;
+                    return Err(Box::new(Response::ValidationError(
+                        "Completion requests require the pipeline to have a tokenizer".into(),
+                    )));
                 };
                 let prompt = tokenizer
                     .encode_fast(text.clone(), true)
                     .map_err(anyhow::Error::msg);
                 (
-                    handle_seq_error!(prompt, request.response)
+                    prompt
+                        .map_err(|e| Response::InternalError(e.into()))?
                         .get_ids()
                         .to_vec(),
                     text,
@@ -379,46 +360,31 @@ impl Engine {
             RequestMessage::CompletionTokens(it)
             | RequestMessage::EmbeddingTokens { prompt: it } => {
                 let Some(tokenizer) = &get_mut_arcmutex!(self.pipeline).tokenizer() else {
-                    request
-                        .response
-                        .send(Response::ValidationError(
+                    return Err(Box::new(Response::ValidationError(
                             "Completion requests w/ raw tokens require the pipeline to have a tokenizer".into(),
-                        ))
-                        .await
-                        .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                    return;
+                        )));
                 };
                 if let Some(token_id) = first_unknown_token_id(tokenizer, &it) {
-                    request
-                        .response
-                        .send(Response::ValidationError(
-                            format!(
-                                "Token ID {token_id} is not present in the selected model tokenizer."
-                            )
-                            .into(),
-                        ))
-                        .await
-                        .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                    return;
+                    return Err(Box::new(Response::ValidationError(
+                        format!(
+                            "Token ID {token_id} is not present in the selected model tokenizer."
+                        )
+                        .into(),
+                    )));
                 }
                 let prompt = tokenizer
                     .decode(&it, false)
                     .map_err(|e| anyhow::Error::msg(e.to_string()));
-                (it, handle_seq_error!(prompt, request.response))
+                (it, prompt.map_err(|e| Response::InternalError(e.into()))?)
             }
         };
         if prompt_tokens.is_empty() {
-            request
-                .response
-                .send(Response::ValidationError(
-                    "Received an empty prompt.".into(),
-                ))
-                .await
-                .unwrap_or_else(|_| warn!("Receiver disconnected"));
-            return;
+            return Err(Box::new(Response::ValidationError(
+                "Received an empty prompt.".into(),
+            )));
         }
         if request.response.is_closed() {
-            return;
+            return Ok(());
         }
 
         if matches!(
@@ -430,14 +396,9 @@ impl Engine {
             // embedding => truncate from end
             let category = get_mut_arcmutex!(self.pipeline).category();
             if !truncate_sequence {
-                request
-                    .response
-                    .send(Response::ValidationError(
+                return Err(Box::new(Response::ValidationError(
                         format!("Prompt sequence length is greater than {}, perhaps consider using `truncate_sequence`?", get_mut_arcmutex!(self.pipeline).get_metadata().max_seq_len).into(),
-                    ))
-                    .await
-                    .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                return;
+                    )));
             } else if matches!(
                 category,
                 ModelCategory::Text | ModelCategory::Multimodal { .. }
@@ -500,14 +461,9 @@ impl Engine {
                     if let Some(tok_env) = tok_env.as_ref() {
                         let tok_trie = tok_env.tok_trie();
                         if tok_trie.has_extensions(tok_trie.token(*id)) {
-                            request
-                                .response
-                                .send(Response::ValidationError(
+                            return Err(Box::new(Response::ValidationError(
                                     format!("Stop token {:?} is also a prefix of other tokens and cannot be used as a stop token.", tok_trie.token_str(*id)).into(),
-                                ))
-                                .await
-                                .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                            return;
+                                )));
                         }
                     }
                 }
@@ -527,20 +483,12 @@ impl Engine {
 
                 for stop_txt in s {
                     let Some(tokenizer) = &tokenizer else {
-                        request
-                            .response
-                            .send(Response::ValidationError(
-                                "Completion requests require the pipeline to have a tokenizer"
-                                    .into(),
-                            ))
-                            .await
-                            .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                        return;
+                        return Err(Box::new(Response::ValidationError(
+                            "Completion requests require the pipeline to have a tokenizer".into(),
+                        )));
                     };
                     let encoded = tokenizer.encode_fast(stop_txt.to_string(), true);
-                    let toks = handle_seq_error!(encoded, request.response)
-                        .get_ids()
-                        .to_vec();
+                    let toks = encoded.map_err(Response::InternalError)?.get_ids().to_vec();
 
                     if toks.len() == 1 {
                         if tok_env.as_ref().is_some_and(|tok_env| {
@@ -583,23 +531,18 @@ impl Engine {
             request.sampling_params.logits_bias.unwrap_or_default(),
             request.logits_processors.unwrap_or_default(),
         );
-        let sampler = handle_request_error!(sampler, request.response);
+        let sampler = sampler.map_err(|e| Response::ValidationError(e.into()))?;
 
         if request.sampling_params.n_choices == 0 {
-            request
-                .response
-                .send(Response::ValidationError(
-                    "Number of choices must be greater than 0.".into(),
-                ))
-                .await
-                .unwrap_or_else(|_| warn!("Receiver disconnected"));
-            return;
+            return Err(Box::new(Response::ValidationError(
+                "Number of choices must be greater than 0.".into(),
+            )));
         }
 
         // Add sequences
         for response_index in 0..request.sampling_params.n_choices {
             if request.response.is_closed() {
-                return;
+                return Ok(());
             }
             let factory = get_mut_arcmutex!(self.pipeline)
                 .get_metadata()
@@ -608,14 +551,9 @@ impl Engine {
             let recognizer = match Self::build_sequence_recognizer(&factory, &request.constraint) {
                 Ok(recognizer) => recognizer,
                 Err(err) => {
-                    request
-                        .response
-                        .send(Response::ValidationError(
-                            format!("Invalid grammar. {err}").into(),
-                        ))
-                        .await
-                        .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                    return;
+                    return Err(Box::new(Response::ValidationError(
+                        format!("Invalid grammar. {err}").into(),
+                    )));
                 }
             };
 
@@ -695,15 +633,10 @@ impl Engine {
                     let k_seq_cache = match Tensor::zeros(k_shape, dtype, &device) {
                         Ok(x) => x,
                         Err(err) => {
-                            request
-                                .response
-                                .send(Response::InternalError(
-                                    err.context("Failed to allocate preallocated KV cache.")
-                                        .into(),
-                                ))
-                                .await
-                                .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                            return;
+                            return Err(Box::new(Response::InternalError(
+                                err.context("Failed to allocate preallocated KV cache.")
+                                    .into(),
+                            )));
                         }
                     };
                     let v_seq_cache = if k_shape == v_shape {
@@ -712,15 +645,10 @@ impl Engine {
                         match Tensor::zeros(v_shape, dtype, &device) {
                             Ok(x) => x,
                             Err(err) => {
-                                request
-                                    .response
-                                    .send(Response::InternalError(
-                                        err.context("Failed to allocate preallocated KV cache.")
-                                            .into(),
-                                    ))
-                                    .await
-                                    .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                                return;
+                                return Err(Box::new(Response::InternalError(
+                                    err.context("Failed to allocate preallocated KV cache.")
+                                        .into(),
+                                )));
                             }
                         }
                     };
@@ -742,14 +670,14 @@ impl Engine {
                     } else {
                         ToolChoice::None
                     };
-                Some(handle_request_error!(
+                Some(
                     ToolCallState::new(
                         tool_choice,
                         request.tools.as_deref(),
                         preferred_tool_call_format,
-                    ),
-                    request.response
-                ))
+                    )
+                    .map_err(|e| Response::ValidationError(e.into()))?,
+                )
             } else {
                 None
             };
@@ -861,32 +789,26 @@ impl Engine {
                     } else {
                         Response::InternalError(error.into())
                     };
-                    request
-                        .response
-                        .send(response)
-                        .await
-                        .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                    return;
+                    return Err(Box::new(response));
                 }
             }
             if request.response.is_closed() {
-                return;
+                return Ok(());
             }
 
             let prefill_cache = if seq.return_raw_logits {
                 None
             } else {
-                handle_seq_error!(
-                    get_mut_arcmutex!(self.prefix_cacher).search_for_matching_cache(
+                get_mut_arcmutex!(self.prefix_cacher)
+                    .search_for_matching_cache(
                         seq.get_toks(),
                         seq.adapter_generation(),
                         seq.mm_features(),
                         seq.image_hashes(),
                         seq.audio_hashes(),
                         seq.video_hashes(),
-                    ),
-                    request.response
-                )
+                    )
+                    .map_err(|e| Response::InternalError(e.into()))?
             };
 
             let recurrent_slot_allocation = {
@@ -918,12 +840,7 @@ impl Engine {
                 Ok(Some(slot_idx)) => seq.set_recurrent_state_idx(Some(slot_idx)),
                 Ok(None) => {}
                 Err(err) => {
-                    request
-                        .response
-                        .send(Response::InternalError(err.into()))
-                        .await
-                        .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                    return;
+                    return Err(Box::new(Response::InternalError(err.into())));
                 }
             }
 
@@ -973,12 +890,7 @@ impl Engine {
                                     }
                                 }
                                 drop(pipeline);
-                                request
-                                    .response
-                                    .send(Response::InternalError(err.into()))
-                                    .await
-                                    .unwrap_or_else(|_| warn!("Receiver disconnected"));
-                                return;
+                                return Err(Box::new(Response::InternalError(err.into())));
                             }
                         }
                     }
@@ -1009,7 +921,7 @@ impl Engine {
                         }
                     }
                 }
-                return;
+                return Ok(());
             }
 
             *get_mut_arcmutex!(self.id) += 1;
@@ -1019,6 +931,7 @@ impl Engine {
         if added_seq {
             self.pending_notify.notify_one();
         }
+        Ok(())
     }
 
     async fn tokenize_text(&self, request: TokenizationRequest) {
