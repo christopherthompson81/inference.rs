@@ -47,6 +47,16 @@ zip.workspace = true
 accelerate-src = { workspace = true, optional = true }
 intel-mkl-src = { workspace = true, optional = true }
 
+[dev-dependencies]
+candle-nn.workspace = true
+indicatif.workspace = true
+inference-models-other.workspace = true
+inference-nn.workspace = true
+inference-quant.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+tower = { workspace = true, features = ["util"] }
+
 [features]
 default = ["swagger-ui", "all-models"]
 all-models = ["inference-core/all-models"]
