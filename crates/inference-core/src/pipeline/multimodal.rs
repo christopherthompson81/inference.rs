@@ -13,8 +13,8 @@ use super::{
 use crate::attention::ATTENTION_CHUNK_SIZE;
 #[cfg(feature = "cuda")]
 use crate::cuda::gdn::GDN_PAD_SLOT;
-use crate::device_map::{self, DeviceMapper};
-use crate::distributed::{self, WorkerTransferData};
+use crate::device_map::DeviceMapper;
+use crate::distributed::{self};
 #[cfg(feature = "cuda")]
 use crate::kv_cache::RecurrentCheckpointStateSnapshot;
 use crate::pipeline::cache_manager::{FullCacheManager, HybridCacheManager, NormalCacheManager};
@@ -195,11 +195,11 @@ use inference_quant::log::once_log_info;
 use inference_quant::IsqType;
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Mutex as StdMutex;
 use std::sync::{Arc, RwLock};
-use std::{env, fs};
 use tokenizers::AddedToken;
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
@@ -623,36 +623,17 @@ impl Loader for MultimodalLoader {
             (processor, preprocessor_config, tokenizer, llg_factory)
         };
 
-        let use_nccl = inference_quant::distributed::use_nccl();
         let write_uqff = self.config.write_uqff.is_some();
-        let tensor_parallelism = distributed::resolve_tensor_parallelism(
+        let super::loading::LoadDevices {
+            tensor_parallelism,
+            device,
+            available_devices,
+        } = super::loading::resolve_load_devices(
             self.inner.model_config(&config)?.as_ref(),
-            use_nccl,
+            device,
             write_uqff,
         )?;
         let use_distributed = tensor_parallelism.is_enabled();
-        let device = device.clone();
-
-        let available_devices = if let Ok(payload) = env::var(distributed::IS_DAEMON_FLAG) {
-            let payload: WorkerTransferData = serde_json::from_str(&payload)?;
-            let WorkerTransferData::Init { worker_rank, .. } = payload;
-            vec![candle_core::Device::new_cuda(worker_rank + 1)?]
-        } else if use_distributed {
-            vec![candle_core::Device::new_cuda(0)?]
-        } else {
-            device_map::get_all_similar_devices(&device)?
-        };
-        #[cfg(feature = "cuda")]
-        for device in &available_devices {
-            if let Device::Cuda(dev) = device {
-                unsafe { dev.disable_event_tracking() };
-            }
-        }
-        let device = if use_distributed {
-            available_devices[0].clone()
-        } else {
-            device
-        };
         let uqff_reader = if let Some(from_uqff) = &*self.from_uqff.read().unwrap() {
             Some(Arc::new(inference_quant::UqffReader::open(from_uqff)?))
         } else {

@@ -7,7 +7,9 @@ use candle_core::{DType, Device};
 use tracing::warn;
 
 use crate::{
-    device_map::{DeviceMapSetting, DeviceMapper},
+    device_map::{self, DeviceMapSetting, DeviceMapper},
+    distributed::{self, TensorParallelism, WorkerTransferData},
+    paged_attention::ModelConfigLike,
     PagedAttentionConfig, Topology, TryIntoDType,
 };
 
@@ -98,4 +100,48 @@ pub(crate) fn prepare_model_config(
     } else {
         Ok(config)
     }
+}
+
+pub(crate) struct LoadDevices {
+    pub tensor_parallelism: TensorParallelism,
+    pub device: Device,
+    pub available_devices: Vec<Device>,
+}
+
+/// A distributed worker's own GPU, GPU 0 under tensor parallelism, or every device like `device`.
+pub(crate) fn resolve_load_devices(
+    model_config: &dyn ModelConfigLike,
+    device: &Device,
+    write_uqff: bool,
+) -> Result<LoadDevices> {
+    let tensor_parallelism = distributed::resolve_tensor_parallelism(
+        model_config,
+        inference_quant::distributed::use_nccl(),
+        write_uqff,
+    )?;
+    let available_devices = if let Ok(payload) = std::env::var(distributed::IS_DAEMON_FLAG) {
+        let payload: WorkerTransferData = serde_json::from_str(&payload)?;
+        let WorkerTransferData::Init { worker_rank, .. } = payload;
+        vec![Device::new_cuda(worker_rank + 1)?]
+    } else if tensor_parallelism.is_enabled() {
+        vec![Device::new_cuda(0)?]
+    } else {
+        device_map::get_all_similar_devices(device)?
+    };
+    #[cfg(feature = "cuda")]
+    for device in &available_devices {
+        if let Device::Cuda(dev) = device {
+            unsafe { dev.disable_event_tracking() };
+        }
+    }
+    let device = if tensor_parallelism.is_enabled() {
+        available_devices[0].clone()
+    } else {
+        device.clone()
+    };
+    Ok(LoadDevices {
+        tensor_parallelism,
+        device,
+        available_devices,
+    })
 }
