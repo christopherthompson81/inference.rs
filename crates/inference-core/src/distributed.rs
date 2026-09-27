@@ -1,6 +1,7 @@
 use anyhow::Context;
 use candle_core::{DType, Device};
 use core::ffi::c_char;
+use futures::future::LocalBoxFuture;
 pub use inference_quant::distributed::{use_nccl, use_ring};
 use inference_quant::{RingConfig, ShardedVarBuilder};
 use interprocess::local_socket::traits::{Listener, Stream};
@@ -9,7 +10,6 @@ use interprocess::local_socket::{ListenerOptions, Stream as LocalStream};
 use serde::{Deserialize, Serialize};
 use serde_big_array::BigArray;
 use std::env;
-use std::future::Future;
 use std::io::{BufRead, BufReader, Write};
 use std::net::TcpStream;
 use std::process::Command;
@@ -178,14 +178,14 @@ pub fn nccl_daemon_replicator(request_sender: Sender<Request>) {
             use interprocess::local_socket::traits::Stream;
             use interprocess::local_socket::Stream as LocalStream;
 
-            let dispatch = move |req| {
+            let dispatch = move |req| -> LocalBoxFuture<'static, Result<(), String>> {
                 let request_sender = request_sender.clone();
-                async move {
+                Box::pin(async move {
                     request_sender
                         .send(req)
                         .await
                         .map_err(|_| "daemon channel closed".to_string())
-                }
+                })
             };
 
             loop {
@@ -224,14 +224,14 @@ pub fn nccl_daemon_replicator_inference(inference: Arc<crate::InferenceRs>) {
             use interprocess::local_socket::traits::Stream;
             use interprocess::local_socket::Stream as LocalStream;
 
-            let dispatch = move |req| {
+            let dispatch = move |req| -> LocalBoxFuture<'static, Result<(), String>> {
                 let inference = inference.clone();
-                async move {
+                Box::pin(async move {
                     inference
                         .send_request_async(req)
                         .await
                         .map_err(|err| format!("{err:?}"))
-                }
+                })
             };
 
             loop {
@@ -271,14 +271,14 @@ pub fn ring_daemon_replicator(request_sender: Sender<Request>) {
     std::thread::spawn(move || {
         let rt = Runtime::new().unwrap();
         rt.block_on(async move {
-            let dispatch = move |req| {
+            let dispatch = move |req| -> LocalBoxFuture<'static, Result<(), String>> {
                 let request_sender = request_sender.clone();
-                async move {
+                Box::pin(async move {
                     request_sender
                         .send(req)
                         .await
                         .map_err(|_| "daemon channel closed".to_string())
-                }
+                })
             };
 
             loop {
@@ -311,14 +311,14 @@ pub fn ring_daemon_replicator_inference(inference: Arc<crate::InferenceRs>) {
     std::thread::spawn(move || {
         let rt = Runtime::new().unwrap();
         rt.block_on(async move {
-            let dispatch = move |req| {
+            let dispatch = move |req| -> LocalBoxFuture<'static, Result<(), String>> {
                 let inference = inference.clone();
-                async move {
+                Box::pin(async move {
                     inference
                         .send_request_async(req)
                         .await
                         .map_err(|err| format!("{err:?}"))
-                }
+                })
             };
 
             loop {
@@ -343,11 +343,10 @@ pub fn ring_daemon_replicator_inference(inference: Arc<crate::InferenceRs>) {
     });
 }
 
-async fn handle_daemon_request<F, Fut>(req: Request, dispatch: &F)
-where
-    F: Fn(Request) -> Fut,
-    Fut: Future<Output = Result<(), String>>,
-{
+// Boxed so the request handling below compiles once for all four replicators.
+type DaemonDispatch<'a> = dyn Fn(Request) -> LocalBoxFuture<'static, Result<(), String>> + 'a;
+
+async fn handle_daemon_request(req: Request, dispatch: &DaemonDispatch<'_>) {
     match req {
         Request::Detokenize(mut x) => {
             let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
@@ -551,7 +550,7 @@ pub(crate) enum DistributedWeightSource<'a> {
     Prepared(ShardedVarBuilder),
 }
 
-pub(crate) struct DistributedMapperConfig<'a, T: ?Sized> {
+pub(crate) struct DistributedMapperConfig<'a> {
     pub dtype: DType,
     pub device: &'a Device,
     pub available_devices: &'a [Device],
@@ -562,12 +561,13 @@ pub(crate) struct DistributedMapperConfig<'a, T: ?Sized> {
     pub from_uqff: bool,
     pub write_uqff: bool,
     pub organization: IsqOrganization,
-    pub model: &'a T,
+    pub isq_loader: &'a dyn IsqModelLoader,
+    pub mapped_loader: &'a dyn DeviceMappedModelLoader,
     pub weights: DistributedWeightSource<'a>,
 }
 
-pub(crate) fn prepare_distributed_mapper<T: DeviceMappedModelLoader + IsqModelLoader + ?Sized>(
-    args: DistributedMapperConfig<'_, T>,
+pub(crate) fn prepare_distributed_mapper(
+    args: DistributedMapperConfig<'_>,
 ) -> anyhow::Result<(Box<dyn DeviceMapper + Send + Sync>, ShardedVarBuilder)> {
     let DistributedMapperConfig {
         dtype,
@@ -580,7 +580,8 @@ pub(crate) fn prepare_distributed_mapper<T: DeviceMappedModelLoader + IsqModelLo
         from_uqff,
         write_uqff,
         organization,
-        model,
+        isq_loader,
+        mapped_loader,
         weights,
     } = args;
     if !(cfg!(feature = "cuda") || cfg!(feature = "ring")) {
@@ -757,9 +758,9 @@ pub(crate) fn prepare_distributed_mapper<T: DeviceMappedModelLoader + IsqModelLo
         // Dummy weights for the layers which will be overwritten...
         Some(std::sync::Arc::new(
             if matches!(organization, IsqOrganization::MoeExpertsOnly) {
-                model.isq_layer_regexes_moqe(config)?
+                isq_loader.isq_layer_regexes_moqe(config)?
             } else {
-                model.isq_layer_regexes(config)?
+                isq_loader.isq_layer_regexes(config)?
             },
         ))
     } else {
@@ -787,7 +788,12 @@ pub(crate) fn prepare_distributed_mapper<T: DeviceMappedModelLoader + IsqModelLo
         nm_device: available_devices[0].clone(),
         comm: Arc::new(comm),
     }
-    .into_mapper(model.num_layers(config)?, device, None, available_devices)?;
+    .into_mapper(
+        mapped_loader.num_layers(config)?,
+        device,
+        None,
+        available_devices,
+    )?;
 
     let sharded_vb = if !loading_isq {
         sharded_vb.clone().set_device(device.clone())
