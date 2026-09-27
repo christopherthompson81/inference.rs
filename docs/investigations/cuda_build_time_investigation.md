@@ -536,3 +536,34 @@ Review follow-ups:
     breaks `add_special_tokens` (now takes owned tokens) and llguidance's `ByteTokenizer::from_tokenizer` (a 0.21
     type), and would still leave two versions.
 - Implication: core's lib test (102 s) is still the last unit and the remaining wall-time lever.
+
+## Run 27 - 2026-09-27 01:10
+
+- Question: core's lib test (102 s cold) ends the cold build; is it worth attacking, e.g. by moving test code out of
+  core or building core at a lower opt-level for tests?
+- Findings:
+  - Core carries ~27k lines of unit tests (pipeline 9.6k, gguf 3.6k, scheduler 3.3k, vision_models 2.9k). The lib
+    test is a full second compile of core with `cfg(test)`, so moving tests out saves only their share (~20 s of the
+    102 s); integration tests would avoid the second compile but the unit tests lean on `pub(crate)` internals.
+  - Incremental, after a one-line edit in core: `cargo test --no-run -p inference-core --lib` rebuilds in 6 s at
+    opt-level 3 and 6 s at opt-level 1 (`--config profile.dev.package.inference-core.opt-level=1`); core's 906 unit
+    tests run in 7.0 s vs 7.9 s.
+- Implication: the cold 102 s only matters for cold builds; for the edit loop it is not the bottleneck, and a lower
+  opt-level buys nothing. The cycle's wall time is in `local_ci.sh` itself; measure its phases next.
+
+## Run 28 - 2026-09-27 01:45
+
+- Question: where does a `local_ci.sh --lint --tests --cuda` cycle spend its time after a one-line core edit, and can
+  the phases overlap?
+- Serial phase times (warm target, edit to a function body in `pipeline/normal.rs`): fmt check 4.3 s, clippy 11.0 s,
+  nextest build 16.1 s, nextest run 9.4 s, doctests 9.9 s, smoke examples 1.4 s, clippy (cuda) 11.3 s, nextest build
+  (cuda) 17.5 s, nextest run (cuda) 54.6 s. Total ~135 s.
+- The CUDA suite is GPU-bound: 2451 tests summing 834 s of per-test time on 16 threads; the inference-nn CUDA tests
+  take ~11 s of wall time at 16, 8 or 4 test threads alike. One nn kernel test takes 0.24 s alone and 2.8 s in the
+  full suite (GPU sharing). Raising `CUDA_CACHE_MAXSIZE` to 4 GiB changed nothing (0.23-0.24 s), so it is not PTX JIT.
+  Leaving out the real-checkpoint tests (PaddleOCR-VL, the layout ABI detection) takes the suite from 53 s to 47 s.
+- Change: `local_ci.sh` lints and builds the CUDA suite, runs it in the background, and runs the CPU clippy, CPU
+  suite, doctests and smoke build meanwhile; the RLIMIT_NPROC sandbox test (it counts every process the user runs)
+  is left out of both suites and runs alone at the end.
+- Result: 103 s after the same kind of edit (135 s serial). An intermediate version that overlapped only the CPU test
+  run and doctests reached 124 s. In the overlapped run the CPU suite takes 9.9 s and the CUDA suite 60.7 s.
