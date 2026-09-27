@@ -9,7 +9,9 @@ use inference_api::{
     anthropic::anthropic_error_body,
     api_error::{ApiError, ApiErrorKind},
     blocking::{BlockingEngine, BlockingStream, StreamPoll},
+    files::{file_too_large, FileUpload, MAX_FILE_UPLOAD_BYTES},
     media_source::{MediaAttachment, MediaAttachments},
+    system::{system_doctor_json, system_info_json},
     Engine, EngineLoadError,
 };
 
@@ -50,9 +52,9 @@ pub struct inference_string {
     text: CString,
 }
 
-/// Opaque; mirrors `inference_audio`.
+/// Opaque; mirrors `inference_blob`.
 #[allow(non_camel_case_types)]
-pub struct inference_audio {
+pub struct inference_blob {
     bytes: Vec<u8>,
     mime_type: CString,
 }
@@ -68,7 +70,7 @@ const _: () = {
 fn api_status(error: &ApiError) -> inference_status {
     match error.kind {
         ApiErrorKind::Internal => INFERENCE_ERR_RUNTIME,
-        ApiErrorKind::NotFound => INFERENCE_ERR_NOT_FOUND,
+        ApiErrorKind::NotFound | ApiErrorKind::Gone => INFERENCE_ERR_NOT_FOUND,
         ApiErrorKind::RateLimited | ApiErrorKind::Unavailable | ApiErrorKind::Overloaded => {
             INFERENCE_ERR_UNAVAILABLE
         }
@@ -136,6 +138,12 @@ unsafe fn arg_media(media: *const inference_media, count: usize) -> FfiResult<Me
         })
         .collect::<FfiResult<Vec<_>>>()?;
     Ok(MediaAttachments::new(attachments))
+}
+
+fn blob_handle(bytes: Vec<u8>, mime_type: String) -> *mut inference_blob {
+    // MIME types never contain NUL; dropping any keeps the C string intact rather than failing the call
+    let mime_type = CString::new(mime_type.replace('\0', "")).unwrap_or_default();
+    Box::into_raw(Box::new(inference_blob { bytes, mime_type }))
 }
 
 fn string_handle(text: String) -> *mut inference_string {
@@ -258,8 +266,7 @@ unsafe fn stream_call(
 ) -> inference_status {
     engine_call(
         engine,
-        request,
-        request_len,
+        (request, request_len, "request"),
         (out_stream, "out_stream"),
         |engine, request| {
             let stream = open(engine, request)?;
@@ -274,18 +281,17 @@ unsafe fn stream_call(
 // Every blocking operation has the same shape: engine and request in, an owned handle out.
 unsafe fn engine_call<H>(
     engine: *const inference_engine,
-    request: *const c_char,
-    request_len: usize,
+    input: (*const c_char, usize, &str),
     out: (*mut *mut H, &str),
     call: impl FnOnce(&BlockingEngine, &[u8]) -> FfiResult<*mut H>,
 ) -> inference_status {
-    let (out, out_name) = out;
+    let ((input, input_len, input_name), (out, out_name)) = (input, out);
     guard(|| {
         out_arg(out, out_name)?;
         let engine = engine
             .as_ref()
             .ok_or_else(|| Failure::invalid("engine is NULL"))?;
-        let request = arg_bytes(request, request_len, "request")?;
+        let request = arg_bytes(input, input_len, input_name)?;
         out.write(call(&engine.engine, request)?);
         Ok(())
     })
@@ -300,8 +306,7 @@ unsafe fn json_call(
 ) -> inference_status {
     engine_call(
         engine,
-        request,
-        request_len,
+        (request, request_len, "request"),
         (out_response, "out_response"),
         |engine, request| call(engine, request).map(string_handle),
     )
@@ -434,7 +439,21 @@ pub unsafe extern "C" fn inference_responses_stream_open(
     )
 }
 
-// The stored-response calls: engine and response id in, the resource JSON out.
+// Engine and a UTF-8 id in, an owned handle out.
+unsafe fn id_call<H>(
+    engine: *const inference_engine,
+    id: (*const c_char, usize, &str),
+    out: (*mut *mut H, &str),
+    call: impl FnOnce(&BlockingEngine, &str) -> FfiResult<*mut H>,
+) -> inference_status {
+    let name = id.2;
+    engine_call(engine, id, out, |engine, id| {
+        let id = std::str::from_utf8(id)
+            .map_err(|_| Failure::invalid(format!("{name} is not UTF-8")))?;
+        call(engine, id)
+    })
+}
+
 unsafe fn response_id_call(
     engine: *const inference_engine,
     response_id: *const c_char,
@@ -442,18 +461,16 @@ unsafe fn response_id_call(
     out_response: *mut *mut inference_string,
     call: impl FnOnce(&Engine, &str) -> Result<String, ApiError>,
 ) -> inference_status {
-    guard(|| {
-        out_arg(out_response, "out_response")?;
-        let engine = engine
-            .as_ref()
-            .ok_or_else(|| Failure::invalid("engine is NULL"))?;
-        let id = arg_bytes(response_id, response_id_len, "response_id")?;
-        let id =
-            std::str::from_utf8(id).map_err(|_| Failure::invalid("response_id is not UTF-8"))?;
-        let response = call(engine.engine.engine(), id).map_err(api_failure)?;
-        out_response.write(string_handle(response));
-        Ok(())
-    })
+    id_call(
+        engine,
+        (response_id, response_id_len, "response_id"),
+        (out_response, "out_response"),
+        |engine, id| {
+            call(engine.engine(), id)
+                .map(string_handle)
+                .map_err(api_failure)
+        },
+    )
 }
 
 /// Safety: `engine` is a live handle, `response_id` valid for `response_id_len` bytes, `out_response` valid for a
@@ -658,62 +675,238 @@ pub unsafe extern "C" fn inference_image_generation(
     )
 }
 
-/// Safety: `engine` is a live handle, `request` valid for `request_len` bytes, `out_audio` valid for a write.
+/// Safety: `engine` is a live handle, `request` valid for `request_len` bytes, `out_blob` valid for a write.
 #[no_mangle]
 pub unsafe extern "C" fn inference_speech_generation(
     engine: *const inference_engine,
     request: *const c_char,
     request_len: usize,
-    out_audio: *mut *mut inference_audio,
+    out_blob: *mut *mut inference_blob,
 ) -> inference_status {
     engine_call(
         engine,
-        request,
-        request_len,
-        (out_audio, "out_audio"),
+        (request, request_len, "request"),
+        (out_blob, "out_blob"),
         |engine, request| {
             let audio = engine
                 .speech_generation_json(request)
                 .map_err(api_failure)?;
-            Ok(Box::into_raw(Box::new(inference_audio {
-                bytes: audio.bytes,
-                mime_type: CString::new(audio.content_type).expect("audio content types are ASCII"),
-            })))
+            Ok(blob_handle(audio.bytes, audio.content_type))
         },
     )
 }
 
-/// Safety: `audio` is NULL or a live audio handle.
+/// Safety: `engine` is a live handle, `approval_id` valid for `approval_id_len` bytes, `request` for `request_len`
+/// bytes and `out_response` for a write.
 #[no_mangle]
-pub unsafe extern "C" fn inference_audio_data(audio: *const inference_audio) -> *const u8 {
+pub unsafe extern "C" fn inference_approval_resolve(
+    engine: *const inference_engine,
+    approval_id: *const c_char,
+    approval_id_len: usize,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| {
+            let id = arg_bytes(approval_id, approval_id_len, "approval_id")?;
+            let id = std::str::from_utf8(id)
+                .map_err(|_| Failure::invalid("approval_id is not UTF-8"))?;
+            engine
+                .engine()
+                .resolve_approval_json(id, request)
+                .map_err(api_failure)
+        },
+    )
+}
+
+/// Safety: `engine` is a live handle, `data` valid for `len` bytes, `filename` and `purpose` C strings, `mime_type`
+/// NULL or a C string, `out_response` valid for a write.
+#[no_mangle]
+pub unsafe extern "C" fn inference_file_upload(
+    engine: *const inference_engine,
+    data: *const u8,
+    len: usize,
+    filename: *const c_char,
+    mime_type: *const c_char,
+    purpose: *const c_char,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    engine_call(
+        engine,
+        (data.cast::<c_char>(), len, "data"),
+        (out_response, "out_response"),
+        |engine, bytes| {
+            // Checked before the copy, so an oversized buffer is refused without being duplicated.
+            if bytes.len() > MAX_FILE_UPLOAD_BYTES {
+                return Err(api_failure(file_too_large()));
+            }
+            let upload = FileUpload {
+                filename: crate::arg_str(filename, "filename")?.to_string(),
+                mime_type: (!mime_type.is_null())
+                    .then(|| crate::arg_str(mime_type, "mime_type").map(str::to_string))
+                    .transpose()?,
+                purpose: crate::arg_str(purpose, "purpose")?.to_string(),
+                bytes: bytes.to_vec(),
+            };
+            engine
+                .engine()
+                .upload_file_json(upload)
+                .map(string_handle)
+                .map_err(api_failure)
+        },
+    )
+}
+
+/// Safety: `engine` is a live handle and `out_response` valid for a write.
+#[no_mangle]
+pub unsafe extern "C" fn inference_files_list(
+    engine: *const inference_engine,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    guard(|| {
+        out_arg(out_response, "out_response")?;
+        let engine = engine
+            .as_ref()
+            .ok_or_else(|| Failure::invalid("engine is NULL"))?;
+        let response = engine.engine.engine().files_json().map_err(api_failure)?;
+        out_response.write(string_handle(response));
+        Ok(())
+    })
+}
+
+unsafe fn file_id_call(
+    engine: *const inference_engine,
+    file_id: *const c_char,
+    file_id_len: usize,
+    out_response: *mut *mut inference_string,
+    call: impl FnOnce(&Engine, &str) -> Result<String, ApiError>,
+) -> inference_status {
+    id_call(
+        engine,
+        (file_id, file_id_len, "file_id"),
+        (out_response, "out_response"),
+        |engine, id| {
+            call(engine.engine(), id)
+                .map(string_handle)
+                .map_err(api_failure)
+        },
+    )
+}
+
+/// Safety: `engine` is a live handle, `file_id` valid for `file_id_len` bytes, `out_response` valid for a write.
+#[no_mangle]
+pub unsafe extern "C" fn inference_file_get(
+    engine: *const inference_engine,
+    file_id: *const c_char,
+    file_id_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    file_id_call(
+        engine,
+        file_id,
+        file_id_len,
+        out_response,
+        Engine::file_json,
+    )
+}
+
+/// Safety: as for `inference_file_get`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_file_delete(
+    engine: *const inference_engine,
+    file_id: *const c_char,
+    file_id_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    file_id_call(
+        engine,
+        file_id,
+        file_id_len,
+        out_response,
+        Engine::delete_file_json,
+    )
+}
+
+/// Safety: as for `inference_file_get`, with `out_blob` valid for a write.
+#[no_mangle]
+pub unsafe extern "C" fn inference_file_content(
+    engine: *const inference_engine,
+    file_id: *const c_char,
+    file_id_len: usize,
+    out_blob: *mut *mut inference_blob,
+) -> inference_status {
+    id_call(
+        engine,
+        (file_id, file_id_len, "file_id"),
+        (out_blob, "out_blob"),
+        |engine, id| {
+            let body = engine.engine().file_content(id).map_err(api_failure)?;
+            Ok(blob_handle(body.bytes, body.mime_type))
+        },
+    )
+}
+
+unsafe fn report(
+    out_response: *mut *mut inference_string,
+    report: fn() -> Result<String, ApiError>,
+) -> inference_status {
+    guard(|| {
+        out_arg(out_response, "out_response")?;
+        out_response.write(string_handle(report().map_err(api_failure)?));
+        Ok(())
+    })
+}
+
+/// Safety: `out_response` is valid for a write.
+#[no_mangle]
+pub unsafe extern "C" fn inference_system_info(
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    report(out_response, system_info_json)
+}
+
+/// Safety: `out_response` is valid for a write.
+#[no_mangle]
+pub unsafe extern "C" fn inference_system_doctor(
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    report(out_response, system_doctor_json)
+}
+
+/// Safety: `blob` is NULL or a live blob handle.
+#[no_mangle]
+pub unsafe extern "C" fn inference_blob_data(blob: *const inference_blob) -> *const u8 {
     guard_value(std::ptr::null(), || {
-        audio
-            .as_ref()
-            .map_or(std::ptr::null(), |audio| audio.bytes.as_ptr())
+        blob.as_ref()
+            .map_or(std::ptr::null(), |blob| blob.bytes.as_ptr())
     })
 }
 
-/// Safety: `audio` is NULL or a live audio handle.
+/// Safety: `blob` is NULL or a live blob handle.
 #[no_mangle]
-pub unsafe extern "C" fn inference_audio_len(audio: *const inference_audio) -> usize {
-    guard_value(0, || audio.as_ref().map_or(0, |audio| audio.bytes.len()))
+pub unsafe extern "C" fn inference_blob_len(blob: *const inference_blob) -> usize {
+    guard_value(0, || blob.as_ref().map_or(0, |blob| blob.bytes.len()))
 }
 
-/// Safety: `audio` is NULL or a live audio handle.
+/// Safety: `blob` is NULL or a live blob handle.
 #[no_mangle]
-pub unsafe extern "C" fn inference_audio_mime_type(audio: *const inference_audio) -> *const c_char {
+pub unsafe extern "C" fn inference_blob_mime_type(blob: *const inference_blob) -> *const c_char {
     guard_value(c"".as_ptr(), || {
-        audio
-            .as_ref()
-            .map_or(c"".as_ptr(), |audio| audio.mime_type.as_ptr())
+        blob.as_ref()
+            .map_or(c"".as_ptr(), |blob| blob.mime_type.as_ptr())
     })
 }
 
-/// Safety: `audio` is NULL or an audio handle that is not used again.
+/// Safety: `blob` is NULL or a blob handle that is not used again.
 #[no_mangle]
-pub unsafe extern "C" fn inference_audio_free(audio: *mut inference_audio) {
-    if !audio.is_null() {
-        guard_value((), || drop(Box::from_raw(audio)));
+pub unsafe extern "C" fn inference_blob_free(blob: *mut inference_blob) {
+    if !blob.is_null() {
+        guard_value((), || drop(Box::from_raw(blob)));
     }
 }
 

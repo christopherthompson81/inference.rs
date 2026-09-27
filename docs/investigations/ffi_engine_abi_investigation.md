@@ -402,3 +402,38 @@ should reach the log. An unexpected engine response is logged, not only mapped t
 literal samples rather than the encoder's own conversion. `engine_call` is the one FFI helper for engine, request and
 owned handle out (`json_call`, `stream_call` and speech are built on it). Tests: an unknown image model is NOT_FOUND
 `model_not_found`; speech on the chat model is refused as incompatible, not earlier.
+
+## Run 13 - 2026-09-27 16:59
+
+Change: files, agent approvals and system reports on the engine surface. Split from skills and host callbacks, which
+need their own design (callbacks mean C function pointers into the agent loop).
+- `inference-api/src/files.rs`: upload, get, list, delete, content and the container views, from the server route,
+  which keeps multipart parsing and the Content-Disposition framing. The 64 MiB limit and the non-empty purpose now
+  hold for every caller. New `ApiErrorKind::Gone` (410; NOT_FOUND over the ABI) for an elided body, which the route
+  used to get by overwriting a NotFound response's status.
+- `agentic::resolve_approval` (from the route) and `Engine::resolve_approval`. With it the engine can answer the
+  approvals it asks for, so the spec and per-request `agent_permission: "ask"` rejection (`reject_ask`) is gone; a
+  blocking call still refuses "ask" (approvals arrive as stream events). The approval event JSON was built in the chat
+  and Anthropic streams separately; `serialize_approval_required` builds it for both.
+- `inference-api/src/system.rs`: system info and doctor reports as JSON.
+- ABI 0.0.9: `inference_approval_resolve`, `inference_file_{upload,get,delete,content}`, `inference_files_list`,
+  `inference_system_{info,doctor}`. `inference_audio` becomes `inference_blob` (bytes + MIME type), shared by speech and
+  file content. The FFI helpers are one `engine_call` (named input, named owned output) with `json_call`, `stream_call`
+  and `id_call` on it.
+
+Tests: an engine loads with `agent_permission: "ask"`; a streamed ask request runs to `message_stop` (the tiny model
+calls no tools, so no approval arises); a blocking ask is refused; upload, list, get, content (bytes and MIME round
+trip), delete, then NOT_FOUND; a blank purpose is refused; an unknown approval is NOT_FOUND; both reports are JSON. Not
+covered end to end: an approval actually being asked and answered, which needs a model that calls a tool; the broker's
+own tests cover resolve and early decisions.
+
+Review fixes: the header said the file store was process-wide; it is per engine (each `InferenceRs` keeps its own).
+`inference_file_upload` names `data` (not "request") when it is NULL, and refuses an oversized buffer before copying
+it. The blocking "ask" refusal is a typed `unsupported_parameter` error on `agent_permission` (it was a bare
+`JsonError`; HTTP gains the code and param too). The server's system routes go through `inference_api::system`. The
+header notes that a spec-level "ask" makes blocking chat refuse, and that a freed stream's pending approval holds its
+sequence slot until the 5-minute timeout denies it. Accepted differences: an oversized upload that also lacks
+`purpose` now reports the missing purpose (the size check moved from the multipart parser to the engine), and a
+store insert failure keeps its classified kind instead of always 500. Tests: FFI NULL `data`, NULL `filename`,
+oversized upload, content of a deleted file, NULL approval id; HTTP multipart upload, served content with its
+Content-Type and Content-Disposition, and a missing purpose.

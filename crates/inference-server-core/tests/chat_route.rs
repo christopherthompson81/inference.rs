@@ -233,3 +233,62 @@ async fn adapter_routes_use_the_openai_error_envelope() -> anyhow::Result<()> {
     assert_eq!(body["error"]["code"], "invalid_query", "{body}");
     Ok(())
 }
+
+fn multipart_upload(fields: &[(&str, Option<&str>, &str)]) -> Request<Body> {
+    const BOUNDARY: &str = "inference-test-boundary";
+    let mut body = String::new();
+    for (name, filename, value) in fields {
+        body.push_str(&format!(
+            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"{name}\""
+        ));
+        if let Some(filename) = filename {
+            body.push_str(&format!(
+                "; filename=\"{filename}\"\r\nContent-Type: text/csv"
+            ));
+        }
+        body.push_str(&format!("\r\n\r\n{value}\r\n"));
+    }
+    body.push_str(&format!("--{BOUNDARY}--\r\n"));
+    Request::post("/v1/files")
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body))
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn files_upload_and_serve_their_content() -> anyhow::Result<()> {
+    let dir = support::tiny_checkpoint()?;
+    let app = router(dir.path()).await?;
+    let response = app
+        .clone()
+        .oneshot(multipart_upload(&[
+            ("purpose", None, "user_data"),
+            ("file", Some("table.csv"), "a,b\n1,2\n"),
+        ]))
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let uploaded: Value = serde_json::from_str(&body_text(response).await?)?;
+    let id = uploaded["id"].as_str().unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(Request::get(format!("/v1/files/{id}/content")).body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "text/csv");
+    assert!(response.headers()["content-disposition"]
+        .to_str()?
+        .contains("filename=\"table.csv\""));
+    assert_eq!(body_text(response).await?, "a,b\n1,2\n");
+
+    let response = app
+        .oneshot(multipart_upload(&[("file", Some("table.csv"), "a,b\n")]))
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_str(&body_text(response).await?)?;
+    assert_eq!(body["error"]["param"], "purpose", "{body}");
+    Ok(())
+}

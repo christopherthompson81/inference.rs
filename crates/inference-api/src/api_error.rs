@@ -11,6 +11,8 @@ pub const SERVICE_UNAVAILABLE_MESSAGE: &str = "The service is temporarily unavai
 pub enum ApiErrorKind {
     InvalidRequest,
     NotFound,
+    /// Existed once but is no longer available.
+    Gone,
     Forbidden,
     Conflict,
     PayloadTooLarge,

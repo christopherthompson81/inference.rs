@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{mpsc::Sender, oneshot};
 use utoipa::ToSchema;
 
+use crate::api_error::{ApiError, ApiErrorKind};
+
 /// Server-level agentic defaults applied to requests that do not set their own.
 #[derive(Clone, Default)]
 pub struct AgenticDefaults {
@@ -24,6 +26,8 @@ pub struct AgenticDefaults {
 }
 
 const APPROVAL_TIMEOUT: Duration = Duration::from_secs(300);
+const APPROVAL_RESOLVED: &str = "resolved";
+const APPROVAL_QUEUED: &str = "queued";
 
 #[derive(Clone, Default)]
 pub struct ApprovalBroker {
@@ -182,6 +186,33 @@ impl ApprovalBroker {
             .approved_sessions
             .contains(session_id)
     }
+}
+
+/// Answers the approval an `agentic_tool_approval_required` event named.
+pub fn resolve_approval(
+    broker: &ApprovalBroker,
+    approval_id: &str,
+    request: ApprovalDecisionRequest,
+) -> Result<ApprovalDecisionResponse, ApiError> {
+    let approve = matches!(request.decision, ApprovalDecision::Approve);
+    let status = match broker.resolve(
+        approval_id,
+        approve,
+        request.remember_for_session,
+        request.message,
+    ) {
+        ApprovalResolveStatus::Resolved => APPROVAL_RESOLVED,
+        ApprovalResolveStatus::Queued => APPROVAL_QUEUED,
+        ApprovalResolveStatus::NotFound => {
+            return Err(ApiError::new(
+                ApiErrorKind::NotFound,
+                format!("Approval `{approval_id}` was not found."),
+                Some("approval_not_found"),
+                Some("approval_id"),
+            ));
+        }
+    };
+    Ok(ApprovalDecisionResponse { status })
 }
 
 /// Whether a decision reached its approval.

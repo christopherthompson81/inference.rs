@@ -123,6 +123,7 @@ impl ApiErrorHttp for ApiError {
         match self.kind {
             ApiErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
             ApiErrorKind::NotFound => StatusCode::NOT_FOUND,
+            ApiErrorKind::Gone => StatusCode::GONE,
             ApiErrorKind::Forbidden => StatusCode::FORBIDDEN,
             ApiErrorKind::Conflict => StatusCode::CONFLICT,
             ApiErrorKind::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
@@ -145,6 +146,7 @@ mod tests {
         for (kind, status) in [
             (ApiErrorKind::InvalidRequest, StatusCode::BAD_REQUEST),
             (ApiErrorKind::NotFound, StatusCode::NOT_FOUND),
+            (ApiErrorKind::Gone, StatusCode::GONE),
             (ApiErrorKind::Forbidden, StatusCode::FORBIDDEN),
             (ApiErrorKind::Conflict, StatusCode::CONFLICT),
             (ApiErrorKind::PayloadTooLarge, StatusCode::PAYLOAD_TOO_LARGE),

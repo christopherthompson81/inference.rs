@@ -1,73 +1,18 @@
-//! OpenAI-compatible Files endpoints for uploaded request files and agent-produced files.
+//! OpenAI-compatible Files routes: HTTP framing over the engine's file store.
 
 use axum::{
     extract::{multipart::MultipartRejection, Multipart, Path, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
-    Json,
 };
-use base64::{engine::general_purpose::STANDARD, Engine};
-use inference_core::{
-    File as CoreFile, FileContent, FileSource, InferenceRs, InferenceRsError,
-    FILE_PURPOSE_USER_DATA,
-};
-use serde::Serialize;
-use utoipa::ToSchema;
+use inference_core::FILE_PURPOSE_USER_DATA;
 
-use crate::handler_core::ApiErrorHttp;
+pub use crate::files_api::{ContainerFileMetadata, FileMetadata, SourceMeta};
 use crate::{
-    handler_core::{openai_error_response, ApiError, ApiErrorKind},
-    types::{ExtractedInferenceRsState, SharedInferenceRsState},
+    files_api::{self, FileUpload},
+    handler_core::{json_response, openai_error_response, ApiError, ApiErrorHttp, ApiErrorKind},
+    types::ExtractedInferenceRsState,
 };
-
-const MAX_FILE_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
-
-struct FileUpload {
-    filename: String,
-    mime_type: Option<String>,
-    purpose: String,
-    bytes: Vec<u8>,
-}
-
-/// OpenAI file metadata + inference.rs extensions (`format`, `mime_type`, `source`, `truncated`).
-#[derive(Serialize, ToSchema)]
-pub struct FileMetadata {
-    pub id: String,
-    pub object: &'static str,
-    pub bytes: u64,
-    pub created_at: u64,
-    pub filename: String,
-    pub purpose: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-    pub mime_type: String,
-    pub source: SourceMeta,
-    #[serde(skip_serializing_if = "std::ops::Not::not")]
-    pub truncated: bool,
-}
-
-/// OpenAI-compatible container file metadata backed by the same in-process file store.
-#[derive(Serialize, ToSchema)]
-pub struct ContainerFileMetadata {
-    pub id: String,
-    pub object: &'static str,
-    pub bytes: u64,
-    pub created_at: u64,
-    pub filename: String,
-    pub container_id: String,
-    pub source: SourceMeta,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-    pub mime_type: String,
-}
-
-/// Which agentic tool produced the file, and when in the session.
-#[derive(Serialize, ToSchema)]
-pub struct SourceMeta {
-    pub tool: String,
-    pub round: usize,
-    pub turn: usize,
-}
 
 #[utoipa::path(
     post,
@@ -90,25 +35,7 @@ pub async fn upload_file(
         }
     };
     match parse_upload(multipart).await {
-        Ok(upload) => {
-            let file = CoreFile::from_bytes(
-                CoreFile::make_upload_id(),
-                upload.filename,
-                upload.mime_type,
-                upload.purpose,
-                FileSource {
-                    tool: "user_upload".to_string(),
-                    round: 0,
-                    turn: 0,
-                },
-                upload.bytes,
-            );
-            if let Err(e) = state.insert_file(None, file.clone(), None) {
-                InferenceRs::maybe_log_error(state, &e);
-                return openai_error_response(ApiError::internal());
-            }
-            Json(metadata(&file)).into_response()
-        }
+        Ok(upload) => json_response(files_api::upload_file(&state, upload)),
         Err(error) => openai_error_response(error),
     }
 }
@@ -140,14 +67,6 @@ async fn parse_upload(mut multipart: Multipart) -> Result<FileUpload, ApiError> 
                     .to_string();
                 let mime_type = field.content_type().map(ToString::to_string);
                 let bytes = field.bytes().await.map_err(multipart_error)?.to_vec();
-                if bytes.len() > MAX_FILE_UPLOAD_BYTES {
-                    return Err(ApiError::new(
-                        ApiErrorKind::PayloadTooLarge,
-                        format!("File upload exceeds the {MAX_FILE_UPLOAD_BYTES} byte limit."),
-                        Some("file_too_large"),
-                        Some("file"),
-                    ));
-                }
                 file = Some((filename, mime_type, bytes));
             }
             _ => {}
@@ -198,11 +117,7 @@ fn multipart_error(error: axum::extract::multipart::MultipartError) -> ApiError 
     )
 )]
 pub async fn get_file(State(state): ExtractedInferenceRsState, Path(id): Path<String>) -> Response {
-    match state.try_find_file(&id) {
-        Ok(Some(f)) => Json(metadata(&f)).into_response(),
-        Ok(None) => not_found(&id),
-        Err(error) => file_store_error(state, &error),
-    }
+    json_response(files_api::get_file(&state, &id))
 }
 
 #[utoipa::path(
@@ -221,7 +136,7 @@ pub async fn get_file_content(
     State(state): ExtractedInferenceRsState,
     Path(id): Path<String>,
 ) -> Response {
-    serve_bytes(state, &id)
+    serve_bytes(files_api::file_content(&state, &id))
 }
 
 #[utoipa::path(
@@ -234,12 +149,7 @@ pub async fn get_file_content(
     )
 )]
 pub async fn list_files(State(state): ExtractedInferenceRsState) -> Response {
-    let files = match state.try_list_files() {
-        Ok(files) => files,
-        Err(error) => return file_store_error(state, &error),
-    };
-    let data: Vec<FileMetadata> = files.iter().map(|f| metadata(f)).collect();
-    Json(serde_json::json!({ "object": "list", "data": data })).into_response()
+    json_response(files_api::list_files(&state))
 }
 
 #[utoipa::path(
@@ -257,17 +167,7 @@ pub async fn delete_file(
     State(state): ExtractedInferenceRsState,
     Path(id): Path<String>,
 ) -> Response {
-    match state.try_remove_file(&id) {
-        Ok(true) => {}
-        Ok(false) => return not_found(&id),
-        Err(error) => return file_store_error(state, &error),
-    }
-    Json(serde_json::json!({
-        "id": id,
-        "object": "file",
-        "deleted": true,
-    }))
-    .into_response()
+    json_response(files_api::delete_file(&state, &id))
 }
 
 #[utoipa::path(
@@ -284,15 +184,7 @@ pub async fn list_container_files(
     State(state): ExtractedInferenceRsState,
     Path(container_id): Path<String>,
 ) -> Response {
-    let files = match state.try_list_files() {
-        Ok(files) => files,
-        Err(error) => return file_store_error(state, &error),
-    };
-    let data: Vec<ContainerFileMetadata> = files
-        .iter()
-        .map(|f| container_metadata(&container_id, f))
-        .collect();
-    Json(serde_json::json!({ "object": "list", "data": data })).into_response()
+    json_response(files_api::list_container_files(&state, &container_id))
 }
 
 #[utoipa::path(
@@ -313,11 +205,11 @@ pub async fn get_container_file(
     State(state): ExtractedInferenceRsState,
     Path((container_id, file_id)): Path<(String, String)>,
 ) -> Response {
-    match state.try_find_file(&file_id) {
-        Ok(Some(f)) => Json(container_metadata(&container_id, &f)).into_response(),
-        Ok(None) => not_found(&file_id),
-        Err(error) => file_store_error(state, &error),
-    }
+    json_response(files_api::get_container_file(
+        &state,
+        &container_id,
+        &file_id,
+    ))
 }
 
 #[utoipa::path(
@@ -339,132 +231,29 @@ pub async fn get_container_file_content(
     State(state): ExtractedInferenceRsState,
     Path((_container_id, file_id)): Path<(String, String)>,
 ) -> Response {
-    serve_bytes(state, &file_id)
+    serve_bytes(files_api::file_content(&state, &file_id))
 }
 
-fn metadata(f: &CoreFile) -> FileMetadata {
-    FileMetadata {
-        id: f.id.clone(),
-        object: "file",
-        bytes: f.bytes,
-        created_at: f.created_at,
-        filename: f.name.clone(),
-        purpose: f.purpose.clone(),
-        format: f.format.clone(),
-        mime_type: f
-            .mime_type
-            .clone()
-            .unwrap_or_else(|| "application/octet-stream".to_string()),
-        source: SourceMeta {
-            tool: f.source.tool.clone(),
-            round: f.source.round,
-            turn: f.source.turn,
-        },
-        truncated: f.is_truncated(),
-    }
-}
-
-fn container_metadata(container_id: &str, f: &CoreFile) -> ContainerFileMetadata {
-    ContainerFileMetadata {
-        id: f.id.clone(),
-        object: "container.file",
-        bytes: f.bytes,
-        created_at: f.created_at,
-        filename: f.name.clone(),
-        container_id: container_id.to_string(),
-        source: SourceMeta {
-            tool: f.source.tool.clone(),
-            round: f.source.round,
-            turn: f.source.turn,
-        },
-        format: f.format.clone(),
-        mime_type: f
-            .mime_type
-            .clone()
-            .unwrap_or_else(|| "application/octet-stream".to_string()),
-    }
-}
-
-fn serve_bytes(state: SharedInferenceRsState, id: &str) -> Response {
-    let file = match state.try_find_file(id) {
-        Ok(Some(file)) => file,
-        Ok(None) => return not_found(id),
-        Err(error) => return file_store_error(state, &error),
+fn serve_bytes(body: Result<files_api::FileBody, ApiError>) -> Response {
+    let body = match body {
+        Ok(body) => body,
+        Err(error) => return openai_error_response(error),
     };
-
-    let mime = file
-        .mime_type
-        .clone()
-        .unwrap_or_else(|| "application/octet-stream".to_string());
-
-    let bytes: Vec<u8> = match &file.content {
-        FileContent::Text { text: Some(t), .. } => t.as_bytes().to_vec(),
-        FileContent::Text { text: None, .. } => {
-            return content_gone("Text body was elided and is no longer available.");
-        }
-        FileContent::Binary {
-            data_base64: Some(b),
-        } => match STANDARD.decode(b) {
-            Ok(bytes) => bytes,
-            Err(error) => {
-                tracing::error!(%error, file_id = id, "failed to decode stored file content");
-                return openai_error_response(ApiError::internal());
-            }
-        },
-        FileContent::Binary { data_base64: None } => {
-            return content_gone("Binary body was elided and is no longer available.");
-        }
-        FileContent::Error { message, .. } => {
-            return openai_error_response(ApiError::new(
-                ApiErrorKind::InvalidRequest,
-                message,
-                Some("file_content_error"),
-                Some("file_id"),
-            ));
-        }
-    };
-
-    let len = bytes.len();
     let disposition = format!(
         "inline; filename=\"{}\"; filename*=UTF-8''{}",
-        ascii_safe_filename(&file.name),
-        percent_encode_filename(&file.name),
+        ascii_safe_filename(&body.filename),
+        percent_encode_filename(&body.filename),
     );
     (
         StatusCode::OK,
         [
-            (header::CONTENT_TYPE, mime),
-            (header::CONTENT_LENGTH, len.to_string()),
+            (header::CONTENT_TYPE, body.mime_type),
+            (header::CONTENT_LENGTH, body.bytes.len().to_string()),
             (header::CONTENT_DISPOSITION, disposition),
         ],
-        bytes,
+        body.bytes,
     )
         .into_response()
-}
-
-fn file_store_error(state: SharedInferenceRsState, error: &InferenceRsError) -> Response {
-    InferenceRs::maybe_log_error(state, error);
-    openai_error_response(ApiError::from_error(error, ApiErrorKind::Internal))
-}
-
-fn not_found(id: &str) -> Response {
-    openai_error_response(ApiError::new(
-        ApiErrorKind::NotFound,
-        format!("File '{id}' not found or expired."),
-        Some("file_not_found"),
-        Some("file_id"),
-    ))
-}
-
-fn content_gone(message: &str) -> Response {
-    let mut response = openai_error_response(ApiError::new(
-        ApiErrorKind::NotFound,
-        message,
-        Some("file_content_unavailable"),
-        Some("file_id"),
-    ));
-    *response.status_mut() = StatusCode::GONE;
-    response
 }
 
 fn ascii_safe_filename(name: &str) -> String {

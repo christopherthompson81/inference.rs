@@ -23,7 +23,8 @@ use crate::{
     api_error::{boxed_anyhow, ApiError, ApiErrorKind, ModelErrorMessage, INTERNAL_ERROR_MESSAGE},
     dispatch::apply_model_override,
     engine_chat::{
-        serialize_agentic_progress, ChatEngine, DispatchError, PreparedChat, ResponseTap,
+        serialize_agentic_progress, serialize_approval_required, ChatEngine, DispatchError,
+        PreparedChat, ResponseTap,
     },
     openai::{
         ChatCompletionRequest, FunctionCalled, Grammar, Message, MessageContent,
@@ -1470,7 +1471,7 @@ pub fn anthropic_error_type(kind: ApiErrorKind) -> &'static str {
         ApiErrorKind::InvalidRequest | ApiErrorKind::UnsupportedMediaType => {
             "invalid_request_error"
         }
-        ApiErrorKind::NotFound => "not_found_error",
+        ApiErrorKind::NotFound | ApiErrorKind::Gone => "not_found_error",
         ApiErrorKind::Forbidden => "permission_error",
         ApiErrorKind::Conflict => "conflict_error",
         ApiErrorKind::PayloadTooLarge => "request_too_large",
@@ -1644,14 +1645,13 @@ impl AnthropicStream {
             } => {
                 self.stream.enqueue_json(
                     "agentic_tool_approval_required",
-                    json!({
-                        "type": "agentic_tool_approval_required",
-                        "approval_id": approval_id,
-                        "session_id": session_id,
-                        "round": round,
-                        "tool": tool,
-                        "arguments": arguments,
-                    }),
+                    serialize_approval_required(
+                        &approval_id,
+                        &session_id,
+                        round,
+                        &tool,
+                        &arguments,
+                    ),
                 );
             }
             Response::File(file) => self.stream.enqueue_json("file_produced", json!(file)),

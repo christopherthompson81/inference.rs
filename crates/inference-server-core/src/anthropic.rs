@@ -145,6 +145,7 @@ fn anthropic_error_status(kind: ApiErrorKind) -> http::StatusCode {
             http::StatusCode::BAD_REQUEST
         }
         ApiErrorKind::NotFound => http::StatusCode::NOT_FOUND,
+        ApiErrorKind::Gone => http::StatusCode::GONE,
         ApiErrorKind::Forbidden => http::StatusCode::FORBIDDEN,
         ApiErrorKind::Conflict => http::StatusCode::CONFLICT,
         ApiErrorKind::PayloadTooLarge => http::StatusCode::PAYLOAD_TOO_LARGE,

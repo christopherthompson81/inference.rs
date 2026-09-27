@@ -14,7 +14,7 @@ pub mod layout;
 pub const ABI_VERSION_MAJOR: u32 = 0;
 pub const ABI_VERSION_MINOR: u32 = 0;
 // The ABI is not stable yet: every change bumps the patch number and callers should require an exact match.
-pub const ABI_VERSION_PATCH: u32 = 8;
+pub const ABI_VERSION_PATCH: u32 = 9;
 
 /// Upper bound on `inference_backend_config.threads`; anything larger is a caller bug, not a pool size.
 pub const MAX_CPU_THREADS: i32 = 1024;

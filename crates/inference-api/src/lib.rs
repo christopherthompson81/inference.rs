@@ -11,6 +11,7 @@ pub mod engine;
 pub mod engine_chat;
 pub mod engine_completion;
 pub mod engine_embeddings;
+pub mod files;
 pub mod generation;
 pub mod inference_for_server_builder;
 #[doc(hidden)]
@@ -27,6 +28,7 @@ pub mod responses_types;
 #[doc(hidden)]
 pub mod sampling;
 pub mod skill_store;
+pub mod system;
 pub mod types;
 pub mod util;
 pub mod video;
