@@ -22,6 +22,8 @@ serde_json.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+rand.workspace = true
+rand_distr.workspace = true
 indicatif.workspace = true
 safetensors.workspace = true
 tempfile.workspace = true

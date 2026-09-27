@@ -1,10 +1,10 @@
-//! Text models from other families: DeepSeek 2/3, GLM-4 and its MoE variants, GPT-OSS, Granite, Hunyuan, LFM2 and StarCoder2.
+//! Models from other families: DeepSeek 2/3, GLM-4 and its MoE variants, GPT-OSS, Granite, Hunyuan, LFM2 and StarCoder2 text models, and LFM2-VL and PaddleOCR-VL.
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use inference_nn::serde_default_fn;
 use inference_nn::{
     amoe, attention, cuda, device_map, gdn, kv_cache, layers, metal, mla, model, moe, ops,
-    paged_attention, speculative, utils,
+    paged_attention, speculative, utils, vision,
 };
 
 pub mod deepseek2;
@@ -18,6 +18,8 @@ mod hunyuan_rope;
 pub mod hunyuan_v1_dense;
 pub mod hunyuan_v1_moe;
 pub mod lfm2;
+pub mod lfm2_vl;
+pub mod paddleocr_vl;
 pub mod starcoder2;
 
 inference_nn::json_config!(

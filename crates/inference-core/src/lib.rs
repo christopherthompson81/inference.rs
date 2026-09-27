@@ -1,4 +1,15 @@
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+// Shared helpers go unused when a family is off; the all-families lint still catches real dead code.
+#![cfg_attr(
+    not(all(
+        feature = "models-gemma",
+        feature = "models-llama",
+        feature = "models-other",
+        feature = "models-phi",
+        feature = "models-qwen"
+    )),
+    allow(dead_code, unused_imports, unused_macros)
+)]
 use candle_core::Device;
 use engine::Engine;
 pub use engine::{

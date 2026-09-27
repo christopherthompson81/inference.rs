@@ -1,4 +1,4 @@
-use crate::{models::qwen2, vision_models::siglip};
+use crate::{qwen2, vision::siglip};
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct MiniCpmOConfig {

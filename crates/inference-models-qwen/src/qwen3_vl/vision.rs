@@ -642,7 +642,7 @@ impl Qwen3VLVisionModel {
         Ok((hidden_states, deepstack_features))
     }
 
-    pub(crate) fn residual_tensors(&self) -> Vec<(String, Tensor)> {
+    pub fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
         let uvb_visual = uvb.pp("model").pp("visual");
 

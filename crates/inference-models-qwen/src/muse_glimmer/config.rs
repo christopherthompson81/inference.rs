@@ -316,7 +316,7 @@ pub struct Config {
     #[serde(default)]
     pub quantization_config: Option<QuantizedConfig>,
     #[serde(default, rename = "_inference_muse_glimmer_gguf_collapsed_temporal")]
-    pub(crate) gguf_collapsed_temporal: bool,
+    pub gguf_collapsed_temporal: bool,
 }
 
 impl Config {

@@ -5,12 +5,6 @@ use std::{fmt::Debug, str::FromStr};
 
 use anyhow::Result;
 use candle_core::DType;
-#[cfg(any(
-    feature = "models-gemma",
-    feature = "models-llama",
-    feature = "models-phi",
-    feature = "models-qwen"
-))]
 use candle_nn::Conv2dConfig;
 use inference_quant::log::once_log_debug;
 use inference_quant::ShardedVarBuilder;
@@ -26,13 +20,6 @@ use self::minicpmo::{MiniCpmOConfig, MiniCpmOModel, MiniCpmOProcessor};
 
 use super::{DeviceMappedModelLoader, NonMappedSubModel, NormalLoadingMetadata};
 // Loaders call these as `super::X`; they live one level up, in `loaders`.
-#[cfg(any(
-    feature = "models-gemma",
-    feature = "models-llama",
-    feature = "models-other",
-    feature = "models-phi",
-    feature = "models-qwen"
-))]
 use super::language_model_pack_factors;
 #[cfg(any(feature = "models-gemma", feature = "models-llama"))]
 use super::promoted_tensor_pack_factor;
@@ -72,7 +59,6 @@ use crate::vision_models::idefics2::{Config as Idefics2Config, Idefics2};
 use crate::vision_models::idefics2_input_processor::Idefics2Processor;
 #[cfg(feature = "models-llama")]
 use crate::vision_models::idefics3::{Idefics3Config, Idefics3Model, Idefics3Processor};
-#[cfg(feature = "models-llama")]
 use crate::vision_models::image_processor::ImagePreProcessor;
 #[cfg(feature = "models-phi")]
 use crate::vision_models::inputs_processor::Phi4MMProcessor;
@@ -98,10 +84,13 @@ use crate::vision_models::minicpmo;
 use crate::vision_models::mistral3::{Mistral3Config, Mistral3Model, Mistral3Processor};
 #[cfg(feature = "models-llama")]
 use crate::vision_models::mllama::{MLlamaConfig, MLlamaModel, MLlamaProcessor};
+#[cfg(feature = "models-qwen")]
 use crate::vision_models::muse_glimmer::{
     Config as MuseGlimmerConfig, MuseGlimmerModel, MuseGlimmerProcessor,
 };
+#[cfg(feature = "models-other")]
 use crate::vision_models::paddleocr_vl::config::Config as PaddleOcrVlConfig;
+#[cfg(feature = "models-other")]
 use crate::vision_models::paddleocr_vl::{
     inputs_processor::PaddleOcrVlProcessor, PaddleOcrVlModel,
 };
@@ -115,15 +104,21 @@ use crate::vision_models::phi4;
 use crate::vision_models::phi4::{Phi4MMConfig, Phi4MMModel, PHI4_MM_VISION_CFG};
 use crate::vision_models::preprocessor_config::PreProcessorConfig;
 use crate::vision_models::processor_config::ProcessorConfig;
+#[cfg(feature = "models-qwen")]
 use crate::vision_models::qwen2_5_vl::{
     Config as Qwen2_5VLConfig, Qwen2_5VLModel, Qwen2_5VLProcessor,
 };
+#[cfg(feature = "models-qwen")]
 use crate::vision_models::qwen2vl::{Config as Qwen2VLConfig, Qwen2VLModel, Qwen2VLProcessor};
+#[cfg(feature = "models-qwen")]
 use crate::vision_models::qwen3_5::{Config as Qwen3_5Config, Qwen3_5Model, Qwen3_5Processor};
+#[cfg(feature = "models-qwen")]
 use crate::vision_models::qwen3_5_moe::{
     Config as Qwen3_5MoeConfig, Qwen3_5MoeModel, Qwen3_5MoeProcessor,
 };
+#[cfg(feature = "models-qwen")]
 use crate::vision_models::qwen3_vl::{Config as Qwen3VLConfig, Qwen3VLModel, Qwen3VLProcessor};
+#[cfg(feature = "models-qwen")]
 use crate::vision_models::qwen3_vl_moe::{
     Config as Qwen3VLMoEConfig, Qwen3VLMoEModel, Qwen3VLMoEProcessor,
 };
@@ -328,19 +323,19 @@ multimodal_loader_types! {
     LLaVA { cli: "llava", hf: "LlavaForConditionalGeneration", loader: LLaVALoader, feature: "models-llama" },
     Lfm2Vl { cli: "lfm2vl" | "lfm2_vl", hf: "Lfm2VlForConditionalGeneration", loader: Lfm2VlLoader, feature: "models-other" },
     VLlama { cli: "vllama", hf: "MllamaForConditionalGeneration", loader: VLlamaLoader, feature: "models-llama" },
-    Qwen2VL { cli: "qwen2vl", hf: "Qwen2VLForConditionalGeneration", loader: Qwen2VLLoader },
+    Qwen2VL { cli: "qwen2vl", hf: "Qwen2VLForConditionalGeneration", loader: Qwen2VLLoader, feature: "models-qwen" },
     Idefics3 { cli: "idefics3", hf: "Idefics3ForConditionalGeneration", loader: Idefics3Loader, feature: "models-llama" },
     MiniCpmO { cli: "minicpmo", hf: "MiniCPMO", loader: MiniCpmOLoader, feature: "models-qwen" },
     Phi4MM { cli: "phi4mm", hf: "Phi4MMForCausalLM", loader: Phi4MMLoader, feature: "models-phi" },
-    Qwen2_5VL { cli: "qwen2_5vl", hf: "Qwen2_5_VLForConditionalGeneration", loader: Qwen2_5VLLoader },
+    Qwen2_5VL { cli: "qwen2_5vl", hf: "Qwen2_5_VLForConditionalGeneration", loader: Qwen2_5VLLoader, feature: "models-qwen" },
     Gemma3 { cli: "gemma3", hf: "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM", loader: Gemma3Loader, feature: "models-gemma" },
     Mistral3 { cli: "mistral3", hf: "Mistral3ForConditionalGeneration", loader: Mistral3Loader, feature: "models-llama" },
     Llama4 { cli: "llama4", hf: "Llama4ForConditionalGeneration", loader: VLlama4Loader, feature: "models-llama" },
     Gemma3n { cli: "gemma3n", hf: "Gemma3nForConditionalGeneration", loader: Gemma3nLoader, feature: "models-gemma" },
-    Qwen3VL { cli: "qwen3vl", hf: "Qwen3VLForConditionalGeneration", loader: Qwen3VLLoader },
-    Qwen3VLMoE { cli: "qwen3vlmoe", hf: "Qwen3VLMoeForConditionalGeneration", loader: Qwen3VLMoELoader },
-    Qwen3_5 { cli: "qwen3_5", hf: "Qwen3_5ForConditionalGeneration", loader: Qwen3_5Loader },
-    Qwen3_5Moe { cli: "qwen3_5moe", hf: "Qwen3_5MoeForConditionalGeneration", loader: Qwen3_5MoeLoader },
+    Qwen3VL { cli: "qwen3vl", hf: "Qwen3VLForConditionalGeneration", loader: Qwen3VLLoader, feature: "models-qwen" },
+    Qwen3VLMoE { cli: "qwen3vlmoe", hf: "Qwen3VLMoeForConditionalGeneration", loader: Qwen3VLMoELoader, feature: "models-qwen" },
+    Qwen3_5 { cli: "qwen3_5", hf: "Qwen3_5ForConditionalGeneration", loader: Qwen3_5Loader, feature: "models-qwen" },
+    Qwen3_5Moe { cli: "qwen3_5moe", hf: "Qwen3_5MoeForConditionalGeneration", loader: Qwen3_5MoeLoader, feature: "models-qwen" },
     Voxtral { cli: "voxtral", hf: "VoxtralRealtimeForConditionalGeneration", loader: VoxtralLoader, feature: "models-llama" },
     Gemma4 {
         cli: "gemma4",
@@ -354,9 +349,10 @@ multimodal_loader_types! {
         cli: "muse_glimmer" | "museglimmer",
         hf: "MuseGlimmerForConditionalGeneration",
         loader: MuseGlimmerLoader,
+        feature: "models-qwen",
     },
     DiffusionGemma { cli: "diffusiongemma", hf: "DiffusionGemmaForBlockDiffusion", loader: DiffusionGemmaLoader, feature: "models-gemma" },
-    PaddleOcrVl { cli: "paddleocr_vl", hf: "PaddleOCRVLForConditionalGeneration", loader: PaddleOcrVlLoader },
+    PaddleOcrVl { cli: "paddleocr_vl", hf: "PaddleOCRVLForConditionalGeneration", loader: PaddleOcrVlLoader, feature: "models-other" },
 }
 
 macro_rules! bias_if {
@@ -449,7 +445,9 @@ pub use llava::*;
 mod vllama;
 #[cfg(feature = "models-llama")]
 pub use vllama::*;
+#[cfg(feature = "models-qwen")]
 mod qwen2vl;
+#[cfg(feature = "models-qwen")]
 pub use qwen2vl::*;
 #[cfg(feature = "models-llama")]
 mod idefics3;
@@ -463,7 +461,9 @@ pub use minicpm_o::*;
 mod phi4mm;
 #[cfg(feature = "models-phi")]
 pub use phi4mm::*;
+#[cfg(feature = "models-qwen")]
 mod qwen2_5vl;
+#[cfg(feature = "models-qwen")]
 pub use qwen2_5vl::*;
 #[cfg(feature = "models-gemma")]
 mod gemma3;
@@ -481,15 +481,25 @@ pub use vllama4::*;
 mod gemma3n;
 #[cfg(feature = "models-gemma")]
 pub use gemma3n::*;
+#[cfg(feature = "models-other")]
 mod paddleocr_vl;
+#[cfg(feature = "models-other")]
 pub use paddleocr_vl::*;
+#[cfg(feature = "models-qwen")]
 mod qwen3vl;
+#[cfg(feature = "models-qwen")]
 pub use qwen3vl::*;
+#[cfg(feature = "models-qwen")]
 mod qwen3vl_moe;
+#[cfg(feature = "models-qwen")]
 pub use qwen3vl_moe::*;
+#[cfg(feature = "models-qwen")]
 mod qwen3_5;
+#[cfg(feature = "models-qwen")]
 pub use qwen3_5::*;
+#[cfg(feature = "models-qwen")]
 mod qwen3_5_moe;
+#[cfg(feature = "models-qwen")]
 pub use qwen3_5_moe::*;
 #[cfg(feature = "models-llama")]
 mod voxtral;
@@ -499,7 +509,9 @@ pub use voxtral::*;
 mod gemma4;
 #[cfg(feature = "models-gemma")]
 pub use gemma4::*;
+#[cfg(feature = "models-qwen")]
 mod muse_glimmer;
+#[cfg(feature = "models-qwen")]
 pub use muse_glimmer::*;
 #[cfg(feature = "models-other")]
 mod lfm2vl;

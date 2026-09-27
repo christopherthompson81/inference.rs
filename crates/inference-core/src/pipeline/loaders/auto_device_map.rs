@@ -40,7 +40,6 @@ fn post_load_memory_config(
 #[derive(Clone, Debug)]
 pub(crate) enum NonMappedSubModel {
     Vision,
-    #[cfg(any(feature = "models-gemma", feature = "models-phi"))]
     Audio,
 }
 
@@ -48,7 +47,6 @@ impl Display for NonMappedSubModel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             NonMappedSubModel::Vision => write!(f, "vision"),
-            #[cfg(any(feature = "models-gemma", feature = "models-phi"))]
             NonMappedSubModel::Audio => write!(f, "audio"),
         }
     }

@@ -293,7 +293,7 @@ normal_loader_types! {
         loader: HunYuanMoEV1Loader, feature: "models-other",
     },
     Qwen3Next { cli: "qwen3next", hf: "Qwen3NextForCausalLM", model_type: "qwen3_next", loader: Qwen3NextLoader, feature: "models-qwen" },
-    Qwen3_5 { cli: "qwen3_5", hf: "Qwen3_5ForCausalLM", model_type: "qwen3_5_text", loader: Qwen3_5TextLoader },
+    Qwen3_5 { cli: "qwen3_5", hf: "Qwen3_5ForCausalLM", model_type: "qwen3_5_text", loader: Qwen3_5TextLoader, feature: "models-qwen" },
     Lfm2 { cli: "lfm2", hf: "Lfm2ForCausalLM", model_type: "lfm2", loader: Lfm2Loader, feature: "models-other" },
     Lfm2Moe { cli: "lfm2_moe", hf: "Lfm2MoeForCausalLM", model_type: "lfm2_moe", loader: Lfm2Loader, feature: "models-other" },
 }
@@ -407,7 +407,9 @@ pub use gpt_oss::*;
 mod qwen3_next;
 #[cfg(feature = "models-qwen")]
 pub use qwen3_next::*;
+#[cfg(feature = "models-qwen")]
 mod qwen3_5_text;
+#[cfg(feature = "models-qwen")]
 pub use qwen3_5_text::*;
 #[cfg(feature = "models-other")]
 mod lfm2;
