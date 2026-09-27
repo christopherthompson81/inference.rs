@@ -5,6 +5,9 @@ use candle_core::{Result, Tensor, D};
 
 use crate::get_mut_arcmutex;
 
+// Recurrent state slots reserved past serving capacity for CUDA graph padding rows.
+pub const RECURRENT_GRAPH_PAD_SLOTS: usize = 1;
+
 mod full_cache;
 mod hybrid_cache;
 mod rotating_cache;

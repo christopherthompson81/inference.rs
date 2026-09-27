@@ -5,7 +5,7 @@ use crate::layers::{Activation, YarnRopeConfig};
 use crate::serde_default_fn;
 
 // Re-export vision config from qwen3_vl
-pub use crate::vision_models::qwen3_vl::config::VisionConfig;
+pub use crate::qwen3_vl::config::VisionConfig;
 
 serde_default_fn!(usize, default_full_attn_interval, 4);
 serde_default_fn!(usize, default_conv_kernel, 4);
@@ -61,7 +61,7 @@ pub struct RopeParameters {
 }
 
 impl RopeParameters {
-    pub(crate) fn supported_max_position_embeddings(
+    pub fn supported_max_position_embeddings(
         &self,
         declared_max_position_embeddings: usize,
     ) -> candle_core::Result<usize> {
@@ -79,10 +79,7 @@ impl RopeParameters {
         Ok(supported.floor() as usize)
     }
 
-    pub(crate) fn validate_scaling(
-        &self,
-        max_position_embeddings: usize,
-    ) -> candle_core::Result<()> {
+    pub fn validate_scaling(&self, max_position_embeddings: usize) -> candle_core::Result<()> {
         if self.rope_type != RopeType::Yarn {
             return Ok(());
         }
@@ -135,7 +132,7 @@ impl RopeParameters {
         Ok(())
     }
 
-    pub(crate) fn yarn_rope_config(
+    pub fn yarn_rope_config(
         &self,
         max_position_embeddings: usize,
         head_dim: usize,
@@ -171,10 +168,7 @@ impl RopeParameters {
     }
 }
 
-pub(crate) fn apply_max_model_len(
-    config: &str,
-    max_model_len: usize,
-) -> candle_core::Result<String> {
+pub fn apply_max_model_len(config: &str, max_model_len: usize) -> candle_core::Result<String> {
     if max_model_len == 0 {
         candle_core::bail!("Qwen3.5 max_model_len must be positive");
     }
@@ -251,7 +245,7 @@ pub struct TextConfig {
     #[serde(default)]
     pub quantization_config: Option<QuantizedConfig>,
     #[serde(default, rename = "_inference_gdn_v_head_layout")]
-    pub(crate) gdn_v_head_layout: GdnVHeadLayout,
+    pub gdn_v_head_layout: GdnVHeadLayout,
     // Multi-token prediction head shipped in the checkpoint (`mtp.*` weights)
     #[serde(default)]
     pub mtp_num_hidden_layers: usize,

@@ -1,6 +1,7 @@
 pub mod cache;
 pub mod config;
-pub mod dflash;
+#[cfg(feature = "models-qwen")]
+pub use inference_models_qwen::dflash;
 pub mod driver;
 pub(crate) mod staging;
 pub mod verifier;
@@ -12,6 +13,7 @@ pub use config::{
     reserve_external_mtp_memory, reserve_external_mtp_memory_with_runtime,
     resolve_speculative_model,
 };
+#[cfg(feature = "models-qwen")]
 pub use dflash::DFlashDraftModel;
 pub use inference_nn::speculative::*;
 pub use inference_nn::speculative::{logging, paged_rows, policy, proposer, target};

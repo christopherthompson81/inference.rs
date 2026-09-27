@@ -28,17 +28,17 @@ use crate::speculative::{MtpConfig, MtpDraftSamplingMethod, SpeculativePrefixRep
 use crate::utils::varbuilder_utils::{from_mmaped_safetensors, DeviceForLoadTensor};
 
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
+use crate::cuda::graph_capture::{
+    record_cuda_graph_dispatch, record_cuda_graph_evictions, record_cuda_graph_resident_entries,
+    take_cuda_graph_capacity_eviction, CudaGraphComponent, CudaGraphDispatchMode,
+    CudaGraphDispatchReason, CudaGraphEvent, CudaGraphEventGuard, CudaGraphEvictionReason,
+};
+#[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
 use crate::cuda::phase_timer::CudaPhaseTimer;
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
 use crate::paged_attention::windowed_pool::{
     WindowedKvBatch, WindowedKvBatchTensors, WindowedKvCheckpoint, WindowedKvPool,
     WindowedKvPoolConfig, WindowedKvQuery,
-};
-#[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
-use crate::pipeline::cuda_graph::{
-    record_cuda_graph_dispatch, record_cuda_graph_evictions, record_cuda_graph_resident_entries,
-    take_cuda_graph_capacity_eviction, CudaGraphComponent, CudaGraphDispatchMode,
-    CudaGraphDispatchReason, CudaGraphEvent, CudaGraphEventGuard, CudaGraphEvictionReason,
 };
 
 const DEFAULT_BLOCK_SIZE: usize = 16;
@@ -123,7 +123,7 @@ fn finalize_dflash_rope(
     Ok((cos.to_dtype(dtype)?, sin.to_dtype(dtype)?))
 }
 
-pub(crate) fn dflash_adaptive_requested() -> bool {
+pub fn dflash_adaptive_requested() -> bool {
     std::env::var(DFLASH_ADAPTIVE_ENV)
         .ok()
         .as_deref()
@@ -131,16 +131,19 @@ pub(crate) fn dflash_adaptive_requested() -> bool {
         .unwrap_or(true)
 }
 
-fn dflash_graph_plans(adaptive: bool, max_n: usize) -> Vec<super::SpeculativeGraphPlan> {
+fn dflash_graph_plans(
+    adaptive: bool,
+    max_n: usize,
+) -> Vec<crate::speculative::SpeculativeGraphPlan> {
     if max_n == 0 {
         return Vec::new();
     }
     if !adaptive || max_n <= ADAPT_BATCH_DEPTH {
-        return vec![super::SpeculativeGraphPlan::new(max_n, None)];
+        return vec![crate::speculative::SpeculativeGraphPlan::new(max_n, None)];
     }
     vec![
-        super::SpeculativeGraphPlan::new(max_n, Some(ADAPT_FULL_DEPTH_MAX_BATCH)),
-        super::SpeculativeGraphPlan::new(ADAPT_BATCH_DEPTH, None),
+        crate::speculative::SpeculativeGraphPlan::new(max_n, Some(ADAPT_FULL_DEPTH_MAX_BATCH)),
+        crate::speculative::SpeculativeGraphPlan::new(ADAPT_BATCH_DEPTH, None),
     ]
 }
 
@@ -149,7 +152,7 @@ fn dflash_graph_plans(adaptive: bool, max_n: usize) -> Vec<super::SpeculativeGra
     test
 ))]
 fn dflash_graph_precapture_shapes(
-    plans: &[super::SpeculativeGraphPlan],
+    plans: &[crate::speculative::SpeculativeGraphPlan],
     batches: impl IntoIterator<Item = usize>,
     sequence_capacity: usize,
 ) -> Vec<(usize, usize)> {
@@ -950,12 +953,12 @@ enum DFlashSequenceEviction {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct DFlashSamplingInputs<'a> {
-    pub(crate) inverse_temperatures: &'a [f32],
-    pub(crate) uniforms: &'a [f32],
+pub struct DFlashSamplingInputs<'a> {
+    pub inverse_temperatures: &'a [f32],
+    pub uniforms: &'a [f32],
 }
 
-pub(crate) enum DFlashProposalBatch {
+pub enum DFlashProposalBatch {
     Tokens(Vec<Vec<u32>>),
     #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
     DeviceTokens(Tensor),
@@ -1143,13 +1146,13 @@ struct DFlashCudaGraphBuffers {
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
 struct DFlashCudaGraphEntry {
     key: DFlashCudaGraphKey,
-    staging: crate::pipeline::cuda_graph::CudaGraphHostStaging,
+    staging: crate::cuda::graph_capture::CudaGraphHostStaging,
     buffers: DFlashCudaGraphBuffers,
     token_embedding: Arc<dyn QuantMethod>,
     lm_head: Arc<dyn QuantMethod>,
     mask_token_id: u32,
     host_rows: DFlashGraphHostRows,
-    graph: crate::pipeline::cuda_graph::CudaGraphHandle,
+    graph: crate::cuda::graph_capture::CudaGraphHandle,
 }
 
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
@@ -1449,7 +1452,7 @@ impl DFlashCudaGraphBuffers {
         &self,
         rows: &DFlashGraphHostRows,
         batch: &WindowedKvBatch,
-        staging: &mut crate::pipeline::cuda_graph::CudaGraphHostStaging,
+        staging: &mut crate::cuda::graph_capture::CudaGraphHostStaging,
     ) -> Result<()> {
         let location = self.token_ids.device().location();
         staging.update(|staging| {
@@ -1604,7 +1607,7 @@ impl DFlashCudaGraphEntry {
 
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
 fn release_dflash_cuda_graph_resources<T>(
-    graph: crate::pipeline::cuda_graph::CudaGraphHandle,
+    graph: crate::cuda::graph_capture::CudaGraphHandle,
     resources: T,
 ) -> (Arc<CudaStream>, Result<()>) {
     let stream = graph.stream().clone();
@@ -1645,7 +1648,7 @@ fn release_dflash_cuda_graphs(entries: Vec<DFlashCudaGraphEntry>) {
         }
     }
     for stream in streams {
-        if let Err(err) = crate::pipeline::cuda_graph::trim_cuda_graph_memory(&stream) {
+        if let Err(err) = crate::cuda::graph_capture::trim_cuda_graph_memory(&stream) {
             tracing::warn!("Failed to trim released DFlash CUDA graph memory: {err:?}");
         }
     }
@@ -1765,14 +1768,14 @@ impl DFlashCudaGraphState {
         };
         let stream = cuda_device.cuda_stream();
         let _memory_pool_guard =
-            crate::pipeline::cuda_graph::prepare_cuda_graph_memory_pool(&stream)?;
+            crate::cuda::graph_capture::prepare_cuda_graph_memory_pool(&stream)?;
         let restore_event_tracking =
-            crate::pipeline::cuda_graph::disable_event_tracking_for_capture(&stream);
+            crate::cuda::graph_capture::disable_event_tracking_for_capture(&stream);
         let _htod_cache_guard = cuda_device.enable_cuda_graph_htod_cache();
         if let Err(err) =
             stream.begin_capture(sys::CUstreamCaptureMode::CU_STREAM_CAPTURE_MODE_RELAXED)
         {
-            crate::pipeline::cuda_graph::restore_event_tracking_after_capture(
+            crate::cuda::graph_capture::restore_event_tracking_after_capture(
                 &stream,
                 restore_event_tracking,
             );
@@ -1804,8 +1807,8 @@ impl DFlashCudaGraphState {
                     }
                 })();
                 if let Err(err) = copy_result {
-                    crate::pipeline::cuda_graph::end_cuda_capture_discard(&stream);
-                    crate::pipeline::cuda_graph::restore_event_tracking_after_capture(
+                    crate::cuda::graph_capture::end_cuda_capture_discard(&stream);
+                    crate::cuda::graph_capture::restore_event_tracking_after_capture(
                         &stream,
                         restore_event_tracking,
                     );
@@ -1813,8 +1816,8 @@ impl DFlashCudaGraphState {
                 }
             }
             Err(err) => {
-                crate::pipeline::cuda_graph::end_cuda_capture_discard(&stream);
-                crate::pipeline::cuda_graph::restore_event_tracking_after_capture(
+                crate::cuda::graph_capture::end_cuda_capture_discard(&stream);
+                crate::cuda::graph_capture::restore_event_tracking_after_capture(
                     &stream,
                     restore_event_tracking,
                 );
@@ -1822,10 +1825,10 @@ impl DFlashCudaGraphState {
             }
         }
 
-        let graph = match crate::pipeline::cuda_graph::CudaGraphHandle::end_capture(&stream) {
+        let graph = match crate::cuda::graph_capture::CudaGraphHandle::end_capture(&stream) {
             Ok(Some(graph)) => graph,
             Ok(None) => {
-                crate::pipeline::cuda_graph::restore_event_tracking_after_capture(
+                crate::cuda::graph_capture::restore_event_tracking_after_capture(
                     &stream,
                     restore_event_tracking,
                 );
@@ -1834,19 +1837,19 @@ impl DFlashCudaGraphState {
                 ));
             }
             Err(err) => {
-                crate::pipeline::cuda_graph::restore_event_tracking_after_capture(
+                crate::cuda::graph_capture::restore_event_tracking_after_capture(
                     &stream,
                     restore_event_tracking,
                 );
                 return Err(err);
             }
         };
-        crate::pipeline::cuda_graph::restore_event_tracking_after_capture(
+        crate::cuda::graph_capture::restore_event_tracking_after_capture(
             &stream,
             restore_event_tracking,
         );
         graph.upload()?;
-        let staging = crate::pipeline::cuda_graph::CudaGraphHostStaging::new(stream)?;
+        let staging = crate::cuda::graph_capture::CudaGraphHostStaging::new(stream)?;
         let entry = DFlashCudaGraphEntry {
             key,
             staging,
@@ -2056,7 +2059,7 @@ fn linear_from_weight(
 
 /// Reads only the drafter's config when it identifies a DFlash checkpoint.
 pub fn peek_config(config: &MtpConfig) -> Result<Option<DFlashConfig>> {
-    let path = crate::speculative::config::resolve_mtp_path(config)?;
+    let path = config.resolve_path()?;
     let raw = fs::read_to_string(path.join("config.json"))
         .map_err(|e| candle_core::Error::Msg(format!("failed to read MTP model config: {e}")))?;
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
@@ -2079,7 +2082,7 @@ pub fn peek_config(config: &MtpConfig) -> Result<Option<DFlashConfig>> {
 }
 
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
-pub(crate) fn windowed_kv_checkpoint_capacity(retained_prefixes: usize) -> Result<usize> {
+pub fn windowed_kv_checkpoint_capacity(retained_prefixes: usize) -> Result<usize> {
     if retained_prefixes == 0 {
         return Ok(0);
     }
@@ -2089,13 +2092,13 @@ pub(crate) fn windowed_kv_checkpoint_capacity(retained_prefixes: usize) -> Resul
 }
 
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
-pub(crate) fn windowed_kv_cache_size_in_bytes(
+pub fn windowed_kv_cache_size_in_bytes(
     config: &MtpConfig,
     live_sequence_capacity: usize,
     retained_prefixes: usize,
     page_size: usize,
 ) -> Result<usize> {
-    let path = crate::speculative::config::resolve_mtp_path(config)?;
+    let path = config.resolve_path()?;
     let raw = fs::read_to_string(path.join("config.json"))
         .map_err(|err| candle_core::Error::msg(format!("failed to read MTP config: {err}")))?;
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
@@ -2148,7 +2151,7 @@ pub(crate) fn windowed_kv_cache_size_in_bytes(
         .ok_or_else(|| candle_core::Error::msg("DFlash windowed KV byte size overflow"))
 }
 
-pub(crate) struct DFlashGraphProposalInputs<'a> {
+pub struct DFlashGraphProposalInputs<'a> {
     pub seq_ids: &'a [usize],
     pub anchors: &'a [u32],
     pub start_positions: &'a [usize],
@@ -2159,7 +2162,7 @@ pub(crate) struct DFlashGraphProposalInputs<'a> {
 }
 
 impl DFlashDraftModel {
-    pub(crate) fn evict_cuda_graphs_lru(&self, max_entries: usize) -> usize {
+    pub fn evict_cuda_graphs_lru(&self, max_entries: usize) -> usize {
         #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
         {
             self.cuda_graphs
@@ -2184,7 +2187,7 @@ impl DFlashDraftModel {
             device,
             dtype,
         } = target;
-        let path = crate::speculative::config::resolve_mtp_path(config)?;
+        let path = config.resolve_path()?;
         let raw = fs::read_to_string(path.join("config.json"))
             .map_err(|e| candle_core::Error::Msg(format!("failed to read DFlash config: {e}")))?;
         let cfg: DFlashConfig = serde_json::from_str(&raw).map_err(candle_core::Error::msg)?;
@@ -2455,13 +2458,13 @@ impl DFlashDraftModel {
     }
 
     #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
-    pub(crate) fn precapture_cuda_graphs(
+    pub fn precapture_cuda_graphs(
         &self,
         max_n: usize,
         token_embedding: &Arc<dyn QuantMethod>,
         lm_head: &Arc<dyn QuantMethod>,
     ) -> Result<()> {
-        if !crate::pipeline::cuda_graph::cuda_decode_graphs_enabled() || max_n == 0 {
+        if !crate::cuda::graph_capture::cuda_decode_graphs_enabled() || max_n == 0 {
             return Ok(());
         }
         let Some(pool) = &self.windowed_pool else {
@@ -2495,7 +2498,7 @@ impl DFlashDraftModel {
             .sequence_capacity();
         let shapes = dflash_graph_precapture_shapes(
             &self.graph_plans(max_n),
-            crate::pipeline::cuda_graph::cuda_graph_precapture_batches(
+            crate::cuda::graph_capture::cuda_graph_precapture_batches(
                 CudaGraphComponent::DFlash,
                 max_n.saturating_add(1),
             ),
@@ -2588,7 +2591,7 @@ impl DFlashDraftModel {
         Ok(())
     }
 
-    pub(crate) fn proposals_cuda_graph(
+    pub fn proposals_cuda_graph(
         &self,
         inputs: &DFlashGraphProposalInputs<'_>,
     ) -> Result<Option<DFlashProposalBatch>> {
@@ -2603,7 +2606,7 @@ impl DFlashDraftModel {
         } = *inputs;
         #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
         {
-            if !crate::pipeline::cuda_graph::cuda_decode_graphs_enabled()
+            if !crate::cuda::graph_capture::cuda_decode_graphs_enabled()
                 || self.windowed_pool.is_none()
                 || seq_ids.is_empty()
                 || seq_ids.len() != anchors.len()
@@ -2616,7 +2619,7 @@ impl DFlashDraftModel {
             if block > self.block_size || !dflash_graph_positions_fit(start_positions, block) {
                 return Ok(None);
             }
-            let Some(batch_bucket) = crate::pipeline::cuda_graph::cuda_graph_batch_bucket(
+            let Some(batch_bucket) = crate::cuda::graph_capture::cuda_graph_batch_bucket(
                 CudaGraphComponent::DFlash,
                 block,
                 seq_ids.len(),
@@ -2724,7 +2727,7 @@ impl DFlashDraftModel {
         select_dflash_depth(adaptive, max_n, batch, self.live_sequence_count())
     }
 
-    pub fn graph_plans(&self, max_n: usize) -> Vec<super::SpeculativeGraphPlan> {
+    pub fn graph_plans(&self, max_n: usize) -> Vec<crate::speculative::SpeculativeGraphPlan> {
         let guard = self.adaptive.lock().expect("dflash adaptive poisoned");
         if let Some(adaptive) = guard.as_ref() {
             debug_assert_eq!(adaptive.max_n, max_n);
@@ -3726,7 +3729,7 @@ impl DFlashDraftModel {
         }
     }
 
-    pub(crate) fn finish_proposals(
+    pub fn finish_proposals(
         &self,
         hidden: &Tensor,
         anchors: &[u32],
@@ -3871,6 +3874,8 @@ fn repeat_kv(x: &Tensor, groups: usize) -> Result<Tensor> {
 #[cfg(test)]
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 mod tests {
+    #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
+    use inference_nn::skip_without_cuda;
     use std::{collections::HashSet, sync::Arc};
 
     use candle_core::{Device, Result, Tensor, D};
@@ -3889,11 +3894,11 @@ mod tests {
     use super::{release_dflash_cuda_graph_resources, windowed_kv_checkpoint_capacity};
     #[cfg(feature = "cuda")]
     use super::{validate_candidate_selector_cuda, CandidateSelectorCudaSpec};
-    use crate::layers::{yarn_inv_freq_and_attention_factor, YarnRopeConfig};
     #[cfg(feature = "cuda")]
-    use crate::pipeline::cuda_graph::{
+    use crate::cuda::graph_capture::{
         cuda_graph_precapture_batches, CudaGraphComponent, CUDA_GRAPH_MAX_BATCH_BUCKET,
     };
+    use crate::layers::{yarn_inv_freq_and_attention_factor, YarnRopeConfig};
     use crate::speculative::MtpDraftSamplingMethod;
     use crate::speculative::{SpeculativeGraphPlan, SpeculativePrefixReplay};
 
@@ -4283,7 +4288,7 @@ mod tests {
         skip_without_cuda!();
         use candle_core::{cuda_backend::cudarc::driver::sys, Var};
 
-        use crate::pipeline::cuda_graph::{
+        use crate::cuda::graph_capture::{
             disable_event_tracking_for_capture, prepare_cuda_graph_memory_pool,
             restore_event_tracking_after_capture, CudaGraphHandle, CudaGraphHostStaging,
         };
@@ -4488,7 +4493,7 @@ mod tests {
         skip_without_cuda!();
         use candle_core::{cuda_backend::cudarc::driver::sys, Var};
 
-        use crate::pipeline::cuda_graph::{
+        use crate::cuda::graph_capture::{
             disable_event_tracking_for_capture, prepare_cuda_graph_memory_pool,
             restore_event_tracking_after_capture, CudaGraphHandle,
         };

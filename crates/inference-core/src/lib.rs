@@ -80,8 +80,6 @@ macro_rules! skip_without_cuda {
 }
 
 pub use inference_nn::metal::warmup_metal_kernels;
-#[cfg(feature = "cuda")]
-use inference_nn::perf_flags;
 use inference_nn::{
     amoe, attention, cuda, device_map, flashinfer, gdn, kv_cache, lora, model, moe, ops,
     paged_attention, sampler, topology, utils,

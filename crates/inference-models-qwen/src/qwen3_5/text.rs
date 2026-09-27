@@ -32,17 +32,15 @@ use crate::{
         GdnLayerCache, GdnSpeculativeStash, GdnTransitionCommitConfig, GdnTransitionStash,
         GdnVHeadLayout, PackedGdnLayout,
     },
+    kv_cache::{EitherCache, KvCache},
     kv_cache::{
         HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, RecurrentLayerConfig,
     },
     layers::masker::{CausalMaskConfig, PastKvLenCache},
     layers::{self, CausalMasker, GemmaRmsNorm, Mlp, Qwen3VLRotaryEmbedding, Sdpa, YarnRopeConfig},
+    model::{ForwardMaskCache, IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     paged_attention::{
         load_fp8_attention_scales, AttentionImplementation, ModelConfigMetadata, PagedAttention,
-    },
-    pipeline::{
-        EitherCache, ForwardMaskCache, IsqModel, KvCache, ModelForwardContext,
-        NormalLoadingMetadata, NormalModel,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -2794,7 +2792,7 @@ impl NormalModel for Qwen3_5TextModel {
         _seqlen_offsets: &[usize],
         _seqlen_offsets_full: &[usize],
         _no_kv_cache: bool,
-        _non_granular_state: &Option<crate::xlora_models::NonGranularState>,
+        _non_granular_state: &Option<crate::model::NonGranularState>,
         _context_lens: Vec<(usize, usize)>,
         _position_ids: Vec<usize>,
         _flash_params: &FlashParams,
@@ -2838,6 +2836,8 @@ impl AnyMoeBaseModelMixin for Qwen3_5TextModel {}
 #[cfg(test)]
 mod tests {
     use candle_core::{DType, Device, Tensor};
+    #[cfg(feature = "cuda")]
+    use inference_nn::skip_without_cuda;
 
     use super::{
         gdn_transition_keep_rows, group_gdn_replay_batches, recurrent_checkpoint_devices_supported,

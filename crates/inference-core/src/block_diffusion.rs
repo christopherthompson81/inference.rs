@@ -3,7 +3,6 @@
 
 #[cfg(feature = "models-gemma")]
 pub use crate::model::BlockDenoisingProgressEmitter;
-pub use crate::model::BlockDiffusionMixin;
 #[cfg(feature = "models-gemma")]
 use {
     crate::{

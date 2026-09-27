@@ -97,8 +97,3 @@ pub(crate) fn adapter_leases(
         .collect::<Vec<_>>()
         .into()
 }
-
-pub(crate) use inference_nn::vision::mrope::{
-    mrope_position_ids_for_input, text_decode_mrope_position_ids_from_context,
-    text_decode_position_ids_from_context, text_mrope_position_ids, text_position_ids,
-};
