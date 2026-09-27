@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 4
+#define INFERENCE_ABI_VERSION_PATCH 5
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -153,7 +153,8 @@ INFERENCE_API inference_status inference_layout_result_detection(const inference
 /* Engine: a loaded model serving OpenAI-style requests. Requests and responses are the JSON the HTTP server accepts and
  * returns (e.g. POST /v1/chat/completions bodies). Engine calls block; they must not be made from inside a tokio
  * runtime thread. An engine handle may be used from several threads at once; a stream handle from one at a time.
- * Failing engine calls, including INFERENCE_ERR_RUNTIME ones, leave the OpenAI error JSON in inference_last_error().
+ * Failing engine calls, including INFERENCE_ERR_RUNTIME ones, leave the error JSON in inference_last_error(): the
+ * OpenAI envelope, or the Anthropic one for the inference_anthropic_* calls.
  * Freeing the last handle of an engine (the engine or one of its streams) waits up to 10 s for the engine to stop.
  * Not yet on this surface: agent tool approvals (agent_permission "ask" is rejected) and uploaded skills. */
 
@@ -199,12 +200,13 @@ INFERENCE_API inference_status inference_chat_stream_open_with_media(const infer
                                                                     const char *request, size_t request_len,
                                                                     const inference_media *media, size_t media_count,
                                                                     inference_stream **out_stream);
-/* Waits up to timeout_ms (< 0 waits indefinitely, 0 polls) for the next event of a chat or completion stream. On an
- * event, out_event receives {"event": <name>, "data": ...}. Chat streams emit "chunk" (data: a chat.completion.chunk),
+/* Waits up to timeout_ms (< 0 waits indefinitely, 0 polls) for the next event of a stream. On an event, out_event
+ * receives {"event": <name>, "data": ...}. Chat streams emit "chunk" (data: a chat.completion.chunk),
  * "agentic_tool_call_progress", "agentic_tool_approval_required", "file_produced" and "error"; completion streams emit
- * "chunk" (data: a text_completion chunk) and "error". An error's data is the OpenAI error JSON, and an error event is
- * always the last event. On a timeout out_event is NULL and out_done 0. Once the stream has ended, out_event is NULL
- * and out_done 1. out_event and out_done are required. */
+ * "chunk" (data: a text_completion chunk) and "error"; Anthropic streams emit the Anthropic stream events (see
+ * inference_anthropic_messages_stream_open). An error's data is the error JSON of the stream's protocol, and an error
+ * event is always the last event. On a timeout out_event is NULL and out_done 0. Once the stream has ended, out_event
+ * is NULL and out_done 1. out_event and out_done are required. */
 INFERENCE_API inference_status inference_stream_next(inference_stream *stream, int64_t timeout_ms,
                                                     inference_string **out_event, int32_t *out_done);
 INFERENCE_API void inference_stream_free(inference_stream *stream);
@@ -220,6 +222,18 @@ INFERENCE_API inference_status inference_completion_stream_open(const inference_
 /* Embeds every input of an embeddings request (the POST /v1/embeddings body); out_response receives the list JSON. */
 INFERENCE_API inference_status inference_embeddings(const inference_engine *engine, const char *request,
                                                    size_t request_len, inference_string **out_response);
+
+/* Runs an Anthropic Messages request (the POST /v1/messages body) to its end; out_response receives the message JSON.
+ * Failures leave the Anthropic error JSON ({"type": "error", "error": {"type", "message"}}) in inference_last_error().
+ * "stream" in the request is ignored. */
+INFERENCE_API inference_status inference_anthropic_messages(const inference_engine *engine, const char *request,
+                                                           size_t request_len, inference_string **out_response);
+/* Starts a streaming Messages request; poll it with inference_stream_next. Its events are the Anthropic stream events
+ * (message_start, content_block_start/delta/stop, message_delta, message_stop, error), agentic_tool_call_progress and
+ * file_produced. */
+INFERENCE_API inference_status inference_anthropic_messages_stream_open(const inference_engine *engine,
+                                                                       const char *request, size_t request_len,
+                                                                       inference_stream **out_stream);
 
 /* The string's bytes, NUL-terminated; valid until the string is freed. "" for NULL. */
 INFERENCE_API const char *inference_string_data(const inference_string *string);

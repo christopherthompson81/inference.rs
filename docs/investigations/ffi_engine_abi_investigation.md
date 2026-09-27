@@ -251,3 +251,30 @@ engine's validation error as internal (HTTP, which kept the `anyhow` error, said
 embedding checkpoint; not built yet.
 
 Result: green, 2139 CPU / 2457 CUDA tests.
+
+## Run 9 - 2026-09-27 (night)
+
+Change: Anthropic Messages on the engine surface.
+- `inference-api/src/anthropic.rs` (git-moved from the server): the Anthropic types, their conversion to and from
+  chat, and the stream state machine, which were already HTTP-free. New there: `prepare_messages` (validation,
+  thinking visibility, conversion, the shared `ChatEngine::prepare`), `collect_messages`, `AnthropicStream` (the old
+  streamer's response mapping, with a `ResponseTap`), and `anthropic_error_type` / `anthropic_error_body`.
+- Server `anthropic.rs`: HTTP only. The SSE wrapper adds the `ping` events while the engine is quiet (keep-alive is
+  transport), the responders keep Anthropic's statuses (including 529 for overloaded), and `count_tokens` stays in
+  the server for now. Tests split: the five that check HTTP statuses/bodies stay; the conversion and stream tests move.
+- ABI 0.0.5: `inference_anthropic_messages` and `inference_anthropic_messages_stream_open`. Their failures carry the
+  Anthropic error envelope, since a caller using that protocol expects it; statuses are the same as the OpenAI calls.
+
+Test: blocking and streamed Messages decode the same text on the tiny checkpoint, the stream runs `message_start` to
+`message_stop`, and a request without `max_tokens` is `INVALID_REQUEST` with an Anthropic error body. Passed first
+run.
+
+Result: green, 2140 CPU / 2458 CUDA tests (the moved Anthropic tests all still run).
+
+Review fixes: the Anthropic engine calls skipped `Engine::prepare`'s per-request `agent_permission: "ask"` rejection,
+so a streamed Messages request could emit approval events the C caller cannot answer and wait out the broker's
+timeout; the check is now one `reject_ask` shared by the chat and Anthropic paths, with a test. The Anthropic error
+envelope is built once (`anthropic_error_body`) for the stream, the HTTP responder and the ABI. `PreparedMessages`
+wraps `PreparedChat`. The server re-exports only the Anthropic types that were public before. Dropping the
+`AnthropicError` serde default would have made `type` required in `docs/openapi.json` (the snapshot test caught it), so
+the default stays.

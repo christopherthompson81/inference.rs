@@ -73,6 +73,20 @@ impl BlockingEngine {
             .map(|stream| BlockingStream::new(stream.map(|event| event.to_json())))
     }
 
+    pub fn anthropic_messages_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let (engine, request) = (self.engine.clone(), request.to_vec());
+        run(async move { engine.anthropic_messages_json(&request).await })
+    }
+
+    pub fn anthropic_messages_stream_json(
+        &self,
+        request: &[u8],
+    ) -> Result<BlockingStream, ApiError> {
+        let (engine, request) = (self.engine.clone(), request.to_vec());
+        run(async move { engine.anthropic_messages_stream_json(&request).await })
+            .map(|stream| BlockingStream::new(stream.map(|event| event.to_json())))
+    }
+
     pub fn embeddings_json(&self, request: &[u8]) -> Result<String, ApiError> {
         let (engine, request) = (self.engine.clone(), request.to_vec());
         run(async move { engine.embeddings_json(&request).await })

@@ -9,7 +9,7 @@ use axum::{
 pub(crate) use crate::api_error::{
     ApiError, ApiErrorKind, ModelErrorMessage, INTERNAL_ERROR_MESSAGE, SERVICE_UNAVAILABLE_MESSAGE,
 };
-pub(crate) use crate::dispatch::{apply_model_override, base_process_non_streaming_response};
+pub(crate) use crate::dispatch::base_process_non_streaming_response;
 pub use crate::dispatch::{
     create_response_channel, send_request, send_request_with_model, DEFAULT_CHANNEL_BUFFER_SIZE,
 };
