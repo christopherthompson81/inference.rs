@@ -174,14 +174,6 @@ pub mod text_models_inputs_processor {
         pub seq_indices: Vec<usize>,
     }
 
-    // chunk_offset_toks is the number of tokens by which the tokens are offset,
-    // chunk_offset_toks / prompt_chunksize = number of batches
-    //
-    // prefix_cache_lens: when provided, indicates how many tokens per sequence are already
-    // cached in the paged KV cache. Only new (non-cached) tokens will be included in the
-    // input tensor, and slot_mappings will only cover new token slots. Block tables still
-    // cover the entire context so that context_attention_fwd can read cached blocks.
-    #[allow(clippy::too_many_arguments)]
     /// Prompt token slices of either id type; Phi-3V uses negative placeholder ids, so it needs i64.
     pub enum PromptTokens<'a> {
         U32(Vec<&'a [u32]>),
@@ -239,6 +231,13 @@ pub mod text_models_inputs_processor {
         }
     }
 
+    // chunk_offset_toks is the number of tokens by which the tokens are offset,
+    // chunk_offset_toks / prompt_chunksize = number of batches
+    //
+    // prefix_cache_lens: when provided, indicates how many tokens per sequence are already
+    // cached in the paged KV cache. Only new (non-cached) tokens will be included in the
+    // input tensor, and slot_mappings will only cover new token slots. Block tables still
+    // cover the entire context so that context_attention_fwd can read cached blocks.
     #[allow(clippy::too_many_arguments)]
     pub fn make_prompt_chunk<T: PromptToken>(
         chunk_offset_toks: usize,
