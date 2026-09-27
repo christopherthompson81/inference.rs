@@ -25,6 +25,7 @@ mod isq_flow;
 pub use isq_flow::CalibrationStatus;
 pub(crate) mod llg;
 mod loaders;
+mod loading;
 mod macros;
 pub(crate) mod model_config;
 mod multimodal;

@@ -745,48 +745,23 @@ impl Loader for NormalLoader {
             mapper = DeviceMapSetting::Map(new);
         }
 
-        let mapper_device = if write_uqff {
-            Device::Cpu
-        } else {
-            device.clone()
-        };
-        let mapper_topology = if write_uqff {
-            None
-        } else {
-            self.config.topology.as_ref()
-        };
-
-        let pipeline_mapper = mapper.into_mapper(
-            self.inner.num_layers(&config)?,
-            &mapper_device,
-            mapper_topology,
-            &available_devices,
-        )?;
-        let mapper = mapper.into_mapper(
-            self.inner.num_layers(&config)?,
-            &mapper_device,
-            mapper_topology,
-            &available_devices,
-        )?;
-        let mut layer_devices = Vec::new();
-        for layer in 0..self.inner.num_layers(&config)? {
-            let device = mapper.device_for(layer, false).cloned();
-            layer_devices.push(device);
-        }
-        let dtype = super::isq_flow::resolve_weight_load_dtype(
+        let super::loading::MaterializedDeviceMapper {
+            pipeline_mapper,
+            mapper,
+            layer_devices,
             dtype,
-            mapper.as_ref(),
-            &available_devices,
-            write_uqff,
+        } = super::loading::materialize_device_mapper(
+            super::loading::DeviceMapperInputs {
+                setting: &mapper,
+                num_layers: self.inner.num_layers(&config)?,
+                device: &device,
+                available_devices: &available_devices,
+                topology: self.config.topology.as_ref(),
+                write_uqff,
+                dtype,
+            },
+            &mut paged_attn_config,
         )?;
-
-        // TODO: PagedAttention is not supported with CPU for now.
-        // This check is not really necessary because `get_device_layers` should prevent it.
-        let mapping_uses_cpu = mapper.get_unique_devices().iter().any(Device::is_cpu);
-        if mapping_uses_cpu && paged_attn_config.is_some() {
-            warn!("Device mapping contains a mix of GPU and CPU. There is no CPU support for PagedAttention, disabling PagedAttention.");
-            paged_attn_config = None;
-        }
 
         trace!("Model config: {:?}", self.inner.get_config_repr(&config)?);
         if crate::using_flash_attn() {
