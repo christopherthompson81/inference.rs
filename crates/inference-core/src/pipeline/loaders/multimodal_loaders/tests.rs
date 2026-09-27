@@ -971,7 +971,7 @@ fn gemma4_runtime_config_caps_nested_and_flat_contexts() -> Result<()> {
     assert!(loader.runtime_config(&config, Some(0)).is_err());
 
     let capped = loader.runtime_config(&config, Some(8192))?;
-    let parsed: Gemma4Config = serde_json::from_str(&capped)?;
+    let parsed = Gemma4Config::from_json(&capped)?;
     assert_eq!(parsed.text_config.max_position_embeddings, 8192);
     assert!(matches!(
         loader.runtime_config(&capped, Some(16384))?,
@@ -991,7 +991,7 @@ fn gemma4_runtime_config_caps_nested_and_flat_contexts() -> Result<()> {
     let flat = serde_json::to_string(&flat_value)?;
     let flat_capped = AutoMultimodalLoader.runtime_config(&flat, Some(8192))?;
     assert_eq!(
-        serde_json::from_str::<Gemma4Config>(&flat_capped)?
+        Gemma4Config::from_json(&flat_capped)?
             .text_config
             .max_position_embeddings,
         8192
@@ -1017,7 +1017,7 @@ fn gemma4_estimator_promotes_tied_untied_and_ple_embeddings() -> Result<()> {
         let promoted_pack_factor = default.promote_for_sensitive_tensor().pack_factor(dtype);
         for tied in [true, false] {
             let config = gemma4_estimator_config(tied);
-            let cfg: Gemma4Config = serde_json::from_str(&config)?;
+            let cfg = Gemma4Config::from_json(&config)?;
             let tc = cfg.text_config;
             let ple_dim = tc.hidden_size_per_layer_input.unwrap();
             let ple_vocab = tc.vocab_size_per_layer_input.unwrap();

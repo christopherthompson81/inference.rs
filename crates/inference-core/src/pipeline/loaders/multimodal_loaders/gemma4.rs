@@ -10,7 +10,7 @@ fn gemma4_runtime_config(config: &str, max_model_len: Option<usize>) -> Result<C
     };
     anyhow::ensure!(max_model_len > 0, "max_model_len must be greater than zero");
 
-    let parsed: Gemma4Config = serde_json::from_str(config)?;
+    let parsed = Gemma4Config::from_json(config)?;
     if parsed.text_config.max_position_embeddings <= max_model_len {
         return Ok(Cow::Borrowed(config));
     }
@@ -48,7 +48,7 @@ impl MultimodalModelLoader for Gemma4Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg: Gemma4Config = serde_json::from_str(config)?;
+        let cfg = Gemma4Config::from_json(config)?;
         Ok(Box::new(Gemma4Model::new(
             &cfg,
             vb,
@@ -68,7 +68,7 @@ impl MultimodalModelLoader for Gemma4Loader {
         true
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let config: Gemma4Config = serde_json::from_str(config)?;
+        let config = Gemma4Config::from_json(config)?;
         Ok(Box::new(config))
     }
     fn get_processor(
@@ -78,7 +78,7 @@ impl MultimodalModelLoader for Gemma4Loader {
         _preprocessor_config: PreProcessorConfig,
         _max_edge: Option<u32>,
     ) -> Arc<dyn Processor + Send + Sync> {
-        let cfg: Gemma4Config = serde_json::from_str(config).expect("Failed to parse Gemma4Config");
+        let cfg = Gemma4Config::from_json(config).expect("Failed to parse Gemma4Config");
         let (patch_size, pooling_kernel_size, default_output_length, supports_images) = cfg
             .vision_config
             .as_ref()
@@ -121,7 +121,7 @@ impl MultimodalModelLoader for Gemma4Loader {
         Arc::new(Gemma4Prefixer)
     }
     fn modalities(&self, config: &str) -> Result<Modalities> {
-        let cfg: Gemma4Config = serde_json::from_str(config)?;
+        let cfg = Gemma4Config::from_json(config)?;
         let mut input = vec![SupportedModality::Text];
         if cfg.vision_config.is_some() {
             input.push(SupportedModality::Vision);
@@ -213,7 +213,7 @@ impl DeviceMappedModelLoader for Gemma4Loader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Gemma4Config = serde_json::from_str(config)?;
+        let cfg = Gemma4Config::from_json(config)?;
         let tc = &cfg.text_config;
 
         let vision_tokens_per_image = if cfg.vision_config.is_some() {
@@ -242,7 +242,7 @@ impl DeviceMappedModelLoader for Gemma4Loader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Gemma4Config = serde_json::from_str(config)?;
+        let cfg = Gemma4Config::from_json(config)?;
         let (max_vision_attn, max_vision_hidden) =
             cfg.vision_config.as_ref().map_or((0, 0), |vc| {
                 let (max_patches, hidden_size, intermediate_size, num_attention_heads) = if cfg
@@ -309,7 +309,7 @@ impl DeviceMappedModelLoader for Gemma4Loader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: Gemma4Config = serde_json::from_str(config)?;
+        let cfg = Gemma4Config::from_json(config)?;
         let tc = &cfg.text_config;
         let text_elems = {
             let (resolved_embed_tokens_pack_factor, lm_head_pack_factor) =
@@ -474,7 +474,7 @@ impl DeviceMappedModelLoader for Gemma4Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: Gemma4Config = serde_json::from_str(config)?;
+        let cfg = Gemma4Config::from_json(config)?;
         let tc = &cfg.text_config;
         let sizes: Vec<usize> = (0..tc.num_hidden_layers)
             .map(|layer_idx| {
@@ -533,7 +533,7 @@ impl DeviceMappedModelLoader for Gemma4Loader {
         Ok(sizes)
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: Gemma4Config = serde_json::from_str(config)?;
+        let cfg = Gemma4Config::from_json(config)?;
         Ok(cfg.text_config.num_hidden_layers)
     }
 
@@ -541,7 +541,7 @@ impl DeviceMappedModelLoader for Gemma4Loader {
         Some(vec![NonMappedSubModel::Vision, NonMappedSubModel::Audio])
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: Gemma4Config = serde_json::from_str(config)?;
+        let cfg = Gemma4Config::from_json(config)?;
         let tc = &cfg.text_config;
 
         let cfg = ModelConfigMetadata {

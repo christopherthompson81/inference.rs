@@ -13,7 +13,7 @@ impl NormalModelLoader for Qwen3NextLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg: crate::models::qwen3_next::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::qwen3_next::Config::from_json(config)?;
 
         Ok(Box::new(models::qwen3_next::Model::new(
             &cfg,
@@ -39,7 +39,7 @@ impl NormalModelLoader for Qwen3NextLoader {
         Ok(true)
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg: crate::models::qwen3_next::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::qwen3_next::Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
     fn supports_paged_attention(&self, _config: &str) -> Result<bool> {
@@ -105,7 +105,7 @@ impl DeviceMappedModelLoader for Qwen3NextLoader {
             anyhow::bail!("Expected text AutoDeviceMapParams for this model!")
         };
 
-        let cfg: crate::models::qwen3_next::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::qwen3_next::Config::from_json(config)?;
 
         Ok(
             max_batch_size
@@ -129,7 +129,7 @@ impl DeviceMappedModelLoader for Qwen3NextLoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: crate::models::qwen3_next::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::qwen3_next::Config::from_json(config)?;
 
         let elems = {
             let (embed_tokens_pack_factor, lm_head_pack_factor) =
@@ -159,7 +159,7 @@ impl DeviceMappedModelLoader for Qwen3NextLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: crate::models::qwen3_next::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::qwen3_next::Config::from_json(config)?;
         let layer_types = cfg.layer_types();
         let mut layer_sizes = Vec::with_capacity(cfg.num_hidden_layers);
 
@@ -217,11 +217,11 @@ impl DeviceMappedModelLoader for Qwen3NextLoader {
         Ok(layer_sizes)
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: crate::models::qwen3_next::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::qwen3_next::Config::from_json(config)?;
         Ok(cfg.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: crate::models::qwen3_next::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::qwen3_next::Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

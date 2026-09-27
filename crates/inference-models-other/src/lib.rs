@@ -19,3 +19,17 @@ pub mod hunyuan_v1_dense;
 pub mod hunyuan_v1_moe;
 pub mod lfm2;
 pub mod starcoder2;
+
+inference_nn::json_config!(
+    deepseek2::DeepSeekV2Config,
+    deepseek3::DeepSeekV3Config,
+    glm4::Config,
+    glm4_moe::Glm4MoeConfig,
+    glm4_moe_lite::Glm4MoeLiteConfig,
+    gpt_oss::Config,
+    granite::Config,
+    hunyuan_v1_dense::Config,
+    hunyuan_v1_moe::Config,
+    lfm2::Config,
+    starcoder2::Config,
+);

@@ -13,7 +13,7 @@ impl NormalModelLoader for DeepSeekV2Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg: crate::models::deepseek2::DeepSeekV2Config = serde_json::from_str(config)?;
+        let cfg = crate::models::deepseek2::DeepSeekV2Config::from_json(config)?;
 
         Ok(Box::new(models::deepseek2::DeepSeekV2::new(
             &cfg,
@@ -39,7 +39,7 @@ impl NormalModelLoader for DeepSeekV2Loader {
         Ok(true)
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg: crate::models::deepseek2::DeepSeekV2Config = serde_json::from_str(config)?;
+        let cfg = crate::models::deepseek2::DeepSeekV2Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
 }
@@ -60,7 +60,7 @@ impl IsqModelLoader for DeepSeekV2Loader {
             Regex::new(r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$")?,
             Regex::new(r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$")?,
         ];
-        let cfg: crate::models::deepseek2::DeepSeekV2Config = serde_json::from_str(config)?;
+        let cfg = crate::models::deepseek2::DeepSeekV2Config::from_json(config)?;
         if cfg.q_lora_rank.is_some() {
             data.extend(vec![
                 Regex::new(r"layers\.(\d+)\.self_attn\.q_a_proj\.(weight|bias)$")?,
@@ -145,7 +145,7 @@ impl DeviceMappedModelLoader for DeepSeekV2Loader {
             anyhow::bail!("Expected text AutoDeviceMapParams for this model!")
         };
 
-        let cfg: crate::models::deepseek2::DeepSeekV2Config = serde_json::from_str(config)?;
+        let cfg = crate::models::deepseek2::DeepSeekV2Config::from_json(config)?;
 
         Ok(
             max_batch_size
@@ -169,7 +169,7 @@ impl DeviceMappedModelLoader for DeepSeekV2Loader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: crate::models::deepseek2::DeepSeekV2Config = serde_json::from_str(config)?;
+        let cfg = crate::models::deepseek2::DeepSeekV2Config::from_json(config)?;
         let elems = {
             let (embed_tokens_pack_factor, lm_head_pack_factor) =
                 super::language_model_pack_factors(
@@ -198,7 +198,7 @@ impl DeviceMappedModelLoader for DeepSeekV2Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: crate::models::deepseek2::DeepSeekV2Config = serde_json::from_str(config)?;
+        let cfg = crate::models::deepseek2::DeepSeekV2Config::from_json(config)?;
         let mut per_layer_elems = Vec::new();
 
         for layer_idx in 0..cfg.num_hidden_layers {
@@ -280,11 +280,11 @@ impl DeviceMappedModelLoader for DeepSeekV2Loader {
             .collect())
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: crate::models::deepseek2::DeepSeekV2Config = serde_json::from_str(config)?;
+        let cfg = crate::models::deepseek2::DeepSeekV2Config::from_json(config)?;
         Ok(cfg.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: crate::models::deepseek2::DeepSeekV2Config = serde_json::from_str(config)?;
+        let cfg = crate::models::deepseek2::DeepSeekV2Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

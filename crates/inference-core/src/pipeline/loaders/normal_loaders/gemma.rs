@@ -13,7 +13,7 @@ impl NormalModelLoader for GemmaLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg: crate::models::gemma::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::gemma::Config::from_json(config)?;
 
         Ok(Box::new(models::gemma::Model::new(
             &cfg,
@@ -33,7 +33,7 @@ impl NormalModelLoader for GemmaLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg: crate::models::gemma::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::gemma::Config::from_json(config)?;
 
         Ok(Box::new(xlora_models::XLoraGemma::new(
             &cfg,
@@ -50,7 +50,7 @@ impl NormalModelLoader for GemmaLoader {
         Ok(true)
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg: crate::models::gemma::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::gemma::Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
 }
@@ -96,7 +96,7 @@ impl DeviceMappedModelLoader for GemmaLoader {
             anyhow::bail!("Expected text AutoDeviceMapParams for this model!")
         };
 
-        let cfg: crate::models::gemma::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::gemma::Config::from_json(config)?;
 
         Ok(
             max_batch_size
@@ -120,7 +120,7 @@ impl DeviceMappedModelLoader for GemmaLoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: crate::models::gemma::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::gemma::Config::from_json(config)?;
 
         let elems = {
             let embed_tokens_pack_factor = super::tied_promoted_tensor_pack_factor(
@@ -144,7 +144,7 @@ impl DeviceMappedModelLoader for GemmaLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: crate::models::gemma::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::gemma::Config::from_json(config)?;
 
         let per_layer_elems = {
             let input_layernorm = cfg.hidden_size;
@@ -184,11 +184,11 @@ impl DeviceMappedModelLoader for GemmaLoader {
         ])
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: crate::models::gemma::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::gemma::Config::from_json(config)?;
         Ok(cfg.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: crate::models::gemma::Config = serde_json::from_str(config)?;
+        let cfg = crate::models::gemma::Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

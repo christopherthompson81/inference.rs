@@ -11,3 +11,10 @@ pub mod qwen2;
 pub mod qwen3;
 pub mod qwen3_moe;
 pub mod qwen3_next;
+
+inference_nn::json_config!(
+    qwen2::Config,
+    qwen3::Config,
+    qwen3_moe::Config,
+    qwen3_next::Config,
+);

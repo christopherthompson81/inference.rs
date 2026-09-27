@@ -13,7 +13,7 @@ impl MultimodalModelLoader for Gemma3Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg: Gemma3Config = serde_json::from_str(config)?;
+        let cfg = Gemma3Config::from_json(config)?;
         Ok(Box::new(Gemma3Model::new(
             &cfg,
             vb,
@@ -26,7 +26,7 @@ impl MultimodalModelLoader for Gemma3Loader {
         true
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let config: Gemma3Config = serde_json::from_str(config)?;
+        let config = Gemma3Config::from_json(config)?;
         Ok(Box::new(config))
     }
     fn get_processor(
@@ -36,7 +36,7 @@ impl MultimodalModelLoader for Gemma3Loader {
         _preprocessor_config: PreProcessorConfig,
         _max_edge: Option<u32>,
     ) -> Arc<dyn Processor + Send + Sync> {
-        let config: Gemma3Config = serde_json::from_str(config).unwrap();
+        let config = Gemma3Config::from_json(config).unwrap();
         // Handle the Gemma 3 1b case here
         Arc::new(Gemma3Processor::new(
             processor_config.unwrap_or_default(),
@@ -64,7 +64,7 @@ impl MultimodalModelLoader for Gemma3Loader {
         config: &str,
         params: &AutoDeviceMapParams,
     ) -> Result<AutoDeviceMapParams> {
-        Ok(match serde_json::from_str::<Gemma3Config>(config)? {
+        Ok(match Gemma3Config::from_json(config)? {
             Gemma3Config::Text(_) => AutoDeviceMapParams::Text {
                 max_seq_len: params.max_seq_len(),
                 max_batch_size: params.max_batch_size(),
@@ -73,7 +73,7 @@ impl MultimodalModelLoader for Gemma3Loader {
         })
     }
     fn modalities(&self, config: &str) -> Result<Modalities> {
-        let config: Gemma3Config = serde_json::from_str(config)?;
+        let config = Gemma3Config::from_json(config)?;
         Ok(Modalities {
             input: match config {
                 Gemma3Config::Text(_) => vec![SupportedModality::Text],
@@ -144,7 +144,7 @@ impl DeviceMappedModelLoader for Gemma3Loader {
         config: &str,
         params: &AutoDeviceMapParams,
     ) -> Result<usize> {
-        let cfg: Gemma3Config = serde_json::from_str(config)?;
+        let cfg = Gemma3Config::from_json(config)?;
 
         match cfg {
             Gemma3Config::Text(text_config) => {
@@ -194,7 +194,7 @@ impl DeviceMappedModelLoader for Gemma3Loader {
         config: &str,
         params: &AutoDeviceMapParams,
     ) -> Result<usize> {
-        let cfg: Gemma3Config = serde_json::from_str(config)?;
+        let cfg = Gemma3Config::from_json(config)?;
         let Gemma3Config::WithVision { vision_config, .. } = cfg else {
             return Ok(0);
         };
@@ -222,7 +222,7 @@ impl DeviceMappedModelLoader for Gemma3Loader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: Gemma3Config = serde_json::from_str(config)?;
+        let cfg = Gemma3Config::from_json(config)?;
 
         let text_elems = {
             let cfg = match &cfg {
@@ -303,7 +303,7 @@ impl DeviceMappedModelLoader for Gemma3Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: Gemma3Config = serde_json::from_str(config)?;
+        let cfg = Gemma3Config::from_json(config)?;
 
         let txt_cfg = match &cfg {
             Gemma3Config::Text(cfg) => cfg,
@@ -349,7 +349,7 @@ impl DeviceMappedModelLoader for Gemma3Loader {
         ])
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: Gemma3Config = serde_json::from_str(config)?;
+        let cfg = Gemma3Config::from_json(config)?;
 
         let txt_cfg = match &cfg {
             Gemma3Config::Text(cfg) => cfg,
@@ -359,7 +359,7 @@ impl DeviceMappedModelLoader for Gemma3Loader {
         Ok(txt_cfg.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: Gemma3Config = serde_json::from_str(config)?;
+        let cfg = Gemma3Config::from_json(config)?;
 
         let cfg = match &cfg {
             Gemma3Config::Text(cfg) => cfg,
@@ -388,7 +388,7 @@ impl DeviceMappedModelLoader for Gemma3Loader {
         &self,
         config: &str,
     ) -> Result<Option<Vec<NonMappedSubModel>>> {
-        let config: Gemma3Config = serde_json::from_str(config)?;
+        let config = Gemma3Config::from_json(config)?;
         Ok(match config {
             Gemma3Config::Text(_) => None,
             Gemma3Config::WithVision { .. } => self.non_mapped_sub_models(),
