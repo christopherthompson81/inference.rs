@@ -1,5 +1,6 @@
 //! Model-related argument structs
 
+use super::{parse_arch, parse_dtype};
 use clap::{Args, ValueEnum};
 use inference_core::{
     AutoDeviceMapParams, HfConfigOverrides, IsqOrganization, LoraAdapterSpec, LoraRuntimeConfig,
@@ -715,14 +716,6 @@ pub struct MultimodalOptions {
     /// Maximum image dimension for device mapping
     #[arg(long)]
     pub max_image_length: Option<usize>,
-}
-
-fn parse_arch(s: &str) -> Result<NormalLoaderType, String> {
-    s.parse()
-}
-
-fn parse_dtype(s: &str) -> Result<ModelDType, String> {
-    s.parse()
 }
 
 fn default_gqa() -> usize {

@@ -1,5 +1,6 @@
 //! Quantize command argument structs for UQFF generation
 
+use super::{parse_arch, parse_dtype};
 use clap::{Args, Subcommand, ValueEnum};
 use inference_core::{AutoDeviceMapParams, IsqOrganization, ModelDType, NormalLoaderType};
 use std::path::PathBuf;
@@ -465,14 +466,6 @@ fn normalize_quantize_model_type(model_type: &mut QuantizeModelType) -> anyhow::
     };
     model.model_id = Some(model_id);
     Ok(())
-}
-
-fn parse_arch(s: &str) -> Result<NormalLoaderType, String> {
-    s.parse()
-}
-
-fn parse_dtype(s: &str) -> Result<ModelDType, String> {
-    s.parse()
 }
 
 #[cfg(test)]
