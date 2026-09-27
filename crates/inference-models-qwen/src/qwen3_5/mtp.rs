@@ -16,8 +16,8 @@ use crate::{
     attention::AttentionMask,
     device_map::DeviceMapper,
     layers::{GemmaRmsNorm, Qwen3VLRotaryEmbedding},
+    model::NormalLoadingMetadata,
     paged_attention::{load_fp8_attention_scales, AttentionImplementation, PagedAttention},
-    pipeline::NormalLoadingMetadata,
     utils::unvarbuilder::UnVarBuilder,
 };
 

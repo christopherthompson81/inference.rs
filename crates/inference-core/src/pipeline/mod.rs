@@ -2,8 +2,8 @@ mod amoe;
 mod auto;
 pub(crate) mod cache_manager;
 pub(crate) use crate::model::{
-    extract_logits, recurrent_batch_kind_for_input, text_positions_tensor, ForwardMaskCache,
-    ModelForwardContext, RecurrentMetadata,
+    extract_logits, recurrent_batch_kind_for_input, text_positions_tensor, ModelForwardContext,
+    RecurrentMetadata,
 };
 pub use cache_manager::CacheManager;
 pub mod chat_template;
@@ -331,7 +331,7 @@ pub(crate) fn validate_lora_loader_config(
 
 pub use crate::kv_cache::{Cache, EitherCache, KvCache, LayerCaches, NormalCache};
 
-pub(crate) const RECURRENT_GRAPH_PAD_SLOTS: usize = 1;
+pub(crate) use crate::kv_cache::RECURRENT_GRAPH_PAD_SLOTS;
 const AUTO_RECURRENT_KV_FLOOR_FRACTION: f64 = 0.05;
 const BYTES_PER_MIB: usize = 1024 * 1024;
 

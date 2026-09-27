@@ -94,7 +94,12 @@ pub fn reserve_external_mtp_memory_with_runtime(
     dtype: &dyn TryIntoDType,
     device: &Device,
 ) -> anyhow::Result<Option<PagedAttentionConfig>> {
-    #[cfg(not(all(feature = "cuda", feature = "flash-attn", target_family = "unix")))]
+    #[cfg(not(all(
+        feature = "cuda",
+        feature = "flash-attn",
+        feature = "models-qwen",
+        target_family = "unix"
+    )))]
     let _ = runtime;
     let Some(cache_config) = cache_config else {
         return Ok(None);
@@ -106,8 +111,16 @@ pub fn reserve_external_mtp_memory_with_runtime(
         return Ok(Some(cache_config));
     }
     let dtype = dtype.try_into_dtype(&[device])?;
+    #[cfg_attr(not(feature = "models-qwen"), allow(unused_mut))]
     let mut cache_config = cache_config;
-    if let Some(dflash_config) = super::dflash::peek_config(mtp_config)? {
+    #[cfg(feature = "models-qwen")]
+    let local_mtp = MtpConfig {
+        model: Some(resolve_mtp_path(mtp_config)?.to_string_lossy().into_owned()),
+        ..mtp_config.clone()
+    };
+    // DFlash drafters exist only for Qwen3.5 targets
+    #[cfg(feature = "models-qwen")]
+    if let Some(dflash_config) = super::dflash::peek_config(&local_mtp)? {
         let max_drafts = dflash_config.block_size().saturating_sub(1);
         let drafts = mtp_config
             .n_predict
@@ -121,14 +134,19 @@ pub fn reserve_external_mtp_memory_with_runtime(
         cache_config.recurrent_checkpoint_lanes_auto = mtp_config.n_predict.is_none();
     }
     let bytes = external_weight_size_in_bytes(mtp_config, dtype)?;
-    #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
+    #[cfg(all(
+        feature = "cuda",
+        feature = "flash-attn",
+        feature = "models-qwen",
+        target_family = "unix"
+    ))]
     let bytes = if device.is_cuda() {
         if let Some(serving_capacity) = cache_config.serving_capacity {
             let sequence_capacity = serving_capacity
                 .checked_add(crate::pipeline::RECURRENT_GRAPH_PAD_SLOTS)
                 .ok_or_else(|| anyhow::anyhow!("DFlash serving capacity overflow"))?;
             let cache_bytes = super::dflash::windowed_kv_cache_size_in_bytes(
-                mtp_config,
+                &local_mtp,
                 sequence_capacity,
                 runtime.prefix_cache_capacity(),
                 crate::paged_attention::DEFAULT_PAGED_ATTENTION_BLOCK_SIZE,

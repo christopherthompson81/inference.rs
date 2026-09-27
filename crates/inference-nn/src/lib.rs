@@ -2,14 +2,17 @@
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 // GPU tests share one device and process-global CUDA state (memory pools, graph scopes), so they run one at a time.
-#[cfg(all(test, feature = "cuda"))]
-static CUDA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+#[cfg(feature = "cuda")]
+#[doc(hidden)]
+pub static CUDA_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // GPU tests run by default under `--features cuda`, skip without a device, and hold the lock for the test's lifetime.
-#[cfg(all(test, feature = "cuda"))]
+#[cfg(feature = "cuda")]
+#[doc(hidden)]
+#[macro_export]
 macro_rules! skip_without_cuda {
     () => {
-        let _cuda_test_guard = crate::CUDA_TEST_LOCK
+        let _cuda_test_guard = $crate::CUDA_TEST_LOCK
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if candle_core::Device::new_cuda(0).is_err() {

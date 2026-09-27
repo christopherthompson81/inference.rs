@@ -23,17 +23,18 @@ use crate::{
         GatedDeltaNet, GdnConfig, GdnInputProjectionKind, GdnLayerCache, GdnVHeadLayout,
         PackedGdnLayout,
     },
+    kv_cache::{EitherCache, KvCache},
     kv_cache::{
         HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, RecurrentLayerConfig,
     },
     layers::{self, GemmaRmsNorm, Qwen3VLRotaryEmbedding},
+    model::{IsqModel, ModelForwardContext, NormalLoadingMetadata},
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{
         load_fp8_attention_scales, AttentionImplementation, ModelConfigMetadata, PagedAttention,
     },
-    pipeline::{EitherCache, IsqModel, KvCache, ModelForwardContext, NormalLoadingMetadata},
+    qwen3_5::packed_gdn::{forward_packed_gdn, packed_gdn_layout},
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
-    vision_models::qwen3_5::packed_gdn::{forward_packed_gdn, packed_gdn_layout},
 };
 
 impl GdnConfig for TextConfig {

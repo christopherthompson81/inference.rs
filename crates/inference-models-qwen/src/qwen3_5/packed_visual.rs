@@ -7,13 +7,11 @@ use crate::{
         block_hash::MultimodalKind,
         encoder_cache::{CacheModality, EncoderCacheManager},
     },
-    vision_models::{
-        multimodal_layout::{MultimodalEncoderOutputs, PackedMultimodalLayout},
-        qwen3_vl::{insert_current_visual_outputs, vision::Qwen3VLVisionModel, VisualEncoder},
-    },
+    qwen3_vl::{insert_current_visual_outputs, vision::Qwen3VLVisionModel, VisualEncoder},
+    vision::multimodal_layout::{MultimodalEncoderOutputs, PackedMultimodalLayout},
 };
 
-pub(crate) struct PackedVisualInput<'a> {
+pub struct PackedVisualInput<'a> {
     pub input_embeds: Tensor,
     pub pixel_values: Option<&'a Tensor>,
     pub pixel_values_videos: Option<&'a Tensor>,
@@ -25,20 +23,20 @@ pub(crate) struct PackedVisualInput<'a> {
 }
 
 #[derive(Debug)]
-pub(crate) struct PackedVisualOutput {
+pub struct PackedVisualOutput {
     pub input_embeds: Tensor,
     pub visual_pos_mask: Option<Tensor>,
     pub deepstack_visual_embeds: Option<Vec<Tensor>>,
 }
 
-pub(crate) struct PackedVisualEncoder<'a> {
+pub struct PackedVisualEncoder<'a> {
     vision: &'a Qwen3VLVisionModel,
     cache: &'a Arc<Mutex<EncoderCacheManager>>,
     spatial_merge_size: usize,
 }
 
 impl<'a> PackedVisualEncoder<'a> {
-    pub(crate) fn new(
+    pub fn new(
         vision: &'a Qwen3VLVisionModel,
         cache: &'a Arc<Mutex<EncoderCacheManager>>,
         spatial_merge_size: usize,
@@ -50,7 +48,7 @@ impl<'a> PackedVisualEncoder<'a> {
         }
     }
 
-    pub(crate) fn prepare(&self, input: PackedVisualInput<'_>) -> Result<PackedVisualOutput> {
+    pub fn prepare(&self, input: PackedVisualInput<'_>) -> Result<PackedVisualOutput> {
         let mut encoder_outputs = MultimodalEncoderOutputs::new();
         self.encode_current(
             &mut encoder_outputs,
@@ -183,7 +181,7 @@ mod tests {
     use super::*;
     use crate::{
         paged_attention::block_hash::MultimodalAttentionPolicy,
-        vision_models::multimodal_layout::{
+        vision::multimodal_layout::{
             MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout,
             RequestMultimodalLayout,
         },

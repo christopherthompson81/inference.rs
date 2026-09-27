@@ -5,7 +5,7 @@ use candle_core::{Result, Tensor};
 use crate::{
     gdn::RecurrentBatchKind,
     gdn::{try_forward_grouped_packed_gdn, GatedDeltaNet, GdnLayerCache, PackedGdnLayout},
-    pipeline::ModelForwardContext,
+    model::ModelForwardContext,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,7 +68,7 @@ fn validate_packed_gdn_state_rows(
     Ok(())
 }
 
-pub(crate) fn packed_gdn_layout(
+pub fn packed_gdn_layout(
     x: &Tensor,
     ctx: &ModelForwardContext<'_>,
 ) -> Result<Option<PackedGdnLayout>> {
@@ -114,7 +114,7 @@ pub(crate) fn packed_gdn_layout(
     )?))
 }
 
-pub(crate) fn forward_packed_gdn(
+pub fn forward_packed_gdn(
     gdn: &GatedDeltaNet,
     x: &Tensor,
     cache: &mut GdnLayerCache,

@@ -2,11 +2,11 @@ use inference_quant::QuantizedConfig;
 
 use crate::gdn::{GdnStateDType, GdnVHeadLayout};
 use crate::layers::{Activation, YarnRopeConfig};
+use crate::qwen3_5::config::RopeParameters;
 use crate::serde_default_fn;
-use crate::vision_models::qwen3_5::config::RopeParameters;
 
 // Re-export vision config from qwen3_vl
-pub use crate::vision_models::qwen3_vl::config::VisionConfig;
+pub use crate::qwen3_vl::config::VisionConfig;
 
 serde_default_fn!(Vec<usize>, default_mlp_only_layers, Vec::new());
 serde_default_fn!(usize, default_full_attn_interval, 4);
@@ -61,7 +61,7 @@ pub struct TextConfig {
     #[serde(default)]
     pub quantization_config: Option<QuantizedConfig>,
     #[serde(default, rename = "_inference_gdn_v_head_layout")]
-    pub(crate) gdn_v_head_layout: GdnVHeadLayout,
+    pub gdn_v_head_layout: GdnVHeadLayout,
 }
 
 impl TextConfig {

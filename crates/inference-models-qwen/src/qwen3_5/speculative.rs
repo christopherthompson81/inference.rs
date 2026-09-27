@@ -12,25 +12,23 @@ use candle_core::{IndexOp, Result, Tensor};
 use rand::Rng;
 
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
-use crate::pipeline::cuda_graph::{CudaGraphComponent, CudaGraphEvent, CudaGraphEventGuard};
+use crate::cuda::graph_capture::{CudaGraphComponent, CudaGraphEvent, CudaGraphEventGuard};
 use crate::{
     attention::AttentionMask,
+    dflash::{
+        CtxAppend, DFlashDraftModel, DFlashGraphProposalInputs, DFlashLoadTarget,
+        DFlashPreparedContext, DFlashProposalBatch, DFlashSamplingInputs,
+    },
     get_mut_arcmutex,
     layers::masker::CausalMaskConfig,
     layers::CausalMasker,
     speculative::{
-        dflash::{
-            CtxAppend, DFlashDraftModel, DFlashGraphProposalInputs, DFlashLoadTarget,
-            DFlashPreparedContext, DFlashProposalBatch, DFlashSamplingInputs,
-        },
-        paged_rows::make_paged_rows_metadata,
-        proposer::sample_draft_rows,
-        MtpRuntimeConfig, SpeculativeAttachInfo, SpeculativeBatchPlan, SpeculativeCommitRow,
-        SpeculativeConfig, SpeculativeGraphPlan, SpeculativeGraphState, SpeculativeKvCache,
-        SpeculativePrefillCtx, SpeculativePrefixReplay, SpeculativeProposal,
-        SpeculativeProposalBatch, SpeculativeProposeBatchCtx, SpeculativeProposePreparation,
-        SpeculativeProposePrepareCtx, SpeculativeTapRouting, SpeculativeTargetMixin,
-        TargetAttentionInputs,
+        paged_rows::make_paged_rows_metadata, proposer::sample_draft_rows, MtpRuntimeConfig,
+        SpeculativeAttachInfo, SpeculativeBatchPlan, SpeculativeCommitRow, SpeculativeConfig,
+        SpeculativeGraphPlan, SpeculativeGraphState, SpeculativeKvCache, SpeculativePrefillCtx,
+        SpeculativePrefixReplay, SpeculativeProposal, SpeculativeProposalBatch,
+        SpeculativeProposeBatchCtx, SpeculativeProposePreparation, SpeculativeProposePrepareCtx,
+        SpeculativeTapRouting, SpeculativeTargetMixin, TargetAttentionInputs,
     },
 };
 
@@ -126,8 +124,7 @@ fn resolve_dflash_n_predict(
         .checked_sub(1)
         .filter(|max_drafts| *max_drafts > 0)
         .ok_or_else(|| candle_core::Error::msg("DFlash block size must be at least 2"))?;
-    let configured =
-        requested.unwrap_or(max_drafts.min(crate::speculative::dflash::DEFAULT_MAX_DRAFTS));
+    let configured = requested.unwrap_or(max_drafts.min(crate::dflash::DEFAULT_MAX_DRAFTS));
     if configured == 0 || configured > max_drafts {
         candle_core::bail!(
             "requested {configured} draft tokens but this DFlash drafter's block size is {block_size} (max {max_drafts} drafts)"
@@ -311,11 +308,10 @@ impl Qwen3_5Model {
             )?;
             *self.draft_lm_head.lock().expect("draft lm_head poisoned") = Some(head);
         }
-        let adaptive = config.n_predict.is_none()
-            && windowed_kv
-            && crate::speculative::dflash::dflash_adaptive_requested();
+        let adaptive =
+            config.n_predict.is_none() && windowed_kv && crate::dflash::dflash_adaptive_requested();
         let max_live_sequences =
-            sequence_capacity.saturating_sub(crate::pipeline::RECURRENT_GRAPH_PAD_SLOTS);
+            sequence_capacity.saturating_sub(crate::kv_cache::RECURRENT_GRAPH_PAD_SLOTS);
         let adaptive = adaptive && drafter.enable_adaptive(n_predict, max_live_sequences);
         let kind = if drafter.has_selector() {
             "DFlash2"
@@ -649,7 +645,7 @@ impl Qwen3_5Model {
             .zip(ctx.chunk_ranges)
             .zip(routing.spans())
         {
-            appends.push(crate::speculative::dflash::CtxAppend {
+            appends.push(crate::dflash::CtxAppend {
                 seq_id: *seq_id,
                 rows: span.rows(),
                 start_pos: start,

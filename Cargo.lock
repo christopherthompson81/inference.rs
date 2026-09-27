@@ -3311,10 +3311,15 @@ dependencies = [
 name = "inference-models-qwen"
 version = "0.9.3"
 dependencies = [
+ "anyhow",
  "candle-core",
  "candle-nn",
+ "inference-flash-attn",
  "inference-nn",
+ "inference-paged-attn",
  "inference-quant",
+ "metrics",
+ "rand 0.9.4",
  "serde",
  "serde_json",
  "tempfile",
