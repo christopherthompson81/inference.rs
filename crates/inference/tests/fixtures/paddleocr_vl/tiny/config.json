@@ -1,0 +1,56 @@
+{
+  "architectures": [
+    "PaddleOCRVLForConditionalGeneration"
+  ],
+  "model_type": "paddleocr_vl",
+  "compression_ratio": 1.0,
+  "head_dim": 64,
+  "hidden_act": "silu",
+  "hidden_size": 32,
+  "intermediate_size": 64,
+  "max_position_embeddings": 4096,
+  "num_attention_heads": 2,
+  "num_hidden_layers": 2,
+  "num_key_value_heads": 1,
+  "pad_token_id": 0,
+  "rms_norm_eps": 1e-05,
+  "rope_scaling": {
+    "mrope_section": [
+      8,
+      12,
+      12
+    ],
+    "rope_type": "default",
+    "type": "default"
+  },
+  "rope_theta": 500000,
+  "tie_word_embeddings": false,
+  "torch_dtype": "float32",
+  "use_bias": false,
+  "vocab_size": 266,
+  "image_token_id": 261,
+  "video_token_id": 265,
+  "vision_start_token_id": 263,
+  "vision_end_token_id": 264,
+  "weight_share_add_bias": true,
+  "use_3d_rope": true,
+  "rope_is_neox_style": true,
+  "vision_config": {
+    "architectures": [
+      "PaddleOCRVisionModel"
+    ],
+    "model_type": "paddleocr_vl",
+    "hidden_act": "gelu_pytorch_tanh",
+    "hidden_size": 32,
+    "image_size": 384,
+    "intermediate_size": 64,
+    "layer_norm_eps": 1e-06,
+    "num_attention_heads": 2,
+    "num_channels": 3,
+    "num_hidden_layers": 2,
+    "patch_size": 14,
+    "spatial_merge_size": 2,
+    "temporal_patch_size": 2,
+    "tokens_per_second": 2
+  }
+}

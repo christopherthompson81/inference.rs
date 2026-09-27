@@ -1,0 +1,22 @@
+{
+  "add_bos_token": false,
+  "add_eos_token": false,
+  "bos_token": "<s>",
+  "eos_token": "</s>",
+  "unk_token": "<unk>",
+  "pad_token": "<unk>",
+  "cls_token": "<|begin_of_sentence|>",
+  "sep_token": "<|end_of_sentence|>",
+  "image_token": "<|IMAGE_PLACEHOLDER|>",
+  "additional_special_tokens": [
+    "<|IMAGE_PLACEHOLDER|>",
+    "<|image_pad|>",
+    "<|IMAGE_START|>",
+    "<|IMAGE_END|>",
+    "<|video_pad|>"
+  ],
+  "clean_up_tokenization_spaces": false,
+  "model_max_length": 4096,
+  "tokenizer_class": "LlamaTokenizer",
+  "processor_class": "PaddleOCRVLProcessor"
+}
