@@ -104,7 +104,6 @@ pub use selection::model_selected::ModelSelected;
 
 mod block_diffusion;
 mod diagnostics;
-mod diffusion_models;
 pub mod distributed;
 pub mod files;
 mod gguf;
@@ -121,7 +120,6 @@ pub mod selection;
 mod sequence;
 pub(crate) mod sequence_macros;
 pub mod speculative;
-mod speech_models;
 mod tools;
 mod vision_models;
 mod xlora_models;
@@ -173,6 +171,7 @@ pub use inference_mcp::{
 pub use inference_mcp::{
     McpClient, McpClientConfig, McpServerConfig, McpServerSource, McpToolInfo,
 };
+pub use inference_models_speech::{utils as speech_utils, SpeechGenerationConfig};
 pub use inference_quant::parse_isq_value;
 pub use inference_quant::{IsqBits, IsqType};
 pub use inference_sandbox::{NetworkMode, SandboxPolicy};
@@ -199,8 +198,8 @@ pub use pipeline::{
     HfConfigOverrides, IsqOrganization, Loader, LocalModelPaths, Modalities, ModelKind, ModelPaths,
     MultimodalLoader, MultimodalLoaderBuilder, MultimodalLoaderType, MultimodalPromptPrefixer,
     MultimodalSpecificConfig, NormalLoader, NormalLoaderBuilder, NormalLoaderType,
-    NormalSpecificConfig, ResolvedLoraAdapter, SpeechLoader, SpeechPipeline, SupportedModality,
-    TokenSource, UqffWriteConfig, UQFF_MULTI_FILE_DELIMITER,
+    NormalSpecificConfig, ResolvedLoraAdapter, SpeechLoader, SpeechLoaderType, SpeechPipeline,
+    SupportedModality, TokenSource, UqffWriteConfig, UQFF_MULTI_FILE_DELIMITER,
 };
 #[cfg(feature = "models-llama")]
 pub use pipeline::{
@@ -235,7 +234,6 @@ pub use speculative::{
     reserve_external_mtp_memory, reserve_external_mtp_memory_with_runtime, MtpConfig,
     MtpDraftSamplingMethod, MtpRuntimeConfig, SpeculativeConfig,
 };
-pub use speech_models::{utils as speech_utils, SpeechGenerationConfig, SpeechLoaderType};
 use tokio::runtime::Runtime;
 pub use tools::{
     AllowedToolChoice, AllowedToolsMode, AllowedToolsToolChoice, AllowedToolsToolChoiceType,

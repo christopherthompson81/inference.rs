@@ -16,15 +16,39 @@ use regex::Regex;
 use serde::Deserialize;
 
 use super::{ModelPaths, NormalLoadingMetadata};
+use inference_models_diffusion::flux::{
+    self,
+    stepper::{FluxStepper, FluxStepperConfig, FluxStepperLoad, RepoFileFetcher},
+};
+
 use crate::{
     api_dir_list, api_get_file,
-    diffusion_models::flux::{
-        self,
-        stepper::{FluxStepper, FluxStepperConfig},
-    },
     paged_attention::AttentionImplementation,
-    pipeline::{paths::AdapterPaths, EmbeddingModulePaths},
+    pipeline::{hf, paths::AdapterPaths, EmbeddingModulePaths},
 };
+
+fn hub_file_fetcher() -> Result<RepoFileFetcher> {
+    let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
+    Ok(Box::new(move |repo_id, revision, file| {
+        let model_id = Path::new(repo_id);
+        if hf::is_hf_hub_offline() {
+            return hf::offline_cache_repo(model_id, revision)
+                .get(file)
+                .ok_or_else(|| {
+                    candle_core::Error::msg(hf::offline_missing_file_error(
+                        model_id, file, revision,
+                    ))
+                });
+        }
+        api.repo(hf_hub::Repo::with_revision(
+            repo_id.to_string(),
+            hf_hub::RepoType::Model,
+            revision.to_string(),
+        ))
+        .get(file)
+        .map_err(candle_core::Error::msg)
+    }))
+}
 
 pub trait DiffusionModelLoader: Send + Sync {
     /// If the model is being loaded with `load_model_from_hf` (so manual paths not provided), this will be called.
@@ -213,10 +237,13 @@ impl DiffusionModelLoader for FluxLoader {
             FluxStepperConfig::default_for_guidance(flux_cfg.guidance_embeds),
             (flux_vb, &flux_cfg),
             (vae_vb, &vae_cfg),
-            flux_dtype,
-            &normal_loading_metadata.real_device,
-            silent,
-            self.offload,
+            FluxStepperLoad {
+                dtype: flux_dtype,
+                device: &normal_loading_metadata.real_device,
+                silent,
+                offloaded: self.offload,
+                fetch: hub_file_fetcher()?,
+            },
         )?))
     }
 }

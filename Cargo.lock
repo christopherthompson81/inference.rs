@@ -3092,11 +3092,13 @@ dependencies = [
  "inference-code-exec",
  "inference-flash-attn",
  "inference-mcp",
+ "inference-models-diffusion",
  "inference-models-gemma",
  "inference-models-llama",
  "inference-models-other",
  "inference-models-phi",
  "inference-models-qwen",
+ "inference-models-speech",
  "inference-nn",
  "inference-paged-attn",
  "inference-quant",
@@ -3135,7 +3137,6 @@ dependencies = [
  "serde",
  "serde-big-array",
  "serde_json",
- "serde_plain",
  "sha2",
  "statrs",
  "strum 0.27.2",
@@ -3255,6 +3256,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-models-diffusion"
+version = "0.9.3"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "candle-nn",
+ "inference-nn",
+ "inference-quant",
+ "serde",
+ "serde_json",
+ "serde_plain",
+ "tokenizers",
+ "tracing",
+]
+
+[[package]]
 name = "inference-models-gemma"
 version = "0.9.3"
 dependencies = [
@@ -3335,6 +3352,20 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tracing",
+]
+
+[[package]]
+name = "inference-models-speech"
+version = "0.9.3"
+dependencies = [
+ "candle-core",
+ "candle-nn",
+ "inference-nn",
+ "inference-quant",
+ "rand 0.9.4",
+ "rand_isaac",
+ "serde",
  "tracing",
 ]
 

@@ -9,7 +9,7 @@ use inference_quant::{
 use crate::{
     attention::{naive_sdpa, SdpaParams},
     layers::{self, repeat_kv, DiaRotaryEmbedding, RmsNorm},
-    utils::progress::{new_multi_progress, NiceProgressBar},
+    nn_utils::progress::{new_multi_progress, NiceProgressBar},
 };
 
 use super::{cache::DiaKvCache, config::DiaConfig};

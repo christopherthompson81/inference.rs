@@ -69,16 +69,17 @@ bytemuck_derive.workspace = true
 inference-paged-attn = { workspace = true, optional = true }
 inference-quant.workspace = true
 inference-nn.workspace = true
+inference-models-diffusion.workspace = true
 inference-models-gemma = { workspace = true, optional = true }
 inference-models-llama = { workspace = true, optional = true }
 inference-models-other = { workspace = true, optional = true }
 inference-models-phi = { workspace = true, optional = true }
 inference-models-qwen = { workspace = true, optional = true }
+inference-models-speech.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 utoipa = { workspace = true, optional = true }
 schemars.workspace = true
 regex.workspace = true
-serde_plain.workspace = true
 as-any.workspace = true
 llguidance.workspace = true
 toktrie.workspace = true
@@ -130,11 +131,13 @@ cuda = [
     "dep:inference-paged-attn",
     "inference-paged-attn/cuda",
     "inference-nn/cuda",
+    "inference-models-diffusion/cuda",
     "inference-models-gemma?/cuda",
     "inference-models-llama?/cuda",
     "inference-models-other?/cuda",
     "inference-models-phi?/cuda",
     "inference-models-qwen?/cuda",
+    "inference-models-speech/cuda",
 ]
 cudnn = ["candle-core/cudnn"]
 cutile = ["cuda", "inference-quant/cutile", "inference-nn/cutile"]
@@ -147,11 +150,13 @@ metal = [
     "dep:inference-paged-attn",
     "inference-paged-attn/metal",
     "inference-nn/metal",
+    "inference-models-diffusion/metal",
     "inference-models-gemma?/metal",
     "inference-models-llama?/metal",
     "inference-models-other?/metal",
     "inference-models-phi?/metal",
     "inference-models-qwen?/metal",
+    "inference-models-speech/metal",
 ]
 flash-attn = ["cuda", "dep:inference-flash-attn", "inference-flash-attn/cuda", "inference-nn/flash-attn", "inference-models-gemma?/flash-attn", "inference-models-llama?/flash-attn", "inference-models-other?/flash-attn", "inference-models-phi?/flash-attn", "inference-models-qwen?/flash-attn"]
 flash-attn-v3 = ["cuda", "dep:candle-flash-attn-v3", "inference-nn/flash-attn-v3"]

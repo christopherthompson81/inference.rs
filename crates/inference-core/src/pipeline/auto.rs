@@ -236,7 +236,7 @@ enum Detected {
     Multimodal(MultimodalLoaderType),
     Embedding(Option<EmbeddingLoaderType>),
     Diffusion(DiffusionLoaderType),
-    Speech(crate::speech_models::SpeechLoaderType),
+    Speech(crate::pipeline::SpeechLoaderType),
 }
 
 fn supports_dynamic_lora(detected: &Detected) -> bool {
@@ -402,9 +402,7 @@ impl AutoLoader {
         }
 
         if let Some(ref config) = artifacts.contents {
-            if let Some(tp) =
-                crate::speech_models::SpeechLoaderType::auto_detect_from_config(config)
-            {
+            if let Some(tp) = crate::pipeline::SpeechLoaderType::auto_detect_from_config(config) {
                 return Ok(Detected::Speech(tp));
             }
         }

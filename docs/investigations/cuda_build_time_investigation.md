@@ -567,3 +567,16 @@ Review follow-ups:
   is left out of both suites and runs alone at the end.
 - Result: 103 s after the same kind of edit (135 s serial). An intermediate version that overlapped only the CPU test
   run and doctests reached 124 s. In the overlapped run the CPU suite takes 9.9 s and the CUDA suite 60.7 s.
+
+## Run 29 - 2026-09-27 (afternoon)
+
+- Question: how much of core's IR leaves with the speech (Dia) and diffusion (FLUX, T5, CLIP) models moved into
+  `inference-models-speech` and `inference-models-diffusion`?
+- Command: `cargo llvm-lines -p inference-core --lib --features cuda` after `local_ci.sh --lint --tests --cuda --slim
+  --sweep` (all green: 2127 CPU and 2445 CUDA tests).
+- Result: 4,134,514 lines (79,045 copies), from ~4.356M after #54: -221k, 5.1%. The module table had put
+  diffusion_models at 86k and speech_models at 49k (135k); the rest is presumably their generic instantiations of
+  shared helpers that are now codegenned in the new crates. Core keeps the loaders, `SpeechLoaderType`/
+  `DiffusionLoaderType` (core impls `arch_metadata` on them) and the diffusion request processor. The Flux stepper's
+  hub access is inverted through a `RepoFileFetcher` closure built by core's loader, so the new crate has no hf_hub dep.
+- Next: X-LoRA models (xlora_models, ~150k) into their family crates.
