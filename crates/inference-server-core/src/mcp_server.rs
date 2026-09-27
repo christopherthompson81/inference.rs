@@ -242,6 +242,7 @@ impl McpCallError {
         match error.kind {
             ApiErrorKind::InvalidRequest
             | ApiErrorKind::NotFound
+            | ApiErrorKind::Forbidden
             | ApiErrorKind::Conflict
             | ApiErrorKind::PayloadTooLarge
             | ApiErrorKind::UnsupportedMediaType => Self::InvalidParams(error.message),

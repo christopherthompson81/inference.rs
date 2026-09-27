@@ -584,6 +584,20 @@ struct RebootState {
     loader_config: Option<ModelLoaderConfig>,
 }
 
+// Clears a model's reloading mark when its reload ends, however it ends.
+struct ReloadingMark<'a> {
+    reloading: &'a RwLock<HashSet<String>>,
+    model_id: &'a str,
+}
+
+impl Drop for ReloadingMark<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut reloading) = self.reloading.write() {
+            reloading.remove(self.model_id);
+        }
+    }
+}
+
 /// Model status for loaded/unloaded state
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModelStatus {
@@ -1942,7 +1956,11 @@ impl InferenceRs {
                 "Model {} is unloaded, triggering auto-reload",
                 resolved_model_id
             );
-            self.reload_model_blocking(&resolved_model_id)?;
+            match self.reload_model_blocking(&resolved_model_id) {
+                // another request reloaded it first
+                Ok(()) | Err(InferenceRsError::ModelAlreadyLoaded(_)) => {}
+                Err(error) => return Err(error),
+            }
 
             // After reload, get the sender
             let engines = self
@@ -2796,53 +2814,38 @@ impl InferenceRs {
     /// This is also called automatically by `get_sender()` when a request targets an unloaded model.
     pub async fn reload_model(&self, model_id: &str) -> Result<(), InferenceRsError> {
         let resolved_model_id = self.resolve_alias(model_id)?;
-        // Check if already reloading
+        // Marked before the checks so two reloads cannot both pass them; the guard clears it even if this is dropped.
+        if !self
+            .reloading_models
+            .write()
+            .map_err(|_| InferenceRsError::EnginePoisoned)?
+            .insert(resolved_model_id.clone())
         {
-            let reloading = self
-                .reloading_models
-                .read()
-                .map_err(|_| InferenceRsError::EnginePoisoned)?;
-            if reloading.contains(&resolved_model_id) {
-                return Err(InferenceRsError::ModelReloading(resolved_model_id.clone()));
-            }
+            return Err(InferenceRsError::ModelReloading(resolved_model_id));
         }
-
-        // Mark as reloading
-        {
-            let mut reloading = self
-                .reloading_models
-                .write()
-                .map_err(|_| InferenceRsError::EnginePoisoned)?;
-            reloading.insert(resolved_model_id.clone());
-        }
-
-        // Get the unloaded state
-        let unloaded_state = {
-            let unloaded = self
-                .unloaded_models
-                .read()
-                .map_err(|_| InferenceRsError::EnginePoisoned)?;
-            unloaded
-                .get(&resolved_model_id)
-                .cloned()
-                .ok_or_else(|| InferenceRsError::ModelNotFound(resolved_model_id.clone()))?
+        let _reloading = ReloadingMark {
+            reloading: &self.reloading_models,
+            model_id: &resolved_model_id,
         };
-
-        // Attempt to reload
-        let result = self
-            .do_reload_model(&resolved_model_id, unloaded_state)
-            .await;
-
-        // Remove from reloading set
+        if self
+            .engines
+            .read()
+            .map_err(|_| InferenceRsError::EnginePoisoned)?
+            .contains_key(&resolved_model_id)
         {
-            let mut reloading = self
-                .reloading_models
-                .write()
-                .map_err(|_| InferenceRsError::EnginePoisoned)?;
-            reloading.remove(&resolved_model_id);
+            return Err(InferenceRsError::ModelAlreadyLoaded(
+                resolved_model_id.clone(),
+            ));
         }
-
-        result
+        let unloaded_state = self
+            .unloaded_models
+            .read()
+            .map_err(|_| InferenceRsError::EnginePoisoned)?
+            .get(&resolved_model_id)
+            .cloned()
+            .ok_or_else(|| InferenceRsError::ModelNotFound(resolved_model_id.clone()))?;
+        self.do_reload_model(&resolved_model_id, unloaded_state)
+            .await
     }
 
     /// Internal method to perform the actual model reload
@@ -3089,6 +3092,30 @@ mod tests {
             empty_state().get_sender(Some("wrong-model")),
             Err(InferenceRsError::ModelNotFound(model)) if model == "wrong-model"
         ));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_reloads_leave_no_reloading_mark() {
+        let state = empty_state();
+        assert!(matches!(
+            state.reload_model("model").await,
+            Err(InferenceRsError::ModelNotFound(model)) if model == "model"
+        ));
+        assert!(state.reloading_models.read().unwrap().is_empty());
+
+        state
+            .reloading_models
+            .write()
+            .unwrap()
+            .insert("model".to_string());
+        assert!(matches!(
+            state.reload_model("model").await,
+            Err(InferenceRsError::ModelReloading(_))
+        ));
+        assert!(
+            state.reloading_models.read().unwrap().contains("model"),
+            "a refused reload leaves the running one's mark alone"
+        );
     }
 
     #[test]

@@ -5,17 +5,22 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use inference_core::{
     auto_tune, collect_system_info, parse_isq_value, run_doctor, AutoDeviceMapParams,
-    AutoTuneRequest, InferenceRs, InferenceRsError, ModelDType, ModelSelected,
-    ModelStatus as CoreModelStatus, Request, SerializedSession, TokenSource, TuneProfile,
+    AutoTuneRequest, InferenceRs, InferenceRsError, ModelDType, ModelSelected, Request,
+    SerializedSession, TokenSource, TuneProfile,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::handler_core::ApiErrorHttp;
+pub use crate::models_api::{ModelOperationRequest, ModelStatus, ModelStatusResponse};
 use crate::{
-    handler_core::{openai_error_from_error, openai_error_response, ApiError, ApiErrorKind},
-    lora_routing::list_lora_adapter_models,
-    openai::{ModelObject, ModelObjects},
+    handler_core::{
+        json_response, openai_error_from_error, openai_error_response, ApiError, ApiErrorKind,
+    },
+    models_api::{
+        list_models, model_status as status, reload_model as reload, unload_model as unload,
+    },
+    openai::ModelObjects,
     types::ExtractedInferenceRsState,
 };
 
@@ -47,90 +52,7 @@ impl From<TuneProfileRequest> for TuneProfile {
   )
 )]
 pub async fn models(State(state): ExtractedInferenceRsState) -> Response {
-    let mut model_objects = Vec::new();
-
-    let models_with_status = match state.list_models_with_status() {
-        Ok(models) => models,
-        Err(error) => return openai_error_from_error(&error, ApiErrorKind::Internal),
-    };
-
-    if !models_with_status.is_empty() {
-        model_objects.push(ModelObject {
-            id: "default".to_string(),
-            object: "model",
-            created: state.get_creation_time(),
-            owned_by: "local",
-            root: Some("default".to_string()),
-            parent: None,
-            adapter_generation: None,
-            status: None,
-            tools_available: None,
-            mcp_tools_count: None,
-            mcp_servers_connected: None,
-        });
-    }
-
-    for (model_id, status) in models_with_status {
-        let (tools_available, mcp_tools_count, mcp_servers_connected) =
-            if status == CoreModelStatus::Loaded {
-                let tools_count = match state.get_tools_count(Some(&model_id)) {
-                    Ok(count) => count,
-                    Err(_) => return openai_error_response(ApiError::internal()),
-                };
-                let has_mcp = match state.has_mcp_client(Some(&model_id)) {
-                    Ok(has_mcp) => has_mcp,
-                    Err(_) => return openai_error_response(ApiError::internal()),
-                };
-
-                if has_mcp || tools_count > 0 {
-                    (Some(tools_count > 0), Some(tools_count), Some(1))
-                } else {
-                    (None, None, None)
-                }
-            } else {
-                (None, None, None)
-            };
-
-        model_objects.push(ModelObject {
-            root: Some(model_id.clone()),
-            id: model_id,
-            object: "model",
-            created: state.get_creation_time(),
-            owned_by: "local",
-            parent: None,
-            adapter_generation: None,
-            status: Some(status.to_string()),
-            tools_available,
-            mcp_tools_count,
-            mcp_servers_connected,
-        });
-    }
-
-    let adapter_models = match list_lora_adapter_models(&state) {
-        Ok(models) => models,
-        Err(error) => return openai_error_from_error(&error, ApiErrorKind::Internal),
-    };
-    for adapter_model in adapter_models {
-        model_objects.push(ModelObject {
-            root: Some(adapter_model.adapter.alias.clone()),
-            id: adapter_model.id,
-            object: "model",
-            created: state.get_creation_time(),
-            owned_by: "local",
-            parent: Some(adapter_model.parent),
-            adapter_generation: Some(adapter_model.adapter.generation.to_string()),
-            status: Some(CoreModelStatus::Loaded.to_string()),
-            tools_available: None,
-            mcp_tools_count: None,
-            mcp_servers_connected: None,
-        });
-    }
-
-    Json(ModelObjects {
-        object: "list",
-        data: model_objects,
-    })
-    .into_response()
+    json_response(list_models(&state))
 }
 
 #[utoipa::path(
@@ -316,78 +238,12 @@ pub async fn calibration_apply(
     .await
 }
 
-/// Request for model operations (unload, reload, status)
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
-pub struct ModelOperationRequest {
-    #[schema(example = "my-model")]
-    pub model_id: String,
-}
-
-/// Model status enum
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum ModelStatus {
-    Loaded,
-    Unloaded,
-    Reloading,
-}
-
-/// Response for model status operations
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
-pub struct ModelStatusResponse {
-    #[schema(example = "my-model")]
-    pub model_id: String,
-    pub status: ModelStatus,
-}
-
 fn model_operation_request(
     payload: Result<Json<ModelOperationRequest>, JsonRejection>,
 ) -> Result<ModelOperationRequest, ApiError> {
     payload
         .map(|Json(request)| request)
         .map_err(ApiError::from_json_rejection)
-}
-
-fn model_status_response(model_id: String, status: ModelStatus) -> Response {
-    Json(ModelStatusResponse { model_id, status }).into_response()
-}
-
-fn unload_model_result(model_id: String, result: Result<(), InferenceRsError>) -> Response {
-    match result {
-        Ok(()) | Err(InferenceRsError::ModelAlreadyUnloaded(_)) => {
-            model_status_response(model_id, ModelStatus::Unloaded)
-        }
-        Err(error) => openai_error_from_error(&error, ApiErrorKind::Internal),
-    }
-}
-
-fn reload_model_result(model_id: String, result: Result<(), InferenceRsError>) -> Response {
-    match result {
-        Ok(()) | Err(InferenceRsError::ModelAlreadyLoaded(_)) => {
-            model_status_response(model_id, ModelStatus::Loaded)
-        }
-        Err(error) => openai_error_from_error(&error, ApiErrorKind::Internal),
-    }
-}
-
-fn get_model_status_result(
-    model_id: String,
-    result: Result<Option<CoreModelStatus>, InferenceRsError>,
-) -> Response {
-    match result {
-        Ok(Some(CoreModelStatus::Loaded)) => model_status_response(model_id, ModelStatus::Loaded),
-        Ok(Some(CoreModelStatus::Unloaded)) => {
-            model_status_response(model_id, ModelStatus::Unloaded)
-        }
-        Ok(Some(CoreModelStatus::Reloading)) => {
-            model_status_response(model_id, ModelStatus::Reloading)
-        }
-        Ok(None) => openai_error_from_error(
-            &InferenceRsError::ModelNotFound(model_id),
-            ApiErrorKind::Internal,
-        ),
-        Err(error) => openai_error_from_error(&error, ApiErrorKind::Internal),
-    }
 }
 
 #[utoipa::path(
@@ -409,13 +265,10 @@ pub async fn unload_model(
     State(state): ExtractedInferenceRsState,
     payload: Result<Json<ModelOperationRequest>, JsonRejection>,
 ) -> Response {
-    let request = match model_operation_request(payload) {
-        Ok(request) => request,
-        Err(error) => return openai_error_response(error),
-    };
-    let model_id = request.model_id;
-    let result = state.unload_model(&model_id);
-    unload_model_result(model_id, result)
+    match model_operation_request(payload) {
+        Ok(request) => json_response(unload(&state, request)),
+        Err(error) => openai_error_response(error),
+    }
 }
 
 #[utoipa::path(
@@ -437,13 +290,10 @@ pub async fn reload_model(
     State(state): ExtractedInferenceRsState,
     payload: Result<Json<ModelOperationRequest>, JsonRejection>,
 ) -> Response {
-    let request = match model_operation_request(payload) {
-        Ok(request) => request,
-        Err(error) => return openai_error_response(error),
-    };
-    let model_id = request.model_id;
-    let result = state.reload_model(&model_id).await;
-    reload_model_result(model_id, result)
+    match model_operation_request(payload) {
+        Ok(request) => json_response(reload(&state, request).await),
+        Err(error) => openai_error_response(error),
+    }
 }
 
 #[utoipa::path(
@@ -464,13 +314,10 @@ pub async fn get_model_status(
     State(state): ExtractedInferenceRsState,
     payload: Result<Json<ModelOperationRequest>, JsonRejection>,
 ) -> Response {
-    let request = match model_operation_request(payload) {
-        Ok(request) => request,
-        Err(error) => return openai_error_response(error),
-    };
-    let model_id = request.model_id;
-    let result = state.get_model_status(&model_id);
-    get_model_status_result(model_id, result)
+    match model_operation_request(payload) {
+        Ok(request) => json_response(status(&state, request)),
+        Err(error) => openai_error_response(error),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -702,11 +549,7 @@ pub async fn delete_session(
 
 #[cfg(test)]
 mod tests {
-    use axum::{
-        body::{to_bytes, Body},
-        extract::FromRequest,
-        http::Request as HttpRequest,
-    };
+    use axum::{body::Body, extract::FromRequest, http::Request as HttpRequest};
 
     use super::*;
 
@@ -727,80 +570,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn unload_model_results_use_operation_statuses() {
-        assert_eq!(
-            unload_model_result("model".to_string(), Ok(())).status(),
-            StatusCode::OK
-        );
-        assert_eq!(
-            unload_model_result(
-                "model".to_string(),
-                Err(InferenceRsError::ModelAlreadyUnloaded("model".to_string())),
-            )
-            .status(),
-            StatusCode::OK
-        );
-        assert_eq!(
-            unload_model_result(
-                "missing".to_string(),
-                Err(InferenceRsError::ModelNotFound("missing".to_string())),
-            )
-            .status(),
-            StatusCode::NOT_FOUND
-        );
-        assert_eq!(
-            unload_model_result(
-                "model".to_string(),
-                Err(InferenceRsError::NoLoaderConfig("model".to_string())),
-            )
-            .status(),
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            unload_model_result(
-                "model".to_string(),
-                Err(InferenceRsError::ModelReloading("model".to_string())),
-            )
-            .status(),
-            StatusCode::CONFLICT
-        );
-        assert_eq!(
-            unload_model_result("model".to_string(), Err(InferenceRsError::EnginePoisoned),)
-                .status(),
-            StatusCode::INTERNAL_SERVER_ERROR
-        );
-    }
-
-    #[test]
-    fn reload_and_status_results_preserve_idempotency() {
-        assert_eq!(
-            reload_model_result(
-                "model".to_string(),
-                Err(InferenceRsError::ModelAlreadyLoaded("model".to_string())),
-            )
-            .status(),
-            StatusCode::OK
-        );
-        assert_eq!(
-            reload_model_result(
-                "model".to_string(),
-                Err(InferenceRsError::ModelReloading("model".to_string())),
-            )
-            .status(),
-            StatusCode::CONFLICT
-        );
-        assert_eq!(
-            get_model_status_result("missing".to_string(), Ok(None)).status(),
-            StatusCode::NOT_FOUND
-        );
-        assert_eq!(
-            get_model_status_result("model".to_string(), Ok(Some(CoreModelStatus::Reloading)),)
-                .status(),
-            StatusCode::OK
-        );
-    }
-
     #[tokio::test]
     async fn lifecycle_json_rejections_use_openai_statuses() {
         let request = HttpRequest::builder()
@@ -814,21 +583,5 @@ mod tests {
 
         assert_eq!(error.status(), StatusCode::BAD_REQUEST);
         assert_eq!(error.code.as_deref(), Some("invalid_request_body"));
-    }
-
-    #[tokio::test]
-    async fn internal_model_errors_do_not_expose_details() {
-        let response = reload_model_result(
-            "model".to_string(),
-            Err(InferenceRsError::ReloadFailed(
-                "private failure".to_string(),
-            )),
-        );
-        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
-
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let body = String::from_utf8(body.to_vec()).unwrap();
-        assert!(!body.contains("private failure"));
-        assert!(body.contains("Internal server error"));
     }
 }

@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 6
+#define INFERENCE_ABI_VERSION_PATCH 7
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -169,7 +169,8 @@ typedef struct inference_string inference_string;
 /* Loads an engine from a JSON spec: {"model": <model selection>, "model_id"?, "runtime"?: {"device": "auto" | "cpu" |
  * "cuda:N" | "metal:N", "seed", "max_seqs", "prefix_cache_n", "no_kv_cache", "chat_template", "jinja_explicit",
  * "max_model_len", "isq", "paged_attn", "token_source"}, "agentic"?: {"max_tool_rounds", "tool_dispatch_url",
- * "agent_permission"}}. The model selection is the ModelSelected JSON, e.g. {"Plain": {"model_id": "org/model"}}.
+ * "agent_permission"}, "adapters"?: {"runtime_updates", "root"}}. The model selection is the ModelSelected JSON, e.g.
+ * {"Plain": {"model_id": "org/model"}}.
  * A malformed spec is INFERENCE_ERR_INVALID_ARGUMENT, a device this build or machine lacks is
  * INFERENCE_ERR_NOT_AVAILABLE, and a model that fails to load is INFERENCE_ERR_LOAD_FAILED. */
 INFERENCE_API inference_status inference_engine_load(const char *spec, size_t spec_len,
@@ -261,6 +262,32 @@ INFERENCE_API inference_status inference_responses_delete(const inference_engine
 /* Cancels a queued or running background response and returns it; a finished one comes back unchanged. */
 INFERENCE_API inference_status inference_responses_cancel(const inference_engine *engine, const char *response_id,
                                                          size_t response_id_len, inference_string **out_response);
+
+/* The served models (the GET /v1/models body): the "default" alias, each model with its status, and each loaded LoRA
+ * adapter as a model of its own. */
+INFERENCE_API inference_status inference_models_list(const inference_engine *engine, inference_string **out_response);
+/* Unloads, reloads or reports a model; the request is {"model_id"} and out_response receives {"model_id", "status":
+ * "loaded" | "unloaded" | "reloading"}. Unloading an unloaded model or reloading a loaded one succeeds. An unknown
+ * model is INFERENCE_ERR_NOT_FOUND. */
+INFERENCE_API inference_status inference_model_unload(const inference_engine *engine, const char *request,
+                                                     size_t request_len, inference_string **out_response);
+INFERENCE_API inference_status inference_model_reload(const inference_engine *engine, const char *request,
+                                                     size_t request_len, inference_string **out_response);
+INFERENCE_API inference_status inference_model_status(const inference_engine *engine, const char *request,
+                                                     size_t request_len, inference_string **out_response);
+
+/* LoRA adapters. Listing takes {"model"?} and returns the GET /v1/lora_adapters body. Loading takes {"lora_name",
+ * "lora_path", "load_inplace"?, "expected_generation"?, "model"?} and unloading {"lora_name", "expected_generation"?,
+ * "model"?}; both return the adapter object and need "adapters": {"runtime_updates": true} in the engine spec (and,
+ * with "root", a lora_path under it). One load runs at a time; a second is INFERENCE_ERR_UNAVAILABLE. Disabled updates
+ * ("lora_updates_disabled"), a path outside the root ("adapter_path_forbidden") and a model mid-reload or an adapter
+ * runtime at capacity (the error's "code" says which) are INFERENCE_ERR_INVALID_REQUEST. */
+INFERENCE_API inference_status inference_lora_adapters_list(const inference_engine *engine, const char *request,
+                                                           size_t request_len, inference_string **out_response);
+INFERENCE_API inference_status inference_lora_adapter_load(const inference_engine *engine, const char *request,
+                                                          size_t request_len, inference_string **out_response);
+INFERENCE_API inference_status inference_lora_adapter_unload(const inference_engine *engine, const char *request,
+                                                            size_t request_len, inference_string **out_response);
 
 /* The string's bytes, NUL-terminated; valid until the string is freed. "" for NULL. */
 INFERENCE_API const char *inference_string_data(const inference_string *string);

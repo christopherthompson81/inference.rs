@@ -1471,6 +1471,7 @@ pub fn anthropic_error_type(kind: ApiErrorKind) -> &'static str {
             "invalid_request_error"
         }
         ApiErrorKind::NotFound => "not_found_error",
+        ApiErrorKind::Forbidden => "permission_error",
         ApiErrorKind::Conflict => "conflict_error",
         ApiErrorKind::PayloadTooLarge => "request_too_large",
         ApiErrorKind::RateLimited => "rate_limit_error",

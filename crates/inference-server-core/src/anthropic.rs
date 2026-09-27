@@ -145,6 +145,7 @@ fn anthropic_error_status(kind: ApiErrorKind) -> http::StatusCode {
             http::StatusCode::BAD_REQUEST
         }
         ApiErrorKind::NotFound => http::StatusCode::NOT_FOUND,
+        ApiErrorKind::Forbidden => http::StatusCode::FORBIDDEN,
         ApiErrorKind::Conflict => http::StatusCode::CONFLICT,
         ApiErrorKind::PayloadTooLarge => http::StatusCode::PAYLOAD_TOO_LARGE,
         ApiErrorKind::RateLimited => http::StatusCode::TOO_MANY_REQUESTS,
@@ -339,7 +340,7 @@ pub async fn anthropic_count_tokens(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::handler_core::INTERNAL_ERROR_MESSAGE;
+    use crate::api_error::INTERNAL_ERROR_MESSAGE;
     use axum::{
         body::{to_bytes, Body},
         extract::FromRequest,
@@ -370,6 +371,11 @@ mod tests {
                 ApiErrorKind::NotFound,
                 http::StatusCode::NOT_FOUND,
                 "not_found_error",
+            ),
+            (
+                ApiErrorKind::Forbidden,
+                http::StatusCode::FORBIDDEN,
+                "permission_error",
             ),
             (
                 ApiErrorKind::Conflict,

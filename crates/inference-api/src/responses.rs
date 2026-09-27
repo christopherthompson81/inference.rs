@@ -761,6 +761,7 @@ fn api_error_code(error: &ApiError) -> String {
     error.code.clone().unwrap_or_else(|| match error.kind {
         ApiErrorKind::InvalidRequest => "invalid_request".to_string(),
         ApiErrorKind::NotFound => "not_found".to_string(),
+        ApiErrorKind::Forbidden => "forbidden".to_string(),
         ApiErrorKind::Conflict => "conflict".to_string(),
         ApiErrorKind::PayloadTooLarge => "request_body_too_large".to_string(),
         ApiErrorKind::UnsupportedMediaType => "invalid_content_type".to_string(),

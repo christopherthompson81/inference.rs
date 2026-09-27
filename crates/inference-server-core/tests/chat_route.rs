@@ -211,3 +211,25 @@ async fn responses_stream_names_its_events_and_ends_with_done() -> anyhow::Resul
     }
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn adapter_routes_use_the_openai_error_envelope() -> anyhow::Result<()> {
+    let dir = support::tiny_checkpoint()?;
+    let app = router(dir.path()).await?;
+    let response = app
+        .clone()
+        .oneshot(Request::get("/v1/lora_adapters?model=no-such-model").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: Value = serde_json::from_str(&body_text(response).await?)?;
+    assert_eq!(body["error"]["code"], "model_not_found", "{body}");
+    assert_eq!(body["error"]["type"], "invalid_request_error", "{body}");
+
+    let response = app
+        .oneshot(Request::get("/v1/lora_adapters?model=a&model=b").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_str(&body_text(response).await?)?;
+    assert_eq!(body["error"]["code"], "invalid_query", "{body}");
+    Ok(())
+}

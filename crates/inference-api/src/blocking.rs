@@ -47,9 +47,31 @@ impl BlockingEngine {
         &self.engine
     }
 
+    // Runs `op` on a runtime worker with owned copies of the engine and the request.
+    fn call<T, Fut>(&self, request: &[u8], op: impl FnOnce(Engine, Vec<u8>) -> Fut) -> T
+    where
+        T: Send + 'static,
+        Fut: std::future::Future<Output = T> + Send + 'static,
+    {
+        run(op(self.engine.clone(), request.to_vec()))
+    }
+
+    fn stream<S, Fut>(
+        &self,
+        request: &[u8],
+        op: impl FnOnce(Engine, Vec<u8>) -> Fut,
+    ) -> Result<BlockingStream, ApiError>
+    where
+        S: Stream<Item = String> + Send + 'static,
+        Fut: std::future::Future<Output = Result<S, ApiError>> + Send + 'static,
+    {
+        self.call(request, op).map(BlockingStream::new)
+    }
+
     pub fn chat_json(&self, request: &[u8], media: MediaAttachments) -> Result<String, ApiError> {
-        let (engine, request) = (self.engine.clone(), request.to_vec());
-        run(async move { engine.chat_json(&request, media).await })
+        self.call(request, |engine, request| async move {
+            engine.chat_json(&request, media).await
+        })
     }
 
     pub fn chat_stream_json(
@@ -57,50 +79,90 @@ impl BlockingEngine {
         request: &[u8],
         media: MediaAttachments,
     ) -> Result<BlockingStream, ApiError> {
-        let (engine, request) = (self.engine.clone(), request.to_vec());
-        run(async move { engine.chat_stream_json(&request, media).await })
-            .map(|stream| BlockingStream::new(stream.map(|event| event.to_json())))
+        self.stream(request, |engine, request| async move {
+            engine
+                .chat_stream_json(&request, media)
+                .await
+                .map(|stream| stream.map(|item| item.to_json()))
+        })
     }
 
     pub fn completion_json(&self, request: &[u8]) -> Result<String, ApiError> {
-        let (engine, request) = (self.engine.clone(), request.to_vec());
-        run(async move { engine.completion_json(&request).await })
+        self.call(request, |engine, request| async move {
+            engine.completion_json(&request).await
+        })
     }
 
     pub fn completion_stream_json(&self, request: &[u8]) -> Result<BlockingStream, ApiError> {
-        let (engine, request) = (self.engine.clone(), request.to_vec());
-        run(async move { engine.completion_stream_json(&request).await })
-            .map(|stream| BlockingStream::new(stream.map(|event| event.to_json())))
+        self.stream(request, |engine, request| async move {
+            engine
+                .completion_stream_json(&request)
+                .await
+                .map(|stream| stream.map(|item| item.to_json()))
+        })
     }
 
     pub fn anthropic_messages_json(&self, request: &[u8]) -> Result<String, ApiError> {
-        let (engine, request) = (self.engine.clone(), request.to_vec());
-        run(async move { engine.anthropic_messages_json(&request).await })
+        self.call(request, |engine, request| async move {
+            engine.anthropic_messages_json(&request).await
+        })
     }
 
     pub fn anthropic_messages_stream_json(
         &self,
         request: &[u8],
     ) -> Result<BlockingStream, ApiError> {
-        let (engine, request) = (self.engine.clone(), request.to_vec());
-        run(async move { engine.anthropic_messages_stream_json(&request).await })
-            .map(|stream| BlockingStream::new(stream.map(|event| event.to_json())))
+        self.stream(request, |engine, request| async move {
+            engine
+                .anthropic_messages_stream_json(&request)
+                .await
+                .map(|stream| stream.map(|item| item.to_json()))
+        })
     }
 
     pub fn responses_json(&self, request: &[u8]) -> Result<String, ApiError> {
-        let (engine, request) = (self.engine.clone(), request.to_vec());
-        run(async move { engine.responses_json(&request).await })
+        self.call(request, |engine, request| async move {
+            engine.responses_json(&request).await
+        })
     }
 
     pub fn responses_stream_json(&self, request: &[u8]) -> Result<BlockingStream, ApiError> {
-        let (engine, request) = (self.engine.clone(), request.to_vec());
-        run(async move { engine.responses_stream_json(&request).await })
-            .map(|stream| BlockingStream::new(stream.map(|item| item.to_json())))
+        self.stream(request, |engine, request| async move {
+            engine
+                .responses_stream_json(&request)
+                .await
+                .map(|stream| stream.map(|item| item.to_json()))
+        })
     }
 
     pub fn embeddings_json(&self, request: &[u8]) -> Result<String, ApiError> {
-        let (engine, request) = (self.engine.clone(), request.to_vec());
-        run(async move { engine.embeddings_json(&request).await })
+        self.call(request, |engine, request| async move {
+            engine.embeddings_json(&request).await
+        })
+    }
+
+    pub fn reload_model_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.reload_model_json(&request).await
+        })
+    }
+
+    pub fn lora_adapters_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.lora_adapters_json(&request).await
+        })
+    }
+
+    pub fn load_lora_adapter_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.load_lora_adapter_json(&request).await
+        })
+    }
+
+    pub fn unload_lora_adapter_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.unload_lora_adapter_json(&request).await
+        })
     }
 }
 

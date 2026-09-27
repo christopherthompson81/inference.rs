@@ -329,3 +329,50 @@ Review fixes:
 - Header: unknown models are NOT_FOUND, not INVALID_REQUEST; lines reflowed to 120.
 - Tests: GET on a streamed id; the follow-up's `input_tokens` exceed the first request's; HTTP 404
   `previous_response_not_found`.
+
+## Run 11 - 2026-09-27 15:55
+
+Change: model and LoRA adapter management on the engine surface.
+- `inference-api/src/models.rs`: `list_models`, `unload_model`, `reload_model`, `model_status` and the request and
+  status types, from the server's handlers. `lora_adapters.rs` git-moves from the server: the filesystem guard
+  (adapter root, handle re-verification, one load at a time) and `load_adapter` / `unload_adapter` / `list_adapters`.
+  The server routes frame HTTP only.
+- One LoRA error mapping. `LoraAdapterApiError` (its own status, code and envelope) is gone; LoRA failures are
+  `ApiError`s, with the lifecycle routes' specific codes (`lora_adapter_already_loaded`, `lora_rank_limit_exceeded`,
+  ...) now also on inference paths, which used to collapse them to `lora_state_conflict` (the docs list the specific
+  ones). New `ApiErrorKind::Forbidden` (403, Anthropic `permission_error`) for paths outside the adapter root. The
+  lifecycle routes now answer with the OpenAI envelope (adds `param`; a 429 is `rate_limit_error`), and every 429 carries
+  `Retry-After: 1`. The skills route's copy of the Anthropic error responder is replaced by the shared one.
+- Engine spec `adapters: {runtime_updates, root}`; loading and unloading are `lora_updates_disabled` (Forbidden) without
+  it, as the server hides those routes unless its env var enables them.
+- `BlockingEngine` builds every call on one `call` helper.
+- ABI 0.0.7: `inference_models_list`, `inference_model_{unload,reload,status}`,
+  `inference_lora_adapters_list`, `inference_lora_adapter_{load,unload}`.
+
+Test, first run: after unload, reload, the second (idempotent) reload failed `model_not_found`. Cause, in core:
+`reload_model` never returned `ModelAlreadyLoaded` (it looked only in the unloaded map), so the "already loaded is
+success" branch the server had was dead; and it marked the model reloading before that lookup, so the early return
+left it marked, and `model_status` said "reloading" from then on. Now it checks the loaded map, then the unloaded
+state, then marks with one `insert` (which also closes the check-then-mark race).
+
+Tests: ABI unload/reload are idempotent, chat works after a reload, unknown models are NOT_FOUND, adapter loads are
+refused outside the root and for missing paths, and without `runtime_updates`; HTTP adapter errors use the OpenAI
+envelope. `docs/openapi.json` loses the LoRA-specific error schemas, like the other routes' errors.
+
+Local CI, first run: `unpredictable_function_pointer_comparisons` in the new ABI test; it pairs each call with its
+request now.
+
+Review fixes:
+- The reloading mark could still strand: it was cleared after `do_reload_model(...).await`, so a dropped caller (an
+  HTTP client that disconnects mid-reload) or a loader panic left the model "reloading" for good. `reload_model` now
+  marks first and clears through a `ReloadingMark` drop guard, and checks loaded and unloaded state after marking, so
+  two reloads can no longer both pass the checks and load the model twice. Core test: a failed reload leaves no mark,
+  and a refused one leaves the running reload's mark.
+- `get_sender`'s auto-reload treats `ModelAlreadyLoaded` (another request won the race) as success; before, the now
+  real error would have failed an ordinary inference request with 409.
+- The adapter path is checked against the root before its metadata, and the not-a-directory message no longer echoes
+  the canonical path, so a caller cannot probe what exists outside the root.
+- `ListLoraAdaptersQuery` stays lenient about extra query parameters, as before. `from_status` maps 403 to Forbidden.
+  One `json_response` helper in `handler_core`. Dead Unavailable/Overloaded masking in `from_lora_error` removed.
+- Header: which adapter refusals are INVALID_REQUEST. Tests: Forbidden in both status tables; LoRA codes survive on
+  the inference path.

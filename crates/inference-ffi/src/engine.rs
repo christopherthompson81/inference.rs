@@ -485,6 +485,139 @@ pub unsafe extern "C" fn inference_responses_cancel(
     )
 }
 
+/// Safety: `engine` is a live handle and `out_response` valid for a write.
+#[no_mangle]
+pub unsafe extern "C" fn inference_models_list(
+    engine: *const inference_engine,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    guard(|| {
+        out_arg(out_response, "out_response")?;
+        let engine = engine
+            .as_ref()
+            .ok_or_else(|| Failure::invalid("engine is NULL"))?;
+        let response = engine.engine.engine().models_json().map_err(api_failure)?;
+        out_response.write(string_handle(response));
+        Ok(())
+    })
+}
+
+/// Safety: as for `inference_chat`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_model_unload(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| {
+            engine
+                .engine()
+                .unload_model_json(request)
+                .map_err(api_failure)
+        },
+    )
+}
+
+/// Safety: as for `inference_chat`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_model_reload(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| engine.reload_model_json(request).map_err(api_failure),
+    )
+}
+
+/// Safety: as for `inference_chat`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_model_status(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| {
+            engine
+                .engine()
+                .model_status_json(request)
+                .map_err(api_failure)
+        },
+    )
+}
+
+/// Safety: as for `inference_chat`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_lora_adapters_list(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| engine.lora_adapters_json(request).map_err(api_failure),
+    )
+}
+
+/// Safety: as for `inference_chat`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_lora_adapter_load(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| engine.load_lora_adapter_json(request).map_err(api_failure),
+    )
+}
+
+/// Safety: as for `inference_chat`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_lora_adapter_unload(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| {
+            engine
+                .unload_lora_adapter_json(request)
+                .map_err(api_failure)
+        },
+    )
+}
+
 /// Safety: `stream` is a live handle not used concurrently; `out_event` and `out_done` are valid for writes.
 #[no_mangle]
 pub unsafe extern "C" fn inference_stream_next(
