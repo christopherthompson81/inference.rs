@@ -426,153 +426,6 @@ pub(crate) fn join_path_list(paths: Option<&[PathBuf]>, delimiter: &str) -> Opti
     })
 }
 
-pub(crate) async fn build_pipeline_from_text_loader(
-    mut builder: crate::TextModelBuilder,
-    loader: Box<dyn inference_core::Loader>,
-) -> anyhow::Result<(Arc<Mutex<dyn Pipeline>>, SchedulerConfig, AddModelConfig)> {
-    use inference_core::*;
-
-    let mtp_runtime = MtpRuntimeConfig::new(builder.prefix_cache_n.unwrap_or(0));
-
-    builder.paged_attn_cfg = paged_attn_with_serving_capacity(
-        builder.paged_attn_cfg,
-        builder.max_num_seqs,
-        builder.prefix_cache_n.unwrap_or(0),
-    )?;
-
-    let engine_config = build_engine_config(
-        builder.throughput_logging,
-        builder.search_embedding_model,
-        builder.search_callback.clone(),
-        &builder.tool_callbacks,
-        builder.no_kv_cache,
-        builder.prefix_cache_n,
-    );
-    let mcp_client_config = builder.mcp_client_config.clone();
-    let device = resolve_device(builder.force_cpu, builder.device.clone())?;
-    builder.paged_attn_cfg = reserve_external_mtp_memory_with_runtime(
-        builder.paged_attn_cfg,
-        builder.mtp_config.as_ref(),
-        mtp_runtime,
-        &builder.dtype,
-        &device,
-    )?;
-    let isq_type = resolve_isq_type(builder.isq.as_ref(), &device)?;
-    let device_map_setting =
-        builder
-            .device_mapping
-            .clone()
-            .unwrap_or(inference_core::DeviceMapSetting::Auto(
-                inference_core::AutoDeviceMapParams::default_text(),
-            ));
-    let paged_attn_requested = builder.paged_attn_cfg.is_some();
-
-    let pipeline = loader.load_model_from_hf(
-        builder.hf_revision,
-        builder.token_source,
-        &builder.dtype,
-        &device,
-        !builder.with_logging,
-        device_map_setting,
-        isq_type,
-        builder.paged_attn_cfg,
-    )?;
-    if let Some(mtp_config) = builder.mtp_config.clone() {
-        pipeline
-            .lock()
-            .await
-            .attach_speculative_with_runtime(SpeculativeConfig::Mtp(mtp_config), mtp_runtime)?;
-    }
-
-    let scheduler_config =
-        scheduler_config_from_pipeline(&pipeline, paged_attn_requested, builder.max_num_seqs)
-            .await?;
-
-    let add_model_config = AddModelConfig {
-        engine_config,
-        mcp_client_config,
-        loader_config: None,
-        code_exec_config: builder.code_exec_config.clone(),
-        shell_config: builder.shell_config.clone(),
-    };
-
-    Ok((pipeline, scheduler_config, add_model_config))
-}
-
-pub(crate) async fn build_pipeline_from_gguf_loader(
-    mut builder: crate::GgufModelBuilder,
-    loader: Box<dyn inference_core::Loader>,
-) -> anyhow::Result<(Arc<Mutex<dyn Pipeline>>, SchedulerConfig, AddModelConfig)> {
-    use inference_core::*;
-
-    let mtp_runtime = MtpRuntimeConfig::new(builder.prefix_cache_n.unwrap_or(0));
-
-    builder.paged_attn_cfg = paged_attn_with_serving_capacity(
-        builder.paged_attn_cfg,
-        builder.max_num_seqs,
-        builder.prefix_cache_n.unwrap_or(0),
-    )?;
-
-    let engine_config = build_engine_config(
-        builder.throughput_logging,
-        builder.search_embedding_model,
-        builder.search_callback.clone(),
-        &builder.tool_callbacks,
-        builder.no_kv_cache,
-        builder.prefix_cache_n,
-    );
-    let device = resolve_device(builder.force_cpu, builder.device.clone())?;
-    builder.paged_attn_cfg = reserve_external_mtp_memory_with_runtime(
-        builder.paged_attn_cfg,
-        builder.mtp_config.as_ref(),
-        mtp_runtime,
-        &builder.dtype,
-        &device,
-    )?;
-    let default_device_map = if builder.mmproj_files.is_some() {
-        AutoDeviceMapParams::default_multimodal()
-    } else {
-        AutoDeviceMapParams::default_text()
-    };
-    let device_map_setting = builder
-        .device_mapping
-        .clone()
-        .unwrap_or(DeviceMapSetting::Auto(default_device_map));
-    let paged_attn_requested = builder.paged_attn_cfg.is_some();
-    let isq_type = resolve_isq_type(builder.isq.as_ref(), &device)?;
-
-    let pipeline = loader.load_model_from_hf(
-        builder.hf_revision,
-        builder.token_source,
-        &builder.dtype,
-        &device,
-        !builder.with_logging,
-        device_map_setting,
-        isq_type,
-        builder.paged_attn_cfg,
-    )?;
-    if let Some(mtp_config) = builder.mtp_config.clone() {
-        pipeline
-            .lock()
-            .await
-            .attach_speculative_with_runtime(SpeculativeConfig::Mtp(mtp_config), mtp_runtime)?;
-    }
-
-    let scheduler_config =
-        scheduler_config_from_pipeline(&pipeline, paged_attn_requested, builder.max_num_seqs)
-            .await?;
-
-    let add_model_config = AddModelConfig {
-        engine_config,
-        mcp_client_config: builder.mcp_client_config.clone(),
-        loader_config: None,
-        code_exec_config: builder.code_exec_config.clone(),
-        shell_config: builder.shell_config.clone(),
-    };
-
-    Ok((pipeline, scheduler_config, add_model_config))
-}
-
 /// Create a Model from pipeline components.
 /// This is the common code path used by all individual builder `build()` methods.
 pub async fn build_model_from_pipeline(
@@ -632,7 +485,40 @@ async fn load_from_config(
 /// Build a text model pipeline from a TextModelBuilder.
 /// Returns the pipeline, scheduler config, and AddModelConfig needed for Model creation.
 pub async fn build_text_pipeline(
+    builder: crate::TextModelBuilder,
+) -> anyhow::Result<(Arc<Mutex<dyn Pipeline>>, SchedulerConfig, AddModelConfig)> {
+    let model_selected = plain_text_selection(&builder);
+    build_text_pipeline_as(builder, model_selected, Default::default()).await
+}
+
+pub(crate) fn plain_text_selection(
+    builder: &crate::TextModelBuilder,
+) -> inference_core::ModelSelected {
+    use inference_core::*;
+    ModelSelected::Plain {
+        model_id: builder.model_id.clone(),
+        tokenizer_json: builder.tokenizer_json.clone(),
+        arch: builder.loader_type.clone(),
+        dtype: builder.dtype,
+        topology: builder.topology_path.clone(),
+        organization: Some(builder.organization),
+        write_uqff: builder.write_uqff.clone(),
+        from_uqff: join_path_list(builder.from_uqff.as_deref(), UQFF_MULTI_FILE_DELIMITER),
+        imatrix: builder.imatrix.clone(),
+        calibration_file: builder.calibration_file.clone(),
+        max_seq_len: AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
+        max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
+        hf_cache_path: builder.hf_cache_path.clone(),
+        matformer_config_path: builder.matformer_config_path.clone(),
+        matformer_slice_name: builder.matformer_slice_name.clone(),
+    }
+}
+
+// Loads `model_selected` with the text builder's runtime options; adapter builders pick their own selection.
+pub(crate) async fn build_text_pipeline_as(
     mut builder: crate::TextModelBuilder,
+    model_selected: inference_core::ModelSelected,
+    overrides: inference_core::LoadOverrides,
 ) -> anyhow::Result<(Arc<Mutex<dyn Pipeline>>, SchedulerConfig, AddModelConfig)> {
     use inference_core::*;
 
@@ -659,23 +545,7 @@ pub async fn build_text_pipeline(
         .unwrap_or(DeviceMapSetting::Auto(AutoDeviceMapParams::default_text()));
 
     let loader_config = ModelLoaderConfig {
-        model_selected: ModelSelected::Plain {
-            model_id: builder.model_id.clone(),
-            tokenizer_json: builder.tokenizer_json.clone(),
-            arch: builder.loader_type,
-            dtype: builder.dtype,
-            topology: builder.topology_path.clone(),
-            organization: Some(builder.organization),
-            write_uqff: builder.write_uqff.clone(),
-            from_uqff: join_path_list(builder.from_uqff.as_deref(), UQFF_MULTI_FILE_DELIMITER),
-            imatrix: builder.imatrix.clone(),
-            calibration_file: builder.calibration_file.clone(),
-            max_seq_len: AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
-            max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
-            hf_cache_path: builder.hf_cache_path.clone(),
-            matformer_config_path: builder.matformer_config_path.clone(),
-            matformer_slice_name: builder.matformer_slice_name.clone(),
-        },
+        model_selected,
         token_source: builder.token_source.clone(),
         hf_revision: builder.hf_revision.clone(),
         dtype: builder.dtype,
@@ -692,7 +562,7 @@ pub async fn build_text_pipeline(
         encoder_cache_memory_bytes: None,
         overrides: LoadOverrides {
             topology: builder.topology.clone(),
-            speech_cfg: None,
+            ..overrides
         },
     };
     let pipeline = load_from_config(&loader_config, builder.no_kv_cache, mtp_runtime).await?;
@@ -790,7 +660,7 @@ pub async fn build_multimodal_pipeline(
         encoder_cache_memory_bytes: builder.encoder_cache_memory_bytes,
         overrides: LoadOverrides {
             topology: builder.topology.clone(),
-            speech_cfg: None,
+            ..Default::default()
         },
     };
     let pipeline = load_from_config(&loader_config, false, mtp_runtime).await?;
@@ -823,7 +693,60 @@ pub async fn build_multimodal_pipeline(
 /// Build a GGUF model pipeline from a GgufModelBuilder.
 /// Returns the pipeline, scheduler config, and AddModelConfig needed for Model creation.
 pub async fn build_gguf_pipeline(
+    builder: crate::GgufModelBuilder,
+) -> anyhow::Result<(Arc<Mutex<dyn Pipeline>>, SchedulerConfig, AddModelConfig)> {
+    build_gguf_pipeline_as(builder, gguf_selection, Default::default()).await
+}
+
+/// Device-map sizes a GGUF selection records, derived from the builder's device mapping.
+pub(crate) struct GgufAutoMapDims {
+    pub(crate) max_seq_len: usize,
+    pub(crate) max_batch_size: usize,
+    pub(crate) max_num_images: Option<usize>,
+    pub(crate) max_image_length: Option<usize>,
+}
+
+pub(crate) fn gguf_selection(
+    builder: &crate::GgufModelBuilder,
+    dims: GgufAutoMapDims,
+) -> inference_core::ModelSelected {
+    use inference_core::*;
+    ModelSelected::GGUF {
+        tok_model_id: builder.tok_model_id.clone(),
+        quantized_model_id: builder.model_id.clone(),
+        quantized_filename: builder.files.join(GGUF_MULTI_FILE_DELIMITER),
+        tokenizer_json: builder.tokenizer_json.clone(),
+        mmproj_filename: builder
+            .mmproj_files
+            .as_ref()
+            .map(|files| files.join(GGUF_MULTI_FILE_DELIMITER)),
+        lora_adapters: builder.lora_adapters.clone().unwrap_or_default(),
+        lora_runtime_config: builder
+            .lora_adapters
+            .as_ref()
+            .map(|_| builder.lora_runtime_config),
+        dtype: builder.dtype,
+        topology: builder.topology_path.clone(),
+        organization: Some(builder.organization),
+        write_uqff: builder.write_uqff.clone(),
+        imatrix: builder.imatrix.clone(),
+        calibration_file: builder.calibration_file.clone(),
+        max_edge: builder.max_edge,
+        max_seq_len: dims.max_seq_len,
+        max_batch_size: dims.max_batch_size,
+        max_num_images: dims.max_num_images,
+        max_image_length: dims.max_image_length,
+        hf_cache_path: builder.hf_cache_path.clone(),
+        matformer_config_path: builder.matformer_config_path.clone(),
+        matformer_slice_name: builder.matformer_slice_name.clone(),
+    }
+}
+
+// Loads the GGUF selection `select` builds with the GGUF builder's runtime options.
+pub(crate) async fn build_gguf_pipeline_as(
     mut builder: crate::GgufModelBuilder,
+    select: impl FnOnce(&crate::GgufModelBuilder, GgufAutoMapDims) -> inference_core::ModelSelected,
+    overrides: inference_core::LoadOverrides,
 ) -> anyhow::Result<(Arc<Mutex<dyn Pipeline>>, SchedulerConfig, AddModelConfig)> {
     use inference_core::*;
 
@@ -886,35 +809,15 @@ pub async fn build_gguf_pipeline(
     };
 
     let loader_config = ModelLoaderConfig {
-        model_selected: ModelSelected::GGUF {
-            tok_model_id: builder.tok_model_id.clone(),
-            quantized_model_id: builder.model_id.clone(),
-            quantized_filename: builder.files.join(GGUF_MULTI_FILE_DELIMITER),
-            tokenizer_json: builder.tokenizer_json.clone(),
-            mmproj_filename: builder
-                .mmproj_files
-                .as_ref()
-                .map(|files| files.join(GGUF_MULTI_FILE_DELIMITER)),
-            lora_adapters: builder.lora_adapters.clone().unwrap_or_default(),
-            lora_runtime_config: builder
-                .lora_adapters
-                .as_ref()
-                .map(|_| builder.lora_runtime_config),
-            dtype: builder.dtype,
-            topology: builder.topology_path.clone(),
-            organization: Some(builder.organization),
-            write_uqff: builder.write_uqff.clone(),
-            imatrix: builder.imatrix.clone(),
-            calibration_file: builder.calibration_file.clone(),
-            max_edge: builder.max_edge,
-            max_seq_len,
-            max_batch_size,
-            max_num_images,
-            max_image_length,
-            hf_cache_path: builder.hf_cache_path.clone(),
-            matformer_config_path: builder.matformer_config_path.clone(),
-            matformer_slice_name: builder.matformer_slice_name.clone(),
-        },
+        model_selected: select(
+            &builder,
+            GgufAutoMapDims {
+                max_seq_len,
+                max_batch_size,
+                max_num_images,
+                max_image_length,
+            },
+        ),
         token_source: builder.token_source.clone(),
         hf_revision: builder.hf_revision.clone(),
         dtype: builder.dtype,
@@ -931,7 +834,7 @@ pub async fn build_gguf_pipeline(
         encoder_cache_memory_bytes: builder.encoder_cache_memory_bytes,
         overrides: LoadOverrides {
             topology: builder.topology.clone(),
-            speech_cfg: None,
+            ..overrides
         },
     };
     let pipeline = load_from_config(&loader_config, builder.no_kv_cache, mtp_runtime).await?;
@@ -1038,8 +941,8 @@ pub async fn build_speech_pipeline(
         mtp_config: None,
         encoder_cache_memory_bytes: None,
         overrides: LoadOverrides {
-            topology: None,
             speech_cfg: builder.cfg,
+            ..Default::default()
         },
     };
     let pipeline = load_from_config(&loader_config, false, MtpRuntimeConfig::default()).await?;
@@ -1101,7 +1004,7 @@ pub async fn build_embedding_pipeline(
         encoder_cache_memory_bytes: None,
         overrides: LoadOverrides {
             topology: builder.topology.clone(),
-            speech_cfg: None,
+            ..Default::default()
         },
     };
     let pipeline = load_from_config(&loader_config, false, MtpRuntimeConfig::default()).await?;
@@ -1191,7 +1094,7 @@ pub async fn build_auto_pipeline(
         encoder_cache_memory_bytes: builder.encoder_cache_memory_bytes,
         overrides: LoadOverrides {
             topology: builder.topology.clone(),
-            speech_cfg: None,
+            ..Default::default()
         },
     };
     let pipeline = load_from_config(&loader_config, builder.no_kv_cache, mtp_runtime).await?;
