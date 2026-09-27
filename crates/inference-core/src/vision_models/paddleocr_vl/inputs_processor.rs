@@ -293,7 +293,7 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
         let config = other_config.expect("Need a PreProcessorConfig config.");
         let config: &PreProcessorConfig = config.downcast_ref().expect("Downcast failed.");
 
-        // Per row, as rows sit at different chunks; grids attach once the prompt so far has image tokens, else phantom rope.
+        // Per row, as rows sit at different chunks; a grid attaches once its image tokens are in, else phantom rope.
         let image_pad_id = tokenizer.token_to_id(PaddleOcrVlProcessor::IMAGE_PLACEHOLDER);
         let mut grids: Vec<Vec<ImageGrid>> = Vec::with_capacity(input_seqs.len());
         let mut hashes: Vec<Vec<u64>> = Vec::with_capacity(input_seqs.len());
@@ -334,12 +334,14 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
                     .map(<[u64]>::to_vec)
                     .unwrap_or_default()
             });
+            // The model walks rows by their grids, so a row contributes only the seen images' patches.
+            let seen_patches = row_grids.iter().map(|&(t, h, w)| t * h * w).sum::<usize>();
             grids.push(row_grids);
             let Some(pixel_values) = pixel_values else {
                 continue;
             };
-            if is_prompt {
-                pixel_values_accum.push(pixel_values);
+            if is_prompt && seen_patches > 0 {
+                pixel_values_accum.push(pixel_values.narrow(0, 0, seen_patches)?);
                 vision_rows.push(row);
             }
         }

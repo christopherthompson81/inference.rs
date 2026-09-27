@@ -73,3 +73,19 @@ test time from `crates/inference/tests/fixtures/paddleocr_vl/tiny`) raised wheth
   `prompt_position_source_toks`.
 - Result: all three tiny tests pass on CPU and CUDA (twice each). Mutation: retain set back to false fails the new
   test on CPU (`cat expects at least one tensor`).
+
+## Run 6 - 2026-09-27 04:50
+
+- Second review: with grids truncated to the images seen, a batch whose earlier image row stops before its last image
+  read later rows' patches at the wrong offset (the model walks rows by their grids, the processor still pushed every
+  image's patches). The processor now passes only the seen images' patches and skips rows that have seen none, which
+  also covers rows whose chunk had not reached their first image (misaligned before this work too).
+- Tests now also assert `usage.prompt_tokens_details.cached_tokens > 0` where a hit must happen. That exposed two
+  cases where none can:
+  - Non-paged: an exact repeat never hits; `search_for_matching_cache` returns no match when the whole prompt is
+    cached, since the forward needs at least one new token. General to every model, not PaddleOCR-specific.
+  - Paged: hits are whole blocks and never end inside an image, so a prefix that ends at an image's end token (one
+    image vs the same image plus a second) can only be served by the token-granular non-paged cacher.
+- The prefix test now shares a long prompt past the image and extends it for the repeat, and compares each cached
+  decode with a fresh model instance; the two-image partial-hit test asserts the hit on CPU only.
+- Result: all three tiny tests pass on CPU and CUDA; the pixel-bytes hash collision mutation fails on both.
