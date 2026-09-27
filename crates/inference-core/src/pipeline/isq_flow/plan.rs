@@ -1,13 +1,11 @@
 //! Load-time ISQ planning: flag validation, capture-mode selection, pool install.
 
-use anyhow::Result;
-use candle_core::{DType, Device};
-use inference_quant::IsqType;
-use tracing::info;
-
 use std::{path::PathBuf, sync::Arc};
 
-use inference_quant::QuantizedWeightSource;
+use anyhow::Result;
+use candle_core::{DType, Device};
+use inference_quant::{IsqType, QuantizedWeightSource};
+use tracing::info;
 
 use crate::{
     device_map::DeviceMapper,
