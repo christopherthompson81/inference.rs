@@ -13,9 +13,9 @@ impl MultimodalPromptPrefixer for Qwen2_5VLPrefixer {
             "{}{prompt}",
             format!(
                 "{}{}{}",
-                Qwen2_5VLProcessor::VISION_START,
-                Qwen2_5VLProcessor::IMAGE_PAD,
-                Qwen2_5VLProcessor::VISION_END
+                Qwen2VLProcessor::VISION_START,
+                Qwen2VLProcessor::IMAGE_PAD,
+                Qwen2VLProcessor::VISION_END
             )
             .repeat(image_indexes.len())
         )
@@ -53,7 +53,7 @@ impl MultimodalModelLoader for Qwen2_5VLLoader {
         _preprocessor_config: PreProcessorConfig,
         max_edge: Option<u32>,
     ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(Qwen2_5VLProcessor::new(max_edge))
+        Arc::new(Qwen2VLProcessor::new(max_edge))
     }
     fn supports_paged_attention(&self, _config: &str) -> bool {
         true
