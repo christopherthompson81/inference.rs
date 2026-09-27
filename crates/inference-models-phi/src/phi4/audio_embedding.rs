@@ -9,14 +9,12 @@ use candle_nn::Module;
 use inference_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
 
 use crate::{
+    conformer::encoder::ConformerEncoder,
     layers::{self, Activation},
     paged_attention::encoder_cache::{CacheModality, EncoderCacheManager},
-    {
-        conformer::encoder::ConformerEncoder,
-        phi4::{
-            config::{Phi4MMAudioConfig, Phi4MMAudioEmbedConfig},
-            mm_embedding::InputMode,
-        },
+    phi4::{
+        config::{Phi4MMAudioConfig, Phi4MMAudioEmbedConfig},
+        mm_embedding::InputMode,
     },
 };
 

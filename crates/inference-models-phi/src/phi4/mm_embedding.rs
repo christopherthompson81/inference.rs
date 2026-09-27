@@ -9,12 +9,10 @@ use inference_quant::{QuantMethod, ShardedVarBuilder};
 
 use crate::{
     paged_attention::encoder_cache::EncoderCacheManager,
+    phi4::image_embedding::IMAGE_SPECIAL_TOKEN_ID,
     utils::unvarbuilder::UnVarBuilder,
-    {
-        phi4::image_embedding::IMAGE_SPECIAL_TOKEN_ID,
-        vision::multimodal_layout::{
-            MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
-        },
+    vision::multimodal_layout::{
+        MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
     },
 };
 

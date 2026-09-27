@@ -32,11 +32,9 @@ use crate::{
     },
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
-    {
-        vision::clip::{ClipConfig, ClipVisionTransformer},
-        vision::multimodal_layout::{
-            MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
-        },
+    vision::clip::{ClipConfig, ClipVisionTransformer},
+    vision::multimodal_layout::{
+        MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
     },
 };
 

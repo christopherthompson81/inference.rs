@@ -1,4 +1,4 @@
-//! Llama-family text models: Llama, Mistral, Mixtral and SmolLM3.
+//! Llama-family models: the Llama, Mistral, Mixtral and SmolLM3 text models, and LLaVA, Idefics 2/3, Mistral 3, Mllama, Llama 4 and Voxtral.
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use inference_nn::{

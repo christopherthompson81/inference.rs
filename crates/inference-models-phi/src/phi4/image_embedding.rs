@@ -11,11 +11,9 @@ use inference_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
 use crate::{
     layers::{AvgPool2d, ReflectionPad2d},
     paged_attention::encoder_cache::{CacheModality, EncoderCacheManager},
+    phi4::config::Phi4MMImgProcessorConfig,
     utils::unvarbuilder::UnVarBuilder,
-    {
-        phi4::config::Phi4MMImgProcessorConfig,
-        vision::siglip::{SiglipVisionConfig, SiglipVisionTransformer},
-    },
+    vision::siglip::{SiglipVisionConfig, SiglipVisionTransformer},
 };
 
 use super::{config::Phi4MMImageEmbedConfig, Phi4MMConfig};
