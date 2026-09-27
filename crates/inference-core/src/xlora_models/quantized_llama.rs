@@ -20,11 +20,11 @@ use crate::device_map::{DeviceMappedMask, DeviceMapper};
 use crate::layers::{CausalMaskConfig, CausalMasker, QRmsNorm, RotaryEmbedding, Sdpa};
 use crate::pipeline::{extract_logits, Cache, EitherCache};
 
-use super::classifier::XLoraClassifier;
-use super::{verify_sanity_adapters, NonGranularState, ScalingsMaker, XLoraConfig};
 use crate::gguf::metadata::ContentMetadata;
 use crate::models::quantized_llama::PropsGGUF;
 use crate::pipeline::model_config as ModelConfig;
+use inference_nn::xlora::XLoraClassifier;
+use inference_nn::xlora::{verify_sanity_adapters, NonGranularState, ScalingsMaker, XLoraConfig};
 
 const DEFAULT_MAX_SEQ_LEN: u32 = 4096;
 const SUPPORTED_LAYERS: [&str; 8] = [

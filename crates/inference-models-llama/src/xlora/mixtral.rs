@@ -5,13 +5,16 @@ use crate::layers::masker::CausalMaskConfig;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, SdpaParams},
-    layers::{self, RotaryEmbedding, Sdpa},
+    kv_cache::EitherCache,
+    layers::{self, Activation, RotaryEmbedding, Sdpa},
     lora::{linear_no_bias, LinearLayerLike, LoraConfig, Ordering},
+    model::{IsqModel, NormalLoadingMetadata},
     paged_attention::ModelConfigMetadata,
-    pipeline::{EitherCache, IsqModel, NormalLoadingMetadata},
     utils::progress::NiceProgressBar,
 };
-/// Mistral LLM, https://github.com/mistralai/mistral-src
+/// Mixtral Model
+/// https://github.com/huggingface/transformers/blob/main/src/transformers/models/mixtral/modeling_mixtral.py
+/// https://mistral.ai/news/mixtral-of-experts/
 use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{QuantMethod, ShardedVarBuilder};
 use std::{collections::HashMap, sync::Arc};
@@ -20,101 +23,13 @@ use tracing::info;
 
 use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
-    layers::{Activation, CausalMasker, RmsNorm},
-    models::mistral::Config,
-    pipeline::{extract_logits, Cache, NormalModel},
+    kv_cache::Cache,
+    layers::{CausalMasker, RmsNorm},
+    mixtral::Config,
+    model::{extract_logits, NormalModel},
 };
 
-use super::{classifier::XLoraClassifier, config::XLoraConfig, NonGranularState, ScalingsMaker};
-
-#[derive(Clone)]
-#[allow(clippy::upper_case_acronyms)]
-struct MLP {
-    gate_proj: Arc<dyn LinearLayerLike + Send + Sync>,
-    up_proj: Arc<dyn LinearLayerLike + Send + Sync>,
-    down_proj: Arc<dyn LinearLayerLike + Send + Sync>,
-    act_fn: Activation,
-}
-
-impl MLP {
-    #[allow(clippy::too_many_arguments)]
-    fn new(
-        cfg: &Config,
-        vb: ShardedVarBuilder,
-        lora_config: &[((String, String), LoraConfig)],
-        count: &mut usize,
-        ord: &Ordering,
-        mapper: &dyn DeviceMapper,
-        layer_idx: usize,
-        loading_isq: bool,
-        preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
-    ) -> Result<Self> {
-        let hidden_sz = cfg.hidden_size;
-        let intermediate_sz = cfg.intermediate_size;
-        let gate_proj = linear_no_bias(
-            hidden_sz,
-            intermediate_sz,
-            mapper.set_device(layer_idx, vb.pp("gate_proj"), loading_isq),
-            mapper.set_device(layer_idx, vb.pp("gate_proj"), false),
-            lora_config,
-            count,
-            ord,
-            preload_adapters,
-        )?;
-        let up_proj = linear_no_bias(
-            hidden_sz,
-            intermediate_sz,
-            mapper.set_device(layer_idx, vb.pp("up_proj"), loading_isq),
-            mapper.set_device(layer_idx, vb.pp("up_proj"), false),
-            lora_config,
-            count,
-            ord,
-            preload_adapters,
-        )?;
-        let down_proj = linear_no_bias(
-            intermediate_sz,
-            hidden_sz,
-            mapper.set_device(layer_idx, vb.pp("down_proj"), loading_isq),
-            mapper.set_device(layer_idx, vb.pp("down_proj"), false),
-            lora_config,
-            count,
-            ord,
-            preload_adapters,
-        )?;
-        Ok(Self {
-            gate_proj,
-            up_proj,
-            down_proj,
-            act_fn: cfg.hidden_act,
-        })
-    }
-
-    fn forward(
-        &self,
-        xs: &Tensor,
-        scalings: Option<Tensor>,
-        global_scaling_weight: f64,
-        is_scaling_pass: Option<f64>,
-    ) -> Result<Tensor> {
-        let lhs = self
-            .gate_proj
-            .lora_forward(xs, scalings.clone(), global_scaling_weight, is_scaling_pass)?
-            .apply(&self.act_fn)?;
-        let rhs = self.up_proj.lora_forward(
-            xs,
-            scalings.clone(),
-            global_scaling_weight,
-            is_scaling_pass,
-        )?;
-        let res = self.down_proj.lora_forward(
-            &(lhs * rhs)?,
-            scalings,
-            global_scaling_weight,
-            is_scaling_pass,
-        )?;
-        Ok(res)
-    }
-}
+use inference_nn::xlora::{NonGranularState, ScalingsMaker, XLoraClassifier, XLoraConfig};
 
 struct Attention {
     q_proj: Arc<dyn LinearLayerLike + Send + Sync>,
@@ -146,7 +61,7 @@ impl Attention {
         let hidden_sz = cfg.hidden_size;
         let num_heads = cfg.num_attention_heads;
         let num_kv_heads = cfg.num_key_value_heads;
-        let head_dim = cfg.head_dim();
+        let head_dim = hidden_sz / num_heads;
         let q_proj = linear_no_bias(
             hidden_sz,
             num_heads * head_dim,
@@ -297,9 +212,223 @@ impl Attention {
     }
 }
 
+#[derive(Clone)]
+struct BlockSparseTop2MLP {
+    w1: Arc<dyn LinearLayerLike + Send + Sync>,
+    w2: Arc<dyn LinearLayerLike + Send + Sync>,
+    w3: Arc<dyn LinearLayerLike + Send + Sync>,
+    act_fn: Activation,
+}
+
+impl BlockSparseTop2MLP {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        cfg: &Config,
+        vb: ShardedVarBuilder,
+        lora_config: &[((String, String), LoraConfig)],
+        count: &mut usize,
+        ord: &Ordering,
+        mapper: &dyn DeviceMapper,
+        layer_idx: usize,
+        loading_isq: bool,
+        preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
+    ) -> Result<Self> {
+        let hidden_sz = cfg.hidden_size;
+        let intermediate_sz = cfg.intermediate_size;
+        let w1 = linear_no_bias(
+            hidden_sz,
+            intermediate_sz,
+            mapper.set_device(layer_idx, vb.pp("w1"), loading_isq),
+            mapper.set_device(layer_idx, vb.pp("w1"), false),
+            lora_config,
+            count,
+            ord,
+            preload_adapters,
+        )?;
+        let w2 = linear_no_bias(
+            intermediate_sz,
+            hidden_sz,
+            mapper.set_device(layer_idx, vb.pp("w2"), loading_isq),
+            mapper.set_device(layer_idx, vb.pp("w2"), false),
+            lora_config,
+            count,
+            ord,
+            preload_adapters,
+        )?;
+        let w3 = linear_no_bias(
+            hidden_sz,
+            intermediate_sz,
+            mapper.set_device(layer_idx, vb.pp("w3"), loading_isq),
+            mapper.set_device(layer_idx, vb.pp("w3"), false),
+            lora_config,
+            count,
+            ord,
+            preload_adapters,
+        )?;
+        Ok(Self {
+            w1,
+            w2,
+            w3,
+            act_fn: cfg.hidden_act,
+        })
+    }
+
+    fn forward(
+        &self,
+        xs: &Tensor,
+        scalings: Option<Tensor>,
+        global_scaling_weight: f64,
+        is_scaling_pass: Option<f64>,
+    ) -> Result<Tensor> {
+        let lhs = self
+            .w1
+            .lora_forward(xs, scalings.clone(), global_scaling_weight, is_scaling_pass)?
+            .apply(&self.act_fn)?;
+        let rhs =
+            self.w3
+                .lora_forward(xs, scalings.clone(), global_scaling_weight, is_scaling_pass)?;
+        let res = self.w2.lora_forward(
+            &(lhs * rhs)?,
+            scalings.clone(),
+            global_scaling_weight,
+            is_scaling_pass,
+        )?;
+        Ok(res)
+    }
+}
+
+#[derive(Clone)]
+struct SparseMoeBlock {
+    gate: Arc<dyn LinearLayerLike + Send + Sync>,
+    experts: Vec<BlockSparseTop2MLP>,
+    num_experts_per_tok: usize,
+}
+
+impl SparseMoeBlock {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        cfg: &Config,
+        vb: ShardedVarBuilder,
+        lora_config: &[((String, String), LoraConfig)],
+        count: &mut usize,
+        ord: &Ordering,
+        mapper: &dyn DeviceMapper,
+        layer_idx: usize,
+        loading_isq: bool,
+        preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
+    ) -> Result<Self> {
+        let gate = linear_no_bias(
+            cfg.hidden_size,
+            cfg.num_local_experts,
+            mapper.set_device(layer_idx, vb.pp("gate"), loading_isq),
+            mapper.set_device(layer_idx, vb.pp("gate"), false),
+            lora_config,
+            count,
+            ord,
+            preload_adapters,
+        )?;
+        let mut experts = Vec::with_capacity(cfg.num_local_experts);
+        let vb = vb.pp("experts");
+        for idx in 0..cfg.num_local_experts {
+            let expert = BlockSparseTop2MLP::new(
+                cfg,
+                vb.pp(idx),
+                lora_config,
+                count,
+                ord,
+                mapper,
+                layer_idx,
+                loading_isq,
+                preload_adapters,
+            )?;
+            experts.push(expert)
+        }
+        Ok(SparseMoeBlock {
+            gate,
+            experts,
+            num_experts_per_tok: cfg.num_experts_per_tok,
+        })
+    }
+
+    fn forward(
+        &self,
+        xs: &Tensor,
+        scalings: Option<Tensor>,
+        global_scaling_weight: f64,
+        is_scaling_pass: Option<f64>,
+    ) -> Result<Tensor> {
+        let (b_size, seq_len, hidden_dim) = xs.dims3()?;
+        let xs = xs.reshape(((), hidden_dim))?;
+
+        let router_logits = self.gate.lora_forward(
+            &xs,
+            scalings.clone(),
+            global_scaling_weight,
+            is_scaling_pass,
+        )?;
+        let topk = crate::ops::moe_router_topk(
+            &router_logits,
+            crate::ops::MoeRouterTopKConfig {
+                top_k: self.num_experts_per_tok,
+                score_function: crate::ops::MoeRouterScoreFunction::Softmax,
+                selected_weight: crate::ops::MoeRouterSelectedWeight::Score,
+                renormalize: true,
+                norm_min: 0.0,
+                output_scale: 1.0,
+                logit_clip: None,
+            },
+            None,
+            None,
+        )?;
+        let selected_experts = topk.indices.to_vec2::<u32>()?;
+        let routing_weights = topk.values.to_dtype(DType::F32)?.to_vec2::<f32>()?;
+
+        let mut top_x = vec![vec![]; self.experts.len()];
+        let mut selected_rws = vec![vec![]; self.experts.len()];
+        for (row_idx, (experts, weights)) in selected_experts
+            .iter()
+            .zip(routing_weights.iter())
+            .enumerate()
+        {
+            for (&expert_idx, &routing_weight) in experts.iter().zip(weights.iter()) {
+                let expert_idx = expert_idx as usize;
+                top_x[expert_idx].push(row_idx as u32);
+                selected_rws[expert_idx].push(routing_weight)
+            }
+        }
+
+        let mut ys = xs.zeros_like()?;
+        for (expert_idx, expert_layer) in self.experts.iter().enumerate() {
+            let top_x = &top_x[expert_idx];
+            if top_x.is_empty() {
+                continue;
+            }
+            let top_x = Tensor::new(top_x.as_slice(), xs.device())?;
+            let selected_rws =
+                Tensor::new(selected_rws[expert_idx].as_slice(), xs.device())?.reshape(((), 1))?;
+            // Index the correct hidden states and compute the expert hidden state for
+            // the current expert. We need to make sure to multiply the output hidden
+            // states by `routing_weights` on the corresponding tokens (top-1 and top-2)
+            let current_state = xs.index_select(&top_x, 0)?.reshape(((), hidden_dim))?;
+            // current_hidden_states = expert_layer(current_state, routing_weights[top_x_list, idx_list, None])
+            let current_hidden_states = expert_layer.forward(
+                &current_state,
+                scalings.clone(),
+                global_scaling_weight,
+                is_scaling_pass,
+            )?;
+            let current_hidden_states = current_hidden_states.broadcast_mul(&selected_rws)?;
+            ys = ys.index_add(&top_x, &current_hidden_states, 0)?;
+        }
+
+        let ys = ys.reshape((b_size, seq_len, hidden_dim))?;
+        Ok(ys)
+    }
+}
+
 struct DecoderLayer {
     self_attn: Attention,
-    mlp: MLP,
+    block_sparse_moe: SparseMoeBlock,
     input_layernorm: RmsNorm,
     post_attention_layernorm: RmsNorm,
 }
@@ -330,9 +459,9 @@ impl DecoderLayer {
             loading_isq,
             preload_adapters,
         )?;
-        let mlp = MLP::new(
+        let block_sparse_moe = SparseMoeBlock::new(
             cfg,
-            vb.pp("mlp"),
+            vb.pp("block_sparse_moe"),
             lora_config,
             count,
             ord,
@@ -353,7 +482,7 @@ impl DecoderLayer {
         )?;
         Ok(Self {
             self_attn,
-            mlp,
+            block_sparse_moe,
             input_layernorm,
             post_attention_layernorm,
         })
@@ -385,12 +514,15 @@ impl DecoderLayer {
         )?;
         let xs = (xs + residual)?;
         let residual = &xs;
-        let xs = self.mlp.forward(
-            &xs.apply(&self.post_attention_layernorm)?,
-            scalings,
-            global_scaling_weight,
-            is_scaling_pass,
-        )?;
+        let xs = self
+            .block_sparse_moe
+            .forward(
+                &xs.apply(&self.post_attention_layernorm)?,
+                scalings.clone(),
+                global_scaling_weight,
+                is_scaling_pass,
+            )?
+            .to_dtype(residual.dtype())?;
         residual + xs
     }
 }
@@ -401,9 +533,9 @@ pub struct XLoraModel {
     norm: RmsNorm,
     lm_head: Arc<dyn LinearLayerLike + Send + Sync>,
     sliding_window: Option<usize>,
-    dtype: DType,
     device: Device,
     cache: EitherCache,
+    dtype: DType,
     max_seq_len: usize,
     xlora_classifier: Option<XLoraClassifier>,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
@@ -430,15 +562,15 @@ impl XLoraModel {
             );
         }
         let mapper = normal_loading_metadata.mapper;
-
         let vb_m = vb.pp("model");
+
         let embed_tokens = layers::embedding(
             cfg.vocab_size,
             cfg.hidden_size,
             mapper.set_nm_device(vb_m.pp("embed_tokens"), normal_loading_metadata.loading_isq),
             &cfg.quantization_config,
         )?;
-        let head_dim = cfg.head_dim();
+        let head_dim = cfg.hidden_size / cfg.num_attention_heads;
         let mut layers = Vec::with_capacity(cfg.num_hidden_layers);
         let vb_l = vb_m.pp("layers");
         let ropes = crate::device_map::per_layer_device(
@@ -456,6 +588,7 @@ impl XLoraModel {
                 )
             },
         )?;
+
         let mut count = 0;
         for layer_idx in NiceProgressBar::<_, 'b'>(
             0..cfg.num_hidden_layers,
@@ -500,15 +633,14 @@ impl XLoraModel {
                     .unwrap()
                     .merge_weights()?;
 
-                Arc::get_mut(&mut layer.mlp.down_proj)
+                Arc::get_mut(&mut layer.block_sparse_moe.gate)
                     .unwrap()
                     .merge_weights()?;
-                Arc::get_mut(&mut layer.mlp.gate_proj)
-                    .unwrap()
-                    .merge_weights()?;
-                Arc::get_mut(&mut layer.mlp.up_proj)
-                    .unwrap()
-                    .merge_weights()?;
+                for expert in layer.block_sparse_moe.experts.iter_mut() {
+                    Arc::get_mut(&mut expert.w1).unwrap().merge_weights()?;
+                    Arc::get_mut(&mut expert.w2).unwrap().merge_weights()?;
+                    Arc::get_mut(&mut expert.w3).unwrap().merge_weights()?;
+                }
             }
         }
         let norm = RmsNorm::new(
@@ -538,7 +670,7 @@ impl XLoraModel {
             sliding_window: cfg.sliding_window,
             device: normal_loading_metadata.real_device,
             dtype: vb.dtype(),
-            cache: EitherCache::Full(Cache::new(cfg.num_hidden_layers, true)),
+            cache: EitherCache::Full(Cache::new(cfg.num_hidden_layers, false)),
             max_seq_len: cfg.max_position_embeddings,
             xlora_classifier: xlora_config.map(|xlora_config| {
                 XLoraClassifier::new(xlora_config, count, lora_config.len(), vb, false).unwrap()
@@ -551,8 +683,8 @@ impl XLoraModel {
                 num_kv_heads: cfg.num_key_value_heads,
                 num_attn_heads: cfg.num_attention_heads,
                 sliding_window: cfg.sliding_window,
-                k_head_dim: cfg.head_dim(),
-                v_head_dim: cfg.head_dim(),
+                k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+                v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
                 kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
             },
         })
@@ -699,7 +831,7 @@ impl NormalModel for XLoraModel {
     fn forward(
         &self,
         _input_ids: &Tensor,
-        _ctx: &mut crate::pipeline::ModelForwardContext<'_>,
+        _ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         unreachable!()
     }
@@ -710,7 +842,7 @@ impl NormalModel for XLoraModel {
         seqlen_offsets: &[usize],
         seqlen_offsets_full: &[usize],
         no_kv_cache: bool,
-        non_granular_state: &Option<crate::xlora_models::NonGranularState>,
+        non_granular_state: &Option<NonGranularState>,
         context_lens: Vec<(usize, usize)>,
         _position_ids: Vec<usize>,
         flash_params: &FlashParams,

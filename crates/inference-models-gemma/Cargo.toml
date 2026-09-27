@@ -21,6 +21,7 @@ rand_isaac.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 statrs.workspace = true
+tqdm.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

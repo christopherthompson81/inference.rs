@@ -580,3 +580,13 @@ Review follow-ups:
   `DiffusionLoaderType` (core impls `arch_metadata` on them) and the diffusion request processor. The Flux stepper's
   hub access is inverted through a `RepoFileFetcher` closure built by core's loader, so the new crate has no hf_hub dep.
 - Next: X-LoRA models (xlora_models, ~150k) into their family crates.
+
+## Run 30 - 2026-09-27 (afternoon)
+
+- Question: what does moving the eight non-GGUF X-LoRA models into their family crates take out of core?
+- Change: ScalingsMaker, XLoraClassifier and XLoraConfig to `inference_nn::xlora`; gemma/gemma2, llama/mistral/mixtral,
+  phi2/phi3 and starcoder2 to `xlora/` in their family crates. The two GGUF ones stay in core (they read gguf Content).
+- Command: `cargo llvm-lines -p inference-core --lib --features cuda` after a green `local_ci.sh --lint --tests --cuda
+  --slim` (2127 CPU, 2445 CUDA tests).
+- Result: 4,047,334 lines (78,650 copies), from 4,134,514: -87k, 2.1%. Less than the 150k the module table gave
+  xlora_models; the GGUF pair and their instantiations of core generics stay behind.

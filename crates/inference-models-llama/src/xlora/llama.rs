@@ -5,10 +5,11 @@ use crate::layers::masker::CausalMaskConfig;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, SdpaParams},
+    kv_cache::EitherCache,
     layers::{Llama3RotaryEmbedding, Sdpa},
     lora::{linear_no_bias as linear, LinearLayerLike, LoraConfig, Ordering},
+    model::IsqModel,
     paged_attention::ModelConfigMetadata,
-    pipeline::{EitherCache, IsqModel},
     utils::progress::NiceProgressBar,
 };
 use candle_core::{DType, Device, Result, Tensor};
@@ -20,12 +21,13 @@ use tracing::info;
 
 use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
+    kv_cache::LayerCaches,
     layers::{embedding, CausalMasker, RmsNorm},
-    models::llama::Config,
-    pipeline::{self, extract_logits, LayerCaches, NormalLoadingMetadata, NormalModel},
+    llama::Config,
+    model::{extract_logits, NormalLoadingMetadata, NormalModel},
 };
 
-use super::{classifier::XLoraClassifier, NonGranularState, ScalingsMaker, XLoraConfig};
+use inference_nn::xlora::{NonGranularState, ScalingsMaker, XLoraClassifier, XLoraConfig};
 
 struct CausalSelfAttention {
     q_proj: Arc<dyn LinearLayerLike + Send + Sync>,
@@ -101,7 +103,7 @@ impl CausalSelfAttention {
         let positions = Tensor::from_vec(positions, seqlen_offsets.len(), q.device())?;
         let (q, k) = self.rotary_emb.forward(&q, &k, &positions)?;
 
-        let (k, v) = crate::pipeline::Cache::update_kv_cache(&mut kv_cache[block_idx], k, v)?;
+        let (k, v) = crate::kv_cache::Cache::update_kv_cache(&mut kv_cache[block_idx], k, v)?;
 
         let y = Sdpa.run_attention(&q, &k, &v, mask, Some(flash_params), &self.sdpa_params)?;
 
@@ -383,7 +385,7 @@ pub struct XLoraLlama {
     blocks: Vec<Block>,
     ln_f: RmsNorm,
     lm_head: Arc<dyn LinearLayerLike + Send + Sync>,
-    kv_cache: pipeline::EitherCache,
+    kv_cache: crate::kv_cache::EitherCache,
     device: Device,
     xlora_classifier: Option<XLoraClassifier>,
     dtype: DType,
@@ -637,7 +639,7 @@ impl XLoraLlama {
             blocks,
             ln_f,
             lm_head,
-            kv_cache: EitherCache::Full(pipeline::Cache::new(cfg.num_hidden_layers, true)),
+            kv_cache: EitherCache::Full(crate::kv_cache::Cache::new(cfg.num_hidden_layers, true)),
             device: normal_loading_metadata.real_device,
             xlora_classifier: xlora_config.map(|xlora_config| {
                 XLoraClassifier::new(xlora_config, count, lora_config.len(), vb, false).unwrap()
@@ -671,7 +673,7 @@ impl NormalModel for XLoraLlama {
     fn forward(
         &self,
         _input_ids: &Tensor,
-        _ctx: &mut crate::pipeline::ModelForwardContext<'_>,
+        _ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
         unreachable!()
     }
@@ -682,7 +684,7 @@ impl NormalModel for XLoraLlama {
         seqlen_offsets: &[usize],
         seqlen_offsets_full: &[usize],
         no_kv_cache: bool,
-        non_granular_state: &Option<crate::xlora_models::NonGranularState>,
+        non_granular_state: &Option<NonGranularState>,
         context_lens: Vec<(usize, usize)>,
         _position_ids: Vec<usize>,
         flash_params: &FlashParams,
@@ -700,7 +702,7 @@ impl NormalModel for XLoraLlama {
             flash_params_full,
         )
     }
-    fn cache(&self) -> &super::EitherCache {
+    fn cache(&self) -> &crate::kv_cache::EitherCache {
         &self.kv_cache
     }
     fn device(&self) -> &Device {
@@ -721,7 +723,7 @@ impl ScalingsMaker for XLoraLlama {
     fn dtype(&self) -> DType {
         self.dtype
     }
-    fn get_cache(&self) -> &pipeline::EitherCache {
+    fn get_cache(&self) -> &crate::kv_cache::EitherCache {
         &self.kv_cache
     }
     fn get_classifier(&self) -> &XLoraClassifier {

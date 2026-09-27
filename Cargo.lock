@@ -3285,6 +3285,7 @@ dependencies = [
  "serde_json",
  "statrs",
  "tempfile",
+ "tqdm",
  "tracing",
 ]
 
@@ -3300,6 +3301,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tqdm",
  "tracing",
 ]
 
@@ -3318,6 +3320,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tqdm",
  "tracing",
 ]
 
@@ -3333,6 +3336,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tqdm",
  "tracing",
 ]
 

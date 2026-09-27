@@ -2,8 +2,8 @@
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use inference_nn::{
-    amoe, attention, device_map, kv_cache, layers, model, moe, ops, paged_attention, speculative,
-    utils, vision,
+    amoe, attention, device_map, kv_cache, layers, lora, model, moe, ops, paged_attention,
+    speculative, utils, vision,
 };
 use inference_nn::{get_delta_from_lora_ab, serde_default_fn};
 
@@ -18,6 +18,7 @@ pub mod mixtral;
 pub mod mllama;
 pub mod smollm3;
 pub mod voxtral;
+pub mod xlora;
 
 inference_nn::json_config!(
     llama::Config,
