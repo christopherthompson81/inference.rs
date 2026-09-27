@@ -90,29 +90,7 @@ macro_rules! handle_seq_error_stateaware_ok {
     };
 }
 
-#[doc(hidden)]
-#[macro_export]
-macro_rules! handle_pipeline_forward_error {
-    ($stage: tt, $fallible:expr, $seq_slice:expr, $pipeline:expr, $label:tt, $prefix_cacher:expr) => {
-        match $fallible {
-            Ok(v) => v,
-            Err(e) => {
-                $crate::sequence_macros::report_pipeline_forward_error(
-                    $stage,
-                    e.to_string(),
-                    format!("{e:?}"),
-                    $seq_slice,
-                    &$pipeline,
-                    &$prefix_cacher,
-                )
-                .await;
-                continue $label;
-            }
-        }
-    };
-}
-
-// Boxed and out of line so the engine loop's many forward sites share one copy of the error path.
+// Boxed and out of line so every forward failure in the engine loop shares one copy of the error path.
 pub(crate) fn report_pipeline_forward_error<'a, 'b: 'a>(
     stage: &'static str,
     message: String,
