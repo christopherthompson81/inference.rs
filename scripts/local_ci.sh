@@ -2,6 +2,7 @@
 # Canonical local checks with fixed package/feature sets: scripts/local_ci.sh [--lint] [--tests] [--cuda] [--models]
 # [--slim] [--docs]; --models runs the real-checkpoint parity tests on CPU (they always run under --cuda).
 # --slim lints inference-core with no model families and with each family alone, so feature gates stay intact.
+# With --cuda, the GPU-bound CUDA suite runs in the background while the CPU lint and tests run.
 # --sweep then deletes target/debug artifacts the selected modes no longer use (stale variants pile up otherwise).
 # Build env (CC/CXX/NVCC) and INFERENCE_TEST_* paths belong in ~/.cargo/config.toml [env]; changing one rebuilds deps.
 set -euo pipefail
@@ -39,26 +40,55 @@ slim_clippy() { cargo clippy -p inference-core --lib --tests --no-default-featur
 
 if [[ $lint -eq 1 ]]; then
     cargo fmt --all -- --check
-    cargo "${CLIPPY[@]}" -- -D warnings
 fi
 if [[ $tests -eq 1 || $cuda -eq 1 || $models -eq 1 ]] && ! cargo nextest --version > /dev/null 2>&1; then
     # nextest runs each test in its own process (CUDA tests stop sharing a context) and schedules nextest.toml groups
     echo "cargo-nextest is required: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin" >&2
     exit 2
 fi
-if [[ $tests -eq 1 ]]; then
-    cargo nextest run --no-fail-fast "${TEST_TARGETS[@]}"
-    # nextest does not run doctests
-    cargo test --workspace --no-fail-fast --doc
-    cargo "${SMOKE[@]}"
+# RLIMIT_NPROC counts every process the user runs, so this test never shares the machine with another suite.
+ALONE='package(inference-sandbox) & test(rlimit_nproc_caps_processes)'
+cuda_pid=
+if [[ $cuda -eq 1 ]]; then
+    cargo "${CLIPPY[@]}" --features cuda -- -D warnings
+    # GPU tests skip themselves without a device; model-backed tests run when their INFERENCE_TEST_* path is set
+    if [[ $lint -eq 1 || $tests -eq 1 ]]; then
+        # The CUDA suite is GPU-bound, so it runs in the background while the CPU lint and tests use the cores.
+        cargo nextest run --no-run --features cuda "${TEST_TARGETS[@]}"
+        cuda_log=$(mktemp)
+        cargo nextest run --no-fail-fast --profile cuda --features cuda "${TEST_TARGETS[@]}" -E "not ($ALONE)" \
+            > "$cuda_log" 2>&1 &
+        cuda_pid=$!
+        trap 'kill "$cuda_pid" 2> /dev/null; rm -f "$cuda_log"' EXIT
+    else
+        cargo nextest run --no-fail-fast --profile cuda --features cuda "${TEST_TARGETS[@]}"
+    fi
 fi
+failed=0
+if [[ $lint -eq 1 ]]; then
+    cargo "${CLIPPY[@]}" -- -D warnings || failed=1
+fi
+if [[ $tests -eq 1 ]]; then
+    if [[ -n $cuda_pid ]]; then
+        cargo nextest run --no-fail-fast "${TEST_TARGETS[@]}" -E "not ($ALONE)" || failed=1
+    else
+        cargo nextest run --no-fail-fast "${TEST_TARGETS[@]}" || failed=1
+    fi
+    # nextest does not run doctests
+    cargo test --workspace --no-fail-fast --doc || failed=1
+    cargo "${SMOKE[@]}" || failed=1
+fi
+if [[ -n $cuda_pid ]]; then
+    wait "$cuda_pid" || failed=1
+    trap - EXIT
+    echo "---- CUDA suite ----"
+    cat "$cuda_log"
+    rm -f "$cuda_log"
+    cargo nextest run --no-fail-fast --profile cuda --features cuda "${TEST_TARGETS[@]}" -E "$ALONE" || failed=1
+fi
+[[ $failed -eq 0 ]] || exit 1
 if [[ $models -eq 1 ]]; then
     cargo nextest run --no-fail-fast --profile models "${TEST_TARGETS[@]}"
-fi
-if [[ $cuda -eq 1 ]]; then
-    # GPU tests skip themselves without a device; model-backed tests run when their INFERENCE_TEST_* path is set
-    cargo "${CLIPPY[@]}" --features cuda -- -D warnings
-    cargo nextest run --no-fail-fast --profile cuda --features cuda "${TEST_TARGETS[@]}"
 fi
 if [[ $slim -eq 1 ]]; then
     for family in "${SLIM_FAMILIES[@]}"; do slim_clippy "$family" -- -D warnings; done
