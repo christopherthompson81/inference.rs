@@ -1438,7 +1438,8 @@ fn gemma3_immediate_isq_accepts_both_text_namespaces() -> Result<()> {
 }
 
 fn paddleocr_vl_config_json() -> String {
-    include_str!("../../../vision_models/paddleocr_vl/reference_config.json").to_string()
+    include_str!("../../../../../inference-models-other/src/paddleocr_vl/reference_config.json")
+        .to_string()
 }
 
 #[test]

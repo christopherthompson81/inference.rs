@@ -733,14 +733,6 @@ fn promoted_tensor_pack_factor(
     })
 }
 
-#[cfg(any(
-    feature = "models-gemma",
-    feature = "models-llama",
-    feature = "models-other",
-    feature = "models-phi",
-    feature = "models-qwen",
-    test
-))]
 fn tied_promoted_tensor_pack_factor(
     quantization: Option<&AutoDeviceMapQuantization<'_>>,
     embedding_name: &str,
@@ -757,13 +749,6 @@ fn tied_promoted_tensor_pack_factor(
     })
 }
 
-#[cfg(any(
-    feature = "models-gemma",
-    feature = "models-llama",
-    feature = "models-other",
-    feature = "models-phi",
-    feature = "models-qwen"
-))]
 fn language_model_pack_factors(
     quantization: Option<&AutoDeviceMapQuantization<'_>>,
     embedding_name: &str,

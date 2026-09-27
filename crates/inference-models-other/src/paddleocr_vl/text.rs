@@ -7,8 +7,8 @@ use std::sync::Arc;
 use super::config::TextConfig;
 use crate::attention::{AttentionMask, Sdpa, SdpaParams};
 use crate::device_map::DeviceMapper;
+use crate::kv_cache::KvCache as EngineKvCache;
 use crate::paged_attention::{AttentionImplementation, PagedAttention};
-use crate::pipeline::KvCache as EngineKvCache;
 use crate::utils::unvarbuilder::UnVarBuilder;
 use candle_core::{DType, Device, Result, Tensor, D};
 use inference_quant::{

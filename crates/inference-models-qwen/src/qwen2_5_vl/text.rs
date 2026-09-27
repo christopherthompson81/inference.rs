@@ -8,19 +8,16 @@ use inference_quant::{
     ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
 };
 
+use super::config::Config;
 use crate::{
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
-    layers::{self, Activation, F32RmsNorm, Qwen2VLRotaryEmbedding, Sdpa},
+    kv_cache::{EitherCache, KvCache, NormalCache, NormalCacheType},
+    layers::{self, Activation, F32RmsNorm, Qwen2_5VLRotaryEmbedding, Sdpa},
+    model::{IsqModel, ModelForwardContext, NormalLoadingMetadata},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
-    pipeline::{
-        EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalCacheType,
-        NormalLoadingMetadata,
-    },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
-
-use super::config::Config;
 
 fn cache_types(
     layer_sliding_windows: &[Option<usize>],
@@ -99,7 +96,7 @@ struct Attention {
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    rotary_emb: Arc<Qwen2VLRotaryEmbedding>,
+    rotary_emb: Arc<Qwen2_5VLRotaryEmbedding>,
     paged_attn: Option<PagedAttention>,
     sdpa_params: SdpaParams,
 }
@@ -114,7 +111,7 @@ struct AttentionForward<'a> {
 
 impl Attention {
     fn new(
-        rotary_emb: Arc<Qwen2VLRotaryEmbedding>,
+        rotary_emb: Arc<Qwen2_5VLRotaryEmbedding>,
         cfg: &Config,
         sliding_window: Option<usize>,
         vb: ShardedVarBuilder,
@@ -223,11 +220,11 @@ impl Attention {
             (q, k, v)
         };
 
-        let cos_sin = &(
+        let cos_sin_relocated = &(
             cos_sin.0.to_device(q.device())?,
             cos_sin.1.to_device(q.device())?,
         );
-        self.rotary_emb.forward(cos_sin, &mut q, &mut k)?;
+        self.rotary_emb.forward(cos_sin_relocated, &mut q, &mut k)?;
         let attention_mask = if self.sdpa_params.sliding_window.is_some() {
             sliding_attention_mask
         } else {
@@ -315,7 +312,7 @@ struct DecoderLayerLoad<'a> {
 
 impl DecoderLayer {
     fn new(
-        rotary_emb: Arc<Qwen2VLRotaryEmbedding>,
+        rotary_emb: Arc<Qwen2_5VLRotaryEmbedding>,
         vb: ShardedVarBuilder,
         args: DecoderLayerLoad<'_>,
     ) -> Result<Self> {
@@ -377,7 +374,7 @@ impl DecoderLayer {
     }
 }
 
-pub struct Qwen2VLTextModel {
+pub struct Qwen2_5VLTextModel {
     embed_tokens: Arc<dyn QuantMethod>,
     pub(super) norm: F32RmsNorm,
     layers: Vec<DecoderLayer>,
@@ -391,7 +388,7 @@ pub struct Qwen2VLTextModel {
     pub(super) sliding_window: Option<usize>,
 }
 
-impl Qwen2VLTextModel {
+impl Qwen2_5VLTextModel {
     pub fn new(
         cfg: &Config,
         vb: ShardedVarBuilder,
@@ -424,7 +421,7 @@ impl Qwen2VLTextModel {
             cfg.num_hidden_layers,
             &normal_loading_metadata.real_device,
             |device| {
-                Qwen2VLRotaryEmbedding::new(
+                Qwen2_5VLRotaryEmbedding::new(
                     cfg.rope_theta as f32,
                     head_dim,
                     device,
@@ -432,7 +429,6 @@ impl Qwen2VLTextModel {
                 )
             },
         )?;
-
         let vb_l = vb_m.pp("layers");
         let layer_sliding_windows = cfg.layer_sliding_windows()?;
         let layers = NiceProgressBar::<_, 'b'>(
@@ -557,7 +553,7 @@ impl Qwen2VLTextModel {
     }
 }
 
-impl IsqModel for Qwen2VLTextModel {
+impl IsqModel for Qwen2_5VLTextModel {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
 
@@ -583,19 +579,19 @@ mod tests {
 
     #[test]
     fn eager_cache_layout_matches_layer_windows() {
-        let types = cache_types(&[None, Some(128), None], 4096);
+        let types = cache_types(&[Some(256), None, Some(256)], 8192);
 
         assert!(matches!(
             &types[0],
-            NormalCacheType::Normal { max_seq_len: 4096 }
+            NormalCacheType::SlidingWindow { window: 256 }
         ));
         assert!(matches!(
             &types[1],
-            NormalCacheType::SlidingWindow { window: 128 }
+            NormalCacheType::Normal { max_seq_len: 8192 }
         ));
         assert!(matches!(
             &types[2],
-            NormalCacheType::Normal { max_seq_len: 4096 }
+            NormalCacheType::SlidingWindow { window: 256 }
         ));
     }
 }

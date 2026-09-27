@@ -12,14 +12,12 @@ use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
     attention::{flash_backend_supports, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
+    kv_cache::{EitherCache, KvCache, NormalCache, NormalCacheType},
     layers::{
         embedding_with_legacy_tied_uqff, CausalMaskConfig, CausalMasker, Mlp, RotaryEmbedding, Sdpa,
     },
+    model::{IsqModel, ModelForwardContext, NormalLoadingMetadata},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
-    pipeline::{
-        EitherCache, IsqModel, KvCache, ModelForwardContext, NormalCache, NormalCacheType,
-        NormalLoadingMetadata,
-    },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 

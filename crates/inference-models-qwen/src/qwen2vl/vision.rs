@@ -2,11 +2,11 @@ use crate::attention::AttentionMask;
 use std::sync::Arc;
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
-use candle_nn::{Linear, Module};
-use inference_quant::{ColumnParallelLayer, QuantMethod, RowParallelLayer, ShardedVarBuilder};
+use candle_nn::{LayerNorm, Linear, Module};
+use inference_quant::{ColumnParallelLayer, QuantMethod, ShardedVarBuilder};
 
 use crate::{
-    layers::{self, Activation, Conv3dConfig, Conv3dNoBias, MatMul, RmsNorm},
+    layers::{self, layer_norm, Activation, Conv3dConfig, Conv3dNoBias, MatMul},
     ops::RepeatInterleaveOp,
     utils::unvarbuilder::UnVarBuilder,
 };
@@ -18,7 +18,7 @@ struct PatchEmbed {
     in_channels: usize,
     patch_size: usize,
     temporal_patch_size: usize,
-    hidden_size: usize,
+    embed_dim: usize,
 }
 
 // https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py#L272
@@ -29,8 +29,8 @@ impl PatchEmbed {
         }
         Ok(Self {
             proj: Conv3dNoBias::new(
-                cfg.in_chans,
-                cfg.hidden_size,
+                cfg.in_channels,
+                cfg.embed_dim,
                 [cfg.temporal_patch_size, cfg.patch_size, cfg.patch_size],
                 Conv3dConfig {
                     stride: cfg.patch_size,
@@ -38,10 +38,10 @@ impl PatchEmbed {
                 },
                 vb.pp("proj"),
             )?,
-            in_channels: cfg.in_chans,
+            in_channels: cfg.in_channels,
             patch_size: cfg.patch_size,
             temporal_patch_size: cfg.temporal_patch_size,
-            hidden_size: cfg.hidden_size,
+            embed_dim: cfg.embed_dim,
         })
     }
 
@@ -53,7 +53,7 @@ impl PatchEmbed {
             self.patch_size,
             self.patch_size,
         ))?;
-        xs.apply(&self.proj)?.reshape(((), self.hidden_size))
+        xs.apply(&self.proj)?.reshape(((), self.embed_dim))
     }
 
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
@@ -61,17 +61,16 @@ impl PatchEmbed {
         let weight = self
             .proj
             .weight()
-            .expect("Qwen2.5-VL patch embedding weight reconstruction should succeed");
+            .expect("Qwen2-VL patch embedding weight reconstruction should succeed");
         uvb.pp("proj").add_tensor("weight", weight);
         uvb.to_safetensors()
     }
 }
 
-// https://github.com/huggingface/transformers/blob/6a1ab634b6886b6560b0502e7a305c8cd881732e/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py#L75
+// https://github.com/huggingface/transformers/blob/a769ed45e17c44fd17b85c025863c4e4f2f73634/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py#L314
 struct VisionMlp {
-    gate_proj: Arc<dyn QuantMethod>,
-    up_proj: Arc<dyn QuantMethod>,
-    down_proj: Arc<dyn QuantMethod>,
+    fc1: Arc<dyn QuantMethod>,
+    fc2: Arc<dyn QuantMethod>,
     act: Activation,
 }
 
@@ -84,49 +83,21 @@ impl VisionMlp {
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
         Ok(Self {
-            gate_proj: ColumnParallelLayer::new(
-                dim,
-                hidden_dim,
-                &None,
-                true,
-                comm,
-                vb.pp("gate_proj"),
-            )?,
-            up_proj: ColumnParallelLayer::new(
-                dim,
-                hidden_dim,
-                &None,
-                true,
-                comm,
-                vb.pp("up_proj"),
-            )?,
-            down_proj: RowParallelLayer::new(
-                hidden_dim,
-                dim,
-                &None,
-                true,
-                comm,
-                vb.pp("down_proj"),
-            )?,
+            fc1: ColumnParallelLayer::new(dim, hidden_dim, &None, true, comm, vb.pp("fc1"))?,
+            fc2: ColumnParallelLayer::new(hidden_dim, dim, &None, true, comm, vb.pp("fc2"))?,
             act,
         })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let xs = xs.unsqueeze(0)?;
-        let lhs = self.gate_proj.forward(&xs)?;
-        let rhs = self.up_proj.forward(&xs)?;
-        let res = self
-            .down_proj
-            .forward(&crate::ops::mul_and_act(&lhs, &rhs, self.act)?)?;
-        res.squeeze(0)
+        let fc1 = self.act.forward(&self.fc1.forward(&xs.unsqueeze(0)?)?)?;
+        self.fc2.forward(&fc1)?.squeeze(0)
     }
 
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
-        uvb.pp("gate_proj").add(&self.gate_proj);
-        uvb.pp("up_proj").add(&self.up_proj);
-        uvb.pp("down_proj").add(&self.down_proj);
+        uvb.pp("fc1").add(&self.fc1);
+        uvb.pp("fc2").add(&self.fc2);
         uvb.to_safetensors()
     }
 }
@@ -139,8 +110,8 @@ fn rotate_half(xs: &Tensor) -> Result<Tensor> {
 }
 
 fn apply_rotary_pos_emb_vision(xs: &Tensor, freqs: &Tensor) -> Result<Tensor> {
-    let cos = freqs.cos()?.unsqueeze(D::Minus2)?.to_dtype(xs.dtype())?;
-    let sin = freqs.sin()?.unsqueeze(D::Minus2)?.to_dtype(xs.dtype())?;
+    let cos = freqs.cos()?;
+    let sin = freqs.sin()?;
 
     xs.broadcast_mul(&cos)? + rotate_half(xs)?.broadcast_mul(&sin)
 }
@@ -218,8 +189,8 @@ impl VisionAttention {
 
 // https://github.com/huggingface/transformers/blob/f2c388e3f946862f657acc1e21b272ec946fc66c/src/transformers/models/qwen2_vl/modeling_qwen2_vl.py#L418
 struct VisionBlock {
-    norm1: RmsNorm,
-    norm2: RmsNorm,
+    norm1: LayerNorm,
+    norm2: LayerNorm,
     mlp: VisionMlp,
     attn: VisionAttention,
 }
@@ -230,17 +201,18 @@ impl VisionBlock {
         vb: ShardedVarBuilder,
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
-        let norm1 = RmsNorm::new(cfg.hidden_size, 1e-6, vb.pp("norm1"))?;
-        let norm2 = RmsNorm::new(cfg.hidden_size, 1e-6, vb.pp("norm2"))?;
+        let norm1 = layer_norm(cfg.embed_dim, 1e-6, vb.pp("norm1"))?;
+        let norm2 = layer_norm(cfg.embed_dim, 1e-6, vb.pp("norm2"))?;
 
+        let mlp_hidden_dim = (cfg.embed_dim as f64 * cfg.mlp_ratio) as usize;
         let mlp = VisionMlp::new(
-            cfg.hidden_size,
-            cfg.intermediate_size,
+            cfg.embed_dim,
+            mlp_hidden_dim,
             cfg.hidden_act,
             vb.pp("mlp"),
             comm,
         )?;
-        let attn = VisionAttention::new(cfg.hidden_size, cfg.num_heads, vb.pp("attn"))?;
+        let attn = VisionAttention::new(cfg.embed_dim, cfg.num_heads, vb.pp("attn"))?;
 
         Ok(Self {
             norm1,
@@ -274,10 +246,10 @@ impl VisionBlock {
 }
 
 struct PatchMerger {
-    ln_q: RmsNorm,
+    ln_q: LayerNorm,
     mlp0: Linear,
     mlp2: Linear,
-    out_hidden_size: usize,
+    hidden_size: usize,
 }
 
 impl PatchMerger {
@@ -287,21 +259,21 @@ impl PatchMerger {
         spatial_merge_size: usize,
         vb: ShardedVarBuilder,
     ) -> Result<Self> {
-        let out_hidden_size = context_dim * spatial_merge_size.pow(2);
-        let mlp0 = layers::linear(out_hidden_size, out_hidden_size, vb.pp("mlp.0"))?;
-        let mlp2 = layers::linear(out_hidden_size, dim, vb.pp("mlp.2"))?;
+        let hidden_size = context_dim * spatial_merge_size.pow(2);
+        let mlp0 = layers::linear(hidden_size, hidden_size, vb.pp("mlp.0"))?;
+        let mlp2 = layers::linear(hidden_size, dim, vb.pp("mlp.2"))?;
         Ok(Self {
-            ln_q: RmsNorm::new(context_dim, 1e-6, vb.pp("ln_q"))?,
+            ln_q: layer_norm(context_dim, 1e-6, vb.pp("ln_q"))?,
             mlp0,
             mlp2,
-            out_hidden_size,
+            hidden_size,
         })
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         xs.unsqueeze(0)?
             .apply(&self.ln_q)?
-            .reshape(((), self.out_hidden_size))?
+            .reshape(((), self.hidden_size))?
             .apply(&self.mlp0)?
             .gelu()?
             .apply(&self.mlp2)?
@@ -342,19 +314,15 @@ impl VisionRotaryEmbedding {
     }
 }
 
-pub struct Qwen2_5VLVisionModel {
+pub struct Qwen2VLVisionModel {
     blocks: Vec<VisionBlock>,
     patch_merger: PatchMerger,
     patch_embed: PatchEmbed,
     rotary_pos_emb: VisionRotaryEmbedding,
     spatial_merge_size: usize,
-    spatial_merge_unit: usize,
-    window_size: usize,
-    patch_size: usize,
-    fullatt_block_indices: Vec<usize>,
 }
 
-impl Qwen2_5VLVisionModel {
+impl Qwen2VLVisionModel {
     pub fn new(
         cfg: &VisionConfig,
         vb: ShardedVarBuilder,
@@ -366,15 +334,15 @@ impl Qwen2_5VLVisionModel {
         }
 
         let patch_merger = PatchMerger::new(
-            cfg.out_hidden_size,
             cfg.hidden_size,
+            cfg.embed_dim,
             cfg.spatial_merge_size,
             vb.pp("merger"),
         )?;
 
         let patch_embed = PatchEmbed::new(cfg, vb.pp("patch_embed"))?;
 
-        let head_dim = cfg.hidden_size / cfg.num_heads;
+        let head_dim = cfg.embed_dim / cfg.num_heads;
         let rotary_pos_emb = VisionRotaryEmbedding::new(head_dim / 2, vb.device())?;
 
         Ok(Self {
@@ -383,10 +351,6 @@ impl Qwen2_5VLVisionModel {
             patch_merger,
             rotary_pos_emb,
             spatial_merge_size: cfg.spatial_merge_size,
-            spatial_merge_unit: cfg.spatial_merge_size * cfg.spatial_merge_size,
-            window_size: cfg.window_size,
-            patch_size: cfg.patch_size,
-            fullatt_block_indices: cfg.fullatt_block_indexes.clone(),
         })
     }
 
@@ -431,105 +395,16 @@ impl Qwen2_5VLVisionModel {
             .flatten_from(1)
     }
 
-    fn get_window_index(&self, grid_thw: &Tensor, device: &Device) -> Result<(Tensor, Vec<i64>)> {
-        const PADDING_VALUE: i32 = -100;
-        let mut window_index = Vec::new();
-        let mut cu_window_seqlens = vec![0];
-        let mut window_index_id = 0;
-        let vit_merger_window_size = self.window_size / self.spatial_merge_size / self.patch_size;
-
-        for i_thw in grid_thw.to_vec2::<u32>()? {
-            let (t, h, w) = (i_thw[0] as usize, i_thw[1] as usize, i_thw[2] as usize);
-            let llm_grid_h = h / self.spatial_merge_size;
-            let llm_grid_w = w / self.spatial_merge_size;
-            let index = Tensor::arange(0i32, (t * llm_grid_h * llm_grid_w) as i32, &Device::Cpu)?
-                .reshape((t, llm_grid_h, llm_grid_w))?;
-            let pad_h = vit_merger_window_size - llm_grid_h % vit_merger_window_size;
-            let pad_w = vit_merger_window_size - llm_grid_w % vit_merger_window_size;
-            let num_windows_h = (llm_grid_h + pad_h) / vit_merger_window_size;
-            let num_windows_w = (llm_grid_w + pad_w) / vit_merger_window_size;
-            let index_padded = {
-                let h = Tensor::full(PADDING_VALUE, (t, pad_h, llm_grid_w), &Device::Cpu)?;
-                let w = Tensor::full(PADDING_VALUE, (t, pad_h + llm_grid_h, pad_w), &Device::Cpu)?;
-                let mut index = Tensor::cat(&[index, h], D::Minus2)?;
-                index = Tensor::cat(&[index, w], D::Minus1)?;
-                index = index.reshape((
-                    t,
-                    num_windows_h,
-                    vit_merger_window_size,
-                    num_windows_w,
-                    vit_merger_window_size,
-                ))?;
-                index = index.permute((0, 1, 3, 2, 4))?.reshape((
-                    t,
-                    num_windows_h * num_windows_w,
-                    vit_merger_window_size,
-                    vit_merger_window_size,
-                ))?;
-                index
-            };
-            let seqlens = index_padded
-                .ne(PADDING_VALUE)?
-                .to_dtype(index_padded.dtype())?
-                .sum((2, 3))?
-                .flatten_all()?;
-            let index_new = index_padded
-                .flatten_all()?
-                .to_vec1::<i32>()?
-                .into_iter()
-                .filter(|x| *x != PADDING_VALUE)
-                .collect::<Vec<_>>();
-            window_index.push(Tensor::new(
-                index_new
-                    .iter()
-                    .map(|x| (x + window_index_id) as u32)
-                    .collect::<Vec<_>>(),
-                device,
-            )?);
-            let cu_seqlens_tmp = ((seqlens
-                .to_dtype(DType::F32)?
-                .cumsum(0)?
-                .to_dtype(seqlens.dtype())?
-                * self.spatial_merge_unit as f64)?
-                + cu_window_seqlens[cu_window_seqlens.len() - 1] as f64)?;
-            cu_window_seqlens.extend(
-                cu_seqlens_tmp
-                    .to_vec1::<i32>()?
-                    .into_iter()
-                    .map(|x| x as i64)
-                    .collect::<Vec<_>>(),
-            );
-            window_index_id += (t * llm_grid_h * llm_grid_w) as i32;
-        }
-
-        Ok((Tensor::cat(&window_index, 0)?, cu_window_seqlens))
-    }
-
     pub fn forward(&self, xs: &Tensor, grid_thw: &Tensor) -> Result<Tensor> {
-        let xs = self
+        let mut xs = self
             .patch_embed
             .forward(&xs.to_dtype(self.patch_merger.mlp0.weight().dtype())?)?;
         let rotary_pos_emb = self.rot_pos_emb(grid_thw, xs.device())?;
-        let (window_index, mut cu_window_seqlens) = self.get_window_index(grid_thw, xs.device())?;
-        cu_window_seqlens.dedup();
-
-        let seq_len = xs.dims2()?.0;
-        let mut xs = xs.reshape((
-            seq_len / self.spatial_merge_unit,
-            self.spatial_merge_unit,
-            (),
-        ))?;
-        xs = xs.index_select(&window_index, 0)?;
-        xs = xs.reshape((seq_len, ()))?;
-        let mut rotary_pos_emb = rotary_pos_emb.reshape((
-            seq_len / self.spatial_merge_unit,
-            self.spatial_merge_unit,
-            (),
-        ))?;
-        rotary_pos_emb = rotary_pos_emb.index_select(&window_index, 0)?;
-        rotary_pos_emb = rotary_pos_emb.reshape((seq_len, ()))?;
-        rotary_pos_emb = Tensor::cat(&[&rotary_pos_emb; 2], D::Minus1)?;
-        rotary_pos_emb = rotary_pos_emb.to_dtype(xs.dtype())?;
+        let rotary_pos_emb = rotary_pos_emb
+            .unsqueeze(1)?
+            .repeat((1, 1, 2))?
+            .unsqueeze(0)?
+            .to_dtype(xs.dtype())?;
 
         let grid_thw = grid_thw.to_device(&Device::Cpu)?;
         let cu_seqlens = (grid_thw.i((.., 1))? * grid_thw.i((.., 2))?)?
@@ -541,7 +416,7 @@ impl Qwen2_5VLVisionModel {
             .to_vec1::<u32>()?;
 
         let seq_len = xs.dim(0)?;
-        let attention_mask_full = match &cu_seqlens[..] {
+        let attention_mask = match &cu_seqlens[..] {
             &[0, len] if len == seq_len as u32 => None,
             cu_seqlens => {
                 let mut attention_mask =
@@ -558,33 +433,11 @@ impl Qwen2_5VLVisionModel {
                 Some(attention_mask)
             }
         };
-        let attention_mask_window = match &cu_window_seqlens[..] {
-            &[0, len] if len == seq_len as i64 => None,
-            cu_seqlens => {
-                let mut attention_mask =
-                    Tensor::full(f32::MIN, (1, seq_len, seq_len), xs.device())?
-                        .to_dtype(xs.dtype())?;
-                for i in 1..cu_seqlens.len() {
-                    let a = cu_seqlens[i - 1] as usize;
-                    let b = cu_seqlens[i] as usize;
-                    attention_mask = attention_mask.slice_assign(
-                        &[0..attention_mask.dim(0)?, a..b, a..b],
-                        &Tensor::zeros((1, b - a, b - a), xs.dtype(), xs.device())?,
-                    )?;
-                }
-                Some(attention_mask)
-            }
-        };
 
-        for (i, blk) in self.blocks.iter().enumerate() {
-            let attention_mask = if self.fullatt_block_indices.contains(&i) {
-                attention_mask_full.as_ref()
-            } else {
-                attention_mask_window.as_ref()
-            };
+        for blk in &self.blocks {
             xs = blk.forward(
                 &xs,
-                &match attention_mask {
+                &match &attention_mask {
                     Some(t) => AttentionMask::Custom(t.clone()),
                     None => AttentionMask::None,
                 },
@@ -592,12 +445,10 @@ impl Qwen2_5VLVisionModel {
             )?;
         }
 
-        xs = self.patch_merger.forward(&xs)?;
-        let reverse_indices = window_index.arg_sort_last_dim(true)?;
-        xs.index_select(&reverse_indices, 0)
+        self.patch_merger.forward(&xs)
     }
 
-    pub(crate) fn residual_tensors(&self) -> Vec<(String, Tensor)> {
+    pub fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
         uvb.pp("patch_embed")
             .extend(self.patch_embed.residual_tensors());
@@ -621,30 +472,30 @@ mod tests {
     fn residual_tensors_cover_the_complete_vision_checkpoint() -> Result<()> {
         let cfg = VisionConfig {
             depth: 1,
+            embed_dim: 4,
             hidden_size: 4,
-            out_hidden_size: 4,
             hidden_act: Activation::QuickGelu,
-            intermediate_size: 8,
+            mlp_ratio: 2.0,
             num_heads: 1,
-            in_chans: 1,
+            in_channels: 1,
             patch_size: 1,
             spatial_merge_size: 1,
             temporal_patch_size: 2,
-            window_size: 4,
-            fullatt_block_indexes: vec![0],
         };
         let shapes = [
             ("patch_embed.proj.weight", vec![4, 1, 2, 1, 1]),
             ("blocks.0.norm1.weight", vec![4]),
+            ("blocks.0.norm1.bias", vec![4]),
             ("blocks.0.norm2.weight", vec![4]),
-            ("blocks.0.mlp.gate_proj.weight", vec![8, 4]),
-            ("blocks.0.mlp.up_proj.weight", vec![8, 4]),
-            ("blocks.0.mlp.down_proj.weight", vec![4, 8]),
+            ("blocks.0.norm2.bias", vec![4]),
+            ("blocks.0.mlp.fc1.weight", vec![8, 4]),
+            ("blocks.0.mlp.fc2.weight", vec![4, 8]),
             ("blocks.0.attn.qkv.weight", vec![12, 4]),
             ("blocks.0.attn.qkv.bias", vec![12]),
             ("blocks.0.attn.proj.weight", vec![4, 4]),
             ("blocks.0.attn.proj.bias", vec![4]),
             ("merger.ln_q.weight", vec![4]),
+            ("merger.ln_q.bias", vec![4]),
             ("merger.mlp.0.weight", vec![4, 4]),
             ("merger.mlp.0.bias", vec![4]),
             ("merger.mlp.2.weight", vec![4, 4]),
@@ -670,7 +521,7 @@ mod tests {
             0,
             1,
         )?);
-        let model = Qwen2_5VLVisionModel::new(&cfg, vb, &comm)?;
+        let model = Qwen2VLVisionModel::new(&cfg, vb, &comm)?;
         let actual = model
             .residual_tensors()
             .into_iter()

@@ -54,7 +54,7 @@ pub struct VisionConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    pub text_config: crate::models::lfm2::Config,
+    pub text_config: crate::lfm2::Config,
     pub vision_config: VisionConfig,
     #[serde(default = "default_image_token_id")]
     pub image_token_id: usize,

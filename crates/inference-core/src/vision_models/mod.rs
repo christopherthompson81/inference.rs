@@ -15,6 +15,7 @@ pub(crate) mod image_processor;
 pub(crate) mod llava;
 #[cfg(feature = "models-llama")]
 pub(crate) mod mllama;
+#[cfg(feature = "models-other")]
 pub(crate) mod paddleocr_vl;
 #[cfg(feature = "models-phi")]
 pub(crate) mod phi3;
@@ -22,7 +23,9 @@ pub(crate) mod phi3;
 pub(crate) use phi3::phi3_inputs_processor;
 pub(crate) mod preprocessor_config;
 pub(crate) mod processor_config;
+#[cfg(feature = "models-qwen")]
 pub(crate) mod qwen2_5_vl;
+#[cfg(feature = "models-qwen")]
 pub(crate) mod qwen2vl;
 #[cfg(feature = "models-llama")]
 pub(crate) use llava::llava15;
@@ -54,17 +57,20 @@ pub(crate) mod lfm2_vl;
 pub(crate) mod llama4;
 #[cfg(feature = "models-llama")]
 pub(crate) mod mistral3;
+#[cfg(feature = "models-qwen")]
 pub(crate) mod muse_glimmer;
+#[cfg(feature = "models-qwen")]
 pub(crate) mod qwen3_5;
+#[cfg(feature = "models-qwen")]
 pub(crate) mod qwen3_5_moe;
+#[cfg(feature = "models-qwen")]
 pub(crate) mod qwen3_vl;
+#[cfg(feature = "models-qwen")]
 pub(crate) mod qwen3_vl_moe;
 #[cfg(feature = "models-llama")]
 pub(crate) mod voxtral;
 
 pub(crate) use inference_nn::vision::multimodal_layout;
-#[cfg(feature = "models-qwen")]
-pub(crate) use inference_nn::vision::siglip;
 
 use crate::gdn::RecurrentBatchKind;
 
