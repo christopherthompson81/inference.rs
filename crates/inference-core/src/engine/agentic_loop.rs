@@ -955,18 +955,11 @@ async fn do_custom_tool(
         tc
     };
 
-    let mut tool_call_ctx;
-    let dispatch_tool_ctx =
-        if is_code_exec_tool(&tc.function.name) || is_shell_tool(&tc.function.name) {
-            tool_call_ctx = ctx.tool_call_ctx.clone();
-            tool_call_ctx.round = Some(round);
-            tool_call_ctx.tool_name = Some(tc.function.name.clone());
-            &tool_call_ctx
-        } else {
-            ctx.tool_call_ctx
-        };
+    let mut dispatch_tool_ctx = ctx.tool_call_ctx.clone();
+    dispatch_tool_ctx.round = Some(round);
+    dispatch_tool_ctx.tool_name = Some(tc.function.name.clone());
 
-    let result = tool_dispatch::execute_custom_tool(ctx.engine, dispatched_ref, dispatch_tool_ctx);
+    let result = tool_dispatch::execute_custom_tool(ctx.engine, dispatched_ref, &dispatch_tool_ctx);
 
     let files: Vec<File> = result
         .files

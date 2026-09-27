@@ -393,24 +393,29 @@ pub(super) fn execute_custom_tool(
     };
 
     match &cb_with_tool.callback {
-        ToolCallbackKind::Text(callback) => match callback(&tc.function, ctx) {
-            Ok(content) => ToolResult {
-                content,
-                images: vec![],
-                video_frames: vec![],
-                files: vec![],
-            },
-            Err(e) => error_result(e),
-        },
-        ToolCallbackKind::Multimodal(callback) => match callback(&tc.function, ctx) {
-            Ok(output) => ToolResult {
-                content: output.text().to_string(),
-                images: output.images().to_vec(),
-                video_frames: output.video_frames().to_vec(),
-                files: output.files().to_vec(),
-            },
-            Err(e) => error_result(e),
-        },
+        // Host callbacks may block on I/O, so they must not hold a runtime worker others are waiting on.
+        ToolCallbackKind::Text(callback) => {
+            match tokio::task::block_in_place(|| callback(&tc.function, ctx)) {
+                Ok(content) => ToolResult {
+                    content,
+                    images: vec![],
+                    video_frames: vec![],
+                    files: vec![],
+                },
+                Err(e) => error_result(e),
+            }
+        }
+        ToolCallbackKind::Multimodal(callback) => {
+            match tokio::task::block_in_place(|| callback(&tc.function, ctx)) {
+                Ok(output) => ToolResult {
+                    content: output.text().to_string(),
+                    images: output.images().to_vec(),
+                    video_frames: output.video_frames().to_vec(),
+                    files: output.files().to_vec(),
+                },
+                Err(e) => error_result(e),
+            }
+        }
     }
 }
 

@@ -1,10 +1,12 @@
 //! A loaded engine and the operations it serves, as OpenAI-style requests and responses.
 
+use std::sync::Arc;
+
 use candle_core::Device;
 use futures::StreamExt;
 use inference_core::{
     AgentPermission, ChatCompletionResponse, CompletionResponse, ImageGenerationResponse,
-    InferenceRs, ModelSelected, Response, TokenSource,
+    InferenceRs, ModelSelected, Response, SearchCallback, TokenSource, ToolCallbackWithTool,
 };
 use serde::Deserialize;
 
@@ -41,6 +43,10 @@ use crate::{
         ResponseDeleted,
     },
     responses_types::ResponseResource,
+    skill_store::{
+        skill_api_error, AnthropicSkillVersionListObject, AnthropicSkillVersionObject, SkillFiles,
+        SkillListObject, SkillStore,
+    },
     types::SharedInferenceRsState,
 };
 
@@ -48,7 +54,7 @@ const INVALID_REQUEST_BODY: &str = "invalid_request_body";
 // Matches `inference serve`'s default, so an engine loaded from a spec batches like the server.
 pub const DEFAULT_MAX_SEQS: usize = 32;
 
-/// What to load and how to run it: the JSON form of the options `inference serve` takes. Skills are not served yet.
+/// What to load and how to run it: the JSON form of the options `inference serve` takes.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EngineSpec {
@@ -62,6 +68,43 @@ pub struct EngineSpec {
     pub agentic: AgenticSpec,
     #[serde(default)]
     pub adapters: AdapterSpec,
+    #[serde(default)]
+    pub skills: SkillsSpec,
+}
+
+/// Where uploaded skills are kept; requests reference them from the shell tool.
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SkillsSpec {
+    /// Kept across loads and shareable between engines, each reading it as it was at load; without a root the engine
+    /// keeps its skills in a directory of its own that goes away with it.
+    #[serde(default)]
+    pub root: Option<std::path::PathBuf>,
+}
+
+impl SkillsSpec {
+    fn open(self) -> Result<(SkillStore, Option<tempfile::TempDir>), EngineLoadError> {
+        let invalid =
+            |error: anyhow::Error| EngineLoadError::InvalidSpec(format!("skills: {error:#}"));
+        match self.root {
+            Some(root) => Ok((SkillStore::new(root).map_err(invalid)?, None)),
+            None => {
+                let dir =
+                    tempfile::tempdir().map_err(|error| EngineLoadError::Load(error.into()))?;
+                let store =
+                    SkillStore::new(dir.path().to_path_buf()).map_err(EngineLoadError::Load)?;
+                Ok((store, Some(dir)))
+            }
+        }
+    }
+}
+
+/// Host functions the agent loop calls: tools by name, and the backend behind `web_search_options`.
+#[derive(Default)]
+pub struct EngineCallbacks {
+    /// Called by their definitions' names.
+    pub tools: Vec<ToolCallbackWithTool>,
+    pub search: Option<Arc<SearchCallback>>,
 }
 
 /// Runtime LoRA adapter management; listing adapters is always allowed.
@@ -211,41 +254,67 @@ fn explicit_device(device: &str, seed: Option<u64>) -> Result<Device, EngineLoad
 pub struct Engine {
     chat: ChatEngine,
     adapters: LoraAdapterApiConfig,
+    // Removed with the last clone, when the engine owns its skill directory.
+    _skill_dir: Option<Arc<tempfile::TempDir>>,
 }
 
 impl Engine {
     /// Wraps an engine the caller already built, with its server-level chat policy and adapter management policy.
     pub fn new(chat: ChatEngine, adapters: LoraAdapterApiConfig) -> Self {
-        Self { chat, adapters }
+        Self {
+            chat,
+            adapters,
+            _skill_dir: None,
+        }
     }
 
-    pub async fn load(mut spec: EngineSpec) -> Result<Self, EngineLoadError> {
+    fn with_skill_dir(mut self, dir: Option<tempfile::TempDir>) -> Self {
+        self._skill_dir = dir.map(Arc::new);
+        self
+    }
+
+    pub async fn load(spec: EngineSpec) -> Result<Self, EngineLoadError> {
+        Self::load_with_callbacks(spec, EngineCallbacks::default()).await
+    }
+
+    pub async fn load_with_callbacks(
+        mut spec: EngineSpec,
+        callbacks: EngineCallbacks,
+    ) -> Result<Self, EngineLoadError> {
         let adapters = std::mem::take(&mut spec.adapters).into_config()?;
+        let (skill_store, skill_dir) = std::mem::take(&mut spec.skills).open()?;
         let agentic = AgenticDefaults {
             max_tool_rounds: spec.agentic.max_tool_rounds,
             tool_dispatch_url: spec.agentic.tool_dispatch_url.clone(),
             agent_permission: spec.agentic.agent_permission,
             approval_broker: Default::default(),
         };
-        let state = spec
-            .into_builder()?
-            .build()
-            .await
-            .map_err(EngineLoadError::Load)?;
+        let mut builder = spec.into_builder()?;
+        if let Some(search) = callbacks.search {
+            builder = builder.with_search_callback(search);
+        }
+        for tool in callbacks.tools {
+            builder = builder.with_tool_callback(tool.tool.function.name.clone(), tool);
+        }
+        let state = builder.build().await.map_err(EngineLoadError::Load)?;
         Ok(Self::new(
             ChatEngine {
                 state,
                 agentic,
-                skill_store: None,
+                skill_store: Some(Arc::new(skill_store)),
             },
             adapters,
-        ))
+        )
+        .with_skill_dir(skill_dir))
     }
 
-    pub async fn load_json(spec: &[u8]) -> Result<Self, EngineLoadError> {
+    pub async fn load_json(
+        spec: &[u8],
+        callbacks: EngineCallbacks,
+    ) -> Result<Self, EngineLoadError> {
         let spec = serde_json::from_slice(spec)
             .map_err(|error| EngineLoadError::InvalidSpec(error.to_string()))?;
-        Self::load(spec).await
+        Self::load_with_callbacks(spec, callbacks).await
     }
 
     pub fn state(&self) -> &SharedInferenceRsState {
@@ -658,6 +727,60 @@ impl Engine {
 
     pub fn file_content(&self, file_id: &str) -> Result<FileBody, ApiError> {
         files::file_content(self.state(), file_id)
+    }
+
+    fn skill_store(&self) -> Result<&SkillStore, ApiError> {
+        self.chat.skill_store.as_deref().ok_or_else(|| {
+            ApiError::new(
+                ApiErrorKind::Unavailable,
+                "this engine has no skill store",
+                Some("skills_unavailable"),
+                None,
+            )
+        })
+    }
+
+    pub fn skills_json(&self) -> Result<String, ApiError> {
+        let data = self.skill_store()?.list().map_err(skill_api_error)?;
+        to_json(&SkillListObject {
+            object: "list",
+            data,
+        })
+    }
+
+    pub fn skill_versions_json(&self, skill_id: &str) -> Result<String, ApiError> {
+        let data = self
+            .skill_store()?
+            .list_versions(skill_id)
+            .map_err(skill_api_error)?;
+        to_json(&AnthropicSkillVersionListObject {
+            data: data.iter().map(AnthropicSkillVersionObject::from).collect(),
+            has_more: false,
+            next_page: None,
+        })
+    }
+
+    /// Stores a new skill from its files (a `SKILL.md` and whatever it references).
+    pub fn upload_skill_json(&self, files: SkillFiles) -> Result<String, ApiError> {
+        to_json(
+            &self
+                .skill_store()?
+                .create_skill(files)
+                .map_err(skill_api_error)?,
+        )
+    }
+
+    pub fn upload_skill_version_json(
+        &self,
+        skill_id: &str,
+        files: SkillFiles,
+    ) -> Result<String, ApiError> {
+        to_json(
+            &self
+                .skill_store()?
+                .create_version(skill_id, files)
+                .map_err(skill_api_error)?,
+        )
     }
 
     /// Embeds every input of an embeddings request.
