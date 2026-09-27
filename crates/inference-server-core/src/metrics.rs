@@ -27,10 +27,8 @@ use tracing::{debug, info};
 use crate::{
     handler_core::{openai_error_response, ApiError, ApiErrorKind, ResponseErrorMessage},
     inference_server_router_builder::DEFAULT_MAX_BODY_LIMIT,
-    lora_adapters::{
-        is_resolvable_lora_adapter_model, lifecycle_body_too_large_response,
-        list_lora_adapter_models,
-    },
+    lora_adapters::lifecycle_body_too_large_response,
+    lora_routing::{is_resolvable_lora_adapter_model, list_lora_adapter_models},
     streaming::{StreamOutcome, StreamOutcomeHandle},
     types::SharedInferenceRsState,
 };
@@ -806,7 +804,7 @@ fn known_model_label(model: &str, observability: &ObservabilityState) -> String 
 
 fn adapter_model_label_is_known(
     model: &str,
-    models: &[crate::lora_adapters::LoraAdapterModel],
+    models: &[crate::lora_routing::LoraAdapterModel],
 ) -> bool {
     is_resolvable_lora_adapter_model(models, model)
 }
@@ -980,7 +978,7 @@ mod tests {
         model_label_field, normalize_model_label_input, query_model, request_outcome,
         ModelLabelField, RequestError, StreamEnd, StreamStats,
     };
-    use crate::{lora_adapters::LoraAdapterModel, streaming::StreamOutcome};
+    use crate::{lora_routing::LoraAdapterModel, streaming::StreamOutcome};
     use axum::{
         body::to_bytes,
         http::{HeaderMap, HeaderValue, StatusCode},

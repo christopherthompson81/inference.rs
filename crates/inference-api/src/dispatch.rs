@@ -47,14 +47,11 @@ pub async fn send_request_with_model(
     state.send_request_async(request).await
 }
 
-pub(crate) fn request_model_override(
-    requested_model: String,
-    routed_model: &str,
-) -> Option<String> {
+pub fn request_model_override(requested_model: String, routed_model: &str) -> Option<String> {
     (requested_model != routed_model).then_some(requested_model)
 }
 
-pub(crate) fn apply_model_override(model: &mut String, model_override: Option<&str>) {
+pub fn apply_model_override(model: &mut String, model_override: Option<&str>) {
     if let Some(model_override) = model_override {
         *model = model_override.to_string();
     }

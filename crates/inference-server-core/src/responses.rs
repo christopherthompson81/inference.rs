@@ -47,7 +47,7 @@ use crate::{
         create_response_channel, openai_error_from_error, openai_error_response,
         send_request_with_model, ApiError, ApiErrorKind, ModelErrorMessage,
     },
-    lora_adapters::resolve_lora_adapter_model,
+    lora_routing::resolve_lora_adapter_model,
     openai::{
         AdapterSelection, ChatCompletionRequest, Message, MessageContent, OpenAiNamespaceEntry,
         OpenAiTool, OpenAiToolSurface, ToolCall,

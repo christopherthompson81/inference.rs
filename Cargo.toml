@@ -2,6 +2,7 @@
 exclude = ["third_party/cudaforge"]
 members = [
     "crates/inference-server-core",
+    "crates/inference-api",
     "crates/inference-cli",
     "crates/inference-core",
     "crates/inference-nn",
@@ -32,6 +33,7 @@ members = [
 # Everything but the examples, so a bare `cargo build`/`cargo test` at the root never links them.
 default-members = [
     "crates/inference-server-core",
+    "crates/inference-api",
     "crates/inference-cli",
     "crates/inference-core",
     "crates/inference-nn",
@@ -248,6 +250,7 @@ inference-metal-compile = { path = "crates/inference-metal-compile", version = "
 inference-flash-attn = { path = "crates/inference-flash-attn", version = "0.9.3" }
 inference-quant = { path = "crates/inference-quant", version = "0.9.3" }
 inference-vision = { path = "crates/inference-vision", version = "0.9.3" }
+inference-api = { path = "crates/inference-api", version = "0.9.3", default-features = false }
 inference-server-core = { path = "crates/inference-server-core", version = "0.9.3", default-features = false }
 inference = { path = "crates/inference", version = "0.9.3", default-features = false }
 inference-audio = { path = "crates/inference-audio", version = "0.9.3" }

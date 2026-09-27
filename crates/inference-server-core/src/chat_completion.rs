@@ -18,6 +18,7 @@ pub use crate::engine_chat::{
 };
 use crate::handler_core::ApiErrorHttp;
 use crate::{
+    agentic::AgenticDefaults,
     completion_core::{
         handle_completion_error, handle_completion_validation_error, BaseCompletionResponder,
     },
@@ -27,7 +28,6 @@ use crate::{
     handler_core::{
         openai_error_from_error, openai_error_response, ApiError, ApiErrorKind, ModelErrorMessage,
     },
-    inference_server_router_builder::AgenticDefaults,
     openai::{
         ChatCompletionChunkResponseBody, ChatCompletionRequest, ChatCompletionResponseBody,
         OpenAiToolSurface,

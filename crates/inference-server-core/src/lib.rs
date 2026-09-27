@@ -234,29 +234,22 @@
 //! ```
 
 pub mod anthropic;
-pub(crate) mod api_error;
 pub mod approvals;
 pub mod background_tasks;
 pub mod cached_responses;
 pub mod chat_completion;
 mod completion_core;
 pub mod completions;
-pub(crate) mod dispatch;
 pub mod embeddings;
-pub(crate) mod engine_chat;
 pub mod files;
 pub mod handler_core;
 mod handlers;
 pub mod image_generation;
-mod input_files;
 pub mod lora_adapters;
 pub mod mcp_server;
-mod media_source;
 pub use media_source::configure_ui_upload_dir;
-pub mod inference_for_server_builder;
 pub mod inference_server_router_builder;
 pub mod metrics;
-pub mod openai;
 pub mod openapi_doc;
 pub mod responses;
 pub mod responses_types;
@@ -265,5 +258,7 @@ pub mod skills;
 pub mod speech_generation;
 pub mod streaming;
 pub mod types;
-pub mod util;
-pub mod video;
+use inference_api::{
+    agentic, api_error, dispatch, engine_chat, lora_routing, media_source, sampling, skill_store,
+};
+pub use inference_api::{inference_for_server_builder, openai, util, video};

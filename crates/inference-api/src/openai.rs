@@ -293,7 +293,7 @@ pub struct ToolCall {
 ///
 /// ```ignore
 /// use either::Either;
-/// use inference_server_core::openai::{Message, MessageContent};
+/// use inference_api::openai::{Message, MessageContent};
 ///
 /// // User message
 /// let user_msg = Message {
@@ -415,7 +415,7 @@ const MAX_WEB_SEARCH_FILTER_DOMAINS: usize = 100;
 /// ### Examples
 ///
 /// ```ignore
-/// use inference_server_core::openai::Grammar;
+/// use inference_api::openai::Grammar;
 ///
 /// // Regex grammar for phone numbers
 /// let phone_regex = Grammar::Regex(r"\d{3}-\d{3}-\d{4}".to_string());

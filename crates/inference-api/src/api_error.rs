@@ -3,12 +3,12 @@
 use inference_core::{InferenceRsError, LoraAdapterError, ServiceUnavailableError};
 use serde::Serialize;
 
-pub(crate) const INTERNAL_ERROR_MESSAGE: &str = "Internal server error.";
-pub(crate) const MODEL_ERROR_MESSAGE: &str = "The model failed to process the request.";
-pub(crate) const SERVICE_UNAVAILABLE_MESSAGE: &str = "The service is temporarily unavailable.";
+pub const INTERNAL_ERROR_MESSAGE: &str = "Internal server error.";
+pub const MODEL_ERROR_MESSAGE: &str = "The model failed to process the request.";
+pub const SERVICE_UNAVAILABLE_MESSAGE: &str = "The service is temporarily unavailable.";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum ApiErrorKind {
+pub enum ApiErrorKind {
     InvalidRequest,
     NotFound,
     Conflict,
@@ -21,16 +21,16 @@ pub(crate) enum ApiErrorKind {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ApiError {
-    pub(crate) kind: ApiErrorKind,
-    pub(crate) message: String,
-    pub(crate) code: Option<String>,
-    pub(crate) param: Option<String>,
+pub struct ApiError {
+    pub kind: ApiErrorKind,
+    pub message: String,
+    pub code: Option<String>,
+    pub param: Option<String>,
 }
 
 impl ApiError {
     /// The OpenAI error `type` for this kind.
-    pub(crate) fn openai_type(&self) -> &'static str {
+    pub fn openai_type(&self) -> &'static str {
         match self.kind {
             ApiErrorKind::RateLimited => "rate_limit_error",
             ApiErrorKind::Unavailable | ApiErrorKind::Overloaded | ApiErrorKind::Internal => {
@@ -41,7 +41,7 @@ impl ApiError {
     }
 
     /// The OpenAI error envelope, `{"error": {"message", "type", "param", "code"}}`.
-    pub(crate) fn to_openai_body(&self) -> serde_json::Value {
+    pub fn to_openai_body(&self) -> serde_json::Value {
         serde_json::json!({
             "error": {
                 "message": self.message,
@@ -52,7 +52,7 @@ impl ApiError {
         })
     }
 
-    pub(crate) fn new(
+    pub fn new(
         kind: ApiErrorKind,
         message: impl Into<String>,
         code: Option<&str>,
@@ -66,11 +66,11 @@ impl ApiError {
         }
     }
 
-    pub(crate) fn invalid_request(message: impl Into<String>) -> Self {
+    pub fn invalid_request(message: impl Into<String>) -> Self {
         Self::new(ApiErrorKind::InvalidRequest, message, None, None)
     }
 
-    pub(crate) fn internal() -> Self {
+    pub fn internal() -> Self {
         Self::new(
             ApiErrorKind::Internal,
             INTERNAL_ERROR_MESSAGE,
@@ -79,7 +79,7 @@ impl ApiError {
         )
     }
 
-    pub(crate) fn model_error() -> Self {
+    pub fn model_error() -> Self {
         Self::new(
             ApiErrorKind::Internal,
             MODEL_ERROR_MESSAGE,
@@ -88,10 +88,7 @@ impl ApiError {
         )
     }
 
-    pub(crate) fn from_error(
-        error: &(dyn std::error::Error + 'static),
-        fallback: ApiErrorKind,
-    ) -> Self {
+    pub fn from_error(error: &(dyn std::error::Error + 'static), fallback: ApiErrorKind) -> Self {
         if let Some(error) = find_error::<ApiError>(error) {
             return error.clone();
         }
@@ -246,13 +243,13 @@ fn find_error<'a, E: std::error::Error + 'static>(
 
 /// Standard JSON error response structure.
 #[derive(Serialize, Debug)]
-pub(crate) struct JsonError {
-    pub(crate) message: String,
+pub struct JsonError {
+    pub message: String,
 }
 
 impl JsonError {
     /// Creates a new JSON error with the specified message.
-    pub(crate) fn new(message: String) -> Self {
+    pub fn new(message: String) -> Self {
         Self { message }
     }
 }
@@ -270,7 +267,7 @@ impl std::error::Error for JsonError {}
 /// This struct wraps error messages from the underlying model and implements
 /// the standard error traits for proper error handling and display.
 #[derive(Debug)]
-pub(crate) struct ModelErrorMessage(pub(crate) String);
+pub struct ModelErrorMessage(pub String);
 
 impl std::fmt::Display for ModelErrorMessage {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {

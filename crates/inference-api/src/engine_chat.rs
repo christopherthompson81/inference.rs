@@ -19,21 +19,21 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
+    agentic::AgenticDefaults,
     api_error::{ApiError, ApiErrorKind, JsonError, ModelErrorMessage},
-    completion_core::{convert_stop_tokens, get_dry_sampling_params},
     dispatch::{
         apply_model_override, create_response_channel, request_model_override,
         send_request_with_model,
     },
-    inference_server_router_builder::AgenticDefaults,
     input_files::{resolve_input_file, InputFileSpec},
-    lora_adapters::{resolve_lora_adapter_model, DEFAULT_MODEL_ID},
+    lora_routing::{resolve_lora_adapter_model, DEFAULT_MODEL_ID},
     openai::{
         normalize_chat_completion_tools, normalize_responses_tools, validate_openai_tool_choice,
         ChatCompletionRequest, Grammar, JsonSchemaResponseFormat, Message, MessageInnerContent,
         OpenAiToolSurface, ResponseFormat,
     },
-    skills::SkillStore,
+    sampling::{convert_stop_tokens, get_dry_sampling_params},
+    skill_store::SkillStore,
     types::SharedInferenceRsState,
     util::{parse_audio_url_for_server, parse_image_url_for_server, validate_model_name},
     video::parse_video_url_for_server,

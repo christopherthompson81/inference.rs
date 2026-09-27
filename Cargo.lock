@@ -2984,6 +2984,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-api"
+version = "0.9.3"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "candle-core",
+ "chrono",
+ "data-url",
+ "either",
+ "futures",
+ "image",
+ "indexmap 2.13.0",
+ "inference-core",
+ "itertools 0.14.0",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+ "utoipa",
+ "uuid 1.19.0",
+ "zip 2.4.2",
+]
+
+[[package]]
 name = "inference-audio"
 version = "0.9.3"
 dependencies = [
@@ -3526,26 +3552,22 @@ dependencies = [
  "base64 0.22.1",
  "candle-core",
  "candle-nn",
- "chrono",
- "data-url",
  "either",
  "futures",
  "http-body",
  "http-body-util",
  "image",
- "indexmap 2.13.0",
  "indicatif 0.18.3",
+ "inference-api",
  "inference-core",
  "inference-models-other",
  "inference-nn",
  "inference-quant",
  "intel-mkl-src",
- "itertools 0.14.0",
  "metrics",
  "metrics-exporter-prometheus",
  "rand 0.9.4",
  "rand_distr 0.5.1",
- "reqwest 0.13.1",
  "serde",
  "serde_json",
  "tempfile",
@@ -3557,7 +3579,6 @@ dependencies = [
  "utoipa",
  "utoipa-swagger-ui",
  "uuid 1.19.0",
- "zip 2.4.2",
 ]
 
 [[package]]

@@ -9,10 +9,10 @@ use inference_core::remote_fetch::{fetch_limited, FetchOptions, NetworkPolicy};
 use tokio::{fs::File, io::AsyncReadExt};
 use url::Url;
 
-pub(crate) const MAX_MEDIA_BYTES: usize = 64 * 1024 * 1024;
-pub(crate) const MEDIA_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
-pub(crate) const MEDIA_FETCH_REDIRECTS: usize = 3;
-pub(crate) const SERVER_VIDEO_FRAME_LIMIT: usize = 32;
+pub const MAX_MEDIA_BYTES: usize = 64 * 1024 * 1024;
+pub const MEDIA_FETCH_TIMEOUT: Duration = Duration::from_secs(30);
+pub const MEDIA_FETCH_REDIRECTS: usize = 3;
+pub const SERVER_VIDEO_FRAME_LIMIT: usize = 32;
 
 const DATA_URL_HEADER_ALLOWANCE: usize = 4096;
 const UI_UPLOAD_SCHEME: &str = "inference-upload";
@@ -24,12 +24,12 @@ const AUDIO_UPLOAD_EXTENSIONS: &[&str] =
 static UI_UPLOAD_DIR: OnceLock<PathBuf> = OnceLock::new();
 
 #[derive(Clone, Copy)]
-pub(crate) enum MediaSourcePolicy {
+pub enum MediaSourcePolicy {
     ServerRequest,
     Local,
 }
 
-pub(crate) struct LoadedMedia {
+pub struct LoadedMedia {
     pub bytes: Vec<u8>,
     pub mime_type: Option<String>,
     pub final_url: Option<Url>,
@@ -55,7 +55,7 @@ pub async fn configure_ui_upload_dir(path: impl AsRef<Path>) -> Result<()> {
     }
 }
 
-pub(crate) async fn load_media_source(
+pub async fn load_media_source(
     source: &str,
     policy: MediaSourcePolicy,
     kind: &str,
@@ -189,11 +189,7 @@ async fn resolve_ui_upload_path(root: &Path, filename: &str) -> Result<PathBuf> 
     Ok(path)
 }
 
-pub(crate) async fn fetch_remote_limited(
-    url: Url,
-    max_bytes: usize,
-    kind: &str,
-) -> Result<LoadedMedia> {
+pub async fn fetch_remote_limited(url: Url, max_bytes: usize, kind: &str) -> Result<LoadedMedia> {
     fetch_media(url, max_bytes, kind, NetworkPolicy::PublicOnly).await
 }
 
@@ -217,7 +213,7 @@ async fn fetch_media(
     })
 }
 
-pub(crate) async fn read_local_file_limited(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
+pub async fn read_local_file_limited(path: &Path, max_bytes: usize) -> Result<Vec<u8>> {
     let metadata = tokio::fs::metadata(path)
         .await
         .with_context(|| format!("Could not read local file metadata: {}", path.display()))?;
@@ -239,11 +235,7 @@ pub(crate) async fn read_local_file_limited(path: &Path, max_bytes: usize) -> Re
     Ok(bytes)
 }
 
-pub(crate) fn decode_data_url_limited(
-    source: &str,
-    max_bytes: usize,
-    kind: &str,
-) -> Result<Vec<u8>> {
+pub fn decode_data_url_limited(source: &str, max_bytes: usize, kind: &str) -> Result<Vec<u8>> {
     let encoded_limit = max_bytes
         .saturating_mul(4)
         .saturating_div(3)
@@ -259,7 +251,7 @@ pub(crate) fn decode_data_url_limited(
     Ok(bytes)
 }
 
-pub(crate) fn data_url_mime(source: &str) -> Option<String> {
+pub fn data_url_mime(source: &str) -> Option<String> {
     let header = source.strip_prefix("data:")?.split_once(',')?.0;
     let mime = header.split(';').next().unwrap_or_default();
     (!mime.is_empty()).then(|| mime.to_string())

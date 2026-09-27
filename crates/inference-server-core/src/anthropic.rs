@@ -36,14 +36,14 @@ use utoipa::ToSchema;
 
 use crate::handler_core::ApiErrorHttp;
 use crate::{
+    agentic::AgenticDefaults,
     chat_completion::{parse_request, ChatCompletionParseContext},
     engine_chat::{ChatDispatchError, ChatEngine, PreparedChat},
     handler_core::{
         apply_model_override, create_response_channel, send_request_with_model, ApiError,
         ApiErrorKind, ResponseErrorMessage, INTERNAL_ERROR_MESSAGE,
     },
-    inference_server_router_builder::AgenticDefaults,
-    lora_adapters::{resolve_lora_adapter_model, DEFAULT_MODEL_ID},
+    lora_routing::{resolve_lora_adapter_model, DEFAULT_MODEL_ID},
     openai::{
         ChatCompletionRequest, FunctionCalled, Grammar, Message, MessageContent,
         OpenAiCodeInterpreterAutoContainer, OpenAiCodeInterpreterContainer,
