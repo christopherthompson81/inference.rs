@@ -18,3 +18,16 @@ tokenizer into the per-token byte strings llguidance builds its grammar trie fro
 - Result: all seven identical: 0 differing tokens across 885k, equal info, equal added-token tables.
 - Implication: the port and the 0.23 bump change nothing llguidance sees. Remaining API changes were mechanical:
   `add_tokens` / `add_special_tokens` take owned tokens and, with `with_normalizer`, return `Result`.
+
+## Run 2 - 2026-09-27 06:00
+
+- Question: does llguidance / toktrie 1.4.0 -> 1.8.0 change the token masks our constraints produce?
+- Command: two throwaway binaries (Cargo cannot hold two semver-compatible versions in one graph), each pinning one
+  version and building the parser factory exactly as `build_llg_factory` does with the in-tree byte tokenizer. Each
+  walks three grammars (a regex, a JSON schema with a required object/array, a small Lark grammar) for up to 24
+  steps, recording the allowed-token mask at every step and consuming a pick fixed by the step index, then prints a
+  digest per mask. Same seven `tokenizer.json` files as Run 1.
+- Result: all 400 mask digests identical between 1.4 and 1.8 (`diff` empty). The regex and JSON walks run all 24
+  steps on every tokenizer; the Lark grammar completes after 2-5 tokens.
+- Implication: the bump is safe for constrained decoding; the workspace compiles with no API changes and the 174
+  grammar/constraint/tool tests pass.
