@@ -1257,6 +1257,14 @@ fn uqff_safetensors_metadata() -> HashMap<String, String> {
     ])
 }
 
+// One shared builder, so the 50-odd ISQ loaders do not each expand a `Regex::new(..)?` error path per pattern.
+pub(crate) fn isq_regexes<S: AsRef<str>>(patterns: &[S]) -> Result<Vec<Regex>> {
+    patterns
+        .iter()
+        .map(|pattern| Ok(Regex::new(pattern.as_ref())?))
+        .collect()
+}
+
 /// Trait for loading models with ISQ.
 pub(crate) trait IsqModelLoader {
     /// Exact checkpoint tensor paths whose default ISQ type should be promoted.

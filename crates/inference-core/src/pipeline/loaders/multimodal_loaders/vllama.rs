@@ -68,9 +68,9 @@ impl MultimodalModelLoader for VLlamaLoader {
 
 impl IsqModelLoader for VLlamaLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-        Ok(vec![
-            Regex::new(r"^language_model\.model\.embed_tokens\.weight$")?,
-            Regex::new(r"^language_model\.lm_head\.(weight|bias)$")?,
+        isq_regexes(&[
+            r"^language_model\.model\.embed_tokens\.weight$",
+            r"^language_model\.lm_head\.(weight|bias)$",
         ])
     }
 
@@ -81,63 +81,33 @@ impl IsqModelLoader for VLlamaLoader {
             (0..config.text_config.num_hidden_layers).filter(|i| !cross_attn_layers.contains(i));
         let mut text_regexes = Vec::new();
         for layer in transformer_layers {
-            text_regexes.extend(vec![
+            text_regexes.extend(isq_regexes(&[
                 // Attention text
-                Regex::new(&format!(
-                    r"language_model.model.layers\.{layer}\.self_attn\.q_proj\.(weight|bias)$"
-                ))?,
-                Regex::new(&format!(
-                    r"language_model.model.layers\.{layer}\.self_attn\.k_proj\.(weight|bias)$"
-                ))?,
-                Regex::new(&format!(
-                    r"language_model.model.layers\.{layer}\.self_attn\.v_proj\.(weight|bias)$"
-                ))?,
-                Regex::new(&format!(
-                    r"language_model.model.layers\.{layer}\.self_attn\.o_proj\.(weight|bias)$"
-                ))?,
+                format!(r"language_model.model.layers\.{layer}\.self_attn\.q_proj\.(weight|bias)$"),
+                format!(r"language_model.model.layers\.{layer}\.self_attn\.k_proj\.(weight|bias)$"),
+                format!(r"language_model.model.layers\.{layer}\.self_attn\.v_proj\.(weight|bias)$"),
+                format!(r"language_model.model.layers\.{layer}\.self_attn\.o_proj\.(weight|bias)$"),
                 // MLP text
-                Regex::new(&format!(
-                    r"language_model.model.layers\.{layer}\.mlp\.gate_proj\.(weight|bias)$"
-                ))?,
-                Regex::new(&format!(
-                    r"language_model.model.layers\.{layer}\.mlp\.up_proj\.(weight|bias)$"
-                ))?,
-                Regex::new(&format!(
-                    r"language_model.model.layers\.{layer}\.mlp\.down_proj\.(weight|bias)$"
-                ))?,
-            ]);
+                format!(r"language_model.model.layers\.{layer}\.mlp\.gate_proj\.(weight|bias)$"),
+                format!(r"language_model.model.layers\.{layer}\.mlp\.up_proj\.(weight|bias)$"),
+                format!(r"language_model.model.layers\.{layer}\.mlp\.down_proj\.(weight|bias)$"),
+            ])?);
         }
-        let vision_regexes = vec![
+        let vision_regexes = isq_regexes(&[
             // Vision attention (transformer)
-            Regex::new(
-                r"vision_model.transformer.layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"vision_model.transformer.layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"vision_model.transformer.layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"vision_model.transformer.layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
-            )?,
+            r"vision_model.transformer.layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
+            r"vision_model.transformer.layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
+            r"vision_model.transformer.layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
+            r"vision_model.transformer.layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
             // Vision attention (global transforemr)
-            Regex::new(
-                r"vision_model.global_transformer.layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"vision_model.global_transformer.layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"vision_model.global_transformer.layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
-            )?,
-            Regex::new(
-                r"vision_model.global_transformer.layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
-            )?,
+            r"vision_model.global_transformer.layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
+            r"vision_model.global_transformer.layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
+            r"vision_model.global_transformer.layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
+            r"vision_model.global_transformer.layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
             // MLP vision
-            Regex::new(r"layers\.(\d+)\.mlp\.fc1\.(weight|bias)$")?,
-            Regex::new(r"layers\.(\d+)\.mlp\.fc2\.(weight|bias)$")?,
-        ];
+            r"layers\.(\d+)\.mlp\.fc1\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.fc2\.(weight|bias)$",
+        ])?;
 
         Ok([text_regexes, vision_regexes].concat())
     }

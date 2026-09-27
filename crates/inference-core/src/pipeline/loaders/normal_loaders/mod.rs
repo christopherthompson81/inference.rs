@@ -24,6 +24,7 @@ use inference_quant::ShardedVarBuilder;
 #[cfg(feature = "pyo3_macros")]
 use pyo3::pyclass;
 
+use crate::pipeline::isq::isq_regexes;
 use regex::Regex;
 use serde::Deserialize;
 
