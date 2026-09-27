@@ -536,3 +536,17 @@ Review follow-ups:
     breaks `add_special_tokens` (now takes owned tokens) and llguidance's `ByteTokenizer::from_tokenizer` (a 0.21
     type), and would still leave two versions.
 - Implication: core's lib test (102 s) is still the last unit and the remaining wall-time lever.
+
+## Run 27 - 2026-09-27 01:10
+
+- Question: core's lib test (102 s cold) ends the cold build; is it worth attacking, e.g. by moving test code out of
+  core or building core at a lower opt-level for tests?
+- Findings:
+  - Core carries ~27k lines of unit tests (pipeline 9.6k, gguf 3.6k, scheduler 3.3k, vision_models 2.9k). The lib
+    test is a full second compile of core with `cfg(test)`, so moving tests out saves only their share (~20 s of the
+    102 s); integration tests would avoid the second compile but the unit tests lean on `pub(crate)` internals.
+  - Incremental, after a one-line edit in core: `cargo test --no-run -p inference-core --lib` rebuilds in 6 s at
+    opt-level 3 and 6 s at opt-level 1 (`--config profile.dev.package.inference-core.opt-level=1`); core's 906 unit
+    tests run in 7.0 s vs 7.9 s.
+- Implication: the cold 102 s only matters for cold builds; for the edit loop it is not the bottleneck, and a lower
+  opt-level buys nothing. The cycle's wall time is in `local_ci.sh` itself; measure its phases next.
