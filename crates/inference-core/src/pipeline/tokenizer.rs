@@ -177,11 +177,13 @@ fn load_tekken_tokenizer<P: AsRef<Path>>(path: P) -> Result<Tokenizer> {
     tokenizer.with_decoder(Some(decoder));
 
     // Register special tokens so the tokenizer treats them as special
-    let special_tokens: Vec<tokenizer::AddedToken> = special_token_names
-        .into_iter()
-        .map(|name| tokenizer::AddedToken::from(name, true))
-        .collect();
-    tokenizer.add_special_tokens(&special_tokens);
+    tokenizer
+        .add_special_tokens(
+            special_token_names
+                .into_iter()
+                .map(|name| tokenizer::AddedToken::from(name, true)),
+        )
+        .map_err(anyhow::Error::msg)?;
 
     Ok(tokenizer)
 }
@@ -200,12 +202,13 @@ pub(crate) fn get_tokenizer<P: AsRef<Path> + Clone>(
     {
         let mut tokenizer = load_tekken_tokenizer(p)?;
         if let Some(added_tokens) = processor_added_tokens {
-            tokenizer.add_special_tokens(
-                &added_tokens
-                    .iter()
-                    .map(|x| tokenizer::AddedToken::from(x.to_string(), true))
-                    .collect::<Vec<_>>(),
-            );
+            tokenizer
+                .add_special_tokens(
+                    added_tokens
+                        .iter()
+                        .map(|x| tokenizer::AddedToken::from(x.to_string(), true)),
+                )
+                .map_err(anyhow::Error::msg)?;
         }
         return Ok(tokenizer);
     }
@@ -216,12 +219,13 @@ pub(crate) fn get_tokenizer<P: AsRef<Path> + Clone>(
         Tokenizer::from_bytes(&raw_fixed).map_err(anyhow::Error::msg)?
     };
     if let Some(added_tokens) = processor_added_tokens {
-        tokenizer.add_special_tokens(
-            &added_tokens
-                .iter()
-                .map(|x| tokenizer::AddedToken::from(x.to_string(), true))
-                .collect::<Vec<_>>(),
-        );
+        tokenizer
+            .add_special_tokens(
+                added_tokens
+                    .iter()
+                    .map(|x| tokenizer::AddedToken::from(x.to_string(), true)),
+            )
+            .map_err(anyhow::Error::msg)?;
     }
     Ok(tokenizer)
 }

@@ -6,6 +6,9 @@ use tokenizers::{decoders::DecoderWrapper, Tokenizer};
 
 use crate::Constraint;
 
+mod byte_tokenizer;
+use byte_tokenizer::{ByteTokenizer, ByteTokenizerEnv};
+
 pub fn build_llg_factory(mut tokenizer: Tokenizer) -> Result<Arc<ParserFactory>> {
     let decoder = match tokenizer.get_decoder() {
         Some(DecoderWrapper::Sequence(sequence)) if sequence.get_decoders().len() == 1 => {
@@ -36,7 +39,7 @@ pub fn build_llg_factory(mut tokenizer: Tokenizer) -> Result<Arc<ParserFactory>>
         .map(|(id, _)| id)
         .collect();
 
-    let bt = toktrie_hf_tokenizers::ByteTokenizer::from_tokenizer(tokenizer)?;
+    let bt = ByteTokenizer::from_tokenizer(tokenizer)?;
     let info = bt.tokrx_info();
     let mut token_bytes = bt.token_bytes();
 
@@ -65,11 +68,11 @@ pub fn build_llg_factory(mut tokenizer: Tokenizer) -> Result<Arc<ParserFactory>>
     }
 
     let tok_trie = toktrie::TokTrie::from(&info, &token_bytes);
-    let env = toktrie_hf_tokenizers::ByteTokenizerEnv {
+    let env = ByteTokenizerEnv {
         tokenizer: bt,
         tok_trie,
     }
-    .to_env();
+    .into_env();
     let factory = ParserFactory::new_simple(&env)?;
     Ok(Arc::new(factory))
 }
@@ -123,7 +126,7 @@ mod tests {
             .filter(|(_, at)| !at.special)
             .map(|(id, _)| id)
             .collect();
-        let bt = toktrie_hf_tokenizers::ByteTokenizer::from_tokenizer(tokenizer).unwrap();
+        let bt = ByteTokenizer::from_tokenizer(tokenizer).unwrap();
         let info = bt.tokrx_info();
         let mut token_bytes = bt.token_bytes();
         for (id, content) in &added_special {
@@ -237,10 +240,11 @@ mod tests {
             .unwrap();
         let mut tok = Tokenizer::new(bpe);
         tok.with_decoder(Some(ByteLevelDecoder::new(true, false, false)));
-        tok.add_tokens(&[
+        tok.add_tokens([
             AddedToken::from("<x>", false),
             AddedToken::from("<s>", true),
-        ]);
+        ])
+        .unwrap();
         let x = tok.token_to_id("<x>").unwrap();
         let s = tok.token_to_id("<s>").unwrap();
         let before = build_trie(tok.clone(), false);

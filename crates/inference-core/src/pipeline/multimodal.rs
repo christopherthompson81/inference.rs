@@ -606,12 +606,14 @@ impl Loader for MultimodalLoader {
             let tokenizer = match self.prepared_source.as_ref() {
                 Some(source) => {
                     let mut tokenizer = source.tokenizer.clone();
-                    let special_tokens = processor
-                        .get_special_tokens()
-                        .iter()
-                        .map(|token| AddedToken::from((*token).to_string(), true))
-                        .collect::<Vec<_>>();
-                    tokenizer.add_special_tokens(&special_tokens);
+                    tokenizer
+                        .add_special_tokens(
+                            processor
+                                .get_special_tokens()
+                                .iter()
+                                .map(|token| AddedToken::from((*token).to_string(), true)),
+                        )
+                        .map_err(anyhow::Error::msg)?;
                     tokenizer
                 }
                 None => get_tokenizer(
