@@ -9,8 +9,8 @@ use crate::{
         MultimodalLoaderBuilder, MultimodalSpecificConfig, NormalLoaderBuilder,
         NormalSpecificConfig, UqffWriteConfig,
     },
-    AutoDeviceMapParams, EmbeddingLoaderBuilder, EmbeddingSpecificConfig, Loader, ModelDType,
-    ModelSelected, Ordering, SpeechLoader, Topology, GGUF_MULTI_FILE_DELIMITER,
+    AutoDeviceMapParams, EmbeddingLoaderBuilder, EmbeddingSpecificConfig, LoadOverrides, Loader,
+    ModelDType, ModelSelected, Ordering, SpeechLoader, Topology, GGUF_MULTI_FILE_DELIMITER,
     UQFF_MULTI_FILE_DELIMITER,
 };
 
@@ -24,6 +24,7 @@ pub struct LoaderBuilder {
     hf_config_overrides: Option<HfConfigOverrides>,
     mtp: bool,
     encoder_cache_memory_bytes: Option<usize>,
+    overrides: LoadOverrides,
 }
 
 impl LoaderBuilder {
@@ -37,7 +38,13 @@ impl LoaderBuilder {
             hf_config_overrides: None,
             mtp: false,
             encoder_cache_memory_bytes: None,
+            overrides: LoadOverrides::default(),
         }
+    }
+
+    pub fn with_overrides(mut self, overrides: LoadOverrides) -> Self {
+        self.overrides = overrides;
+        self
     }
 
     /// Load the MTP head built into the checkpoint so it can drive speculative decoding.
@@ -80,6 +87,16 @@ impl LoaderBuilder {
 
     pub fn build(self) -> anyhow::Result<Box<dyn Loader>> {
         loader_from_model_selected(self)
+    }
+}
+
+fn resolve_topology(
+    inline: &Option<Topology>,
+    path: Option<String>,
+) -> anyhow::Result<Option<Topology>> {
+    match inline {
+        Some(topology) => Ok(Some(topology.clone())),
+        None => Topology::from_option_path(path),
     }
 }
 
@@ -386,6 +403,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
     }
 
     let base = SafetensorsOptions::from_args(&args);
+    let inline_topology = args.overrides.topology.clone();
     let loader: Box<dyn Loader> = match args.model {
         ModelSelected::Plain {
             model_id,
@@ -405,7 +423,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             matformer_slice_name,
         } => {
             let options = SafetensorsOptions {
-                topology: Topology::from_option_path(topology)?,
+                topology: resolve_topology(&inline_topology, topology)?,
                 organization: organization.unwrap_or_default(),
                 write_uqff,
                 from_uqff: uqff_paths(from_uqff),
@@ -447,7 +465,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             matformer_slice_name,
         } => {
             let options = SafetensorsOptions {
-                topology: Topology::from_option_path(topology)?,
+                topology: resolve_topology(&inline_topology, topology)?,
                 organization: organization.unwrap_or_default(),
                 write_uqff,
                 from_uqff: uqff_paths(from_uqff),
@@ -499,7 +517,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             organization,
         } => {
             let options = SafetensorsOptions {
-                topology: Topology::from_option_path(topology)?,
+                topology: resolve_topology(&inline_topology, topology)?,
                 organization: organization.unwrap_or_default(),
                 write_uqff,
                 from_uqff: uqff_paths(from_uqff),
@@ -535,7 +553,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             model_id,
             dac_model_id,
             arch,
-            cfg: None,
+            cfg: args.overrides.speech_cfg,
         }),
         ModelSelected::XLora {
             model_id,
@@ -553,7 +571,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             hf_cache_path,
         } => {
             let options = SafetensorsOptions {
-                topology: Topology::from_option_path(topology)?,
+                topology: resolve_topology(&inline_topology, topology)?,
                 write_uqff,
                 from_uqff: uqff_paths(from_uqff),
                 hf_cache_path,
@@ -598,7 +616,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             matformer_slice_name,
         } => {
             let options = SafetensorsOptions {
-                topology: Topology::from_option_path(topology)?,
+                topology: resolve_topology(&inline_topology, topology)?,
                 organization: organization.unwrap_or_default(),
                 write_uqff,
                 from_uqff: uqff_paths(from_uqff),
@@ -667,7 +685,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
                 quantized_model_id,
                 gguf_files(&quantized_filename),
                 GGUFSpecificConfig {
-                    topology: Topology::from_option_path(topology)?,
+                    topology: resolve_topology(&inline_topology, topology)?,
                     organization: organization.unwrap_or_default(),
                     write_uqff,
                     imatrix,
@@ -708,7 +726,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             quantized_model_id,
             gguf_files(&quantized_filename),
             GGUFSpecificConfig {
-                topology: Topology::from_option_path(topology)?,
+                topology: resolve_topology(&inline_topology, topology)?,
                 ..Default::default()
             },
             args.no_kv_cache,
@@ -736,7 +754,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             quantized_model_id,
             gguf_files(&quantized_filename),
             GGUFSpecificConfig {
-                topology: Topology::from_option_path(topology)?,
+                topology: resolve_topology(&inline_topology, topology)?,
                 ..Default::default()
             },
             args.no_kv_cache,
@@ -756,7 +774,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
         } => GGMLLoaderBuilder::new(
             GGMLSpecificConfig {
                 gqa,
-                topology: Topology::from_option_path(topology)?,
+                topology: resolve_topology(&inline_topology, topology)?,
             },
             args.chat_template,
             tokenizer_json,
@@ -781,7 +799,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
         } => GGMLLoaderBuilder::new(
             GGMLSpecificConfig {
                 gqa,
-                topology: Topology::from_option_path(topology)?,
+                topology: resolve_topology(&inline_topology, topology)?,
             },
             args.chat_template,
             tokenizer_json,
@@ -811,7 +829,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
         } => GGMLLoaderBuilder::new(
             GGMLSpecificConfig {
                 gqa,
-                topology: Topology::from_option_path(topology)?,
+                topology: resolve_topology(&inline_topology, topology)?,
             },
             args.chat_template,
             tokenizer_json,
@@ -836,7 +854,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             hf_cache_path,
         } => {
             let options = SafetensorsOptions {
-                topology: Topology::from_option_path(topology)?,
+                topology: resolve_topology(&inline_topology, topology)?,
                 write_uqff,
                 from_uqff: uqff_paths(from_uqff),
                 imatrix,
@@ -899,6 +917,23 @@ mod tests {
         Ok(())
     }
 
+    #[test]
+    fn inline_topology_is_used_over_the_path() -> anyhow::Result<()> {
+        let model = || {
+            selected(serde_json::json!({
+                "Plain": {"model_id": "org/model", "topology": "/nonexistent/topology.yml"}
+            }))
+        };
+        assert!(LoaderBuilder::new(model()).build().is_err());
+        LoaderBuilder::new(model())
+            .with_overrides(LoadOverrides {
+                topology: Some(Topology::empty()),
+                speech_cfg: None,
+            })
+            .build()?;
+        Ok(())
+    }
+
     fn loader_config(
         model: ModelSelected,
         max_model_len: Option<usize>,
@@ -919,6 +954,7 @@ mod tests {
             hf_config_overrides: None,
             mtp_config: None,
             encoder_cache_memory_bytes: None,
+            overrides: Default::default(),
         }
     }
 

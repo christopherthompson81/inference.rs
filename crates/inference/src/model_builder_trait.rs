@@ -619,6 +619,16 @@ pub async fn build_model_from_pipeline(
     Model::new(runner_builder.build().await)
 }
 
+// The first load and a later reload both go through the stored config, so they build the same pipeline.
+async fn load_from_config(
+    loader_config: &inference_core::ModelLoaderConfig,
+    no_kv_cache: bool,
+    mtp_runtime: inference_core::MtpRuntimeConfig,
+) -> anyhow::Result<Arc<Mutex<dyn Pipeline>>> {
+    let loader = loader_config.build_loader(no_kv_cache)?;
+    Ok(loader_config.load(&*loader, mtp_runtime).await?)
+}
+
 /// Build a text model pipeline from a TextModelBuilder.
 /// Returns the pipeline, scheduler config, and AddModelConfig needed for Model creation.
 pub async fn build_text_pipeline(
@@ -627,46 +637,14 @@ pub async fn build_text_pipeline(
     use inference_core::*;
 
     let mtp_runtime = MtpRuntimeConfig::new(builder.prefix_cache_n.unwrap_or(0));
-
     builder.paged_attn_cfg = paged_attn_with_serving_capacity(
         builder.paged_attn_cfg,
         builder.max_num_seqs,
         builder.prefix_cache_n.unwrap_or(0),
     )?;
-
-    let config = NormalSpecificConfig {
-        topology: builder.topology.clone(),
-        organization: builder.organization,
-        write_uqff: builder.write_uqff.clone(),
-        from_uqff: builder.from_uqff.clone(),
-        imatrix: builder.imatrix.clone(),
-        calibration_file: builder.calibration_file.clone(),
-        hf_cache_path: builder.hf_cache_path.clone(),
-        hf_config_overrides: builder.hf_config_overrides.clone(),
-        max_model_len: builder.max_model_len,
-        matformer_config_path: builder.matformer_config_path.clone(),
-        matformer_slice_name: builder.matformer_slice_name.clone(),
-    };
-
     maybe_initialize_logging(builder.with_logging);
 
-    let loader = NormalLoaderBuilder::new(
-        config,
-        builder.chat_template.clone(),
-        builder.tokenizer_json.clone(),
-        Some(builder.model_id.clone()),
-        builder.no_kv_cache,
-        builder.jinja_explicit.clone(),
-    )
-    .with_mtp(
-        builder
-            .mtp_config
-            .as_ref()
-            .is_some_and(MtpConfig::is_builtin),
-    )
-    .build(builder.loader_type.clone())?;
-
-    let device = resolve_device(builder.force_cpu, None)?;
+    let device = resolve_device(builder.force_cpu, builder.device.clone())?;
     builder.paged_attn_cfg = reserve_external_mtp_memory_with_runtime(
         builder.paged_attn_cfg,
         builder.mtp_config.as_ref(),
@@ -675,51 +653,10 @@ pub async fn build_text_pipeline(
         &device,
     )?;
     let isq_type = resolve_isq_type(builder.isq.as_ref(), &device)?;
-
-    let pipeline = loader.load_model_from_hf(
-        builder.hf_revision.clone(),
-        builder.token_source.clone(),
-        &builder.dtype,
-        &device,
-        !builder.with_logging,
-        builder
-            .device_mapping
-            .clone()
-            .unwrap_or(DeviceMapSetting::Auto(AutoDeviceMapParams::default_text())),
-        isq_type,
-        builder.paged_attn_cfg,
-    )?;
-    if let Some(mtp_config) = builder.mtp_config.clone() {
-        pipeline
-            .lock()
-            .await
-            .attach_speculative_with_runtime(SpeculativeConfig::Mtp(mtp_config), mtp_runtime)?;
-    }
-
-    let scheduler_config = scheduler_config_from_pipeline(
-        &pipeline,
-        builder.paged_attn_cfg.is_some(),
-        builder.max_num_seqs,
-    )
-    .await?;
-
-    let engine_config = build_engine_config(
-        builder.throughput_logging,
-        builder.search_embedding_model,
-        builder.search_callback.clone(),
-        &builder.tool_callbacks,
-        builder.no_kv_cache,
-        builder.prefix_cache_n,
-    );
-
-    // Create loader config for unload/reload support
     let device_map_setting = builder
         .device_mapping
         .clone()
         .unwrap_or(DeviceMapSetting::Auto(AutoDeviceMapParams::default_text()));
-
-    // Convert from_uqff Vec<PathBuf> to semicolon-separated string if present
-    let from_uqff_str = join_path_list(builder.from_uqff.as_deref(), UQFF_MULTI_FILE_DELIMITER);
 
     let loader_config = ModelLoaderConfig {
         model_selected: ModelSelected::Plain {
@@ -730,7 +667,7 @@ pub async fn build_text_pipeline(
             topology: builder.topology_path.clone(),
             organization: Some(builder.organization),
             write_uqff: builder.write_uqff.clone(),
-            from_uqff: from_uqff_str,
+            from_uqff: join_path_list(builder.from_uqff.as_deref(), UQFF_MULTI_FILE_DELIMITER),
             imatrix: builder.imatrix.clone(),
             calibration_file: builder.calibration_file.clone(),
             max_seq_len: AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
@@ -753,8 +690,27 @@ pub async fn build_text_pipeline(
         hf_config_overrides: builder.hf_config_overrides.clone(),
         mtp_config: builder.mtp_config.clone(),
         encoder_cache_memory_bytes: None,
+        overrides: LoadOverrides {
+            topology: builder.topology.clone(),
+            speech_cfg: None,
+        },
     };
+    let pipeline = load_from_config(&loader_config, builder.no_kv_cache, mtp_runtime).await?;
 
+    let scheduler_config = scheduler_config_from_pipeline(
+        &pipeline,
+        builder.paged_attn_cfg.is_some(),
+        builder.max_num_seqs,
+    )
+    .await?;
+    let engine_config = build_engine_config(
+        builder.throughput_logging,
+        builder.search_embedding_model,
+        builder.search_callback.clone(),
+        &builder.tool_callbacks,
+        builder.no_kv_cache,
+        builder.prefix_cache_n,
+    );
     let add_model_config = AddModelConfig {
         engine_config,
         mcp_client_config: builder.mcp_client_config.clone(),
@@ -774,47 +730,14 @@ pub async fn build_multimodal_pipeline(
     use inference_core::*;
 
     let mtp_runtime = MtpRuntimeConfig::new(builder.prefix_cache_n.unwrap_or(0));
-
     builder.paged_attn_cfg = paged_attn_with_serving_capacity(
         builder.paged_attn_cfg,
         builder.max_num_seqs,
         builder.prefix_cache_n.unwrap_or(0),
     )?;
-
-    let config = MultimodalSpecificConfig {
-        topology: builder.topology.clone(),
-        write_uqff: builder.write_uqff.clone(),
-        from_uqff: builder.from_uqff.clone(),
-        max_edge: builder.max_edge,
-        max_model_len: builder.max_model_len,
-        hf_config_overrides: builder.hf_config_overrides.clone(),
-        calibration_file: builder.calibration_file.clone(),
-        imatrix: builder.imatrix.clone(),
-        hf_cache_path: builder.hf_cache_path.clone(),
-        matformer_config_path: builder.matformer_config_path.clone(),
-        matformer_slice_name: builder.matformer_slice_name.clone(),
-        organization: builder.organization,
-    };
-
     maybe_initialize_logging(builder.with_logging);
 
-    let loader = MultimodalLoaderBuilder::new(
-        config,
-        builder.chat_template.clone(),
-        builder.tokenizer_json.clone(),
-        Some(builder.model_id.clone()),
-        builder.jinja_explicit.clone(),
-    )
-    .with_mtp(
-        builder
-            .mtp_config
-            .as_ref()
-            .is_some_and(MtpConfig::is_builtin),
-    )
-    .with_encoder_cache_memory_bytes(builder.encoder_cache_memory_bytes)
-    .build(builder.loader_type.clone())?;
-
-    let device = resolve_device(builder.force_cpu, None)?;
+    let device = resolve_device(builder.force_cpu, builder.device.clone())?;
     builder.paged_attn_cfg = reserve_external_mtp_memory_with_runtime(
         builder.paged_attn_cfg,
         builder.mtp_config.as_ref(),
@@ -823,55 +746,12 @@ pub async fn build_multimodal_pipeline(
         &device,
     )?;
     let isq_type = resolve_isq_type(builder.isq.as_ref(), &device)?;
-
-    let pipeline = loader.load_model_from_hf(
-        builder.hf_revision.clone(),
-        builder.token_source.clone(),
-        &builder.dtype,
-        &device,
-        !builder.with_logging,
-        builder
-            .device_mapping
-            .clone()
-            .unwrap_or(DeviceMapSetting::Auto(
-                AutoDeviceMapParams::default_multimodal(),
-            )),
-        isq_type,
-        builder.paged_attn_cfg,
-    )?;
-    if let Some(mtp_config) = builder.mtp_config.clone() {
-        pipeline
-            .lock()
-            .await
-            .attach_speculative_with_runtime(SpeculativeConfig::Mtp(mtp_config), mtp_runtime)?;
-    }
-
-    let scheduler_config = scheduler_config_from_pipeline(
-        &pipeline,
-        builder.paged_attn_cfg.is_some(),
-        builder.max_num_seqs,
-    )
-    .await?;
-
-    let engine_config = build_engine_config(
-        builder.throughput_logging,
-        builder.search_embedding_model,
-        builder.search_callback.clone(),
-        &builder.tool_callbacks,
-        false,
-        builder.prefix_cache_n,
-    );
-
-    // Create loader config for unload/reload support
     let device_map_setting = builder
         .device_mapping
         .clone()
         .unwrap_or(DeviceMapSetting::Auto(
             AutoDeviceMapParams::default_multimodal(),
         ));
-
-    // Convert from_uqff Vec<PathBuf> to semicolon-separated string if present
-    let from_uqff_str = join_path_list(builder.from_uqff.as_deref(), UQFF_MULTI_FILE_DELIMITER);
 
     let loader_config = ModelLoaderConfig {
         model_selected: ModelSelected::MultimodalPlain {
@@ -881,7 +761,7 @@ pub async fn build_multimodal_pipeline(
             dtype: builder.dtype,
             topology: builder.topology_path.clone(),
             write_uqff: builder.write_uqff.clone(),
-            from_uqff: from_uqff_str,
+            from_uqff: join_path_list(builder.from_uqff.as_deref(), UQFF_MULTI_FILE_DELIMITER),
             max_edge: builder.max_edge,
             calibration_file: builder.calibration_file.clone(),
             imatrix: builder.imatrix.clone(),
@@ -908,8 +788,27 @@ pub async fn build_multimodal_pipeline(
         hf_config_overrides: builder.hf_config_overrides.clone(),
         mtp_config: builder.mtp_config.clone(),
         encoder_cache_memory_bytes: builder.encoder_cache_memory_bytes,
+        overrides: LoadOverrides {
+            topology: builder.topology.clone(),
+            speech_cfg: None,
+        },
     };
+    let pipeline = load_from_config(&loader_config, false, mtp_runtime).await?;
 
+    let scheduler_config = scheduler_config_from_pipeline(
+        &pipeline,
+        builder.paged_attn_cfg.is_some(),
+        builder.max_num_seqs,
+    )
+    .await?;
+    let engine_config = build_engine_config(
+        builder.throughput_logging,
+        builder.search_embedding_model,
+        builder.search_callback.clone(),
+        &builder.tool_callbacks,
+        false,
+        builder.prefix_cache_n,
+    );
     let add_model_config = AddModelConfig {
         engine_config,
         mcp_client_config: None,
@@ -929,48 +828,12 @@ pub async fn build_gguf_pipeline(
     use inference_core::*;
 
     let mtp_runtime = MtpRuntimeConfig::new(builder.prefix_cache_n.unwrap_or(0));
-
     builder.paged_attn_cfg = paged_attn_with_serving_capacity(
         builder.paged_attn_cfg,
         builder.max_num_seqs,
         builder.prefix_cache_n.unwrap_or(0),
     )?;
-
-    let config = GGUFSpecificConfig {
-        topology: builder.topology.clone(),
-        organization: builder.organization,
-        write_uqff: builder.write_uqff.clone(),
-        imatrix: builder.imatrix.clone(),
-        calibration_file: builder.calibration_file.clone(),
-        max_edge: builder.max_edge,
-        max_model_len: builder.max_model_len,
-        hf_cache_path: builder.hf_cache_path.clone(),
-        matformer_config_path: builder.matformer_config_path.clone(),
-        matformer_slice_name: builder.matformer_slice_name.clone(),
-    };
-
     maybe_initialize_logging(builder.with_logging);
-
-    let mut loader_builder = GGUFLoaderBuilder::new(
-        builder.chat_template.clone(),
-        builder.tok_model_id.clone(),
-        builder.model_id.clone(),
-        builder.files.clone(),
-        config,
-        builder.no_kv_cache,
-        builder.jinja_explicit.clone(),
-    )
-    .with_encoder_cache_memory_bytes(builder.encoder_cache_memory_bytes);
-    if let Some(mmproj_files) = builder.mmproj_files.clone() {
-        loader_builder = loader_builder.with_mmproj_files(mmproj_files);
-    }
-    if let Some(tokenizer_json) = builder.tokenizer_json.clone() {
-        loader_builder = loader_builder.with_tokenizer_json(tokenizer_json);
-    }
-    if let Some(adapters) = builder.lora_adapters.clone() {
-        loader_builder = loader_builder.with_dynamic_lora(adapters, builder.lora_runtime_config);
-    }
-    let loader = loader_builder.build();
 
     let device = resolve_device(builder.force_cpu, builder.device.clone())?;
     builder.paged_attn_cfg = reserve_external_mtp_memory_with_runtime(
@@ -990,40 +853,7 @@ pub async fn build_gguf_pipeline(
         .clone()
         .unwrap_or(DeviceMapSetting::Auto(default_device_map));
     let isq_type = resolve_isq_type(builder.isq.as_ref(), &device)?;
-    let pipeline = loader.load_model_from_hf(
-        builder.hf_revision.clone(),
-        builder.token_source.clone(),
-        &builder.dtype,
-        &device,
-        !builder.with_logging,
-        device_map_setting.clone(),
-        isq_type,
-        builder.paged_attn_cfg,
-    )?;
-    if let Some(mtp_config) = builder.mtp_config.clone() {
-        pipeline
-            .lock()
-            .await
-            .attach_speculative_with_runtime(SpeculativeConfig::Mtp(mtp_config), mtp_runtime)?;
-    }
 
-    let scheduler_config = scheduler_config_from_pipeline(
-        &pipeline,
-        builder.paged_attn_cfg.is_some(),
-        builder.max_num_seqs,
-    )
-    .await?;
-
-    let engine_config = build_engine_config(
-        builder.throughput_logging,
-        builder.search_embedding_model,
-        builder.search_callback.clone(),
-        &builder.tool_callbacks,
-        builder.no_kv_cache,
-        builder.prefix_cache_n,
-    );
-
-    // Create loader config for unload/reload support
     let (max_seq_len, max_batch_size, max_num_images, max_image_length) = match &device_map_setting
     {
         DeviceMapSetting::Auto(AutoDeviceMapParams::Text {
@@ -1099,8 +929,27 @@ pub async fn build_gguf_pipeline(
         hf_config_overrides: None,
         mtp_config: builder.mtp_config.clone(),
         encoder_cache_memory_bytes: builder.encoder_cache_memory_bytes,
+        overrides: LoadOverrides {
+            topology: builder.topology.clone(),
+            speech_cfg: None,
+        },
     };
+    let pipeline = load_from_config(&loader_config, builder.no_kv_cache, mtp_runtime).await?;
 
+    let scheduler_config = scheduler_config_from_pipeline(
+        &pipeline,
+        builder.paged_attn_cfg.is_some(),
+        builder.max_num_seqs,
+    )
+    .await?;
+    let engine_config = build_engine_config(
+        builder.throughput_logging,
+        builder.search_embedding_model,
+        builder.search_callback.clone(),
+        &builder.tool_callbacks,
+        builder.no_kv_cache,
+        builder.prefix_cache_n,
+    );
     let add_model_config = AddModelConfig {
         engine_config,
         mcp_client_config: builder.mcp_client_config.clone(),
@@ -1120,28 +969,6 @@ pub async fn build_diffusion_pipeline(
     use inference_core::*;
 
     maybe_initialize_logging(builder.with_logging);
-
-    let loader = DiffusionLoaderBuilder::new(Some(builder.model_id.clone()))
-        .build(builder.loader_type.clone());
-
-    let device = resolve_device(builder.force_cpu, None)?;
-
-    let pipeline = loader.load_model_from_hf(
-        builder.hf_revision.clone(),
-        builder.token_source.clone(),
-        &builder.dtype,
-        &device,
-        !builder.with_logging,
-        DeviceMapSetting::Auto(AutoDeviceMapParams::default_text()),
-        None,
-        None,
-    )?;
-
-    let scheduler_config = default_scheduler_config(builder.max_num_seqs)?;
-
-    let engine_config = EngineConfig::default();
-
-    // Create loader config for unload/reload support
     let loader_config = ModelLoaderConfig {
         model_selected: ModelSelected::DiffusionPlain {
             model_id: builder.model_id.clone(),
@@ -1151,7 +978,7 @@ pub async fn build_diffusion_pipeline(
         token_source: builder.token_source.clone(),
         hf_revision: builder.hf_revision.clone(),
         dtype: builder.dtype,
-        device,
+        device: resolve_device(builder.force_cpu, None)?,
         device_map_setting: DeviceMapSetting::Auto(AutoDeviceMapParams::default_text()),
         isq: None,
         paged_attn_config: None,
@@ -1162,17 +989,23 @@ pub async fn build_diffusion_pipeline(
         hf_config_overrides: None,
         mtp_config: None,
         encoder_cache_memory_bytes: None,
+        overrides: LoadOverrides::default(),
     };
+    let pipeline = load_from_config(&loader_config, false, MtpRuntimeConfig::default()).await?;
 
     let add_model_config = AddModelConfig {
-        engine_config,
+        engine_config: EngineConfig::default(),
         mcp_client_config: None,
         loader_config: Some(loader_config),
         code_exec_config: None,
         shell_config: None,
     };
 
-    Ok((pipeline, scheduler_config, add_model_config))
+    Ok((
+        pipeline,
+        default_scheduler_config(builder.max_num_seqs)?,
+        add_model_config,
+    ))
 }
 
 /// Build a speech model pipeline from a SpeechModelBuilder.
@@ -1183,31 +1016,6 @@ pub async fn build_speech_pipeline(
     use inference_core::*;
 
     maybe_initialize_logging(builder.with_logging);
-
-    let loader = SpeechLoader {
-        model_id: builder.model_id.clone(),
-        dac_model_id: builder.dac_model_id.clone(),
-        arch: builder.loader_type,
-        cfg: builder.cfg,
-    };
-
-    let device = resolve_device(builder.force_cpu, None)?;
-    let pipeline = loader.load_model_from_hf(
-        builder.hf_revision.clone(),
-        builder.token_source.clone(),
-        &builder.dtype,
-        &device,
-        !builder.with_logging,
-        DeviceMapSetting::Auto(AutoDeviceMapParams::default_text()),
-        None,
-        None,
-    )?;
-
-    let scheduler_config = default_scheduler_config(builder.max_num_seqs)?;
-
-    let engine_config = EngineConfig::default();
-
-    // Create loader config for unload/reload support
     let loader_config = ModelLoaderConfig {
         model_selected: ModelSelected::Speech {
             model_id: builder.model_id.clone(),
@@ -1218,7 +1026,7 @@ pub async fn build_speech_pipeline(
         token_source: builder.token_source.clone(),
         hf_revision: builder.hf_revision.clone(),
         dtype: builder.dtype,
-        device,
+        device: resolve_device(builder.force_cpu, None)?,
         device_map_setting: DeviceMapSetting::Auto(AutoDeviceMapParams::default_text()),
         isq: None,
         paged_attn_config: None,
@@ -1229,17 +1037,26 @@ pub async fn build_speech_pipeline(
         hf_config_overrides: None,
         mtp_config: None,
         encoder_cache_memory_bytes: None,
+        overrides: LoadOverrides {
+            topology: None,
+            speech_cfg: builder.cfg,
+        },
     };
+    let pipeline = load_from_config(&loader_config, false, MtpRuntimeConfig::default()).await?;
 
     let add_model_config = AddModelConfig {
-        engine_config,
+        engine_config: EngineConfig::default(),
         mcp_client_config: None,
         loader_config: Some(loader_config),
         code_exec_config: None,
         shell_config: None,
     };
 
-    Ok((pipeline, scheduler_config, add_model_config))
+    Ok((
+        pipeline,
+        default_scheduler_config(builder.max_num_seqs)?,
+        add_model_config,
+    ))
 }
 
 /// Build an embedding model pipeline from an EmbeddingModelBuilder.
@@ -1249,57 +1066,9 @@ pub async fn build_embedding_pipeline(
 ) -> anyhow::Result<(Arc<Mutex<dyn Pipeline>>, SchedulerConfig, AddModelConfig)> {
     use inference_core::*;
 
-    let config = EmbeddingSpecificConfig {
-        topology: builder.topology.clone(),
-        write_uqff: builder.write_uqff.clone(),
-        from_uqff: builder.from_uqff.clone(),
-        imatrix: builder.imatrix.clone(),
-        calibration_file: builder.calibration_file.clone(),
-        hf_cache_path: builder.hf_cache_path.clone(),
-    };
-
     maybe_initialize_logging(builder.with_logging);
-
-    let loader = EmbeddingLoaderBuilder::new(
-        config,
-        builder.tokenizer_json.clone(),
-        Some(builder.model_id.clone()),
-    )
-    .build(builder.loader_type.clone());
-
     let device = resolve_device(builder.force_cpu, builder.device.clone())?;
     let isq_type = resolve_isq_type(builder.isq.as_ref(), &device)?;
-
-    let pipeline = loader.load_model_from_hf(
-        builder.hf_revision.clone(),
-        builder.token_source.clone(),
-        &builder.dtype,
-        &device,
-        !builder.with_logging,
-        builder
-            .device_mapping
-            .clone()
-            .unwrap_or(DeviceMapSetting::Auto(AutoDeviceMapParams::default_text())),
-        isq_type,
-        None,
-    )?;
-
-    let scheduler_config = default_scheduler_config(builder.max_num_seqs)?;
-
-    let engine_config = EngineConfig {
-        throughput_logging_enabled: builder.throughput_logging,
-        ..Default::default()
-    };
-
-    // Create loader config for unload/reload support
-    let device_map_setting = builder
-        .device_mapping
-        .clone()
-        .unwrap_or(DeviceMapSetting::Auto(AutoDeviceMapParams::default_text()));
-
-    // Convert from_uqff Vec<PathBuf> to semicolon-separated string if present
-    let from_uqff_str = join_path_list(builder.from_uqff.as_deref(), UQFF_MULTI_FILE_DELIMITER);
-
     let loader_config = ModelLoaderConfig {
         model_selected: ModelSelected::Embedding {
             model_id: builder.model_id.clone(),
@@ -1308,16 +1077,19 @@ pub async fn build_embedding_pipeline(
             dtype: builder.dtype,
             topology: builder.topology_path.clone(),
             write_uqff: builder.write_uqff.clone(),
-            from_uqff: from_uqff_str,
-            imatrix: None,
-            calibration_file: None,
+            from_uqff: join_path_list(builder.from_uqff.as_deref(), UQFF_MULTI_FILE_DELIMITER),
+            imatrix: builder.imatrix.clone(),
+            calibration_file: builder.calibration_file.clone(),
             hf_cache_path: builder.hf_cache_path.clone(),
         },
         token_source: builder.token_source.clone(),
         hf_revision: builder.hf_revision.clone(),
         dtype: builder.dtype,
         device,
-        device_map_setting,
+        device_map_setting: builder
+            .device_mapping
+            .clone()
+            .unwrap_or(DeviceMapSetting::Auto(AutoDeviceMapParams::default_text())),
         isq: isq_type,
         paged_attn_config: None,
         silent: !builder.with_logging,
@@ -1327,8 +1099,17 @@ pub async fn build_embedding_pipeline(
         hf_config_overrides: None,
         mtp_config: None,
         encoder_cache_memory_bytes: None,
+        overrides: LoadOverrides {
+            topology: builder.topology.clone(),
+            speech_cfg: None,
+        },
     };
+    let pipeline = load_from_config(&loader_config, false, MtpRuntimeConfig::default()).await?;
 
+    let engine_config = EngineConfig {
+        throughput_logging_enabled: builder.throughput_logging,
+        ..Default::default()
+    };
     let add_model_config = AddModelConfig {
         engine_config,
         mcp_client_config: None,
@@ -1337,7 +1118,11 @@ pub async fn build_embedding_pipeline(
         shell_config: None,
     };
 
-    Ok((pipeline, scheduler_config, add_model_config))
+    Ok((
+        pipeline,
+        default_scheduler_config(builder.max_num_seqs)?,
+        add_model_config,
+    ))
 }
 
 /// Build a model pipeline using auto-detection from a ModelBuilder.
@@ -1349,77 +1134,12 @@ pub async fn build_auto_pipeline(
     use inference_core::*;
 
     let mtp_runtime = MtpRuntimeConfig::new(builder.prefix_cache_n.unwrap_or(0));
-
     builder.paged_attn_cfg = paged_attn_with_serving_capacity(
         builder.paged_attn_cfg,
         builder.max_num_seqs,
         builder.prefix_cache_n.unwrap_or(0),
     )?;
-
-    let normal_config = NormalSpecificConfig {
-        topology: builder.topology.clone(),
-        organization: builder.organization,
-        write_uqff: builder.write_uqff.clone(),
-        from_uqff: builder.from_uqff.clone(),
-        imatrix: builder.imatrix.clone(),
-        calibration_file: builder.calibration_file.clone(),
-        hf_cache_path: builder.hf_cache_path.clone(),
-        hf_config_overrides: builder.hf_config_overrides.clone(),
-        max_model_len: builder.max_model_len,
-        matformer_config_path: builder.matformer_config_path.clone(),
-        matformer_slice_name: builder.matformer_slice_name.clone(),
-    };
-
-    let vision_config = MultimodalSpecificConfig {
-        topology: builder.topology.clone(),
-        write_uqff: builder.write_uqff.clone(),
-        from_uqff: builder.from_uqff.clone(),
-        max_edge: builder.max_edge,
-        max_model_len: builder.max_model_len,
-        hf_config_overrides: builder.hf_config_overrides.clone(),
-        calibration_file: builder.calibration_file.clone(),
-        imatrix: builder.imatrix.clone(),
-        hf_cache_path: builder.hf_cache_path.clone(),
-        matformer_config_path: builder.matformer_config_path.clone(),
-        matformer_slice_name: builder.matformer_slice_name.clone(),
-        organization: builder.organization,
-    };
-
-    let embedding_config = EmbeddingSpecificConfig {
-        topology: builder.topology.clone(),
-        write_uqff: builder.write_uqff.clone(),
-        from_uqff: builder.from_uqff.clone(),
-        imatrix: builder.imatrix.clone(),
-        calibration_file: builder.calibration_file.clone(),
-        hf_cache_path: builder.hf_cache_path.clone(),
-    };
-
     maybe_initialize_logging(builder.with_logging);
-
-    let auto_builder = AutoLoaderBuilder::new(
-        normal_config,
-        vision_config,
-        embedding_config,
-        builder.chat_template.clone(),
-        builder.tokenizer_json.clone(),
-        builder.model_id.clone(),
-        builder.no_kv_cache,
-        builder.jinja_explicit.clone(),
-    )
-    .with_encoder_cache_memory_bytes(builder.encoder_cache_memory_bytes);
-    let auto_builder = if let Some(ref path) = builder.hf_cache_path {
-        auto_builder.hf_cache_path(path.clone())
-    } else {
-        auto_builder
-    };
-    let loader = auto_builder
-        .with_mtp(
-            builder
-                .mtp_config
-                .as_ref()
-                .is_some_and(MtpConfig::is_builtin),
-        )
-        .build();
 
     let device = resolve_device(builder.force_cpu, builder.device.clone())?;
     builder.paged_attn_cfg = reserve_external_mtp_memory_with_runtime(
@@ -1430,47 +1150,6 @@ pub async fn build_auto_pipeline(
         &device,
     )?;
     let isq_type = resolve_isq_type(builder.isq.as_ref(), &device)?;
-
-    let pipeline = loader.load_model_from_hf(
-        builder.hf_revision.clone(),
-        builder.token_source.clone(),
-        &builder.dtype,
-        &device,
-        !builder.with_logging,
-        builder
-            .device_mapping
-            .clone()
-            .unwrap_or(DeviceMapSetting::Auto(AutoDeviceMapParams::default_text())),
-        isq_type,
-        builder.paged_attn_cfg,
-    )?;
-    if let Some(mtp_config) = builder.mtp_config.clone() {
-        pipeline
-            .lock()
-            .await
-            .attach_speculative_with_runtime(SpeculativeConfig::Mtp(mtp_config), mtp_runtime)?;
-    }
-
-    let scheduler_config = scheduler_config_from_pipeline(
-        &pipeline,
-        builder.paged_attn_cfg.is_some(),
-        builder.max_num_seqs,
-    )
-    .await?;
-
-    let engine_config = build_engine_config(
-        builder.throughput_logging,
-        builder.search_embedding_model,
-        builder.search_callback.clone(),
-        &builder.tool_callbacks,
-        builder.no_kv_cache,
-        builder.prefix_cache_n,
-    );
-
-    // Convert from_uqff Vec<PathBuf> to semicolon-separated string if present
-    let from_uqff_str = join_path_list(builder.from_uqff.as_deref(), UQFF_MULTI_FILE_DELIMITER);
-
-    // Create loader config using ModelSelected::Run for auto-detection on reload
     let device_map_setting = builder
         .device_mapping
         .clone()
@@ -1484,7 +1163,7 @@ pub async fn build_auto_pipeline(
             topology: builder.topology_path.clone(),
             organization: Some(builder.organization),
             write_uqff: builder.write_uqff.clone(),
-            from_uqff: from_uqff_str,
+            from_uqff: join_path_list(builder.from_uqff.as_deref(), UQFF_MULTI_FILE_DELIMITER),
             imatrix: builder.imatrix.clone(),
             calibration_file: builder.calibration_file.clone(),
             max_edge: builder.max_edge,
@@ -1510,8 +1189,27 @@ pub async fn build_auto_pipeline(
         hf_config_overrides: builder.hf_config_overrides.clone(),
         mtp_config: builder.mtp_config.clone(),
         encoder_cache_memory_bytes: builder.encoder_cache_memory_bytes,
+        overrides: LoadOverrides {
+            topology: builder.topology.clone(),
+            speech_cfg: None,
+        },
     };
+    let pipeline = load_from_config(&loader_config, builder.no_kv_cache, mtp_runtime).await?;
 
+    let scheduler_config = scheduler_config_from_pipeline(
+        &pipeline,
+        builder.paged_attn_cfg.is_some(),
+        builder.max_num_seqs,
+    )
+    .await?;
+    let engine_config = build_engine_config(
+        builder.throughput_logging,
+        builder.search_embedding_model,
+        builder.search_callback.clone(),
+        &builder.tool_callbacks,
+        builder.no_kv_cache,
+        builder.prefix_cache_n,
+    );
     let add_model_config = AddModelConfig {
         engine_config,
         mcp_client_config: builder.mcp_client_config.clone(),
