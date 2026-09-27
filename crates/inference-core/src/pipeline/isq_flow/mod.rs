@@ -14,8 +14,8 @@ pub(crate) use drive::{
 pub use online::CalibrationStatus;
 pub(crate) use online::{apply_calibration, begin_calibration, calibration_status};
 pub(crate) use plan::{
-    resolve_and_install_isq_plan, resolve_auto_device_map_sizing, resolve_weight_load_dtype,
-    AutoDeviceMapSizing, IsqPlanInputs,
+    auto_device_map_sizes, resolve_and_install_isq_plan, resolve_auto_device_map_sizing,
+    resolve_weight_load_dtype, AutoDeviceMapSizes, AutoDeviceMapSizingInputs, IsqPlanInputs,
 };
 
 use std::collections::HashMap;
