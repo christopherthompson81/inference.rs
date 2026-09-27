@@ -2,7 +2,7 @@ use std::{
     any::Any,
     fs::{self, File},
     io::Read,
-    path::Path,
+    path::{Path, PathBuf},
     sync::Arc,
 };
 
@@ -10,21 +10,28 @@ use base64::{engine::general_purpose, Engine};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW};
 use either::Either;
+use hf_hub::{Repo, RepoType};
 use image::DynamicImage;
 use indexmap::IndexMap;
-use inference_quant::IsqType;
+use inference_quant::{IsqType, ShardedVarBuilder};
 use rand::{rng, seq::SliceRandom};
 use rand_isaac::Isaac64Rng;
+use regex_automata::meta::Regex;
 use tracing::{info, warn};
 
 use crate::{
     amoe::{AnyMoeConfig, AnyMoeTrainingInputRow, AnyMoeTrainingInputs, AnyMoeTrainingResult},
+    api_dir_list, api_get_file,
     device_map::DeviceMapper,
     get_mut_arcmutex,
+    pipeline::hf::build_api,
     prefix_cacher::PrefixCacheManagerV2,
     sampler::Sampler,
     sequence::{SeqStepType, Sequence, SequenceGroup, SequenceRecognizer},
-    utils::progress::{new_multi_progress, NiceProgressBar, ProgressScopeGuard},
+    utils::{
+        progress::{new_multi_progress, NiceProgressBar, ProgressScopeGuard},
+        varbuilder_utils::{from_mmaped_safetensors, DeviceForLoadTensor},
+    },
     DeviceMapSetting, Loader, ModelCategory, ModelKind, ModelPaths, PagedAttentionConfig, Pipeline,
     Response, TokenSource, TryIntoDType,
 };
@@ -760,4 +767,102 @@ fn new_dummy_seq(
         eos_toks,
         None,
     )
+}
+
+pub(crate) struct AnyMoeWeightSources<'a> {
+    pub model_ids: Vec<String>,
+    pub token: &'a TokenSource,
+    pub revision: Option<String>,
+    pub match_regex: &'a str,
+    pub dtype: DType,
+    pub dev: &'a Device,
+    pub layers: &'a [usize],
+    pub silent: bool,
+    pub gate_model_id: Option<String>,
+}
+
+fn repo_safetensors(
+    token: &TokenSource,
+    revision: &Option<String>,
+    model_id: &str,
+    silent: bool,
+) -> candle_core::Result<Vec<PathBuf>> {
+    let api = build_api(token, !silent).map_err(candle_core::Error::msg)?;
+    let revision = revision.clone().unwrap_or("main".to_string());
+    let api = api.repo(Repo::with_revision(
+        model_id.to_string(),
+        RepoType::Model,
+        revision.clone(),
+    ));
+    let mut filenames = vec![];
+    for rfilename in
+        api_dir_list!(api, model_id, true, &revision).filter(|x| x.ends_with(".safetensors"))
+    {
+        filenames.push(api_get_file!(api, &rfilename, model_id, &revision));
+    }
+    Ok(filenames)
+}
+
+/// Expert weights (restricted to the matched MLPs of `layers`) and the optional gate for AnyMoE layer creation.
+pub(crate) fn load_anymoe_weights(
+    src: AnyMoeWeightSources<'_>,
+) -> candle_core::Result<(Vec<ShardedVarBuilder>, Option<ShardedVarBuilder>)> {
+    let regex = Regex::new(src.match_regex).map_err(candle_core::Error::msg)?;
+    let mut vbs = Vec::new();
+    for model_id in &src.model_ids {
+        let filenames = repo_safetensors(src.token, &src.revision, model_id, src.silent)?;
+        let regex = regex.clone();
+        let match_regex = src.match_regex.to_string();
+        let layers = src.layers.to_vec();
+        let vb = from_mmaped_safetensors(
+            filenames,
+            vec![],
+            Some(src.dtype),
+            src.dev,
+            vec![None],
+            src.silent,
+            None,
+            move |key| {
+                if regex.is_match(&key) {
+                    // key is `...<N>.<match_regex>...`; slice out N
+                    let last_layer_idx = key.find(&match_regex).unwrap() - 1;
+                    let first_layer_idx = key[..last_layer_idx].rfind('.').unwrap();
+                    let layer_n = key[first_layer_idx + 1..last_layer_idx]
+                        .parse::<usize>()
+                        .unwrap();
+                    layers.contains(&layer_n) || layers.is_empty()
+                } else {
+                    false
+                }
+            },
+            Arc::new(|_| DeviceForLoadTensor::Base),
+        )?;
+        vbs.push(vb);
+    }
+
+    let gate_vb = if let Some(gate_model_id) = &src.gate_model_id {
+        let gate_filenames = repo_safetensors(src.token, &src.revision, gate_model_id, src.silent)?;
+        assert_eq!(
+            gate_filenames.len(),
+            1,
+            "Gate model ID must contain only one .safetensors file"
+        );
+        let gate_path = gate_filenames[0].display().to_string();
+        let vb = from_mmaped_safetensors(
+            gate_filenames,
+            vec![],
+            Some(src.dtype),
+            src.dev,
+            vec![None],
+            src.silent,
+            None,
+            |_| true,
+            Arc::new(|_| DeviceForLoadTensor::Base),
+        )?;
+        info!("Loaded gating layers from `{gate_path}`");
+        Some(vb)
+    } else {
+        None
+    };
+    Ok((vbs, gate_vb))
 }

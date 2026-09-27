@@ -169,12 +169,11 @@ use crate::pipeline::sampling::{sample_and_add_toks, sample_and_add_toks_batched
 use crate::pipeline::text_models_inputs_processor::InputMetadata;
 use crate::pipeline::tokenizer::get_tokenizer;
 use crate::pipeline::{
-    get_chat_template, hf::build_api, ChatTemplate, IsqOrganization, LocalModelPaths,
-    ModelForwardContext, RecurrentMetadata,
+    get_chat_template, ChatTemplate, IsqOrganization, LocalModelPaths, ModelForwardContext,
+    RecurrentMetadata,
 };
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
-use crate::utils::varbuilder_utils::DeviceForLoadTensor;
 use crate::utils::{
     progress::{new_multi_progress, ProgressScopeGuard},
     varbuilder_utils::from_mmaped_safetensors,
@@ -183,10 +182,10 @@ use crate::vision_models::preprocessor_config::PreProcessorConfig;
 use crate::vision_models::processor_config::ProcessorConfig;
 use crate::vision_models::ModelInputs;
 use crate::{
-    api_dir_list, api_get_file, get_paths, get_uqff_paths, lora_model_loader,
-    multimodal_normal_model_loader, multimodal_normal_model_loader_sharded, AnyMoeExpertType,
-    DeviceMapSetting, DynamicLoraRuntime, LoraAdapterSpec, LoraRuntimeConfig, PagedAttentionConfig,
-    Pipeline, Topology, TryIntoDType, GLOBAL_HF_CACHE,
+    get_paths, get_uqff_paths, lora_model_loader, multimodal_normal_model_loader,
+    multimodal_normal_model_loader_sharded, AnyMoeExpertType, DeviceMapSetting, DynamicLoraRuntime,
+    LoraAdapterSpec, LoraRuntimeConfig, PagedAttentionConfig, Pipeline, Topology, TryIntoDType,
+    GLOBAL_HF_CACHE,
 };
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, Tensor, Var};
@@ -196,7 +195,6 @@ use hf_hub::{Repo, RepoType};
 use inference_quant::log::once_log_info;
 use inference_quant::IsqType;
 use rand_isaac::Isaac64Rng;
-use regex_automata::meta::Regex;
 use std::any::Any;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
@@ -3014,102 +3012,17 @@ impl AnyMoePipelineMixin for MultimodalPipeline {
         silent: bool,
         gate_model_id: Option<String>,
     ) -> candle_core::Result<()> {
-        let mut vbs = Vec::new();
-        // Precompile regex here
-        let regex = Regex::new(match_regex).map_err(candle_core::Error::msg)?;
-        for model_id in model_ids {
-            let model_id_str = &model_id;
-            let model_id = Path::new(&model_id);
-
-            let api = build_api(token, !silent).map_err(candle_core::Error::msg)?;
-            let revision = revision.clone().unwrap_or("main".to_string());
-            let api = api.repo(Repo::with_revision(
-                model_id_str.clone(),
-                RepoType::Model,
-                revision.clone(),
-            ));
-
-            let mut filenames = vec![];
-            for rfilename in api_dir_list!(api, model_id, true, &revision)
-                .filter(|x| x.ends_with(".safetensors"))
-            {
-                filenames.push(api_get_file!(api, &rfilename, model_id, &revision));
-            }
-
-            let regex = regex.clone();
-            let match_regex_clone = match_regex.to_string();
-            let layers_clone = layers.clone();
-            let vb = from_mmaped_safetensors(
-                filenames,
-                vec![],
-                Some(dtype),
-                dev,
-                vec![None],
-                silent,
-                None,
-                move |key| {
-                    if regex.is_match(&key) {
-                        // Idx of the last char of the layer id, +1
-                        // Assumes N.MLP
-                        let last_layer_idx = key.find(&match_regex_clone).unwrap() - 1;
-                        let first_layer_idx = key[..last_layer_idx].rfind('.').unwrap();
-                        let layer_n = key[first_layer_idx + 1..last_layer_idx]
-                            .parse::<usize>()
-                            .unwrap();
-                        layers_clone.contains(&layer_n) || layers_clone.is_empty()
-                    } else {
-                        false
-                    }
-                },
-                Arc::new(|_| DeviceForLoadTensor::Base),
-            )?;
-            vbs.push(vb);
-        }
-
-        let gate_vb = if let Some(gate_model_id) = gate_model_id {
-            let model_id_str = &gate_model_id;
-            let model_id = Path::new(&gate_model_id);
-
-            let api = build_api(token, !silent).map_err(candle_core::Error::msg)?;
-            let revision = revision.clone().unwrap_or("main".to_string());
-            let api = api.repo(Repo::with_revision(
-                model_id_str.clone(),
-                RepoType::Model,
-                revision.clone(),
-            ));
-
-            let mut gate_filenames = vec![];
-            for rfilename in api_dir_list!(api, model_id, true, &revision)
-                .filter(|x| x.ends_with(".safetensors"))
-            {
-                gate_filenames.push(api_get_file!(api, &rfilename, model_id, &revision));
-            }
-            assert_eq!(
-                gate_filenames.len(),
-                1,
-                "Gate model ID must contain only one .safetensors file"
-            );
-
-            let vb = from_mmaped_safetensors(
-                gate_filenames.clone(),
-                vec![],
-                Some(dtype),
-                dev,
-                vec![None],
-                silent,
-                None,
-                |_| true,
-                Arc::new(|_| DeviceForLoadTensor::Base),
-            )?;
-            info!(
-                "Loaded gating layers from `{}`",
-                gate_filenames[0].display()
-            );
-            Some(vb)
-        } else {
-            None
-        };
-
+        let (vbs, gate_vb) = super::amoe::load_anymoe_weights(super::amoe::AnyMoeWeightSources {
+            model_ids,
+            token,
+            revision,
+            match_regex,
+            dtype,
+            dev,
+            layers: &layers,
+            silent,
+            gate_model_id,
+        })?;
         self.model
             .create_anymoe_layers(vbs, config, (prefix, mlp), layers, expert_type, gate_vb)
     }
