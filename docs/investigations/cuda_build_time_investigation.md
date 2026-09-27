@@ -514,3 +514,25 @@ Review follow-ups:
 - Parallel `--slim` in per-set target dirs: first run 159 s (one-time dependency check into six new dirs), then
   10 s after a one-line core edit (was ~31 s serial). The six dirs hold 11 GB.
 - Decision: rejected. 11 GB of extra target dirs is not worth ~21 s per slim run; `--slim` stays serial in `target/`.
+
+## Run 26 - 2026-09-26 23:20
+
+- Question: cold, like-for-like with Runs 13-23, after the vision, DFlash and loader moves (#35-#44)?
+- Command: `CARGO_TARGET_DIR=<scratch> cargo test --no-run --features cuda --workspace --lib --bins --tests --timings`,
+  load average ~17 at the end (other work on the machine).
+- Result: 241 s (Run 13: 297 s, Run 23: 255 s), 884 units, 2131 unit-seconds. 47 s of the build has <= 3 units
+  active (was 86 s).
+- Critical path: candle-kernels build script t=13-77 s (64 s), candle-core t=77-119 s, `inference-core` lib
+  t=119-199 s (80 s, was 93.6 s), core lib test t=137-239 s (102 s, was 118 s), server-core lib t=168-206 s, its lib
+  test and pyo3's lib test t=200-240 s.
+- Core's LLVM IR (CUDA lib) is 4.42M lines, from 5.68M at the start of this series.
+- Off the critical path but large: `image` 44.5 s, `ravif` 36 s (still pulled in by something even though the server
+  no longer encodes AVIF), `tokenizers` 37 s twice (two feature sets), `rust-mcp-schema` 36 s.
+- Traced the two off-path extras; neither can be dropped from this workspace:
+  - `ravif`: `openai-harmony` 0.0.8 depends on `image` with default features (so AVIF) but never uses `image` in its
+    source; its own `default` feature is empty, so only a patched or vendored harmony would drop it.
+  - `tokenizers` twice: we use 0.21.4, shared with `toktrie_hf_tokenizers` (even its latest, 1.8.0, pins 0.21); the
+    pinned candle rev needs 0.23.2 unconditionally (`candle-core/src/quantized/tokenizer.rs`). Bumping us to 0.23
+    breaks `add_special_tokens` (now takes owned tokens) and llguidance's `ByteTokenizer::from_tokenizer` (a 0.21
+    type), and would still leave two versions.
+- Implication: core's lib test (102 s) is still the last unit and the remaining wall-time lever.
