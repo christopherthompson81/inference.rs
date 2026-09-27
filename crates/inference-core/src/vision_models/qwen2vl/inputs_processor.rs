@@ -444,7 +444,7 @@ fn completed_media_grid(
         .map_err(Into::into)
 }
 
-pub(crate) struct PromptMropeConfig<'a> {
+struct PromptMropeConfig<'a> {
     packed: bool,
     padded_len: usize,
     spatial_merge_size: usize,
@@ -473,7 +473,7 @@ impl<'a> PromptMropeConfig<'a> {
     }
 }
 
-pub(crate) fn prompt_mrope(
+fn prompt_mrope(
     input_seqs: &mut [&mut Sequence],
     query_ranges: &[Range<usize>],
     config: PromptMropeConfig<'_>,
@@ -552,7 +552,7 @@ pub(crate) fn prompt_mrope(
     Ok(Tensor::stack(&rows, 1)?)
 }
 
-pub(crate) fn apply_mrope_position_deltas(
+fn apply_mrope_position_deltas(
     position_ids: Vec<usize>,
     input_seqs: &[&mut Sequence],
 ) -> Result<Vec<usize>> {
@@ -598,7 +598,7 @@ fn qwen2_decode_args(input_ids: &Tensor, seqlens: Vec<usize>) -> Qwen2VLVisionSp
     }
 }
 
-pub(crate) fn packed_layout(
+fn packed_layout(
     input_seqs: &[&mut Sequence],
     query_lens: &[usize],
     continuous_img_pad: &[Vec<(usize, usize)>],
@@ -1953,6 +1953,15 @@ mod tests {
         let mut spans = vec![(0, 2), (4, 7)];
         assert_eq!(shift_media_spans(&mut spans, 2)?, 1);
         assert_eq!(spans, vec![(2, 5)]);
+        Ok(())
+    }
+
+    #[test]
+    fn split_pixels_rejects_grid_mismatch() -> Result<()> {
+        let pixels = Tensor::zeros((4, 2), DType::F32, &Device::Cpu)?;
+        let image_grid = Tensor::new(&[[1u32, 1, 3]], &Device::Cpu)?;
+
+        assert!(split_media_pixels(&pixels, Some(&image_grid), None).is_err());
         Ok(())
     }
 }

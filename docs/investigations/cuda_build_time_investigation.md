@@ -590,3 +590,19 @@ Review follow-ups:
   --slim` (2127 CPU, 2445 CUDA tests).
 - Result: 4,047,334 lines (78,650 copies), from 4,134,514: -87k, 2.1%. Less than the 150k the module table gave
   xlora_models; the GGUF pair and their instantiations of core generics stay behind.
+
+## Run 31 - 2026-09-27 (afternoon)
+
+- Question: what is left in core by module after #56, and is any of the biggest share duplicated?
+- Command: `cargo llvm-lines -p inference-core --lib --features cuda`, grouped by `inference_core::<module>` prefix.
+- Finding: vision_models (the inputs processors kept in core) is now the largest group, spread over ~20 processors of
+  4-22k each. Qwen2-VL and Qwen2.5-VL `process_inputs` were 7331 and 7327 lines, and a name-normalized diff of the two
+  files showed the 2.5 processor was a copy of the 2-VL one: identical bodies, identical vision args structs; the only
+  non-rename difference was that 2.5 built the text metadata after the media block instead of before. That block only
+  rewrites tokens when `has_changed_prompt` is false, and prompt planning (add_request and every prompt step) sets it
+  first, so the order is moot.
+- Change: Qwen2.5-VL uses Qwen2VLProcessor and Qwen2VLVisionSpecificArgs; the 1235-line copy is deleted.
+- Result: 4,028,130 lines (78,444 copies), from 4,047,334: -19k. No Qwen VL checkpoint on this machine, so no
+  end-to-end run; CPU and CUDA suites green.
+- Next: Qwen3-VL and muse_glimmer also import qwen2vl helpers; a normalized diff of qwen3_vl against qwen2vl showed
+  1374 differing lines, so less of it is shared.

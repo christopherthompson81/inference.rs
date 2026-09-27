@@ -105,9 +105,7 @@ use crate::vision_models::phi4::{Phi4MMConfig, Phi4MMModel, PHI4_MM_VISION_CFG};
 use crate::vision_models::preprocessor_config::PreProcessorConfig;
 use crate::vision_models::processor_config::ProcessorConfig;
 #[cfg(feature = "models-qwen")]
-use crate::vision_models::qwen2_5_vl::{
-    Config as Qwen2_5VLConfig, Qwen2_5VLModel, Qwen2_5VLProcessor,
-};
+use crate::vision_models::qwen2_5_vl::{Config as Qwen2_5VLConfig, Qwen2_5VLModel};
 #[cfg(feature = "models-qwen")]
 use crate::vision_models::qwen2vl::{Config as Qwen2VLConfig, Qwen2VLModel, Qwen2VLProcessor};
 #[cfg(feature = "models-qwen")]
