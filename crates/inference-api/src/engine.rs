@@ -3,13 +3,14 @@
 use candle_core::Device;
 use futures::StreamExt;
 use inference_core::{
-    AgentPermission, ChatCompletionResponse, CodeExecutionPermission, CompletionResponse,
-    ImageGenerationResponse, InferenceRs, ModelSelected, Response, TokenSource,
+    AgentPermission, ChatCompletionResponse, CompletionResponse, ImageGenerationResponse,
+    InferenceRs, ModelSelected, Response, TokenSource,
 };
 use serde::Deserialize;
 
 use crate::{
     agentic::AgenticDefaults,
+    agentic::{resolve_approval, ApprovalDecisionRequest, ApprovalDecisionResponse},
     anthropic::{
         collect_messages, prepare_messages, AnthropicMessageResponse, AnthropicMessagesRequest,
         AnthropicStream, MessagesFailure,
@@ -18,6 +19,7 @@ use crate::{
     engine_chat::{collect_chat, ChatEngine, ChatStream, ChatStreamEvent},
     engine_completion::{collect_completion, prepare_completion, CompletionStream},
     engine_embeddings::{embed, EmbeddingError},
+    files::{self, FileBody, FileMetadata, FileUpload},
     generation::{generate_image, generate_speech, SpeechAudio},
     inference_for_server_builder::InferenceRsForServerBuilder,
     lora_adapters::{
@@ -45,8 +47,6 @@ use crate::{
 const INVALID_REQUEST_BODY: &str = "invalid_request_body";
 // Matches `inference serve`'s default, so an engine loaded from a spec batches like the server.
 pub const DEFAULT_MAX_SEQS: usize = 32;
-const ASK_UNAVAILABLE: &str =
-    "agent_permission \"ask\" needs approval resolution, which this surface does not offer yet";
 
 /// What to load and how to run it: the JSON form of the options `inference serve` takes. Skills are not served yet.
 #[derive(Debug, Deserialize)]
@@ -155,9 +155,6 @@ impl std::error::Error for EngineLoadError {}
 impl EngineSpec {
     fn into_builder(self) -> Result<InferenceRsForServerBuilder, EngineLoadError> {
         let invalid = EngineLoadError::InvalidSpec;
-        if matches!(self.agentic.agent_permission, Some(AgentPermission::Ask)) {
-            return Err(invalid(ASK_UNAVAILABLE.into()));
-        }
         let runtime = self.runtime;
         let mut builder = InferenceRsForServerBuilder::new()
             .with_model(self.model)
@@ -328,7 +325,6 @@ impl Engine {
         request: ChatCompletionRequest,
         media: MediaAttachments,
     ) -> Result<crate::engine_chat::PreparedChat, ApiError> {
-        reject_ask(request.agent_permission, request.code_execution_permission)?;
         let state = self.state().clone();
         self.chat
             .prepare(request, OpenAiToolSurface::ChatCompletions, media)
@@ -405,7 +401,6 @@ impl Engine {
         mut request: AnthropicMessagesRequest,
     ) -> Result<AnthropicMessageResponse, ApiError> {
         request.stream = Some(false);
-        reject_ask(request.agent_permission, request.code_execution_permission)?;
         let state = self.state().clone();
         let prepared = prepare_messages(&self.chat, request)
             .await
@@ -432,7 +427,6 @@ impl Engine {
         mut request: AnthropicMessagesRequest,
     ) -> Result<AnthropicStream, ApiError> {
         request.stream = Some(true);
-        reject_ask(request.agent_permission, request.code_execution_permission)?;
         let state = self.state().clone();
         let prepared = prepare_messages(&self.chat, request)
             .await
@@ -625,6 +619,47 @@ impl Engine {
         self.speech_generation(parse_json(request)?).await
     }
 
+    /// Answers the approval an `agentic_tool_approval_required` stream event named.
+    pub fn resolve_approval(
+        &self,
+        approval_id: &str,
+        request: ApprovalDecisionRequest,
+    ) -> Result<ApprovalDecisionResponse, ApiError> {
+        resolve_approval(&self.chat.agentic.approval_broker, approval_id, request)
+    }
+
+    pub fn resolve_approval_json(
+        &self,
+        approval_id: &str,
+        request: &[u8],
+    ) -> Result<String, ApiError> {
+        to_json(&self.resolve_approval(approval_id, parse_json(request)?)?)
+    }
+
+    pub fn upload_file(&self, upload: FileUpload) -> Result<FileMetadata, ApiError> {
+        files::upload_file(self.state(), upload)
+    }
+
+    pub fn upload_file_json(&self, upload: FileUpload) -> Result<String, ApiError> {
+        to_json(&self.upload_file(upload)?)
+    }
+
+    pub fn files_json(&self) -> Result<String, ApiError> {
+        to_json(&files::list_files(self.state())?)
+    }
+
+    pub fn file_json(&self, file_id: &str) -> Result<String, ApiError> {
+        to_json(&files::get_file(self.state(), file_id)?)
+    }
+
+    pub fn delete_file_json(&self, file_id: &str) -> Result<String, ApiError> {
+        to_json(&files::delete_file(self.state(), file_id)?)
+    }
+
+    pub fn file_content(&self, file_id: &str) -> Result<FileBody, ApiError> {
+        files::file_content(self.state(), file_id)
+    }
+
     /// Embeds every input of an embeddings request.
     pub async fn embeddings(
         &self,
@@ -647,25 +682,6 @@ impl Engine {
         let response = self.embeddings(parse_json(request)?).await?;
         to_json(&response)
     }
-}
-
-// A request cannot ask for tool approvals this surface cannot answer.
-fn reject_ask(
-    agent_permission: Option<AgentPermission>,
-    code_execution_permission: Option<CodeExecutionPermission>,
-) -> Result<(), ApiError> {
-    let asks = agent_permission
-        .or_else(|| code_execution_permission.map(Into::into))
-        .is_some_and(|permission| permission == AgentPermission::Ask);
-    if asks {
-        return Err(ApiError::new(
-            ApiErrorKind::InvalidRequest,
-            ASK_UNAVAILABLE,
-            Some("unsupported_parameter"),
-            Some("agent_permission"),
-        ));
-    }
-    Ok(())
 }
 
 fn parse_json<T: serde::de::DeserializeOwned>(request: &[u8]) -> Result<T, ApiError> {

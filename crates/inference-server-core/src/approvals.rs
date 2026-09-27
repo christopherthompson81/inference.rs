@@ -1,7 +1,5 @@
 use axum::{
     extract::{rejection::JsonRejection, Json, Path},
-    http::StatusCode,
-    response::IntoResponse,
     Extension,
 };
 
@@ -9,8 +7,8 @@ pub use crate::agentic::{
     ApprovalBroker, ApprovalDecision, ApprovalDecisionRequest, ApprovalDecisionResponse,
 };
 use crate::{
-    agentic::ApprovalResolveStatus,
-    handler_core::{openai_error_response, ApiError, ApiErrorHttp, ApiErrorKind},
+    agentic::resolve_approval,
+    handler_core::{json_response, openai_error_response, ApiError, ApiErrorHttp},
 };
 
 #[utoipa::path(
@@ -32,30 +30,10 @@ pub async fn resolve_agent_approval(
     Path(approval_id): Path<String>,
     payload: Result<Json<ApprovalDecisionRequest>, JsonRejection>,
 ) -> axum::response::Response {
-    let Json(request) = match payload {
-        Ok(request) => request,
-        Err(error) => return openai_error_response(ApiError::from_json_rejection(error)),
-    };
-    let approve = matches!(request.decision, ApprovalDecision::Approve);
-    let status = broker.resolve(
-        &approval_id,
-        approve,
-        request.remember_for_session,
-        request.message,
-    );
-    let status = match status {
-        ApprovalResolveStatus::Resolved => "resolved",
-        ApprovalResolveStatus::Queued => "queued",
-        ApprovalResolveStatus::NotFound => {
-            return openai_error_response(ApiError::new(
-                ApiErrorKind::NotFound,
-                format!("Approval `{approval_id}` was not found."),
-                Some("approval_not_found"),
-                Some("approval_id"),
-            ));
-        }
-    };
-    (StatusCode::OK, Json(ApprovalDecisionResponse { status })).into_response()
+    match payload {
+        Ok(Json(request)) => json_response(resolve_approval(&broker, &approval_id, request)),
+        Err(error) => openai_error_response(ApiError::from_json_rejection(error)),
+    }
 }
 
 #[cfg(test)]
@@ -63,7 +41,7 @@ mod tests {
     use axum::{
         body::{to_bytes, Body},
         extract::FromRequest,
-        http::{header::CONTENT_TYPE, Request as HttpRequest},
+        http::{header::CONTENT_TYPE, Request as HttpRequest, StatusCode},
     };
     use std::time::Duration;
 
@@ -73,6 +51,7 @@ mod tests {
     };
 
     use super::*;
+    use crate::agentic::ApprovalResolveStatus;
 
     const TEST_PENDING_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
     const TEST_PENDING_WAIT_RETRY: Duration = Duration::from_millis(1);

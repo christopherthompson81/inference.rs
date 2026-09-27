@@ -144,17 +144,17 @@ fn chat_and_stream_agree_and_errors_carry_openai_bodies() {
     assert_eq!(error["error"]["code"], "model_not_found", "{error}");
     assert_eq!(error["error"]["param"], "model", "{error}");
 
-    // a request cannot ask for tool approvals this surface cannot answer
+    // approvals arrive as stream events, so a blocking call cannot ask for them
     let ask = json!({
         "model": "default",
         "messages": [{"role": "user", "content": "hi"}],
-        "stream": true,
         "agent_permission": "ask",
     });
     let (status, _) = chat(engine, &ask.to_string());
     assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST);
     let error: Value = serde_json::from_str(&last_error()).unwrap();
     assert_eq!(error["error"]["param"], "agent_permission", "{error}");
+    assert_eq!(error["error"]["code"], "unsupported_parameter", "{error}");
 
     let mut event = null_mut();
     let mut stream = null_mut();
@@ -189,12 +189,6 @@ fn load_failures_are_classified() {
         "{}",
         last_error()
     );
-
-    let ask = json!({
-        "model": {"Plain": {"model_id": "org/model"}},
-        "agentic": {"agent_permission": "ask"},
-    });
-    assert_eq!(load(&ask.to_string()).0, INFERENCE_ERR_INVALID_ARGUMENT);
 
     let bad_device =
         json!({"model": {"Plain": {"model_id": "org/model"}}, "runtime": {"device": "tpu:0"}});
@@ -515,7 +509,7 @@ fn anthropic_messages_and_stream_agree_and_errors_use_the_anthropic_shape() {
     assert_eq!(error["type"], "error", "{error}");
     assert_eq!(error["error"]["type"], "invalid_request_error", "{error}");
 
-    // a streamed request cannot ask for tool approvals this surface cannot answer
+    // a streamed request may ask for tool approvals; this model calls no tools, so it simply finishes
     let ask = json!({
         "model": "default",
         "max_tokens": MAX_TOKENS,
@@ -533,8 +527,13 @@ fn anthropic_messages_and_stream_agree_and_errors_use_the_anthropic_shape() {
             &mut stream,
         )
     };
-    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{}", last_error());
-    assert!(stream.is_null());
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let events = drain(stream);
+    assert_eq!(
+        events.last().unwrap()["event"],
+        "message_stop",
+        "{events:?}"
+    );
 
     unsafe { inference_engine_free(engine) };
 }
@@ -921,13 +920,194 @@ fn generation_requests_reach_the_engine_and_are_refused_by_a_chat_model() {
     assert_eq!(error["error"]["code"], "model_not_found", "{error}");
 
     unsafe {
-        assert!(inference_audio_data(null()).is_null());
-        assert_eq!(inference_audio_len(null()), 0);
+        assert!(inference_blob_data(null()).is_null());
+        assert_eq!(inference_blob_len(null()), 0);
         assert_eq!(
-            CStr::from_ptr(inference_audio_mime_type(null())).to_bytes(),
+            CStr::from_ptr(inference_blob_mime_type(null())).to_bytes(),
             b""
         );
-        inference_audio_free(null_mut());
+        inference_blob_free(null_mut());
         inference_engine_free(engine);
     }
+}
+
+#[test]
+fn files_approvals_and_system_reports() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let mut spec: Value = serde_json::from_str(&spec(dir.path())).unwrap();
+    spec["agentic"] = json!({"agent_permission": "ask"});
+    let (status, engine) = load(&spec.to_string());
+    assert_eq!(
+        status,
+        INFERENCE_OK,
+        "an engine may ask for approvals: {}",
+        last_error()
+    );
+
+    let contents = b"col_a,col_b\n1,2\n";
+    let mut response = null_mut();
+    let status = unsafe {
+        inference_file_upload(
+            engine,
+            contents.as_ptr(),
+            contents.len(),
+            c"table.csv".as_ptr(),
+            c"text/csv".as_ptr(),
+            c"user_data".as_ptr(),
+            &mut response,
+        )
+    };
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let uploaded: Value = serde_json::from_str(&take_string(response)).unwrap();
+    assert_eq!(uploaded["filename"], "table.csv", "{uploaded}");
+    assert_eq!(uploaded["bytes"], contents.len(), "{uploaded}");
+    let file_id = uploaded["id"].as_str().unwrap().to_string();
+
+    let mut response = null_mut();
+    assert_eq!(
+        unsafe { inference_files_list(engine, &mut response) },
+        INFERENCE_OK
+    );
+    let listed: Value = serde_json::from_str(&take_string(response)).unwrap();
+    assert!(
+        listed["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|f| f["id"] == file_id.as_str()),
+        "{listed}"
+    );
+    let (status, fetched) = by_id(inference_file_get, engine, &file_id);
+    assert_eq!(status, INFERENCE_OK, "{fetched}");
+    assert_eq!(fetched["mime_type"], "text/csv", "{fetched}");
+
+    let mut blob = null_mut();
+    let status = unsafe {
+        inference_file_content(
+            engine,
+            file_id.as_ptr().cast::<c_char>(),
+            file_id.len(),
+            &mut blob,
+        )
+    };
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let (bytes, mime) = unsafe {
+        (
+            std::slice::from_raw_parts(inference_blob_data(blob), inference_blob_len(blob))
+                .to_vec(),
+            CStr::from_ptr(inference_blob_mime_type(blob))
+                .to_str()
+                .unwrap()
+                .to_string(),
+        )
+    };
+    unsafe { inference_blob_free(blob) };
+    assert_eq!(
+        (bytes.as_slice(), mime.as_str()),
+        (&contents[..], "text/csv")
+    );
+
+    let (status, deleted) = by_id(inference_file_delete, engine, &file_id);
+    assert_eq!(status, INFERENCE_OK, "{deleted}");
+    assert_eq!(deleted["deleted"], true, "{deleted}");
+    let (status, error) = by_id(inference_file_get, engine, &file_id);
+    assert_eq!(status, INFERENCE_ERR_NOT_FOUND, "{error}");
+    assert_eq!(error["error"]["code"], "file_not_found", "{error}");
+    let mut blob = null_mut();
+    let status = unsafe {
+        inference_file_content(
+            engine,
+            file_id.as_ptr().cast::<c_char>(),
+            file_id.len(),
+            &mut blob,
+        )
+    };
+    assert_eq!((status, blob.is_null()), (INFERENCE_ERR_NOT_FOUND, true));
+
+    let upload = |data: *const u8, len: usize, filename: *const c_char| {
+        let mut response = null_mut();
+        let status = unsafe {
+            inference_file_upload(
+                engine,
+                data,
+                len,
+                filename,
+                null(),
+                c"user_data".as_ptr(),
+                &mut response,
+            )
+        };
+        assert!(response.is_null());
+        (status, last_error())
+    };
+    let (status, error) = upload(null(), 0, c"table.csv".as_ptr());
+    assert_eq!(status, INFERENCE_ERR_INVALID_ARGUMENT);
+    assert!(error.contains("data is NULL"), "{error}");
+    let (status, error) = upload(contents.as_ptr(), contents.len(), null());
+    assert_eq!(status, INFERENCE_ERR_INVALID_ARGUMENT);
+    assert!(error.contains("filename"), "{error}");
+    let oversized = vec![0_u8; inference_api::files::MAX_FILE_UPLOAD_BYTES + 1];
+    let (status, error) = upload(oversized.as_ptr(), oversized.len(), c"big.bin".as_ptr());
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+    assert!(error.contains("file_too_large"), "{error}");
+
+    let mut response = null_mut();
+    let status = unsafe {
+        inference_file_upload(
+            engine,
+            contents.as_ptr(),
+            contents.len(),
+            c"table.csv".as_ptr(),
+            null(),
+            c" ".as_ptr(),
+            &mut response,
+        )
+    };
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{}", last_error());
+    assert!(response.is_null());
+
+    let approval_id = "approval-that-was-never-issued";
+    let decision = json!({"decision": "approve"}).to_string();
+    let mut response = null_mut();
+    let status = unsafe {
+        inference_approval_resolve(
+            engine,
+            approval_id.as_ptr().cast::<c_char>(),
+            approval_id.len(),
+            decision.as_ptr().cast::<c_char>(),
+            decision.len(),
+            &mut response,
+        )
+    };
+    assert_eq!(status, INFERENCE_ERR_NOT_FOUND, "{}", last_error());
+    let error: Value = serde_json::from_str(&last_error()).unwrap();
+    assert_eq!(error["error"]["code"], "approval_not_found", "{error}");
+    assert!(response.is_null());
+    let status = unsafe {
+        inference_approval_resolve(
+            engine,
+            null(),
+            0,
+            decision.as_ptr().cast::<c_char>(),
+            decision.len(),
+            &mut response,
+        )
+    };
+    assert_eq!(
+        (status, response.is_null()),
+        (INFERENCE_ERR_INVALID_ARGUMENT, true)
+    );
+
+    for report in [inference_system_info, inference_system_doctor] {
+        let mut response = null_mut();
+        assert_eq!(
+            unsafe { report(&mut response) },
+            INFERENCE_OK,
+            "{}",
+            last_error()
+        );
+        let report: Value = serde_json::from_str(&take_string(response)).unwrap();
+        assert!(report.is_object(), "{report}");
+    }
+    unsafe { inference_engine_free(engine) };
 }

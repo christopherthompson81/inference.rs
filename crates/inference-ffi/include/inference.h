@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 8
+#define INFERENCE_ABI_VERSION_PATCH 9
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -159,14 +159,14 @@ INFERENCE_API inference_status inference_layout_result_detection(const inference
  * Failing engine calls, including INFERENCE_ERR_RUNTIME ones, leave the error JSON in inference_last_error(): the
  * OpenAI envelope, or the Anthropic one for the inference_anthropic_* calls.
  * Freeing the last handle of an engine (the engine or one of its streams) waits up to 10 s for the engine to stop.
- * Not yet on this surface: agent tool approvals (agent_permission "ask" is rejected) and uploaded skills. */
+ * Not yet on this surface: uploaded skills, and host tool or search callbacks. */
 
 typedef struct inference_engine inference_engine;
 typedef struct inference_stream inference_stream;
 /* An owned, NUL-terminated UTF-8 JSON string. */
 typedef struct inference_string inference_string;
-/* Owned encoded audio and its MIME type. */
-typedef struct inference_audio inference_audio;
+/* Owned bytes (audio, a file's content) and their MIME type. */
+typedef struct inference_blob inference_blob;
 
 /* Loads an engine from a JSON spec: {"model": <model selection>, "model_id"?, "runtime"?: {"device": "auto" | "cpu" |
  * "cuda:N" | "metal:N", "seed", "max_seqs", "prefix_cache_n", "no_kv_cache", "chat_template", "jinja_explicit",
@@ -295,18 +295,47 @@ INFERENCE_API inference_status inference_lora_adapter_unload(const inference_eng
  * list JSON. */
 INFERENCE_API inference_status inference_image_generation(const inference_engine *engine, const char *request,
                                                          size_t request_len, inference_string **out_response);
-/* Speaks text with a speech model (the POST /v1/audio/speech body; "response_format" is "wav" or "pcm"). out_audio
+/* Speaks text with a speech model (the POST /v1/audio/speech body; "response_format" is "wav" or "pcm"). out_blob
  * receives the encoded audio; its MIME type carries the sample rate and channel count, e.g.
  * "audio/pcm; codecs=1; format=s16le; rate=44100; channels=1". */
 INFERENCE_API inference_status inference_speech_generation(const inference_engine *engine, const char *request,
-                                                          size_t request_len, inference_audio **out_audio);
-/* The audio bytes; valid until the audio is freed. NULL for NULL. */
-INFERENCE_API const uint8_t *inference_audio_data(const inference_audio *audio);
+                                                          size_t request_len, inference_blob **out_blob);
+/* Answers the approval an "agentic_tool_approval_required" stream event named (its "approval_id"); the request is
+ * {"decision": "approve" | "deny", "remember_for_session"?, "message"?} and out_response receives {"status":
+ * "resolved" | "queued"}. An unknown approval is INFERENCE_ERR_NOT_FOUND. Approvals only arise on streamed requests
+ * with agent_permission "ask" (per request or in the spec, which makes blocking chat calls refuse); unanswered
+ * ones, including those of a freed stream, are denied after 5 minutes and hold their sequence slot until then. */
+INFERENCE_API inference_status inference_approval_resolve(const inference_engine *engine, const char *approval_id,
+                                                         size_t approval_id_len, const char *request,
+                                                         size_t request_len, inference_string **out_response);
+
+/* The engine's file store, shared by its models: uploads that requests name by id, and files agentic tools
+ * produce. Uploading copies len bytes (at most 64 MiB; data must not be NULL) under filename and purpose (e.g.
+ * "user_data"); mime_type may be NULL. Metadata calls return the /v1/files JSON; content returns the bytes, and a body
+ * the store elided is INFERENCE_ERR_NOT_FOUND with code "file_content_unavailable". */
+INFERENCE_API inference_status inference_file_upload(const inference_engine *engine, const uint8_t *data, size_t len,
+                                                    const char *filename, const char *mime_type, const char *purpose,
+                                                    inference_string **out_response);
+INFERENCE_API inference_status inference_files_list(const inference_engine *engine, inference_string **out_response);
+INFERENCE_API inference_status inference_file_get(const inference_engine *engine, const char *file_id,
+                                                 size_t file_id_len, inference_string **out_response);
+INFERENCE_API inference_status inference_file_delete(const inference_engine *engine, const char *file_id,
+                                                    size_t file_id_len, inference_string **out_response);
+INFERENCE_API inference_status inference_file_content(const inference_engine *engine, const char *file_id,
+                                                     size_t file_id_len, inference_blob **out_blob);
+
+/* Host, device and build information, and environment diagnostics (the /v1/system/info and /v1/system/doctor
+ * JSON). They need no engine. */
+INFERENCE_API inference_status inference_system_info(inference_string **out_response);
+INFERENCE_API inference_status inference_system_doctor(inference_string **out_response);
+
+/* The blob's bytes; valid until the blob is freed. NULL for NULL. */
+INFERENCE_API const uint8_t *inference_blob_data(const inference_blob *blob);
 /* Length in bytes. 0 for NULL. */
-INFERENCE_API size_t inference_audio_len(const inference_audio *audio);
-/* The MIME type, NUL-terminated; valid until the audio is freed. "" for NULL. */
-INFERENCE_API const char *inference_audio_mime_type(const inference_audio *audio);
-INFERENCE_API void inference_audio_free(inference_audio *audio);
+INFERENCE_API size_t inference_blob_len(const inference_blob *blob);
+/* The MIME type, NUL-terminated; valid until the blob is freed. "" for NULL. */
+INFERENCE_API const char *inference_blob_mime_type(const inference_blob *blob);
+INFERENCE_API void inference_blob_free(inference_blob *blob);
 
 /* The string's bytes, NUL-terminated; valid until the string is freed. "" for NULL. */
 INFERENCE_API const char *inference_string_data(const inference_string *string);

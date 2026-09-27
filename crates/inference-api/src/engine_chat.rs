@@ -79,6 +79,24 @@ pub fn serialize_agentic_progress(
     })
 }
 
+/// The payload of an `agentic_tool_approval_required` event; answer it with the engine's approval resolution.
+pub fn serialize_approval_required(
+    approval_id: &str,
+    session_id: &str,
+    round: usize,
+    tool: &inference_core::AgentToolMetadata,
+    arguments: &Value,
+) -> Value {
+    json!({
+        "type": "agentic_tool_approval_required",
+        "approval_id": approval_id,
+        "session_id": session_id,
+        "round": round,
+        "tool": tool,
+        "arguments": arguments,
+    })
+}
+
 fn serialize_agentic_data(data: &AgenticToolCallData) -> Value {
     match data {
         AgenticToolCallData::CodeExecution {
@@ -959,8 +977,11 @@ impl ChatEngine {
         let asks = matches!(oairequest.agent_permission, Some(AgentPermission::Ask));
         let is_streaming = oairequest.stream.unwrap_or(false);
         if asks && !is_streaming {
-            return Err(DispatchError::Validation(Box::new(JsonError::new(
-                ASK_REQUIRES_STREAMING.to_string(),
+            return Err(DispatchError::Validation(Box::new(ApiError::new(
+                ApiErrorKind::InvalidRequest,
+                ASK_REQUIRES_STREAMING,
+                Some("unsupported_parameter"),
+                Some("agent_permission"),
             ))));
         }
         let agent_approval_handler = asks
@@ -1151,14 +1172,13 @@ impl ChatStream {
                 round,
                 tool,
                 arguments,
-            } => ChatStreamEvent::AgenticToolApprovalRequired(json!({
-                "type": "agentic_tool_approval_required",
-                "approval_id": approval_id,
-                "session_id": session_id,
-                "round": round,
-                "tool": tool,
-                "arguments": arguments,
-            })),
+            } => ChatStreamEvent::AgenticToolApprovalRequired(serialize_approval_required(
+                &approval_id,
+                &session_id,
+                round,
+                &tool,
+                &arguments,
+            )),
             Response::BlockDenoisingProgress(_) => return None,
             Response::File(file) => ChatStreamEvent::FileProduced(file),
             Response::Done(_)

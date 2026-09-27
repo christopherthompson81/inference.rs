@@ -4,9 +4,9 @@ use axum::extract::{rejection::JsonRejection, Json, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use inference_core::{
-    auto_tune, collect_system_info, parse_isq_value, run_doctor, AutoDeviceMapParams,
-    AutoTuneRequest, InferenceRs, InferenceRsError, ModelDType, ModelSelected, Request,
-    SerializedSession, TokenSource, TuneProfile,
+    auto_tune, parse_isq_value, AutoDeviceMapParams, AutoTuneRequest, InferenceRs,
+    InferenceRsError, ModelDType, ModelSelected, Request, SerializedSession, TokenSource,
+    TuneProfile,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -21,6 +21,7 @@ use crate::{
         list_models, model_status as status, reload_model as reload, unload_model as unload,
     },
     openai::ModelObjects,
+    system,
     types::ExtractedInferenceRsState,
 };
 
@@ -72,7 +73,7 @@ pub async fn health() -> &'static str {
   responses((status = 200, description = "Host, device, and build information"))
 )]
 pub async fn system_info() -> Json<inference_core::SystemInfo> {
-    Json(collect_system_info())
+    Json(system::system_info())
 }
 
 #[utoipa::path(
@@ -82,7 +83,7 @@ pub async fn system_info() -> Json<inference_core::SystemInfo> {
   responses((status = 200, description = "Environment diagnostics report"))
 )]
 pub async fn system_doctor() -> Json<inference_core::DoctorReport> {
-    Json(run_doctor())
+    Json(system::system_doctor())
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
