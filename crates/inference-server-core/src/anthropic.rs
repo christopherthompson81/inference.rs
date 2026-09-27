@@ -21,11 +21,10 @@ use axum::{
 };
 use either::Either;
 use inference_core::{
-    is_chat_template_request_error, AgentPermission, AgentToolApprovalHandler,
-    ApproximateUserLocation, ChatCompletionChunkResponse, ChatCompletionResponse,
-    CodeExecutionPermission, Function, InferenceRs, ReasoningEffort, Request, RequestMessage,
-    Response, TokenizationRequest, Tool, ToolChoice, ToolType, Usage, WebSearchOptions,
-    WebSearchUserLocation,
+    is_chat_template_request_error, AgentPermission, ApproximateUserLocation,
+    ChatCompletionChunkResponse, ChatCompletionResponse, CodeExecutionPermission, Function,
+    InferenceRs, ReasoningEffort, Request, RequestMessage, Response, TokenizationRequest, Tool,
+    ToolChoice, ToolType, Usage, WebSearchOptions, WebSearchUserLocation,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -37,11 +36,13 @@ use utoipa::ToSchema;
 
 use crate::{
     chat_completion::{parse_request, ChatCompletionParseContext},
+    engine_chat::{ChatDispatchError, ChatEngine, PreparedChat},
     handler_core::{
-        create_response_channel, send_request_with_model, ApiError, ApiErrorKind,
-        ResponseErrorMessage, INTERNAL_ERROR_MESSAGE,
+        apply_model_override, create_response_channel, send_request_with_model, ApiError,
+        ApiErrorKind, ResponseErrorMessage, INTERNAL_ERROR_MESSAGE,
     },
     inference_server_router_builder::AgenticDefaults,
+    lora_adapters::{resolve_lora_adapter_model, DEFAULT_MODEL_ID},
     openai::{
         ChatCompletionRequest, FunctionCalled, Grammar, Message, MessageContent,
         OpenAiCodeInterpreterAutoContainer, OpenAiCodeInterpreterContainer,
@@ -1495,6 +1496,7 @@ impl AnthropicStreamState {
 pub struct AnthropicStreamer {
     rx: Receiver<Response>,
     state: SharedInferenceRsState,
+    model_override: Option<String>,
     stream: AnthropicStreamState,
     ping: Interval,
     outcome: Option<StreamOutcomeHandle>,
@@ -1504,6 +1506,7 @@ impl AnthropicStreamer {
     fn new(
         rx: Receiver<Response>,
         state: SharedInferenceRsState,
+        model_override: Option<String>,
         outcome: Option<StreamOutcomeHandle>,
         omit_thinking: bool,
     ) -> Self {
@@ -1513,6 +1516,7 @@ impl AnthropicStreamer {
         Self {
             rx,
             state,
+            model_override,
             stream: AnthropicStreamState::new(omit_thinking),
             ping,
             outcome,
@@ -1539,8 +1543,9 @@ impl futures::Stream for AnthropicStreamer {
                 Poll::Ready(Some(resp)) => {
                     observe_response(&self.outcome, &resp);
                     match resp {
-                        Response::Chunk(chunk) => {
+                        Response::Chunk(mut chunk) => {
                             InferenceRs::maybe_log_response(self.state.clone(), &chunk);
+                            apply_model_override(&mut chunk.model, self.model_override.as_deref());
                             self.stream.handle_chunk(chunk);
                         }
                         Response::ModelError(msg, _) => {
@@ -1750,10 +1755,11 @@ fn handle_validation_error(e: anyhow::Error) -> AnthropicMessagesResponder {
 fn create_streamer(
     rx: Receiver<Response>,
     state: SharedInferenceRsState,
+    model_override: Option<String>,
     outcome: Option<StreamOutcomeHandle>,
     omit_thinking: bool,
 ) -> AnthropicMessagesSse {
-    let streamer = AnthropicStreamer::new(rx, state, outcome, omit_thinking);
+    let streamer = AnthropicStreamer::new(rx, state, model_override, outcome, omit_thinking);
     Sse::new(streamer)
         .keep_alive(KeepAlive::new().interval(Duration::from_millis(get_keep_alive_interval())))
 }
@@ -1761,11 +1767,13 @@ fn create_streamer(
 async fn process_non_streaming_response(
     rx: &mut Receiver<Response>,
     state: SharedInferenceRsState,
+    model_override: Option<&str>,
     omit_thinking: bool,
 ) -> AnthropicMessagesResponder {
     loop {
         match rx.recv().await {
-            Some(Response::Done(response)) => {
+            Some(Response::Done(mut response)) => {
+                apply_model_override(&mut response.model, model_override);
                 InferenceRs::maybe_log_response(state, &response);
                 return AnthropicMessagesResponder::Json(anthropic_response_from_chat(
                     response,
@@ -1839,77 +1847,41 @@ pub async fn anthropic_messages(
         Err(error) => return handle_validation_error(error),
     };
 
-    let (tx, mut rx) = create_response_channel(None);
-    let mut oairequest = match request.into_chat_completion_request() {
+    let oairequest = match request.into_chat_completion_request() {
         Ok(request) => request,
         Err(e) => return handle_validation_error(e),
     };
-
-    oairequest.max_tool_rounds = oairequest
-        .max_tool_rounds
-        .or(agentic_defaults.max_tool_rounds);
-
-    let request_permission = oairequest
-        .agent_permission
-        .or_else(|| oairequest.code_execution_permission.map(Into::into));
-    oairequest.agent_permission = match (agentic_defaults.agent_permission, request_permission) {
-        (Some(server_permission), Some(request_permission)) => {
-            Some(server_permission.strictest(request_permission))
-        }
-        (Some(server_permission), None) => Some(server_permission),
-        (None, permission) => permission,
+    let engine = ChatEngine {
+        state: state.clone(),
+        agentic: agentic_defaults,
+        skill_store: Some(skill_store),
     };
-    oairequest.code_execution_permission = None;
-
-    let is_streaming = oairequest.stream.unwrap_or(false);
-    if matches!(oairequest.agent_permission, Some(AgentPermission::Ask)) && !is_streaming {
-        return AnthropicMessagesResponder::ValidationError(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "agent_permission `ask` requires stream=true over HTTP.",
-        )));
-    }
-
-    let agent_approval_handler = matches!(oairequest.agent_permission, Some(AgentPermission::Ask))
-        .then(|| AgentToolApprovalHandler::from_async(agentic_defaults.approval_broker.callback()));
-    let agent_approval_notifier =
-        if is_streaming && matches!(oairequest.agent_permission, Some(AgentPermission::Ask)) {
-            Some(agentic_defaults.approval_broker.notifier(tx.clone()))
-        } else {
-            None
-        };
-    let model_id = (oairequest.model != "default").then(|| oairequest.model.clone());
-
-    let (request, is_streaming) = match parse_request(
-        oairequest,
-        ChatCompletionParseContext {
-            state: state.clone(),
-            tx,
-            tool_dispatch_url: agentic_defaults.tool_dispatch_url,
-            agent_approval_handler,
-            agent_approval_notifier,
-            tool_surface: OpenAiToolSurface::ChatCompletions,
-            skill_store: Some(skill_store),
-        },
-    )
-    .await
+    let PreparedChat {
+        mut rx,
+        is_streaming,
+        model_override,
+    } = match engine
+        .prepare(oairequest, OpenAiToolSurface::ChatCompletions)
+        .await
     {
-        Ok(x) => x,
-        Err(e) => return handle_validation_error(e),
+        Ok(prepared) => prepared,
+        Err(ChatDispatchError::Validation(e)) => {
+            return AnthropicMessagesResponder::ValidationError(e)
+        }
+        Err(ChatDispatchError::Internal(e)) => return AnthropicMessagesResponder::InternalError(e),
     };
-
-    if let Err(e) = send_request_with_model(&state, request, model_id.as_deref()).await {
-        return AnthropicMessagesResponder::InternalError(Box::new(e));
-    }
 
     if is_streaming {
         AnthropicMessagesResponder::Sse(create_streamer(
             rx,
             state,
+            model_override,
             stream_outcome.map(|Extension(handle)| handle),
             omit_thinking,
         ))
     } else {
-        process_non_streaming_response(&mut rx, state, omit_thinking).await
+        process_non_streaming_response(&mut rx, state, model_override.as_deref(), omit_thinking)
+            .await
     }
 }
 
@@ -1943,7 +1915,12 @@ pub async fn anthropic_count_tokens(
     };
 
     oairequest.stream = Some(false);
-    let model_id = (oairequest.model != "default").then(|| oairequest.model.clone());
+    if let Err(error) =
+        resolve_lora_adapter_model(&state, &mut oairequest.model, &mut oairequest.adapter)
+    {
+        return AnthropicCountTokensResponder::ValidationError(Box::new(error));
+    }
+    let model_id = (oairequest.model != DEFAULT_MODEL_ID).then(|| oairequest.model.clone());
 
     let (request, _) = match parse_request(
         oairequest,

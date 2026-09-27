@@ -34,7 +34,7 @@ const LORA_ADAPTER_OBJECT: &str = "lora_adapter";
 const LORA_ADAPTER_LIST_OBJECT: &str = "list";
 const LORA_CONFIG_FILE: &str = "adapter_config.json";
 const LORA_WEIGHTS_FILE: &str = "adapter_model.safetensors";
-const DEFAULT_MODEL_ID: &str = "default";
+pub(crate) const DEFAULT_MODEL_ID: &str = "default";
 const MAX_CONCURRENT_HTTP_LORA_LOADS: usize = 1;
 
 #[derive(Clone, Debug)]
