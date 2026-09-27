@@ -12,6 +12,7 @@ on:
       - "crates/inference-cli/**"
       - "crates/inference-pyo3/**"
       - "crates/inference-server-core/**"
+      - "crates/inference-api/**"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
@@ -23,6 +24,7 @@ on:
       - "crates/inference-cli/**"
       - "crates/inference-pyo3/**"
       - "crates/inference-server-core/**"
+      - "crates/inference-api/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 

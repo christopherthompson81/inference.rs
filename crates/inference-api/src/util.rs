@@ -25,7 +25,7 @@ use crate::media_source::{load_media_source, MediaSourcePolicy};
 /// ### Examples
 ///
 /// ```ignore
-/// use inference_server_core::util::parse_image_url;
+/// use inference_api::util::parse_image_url;
 ///
 /// // Load from HTTP URL
 /// let image = parse_image_url("https://example.com/photo.jpg").await?;
@@ -43,9 +43,7 @@ pub async fn parse_image_url(url_unparsed: &str) -> Result<DynamicImage, anyhow:
     parse_image_url_with_policy(url_unparsed, MediaSourcePolicy::Local).await
 }
 
-pub(crate) async fn parse_image_url_for_server(
-    url_unparsed: &str,
-) -> Result<DynamicImage, anyhow::Error> {
+pub async fn parse_image_url_for_server(url_unparsed: &str) -> Result<DynamicImage, anyhow::Error> {
     parse_image_url_with_policy(url_unparsed, MediaSourcePolicy::ServerRequest).await
 }
 
@@ -62,9 +60,7 @@ pub async fn parse_audio_url(url_unparsed: &str) -> Result<AudioInput, anyhow::E
     parse_audio_url_with_policy(url_unparsed, MediaSourcePolicy::Local).await
 }
 
-pub(crate) async fn parse_audio_url_for_server(
-    url_unparsed: &str,
-) -> Result<AudioInput, anyhow::Error> {
+pub async fn parse_audio_url_for_server(url_unparsed: &str) -> Result<AudioInput, anyhow::Error> {
     parse_audio_url_with_policy(url_unparsed, MediaSourcePolicy::ServerRequest).await
 }
 
@@ -126,7 +122,7 @@ pub fn validate_model_name(
 /// ### Examples
 ///
 /// ```ignore
-/// use inference_server_core::util::sanitize_error_message;
+/// use inference_api::util::sanitize_error_message;
 ///
 /// // For a simple error without chain
 /// let error = std::io::Error::new(std::io::ErrorKind::NotFound, "File not found");

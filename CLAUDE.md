@@ -81,6 +81,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-models-{speech,diffusion}/` - Speech (Dia) and image generation (FLUX) models, always built; their loaders, `SpeechLoaderType`/`DiffusionLoaderType` and request processors stay in core
 - `crates/inference-nn/` - Model-facing building blocks: layers, attention and its metadata, KV/paged caches, GDN, MoE, device mapping, and the CUDA/Metal kernels behind them
 - `crates/inference-cli/` - Unified CLI binary (commands: run, serve, bench, from-config)
+- `crates/inference-api/` - The engine surface with no HTTP: OpenAI request/response types, request parsing and dispatch, chat as an engine operation, the server/engine builder. The HTTP server builds on it and the C ABI is to expose it (#19); add engine features here, not in the server
 - `crates/inference-server-core/` - HTTP server routing, OpenAI API implementation
 - `crates/inference-pyo3/` - Python SDK (PyO3 bindings)
 - `crates/inference/` - Rust SDK (high-level crate)

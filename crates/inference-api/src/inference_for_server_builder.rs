@@ -153,7 +153,7 @@ pub mod defaults {
 ///
 /// Basic usage:
 /// ```ignore
-/// use inference_server_core::inference_for_server_builder::InferenceRsForServerBuilder;
+/// use inference_api::inference_for_server_builder::InferenceRsForServerBuilder;
 ///
 /// let args = Args::parse();
 ///
@@ -362,9 +362,9 @@ impl InferenceRsForServerBuilder {
     /// ### Examples
     ///
     /// ```ignore
-    /// use inference_server_core::inference_for_server_builder::InferenceRsForServerBuilder;
+    /// use inference_api::inference_for_server_builder::InferenceRsForServerBuilder;
     ///
-    /// let builder = inference_server_core::inference_for_server_builder::InferenceRsForServerBuilder::new();
+    /// let builder = inference_api::inference_for_server_builder::InferenceRsForServerBuilder::new();
     /// ```
     pub fn new() -> Self {
         Default::default()
@@ -793,7 +793,7 @@ impl InferenceRsForServerBuilder {
     /// ### Examples
     ///
     /// ```ignore
-    /// use inference_server_core::inference_for_server_builder::InferenceRsForServerBuilder;
+    /// use inference_api::inference_for_server_builder::InferenceRsForServerBuilder;
     ///
     /// let shared_inference = InferenceRsForServerBuilder::new()
     ///     .with_model(model)

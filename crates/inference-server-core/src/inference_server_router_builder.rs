@@ -54,15 +54,7 @@ use crate::{
     types::SharedInferenceRsState,
 };
 
-/// Server-level defaults for agentic features.
-/// Injected as an axum Extension so handlers can apply them to incoming requests.
-#[derive(Clone, Default)]
-pub struct AgenticDefaults {
-    pub max_tool_rounds: Option<usize>,
-    pub tool_dispatch_url: Option<String>,
-    pub agent_permission: Option<inference_core::AgentPermission>,
-    pub approval_broker: ApprovalBroker,
-}
+pub use crate::agentic::AgenticDefaults;
 
 // NOTE(EricLBuehler): Accept up to 50mb input
 const N_INPUT_SIZE: usize = 50;

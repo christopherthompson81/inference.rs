@@ -146,3 +146,25 @@ the response builders. `engine_chat.rs` now depends only on HTTP-free modules. T
 pins every error kind's HTTP status.
 
 Result: green, 2129 CPU / 2447 CUDA tests (+1). Next: move the HTTP-free modules into `inference-api`.
+
+## Run 5 - 2026-09-27 (night)
+
+Change: the crate move.
+- In place first, so each HTTP-free half had its own file: `agentic.rs` (`AgenticDefaults` and the approval broker,
+  whose `resolve` becomes public for the ABI), `skill_store.rs` (the store takes `SkillFiles`, `(name, bytes)` pairs
+  checked against the size/count limits as they are added; the server's multipart reader fills it),
+  `lora_routing.rs` (model-name to LoRA adapter resolution), `sampling.rs` (stop tokens, DRY params). Tests that
+  mixed store internals with HTTP checks were split along the same line.
+- Then `git mv` into the new `crates/inference-api`: agentic, api_error, dispatch, engine_chat, input_files,
+  lora_routing, media_source, openai, sampling, skill_store, util, video, inference_for_server_builder, and types
+  (minus the axum `State` alias). `inference-api` depends on no HTTP crate; it compiled on its own first time.
+- The server depends on it and re-exports those modules at their old paths, so `inference_server_core::openai`,
+  `::inference_for_server_builder` etc. (used by inference-cli) keep working. Features forward to both crates.
+- Review cleanup: the server publicly re-exports only `inference_for_server_builder`, `openai`, `util` and `video`
+  (old public paths); the other moved modules are private imports. Plumbing-only items in `inference-api` are
+  `#[doc(hidden)]`. Internal re-export shims were replaced by imports from the new modules. Unused server-core
+  dependencies (candle-core, chrono, data-url, indexmap, itertools, zip, reqwest) dropped.
+
+Result: green, 2132 CPU / 2450 CUDA tests (+3 from the split tests). `docs/openapi.json` changed only in a doc
+example path (`inference_api::openai`).
+

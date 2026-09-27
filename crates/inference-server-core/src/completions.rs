@@ -10,16 +10,16 @@ use std::{
 use crate::handler_core::ApiErrorHttp;
 use crate::{
     completion_core::{
-        convert_stop_tokens, get_dry_sampling_params, handle_completion_error,
-        handle_completion_validation_error, BaseCompletionResponder,
+        handle_completion_error, handle_completion_validation_error, BaseCompletionResponder,
     },
     handler_core::{
         apply_model_override, base_process_non_streaming_response, create_response_channel,
         openai_error_from_error, openai_error_response, request_model_override,
         send_request_with_model, ApiError, ApiErrorKind, ModelErrorMessage,
     },
-    lora_adapters::resolve_lora_adapter_model,
+    lora_routing::resolve_lora_adapter_model,
     openai::{CompletionChunkResponseBody, CompletionRequest, CompletionResponseBody, Grammar},
+    sampling::{convert_stop_tokens, get_dry_sampling_params},
     streaming::{
         base_create_streamer, get_keep_alive_interval, observe_response, openai_error_event,
         BaseStreamer, DoneState, StreamOutcomeHandle,

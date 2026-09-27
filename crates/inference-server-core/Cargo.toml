@@ -17,22 +17,16 @@ anyhow.workspace = true
 axum = { workspace = true, features = ["tokio", "multipart"] }
 http-body = { workspace = true }
 http-body-util.workspace = true
-candle-core.workspace = true
-chrono.workspace = true
-data-url.workspace = true
 either.workspace = true
 futures.workspace = true
 image.workspace = true
-indexmap.workspace = true
-itertools.workspace = true
 base64.workspace = true
+inference-api.workspace = true
 inference-core = { workspace = true, features = [
   "utoipa",
 ] }
-reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tempfile.workspace = true
 tokio.workspace = true
 tower-http = { workspace = true, features = ["cors"] }
 tracing.workspace = true
@@ -42,12 +36,13 @@ url.workspace = true
 utoipa = { workspace = true, features = ["axum_extras"] }
 utoipa-swagger-ui = { workspace = true, features = ["axum"], optional = true }
 uuid = { workspace = true, features = ["v4"] }
-zip.workspace = true
 
 accelerate-src = { workspace = true, optional = true }
 intel-mkl-src = { workspace = true, optional = true }
 
 [dev-dependencies]
+candle-core.workspace = true
+tempfile.workspace = true
 candle-nn.workspace = true
 indicatif.workspace = true
 inference-models-other.workspace = true
@@ -59,20 +54,20 @@ tower = { workspace = true, features = ["util"] }
 
 [features]
 default = ["swagger-ui", "all-models"]
-all-models = ["inference-core/all-models"]
-models-gemma = ["inference-core/models-gemma"]
-models-llama = ["inference-core/models-llama"]
-models-other = ["inference-core/models-other"]
-models-phi = ["inference-core/models-phi"]
-models-qwen = ["inference-core/models-qwen"]
+all-models = ["inference-core/all-models", "inference-api/all-models"]
+models-gemma = ["inference-core/models-gemma", "inference-api/models-gemma"]
+models-llama = ["inference-core/models-llama", "inference-api/models-llama"]
+models-other = ["inference-core/models-other", "inference-api/models-other"]
+models-phi = ["inference-core/models-phi", "inference-api/models-phi"]
+models-qwen = ["inference-core/models-qwen", "inference-api/models-qwen"]
 swagger-ui = ["dep:utoipa-swagger-ui"]
-cuda = ["inference-core/cuda"]
-cudnn = ["inference-core/cudnn"]
-metal = ["inference-core/metal"]
-flash-attn = ["cuda", "inference-core/flash-attn"]
-flash-attn-v3 = ["cuda", "inference-core/flash-attn-v3"]
-accelerate = ["inference-core/accelerate"]
-mkl = ["inference-core/mkl"]
-nccl = ["inference-core/nccl"]
-ring = ["inference-core/ring"]
-code-execution = ["inference-core/code-execution"]
+cuda = ["inference-core/cuda", "inference-api/cuda"]
+cudnn = ["inference-core/cudnn", "inference-api/cudnn"]
+metal = ["inference-core/metal", "inference-api/metal"]
+flash-attn = ["cuda", "inference-core/flash-attn", "inference-api/flash-attn"]
+flash-attn-v3 = ["cuda", "inference-core/flash-attn-v3", "inference-api/flash-attn-v3"]
+accelerate = ["inference-core/accelerate", "inference-api/accelerate"]
+mkl = ["inference-core/mkl", "inference-api/mkl"]
+nccl = ["inference-core/nccl", "inference-api/nccl"]
+ring = ["inference-core/ring", "inference-api/ring"]
+code-execution = ["inference-core/code-execution", "inference-api/code-execution"]

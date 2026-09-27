@@ -62,7 +62,7 @@ pub async fn parse_video_url(
     parse_video_url_with_policy(url_unparsed, sampling, MediaSourcePolicy::Local).await
 }
 
-pub(crate) async fn parse_video_url_for_server(
+pub async fn parse_video_url_for_server(
     url_unparsed: &str,
     sampling: Option<VideoFrameSampling>,
 ) -> Result<VideoInput> {

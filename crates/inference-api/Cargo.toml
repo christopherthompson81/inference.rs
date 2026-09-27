@@ -1,0 +1,54 @@
+[package]
+name = "inference-api"
+readme = "README.md"
+authors = ["Eric Buehler", "Chris Thompson"]
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+description = "The inference.rs engine surface: OpenAI-style operations over a loaded engine, with no HTTP."
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+homepage.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64.workspace = true
+candle-core.workspace = true
+chrono.workspace = true
+data-url.workspace = true
+either.workspace = true
+futures.workspace = true
+image.workspace = true
+indexmap.workspace = true
+inference-core = { workspace = true, features = ["utoipa"] }
+itertools.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+url.workspace = true
+utoipa.workspace = true
+uuid = { workspace = true, features = ["v4"] }
+zip.workspace = true
+
+[features]
+default = ["all-models"]
+all-models = ["inference-core/all-models"]
+models-gemma = ["inference-core/models-gemma"]
+models-llama = ["inference-core/models-llama"]
+models-other = ["inference-core/models-other"]
+models-phi = ["inference-core/models-phi"]
+models-qwen = ["inference-core/models-qwen"]
+cuda = ["inference-core/cuda"]
+cudnn = ["inference-core/cudnn"]
+metal = ["inference-core/metal"]
+flash-attn = ["cuda", "inference-core/flash-attn"]
+flash-attn-v3 = ["cuda", "inference-core/flash-attn-v3"]
+accelerate = ["inference-core/accelerate"]
+mkl = ["inference-core/mkl"]
+nccl = ["inference-core/nccl"]
+ring = ["inference-core/ring"]
+code-execution = ["inference-core/code-execution"]
