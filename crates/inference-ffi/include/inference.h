@@ -16,7 +16,8 @@
  *
  * Versioning
  *   inference_abi_version() returns (major << 16) | (minor << 8) | patch. A different major version must not be used.
- *   Minor versions only add entry points (callers may require a minimum); patch versions change behaviour only.
+ *   Minor versions only add entry points and status codes (callers may require a minimum; treat an unknown status as
+ *   an error); patch versions change behaviour only.
  *
  * Symbol surface
  *   The shared library exports exactly the inference_* functions declared here (tests/export_surface.py checks it).
@@ -46,7 +47,7 @@ extern "C" {
 #endif
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
-#define INFERENCE_ABI_VERSION_MINOR 1
+#define INFERENCE_ABI_VERSION_MINOR 2
 #define INFERENCE_ABI_VERSION_PATCH 0
 
 typedef enum inference_status {
@@ -62,7 +63,13 @@ typedef enum inference_status {
     /* The requested backend (e.g. "cuda") is not compiled into this build or the device is missing. */
     INFERENCE_ERR_NOT_AVAILABLE = 5,
     /* A bug: an internal panic was caught at the boundary. */
-    INFERENCE_ERR_INTERNAL = 6
+    INFERENCE_ERR_INTERNAL = 6,
+    /* The engine rejected a request (malformed JSON, unknown model, bad parameters). inference_last_error() holds the
+     * OpenAI error JSON: {"error": {"message", "type", "param", "code"}}. */
+    INFERENCE_ERR_INVALID_REQUEST = 7,
+    /* The engine is overloaded or unavailable; retrying later may succeed. inference_last_error() holds the error
+     * JSON. */
+    INFERENCE_ERR_UNAVAILABLE = 8
 } inference_status;
 
 /* (major << 16) | (minor << 8) | patch of the ABI this library implements. */
@@ -142,6 +149,51 @@ INFERENCE_API size_t inference_layout_result_count(const inference_layout_result
 INFERENCE_API inference_status inference_layout_result_detection(const inference_layout_result *result, size_t index,
                                                                 int32_t *out_class_id, const char **out_label,
                                                                 float *out_score, float *out_bbox);
+
+/* Engine: a loaded model serving OpenAI-style requests. Requests and responses are the JSON the HTTP server accepts and
+ * returns (e.g. POST /v1/chat/completions bodies). Engine calls block; they must not be made from inside a tokio
+ * runtime thread. An engine handle may be used from several threads at once; a stream handle from one at a time.
+ * Failing engine calls, including INFERENCE_ERR_RUNTIME ones, leave the OpenAI error JSON in inference_last_error().
+ * Freeing the last handle of an engine (the engine or one of its streams) waits up to 10 s for the engine to stop.
+ * Not yet on this surface: agent tool approvals (agent_permission "ask" is rejected) and uploaded skills. */
+
+typedef struct inference_engine inference_engine;
+typedef struct inference_stream inference_stream;
+/* An owned, NUL-terminated UTF-8 JSON string. */
+typedef struct inference_string inference_string;
+
+/* Loads an engine from a JSON spec: {"model": <model selection>, "model_id"?, "runtime"?: {"device": "auto" | "cpu" |
+ * "cuda:N" | "metal:N", "seed", "max_seqs", "prefix_cache_n", "no_kv_cache", "chat_template", "jinja_explicit",
+ * "max_model_len", "isq", "paged_attn", "token_source"}, "agentic"?: {"max_tool_rounds", "tool_dispatch_url",
+ * "agent_permission"}}. The model selection is the ModelSelected JSON, e.g. {"Plain": {"model_id": "org/model"}}.
+ * A malformed spec is INFERENCE_ERR_INVALID_ARGUMENT, a device this build or machine lacks is
+ * INFERENCE_ERR_NOT_AVAILABLE, and a model that fails to load is INFERENCE_ERR_LOAD_FAILED. */
+INFERENCE_API inference_status inference_engine_load(const char *spec, size_t spec_len,
+                                                    inference_engine **out_engine);
+INFERENCE_API void inference_engine_free(inference_engine *engine);
+
+/* Runs a chat completion to its end; out_response receives the chat.completion JSON. "stream" in the request is
+ * ignored. */
+INFERENCE_API inference_status inference_chat(const inference_engine *engine, const char *request,
+                                             size_t request_len, inference_string **out_response);
+
+/* Starts a streaming chat completion. Poll it with inference_stream_next; freeing it abandons the request. */
+INFERENCE_API inference_status inference_chat_stream_open(const inference_engine *engine, const char *request,
+                                                         size_t request_len, inference_stream **out_stream);
+/* Waits up to timeout_ms (< 0 waits indefinitely, 0 polls) for the next event. On an event, out_event receives
+ * {"event": "chunk" | "agentic_tool_call_progress" | "agentic_tool_approval_required" | "file_produced" | "error",
+ * "data": ...}; a chunk's data is a chat.completion.chunk and an error's is the OpenAI error JSON. On a timeout
+ * out_event is NULL and out_done 0. Once the stream has ended, out_event is NULL and out_done 1; an error event is
+ * always the last event. out_event and out_done are required. */
+INFERENCE_API inference_status inference_stream_next(inference_stream *stream, int64_t timeout_ms,
+                                                    inference_string **out_event, int32_t *out_done);
+INFERENCE_API void inference_stream_free(inference_stream *stream);
+
+/* The string's bytes, NUL-terminated; valid until the string is freed. "" for NULL. */
+INFERENCE_API const char *inference_string_data(const inference_string *string);
+/* Length in bytes, excluding the terminating NUL. 0 for NULL. */
+INFERENCE_API size_t inference_string_len(const inference_string *string);
+INFERENCE_API void inference_string_free(inference_string *string);
 
 #ifdef __cplusplus
 }

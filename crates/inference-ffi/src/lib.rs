@@ -8,10 +8,11 @@ use std::panic::{catch_unwind, AssertUnwindSafe};
 
 use candle_core::Device;
 
+pub mod engine;
 pub mod layout;
 
 pub const ABI_VERSION_MAJOR: u32 = 0;
-pub const ABI_VERSION_MINOR: u32 = 1;
+pub const ABI_VERSION_MINOR: u32 = 2;
 pub const ABI_VERSION_PATCH: u32 = 0;
 
 /// Upper bound on `inference_backend_config.threads`; anything larger is a caller bug, not a pool size.
@@ -39,6 +40,8 @@ pub enum inference_status {
     INFERENCE_ERR_OUT_OF_RANGE = 4,
     INFERENCE_ERR_NOT_AVAILABLE = 5,
     INFERENCE_ERR_INTERNAL = 6,
+    INFERENCE_ERR_INVALID_REQUEST = 7,
+    INFERENCE_ERR_UNAVAILABLE = 8,
 }
 
 use inference_status::*;
@@ -224,6 +227,8 @@ pub extern "C" fn inference_status_string(status: i32) -> *const c_char {
         4 => c"INFERENCE_ERR_OUT_OF_RANGE",
         5 => c"INFERENCE_ERR_NOT_AVAILABLE",
         6 => c"INFERENCE_ERR_INTERNAL",
+        7 => c"INFERENCE_ERR_INVALID_REQUEST",
+        8 => c"INFERENCE_ERR_UNAVAILABLE",
         _ => c"INFERENCE_UNKNOWN_STATUS",
     };
     name.as_ptr()

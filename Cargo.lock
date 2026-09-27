@@ -3209,9 +3209,20 @@ dependencies = [
 name = "inference-ffi"
 version = "0.9.3"
 dependencies = [
+ "anyhow",
  "candle-core",
+ "candle-nn",
  "image",
+ "indicatif 0.18.3",
+ "inference-api",
  "inference-layout",
+ "inference-models-other",
+ "inference-nn",
+ "inference-quant",
+ "rand 0.9.4",
+ "rand_distr 0.5.1",
+ "serde_json",
+ "tempfile",
 ]
 
 [[package]]

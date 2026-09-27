@@ -2,11 +2,15 @@
 
 C ABI for inference.rs, built as `libinference_ffi` (`.so` / `.dylib` / `.dll`). The header is
 [`include/inference.h`](include/inference.h), and the contract at its top is normative: opaque handles, status codes plus
-a thread-local `inference_last_error()`, inputs copied, outputs borrowed from their handle, no callbacks, and no panic
-crossing the boundary.
+a thread-local `inference_last_error()`, inputs copied, outputs borrowed from their handle (or returned as an owned
+`inference_string`), no callbacks, and no panic crossing the boundary.
 
 Current modules:
 
+- **Engine** (`inference_engine_*`, `inference_chat*`, `inference_stream_*`): load an engine from a JSON spec and run
+  OpenAI-style chat completions on it, blocking or streamed by polling. Requests and responses are the JSON the HTTP
+  server takes and returns; errors carry the OpenAI error body in `inference_last_error()`. It is a shim over
+  `inference-api`, the same engine surface the HTTP server is built on.
 - **Layout** (`inference_layout_*`): PP-DocLayoutV3 document layout detection. It returns class, label, score and
   bounding box per region, in predicted reading order, and takes RGB/BGR/RGBA/BGRA/gray 8-bit images with arbitrary row
   stride.
@@ -37,7 +41,9 @@ The script:
 
 1. Builds the library.
 2. Checks that its exports match the header (`tests/export_surface.py`).
-3. Runs the Rust ABI tests (`tests/layout_abi.rs`: error paths, pixel formats, batching, handle lifetimes).
+3. Runs the Rust ABI tests: `tests/layout_abi.rs` (error paths, pixel formats, batching, handle lifetimes),
+   `tests/engine_abi.rs` (chat and streaming on a tiny random-weight model built at test time) and `tests/header.rs`
+   (the header declares exactly the exports and compiles as C99; these also run in `scripts/local_ci.sh --tests`).
 4. Compiles the C99 consumer (`tests/c/layout_test.c`) with `-Wall -Wextra -Werror -pedantic`.
 5. Diffs the consumer's detections against the Rust `pp_doclayout_v3_detect` example on the same page.
 

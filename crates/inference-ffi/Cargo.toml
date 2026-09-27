@@ -20,8 +20,21 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 candle-core.workspace = true
 image.workspace = true
+inference-api = { workspace = true, features = ["all-models"] }
 inference-layout = { path = "../inference-layout" }
 
+[dev-dependencies]
+anyhow.workspace = true
+candle-nn.workspace = true
+indicatif.workspace = true
+inference-models-other.workspace = true
+inference-nn.workspace = true
+inference-quant.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+
 [features]
-cuda = ["candle-core/cuda", "inference-layout/cuda"]
-metal = ["candle-core/metal", "inference-layout/metal"]
+cuda = ["candle-core/cuda", "inference-api/cuda", "inference-layout/cuda"]
+metal = ["candle-core/metal", "inference-api/metal", "inference-layout/metal"]
