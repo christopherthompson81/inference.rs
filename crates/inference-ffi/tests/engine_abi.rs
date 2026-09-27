@@ -849,3 +849,85 @@ fn models_unload_reload_and_adapter_management_is_guarded() {
     }
     unsafe { inference_engine_free(engine) };
 }
+
+#[test]
+fn generation_requests_reach_the_engine_and_are_refused_by_a_chat_model() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let (status, engine) = load(&spec(dir.path()));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+
+    let request = json!({"prompt": "a red square", "height": 64, "width": 64}).to_string();
+    let mut response = null_mut();
+    let status = unsafe {
+        inference_image_generation(
+            engine,
+            request.as_ptr().cast::<c_char>(),
+            request.len(),
+            &mut response,
+        )
+    };
+    assert!(response.is_null());
+    let error: Value = serde_json::from_str(&last_error()).unwrap();
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("incompatible")),
+        "{error}"
+    );
+
+    let speak = |format: &str| {
+        let request = json!({"input": "hello", "response_format": format}).to_string();
+        let mut audio = null_mut();
+        let status = unsafe {
+            inference_speech_generation(
+                engine,
+                request.as_ptr().cast::<c_char>(),
+                request.len(),
+                &mut audio,
+            )
+        };
+        assert!(audio.is_null());
+        (
+            status,
+            serde_json::from_str::<Value>(&last_error()).unwrap(),
+        )
+    };
+    let (status, error) = speak("mp3");
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+    assert_eq!(error["error"]["code"], "invalid_response_format", "{error}");
+    let (status, error) = speak("wav");
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+    assert!(
+        error["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("incompatible")),
+        "{error}"
+    );
+
+    let request = json!({"model": "no-such-model", "prompt": "x"}).to_string();
+    let mut response = null_mut();
+    let status = unsafe {
+        inference_image_generation(
+            engine,
+            request.as_ptr().cast::<c_char>(),
+            request.len(),
+            &mut response,
+        )
+    };
+    assert_eq!(status, INFERENCE_ERR_NOT_FOUND, "{}", last_error());
+    assert!(response.is_null());
+    let error: Value = serde_json::from_str(&last_error()).unwrap();
+    assert_eq!(error["error"]["code"], "model_not_found", "{error}");
+
+    unsafe {
+        assert!(inference_audio_data(null()).is_null());
+        assert_eq!(inference_audio_len(null()), 0);
+        assert_eq!(
+            CStr::from_ptr(inference_audio_mime_type(null())).to_bytes(),
+            b""
+        );
+        inference_audio_free(null_mut());
+        inference_engine_free(engine);
+    }
+}

@@ -376,3 +376,29 @@ Review fixes:
   One `json_response` helper in `handler_core`. Dead Unavailable/Overloaded masking in `from_lora_error` removed.
 - Header: which adapter refusals are INVALID_REQUEST. Tests: Forbidden in both status tables; LoRA codes survive on
   the inference path.
+
+## Run 12 - 2026-09-27 16:34
+
+Change: image and speech generation on the engine surface.
+- `inference-api/src/generation.rs`: `generate_image` and `generate_speech`, sharing one request builder (core's
+  `NormalRequest::new_simple`, replacing two copies of the 30-field literal) and one collect step. Speech encoding (WAV,
+  or s16le PCM) moves with it and returns `SpeechAudio { bytes, content_type }`. The routes frame HTTP only.
+- Differences from the old routes: an unexpected engine response is an internal error, not an `unreachable!` panic;
+  an unknown model is 404 `model_not_found` (the old path boxed the anyhow error and lost the type, like Run 10's fix).
+- ABI 0.0.8: `inference_image_generation` (JSON out) and `inference_speech_generation`, which returns a new
+  `inference_audio` handle (`_data`, `_len`, `_mime_type`, `_free`) rather than base64 in JSON.
+
+Test: on the tiny (chat) checkpoint both calls reach the engine and come back INVALID_REQUEST "incompatible for this
+model's category", with out-params NULL; `mp3` is `invalid_response_format` before dispatch; the audio accessors are
+NULL-safe. Unit test: PCM is little-endian i16 and WAV has its RIFF/WAVE header. Not covered: a successful image or
+speech generation, which needs a tiny FLUX or Dia checkpoint (FLUX needs T5, CLIP, a VAE and the transformer; not
+built).
+
+Local CI, first run: clippy `chunks_exact_to_as_chunks` in the PCM test.
+
+Review fixes: the format check now runs before request logging and model validation (an mp3 request is refused
+without being logged, and mp3 plus an unknown model reports the format, not the model); kept, since nothing unusable
+should reach the log. An unexpected engine response is logged, not only mapped to internal. The PCM test asserts
+literal samples rather than the encoder's own conversion. `engine_call` is the one FFI helper for engine, request and
+owned handle out (`json_call`, `stream_call` and speech are built on it). Tests: an unknown image model is NOT_FOUND
+`model_not_found`; speech on the chat model is refused as incompatible, not earlier.

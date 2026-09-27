@@ -4,7 +4,7 @@ use candle_core::Device;
 use futures::StreamExt;
 use inference_core::{
     AgentPermission, ChatCompletionResponse, CodeExecutionPermission, CompletionResponse,
-    InferenceRs, ModelSelected, Response, TokenSource,
+    ImageGenerationResponse, InferenceRs, ModelSelected, Response, TokenSource,
 };
 use serde::Deserialize;
 
@@ -18,6 +18,7 @@ use crate::{
     engine_chat::{collect_chat, ChatEngine, ChatStream, ChatStreamEvent},
     engine_completion::{collect_completion, prepare_completion, CompletionStream},
     engine_embeddings::{embed, EmbeddingError},
+    generation::{generate_image, generate_speech, SpeechAudio},
     inference_for_server_builder::InferenceRsForServerBuilder,
     lora_adapters::{
         list_adapters, load_adapter, unload_adapter, ListLoraAdaptersQuery, LoadLoraAdapterRequest,
@@ -30,7 +31,7 @@ use crate::{
     },
     openai::{
         ChatCompletionRequest, CompletionRequest, EmbeddingRequest, EmbeddingResponse,
-        ModelObjects, OpenAiToolSurface,
+        ImageGenerationRequest, ModelObjects, OpenAiToolSurface, SpeechGenerationRequest,
     },
     responses::{
         cancel_response, collect_response, delete_response, get_response, prepare_response,
@@ -598,6 +599,30 @@ impl Engine {
 
     pub async fn unload_lora_adapter_json(&self, request: &[u8]) -> Result<String, ApiError> {
         to_json(&self.unload_lora_adapter(parse_json(request)?).await?)
+    }
+
+    /// Generates images with a diffusion model.
+    pub async fn image_generation(
+        &self,
+        request: ImageGenerationRequest,
+    ) -> Result<ImageGenerationResponse, ApiError> {
+        generate_image(self.state(), request).await
+    }
+
+    /// Speaks text with a speech model, as WAV or 16-bit PCM.
+    pub async fn speech_generation(
+        &self,
+        request: SpeechGenerationRequest,
+    ) -> Result<SpeechAudio, ApiError> {
+        generate_speech(self.state(), request).await
+    }
+
+    pub async fn image_generation_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.image_generation(parse_json(request)?).await?)
+    }
+
+    pub async fn speech_generation_json(&self, request: &[u8]) -> Result<SpeechAudio, ApiError> {
+        self.speech_generation(parse_json(request)?).await
     }
 
     /// Embeds every input of an embeddings request.
