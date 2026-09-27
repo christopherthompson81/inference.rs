@@ -465,3 +465,28 @@ Review follow-ups:
 - Implication: sub-second. Splitting `add_request` validation into a sync function would take another ~0.1 s and
   is worth doing for readability, not build time. The larger serial phases left in core are
   generate_crate_metadata (~12 s) and the type/borrow checking spread over many items.
+
+## Run 24 - 2026-09-26 19:30
+
+- Question: did the inference-nn / family-crate splits (cross-crate inlining with LTO off) or the boxed engine
+  futures cost inference speed?
+- Binaries: `cargo build --release -p inference-cli --features cuda` at `c159663f` (before the splits, separate
+  worktree and target dir) and at `8dddd57c` (current). RTX 3090.
+- Command: `inference bench -f <model.gguf> --iterations 5` (512-token TTFT, 128-token decode at depth 4), 4 rounds,
+  alternating base/current per model. Each GGUF symlinked into its own dir so the loader doesn't pick up an unrelated
+  mmproj sitting beside it in the models dir.
+- Raw (prefill T/s | decode T/s):
+
+| round | tiny base | tiny cur | qwen3b base | qwen3b cur |
+|---|---|---|---|---|
+| 1 | 13514 / 650.8 | 13127 / 648.8 | 7333 / 256.8 | 7359 / 256.3 |
+| 2 | 13417 / 646.4 | 13335 / 648.2 | 7463 / 255.7 | 7218 / 255.2 |
+| 3 | 13339 / 643.1 | 13086 / 645.8 | 7312 / 254.4 | 7194 / 254.9 |
+| 4 | 13308 / 641.8 | 13301 / 643.3 | 7418 / 254.2 | 7546 / 253.8 |
+| mean | 13394 / 645.5 | 13212 / 646.5 | 7382 / 255.3 | 7329 / 255.1 |
+
+- Finding: decode is flat (+0.15% TinyLlama, -0.1% Qwen 3B). TinyLlama decode runs at 1.5 ms/token, so it is
+  dominated by host overhead and is where an engine-path or inlining regression would show first. Prefill is -1.4% / -0.7%, inside the
+  per-run spread (current's r1/r3 TinyLlama runs had +/-570 T/s within-run stddev, base's rounds span 200 T/s).
+  Rounds drift down together for both binaries (thermal).
+- Implication: no measurable speed cost from the splits or the boxing. Nothing to chase. Release LTO stays off.
