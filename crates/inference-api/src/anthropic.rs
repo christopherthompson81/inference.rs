@@ -20,7 +20,7 @@ use tokio::sync::mpsc::Receiver;
 use utoipa::ToSchema;
 
 use crate::{
-    api_error::{ApiError, ApiErrorKind, ModelErrorMessage, INTERNAL_ERROR_MESSAGE},
+    api_error::{boxed_anyhow, ApiError, ApiErrorKind, ModelErrorMessage, INTERNAL_ERROR_MESSAGE},
     dispatch::apply_model_override,
     engine_chat::{
         serialize_agentic_progress, ChatEngine, DispatchError, PreparedChat, ResponseTap,
@@ -1499,7 +1499,7 @@ pub async fn prepare_messages(
     engine: &ChatEngine,
     request: AnthropicMessagesRequest,
 ) -> Result<PreparedMessages, DispatchError> {
-    let validation = |error: anyhow::Error| DispatchError::Validation(error.into());
+    let validation = |error: anyhow::Error| DispatchError::Validation(boxed_anyhow(error));
     request.validate(true).map_err(validation)?;
     let omit_thinking =
         omit_anthropic_thinking_output(request.thinking.as_ref()).map_err(validation)?;

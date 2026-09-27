@@ -22,7 +22,7 @@ use crate::{
     completion_core::{
         handle_completion_error, handle_completion_validation_error, BaseCompletionResponder,
     },
-    engine_chat::{DispatchError, ResponseTap},
+    engine_chat::DispatchError,
     engine_completion::{
         collect_completion, prepare_completion, CompletionStream, CompletionStreamEvent,
     },
@@ -174,9 +174,7 @@ pub async fn completions(
         Err(DispatchError::Internal(e)) => return handle_error(state, e),
     };
     if prepared.is_streaming {
-        let tap = stream_outcome.map(|Extension(handle)| {
-            Box::new(move |response: &Response| handle.observe(response)) as ResponseTap
-        });
+        let tap = stream_outcome.map(|Extension(handle)| handle.tap());
         let stream = CompletionStream::new(prepared.rx, state, prepared.model_override, tap);
         CompletionResponder::Sse(sse(stream, None, None))
     } else {
@@ -212,8 +210,7 @@ pub fn create_streamer_with_outcome(
     on_done: Option<CompletionOnDoneCallback>,
     outcome: Option<StreamOutcomeHandle>,
 ) -> Sse<KeepAliveStream<CompletionStreamer>> {
-    let tap = outcome
-        .map(|handle| Box::new(move |response: &Response| handle.observe(response)) as ResponseTap);
+    let tap = outcome.map(StreamOutcomeHandle::tap);
     sse(
         CompletionStream::new(rx, state, None, tap),
         on_chunk,

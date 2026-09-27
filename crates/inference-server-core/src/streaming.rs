@@ -9,6 +9,7 @@ use std::{
 use inference_core::{Response, Usage};
 
 use crate::{
+    engine_chat::ResponseTap,
     handler_core::ApiError,
     metrics::{ITL_METRIC, TTFT_METRIC},
     util::sanitize_error_message,
@@ -42,6 +43,11 @@ struct StreamLatency {
 }
 
 impl StreamOutcomeHandle {
+    /// A tap for an engine stream that records into this handle.
+    pub fn tap(self) -> ResponseTap {
+        Box::new(move |response: &Response| self.observe(response))
+    }
+
     pub fn snapshot(&self) -> StreamOutcome {
         let state = self.0.lock().expect("stream outcome poisoned");
         StreamOutcome {
@@ -90,13 +96,6 @@ impl StreamOutcomeHandle {
             }
             state.last_token_at = Some(now);
         }
-    }
-}
-
-/// Convenience for streamers holding an optional handle.
-pub(crate) fn observe_response(handle: &Option<StreamOutcomeHandle>, response: &Response) {
-    if let Some(handle) = handle {
-        handle.observe(response);
     }
 }
 

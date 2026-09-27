@@ -20,7 +20,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
     agentic::AgenticDefaults,
-    api_error::{ApiError, ApiErrorKind, JsonError, ModelErrorMessage},
+    api_error::{boxed_anyhow, ApiError, ApiErrorKind, JsonError, ModelErrorMessage},
     dispatch::{
         apply_model_override, create_response_channel, request_model_override,
         send_request_with_model,
@@ -907,6 +907,28 @@ pub enum DispatchError {
     Internal(Box<dyn std::error::Error + Send + Sync>),
 }
 
+impl DispatchError {
+    /// The error to report, logging it when it is the engine's fault.
+    pub fn into_api_error(self, state: SharedInferenceRsState) -> ApiError {
+        match self {
+            DispatchError::Validation(error) => {
+                let api = ApiError::from_error(error.as_ref(), ApiErrorKind::InvalidRequest);
+                if matches!(
+                    api.kind,
+                    ApiErrorKind::Internal | ApiErrorKind::Unavailable | ApiErrorKind::Overloaded
+                ) {
+                    InferenceRs::maybe_log_error(state, error.as_ref());
+                }
+                api
+            }
+            DispatchError::Internal(error) => {
+                InferenceRs::maybe_log_error(state, error.as_ref());
+                ApiError::from_error(error.as_ref(), ApiErrorKind::Internal)
+            }
+        }
+    }
+}
+
 impl ChatEngine {
     /// Applies the server's agentic policy to `oairequest`, parses it and sends it to its model.
     pub async fn prepare(
@@ -961,7 +983,7 @@ impl ChatEngine {
             },
         )
         .await
-        .map_err(|error| DispatchError::Validation(error.into()))?;
+        .map_err(|error| DispatchError::Validation(boxed_anyhow(error)))?;
         send_request_with_model(&self.state, request, model_id.as_deref())
             .await
             .map_err(|error| DispatchError::Internal(error.into()))?;

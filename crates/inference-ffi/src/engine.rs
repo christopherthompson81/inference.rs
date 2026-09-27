@@ -10,14 +10,14 @@ use inference_api::{
     api_error::{ApiError, ApiErrorKind},
     blocking::{BlockingEngine, BlockingStream, StreamPoll},
     media_source::{MediaAttachment, MediaAttachments},
-    EngineLoadError,
+    Engine, EngineLoadError,
 };
 
 use crate::{
     guard, guard_value, inference_status,
     inference_status::{
         INFERENCE_ERR_INVALID_REQUEST, INFERENCE_ERR_LOAD_FAILED, INFERENCE_ERR_NOT_AVAILABLE,
-        INFERENCE_ERR_RUNTIME, INFERENCE_ERR_UNAVAILABLE,
+        INFERENCE_ERR_NOT_FOUND, INFERENCE_ERR_RUNTIME, INFERENCE_ERR_UNAVAILABLE,
     },
     Failure, FfiResult,
 };
@@ -61,6 +61,7 @@ const _: () = {
 fn api_status(error: &ApiError) -> inference_status {
     match error.kind {
         ApiErrorKind::Internal => INFERENCE_ERR_RUNTIME,
+        ApiErrorKind::NotFound => INFERENCE_ERR_NOT_FOUND,
         ApiErrorKind::RateLimited | ApiErrorKind::Unavailable | ApiErrorKind::Overloaded => {
             INFERENCE_ERR_UNAVAILABLE
         }
@@ -228,17 +229,33 @@ pub unsafe extern "C" fn inference_chat_stream_open_with_media(
     media_count: usize,
     out_stream: *mut *mut inference_stream,
 ) -> inference_status {
+    stream_call(
+        engine,
+        request,
+        request_len,
+        out_stream,
+        |engine, request| {
+            let media = arg_media(media, media_count)?;
+            engine.chat_stream_json(request, media).map_err(api_failure)
+        },
+    )
+}
+
+// Every stream opener has the same shape: engine and request in, an owned stream handle out.
+unsafe fn stream_call(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_stream: *mut *mut inference_stream,
+    open: impl FnOnce(&BlockingEngine, &[u8]) -> FfiResult<BlockingStream>,
+) -> inference_status {
     guard(|| {
         out_arg(out_stream, "out_stream")?;
         let engine = engine
             .as_ref()
             .ok_or_else(|| Failure::invalid("engine is NULL"))?;
         let request = arg_bytes(request, request_len, "request")?;
-        let media = arg_media(media, media_count)?;
-        let stream = engine
-            .engine
-            .chat_stream_json(request, media)
-            .map_err(api_failure)?;
+        let stream = open(&engine.engine, request)?;
         out_stream.write(Box::into_raw(Box::new(inference_stream {
             stream,
             done: false,
@@ -292,22 +309,13 @@ pub unsafe extern "C" fn inference_completion_stream_open(
     request_len: usize,
     out_stream: *mut *mut inference_stream,
 ) -> inference_status {
-    guard(|| {
-        out_arg(out_stream, "out_stream")?;
-        let engine = engine
-            .as_ref()
-            .ok_or_else(|| Failure::invalid("engine is NULL"))?;
-        let request = arg_bytes(request, request_len, "request")?;
-        let stream = engine
-            .engine
-            .completion_stream_json(request)
-            .map_err(api_failure)?;
-        out_stream.write(Box::into_raw(Box::new(inference_stream {
-            stream,
-            done: false,
-        })));
-        Ok(())
-    })
+    stream_call(
+        engine,
+        request,
+        request_len,
+        out_stream,
+        |engine, request| engine.completion_stream_json(request).map_err(api_failure),
+    )
 }
 
 /// Safety: as for `inference_chat`.
@@ -356,22 +364,125 @@ pub unsafe extern "C" fn inference_anthropic_messages_stream_open(
     request_len: usize,
     out_stream: *mut *mut inference_stream,
 ) -> inference_status {
+    stream_call(
+        engine,
+        request,
+        request_len,
+        out_stream,
+        |engine, request| {
+            engine
+                .anthropic_messages_stream_json(request)
+                .map_err(anthropic_failure)
+        },
+    )
+}
+
+/// Safety: as for `inference_chat`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_responses_create(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| engine.responses_json(request).map_err(api_failure),
+    )
+}
+
+/// Safety: as for `inference_chat_stream_open`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_responses_stream_open(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_stream: *mut *mut inference_stream,
+) -> inference_status {
+    stream_call(
+        engine,
+        request,
+        request_len,
+        out_stream,
+        |engine, request| engine.responses_stream_json(request).map_err(api_failure),
+    )
+}
+
+// The stored-response calls: engine and response id in, the resource JSON out.
+unsafe fn response_id_call(
+    engine: *const inference_engine,
+    response_id: *const c_char,
+    response_id_len: usize,
+    out_response: *mut *mut inference_string,
+    call: impl FnOnce(&Engine, &str) -> Result<String, ApiError>,
+) -> inference_status {
     guard(|| {
-        out_arg(out_stream, "out_stream")?;
+        out_arg(out_response, "out_response")?;
         let engine = engine
             .as_ref()
             .ok_or_else(|| Failure::invalid("engine is NULL"))?;
-        let request = arg_bytes(request, request_len, "request")?;
-        let stream = engine
-            .engine
-            .anthropic_messages_stream_json(request)
-            .map_err(anthropic_failure)?;
-        out_stream.write(Box::into_raw(Box::new(inference_stream {
-            stream,
-            done: false,
-        })));
+        let id = arg_bytes(response_id, response_id_len, "response_id")?;
+        let id =
+            std::str::from_utf8(id).map_err(|_| Failure::invalid("response_id is not UTF-8"))?;
+        let response = call(engine.engine.engine(), id).map_err(api_failure)?;
+        out_response.write(string_handle(response));
         Ok(())
     })
+}
+
+/// Safety: `engine` is a live handle, `response_id` valid for `response_id_len` bytes, `out_response` valid for a
+/// write.
+#[no_mangle]
+pub unsafe extern "C" fn inference_responses_get(
+    engine: *const inference_engine,
+    response_id: *const c_char,
+    response_id_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    response_id_call(
+        engine,
+        response_id,
+        response_id_len,
+        out_response,
+        Engine::response_json,
+    )
+}
+
+/// Safety: as for `inference_responses_get`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_responses_delete(
+    engine: *const inference_engine,
+    response_id: *const c_char,
+    response_id_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    response_id_call(
+        engine,
+        response_id,
+        response_id_len,
+        out_response,
+        Engine::delete_response_json,
+    )
+}
+
+/// Safety: as for `inference_responses_get`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_responses_cancel(
+    engine: *const inference_engine,
+    response_id: *const c_char,
+    response_id_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    response_id_call(
+        engine,
+        response_id,
+        response_id_len,
+        out_response,
+        Engine::cancel_response_json,
+    )
 }
 
 /// Safety: `stream` is a live handle not used concurrently; `out_event` and `out_done` are valid for writes.

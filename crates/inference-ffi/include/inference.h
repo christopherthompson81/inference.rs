@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 5
+#define INFERENCE_ABI_VERSION_PATCH 6
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -64,12 +64,15 @@ typedef enum inference_status {
     INFERENCE_ERR_NOT_AVAILABLE = 5,
     /* A bug: an internal panic was caught at the boundary. */
     INFERENCE_ERR_INTERNAL = 6,
-    /* The engine rejected a request (malformed JSON, unknown model, bad parameters). inference_last_error() holds the
+    /* The engine rejected a request (malformed JSON, bad parameters). inference_last_error() holds the
      * OpenAI error JSON: {"error": {"message", "type", "param", "code"}}. */
     INFERENCE_ERR_INVALID_REQUEST = 7,
     /* The engine is overloaded or unavailable; retrying later may succeed. inference_last_error() holds the error
      * JSON. */
-    INFERENCE_ERR_UNAVAILABLE = 8
+    INFERENCE_ERR_UNAVAILABLE = 8,
+    /* The request names something that does not exist: a model, adapter or response id. inference_last_error() holds
+     * the error JSON. */
+    INFERENCE_ERR_NOT_FOUND = 9
 } inference_status;
 
 /* (major << 16) | (minor << 8) | patch of the ABI this library implements. */
@@ -203,10 +206,10 @@ INFERENCE_API inference_status inference_chat_stream_open_with_media(const infer
 /* Waits up to timeout_ms (< 0 waits indefinitely, 0 polls) for the next event of a stream. On an event, out_event
  * receives {"event": <name>, "data": ...}. Chat streams emit "chunk" (data: a chat.completion.chunk),
  * "agentic_tool_call_progress", "agentic_tool_approval_required", "file_produced" and "error"; completion streams emit
- * "chunk" (data: a text_completion chunk) and "error"; Anthropic streams emit the Anthropic stream events (see
- * inference_anthropic_messages_stream_open). An error's data is the error JSON of the stream's protocol, and an error
- * event is always the last event. On a timeout out_event is NULL and out_done 0. Once the stream has ended, out_event
- * is NULL and out_done 1. out_event and out_done are required. */
+ * "chunk" (data: a text_completion chunk) and "error"; Anthropic and Responses streams emit their protocol's events
+ * (see inference_anthropic_messages_stream_open and inference_responses_stream_open). An error's data is the error
+ * JSON of the stream's protocol, and an error event is always the last event. On a timeout out_event is NULL and
+ * out_done 0. Once the stream has ended, out_event is NULL and out_done 1. out_event and out_done are required. */
 INFERENCE_API inference_status inference_stream_next(inference_stream *stream, int64_t timeout_ms,
                                                     inference_string **out_event, int32_t *out_done);
 INFERENCE_API void inference_stream_free(inference_stream *stream);
@@ -234,6 +237,30 @@ INFERENCE_API inference_status inference_anthropic_messages(const inference_engi
 INFERENCE_API inference_status inference_anthropic_messages_stream_open(const inference_engine *engine,
                                                                        const char *request, size_t request_len,
                                                                        inference_stream **out_stream);
+
+/* Runs a Responses request (the POST /v1/responses body); out_response receives the response resource JSON. A request
+ * with "background": true returns at once with status "queued"; follow it with inference_responses_get. "stream" in
+ * the request is ignored. Responses, streamed or not, are stored (unless "store" is false) for inference_responses_get
+ * and "previous_response_id"; the store is shared by every engine in the process and lives until the process exits
+ * or the response is deleted. */
+INFERENCE_API inference_status inference_responses_create(const inference_engine *engine, const char *request,
+                                                         size_t request_len, inference_string **out_response);
+/* Starts a streaming Responses request; poll it with inference_stream_next. Its events are the OpenResponses stream
+ * events named by their "type" (response.created, response.in_progress, response.output_item.added/done,
+ * response.content_part.added/done, response.output_text.delta, response.reasoning_text.delta/done,
+ * response.function_call_arguments.delta/done, response.completed, response.failed, error), plus
+ * agentic_tool_call_progress and file_produced. "background" cannot be streamed. */
+INFERENCE_API inference_status inference_responses_stream_open(const inference_engine *engine, const char *request,
+                                                              size_t request_len, inference_stream **out_stream);
+/* A background response in its current state, or a stored one; an unknown id is INFERENCE_ERR_NOT_FOUND. */
+INFERENCE_API inference_status inference_responses_get(const inference_engine *engine, const char *response_id,
+                                                      size_t response_id_len, inference_string **out_response);
+/* Forgets a response; out_response receives {"id", "object": "response.deleted", "deleted": true}. */
+INFERENCE_API inference_status inference_responses_delete(const inference_engine *engine, const char *response_id,
+                                                         size_t response_id_len, inference_string **out_response);
+/* Cancels a queued or running background response and returns it; a finished one comes back unchanged. */
+INFERENCE_API inference_status inference_responses_cancel(const inference_engine *engine, const char *response_id,
+                                                         size_t response_id_len, inference_string **out_response);
 
 /* The string's bytes, NUL-terminated; valid until the string is freed. "" for NULL. */
 INFERENCE_API const char *inference_string_data(const inference_string *string);

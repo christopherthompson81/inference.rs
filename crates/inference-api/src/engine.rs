@@ -15,7 +15,7 @@ use crate::{
         AnthropicStream, MessagesFailure,
     },
     api_error::{ApiError, ApiErrorKind, ModelErrorMessage},
-    engine_chat::{collect_chat, ChatEngine, ChatStream, ChatStreamEvent, DispatchError},
+    engine_chat::{collect_chat, ChatEngine, ChatStream, ChatStreamEvent},
     engine_completion::{collect_completion, prepare_completion, CompletionStream},
     engine_embeddings::{embed, EmbeddingError},
     inference_for_server_builder::InferenceRsForServerBuilder,
@@ -24,6 +24,12 @@ use crate::{
         ChatCompletionRequest, CompletionRequest, EmbeddingRequest, EmbeddingResponse,
         OpenAiToolSurface,
     },
+    responses::{
+        cancel_response, collect_response, delete_response, get_response, prepare_response,
+        spawn_background, OpenResponsesCreateRequest, OpenResponsesStreamer, PreparedResponse,
+        ResponseDeleted,
+    },
+    responses_types::ResponseResource,
     types::SharedInferenceRsState,
 };
 
@@ -264,8 +270,8 @@ impl Engine {
         request: &[u8],
         media: MediaAttachments,
     ) -> Result<String, ApiError> {
-        let response = self.chat(parse_request(request)?, media).await?;
-        serde_json::to_string(&response).map_err(|_| ApiError::internal())
+        let response = self.chat(parse_json(request)?, media).await?;
+        to_json(&response)
     }
 
     /// [`Engine::chat_stream`] over JSON; each event serializes with [`ChatStreamEvent::to_json`].
@@ -274,7 +280,7 @@ impl Engine {
         request: &[u8],
         media: MediaAttachments,
     ) -> Result<ChatStream, ApiError> {
-        self.chat_stream(parse_request(request)?, media).await
+        self.chat_stream(parse_json(request)?, media).await
     }
 
     async fn prepare(
@@ -287,7 +293,7 @@ impl Engine {
         self.chat
             .prepare(request, OpenAiToolSurface::ChatCompletions, media)
             .await
-            .map_err(|error| dispatch_error(state, error))
+            .map_err(|error| error.into_api_error(state))
     }
 
     /// Runs a completion to its end.
@@ -299,7 +305,7 @@ impl Engine {
         let state = self.state().clone();
         let prepared = prepare_completion(&state, request)
             .await
-            .map_err(|error| dispatch_error(state.clone(), error))?;
+            .map_err(|error| error.into_api_error(state.clone()))?;
         let mut rx = prepared.rx;
         match collect_completion(&mut rx, prepared.model_override.as_deref()).await {
             Response::CompletionDone(response) => {
@@ -332,7 +338,7 @@ impl Engine {
         let state = self.state().clone();
         let prepared = prepare_completion(&state, request)
             .await
-            .map_err(|error| dispatch_error(state.clone(), error))?;
+            .map_err(|error| error.into_api_error(state.clone()))?;
         Ok(CompletionStream::new(
             prepared.rx,
             state,
@@ -343,7 +349,7 @@ impl Engine {
 
     pub async fn completion_json(&self, request: &[u8]) -> Result<String, ApiError> {
         let response = self.completion(parse_json(request)?).await?;
-        serde_json::to_string(&response).map_err(|_| ApiError::internal())
+        to_json(&response)
     }
 
     pub async fn completion_stream_json(
@@ -363,7 +369,7 @@ impl Engine {
         let state = self.state().clone();
         let prepared = prepare_messages(&self.chat, request)
             .await
-            .map_err(|error| dispatch_error(state.clone(), error))?;
+            .map_err(|error| error.into_api_error(state.clone()))?;
         let (omit_thinking, model_override) =
             (prepared.omit_thinking, prepared.chat.model_override);
         let mut rx = prepared.chat.rx;
@@ -390,13 +396,13 @@ impl Engine {
         let state = self.state().clone();
         let prepared = prepare_messages(&self.chat, request)
             .await
-            .map_err(|error| dispatch_error(state.clone(), error))?;
+            .map_err(|error| error.into_api_error(state.clone()))?;
         Ok(AnthropicStream::new(prepared, state, None))
     }
 
     pub async fn anthropic_messages_json(&self, request: &[u8]) -> Result<String, ApiError> {
         let response = self.anthropic_messages(parse_json(request)?).await?;
-        serde_json::to_string(&response).map_err(|_| ApiError::internal())
+        to_json(&response)
     }
 
     pub async fn anthropic_messages_stream_json(
@@ -404,6 +410,80 @@ impl Engine {
         request: &[u8],
     ) -> Result<AnthropicStream, ApiError> {
         self.anthropic_messages_stream(parse_json(request)?).await
+    }
+
+    /// Runs a Responses request to its end, or queues it when it asks for `background` and returns it queued.
+    pub async fn responses(
+        &self,
+        mut request: OpenResponsesCreateRequest,
+    ) -> Result<ResponseResource, ApiError> {
+        request.stream = Some(false);
+        let prepared = self.prepare_response(request).await?;
+        if prepared.background {
+            return Ok(spawn_background(prepared, self.state().clone()));
+        }
+        collect_response(prepared, self.state()).await
+    }
+
+    /// Starts a streaming Responses request. Dropping the stream abandons the request.
+    pub async fn responses_stream(
+        &self,
+        mut request: OpenResponsesCreateRequest,
+    ) -> Result<OpenResponsesStreamer, ApiError> {
+        request.stream = Some(true);
+        let prepared = self.prepare_response(request).await?;
+        Ok(OpenResponsesStreamer::new(
+            prepared,
+            self.state().clone(),
+            None,
+        ))
+    }
+
+    async fn prepare_response(
+        &self,
+        request: OpenResponsesCreateRequest,
+    ) -> Result<PreparedResponse, ApiError> {
+        let state = self.state().clone();
+        prepare_response(&state, self.chat.skill_store.clone(), request)
+            .await
+            .map_err(|error| error.into_api_error(state))
+    }
+
+    /// A background response in its current state, or a stored one. The store is shared by the process's engines.
+    pub fn response(&self, response_id: &str) -> Result<ResponseResource, ApiError> {
+        get_response(self.state(), response_id)
+    }
+
+    pub fn delete_response(&self, response_id: &str) -> Result<ResponseDeleted, ApiError> {
+        delete_response(self.state(), response_id)
+    }
+
+    /// Cancels a background response that has not finished, and returns it.
+    pub fn cancel_response(&self, response_id: &str) -> Result<ResponseResource, ApiError> {
+        cancel_response(self.state(), response_id)
+    }
+
+    pub async fn responses_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.responses(parse_json(request)?).await?)
+    }
+
+    pub async fn responses_stream_json(
+        &self,
+        request: &[u8],
+    ) -> Result<OpenResponsesStreamer, ApiError> {
+        self.responses_stream(parse_json(request)?).await
+    }
+
+    pub fn response_json(&self, response_id: &str) -> Result<String, ApiError> {
+        to_json(&self.response(response_id)?)
+    }
+
+    pub fn delete_response_json(&self, response_id: &str) -> Result<String, ApiError> {
+        to_json(&self.delete_response(response_id)?)
+    }
+
+    pub fn cancel_response_json(&self, response_id: &str) -> Result<String, ApiError> {
+        to_json(&self.cancel_response(response_id)?)
     }
 
     /// Embeds every input of an embeddings request.
@@ -426,7 +506,7 @@ impl Engine {
 
     pub async fn embeddings_json(&self, request: &[u8]) -> Result<String, ApiError> {
         let response = self.embeddings(parse_json(request)?).await?;
-        serde_json::to_string(&response).map_err(|_| ApiError::internal())
+        to_json(&response)
     }
 }
 
@@ -449,25 +529,6 @@ fn reject_ask(
     Ok(())
 }
 
-fn dispatch_error(state: SharedInferenceRsState, error: DispatchError) -> ApiError {
-    match error {
-        DispatchError::Validation(error) => {
-            let api = ApiError::from_error(error.as_ref(), ApiErrorKind::InvalidRequest);
-            if matches!(
-                api.kind,
-                ApiErrorKind::Internal | ApiErrorKind::Unavailable | ApiErrorKind::Overloaded
-            ) {
-                InferenceRs::maybe_log_error(state, error.as_ref());
-            }
-            api
-        }
-        DispatchError::Internal(error) => {
-            InferenceRs::maybe_log_error(state, error.as_ref());
-            ApiError::from_error(error.as_ref(), ApiErrorKind::Internal)
-        }
-    }
-}
-
 fn parse_json<T: serde::de::DeserializeOwned>(request: &[u8]) -> Result<T, ApiError> {
     serde_json::from_slice(request).map_err(|error| {
         ApiError::new(
@@ -479,8 +540,8 @@ fn parse_json<T: serde::de::DeserializeOwned>(request: &[u8]) -> Result<T, ApiEr
     })
 }
 
-fn parse_request(request: &[u8]) -> Result<ChatCompletionRequest, ApiError> {
-    parse_json(request)
+fn to_json(response: &impl serde::Serialize) -> Result<String, ApiError> {
+    serde_json::to_string(response).map_err(|_| ApiError::internal())
 }
 
 impl ChatStreamEvent {

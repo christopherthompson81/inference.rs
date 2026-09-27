@@ -14,7 +14,7 @@ use inference_core::{
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
-    api_error::{ApiError, ApiErrorKind, ModelErrorMessage},
+    api_error::{boxed_anyhow, ApiError, ApiErrorKind, ModelErrorMessage},
     dispatch::{
         apply_model_override, create_response_channel, request_model_override,
         send_request_with_model,
@@ -47,7 +47,7 @@ pub async fn prepare_completion(
     let model_override = request_model_override(requested_model, &oairequest.model);
     let model_id = (oairequest.model != DEFAULT_MODEL_ID).then(|| oairequest.model.clone());
     let (request, is_streaming) = parse_request(oairequest, state.clone(), tx)
-        .map_err(|error| DispatchError::Validation(error.into()))?;
+        .map_err(|error| DispatchError::Validation(boxed_anyhow(error)))?;
     send_request_with_model(state, request, model_id.as_deref())
         .await
         .map_err(|error| DispatchError::Internal(error.into()))?;
