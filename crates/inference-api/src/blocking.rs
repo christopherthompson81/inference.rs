@@ -87,6 +87,17 @@ impl BlockingEngine {
             .map(|stream| BlockingStream::new(stream.map(|event| event.to_json())))
     }
 
+    pub fn responses_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let (engine, request) = (self.engine.clone(), request.to_vec());
+        run(async move { engine.responses_json(&request).await })
+    }
+
+    pub fn responses_stream_json(&self, request: &[u8]) -> Result<BlockingStream, ApiError> {
+        let (engine, request) = (self.engine.clone(), request.to_vec());
+        run(async move { engine.responses_stream_json(&request).await })
+            .map(|stream| BlockingStream::new(stream.map(|item| item.to_json())))
+    }
+
     pub fn embeddings_json(&self, request: &[u8]) -> Result<String, ApiError> {
         let (engine, request) = (self.engine.clone(), request.to_vec());
         run(async move { engine.embeddings_json(&request).await })

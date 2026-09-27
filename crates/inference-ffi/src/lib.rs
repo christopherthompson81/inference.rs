@@ -14,7 +14,7 @@ pub mod layout;
 pub const ABI_VERSION_MAJOR: u32 = 0;
 pub const ABI_VERSION_MINOR: u32 = 0;
 // The ABI is not stable yet: every change bumps the patch number and callers should require an exact match.
-pub const ABI_VERSION_PATCH: u32 = 5;
+pub const ABI_VERSION_PATCH: u32 = 6;
 
 /// Upper bound on `inference_backend_config.threads`; anything larger is a caller bug, not a pool size.
 pub const MAX_CPU_THREADS: i32 = 1024;
@@ -43,6 +43,7 @@ pub enum inference_status {
     INFERENCE_ERR_INTERNAL = 6,
     INFERENCE_ERR_INVALID_REQUEST = 7,
     INFERENCE_ERR_UNAVAILABLE = 8,
+    INFERENCE_ERR_NOT_FOUND = 9,
 }
 
 use inference_status::*;
@@ -230,6 +231,7 @@ pub extern "C" fn inference_status_string(status: i32) -> *const c_char {
         6 => c"INFERENCE_ERR_INTERNAL",
         7 => c"INFERENCE_ERR_INVALID_REQUEST",
         8 => c"INFERENCE_ERR_UNAVAILABLE",
+        9 => c"INFERENCE_ERR_NOT_FOUND",
         _ => c"INFERENCE_UNKNOWN_STATUS",
     };
     name.as_ptr()

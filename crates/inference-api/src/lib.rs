@@ -3,7 +3,9 @@
 pub mod agentic;
 pub mod anthropic;
 pub mod api_error;
+pub mod background_tasks;
 pub mod blocking;
+pub mod cached_responses;
 pub mod dispatch;
 pub mod engine;
 pub mod engine_chat;
@@ -17,6 +19,8 @@ pub mod lora_routing;
 #[doc(hidden)]
 pub mod media_source;
 pub mod openai;
+pub mod responses;
+pub mod responses_types;
 #[doc(hidden)]
 pub mod sampling;
 pub mod skill_store;

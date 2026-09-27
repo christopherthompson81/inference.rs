@@ -131,3 +131,83 @@ async fn ask_permission_without_streaming_is_a_validation_error() -> anyhow::Res
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_models_and_responses_are_typed_not_found() -> anyhow::Result<()> {
+    let dir = support::tiny_checkpoint()?;
+    let app = router(dir.path()).await?;
+    let body = json!({"model": "no-such-model", "messages": [{"role": "user", "content": PROMPT}]});
+    let response = app
+        .clone()
+        .oneshot(
+            Request::post("/v1/chat/completions")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: Value = serde_json::from_str(&body_text(response).await?)?;
+    assert_eq!(body["error"]["code"], "model_not_found", "{body}");
+
+    let response = app
+        .clone()
+        .oneshot(Request::get("/v1/responses/resp_missing").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: Value = serde_json::from_str(&body_text(response).await?)?;
+    assert_eq!(body["error"]["code"], "response_not_found", "{body}");
+
+    let body = json!({"input": PROMPT, "previous_response_id": "resp_missing"});
+    let response = app
+        .oneshot(
+            Request::post("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body: Value = serde_json::from_str(&body_text(response).await?)?;
+    assert_eq!(
+        body["error"]["code"], "previous_response_not_found",
+        "{body}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn responses_stream_names_its_events_and_ends_with_done() -> anyhow::Result<()> {
+    let dir = support::tiny_checkpoint()?;
+    let app = router(dir.path()).await?;
+    let body = json!({
+        "input": PROMPT,
+        "max_output_tokens": MAX_TOKENS,
+        "temperature": 0.0,
+        "top_k": 1,
+        "stream": true,
+    });
+    let response = app
+        .oneshot(
+            Request::post("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let sse = body_text(response).await?;
+    let names: Vec<&str> = sse
+        .lines()
+        .filter_map(|line| line.strip_prefix("event: "))
+        .collect();
+    assert_eq!(names.first(), Some(&"response.created"), "{sse}");
+    assert_eq!(names.last(), Some(&"response.completed"), "{sse}");
+    let data: Vec<&str> = sse
+        .lines()
+        .filter_map(|line| line.strip_prefix("data: "))
+        .collect();
+    assert_eq!(data.last(), Some(&"[DONE]"), "{sse}");
+    for (name, data) in names.iter().zip(&data) {
+        let event: Value = serde_json::from_str(data)?;
+        assert_eq!(event["type"], *name, "{event}");
+    }
+    Ok(())
+}

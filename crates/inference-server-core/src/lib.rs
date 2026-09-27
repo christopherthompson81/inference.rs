@@ -236,8 +236,6 @@
 
 pub mod anthropic;
 pub mod approvals;
-pub mod background_tasks;
-pub mod cached_responses;
 pub mod chat_completion;
 mod completion_core;
 pub mod completions;
@@ -253,7 +251,6 @@ pub mod inference_server_router_builder;
 pub mod metrics;
 pub mod openapi_doc;
 pub mod responses;
-pub mod responses_types;
 pub mod route_registry;
 pub mod skills;
 pub mod speech_generation;
@@ -261,6 +258,7 @@ pub mod streaming;
 pub mod types;
 use inference_api::{
     agentic, anthropic as anthropic_api, api_error, dispatch, engine_chat, engine_completion,
-    engine_embeddings, lora_routing, media_source, skill_store,
+    engine_embeddings, lora_routing, media_source, responses as responses_api, responses_types,
+    skill_store,
 };
 pub use inference_api::{inference_for_server_builder, openai, util, video};

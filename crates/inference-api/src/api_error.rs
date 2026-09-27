@@ -230,6 +230,27 @@ impl std::fmt::Display for ApiError {
 
 impl std::error::Error for ApiError {}
 
+/// Boxes an `anyhow` error so [`ApiError::from_error`] still finds the typed error it wraps.
+pub fn boxed_anyhow(error: anyhow::Error) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(AnyhowError(error))
+}
+
+// anyhow's own boxing reports the wrapped error's source, not the error, so a typed root would be skipped.
+#[derive(Debug)]
+struct AnyhowError(anyhow::Error);
+
+impl std::fmt::Display for AnyhowError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl std::error::Error for AnyhowError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
 fn find_error<'a, E: std::error::Error + 'static>(
     mut error: &'a (dyn std::error::Error + 'static),
 ) -> Option<&'a E> {

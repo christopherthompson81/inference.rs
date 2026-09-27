@@ -14,7 +14,7 @@ use axum::{
 use either::Either;
 use futures::Stream;
 use inference_core::{
-    is_chat_template_request_error, Request, RequestMessage, Response, TokenizationRequest,
+    is_chat_template_request_error, Request, RequestMessage, TokenizationRequest,
 };
 use tokio::time::{interval_at, Instant, Interval, MissedTickBehavior};
 
@@ -33,7 +33,7 @@ pub use crate::anthropic_api::{
 use crate::{
     agentic::AgenticDefaults,
     chat_completion::{parse_request, ChatCompletionParseContext},
-    engine_chat::{ChatEngine, DispatchError, ResponseTap},
+    engine_chat::{ChatEngine, DispatchError},
     handler_core::{
         create_response_channel, send_request_with_model, ApiError, ApiErrorHttp, ApiErrorKind,
         ResponseErrorMessage,
@@ -206,9 +206,7 @@ pub async fn anthropic_messages(
         Err(DispatchError::Internal(e)) => return AnthropicMessagesResponder::InternalError(e),
     };
     if prepared.chat.is_streaming {
-        let tap = stream_outcome.map(|Extension(handle)| {
-            Box::new(move |response: &Response| handle.observe(response)) as ResponseTap
-        });
+        let tap = stream_outcome.map(|Extension(handle)| handle.tap());
         let streamer = AnthropicStreamer::new(AnthropicStream::new(prepared, state, tap));
         AnthropicMessagesResponder::Sse(Sse::new(streamer).keep_alive(
             KeepAlive::new().interval(Duration::from_millis(get_keep_alive_interval())),

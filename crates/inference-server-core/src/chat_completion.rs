@@ -22,9 +22,7 @@ use crate::{
     completion_core::{
         handle_completion_error, handle_completion_validation_error, BaseCompletionResponder,
     },
-    engine_chat::{
-        collect_chat, ChatEngine, ChatStream, ChatStreamEvent, DispatchError, ResponseTap,
-    },
+    engine_chat::{collect_chat, ChatEngine, ChatStream, ChatStreamEvent, DispatchError},
     handler_core::{
         openai_error_from_error, openai_error_response, ApiError, ApiErrorKind, ModelErrorMessage,
     },
@@ -229,9 +227,7 @@ pub async fn chatcompletions(
     };
 
     if prepared.is_streaming {
-        let tap = stream_outcome.map(|Extension(handle)| {
-            Box::new(move |response: &Response| handle.observe(response)) as ResponseTap
-        });
+        let tap = stream_outcome.map(|Extension(handle)| handle.tap());
         let stream = ChatStream::new(prepared.rx, state, prepared.model_override, tap);
         ChatCompletionResponder::Sse(sse(ChatCompletionStreamer::new(stream, None, None)))
     } else {
@@ -267,8 +263,7 @@ pub fn create_streamer_with_outcome(
     on_done: Option<ChatCompletionOnDoneCallback>,
     outcome: Option<StreamOutcomeHandle>,
 ) -> Sse<KeepAliveStream<ChatCompletionStreamer>> {
-    let tap = outcome
-        .map(|handle| Box::new(move |response: &Response| handle.observe(response)) as ResponseTap);
+    let tap = outcome.map(StreamOutcomeHandle::tap);
     let stream = ChatStream::new(rx, state, None, tap);
     sse(ChatCompletionStreamer::new(stream, on_chunk, on_done))
 }

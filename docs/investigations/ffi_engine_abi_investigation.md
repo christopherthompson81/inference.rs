@@ -278,3 +278,54 @@ envelope is built once (`anthropic_error_body`) for the stream, the HTTP respond
 wraps `PreparedChat`. The server re-exports only the Anthropic types that were public before. Dropping the
 `AnthropicError` serde default would have made `type` required in `docs/openapi.json` (the snapshot test caught it), so
 the default stays.
+
+## Run 10 - 2026-09-27 15:18
+
+Change: the Responses API on the engine surface.
+- `responses.rs`, `responses_types/`, `background_tasks.rs` and `cached_responses.rs` git-move from the server to
+  `inference-api`. New there: `prepare_response`, `collect_response` (shared by blocking and background requests, which
+  each had their own copy of the collect-and-store loop), `spawn_background`, and `get_response` /
+  `delete_response` / `cancel_response`. `OpenResponsesStreamer` yields `ResponsesStreamItem` (an OpenResponses event,
+  agentic progress or a produced file) with a `ResponseTap`; the server wraps it for SSE and `[DONE]`.
+- Dead code dropped on the way: the streamer's `on_done` callback and event log (always `None`), `IncludeConfig`
+  (computed, never read), the server's `observe_response`.
+- The streamer stores the conversation when its terminal event is produced, not after the SSE body ends, so a
+  follow-up with `previous_response_id` can start as soon as `response.completed` arrives (the ABI test does).
+- A background request is dispatched before the queued resource is returned, so a dispatch failure is an error
+  rather than a queued response that fails. A cancelled task now stays cancelled when its abandoned request finishes
+  (before, `mark_completed` overwrote `Cancelled`). The request itself still runs to the end.
+- ABI 0.0.6: `inference_responses_create`, `inference_responses_stream_open`, `inference_responses_get` / `_delete` /
+  `_cancel`, and `INFERENCE_ERR_NOT_FOUND` (9) for `ApiErrorKind::NotFound`. The stream openers share a `stream_call`
+  helper. Stored responses are process-wide (the server's globals), which the header says.
+
+Test, first run: the ABI test failed where a missing `previous_response_id` came back
+`{"type": "invalid_request_error", "param": null, "code": null}` with `INVALID_REQUEST`, not the typed
+`previous_response_not_found`. Cause: converting an `anyhow::Error` into `Box<dyn Error>` boxes anyhow's `ErrorImpl`,
+whose `source()` is the wrapped error's source, so `ApiError::from_error`'s chain walk skips the typed root. HTTP had
+the same bug on every path through `DispatchError::Validation(error.into())`: chat, completions, Anthropic and
+Responses. `api_error::boxed_anyhow` wraps the error so the root is its first source. Effect: an unknown model is now
+404 `model_not_found` over HTTP (it was 400 with a null code) and `INFERENCE_ERR_NOT_FOUND` over the ABI; the chat
+ABI test is updated and a route test pins the HTTP status.
+
+Tests: ABI, blocking and streamed Responses decode the same text; the stream runs `response.created` to
+`response.completed`; a stored response is fetched, cancelled (unchanged), deleted, then NOT_FOUND; a background
+response goes from `queued` to `completed` with the same text; background plus stream is rejected. HTTP: the Responses
+SSE names each event by its `type` and ends with `[DONE]`; a missing response is 404.
+
+Local CI, first run: clippy `large_enum_variant` on `ResponsesStreamItem`; allowed, since nearly every item is an
+`Event` and boxing would allocate per event.
+
+Review fixes:
+- A background response cancelled or deleted while it ran was still written to the response cache when it finished
+  (the delete case resurrected it for GET and `previous_response_id`). `run_to_end` now returns what to store, and
+  `spawn_background` saves it only if its task is still current. Cancel is one locked `Queued | InProgress ->
+  Cancelled` transition; `request_cancel` / `mark_cancelled` / `cancel_requested` and the unused `list_tasks` /
+  `cleanup_old_tasks` are gone. The cancelled request itself still runs to the end.
+- Streamed responses stored their conversation but never their resource, so GET on a streamed id was 404. `finish`
+  stores the terminal resource too.
+- The Responses route stopped logging dispatch failures; `DispatchError::into_api_error` now does the logging for the
+  engine and the route alike (it was `engine::dispatch_error`).
+- `StreamOutcomeHandle::tap` replaces six copies of the tap closure; `OpenResponsesStreamer::next_item` had no caller.
+- Header: unknown models are NOT_FOUND, not INVALID_REQUEST; lines reflowed to 120.
+- Tests: GET on a streamed id; the follow-up's `input_tokens` exceed the first request's; HTTP 404
+  `previous_response_not_found`.
