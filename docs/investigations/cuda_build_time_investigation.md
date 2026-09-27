@@ -606,3 +606,14 @@ Review follow-ups:
   end-to-end run; CPU and CUDA suites green.
 - Next: Qwen3-VL and muse_glimmer also import qwen2vl helpers; a normalized diff of qwen3_vl against qwen2vl showed
   1374 differing lines, so less of it is shared.
+
+## Run 32 - 2026-09-27 (afternoon)
+
+- Question: how much of Qwen3-VL's processor duplicates Qwen2-VL's?
+- Finding: a per-function comparison showed ten Qwen3-VL helpers identical to the qwen2vl ones (find_sequences,
+  video_hashes, grid_patch_count, split_media_pixels, select_media_view, shift_media_spans, media_data_cached_offset,
+  select_media_batch, apply_mrope_position_delta(s)) and `Qwen3VLVisionSpecificArgs` field-identical to
+  `Qwen2VLVisionSpecificArgs`; packed_layout, prompt_mrope and the processor bodies really differ (video timestamps).
+- Change: Qwen3-VL (and Qwen3-VL-MoE, Qwen3.5, Qwen3.5-MoE, which reuse its processor) use the qwen2vl helpers and
+  args struct; four duplicate tests removed.
+- Result: 4,021,774 lines, from 4,028,130: -6k. Small in IR; the gain is ~360 fewer lines to keep in sync.

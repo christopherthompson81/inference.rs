@@ -7,6 +7,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+use crate::qwen2vl::Qwen2VLVisionSpecificArgs;
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
 pub use text::Qwen3_5TextModel;
@@ -21,10 +22,7 @@ use crate::{
         encoder_cache::{CacheModality, EncoderCacheManager},
         AttentionImplementation, HybridPagedKvCacheConfig, ModelConfigLike, ModelConfigMetadata,
     },
-    qwen3_vl::{
-        concatenate_visual_items, vision::Qwen3VLVisionModel, Qwen3VLVisionSpecificArgs,
-        VisualEncoder,
-    },
+    qwen3_vl::{concatenate_visual_items, vision::Qwen3VLVisionModel, VisualEncoder},
     vision::multimodal_layout::PackedMultimodalLayout,
 };
 
@@ -443,7 +441,7 @@ impl MultimodalModel for Qwen3_5Model {
         model_specific_args: Box<dyn Any>,
         ctx: &mut crate::model::ModelForwardContext<'_>,
     ) -> Result<Tensor> {
-        let Qwen3VLVisionSpecificArgs {
+        let Qwen2VLVisionSpecificArgs {
             input_ids_full,
             pixel_values_videos,
             image_grid_thw,
@@ -459,7 +457,7 @@ impl MultimodalModel for Qwen3_5Model {
             prompt_position_ids,
         } = *model_specific_args
             .downcast()
-            .expect("Cannot downcast into `Qwen3VLVisionSpecificArgs`");
+            .expect("Cannot downcast into `Qwen2VLVisionSpecificArgs`");
         let pixel_values_video = pixel_values_videos.or_else(|| {
             (image_grid_thw.is_none() && video_grid_thw.is_some())
                 .then(|| pixel_values.clone())
@@ -503,7 +501,7 @@ impl MultimodalModel for Qwen3_5Model {
     #[cfg(feature = "cuda")]
     fn supports_cuda_decode_graphs_for_args(&self, model_specific_args: &dyn Any) -> bool {
         model_specific_args
-            .downcast_ref::<Qwen3VLVisionSpecificArgs>()
+            .downcast_ref::<Qwen2VLVisionSpecificArgs>()
             .is_some()
     }
     fn config(&self) -> &ModelConfigMetadata {
@@ -517,7 +515,7 @@ impl MultimodalModel for Qwen3_5Model {
     }
     fn default_model_specific_args(&self, input_ids: &Tensor) -> Box<dyn Any> {
         let (batch_size, seq_len) = input_ids.dims2().expect("input ids must be rank 2");
-        Box::new(Qwen3VLVisionSpecificArgs {
+        Box::new(Qwen2VLVisionSpecificArgs {
             input_ids_full: input_ids.clone(),
             pixel_values_videos: None,
             image_grid_thw: None,

@@ -188,7 +188,7 @@ pub(crate) fn validated_mm_features(
     Ok(build_mm_features_from_ranges(ranges, hashes, kind))
 }
 
-fn find_sequences(nums: &[u32], needle: u32) -> Vec<(usize, usize)> {
+pub(crate) fn find_sequences(nums: &[u32], needle: u32) -> Vec<(usize, usize)> {
     let mut sequences = Vec::new();
     let mut start = None;
 
@@ -552,7 +552,7 @@ fn prompt_mrope(
     Ok(Tensor::stack(&rows, 1)?)
 }
 
-fn apply_mrope_position_deltas(
+pub(crate) fn apply_mrope_position_deltas(
     position_ids: Vec<usize>,
     input_seqs: &[&mut Sequence],
 ) -> Result<Vec<usize>> {
@@ -572,7 +572,7 @@ fn apply_mrope_position_deltas(
         .collect()
 }
 
-fn apply_mrope_position_delta(position: usize, delta: i64) -> Result<usize> {
+pub(crate) fn apply_mrope_position_delta(position: usize, delta: i64) -> Result<usize> {
     let position = i64::try_from(position)?;
     let position = position
         .checked_add(delta)
@@ -580,7 +580,10 @@ fn apply_mrope_position_delta(position: usize, delta: i64) -> Result<usize> {
     usize::try_from(position).map_err(anyhow::Error::from)
 }
 
-fn qwen2_decode_args(input_ids: &Tensor, seqlens: Vec<usize>) -> Qwen2VLVisionSpecificArgs {
+pub(crate) fn qwen2_decode_args(
+    input_ids: &Tensor,
+    seqlens: Vec<usize>,
+) -> Qwen2VLVisionSpecificArgs {
     Qwen2VLVisionSpecificArgs {
         input_ids_full: input_ids.clone(),
         pixel_values_videos: None,
