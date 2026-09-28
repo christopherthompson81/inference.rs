@@ -8,8 +8,8 @@ use super::{
     PreProcessingMixin, TokenSource,
 };
 use crate::attention::ATTENTION_CHUNK_SIZE;
-use crate::device_map::{self, DeviceMapper};
-use crate::distributed::{self, WorkerTransferData};
+use crate::device_map::DeviceMapper;
+use crate::distributed;
 use crate::embedding_models::inputs_processor::{EmbeddingProcessor, ModelInputs};
 use crate::embedding_models::{Dense, DenseActivation, Normalize, Pooling};
 use crate::embedding_normal_model_loader;
@@ -17,7 +17,6 @@ use crate::embedding_normal_model_loader_sharded;
 use crate::get_embedding_paths;
 use crate::paged_attention::AttentionImplementation;
 use crate::pipeline::loaders::auto_device_map;
-use crate::pipeline::loaders::{AutoDeviceMapQuantization, QuantizationConfigShim};
 use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::tokenizer::get_tokenizer;
 use crate::pipeline::EmbeddingLoaderType;
@@ -48,7 +47,6 @@ use inference_quant::safetensors::MmapedSafetensors;
 use inference_quant::IsqType;
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
-use std::env;
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
@@ -231,15 +229,13 @@ impl Loader for EmbeddingLoader {
         mut paged_attn_config: Option<PagedAttentionConfig>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let _progress_guard = ProgressScopeGuard::new(silent);
-        let config = super::loaders::load_model_config(
+        let config = super::loading::prepare_model_config(
+            None,
             paths.get_config_filename(),
-            self.config.from_uqff.is_none(),
+            self.config.from_uqff.is_some(),
+            None,
+            false,
         )?;
-        let config = if self.config.from_uqff.is_some() {
-            super::isq::sanitize_quantized_weight_source_config(&config)?
-        } else {
-            config
-        };
 
         if paged_attn_config.is_some() {
             warn!("PagedAttention is not supported for embedding models, disabling it.");
@@ -248,35 +244,17 @@ impl Loader for EmbeddingLoader {
 
         debug!("Prompt chunk size is {ATTENTION_CHUNK_SIZE}.");
 
-        let use_nccl = inference_quant::distributed::use_nccl();
         let write_uqff = self.config.write_uqff.is_some();
-        let tensor_parallelism = distributed::resolve_tensor_parallelism(
+        let super::loading::LoadDevices {
+            tensor_parallelism,
+            device,
+            available_devices,
+        } = super::loading::resolve_load_devices(
             self.inner.model_config(&config)?.as_ref(),
-            use_nccl,
+            device,
             write_uqff,
         )?;
         let use_distributed = tensor_parallelism.is_enabled();
-
-        let available_devices = if let Ok(payload) = env::var(distributed::IS_DAEMON_FLAG) {
-            let payload: WorkerTransferData = serde_json::from_str(&payload)?;
-            let WorkerTransferData::Init { worker_rank, .. } = payload;
-            vec![candle_core::Device::new_cuda(worker_rank + 1)?]
-        } else if use_distributed {
-            vec![candle_core::Device::new_cuda(0)?]
-        } else {
-            device_map::get_all_similar_devices(device)?
-        };
-        #[cfg(feature = "cuda")]
-        for device in &available_devices {
-            if let Device::Cuda(dev) = device {
-                unsafe { dev.disable_event_tracking() };
-            }
-        }
-        let device = if use_distributed {
-            available_devices[0].clone()
-        } else {
-            device.clone()
-        };
         let uqff_reader = if let Some(from_uqff) = &*self.from_uqff.read().unwrap() {
             Some(Arc::new(inference_quant::UqffReader::open(from_uqff)?))
         } else {
@@ -294,112 +272,33 @@ impl Loader for EmbeddingLoader {
             // Initial dtype
             let dtype = dtype.try_into_dtype(&available_devices.iter().collect::<Vec<_>>())?;
 
-            // ISQ or UQFF: quantized path
-            // Match logic below where UQFF has priority
-            let (layer_sizes_in_bytes, non_mapped_size_in_bytes, total_model_size_in_bytes) =
-                if let Some(reader) = uqff_reader.as_ref() {
-                    let weight_pack_factor = reader.pack_factor(dtype)?;
-                    let quantization = AutoDeviceMapQuantization::uqff(reader);
-                    let layer_sizes_in_bytes = self.inner.layer_sizes_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        None,
-                    )?;
-                    let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        Some(&quantization),
-                        None,
-                    )?;
-                    let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
-                    (
-                        layer_sizes_in_bytes,
-                        non_mapped_size_in_bytes,
-                        layer_sizes_sum + non_mapped_size_in_bytes,
-                    )
-                } else if let Some(isq) = in_situ_quant {
-                    let quantization =
-                        AutoDeviceMapQuantization::isq(Some(isq), self.config.topology.as_ref());
-                    let weight_pack_factor =
-                        quantization.conservative_pack_factor(dtype, isq.pack_factor(dtype));
-                    let layer_sizes_in_bytes = self.inner.layer_sizes_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        None,
-                    )?;
-                    let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
-                        &config,
-                        dtype,
-                        weight_pack_factor,
-                        Some(&quantization),
-                        None,
-                    )?;
-                    let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
-                    (
-                        layer_sizes_in_bytes,
-                        non_mapped_size_in_bytes,
-                        layer_sizes_sum + non_mapped_size_in_bytes,
-                    )
-                } else {
-                    let inventory = if self.config.topology.is_none() {
-                        let num_layers = self.inner.num_layers(&config)?;
-                        crate::pipeline::loaders::checkpoint_device_map_sizes(
-                            paths.get_weight_filenames(),
-                            num_layers,
-                            dtype,
-                            |name| self.inner.checkpoint_layer_index(&config, name),
-                        )?
-                    } else {
-                        None
-                    };
-                    if let Some(inventory) = inventory {
-                        info!(
-                            model_mib = inventory.total_model_size_in_bytes / (1024 * 1024),
-                            "Using checkpoint tensor inventory for automatic device mapping"
-                        );
-                        (
-                            inventory.layer_sizes_in_bytes,
-                            inventory.non_mapped_size_in_bytes,
-                            inventory.total_model_size_in_bytes,
-                        )
-                    } else {
-                        // Be sure to get the weight pack factor here; we might be loading a prequantized model.
-                        let weight_pack_factor =
-                            QuantizationConfigShim::get_quant_config_pack_factor(&config, dtype)?;
-                        let quantization =
-                            self.config.topology.as_ref().map(|topology| {
-                                AutoDeviceMapQuantization::isq(None, Some(topology))
-                            });
-                        let weight_pack_factor =
-                            quantization
-                                .as_ref()
-                                .map_or(weight_pack_factor, |quantization| {
-                                    quantization.conservative_pack_factor(dtype, weight_pack_factor)
-                                });
-                        let layer_sizes_in_bytes = self.inner.layer_sizes_in_bytes(
-                            &config,
-                            dtype,
-                            weight_pack_factor,
-                            None,
-                        )?;
-                        let non_mapped_size_in_bytes = self.inner.non_mapped_size_in_bytes(
-                            &config,
-                            dtype,
-                            weight_pack_factor,
-                            quantization.as_ref(),
-                            None,
-                        )?;
-                        let layer_sizes_sum = layer_sizes_in_bytes.iter().sum::<usize>();
-                        (
-                            layer_sizes_in_bytes,
-                            non_mapped_size_in_bytes,
-                            layer_sizes_sum + non_mapped_size_in_bytes,
-                        )
-                    }
-                };
+            let weight_source = uqff_reader
+                .clone()
+                .map(|reader| reader as Arc<dyn inference_quant::QuantizedWeightSource>);
+            let super::isq_flow::AutoDeviceMapSizes {
+                layer_sizes_in_bytes,
+                non_mapped_size_in_bytes,
+                total_model_size_in_bytes,
+            } = super::isq_flow::auto_device_map_sizes(
+                super::isq_flow::AutoDeviceMapSizingInputs {
+                    loader: &*self.inner,
+                    config: &config,
+                    dtype,
+                    sizing: super::isq_flow::resolve_auto_device_map_sizing(
+                        uqff_reader.is_some(),
+                        false,
+                        in_situ_quant,
+                    ),
+                    weight_source: weight_source.as_ref(),
+                    prepared_weight_source: None,
+                    topology: self.config.topology.as_ref(),
+                    organization: IsqOrganization::Default,
+                    weight_filenames: paths.get_weight_filenames(),
+                    has_lora: false,
+                    matformer: None,
+                    non_mapped_unpacked: false,
+                },
+            )?;
 
             let new = auto_device_map::get_device_layers(
                 &*self.inner,
@@ -416,39 +315,22 @@ impl Loader for EmbeddingLoader {
             mapper = DeviceMapSetting::Map(new);
         }
 
-        let mapper_device = if write_uqff {
-            Device::Cpu
-        } else {
-            device.clone()
-        };
-        let mapper_topology = if write_uqff {
-            None
-        } else {
-            self.config.topology.as_ref()
-        };
-
-        let pipeline_mapper = mapper.into_mapper(
-            self.inner.num_layers(&config)?,
-            &mapper_device,
-            mapper_topology,
-            &available_devices,
-        )?;
-        let mapper = mapper.into_mapper(
-            self.inner.num_layers(&config)?,
-            &mapper_device,
-            mapper_topology,
-            &available_devices,
-        )?;
-        let mut layer_devices = Vec::new();
-        for layer in 0..self.inner.num_layers(&config)? {
-            let device = mapper.device_for(layer, false).cloned();
-            layer_devices.push(device);
-        }
-        let dtype = super::isq_flow::resolve_weight_load_dtype(
+        let super::loading::MaterializedDeviceMapper {
+            pipeline_mapper,
+            mapper,
+            layer_devices,
             dtype,
-            mapper.as_ref(),
-            &available_devices,
-            write_uqff,
+        } = super::loading::materialize_device_mapper(
+            super::loading::DeviceMapperInputs {
+                setting: &mapper,
+                num_layers: self.inner.num_layers(&config)?,
+                device: &device,
+                available_devices: &available_devices,
+                topology: self.config.topology.as_ref(),
+                write_uqff,
+                dtype,
+            },
+            &mut paged_attn_config,
         )?;
 
         trace!("Model config: {:?}", self.inner.get_config_repr(&config)?);
