@@ -638,10 +638,6 @@ impl<'a> AutoDeviceMapQuantization<'a> {
         }
     }
 
-    pub fn uqff(source: &'a dyn QuantizedWeightSource) -> Self {
-        Self::weight_source(source)
-    }
-
     #[cfg(test)]
     fn unpromoted_pack_factor_for(
         &self,
