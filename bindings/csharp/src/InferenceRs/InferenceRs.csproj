@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <!-- An interop assembly: request and response buffers cross the ABI as pointers. -->
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <IsAotCompatible>true</IsAotCompatible>
+    <AssemblyName>InferenceRs</AssemblyName>
+    <RootNamespace>InferenceRs</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- The coverage test reflects over NativeMethods to check every ABI entry point is bound. -->
+    <InternalsVisibleTo Include="InferenceRs.BindingCoverage" />
+  </ItemGroup>
+
+</Project>
