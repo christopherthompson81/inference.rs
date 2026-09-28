@@ -66,14 +66,18 @@ pub async fn run_server(
     apply_quant_resolution(&mut model_type, &global.token_source, &matformer).await?;
     let api_id_override =
         (model_id_of(&model_type) != original_model_id).then_some(original_model_id);
-    let spec = serve_engine_spec(ServeSpecInputs {
+    let spec = engine_spec(EngineSpecInputs {
         model_type: &model_type,
         matformer: &matformer,
         model_id: api_id_override,
         runtime: &runtime,
-        server: &server,
         sandbox,
         global: &global,
+        max_tool_rounds: server.max_tool_rounds,
+        tool_dispatch_url: server.tool_dispatch_url.clone(),
+        skills_root: Some(skills_root(&runtime)),
+        adapters: adapter_spec_from_env(),
+        throughput_logging: true,
     })?;
     let engine = Engine::load(spec).await?;
     let inference_for_ui = engine.state().clone();
@@ -145,63 +149,72 @@ pub async fn run_server(
     Ok(())
 }
 
-/// What `serve` needs to describe its engine, resolved from the command line.
-struct ServeSpecInputs<'a> {
-    model_type: &'a ModelType,
-    matformer: &'a MatformerSelection,
-    model_id: Option<String>,
-    runtime: &'a RuntimeOptions,
-    server: &'a ServerOptions,
-    sandbox: SandboxOptions,
-    global: &'a GlobalOptions,
+/// The model and the runtime settings that come with it, as `serve`, `run` and `bench` all resolve them.
+pub(crate) fn model_spec(
+    model_type: &ModelType,
+    matformer: &MatformerSelection,
+    global: &GlobalOptions,
+) -> Result<(ModelSelected, RuntimeSpec)> {
+    let model = convert_to_model_selected(model_type, matformer)?;
+    let (max_model_len, hf_config_overrides) = extract_hf_config_settings(model_type);
+    let (paged_attn, memory_mb, memory_fraction, context_len, block_size, cache_type) =
+        extract_paged_attn_settings(model_type);
+    let (cpu, device_layers) = extract_device_settings(model_type);
+    let runtime = RuntimeSpec {
+        device: cpu.then(|| "cpu".to_string()),
+        seed: global.seed,
+        max_model_len,
+        isq: extract_isq_setting(model_type),
+        paged_attn,
+        token_source: Some(global.token_source.to_string()),
+        device_layers,
+        paged_cache: PagedCacheSpec {
+            context_len,
+            memory_mb,
+            memory_fraction,
+            block_size,
+            cache_type,
+        },
+        encoder_cache_memory_bytes: extract_encoder_cache_memory_bytes(model_type)?,
+        hf_config_overrides,
+        log: global.log.clone(),
+        ..Default::default()
+    };
+    Ok((model, runtime))
 }
 
-/// The engine `inference serve` loads, as the spec the C ABI and bindings load from.
-fn serve_engine_spec(inputs: ServeSpecInputs) -> Result<EngineSpec> {
-    let (runtime, server, global) = (inputs.runtime, inputs.server, inputs.global);
-    let model_selected = convert_to_model_selected(inputs.model_type, inputs.matformer)?;
-    let (max_model_len, hf_config_overrides) = extract_hf_config_settings(inputs.model_type);
+/// What `serve` and `run` need to describe their engine, resolved from the command line.
+pub(crate) struct EngineSpecInputs<'a> {
+    pub model_type: &'a ModelType,
+    pub matformer: &'a MatformerSelection,
+    pub model_id: Option<String>,
+    pub runtime: &'a RuntimeOptions,
+    pub sandbox: SandboxOptions,
+    pub global: &'a GlobalOptions,
+    pub max_tool_rounds: Option<usize>,
+    pub tool_dispatch_url: Option<String>,
+    /// `None` keeps skills in a directory of the engine's own.
+    pub skills_root: Option<std::path::PathBuf>,
+    pub adapters: AdapterSpec,
+    pub throughput_logging: bool,
+}
 
-    let (
-        paged_attn,
-        paged_attn_gpu_mem,
-        paged_attn_gpu_mem_usage,
-        paged_ctxt_len,
-        paged_attn_block_size,
-        paged_cache_type,
-    ) = extract_paged_attn_settings(inputs.model_type);
-
-    let (cpu, device_layers) = extract_device_settings(inputs.model_type);
-
-    let isq = extract_isq_setting(inputs.model_type);
-    let encoder_cache_memory_bytes = extract_encoder_cache_memory_bytes(inputs.model_type)?;
-
+/// The engine `serve` and `run` load, as the spec the C ABI and bindings load from.
+pub(crate) fn engine_spec(inputs: EngineSpecInputs) -> Result<EngineSpec> {
+    let runtime = inputs.runtime;
+    let (model, model_runtime) = model_spec(inputs.model_type, inputs.matformer, inputs.global)?;
     let sandbox_policy = extract_sandbox_settings(inputs.sandbox, runtime);
     #[cfg(not(feature = "code-execution"))]
     let _ = sandbox_policy;
     Ok(EngineSpec {
-        model: model_selected,
+        model,
         model_id: inputs.model_id,
         runtime: RuntimeSpec {
-            device: cpu.then(|| "cpu".to_string()),
-            seed: global.seed,
             max_seqs: Some(runtime.max_seqs),
             prefix_cache_n: Some(runtime.prefix_cache_n),
             no_kv_cache: runtime.no_kv_cache,
             chat_template: path_string(runtime.chat_template.as_deref()),
             jinja_explicit: path_string(runtime.jinja_explicit.as_deref()),
-            max_model_len,
-            isq,
-            paged_attn,
-            token_source: Some(global.token_source.to_string()),
-            device_layers,
-            paged_cache: PagedCacheSpec {
-                context_len: paged_ctxt_len,
-                memory_mb: paged_attn_gpu_mem,
-                memory_fraction: paged_attn_gpu_mem_usage,
-                block_size: paged_attn_block_size,
-                cache_type: paged_cache_type,
-            },
             mtp: mtp_spec(
                 runtime.mtp,
                 runtime.mtp_model.clone(),
@@ -211,14 +224,12 @@ fn serve_engine_spec(inputs: ServeSpecInputs) -> Result<EngineSpec> {
             max_num_batched_tokens: Some(runtime.max_num_batched_tokens.get()),
             max_prefill_chunk_tokens: Some(runtime.max_prefill_chunk_tokens.get()),
             max_decode_steps_before_prefill: Some(runtime.max_decode_steps_before_prefill.get()),
-            encoder_cache_memory_bytes,
-            hf_config_overrides,
-            log: global.log.clone(),
-            throughput_logging: None,
+            throughput_logging: Some(inputs.throughput_logging),
+            ..model_runtime
         },
         agentic: AgenticSpec {
-            max_tool_rounds: server.max_tool_rounds,
-            tool_dispatch_url: server.tool_dispatch_url.clone(),
+            max_tool_rounds: inputs.max_tool_rounds,
+            tool_dispatch_url: inputs.tool_dispatch_url,
             agent_permission: Some(runtime.code_exec_permission.into()),
             search: runtime.enable_search.then(|| SearchSpec {
                 embedding_model: runtime
@@ -238,9 +249,9 @@ fn serve_engine_spec(inputs: ServeSpecInputs) -> Result<EngineSpec> {
             // The CLI resolves its sandbox into each config's policy, so the spec must not add one.
             sandbox: SandboxMode::Off,
         },
-        adapters: adapter_spec_from_env(),
+        adapters: inputs.adapters,
         skills: SkillsSpec {
-            root: Some(skills_root(runtime)),
+            root: inputs.skills_root,
         },
         anymoe: None,
     })
@@ -250,7 +261,7 @@ fn path_string(path: Option<&Path>) -> Option<String> {
     path.map(|path| path.to_string_lossy().into_owned())
 }
 
-fn mtp_spec(
+pub(crate) fn mtp_spec(
     builtin: bool,
     model: Option<String>,
     n_predict: Option<usize>,
@@ -2761,14 +2772,18 @@ mod tests {
         };
         agent_options.apply_to(&mut runtime);
         let model_type = crate::args::resolve_model_type(model_type, default_model).unwrap();
-        serve_engine_spec(ServeSpecInputs {
+        engine_spec(EngineSpecInputs {
             model_type: &model_type,
             matformer: &runtime.matformer_selection(),
             model_id: Some("alias".to_string()),
             runtime: &runtime,
-            server: &server,
             sandbox,
             global: &cli.global,
+            max_tool_rounds: server.max_tool_rounds,
+            tool_dispatch_url: server.tool_dispatch_url.clone(),
+            skills_root: Some(skills_root(&runtime)),
+            adapters: adapter_spec_from_env(),
+            throughput_logging: true,
         })
         .unwrap()
     }

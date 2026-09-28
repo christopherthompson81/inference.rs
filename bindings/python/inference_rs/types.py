@@ -2309,6 +2309,7 @@ class RuntimeSpec:
     chat_template: str | None = None
     device: str | None = None
     device_layers: list[str] | None = None
+    disable_eos_stop: bool | None = None
     encoder_cache_memory_bytes: int | None = None
     hf_config_overrides: dict[str, Any] | None = None
     isq: str | None = None

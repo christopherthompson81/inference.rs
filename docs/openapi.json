@@ -10521,6 +10521,10 @@
             },
             "description": "Layers per device, as `--device-layers` takes them: `ORD:NUM` entries, or one count for device 0."
           },
+          "disable_eos_stop": {
+            "type": "boolean",
+            "description": "Generate to `max_tokens` regardless of end-of-sequence tokens, as a benchmark needs."
+          },
           "encoder_cache_memory_bytes": {
             "type": [
               "integer",

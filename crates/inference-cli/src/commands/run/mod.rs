@@ -9,18 +9,14 @@ use anyhow::Result;
 use inference_core::{resolve_reasoning_controls, ReasoningEffort};
 use tracing::info;
 
+use inference_api::Engine;
 use inference_core::initialize_logging;
-use inference_server_core::inference_for_server_builder::InferenceRsForServerBuilder;
 
 use super::normalize_requested_adapter;
 use super::serve::{
-    apply_agent_mode, apply_quant_resolution, convert_to_model_selected, extract_device_settings,
-    extract_encoder_cache_memory_bytes, extract_hf_config_settings, extract_isq_setting,
-    extract_paged_attn_settings, extract_sandbox_settings, load_mcp_config, log_agent_runtime,
-    validate_agent_options,
+    apply_agent_mode, apply_quant_resolution, engine_spec, log_agent_runtime,
+    validate_agent_options, EngineSpecInputs,
 };
-#[cfg(feature = "code-execution")]
-use super::serve::{build_code_exec_config, build_shell_config};
 use crate::args::{AgentCliOptions, GlobalOptions, ModelType, RuntimeOptions, SandboxOptions};
 
 /// Run the model in interactive or one-shot mode
@@ -52,85 +48,9 @@ pub async fn run_interactive(
     // Convert our clean args to ModelSelected
     let matformer = runtime.matformer_selection();
     apply_quant_resolution(&mut model_type, &global.token_source, &matformer).await?;
-    let model_selected = convert_to_model_selected(&model_type, &matformer)?;
-    let (max_model_len, hf_config_overrides) = extract_hf_config_settings(&model_type);
-
-    // Extract settings
-    let (
-        paged_attn,
-        paged_attn_gpu_mem,
-        paged_attn_gpu_mem_usage,
-        paged_ctxt_len,
-        paged_attn_block_size,
-        paged_cache_type,
-    ) = extract_paged_attn_settings(&model_type);
-    let (cpu, device_layers) = extract_device_settings(&model_type);
-    let isq = extract_isq_setting(&model_type);
-    let encoder_cache_memory_bytes = extract_encoder_cache_memory_bytes(&model_type)?;
-
-    // Build the InferenceRs instance
-    let mut builder = InferenceRsForServerBuilder::new()
-        .with_model(model_selected)
-        .with_max_seqs(runtime.max_seqs)
-        .with_max_num_batched_tokens(runtime.max_num_batched_tokens)
-        .with_max_prefill_chunk_tokens(runtime.max_prefill_chunk_tokens)
-        .with_max_decode_steps_before_prefill(runtime.max_decode_steps_before_prefill)
-        .with_no_kv_cache(runtime.no_kv_cache)
-        .with_token_source(global.token_source)
-        .with_interactive_mode(true)
-        .with_prefix_cache_n(runtime.prefix_cache_n)
-        .set_paged_attn(paged_attn)
-        .with_cpu(cpu)
-        .with_enable_search(runtime.enable_search)
-        .with_seed_optional(global.seed)
-        .with_log_optional(global.log.as_ref().map(|p| p.to_string_lossy().to_string()))
-        .with_chat_template_optional(
-            runtime
-                .chat_template
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-        )
-        .with_jinja_explicit_optional(
-            runtime
-                .jinja_explicit
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-        )
-        .with_num_device_layers_optional(device_layers)
-        .with_in_situ_quant_optional(isq)
-        .with_paged_attn_gpu_mem_optional(paged_attn_gpu_mem)
-        .with_paged_attn_gpu_mem_usage_optional(paged_attn_gpu_mem_usage)
-        .with_paged_ctxt_len_optional(paged_ctxt_len)
-        .with_paged_attn_block_size_optional(paged_attn_block_size)
-        .with_mtp_config_optional(runtime.mtp_config())
-        .with_max_model_len_optional(max_model_len)
-        .with_hf_config_overrides_optional(hf_config_overrides)
-        .with_paged_attn_cache_type(paged_cache_type);
-
-    if let Some(max_bytes) = encoder_cache_memory_bytes {
-        builder = builder.with_encoder_cache_memory_bytes(max_bytes);
-    }
-
-    if let Some(model) = runtime.search_embedding_model {
-        builder = builder.with_search_embedding_model(model.into());
-    }
-
-    let mcp_client_config = load_mcp_config(runtime.mcp_config.as_deref())?;
-    builder = builder.with_mcp_config_optional(mcp_client_config);
-
-    let sandbox_policy = extract_sandbox_settings(sandbox, &runtime);
-
-    #[cfg(feature = "code-execution")]
-    {
-        let config = build_code_exec_config(&runtime, sandbox_policy.clone());
-        builder = builder.with_code_exec_config_optional(config);
-        let shell_config = build_shell_config(&runtime, sandbox_policy);
-        builder = builder.with_shell_config_optional(shell_config);
-    }
-    #[cfg(not(feature = "code-execution"))]
-    let _ = sandbox_policy;
-
-    let inference = builder.build().await?;
+    let spec = run_spec(&model_type, &runtime, sandbox, &global)?;
+    let engine = Engine::load(spec).await?;
+    let inference = engine.state().clone();
 
     if let Some(alias) = request_adapter.as_deref() {
         let adapters = inference.list_lora_adapters(None).await?;
@@ -196,4 +116,56 @@ pub async fn run_interactive(
     }
 
     Ok(())
+}
+
+/// The engine `run` chats with: the terminal loop talks to its state directly, so no tool loop limits, adapter
+/// management or shared skill store, and no throughput lines between turns.
+fn run_spec(
+    model_type: &ModelType,
+    runtime: &RuntimeOptions,
+    sandbox: SandboxOptions,
+    global: &GlobalOptions,
+) -> Result<inference_api::EngineSpec> {
+    engine_spec(EngineSpecInputs {
+        model_type,
+        matformer: &runtime.matformer_selection(),
+        model_id: None,
+        runtime,
+        sandbox,
+        global,
+        max_tool_rounds: None,
+        tool_dispatch_url: None,
+        skills_root: None,
+        adapters: Default::default(),
+        throughput_logging: false,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn run_keeps_its_turns_free_of_throughput_lines() {
+        use clap::Parser;
+        let cli =
+            crate::args::Cli::try_parse_from(["inference", "run", "-m", "org/model", "--cpu"])
+                .unwrap();
+        let crate::args::Command::Run {
+            model_type,
+            default_model,
+            runtime,
+            sandbox,
+            ..
+        } = cli.command
+        else {
+            panic!("not a run command");
+        };
+        let model_type = crate::args::resolve_model_type(model_type, default_model).unwrap();
+        let spec = run_spec(&model_type, &runtime, sandbox, &cli.global).unwrap();
+        assert_eq!(spec.runtime.throughput_logging, Some(false));
+        assert!(spec.skills.root.is_none() && !spec.adapters.runtime_updates);
+        assert!(spec.agentic.max_tool_rounds.is_none());
+        assert_eq!(spec.runtime.device.as_deref(), Some("cpu"));
+    }
 }
