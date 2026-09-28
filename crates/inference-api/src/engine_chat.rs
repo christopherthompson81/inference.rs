@@ -22,8 +22,7 @@ use crate::{
     agentic::AgenticDefaults,
     api_error::{boxed_anyhow, ApiError, ApiErrorKind, JsonError, ModelErrorMessage},
     dispatch::{
-        apply_model_override, create_response_channel, request_model_override,
-        send_request_with_model,
+        apply_model_override, create_response_channel, response_model_id, send_request_with_model,
     },
     input_files::{resolve_input_file, InputFileSpec},
     lora_routing::{resolve_lora_adapter_model, DEFAULT_MODEL_ID},
@@ -959,7 +958,7 @@ impl ChatEngine {
         let requested_model = oairequest.model.clone();
         resolve_lora_adapter_model(&self.state, &mut oairequest.model, &mut oairequest.adapter)
             .map_err(|error| DispatchError::Validation(Box::new(error)))?;
-        let model_override = request_model_override(requested_model, &oairequest.model);
+        let model_override = response_model_id(&self.state, requested_model, &oairequest.model);
 
         oairequest.max_tool_rounds = oairequest.max_tool_rounds.or(self.agentic.max_tool_rounds);
         let request_permission = oairequest

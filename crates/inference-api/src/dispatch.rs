@@ -1,9 +1,9 @@
 //! Sending requests to the engine and routing their responses.
 
-use inference_core::{InferenceRsError, Request, Response};
+use inference_core::{InferenceRs, InferenceRsError, Request, Response};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 
-use crate::types::SharedInferenceRsState;
+use crate::{lora_routing::DEFAULT_MODEL_ID, types::SharedInferenceRsState};
 
 /// Default buffer size for the response channel used in streaming operations.
 ///
@@ -47,8 +47,18 @@ pub async fn send_request_with_model(
     state.send_request_async(request).await
 }
 
-pub fn request_model_override(requested_model: String, routed_model: &str) -> Option<String> {
-    (requested_model != routed_model).then_some(requested_model)
+/// The model id a response names: the adapter id a request was routed to by alias, else the registered id of the
+/// model it resolved to (the one `/v1/models` lists, never a checkpoint path or `default`).
+pub fn response_model_id(
+    state: &InferenceRs,
+    requested_model: String,
+    routed_model: &str,
+) -> Option<String> {
+    if requested_model != routed_model {
+        return Some(requested_model);
+    }
+    let named = (routed_model != DEFAULT_MODEL_ID).then_some(routed_model);
+    state.resolve_alias_or_default(named).ok()
 }
 
 pub fn apply_model_override(model: &mut String, model_override: Option<&str>) {
@@ -88,15 +98,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn request_model_override_only_preserves_routed_aliases() {
-        assert_eq!(
-            request_model_override("code".to_string(), "base"),
-            Some("code".to_string())
-        );
-        assert_eq!(request_model_override("base".to_string(), "base"), None);
-
+    fn apply_model_override_renames_the_response() {
         let mut response_model = "base".to_string();
         apply_model_override(&mut response_model, Some("code"));
+        assert_eq!(response_model, "code");
+        apply_model_override(&mut response_model, None);
         assert_eq!(response_model, "code");
     }
 }

@@ -13,7 +13,8 @@ impl InferenceRs {
         }
     }
 
-    pub(super) fn resolve_alias_or_default(
+    /// The registered id `model_id` (or the default model, for `None`) names.
+    pub fn resolve_alias_or_default(
         &self,
         model_id: Option<&str>,
     ) -> Result<String, InferenceRsError> {

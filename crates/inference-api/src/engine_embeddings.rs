@@ -11,7 +11,8 @@ use tokio::sync::mpsc::Receiver;
 use crate::{
     api_error::{ApiError, ApiErrorKind, ModelErrorMessage},
     dispatch::{
-        base_process_non_streaming_response, create_response_channel, send_request_with_model,
+        base_process_non_streaming_response, create_response_channel, response_model_id,
+        send_request_with_model,
     },
     openai::{
         EmbeddingData, EmbeddingEncodingFormat, EmbeddingInput, EmbeddingRequest,
@@ -179,7 +180,8 @@ pub async fn embed(
     let response = EmbeddingResponse {
         object: "list",
         data,
-        model: oairequest.model,
+        model: response_model_id(&state, oairequest.model.clone(), &oairequest.model)
+            .unwrap_or(oairequest.model),
         usage,
     };
 
