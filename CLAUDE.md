@@ -43,7 +43,8 @@ cargo clippy --workspace --tests --examples -- -D warnings
 
 # Canonical local checks (default: --lint --tests). Use these rather than ad-hoc cargo invocations: each mode always
 # builds the same package/feature set, so artifacts are reused instead of rebuilt per combination.
-scripts/local_ci.sh [--lint] [--tests] [--cuda] [--models] [--slim] [--docs]
+# --bindings builds libinference_ffi and runs the C# binding tests (needs the .NET SDK).
+scripts/local_ci.sh [--lint] [--tests] [--cuda] [--models] [--slim] [--docs] [--bindings]
 
 # Same, then delete target/debug artifacts the selected modes don't use (including on-request example builds).
 scripts/local_ci.sh --lint --tests --cuda --sweep
@@ -92,6 +93,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-mcp/` - Model Context Protocol client
 - `crates/inference-layout/` - Document layout detection (PP-DocLayoutV3) with custom CPU/CUDA kernels
 - `crates/inference-ffi/` - C ABI (`libinference_ffi`, header `include/inference.h`) for bindings in other languages
+- `bindings/csharp/` - .NET bindings over the C ABI (`InferenceRs.slnx`); a new ABI entry point needs its binding, which the coverage test enforces
 - Kernel sources live in `<crate>/kernels/{cuda,metal}/` (inference-layout compiles inline sources with NVRTC); each kernel crate's `third_party/README.md` records upstream provenance and license.
 
 ### Key Design Patterns

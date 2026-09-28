@@ -183,8 +183,9 @@ INFERENCE_API void inference_engine_free(inference_engine *engine);
  * with inference_callback_result_set (text, copied; NULL with len 0 is empty, invalid UTF-8 is replaced) or
  * inference_callback_result_fail; the last call wins, and returning without either is a failure. The result is valid
  * only during the call, on the calling thread. Callbacks run on engine worker threads, possibly several at once, may
- * block, must not throw or longjmp, and must not call inference_* engine functions. user_data is passed back untouched
- * and must stay valid until the engine is freed. */
+ * block, must not throw or longjmp, and must not call inference_* engine functions. user_data is passed back untouched.
+ * Requests still finishing may call a callback shortly after inference_engine_free returns, so user_data must stay
+ * valid beyond it, or the callback must recognise a stale user_data (e.g. an id whose handler is gone) and fail. */
 typedef struct inference_callback_result inference_callback_result;
 INFERENCE_API void inference_callback_result_set(inference_callback_result *result, const char *data, size_t len);
 /* message may be NULL. */

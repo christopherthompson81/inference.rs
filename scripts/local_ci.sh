@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # Canonical local checks with fixed package/feature sets: scripts/local_ci.sh [--lint] [--tests] [--cuda] [--models]
-# [--slim] [--docs]; --models runs the real-checkpoint parity tests on CPU (--cuda keeps one GPU parity check).
+# [--slim] [--docs] [--bindings]; --models runs the real-checkpoint parity tests on CPU (--cuda keeps one GPU parity check).
 # --slim lints inference-core with no model families and with each family alone, so feature gates stay intact.
 # With --cuda, the GPU-bound CUDA suite runs in the background while the CPU lint and tests run.
+# --bindings builds libinference_ffi and runs the C# binding tests (needs the .NET SDK) on the tiny test checkpoint.
 # --sweep then deletes target/debug artifacts the selected modes no longer use (stale variants pile up otherwise).
 # Build env (CC/CXX/NVCC) and INFERENCE_TEST_* paths belong in ~/.cargo/config.toml [env]; changing one rebuilds deps.
 set -euo pipefail
@@ -14,6 +15,7 @@ cuda=0
 models=0
 slim=0
 docs=0
+bindings=0
 sweep=0
 for arg in "$@"; do
     case $arg in
@@ -23,11 +25,12 @@ for arg in "$@"; do
         --models) models=1 ;;
         --slim) slim=1 ;;
         --docs) docs=1 ;;
+        --bindings) bindings=1 ;;
         --sweep) sweep=1 ;;
         *) echo "unknown option $arg" >&2; exit 2 ;;
     esac
 done
-[[ $((lint + tests + cuda + models + slim + docs)) -eq 0 ]] && lint=1 && tests=1
+[[ $((lint + tests + cuda + models + slim + docs + bindings)) -eq 0 ]] && lint=1 && tests=1
 
 # Examples are compile-checked by clippy --examples; the test modes only link the smoke set below.
 CLIPPY=(clippy --workspace --tests --examples)
@@ -36,6 +39,9 @@ TEST_TARGETS=(--workspace --lib --bins --tests)
 # --workspace keeps the same feature unification as the tests, so no second copy of the crates gets built.
 SMOKE=(build --workspace --example text_generation --example streaming --example multimodal_basic)
 SLIM_FAMILIES=("" models-gemma models-llama models-other models-phi models-qwen)
+# --workspace keeps the tests' feature unification, so the cdylib reuses their artifacts instead of rebuilding deps.
+BINDINGS=(build --workspace --lib --example tiny_checkpoint)
+CSHARP=bindings/csharp
 slim_clippy() { cargo clippy -p inference-core --lib --tests --no-default-features ${1:+--features $1} "${@:2}"; }
 
 if [[ $lint -eq 1 ]]; then
@@ -93,6 +99,21 @@ fi
 if [[ $slim -eq 1 ]]; then
     for family in "${SLIM_FAMILIES[@]}"; do slim_clippy "$family" -- -D warnings; done
 fi
+if [[ $bindings -eq 1 ]]; then
+    cargo "${BINDINGS[@]}"
+    tiny=$(mktemp -d)
+    target/debug/examples/tiny_checkpoint "$tiny" > /dev/null
+    dotnet build "$CSHARP/InferenceRs.slnx" -v quiet
+    # The library just built, not a release build a resolver would prefer
+    native=$PWD/target/debug
+    bindings_failed=0
+    INFERENCE_NATIVE_DIR=$native dotnet run --project "$CSHARP/tests/InferenceRs.BindingCoverage" --no-build \
+        || bindings_failed=1
+    INFERENCE_NATIVE_DIR=$native INFERENCE_TEST_TINY_CHECKPOINT=$tiny \
+        dotnet run --project "$CSHARP/tests/InferenceRs.EngineTest" --no-build || bindings_failed=1
+    rm -rf "$tiny"
+    [[ $bindings_failed -eq 0 ]] || exit 1
+fi
 doc_build() { RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -D warnings" cargo doc --workspace --no-deps "$@"; }
 if [[ $docs -eq 1 ]]; then
     doc_build
@@ -118,5 +139,6 @@ if [[ $sweep -eq 1 ]]; then
         done
     fi
     if [[ $docs -eq 1 ]]; then doc_build --message-format=json >> "$live"; fi
+    if [[ $bindings -eq 1 ]]; then replay "${BINDINGS[@]}"; fi
     scripts/sweep_target.py target/debug < "$live"
 fi
