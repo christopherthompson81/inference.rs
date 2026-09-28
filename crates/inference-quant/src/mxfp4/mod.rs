@@ -25,13 +25,11 @@ pub(crate) const N_BITS: usize = 4;
 pub struct MXFP4Layer {
     /// Packed FP4 weights: [N, K/2] or [num_experts, N, K/2]
     /// Each byte contains 2 FP4 values (low nibble = k, high nibble = k+1)
-    #[allow(dead_code)]
     blocks: Tensor,
     /// E8M0 scales: [N, K/32] or [num_experts, N, K/32]
     /// Each byte is an 8-bit exponent with bias 127
     scales: Tensor,
     /// Optional bias: [N] or [num_experts, N]
-    #[allow(dead_code)]
     bias: Option<Tensor>,
 }
 
@@ -102,7 +100,6 @@ impl QuantMethod for MXFP4Layer {
         Self::dequantize_rows(&blocks, &scales)?.reshape(output_shape)
     }
 
-    #[allow(unused_variables)]
     fn forward_raw(&self, x: &Tensor) -> Result<Tensor> {
         #[cfg(feature = "cuda")]
         if matches!(x.device(), Device::Cuda(_)) && ffi::HAVE_MXFP4_GEMM_KERNELS {
@@ -152,7 +149,6 @@ impl QuantMethod for MXFP4Layer {
         self.forward_dequantize(x)
     }
 
-    #[allow(unused_variables)]
     fn gather_forward_raw(&self, x: &Tensor, indices: &Tensor) -> Result<Tensor> {
         #[cfg(feature = "cuda")]
         if matches!(x.device(), Device::Cuda(_)) && ffi::HAVE_MXFP4_GEMM_KERNELS {

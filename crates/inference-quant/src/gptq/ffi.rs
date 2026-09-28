@@ -1,6 +1,5 @@
 use half::f16;
 
-#[allow(dead_code)]
 extern "C" {
     pub(crate) fn reconstruct_exllama(
         b_q_weight: *const u32,

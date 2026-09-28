@@ -1581,7 +1581,6 @@ pub trait QuantizedSerde {
 
 /// Used to gate access to quantizing onto the host device
 #[derive(Clone, Debug)]
-#[allow(unused)]
 pub struct QuantizeOntoGuard {
     pub inner: Arc<Mutex<()>>,
     module_key: Option<Arc<str>>,

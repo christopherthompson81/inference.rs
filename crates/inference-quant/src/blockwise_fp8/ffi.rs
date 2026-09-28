@@ -128,7 +128,6 @@ extern "C" {
         stream: *mut core::ffi::c_void,
     ) -> i32;
 
-    #[allow(dead_code)]
     pub(crate) fn inference_deepgemm_sm90_gemm_prequantized(
         prepared: *const DeepGemmPrepared,
         m: u32,

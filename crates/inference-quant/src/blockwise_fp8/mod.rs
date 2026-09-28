@@ -15,9 +15,6 @@ pub use ops::{
     fp8_blockwise_dequantize, fp8_blockwise_quantize, fused_add_rms_norm_quantized,
     fused_add_rms_norm_quantized_with_normalized,
 };
-#[cfg(feature = "cuda")]
-#[allow(unused_imports)]
-pub(crate) use ops::{fp8_blockwise_matmul, fp8_indexed_moe_gemm};
 
 #[cfg(feature = "cuda")]
 mod ffi;

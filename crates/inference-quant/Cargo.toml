@@ -62,7 +62,6 @@ metal = [
     "dep:inference-metal-compile",
 ]
 accelerate = ["candle-core/accelerate", "candle-nn/accelerate"]
-arm-nightly-feat = []
 ring = []
 
 
