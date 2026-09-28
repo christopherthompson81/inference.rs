@@ -2884,6 +2884,7 @@ dependencies = [
  "inference-macros",
  "inference-models-llama",
  "inference-models-other",
+ "inference-models-qwen",
  "inference-nn",
  "inference-quant",
  "rand 0.9.4",

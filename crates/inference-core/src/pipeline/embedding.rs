@@ -66,6 +66,8 @@ pub struct EmbeddingPipeline {
     mapper: Box<dyn DeviceMapper + Send + Sync>,
     modules: Vec<Box<dyn Module + Send + Sync>>,
     processor: Arc<dyn Processor + Send + Sync>,
+    // Embedding runs keep no KV cache, but the engine reads the cache kind of every pipeline it starts.
+    dummy_cache: EitherCache,
 }
 
 /// A loader for an embedding (non-quantized) model.
@@ -678,6 +680,7 @@ impl Loader for EmbeddingLoader {
         };
 
         Ok(Arc::new(Mutex::new(EmbeddingPipeline {
+            dummy_cache: EitherCache::Full(crate::pipeline::Cache::new(0, false)),
             model,
             tracked_modules,
             source_weight_files,
@@ -785,7 +788,7 @@ impl CacheManagerMixin for EmbeddingPipeline {
         Ok(())
     }
     fn cache(&self) -> &EitherCache {
-        unreachable!()
+        &self.dummy_cache
     }
 }
 
