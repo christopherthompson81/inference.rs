@@ -14,9 +14,7 @@ class Blob:
 
 def take_string(handle) -> str:
     try:
-        return ctypes.string_at(
-            lib.inference_string_data(handle), lib.inference_string_len(handle)
-        ).decode("utf-8")
+        return ctypes.string_at(lib.inference_string_data(handle), lib.inference_string_len(handle)).decode("utf-8")
     finally:
         lib.inference_string_free(handle)
 

@@ -77,6 +77,7 @@ pub trait EmbeddingModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModel
 }
 
 #[cfg_attr(feature = "pyo3_macros", pyclass(eq, eq_int))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
 /// The architecture to load the embedding model as.
 pub enum EmbeddingLoaderType {

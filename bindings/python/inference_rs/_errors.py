@@ -27,11 +27,7 @@ class InferenceError(Exception):
         self.detail = detail
         self.operation = operation
         description = borrowed(lib.inference_status_string(status))
-        super().__init__(
-            f"{operation}: {detail} ({description})"
-            if detail
-            else f"{operation}: {description}"
-        )
+        super().__init__(f"{operation}: {detail} ({description})" if detail else f"{operation}: {description}")
 
     @property
     def code(self):

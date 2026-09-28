@@ -112,3 +112,34 @@ Review fixes (Run 2):
   confirmations and the image generation response now have schemas (`FileListObject`, `ContainerFileListObject`,
   `FileDeleted`, `ResponseDeleted`, `ImageGenerationResponse`), so those methods are typed too.
 - `force-exclude` keeps ruff off `types.py` even when a path names it. 32 tests pass.
+
+## Run 3 - 2026-09-27 20:29
+
+Question: can the engine spec be typed from the same schema as requests?
+
+Change:
+- `EngineSpec` and its parts derive `ToSchema` and are registered in the OpenAPI document (not a route body: the spec
+  the C ABI and bindings load from). `ModelSelected` and its field types (`ModelDType`, the loader-type enums,
+  `IsqOrganization`, `LoraAdapterSpec`, `LoraRuntimeConfig`, `AgentPermission`) derive it under the `utoipa`
+  feature; `inference-nn` gains that feature, enabled by core's. utoipa has no `PathBuf` schema, so the 32 path
+  fields say `value_type = String`, and `write_uqff` is described by `UqffWriteSpec` (see the fixes below).
+- `ModelSelected` is externally tagged (`{"Plain": {...}}`). The generator names each such variant's fields class
+  after its tag (`ModelSelectedPlain`) with an `_external` key; the codec wraps and unwraps that layer, and a union
+  picks an externally tagged variant by its key.
+- `Engine` takes an `EngineSpec` (or its JSON as a dict or string); the typed tests load their engine from one.
+- The package's ruff line length is 120, the repo's width (ruff's default 88 had rewrapped every edit).
+
+Result: 34 Python tests pass, including a typed spec loading the tiny checkpoint and the external tags round-tripping.
+
+Review fixes (Run 3):
+- The loader-type enums published their Rust variant names (`"Qwen3"`), which serde rejects, so a spec with `arch` from
+  the generated enum failed to load. The macros take each CLI name as a `literal` fragment, which reaches the derive
+  wrapped in an invisible group utoipa does not read as a rename; they take `tt` now. A core test checks every
+  loader enum's schema lists exactly the names serde writes, and that each parses back.
+- `write_uqff` takes a path or `{output, types?, base_model?, repo_id?}`; its private deserializer enum is now the
+  public `UqffWriteSpec`, which both parses and describes it (the object variant titled `Config`, and the generator
+  names union variants by schema title when they have no tag).
+- A dict spec holding classes serializes (`to_json` for every spec form); the single-value tag default applies only
+  to `type` (it had made `ModelSelectedSpeech.arch`, an enum with one member today, silently optional).
+- Tests: a misspelled or padded external tag stays as it came leniently and fits nothing strictly; loader enum
+  values serialize as the engine's names. 35 Python tests pass.

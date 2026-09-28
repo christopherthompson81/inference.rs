@@ -14,12 +14,8 @@ from inference_rs import _callbacks, _handle, _native
 
 def call_tool(user_data, arguments=b"{}", context=b'{"session_id": "s", "round": 2}'):
     # A NULL result is allowed: inference_callback_result_set and _fail ignore it, so only the handler is observed.
-    trampoline = _native.TOOL_CALLBACK(
-        ctypes.cast(_callbacks._tool, ctypes.c_void_p).value
-    )
-    trampoline(
-        user_data, b"lookup", arguments, len(arguments), context, len(context), None
-    )
+    trampoline = _native.TOOL_CALLBACK(ctypes.cast(_callbacks._tool, ctypes.c_void_p).value)
+    trampoline(user_data, b"lookup", arguments, len(arguments), context, len(context), None)
 
 
 class Callbacks(unittest.TestCase):
@@ -61,9 +57,7 @@ class Callbacks(unittest.TestCase):
     def test_a_search_call_reaches_its_handler(self):
         queries = []
         handler_id = _callbacks._register(lambda query: queries.append(query) or "[]")
-        trampoline = _native.SEARCH_CALLBACK(
-            ctypes.cast(_callbacks._search, ctypes.c_void_p).value
-        )
+        trampoline = _native.SEARCH_CALLBACK(ctypes.cast(_callbacks._search, ctypes.c_void_p).value)
         try:
             trampoline(handler_id, b"rust", 4, None)
         finally:
@@ -112,9 +106,7 @@ class Arguments(unittest.TestCase):
     def test_error_codes_tolerate_any_detail(self):
         for detail in ("", "[]", '{"error": 1}', '{"error": {"type": 5}}', "not json"):
             self.assertIsNone(ir.InferenceError(7, detail, "op").code)
-        self.assertEqual(
-            ir.InferenceError(7, json.dumps({"error": {"code": "c"}}), "op").code, "c"
-        )
+        self.assertEqual(ir.InferenceError(7, json.dumps({"error": {"code": "c"}}), "op").code, "c")
 
 
 if __name__ == "__main__":

@@ -96,9 +96,7 @@ def _tool(user_data, tool_name, arguments, arguments_len, context, context_len, 
         if handler is None:
             _fail(result, ENGINE_GONE)
             return
-        session_id, round_number = _context(
-            ctypes.string_at(context, context_len).decode("utf-8")
-        )
+        session_id, round_number = _context(ctypes.string_at(context, context_len).decode("utf-8"))
         call = HostToolCall(
             tool_name.decode("utf-8"),
             ctypes.string_at(arguments, arguments_len).decode("utf-8"),
@@ -131,9 +129,7 @@ class Registration:
         tools = (_native.HostTool * max(len(callbacks.tools), 1))()
         try:
             for index, tool in enumerate(callbacks.tools):
-                definition = ctypes.create_string_buffer(
-                    tool.definition_json.encode("utf-8")
-                )
+                definition = ctypes.create_string_buffer(tool.definition_json.encode("utf-8"))
                 self._definitions.append(definition)
                 handler_id = _register(tool.handler)
                 self.ids.append(handler_id)
@@ -143,9 +139,7 @@ class Registration:
                     _tool,
                     handler_id,
                 )
-            search_id = (
-                _register(callbacks.search) if callbacks.search is not None else 0
-            )
+            search_id = _register(callbacks.search) if callbacks.search is not None else 0
             if search_id:
                 self.ids.append(search_id)
         except BaseException:

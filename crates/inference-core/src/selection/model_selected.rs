@@ -29,6 +29,7 @@ fn default_max_image_length() -> usize {
     AutoDeviceMapParams::DEFAULT_MAX_IMAGE_LENGTH
 }
 
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub enum ModelSelected {
     /// Select a model for running via auto loader
@@ -50,15 +51,18 @@ pub enum ModelSelected {
         organization: Option<IsqOrganization>,
 
         /// UQFF path to write to.
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;).
         from_uqff: Option<String>,
 
         /// .imatrix file to enhance GGUF quantizations with.
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         imatrix: Option<PathBuf>,
 
         /// Generate and utilize an imatrix to enhance GGUF quantizations.
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         calibration_file: Option<PathBuf>,
 
         /// Automatically resize and pad images to this maximum edge length. Aspect ratio is preserved.
@@ -83,9 +87,11 @@ pub enum ModelSelected {
         max_image_length: Option<usize>,
 
         /// Cache path for Hugging Face models downloaded locally.
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         hf_cache_path: Option<PathBuf>,
 
         /// Path to local Matryoshka Transformer configuration CSV file
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         matformer_config_path: Option<PathBuf>,
 
         /// Name of the Matryoshka Transformer slice to use
@@ -120,6 +126,7 @@ pub enum ModelSelected {
 
         /// UQFF path to write to.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;)
@@ -129,11 +136,13 @@ pub enum ModelSelected {
         /// .imatrix file to enhance GGUF quantizations with.
         /// Incompatible with `--calibration-file/-c`
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         imatrix: Option<PathBuf>,
 
         /// Generate and utilize an imatrix to enhance GGUF quantizations.
         /// Incompatible with `--imatrix/-i`
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         calibration_file: Option<PathBuf>,
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
@@ -146,10 +155,12 @@ pub enum ModelSelected {
 
         /// Cache path for Hugging Face models downloaded locally
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         hf_cache_path: Option<PathBuf>,
 
         /// Path to local Matryoshka Transformer configuration CSV file
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         matformer_config_path: Option<PathBuf>,
 
         /// Name of the Matryoshka Transformer slice to use
@@ -185,6 +196,7 @@ pub enum ModelSelected {
         topology: Option<String>,
 
         /// UQFF path to write to.
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;).
@@ -197,6 +209,7 @@ pub enum ModelSelected {
         max_batch_size: usize,
 
         /// Cache path for Hugging Face models downloaded locally
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         hf_cache_path: Option<PathBuf>,
 
         /// ISQ organization: `default` or `moqe`.
@@ -232,6 +245,7 @@ pub enum ModelSelected {
         organization: Option<IsqOrganization>,
 
         /// UQFF path to write to.
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;).
@@ -239,10 +253,12 @@ pub enum ModelSelected {
 
         /// .imatrix file to enhance GGUF quantizations with.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         imatrix: Option<PathBuf>,
 
         /// Generate and utilize an imatrix to enhance GGUF quantizations.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         calibration_file: Option<PathBuf>,
 
         /// Automatically resize and pad images to this maximum edge length.
@@ -264,10 +280,12 @@ pub enum ModelSelected {
         max_image_length: Option<usize>,
 
         /// Cache path for Hugging Face models downloaded locally
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         hf_cache_path: Option<PathBuf>,
 
         /// Path to local Matryoshka Transformer configuration CSV file.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         matformer_config_path: Option<PathBuf>,
 
         /// Name of the Matryoshka Transformer slice to use.
@@ -314,12 +332,15 @@ pub enum ModelSelected {
         organization: Option<IsqOrganization>,
 
         /// UQFF path and quantization types to write.
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// Imatrix file to use while requantizing the GGUF weights.
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         imatrix: Option<PathBuf>,
 
         /// Calibration file used to generate an imatrix while requantizing the GGUF weights.
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         calibration_file: Option<PathBuf>,
 
         /// Automatically resize and pad images to this maximum edge length.
@@ -342,10 +363,12 @@ pub enum ModelSelected {
 
         /// Cache path for Hugging Face models downloaded locally.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         hf_cache_path: Option<PathBuf>,
 
         /// Path to a local Matryoshka Transformer configuration CSV file.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         matformer_config_path: Option<PathBuf>,
 
         /// Name of the Matryoshka Transformer slice to use.
@@ -400,22 +423,27 @@ pub enum ModelSelected {
 
         /// UQFF path and quantization types to write.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// Imatrix file to use while requantizing the GGUF weights.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         imatrix: Option<PathBuf>,
 
         /// Calibration file used to generate an imatrix while requantizing the GGUF weights.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         calibration_file: Option<PathBuf>,
 
         /// Cache path for Hugging Face models downloaded locally.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         hf_cache_path: Option<PathBuf>,
 
         /// Path to a local Matryoshka Transformer configuration CSV file.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         matformer_config_path: Option<PathBuf>,
 
         /// Name of the Matryoshka Transformer slice to use.
@@ -466,22 +494,27 @@ pub enum ModelSelected {
 
         /// UQFF path and quantization types to write.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// Imatrix file to use while requantizing the GGUF weights.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         imatrix: Option<PathBuf>,
 
         /// Calibration file used to generate an imatrix while requantizing the GGUF weights.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         calibration_file: Option<PathBuf>,
 
         /// Cache path for Hugging Face models downloaded locally.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         hf_cache_path: Option<PathBuf>,
 
         /// Path to a local Matryoshka Transformer configuration CSV file.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         matformer_config_path: Option<PathBuf>,
 
         /// Name of the Matryoshka Transformer slice to use.
@@ -617,6 +650,7 @@ pub enum ModelSelected {
         topology: Option<String>,
 
         /// UQFF path to write to.
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;).
@@ -627,9 +661,11 @@ pub enum ModelSelected {
         max_edge: Option<u32>,
 
         /// Generate and utilize an imatrix to enhance GGUF quantizations.
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         calibration_file: Option<PathBuf>,
 
         /// .cimatrix file to enhance GGUF quantizations with. This must be a .cimatrix file.
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         imatrix: Option<PathBuf>,
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
@@ -650,9 +686,11 @@ pub enum ModelSelected {
         max_image_length: usize,
 
         /// Cache path for Hugging Face models downloaded locally
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         hf_cache_path: Option<PathBuf>,
 
         /// Path to local Matryoshka Transformer configuration CSV file
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         matformer_config_path: Option<PathBuf>,
 
         /// Name of the Matryoshka Transformer slice to use
@@ -721,6 +759,7 @@ pub enum ModelSelected {
 
         /// UQFF path to write to.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;)
@@ -729,14 +768,57 @@ pub enum ModelSelected {
 
         /// imatrix file for enhanced quantization.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         imatrix: Option<PathBuf>,
 
         /// Calibration file for imatrix generation.
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         calibration_file: Option<PathBuf>,
 
         /// Cache path for Hugging Face models downloaded locally
         #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         hf_cache_path: Option<PathBuf>,
     },
+}
+
+#[cfg(all(test, feature = "utoipa"))]
+mod tests {
+    use serde::{de::DeserializeOwned, Serialize};
+    use strum::IntoEnumIterator;
+
+    use crate::{
+        pipeline::{EmbeddingLoaderType, MultimodalLoaderType, NormalLoaderType},
+        DiffusionLoaderType, ModelDType, SpeechLoaderType,
+    };
+
+    // The names a schema publishes must be the ones serde writes, and each must parse back.
+    fn assert_schema_names_are_serde_names<T>()
+    where
+        T: utoipa::PartialSchema + IntoEnumIterator + Serialize + DeserializeOwned,
+    {
+        let schema = serde_json::to_value(T::schema()).unwrap();
+        let published: Vec<serde_json::Value> = schema["enum"].as_array().unwrap().clone();
+        let serde: Vec<serde_json::Value> = T::iter()
+            .map(|v| serde_json::to_value(v).unwrap())
+            .collect();
+        assert_eq!(published, serde, "{}", std::any::type_name::<T>());
+        for name in published {
+            serde_json::from_value::<T>(name).unwrap();
+        }
+    }
+
+    #[test]
+    fn loader_and_dtype_schemas_list_the_names_serde_accepts() {
+        assert_schema_names_are_serde_names::<NormalLoaderType>();
+        assert_schema_names_are_serde_names::<MultimodalLoaderType>();
+        assert_schema_names_are_serde_names::<EmbeddingLoaderType>();
+        assert_schema_names_are_serde_names::<DiffusionLoaderType>();
+        assert_schema_names_are_serde_names::<SpeechLoaderType>();
+        let dtype = serde_json::to_value(<ModelDType as utoipa::PartialSchema>::schema()).unwrap();
+        for name in dtype["enum"].as_array().unwrap() {
+            serde_json::from_value::<ModelDType>(name.clone()).unwrap();
+        }
+    }
 }

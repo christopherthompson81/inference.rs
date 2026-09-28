@@ -4,12 +4,12 @@ A pure-Python package for `libinference_ffi`, the inference.rs C ABI (`crates/in
 It needs no compiled extension: `ctypes` loads the library, and the package checks its ABI version on first use,
 refusing any other while the ABI is 0.0.x.
 
-- `Engine` loads a model from its spec and serves the requests the HTTP server does: chat (with media attachments),
-  completions, embeddings, Anthropic Messages, Responses, model and LoRA adapter management, image and speech
-  generation, files, skills and agent approvals. Requests and responses are the dataclasses in `inference_rs.types`,
-  generated from the server's OpenAPI document, so they match what the engine accepts (a request may also be its JSON
-  string). Streaming calls return a `Stream` of `StreamEvent`s whose data is parsed the same way. Failures raise
-  `InferenceError`, whose `detail` is the protocol's error JSON and `code` its code.
+- `Engine` loads a model from its `EngineSpec` and serves the requests the HTTP server does: chat (with media
+  attachments), completions, embeddings, Anthropic Messages, Responses, model and LoRA adapter management, image and
+  speech generation, files, skills and agent approvals. Specs, requests and responses are the dataclasses in
+  `inference_rs.types`, generated from the server's OpenAPI document, so they match what the engine accepts (each may
+  also be its JSON). Streaming calls return a `Stream` of `StreamEvent`s whose data is parsed the same way. Failures
+  raise `InferenceError`, whose `detail` is the protocol's error JSON and `code` its code.
 - `engine.json` (a `JsonEngine`) serves the same operations as JSON strings.
 - `HostCallbacks` registers host tools and a search backend when an engine loads.
 - `LayoutModel` runs PP-DocLayoutV3 document layout detection. `system_info()` and `system_doctor()` need no engine.
@@ -30,10 +30,12 @@ package sits in, then the platform's own search.
 import inference_rs as ir
 from inference_rs import types as t
 
-with ir.Engine({"model": {"Plain": {"model_id": "Qwen/Qwen3-0.6B"}}}) as engine:
-    request = t.ChatCompletionRequest(
-        model="default", messages=[t.Message(role="user", content="Hello")]
-    )
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-0.6B", arch=t.NormalLoaderType.QWEN3),
+    runtime=t.RuntimeSpec(device="cuda:0"),
+)
+with ir.Engine(spec) as engine:
+    request = t.ChatCompletionRequest(model="default", messages=[t.Message(role="user", content="Hello")])
     print(engine.chat(request).choices[0].message.content)
     request.stream = True
     with engine.chat_stream(request) as stream:

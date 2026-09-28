@@ -118,6 +118,8 @@ pub fn get_openapi_doc(base_path: Option<&str>) -> utoipa::openapi::OpenApi {
     #[openapi(
         paths(models, health, chatcompletions, anthropic_messages, anthropic_count_tokens, completions, embeddings, re_isq, calibration_start, calibration_status, calibration_apply, image_generation, speech_generation, create_response, get_response, delete_response, cancel_response, upload_skill, list_skills, upload_skill_version, list_skill_versions, load_lora_adapter, unload_lora_adapter, list_lora_adapters, unload_model, reload_model, get_model_status, tune_model, system_info, system_doctor, get_session, put_session, delete_session, list_files, upload_file, get_file, get_file_content, delete_file, list_container_files, get_container_file, get_container_file_content, resolve_agent_approval, metrics),
         components(schemas(
+            // Not a route's body: the engine spec the C ABI and bindings load from, typed from this document.
+            inference_api::EngineSpec,
             ApprovalDecision,
             ApprovalDecisionRequest,
             ApprovalDecisionResponse,

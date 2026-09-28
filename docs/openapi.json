@@ -1402,6 +1402,61 @@
         ],
         "description": "A request-scoped LoRA adapter alias or exact immutable generation."
       },
+      "AdapterSpec": {
+        "type": "object",
+        "description": "Runtime LoRA adapter management; listing adapters is always allowed.",
+        "properties": {
+          "root": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The directory adapters must load from; relative adapter paths resolve under it."
+          },
+          "runtime_updates": {
+            "type": "boolean",
+            "description": "Allow loading and unloading adapters while the engine runs."
+          }
+        },
+        "additionalProperties": false
+      },
+      "AgentPermission": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "ask",
+          "deny"
+        ]
+      },
+      "AgenticSpec": {
+        "type": "object",
+        "properties": {
+          "agent_permission": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AgentPermission"
+              }
+            ]
+          },
+          "max_tool_rounds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "tool_dispatch_url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "AllowedToolChoice": {
         "oneOf": [
           {
@@ -3721,6 +3776,14 @@
           }
         }
       },
+      "DiffusionLoaderType": {
+        "type": "string",
+        "description": "The architecture to load the diffusion model as.",
+        "enum": [
+          "flux",
+          "flux-offloaded"
+        ]
+      },
       "EmbeddingData": {
         "type": "object",
         "required": [
@@ -3778,6 +3841,14 @@
             },
             "description": "Multiple token arrays"
           }
+        ]
+      },
+      "EmbeddingLoaderType": {
+        "type": "string",
+        "description": "The architecture to load the embedding model as.",
+        "enum": [
+          "embeddinggemma",
+          "qwen3embedding"
         ]
       },
       "EmbeddingRequest": {
@@ -3891,6 +3962,38 @@
             "description": "Embedding returned as a base64-encoded string"
           }
         ]
+      },
+      "EngineSpec": {
+        "type": "object",
+        "description": "What to load and how to run it: the JSON form of the options `inference serve` takes.",
+        "required": [
+          "model"
+        ],
+        "properties": {
+          "adapters": {
+            "$ref": "#/components/schemas/AdapterSpec"
+          },
+          "agentic": {
+            "$ref": "#/components/schemas/AgenticSpec"
+          },
+          "model": {
+            "$ref": "#/components/schemas/ModelSelected"
+          },
+          "model_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The id requests use for this model; defaults to the model's own id."
+          },
+          "runtime": {
+            "$ref": "#/components/schemas/RuntimeSpec"
+          },
+          "skills": {
+            "$ref": "#/components/schemas/SkillsSpec"
+          }
+        },
+        "additionalProperties": false
       },
       "FileCitation": {
         "type": "object",
@@ -4342,6 +4445,13 @@
           }
         }
       },
+      "IsqOrganization": {
+        "type": "string",
+        "enum": [
+          "default",
+          "moqe"
+        ]
+      },
       "JsonSchemaResponseFormat": {
         "type": "object",
         "description": "JSON Schema for structured responses",
@@ -4495,6 +4605,38 @@
           }
         }
       },
+      "LoraAdapterSpec": {
+        "type": "object",
+        "description": "Alias and source used to preload a LoRA adapter.",
+        "required": [
+          "alias",
+          "source"
+        ],
+        "properties": {
+          "alias": {
+            "type": "string",
+            "description": "Stable request-facing name for the adapter."
+          },
+          "base_model_name": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Parent-model lineage metadata accepted by vLLM-compatible configuration."
+          },
+          "revision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Hugging Face revision for a remote adapter repository."
+          },
+          "source": {
+            "type": "string",
+            "description": "Hugging Face repository or local adapter directory."
+          }
+        }
+      },
       "LoraResidentGenerationObject": {
         "type": "object",
         "required": [
@@ -4530,6 +4672,33 @@
           },
           "retired": {
             "type": "boolean"
+          }
+        }
+      },
+      "LoraRuntimeConfig": {
+        "type": "object",
+        "description": "Admission limits for a dynamic LoRA runtime.",
+        "required": [
+          "max_adapters",
+          "max_rank",
+          "max_bytes"
+        ],
+        "properties": {
+          "max_adapters": {
+            "type": "integer",
+            "description": "Maximum loaded aliases and resident generations, including retired generations in use.",
+            "minimum": 0
+          },
+          "max_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Maximum bytes held by resident adapter tensors.",
+            "minimum": 0
+          },
+          "max_rank": {
+            "type": "integer",
+            "description": "Maximum rank accepted from an adapter configuration.",
+            "minimum": 0
           }
         }
       },
@@ -4615,6 +4784,16 @@
               "type": "string"
             }
           }
+        ]
+      },
+      "ModelDType": {
+        "type": "string",
+        "description": "DType for the model.\n\nIf the model is quantized, this is ignored so it is reasonable to use the [`Default`] impl.\n\nNote: When using `Auto`, fallback pattern is: BF16 -> F16 -> 32",
+        "enum": [
+          "auto",
+          "bf16",
+          "f16",
+          "f32"
         ]
       },
       "ModelObject": {
@@ -4726,6 +4905,1575 @@
           }
         }
       },
+      "ModelSelected": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Select a model for running via auto loader",
+            "required": [
+              "Run"
+            ],
+            "properties": {
+              "Run": {
+                "type": "object",
+                "description": "Select a model for running via auto loader",
+                "required": [
+                  "model_id"
+                ],
+                "properties": {
+                  "calibration_file": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Generate and utilize an imatrix to enhance GGUF quantizations."
+                  },
+                  "dtype": {
+                    "$ref": "#/components/schemas/ModelDType",
+                    "description": "Model data type. Defaults to `auto`."
+                  },
+                  "from_uqff": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;)."
+                  },
+                  "hf_cache_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Cache path for Hugging Face models downloaded locally."
+                  },
+                  "imatrix": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": ".imatrix file to enhance GGUF quantizations with."
+                  },
+                  "matformer_config_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to local Matryoshka Transformer configuration CSV file"
+                  },
+                  "matformer_slice_name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Name of the Matryoshka Transformer slice to use"
+                  },
+                  "max_batch_size": {
+                    "type": "integer",
+                    "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "max_edge": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int32",
+                    "description": "Automatically resize and pad images to this maximum edge length. Aspect ratio is preserved.\nOnly supported on specific multimodal models.",
+                    "minimum": 0
+                  },
+                  "max_image_length": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Maximum expected image size will have this edge length on both edges.\nThis affects automatic device mapping but is not a hard limit.\nOnly supported on specific multimodal models.",
+                    "minimum": 0
+                  },
+                  "max_num_images": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Maximum prompt number of images to expect for this model. This affects automatic device mapping but is not a hard limit.\nOnly supported on specific multimodal models.",
+                    "minimum": 0
+                  },
+                  "max_seq_len": {
+                    "type": "integer",
+                    "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "description": "Model ID to load from. May be a HF hub repo or a local path."
+                  },
+                  "organization": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/IsqOrganization",
+                        "description": "ISQ organization: `default` or `moqe`."
+                      }
+                    ]
+                  },
+                  "tokenizer_json": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to local tokenizer.json file. If specified, it is used over any remote file."
+                  },
+                  "topology": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a topology YAML file."
+                  },
+                  "write_uqff": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/UqffWriteSpec",
+                        "description": "UQFF path to write to."
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select a plain model, without quantization or adapters",
+            "required": [
+              "Plain"
+            ],
+            "properties": {
+              "Plain": {
+                "type": "object",
+                "description": "Select a plain model, without quantization or adapters",
+                "required": [
+                  "model_id"
+                ],
+                "properties": {
+                  "arch": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/NormalLoaderType",
+                        "description": "The architecture of the model."
+                      }
+                    ]
+                  },
+                  "calibration_file": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Generate and utilize an imatrix to enhance GGUF quantizations.\nIncompatible with `--imatrix/-i`"
+                  },
+                  "dtype": {
+                    "$ref": "#/components/schemas/ModelDType",
+                    "description": "Model data type. Defaults to `auto`."
+                  },
+                  "from_uqff": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;)"
+                  },
+                  "hf_cache_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Cache path for Hugging Face models downloaded locally"
+                  },
+                  "imatrix": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": ".imatrix file to enhance GGUF quantizations with.\nIncompatible with `--calibration-file/-c`"
+                  },
+                  "matformer_config_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to local Matryoshka Transformer configuration CSV file"
+                  },
+                  "matformer_slice_name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Name of the Matryoshka Transformer slice to use"
+                  },
+                  "max_batch_size": {
+                    "type": "integer",
+                    "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "max_seq_len": {
+                    "type": "integer",
+                    "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "description": "Model ID to load from. This may be a HF hub repo or a local path."
+                  },
+                  "organization": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/IsqOrganization",
+                        "description": "ISQ organization: `default` or `moqe` (Mixture of Quantized Experts: <https://arxiv.org/abs/2310.02410>)."
+                      }
+                    ]
+                  },
+                  "tokenizer_json": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to local tokenizer.json file. If this is specified it is used over any remote file."
+                  },
+                  "topology": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a topology YAML file."
+                  },
+                  "write_uqff": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/UqffWriteSpec",
+                        "description": "UQFF path to write to."
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select an X-LoRA architecture",
+            "required": [
+              "XLora"
+            ],
+            "properties": {
+              "XLora": {
+                "type": "object",
+                "description": "Select an X-LoRA architecture",
+                "required": [
+                  "xlora_model_id",
+                  "order",
+                  "dtype",
+                  "max_seq_len",
+                  "max_batch_size"
+                ],
+                "properties": {
+                  "arch": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/NormalLoaderType",
+                        "description": "The architecture of the model."
+                      }
+                    ]
+                  },
+                  "dtype": {
+                    "$ref": "#/components/schemas/ModelDType",
+                    "description": "Model data type. Defaults to `auto`."
+                  },
+                  "from_uqff": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;)."
+                  },
+                  "hf_cache_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Cache path for Hugging Face models downloaded locally"
+                  },
+                  "max_batch_size": {
+                    "type": "integer",
+                    "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "max_seq_len": {
+                    "type": "integer",
+                    "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "model_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Force a base model ID to load from instead of using the ordering file. This may be a HF hub repo or a local path."
+                  },
+                  "order": {
+                    "type": "string",
+                    "description": "Ordering JSON file"
+                  },
+                  "organization": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/IsqOrganization",
+                        "description": "ISQ organization: `default` or `moqe`."
+                      }
+                    ]
+                  },
+                  "tgt_non_granular_index": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Index of completion tokens to generate scalings up until. If this is 1, then there will be one completion token generated before it is cached.\nThis makes the maximum running sequences 1.",
+                    "minimum": 0
+                  },
+                  "tokenizer_json": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to local tokenizer.json file. If this is specified it is used over any remote file."
+                  },
+                  "topology": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a topology YAML file."
+                  },
+                  "write_uqff": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/UqffWriteSpec",
+                        "description": "UQFF path to write to."
+                      }
+                    ]
+                  },
+                  "xlora_model_id": {
+                    "type": "string",
+                    "description": "Model ID to load X-LoRA from. This may be a HF hub repo or a local path."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select a LoRA architecture",
+            "required": [
+              "Lora"
+            ],
+            "properties": {
+              "Lora": {
+                "type": "object",
+                "description": "Select a LoRA architecture",
+                "required": [
+                  "model_id",
+                  "adapters",
+                  "runtime_config",
+                  "dtype",
+                  "max_seq_len",
+                  "max_batch_size"
+                ],
+                "properties": {
+                  "adapters": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/LoraAdapterSpec"
+                    },
+                    "description": "LoRA adapters to preload, each formatted as ALIAS=SOURCE."
+                  },
+                  "arch": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/NormalLoaderType",
+                        "description": "The architecture of the model."
+                      }
+                    ]
+                  },
+                  "calibration_file": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Generate and utilize an imatrix to enhance GGUF quantizations."
+                  },
+                  "dtype": {
+                    "$ref": "#/components/schemas/ModelDType",
+                    "description": "Model data type. Defaults to `auto`."
+                  },
+                  "from_uqff": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;)."
+                  },
+                  "hf_cache_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Cache path for Hugging Face models downloaded locally"
+                  },
+                  "imatrix": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": ".imatrix file to enhance GGUF quantizations with."
+                  },
+                  "matformer_config_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to local Matryoshka Transformer configuration CSV file."
+                  },
+                  "matformer_slice_name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Name of the Matryoshka Transformer slice to use."
+                  },
+                  "max_batch_size": {
+                    "type": "integer",
+                    "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "max_edge": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int32",
+                    "description": "Automatically resize and pad images to this maximum edge length.",
+                    "minimum": 0
+                  },
+                  "max_image_length": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Maximum expected image edge length for automatic device mapping.",
+                    "minimum": 0
+                  },
+                  "max_num_images": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Maximum prompt number of images to expect for automatic device mapping.",
+                    "minimum": 0
+                  },
+                  "max_seq_len": {
+                    "type": "integer",
+                    "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "description": "Base model ID. This may be a Hugging Face repository or a local path."
+                  },
+                  "organization": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/IsqOrganization",
+                        "description": "ISQ organization: `default` or `moqe`."
+                      }
+                    ]
+                  },
+                  "runtime_config": {
+                    "$ref": "#/components/schemas/LoraRuntimeConfig",
+                    "description": "Dynamic LoRA runtime capacity and rank limits."
+                  },
+                  "tokenizer_json": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to local tokenizer.json file. If this is specified it is used over any remote file."
+                  },
+                  "topology": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a topology YAML file."
+                  },
+                  "write_uqff": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/UqffWriteSpec",
+                        "description": "UQFF path to write to."
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select a GGUF model.",
+            "required": [
+              "GGUF"
+            ],
+            "properties": {
+              "GGUF": {
+                "type": "object",
+                "description": "Select a GGUF model.",
+                "required": [
+                  "quantized_model_id",
+                  "quantized_filename",
+                  "dtype",
+                  "max_seq_len",
+                  "max_batch_size"
+                ],
+                "properties": {
+                  "calibration_file": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Calibration file used to generate an imatrix while requantizing the GGUF weights."
+                  },
+                  "dtype": {
+                    "$ref": "#/components/schemas/ModelDType",
+                    "description": "Model data type. Defaults to `auto`."
+                  },
+                  "hf_cache_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Cache path for Hugging Face models downloaded locally."
+                  },
+                  "imatrix": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Imatrix file to use while requantizing the GGUF weights."
+                  },
+                  "lora_adapters": {
+                    "type": "array",
+                    "items": {
+                      "$ref": "#/components/schemas/LoraAdapterSpec"
+                    },
+                    "description": "Dynamic LoRA adapters to preload."
+                  },
+                  "lora_runtime_config": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/LoraRuntimeConfig",
+                        "description": "Dynamic LoRA runtime limits. `None` disables dynamic LoRA."
+                      }
+                    ]
+                  },
+                  "matformer_config_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a local Matryoshka Transformer configuration CSV file."
+                  },
+                  "matformer_slice_name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Name of the Matryoshka Transformer slice to use."
+                  },
+                  "max_batch_size": {
+                    "type": "integer",
+                    "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "max_edge": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int32",
+                    "description": "Automatically resize and pad images to this maximum edge length.",
+                    "minimum": 0
+                  },
+                  "max_image_length": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Maximum expected image edge length for automatic device mapping.",
+                    "minimum": 0
+                  },
+                  "max_num_images": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Maximum prompt number of images to expect for automatic device mapping.",
+                    "minimum": 0
+                  },
+                  "max_seq_len": {
+                    "type": "integer",
+                    "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "mmproj_filename": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Multimodal projector filename(s), separated by semicolons."
+                  },
+                  "organization": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/IsqOrganization",
+                        "description": "ISQ organization: `default` or `moqe`."
+                      }
+                    ]
+                  },
+                  "quantized_filename": {
+                    "type": "string",
+                    "description": "Quantized filename(s).\nMay be a single filename, or use semicolons to separate multiple files."
+                  },
+                  "quantized_model_id": {
+                    "type": "string",
+                    "description": "Quantized model ID to find the `quantized_filename`.\nThis may be a HF hub repo or a local path."
+                  },
+                  "tok_model_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "`tok_model_id` optionally overrides embedded configuration and tokenizer assets.\nIf the `chat_template` is specified, then it will be treated as a path and used over remote files,\nremoving all remote accesses."
+                  },
+                  "tokenizer_json": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a tokenizer JSON file."
+                  },
+                  "topology": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a topology YAML file."
+                  },
+                  "write_uqff": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/UqffWriteSpec",
+                        "description": "UQFF path and quantization types to write."
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select a GGUF model with X-LoRA.",
+            "required": [
+              "XLoraGGUF"
+            ],
+            "properties": {
+              "XLoraGGUF": {
+                "type": "object",
+                "description": "Select a GGUF model with X-LoRA.",
+                "required": [
+                  "quantized_model_id",
+                  "quantized_filename",
+                  "xlora_model_id",
+                  "order",
+                  "dtype",
+                  "max_seq_len",
+                  "max_batch_size"
+                ],
+                "properties": {
+                  "calibration_file": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Calibration file used to generate an imatrix while requantizing the GGUF weights."
+                  },
+                  "dtype": {
+                    "$ref": "#/components/schemas/ModelDType",
+                    "description": "Model data type. Defaults to `auto`."
+                  },
+                  "hf_cache_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Cache path for Hugging Face models downloaded locally."
+                  },
+                  "imatrix": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Imatrix file to use while requantizing the GGUF weights."
+                  },
+                  "matformer_config_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a local Matryoshka Transformer configuration CSV file."
+                  },
+                  "matformer_slice_name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Name of the Matryoshka Transformer slice to use."
+                  },
+                  "max_batch_size": {
+                    "type": "integer",
+                    "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "max_seq_len": {
+                    "type": "integer",
+                    "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "order": {
+                    "type": "string",
+                    "description": "Ordering JSON file"
+                  },
+                  "organization": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/IsqOrganization",
+                        "description": "ISQ organization: `default` or `moqe`."
+                      }
+                    ]
+                  },
+                  "quantized_filename": {
+                    "type": "string",
+                    "description": "Quantized filename(s).\nMay be a single filename, or use semicolons to separate multiple files."
+                  },
+                  "quantized_model_id": {
+                    "type": "string",
+                    "description": "Quantized model ID to find the `quantized_filename`.\nThis may be a HF hub repo or a local path."
+                  },
+                  "tgt_non_granular_index": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Index of completion tokens to generate scalings up until. If this is 1, then there will be one completion token generated before it is cached.\nThis makes the maximum running sequences 1.",
+                    "minimum": 0
+                  },
+                  "tok_model_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "`tok_model_id` is the local or remote model ID where you can find a `tokenizer_config.json` file.\nIf the `chat_template` is specified, then it will be treated as a path and used over remote files,\nremoving all remote accesses."
+                  },
+                  "tokenizer_json": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a local `tokenizer.json` file. If specified, it is used over any remote file."
+                  },
+                  "topology": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a topology YAML file."
+                  },
+                  "write_uqff": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/UqffWriteSpec",
+                        "description": "UQFF path and quantization types to write."
+                      }
+                    ]
+                  },
+                  "xlora_model_id": {
+                    "type": "string",
+                    "description": "Model ID to load X-LoRA from. This may be a HF hub repo or a local path."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select a GGUF model with LoRA.",
+            "required": [
+              "LoraGGUF"
+            ],
+            "properties": {
+              "LoraGGUF": {
+                "type": "object",
+                "description": "Select a GGUF model with LoRA.",
+                "required": [
+                  "quantized_model_id",
+                  "quantized_filename",
+                  "adapters_model_id",
+                  "order",
+                  "dtype",
+                  "max_seq_len",
+                  "max_batch_size"
+                ],
+                "properties": {
+                  "adapters_model_id": {
+                    "type": "string",
+                    "description": "Model ID to load LoRA from. This may be a HF hub repo or a local path."
+                  },
+                  "calibration_file": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Calibration file used to generate an imatrix while requantizing the GGUF weights."
+                  },
+                  "dtype": {
+                    "$ref": "#/components/schemas/ModelDType",
+                    "description": "Model data type. Defaults to `auto`."
+                  },
+                  "hf_cache_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Cache path for Hugging Face models downloaded locally."
+                  },
+                  "imatrix": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Imatrix file to use while requantizing the GGUF weights."
+                  },
+                  "matformer_config_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a local Matryoshka Transformer configuration CSV file."
+                  },
+                  "matformer_slice_name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Name of the Matryoshka Transformer slice to use."
+                  },
+                  "max_batch_size": {
+                    "type": "integer",
+                    "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "max_seq_len": {
+                    "type": "integer",
+                    "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "order": {
+                    "type": "string",
+                    "description": "Ordering JSON file"
+                  },
+                  "organization": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/IsqOrganization",
+                        "description": "ISQ organization: `default` or `moqe`."
+                      }
+                    ]
+                  },
+                  "quantized_filename": {
+                    "type": "string",
+                    "description": "Quantized filename(s).\nMay be a single filename, or use semicolons to separate multiple files."
+                  },
+                  "quantized_model_id": {
+                    "type": "string",
+                    "description": "Quantized model ID to find the `quantized_filename`.\nThis may be a HF hub repo or a local path."
+                  },
+                  "tok_model_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "`tok_model_id` is the local or remote model ID where you can find a `tokenizer_config.json` file.\nIf the `chat_template` is specified, then it will be treated as a path and used over remote files,\nremoving all remote accesses."
+                  },
+                  "tokenizer_json": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a local `tokenizer.json` file. If specified, it is used over any remote file."
+                  },
+                  "topology": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a topology YAML file."
+                  },
+                  "write_uqff": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/UqffWriteSpec",
+                        "description": "UQFF path and quantization types to write."
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select a GGML model.",
+            "required": [
+              "GGML"
+            ],
+            "properties": {
+              "GGML": {
+                "type": "object",
+                "description": "Select a GGML model.",
+                "required": [
+                  "tok_model_id",
+                  "quantized_model_id",
+                  "quantized_filename",
+                  "gqa",
+                  "dtype",
+                  "max_seq_len",
+                  "max_batch_size"
+                ],
+                "properties": {
+                  "dtype": {
+                    "$ref": "#/components/schemas/ModelDType",
+                    "description": "Model data type. Defaults to `auto`."
+                  },
+                  "gqa": {
+                    "type": "integer",
+                    "description": "GQA value",
+                    "minimum": 0
+                  },
+                  "max_batch_size": {
+                    "type": "integer",
+                    "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "max_seq_len": {
+                    "type": "integer",
+                    "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "quantized_filename": {
+                    "type": "string",
+                    "description": "Quantized filename."
+                  },
+                  "quantized_model_id": {
+                    "type": "string",
+                    "description": "Quantized model ID to find the `quantized_filename`.\nThis may be a HF hub repo or a local path."
+                  },
+                  "tok_model_id": {
+                    "type": "string",
+                    "description": "Model ID to load the tokenizer from. This may be a HF hub repo or a local path."
+                  },
+                  "tokenizer_json": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to local tokenizer.json file. If this is specified it is used over any remote file."
+                  },
+                  "topology": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a topology YAML file."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select a GGML model with X-LoRA.",
+            "required": [
+              "XLoraGGML"
+            ],
+            "properties": {
+              "XLoraGGML": {
+                "type": "object",
+                "description": "Select a GGML model with X-LoRA.",
+                "required": [
+                  "quantized_model_id",
+                  "quantized_filename",
+                  "xlora_model_id",
+                  "order",
+                  "gqa",
+                  "dtype",
+                  "max_seq_len",
+                  "max_batch_size"
+                ],
+                "properties": {
+                  "dtype": {
+                    "$ref": "#/components/schemas/ModelDType",
+                    "description": "Model data type. Defaults to `auto`."
+                  },
+                  "gqa": {
+                    "type": "integer",
+                    "description": "GQA value",
+                    "minimum": 0
+                  },
+                  "max_batch_size": {
+                    "type": "integer",
+                    "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "max_seq_len": {
+                    "type": "integer",
+                    "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "order": {
+                    "type": "string",
+                    "description": "Ordering JSON file"
+                  },
+                  "quantized_filename": {
+                    "type": "string",
+                    "description": "Quantized filename."
+                  },
+                  "quantized_model_id": {
+                    "type": "string",
+                    "description": "Quantized model ID to find the `quantized_filename`.\nThis may be a HF hub repo or a local path."
+                  },
+                  "tgt_non_granular_index": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "description": "Index of completion tokens to generate scalings up until. If this is 1, then there will be one completion token generated before it is cached.\nThis makes the maximum running sequences 1.",
+                    "minimum": 0
+                  },
+                  "tok_model_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Model ID to load the tokenizer from. This may be a HF hub repo or a local path."
+                  },
+                  "tokenizer_json": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to local tokenizer.json file. If this is specified it is used over any remote file."
+                  },
+                  "topology": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a topology YAML file."
+                  },
+                  "xlora_model_id": {
+                    "type": "string",
+                    "description": "Model ID to load X-LoRA from. This may be a HF hub repo or a local path."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select a GGML model with LoRA.",
+            "required": [
+              "LoraGGML"
+            ],
+            "properties": {
+              "LoraGGML": {
+                "type": "object",
+                "description": "Select a GGML model with LoRA.",
+                "required": [
+                  "quantized_model_id",
+                  "quantized_filename",
+                  "adapters_model_id",
+                  "order",
+                  "gqa",
+                  "dtype",
+                  "max_seq_len",
+                  "max_batch_size"
+                ],
+                "properties": {
+                  "adapters_model_id": {
+                    "type": "string",
+                    "description": "Model ID to load LoRA from. This may be a HF hub repo or a local path."
+                  },
+                  "dtype": {
+                    "$ref": "#/components/schemas/ModelDType",
+                    "description": "Model data type. Defaults to `auto`."
+                  },
+                  "gqa": {
+                    "type": "integer",
+                    "description": "GQA value",
+                    "minimum": 0
+                  },
+                  "max_batch_size": {
+                    "type": "integer",
+                    "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "max_seq_len": {
+                    "type": "integer",
+                    "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "order": {
+                    "type": "string",
+                    "description": "Ordering JSON file"
+                  },
+                  "quantized_filename": {
+                    "type": "string",
+                    "description": "Quantized filename."
+                  },
+                  "quantized_model_id": {
+                    "type": "string",
+                    "description": "Quantized model ID to find the `quantized_filename`.\nThis may be a HF hub repo or a local path."
+                  },
+                  "tok_model_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Model ID to load the tokenizer from. This may be a HF hub repo or a local path."
+                  },
+                  "tokenizer_json": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to local tokenizer.json file. If this is specified it is used over any remote file."
+                  },
+                  "topology": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a topology YAML file."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select a multimodal plain model, without quantization or adapters",
+            "required": [
+              "MultimodalPlain"
+            ],
+            "properties": {
+              "MultimodalPlain": {
+                "type": "object",
+                "description": "Select a multimodal plain model, without quantization or adapters",
+                "required": [
+                  "model_id"
+                ],
+                "properties": {
+                  "arch": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/MultimodalLoaderType",
+                        "description": "The architecture of the model."
+                      }
+                    ]
+                  },
+                  "calibration_file": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Generate and utilize an imatrix to enhance GGUF quantizations."
+                  },
+                  "dtype": {
+                    "$ref": "#/components/schemas/ModelDType",
+                    "description": "Model data type. Defaults to `auto`."
+                  },
+                  "from_uqff": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;)."
+                  },
+                  "hf_cache_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Cache path for Hugging Face models downloaded locally"
+                  },
+                  "imatrix": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": ".cimatrix file to enhance GGUF quantizations with. This must be a .cimatrix file."
+                  },
+                  "matformer_config_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to local Matryoshka Transformer configuration CSV file"
+                  },
+                  "matformer_slice_name": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Name of the Matryoshka Transformer slice to use"
+                  },
+                  "max_batch_size": {
+                    "type": "integer",
+                    "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "max_edge": {
+                    "type": [
+                      "integer",
+                      "null"
+                    ],
+                    "format": "int32",
+                    "description": "Automatically resize and pad images to this maximum edge length. Aspect ratio is preserved.\nThis is only supported on the Qwen2-VL and Idefics models. Others handle this internally.",
+                    "minimum": 0
+                  },
+                  "max_image_length": {
+                    "type": "integer",
+                    "description": "Maximum expected image size will have this edge length on both edges.\nThis affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "max_num_images": {
+                    "type": "integer",
+                    "description": "Maximum prompt number of images to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "max_seq_len": {
+                    "type": "integer",
+                    "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "minimum": 0
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "description": "Model ID to load from. This may be a HF hub repo or a local path."
+                  },
+                  "organization": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/IsqOrganization",
+                        "description": "ISQ organization: `default` or `moqe` (Mixture of Quantized Experts: <https://arxiv.org/abs/2310.02410>)."
+                      }
+                    ]
+                  },
+                  "tokenizer_json": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to local tokenizer.json file. If this is specified it is used over any remote file."
+                  },
+                  "topology": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a topology YAML file."
+                  },
+                  "write_uqff": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/UqffWriteSpec",
+                        "description": "UQFF path to write to."
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select a diffusion model, without quantization or adapters",
+            "required": [
+              "DiffusionPlain"
+            ],
+            "properties": {
+              "DiffusionPlain": {
+                "type": "object",
+                "description": "Select a diffusion model, without quantization or adapters",
+                "required": [
+                  "model_id",
+                  "arch",
+                  "dtype"
+                ],
+                "properties": {
+                  "arch": {
+                    "$ref": "#/components/schemas/DiffusionLoaderType",
+                    "description": "The architecture of the model."
+                  },
+                  "dtype": {
+                    "$ref": "#/components/schemas/ModelDType",
+                    "description": "Model data type. Defaults to `auto`."
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "description": "Model ID to load from. This may be a HF hub repo or a local path."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "Speech"
+            ],
+            "properties": {
+              "Speech": {
+                "type": "object",
+                "required": [
+                  "model_id",
+                  "arch",
+                  "dtype"
+                ],
+                "properties": {
+                  "arch": {
+                    "$ref": "#/components/schemas/SpeechLoaderType",
+                    "description": "The architecture of the model."
+                  },
+                  "dac_model_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "DAC Model ID to load from. If not provided, this is automatically downloaded from the default path for the model.\nThis may be a HF hub repo or a local path."
+                  },
+                  "dtype": {
+                    "$ref": "#/components/schemas/ModelDType",
+                    "description": "Model data type. Defaults to `auto`."
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "description": "Model ID to load from. This may be a HF hub repo or a local path."
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select multi-model mode with configuration file",
+            "required": [
+              "MultiModel"
+            ],
+            "properties": {
+              "MultiModel": {
+                "type": "object",
+                "description": "Select multi-model mode with configuration file",
+                "required": [
+                  "config"
+                ],
+                "properties": {
+                  "config": {
+                    "type": "string",
+                    "description": "Multi-model configuration file path (JSON format)"
+                  },
+                  "default_model_id": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Default model ID to use when no model is specified in requests"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Select an embedding model, without quantization or adapters",
+            "required": [
+              "Embedding"
+            ],
+            "properties": {
+              "Embedding": {
+                "type": "object",
+                "description": "Select an embedding model, without quantization or adapters",
+                "required": [
+                  "model_id"
+                ],
+                "properties": {
+                  "arch": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/EmbeddingLoaderType",
+                        "description": "The architecture of the model."
+                      }
+                    ]
+                  },
+                  "calibration_file": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Calibration file for imatrix generation."
+                  },
+                  "dtype": {
+                    "$ref": "#/components/schemas/ModelDType",
+                    "description": "Model data type. Defaults to `auto`."
+                  },
+                  "from_uqff": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;)"
+                  },
+                  "hf_cache_path": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Cache path for Hugging Face models downloaded locally"
+                  },
+                  "imatrix": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "imatrix file for enhanced quantization."
+                  },
+                  "model_id": {
+                    "type": "string",
+                    "description": "Model ID to load from. This may be a HF hub repo or a local path."
+                  },
+                  "tokenizer_json": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to local tokenizer.json file. If this is specified it is used over any remote file."
+                  },
+                  "topology": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "Path to a topology YAML file."
+                  },
+                  "write_uqff": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/UqffWriteSpec",
+                        "description": "UQFF path to write to."
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
       "ModelStatus": {
         "type": "string",
         "enum": [
@@ -4750,6 +6498,36 @@
           }
         }
       },
+      "MultimodalLoaderType": {
+        "type": "string",
+        "description": "The architecture to load the multimodal model as.",
+        "enum": [
+          "phi3v",
+          "idefics2",
+          "llava_next",
+          "llava",
+          "lfm2vl",
+          "vllama",
+          "qwen2vl",
+          "idefics3",
+          "minicpmo",
+          "phi4mm",
+          "qwen2_5vl",
+          "gemma3",
+          "mistral3",
+          "llama4",
+          "gemma3n",
+          "qwen3vl",
+          "qwen3vlmoe",
+          "qwen3_5",
+          "qwen3_5moe",
+          "voxtral",
+          "gemma4",
+          "muse_glimmer",
+          "diffusiongemma",
+          "paddleocr_vl"
+        ]
+      },
       "NamedFunctionToolChoice": {
         "type": "object",
         "required": [
@@ -4764,6 +6542,38 @@
             "$ref": "#/components/schemas/ToolType"
           }
         }
+      },
+      "NormalLoaderType": {
+        "type": "string",
+        "description": "The architecture to load the normal model as.",
+        "enum": [
+          "mistral",
+          "gemma",
+          "mixtral",
+          "llama",
+          "phi2",
+          "phi3",
+          "qwen2",
+          "gemma2",
+          "starcoder2",
+          "phi3.5moe",
+          "deepseekv2",
+          "deepseekv3",
+          "qwen3",
+          "glm4",
+          "glm4moelite",
+          "glm4moe",
+          "qwen3moe",
+          "smollm3",
+          "granitemoehybrid",
+          "gpt_oss",
+          "hunyuanv1dense",
+          "hunyuanv1moe",
+          "qwen3next",
+          "qwen3_5",
+          "lfm2",
+          "lfm2_moe"
+        ]
       },
       "OpenAiCodeInterpreterAutoContainer": {
         "type": "object",
@@ -8035,6 +9845,85 @@
           }
         }
       },
+      "RuntimeSpec": {
+        "type": "object",
+        "properties": {
+          "chat_template": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "device": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`auto` (the best available), `cpu`, `cuda:N` or `metal:N`."
+          },
+          "isq": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "In-situ quantization, e.g. `q4k`."
+          },
+          "jinja_explicit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_model_len": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "max_seqs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "no_kv_cache": {
+            "type": "boolean"
+          },
+          "paged_attn": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Paged attention: unset picks the device default."
+          },
+          "prefix_cache_n": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Prefix cache capacity in sequences; 0 disables the prefix cache.",
+            "minimum": 0
+          },
+          "seed": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "token_source": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`cache`, `none`, `env:VAR`, `literal:TOKEN` or `path:FILE`."
+          }
+        },
+        "additionalProperties": false
+      },
       "SearchContextSize": {
         "type": "string",
         "enum": [
@@ -8220,6 +10109,20 @@
           }
         }
       },
+      "SkillsSpec": {
+        "type": "object",
+        "description": "Where uploaded skills are kept; requests reference them from the shell tool.",
+        "properties": {
+          "root": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Kept across loads and shareable between engines, each reading it as it was at load; without a root the engine\nkeeps its skills in a directory of its own that goes away with it."
+          }
+        },
+        "additionalProperties": false
+      },
       "SourceMeta": {
         "type": "object",
         "description": "Which agentic tool produced the file, and when in the session.",
@@ -8265,6 +10168,12 @@
             "description": "The desired audio format for the generated speech."
           }
         }
+      },
+      "SpeechLoaderType": {
+        "type": "string",
+        "enum": [
+          "dia"
+        ]
       },
       "StopTokens": {
         "oneOf": [
@@ -8602,6 +10511,44 @@
           }
         },
         "additionalProperties": false
+      },
+      "UqffWriteSpec": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "object",
+            "title": "Config",
+            "required": [
+              "output"
+            ],
+            "properties": {
+              "base_model": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "output": {
+                "type": "string"
+              },
+              "repo_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "types": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        ],
+        "description": "How a spec names a UQFF to write: an output path, or the path with the ISQ types and report metadata."
       },
       "UrlCitation": {
         "type": "object",

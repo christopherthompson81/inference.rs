@@ -161,13 +161,14 @@ pub trait NormalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoa
 // One row per text architecture; everything that names an architecture is generated from it.
 macro_rules! normal_loader_types {
     ($($variant:ident {
-        cli: $cli:literal,
+        cli: $cli:tt,
         hf: $hf:literal,
         model_type: $model_type:literal,
         loader: $loader:ident
         $(, feature: $feature:literal)? $(,)?
     }),* $(,)?) => {
         #[cfg_attr(feature = "pyo3_macros", pyclass(eq, eq_int))]
+        #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
         #[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
         /// The architecture to load the normal model as.
         pub enum NormalLoaderType {
