@@ -37,10 +37,9 @@ use std::{
     fmt,
     io::{BufWriter, Write},
     net::TcpListener,
-    ops::Deref,
     str::FromStr,
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, LazyLock,
     },
     time::{Duration, Instant},
@@ -192,6 +191,9 @@ pub fn reset_engine_terminate_flag() {
     }
 }
 
+/// Hands each engine its own `ENGINE_INSTRUCTIONS` key.
+pub(crate) static NEXT_ENGINE_INSTRUCTION_ID: AtomicUsize = AtomicUsize::new(0);
+
 /// Engine instructions, per Engine (InferenceRs) ID.
 pub static ENGINE_INSTRUCTIONS: LazyLock<
     std::sync::Mutex<HashMap<usize, Option<EngineInstruction>>>,
@@ -232,7 +234,9 @@ pub struct Engine {
     tool_callbacks: tools::ToolCallbacksWithTools,
     scheduler: Arc<Mutex<dyn Scheduler>>,
     max_active_sequences: usize,
-    id: Arc<Mutex<usize>>,
+    next_seq_id: Arc<Mutex<usize>>,
+    // The key `ENGINE_INSTRUCTIONS` holds this engine's out-of-band instruction under.
+    instruction_id: usize,
     no_kv_cache: bool,
     prefix_cacher: Arc<Mutex<PrefixCacheManagerV2>>,
     paged_block_retention_monitor: Option<PrefixBlockRetentionRevocationMonitor>,
@@ -557,6 +561,11 @@ impl Drop for Engine {
 }
 
 impl Engine {
+    pub(crate) fn with_instruction_id(mut self, instruction_id: usize) -> Self {
+        self.instruction_id = instruction_id;
+        self
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         tx: Sender<Request>,
@@ -744,7 +753,8 @@ impl Engine {
             tool_callbacks,
             scheduler: scheduler.clone(),
             max_active_sequences,
-            id: Arc::new(Mutex::new(0)),
+            next_seq_id: Arc::new(Mutex::new(0)),
+            instruction_id: 0,
             no_kv_cache,
             prefix_cacher: Arc::new(Mutex::new(prefix_cacher)),
             paged_block_retention_monitor,
@@ -1967,7 +1977,7 @@ impl Engine {
             ENGINE_INSTRUCTIONS
                 .lock()
                 .expect("`ENGINE_INSTRUCTIONS` was poisoned")
-                .get(get_mut_arcmutex!(self.id).deref()),
+                .get(&self.instruction_id),
             Some(Some(EngineInstruction::Terminate))
         )
     }

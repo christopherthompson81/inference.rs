@@ -34,6 +34,8 @@ pub struct UnloadedModelState {
 /// Internal structure to hold per-engine state
 struct EngineInstance {
     sender: Sender<Request>,
+    // Also delivered out of band through `ENGINE_INSTRUCTIONS`, since a full queue hides a queued Terminate.
+    instruction_id: usize,
     engine_handler: Option<JoinHandle<()>>,
     reboot_state: RebootState,
     adapter_runtime: Option<Arc<DynamicLoraRuntime>>,
@@ -48,6 +50,10 @@ struct EngineInstance {
 
 impl Drop for EngineInstance {
     fn drop(&mut self) {
+        engine::ENGINE_INSTRUCTIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.instruction_id);
         // The engine frees its own graphs on exit; this covers an engine that never ran its loop.
         if let Ok(pipeline) = self.reboot_state.pipeline.try_lock() {
             pipeline.cleanup_cuda_graphs();
@@ -63,6 +69,13 @@ impl EngineInstance {
     }
 
     fn terminate(&self) {
+        engine::ENGINE_INSTRUCTIONS
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                self.instruction_id,
+                Some(engine::EngineInstruction::Terminate),
+            );
         let _ = self.sender.try_send(Request::Terminate);
     }
 
@@ -333,6 +346,8 @@ impl InferenceRs {
         let file_store_for_engine = file_store.clone();
 
         let tx_for_engine = tx.clone();
+        let instruction_id =
+            engine::NEXT_ENGINE_INSTRUCTION_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         // Propagate Engine::new's outcome so a creation failure is a clean load error, not a zombie-engine panic.
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel::<Result<(), String>>(1);
         let engine_handler = thread::spawn(move || {
@@ -366,7 +381,7 @@ impl InferenceRs {
                     ) {
                         Ok(engine) => {
                             let _ = ready_tx.send(Ok(()));
-                            engine
+                            engine.with_instruction_id(instruction_id)
                         }
                         Err(e) => {
                             let _ = ready_tx.send(Err(format!("{e:#}")));
@@ -406,7 +421,7 @@ impl InferenceRs {
                     ) {
                         Ok(engine) => {
                             let _ = ready_tx.send(Ok(()));
-                            engine
+                            engine.with_instruction_id(instruction_id)
                         }
                         Err(e) => {
                             let _ = ready_tx.send(Err(format!("{e:#}")));
@@ -427,6 +442,7 @@ impl InferenceRs {
         }
 
         Ok(EngineInstance {
+            instruction_id,
             sender: tx,
             engine_handler: Some(engine_handler),
             reboot_state,

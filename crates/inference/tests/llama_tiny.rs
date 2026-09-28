@@ -107,3 +107,54 @@ async fn an_isq_load_can_calibrate_on_a_text_file_first() -> anyhow::Result<()> 
     greedy_ids(&model).await?;
     Ok(())
 }
+
+// Well under the 10 s drop timeout, which is what a Terminate stuck behind the queue used to cost.
+const PROMPT_DROP_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+const QUEUED_MAX_TOKENS: usize = 64;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dropping_an_engine_with_a_full_request_queue_stops_it_promptly() -> anyhow::Result<()> {
+    use inference::{NormalRequest, Request, RequestMessage, SamplingParams};
+    use tokio::sync::mpsc::{channel, error::TrySendError};
+
+    let checkpoint = tiny_llama_checkpoint()?;
+    let model = cpu_text_builder(checkpoint.path()).build().await?;
+    let sender = model.inner().get_sender(None)?;
+    // Held so the engine does not skip the queued requests as abandoned.
+    let mut receivers = Vec::new();
+    loop {
+        let (tx, rx) = channel(1);
+        let mut sampling = SamplingParams::deterministic();
+        sampling.max_len = Some(QUEUED_MAX_TOKENS);
+        let request = NormalRequest::new_simple(
+            RequestMessage::Completion {
+                text: PROMPT.to_string(),
+                echo_prompt: false,
+                best_of: None,
+            },
+            sampling,
+            tx,
+            0,
+            None,
+            None,
+        );
+        match sender.try_send(Request::Normal(Box::new(request))) {
+            Ok(()) => receivers.push(rx),
+            Err(TrySendError::Full(_)) => break,
+            Err(TrySendError::Closed(_)) => {
+                anyhow::bail!("the engine stopped while the queue filled")
+            }
+        }
+    }
+    drop(sender);
+
+    let started = std::time::Instant::now();
+    drop(model);
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < PROMPT_DROP_LIMIT,
+        "drop took {elapsed:?} with {} queued requests",
+        receivers.len()
+    );
+    Ok(())
+}
