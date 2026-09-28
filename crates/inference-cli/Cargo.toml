@@ -44,13 +44,11 @@ either = { workspace = true }
 indexmap = { workspace = true }
 regex = { workspace = true }
 comfy-table = "7"
+uuid = { workspace = true, features = ["v4"] }
 dirs = { workspace = true }
 walkdir = { workspace = true }
 crossterm = "0.28"
 fuzzy-matcher = "0.3"
-
-[dev-dependencies]
-uuid = { workspace = true, features = ["v4"] }
 
 [features]
 default = ["code-execution", "swagger-ui", "all-models"]
