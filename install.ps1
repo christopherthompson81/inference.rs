@@ -85,7 +85,7 @@ function Show-Banner {
 
 # Minimum required Rust version (from Cargo.toml rust-version)
 $RequiredRustVersion = "1.94"
-$InferenceRsRepoUrl = "https://github.com/EricLBuehler/mistral.rs"
+$InferenceRsRepoUrl = "https://github.com/christopherthompson81/inference.rs"
 $InferenceRsBranch = "master"
 $InferenceRsCliPackage = "inference-cli"
 
@@ -392,9 +392,9 @@ function Install-MistralRS {
 
 # INFERENCE_RS_INSTALL_TAG pins a specific release (e.g. v0.8.9); default is the latest stable release.
 $ReleaseBase = if ($env:INFERENCE_RS_INSTALL_TAG) {
-    "https://github.com/EricLBuehler/mistral.rs/releases/download/$($env:MISTRALRS_INSTALL_TAG)"
+    "https://github.com/christopherthompson81/inference.rs/releases/download/$($env:INFERENCE_RS_INSTALL_TAG)"
 } else {
-    "https://github.com/EricLBuehler/mistral.rs/releases/latest/download"
+    "https://github.com/christopherthompson81/inference.rs/releases/latest/download"
 }
 $PrebuiltDir = "$env:USERPROFILE\.inference-rs"
 $BinDir = "$env:USERPROFILE\.local\bin"

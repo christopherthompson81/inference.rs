@@ -273,16 +273,6 @@ impl RmsNorm {
         Ok(Self { eps, weight: w })
     }
 
-    /// Gemma uses weight + 1.0
-    #[deprecated(
-        note = "Use GemmaRmsNorm::new() instead, which handles UQFF serialization correctly"
-    )]
-    pub fn new_gemma(size: usize, eps: f64, vb: ShardedVarBuilder) -> Result<Self> {
-        let w = vb.get(size, "weight")?;
-        let w = (w + 1.0)?;
-        Ok(Self { eps, weight: w })
-    }
-
     /// Gemma 3n uses weight
     pub fn new_gemma_3n(
         size: usize,
@@ -296,15 +286,6 @@ impl RmsNorm {
             Tensor::ones(size, vb.dtype(), vb.device())?
         };
         Ok(Self { eps, weight: w })
-    }
-
-    /// Gemma uses weight + 1.0. Undo for UQFF generation.
-    #[deprecated(note = "Use GemmaRmsNorm instead, which handles UQFF serialization automatically")]
-    pub fn undo_gemma(&self) -> Result<Self> {
-        Ok(Self {
-            eps: self.eps,
-            weight: (&self.weight - 1.0)?,
-        })
     }
 
     pub fn from_w(w: Tensor, eps: f64) -> Result<Self> {

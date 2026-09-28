@@ -120,7 +120,7 @@ pub fn run_doctor(json: bool) -> Result<()> {
 
     // Installation section
     println!();
-    println!("Mistral.rs Installation");
+    println!("inference.rs Installation");
     println!("-----------------------");
     println!("[INFO] Version: {}", system.build.version);
     println!("[INFO] Git revision: {}", system.build.git_revision);

@@ -792,15 +792,6 @@ pub enum ModelSelected {
         dtype: ModelDType,
     },
 
-    /// Select multi-model mode with configuration file
-    MultiModel {
-        /// Multi-model configuration file path (JSON format)
-        config: String,
-
-        /// Default model ID to use when no model is specified in requests
-        default_model_id: Option<String>,
-    },
-
     /// Select an embedding model, without quantization or adapters
     Embedding {
         /// Model ID to load from. This may be a HF hub repo or a local path.

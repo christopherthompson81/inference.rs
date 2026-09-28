@@ -100,7 +100,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 
 1. **Pipeline Architecture**: All models implement the `Pipeline` trait in `crates/inference-core/src/pipeline/mod.rs`. Different model types (Plain, GGUF, GGML, Multimodal) have their own pipeline implementations.
 
-2. **Model Loading**: Models are loaded through `Loader` traits that handle different formats and quantizations. See `crates/inference-core/src/loader.rs`.
+2. **Model Loading**: Models are loaded through `Loader` traits that handle different formats and quantizations. See `crates/inference-core/src/pipeline/loaders/mod.rs` (the `Loader` trait) and `pipeline/loading.rs`.
 
 3. **Request Handling**: The server uses message passing with `InferenceRs` struct managing a background thread pool. Requests flow through `crates/inference-core/src/engine/mod.rs`.
 
@@ -125,7 +125,7 @@ When adding new quantization methods:
 
 - `crates/inference-core/src/engine/mod.rs` - Main engine orchestration
 - `crates/inference-core/src/pipeline/mod.rs` - Pipeline trait and common logic
-- `crates/inference-server-core/src/routes.rs` - HTTP API endpoints
+- `crates/inference-server-core/src/route_registry.rs` - HTTP API endpoints (routes wired in `inference_server_router_builder.rs`)
 - `bindings/python/inference_rs/_typed.py` - Python SDK entry point (`Engine`)
 - `examples/rust/` - Rust SDK examples (`inference-examples`, not a default member: build with `-p inference-examples --example <name>`)
 

@@ -276,7 +276,6 @@ fn model_dtype(model_selected: &ModelSelected) -> Option<&'static str> {
             ModelDType::BF16 => "bf16",
             ModelDType::F32 => "f32",
         }),
-        ModelSelected::MultiModel { .. } => None,
     }
 }
 
