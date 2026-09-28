@@ -17,9 +17,10 @@ pub const SERVER_VIDEO_FRAME_LIMIT: usize = 32;
 
 const DATA_URL_HEADER_ALLOWANCE: usize = 4096;
 const UI_UPLOAD_SCHEME: &str = "inference-upload";
-const IMAGE_UPLOAD_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg"];
-const VIDEO_UPLOAD_EXTENSIONS: &[&str] = &["mp4", "avi", "mov", "mkv", "webm", "m4v", "gif"];
-const AUDIO_UPLOAD_EXTENSIONS: &[&str] =
+// The web UI accepts uploads by these lists, and an `inference-upload:` source is refused outside them.
+pub const IMAGE_UPLOAD_EXTENSIONS: &[&str] = &["jpg", "jpeg", "png", "gif", "webp", "bmp", "svg"];
+pub const VIDEO_UPLOAD_EXTENSIONS: &[&str] = &["mp4", "avi", "mov", "mkv", "webm", "m4v", "gif"];
+pub const AUDIO_UPLOAD_EXTENSIONS: &[&str] =
     &["wav", "mp3", "ogg", "flac", "m4a", "aac", "opus", "webm"];
 
 static UI_UPLOAD_DIR: OnceLock<PathBuf> = OnceLock::new();

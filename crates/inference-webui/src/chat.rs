@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::fs;
 
-use crate::ui::handlers::api::MessageStats;
-use crate::ui::types::{AppState, ChatFile, ChatMessage};
+use crate::handlers::api::MessageStats;
+use crate::types::{AppState, ChatFile, ChatMessage};
 
 /// Append a chat message to the specified chat file.
 #[allow(clippy::too_many_arguments)]

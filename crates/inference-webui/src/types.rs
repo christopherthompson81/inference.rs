@@ -1,9 +1,10 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use inference::{ModelGenerationDefaults, SearchEmbeddingModel};
+use inference_core::{InferenceRs, ModelGenerationDefaults, SearchEmbeddingModel};
 
 #[derive(Clone, Serialize)]
 pub struct UiModelInfo {
@@ -133,7 +134,7 @@ impl GenerationParams {
 }
 
 pub struct AppState {
-    pub model: inference::Model,
+    pub inference: Arc<InferenceRs>,
     pub models: IndexMap<String, UiModelInfo>,
     pub current: RwLock<Option<String>>,
     pub chats_dir: String,

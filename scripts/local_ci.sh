@@ -32,8 +32,8 @@ for arg in "$@"; do
 done
 [[ $((lint + tests + cuda + models + slim + docs + bindings)) -eq 0 ]] && lint=1 && tests=1
 
-# Examples are compile-checked by clippy --examples; the test modes only link the smoke set below.
-CLIPPY=(clippy --workspace --tests --examples)
+# --examples compile-checks the examples (tests only link the smoke set below); --bins checks bins without dev-deps, like CI.
+CLIPPY=(clippy --workspace --bins --tests --examples)
 TEST_TARGETS=(--workspace --lib --bins --tests)
 # The rest of examples/rust is built on request (`-p inference-examples --example <name>`).
 # --workspace keeps the same feature unification as the tests, so no second copy of the crates gets built.

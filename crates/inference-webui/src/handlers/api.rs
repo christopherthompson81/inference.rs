@@ -7,91 +7,87 @@ use axum::{
 use chrono::Utc;
 use serde::Deserialize;
 use serde_json::json;
-use std::fs::File;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs;
 use tracing::error;
 use uuid::Uuid;
 
-use inference::speech_utils;
+use inference_api::media_source::{
+    AUDIO_UPLOAD_EXTENSIONS, IMAGE_UPLOAD_EXTENSIONS, VIDEO_UPLOAD_EXTENSIONS,
+};
+use inference_api::openai::{AudioResponseFormat, SpeechGenerationRequest};
 
-use crate::ui::chat::append_chat_message;
-use crate::ui::types::{
+use crate::chat::append_chat_message;
+use crate::types::{
     AppState, ChatFile, DeleteChatRequest, LoadChatRequest, NewChatRequest, RenameChatRequest,
     SelectRequest,
 };
-use crate::ui::utils::get_cache_dir;
+use crate::utils::get_cache_dir;
 
 const INVALID_CHAT_ID: &str = "Invalid chat id";
+
+fn media_upload_extension(
+    filename: Option<&str>,
+    allowed: &[&str],
+    unsupported: &'static str,
+) -> Result<String, &'static str> {
+    let ext = filename
+        .ok_or("No filename provided")?
+        .rsplit('.')
+        .next()
+        .unwrap_or("")
+        .to_lowercase();
+    if ext.is_empty() {
+        return Err("No file extension");
+    }
+    if allowed.contains(&ext.as_str()) {
+        Ok(ext)
+    } else {
+        Err(unsupported)
+    }
+}
 
 fn validate_image_upload(
     filename: Option<&str>,
     content_type: Option<&str>,
 ) -> Result<String, &'static str> {
-    if let Some(mime) = content_type {
-        if !mime.starts_with("image/") {
-            return Err("File must be an image");
-        }
+    if content_type.is_some_and(|mime| !mime.starts_with("image/")) {
+        return Err("File must be an image");
     }
-
-    let ext = if let Some(name) = filename {
-        name.rsplit('.').next().unwrap_or("").to_lowercase()
-    } else {
-        return Err("No filename provided");
-    };
-
-    match ext.as_str() {
-        "jpg" | "jpeg" | "png" | "gif" | "webp" | "bmp" | "svg" => Ok(ext),
-        "" => Err("No file extension"),
-        _ => Err("Unsupported image format"),
-    }
+    media_upload_extension(
+        filename,
+        IMAGE_UPLOAD_EXTENSIONS,
+        "Unsupported image format",
+    )
 }
 
 fn validate_video_upload(
     filename: Option<&str>,
     content_type: Option<&str>,
 ) -> Result<String, &'static str> {
-    if let Some(mime) = content_type {
-        if !mime.starts_with("video/") && mime != "image/gif" {
-            return Err("File must be a video");
-        }
+    if content_type.is_some_and(|mime| !mime.starts_with("video/") && mime != "image/gif") {
+        return Err("File must be a video");
     }
-
-    let ext = if let Some(name) = filename {
-        name.rsplit('.').next().unwrap_or("").to_lowercase()
-    } else {
-        return Err("No filename provided");
-    };
-
-    match ext.as_str() {
-        "mp4" | "avi" | "mov" | "mkv" | "webm" | "m4v" | "gif" => Ok(ext),
-        "" => Err("No file extension"),
-        _ => Err("Unsupported video format"),
-    }
+    media_upload_extension(
+        filename,
+        VIDEO_UPLOAD_EXTENSIONS,
+        "Unsupported video format",
+    )
 }
 
 fn validate_audio_upload(
     filename: Option<&str>,
     content_type: Option<&str>,
 ) -> Result<String, &'static str> {
-    if let Some(mime) = content_type {
-        if !mime.starts_with("audio/") {
-            return Err("File must be an audio file");
-        }
+    if content_type.is_some_and(|mime| !mime.starts_with("audio/")) {
+        return Err("File must be an audio file");
     }
-
-    let ext = if let Some(name) = filename {
-        name.rsplit('.').next().unwrap_or("").to_lowercase()
-    } else {
-        return Err("No filename provided");
-    };
-
-    match ext.as_str() {
-        "wav" | "mp3" | "ogg" | "flac" | "m4a" | "aac" | "opus" | "webm" => Ok(ext),
-        "" => Err("No file extension"),
-        _ => Err("Unsupported audio format"),
-    }
+    media_upload_extension(
+        filename,
+        AUDIO_UPLOAD_EXTENSIONS,
+        "Unsupported audio format",
+    )
 }
 
 fn validate_text_upload(
@@ -131,8 +127,8 @@ fn validate_text_upload(
         | "tese" | "hlsl" | "metal" | "wgsl" => Ok(ext),
         "sh" | "bash" | "zsh" | "fish" | "ps1" | "bat" | "cmd" | "sql" | "dockerfile"
         | "makefile" => Ok(ext),
-        "r" | "R" | "scala" | "clj" | "cljs" | "hs" | "elm" | "ex" | "exs" | "erl" | "fs"
-        | "fsx" | "ml" | "mli" => Ok(ext),
+        "r" | "scala" | "clj" | "cljs" | "hs" | "elm" | "ex" | "exs" | "erl" | "fs" | "fsx"
+        | "ml" | "mli" => Ok(ext),
         "vue" | "svelte" | "astro" | "lua" | "nim" | "zig" | "d" | "dart" | "jl" | "pl" | "pm"
         | "tcl" => Ok(ext),
         "gitignore" | "dockerignore" | "editorconfig" | "env" | "htaccess" => Ok(ext),
@@ -559,7 +555,7 @@ pub async fn append_message(
         req.videos,
         req.blocks,
         req.finish_reason,
-        crate::ui::handlers::api::MessageStats {
+        crate::handlers::api::MessageStats {
             elapsed_ms: req.elapsed_ms,
             ttft_ms: req.ttft_ms,
             tokens: req.tokens,
@@ -587,7 +583,7 @@ pub async fn edit_message(
     Json(req): Json<EditMessageRequest>,
 ) -> impl IntoResponse {
     if let Err(e) =
-        crate::ui::chat::edit_chat_message(&app, &req.id, &req.message_id, &req.content).await
+        crate::chat::edit_chat_message(&app, &req.id, &req.message_id, &req.content).await
     {
         error!("edit message error: {}", e);
         return (StatusCode::INTERNAL_SERVER_ERROR, "edit failed").into_response();
@@ -606,7 +602,7 @@ pub async fn set_tail(
     Extension(app): Extension<Arc<AppState>>,
     Json(req): Json<SetTailRequest>,
 ) -> impl IntoResponse {
-    if let Err(e) = crate::ui::chat::set_chat_tail(&app, &req.id, req.tail).await {
+    if let Err(e) = crate::chat::set_chat_tail(&app, &req.id, req.tail).await {
         error!("set tail error: {}", e);
         return (StatusCode::INTERNAL_SERVER_ERROR, "set_tail failed").into_response();
     }
@@ -624,7 +620,7 @@ pub async fn fork_session(
     Extension(app): Extension<Arc<AppState>>,
     Json(req): Json<ForkSessionRequest>,
 ) -> impl IntoResponse {
-    let result = app.model.fork_session(
+    let result = app.inference.fork_session(
         None,
         &req.src_session_id,
         req.dest_session_id,
@@ -700,12 +696,13 @@ pub async fn generate_speech(
             .into_response();
     }
 
-    let (pcm, rate, channels) = match app
-        .model
-        .generate_speech_with_model(req.text, Some(&model_name))
-        .await
-    {
-        Ok(res) => res,
+    let request = SpeechGenerationRequest {
+        model: model_name,
+        input: req.text,
+        response_format: AudioResponseFormat::Wav,
+    };
+    let audio = match inference_api::generation::generate_speech(&app.inference, request).await {
+        Ok(audio) => audio,
         Err(e) => {
             error!("speech generation error: {}", e);
             return (
@@ -718,9 +715,7 @@ pub async fn generate_speech(
 
     let filename = format!("{}.wav", Uuid::new_v4());
     let filepath = PathBuf::from(&app.speech_dir).join(&filename);
-    if let Err(e) = File::create(&filepath).and_then(|mut f| {
-        speech_utils::write_pcm_as_wav(&mut f, &pcm, rate as u32, channels as u16)
-    }) {
+    if let Err(e) = fs::write(&filepath, &audio.bytes).await {
         error!("failed to write wav file: {}", e);
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -754,7 +749,7 @@ pub async fn save_chat_session(
     Json(req): Json<SaveChatSessionRequest>,
 ) -> impl IntoResponse {
     // Export the session from the in-memory store
-    let session = match app.model.export_session(None, &req.session_id) {
+    let session = match app.inference.export_session(None, &req.session_id) {
         Ok(Some(s)) => s,
         Ok(None) => {
             return (StatusCode::NOT_FOUND, "Session not found in store").into_response();
@@ -831,7 +826,7 @@ pub async fn restore_chat_session(
         }
     };
 
-    let serialized: inference::SerializedSession = match serde_json::from_slice(&bytes) {
+    let serialized: inference_core::SerializedSession = match serde_json::from_slice(&bytes) {
         Ok(s) => s,
         Err(e) => {
             error!("parse session sidecar error: {}", e);
@@ -840,7 +835,7 @@ pub async fn restore_chat_session(
     };
 
     if let Err(e) = app
-        .model
+        .inference
         .import_session(None, session_id.clone(), serialized)
     {
         error!("import_session error: {}", e);
@@ -852,7 +847,7 @@ pub async fn restore_chat_session(
 
 /// Return the list of MCP-provided tools registered on the default model.
 pub async fn list_mcp_tools(Extension(app): Extension<Arc<AppState>>) -> impl IntoResponse {
-    match app.model.list_mcp_tools(None) {
+    match app.inference.list_mcp_tools(None) {
         Ok(tools) => {
             let payload: Vec<_> = tools
                 .into_iter()
@@ -862,7 +857,63 @@ pub async fn list_mcp_tools(Extension(app): Extension<Arc<AppState>>) -> impl In
         }
         Err(e) => {
             error!("list_mcp_tools error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response()
+            (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uploads_are_checked_against_the_lists_media_sources_accept() {
+        assert_eq!(
+            validate_image_upload(Some("Photo.PNG"), Some("image/png")),
+            Ok("png".to_string())
+        );
+        assert_eq!(
+            validate_video_upload(Some("clip.gif"), Some("image/gif")),
+            Ok("gif".to_string())
+        );
+        assert_eq!(
+            validate_audio_upload(Some("take.opus"), None),
+            Ok("opus".to_string())
+        );
+        assert_eq!(
+            validate_image_upload(Some("scan.tiff"), Some("image/tiff")),
+            Err("Unsupported image format")
+        );
+        assert_eq!(
+            validate_audio_upload(Some("take.wav"), Some("video/mp4")),
+            Err("File must be an audio file")
+        );
+        assert_eq!(
+            validate_video_upload(None, None),
+            Err("No filename provided")
+        );
+        assert_eq!(
+            validate_image_upload(Some("photo."), None),
+            Err("No file extension")
+        );
+        for ext in IMAGE_UPLOAD_EXTENSIONS {
+            assert!(validate_image_upload(Some(&format!("a.{ext}")), None).is_ok());
+        }
+    }
+
+    #[test]
+    fn text_uploads_accept_source_files_by_extension() {
+        assert_eq!(
+            validate_text_upload(Some("notes.R"), None),
+            Ok("r".to_string())
+        );
+        assert_eq!(
+            validate_text_upload(Some("main.rs"), Some("application/x-rust")),
+            Ok("rs".to_string())
+        );
+        assert_eq!(
+            validate_text_upload(Some("image.png"), Some("image/png")),
+            Err("File must be a text file")
+        );
     }
 }

@@ -8,15 +8,14 @@ use axum::routing::{get, get_service, post};
 use axum::Router;
 use include_dir::{include_dir, Dir};
 use indexmap::IndexMap;
-use inference::{Model, SearchEmbeddingModel};
-use inference_core::{InferenceRs, ModelCategory, SupportedModality};
+use inference_core::{InferenceRs, ModelCategory, SearchEmbeddingModel, SupportedModality};
 use inference_server_core::route_registry::{RouteInfo, RouteKind};
 use tokio::fs;
 use tower_http::services::ServeDir;
 
-use crate::ui::handlers::api::*;
-use crate::ui::types::{AppState, GenerationParams, UiModelInfo};
-use crate::ui::utils::get_cache_dir;
+use crate::handlers::api::*;
+use crate::types::{AppState, GenerationParams, UiModelInfo};
+use crate::utils::get_cache_dir;
 
 mod chat;
 mod handlers;
@@ -165,7 +164,6 @@ pub async fn build_ui_router(
     tool_dispatch_url: Option<String>,
 ) -> Result<Router> {
     let models = build_model_list(&inference);
-    let model_wrapper = Model::new(inference.clone());
 
     let base_cache = get_cache_dir();
     let chats_dir = base_cache.join("chats");
@@ -199,7 +197,7 @@ pub async fn build_ui_router(
         .or_else(|| models.keys().next().cloned());
 
     let app_state = Arc::new(AppState {
-        model: model_wrapper,
+        inference,
         models,
         current: tokio::sync::RwLock::new(default_model),
         chats_dir: chats_dir.to_string_lossy().to_string(),

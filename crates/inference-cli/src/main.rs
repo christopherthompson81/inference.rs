@@ -11,7 +11,6 @@ mod commands;
 mod config;
 #[cfg(test)]
 mod docgen;
-mod ui;
 
 use anyhow::Result;
 use clap::{CommandFactory, Parser};
