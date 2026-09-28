@@ -101,7 +101,6 @@ pub(crate) enum AutoDeviceMapSizing {
 pub(crate) struct AutoDeviceMapSizingInputs<'a> {
     pub loader: &'a dyn DeviceMappedModelLoader,
     pub config: &'a str,
-    pub dtype: DType,
     pub sizing: AutoDeviceMapSizing,
     pub weight_source: Option<&'a Arc<dyn QuantizedWeightSource>>,
     pub prepared_weight_source: Option<&'a Arc<dyn QuantizedWeightSource>>,
@@ -122,19 +121,20 @@ pub(crate) struct AutoDeviceMapSizes {
 
 fn packed_sizes(
     inputs: &AutoDeviceMapSizingInputs<'_>,
+    dtype: DType,
     weight_pack_factor: usize,
     non_mapped_pack_factor: usize,
     quantization: Option<&AutoDeviceMapQuantization<'_>>,
 ) -> Result<AutoDeviceMapSizes> {
     let layer_sizes_in_bytes = inputs.loader.layer_sizes_in_bytes(
         inputs.config,
-        inputs.dtype,
+        dtype,
         weight_pack_factor,
         inputs.matformer,
     )?;
     let non_mapped_size_in_bytes = inputs.loader.non_mapped_size_in_bytes(
         inputs.config,
-        inputs.dtype,
+        dtype,
         non_mapped_pack_factor,
         quantization,
         inputs.matformer,
@@ -151,8 +151,8 @@ fn packed_sizes(
 /// Per-layer and non-mapped weight sizes for automatic device mapping, following the weights that will be loaded.
 pub(crate) fn auto_device_map_sizes(
     inputs: AutoDeviceMapSizingInputs<'_>,
+    dtype: DType,
 ) -> Result<AutoDeviceMapSizes> {
-    let dtype = inputs.dtype;
     match inputs.sizing {
         sizing @ (AutoDeviceMapSizing::Uqff | AutoDeviceMapSizing::PreparedWeightSource) => {
             let source = inputs
@@ -176,6 +176,7 @@ pub(crate) fn auto_device_map_sizes(
                 };
             packed_sizes(
                 &inputs,
+                dtype,
                 weight_pack_factor,
                 non_mapped_pack_factor,
                 Some(&quantization),
@@ -218,6 +219,7 @@ pub(crate) fn auto_device_map_sizes(
             };
             packed_sizes(
                 &inputs,
+                dtype,
                 weight_pack_factor,
                 non_mapped_pack_factor,
                 Some(&quantization),
@@ -258,6 +260,7 @@ pub(crate) fn auto_device_map_sizes(
             });
             packed_sizes(
                 &inputs,
+                dtype,
                 weight_pack_factor,
                 weight_pack_factor,
                 quantization.as_ref(),

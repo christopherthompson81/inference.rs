@@ -1,7 +1,4 @@
-use super::isq::{
-    write_uqff_artifacts, UqffFullSer, UqffWriteConfig, UqffWriteRequest, WeightLoadingMode,
-    WeightLoadingState,
-};
+use super::isq::{UqffFullSer, UqffWriteConfig, WeightLoadingMode, WeightLoadingState};
 use super::{
     get_model_paths, AnyMoePipelineMixin, CacheManagerMixin, EitherCache, ForwardInputsResult,
     GeneralMetadata, IsqPipelineMixin, Loader, MetadataMixin, ModelCategory, ModelKind, ModelPaths,
@@ -16,7 +13,6 @@ use crate::embedding_normal_model_loader;
 use crate::embedding_normal_model_loader_sharded;
 use crate::get_embedding_paths;
 use crate::paged_attention::AttentionImplementation;
-use crate::pipeline::loaders::auto_device_map;
 use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::tokenizer::get_tokenizer;
 use crate::pipeline::EmbeddingLoaderType;
@@ -224,7 +220,7 @@ impl Loader for EmbeddingLoader {
         dtype: &dyn TryIntoDType,
         device: &Device,
         silent: bool,
-        mut mapper: DeviceMapSetting,
+        mapper: DeviceMapSetting,
         in_situ_quant: Option<IsqType>,
         mut paged_attn_config: Option<PagedAttentionConfig>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
@@ -255,35 +251,24 @@ impl Loader for EmbeddingLoader {
             write_uqff,
         )?;
         let use_distributed = tensor_parallelism.is_enabled();
-        let uqff_reader = if let Some(from_uqff) = &*self.from_uqff.read().unwrap() {
-            Some(Arc::new(inference_quant::UqffReader::open(from_uqff)?))
-        } else {
-            None
-        };
+        let super::loading::WeightSources {
+            uqff_reader,
+            combined: weight_source,
+            ..
+        } = super::loading::open_weight_sources(self.from_uqff.read().unwrap().as_deref(), None)?;
 
-        // If auto, convert to Map if not using nccl
-        if write_uqff {
-            mapper = DeviceMapSetting::dummy();
-        } else if use_distributed {
-            mapper = DeviceMapSetting::DummyNccl {
-                nm_device: available_devices[0].clone(),
-            };
-        } else if let DeviceMapSetting::Auto(params) = mapper.clone() {
-            // Initial dtype
-            let dtype = dtype.try_into_dtype(&available_devices.iter().collect::<Vec<_>>())?;
-
-            let weight_source = uqff_reader
-                .clone()
-                .map(|reader| reader as Arc<dyn inference_quant::QuantizedWeightSource>);
-            let super::isq_flow::AutoDeviceMapSizes {
-                layer_sizes_in_bytes,
-                non_mapped_size_in_bytes,
-                total_model_size_in_bytes,
-            } = super::isq_flow::auto_device_map_sizes(
-                super::isq_flow::AutoDeviceMapSizingInputs {
+        let super::loading::ResolvedMapSetting {
+            setting: mapper, ..
+        } = super::loading::resolve_map_setting(
+            super::loading::MapSettingInputs {
+                setting: mapper,
+                write_uqff,
+                distributed: use_distributed,
+                available_devices: &available_devices,
+                dtype,
+                sizing: super::isq_flow::AutoDeviceMapSizingInputs {
                     loader: &*self.inner,
                     config: &config,
-                    dtype,
                     sizing: super::isq_flow::resolve_auto_device_map_sizing(
                         uqff_reader.is_some(),
                         false,
@@ -298,22 +283,9 @@ impl Loader for EmbeddingLoader {
                     matformer: None,
                     non_mapped_unpacked: false,
                 },
-            )?;
-
-            let new = auto_device_map::get_device_layers(
-                &*self.inner,
-                &config,
-                self.inner.num_layers(&config)?,
-                layer_sizes_in_bytes,
-                non_mapped_size_in_bytes,
-                total_model_size_in_bytes,
-                &available_devices,
-                dtype,
-                &params,
-                paged_attn_config.as_mut(),
-            )?;
-            mapper = DeviceMapSetting::Map(new);
-        }
+            },
+            &mut paged_attn_config,
+        )?;
 
         let super::loading::MaterializedDeviceMapper {
             pipeline_mapper,
@@ -482,84 +454,52 @@ impl Loader for EmbeddingLoader {
 
         let tokenizer = get_tokenizer(paths.get_tokenizer_filename(), None)?;
 
-        plan.validate_tracked_selection(&tracker.get())?;
-
-        let imatrix_map = if plan.wants_imatrix {
-            let drive = super::isq_flow::EmbeddingCalibrationDrive(&*model);
-            Some(super::isq_flow::resolve_imatrix_map(
-                &drive,
-                &tracker.get().clone(),
-                self.config.imatrix.as_ref(),
-                self.config.calibration_file.as_ref(),
-                &super::isq_flow::CalibrationCtx {
-                    tokenizer: &tokenizer,
-                    bos_tok_id: None,
-                    load_device: &load_device,
-                    mapper: Some(pipeline_mapper.as_ref()),
-                },
-            )?)
-        } else {
-            None
-        };
-
-        if plan.capture == inference_quant::IsqCaptureMode::CaptureMatches {
-            let ty = in_situ_quant.context("imatrix quantization requires an ISQ type")?;
-            super::isq_flow::complete_isq_capture(
-                &tracker.get().clone(),
-                ty,
-                imatrix_map
-                    .as_ref()
-                    .expect("CaptureMatches requires imatrix data"),
-            )?;
-        }
-
-        if let Some(write_uqff) = &self.config.write_uqff {
-            let layers = tracker.get().clone();
-            let uqff_types = plan
-                .write_types
-                .clone()
-                .filter(|types| !types.is_empty())
-                .context("UQFF serialization requires at least one ISQ type.")?;
-            let modules_json = EmbeddingModulePaths::serialize_modules(&modules_config);
-            let full_ser = UqffFullSer {
+        let modules_json = EmbeddingModulePaths::serialize_modules(&modules_config);
+        // cloned out so the tracker lock is not held through calibration and the UQFF write
+        let tracked = tracker.get().clone();
+        super::isq_flow::finish_isq_load(super::isq_flow::FinishIsqLoad {
+            plan: &plan,
+            modules: tracked,
+            drive: &super::isq_flow::EmbeddingCalibrationDrive(&*model),
+            in_situ_quant,
+            imatrix: self.config.imatrix.as_ref(),
+            calibration_file: self.config.calibration_file.as_ref(),
+            calibration: super::isq_flow::CalibrationCtx {
                 tokenizer: &tokenizer,
-                template_filename: paths.get_template_filename(),
-                effective_chat_template: None,
-                generation_config: paths.get_gen_conf_filename(),
-                config: config.clone(),
-                processor_filename: &None,
-                preprocessor_filename: &None,
-                modules: Some(&modules_json),
-                module_paths: Some(&modules_config),
-            };
-            write_uqff_artifacts(UqffWriteRequest {
-                output: write_uqff.output.clone(),
-                types: uqff_types,
-                base_model: write_uqff.base_model.clone(),
-                repo_id: write_uqff.repo_id.clone(),
-                layers,
-                quantize_predicates: plan.uqff_quantize_predicates.clone(),
-                residual: model.residual_tensors(),
-                full_ser,
-                imatrix: imatrix_map.unwrap_or_default(),
-            })?;
-        }
-
-        if plan.immediate_isq_installed {
-            for module in tracker.get().clone() {
-                module.ct.resolve()?;
-            }
-        }
+                bos_tok_id: None,
+                load_device: &load_device,
+                mapper: Some(pipeline_mapper.as_ref()),
+            },
+            uqff: self
+                .config
+                .write_uqff
+                .as_ref()
+                .map(|write| super::isq_flow::UqffArtifact {
+                    config: write,
+                    residual: model.residual_tensors(),
+                    full_ser: UqffFullSer {
+                        tokenizer: &tokenizer,
+                        template_filename: paths.get_template_filename(),
+                        effective_chat_template: None,
+                        generation_config: paths.get_gen_conf_filename(),
+                        config: config.clone(),
+                        processor_filename: &None,
+                        preprocessor_filename: &None,
+                        modules: Some(&modules_json),
+                        module_paths: Some(&modules_config),
+                    },
+                }),
+        })?;
 
         let has_causal_attention = self.inner.has_causal_attention(&config)?;
         let max_seq_len = self.inner.model_config(&config)?.max_seq_len();
         let tracked_modules = tracker.get().clone();
         // rank-sliced layers re-slice at source read; inexpressible slices fall back per layer
-        let source_weight_files = if self.config.from_uqff.is_some() {
-            Vec::new()
-        } else {
-            paths.get_weight_filenames().to_vec()
-        };
+        let source_weight_files = super::loading::source_weight_files(
+            None,
+            self.config.from_uqff.is_some(),
+            paths.get_weight_filenames(),
+        );
 
         Ok(Arc::new(Mutex::new(EmbeddingPipeline {
             dummy_cache: EitherCache::Full(crate::pipeline::Cache::new(0, false)),

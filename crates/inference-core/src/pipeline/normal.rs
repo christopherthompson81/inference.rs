@@ -58,11 +58,7 @@ use crate::pipeline::cuda_graph::{
     CudaGraphDispatchMode, CudaGraphDispatchReason, CudaGraphEvent, CudaGraphEventGuard,
     CudaGraphPrecaptureInputs,
 };
-use crate::pipeline::isq::{
-    write_uqff_artifacts, UqffFullSer, UqffWriteConfig, UqffWriteRequest, WeightLoadingMode,
-    WeightLoadingState,
-};
-use crate::pipeline::loaders::auto_device_map;
+use crate::pipeline::isq::{UqffFullSer, UqffWriteConfig, WeightLoadingMode, WeightLoadingState};
 use crate::pipeline::sampling::{sample_and_add_toks, sample_and_add_toks_batched};
 use crate::pipeline::text_models_inputs_processor::InputMetadata;
 use crate::pipeline::tokenizer::get_tokenizer;
@@ -82,7 +78,7 @@ use crate::{
     xlora_model_loader, DeviceMapSetting, DynamicLoraRuntime, LoraAdapterSpec, LoraRuntimeConfig,
     PagedAttentionConfig, Pipeline, Topology, TryIntoDType, GLOBAL_HF_CACHE,
 };
-use anyhow::{Context, Result};
+use anyhow::Result;
 use candle_core::{DType, Device, Tensor, Var};
 use either::Either;
 use hf_hub::Cache;
@@ -604,7 +600,7 @@ impl Loader for NormalLoader {
         dtype: &dyn TryIntoDType,
         device: &Device,
         silent: bool,
-        mut mapper: DeviceMapSetting,
+        mapper: DeviceMapSetting,
         in_situ_quant: Option<IsqType>,
         mut paged_attn_config: Option<PagedAttentionConfig>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
@@ -644,45 +640,31 @@ impl Loader for NormalLoader {
             write_uqff,
         )?;
         let use_distributed = tensor_parallelism.is_enabled();
-        let uqff_reader = if let Some(from_uqff) = &*self.from_uqff.read().unwrap() {
-            Some(Arc::new(inference_quant::UqffReader::open(from_uqff)?))
-        } else {
-            None
-        };
-        let prepared_weight_source = self
-            .prepared_source
-            .as_ref()
-            .and_then(|source| source.weights.weight_source().cloned());
+        let super::loading::WeightSources {
+            uqff_reader,
+            prepared: prepared_weight_source,
+            combined: weight_source,
+        } = super::loading::open_weight_sources(
+            self.from_uqff.read().unwrap().as_deref(),
+            self.prepared_source
+                .as_ref()
+                .and_then(|source| source.weights.weight_source().cloned()),
+        )?;
         let has_prepared_weight_source = prepared_weight_source.is_some();
-        let weight_source: Option<Arc<dyn inference_quant::QuantizedWeightSource>> = uqff_reader
-            .clone()
-            .map(|reader| reader as Arc<dyn inference_quant::QuantizedWeightSource>)
-            .or(prepared_weight_source.clone());
 
-        // If auto, convert to Map if not using nccl
-        let mut max_kv_tokens: Option<usize> = None;
-        if write_uqff {
-            mapper = DeviceMapSetting::dummy();
-        } else if use_distributed {
-            mapper = DeviceMapSetting::DummyNccl {
-                nm_device: available_devices[0].clone(),
-            };
-        } else if let DeviceMapSetting::Auto(params) = mapper.clone() {
-            max_kv_tokens = Some(params.max_seq_len() * params.max_batch_size());
-            // Initial dtype
-            let dtype = dtype.try_into_dtype(&available_devices.iter().collect::<Vec<_>>())?;
-
-            // ISQ or UQFF: quantized path
-            // Match logic below where UQFF has priority
-            let super::isq_flow::AutoDeviceMapSizes {
-                layer_sizes_in_bytes,
-                non_mapped_size_in_bytes,
-                total_model_size_in_bytes,
-            } = super::isq_flow::auto_device_map_sizes(
-                super::isq_flow::AutoDeviceMapSizingInputs {
+        let super::loading::ResolvedMapSetting {
+            setting: mapper,
+            max_kv_tokens,
+        } = super::loading::resolve_map_setting(
+            super::loading::MapSettingInputs {
+                setting: mapper,
+                write_uqff,
+                distributed: use_distributed,
+                available_devices: &available_devices,
+                dtype,
+                sizing: super::isq_flow::AutoDeviceMapSizingInputs {
                     loader: &*self.inner,
                     config: &config,
-                    dtype,
                     sizing: super::isq_flow::resolve_auto_device_map_sizing(
                         uqff_reader.is_some(),
                         has_prepared_weight_source,
@@ -697,22 +679,9 @@ impl Loader for NormalLoader {
                     matformer: None,
                     non_mapped_unpacked: false,
                 },
-            )?;
-
-            let new = auto_device_map::get_device_layers(
-                &*self.inner,
-                &config,
-                self.inner.num_layers(&config)?,
-                layer_sizes_in_bytes,
-                non_mapped_size_in_bytes,
-                total_model_size_in_bytes,
-                &available_devices,
-                dtype,
-                &params,
-                paged_attn_config.as_mut(),
-            )?;
-            mapper = DeviceMapSetting::Map(new);
-        }
+            },
+            &mut paged_attn_config,
+        )?;
 
         let super::loading::MaterializedDeviceMapper {
             pipeline_mapper,
@@ -771,25 +740,15 @@ impl Loader for NormalLoader {
 
         let multi_progress = Arc::new(new_multi_progress());
 
-        // Load matformer slicing config if provided
-        let matformer_slicing_config = if let Some(matformer_path) =
-            &self.config.matformer_config_path
-        {
-            use crate::matformer::{MatformerConfig, MatformerSliceConfig};
-            info!("Loading Matformer config from {:?}", matformer_path);
-            let config = Arc::new(MatformerConfig::from_file(matformer_path)?);
-
-            if let Some(slice_name) = &self.config.matformer_slice_name {
-                info!("Using Matformer slice: {}", slice_name);
-                Some(MatformerSliceConfig::new(slice_name.clone(), config))
-            } else {
-                // If no slice name is provided but config exists, we'll need to handle this
-                // For now, return None and let the model handle the default slice selection
-                warn!("Matformer config loaded but no slice name specified. Models will use their default slice.");
-                None
-            }
-        } else {
-            None
+        let matformer_slicing_config = super::loading::load_matformer_slice(
+            self.config.matformer_config_path.as_deref(),
+            self.config.matformer_slice_name.as_deref(),
+        )?;
+        let load_parts = super::loading::LoadMetadataParts {
+            loading_isq,
+            device: device.clone(),
+            multi_progress: multi_progress.clone(),
+            matformer: matformer_slicing_config.clone(),
         };
 
         info!(
@@ -839,17 +798,12 @@ impl Loader for NormalLoader {
                     let model = self.inner.load(
                         &config,
                         sharded_vb,
-                        crate::pipeline::NormalLoadingMetadata {
+                        load_parts.metadata(
                             mapper,
-                            loading_isq,
-                            real_device: device.clone(),
-                            multi_progress: multi_progress.clone(),
-                            matformer_slicing_config: matformer_slicing_config.clone(),
-                            rope_pairing: self
-                                .prepared_source
+                            self.prepared_source
                                 .as_ref()
                                 .map(|source| source.rope_pairing),
-                        },
+                        ),
                         attention_mechanism,
                     )?;
                     (model, tracker, None)
@@ -892,14 +846,7 @@ impl Loader for NormalLoader {
                         let model = self.inner.load(
                             &config,
                             sharded_vb,
-                            crate::pipeline::NormalLoadingMetadata {
-                                mapper,
-                                loading_isq,
-                                real_device: device.clone(),
-                                multi_progress: multi_progress.clone(),
-                                matformer_slicing_config: matformer_slicing_config.clone(),
-                                rope_pairing: Some(source.rope_pairing),
-                            },
+                            load_parts.metadata(mapper, Some(source.rope_pairing)),
                             attention_mechanism,
                         )?;
                         let dynamic_lora = super::finish_dynamic_lora_runtime(
@@ -949,14 +896,7 @@ impl Loader for NormalLoader {
                         let model = self.inner.load(
                             &config,
                             vb,
-                            crate::pipeline::NormalLoadingMetadata {
-                                mapper,
-                                loading_isq,
-                                real_device: device.clone(),
-                                multi_progress: multi_progress.clone(),
-                                matformer_slicing_config: matformer_slicing_config.clone(),
-                                rope_pairing: Some(source.rope_pairing),
-                            },
+                            load_parts.metadata(mapper, Some(source.rope_pairing)),
                             attention_mechanism,
                         )?;
                         (model, tracker)
@@ -1025,14 +965,7 @@ impl Loader for NormalLoader {
                         let model = self.inner.load(
                             &config,
                             vb,
-                            crate::pipeline::NormalLoadingMetadata {
-                                mapper,
-                                loading_isq,
-                                real_device: device.clone(),
-                                multi_progress: multi_progress.clone(),
-                                matformer_slicing_config: matformer_slicing_config.clone(),
-                                rope_pairing: Some(source.rope_pairing),
-                            },
+                            load_parts.metadata(mapper, Some(source.rope_pairing)),
                             attention_mechanism,
                         )?;
                         let dynamic_lora = super::finish_dynamic_lora_runtime(
@@ -1123,79 +1056,52 @@ impl Loader for NormalLoader {
             }
         }
 
-        plan.validate_tracked_selection(&tracker.get())?;
-
-        let imatrix_map = if plan.wants_imatrix {
-            let drive = super::isq_flow::NormalCalibrationDrive(&*model);
-            Some(super::isq_flow::resolve_imatrix_map(
-                &drive,
-                &tracker.get().clone(),
-                self.config.imatrix.as_ref(),
-                self.config.calibration_file.as_ref(),
-                &super::isq_flow::CalibrationCtx {
-                    tokenizer: &tokenizer,
-                    bos_tok_id: chat_template
-                        .bos_tok()
-                        .as_deref()
-                        .and_then(|tok| tokenizer.token_to_id(tok)),
-                    load_device: &load_device,
-                    mapper: Some(pipeline_mapper.as_ref()),
-                },
-            )?)
-        } else {
-            None
-        };
-
-        if plan.capture == inference_quant::IsqCaptureMode::CaptureMatches {
-            let ty = in_situ_quant.context("imatrix quantization requires an ISQ type")?;
-            super::isq_flow::complete_isq_capture(
-                &tracker.get().clone(),
-                ty,
-                imatrix_map
-                    .as_ref()
-                    .expect("CaptureMatches requires imatrix data"),
-            )?;
-        }
-
-        if let Some(write_uqff) = &self.config.write_uqff {
-            let layers = tracker.get().clone();
-            let uqff_types = plan
-                .write_types
-                .clone()
-                .filter(|types| !types.is_empty())
-                .context("UQFF serialization requires at least one ISQ type.")?;
-            let residual = match self.config.organization {
-                IsqOrganization::Default => model.residual_tensors(),
-                IsqOrganization::MoeExpertsOnly => model
-                    .residual_tensors_moe_experts_only()
-                    .unwrap_or(model.residual_tensors()),
-            };
-            let full_ser = UqffFullSer {
+        // cloned out so the tracker lock is not held through calibration and the UQFF write
+        let tracked = tracker.get().clone();
+        super::isq_flow::finish_isq_load(super::isq_flow::FinishIsqLoad {
+            plan: &plan,
+            modules: tracked,
+            drive: &super::isq_flow::NormalCalibrationDrive(&*model),
+            in_situ_quant,
+            imatrix: self.config.imatrix.as_ref(),
+            calibration_file: self.config.calibration_file.as_ref(),
+            calibration: super::isq_flow::CalibrationCtx {
                 tokenizer: &tokenizer,
-                template_filename: paths.get_template_filename(),
-                effective_chat_template: Some(&chat_template),
-                generation_config: match self.prepared_source.as_ref() {
-                    Some(source) if source.generation_config.is_none() => None,
-                    _ => paths.get_gen_conf_filename(),
-                },
-                config: config.clone(),
-                processor_filename: &None,
-                preprocessor_filename: &None,
-                modules: None,
-                module_paths: None,
-            };
-            write_uqff_artifacts(UqffWriteRequest {
-                output: write_uqff.output.clone(),
-                types: uqff_types,
-                base_model: write_uqff.base_model.clone(),
-                repo_id: write_uqff.repo_id.clone(),
-                layers,
-                quantize_predicates: plan.uqff_quantize_predicates.clone(),
-                residual,
-                full_ser,
-                imatrix: imatrix_map.unwrap_or_default(),
-            })?;
-        }
+                bos_tok_id: chat_template
+                    .bos_tok()
+                    .as_deref()
+                    .and_then(|tok| tokenizer.token_to_id(tok)),
+                load_device: &load_device,
+                mapper: Some(pipeline_mapper.as_ref()),
+            },
+            uqff: self
+                .config
+                .write_uqff
+                .as_ref()
+                .map(|write| super::isq_flow::UqffArtifact {
+                    config: write,
+                    residual: match self.config.organization {
+                        IsqOrganization::Default => model.residual_tensors(),
+                        IsqOrganization::MoeExpertsOnly => model
+                            .residual_tensors_moe_experts_only()
+                            .unwrap_or(model.residual_tensors()),
+                    },
+                    full_ser: UqffFullSer {
+                        tokenizer: &tokenizer,
+                        template_filename: paths.get_template_filename(),
+                        effective_chat_template: Some(&chat_template),
+                        generation_config: match self.prepared_source.as_ref() {
+                            Some(source) if source.generation_config.is_none() => None,
+                            _ => paths.get_gen_conf_filename(),
+                        },
+                        config: config.clone(),
+                        processor_filename: &None,
+                        preprocessor_filename: &None,
+                        modules: None,
+                        module_paths: None,
+                    },
+                }),
+        })?;
 
         let paged_attn_config = if matches!(
             self.kind,
@@ -1211,20 +1117,17 @@ impl Loader for NormalLoader {
             paged_attn_config
         };
 
-        if plan.immediate_isq_installed {
-            for module in tracker.get().clone() {
-                module.ct.resolve()?;
-            }
-        }
         #[cfg(feature = "cuda")]
         super::synchronize_cuda_contexts(&device, pipeline_mapper.as_ref())?;
 
         let tracked_modules = tracker.get().clone();
-        let source_weight_files = match self.prepared_source.as_ref() {
-            Some(source) => source.source_weight_files.clone(),
-            None if self.config.from_uqff.is_some() => Vec::new(),
-            None => paths.get_weight_filenames().to_vec(),
-        };
+        let source_weight_files = super::loading::source_weight_files(
+            self.prepared_source
+                .as_ref()
+                .map(|source| source.source_weight_files.as_slice()),
+            self.config.from_uqff.is_some(),
+            paths.get_weight_filenames(),
+        );
 
         build_normal_pipeline(NormalPipelineBuildArgs {
             model,
