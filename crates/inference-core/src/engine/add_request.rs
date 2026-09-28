@@ -379,7 +379,7 @@ impl Engine {
             let mut seq = Sequence::new_waiting(
                 prompt_tokens.clone(),
                 prompt_text.clone(),
-                *get_mut_arcmutex!(self.id).deref(),
+                *get_mut_arcmutex!(self.next_seq_id).deref(),
                 now.as_millis(),
                 num_hidden_layers,
                 request.response.clone(),
@@ -453,7 +453,7 @@ impl Engine {
                 return Ok(());
             }
 
-            *get_mut_arcmutex!(self.id) += 1;
+            *get_mut_arcmutex!(self.next_seq_id) += 1;
             get_mut_arcmutex!(self.scheduler).add_seq(seq);
             added_seq = true;
         }
