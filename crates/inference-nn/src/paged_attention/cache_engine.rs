@@ -36,7 +36,6 @@ fn cuda_supports_fp8(device: &Device) -> bool {
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Default)]
-#[cfg_attr(feature = "pyo3_macros", pyo3::pyclass(eq, eq_int))]
 #[serde(rename_all = "lowercase")]
 pub enum PagedCacheType {
     #[default]

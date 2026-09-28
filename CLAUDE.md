@@ -84,7 +84,6 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-cli/` - Unified CLI binary (commands: run, serve, bench, from-config)
 - `crates/inference-api/` - The engine surface with no HTTP: OpenAI request/response types, request parsing and dispatch, chat as an engine operation, the server/engine builder. The HTTP server builds on it and the C ABI exposes it; add engine features here, not in the server
 - `crates/inference-server-core/` - HTTP server routing, OpenAI API implementation
-- `crates/inference-pyo3/` - Python SDK (PyO3 bindings)
 - `crates/inference/` - Rust SDK (high-level crate)
 - `crates/inference-vision/` - Image processing utilities
 - `crates/inference-quant/` - Quantization implementations (ISQ, GGUF, GPTQ, etc.)
@@ -94,7 +93,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-layout/` - Document layout detection (PP-DocLayoutV3) with custom CPU/CUDA kernels
 - `crates/inference-ffi/` - C ABI (`libinference_ffi`, header `include/inference.h`) for bindings in other languages
 - `bindings/csharp/` - .NET bindings over the C ABI (`InferenceRs.slnx`); a new ABI entry point needs its binding, which the coverage test enforces
-- `bindings/python/` - pure-Python ctypes package over the C ABI (`inference_rs`), which replaces the pyo3 package (being retired; both use the name); its coverage test enforces the same. Its typed classes (`inference_rs/types.py`) are generated from `docs/openapi.json`: after regenerating that, run `python3 bindings/python/scripts/generate_types.py`
+- `bindings/python/` - the Python SDK: a pure-Python ctypes package over the C ABI (`inference_rs`); its coverage test enforces the same, and `scripts/release/build_wheels.py` builds wheels that bundle the library. Its typed classes (`inference_rs/types.py`) are generated from `docs/openapi.json`: after regenerating that, run `python3 bindings/python/scripts/generate_types.py`
 - Kernel sources live in `<crate>/kernels/{cuda,metal}/` (inference-layout compiles inline sources with NVRTC); each kernel crate's `third_party/README.md` records upstream provenance and license.
 
 ### Key Design Patterns
@@ -127,7 +126,7 @@ When adding new quantization methods:
 - `crates/inference-core/src/engine/mod.rs` - Main engine orchestration
 - `crates/inference-core/src/pipeline/mod.rs` - Pipeline trait and common logic
 - `crates/inference-server-core/src/routes.rs` - HTTP API endpoints
-- `crates/inference-pyo3/src/lib.rs` - Python SDK entry point
+- `bindings/python/inference_rs/_typed.py` - Python SDK entry point (`Engine`)
 - `examples/rust/` - Rust SDK examples (`inference-examples`, not a default member: build with `-p inference-examples --example <name>`)
 
 ### Pull Requests
@@ -166,7 +165,7 @@ Avoid returning TODOs.
 - Real-checkpoint parity tests are integration tests: `--models` runs them (CPU) and `--cuda` keeps one GPU parity check. Engine behavior is tested on tiny random-weight checkpoints built at test time (see `crates/inference/tests/paddleocr_vl_tiny.rs`).
 - GPU tests use `skip_without_cuda!()` instead of `#[ignore]`, so `--features cuda` runs them wherever a device exists. Keep `#[ignore]` for hardware this suite can't assume (SM90, SM121, cuTile), benchmarks, and tests that write files.
 - A check worth running by hand is a test worth committing.
-- Python tests require building and installing the package first
+- Python tests run from the checkout against `target/debug`; `scripts/local_ci.sh --bindings` builds the library and runs them
 
 ### Common Pitfalls
 

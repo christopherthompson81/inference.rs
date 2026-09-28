@@ -5,28 +5,12 @@ use std::{
 };
 
 use candle_core::Tensor;
-#[cfg(feature = "pyo3_macros")]
-use pyo3::{pyclass, pymethods};
 use serde::Serialize;
 
 use crate::{sampler::TopLogprob, tools::ToolCallResponse};
 
 pub const SYSTEM_FINGERPRINT: &str = "local";
 
-macro_rules! generate_repr {
-    ($t:ident) => {
-        #[cfg(feature = "pyo3_macros")]
-        #[pymethods]
-        impl $t {
-            fn __repr__(&self) -> String {
-                format!("{self:#?}")
-            }
-        }
-    };
-}
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
 /// Chat completion response message.
 pub struct ResponseMessage {
@@ -39,10 +23,6 @@ pub struct ResponseMessage {
     pub reasoning_content: Option<String>,
 }
 
-generate_repr!(ResponseMessage);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
 /// Delta in content for streaming response.
 pub struct Delta {
@@ -55,10 +35,6 @@ pub struct Delta {
     pub reasoning_content: Option<String>,
 }
 
-generate_repr!(Delta);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
 /// A logprob with the top logprobs for this token.
 pub struct ResponseLogprob {
@@ -68,20 +44,12 @@ pub struct ResponseLogprob {
     pub top_logprobs: Vec<TopLogprob>,
 }
 
-generate_repr!(ResponseLogprob);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
 /// Logprobs per token.
 pub struct Logprobs {
     pub content: Option<Vec<ResponseLogprob>>,
 }
 
-generate_repr!(Logprobs);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
 /// Chat completion choice.
 pub struct Choice {
@@ -93,10 +61,6 @@ pub struct Choice {
     pub logprobs: Option<Logprobs>,
 }
 
-generate_repr!(Choice);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
 /// Chat completion streaming chunk choice.
 pub struct ChunkChoice {
@@ -108,10 +72,6 @@ pub struct ChunkChoice {
     pub logprobs: Option<ResponseLogprob>,
 }
 
-generate_repr!(ChunkChoice);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
 /// Chat completion streaming chunk choice.
 pub struct CompletionChunkChoice {
@@ -121,10 +81,6 @@ pub struct CompletionChunkChoice {
     pub finish_reason: Option<String>,
 }
 
-generate_repr!(CompletionChunkChoice);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
 /// OpenAI compatible prompt token breakdown.
 pub struct PromptTokensDetails {
@@ -132,10 +88,6 @@ pub struct PromptTokensDetails {
     pub cached_tokens: usize,
 }
 
-generate_repr!(PromptTokensDetails);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
 /// OpenAI compatible (superset) usage during a request.
 pub struct Usage {
@@ -153,10 +105,6 @@ pub struct Usage {
     pub total_completion_time_sec: f32,
 }
 
-generate_repr!(Usage);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
 pub struct AgenticToolCallRecord {
     pub round: usize,
@@ -171,10 +119,6 @@ pub struct AgenticToolCallRecord {
     pub file_ids: Vec<String>,
 }
 
-generate_repr!(AgenticToolCallRecord);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
 /// An OpenAI compatible chat completion response.
 pub struct ChatCompletionResponse {
@@ -199,10 +143,6 @@ pub struct ChatCompletionResponse {
     pub session_id: Option<String>,
 }
 
-generate_repr!(ChatCompletionResponse);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
 /// Chat completion streaming request chunk.
 pub struct ChatCompletionChunkResponse {
@@ -221,10 +161,6 @@ pub struct ChatCompletionChunkResponse {
     pub session_id: Option<String>,
 }
 
-generate_repr!(ChatCompletionChunkResponse);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
 /// Completion request choice.
 pub struct CompletionChoice {
@@ -234,10 +170,6 @@ pub struct CompletionChoice {
     pub logprobs: Option<Logprobs>,
 }
 
-generate_repr!(CompletionChoice);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
 /// An OpenAI compatible completion response.
 pub struct CompletionResponse {
@@ -253,10 +185,6 @@ pub struct CompletionResponse {
     pub adapter_generation: Option<String>,
 }
 
-generate_repr!(CompletionResponse);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize)]
 /// Completion request choice.
 pub struct CompletionChunkResponse {
@@ -271,10 +199,6 @@ pub struct CompletionChunkResponse {
     pub adapter_generation: Option<String>,
 }
 
-generate_repr!(CompletionChunkResponse);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct ImageChoice {
@@ -282,18 +206,12 @@ pub struct ImageChoice {
     pub b64_json: Option<String>,
 }
 
-generate_repr!(ImageChoice);
-
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct ImageGenerationResponse {
     pub created: u128,
     pub data: Vec<ImageChoice>,
 }
-
-generate_repr!(ImageGenerationResponse);
 
 /// Tool-specific structured progress data for agentic tool calls.
 #[derive(Debug, Clone)]

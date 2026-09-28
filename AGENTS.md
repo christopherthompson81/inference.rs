@@ -10,7 +10,7 @@ This file provides instructions for AI agents to understand the layout of the `i
 - `crates/inference-vision/`    : Image processing utilities (resizing, preprocessing for multimodal models)
 - `crates/inference-quant/`     : Quantization support (ISQ, GGUF, GPTQ, AWQ, FP8, HQQ, etc.)
 - `crates/inference-paged-attn/`: PagedAttention implementation
-- `crates/inference-pyo3/`      : Python bindings (PyO3)
+- `bindings/python/`           : Python SDK (ctypes over the C ABI)
 - `crates/inference-cli/`       : Unified CLI binary (commands: run, serve, bench, from-config)
 - `crates/inference-server-core/`: Shared server core logic
 - `/docs/`             : Astro/Starlight documentation site (deployed at https://docs.mistralrs.dev)

@@ -3,8 +3,6 @@
 use std::path::Path;
 
 use base64::Engine;
-#[cfg(feature = "pyo3_macros")]
-use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
 
 mod inject;
@@ -38,8 +36,6 @@ pub fn default_file_purpose() -> String {
 }
 
 /// Where a file was produced.
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileSource {
     pub tool: String,
@@ -85,7 +81,6 @@ impl FileContent {
 }
 
 /// A file produced by an agentic run.
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct File {
     /// `file_<run>_r<round>_<idx>`.
@@ -300,98 +295,7 @@ impl File {
     }
 }
 
-#[cfg(feature = "pyo3_macros")]
-#[pymethods]
-impl File {
-    #[getter]
-    fn id(&self) -> &str {
-        &self.id
-    }
-
-    #[getter]
-    fn name(&self) -> &str {
-        &self.name
-    }
-
-    #[getter]
-    fn format(&self) -> Option<&str> {
-        self.format.as_deref()
-    }
-
-    #[getter]
-    fn mime_type(&self) -> Option<&str> {
-        self.mime_type.as_deref()
-    }
-
-    #[getter]
-    fn bytes(&self) -> u64 {
-        self.bytes
-    }
-
-    #[getter]
-    fn source(&self) -> FileSource {
-        self.source.clone()
-    }
-
-    #[getter]
-    fn text(&self) -> Option<&str> {
-        self.as_text()
-    }
-
-    #[getter]
-    fn data_base64(&self) -> Option<&str> {
-        self.binary_data()
-    }
-
-    #[getter]
-    fn preview(&self) -> Option<&str> {
-        self.preview_str()
-    }
-
-    #[pyo3(name = "is_text")]
-    fn py_is_text(&self) -> bool {
-        self.is_text()
-    }
-
-    #[pyo3(name = "is_binary")]
-    fn py_is_binary(&self) -> bool {
-        self.is_binary()
-    }
-
-    #[pyo3(name = "is_error")]
-    fn py_is_error(&self) -> bool {
-        self.is_error()
-    }
-
-    #[pyo3(name = "is_image")]
-    fn py_is_image(&self) -> bool {
-        self.is_image()
-    }
-
-    #[pyo3(name = "is_video")]
-    fn py_is_video(&self) -> bool {
-        self.is_video()
-    }
-
-    #[pyo3(name = "is_truncated")]
-    fn py_is_truncated(&self) -> bool {
-        self.is_truncated()
-    }
-
-    #[pyo3(name = "save")]
-    fn py_save(&self, path: &str) -> pyo3::PyResult<()> {
-        self.save(path)
-            .map_err(|e| pyo3::exceptions::PyIOError::new_err(format!("failed to save file: {e}")))
-    }
-
-    fn __repr__(&self) -> String {
-        format!("{self:#?}")
-    }
-}
-
 /// A file the runtime asks the model to produce. Surfaces as `File` (or `FileContent::Error` if missing).
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RequestedFile {
     pub name: String,

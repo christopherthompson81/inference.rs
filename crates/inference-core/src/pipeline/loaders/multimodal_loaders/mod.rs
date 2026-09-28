@@ -9,9 +9,6 @@ use candle_nn::Conv2dConfig;
 use inference_quant::log::once_log_debug;
 use inference_quant::ShardedVarBuilder;
 
-#[cfg(feature = "pyo3_macros")]
-use pyo3::pyclass;
-
 use crate::pipeline::isq::isq_regexes;
 use regex::Regex;
 use serde::Deserialize;
@@ -248,7 +245,6 @@ macro_rules! multimodal_loader_types {
         loader: $loader:ident
         $(, feature: $feature:literal)? $(,)?
     }),* $(,)?) => {
-        #[cfg_attr(feature = "pyo3_macros", pyclass(eq, eq_int))]
         #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
         #[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
         /// The architecture to load the multimodal model as.

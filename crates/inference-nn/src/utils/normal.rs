@@ -10,7 +10,6 @@ use tracing::debug;
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Copy, Default, Debug, Deserialize, Serialize, PartialEq)]
-#[cfg_attr(feature = "pyo3_macros", pyo3::pyclass(eq, eq_int))]
 /// DType for the model.
 ///
 /// If the model is quantized, this is ignored so it is reasonable to use the [`Default`] impl.
