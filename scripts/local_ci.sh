@@ -47,6 +47,8 @@ slim_clippy() { cargo clippy -p inference-core --lib --tests --no-default-featur
 
 if [[ $lint -eq 1 ]]; then
     cargo fmt --all -- --check
+    # CI's typos job; skipped with a note where the binary is missing so lint still runs everywhere.
+    if command -v typos > /dev/null; then typos --config .typos.toml; else echo "typos not installed: cargo install typos-cli" >&2; fi
 fi
 if [[ $tests -eq 1 || $cuda -eq 1 || $models -eq 1 ]] && ! cargo nextest --version > /dev/null 2>&1; then
     # nextest runs each test in its own process (CUDA tests stop sharing a context) and schedules nextest.toml groups
