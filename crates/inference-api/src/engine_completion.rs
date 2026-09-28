@@ -16,8 +16,7 @@ use tokio::sync::mpsc::{Receiver, Sender};
 use crate::{
     api_error::{boxed_anyhow, ApiError, ApiErrorKind, ModelErrorMessage},
     dispatch::{
-        apply_model_override, create_response_channel, request_model_override,
-        send_request_with_model,
+        apply_model_override, create_response_channel, response_model_id, send_request_with_model,
     },
     engine_chat::{DispatchError, ResponseTap},
     lora_routing::{resolve_lora_adapter_model, DEFAULT_MODEL_ID},
@@ -44,7 +43,7 @@ pub async fn prepare_completion(
     let requested_model = oairequest.model.clone();
     resolve_lora_adapter_model(state, &mut oairequest.model, &mut oairequest.adapter)
         .map_err(|error| DispatchError::Validation(Box::new(error)))?;
-    let model_override = request_model_override(requested_model, &oairequest.model);
+    let model_override = response_model_id(state, requested_model, &oairequest.model);
     let model_id = (oairequest.model != DEFAULT_MODEL_ID).then(|| oairequest.model.clone());
     let (request, is_streaming) = parse_request(oairequest, state.clone(), tx)
         .map_err(|error| DispatchError::Validation(boxed_anyhow(error)))?;

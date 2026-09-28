@@ -27,7 +27,7 @@ use crate::{
     api_error::{boxed_anyhow, ApiError, ApiErrorKind, ModelErrorMessage},
     background_tasks::get_background_task_manager,
     cached_responses::get_response_cache,
-    dispatch::{create_response_channel, send_request_with_model},
+    dispatch::{create_response_channel, response_model_id, send_request_with_model},
     engine_chat::{
         parse_request as parse_chat_request, serialize_agentic_progress,
         ChatCompletionParseContext, DispatchError, ResponseTap,
@@ -1939,9 +1939,11 @@ pub async fn prepare_response(
         )));
     }
     let (tx, rx) = create_response_channel(None);
-    let model = request.model.clone();
+    let requested_model = request.model.clone();
     resolve_lora_adapter_model(state, &mut request.model, &mut request.adapter)
         .map_err(|error| DispatchError::Validation(Box::new(error)))?;
+    let model = response_model_id(state, requested_model.clone(), &request.model)
+        .unwrap_or(requested_model);
     let model_id = (request.model != DEFAULT_MODEL_ID).then(|| request.model.clone());
     let metadata = request.metadata.clone();
     let store = request.store.unwrap_or(true);

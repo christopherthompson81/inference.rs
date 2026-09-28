@@ -1474,12 +1474,23 @@ fn one_engine_serves_several_models_by_id() {
         assert_eq!(status, INFERENCE_OK, "{id}: {}", last_error());
         let response: Value = serde_json::from_str(&response.unwrap()).unwrap();
         assert_eq!(response["object"], "chat.completion", "{id}");
-        // The response names the model by its checkpoint; "default" goes to the one default_model_id names.
-        let served = if id == "first" { &dirs[0] } else { &dirs[1] };
+        // A response names the model as /v1/models lists it; "default" resolves to default_model_id.
+        let served = if id == "default" { "second" } else { id };
+        assert_eq!(response["model"], served, "{response}");
+
+        let mut request: Value = serde_json::from_str(&completion_request(false)).unwrap();
+        request["model"] = json!(id);
+        let (status, completion) = request_call(inference_completion, engine, &request);
         assert_eq!(
-            response["model"],
-            json!(served.path().to_string_lossy()),
-            "{id}"
+            (status, completion["model"].clone()),
+            (INFERENCE_OK, json!(served)),
+            "{completion}"
+        );
+        let (status, created) = create_response(engine, &responses_request(json!({"model": id})));
+        assert_eq!(
+            (status, created["model"].clone()),
+            (INFERENCE_OK, json!(served)),
+            "{created}"
         );
     }
     unsafe { inference_engine_free(engine) };
