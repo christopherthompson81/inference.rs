@@ -273,61 +273,11 @@ impl Model {
     /// If `model_id` is `None`, the request is sent to the default model.
     pub async fn stream_chat_request_with_model<R: RequestLike>(
         &self,
-        mut request: R,
+        request: R,
         model_id: Option<&str>,
     ) -> crate::error::Result<Stream<'_>> {
-        let (tx, rx) = channel(1);
-
-        if let Ok(config) = self.config_with_model(model_id) {
-            request.resolve_pending_prefixes(&config.category);
-        }
-        let truncate_sequence = request.truncate_sequence();
-        let (tools, tool_choice) = if let Some((a, b)) = request.take_tools() {
-            (Some(a), Some(b))
-        } else {
-            (None, None)
-        };
-        let messages = request.take_messages();
-        validate_reasoning_controls(&messages)?;
-        let request = Request::Normal(Box::new(NormalRequest {
-            messages,
-            sampling_params: request.take_sampling_params(),
-            seed: None,
-            response: tx,
-            return_logprobs: request.return_logprobs(),
-            is_streaming: true,
-            id: 0,
-            queued_at: None,
-            constraint: request.take_constraint(),
-            suffix: None,
-            tools,
-            tool_choice,
-            logits_processors: request.take_logits_processors(),
-            return_raw_logits: false,
-            web_search_options: request.take_web_search_options(),
-            enable_code_execution: request.enable_code_execution(),
-            enable_shell: request.enable_shell(),
-            shell_options: request.take_shell_options(),
-            code_execution_permission: request.code_execution_permission(),
-            code_execution_approval_notifier: None,
-            agent_permission: request.agent_permission(),
-            agent_approval_handler: request.agent_approval_handler(),
-            agent_approval_notifier: None,
-            max_tool_rounds: request.max_tool_rounds(),
-            tool_dispatch_url: request.tool_dispatch_url().map(|s| s.to_string()),
-            model_id: model_id.map(|s| s.to_string()),
-            adapter: request.take_adapter(),
-            truncate_sequence,
-            session_id: request.session_id().map(|s| s.to_string()),
-            files: request.take_files(),
-            input_files: request.take_input_files(),
-        }));
-
-        self.runner.get_sender(model_id)?.send(request).await?;
-
-        let stream = Stream { _server: self, rx };
-
-        Ok(stream)
+        let rx = self.submit_chat(request, model_id, true, false).await?;
+        Ok(Stream { _server: self, rx })
     }
 
     /// Generate with the model (non-streaming).
@@ -342,77 +292,14 @@ impl Model {
     /// If `model_id` is `None`, the request is sent to the default model.
     pub async fn send_chat_request_with_model<R: RequestLike>(
         &self,
-        mut request: R,
+        request: R,
         model_id: Option<&str>,
     ) -> crate::error::Result<ChatCompletionResponse> {
-        let (tx, mut rx) = channel(1);
-
-        if let Ok(config) = self.config_with_model(model_id) {
-            request.resolve_pending_prefixes(&config.category);
+        let mut rx = self.submit_chat(request, model_id, false, false).await?;
+        match final_response(&mut rx).await? {
+            ResponseOk::Done(response) => Ok(response),
+            _ => Err(SdkError::UnexpectedResponse { expected: "Done" }),
         }
-        let truncate_sequence = request.truncate_sequence();
-        let (tools, tool_choice) = if let Some((a, b)) = request.take_tools() {
-            (Some(a), Some(b))
-        } else {
-            (None, None)
-        };
-        let messages = request.take_messages();
-        validate_reasoning_controls(&messages)?;
-        let request = Request::Normal(Box::new(NormalRequest {
-            messages,
-            sampling_params: request.take_sampling_params(),
-            seed: None,
-            response: tx,
-            return_logprobs: request.return_logprobs(),
-            is_streaming: false,
-            id: 0,
-            queued_at: None,
-            constraint: request.take_constraint(),
-            suffix: None,
-            tools,
-            tool_choice,
-            logits_processors: request.take_logits_processors(),
-            return_raw_logits: false,
-            web_search_options: request.take_web_search_options(),
-            enable_code_execution: request.enable_code_execution(),
-            enable_shell: request.enable_shell(),
-            shell_options: request.take_shell_options(),
-            code_execution_permission: request.code_execution_permission(),
-            code_execution_approval_notifier: None,
-            agent_permission: request.agent_permission(),
-            agent_approval_handler: request.agent_approval_handler(),
-            agent_approval_notifier: None,
-            max_tool_rounds: request.max_tool_rounds(),
-            tool_dispatch_url: request.tool_dispatch_url().map(|s| s.to_string()),
-            model_id: model_id.map(|s| s.to_string()),
-            adapter: request.take_adapter(),
-            truncate_sequence,
-            session_id: request.session_id().map(|s| s.to_string()),
-            files: request.take_files(),
-            input_files: request.take_input_files(),
-        }));
-
-        self.runner.get_sender(model_id)?.send(request).await?;
-
-        // The agentic loop may send AgenticToolCallProgress and File
-        // events before the final Done response. Skip them; the final
-        // ChatCompletionResponse carries the full files list.
-        let response = loop {
-            let resp = rx
-                .recv()
-                .await
-                .ok_or(SdkError::Channel("channel closed unexpectedly".into()))?
-                .as_result()?;
-            match resp {
-                ResponseOk::AgenticToolCallProgress { .. } => continue,
-                ResponseOk::BlockDenoisingProgress(_) => continue,
-                ResponseOk::File(_) => continue,
-                ResponseOk::Done(response) => break response,
-                _ => return Err(SdkError::UnexpectedResponse { expected: "Done" }),
-            }
-        };
-
-        Ok(response)
     }
 
     /// Generate with the model, returning raw logits of the first token generated.
@@ -429,20 +316,55 @@ impl Model {
     /// If `model_id` is `None`, the request is sent to the default model.
     pub async fn send_raw_chat_request_with_model<R: RequestLike>(
         &self,
-        mut request: R,
+        request: R,
         model_id: Option<&str>,
     ) -> crate::error::Result<(Vec<Tensor>, Vec<u32>)> {
-        let (tx, mut rx) = channel(1);
+        let mut rx = self.submit_chat(request, model_id, false, true).await?;
+        match final_response(&mut rx).await? {
+            ResponseOk::Raw {
+                logits_chunks,
+                tokens,
+            } => Ok((logits_chunks, tokens)),
+            _ => Err(SdkError::UnexpectedResponse { expected: "Raw" }),
+        }
+    }
 
+    // Image, speech and embedding requests are one-shot and deterministic, with no tools.
+    async fn send_simple(
+        &self,
+        messages: RequestMessage,
+        model_id: Option<&str>,
+        truncate_sequence: bool,
+    ) -> crate::error::Result<ResponseOk> {
+        let (tx, mut rx) = channel(1);
+        let mut request =
+            NormalRequest::new_simple(messages, SamplingParams::deterministic(), tx, 0, None, None);
+        request.model_id = model_id.map(str::to_string);
+        request.truncate_sequence = truncate_sequence;
+        self.runner
+            .get_sender(model_id)?
+            .send(Request::Normal(Box::new(request)))
+            .await?;
+        Ok(rx
+            .recv()
+            .await
+            .ok_or(SdkError::Channel("channel closed unexpectedly".into()))?
+            .as_result()?)
+    }
+
+    async fn submit_chat<R: RequestLike>(
+        &self,
+        mut request: R,
+        model_id: Option<&str>,
+        is_streaming: bool,
+        return_raw_logits: bool,
+    ) -> crate::error::Result<Receiver<Response>> {
+        let (tx, rx) = channel(1);
         if let Ok(config) = self.config_with_model(model_id) {
             request.resolve_pending_prefixes(&config.category);
         }
         let truncate_sequence = request.truncate_sequence();
-        let (tools, tool_choice) = if let Some((a, b)) = request.take_tools() {
-            (Some(a), Some(b))
-        } else {
-            (None, None)
-        };
+        let (tools, tool_choice) = request.take_tools().unzip();
         let messages = request.take_messages();
         validate_reasoning_controls(&messages)?;
         let request = Request::Normal(Box::new(NormalRequest {
@@ -451,7 +373,7 @@ impl Model {
             seed: None,
             response: tx,
             return_logprobs: request.return_logprobs(),
-            is_streaming: false,
+            is_streaming,
             id: 0,
             queued_at: None,
             constraint: request.take_constraint(),
@@ -459,7 +381,7 @@ impl Model {
             tools,
             tool_choice,
             logits_processors: request.take_logits_processors(),
-            return_raw_logits: true,
+            return_raw_logits,
             web_search_options: request.take_web_search_options(),
             enable_code_execution: request.enable_code_execution(),
             enable_shell: request.enable_shell(),
@@ -478,27 +400,8 @@ impl Model {
             files: request.take_files(),
             input_files: request.take_input_files(),
         }));
-
         self.runner.get_sender(model_id)?.send(request).await?;
-
-        // The agentic loop may emit progress or file events before the final Raw response.
-        loop {
-            let resp = rx
-                .recv()
-                .await
-                .ok_or(SdkError::Channel("channel closed unexpectedly".into()))?
-                .as_result()?;
-            match resp {
-                ResponseOk::AgenticToolCallProgress { .. } => continue,
-                ResponseOk::BlockDenoisingProgress(_) => continue,
-                ResponseOk::File(_) => continue,
-                ResponseOk::Raw {
-                    logits_chunks,
-                    tokens,
-                } => return Ok((logits_chunks, tokens)),
-                _ => return Err(SdkError::UnexpectedResponse { expected: "Raw" }),
-            }
-        }
+        Ok(rx)
     }
 
     // ========================================================================
@@ -615,54 +518,14 @@ impl Model {
         model_id: Option<&str>,
         save_file: Option<PathBuf>,
     ) -> crate::error::Result<ImageGenerationResponse> {
-        let (tx, mut rx) = channel(1);
-
-        let request = Request::Normal(Box::new(NormalRequest {
-            id: 0,
-            queued_at: None,
-            messages: RequestMessage::ImageGeneration {
-                prompt: prompt.to_string(),
-                format: response_format,
-                generation_params,
-                save_file,
-            },
-            sampling_params: SamplingParams::deterministic(),
-            seed: None,
-            response: tx,
-            return_logprobs: false,
-            is_streaming: false,
-            suffix: None,
-            constraint: Constraint::None,
-            tool_choice: None,
-            tools: None,
-            logits_processors: None,
-            return_raw_logits: false,
-            web_search_options: None,
-            enable_code_execution: false,
-            enable_shell: false,
-            shell_options: None,
-            code_execution_permission: None,
-            code_execution_approval_notifier: None,
-            agent_permission: None,
-            agent_approval_handler: None,
-            agent_approval_notifier: None,
-            max_tool_rounds: None,
-            tool_dispatch_url: None,
-            model_id: model_id.map(|s| s.to_string()),
-            adapter: None,
-            truncate_sequence: false,
-            session_id: None,
-            files: None,
-            input_files: Vec::new(),
-        }));
-
-        self.runner.get_sender(model_id)?.send(request).await?;
-
-        let ResponseOk::ImageGeneration(response) = rx
-            .recv()
-            .await
-            .ok_or(SdkError::Channel("channel closed unexpectedly".into()))?
-            .as_result()?
+        let messages = RequestMessage::ImageGeneration {
+            prompt: prompt.to_string(),
+            format: response_format,
+            generation_params,
+            save_file,
+        };
+        let ResponseOk::ImageGeneration(response) =
+            self.send_simple(messages, model_id, false).await?
         else {
             return Err(SdkError::UnexpectedResponse {
                 expected: "ImageGeneration",
@@ -695,55 +558,14 @@ impl Model {
         prompt: impl ToString,
         model_id: Option<&str>,
     ) -> crate::error::Result<(Arc<Vec<f32>>, usize, usize)> {
-        let (tx, mut rx) = channel(1);
-
-        let request = Request::Normal(Box::new(NormalRequest {
-            id: 0,
-            queued_at: None,
-            messages: RequestMessage::SpeechGeneration {
-                prompt: prompt.to_string(),
-            },
-            sampling_params: SamplingParams::deterministic(),
-            seed: None,
-            response: tx,
-            return_logprobs: false,
-            is_streaming: false,
-            suffix: None,
-            constraint: Constraint::None,
-            tool_choice: None,
-            tools: None,
-            logits_processors: None,
-            return_raw_logits: false,
-            web_search_options: None,
-            enable_code_execution: false,
-            enable_shell: false,
-            shell_options: None,
-            code_execution_permission: None,
-            code_execution_approval_notifier: None,
-            agent_permission: None,
-            agent_approval_handler: None,
-            agent_approval_notifier: None,
-            max_tool_rounds: None,
-            tool_dispatch_url: None,
-            model_id: model_id.map(|s| s.to_string()),
-            adapter: None,
-            truncate_sequence: false,
-            session_id: None,
-            files: None,
-            input_files: Vec::new(),
-        }));
-
-        self.runner.get_sender(model_id)?.send(request).await?;
-
+        let messages = RequestMessage::SpeechGeneration {
+            prompt: prompt.to_string(),
+        };
         let ResponseOk::Speech {
             pcm,
             rate,
             channels,
-        } = rx
-            .recv()
-            .await
-            .ok_or(SdkError::Channel("channel closed unexpectedly".into()))?
-            .as_result()?
+        } = self.send_simple(messages, model_id, false).await?
         else {
             return Err(SdkError::UnexpectedResponse { expected: "Speech" });
         };
@@ -780,66 +602,16 @@ impl Model {
             truncate_sequence,
         } = request;
 
-        let runner = self.runner.clone();
-        let model_id_owned = model_id.map(|s| s.to_string());
-        let futures = inputs.into_iter().map(|input| {
-            let runner = runner.clone();
-            let model_id_owned = model_id_owned.clone();
-            async move {
-                let message = input.into_request_message();
-                let (tx, mut rx) = channel(1);
-
-                let request = Request::Normal(Box::new(NormalRequest {
-                    id: 0,
-                    queued_at: None,
-                    messages: message,
-                    sampling_params: SamplingParams::deterministic(),
-                    seed: None,
-                    response: tx,
-                    return_logprobs: false,
-                    is_streaming: false,
-                    suffix: None,
-                    constraint: Constraint::None,
-                    tool_choice: None,
-                    tools: None,
-                    logits_processors: None,
-                    return_raw_logits: false,
-                    web_search_options: None,
-                    enable_code_execution: false,
-                    enable_shell: false,
-                    shell_options: None,
-                    code_execution_permission: None,
-                    code_execution_approval_notifier: None,
-                    agent_permission: None,
-                    agent_approval_handler: None,
-                    agent_approval_notifier: None,
-                    max_tool_rounds: None,
-                    tool_dispatch_url: None,
-                    model_id: model_id_owned.clone(),
-                    adapter: None,
-                    truncate_sequence,
-                    session_id: None,
-                    files: None,
-                    input_files: Vec::new(),
-                }));
-
-                runner
-                    .get_sender(model_id_owned.as_deref())?
-                    .send(request)
-                    .await
-                    .map_err(|e| anyhow::anyhow!(e.to_string()))?;
-
-                let ResponseOk::Embeddings { embeddings, .. } = rx
-                    .recv()
-                    .await
-                    .ok_or_else(|| anyhow::anyhow!("channel closed unexpectedly"))?
-                    .as_result()
-                    .map_err(|e| anyhow::anyhow!(e))?
-                else {
-                    anyhow::bail!("Got unexpected response type.")
-                };
-
-                Ok::<Vec<f32>, anyhow::Error>(embeddings)
+        let futures = inputs.into_iter().map(|input| async move {
+            let messages = input.into_request_message();
+            match self
+                .send_simple(messages, model_id, truncate_sequence)
+                .await?
+            {
+                ResponseOk::Embeddings { embeddings, .. } => Ok(embeddings),
+                _ => Err(SdkError::UnexpectedResponse {
+                    expected: "Embeddings",
+                }),
             }
         });
 
@@ -1274,5 +1046,59 @@ impl Model {
         self.runner
             .list_mcp_tools(model_id)
             .map_err(|e| crate::error::Error::from(inference_core::InferenceRsError::Other(e)))
+    }
+}
+
+// Skip agentic progress, denoising progress and file events; the final response carries the full files list.
+async fn final_response(rx: &mut Receiver<Response>) -> crate::error::Result<ResponseOk> {
+    loop {
+        let response = rx
+            .recv()
+            .await
+            .ok_or(SdkError::Channel("channel closed unexpectedly".into()))?
+            .as_result()?;
+        match response {
+            ResponseOk::AgenticToolCallProgress { .. }
+            | ResponseOk::BlockDenoisingProgress(_)
+            | ResponseOk::File(_) => continue,
+            response => return Ok(response),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn the_final_response_skips_progress_events() {
+        let (tx, mut rx) = channel(4);
+        let progress = BlockDenoisingProgress {
+            index: 0,
+            step: 1,
+            total_steps: 2,
+            tokens: Vec::new(),
+            text: String::new(),
+            finished: false,
+            final_block: false,
+        };
+        tx.send(Response::BlockDenoisingProgress(progress))
+            .await
+            .unwrap();
+        tx.send(Response::Raw {
+            logits_chunks: Vec::new(),
+            tokens: vec![7],
+        })
+        .await
+        .unwrap();
+        let ResponseOk::Raw { tokens, .. } = final_response(&mut rx).await.unwrap() else {
+            panic!("expected the raw response");
+        };
+        assert_eq!(tokens, vec![7]);
+        drop(tx);
+        assert!(matches!(
+            final_response(&mut rx).await,
+            Err(SdkError::Channel(_))
+        ));
     }
 }
