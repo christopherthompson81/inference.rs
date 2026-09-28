@@ -28,6 +28,7 @@ pub mod cuda;
 pub mod device_map;
 pub mod flashinfer;
 pub mod gdn;
+pub mod gguf;
 pub mod kv_cache;
 pub mod layers;
 pub mod lora;

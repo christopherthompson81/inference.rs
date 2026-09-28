@@ -56,7 +56,10 @@ use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::progress::ProgressScopeGuard;
 use crate::xlora_models::NonGranularState;
-use crate::xlora_models::{XLoraQLlama, XLoraQPhi3};
+#[cfg(feature = "models-llama")]
+use crate::xlora_models::XLoraQLlama;
+#[cfg(feature = "models-phi")]
+use crate::xlora_models::XLoraQPhi3;
 use crate::{
     distributed, get_mut_arcmutex, get_paths_gguf, DeviceMapSetting, LocalModelPaths,
     LoraAdapterSpec, LoraRuntimeConfig, MultimodalLoaderType, PagedAttentionConfig, Pipeline,
@@ -66,6 +69,7 @@ use anyhow::{bail, Context, Result};
 use candle_core::{Device, Tensor};
 use either::Either;
 use hf_hub::{Repo, RepoType};
+use inference_nn::gguf::{QuantizedForwardInputs, QuantizedModel};
 use inference_quant::IsqType;
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
@@ -129,13 +133,8 @@ fn requires_multimodal_projector(architecture: &str) -> bool {
         .any(|candidate| candidate.eq_ignore_ascii_case(architecture))
 }
 
-enum Model {
-    XLoraLlama(XLoraQLlama),
-    XLoraPhi3(XLoraQPhi3),
-}
-
 pub struct GGUFPipeline {
-    model: Model,
+    model: Box<dyn QuantizedModel>,
     tokenizer: Arc<Tokenizer>,
     no_kv_cache: bool,
     chat_template: Arc<ChatTemplate>,
@@ -1336,19 +1335,10 @@ impl Loader for GGUFLoader {
         let adapter = ModelConfig::Adapter::try_new(paths, device, silent, is_xlora)?;
         let model_config = ModelConfig::ModelParams::new(quant, Some(adapter));
 
-        let model = match self.kind {
-            ModelKind::GgufAdapter { adapter, .. } => match arch {
-                GGUFArchitecture::Llama | GGUFArchitecture::Mistral3 => {
-                    Model::XLoraLlama(XLoraQLlama::try_from(model_config)?)
-                }
-                GGUFArchitecture::Phi3 => Model::XLoraPhi3(XLoraQPhi3::try_from(model_config)?),
-                a => bail!(
-                    "Unsupported architecture `{a:?}` for GGUF {kind}",
-                    kind = adapter.pretty_name()
-                ),
-            },
-            _ => unreachable!(),
+        let ModelKind::GgufAdapter { adapter, .. } = self.kind else {
+            unreachable!("only GGUF adapter models reach the quantized-model path")
         };
+        let model = adapted_gguf_model(arch, model_config, &adapter.pretty_name())?;
 
         let chat_template_explicit = paths
             .get_chat_template_explicit()
@@ -1362,15 +1352,9 @@ impl Loader for GGUFLoader {
             gguf_chat_template,
         );
 
-        let max_seq_len = match model {
-            Model::XLoraLlama(ref xl) => xl.max_seq_len,
-            Model::XLoraPhi3(ref p) => p.max_seq_len,
-        };
+        let max_seq_len = model.max_seq_len();
         let llg_factory = build_llg_factory(tokenizer.clone())?;
-        let num_hidden_layers = match model {
-            Model::XLoraLlama(ref model) => model.cache.full().lock().len(),
-            Model::XLoraPhi3(ref model) => model.cache.full().lock().len(),
-        };
+        let num_hidden_layers = model.num_hidden_layers();
 
         if chat_template.bos_token.is_none() {
             if let Some(v) = bos {
@@ -1479,19 +1463,13 @@ impl CacheManagerMixin for GGUFPipeline {
         Ok(())
     }
     fn cache(&self) -> &EitherCache {
-        match self.model {
-            Model::XLoraLlama(ref model) => &model.cache,
-            Model::XLoraPhi3(ref model) => &model.cache,
-        }
+        self.model.cache()
     }
 }
 
 impl MetadataMixin for GGUFPipeline {
     fn device(&self) -> Device {
-        match self.model {
-            Model::XLoraLlama(ref model) => model.device.clone(),
-            Model::XLoraPhi3(ref model) => model.device.clone(),
-        }
+        self.model.device().clone()
     }
     fn tokenizer(&self) -> Option<Arc<Tokenizer>> {
         Some(self.tokenizer.clone())
@@ -1544,30 +1522,17 @@ impl Pipeline for GGUFPipeline {
             recurrent_batch_kind: _,
             adapter_leases: _adapter_leases,
         } = *inputs.downcast().expect("Downcast failed.");
-        let logits = match self.model {
-            Model::XLoraLlama(ref model) => model.forward(
-                &input_ids,
-                input_ids_full.as_ref().unwrap_or(&input_ids),
-                &seqlen_offsets,
-                seqlen_offsets_full.as_ref().unwrap_or(&seqlen_offsets),
-                self.no_kv_cache,
-                &self.non_granular_state,
-                context_lens,
-                &flash_meta,
-                flash_meta_full.as_ref().unwrap_or(&flash_meta),
-            )?,
-            Model::XLoraPhi3(ref model) => model.forward(
-                &input_ids,
-                input_ids_full.as_ref().unwrap_or(&input_ids),
-                &seqlen_offsets,
-                seqlen_offsets_full.as_ref().unwrap_or(&seqlen_offsets),
-                self.no_kv_cache,
-                &self.non_granular_state,
-                context_lens,
-                &flash_meta,
-                flash_meta_full.as_ref().unwrap_or(&flash_meta),
-            )?,
-        };
+        let logits = self.model.forward_step(QuantizedForwardInputs {
+            input_ids: &input_ids,
+            input_ids_full: input_ids_full.as_ref().unwrap_or(&input_ids),
+            seqlen_offsets: &seqlen_offsets,
+            seqlen_offsets_full: seqlen_offsets_full.as_ref().unwrap_or(&seqlen_offsets),
+            no_kv_cache: self.no_kv_cache,
+            non_granular_state: &self.non_granular_state,
+            context_lens,
+            flash_params: &flash_meta,
+            flash_params_full: flash_meta_full.as_ref().unwrap_or(&flash_meta),
+        })?;
         if return_raw_logits {
             Ok(ForwardInputsResult::RawLogits { logits })
         } else {
@@ -1590,6 +1555,23 @@ impl Pipeline for GGUFPipeline {
 }
 
 impl AnyMoePipelineMixin for GGUFPipeline {}
+
+fn adapted_gguf_model<R: std::io::Seek + std::io::Read>(
+    arch: GGUFArchitecture,
+    config: ModelConfig::ModelParams<'_, ModelConfig::ParamsGGUF<'_, R>>,
+    adapter: &str,
+) -> Result<Box<dyn QuantizedModel>> {
+    #[cfg(feature = "models-llama")]
+    if matches!(arch, GGUFArchitecture::Llama | GGUFArchitecture::Mistral3) {
+        return Ok(Box::new(XLoraQLlama::try_from(config)?));
+    }
+    #[cfg(feature = "models-phi")]
+    if matches!(arch, GGUFArchitecture::Phi3) {
+        return Ok(Box::new(XLoraQPhi3::try_from(config)?));
+    }
+    drop(config);
+    bail!("Unsupported architecture `{arch:?}` for GGUF {adapter}")
+}
 
 #[cfg(test)]
 mod tests {

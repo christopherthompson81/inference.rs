@@ -2990,7 +2990,6 @@ name = "inference-core"
 version = "0.9.3"
 dependencies = [
  "ahash",
- "akin",
  "anyhow",
  "as-any",
  "async-trait",
@@ -3213,6 +3212,7 @@ dependencies = [
 name = "inference-models-llama"
 version = "0.9.3"
 dependencies = [
+ "anyhow",
  "candle-core",
  "candle-nn",
  "indicatif 0.18.3",
@@ -3248,6 +3248,7 @@ dependencies = [
 name = "inference-models-phi"
 version = "0.9.3"
 dependencies = [
+ "anyhow",
  "candle-core",
  "candle-nn",
  "either",
@@ -3296,6 +3297,7 @@ dependencies = [
 name = "inference-nn"
 version = "0.9.3"
 dependencies = [
+ "akin",
  "anyhow",
  "candle-core",
  "candle-flash-attn-v3",
@@ -3324,6 +3326,7 @@ dependencies = [
  "serde-saphyr",
  "serde_json",
  "sha2",
+ "strum 0.27.2",
  "sysinfo",
  "tempfile",
  "thiserror 2.0.18",

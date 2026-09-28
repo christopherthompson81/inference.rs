@@ -1,6 +1,5 @@
 pub(crate) mod base_model;
 mod chat_template;
-mod content;
 #[cfg(feature = "models-gemma")]
 pub(crate) mod gemma3_bindings;
 #[cfg(feature = "models-gemma")]
@@ -21,47 +20,13 @@ pub(crate) mod normal_bindings;
 pub(crate) mod normal_config;
 pub(crate) mod normal_registry;
 pub(crate) mod qwen_multimodal_bindings;
-use strum::EnumString;
 
-use anyhow::{Context, Result};
 pub(crate) use chat_template::{get_gguf_chat_template, get_gguf_chat_template_from_metadata};
-pub(crate) use content::Content;
 pub(crate) use gguf_tokenizer::{
     convert_gguf_metadata_to_hf_tokenizer, validate_external_gguf_tokenizer,
     GgufTokenizerConversion,
 };
-use std::str::FromStr;
+pub(crate) use inference_nn::gguf::Content;
+pub use inference_nn::gguf::GGUFArchitecture;
 
 pub const GGUF_MULTI_FILE_DELIMITER: &str = ";";
-
-#[derive(Debug, EnumString, Clone, Copy, strum::Display)]
-#[strum(serialize_all = "lowercase")]
-pub enum GGUFArchitecture {
-    Llama,
-    Mpt,
-    Gptneox,
-    Gptj,
-    Gpt2,
-    Bloom,
-    Falcon,
-    Mamba,
-    Rwkv,
-    Phi2,
-    Phi3,
-    Starcoder2,
-    Qwen2,
-    Qwen3,
-    Qwen3MoE,
-    Mistral3,
-}
-
-// Wraps from_str() for some convenience:
-// - Case-insensitive variant matching (TODO: is this desirable?)
-// - Customized error until potential upstream support: https://github.com/Peternator7/strum/issues/332
-impl GGUFArchitecture {
-    pub fn from_value<T: AsRef<str> + std::fmt::Display>(value: T) -> Result<Self> {
-        Self::from_str(&value.as_ref().to_ascii_lowercase())
-            .with_context(|| format!("Unknown GGUF architecture `{value}`"))
-            .map_err(anyhow::Error::msg)
-    }
-}

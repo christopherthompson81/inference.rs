@@ -157,50 +157,7 @@ impl<'a, Q: QuantParams> ModelParams<'a, Q> {
     }
 }
 
-// Traits for the existing methods used across various model types to impl `from_ggml()` / `from_gguf()`
-// Basic:
-pub trait FromGGML {
-    fn from_ggml(
-        ct: ggml_file::Content,
-        gqa: usize,
-        dtype: DType,
-    ) -> Result<Self, candle_core::Error>
-    where
-        Self: Sized;
-}
-
-// Extended variants:
-pub trait FromAdapterGGML {
-    #[allow(clippy::too_many_arguments)]
-    fn from_ggml(
-        ct: ggml_file::Content,
-        gqa: usize,
-        lora_config: &[((String, String), LoraConfig)],
-        vb: &ShardedVarBuilder,
-        ordering: &Ordering,
-        xlora_config: Option<XLoraConfig>,
-        preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
-        dtype: DType,
-    ) -> Result<Self, candle_core::Error>
-    where
-        Self: Sized;
-}
-pub trait FromAdapterGGUF {
-    #[allow(clippy::too_many_arguments)]
-    fn from_gguf<R: std::io::Seek + std::io::Read>(
-        ct: Content<'_, R>,
-        device: &candle_core::Device,
-        lora_config: &[((String, String), LoraConfig)],
-        vb: &ShardedVarBuilder,
-        ordering: &Ordering,
-        xlora_config: Option<XLoraConfig>,
-        mapper: Box<dyn DeviceMapper + Send + Sync>,
-        preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
-        dtype: DType,
-    ) -> Result<Self, candle_core::Error>
-    where
-        Self: Sized;
-}
+pub use inference_nn::gguf::{FromAdapterGGML, FromAdapterGGUF, FromGGML};
 
 // NOTE: Below is a workaround to proxy params to the existing API methods `get_gguf()` / `get_gmml()` traits covered above.
 impl Config<ParamsGGML, NoAdapter> {
@@ -268,12 +225,12 @@ impl<R: std::io::Seek + std::io::Read> Config<ParamsGGUF<'_, R>, Adapter<'_>> {
     }
 }
 
-use crate::{
-    models::quantized_llama::ModelWeights as QLlama,
-    xlora_models::{XLoraQLlama, XLoraQPhi3},
-};
-use akin::akin;
+#[cfg(feature = "models-phi")]
+use crate::xlora_models::XLoraQPhi3;
+#[cfg(feature = "models-llama")]
+use crate::{models::quantized_llama::ModelWeights as QLlama, xlora_models::XLoraQLlama};
 
+#[cfg(feature = "models-llama")]
 impl TryFrom<ModelParams<'_, ParamsGGML>> for QLlama {
     type Error = candle_core::Error;
 
@@ -283,6 +240,7 @@ impl TryFrom<ModelParams<'_, ParamsGGML>> for QLlama {
     }
 }
 
+#[cfg(feature = "models-llama")]
 impl TryFrom<ModelParams<'_, ParamsGGML>> for XLoraQLlama {
     type Error = candle_core::Error;
 
@@ -292,15 +250,22 @@ impl TryFrom<ModelParams<'_, ParamsGGML>> for XLoraQLlama {
     }
 }
 
-akin! {
-    let &models_gguf_a = [XLoraQLlama, XLoraQPhi3];
+macro_rules! adapted_gguf_model {
+    ($model:ty) => {
+        impl<R: std::io::Seek + std::io::Read> TryFrom<ModelParams<'_, ParamsGGUF<'_, R>>>
+            for $model
+        {
+            type Error = candle_core::Error;
 
-    impl<R: std::io::Seek + std::io::Read> TryFrom<ModelParams<'_, ParamsGGUF<'_, R>>> for *models_gguf_a {
-        type Error = candle_core::Error;
-
-        fn try_from(params: ModelParams<'_, ParamsGGUF<'_, R>>) -> Result<Self, Self::Error> {
-            let config = params.expect_adapted("`Config` should be GGUF Quantized with an Adapter");
-            config.try_into_model()
+            fn try_from(params: ModelParams<'_, ParamsGGUF<'_, R>>) -> Result<Self, Self::Error> {
+                let config =
+                    params.expect_adapted("`Config` should be GGUF Quantized with an Adapter");
+                config.try_into_model()
+            }
         }
-    }
+    };
 }
+#[cfg(feature = "models-llama")]
+adapted_gguf_model!(XLoraQLlama);
+#[cfg(feature = "models-phi")]
+adapted_gguf_model!(XLoraQPhi3);
