@@ -614,9 +614,11 @@ impl Loader for NormalLoader {
             self.config.hf_config_overrides.as_ref(),
             self.mtp,
         )?;
+        // The UQFF artifact keeps the checkpoint config; max_model_len and the like apply to this load only.
+        let source_config = config;
         let config = self
             .inner
-            .runtime_config(&config, self.config.max_model_len)?
+            .runtime_config(&source_config, self.config.max_model_len)?
             .into_owned();
         super::loaders::validate_lora_qk_rope_layout(
             &config,
@@ -1094,7 +1096,7 @@ impl Loader for NormalLoader {
                             Some(source) if source.generation_config.is_none() => None,
                             _ => paths.get_gen_conf_filename(),
                         },
-                        config: config.clone(),
+                        config: source_config.clone(),
                         processor_filename: &None,
                         preprocessor_filename: &None,
                         modules: None,
