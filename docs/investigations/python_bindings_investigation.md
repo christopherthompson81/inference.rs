@@ -200,9 +200,9 @@ Review fixes:
 - A bare `code_execution`/`shell` config ran model-written code unsandboxed with no approval, where the CLI
   sandboxes by default. `agentic.sandbox` (auto/on/off, honoring `INFERENCE_RS_SANDBOX`, the resolution now shared
   with the CLI in `inference_sandbox::SandboxMode`) gives a policy-less config the developer profile.
-- The embedded configs accepted unknown keys, so `"sandbox_polcy"` parsed and ran unsandboxed; code execution,
-  shell, sandbox policy and AnyMoE configs deny unknown fields (MCP stays lenient: its reference JSON has `_comment`
-  keys).
+- The embedded configs accepted unknown keys, so a misspelled `sandbox_policy` key parsed and the tool ran
+  unsandboxed; code execution, shell, sandbox policy and AnyMoE configs deny unknown fields (MCP stays lenient: its
+  reference JSON has `_comment` keys).
 - `device_layers` parsing panicked on a bad entry (an internal error across the ABI); it returns an error, checked at
   spec time. Two paged-cache sizes were silently resolved by order, all three turned paged attention off; the spec
   refuses more than one.
