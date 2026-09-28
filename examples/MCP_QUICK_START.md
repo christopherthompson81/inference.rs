@@ -10,7 +10,7 @@
 - 🌐 **Universal protocol** - Works with any MCP-compatible server
 - 🔒 **Secure** - Built-in authentication and timeout controls
 
-[📚 Full Documentation](https://docs.mistralrs.dev/guides/agents/connect-mcp-server/) | [⚙️ Configuration Reference](https://docs.mistralrs.dev/reference/mcp-config-schema/)
+[📚 Full Documentation](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/connect-mcp-server.mdx) | [⚙️ Configuration Reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/mcp-config-schema.md)
 
 ## Quick Start
 
@@ -263,11 +263,11 @@ The system gracefully handles failures:
 
 **Ready for more?**
 - 🔧 [Configuration Reference](mcp-config-reference.json) - All available options
-- 📖 [Full MCP Documentation](https://docs.mistralrs.dev/guides/agents/connect-mcp-server/) - Complete guide
+- 📖 [Full MCP Documentation](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/connect-mcp-server.mdx) - Complete guide
 - 🛠️ [Server Examples](mcp-server-config.json) - Real-world configurations
-- 🚀 [Advanced Usage](https://docs.mistralrs.dev/guides/agents/connect-mcp-server/) - Multi-server setups
+- 🚀 [Advanced Usage](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/connect-mcp-server.mdx) - Multi-server setups
 
 **Need help?**
 - [MCP Server Registry](https://github.com/modelcontextprotocol/servers) - Find more servers
-- [Troubleshooting](https://docs.mistralrs.dev/reference/troubleshooting/) - Common issues
+- [Troubleshooting](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/troubleshooting.md) - Common issues
 - [Discord Community](https://discord.gg/SZrecqK8qw) - Get support

@@ -21,7 +21,6 @@ serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tempfile.workspace = true
-inference-flash-attn = { workspace = true, optional = true }
 dirs.workspace = true
 hf-hub.workspace = true
 thiserror.workspace = true
@@ -33,20 +32,11 @@ minijinja-contrib.workspace = true
 either.workspace = true
 indexmap.workspace = true
 mime_guess = { workspace = true }
-accelerate-src = { workspace = true, optional = true }
-intel-mkl-src = { workspace = true, optional = true }
 tracing.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
 regex-automata.workspace = true
-rustc-hash.workspace = true
-vob.workspace = true
-cfgrammar.workspace = true
-lrtable.workspace = true
 galil-seiferas.workspace = true
-radix_trie.workspace = true
-bytemuck.workspace = true
-rayon.workspace = true
 tokio.workspace = true
 tokio-rayon.workspace = true
 rand_isaac.workspace = true
@@ -64,7 +54,6 @@ inference-vision.workspace = true
 csv.workspace = true
 reqwest.workspace = true
 base64.workspace = true
-bytemuck_derive.workspace = true
 inference-paged-attn = { workspace = true, optional = true }
 inference-quant.workspace = true
 inference-nn.workspace = true
@@ -77,37 +66,25 @@ inference-models-qwen = { workspace = true, optional = true }
 inference-models-speech.workspace = true
 uuid = { workspace = true, features = ["v4"] }
 utoipa = { workspace = true, optional = true }
-schemars.workspace = true
 regex.workspace = true
 as-any.workspace = true
 llguidance.workspace = true
 toktrie.workspace = true
-candle-flash-attn-v3 = { workspace = true, optional = true }
 safetensors.workspace = true
 serde-big-array.workspace = true
 interprocess.workspace = true
 urlencoding.workspace = true
 scraper.workspace = true
 html2text.workspace = true
-tokio-tungstenite.workspace = true
-http.workspace = true
 ordered-float.workspace = true
-hashbrown.workspace = true
-parking_lot.workspace = true
 ahash.workspace = true
 num-traits.workspace = true
-libc.workspace = true
 bm25.workspace = true
 rubato.workspace = true
-hound.workspace = true
-apodize.workspace = true
-symphonia.workspace = true
 inference-audio.workspace = true
-rust-mcp-schema.workspace = true
 inference-mcp = { workspace = true, features = ["utoipa"] }
 inference-code-exec.workspace = true
 inference-sandbox.workspace = true
-statrs.workspace = true
 openai-harmony = "0.0.8"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))'.dependencies]
@@ -156,8 +133,8 @@ metal = [
     "inference-models-qwen?/metal",
     "inference-models-speech/metal",
 ]
-flash-attn = ["cuda", "dep:inference-flash-attn", "inference-flash-attn/cuda", "inference-nn/flash-attn", "inference-models-gemma?/flash-attn", "inference-models-llama?/flash-attn", "inference-models-other?/flash-attn", "inference-models-phi?/flash-attn", "inference-models-qwen?/flash-attn"]
-flash-attn-v3 = ["cuda", "dep:candle-flash-attn-v3", "inference-nn/flash-attn-v3"]
+flash-attn = ["cuda", "inference-nn/flash-attn", "inference-models-gemma?/flash-attn", "inference-models-llama?/flash-attn", "inference-models-other?/flash-attn", "inference-models-phi?/flash-attn", "inference-models-qwen?/flash-attn"]
+flash-attn-v3 = ["cuda", "inference-nn/flash-attn-v3"]
 accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "inference-quant/accelerate", "inference-nn/accelerate"]
 mkl = ["candle-core/mkl", "candle-nn/mkl"]
 nccl = ["cuda", "inference-quant/nccl"]

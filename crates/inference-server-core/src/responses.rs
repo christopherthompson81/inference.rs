@@ -81,7 +81,7 @@ impl IntoResponse for OpenResponsesResponder {
 /// Create response endpoint - OpenResponses API
 #[utoipa::path(
     post,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/responses",
     request_body = OpenResponsesCreateRequest,
     responses((
@@ -136,7 +136,7 @@ fn resource_response(result: Result<ResponseResource, ApiError>) -> axum::respon
 /// Get response by ID endpoint
 #[utoipa::path(
     get,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/responses/{response_id}",
     params(("response_id" = String, Path, description = "The ID of the response to retrieve")),
     responses((status = 200, description = "Response object", body = ResponseResource))
@@ -151,7 +151,7 @@ pub async fn get_response(
 /// Delete response by ID endpoint
 #[utoipa::path(
     delete,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/responses/{response_id}",
     params(("response_id" = String, Path, description = "The ID of the response to delete")),
     responses((status = 200, description = "Response deleted", body = ResponseDeleted))
@@ -169,7 +169,7 @@ pub async fn delete_response(
 /// Cancel response endpoint
 #[utoipa::path(
     post,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/responses/{response_id}/cancel",
     params(("response_id" = String, Path, description = "The ID of the response to cancel")),
     responses((status = 200, description = "Response cancelled", body = ResponseResource))

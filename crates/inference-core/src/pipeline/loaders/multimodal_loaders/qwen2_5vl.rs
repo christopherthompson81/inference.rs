@@ -2,7 +2,7 @@ use super::*;
 
 /// [`MultimodalLoader`] for an Qwen2_5VL model.
 ///
-/// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
+/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
 pub struct Qwen2_5VLLoader;
 
 pub struct Qwen2_5VLPrefixer;

@@ -10,7 +10,6 @@ use inference_quant::{
     ColumnParallelLayer, LoraLinearSpec, LoraSiteHandle, QuantMethod, ReplicatedLayer,
     RowParallelLayer, ShardedVarBuilder,
 };
-use statrs::distribution::{ContinuousCDF, Normal};
 
 use crate::kv_cache::EitherCache;
 use crate::kv_cache::KvCache;
@@ -256,8 +255,7 @@ impl Mlp {
     }
 
     fn std_multiplier(p: f64) -> f64 {
-        let normal = Normal::new(0.0, 1.0).unwrap();
-        normal.inverse_cdf(p)
+        standard_normal_quantile(p)
     }
 
     fn gaussian_topk(&self, xs: &Tensor) -> Result<Tensor> {
@@ -2386,5 +2384,79 @@ mod tests {
                 .unwrap(),
             vec![8, 13]
         );
+    }
+}
+
+// Acklam's rational approximation of the standard normal inverse CDF; relative error below 1.2e-9 over (0, 1).
+const QUANTILE_A: [f64; 6] = [
+    -3.969683028665376e1,
+    2.209460984245205e2,
+    -2.759285104469687e2,
+    1.38357751867269e2,
+    -3.066479806614716e1,
+    2.506628277459239,
+];
+const QUANTILE_B: [f64; 5] = [
+    -5.447609879822406e1,
+    1.615858368580409e2,
+    -1.556989798598866e2,
+    6.680131188771972e1,
+    -1.328068155288572e1,
+];
+const QUANTILE_C: [f64; 6] = [
+    -7.784894002430293e-3,
+    -3.223964580411365e-1,
+    -2.400758277161838,
+    -2.549732539343734,
+    4.374664141464968,
+    2.938163982698783,
+];
+const QUANTILE_D: [f64; 4] = [
+    7.784695709041462e-3,
+    3.224671290700398e-1,
+    2.445134137142996,
+    3.754408661907416,
+];
+const QUANTILE_TAIL: f64 = 0.02425;
+
+fn standard_normal_quantile(p: f64) -> f64 {
+    let [a0, a1, a2, a3, a4, a5] = QUANTILE_A;
+    let [b0, b1, b2, b3, b4] = QUANTILE_B;
+    let [c0, c1, c2, c3, c4, c5] = QUANTILE_C;
+    let [d0, d1, d2, d3] = QUANTILE_D;
+    let tail = |q: f64| {
+        (((((c0 * q + c1) * q + c2) * q + c3) * q + c4) * q + c5)
+            / ((((d0 * q + d1) * q + d2) * q + d3) * q + 1.0)
+    };
+    if p < QUANTILE_TAIL {
+        tail((-2.0 * p.ln()).sqrt())
+    } else if p > 1.0 - QUANTILE_TAIL {
+        -tail((-2.0 * (1.0 - p).ln()).sqrt())
+    } else {
+        let q = p - 0.5;
+        let r = q * q;
+        (((((a0 * r + a1) * r + a2) * r + a3) * r + a4) * r + a5) * q
+            / (((((b0 * r + b1) * r + b2) * r + b3) * r + b4) * r + 1.0)
+    }
+}
+
+#[cfg(test)]
+mod quantile_tests {
+    use super::standard_normal_quantile;
+
+    #[test]
+    fn matches_the_standard_normal_quantiles() {
+        // Reference values from scipy.stats.norm.ppf.
+        for (p, expected) in [
+            (0.5, 0.0),
+            (0.95, 1.6448536269514722),
+            (0.975, 1.959963984540054),
+            (0.99, 2.3263478740408408),
+            (0.01, -2.3263478740408408),
+            (0.001, -3.090232306167813),
+        ] {
+            let got = standard_normal_quantile(p);
+            assert!((got - expected).abs() < 1e-8, "p={p}: {got} vs {expected}");
+        }
     }
 }

@@ -18,7 +18,7 @@ A source build needs Rust 1.94+ ([rustup](https://rustup.rs)) plus, per platform
 ## Clone and build
 
 ```bash
-git clone https://github.com/EricLBuehler/mistral.rs.git
+git clone https://github.com/christopherthompson81/inference.rs.git
 cd inference.rs
 ```
 
@@ -80,7 +80,7 @@ To depend on the workspace directly (e.g., to use an unreleased change), add a g
 
 ```toml
 [dependencies]
-inference = { git = "https://github.com/EricLBuehler/mistral.rs", branch = "master" }
+inference = { git = "https://github.com/christopherthompson81/inference.rs", branch = "master" }
 ```
 
 For production, pin to a release tag or a specific commit SHA for reproducible builds.

@@ -32,7 +32,7 @@ The minimum supported NVIDIA GPU is **Ampere (compute capability 8.0)**. Turing 
 
 ## CUDA artifacts
 
-CUDA artifact names encode both the toolkit lane and compute capability:
+No artifacts are published for this repository yet; these are the names the installer looks for once they are. CUDA artifact names encode both the toolkit lane and compute capability:
 
 ```text
 inference-cuda128-sm90-aarch64-unknown-linux-gnu.tar.gz

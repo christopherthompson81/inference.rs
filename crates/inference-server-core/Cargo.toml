@@ -19,8 +19,6 @@ http-body = { workspace = true }
 http-body-util.workspace = true
 either.workspace = true
 futures.workspace = true
-image.workspace = true
-base64.workspace = true
 inference-api.workspace = true
 inference-core = { workspace = true, features = [
   "utoipa",
@@ -37,8 +35,6 @@ utoipa = { workspace = true, features = ["axum_extras"] }
 utoipa-swagger-ui = { workspace = true, features = ["axum"], optional = true }
 uuid = { workspace = true, features = ["v4"] }
 
-accelerate-src = { workspace = true, optional = true }
-intel-mkl-src = { workspace = true, optional = true }
 
 [dev-dependencies]
 candle-core.workspace = true

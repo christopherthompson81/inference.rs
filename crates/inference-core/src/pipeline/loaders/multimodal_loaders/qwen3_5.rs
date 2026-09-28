@@ -2,7 +2,7 @@ use super::*;
 
 /// [`MultimodalLoader`] for a Qwen3.5 dense (hybrid GDN + full attention) model.
 ///
-/// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
+/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
 pub struct Qwen3_5Loader;
 
 pub struct Qwen3_5Prefixer;

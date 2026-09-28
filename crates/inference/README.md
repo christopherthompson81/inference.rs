@@ -1,9 +1,9 @@
 # inference — Blazing-Fast LLM Inference in Rust
 
-The Rust SDK for [inference.rs](https://github.com/EricLBuehler/mistral.rs), a high-performance
+The Rust SDK for [inference.rs](https://github.com/christopherthompson81/inference.rs), a high-performance
 LLM inference engine supporting text, multimodal, speech, image generation, and embedding models.
 
-[API Docs](https://docs.rs/mistralrs) | [GitHub](https://github.com/EricLBuehler/mistral.rs) | [Examples](https://github.com/EricLBuehler/mistral.rs/tree/master/mistralrs/examples) | [Discord](https://discord.gg/SZrecqK8qw)
+[GitHub](https://github.com/christopherthompson81/inference.rs) | [Examples](https://github.com/christopherthompson81/inference.rs/tree/master/examples/rust)
 
 ## Quick Start
 

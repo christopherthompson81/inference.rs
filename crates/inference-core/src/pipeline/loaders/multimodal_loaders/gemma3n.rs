@@ -3,7 +3,7 @@ use candle_core::Device;
 
 /// [`MultimodalLoader`] for an Gemma 3n model.
 ///
-/// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
+/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
 pub struct Gemma3nLoader;
 
 impl MultimodalModelLoader for Gemma3nLoader {

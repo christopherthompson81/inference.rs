@@ -4,7 +4,7 @@ use super::*;
 
 /// [`MultimodalLoader`] for a Voxtral model.
 ///
-/// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
+/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
 pub struct VoxtralLoader;
 
 pub struct VoxtralPrefixer;

@@ -2,7 +2,7 @@ use super::*;
 
 /// [`MultimodalLoader`] for a Qwen3.5 MoE (hybrid GDN + full attention) model.
 ///
-/// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
+/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
 pub struct Qwen3_5MoeLoader;
 
 pub struct Qwen3_5MoePrefixer;

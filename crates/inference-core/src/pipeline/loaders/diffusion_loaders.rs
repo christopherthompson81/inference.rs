@@ -171,7 +171,7 @@ impl ModelPaths for DiffusionModelPaths {
 
 /// [`DiffusionLoader`] for a Flux Diffusion model.
 ///
-/// [`DiffusionLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.DiffusionLoader.html
+/// [`DiffusionLoader`]: crate::pipeline::DiffusionLoader
 pub struct FluxLoader {
     pub(crate) offload: bool,
 }

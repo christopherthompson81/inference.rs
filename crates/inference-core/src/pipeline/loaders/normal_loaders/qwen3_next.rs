@@ -2,7 +2,7 @@ use super::*;
 
 /// [`NormalLoader`] for a Qwen3Next (Qwen3-Coder-Next) model.
 ///
-/// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
+/// [`NormalLoader`]: crate::pipeline::NormalLoader
 pub struct Qwen3NextLoader;
 
 impl NormalModelLoader for Qwen3NextLoader {

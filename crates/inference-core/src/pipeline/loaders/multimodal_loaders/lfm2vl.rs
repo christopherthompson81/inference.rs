@@ -2,7 +2,7 @@ use super::*;
 
 /// [`MultimodalLoader`] for an LFM2-VL model.
 ///
-/// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
+/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
 pub struct Lfm2VlLoader;
 
 pub struct Lfm2VlPrefixer;

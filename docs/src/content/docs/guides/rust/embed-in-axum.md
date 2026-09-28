@@ -76,7 +76,7 @@ async fn main() -> anyhow::Result<()> {
 
 `with_in_situ_quant("4")` applies [ISQ (in-situ quantization)](/reference/quantization-types/) to 4-bit; omit it to run the model unquantized.
 
-`ModelSelected` names every field, so this literal will not compile when new fields are added. For the current field list, see the [docs.rs `ModelSelected` entry](https://docs.rs/mistralrs-core/latest/mistralrs_core/enum.ModelSelected.html) or the `inference-server-core` crate-level docs.
+`ModelSelected` names every field, so this literal will not compile when new fields are added. For the current field list, see [`ModelSelected`](https://github.com/christopherthompson81/inference.rs/blob/master/crates/inference-core/src/selection/model_selected.rs), or the `EngineSpec` schema in `docs/openapi.json`.
 
 ## Builder options
 
@@ -96,4 +96,4 @@ async fn main() -> anyhow::Result<()> {
 
 For custom request shapes, share the `SharedInferenceRsState` directly with Axum handlers and use the lower-level helpers exposed by `inference-server-core` (`chat_completion::parse_request`, `handler_core::send_request`, ...).
 
-A complete example with custom OpenAPI integration is in the [`inference-server-core` crate-level documentation](https://docs.rs/mistralrs-server-core).
+A complete example with custom OpenAPI integration is in the `inference-server-core` crate-level documentation (`cargo doc -p inference-server-core --open`).

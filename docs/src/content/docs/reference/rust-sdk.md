@@ -3,7 +3,7 @@ title: Rust SDK reference
 description: The Model API surface of the inference crate, with signatures and links to runnable examples.
 ---
 
-`Model` is the object every builder (`ModelBuilder`, `GgufModelBuilder`, `EmbeddingModelBuilder`, ...) returns. All methods take `&self`; share one instance by reference or in an `Arc`. This page lists the surface; [docs.rs/inference](https://docs.rs/mistralrs) has full rustdoc, and the [Rust examples](/examples/) are runnable.
+`Model` is the object every builder (`ModelBuilder`, `GgufModelBuilder`, `EmbeddingModelBuilder`, ...) returns. All methods take `&self`; share one instance by reference or in an `Arc`. This page lists the surface; `cargo doc -p inference --open` builds the full rustdoc, and the [Rust examples](/examples/) are runnable.
 
 Most request methods have a `*_with_model(..., model_id: Option<&str>)` twin for multi-model setups; `None` targets the default model. The twins are omitted below.
 

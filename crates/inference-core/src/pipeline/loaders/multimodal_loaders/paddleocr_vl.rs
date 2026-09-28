@@ -2,7 +2,7 @@ use super::*;
 
 /// [`MultimodalLoader`] for a PaddleOCR-VL (1.5, 1.6) model.
 ///
-/// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
+/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
 pub struct PaddleOcrVlLoader;
 
 pub struct PaddleOcrVlPrefixer;

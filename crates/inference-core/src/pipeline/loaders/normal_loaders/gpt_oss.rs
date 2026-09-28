@@ -2,7 +2,7 @@ use super::*;
 
 /// [`NormalLoader`] for a GPT-OSS model.
 ///
-/// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
+/// [`NormalLoader`]: crate::pipeline::NormalLoader
 pub struct GptOssLoader;
 
 impl NormalModelLoader for GptOssLoader {

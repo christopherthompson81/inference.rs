@@ -19,7 +19,7 @@ use crate::{
 
 #[utoipa::path(
     post,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/files",
     request_body(content_type = "multipart/form-data"),
     responses(
@@ -110,7 +110,7 @@ fn multipart_error(error: axum::extract::multipart::MultipartError) -> ApiError 
 
 #[utoipa::path(
     get,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/files/{id}",
     params(("id" = String, Path, description = "File ID")),
     responses(
@@ -125,7 +125,7 @@ pub async fn get_file(State(state): ExtractedInferenceRsState, Path(id): Path<St
 
 #[utoipa::path(
     get,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/files/{id}/content",
     params(("id" = String, Path, description = "File ID")),
     responses(
@@ -144,7 +144,7 @@ pub async fn get_file_content(
 
 #[utoipa::path(
     get,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/files",
     responses(
         (status = 200, description = "List of file metadata", body = FileListObject),
@@ -157,7 +157,7 @@ pub async fn list_files(State(state): ExtractedInferenceRsState) -> Response {
 
 #[utoipa::path(
     delete,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/files/{id}",
     params(("id" = String, Path, description = "File ID")),
     responses(
@@ -175,7 +175,7 @@ pub async fn delete_file(
 
 #[utoipa::path(
     get,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/containers/{container_id}/files",
     params(("container_id" = String, Path, description = "Container ID")),
     responses(
@@ -192,7 +192,7 @@ pub async fn list_container_files(
 
 #[utoipa::path(
     get,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/containers/{container_id}/files/{file_id}",
     params(
         ("container_id" = String, Path, description = "Container ID"),
@@ -217,7 +217,7 @@ pub async fn get_container_file(
 
 #[utoipa::path(
     get,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/containers/{container_id}/files/{file_id}/content",
     params(
         ("container_id" = String, Path, description = "Container ID"),

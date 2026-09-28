@@ -14,7 +14,7 @@
 //! - **macOS**: `brew install ffmpeg`
 //! - **Windows**: <https://ffmpeg.org/download.html>
 //!
-//! See <https://docs.mistralrs.dev/guides/models/video-setup/> for full details.
+//! See <https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/video-setup.md> for full details.
 
 use anyhow::{bail, Context, Result};
 use image::codecs::gif::GifDecoder;
@@ -42,7 +42,7 @@ FFmpeg is required for video input (non-GIF formats). Install it:
   - Linux:   apt install ffmpeg  /  dnf install ffmpeg
   - macOS:   brew install ffmpeg
   - Windows: https://ffmpeg.org/download.html
-See https://docs.mistralrs.dev/guides/models/video-setup/ for details.";
+See https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/video-setup.md for details.";
 
 /// Fetch video bytes from a URL, file path, or data URL, then decode into
 /// a [`VideoInput`] (sampled frames + metadata).

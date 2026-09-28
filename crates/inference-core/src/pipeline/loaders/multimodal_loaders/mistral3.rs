@@ -2,7 +2,7 @@ use super::*;
 
 /// [`MultimodalLoader`] for an Mistral 3 model.
 ///
-/// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
+/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
 pub struct Mistral3Loader;
 
 pub struct Mistral3Prefixer;

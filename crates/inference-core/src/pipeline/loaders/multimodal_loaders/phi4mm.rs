@@ -3,7 +3,7 @@ use itertools::Itertools;
 
 /// [`MultimodalLoader`] for a Phi 4MM Vision model.
 ///
-/// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
+/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
 pub struct Phi4MMLoader;
 
 pub struct Phi4MMPrefixer;

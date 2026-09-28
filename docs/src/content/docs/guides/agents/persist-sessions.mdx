@@ -82,7 +82,7 @@ with ir.Engine(t.EngineSpec(model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B")
 </TabItem>
 <TabItem label="Rust">
 
-[`Model`](https://docs.rs/mistralrs/latest/mistralrs/struct.Model.html) exposes `export_session`, `import_session`, `delete_session`, and `list_session_ids`, plus `fork_session(model_id, src_session_id, dest_session_id, num_turns)` to clone the first complete turns of a session under a new id. Like the other four methods, it takes a leading `model_id: Option<&str>` for multi-model setups. Request-level `session_id` is set via `RequestBuilder::with_session_id`:
+[`Model`](/reference/rust-sdk/) exposes `export_session`, `import_session`, `delete_session`, and `list_session_ids`, plus `fork_session(model_id, src_session_id, dest_session_id, num_turns)` to clone the first complete turns of a session under a new id. Like the other four methods, it takes a leading `model_id: Option<&str>` for multi-model setups. Request-level `session_id` is set via `RequestBuilder::with_session_id`:
 
 ```rust
 let request = RequestBuilder::from(messages).with_session_id("user-42-chat-abc");

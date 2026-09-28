@@ -14,12 +14,12 @@
 </div>
 
 <p align="center">
-  | <a href="https://docs.mistralrs.dev/"><b>Documentation</b></a> | <a href="https://docs.mistralrs.dev/quickstart/"><b>Quickstart</b></a> | <a href="https://docs.mistralrs.dev/reference/supported-models/"><b>Supported models</b></a> | <a href="https://crates.io/crates/mistralrs"><b>Rust SDK</b></a> | <a href="https://docs.mistralrs.dev/guides/python/getting-started/"><b>Python SDK</b></a> | <a href="https://discord.gg/SZrecqK8qw"><b>Discord</b></a> |
+  | <a href="https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/index.mdx"><b>Documentation</b></a> | <a href="https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/quickstart.mdx"><b>Quickstart</b></a> | <a href="https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/supported-models.md"><b>Supported models</b></a> | <a href="https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/rust/getting-started.mdx"><b>Rust SDK</b></a> | <a href="https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/python/getting-started.mdx"><b>Python SDK</b></a> |
 </p>
 
 <p align="center">
-  <a href="https://github.com/EricLBuehler/mistral.rs/stargazers">
-    <img src="https://img.shields.io/github/stars/EricLBuehler/mistral.rs?style=social&label=Star" alt="GitHub stars">
+  <a href="https://github.com/christopherthompson81/inference.rs/stargazers">
+    <img src="https://img.shields.io/github/stars/christopherthompson81/inference.rs?style=social&label=Star" alt="GitHub stars">
   </a>
 </p>
 
@@ -31,85 +31,31 @@ detector in `inference-layout`) and a C ABI for bindings in other languages. All
 to upstream; see [LICENSE](LICENSE) and [CITATION.cff](CITATION.cff).
 
 Names differ from upstream: crates are `inference-*` (the Rust SDK is `inference`), the CLI binary is `inference`, the
-Python package is `inference_rs`, and environment variables use `INFERENCE_RS_*`. Documentation links below still point
-to upstream's hosted docs, where `mistralrs ...` commands correspond to `inference ...` here.
+Python package is `inference_rs`, and environment variables use `INFERENCE_RS_*`. Documentation links below go to the
+docs sources in this repository.
 
 ## Latest
 
-- **Muse Glimmer 30B**: native text, image, and video inference with ATEM tool calling, reasoning controls, LoRA, ISQ/UQFF, and companion-projector GGUF loading. [Model notes](https://docs.mistralrs.dev/guides/models/model-family-notes/#muse-glimmer)
-- **GGUF loading**: load a local file with `-f`, or select a published artifact with `--quant`. Tokenizer, configuration, and multimodal projector files are discovered when the available metadata identifies them unambiguously. [Guide](https://docs.mistralrs.dev/guides/models/run-gguf/)
-- **OpenAI-compatible Skills**: upload `/v1/skills` bundles and reference them from Responses requests for reusable procedures, helper scripts, and local data. [Guide](https://docs.mistralrs.dev/guides/agents/skills/)
-- **OpenAI-compatible file inputs**: upload `/v1/files`, attach Responses `input_file` or Chat `file` parts, and mount request files into shell/code sessions. [Guide](https://docs.mistralrs.dev/guides/agents/file-inputs/)
-- **DiffusionGemma**: block-diffusion text generation. Fully integrated: paged attention, prefix caching, ISQ, multimodal, and tool calling. [Guide](https://docs.mistralrs.dev/guides/models/use-block-diffusion/)
-- **Anthropic Messages API**: `inference serve` now exposes Anthropic-compatible `/v1/messages` and `/v1/messages/count_tokens` endpoints alongside the OpenAI-compatible `/v1` API. [Guide](https://docs.mistralrs.dev/guides/serve/anthropic-messages-api/)
-- **v0.8.2 CUDA performance**: paged-attention and MoE optimizations deliver strong results on GB10, B200, and H100 SXM. [Benchmarks](#benchmarks)
-- **Agentic runtime**: web search, local Python code execution, shell execution, OpenAI-compatible Skills, session management, and custom tool hooks. [Guide](https://docs.mistralrs.dev/guides/agents/)
-- **Gemma 4**: full multimodal: text, image, video, and audio input. [Supported models](https://docs.mistralrs.dev/reference/supported-models/) | [Video setup](https://docs.mistralrs.dev/guides/models/video-setup/)
-
-## Benchmarks
-
-<details>
-<summary><b>v0.8.2 CUDA benchmarks</b></summary>
-
-Mean tokens per second across prompt lengths and decode depths from 128 to 16384 tokens. Decode uses 256 generated tokens. See the full [v0.8.2 report](releases/v0.8.2/report.md) for commands, model revisions, host metadata, and appendix tables.
-
-**Q8 prefill TPS: inference.rs UQFF q8 vs llama.cpp GGUF Q8_0**
-
-| Model | Hardware | inference.rs | llama.cpp |
-|---|---|---:|---:|
-| Gemma 4 E4B | GB10 | 7395.7 | 3973.7 |
-| Gemma 4 E4B | B200 | 27705.6 | 11992.4 |
-| Gemma 4 E4B | H100 SXM | 26220.6 | 11702.1 |
-| Gemma 4 26B-A4B | GB10 | 2947.0 | 2178.5 |
-| Gemma 4 26B-A4B | B200 | 12725.3 | 8503.4 |
-| Gemma 4 26B-A4B | H100 SXM | 12362.3 | 8055.1 |
-
-**Q8 decode TPS: inference.rs UQFF q8 vs llama.cpp GGUF Q8_0**
-
-| Model | Hardware | inference.rs | llama.cpp |
-|---|---|---:|---:|
-| Gemma 4 E4B | GB10 | 44.1 | 40.5 |
-| Gemma 4 E4B | B200 | 241.4 | 194.4 |
-| Gemma 4 E4B | H100 SXM | 223.1 | 183.0 |
-| Gemma 4 26B-A4B | GB10 | 46.8 | 46.4 |
-| Gemma 4 26B-A4B | B200 | 210.9 | 192.2 |
-| Gemma 4 26B-A4B | H100 SXM | 199.8 | 183.9 |
-
-**BF16 prefill TPS: inference.rs BF16 vs vLLM BF16**
-
-| Model | Hardware | inference.rs | vLLM |
-|---|---|---:|---:|
-| Gemma 4 E4B | GB10 | 5838.9 | 5812.9 |
-| Gemma 4 E4B | B200 | 43547.8 | 39431.2 |
-| Gemma 4 E4B | H100 SXM | 35852.2 | 39293.7 |
-| Gemma 4 26B-A4B | GB10 | 592.2 | 3878.6 |
-| Gemma 4 26B-A4B | B200 | 3467.3 | 28532.8 |
-| Gemma 4 26B-A4B | H100 SXM | 2766.0 | 26295.9 |
-
-**BF16 decode TPS: inference.rs BF16 vs vLLM BF16**
-
-| Model | Hardware | inference.rs | vLLM |
-|---|---|---:|---:|
-| Gemma 4 E4B | GB10 | 25.1 | 18.8 |
-| Gemma 4 E4B | B200 | 202.6 | 196.2 |
-| Gemma 4 E4B | H100 SXM | 174.4 | 153.0 |
-| Gemma 4 26B-A4B | GB10 | 26.9 | 23.2 |
-| Gemma 4 26B-A4B | B200 | 159.6 | 220.2 |
-| Gemma 4 26B-A4B | H100 SXM | 138.7 | 148.0 |
-
-</details>
+- **Muse Glimmer 30B**: native text, image, and video inference with ATEM tool calling, reasoning controls, LoRA, ISQ/UQFF, and companion-projector GGUF loading. [Model notes](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/model-family-notes.mdx#muse-glimmer)
+- **GGUF loading**: load a local file with `-f`, or select a published artifact with `--quant`. Tokenizer, configuration, and multimodal projector files are discovered when the available metadata identifies them unambiguously. [Guide](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/run-gguf.mdx)
+- **OpenAI-compatible Skills**: upload `/v1/skills` bundles and reference them from Responses requests for reusable procedures, helper scripts, and local data. [Guide](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/skills.mdx)
+- **OpenAI-compatible file inputs**: upload `/v1/files`, attach Responses `input_file` or Chat `file` parts, and mount request files into shell/code sessions. [Guide](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/file-inputs.mdx)
+- **DiffusionGemma**: block-diffusion text generation. Fully integrated: paged attention, prefix caching, ISQ, multimodal, and tool calling. [Guide](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/use-block-diffusion.mdx)
+- **Anthropic Messages API**: `inference serve` now exposes Anthropic-compatible `/v1/messages` and `/v1/messages/count_tokens` endpoints alongside the OpenAI-compatible `/v1` API. [Guide](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/serve/anthropic-messages-api.md)
+- **Agentic runtime**: web search, local Python code execution, shell execution, OpenAI-compatible Skills, session management, and custom tool hooks. [Guide](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/index.md)
+- **Gemma 4**: full multimodal: text, image, video, and audio input. [Supported models](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/supported-models.md) | [Video setup](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/video-setup.md)
 
 ## Why inference.rs?
 
 - **Automatic model loading**: Architecture, weight format, and chat template are detected for supported Hugging Face models and GGUF files, with flags available for explicit selection.
 - **True multimodality**: Text, vision, video, and audio, speech generation, image generation, and embeddings in one engine.
-- **Quantization selection**: `--quant` selects a matching artifact from GGUF repositories. For other Hugging Face repositories, it uses a prebuilt UQFF when available and otherwise applies ISQ. [Docs](https://docs.mistralrs.dev/guides/quantization/quantize-a-model/)
+- **Quantization selection**: `--quant` selects a matching artifact from GGUF repositories. For other Hugging Face repositories, it uses a prebuilt UQFF when available and otherwise applies ISQ. [Docs](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/quantization/quantize-a-model.mdx)
 - **OpenAI + Anthropic compatible serving**: The same `inference serve` process exposes OpenAI-compatible `/v1` endpoints and Anthropic-compatible Messages endpoints.
-- **Prometheus metrics**: `inference serve` exposes a `/metrics` endpoint in Prometheus format, recording per-request counts and latency labeled by method, route, and status. [Docs](https://docs.mistralrs.dev/reference/http-api/)
+- **Prometheus metrics**: `inference serve` exposes a `/metrics` endpoint in Prometheus format, recording per-request counts and latency labeled by method, route, and status. [Docs](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/http-api.md)
 - **Built-in web UI**: Served at `/ui` by default. Shows reasoning, code execution, plots, and files inline. Edit any message and the new branch runs with its own Python state. Pass `--no-ui` to disable.
 - **Hardware-aware**: `inference tune` recommends quantization and device mapping from the model config and your detected hardware.
 - **Flexible SDKs**: Python package and Rust crate to build your projects.
-- **Native agentic support**: built-in [agentic loop](https://docs.mistralrs.dev/guides/agents/) with web search, local Python code execution, shell execution, OpenAI-compatible Skills, session management, and custom tool hooks.
+- **Native agentic support**: built-in [agentic loop](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/index.md) with web search, local Python code execution, shell execution, OpenAI-compatible Skills, session management, and custom tool hooks.
 
 ## Quick Start
 
@@ -117,17 +63,17 @@ Mean tokens per second across prompt lengths and decode depths from 128 to 16384
 
 **Linux/macOS:**
 ```bash
-curl -fsSL https://mistralrs.dev/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/christopherthompson81/inference.rs/master/install.sh | sh
 ```
 
 **Windows (PowerShell):**
 ```powershell
-irm https://mistralrs.dev/install.ps1 | iex
+irm https://raw.githubusercontent.com/christopherthompson81/inference.rs/master/install.ps1 | iex
 ```
 
 Downloads a self-contained prebuilt binary for your platform (Metal on Apple Silicon; per-GPU CUDA or CPU on Linux; CPU on Windows), falling back to a source build if none matches. Standard acceleration needs no Rust or CUDA toolkit. Optional cuTile acceleration requires NVIDIA's separately installed `tileiras` tool.
 
-[Manual installation, accelerator details & other platforms](https://docs.mistralrs.dev/quickstart/)
+[Manual installation, accelerator details & other platforms](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/quickstart.mdx)
 
 ### Run Your First Model
 
@@ -161,7 +107,7 @@ The CLI uses the same `run`, `serve`, and `bench` commands for model repositorie
 - **Auto-detection**: Automatically detects model architecture, quantization format, and chat template
 - **All-in-one**: Single binary for chat, server, benchmarks, and web UI (`run`, `serve`, `bench`)
 - **Hardware-aware tuning**: `inference tune` recommends quantization and device mapping for your model and hardware
-- **Model formats**: Hugging Face checkpoints, [GGUF files](https://docs.mistralrs.dev/guides/models/run-gguf/), and [UQFF quantizations](https://docs.mistralrs.dev/reference/uqff-format/)
+- **Model formats**: Hugging Face checkpoints, [GGUF files](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/run-gguf.mdx), and [UQFF quantizations](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/uqff-format.md)
 
 ```bash
 # Recommend settings for your hardware and emit a config file
@@ -174,7 +120,7 @@ inference from-config -f config.toml
 inference doctor
 ```
 
-[Full CLI documentation](https://docs.mistralrs.dev/reference/cli/)
+[Full CLI documentation](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/cli/index.md)
 
 <details open>
   <summary><b>UI Demo</b></summary>
@@ -186,39 +132,39 @@ inference doctor
 
 **Performance**
 - Continuous batching support by default on all devices.
-- CUDA with FlashAttention V2/V3, Metal, and [multi-GPU/distributed inference](https://docs.mistralrs.dev/guides/perf/distributed-inference/)
-- [PagedAttention](https://docs.mistralrs.dev/guides/perf/paged-attention/) for high throughput continuous batching on CUDA or Apple Silicon, prefix caching (including multimodal)
+- CUDA with FlashAttention V2/V3, Metal, and [multi-GPU/distributed inference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/distributed-inference.mdx)
+- [PagedAttention](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/paged-attention.mdx) for high throughput continuous batching on CUDA or Apple Silicon, prefix caching (including multimodal)
 
-**Quantization** ([full docs](https://docs.mistralrs.dev/reference/quantization-types/))
-- [In-situ quantization (ISQ)](https://docs.mistralrs.dev/guides/quantization/quantize-a-model/) for Hugging Face models
-- [GGUF](https://docs.mistralrs.dev/reference/gguf-support/) (2-8 bit), GPTQ, AWQ, HQQ, FP8, BNB support
-- ⭐ [Per-layer topology](https://docs.mistralrs.dev/guides/perf/topology/): Fine-tune quantization per layer for optimal quality/speed
+**Quantization** ([full docs](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/quantization-types.md))
+- [In-situ quantization (ISQ)](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/quantization/quantize-a-model.mdx) for Hugging Face models
+- [GGUF](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/gguf-support.md) (2-8 bit), GPTQ, AWQ, HQQ, FP8, BNB support
+- ⭐ [Per-layer topology](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/topology.mdx): Fine-tune quantization per layer for optimal quality/speed
 - ⭐ Auto-select fastest quant method for your hardware
 
 **Flexibility**
-- [LoRA & X-LoRA](https://docs.mistralrs.dev/guides/customize/lora-adapters/) with per-request LoRA selection and X-LoRA adapter mixing
+- [LoRA & X-LoRA](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/customize/lora-adapters.mdx) with per-request LoRA selection and X-LoRA adapter mixing
 - AnyMoE: Create mixture-of-experts on any base model
-- [Multiple models](https://docs.mistralrs.dev/guides/serve/multiple-models/): Load/unload at runtime
+- [Multiple models](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/serve/multiple-models.mdx): Load/unload at runtime
 
 **Agentic Features**
-- Integrated [tool calling](https://docs.mistralrs.dev/guides/agents/tool-calling-basics/) with grammar enforcement and strict schema mode
-- ⭐ Server-side [agentic loop](https://docs.mistralrs.dev/guides/agents/tool-calling-basics/): auto-execute tools and feed results back
-- ⭐ [Python code execution](https://docs.mistralrs.dev/guides/agents/enable-code-execution/): persistent Jupyter-like sessions with matplotlib capture and multimodal feedback
-- ⭐ [Shell execution](https://docs.mistralrs.dev/guides/agents/enable-shell/): persistent command-line sessions with sandboxing and approval controls
-- ⭐ [OpenAI-compatible Skills](https://docs.mistralrs.dev/guides/agents/skills/): uploaded skill bundles for Responses API agents
-- ⭐ [OpenAI-compatible file inputs](https://docs.mistralrs.dev/guides/agents/file-inputs/): `/v1/files`, Responses `input_file`, Chat `file`, and workdir mounts
-- ⭐ [Web search integration](https://docs.mistralrs.dev/guides/agents/web-search/) with embedding-based ranking
-- ⭐ [Tool dispatch URL](https://docs.mistralrs.dev/guides/agents/tool-calling-basics/): POST tool calls to your own endpoint
-- ⭐ [MCP client](https://docs.mistralrs.dev/guides/agents/connect-mcp-server/): Connect to external tools via Process, HTTP, or WebSocket
-- Python/Rust [tool callbacks](https://docs.mistralrs.dev/guides/agents/tool-calling-basics/) for custom execution
+- Integrated [tool calling](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/tool-calling-basics.mdx) with grammar enforcement and strict schema mode
+- ⭐ Server-side [agentic loop](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/tool-calling-basics.mdx): auto-execute tools and feed results back
+- ⭐ [Python code execution](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/enable-code-execution.mdx): persistent Jupyter-like sessions with matplotlib capture and multimodal feedback
+- ⭐ [Shell execution](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/enable-shell.mdx): persistent command-line sessions with sandboxing and approval controls
+- ⭐ [OpenAI-compatible Skills](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/skills.mdx): uploaded skill bundles for Responses API agents
+- ⭐ [OpenAI-compatible file inputs](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/file-inputs.mdx): `/v1/files`, Responses `input_file`, Chat `file`, and workdir mounts
+- ⭐ [Web search integration](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/web-search.mdx) with embedding-based ranking
+- ⭐ [Tool dispatch URL](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/tool-calling-basics.mdx): POST tool calls to your own endpoint
+- ⭐ [MCP client](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/connect-mcp-server.mdx): Connect to external tools via Process, HTTP, or WebSocket
+- Python/Rust [tool callbacks](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/tool-calling-basics.mdx) for custom execution
 
-[Full feature documentation](https://docs.mistralrs.dev/)
+[Full feature documentation](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/index.mdx)
 
 ## Supported Models
 
-Text, multimodal, speech, image generation, and embedding models across 45+ architectures. The **[supported models reference](https://docs.mistralrs.dev/reference/supported-models/)** is the single source of truth: it explains how to check whether your model's `config.json` is supported, lists every architecture with copy-paste run commands, and is generated directly from the engine's loader registry so it never drifts.
+Text, multimodal, speech, image generation, and embedding models across 45+ architectures. The **[supported models reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/supported-models.md)** is the single source of truth: it explains how to check whether your model's `config.json` is supported, lists every architecture with copy-paste run commands, and is generated directly from the engine's loader registry so it never drifts.
 
-[Supported models reference](https://docs.mistralrs.dev/reference/supported-models/) | [Request a new model](https://github.com/EricLBuehler/mistral.rs/issues/156)
+[Supported models reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/supported-models.md) | [Request a new model](https://github.com/EricLBuehler/mistral.rs/issues/156)
 
 ## Python SDK
 
@@ -229,7 +175,7 @@ pip install target/wheels/<the wheel it printed>
 
 In-process inference from Python: a pure-Python package over the engine's C ABI. Load a model with `Engine` and send typed, OpenAI-shaped requests, no server required. The wheel bundles the engine library, built for CPU, CUDA or Metal.
 
-[Get started](https://docs.mistralrs.dev/guides/python/getting-started/) | [API reference](https://docs.mistralrs.dev/reference/python/) | [Examples](examples/python)
+[Get started](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/python/getting-started.mdx) | [API reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/python/index.md) | [Examples](examples/python)
 
 ## Rust SDK
 
@@ -239,26 +185,26 @@ cargo add inference
 
 Embed the engine in a Rust application with the high-level `inference` crate.
 
-[Get started](https://docs.mistralrs.dev/guides/rust/getting-started/) | [docs.rs](https://docs.rs/mistralrs) | [Crate](https://crates.io/crates/mistralrs) | [Examples](examples/rust)
+[Get started](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/rust/getting-started.mdx) | [Examples](examples/rust)
 
 ## Docker
 
-Prebuilt CPU and CUDA images are published to GHCR. Pull commands, tags, and Kubernetes notes are in the [Docker guide](https://docs.mistralrs.dev/guides/deploy/docker/).
+Build a CUDA image from `docker/Dockerfile.cuda-13.0-ubi9`; build and run commands and Kubernetes notes are in the [Docker guide](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/deploy/docker.md).
 
 ## Documentation
 
-For complete documentation, see the **[Documentation](https://docs.mistralrs.dev/)**.
+For complete documentation, see the **[Documentation](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/index.mdx)**.
 
 **Quick Links:**
-- [Quickstart](https://docs.mistralrs.dev/quickstart/) - Install, first run, first serve
-- [CLI Reference](https://docs.mistralrs.dev/reference/cli/) - All commands and options
-- [Anthropic Messages API](https://docs.mistralrs.dev/guides/serve/anthropic-messages-api/) - Anthropic-compatible Messages, streaming, tool use, and token counting
-- [HTTP API](https://docs.mistralrs.dev/reference/http-api/) - OpenAI-compatible and Anthropic-compatible endpoints
-- [Quantization](https://docs.mistralrs.dev/reference/quantization-types/) - ISQ, GGUF, GPTQ, and more
-- [Multi-GPU and Distributed](https://docs.mistralrs.dev/guides/perf/distributed-inference/) - NCCL TP, P2P layer mapping, multi-node, and ring
-- [MCP Integration](https://docs.mistralrs.dev/guides/agents/connect-mcp-server/) - MCP integration documentation
-- [Troubleshooting](https://docs.mistralrs.dev/reference/troubleshooting/) - Common issues and solutions
-- [Environment variables](https://docs.mistralrs.dev/reference/environment-variables/) - Environment variables for configuration
+- [Quickstart](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/quickstart.mdx) - Install, first run, first serve
+- [CLI Reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/cli/index.md) - All commands and options
+- [Anthropic Messages API](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/serve/anthropic-messages-api.md) - Anthropic-compatible Messages, streaming, tool use, and token counting
+- [HTTP API](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/http-api.md) - OpenAI-compatible and Anthropic-compatible endpoints
+- [Quantization](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/quantization-types.md) - ISQ, GGUF, GPTQ, and more
+- [Multi-GPU and Distributed](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/perf/distributed-inference.mdx) - NCCL TP, P2P layer mapping, multi-node, and ring
+- [MCP Integration](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/agents/connect-mcp-server.mdx) - MCP integration documentation
+- [Troubleshooting](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/troubleshooting.md) - Common issues and solutions
+- [Environment variables](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/environment-variables.md) - Environment variables for configuration
 
 ## Citation
 
@@ -277,11 +223,11 @@ Citation metadata is available in [CITATION.cff](CITATION.cff).
 
 ## Contributing
 
-Contributions welcome! Please [open an issue](https://github.com/EricLBuehler/mistral.rs/issues) to discuss new features or report bugs. If you want to add a new model, please contact us via an issue and we can coordinate.
+Contributions welcome! Please [open an issue](https://github.com/christopherthompson81/inference.rs/issues) to discuss new features or report bugs. If you want to add a new model, please contact us via an issue and we can coordinate.
 
 ## Credits
 
-This project would not be possible without the excellent work at [Candle](https://github.com/huggingface/candle). Thank you to all [contributors](https://github.com/EricLBuehler/mistral.rs/graphs/contributors)!
+This project would not be possible without the excellent work at [Candle](https://github.com/huggingface/candle). Thank you to all [contributors](https://github.com/christopherthompson81/inference.rs/graphs/contributors)!
 
 inference.rs is not affiliated with Mistral AI.
 

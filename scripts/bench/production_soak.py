@@ -119,7 +119,7 @@ DEFAULT_MULTIMODAL_MIN_MIXED_THROUGHPUT_RATIO = 0.90
 DEFAULT_MULTIMODAL_MAX_MIXED_TPOT_RATIO = 1.20
 DEFAULT_MULTIMODAL_MAX_MIXED_TTFT_P99_SECONDS = 2.0
 DEFAULT_MULTIMODAL_MIN_RECOVERY_THROUGHPUT_RATIO = 0.95
-DEFAULT_MULTIMODAL_IMAGE = "website/public/og.png"
+DEFAULT_MULTIMODAL_IMAGE = "crates/inference/tests/fixtures/paddleocr_vl/page_00.png"
 DEFAULT_MULTIMODAL_IMAGE_PROMPT = (
     "Read the prominent title and subtitle exactly, then identify the background "
     "color and the colors used for the title lettering."

@@ -2,7 +2,7 @@ use super::*;
 
 /// [`NormalLoader`] for the text backbone of a dense Qwen3.5 model.
 ///
-/// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
+/// [`NormalLoader`]: crate::pipeline::NormalLoader
 pub struct Qwen3_5TextLoader;
 
 fn parse_qwen35_text_config(config: &str) -> Result<crate::vision_models::qwen3_5::TextConfig> {

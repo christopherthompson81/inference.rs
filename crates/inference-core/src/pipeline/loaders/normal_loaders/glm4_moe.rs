@@ -2,7 +2,7 @@ use super::*;
 
 /// [`NormalLoader`] for a GLM 4 MoE model (GLM-4.5).
 ///
-/// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
+/// [`NormalLoader`]: crate::pipeline::NormalLoader
 pub struct GLM4MoeLoader;
 
 impl NormalModelLoader for GLM4MoeLoader {

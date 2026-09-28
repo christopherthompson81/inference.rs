@@ -1580,7 +1580,7 @@ impl InferenceRs {
                         warn!("  Sandbox: OFF. Network and filesystem are NOT restricted.");
                         warn!("  Pass a sandbox_policy (or --sandbox on at the CLI) to enable isolation.");
                     }
-                    warn!("  See: https://docs.mistralrs.dev/reference/sandbox/");
+                    warn!("  See: https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/sandbox.md");
                     warn!("============================================================");
                     info!("Code execution initialized with {count} tools");
                 }
@@ -1632,7 +1632,7 @@ impl InferenceRs {
                     } else {
                         warn!("  Sandbox: OFF. Network and filesystem are NOT restricted.");
                     }
-                    warn!("  See: https://docs.mistralrs.dev/reference/sandbox/");
+                    warn!("  See: https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/sandbox.md");
                     warn!("============================================================");
                     info!("Shell execution initialized with {count} tool");
                 }

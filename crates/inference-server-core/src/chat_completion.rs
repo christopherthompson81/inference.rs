@@ -181,7 +181,7 @@ impl IntoResponse for ChatCompletionResponder {
 /// OpenAI-compatible chat completions endpoint handler.
 #[utoipa::path(
     post,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/chat/completions",
     request_body = ChatCompletionRequest,
     responses((

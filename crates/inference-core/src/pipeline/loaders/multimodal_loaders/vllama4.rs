@@ -4,7 +4,7 @@ use image::{ColorType, DynamicImage};
 
 /// [`MultimodalLoader`] for an Llama Vision model.
 ///
-/// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
+/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
 pub struct VLlama4Loader;
 
 pub struct VLlama4Prefixer;

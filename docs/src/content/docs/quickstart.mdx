@@ -13,8 +13,8 @@ inference.rs is a single binary: `inference run` chats with a model in your term
 <TabItem label="macOS / Linux">
 
 ```bash
-# 1. Install: downloads a prebuilt binary for your platform (or builds from source if none matches)
-curl -fsSL https://mistralrs.dev/install.sh | sh
+# 1. Install: builds from source for your platform (no prebuilt binaries are published yet)
+curl -fsSL https://raw.githubusercontent.com/christopherthompson81/inference.rs/master/install.sh | sh
 
 # 2. Chat: downloads the weights on first run
 inference run --quant 4 -m Qwen/Qwen3-4B
@@ -27,8 +27,8 @@ inference serve --quant 4 -m Qwen/Qwen3-4B
 <TabItem label="Windows">
 
 ```powershell
-# 1. Install from PowerShell (downloads a prebuilt binary, or builds from source)
-irm https://mistralrs.dev/install.ps1 | iex
+# 1. Install from PowerShell (builds from source; no prebuilt binaries are published yet)
+irm https://raw.githubusercontent.com/christopherthompson81/inference.rs/master/install.ps1 | iex
 
 # 2. Chat: downloads the weights on first run
 inference run --quant 4 -m Qwen/Qwen3-4B
@@ -46,7 +46,7 @@ Accelerator specifics, manual builds, and the Python/Rust SDKs are below.
 
 ## Install
 
-The install script detects your platform and downloads a matching prebuilt binary, falling back to a source build if none matches your hardware or NVIDIA driver.
+The install script detects your platform and downloads a matching prebuilt binary when a release publishes one. This repository publishes none yet, so it builds from source with the features your hardware supports, which needs Rust (the installer sets it up) and, for CUDA, a toolkit.
 
 <details>
 <summary>Install locations, per-platform binaries, and environment variables</summary>
@@ -95,21 +95,21 @@ At runtime, `HF_HOME` controls where models are cached (see [environment variabl
 <TabItem label="macOS">
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/EricLBuehler/mistral.rs/master/install.sh | sh
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/christopherthompson81/inference.rs/master/install.sh | sh
 ```
 
 </TabItem>
 <TabItem label="Linux">
 
 ```bash
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/EricLBuehler/mistral.rs/master/install.sh | sh
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/christopherthompson81/inference.rs/master/install.sh | sh
 ```
 
 </TabItem>
 <TabItem label="Windows">
 
 ```powershell
-irm https://raw.githubusercontent.com/EricLBuehler/mistral.rs/master/install.ps1 | iex
+irm https://raw.githubusercontent.com/christopherthompson81/inference.rs/master/install.ps1 | iex
 ```
 
 </TabItem>

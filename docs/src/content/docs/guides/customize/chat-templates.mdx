@@ -97,7 +97,7 @@ let model = ModelBuilder::new("<model>")
 
 ## Bundled templates
 
-The source repository's [`chat_templates/`](https://github.com/EricLBuehler/mistral.rs/tree/master/chat_templates) directory contains ready-made templates: `.json` templates for common formats (`chatml`, `llama2`, `llama3`, `mistral`, `phi3`, `vicuna`, ...) and `.jinja` tool-calling templates (Mistral Nemo/Small, Hermes 2 Pro/3, DeepSeek, SmolLM3, Gemma 3n). They are plain files, not built into the binary; download or clone them and pass a path:
+The source repository's [`chat_templates/`](https://github.com/christopherthompson81/inference.rs/tree/master/chat_templates) directory contains ready-made templates: `.json` templates for common formats (`chatml`, `llama2`, `llama3`, `mistral`, `phi3`, `vicuna`, ...) and `.jinja` tool-calling templates (Mistral Nemo/Small, Hermes 2 Pro/3, DeepSeek, SmolLM3, Gemma 3n). They are plain files, not built into the binary; download or clone them and pass a path:
 
 ```bash
 inference run -m <model> --chat-template chat_templates/llama3.json

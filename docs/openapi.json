@@ -1,7 +1,7 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Mistral.rs",
+    "title": "inference.rs",
     "description": "Fast, flexible model inference.",
     "contact": {
       "name": "Eric Buehler"
@@ -15,7 +15,7 @@
     "/calibration/apply": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "calibration_apply",
         "requestBody": {
@@ -45,7 +45,7 @@
     "/calibration/start": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "calibration_start",
         "responses": {
@@ -65,7 +65,7 @@
     "/calibration/status": {
       "get": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "calibration_status",
         "responses": {
@@ -85,7 +85,7 @@
     "/health": {
       "get": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "health",
         "responses": {
@@ -98,7 +98,7 @@
     "/metrics": {
       "get": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "summary": "Axum handler for `GET /metrics`. Renders the Prometheus exposition format.",
         "operationId": "metrics",
@@ -118,7 +118,7 @@
     "/re_isq": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "re_isq",
         "requestBody": {
@@ -154,7 +154,7 @@
     "/v1/agent/approvals/{approval_id}": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "resolve_agent_approval",
         "parameters": [
@@ -207,7 +207,7 @@
     "/v1/audio/speech": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "summary": "Speech generation endpoint handler.",
         "operationId": "speech_generation",
@@ -231,7 +231,7 @@
     "/v1/chat/completions": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "summary": "OpenAI-compatible chat completions endpoint handler.",
         "operationId": "chatcompletions",
@@ -267,7 +267,7 @@
     "/v1/completions": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "summary": "OpenAI-compatible completions endpoint handler.",
         "operationId": "completions",
@@ -303,7 +303,7 @@
     "/v1/containers/{container_id}/files": {
       "get": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "list_container_files",
         "parameters": [
@@ -337,7 +337,7 @@
     "/v1/containers/{container_id}/files/{file_id}": {
       "get": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "get_container_file",
         "parameters": [
@@ -383,7 +383,7 @@
     "/v1/containers/{container_id}/files/{file_id}/content": {
       "get": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "get_container_file_content",
         "parameters": [
@@ -425,7 +425,7 @@
     "/v1/embeddings": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "embeddings",
         "requestBody": {
@@ -455,7 +455,7 @@
     "/v1/files": {
       "get": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "list_files",
         "responses": {
@@ -476,7 +476,7 @@
       },
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "upload_file",
         "requestBody": {
@@ -504,7 +504,7 @@
     "/v1/files/{id}": {
       "get": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "get_file",
         "parameters": [
@@ -539,7 +539,7 @@
       },
       "delete": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "delete_file",
         "parameters": [
@@ -576,7 +576,7 @@
     "/v1/files/{id}/content": {
       "get": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "get_file_content",
         "parameters": [
@@ -609,7 +609,7 @@
     "/v1/images/generations": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "summary": "Image generation endpoint handler.",
         "operationId": "image_generation",
@@ -745,7 +745,7 @@
     "/v1/messages": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "anthropic_messages",
         "requestBody": {
@@ -775,7 +775,7 @@
     "/v1/messages/count_tokens": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "anthropic_count_tokens",
         "requestBody": {
@@ -805,7 +805,7 @@
     "/v1/models": {
       "get": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "models",
         "responses": {
@@ -828,7 +828,7 @@
     "/v1/models/reload": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "reload_model",
         "requestBody": {
@@ -876,7 +876,7 @@
     "/v1/models/status": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "get_model_status",
         "requestBody": {
@@ -921,7 +921,7 @@
     "/v1/models/tune": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "tune_model",
         "requestBody": {
@@ -956,7 +956,7 @@
     "/v1/models/unload": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "unload_model",
         "requestBody": {
@@ -1004,7 +1004,7 @@
     "/v1/responses": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "summary": "Create response endpoint - OpenResponses API",
         "operationId": "create_response",
@@ -1040,7 +1040,7 @@
     "/v1/responses/{response_id}": {
       "get": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "summary": "Get response by ID endpoint",
         "operationId": "get_response",
@@ -1070,7 +1070,7 @@
       },
       "delete": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "summary": "Delete response by ID endpoint",
         "operationId": "delete_response",
@@ -1102,7 +1102,7 @@
     "/v1/responses/{response_id}/cancel": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "summary": "Cancel response endpoint",
         "operationId": "cancel_response",
@@ -1134,7 +1134,7 @@
     "/v1/sessions/{session_id}": {
       "get": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "summary": "GET `/v1/sessions/{session_id}`. 404 if the session doesn't exist.",
         "operationId": "get_session",
@@ -1167,7 +1167,7 @@
       },
       "put": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "summary": "PUT `/v1/sessions/{session_id}`. Replaces any existing session.",
         "operationId": "put_session",
@@ -1203,7 +1203,7 @@
       },
       "delete": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "summary": "DELETE `/v1/sessions/{session_id}`. Idempotent: returns 200 either way.",
         "operationId": "delete_session",
@@ -1228,7 +1228,7 @@
     "/v1/skills": {
       "get": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "list_skills",
         "responses": {
@@ -1246,7 +1246,7 @@
       },
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "upload_skill",
         "responses": {
@@ -1266,7 +1266,7 @@
     "/v1/skills/{skill_id}/versions": {
       "get": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "list_skill_versions",
         "responses": {
@@ -1284,7 +1284,7 @@
       },
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "upload_skill_version",
         "responses": {
@@ -1304,7 +1304,7 @@
     "/v1/system/doctor": {
       "post": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "system_doctor",
         "responses": {
@@ -1317,7 +1317,7 @@
     "/v1/system/info": {
       "get": {
         "tags": [
-          "Mistral.rs"
+          "inference.rs"
         ],
         "operationId": "system_info",
         "responses": {
@@ -11626,8 +11626,8 @@
   },
   "tags": [
     {
-      "name": "Mistral.rs",
-      "description": "Mistral.rs API"
+      "name": "inference.rs",
+      "description": "inference.rs API"
     },
     {
       "name": "LoRA adapters",
