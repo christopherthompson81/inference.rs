@@ -28,8 +28,8 @@ use crate::{
         __path_delete_session, __path_get_model_status, __path_get_session, __path_health,
         __path_models, __path_put_session, __path_re_isq, __path_reload_model,
         __path_system_doctor, __path_system_info, __path_tune_model, __path_unload_model,
-        CalibrationApplyRequest, ModelOperationRequest, ModelStatus, ModelStatusResponse,
-        ReIsqRequest, TuneModelRequest, TuneProfileRequest,
+        ModelOperationRequest, ModelStatus, ModelStatusResponse, TuneModelRequest,
+        TuneProfileRequest,
     },
     image_generation::__path_image_generation,
     lora_adapters::{
@@ -67,6 +67,7 @@ use crate::{
     },
     speech_generation::__path_speech_generation,
 };
+use inference_api::operations::{CalibrationApplyRequest, ReIsqRequest, ReIsqResponse};
 use inference_core::{
     ApproximateUserLocation, CalibrationStatus, Function, ImageGenerationResponseFormat,
     NamedFunctionToolChoice, SearchContextSize, SerializedSession, Tool, ToolChoice, ToolType,
@@ -120,6 +121,14 @@ pub fn get_openapi_doc(base_path: Option<&str>) -> utoipa::openapi::OpenApi {
         components(schemas(
             // Not a route's body: the engine spec the C ABI and bindings load from, typed from this document.
             inference_api::EngineSpec,
+            // Engine operations the C ABI offers without an HTTP route.
+            inference_api::operations::SessionList,
+            inference_api::operations::SessionDeleted,
+            inference_api::operations::SessionStored,
+            inference_api::operations::TokenizeRequest,
+            inference_api::operations::TokenizeResponse,
+            inference_api::operations::DetokenizeRequest,
+            inference_api::operations::DetokenizeResponse,
             ApprovalDecision,
             ApprovalDecisionRequest,
             ApprovalDecisionResponse,
@@ -198,7 +207,7 @@ pub fn get_openapi_doc(base_path: Option<&str>) -> utoipa::openapi::OpenApi {
             ModelOperationRequest,
             ModelStatus,
             ModelStatusResponse,
-            ReIsqRequest, CalibrationApplyRequest,
+            ReIsqRequest, ReIsqResponse, CalibrationApplyRequest,
             ResponseFormat,
             ResponsesAnnotation,
             ResponsesChunk,

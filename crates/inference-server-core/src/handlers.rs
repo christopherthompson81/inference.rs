@@ -3,10 +3,10 @@
 use axum::extract::{rejection::JsonRejection, Json, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
+use inference_api::operations::{self, CalibrationApplyRequest, ReIsqRequest, ReIsqResponse};
 use inference_core::{
-    auto_tune, parse_isq_value, AutoDeviceMapParams, AutoTuneRequest, InferenceRs,
-    InferenceRsError, ModelDType, ModelSelected, Request, SerializedSession, TokenSource,
-    TuneProfile,
+    auto_tune, parse_isq_value, AutoDeviceMapParams, AutoTuneRequest, CalibrationAction,
+    InferenceRs, ModelDType, ModelSelected, SerializedSession, TokenSource, TuneProfile,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -14,9 +14,7 @@ use utoipa::ToSchema;
 use crate::handler_core::ApiErrorHttp;
 pub use crate::models_api::{ModelOperationRequest, ModelStatus, ModelStatusResponse};
 use crate::{
-    handler_core::{
-        json_response, openai_error_from_error, openai_error_response, ApiError, ApiErrorKind,
-    },
+    handler_core::{json_response, openai_error_response, ApiError, ApiErrorKind},
     models_api::{
         list_models, model_status as status, reload_model as reload, unload_model as unload,
     },
@@ -86,19 +84,13 @@ pub async fn system_doctor() -> Json<inference_core::DoctorReport> {
     Json(system::system_doctor())
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
-pub struct ReIsqRequest {
-    #[schema(example = "Q4K")]
-    ggml_type: String,
-}
-
 #[utoipa::path(
   post,
   tag = "Mistral.rs",
   path = "/re_isq",
   request_body = ReIsqRequest,
   responses(
-    (status = 200, description = "Reapply ISQ to a model that was loaded with ISQ."),
+    (status = 200, description = "Requantization queued for a model that was loaded with ISQ.", body = ReIsqResponse),
     (status = 400, description = "Invalid ISQ type"),
     (status = 500, description = "Failed to dispatch the ISQ request")
   )
@@ -111,36 +103,8 @@ pub async fn re_isq(
         Ok(Json(request)) => request,
         Err(error) => return openai_error_response(ApiError::from_json_rejection(error)),
     };
-    let repr = format!("Re ISQ: {:?}", request.ggml_type);
-    InferenceRs::maybe_log_request(state.clone(), repr.clone());
-    let level = match parse_isq_value(&request.ggml_type, None) {
-        Ok(level) => level,
-        Err(error) => {
-            return openai_error_response(ApiError::new(
-                ApiErrorKind::InvalidRequest,
-                error,
-                Some("invalid_isq"),
-                Some("ggml_type"),
-            ));
-        }
-    };
-    let sender = match state.get_sender(None) {
-        Ok(sender) => sender,
-        Err(error) => return openai_error_from_error(&error, ApiErrorKind::Internal),
-    };
-    if let Err(error) = sender.send(Request::ReIsq(level)).await {
-        tracing::error!(%error, "failed to dispatch ISQ request");
-        return openai_error_response(ApiError::internal());
-    }
-    (StatusCode::OK, repr).into_response()
-}
-
-/// Request body for applying online calibration.
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
-pub struct CalibrationApplyRequest {
-    /// Optionally save the collected imatrix to this `.cimatrix` file name in the server's working directory.
-    #[serde(default)]
-    pub save_cimatrix: Option<String>,
+    InferenceRs::maybe_log_request(state.clone(), format!("Re ISQ: {:?}", request.ggml_type));
+    json_response(operations::re_isq(&state, request).await)
 }
 
 // remote clients only get a bare file name so the write can't leave the working directory
@@ -159,33 +123,6 @@ fn http_save_cimatrix_path(name: &str) -> Result<std::path::PathBuf, ApiError> {
     Ok(path.to_path_buf())
 }
 
-async fn send_calibration(
-    state: &crate::types::SharedInferenceRsState,
-    action: inference_core::CalibrationAction,
-) -> Response {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-    let request = Request::Calibration(inference_core::CalibrationRequest {
-        action,
-        response: tx,
-    });
-    let sender = match state.get_sender(None) {
-        Ok(sender) => sender,
-        Err(error) => return openai_error_from_error(&error, ApiErrorKind::Internal),
-    };
-    if let Err(error) = sender.send(request).await {
-        tracing::error!(%error, "failed to dispatch calibration request");
-        return openai_error_response(ApiError::internal());
-    }
-    match rx.recv().await {
-        Some(Ok(status)) => Json(status).into_response(),
-        Some(Err(error)) => {
-            InferenceRs::maybe_log_error(state.clone(), error.as_ref());
-            openai_error_response(ApiError::internal())
-        }
-        None => openai_error_response(ApiError::internal()),
-    }
-}
-
 #[utoipa::path(
   post,
   tag = "Mistral.rs",
@@ -194,7 +131,7 @@ async fn send_calibration(
 )]
 pub async fn calibration_start(State(state): ExtractedInferenceRsState) -> Response {
     InferenceRs::maybe_log_request(state.clone(), "Calibration start".to_string());
-    send_calibration(&state, inference_core::CalibrationAction::Start).await
+    json_response(operations::calibration(&state, CalibrationAction::Start).await)
 }
 
 #[utoipa::path(
@@ -204,7 +141,7 @@ pub async fn calibration_start(State(state): ExtractedInferenceRsState) -> Respo
   responses((status = 200, description = "Per-layer calibration collection progress.", body = inference_core::CalibrationStatus))
 )]
 pub async fn calibration_status(State(state): ExtractedInferenceRsState) -> Response {
-    send_calibration(&state, inference_core::CalibrationAction::Status).await
+    json_response(operations::calibration(&state, CalibrationAction::Status).await)
 }
 
 #[utoipa::path(
@@ -232,11 +169,7 @@ pub async fn calibration_apply(
         Err(error) => return openai_error_response(error),
     };
     InferenceRs::maybe_log_request(state.clone(), "Calibration apply".to_string());
-    send_calibration(
-        &state,
-        inference_core::CalibrationAction::Apply { save_cimatrix },
-    )
-    .await
+    json_response(operations::calibration(&state, CalibrationAction::Apply { save_cimatrix }).await)
 }
 
 fn model_operation_request(
@@ -485,16 +418,7 @@ pub async fn get_session(
     State(state): ExtractedInferenceRsState,
     Path(session_id): Path<String>,
 ) -> Response {
-    match state.export_session(None, &session_id) {
-        Ok(Some(session)) => Json(session).into_response(),
-        Ok(None) => openai_error_response(ApiError::new(
-            ApiErrorKind::NotFound,
-            format!("Session '{session_id}' was not found."),
-            Some("session_not_found"),
-            Some("session_id"),
-        )),
-        Err(error) => openai_error_from_error(&error, ApiErrorKind::Internal),
-    }
+    json_response(operations::export_session(&state, &session_id))
 }
 
 /// PUT `/v1/sessions/{session_id}`. Replaces any existing session.
@@ -518,15 +442,9 @@ pub async fn put_session(
         Ok(Json(session)) => session,
         Err(error) => return openai_error_response(ApiError::from_json_rejection(error)),
     };
-    match state.import_session(None, session_id, session) {
+    match operations::import_session(&state, session_id, session) {
         Ok(()) => StatusCode::OK.into_response(),
-        Err(InferenceRsError::Other(message)) => openai_error_response(ApiError::new(
-            ApiErrorKind::InvalidRequest,
-            message,
-            Some("invalid_session"),
-            None,
-        )),
-        Err(error) => openai_error_from_error(&error, ApiErrorKind::Internal),
+        Err(error) => openai_error_response(error),
     }
 }
 
@@ -542,9 +460,9 @@ pub async fn delete_session(
     State(state): ExtractedInferenceRsState,
     Path(session_id): Path<String>,
 ) -> Response {
-    match state.delete_session(None, &session_id) {
+    match operations::delete_session(&state, &session_id) {
         Ok(_) => StatusCode::OK.into_response(),
-        Err(error) => openai_error_from_error(&error, ApiErrorKind::Internal),
+        Err(error) => openai_error_response(error),
     }
 }
 

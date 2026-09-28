@@ -177,6 +177,42 @@ impl BlockingEngine {
             engine.unload_lora_adapter_json(&request).await
         })
     }
+
+    pub fn re_isq_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.re_isq_json(&request).await
+        })
+    }
+
+    pub fn calibration_start_json(&self) -> Result<String, ApiError> {
+        self.call(&[], |engine, _| async move {
+            engine.calibration_start_json().await
+        })
+    }
+
+    pub fn calibration_status_json(&self) -> Result<String, ApiError> {
+        self.call(&[], |engine, _| async move {
+            engine.calibration_status_json().await
+        })
+    }
+
+    pub fn calibration_apply_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.calibration_apply_json(&request).await
+        })
+    }
+
+    pub fn tokenize_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.tokenize_json(&request).await
+        })
+    }
+
+    pub fn detokenize_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.detokenize_json(&request).await
+        })
+    }
 }
 
 /// What one poll of a stream produced.

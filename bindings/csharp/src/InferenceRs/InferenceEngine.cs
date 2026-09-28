@@ -180,6 +180,89 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Text(status, response, nameof(NativeMethods.inference_model_status));
     }
 
+    /// <summary>Requantizes a model that loaded with ISQ; answers once the engine has queued it.</summary>
+    public string ReIsq(string requestJson)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_re_isq(engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_re_isq));
+    }
+
+    /// <summary>Starts collecting activation statistics from the requests the engine serves.</summary>
+    public string CalibrationStart()
+    {
+        using var engine = Borrow();
+        var status = NativeMethods.inference_calibration_start(engine.Handle, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_calibration_start));
+    }
+
+    public string CalibrationStatus()
+    {
+        using var engine = Borrow();
+        var status = NativeMethods.inference_calibration_status(engine.Handle, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_calibration_status));
+    }
+
+    /// <summary>Requantizes from the collected statistics; returns the status as it stood before.</summary>
+    public string CalibrationApply(string requestJson = "{}")
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_calibration_apply(engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_calibration_apply));
+    }
+
+    public string ListSessions()
+    {
+        using var engine = Borrow();
+        var status = NativeMethods.inference_sessions_list(engine.Handle, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_sessions_list));
+    }
+
+    public string GetSession(string sessionId)
+    {
+        using var engine = Borrow();
+        using var id = new PinnedBytes(sessionId);
+        var status = NativeMethods.inference_session_get(engine.Handle, id.Pointer, id.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_session_get));
+    }
+
+    /// <summary>Imports a session under <paramref name="sessionId"/>, replacing any session there.</summary>
+    public string PutSession(string sessionId, string sessionJson)
+    {
+        using var engine = Borrow();
+        using var id = new PinnedBytes(sessionId);
+        using var session = new PinnedBytes(sessionJson);
+        var status = NativeMethods.inference_session_put(
+            engine.Handle, id.Pointer, id.Length, session.Pointer, session.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_session_put));
+    }
+
+    public string DeleteSession(string sessionId)
+    {
+        using var engine = Borrow();
+        using var id = new PinnedBytes(sessionId);
+        var status = NativeMethods.inference_session_delete(engine.Handle, id.Pointer, id.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_session_delete));
+    }
+
+    public string Tokenize(string requestJson)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_tokenize(engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_tokenize));
+    }
+
+    public string Detokenize(string requestJson)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_detokenize(engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_detokenize));
+    }
+
     public string ListLoraAdapters(string requestJson = "{}")
     {
         using var engine = Borrow();

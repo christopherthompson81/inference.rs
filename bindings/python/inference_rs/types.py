@@ -377,8 +377,6 @@ class BuiltinToolChoiceType(str, Enum):
 
 @dataclass(kw_only=True)
 class CalibrationApplyRequest:
-    """Request body for applying online calibration."""
-
     save_cimatrix: str | None = None
 
 
@@ -621,6 +619,18 @@ class ContainerFileMetadata:
     mime_type: str
     object: str
     source: SourceMeta
+
+
+@dataclass(kw_only=True)
+class DetokenizeRequest:
+    model: str | None = None
+    skip_special_tokens: bool | None = True
+    tokens: list[int]
+
+
+@dataclass(kw_only=True)
+class DetokenizeResponse:
+    text: str
 
 
 class DiffusionLoaderType(str, Enum):
@@ -1011,6 +1021,7 @@ class ModelObject:
     adapter_generation: str | None = None
     created: int
     id: str
+    max_model_len: int | None = None
     mcp_servers_connected: int | None = None
     mcp_tools_count: int | None = None
     object: str
@@ -1991,6 +2002,13 @@ class ReIsqRequest:
 
 
 @dataclass(kw_only=True)
+class ReIsqResponse:
+    """Answered once the requantization is queued behind the requests already running."""
+
+    ggml_type: str
+
+
+@dataclass(kw_only=True)
 class ReasoningConfig:
     """Reasoning configuration for models that support extended thinking"""
 
@@ -2373,6 +2391,22 @@ class SerializedVideo:
 
 
 @dataclass(kw_only=True)
+class SessionDeleted:
+    deleted: bool
+    id: str
+
+
+@dataclass(kw_only=True)
+class SessionList:
+    data: list[str]
+
+
+@dataclass(kw_only=True)
+class SessionStored:
+    id: str
+
+
+@dataclass(kw_only=True)
 class ShellConfig:
     """Shell execution config."""
 
@@ -2482,6 +2516,18 @@ class TextFormatJsonObject:
     """JSON object output"""
 
     type: Literal["json_object"] = "json_object"
+
+
+@dataclass(kw_only=True)
+class TokenizeRequest:
+    add_special_tokens: bool | None = True
+    model: str | None = None
+    text: str
+
+
+@dataclass(kw_only=True)
+class TokenizeResponse:
+    tokens: list[int]
 
 
 @dataclass(kw_only=True)

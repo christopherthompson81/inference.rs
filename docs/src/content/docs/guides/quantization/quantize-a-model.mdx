@@ -160,6 +160,7 @@ engine = ir.Engine(spec)
 
 Use `t.ModelSelectedGGUF(...)` with the same `isq` runtime setting to requantize a compatible GGUF.
 `t.ModelSelectedGGUF` also accepts `imatrix`, `calibration_file`, `organization`, and `write_uqff`.
+`engine.re_isq("Q8_0")` requantizes a model that loaded with ISQ while it runs, as `POST /re_isq` does.
 
 [Full example](/examples/python/isq/)
 

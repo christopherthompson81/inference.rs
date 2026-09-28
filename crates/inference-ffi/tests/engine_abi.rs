@@ -1284,3 +1284,149 @@ fn host_callbacks_load_and_skills_are_stored() {
         (INFERENCE_ERR_INVALID_ARGUMENT, true)
     );
 }
+
+type QueryCall =
+    unsafe extern "C" fn(*const inference_engine, *mut *mut inference_string) -> inference_status;
+
+fn query(call: QueryCall, engine: *const inference_engine) -> (inference_status, Value) {
+    let mut response = null_mut();
+    let status = unsafe { call(engine, &mut response) };
+    (status, stored_body(status, response))
+}
+
+#[test]
+fn tokens_sessions_and_quantization_operations() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let (status, engine) = load(&spec(dir.path()));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+
+    let (status, tokens) = request_call(inference_tokenize, engine, &json!({"text": PROMPT}));
+    assert_eq!(status, INFERENCE_OK, "{tokens}");
+    assert!(!tokens["tokens"].as_array().unwrap().is_empty());
+    let request = json!({"tokens": tokens["tokens"], "skip_special_tokens": true});
+    let (status, text) = request_call(inference_detokenize, engine, &request);
+    assert_eq!(status, INFERENCE_OK, "{text}");
+    // The tiny tokenizer has no decoder, so its word-boundary markers come back as they are.
+    let text = text["text"].as_str().unwrap().replace('\u{2581}', " ");
+    assert_eq!(text, PROMPT);
+
+    let (status, sessions) = query(inference_sessions_list, engine);
+    assert_eq!(
+        (status, sessions["data"].as_array().unwrap().len()),
+        (INFERENCE_OK, 0)
+    );
+    let (status, missing) = by_id(inference_session_get, engine, "no-such-session");
+    assert_eq!(status, INFERENCE_ERR_NOT_FOUND, "{missing}");
+    let (status, deleted) = by_id(inference_session_delete, engine, "no-such-session");
+    assert_eq!(
+        (status, deleted["deleted"].clone()),
+        (INFERENCE_OK, json!(false))
+    );
+
+    let put = |id: &str, body: &Value| {
+        let body = body.to_string();
+        let mut stored = null_mut();
+        let status = unsafe {
+            inference_session_put(
+                engine,
+                id.as_ptr().cast::<c_char>(),
+                id.len(),
+                body.as_ptr().cast::<c_char>(),
+                body.len(),
+                &mut stored,
+            )
+        };
+        (status, stored_body(status, stored))
+    };
+    // The session wire format keeps each message field as the engine's `Either`.
+    let session = json!({"messages": [{"role": {"Left": "user"}, "content": {"Left": PROMPT}}]});
+    for id in ["s1", "s2"] {
+        let (status, stored) = put(id, &session);
+        assert_eq!(
+            (status, stored["id"].clone()),
+            (INFERENCE_OK, json!(id)),
+            "{stored}"
+        );
+    }
+    let (status, exported) = by_id(inference_session_get, engine, "s1");
+    assert_eq!(status, INFERENCE_OK, "{exported}");
+    assert_eq!(exported["messages"], session["messages"]);
+    let (status, error) = put("s3", &json!({"messages": "not a list"}));
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+    let (_, sessions) = query(inference_sessions_list, engine);
+    let mut ids = sessions["data"].as_array().unwrap().to_vec();
+    ids.sort_by_key(|id| id.to_string());
+    assert_eq!(ids, [json!("s1"), json!("s2")]);
+    let (status, deleted) = by_id(inference_session_delete, engine, "s1");
+    assert_eq!(
+        (status, deleted["deleted"].clone()),
+        (INFERENCE_OK, json!(true))
+    );
+
+    let (status, error) = request_call(
+        inference_re_isq,
+        engine,
+        &json!({"ggml_type": "no-such-type"}),
+    );
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+    let (status, report) = query(inference_calibration_status, engine);
+    assert_eq!(
+        (status, report["layers"].clone()),
+        (INFERENCE_OK, json!(0)),
+        "{report}"
+    );
+    let (status, error) = query(inference_calibration_start, engine);
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+    assert!(
+        error["error"]["message"].as_str().unwrap().contains("ISQ"),
+        "{error}"
+    );
+
+    let mut models = null_mut();
+    assert_eq!(
+        unsafe { inference_models_list(engine, &mut models) },
+        INFERENCE_OK
+    );
+    let models: Value = serde_json::from_str(&take_string(models)).unwrap();
+    assert!(
+        models["data"][1]["max_model_len"].as_u64().unwrap() > 0,
+        "{models}"
+    );
+    unsafe { inference_engine_free(engine) };
+}
+
+#[test]
+fn online_calibration_collects_from_traffic_and_applies() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let mut spec: Value = serde_json::from_str(&spec(dir.path())).unwrap();
+    spec["runtime"]["isq"] = json!("q8_0");
+    let (status, engine) = load(&spec.to_string());
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+
+    let (status, started) = query(inference_calibration_start, engine);
+    assert_eq!(
+        (status, started["collecting"].clone()),
+        (INFERENCE_OK, json!(true)),
+        "{started}"
+    );
+    assert!(
+        started["layers_tracking"].as_u64().unwrap() > 0,
+        "{started}"
+    );
+    let (status, _) = chat(engine, &chat_request(false));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let (_, collected) = query(inference_calibration_status, engine);
+    assert!(collected["total_rows"].as_u64().unwrap() > 0, "{collected}");
+    let dir = tempfile::tempdir().unwrap();
+    let cimatrix = dir.path().join("traffic.cimatrix");
+    let request = json!({"save_cimatrix": cimatrix});
+    let (status, applied) = request_call(inference_calibration_apply, engine, &request);
+    assert_eq!(status, INFERENCE_OK, "{applied}");
+    assert!(cimatrix.exists());
+    let (_, after) = query(inference_calibration_status, engine);
+    assert_eq!(after["collecting"], json!(false), "{after}");
+    // The requantized model still serves.
+    let (status, _) = chat(engine, &chat_request(false));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    unsafe { inference_engine_free(engine) };
+}

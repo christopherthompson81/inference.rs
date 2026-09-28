@@ -1311,6 +1311,9 @@ pub struct ModelObject {
     /// Number of connected MCP servers
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mcp_servers_connected: Option<usize>,
+    /// Longest sequence, prompt plus completion, a loaded model accepts
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_model_len: Option<usize>,
 }
 
 /// Collection of available models

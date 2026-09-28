@@ -558,12 +558,21 @@ pub unsafe extern "C" fn inference_models_list(
     engine: *const inference_engine,
     out_response: *mut *mut inference_string,
 ) -> inference_status {
+    query_call(engine, out_response, |engine| engine.engine().models_json())
+}
+
+// An engine call with no request body.
+unsafe fn query_call(
+    engine: *const inference_engine,
+    out_response: *mut *mut inference_string,
+    call: impl FnOnce(&BlockingEngine) -> Result<String, ApiError>,
+) -> inference_status {
     guard(|| {
         out_arg(out_response, "out_response")?;
         let engine = engine
             .as_ref()
             .ok_or_else(|| Failure::invalid("engine is NULL"))?;
-        let response = engine.engine.engine().models_json().map_err(api_failure)?;
+        let response = call(&engine.engine).map_err(api_failure)?;
         out_response.write(string_handle(response));
         Ok(())
     })
@@ -795,15 +804,7 @@ pub unsafe extern "C" fn inference_files_list(
     engine: *const inference_engine,
     out_response: *mut *mut inference_string,
 ) -> inference_status {
-    guard(|| {
-        out_arg(out_response, "out_response")?;
-        let engine = engine
-            .as_ref()
-            .ok_or_else(|| Failure::invalid("engine is NULL"))?;
-        let response = engine.engine.engine().files_json().map_err(api_failure)?;
-        out_response.write(string_handle(response));
-        Ok(())
-    })
+    query_call(engine, out_response, |engine| engine.engine().files_json())
 }
 
 unsafe fn file_id_call(
@@ -1117,4 +1118,186 @@ pub unsafe extern "C" fn inference_string_free(string: *mut inference_string) {
     if !string.is_null() {
         guard_value((), || drop(Box::from_raw(string)));
     }
+}
+
+/// Safety: as for `inference_chat`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_re_isq(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| engine.re_isq_json(request).map_err(api_failure),
+    )
+}
+
+/// Safety: as for `inference_models_list`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_calibration_start(
+    engine: *const inference_engine,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    query_call(engine, out_response, BlockingEngine::calibration_start_json)
+}
+
+/// Safety: as for `inference_models_list`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_calibration_status(
+    engine: *const inference_engine,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    query_call(
+        engine,
+        out_response,
+        BlockingEngine::calibration_status_json,
+    )
+}
+
+/// Safety: as for `inference_chat`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_calibration_apply(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| engine.calibration_apply_json(request).map_err(api_failure),
+    )
+}
+
+/// Safety: as for `inference_models_list`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_sessions_list(
+    engine: *const inference_engine,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    query_call(engine, out_response, |engine| {
+        engine.engine().sessions_json()
+    })
+}
+
+unsafe fn session_id_call(
+    engine: *const inference_engine,
+    session_id: *const c_char,
+    session_id_len: usize,
+    out_response: *mut *mut inference_string,
+    call: impl FnOnce(&Engine, &str) -> Result<String, ApiError>,
+) -> inference_status {
+    id_call(
+        engine,
+        (session_id, session_id_len, "session_id"),
+        (out_response, "out_response"),
+        |engine, id| {
+            call(engine.engine(), id)
+                .map(string_handle)
+                .map_err(api_failure)
+        },
+    )
+}
+
+/// Safety: `engine` is a live handle, `session_id` valid for `session_id_len` bytes, `out_response` valid for a
+/// write.
+#[no_mangle]
+pub unsafe extern "C" fn inference_session_get(
+    engine: *const inference_engine,
+    session_id: *const c_char,
+    session_id_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    session_id_call(
+        engine,
+        session_id,
+        session_id_len,
+        out_response,
+        Engine::session_json,
+    )
+}
+
+/// Safety: as for `inference_approval_resolve`, with `session_id` in place of `approval_id`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_session_put(
+    engine: *const inference_engine,
+    session_id: *const c_char,
+    session_id_len: usize,
+    session: *const c_char,
+    session_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        session,
+        session_len,
+        out_response,
+        |engine, session| {
+            let id = arg_bytes(session_id, session_id_len, "session_id")?;
+            let id =
+                std::str::from_utf8(id).map_err(|_| Failure::invalid("session_id is not UTF-8"))?;
+            engine
+                .engine()
+                .put_session_json(id, session)
+                .map_err(api_failure)
+        },
+    )
+}
+
+/// Safety: as for `inference_session_get`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_session_delete(
+    engine: *const inference_engine,
+    session_id: *const c_char,
+    session_id_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    session_id_call(
+        engine,
+        session_id,
+        session_id_len,
+        out_response,
+        Engine::delete_session_json,
+    )
+}
+
+/// Safety: as for `inference_chat`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_tokenize(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| engine.tokenize_json(request).map_err(api_failure),
+    )
+}
+
+/// Safety: as for `inference_chat`.
+#[no_mangle]
+pub unsafe extern "C" fn inference_detokenize(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    json_call(
+        engine,
+        request,
+        request_len,
+        out_response,
+        |engine, request| engine.detokenize_json(request).map_err(api_failure),
+    )
 }

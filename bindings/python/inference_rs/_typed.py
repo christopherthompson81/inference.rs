@@ -103,6 +103,43 @@ class Engine:
     def cancel_response(self, response_id: str) -> types.ResponseResource:
         return from_json(types.ResponseResource, self.json.cancel_response(response_id))
 
+    def re_isq(self, ggml_type: str) -> types.ReIsqResponse:
+        """Requantizes a model that loaded with ISQ; answers once the engine has queued it."""
+        return from_json(types.ReIsqResponse, self.json.re_isq(json.dumps({"ggml_type": ggml_type})))
+
+    def calibration_start(self) -> types.CalibrationStatus:
+        """Starts collecting activation statistics from the requests the engine serves."""
+        return from_json(types.CalibrationStatus, self.json.calibration_start())
+
+    def calibration_status(self) -> types.CalibrationStatus:
+        return from_json(types.CalibrationStatus, self.json.calibration_status())
+
+    def calibration_apply(self, save_cimatrix: str | None = None) -> types.CalibrationStatus:
+        """Requantizes from the collected statistics; returns the status as it stood before."""
+        request = {} if save_cimatrix is None else {"save_cimatrix": str(save_cimatrix)}
+        return from_json(types.CalibrationStatus, self.json.calibration_apply(json.dumps(request)))
+
+    def list_sessions(self) -> types.SessionList:
+        return from_json(types.SessionList, self.json.list_sessions())
+
+    def get_session(self, session_id: str) -> types.SerializedSession:
+        return from_json(types.SerializedSession, self.json.get_session(session_id))
+
+    def put_session(self, session_id: str, session: types.SerializedSession | str) -> types.SessionStored:
+        """Imports a session under `session_id`, replacing any session there."""
+        return from_json(types.SessionStored, self.json.put_session(session_id, to_json(session)))
+
+    def delete_session(self, session_id: str) -> types.SessionDeleted:
+        return from_json(types.SessionDeleted, self.json.delete_session(session_id))
+
+    def tokenize(self, text: str, add_special_tokens: bool = True, model: str | None = None) -> list[int]:
+        request = {"text": text, "add_special_tokens": add_special_tokens, "model": model}
+        return from_json(types.TokenizeResponse, self.json.tokenize(json.dumps(request))).tokens
+
+    def detokenize(self, tokens: Sequence[int], skip_special_tokens: bool = True, model: str | None = None) -> str:
+        request = {"tokens": list(tokens), "skip_special_tokens": skip_special_tokens, "model": model}
+        return from_json(types.DetokenizeResponse, self.json.detokenize(json.dumps(request))).text
+
     def list_models(self) -> types.ModelObjects:
         return from_json(types.ModelObjects, self.json.list_models())
 

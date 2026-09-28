@@ -19,7 +19,7 @@ from ctypes import (
 from pathlib import Path
 
 # The ABI these declarations mirror; while it is 0.0.x any other version may differ anywhere.
-ABI_VERSION = (0 << 16) | (0 << 8) | 10
+ABI_VERSION = (0 << 16) | (0 << 8) | 11
 
 NATIVE_DIR_VARIABLE = "INFERENCE_NATIVE_DIR"
 # Release first: a consumer that built it has the fast one; tests fall back to the dev build.
@@ -150,6 +150,16 @@ SIGNATURES = {
     ),
     "inference_skills_list": (status, (c_void_p, out)),
     "inference_skill_versions_list": (status, (c_void_p, *buffer, out)),
+    "inference_re_isq": (status, (c_void_p, *buffer, out)),
+    "inference_calibration_start": (status, (c_void_p, out)),
+    "inference_calibration_status": (status, (c_void_p, out)),
+    "inference_calibration_apply": (status, (c_void_p, *buffer, out)),
+    "inference_sessions_list": (status, (c_void_p, out)),
+    "inference_session_get": (status, (c_void_p, *buffer, out)),
+    "inference_session_put": (status, (c_void_p, *buffer, *buffer, out)),
+    "inference_session_delete": (status, (c_void_p, *buffer, out)),
+    "inference_tokenize": (status, (c_void_p, *buffer, out)),
+    "inference_detokenize": (status, (c_void_p, *buffer, out)),
     "inference_system_info": (status, (out,)),
     "inference_system_doctor": (status, (out,)),
     "inference_stream_next": (status, (c_void_p, c_int64, out, POINTER(c_int32))),

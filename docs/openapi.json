@@ -133,7 +133,14 @@
         },
         "responses": {
           "200": {
-            "description": "Reapply ISQ to a model that was loaded with ISQ."
+            "description": "Requantization queued for a model that was loaded with ISQ.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReIsqResponse"
+                }
+              }
+            }
           },
           "400": {
             "description": "Invalid ISQ type"
@@ -2789,14 +2796,13 @@
       },
       "CalibrationApplyRequest": {
         "type": "object",
-        "description": "Request body for applying online calibration.",
         "properties": {
           "save_cimatrix": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Optionally save the collected imatrix to this `.cimatrix` file name in the server's working directory."
+            "description": "Also save the collected importance matrix to this `.cimatrix` path; over HTTP, a bare file name written to\nthe server's working directory."
           }
         }
       },
@@ -3997,6 +4003,44 @@
           },
           "source": {
             "$ref": "#/components/schemas/SourceMeta"
+          }
+        }
+      },
+      "DetokenizeRequest": {
+        "type": "object",
+        "required": [
+          "tokens"
+        ],
+        "properties": {
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "skip_special_tokens": {
+            "type": "boolean",
+            "default": true
+          },
+          "tokens": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "DetokenizeResponse": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "text": {
+            "type": "string"
           }
         }
       },
@@ -5278,6 +5322,14 @@
           },
           "id": {
             "type": "string"
+          },
+          "max_model_len": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Longest sequence, prompt plus completion, a loaded model accepts",
+            "minimum": 0
           },
           "mcp_servers_connected": {
             "type": [
@@ -9207,7 +9259,20 @@
         "properties": {
           "ggml_type": {
             "type": "string",
+            "description": "The ISQ type to requantize to, e.g. `Q4K`; numeric shorthands resolve as they would on the CPU.",
             "example": "Q4K"
+          }
+        }
+      },
+      "ReIsqResponse": {
+        "type": "object",
+        "description": "Answered once the requantization is queued behind the requests already running.",
+        "required": [
+          "ggml_type"
+        ],
+        "properties": {
+          "ggml_type": {
+            "type": "string"
           }
         }
       },
@@ -10735,6 +10800,47 @@
           }
         }
       },
+      "SessionDeleted": {
+        "type": "object",
+        "required": [
+          "id",
+          "deleted"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "boolean",
+            "description": "False when there was no such session."
+          },
+          "id": {
+            "type": "string"
+          }
+        }
+      },
+      "SessionList": {
+        "type": "object",
+        "required": [
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "SessionStored": {
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          }
+        }
+      },
       "ShellConfig": {
         "type": "object",
         "description": "Shell execution config.",
@@ -11061,6 +11167,44 @@
           }
         ],
         "description": "Text format configuration"
+      },
+      "TokenizeRequest": {
+        "type": "object",
+        "required": [
+          "text"
+        ],
+        "properties": {
+          "add_special_tokens": {
+            "type": "boolean",
+            "default": true
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "text": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TokenizeResponse": {
+        "type": "object",
+        "required": [
+          "tokens"
+        ],
+        "properties": {
+          "tokens": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        }
       },
       "Tool": {
         "type": "object",

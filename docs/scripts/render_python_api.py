@@ -154,7 +154,7 @@ GROUPS = [
     (
         "Models, adapters, files and skills",
         "management",
-        "Model status, LoRA adapters, files, skills, approvals and the media generation calls.",
+        "Model status, LoRA adapters, files, skills, approvals, sessions, calibration, tokenization and the media generation calls.",
         lambda n: n.startswith(
             (
                 "Model",
@@ -174,6 +174,9 @@ GROUPS = [
                 "ReIsq",
                 "Tune",
                 "Serialized",
+                "Session",
+                "Tokenize",
+                "Detokenize",
             )
         ),
     ),

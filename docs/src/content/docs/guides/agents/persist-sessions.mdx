@@ -61,9 +61,7 @@ curl -X DELETE http://localhost:1234/v1/sessions/user-42-chat-abc
 </TabItem>
 <TabItem label="Python">
 
-The Python package does not expose session listing, export, import, or delete yet; use the HTTP endpoints for those.
-
-In-process requests reuse agentic state by setting `session_id` on the request:
+`engine.list_sessions()`, `engine.get_session(id)`, `engine.put_session(id, session)` and `engine.delete_session(id)` list, export, import and delete sessions; an exported or imported session has the same body as over HTTP. In-process requests reuse agentic state by setting `session_id` on the request:
 
 ```python
 import inference_rs as ir

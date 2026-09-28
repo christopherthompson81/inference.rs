@@ -195,7 +195,7 @@ Not supported. inference.rs is an inference engine, not a training platform.
 
 ## Tokenization
 
-inference.rs does not expose `/v1/tokenize` or `/v1/detokenize` HTTP endpoints. Tokenizer access is available through the SDKs (`tokenize_text` / `detokenize_text` in Python; `tokenize_with_model` / `detokenize_with_model` in Rust).
+inference.rs does not expose `/v1/tokenize` or `/v1/detokenize` HTTP endpoints. Tokenizer access is available through the SDKs (`engine.tokenize` / `engine.detokenize` in Python, `inference_tokenize` / `inference_detokenize` in the C ABI; `tokenize_with_model` / `detokenize_with_model` in Rust).
 
 ## Authentication
 

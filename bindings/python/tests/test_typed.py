@@ -266,6 +266,25 @@ class TypedEngine(unittest.TestCase):
             self.engine.model_status("no-such-model")
         self.assertEqual(unknown.exception.status, ir.Status.NOT_FOUND)
 
+    def test_runtime_operations_are_typed(self):
+        tokens = self.engine.tokenize("Reply with ok")
+        self.assertTrue(tokens and all(isinstance(token, int) for token in tokens))
+        # The tiny tokenizer has no decoder, so its word-boundary markers come back as they are.
+        self.assertEqual(self.engine.detokenize(tokens).replace("\u2581", " "), "Reply with ok")
+        session = t.SerializedSession(messages=[{"role": {"Left": "user"}, "content": {"Left": "hi"}}])
+        self.assertEqual(self.engine.put_session("typed-session", session).id, "typed-session")
+        self.assertIn("typed-session", self.engine.list_sessions().data)
+        self.assertEqual(self.engine.get_session("typed-session").messages, session.messages)
+        self.assertTrue(self.engine.delete_session("typed-session").deleted)
+        with self.assertRaises(ir.InferenceError) as gone:
+            self.engine.get_session("typed-session")
+        self.assertEqual(gone.exception.status, ir.Status.NOT_FOUND)
+        self.assertIsInstance(self.engine.calibration_status(), t.CalibrationStatus)
+        with self.assertRaises(ir.InferenceError):
+            self.engine.re_isq("no-such-type")
+        models = self.engine.list_models().data
+        self.assertGreater(next(m for m in models if m.id != "default").max_model_len, 0)
+
 
 if __name__ == "__main__":
     unittest.main()
