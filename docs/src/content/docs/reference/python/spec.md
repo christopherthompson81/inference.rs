@@ -699,6 +699,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `chat_template` | `str \| None` | optional |
 | `device` | `str \| None` | optional |
 | `device_layers` | `list[str] \| None` | optional |
+| `disable_eos_stop` | `bool \| None` | optional |
 | `encoder_cache_memory_bytes` | `int \| None` | optional |
 | `hf_config_overrides` | `dict[str, Any] \| None` | optional |
 | `isq` | `str \| None` | optional |

@@ -8,10 +8,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
+use inference_api::{engine::RuntimeSpec, Engine, EngineSpec};
 use inference_core::{
     expand_isq_value, initialize_logging, IsqType, ModelSelected, TokenSource, UqffWriteConfig,
 };
-use inference_server_core::inference_for_server_builder::{defaults, InferenceRsForServerBuilder};
 
 use crate::args::{
     GlobalOptions, QuantizeDeviceOptions, QuantizeModelFormat, QuantizeModelSourceOptions,
@@ -261,19 +261,31 @@ pub async fn run_quantize(mut model_type: QuantizeModelType, global: GlobalOptio
 
     let (model_selected, cpu, device_layers) = convert_to_model_selected(&model_type, write_uqff)?;
 
-    let inference = InferenceRsForServerBuilder::new()
-        .with_model(model_selected)
-        .with_max_seqs(1)
-        .with_no_kv_cache(defaults::NO_KV_CACHE)
-        .with_token_source(global.token_source.clone())
-        .with_interactive_mode(defaults::INTERACTIVE_MODE)
-        .with_prefix_cache_n(0)
-        .set_paged_attn(Some(false))
-        .with_cpu(cpu)
-        .with_num_device_layers_optional(device_layers)
-        .build()
-        .await?;
-    inference.shutdown().await.map_err(anyhow::Error::msg)?;
+    // Loading with write_uqff set writes the files; the engine is shut down once it has.
+    let spec = EngineSpec {
+        model: model_selected,
+        model_id: None,
+        runtime: RuntimeSpec {
+            device: cpu.then(|| "cpu".to_string()),
+            max_seqs: Some(1),
+            prefix_cache_n: Some(0),
+            paged_attn: Some(false),
+            token_source: Some(global.token_source.to_string()),
+            device_layers,
+            ..Default::default()
+        },
+        agentic: Default::default(),
+        adapters: Default::default(),
+        skills: Default::default(),
+        anymoe: None,
+    };
+    let engine = Engine::load(spec).await?;
+    engine
+        .state()
+        .clone()
+        .shutdown()
+        .await
+        .map_err(anyhow::Error::msg)?;
 
     info!("UQFF generation for ISQ=[{}] complete!", requested);
 

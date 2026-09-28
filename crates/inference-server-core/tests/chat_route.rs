@@ -270,3 +270,17 @@ async fn files_upload_and_serve_their_content() -> anyhow::Result<()> {
     assert_eq!(body["error"]["param"], "purpose", "{body}");
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_engine_shuts_down_from_its_last_clone() -> anyhow::Result<()> {
+    let dir = support::tiny_checkpoint()?;
+    let spec = serde_json::from_value(json!({
+        "model": {"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}},
+        "runtime": {"device": "cpu"},
+    }))?;
+    let engine = inference_api::Engine::load(spec).await?;
+    let other = engine.clone();
+    assert!(engine.shutdown().await.is_err());
+    other.shutdown().await.map_err(anyhow::Error::msg)?;
+    Ok(())
+}

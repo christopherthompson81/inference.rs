@@ -844,19 +844,6 @@ impl BenchRuntimeOptions {
             slice_name: self.matformer_slice_name.clone(),
         }
     }
-
-    pub fn mtp_config(&self) -> Option<inference_core::MtpConfig> {
-        if self.mtp {
-            return Some(
-                inference_core::MtpConfig::builtin(self.mtp_n_predict)
-                    .with_draft_sampling_method(self.mtp_draft_sampling.into()),
-            );
-        }
-        self.mtp_model.clone().map(|model| {
-            inference_core::MtpConfig::new(model, self.mtp_n_predict)
-                .with_draft_sampling_method(self.mtp_draft_sampling.into())
-        })
-    }
 }
 
 /// Search embedding model options

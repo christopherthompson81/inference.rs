@@ -211,6 +211,9 @@ pub struct RuntimeSpec {
     /// Periodic throughput logging; on unless set to false.
     #[serde(default)]
     pub throughput_logging: Option<bool>,
+    /// Generate to `max_tokens` regardless of end-of-sequence tokens, as a benchmark needs.
+    #[serde(default)]
+    pub disable_eos_stop: bool,
 }
 
 fn nonzero(field: &str, value: usize) -> Result<std::num::NonZeroUsize, EngineLoadError> {
@@ -385,7 +388,8 @@ impl EngineSpec {
         builder = builder
             .with_hf_config_overrides_optional(runtime.hf_config_overrides)
             .with_log_optional(runtime.log.map(|path| path.to_string_lossy().into_owned()))
-            .with_interactive_mode(!runtime.throughput_logging.unwrap_or(true));
+            .with_interactive_mode(!runtime.throughput_logging.unwrap_or(true))
+            .with_disable_eos_stop(runtime.disable_eos_stop);
         let paged = runtime.paged_cache;
         let sizes = [
             paged.context_len.is_some(),
@@ -535,6 +539,12 @@ impl Engine {
 
     pub fn state(&self) -> &SharedInferenceRsState {
         &self.chat.state
+    }
+
+    /// Stops the engine threads and waits for them; fails while another clone of this engine is alive.
+    pub async fn shutdown(self) -> Result<(), String> {
+        let Self { chat, .. } = self;
+        chat.state.shutdown().await
     }
 
     /// The chat policy and skill store an HTTP server over this engine shares.

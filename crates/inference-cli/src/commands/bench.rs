@@ -2,11 +2,11 @@
 
 use anyhow::Result;
 use comfy_table::{presets::UTF8_FULL, Cell, Color, ContentArrangement, Table};
+use inference_api::{engine::RuntimeSpec, Engine, EngineSpec};
 use inference_core::{
     initialize_logging, AdapterSelection, Constraint, NormalRequest, Request, RequestMessage,
     Response, SamplingParams,
 };
-use inference_server_core::inference_for_server_builder::InferenceRsForServerBuilder;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -17,11 +17,40 @@ use tracing::info;
 use crate::args::{BenchRuntimeOptions, GlobalOptions, ModelType};
 
 use super::normalize_requested_adapter;
-use super::serve::{
-    apply_quant_resolution, convert_to_model_selected, extract_device_settings,
-    extract_encoder_cache_memory_bytes, extract_hf_config_settings, extract_isq_setting,
-    extract_paged_attn_settings,
-};
+use super::serve::{apply_quant_resolution, model_spec, mtp_spec};
+
+/// The engine a benchmark measures: the model as `serve` would load it, run one sequence at a time.
+fn bench_spec(
+    model_type: &ModelType,
+    runtime: &BenchRuntimeOptions,
+    global: &GlobalOptions,
+) -> Result<EngineSpec> {
+    let (model, model_runtime) = model_spec(model_type, &runtime.matformer_selection(), global)?;
+
+    Ok(EngineSpec {
+        model,
+        model_id: None,
+        runtime: RuntimeSpec {
+            // One sequence, no prefix cache, and exactly gen_len tokens, so each measurement is the same work.
+            max_seqs: Some(1),
+            prefix_cache_n: Some(0),
+            disable_eos_stop: true,
+            no_kv_cache: runtime.no_kv_cache,
+            mtp: mtp_spec(
+                runtime.mtp,
+                runtime.mtp_model.clone(),
+                runtime.mtp_n_predict,
+                runtime.mtp_draft_sampling,
+            ),
+            log: None,
+            ..model_runtime
+        },
+        agentic: Default::default(),
+        adapters: Default::default(),
+        skills: Default::default(),
+        anymoe: None,
+    })
+}
 
 #[cfg(feature = "cuda")]
 unsafe extern "C" {
@@ -116,52 +145,10 @@ pub async fn run_bench(
     // Convert args and load model
     let matformer = runtime.matformer_selection();
     apply_quant_resolution(&mut model_type, &global.token_source, &matformer).await?;
-    let model_selected = convert_to_model_selected(&model_type, &matformer)?;
-    let (max_model_len, hf_config_overrides) = extract_hf_config_settings(&model_type);
-
-    let (
-        paged_attn,
-        paged_attn_gpu_mem,
-        paged_attn_gpu_mem_usage,
-        paged_ctxt_len,
-        paged_attn_block_size,
-        paged_cache_type,
-    ) = extract_paged_attn_settings(&model_type);
-
-    let (cpu, device_layers) = extract_device_settings(&model_type);
-    let isq = extract_isq_setting(&model_type);
-    let encoder_cache_memory_bytes = extract_encoder_cache_memory_bytes(&model_type)?;
-
     info!("Loading model for benchmarking...");
-
-    // Build using the same infrastructure as serve
-    let mut builder = InferenceRsForServerBuilder::new()
-        .with_model(model_selected)
-        .with_max_seqs(1) // Single sequence for benchmarking
-        .with_no_kv_cache(runtime.no_kv_cache)
-        .with_token_source(global.token_source)
-        .with_interactive_mode(false)
-        .with_prefix_cache_n(0) // Disable prefix cache for benchmarking
-        .with_disable_eos_stop(true) // Always generate exactly gen_len tokens
-        .with_mtp_config_optional(runtime.mtp_config())
-        .with_max_model_len_optional(max_model_len)
-        .with_hf_config_overrides_optional(hf_config_overrides)
-        .set_paged_attn(paged_attn)
-        .with_cpu(cpu)
-        .with_seed_optional(global.seed)
-        .with_num_device_layers_optional(device_layers)
-        .with_in_situ_quant_optional(isq)
-        .with_paged_attn_gpu_mem_optional(paged_attn_gpu_mem)
-        .with_paged_attn_gpu_mem_usage_optional(paged_attn_gpu_mem_usage)
-        .with_paged_ctxt_len_optional(paged_ctxt_len)
-        .with_paged_attn_block_size_optional(paged_attn_block_size)
-        .with_paged_attn_cache_type(paged_cache_type);
-
-    if let Some(max_bytes) = encoder_cache_memory_bytes {
-        builder = builder.with_encoder_cache_memory_bytes(max_bytes);
-    }
-
-    let inference = builder.build().await?;
+    let spec = bench_spec(&model_type, &runtime, &global)?;
+    let engine = Engine::load(spec).await?;
+    let inference = engine.state().clone();
     if let Some(alias) = request_adapter.as_deref() {
         let adapters = inference.list_lora_adapters(None).await?;
         if !adapters.iter().any(|adapter| adapter.alias == alias) {
@@ -525,4 +512,41 @@ fn print_results(
 
     println!("{table}");
     println!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_benchmark_runs_one_sequence_to_its_full_length() {
+        use clap::Parser;
+        let cli = crate::args::Cli::try_parse_from([
+            "inference",
+            "--seed",
+            "3",
+            "bench",
+            "-m",
+            "org/model",
+            "--cpu",
+            "--mtp",
+        ])
+        .unwrap();
+        let crate::args::Command::Bench {
+            model_type,
+            default_model,
+            runtime,
+            ..
+        } = cli.command
+        else {
+            panic!("not a bench command");
+        };
+        let model_type = crate::args::resolve_model_type(model_type, default_model).unwrap();
+        let spec = bench_spec(&model_type, &runtime, &cli.global).unwrap();
+        let rt = &spec.runtime;
+        assert_eq!((rt.max_seqs, rt.prefix_cache_n), (Some(1), Some(0)));
+        assert!(rt.disable_eos_stop);
+        assert_eq!((rt.device.as_deref(), rt.seed), (Some("cpu"), Some(3)));
+        assert!(rt.mtp.is_some() && rt.log.is_none() && rt.throughput_logging.is_none());
+    }
 }
