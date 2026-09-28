@@ -32,6 +32,7 @@ futures.workspace = true
 indicatif.workspace = true
 inference-models-llama.workspace = true
 inference-models-other.workspace = true
+inference-models-qwen.workspace = true
 inference-nn.workspace = true
 inference-quant.workspace = true
 rand.workspace = true
