@@ -74,7 +74,7 @@ impl SearchPipeline {
             Some(model_id.clone()),
         )
         .with_load_context(EmbeddingLoadContext::Search)
-        .build(None);
+        .build(None)?;
 
         let pipeline = loader.load_model_from_hf(
             None,

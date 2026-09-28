@@ -1,94 +1,68 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+/// Mistral LLM, https://github.com/mistralai/mistral-src
 use crate::attention::FlashParams;
-use std::sync::Arc;
-
+use crate::layers::masker::CausalMaskConfig;
 use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
-    softcap, ColumnParallelLayer, QuantMethod, RowParallelLayer, ShardedVarBuilder,
+    ColumnParallelLayer, QuantMethod, QuantizedConfig, RowParallelLayer, ShardedVarBuilder,
 };
+use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::{
     amoe::{AnyMoeBaseModelMixin, MlpLayer},
     attention::{AttentionMask, SdpaParams},
-    device_map::DeviceMapper,
-    layers::masker::BidirectionalMasker,
-    layers::{embedding, Gemma3RotaryEmbedding, GemmaRmsNorm, Mlp, RotaryEmbedding, Sdpa},
-    paged_attention::AttentionImplementation,
-    pipeline::{EmbeddingModel, IsqModel, NormalLoadingMetadata},
+    device_map::{DeviceMappedMask, DeviceMapper},
+    layers::masker::NotACache,
+    layers::{embedding, Activation, CausalMasker, Mlp, RmsNorm, RotaryEmbedding, Sdpa},
+    model::{EmbeddingModel, IsqModel, NormalLoadingMetadata},
+    paged_attention::{AttentionImplementation, ModelConfigMetadata},
+    serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
-use inference_quant::QuantizedConfig;
 
-use crate::{
-    layers::{Activation, Gemma3RopeScalingConfig, Gemma3RopeSpec},
-    serde_default_fn,
-};
+macro_rules! sliding_window {
+    ($layer_idx:expr, $cfg:expr) => {
+        if !($cfg.sliding_window.is_some()
+            && $cfg.use_sliding_window
+            && $layer_idx >= $cfg.max_window_layers)
+        {
+            None
+        } else {
+            $cfg.sliding_window
+        }
+    };
+}
 
-serde_default_fn!(bool, attention_bias, false);
-serde_default_fn!(usize, head_dim, 256);
-serde_default_fn!(Activation, hidden_activation, Activation::GeluPytorchTanh);
-serde_default_fn!(f64, rms_norm_eps, 1e-6);
-serde_default_fn!(f64, rope_theta, 1000000.);
-serde_default_fn!(usize, vocab_size, 262208);
-serde_default_fn!(usize, query_pre_attn_scalar, 256);
-serde_default_fn!(usize, max_position_embeddings, 131072);
-serde_default_fn!(f64, rope_local_base_freq, 10000.);
-serde_default_fn!(usize, sliding_window_pattern, 6);
-serde_default_fn!(usize, num_attention_heads, 8);
-serde_default_fn!(usize, num_key_value_heads, 4);
+serde_default_fn!(bool, tie_word_embeddings, false);
 
-#[derive(Debug, Clone, serde::Deserialize)]
-pub struct EmbeddingGemmaConfig {
-    #[serde(default = "attention_bias")]
-    pub attention_bias: bool,
-    #[serde(default = "head_dim")]
-    pub head_dim: usize,
-    #[serde(default = "hidden_activation")]
-    pub hidden_activation: Activation,
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Config {
+    pub vocab_size: usize,
     pub hidden_size: usize,
     pub intermediate_size: usize,
-    #[serde(default = "num_attention_heads")]
-    pub num_attention_heads: usize,
     pub num_hidden_layers: usize,
-    #[serde(default = "num_key_value_heads")]
+    pub num_attention_heads: usize,
     pub num_key_value_heads: usize,
-    #[serde(default = "rms_norm_eps")]
-    pub rms_norm_eps: f64,
-    #[serde(default = "rope_theta")]
-    pub rope_theta: f64,
-    #[serde(default = "vocab_size")]
-    pub vocab_size: usize,
-    pub sliding_window: usize,
-    pub attn_logit_softcapping: Option<f64>,
-    pub final_logit_softcapping: Option<f64>,
-    #[serde(default = "query_pre_attn_scalar")]
-    pub query_pre_attn_scalar: usize,
-    #[serde(default = "max_position_embeddings")]
+    pub hidden_act: Activation,
     pub max_position_embeddings: usize,
+    pub rms_norm_eps: f64,
+    pub rope_theta: f64,
+    pub sliding_window: Option<usize>,
+    pub head_dim: Option<usize>,
     pub quantization_config: Option<QuantizedConfig>,
-    #[serde(default = "rope_local_base_freq")]
-    pub rope_local_base_freq: f64,
-    #[serde(default = "sliding_window_pattern")]
-    pub sliding_window_pattern: usize,
-    pub rope_scaling: Option<Gemma3RopeScalingConfig>,
+    #[serde(default = "tie_word_embeddings")]
+    pub tie_word_embeddings: bool,
+    pub max_window_layers: usize,
+    pub use_sliding_window: bool,
 }
 
-impl EmbeddingGemmaConfig {
-    pub fn rope_spec(&self) -> Gemma3RopeSpec<'_> {
-        Gemma3RopeSpec {
-            rope_theta: self.rope_theta,
-            head_dim: self.head_dim,
-            max_position_embeddings: self.max_position_embeddings,
-            scaling: self.rope_scaling.as_ref(),
-        }
+impl Config {
+    pub fn head_dim(&self) -> usize {
+        self.head_dim
+            .unwrap_or(self.hidden_size / self.num_attention_heads)
     }
-}
-
-macro_rules! is_sliding {
-    ($layer_idx:expr, $cfg:expr) => {
-        ($layer_idx + 1) % $cfg.sliding_window_pattern != 0
-    };
 }
 
 struct Attention {
@@ -96,40 +70,37 @@ struct Attention {
     k_proj: Arc<dyn QuantMethod>,
     v_proj: Arc<dyn QuantMethod>,
     o_proj: Arc<dyn QuantMethod>,
+    q_norm: RmsNorm,
+    k_norm: RmsNorm,
     num_heads: usize,
     num_kv_heads: usize,
     head_dim: usize,
-    rotary_emb_global: Arc<Gemma3RotaryEmbedding>,
-    rotary_emb_local: Arc<RotaryEmbedding>,
-    use_sliding_window: bool,
+    rotary_emb: Arc<RotaryEmbedding>,
     sdpa_params: SdpaParams,
-    q_norm: GemmaRmsNorm,
-    k_norm: GemmaRmsNorm,
 }
 
 impl Attention {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        rotary_emb_global: Arc<Gemma3RotaryEmbedding>,
-        rotary_emb_local: Arc<RotaryEmbedding>,
-        cfg: &EmbeddingGemmaConfig,
-        layer_idx: usize,
-        mapper: &dyn DeviceMapper,
+        rotary_emb: Arc<RotaryEmbedding>,
+        cfg: &Config,
         vb: ShardedVarBuilder,
+        mapper: &dyn DeviceMapper,
+        layer_idx: usize,
+        loading_isq: bool,
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
         let hidden_sz = cfg.hidden_size;
         let num_heads = cfg.num_attention_heads;
         let num_kv_heads = cfg.num_key_value_heads;
-        let head_dim = cfg.head_dim;
-        let bias = cfg.attention_bias;
+        let head_dim = cfg.head_dim();
         let q_proj = ColumnParallelLayer::new(
             hidden_sz,
             num_heads * head_dim,
             &cfg.quantization_config,
-            bias,
+            false,
             comm,
-            vb.pp("q_proj"),
+            mapper.set_device(layer_idx, vb.pp("q_proj"), loading_isq),
         )?;
         let kv_shard = inference_quant::compute_kv_shard(
             cfg.num_key_value_heads,
@@ -140,41 +111,36 @@ impl Attention {
             hidden_sz,
             num_kv_heads * head_dim,
             &cfg.quantization_config,
-            bias,
+            false,
             comm,
             kv_shard,
-            vb.pp("k_proj"),
+            mapper.set_device(layer_idx, vb.pp("k_proj"), loading_isq),
         )?;
         let v_proj = ColumnParallelLayer::new_with_shard(
             hidden_sz,
             num_kv_heads * head_dim,
             &cfg.quantization_config,
-            bias,
+            false,
             comm,
             kv_shard,
-            vb.pp("v_proj"),
+            mapper.set_device(layer_idx, vb.pp("v_proj"), loading_isq),
         )?;
         let o_proj = RowParallelLayer::new(
             num_heads * head_dim,
             hidden_sz,
             &cfg.quantization_config,
-            bias,
+            false,
             comm,
-            vb.pp("o_proj"),
+            mapper.set_device(layer_idx, vb.pp("o_proj"), loading_isq),
         )?;
-        let sliding_window = if is_sliding!(layer_idx, cfg) {
-            Some(cfg.sliding_window)
-        } else {
-            None
-        };
-
-        let q_norm = GemmaRmsNorm::new(
-            cfg.head_dim,
+        let sliding_window = sliding_window!(layer_idx, cfg);
+        let q_norm = RmsNorm::new(
+            cfg.head_dim(),
             cfg.rms_norm_eps,
             mapper.set_device(layer_idx, vb.pp("q_norm"), false),
         )?;
-        let k_norm = GemmaRmsNorm::new(
-            cfg.head_dim,
+        let k_norm = RmsNorm::new(
+            cfg.head_dim(),
             cfg.rms_norm_eps,
             mapper.set_device(layer_idx, vb.pp("k_norm"), false),
         )?;
@@ -183,25 +149,23 @@ impl Attention {
             k_proj,
             v_proj,
             o_proj,
+            q_norm,
+            k_norm,
             num_heads: num_heads / comm.world_size(),
             num_kv_heads: (num_kv_heads / comm.world_size()).max(1),
             head_dim,
-            rotary_emb_global,
-            rotary_emb_local,
-            use_sliding_window: sliding_window.is_some(),
+            rotary_emb,
             sdpa_params: SdpaParams {
                 n_kv_groups: inference_quant::compute_n_kv_groups(
                     cfg.num_key_value_heads,
                     cfg.num_attention_heads,
                     comm,
                 )?,
-                softcap: cfg.attn_logit_softcapping.map(|x| x as f32),
-                softmax_scale: 1.0 / (cfg.query_pre_attn_scalar as f32).sqrt(),
+                softcap: None,
+                softmax_scale: 1.0 / (head_dim as f32).sqrt(),
                 sliding_window,
                 sinks: None,
             },
-            q_norm,
-            k_norm,
         })
     }
 
@@ -209,8 +173,7 @@ impl Attention {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &Tensor,
-        sliding_attention_mask: &Tensor,
+        attention_mask: &AttentionMask,
         seqlen_offsets: &[usize],
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
@@ -232,24 +195,14 @@ impl Attention {
         q = q.apply(&self.q_norm)?;
         k = k.apply(&self.k_norm)?;
 
-        let positions =
-            crate::pipeline::text_positions_tensor(seqlen_offsets, q.dim(2)?, q.device())?;
-        (q, k) = match self.use_sliding_window {
-            true => self.rotary_emb_local.forward(&q, &k, &positions)?,
-            false => self.rotary_emb_global.forward(&q, &k, &positions)?,
-        };
-
-        let mask = if self.use_sliding_window {
-            sliding_attention_mask
-        } else {
-            attention_mask
-        };
+        let positions = crate::model::text_positions_tensor(seqlen_offsets, q.dim(2)?, q.device())?;
+        (q, k) = self.rotary_emb.forward(&q, &k, &positions)?;
 
         let mut attn_output = Sdpa.run_attention(
             &q,
             &k,
             &v,
-            &AttentionMask::Custom(mask.clone()),
+            attention_mask,
             Some(flash_params),
             &self.sdpa_params,
         )?;
@@ -263,18 +216,15 @@ impl Attention {
 struct DecoderLayer {
     self_attn: Attention,
     mlp: Box<dyn MlpLayer>,
-    input_layernorm: GemmaRmsNorm,
-    post_attention_layernorm: GemmaRmsNorm,
-    pre_feedforward_layernorm: GemmaRmsNorm,
-    post_feedforward_layernorm: GemmaRmsNorm,
+    input_layernorm: RmsNorm,
+    post_attention_layernorm: RmsNorm,
 }
 
 impl DecoderLayer {
     #[allow(clippy::too_many_arguments)]
     fn new(
-        rotary_emb_global: Arc<Gemma3RotaryEmbedding>,
-        rotary_emb_local: Arc<RotaryEmbedding>,
-        cfg: &EmbeddingGemmaConfig,
+        rotary_emb: Arc<RotaryEmbedding>,
+        cfg: &Config,
         vb: ShardedVarBuilder,
         mapper: &dyn DeviceMapper,
         layer_idx: usize,
@@ -282,12 +232,12 @@ impl DecoderLayer {
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
         let self_attn = Attention::new(
-            rotary_emb_global,
-            rotary_emb_local,
+            rotary_emb,
             cfg,
-            layer_idx,
-            mapper,
             mapper.set_device(layer_idx, vb.pp("self_attn"), loading_isq),
+            mapper,
+            layer_idx,
+            loading_isq,
             comm,
         )?;
         let mlp = Mlp::new(
@@ -295,36 +245,24 @@ impl DecoderLayer {
             cfg.hidden_size,
             cfg.intermediate_size,
             &cfg.quantization_config,
-            cfg.hidden_activation,
+            cfg.hidden_act,
             comm,
         )?;
-        let input_layernorm = GemmaRmsNorm::new(
+        let input_layernorm = RmsNorm::new(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             mapper.set_device(layer_idx, vb.pp("input_layernorm"), false),
         )?;
-        let post_attention_layernorm = GemmaRmsNorm::new(
+        let post_attention_layernorm = RmsNorm::new(
             cfg.hidden_size,
             cfg.rms_norm_eps,
             mapper.set_device(layer_idx, vb.pp("post_attention_layernorm"), false),
-        )?;
-        let pre_feedforward_layernorm = GemmaRmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("pre_feedforward_layernorm"), false),
-        )?;
-        let post_feedforward_layernorm = GemmaRmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("post_feedforward_layernorm"), false),
         )?;
         Ok(Self {
             self_attn,
             mlp: Box::new(mlp),
             input_layernorm,
             post_attention_layernorm,
-            pre_feedforward_layernorm,
-            post_feedforward_layernorm,
         })
     }
 
@@ -332,8 +270,7 @@ impl DecoderLayer {
     fn forward(
         &self,
         xs: &Tensor,
-        attention_mask: &Tensor,
-        sliding_attention_mask: &Tensor,
+        attention_mask: &AttentionMask,
         seqlen_offsets: &[usize],
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
@@ -341,40 +278,48 @@ impl DecoderLayer {
         let xs = self.input_layernorm.forward(xs)?;
         let xs = self
             .self_attn
-            .forward(
-                &xs,
-                attention_mask,
-                sliding_attention_mask,
-                seqlen_offsets,
-                flash_params,
-            )?
-            .apply(&self.post_attention_layernorm)?;
+            .forward(&xs, attention_mask, seqlen_offsets, flash_params)?;
         let xs = (xs + residual)?;
         let residual = &xs;
         let xs = self
             .mlp
-            .forward(&xs.apply(&self.pre_feedforward_layernorm)?)?
-            .apply(&self.post_feedforward_layernorm)?;
+            .forward(&xs.apply(&self.post_attention_layernorm)?)?;
         residual + xs
     }
 }
 
-pub struct EmbeddingGemma {
+pub struct Model {
     embed_tokens: Arc<dyn QuantMethod>,
-    embed_tokens_scale: f64,
-    dtype: DType,
     layers: Vec<DecoderLayer>,
-    norm: GemmaRmsNorm,
+    norm: RmsNorm,
+    dtype: DType,
+    sliding_window: Option<usize>,
     device: Device,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
-    sliding_window: usize,
-    final_logit_softcapping: Option<f64>,
+    #[allow(dead_code)]
+    cfg: ModelConfigMetadata,
 }
 
-impl EmbeddingGemma {
+impl Model {
     pub fn new(
-        cfg: &EmbeddingGemmaConfig,
+        cfg: &Config,
         vb: ShardedVarBuilder,
+        is_gptx: bool,
+        normal_loading_metadata: NormalLoadingMetadata,
+        attention_mechanism: AttentionImplementation,
+    ) -> Result<Self> {
+        Self::new_inner(
+            cfg,
+            vb,
+            is_gptx,
+            normal_loading_metadata,
+            attention_mechanism,
+        )
+    }
+
+    pub fn new_inner(
+        cfg: &Config,
+        vb_m: ShardedVarBuilder,
         is_gptx: bool,
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
@@ -383,70 +328,57 @@ impl EmbeddingGemma {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),
-                quant_cfg.get_bits_name(&vb)
+                quant_cfg.get_bits_name(&vb_m)
             );
         }
-
         if !matches!(attention_mechanism, AttentionImplementation::Eager) {
             candle_core::bail!("Expected AttentionImplementation::Eager");
         }
 
         let mapper = normal_loading_metadata.mapper;
-        let dtype = vb.dtype();
-        let embed_tokens_scale = (cfg.hidden_size as f64).sqrt();
+        let dtype = vb_m.dtype();
 
         let embed_tokens = embedding(
             cfg.vocab_size,
             cfg.hidden_size,
-            mapper.set_nm_device(vb.pp("embed_tokens"), normal_loading_metadata.loading_isq),
+            mapper.set_nm_device(vb_m.pp("embed_tokens"), normal_loading_metadata.loading_isq),
             &cfg.quantization_config,
         )?;
 
-        let global_ropes = crate::device_map::per_layer_device(
-            &*mapper,
-            cfg.num_hidden_layers,
-            &normal_loading_metadata.real_device,
-            |device| Gemma3RotaryEmbedding::new(is_gptx, vb.dtype(), cfg.rope_spec(), device),
-        )?;
-
-        let local_ropes = crate::device_map::per_layer_device(
+        let head_dim = cfg.head_dim();
+        let ropes = crate::device_map::per_layer_device(
             &*mapper,
             cfg.num_hidden_layers,
             &normal_loading_metadata.real_device,
             |device| {
                 RotaryEmbedding::new(
-                    cfg.rope_local_base_freq as f32,
-                    cfg.head_dim,
+                    cfg.rope_theta as f32,
+                    head_dim,
                     cfg.max_position_embeddings,
                     device,
                     is_gptx,
-                    vb.dtype(),
+                    vb_m.dtype(),
                 )
             },
         )?;
 
-        let vb_l = vb.pp("layers");
+        let vb_l = vb_m.pp("layers");
         let layers = NiceProgressBar::<_, 'b'>(
             0..cfg.num_hidden_layers,
             "Loading repeating layers",
             &normal_loading_metadata.multi_progress,
         )
-        .par_iter_if_isq(|layer_idx| {
+        .par_iter_if_isq(|layer_idx| -> Result<DecoderLayer> {
             let device = mapper
                 .device_for(layer_idx, false)
                 .unwrap_or(&normal_loading_metadata.real_device);
-            let rotary_emb_global = global_ropes
-                .get(&device.location())
-                .expect("No RoPE for device location!")
-                .clone();
-            let rotary_emb_local = local_ropes
+            let rotary_emb = ropes
                 .get(&device.location())
                 .expect("No RoPE for device location!")
                 .clone();
             let comm = mapper.get_comm_for(layer_idx)?;
             DecoderLayer::new(
-                rotary_emb_global,
-                rotary_emb_local,
+                rotary_emb.clone(),
                 cfg,
                 vb_l.pp(layer_idx),
                 &*mapper,
@@ -455,65 +387,81 @@ impl EmbeddingGemma {
                 &comm,
             )
         })?;
-        let norm = GemmaRmsNorm::new(
+        let norm = RmsNorm::new(
             cfg.hidden_size,
             cfg.rms_norm_eps,
-            mapper.set_nm_device(vb.pp("norm"), false),
+            mapper.set_nm_device(vb_m.pp("norm"), false),
         )?;
 
         Ok(Self {
             embed_tokens,
-            embed_tokens_scale,
-            dtype,
             layers,
             norm,
-            device: normal_loading_metadata.real_device,
+            dtype,
             sliding_window: cfg.sliding_window,
-            final_logit_softcapping: cfg.final_logit_softcapping,
+            device: normal_loading_metadata.real_device,
+            cfg: ModelConfigMetadata {
+                max_seq_len: cfg.max_position_embeddings,
+                num_layers: cfg.num_hidden_layers,
+                hidden_size: cfg.hidden_size,
+                num_kv_heads: (cfg.num_key_value_heads / mapper.get_comm_for(0)?.world_size())
+                    .max(1),
+                num_attn_heads: cfg.num_attention_heads / mapper.get_comm_for(0)?.world_size(),
+                sliding_window: cfg.sliding_window,
+                k_head_dim: cfg.head_dim(),
+                v_head_dim: cfg.head_dim(),
+                kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
+            },
             mapper,
         })
     }
 
-    pub fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
-        self.embed_tokens.embedding_forward(input_ids, self.dtype)? * self.embed_tokens_scale
+    pub fn forward(&self, input_ids: &Tensor, flash_params: &FlashParams) -> Result<Tensor> {
+        self.forward_embeds(
+            input_ids,
+            self.embed_tokens.embedding_forward(input_ids, self.dtype)?,
+            flash_params,
+        )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn forward_embeds(
         &self,
         input_ids: &Tensor,
-        mut xs: Tensor,
+        input_embeds: Tensor,
         flash_params: &FlashParams,
     ) -> Result<Tensor> {
+        let mut xs = input_embeds;
+
         let (bs, _seqlen) = input_ids.dims2()?;
         let seqlen_offsets = vec![0; bs];
 
-        let attention_mask = BidirectionalMasker.make_mask(input_ids, xs.dtype())?;
-        let sliding_mask =
-            BidirectionalMasker.make_sliding_mask(input_ids, xs.dtype(), self.sliding_window)?;
+        let attention_mask = CausalMasker.make_causal_mask(
+            input_ids,
+            &NotACache,
+            xs.dtype(),
+            &CausalMaskConfig {
+                sliding_window: self.sliding_window,
+                ..Default::default()
+            },
+        )?;
+        let attention_mask = DeviceMappedMask::new(attention_mask, &*self.mapper)?;
 
         for (i, layer) in self.layers.iter().enumerate() {
             xs = self.mapper.map(xs, i)?;
             xs = layer.forward(
                 &xs,
-                &attention_mask.to_device(xs.device())?,
-                &sliding_mask.to_device(xs.device())?,
+                &attention_mask.get(xs.device()),
                 &seqlen_offsets,
                 flash_params,
             )?;
         }
         let xs = xs.to_device(&self.device)?;
-        let mut xs = xs.apply(&self.norm)?;
-
-        if let Some(final_logit_softcapping) = self.final_logit_softcapping {
-            let dtype = xs.dtype();
-            xs = softcap(&xs, final_logit_softcapping as f32)?.to_dtype(dtype)?;
-        }
-
-        Ok(xs)
+        xs.apply(&self.norm)
     }
 }
 
-impl IsqModel for EmbeddingGemma {
+impl IsqModel for Model {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
 
@@ -522,6 +470,10 @@ impl IsqModel for EmbeddingGemma {
 
         for (layer_idx, layer) in self.layers.iter().enumerate() {
             let uvb_l = uvb.pp("layers").pp(layer_idx);
+            uvb_l.pp("input_layernorm").add(&layer.input_layernorm);
+            uvb_l
+                .pp("post_attention_layernorm")
+                .add(&layer.post_attention_layernorm);
             uvb_l
                 .pp("self_attn")
                 .pp("q_norm")
@@ -530,33 +482,23 @@ impl IsqModel for EmbeddingGemma {
                 .pp("self_attn")
                 .pp("k_norm")
                 .add(&layer.self_attn.k_norm);
-            uvb_l.pp("input_layernorm").add(&layer.input_layernorm);
-            uvb_l
-                .pp("post_attention_layernorm")
-                .add(&layer.post_attention_layernorm);
-            uvb_l
-                .pp("pre_feedforward_layernorm")
-                .add(&layer.pre_feedforward_layernorm);
-            uvb_l
-                .pp("post_feedforward_layernorm")
-                .add(&layer.post_feedforward_layernorm);
         }
 
         uvb.to_safetensors()
     }
 }
 
-impl EmbeddingModel for EmbeddingGemma {
+impl EmbeddingModel for Model {
     fn forward(
         &self,
         input_ids: &Tensor,
         flash_params: &FlashParams,
     ) -> candle_core::Result<Tensor> {
-        self.forward_embeds(input_ids, self.embed_tokens(input_ids)?, flash_params)
+        self.forward(input_ids, flash_params)
     }
     fn device(&self) -> &Device {
         &self.device
     }
 }
 
-impl AnyMoeBaseModelMixin for EmbeddingGemma {}
+impl AnyMoeBaseModelMixin for Model {}

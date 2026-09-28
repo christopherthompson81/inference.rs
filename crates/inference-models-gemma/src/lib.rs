@@ -8,6 +8,7 @@ use inference_nn::{
 };
 
 pub mod diffusion_gemma;
+pub mod embedding_gemma;
 pub mod gemma;
 pub mod gemma2;
 pub mod gemma3;
@@ -22,4 +23,5 @@ inference_nn::json_config!(
     gemma3n::config::Gemma3nConfig,
     gemma4::config::Gemma4Config,
     diffusion_gemma::config::DiffusionGemmaConfig,
+    embedding_gemma::EmbeddingGemmaConfig,
 );

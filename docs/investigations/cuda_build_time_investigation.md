@@ -646,3 +646,21 @@ Review follow-ups:
   validation, message extras, prompt rendering, context fitting, stop criteria, KV preallocation, reasoning setup,
   multimodal prompt prep, recurrent slot assign/release, prefix-cache hit. admit_request is now 231 lines; a review
   found no behavior change (validation order, error variants, lock scopes, early returns).
+
+## Run 36 - 2026-09-28
+
+- Question: what do the embedding models still in core cost, and does splitting core's lib.rs change anything?
+- Command: `cargo llvm-lines -p inference-core --lib --features cuda` before and after, on the same tree otherwise.
+- Baseline: 3,918,365 lines (78,652 copies). embedding_models:: held 35.3k, of which embedding_gemma 14.8k and
+  qwen3_embedding 13.9k; xlora_models:: 32.1k and models::quantized_llama 28.7k.
+- Change: EmbeddingGemma and Qwen3-Embedding move to inference-models-gemma / -qwen; their loaders split into
+  `embedding_loaders/{gemma,qwen3}.rs`, gated on the family features like the normal loaders (an unbuilt family is
+  a load error naming the feature; `EmbeddingLoaderBuilder::build` returns a Result for it). The 2.2k-line
+  `impl InferenceRs` and its builder and configs leave lib.rs for `inference_rs/{mod,builder,config,lora,models,
+  sessions}.rs` (readability, not IR).
+- Result: 3,902,517 after the move (-15.8k): 15.3k of the models' code was still instantiated in core, serde
+  deserialization of their configs (generic, so emitted where core called `serde_json::from_str`) and the
+  AnyMoE mixin defaults emitted with the trait-object vtables core builds. With the configs parsed through the
+  family crates' `json_config!` (as the normal loaders do): 3,892,700, -25.7k (0.66%); 7.8k of vtable defaults stay.
+- Not moved: the GGML llama and the two quantized X-LoRA models (60.8k together) read GGUF content, LoRA and the
+  model-config traits, which live in core; moving them needs those in inference-nn first.

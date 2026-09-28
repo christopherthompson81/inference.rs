@@ -1,4 +1,3 @@
-pub use crate::model::IsqModel;
 use std::{
     borrow::Cow,
     collections::{BTreeSet, HashMap, HashSet},

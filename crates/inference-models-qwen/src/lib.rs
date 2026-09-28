@@ -17,6 +17,7 @@ pub mod qwen2vl;
 pub mod qwen3;
 pub mod qwen3_5;
 pub mod qwen3_5_moe;
+pub mod qwen3_embedding;
 pub mod qwen3_moe;
 pub mod qwen3_next;
 pub mod qwen3_vl;
@@ -27,4 +28,5 @@ inference_nn::json_config!(
     qwen3::Config,
     qwen3_moe::Config,
     qwen3_next::Config,
+    qwen3_embedding::Config,
 );
