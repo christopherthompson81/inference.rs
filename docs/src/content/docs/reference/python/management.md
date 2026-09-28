@@ -181,8 +181,8 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 
 | Member | Wire/config name |
 | --- | --- |
-| `ImageGenerationResponseFormat.URL` | `'Url'` |
-| `ImageGenerationResponseFormat.B64JSON` | `'B64Json'` |
+| `ImageGenerationResponseFormat.URL` | `'url'` |
+| `ImageGenerationResponseFormat.B64_JSON` | `'b64_json'` |
 
 
 ## `LoadLoraAdapterRequest`

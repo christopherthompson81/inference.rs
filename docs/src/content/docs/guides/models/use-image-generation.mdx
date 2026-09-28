@@ -22,6 +22,26 @@ The CLI and server always load the fully-resident `Flux` path. To trade speed fo
 | `Flux` | Full model resident | CLI, server, SDK | Fully loaded path. Fastest. |
 | `FluxOffloaded` | Much smaller | SDK only | Offloads components to CPU; useful when the full model does not fit. |
 
+### From GGUF files
+
+A local directory in the single-file layout loads FLUX from GGUF, with the T5 text encoder quantized too:
+
+| File | What it is |
+|---|---|
+| `flux1-dev-Q8_0.gguf` (or `flux1-schnell-*.gguf`) | The FLUX transformer, quantized |
+| `ae.safetensors` | The FLUX autoencoder |
+| `t5-v1_1-xxl-encoder-*.gguf` (optional) | The T5-XXL text encoder, quantized, in llama.cpp naming |
+| `clip_l.safetensors` (optional) | The CLIP-L text encoder |
+
+```bash
+inference serve -m /path/to/flux-files
+```
+
+The directory needs exactly one `flux<N>-dev*.gguf` or `flux<N>-schnell*.gguf` and at most one `t5*.gguf`. The
+transformer config is read off the GGUF's tensors. The T5 and CLIP configs and tokenizers, and any text encoder missing from the directory, come from the Hugging
+Face Hub. FLUX.1-dev at Q8_0 with a Q8_0 T5 needs roughly 18 GB of GPU memory; quantized weights cannot be offloaded,
+so the GGUF layout loads with `Flux`, not `FluxOffloaded`.
+
 Generating an image:
 
 <Tabs>
@@ -39,7 +59,7 @@ curl http://localhost:1234/v1/images/generations \
   }'
 ```
 
-The response is JSON with a `data` array. Each entry has either `url` or `b64_json`, controlled by `response_format` (default `Url`); see [Request fields](#request-fields) and [Output handling](#output-handling).
+The response is JSON with a `data` array. Each entry has either `url` or `b64_json`, controlled by `response_format` (default `url`); see [Request fields](#request-fields) and [Output handling](#output-handling).
 
 </TabItem>
 <TabItem label="Python">
@@ -103,7 +123,7 @@ println!("{}", response.data[0].url.as_ref().unwrap());
 | `n` | 1 | Number of images. |
 | `height` | 720 | Output height in pixels. |
 | `width` | 1280 | Output width in pixels. |
-| `response_format` | `"Url"` | `"Url"` (response carries a server-side filename in `url`) or `"B64Json"` (response carries a `data:image/png;base64,...` string in `b64_json`). |
+| `response_format` | `"url"` | `"url"` (response carries a server-side filename in `url`) or `"b64_json"` (response carries the base64-encoded PNG in `b64_json`). |
 
 `size` (the OpenAI string form) is not supported. Use `height` and `width`.
 
@@ -111,23 +131,24 @@ println!("{}", response.data[0].url.as_ref().unwrap());
 
 FLUX is memory-hungry at native precision: the model is roughly 12B parameters, and the T5 XXL text encoder adds a large memory footprint. For low-memory hosts, use the `FluxOffloaded` loader (SDK only) from the [Running FLUX](#running-flux) table.
 
+For a smaller footprint without offloading, load FLUX and T5 from GGUF ([From GGUF files](#from-gguf-files)).
+
 Diffusion models do not support [ISQ (in-situ quantization)](/reference/quantization-types/). Load them at native precision instead of passing `--quant` or `--isq`; they are generally more sensitive to quantization than language models.
 
 ## Output handling
 
-With `Url` (the default), the server writes the PNG to disk and returns its filename in `url`:
+With `url` (the default), the server writes the PNG to disk and returns its filename in `url`:
 
 ```python
 import shutil
 shutil.copy(response.data[0].url, "out.png")
 ```
 
-With `B64Json`, `b64_json` is a `data:image/png;base64,...` string. Strip the prefix before decoding:
+With `b64_json`, `b64_json` is the base64-encoded PNG, as in OpenAI's API:
 
 ```python
-import base64, re
+import base64
 
-payload = re.sub(r"^data:image/\w+;base64,", "", response.data[0].b64_json)
 with open("out.png", "wb") as f:
-    f.write(base64.b64decode(payload))
+    f.write(base64.b64decode(response.data[0].b64_json))
 ```

@@ -1,4 +1,9 @@
-use std::{cmp::Ordering, fs::File, path::PathBuf, sync::Arc};
+use std::{
+    cmp::Ordering,
+    fs::File,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use candle_core::{DType, Device, Result, Tensor, D};
 use candle_nn::Module;
@@ -65,12 +70,22 @@ impl FluxStepperConfig {
     }
 }
 
+/// Local text-encoder weights to use instead of the hub's; configs and tokenizers still come from the hub.
+#[derive(Debug, Clone, Default)]
+pub struct LocalTextEncoders {
+    /// T5-XXL encoder weights, a GGUF file in llama.cpp `t5encoder` naming.
+    pub t5: Option<PathBuf>,
+    /// CLIP-L text encoder weights, a safetensors file in HF naming.
+    pub clip: Option<PathBuf>,
+}
+
 pub struct FluxStepperLoad<'a> {
     pub dtype: DType,
     pub device: &'a Device,
     pub silent: bool,
     pub offloaded: bool,
     pub fetch: RepoFileFetcher,
+    pub text_encoders: LocalTextEncoders,
 }
 
 pub struct FluxStepper {
@@ -84,6 +99,7 @@ pub struct FluxStepper {
     device: Device,
     dtype: DType,
     fetch: RepoFileFetcher,
+    t5_weights: Option<PathBuf>,
     silent: bool,
     offloaded: bool,
 }
@@ -99,6 +115,7 @@ fn get_t5_tokenizer(fetch: &RepoFileFetcher) -> anyhow::Result<Tokenizer> {
 
 fn get_t5_model(
     fetch: &RepoFileFetcher,
+    local_weights: Option<&Path>,
     dtype: DType,
     device: &Device,
     silent: bool,
@@ -106,20 +123,23 @@ fn get_t5_model(
 ) -> candle_core::Result<T5EncoderModel> {
     let repo_id = T5_XXL_REPO;
 
-    let vb = from_mmaped_safetensors(
-        T5_XXL_SAFETENSOR_FILES
-            .iter()
-            .map(|f| fetch(repo_id, HUB_REVISION, f))
-            .collect::<candle_core::Result<Vec<_>>>()?,
-        vec![],
-        Some(dtype),
-        device,
-        vec![None],
-        silent,
-        None,
-        |_| true,
-        Arc::new(|_| DeviceForLoadTensor::Base),
-    )?;
+    let vb = match local_weights {
+        Some(path) => crate::gguf::var_builder(path, crate::gguf::t5_native_name, dtype, device)?.0,
+        None => from_mmaped_safetensors(
+            T5_XXL_SAFETENSOR_FILES
+                .iter()
+                .map(|f| fetch(repo_id, HUB_REVISION, f))
+                .collect::<candle_core::Result<Vec<_>>>()?,
+            vec![],
+            Some(dtype),
+            device,
+            vec![None],
+            silent,
+            None,
+            |_| true,
+            Arc::new(|_| DeviceForLoadTensor::Base),
+        )?,
+    };
     let config_filename = fetch(repo_id, HUB_REVISION, "config.json")?;
     let config = std::fs::read_to_string(config_filename)?;
     let config: t5::Config = serde_json::from_str(&config).map_err(candle_core::Error::msg)?;
@@ -129,12 +149,16 @@ fn get_t5_model(
 
 fn get_clip_model_and_tokenizer(
     fetch: &RepoFileFetcher,
+    local_weights: Option<&Path>,
     device: &Device,
     silent: bool,
 ) -> anyhow::Result<(ClipTextTransformer, Tokenizer)> {
     let repo_id = CLIP_REPO;
 
-    let model_file = fetch(repo_id, HUB_REVISION, "model.safetensors")?;
+    let model_file = match local_weights {
+        Some(path) => path.to_path_buf(),
+        None => fetch(repo_id, HUB_REVISION, "model.safetensors")?,
+    };
     let vb = from_mmaped_safetensors(
         vec![model_file],
         vec![],
@@ -179,12 +203,14 @@ impl FluxStepper {
             silent,
             offloaded,
             fetch,
+            text_encoders,
         }: FluxStepperLoad<'_>,
     ) -> anyhow::Result<Self> {
         info!("Loading T5 XXL tokenizer.");
         let t5_tokenizer = get_t5_tokenizer(&fetch)?;
         info!("Loading CLIP model and tokenizer.");
-        let (clip_encoder, clip_tokenizer) = get_clip_model_and_tokenizer(&fetch, device, silent)?;
+        let (clip_encoder, clip_tokenizer) =
+            get_clip_model_and_tokenizer(&fetch, text_encoders.clip.as_deref(), device, silent)?;
 
         Ok(Self {
             cfg,
@@ -197,6 +223,7 @@ impl FluxStepper {
             device: device.clone(),
             dtype,
             fetch,
+            t5_weights: text_encoders.t5,
             silent,
             offloaded,
         })
@@ -226,6 +253,7 @@ impl DiffusionModel for FluxStepper {
             info!("Hotloading T5 XXL model.");
             let mut t5_encoder = get_t5_model(
                 &self.fetch,
+                self.t5_weights.as_deref(),
                 self.dtype,
                 &self.device,
                 self.silent,

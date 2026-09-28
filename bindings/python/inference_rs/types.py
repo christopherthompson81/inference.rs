@@ -828,8 +828,8 @@ class ImageGenerationResponse:
 class ImageGenerationResponseFormat(str, Enum):
     """Image generation response format"""
 
-    URL = "Url"
-    B64JSON = "B64Json"
+    URL = "url"
+    B64_JSON = "b64_json"
 
 
 class IncludeOption(str, Enum):

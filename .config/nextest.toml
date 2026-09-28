@@ -36,3 +36,9 @@ not (
 [[profile.cuda.overrides]]
 filter = 'binary(paddleocr_vl)'
 test-group = 'gpu-model'
+
+# Real-weight FLUX takes ~18 GB of VRAM, so it runs alone, first so the rest of the suite follows it.
+[[profile.cuda.overrides]]
+filter = 'package(inference-server-core) & binary(flux)'
+threads-required = 'num-test-threads'
+priority = 100

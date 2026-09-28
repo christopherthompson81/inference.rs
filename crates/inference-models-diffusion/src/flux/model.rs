@@ -1,11 +1,15 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+use std::collections::HashMap;
+
 use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
-use candle_nn::{LayerNorm, Linear, RmsNorm};
+use candle_nn::{LayerNorm, RmsNorm};
+
+use crate::qlinear::MaybeQuantLinear;
 use inference_quant::ShardedVarBuilder;
 use serde::Deserialize;
 
-use crate::layers::{self, MatMul};
+use crate::layers::MatMul;
 
 const MLP_RATIO: f64 = 4.;
 const HIDDEN_SIZE: usize = 3072;
@@ -21,6 +25,36 @@ pub struct Config {
     pub num_layers: usize,
     pub num_single_layers: usize,
     pub guidance_embeds: bool,
+}
+
+impl Config {
+    /// The config of a checkpoint that ships none (a GGUF transformer), read off its tensor shapes.
+    pub fn from_weights(shapes: &HashMap<String, Vec<usize>>) -> Result<Self> {
+        let dim = |name: &str, axis: usize| -> Result<usize> {
+            shapes
+                .get(name)
+                .and_then(|shape| shape.get(axis).copied())
+                .ok_or_else(|| candle_core::Error::Msg(format!("FLUX weights lack `{name}`")))
+        };
+        let count = |prefix: &str, tensor: &str| {
+            (0..)
+                .take_while(|i| shapes.contains_key(&format!("{prefix}.{i}.{tensor}")))
+                .count()
+        };
+        let hidden = dim("img_in.weight", 0)?;
+        if hidden != HIDDEN_SIZE {
+            candle_core::bail!("FLUX weights have hidden size {hidden}, expected {HIDDEN_SIZE}");
+        }
+        Ok(Self {
+            in_channels: dim("img_in.weight", 1)?,
+            pooled_projection_dim: dim("vector_in.in_layer.weight", 1)?,
+            joint_attention_dim: dim("txt_in.weight", 1)?,
+            num_attention_heads: hidden / dim("double_blocks.0.img_attn.norm.query_norm.scale", 0)?,
+            num_layers: count("double_blocks", "img_attn.qkv.weight"),
+            num_single_layers: count("single_blocks", "linear1.weight"),
+            guidance_embeds: shapes.contains_key("guidance_in.in_layer.weight"),
+        })
+    }
 }
 
 fn layer_norm(dim: usize, vb: ShardedVarBuilder) -> Result<LayerNorm> {
@@ -133,14 +167,14 @@ impl candle_core::Module for EmbedNd {
 
 #[derive(Debug, Clone)]
 pub struct MlpEmbedder {
-    in_layer: Linear,
-    out_layer: Linear,
+    in_layer: MaybeQuantLinear,
+    out_layer: MaybeQuantLinear,
 }
 
 impl MlpEmbedder {
     fn new(in_sz: usize, h_sz: usize, vb: ShardedVarBuilder) -> Result<Self> {
-        let in_layer = layers::linear(in_sz, h_sz, vb.pp("in_layer"))?;
-        let out_layer = layers::linear(h_sz, h_sz, vb.pp("out_layer"))?;
+        let in_layer = MaybeQuantLinear::new(in_sz, h_sz, true, vb.pp("in_layer"))?;
+        let out_layer = MaybeQuantLinear::new(h_sz, h_sz, true, vb.pp("out_layer"))?;
         Ok(Self {
             in_layer,
             out_layer,
@@ -192,12 +226,12 @@ impl ModulationOut {
 
 #[derive(Debug, Clone)]
 struct Modulation1 {
-    lin: Linear,
+    lin: MaybeQuantLinear,
 }
 
 impl Modulation1 {
     fn new(dim: usize, vb: ShardedVarBuilder) -> Result<Self> {
-        let lin = layers::linear(dim, 3 * dim, vb.pp("lin"))?;
+        let lin = MaybeQuantLinear::new(dim, 3 * dim, true, vb.pp("lin"))?;
         Ok(Self { lin })
     }
 
@@ -220,12 +254,12 @@ impl Modulation1 {
 
 #[derive(Debug, Clone)]
 struct Modulation2 {
-    lin: Linear,
+    lin: MaybeQuantLinear,
 }
 
 impl Modulation2 {
     fn new(dim: usize, vb: ShardedVarBuilder) -> Result<Self> {
-        let lin = layers::linear(dim, 6 * dim, vb.pp("lin"))?;
+        let lin = MaybeQuantLinear::new(dim, 6 * dim, true, vb.pp("lin"))?;
         Ok(Self { lin })
     }
 
@@ -254,9 +288,9 @@ impl Modulation2 {
 
 #[derive(Debug, Clone)]
 pub struct SelfAttention {
-    qkv: Linear,
+    qkv: MaybeQuantLinear,
     norm: QkNorm,
-    proj: Linear,
+    proj: MaybeQuantLinear,
     num_attention_heads: usize,
 }
 
@@ -268,9 +302,9 @@ impl SelfAttention {
         vb: ShardedVarBuilder,
     ) -> Result<Self> {
         let head_dim = dim / num_attention_heads;
-        let qkv = layers::linear_b(dim, dim * 3, qkv_bias, vb.pp("qkv"))?;
+        let qkv = MaybeQuantLinear::new(dim, dim * 3, qkv_bias, vb.pp("qkv"))?;
         let norm = QkNorm::new(head_dim, vb.pp("norm"))?;
-        let proj = layers::linear(dim, dim, vb.pp("proj"))?;
+        let proj = MaybeQuantLinear::new(dim, dim, true, vb.pp("proj"))?;
         Ok(Self {
             qkv,
             norm,
@@ -292,14 +326,8 @@ impl SelfAttention {
     }
 
     fn cast_to(&mut self, device: &Device) -> Result<()> {
-        self.qkv = Linear::new(
-            self.qkv.weight().to_device(device)?,
-            self.qkv.bias().map(|x| x.to_device(device).unwrap()),
-        );
-        self.proj = Linear::new(
-            self.proj.weight().to_device(device)?,
-            self.proj.bias().map(|x| x.to_device(device).unwrap()),
-        );
+        self.qkv = self.qkv.to_device(device)?;
+        self.proj = self.proj.to_device(device)?;
         self.norm = QkNorm {
             query_norm: RmsNorm::new(
                 self.norm
@@ -326,26 +354,20 @@ impl SelfAttention {
 
 #[derive(Debug, Clone)]
 struct Mlp {
-    lin1: Linear,
-    lin2: Linear,
+    lin1: MaybeQuantLinear,
+    lin2: MaybeQuantLinear,
 }
 
 impl Mlp {
     fn new(in_sz: usize, mlp_sz: usize, vb: ShardedVarBuilder) -> Result<Self> {
-        let lin1 = layers::linear(in_sz, mlp_sz, vb.pp("0"))?;
-        let lin2 = layers::linear(mlp_sz, in_sz, vb.pp("2"))?;
+        let lin1 = MaybeQuantLinear::new(in_sz, mlp_sz, true, vb.pp("0"))?;
+        let lin2 = MaybeQuantLinear::new(mlp_sz, in_sz, true, vb.pp("2"))?;
         Ok(Self { lin1, lin2 })
     }
 
     fn cast_to(&mut self, device: &Device) -> Result<()> {
-        self.lin1 = Linear::new(
-            self.lin1.weight().to_device(device)?,
-            self.lin1.bias().map(|x| x.to_device(device).unwrap()),
-        );
-        self.lin2 = Linear::new(
-            self.lin2.weight().to_device(device)?,
-            self.lin2.bias().map(|x| x.to_device(device).unwrap()),
-        );
+        self.lin1 = self.lin1.to_device(device)?;
+        self.lin2 = self.lin2.to_device(device)?;
         Ok(())
     }
 }
@@ -443,25 +465,13 @@ impl DoubleStreamBlock {
     }
 
     fn cast_to(&mut self, device: &Device) -> Result<()> {
-        self.img_mod.lin = Linear::new(
-            self.img_mod.lin.weight().to_device(device)?,
-            self.img_mod
-                .lin
-                .bias()
-                .map(|x| x.to_device(device).unwrap()),
-        );
+        self.img_mod.lin = self.img_mod.lin.to_device(device)?;
         self.img_norm1 = LayerNorm::new_no_bias(self.img_norm1.weight().to_device(device)?, 1e-6);
         self.img_attn.cast_to(device)?;
         self.img_norm2 = LayerNorm::new_no_bias(self.img_norm2.weight().to_device(device)?, 1e-6);
         self.img_mlp.cast_to(device)?;
 
-        self.txt_mod.lin = Linear::new(
-            self.txt_mod.lin.weight().to_device(device)?,
-            self.txt_mod
-                .lin
-                .bias()
-                .map(|x| x.to_device(device).unwrap()),
-        );
+        self.txt_mod.lin = self.txt_mod.lin.to_device(device)?;
         self.txt_norm1 = LayerNorm::new_no_bias(self.txt_norm1.weight().to_device(device)?, 1e-6);
         self.txt_attn.cast_to(device)?;
         self.txt_norm2 = LayerNorm::new_no_bias(self.txt_norm2.weight().to_device(device)?, 1e-6);
@@ -473,8 +483,8 @@ impl DoubleStreamBlock {
 
 #[derive(Debug, Clone)]
 pub struct SingleStreamBlock {
-    linear1: Linear,
-    linear2: Linear,
+    linear1: MaybeQuantLinear,
+    linear2: MaybeQuantLinear,
     norm: QkNorm,
     pre_norm: LayerNorm,
     modulation: Modulation1,
@@ -488,8 +498,8 @@ impl SingleStreamBlock {
         let h_sz = HIDDEN_SIZE;
         let mlp_sz = (h_sz as f64 * MLP_RATIO) as usize;
         let head_dim = h_sz / cfg.num_attention_heads;
-        let linear1 = layers::linear(h_sz, h_sz * 3 + mlp_sz, vb.pp("linear1"))?;
-        let linear2 = layers::linear(h_sz + mlp_sz, h_sz, vb.pp("linear2"))?;
+        let linear1 = MaybeQuantLinear::new(h_sz, h_sz * 3 + mlp_sz, true, vb.pp("linear1"))?;
+        let linear2 = MaybeQuantLinear::new(h_sz + mlp_sz, h_sz, true, vb.pp("linear2"))?;
         let norm = QkNorm::new(head_dim, vb.pp("norm"))?;
         let pre_norm = layer_norm(h_sz, vb.pp("pre_norm"))?;
         let modulation = Modulation1::new(h_sz, vb.pp("modulation"))?;
@@ -524,14 +534,8 @@ impl SingleStreamBlock {
     }
 
     fn cast_to(&mut self, device: &Device) -> Result<()> {
-        self.linear1 = Linear::new(
-            self.linear1.weight().to_device(device)?,
-            self.linear1.bias().map(|x| x.to_device(device).unwrap()),
-        );
-        self.linear2 = Linear::new(
-            self.linear2.weight().to_device(device)?,
-            self.linear2.bias().map(|x| x.to_device(device).unwrap()),
-        );
+        self.linear1 = self.linear1.to_device(device)?;
+        self.linear2 = self.linear2.to_device(device)?;
         self.norm = QkNorm {
             query_norm: RmsNorm::new(
                 self.norm
@@ -553,13 +557,7 @@ impl SingleStreamBlock {
             ),
         };
         self.pre_norm = LayerNorm::new_no_bias(self.pre_norm.weight().to_device(device)?, 1e-6);
-        self.modulation.lin = Linear::new(
-            self.modulation.lin.weight().to_device(device)?,
-            self.modulation
-                .lin
-                .bias()
-                .map(|x| x.to_device(device).unwrap()),
-        );
+        self.modulation.lin = self.modulation.lin.to_device(device)?;
         Ok(())
     }
 }
@@ -567,15 +565,16 @@ impl SingleStreamBlock {
 #[derive(Debug, Clone)]
 pub struct LastLayer {
     norm_final: LayerNorm,
-    linear: Linear,
-    ada_ln_modulation: Linear,
+    linear: MaybeQuantLinear,
+    ada_ln_modulation: MaybeQuantLinear,
 }
 
 impl LastLayer {
     fn new(h_sz: usize, p_sz: usize, out_c: usize, vb: ShardedVarBuilder) -> Result<Self> {
         let norm_final = layer_norm(h_sz, vb.pp("norm_final"))?;
-        let linear = layers::linear(h_sz, p_sz * p_sz * out_c, vb.pp("linear"))?;
-        let ada_ln_modulation = layers::linear(h_sz, 2 * h_sz, vb.pp("adaLN_modulation.1"))?;
+        let linear = MaybeQuantLinear::new(h_sz, p_sz * p_sz * out_c, true, vb.pp("linear"))?;
+        let ada_ln_modulation =
+            MaybeQuantLinear::new(h_sz, 2 * h_sz, true, vb.pp("adaLN_modulation.1"))?;
         Ok(Self {
             norm_final,
             linear,
@@ -596,8 +595,8 @@ impl LastLayer {
 
 #[derive(Debug, Clone)]
 pub struct Flux {
-    img_in: Linear,
-    txt_in: Linear,
+    img_in: MaybeQuantLinear,
+    txt_in: MaybeQuantLinear,
     time_in: MlpEmbedder,
     vector_in: MlpEmbedder,
     guidance_in: Option<MlpEmbedder>,
@@ -616,14 +615,16 @@ impl Flux {
         device: Device,
         offloaded: bool,
     ) -> Result<Self> {
-        let img_in = layers::linear(
+        let img_in = MaybeQuantLinear::new(
             cfg.in_channels,
             HIDDEN_SIZE,
+            true,
             vb.pp("img_in").set_device(device.clone()),
         )?;
-        let txt_in = layers::linear(
+        let txt_in = MaybeQuantLinear::new(
             cfg.joint_attention_dim,
             HIDDEN_SIZE,
+            true,
             vb.pp("txt_in").set_device(device.clone()),
         )?;
         let mut double_blocks = Vec::with_capacity(cfg.num_layers);
@@ -736,5 +737,62 @@ impl Flux {
         }
         let img = img.i((.., txt.dim(1)?..))?;
         self.final_layer.forward(&img, &vec_)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::{Config, HIDDEN_SIZE};
+
+    fn shapes(guidance: bool, hidden: usize) -> HashMap<String, Vec<usize>> {
+        let mut shapes = HashMap::from([
+            ("img_in.weight".to_string(), vec![hidden, 64]),
+            ("vector_in.in_layer.weight".to_string(), vec![hidden, 768]),
+            ("txt_in.weight".to_string(), vec![hidden, 4096]),
+            (
+                "double_blocks.0.img_attn.norm.query_norm.scale".to_string(),
+                vec![128],
+            ),
+        ]);
+        for i in 0..3 {
+            shapes.insert(
+                format!("double_blocks.{i}.img_attn.qkv.weight"),
+                vec![3 * hidden, hidden],
+            );
+        }
+        for i in 0..5 {
+            shapes.insert(
+                format!("single_blocks.{i}.linear1.weight"),
+                vec![4 * hidden, hidden],
+            );
+        }
+        if guidance {
+            shapes.insert("guidance_in.in_layer.weight".to_string(), vec![hidden, 256]);
+        }
+        shapes
+    }
+
+    #[test]
+    fn the_config_is_read_off_the_tensor_shapes() {
+        let config = Config::from_weights(&shapes(true, HIDDEN_SIZE)).unwrap();
+        assert_eq!(
+            (
+                config.in_channels,
+                config.pooled_projection_dim,
+                config.joint_attention_dim
+            ),
+            (64, 768, 4096)
+        );
+        assert_eq!(config.num_attention_heads, HIDDEN_SIZE / 128);
+        assert_eq!((config.num_layers, config.num_single_layers), (3, 5));
+        assert!(config.guidance_embeds);
+        assert!(
+            !Config::from_weights(&shapes(false, HIDDEN_SIZE))
+                .unwrap()
+                .guidance_embeds
+        );
+        assert!(Config::from_weights(&shapes(true, 2048)).is_err());
     }
 }

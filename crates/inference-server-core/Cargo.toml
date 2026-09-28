@@ -37,10 +37,12 @@ uuid = { workspace = true, features = ["v4"] }
 
 
 [dev-dependencies]
+base64.workspace = true
 candle-core.workspace = true
 tempfile.workspace = true
 candle-nn.workspace = true
 indicatif.workspace = true
+image.workspace = true
 inference-models-other.workspace = true
 inference-nn.workspace = true
 inference-quant.workspace = true
