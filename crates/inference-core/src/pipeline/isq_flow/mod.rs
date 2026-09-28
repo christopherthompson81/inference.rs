@@ -8,21 +8,108 @@ mod online;
 mod plan;
 
 pub(crate) use drive::{
-    resolve_imatrix_map, CalibrationCtx, EmbeddingCalibrationDrive, MultimodalCalibrationDrive,
-    NormalCalibrationDrive,
+    resolve_imatrix_map, CalibrationCtx, CalibrationDrive, EmbeddingCalibrationDrive,
+    MultimodalCalibrationDrive, NormalCalibrationDrive,
 };
 pub use online::CalibrationStatus;
 pub(crate) use online::{apply_calibration, begin_calibration, calibration_status};
 pub(crate) use plan::{
     auto_device_map_sizes, resolve_and_install_isq_plan, resolve_auto_device_map_sizing,
-    resolve_weight_load_dtype, AutoDeviceMapSizes, AutoDeviceMapSizingInputs, IsqPlanInputs,
+    resolve_weight_load_dtype, AutoDeviceMapSizes, AutoDeviceMapSizingInputs, IsqLoadPlan,
+    IsqPlanInputs,
 };
 
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use candle_core::Tensor;
 use inference_quant::{IsqType, QuantMethod, TrackedModule};
 use tracing::info;
+
+use super::isq::{write_uqff_artifacts, UqffFullSer, UqffWriteConfig, UqffWriteRequest};
+
+/// A UQFF to write once the model is loaded: where, and the tensors and files that are not quantized layers.
+pub(crate) struct UqffArtifact<'a> {
+    pub config: &'a UqffWriteConfig,
+    pub residual: Vec<(String, Tensor)>,
+    pub full_ser: UqffFullSer<'a>,
+}
+
+pub(crate) struct FinishIsqLoad<'a> {
+    pub plan: &'a IsqLoadPlan,
+    pub modules: Vec<TrackedModule>,
+    pub drive: &'a dyn CalibrationDrive,
+    pub in_situ_quant: Option<IsqType>,
+    pub imatrix: Option<&'a PathBuf>,
+    pub calibration_file: Option<&'a PathBuf>,
+    pub calibration: CalibrationCtx<'a>,
+    pub uqff: Option<UqffArtifact<'a>>,
+}
+
+/// After the weights are read: validate the ISQ selection, calibrate, capture, write the UQFF, then quantize.
+pub(crate) fn finish_isq_load(inputs: FinishIsqLoad<'_>) -> Result<()> {
+    let FinishIsqLoad {
+        plan,
+        modules,
+        drive,
+        in_situ_quant,
+        imatrix,
+        calibration_file,
+        calibration,
+        uqff,
+    } = inputs;
+    plan.validate_tracked_selection(&modules)?;
+    let imatrix_map = if plan.wants_imatrix {
+        Some(resolve_imatrix_map(
+            drive,
+            &modules,
+            imatrix,
+            calibration_file,
+            &calibration,
+        )?)
+    } else {
+        None
+    };
+    if plan.capture == inference_quant::IsqCaptureMode::CaptureMatches {
+        let ty = in_situ_quant.context("imatrix quantization requires an ISQ type")?;
+        complete_isq_capture(
+            &modules,
+            ty,
+            imatrix_map
+                .as_ref()
+                .expect("CaptureMatches requires imatrix data"),
+        )?;
+    }
+    if let Some(UqffArtifact {
+        config,
+        residual,
+        full_ser,
+    }) = uqff
+    {
+        let types = plan
+            .write_types
+            .clone()
+            .filter(|types| !types.is_empty())
+            .context("UQFF serialization requires at least one ISQ type.")?;
+        write_uqff_artifacts(UqffWriteRequest {
+            output: config.output.clone(),
+            types,
+            base_model: config.base_model.clone(),
+            repo_id: config.repo_id.clone(),
+            layers: modules.clone(),
+            quantize_predicates: plan.uqff_quantize_predicates.clone(),
+            residual,
+            full_ser,
+            imatrix: imatrix_map.unwrap_or_default(),
+        })?;
+    }
+    if plan.immediate_isq_installed {
+        for module in modules {
+            module.ct.resolve()?;
+        }
+    }
+    Ok(())
+}
 
 pub(crate) fn requantize_and_swap(
     modules: &[TrackedModule],

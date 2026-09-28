@@ -1,14 +1,19 @@
-//! Load steps shared by the normal and multimodal pipeline loaders.
+//! Load steps shared by the normal, multimodal and embedding pipeline loaders.
 
-use std::path::Path;
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 
 use anyhow::Result;
 use candle_core::{DType, Device};
-use tracing::warn;
+use inference_quant::{QuantizedWeightSource, UqffReader};
+use tracing::{info, warn};
 
 use crate::{
     device_map::{self, DeviceMapSetting, DeviceMapper},
     distributed::{self, TensorParallelism, WorkerTransferData},
+    matformer::{MatformerConfig, MatformerSliceConfig},
     paged_attention::ModelConfigLike,
     PagedAttentionConfig, Topology, TryIntoDType,
 };
@@ -144,4 +149,163 @@ pub(crate) fn resolve_load_devices(
         device,
         available_devices,
     })
+}
+
+pub(crate) struct WeightSources {
+    pub uqff_reader: Option<Arc<UqffReader>>,
+    pub prepared: Option<Arc<dyn QuantizedWeightSource>>,
+    /// The UQFF reader when loading from UQFF, else the prepared source; this is what sizing and loading read.
+    pub combined: Option<Arc<dyn QuantizedWeightSource>>,
+}
+
+pub(crate) fn open_weight_sources(
+    from_uqff: Option<&[PathBuf]>,
+    prepared: Option<Arc<dyn QuantizedWeightSource>>,
+) -> Result<WeightSources> {
+    let uqff_reader = from_uqff.map(UqffReader::open).transpose()?.map(Arc::new);
+    let combined = uqff_reader
+        .clone()
+        .map(|reader| reader as Arc<dyn QuantizedWeightSource>)
+        .or(prepared.clone());
+    Ok(WeightSources {
+        uqff_reader,
+        prepared,
+        combined,
+    })
+}
+
+pub(crate) fn load_matformer_slice(
+    config_path: Option<&Path>,
+    slice_name: Option<&str>,
+) -> Result<Option<MatformerSliceConfig>> {
+    let Some(config_path) = config_path else {
+        return Ok(None);
+    };
+    info!("Loading Matformer config from {:?}", config_path);
+    let config = Arc::new(MatformerConfig::from_file(config_path)?);
+    match slice_name {
+        Some(slice_name) => {
+            info!("Using Matformer slice: {}", slice_name);
+            Ok(Some(MatformerSliceConfig::new(
+                slice_name.to_string(),
+                config,
+            )))
+        }
+        None => {
+            warn!("Matformer config loaded but no slice name specified. Models will use their default slice.");
+            Ok(None)
+        }
+    }
+}
+
+/// The checkpoint files a pipeline keeps for re-quantizing later; a UQFF load has none.
+pub(crate) fn source_weight_files(
+    prepared: Option<&[PathBuf]>,
+    from_uqff: bool,
+    weight_files: &[PathBuf],
+) -> Vec<PathBuf> {
+    match prepared {
+        Some(files) => files.to_vec(),
+        None if from_uqff => Vec::new(),
+        None => weight_files.to_vec(),
+    }
+}
+
+pub(crate) struct MapSettingInputs<'a> {
+    pub setting: DeviceMapSetting,
+    pub write_uqff: bool,
+    pub distributed: bool,
+    pub available_devices: &'a [Device],
+    pub dtype: &'a dyn TryIntoDType,
+    pub sizing: super::isq_flow::AutoDeviceMapSizingInputs<'a>,
+}
+
+pub(crate) struct ResolvedMapSetting {
+    pub setting: DeviceMapSetting,
+    /// The KV tokens an automatic map planned for; `None` for a manual, dummy or tensor-parallel map.
+    pub max_kv_tokens: Option<usize>,
+}
+
+/// UQFF writing loads unmapped, tensor parallelism shards instead of mapping, and an automatic map is sized here.
+pub(crate) fn resolve_map_setting(
+    inputs: MapSettingInputs<'_>,
+    paged_attn_config: &mut Option<PagedAttentionConfig>,
+) -> Result<ResolvedMapSetting> {
+    let MapSettingInputs {
+        setting,
+        write_uqff,
+        distributed,
+        available_devices,
+        dtype,
+        sizing,
+    } = inputs;
+    if write_uqff {
+        return Ok(ResolvedMapSetting {
+            setting: DeviceMapSetting::dummy(),
+            max_kv_tokens: None,
+        });
+    }
+    if distributed {
+        return Ok(ResolvedMapSetting {
+            setting: DeviceMapSetting::DummyNccl {
+                nm_device: available_devices[0].clone(),
+            },
+            max_kv_tokens: None,
+        });
+    }
+    let DeviceMapSetting::Auto(params) = &setting else {
+        return Ok(ResolvedMapSetting {
+            setting,
+            max_kv_tokens: None,
+        });
+    };
+    let max_kv_tokens = Some(params.max_seq_len() * params.max_batch_size());
+    let dtype = dtype.try_into_dtype(&available_devices.iter().collect::<Vec<_>>())?;
+    let (loader, config) = (sizing.loader, sizing.config);
+    let super::isq_flow::AutoDeviceMapSizes {
+        layer_sizes_in_bytes,
+        non_mapped_size_in_bytes,
+        total_model_size_in_bytes,
+    } = super::isq_flow::auto_device_map_sizes(sizing, dtype)?;
+    let map = super::loaders::auto_device_map::get_device_layers(
+        loader,
+        config,
+        loader.num_layers(config)?,
+        layer_sizes_in_bytes,
+        non_mapped_size_in_bytes,
+        total_model_size_in_bytes,
+        available_devices,
+        dtype,
+        params,
+        paged_attn_config.as_mut(),
+    )?;
+    Ok(ResolvedMapSetting {
+        setting: DeviceMapSetting::Map(map),
+        max_kv_tokens,
+    })
+}
+
+/// The load-time metadata every model constructor receives, less its mapper and rope pairing.
+pub(crate) struct LoadMetadataParts {
+    pub loading_isq: bool,
+    pub device: Device,
+    pub multi_progress: Arc<indicatif::MultiProgress>,
+    pub matformer: Option<MatformerSliceConfig>,
+}
+
+impl LoadMetadataParts {
+    pub fn metadata(
+        &self,
+        mapper: Box<dyn DeviceMapper + Send + Sync>,
+        rope_pairing: Option<crate::model::RopePairing>,
+    ) -> crate::pipeline::NormalLoadingMetadata {
+        crate::pipeline::NormalLoadingMetadata {
+            mapper,
+            loading_isq: self.loading_isq,
+            real_device: self.device.clone(),
+            multi_progress: self.multi_progress.clone(),
+            matformer_slicing_config: self.matformer.clone(),
+            rope_pairing,
+        }
+    }
 }
