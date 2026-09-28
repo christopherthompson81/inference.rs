@@ -222,25 +222,18 @@ impl candle_core::Module for Decoder {
     }
 }
 
-#[allow(unused)]
 #[derive(Clone, Debug)]
 pub struct VectorQuantizer {
-    in_proj: Conv1d,
     out_proj: Conv1d,
     codebook: candle_nn::Embedding,
 }
 
 impl VectorQuantizer {
     pub fn new(in_dim: usize, cb_size: usize, cb_dim: usize, vb: VarBuilder) -> Result<Self> {
-        let in_proj = conv1d_weight_norm(in_dim, cb_dim, 1, Default::default(), vb.pp("in_proj"))?;
         let out_proj =
             conv1d_weight_norm(cb_dim, in_dim, 1, Default::default(), vb.pp("out_proj"))?;
         let codebook = candle_nn::embedding(cb_size, cb_dim, vb.pp("codebook"))?;
-        Ok(Self {
-            in_proj,
-            out_proj,
-            codebook,
-        })
+        Ok(Self { out_proj, codebook })
     }
 
     pub fn embed_code(&self, embed_id: &Tensor) -> Result<Tensor> {

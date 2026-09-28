@@ -7,7 +7,6 @@ use crate::{layers::Activation, serde_default_fn};
 // ── Rope parameter structs ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, serde::Deserialize)]
-#[allow(dead_code)]
 pub struct Gemma4RopeLayerParams {
     pub rope_theta: Option<f64>,
     pub rope_type: Option<String>,
@@ -15,7 +14,6 @@ pub struct Gemma4RopeLayerParams {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-#[allow(dead_code)]
 pub struct Gemma4RopeParameters {
     pub full_attention: Option<Gemma4RopeLayerParams>,
     pub sliding_attention: Option<Gemma4RopeLayerParams>,
@@ -49,7 +47,6 @@ serde_default_fn!(bool, use_double_wide_mlp, false);
 // ── Gemma4TextConfig ────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, serde::Deserialize)]
-#[allow(dead_code)]
 pub struct Gemma4TextConfig {
     #[serde(default = "attention_bias")]
     pub attention_bias: bool,
@@ -180,7 +177,6 @@ serde_default_fn!(bool, vision_standardize, false);
 // ── Gemma4VisionConfig ──────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, serde::Deserialize)]
-#[allow(dead_code)]
 pub struct Gemma4VisionConfig {
     #[serde(default = "vision_hidden_size")]
     pub hidden_size: usize,
@@ -280,7 +276,6 @@ serde_default_fn!(bool, use_clipped_linears, true);
 // ── Gemma4AudioConfig ───────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, serde::Deserialize)]
-#[allow(dead_code)]
 pub struct Gemma4AudioConfig {
     #[serde(default = "audio_input_feat_size")]
     pub input_feat_size: usize,
@@ -379,7 +374,6 @@ serde_default_fn!(usize, eoa_token_id, 258883);
 // ── Gemma4Config ────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Gemma4Config {
     pub architectures: Vec<String>,
     pub text_config: Gemma4TextConfig,

@@ -300,7 +300,7 @@ impl PythonSession {
         }
 
         self.send(&ExecutorRequest::Reset).await?;
-        let _response: ResetResponse = self.read_response().await?;
+        let _: ResetResponse = self.read_response().await?;
         Ok(())
     }
 

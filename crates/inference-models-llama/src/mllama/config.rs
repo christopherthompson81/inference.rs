@@ -75,7 +75,6 @@ pub enum MLlamaRopeType {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
-#[allow(dead_code)]
 pub struct MLlamaRopeScaling {
     pub rope_type: MLlamaRopeType,
     pub factor: Option<f32>,

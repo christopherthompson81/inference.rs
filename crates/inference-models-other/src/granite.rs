@@ -1512,7 +1512,6 @@ enum DecoderLayer {
 
 // ====================== End Mamba Implementation ======================
 
-#[allow(dead_code)]
 struct CausalSelfAttention {
     q_proj: Arc<dyn QuantMethod>,
     k_proj: Arc<dyn QuantMethod>,
@@ -1522,7 +1521,6 @@ struct CausalSelfAttention {
     num_key_value_heads: usize,
     head_dim: usize,
     rotary_emb: Option<Arc<RotaryEmbedding>>, // Optional - None when position_embedding_type == "nope"
-    max_seq_len: usize,
     paged_attn: Option<PagedAttention>,
     sdpa_params: SdpaParams,
 }
@@ -1643,7 +1641,6 @@ impl CausalSelfAttention {
             num_key_value_heads: (cfg.num_key_value_heads() / comm.world_size()).max(1),
             head_dim: cfg.head_dim(),
             rotary_emb: rope, // Now optional
-            max_seq_len: cfg.max_position_embeddings,
             paged_attn,
             sdpa_params: SdpaParams {
                 n_kv_groups: inference_quant::compute_n_kv_groups(
@@ -1787,10 +1784,8 @@ enum GraniteLayerCache {
 
 /// Hybrid cache that can store either KV cache or Mamba cache per layer
 /// (local to granite model - wraps kv_cache::HybridCache for pipeline integration)
-#[allow(dead_code)]
 struct GraniteHybridCache {
     pub caches: Vec<GraniteLayerCache>,
-    max_seq_len: usize,
 }
 
 impl GraniteHybridCache {
@@ -1824,10 +1819,7 @@ impl GraniteHybridCache {
                 }
             }
         }
-        Ok(Self {
-            caches,
-            max_seq_len: cfg.max_position_embeddings,
-        })
+        Ok(Self { caches })
     }
 
     pub fn seqlen(&self) -> usize {
@@ -1840,23 +1832,6 @@ impl GraniteHybridCache {
         // If no attention layers, return 0
         0
     }
-
-    #[allow(dead_code)]
-    pub fn reset(&mut self) {
-        for cache in &mut self.caches {
-            match cache {
-                GraniteLayerCache::Attention(kv) => kv.reset(),
-                GraniteLayerCache::Mamba(mamba) => {
-                    let _ = mamba.reset();
-                }
-            }
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn num_layers(&self) -> usize {
-        self.caches.len()
-    }
 }
 
 impl PastKvLenCache for GraniteHybridCache {
@@ -1865,7 +1840,6 @@ impl PastKvLenCache for GraniteHybridCache {
     }
 }
 
-#[allow(dead_code)]
 pub struct GraniteMoeHybrid {
     wte: Arc<dyn QuantMethod>,
     layers: Vec<DecoderLayer>,
@@ -1881,7 +1855,6 @@ pub struct GraniteMoeHybrid {
     cfg: ModelConfigMetadata,
     embedding_multiplier: f32,
     logits_scaling: f32,
-    num_attention_heads: usize,
     max_seq_len: usize,
 }
 
@@ -2140,7 +2113,6 @@ impl GraniteMoeHybrid {
             } else {
                 1.0 / cfg.logits_scaling
             },
-            num_attention_heads,
             max_seq_len: cfg.max_position_embeddings,
         })
     }

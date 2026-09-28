@@ -12,7 +12,6 @@ serde_default_fn!(bool, default_norm_topk_prob, true);
 serde_default_fn!(bool, default_use_sliding_window, false);
 serde_default_fn!(usize, default_max_window_layers, 0);
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct TextConfig {
     pub head_dim: usize,

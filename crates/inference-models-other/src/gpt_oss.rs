@@ -113,7 +113,6 @@ impl GptOssRotaryEmbeddingVariant {
 
 /// Custom SwiGLU activation: (up + 1) * gate * sigmoid(gate * alpha)
 /// With clamping: gate max=limit, up [-limit, limit]
-#[allow(dead_code)]
 fn gptoss_swiglu(gate: &Tensor, up: &Tensor, alpha: f32, limit: f32) -> Result<Tensor> {
     #[cfg(feature = "cuda")]
     if gate.device().is_cuda() {
@@ -146,7 +145,6 @@ struct Attention {
     rotary_emb: GptOssRotaryEmbeddingVariant,
     paged_attn: Option<PagedAttention>,
     sdpa_params: SdpaParams,
-    #[allow(dead_code)]
     is_sliding: bool,
 }
 
@@ -674,7 +672,6 @@ pub struct Model {
     cache: EitherCache,
     max_seq_len: usize,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
-    #[allow(dead_code)]
     cfg: Config,
     cfg_metadata: ModelConfigMetadata,
 }

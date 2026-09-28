@@ -76,7 +76,6 @@ pub struct TextConfig {
     #[serde(default)]
     pub quantization_config: Option<QuantizedConfig>,
     #[serde(default)]
-    #[allow(dead_code)]
     pub max_window_layers: usize,
 }
 

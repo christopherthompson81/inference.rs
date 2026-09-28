@@ -9,10 +9,7 @@ use inference_quant::{Convolution, QuantMethod, ShardedVarBuilder};
 
 use crate::{
     attention::{AttentionMask, SdpaParams},
-    conformer::{
-        nemo::NemoConvSubsampling,
-        pos_embed::{AbsolutePositionalEncoding, T5RelativeAttentionLogitBias},
-    },
+    conformer::{nemo::NemoConvSubsampling, pos_embed::T5RelativeAttentionLogitBias},
     layers::{self, Activation, Sdpa},
 };
 
@@ -562,8 +559,6 @@ impl EncoderEmbedding {
 pub struct ConformerEncoder {
     encoder_embedding: EncoderEmbedding,
     embed: NemoConvSubsampling,
-    #[allow(unused)]
-    pos_embed: AbsolutePositionalEncoding,
     relative_attention_bias_layer: T5RelativeAttentionLogitBias,
     encoders: Vec<EncoderLayer>,
 }
@@ -574,8 +569,6 @@ impl ConformerEncoder {
 
         cfg.finish_nemo_config();
         let embed = NemoConvSubsampling::new(&cfg.nemo_conv_settings, vb.pp("embed"))?;
-
-        let pos_embed = AbsolutePositionalEncoding::new(&cfg, vb.device())?;
 
         assert!(cfg
             .relative_attention_bias_args
@@ -604,7 +597,6 @@ impl ConformerEncoder {
         Ok(Self {
             encoder_embedding,
             embed,
-            pos_embed,
             relative_attention_bias_layer,
             encoders,
         })
@@ -637,9 +629,6 @@ impl ConformerEncoder {
             // Unfold into chunks
             input_tensor = unfold_tensor(&input_tensor, max_seq_len)?;
         }
-
-        // // Apply positional encoding
-        // input_tensor = self.pos_embed.forward(&input_tensor)?;
 
         // Compute relative attention bias if available
         let relative_attention_bias = self.relative_attention_bias_layer.forward(&input_tensor)?;

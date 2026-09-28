@@ -55,7 +55,6 @@ pub struct Glm4MoeLiteConfig {
     pub moe_intermediate_size: usize,
     pub num_hidden_layers: usize,
     pub num_attention_heads: usize,
-    #[allow(dead_code)]
     pub num_key_value_heads: usize,
     pub q_lora_rank: usize,
     pub kv_lora_rank: usize,

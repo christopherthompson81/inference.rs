@@ -944,7 +944,6 @@ fn is_paged_decode_forward(
 //  Decoder layer
 // ────────────────────────────────────────────────────────────────────────────
 
-#[allow(dead_code)]
 struct DecoderLayer {
     self_attn: Attention,
     mlp: Box<dyn crate::amoe::MlpLayer>,
@@ -966,7 +965,6 @@ struct DecoderLayer {
     // Layer scalar
     layer_scalar: Option<Tensor>,
     act: Activation,
-    layer_idx: usize,
 }
 
 impl DecoderLayer {
@@ -1155,7 +1153,6 @@ impl DecoderLayer {
             post_per_layer_input_norm,
             layer_scalar,
             act: cfg.hidden_activation,
-            layer_idx,
         })
     }
 
@@ -1485,7 +1482,6 @@ impl ModelConfigLike for Gemma4ModelConfigLike {
     }
 }
 
-#[allow(dead_code)]
 pub struct TextModel {
     embed_tokens: Arc<dyn QuantMethod>,
     embed_tokens_scale: f64,
@@ -1493,7 +1489,6 @@ pub struct TextModel {
     layers: Vec<DecoderLayer>,
     norm: RmsNorm,
     lm_head: Arc<dyn QuantMethod>,
-    lm_head_is_tied: bool,
     // PLE global
     embed_tokens_per_layer: Option<Arc<dyn QuantMethod>>,
     embed_tokens_per_layer_in_residual: bool,
@@ -1501,7 +1496,6 @@ pub struct TextModel {
     per_layer_projection_norm: Option<RmsNorm>,
     hidden_size_per_layer_input: usize,
     num_hidden_layers: usize,
-    vocab_size_per_layer_input: usize,
     per_layer_input_scale: f64,
     per_layer_projection_scalar: f64,
     // Standard
@@ -1866,14 +1860,12 @@ impl TextModel {
             layers,
             norm,
             lm_head,
-            lm_head_is_tied: cfg.tie_word_embeddings,
             embed_tokens_per_layer,
             embed_tokens_per_layer_in_residual: false,
             per_layer_model_projection,
             per_layer_projection_norm,
             hidden_size_per_layer_input: ple_dim,
             num_hidden_layers: cfg.num_hidden_layers,
-            vocab_size_per_layer_input: ple_vocab,
             per_layer_input_scale: 2f64.powf(-0.5),
             per_layer_projection_scalar: (cfg.hidden_size as f64).powf(-0.5),
             device: normal_loading_metadata.real_device,

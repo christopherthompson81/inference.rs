@@ -212,7 +212,6 @@ pub fn apply_max_model_len(config: &str, max_model_len: usize) -> candle_core::R
     serde_json::to_string(&config).map_err(|err| candle_core::Error::msg(err.to_string()))
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct TextConfig {
     pub head_dim: usize,

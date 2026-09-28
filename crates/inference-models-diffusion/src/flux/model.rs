@@ -104,19 +104,13 @@ fn timestep_embedding(t: &Tensor, dim: usize, dtype: DType) -> Result<Tensor> {
 
 #[derive(Debug, Clone)]
 pub struct EmbedNd {
-    #[allow(unused)]
-    dim: usize,
     theta: usize,
     axes_dim: Vec<usize>,
 }
 
 impl EmbedNd {
-    fn new(dim: usize, theta: usize, axes_dim: Vec<usize>) -> Self {
-        Self {
-            dim,
-            theta,
-            axes_dim,
-        }
+    fn new(theta: usize, axes_dim: Vec<usize>) -> Self {
+        Self { theta, axes_dim }
     }
 }
 
@@ -295,12 +289,6 @@ impl SelfAttention {
         let q = q.apply(&self.norm.query_norm)?;
         let k = k.apply(&self.norm.key_norm)?;
         Ok((q, k, v))
-    }
-
-    #[allow(unused)]
-    fn forward(&self, xs: &Tensor, pe: &Tensor) -> Result<Tensor> {
-        let (q, k, v) = self.qkv(xs)?;
-        attention(&q, &k, &v, pe)?.apply(&self.proj)
     }
 
     fn cast_to(&mut self, device: &Device) -> Result<()> {
@@ -676,8 +664,7 @@ impl Flux {
             cfg.in_channels,
             vb.pp("final_layer").set_device(device.clone()),
         )?;
-        let pe_dim = HIDDEN_SIZE / cfg.num_attention_heads;
-        let pe_embedder = EmbedNd::new(pe_dim, THETA, AXES_DIM.to_vec());
+        let pe_embedder = EmbedNd::new(THETA, AXES_DIM.to_vec());
         Ok(Self {
             img_in,
             txt_in,
