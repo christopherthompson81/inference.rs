@@ -491,6 +491,7 @@ pub(crate) fn read_uqff_report_file(path: &Path) -> Result<UqffReport> {
         .with_context(|| format!("Failed to parse UQFF report `{}`", path.display()))
 }
 
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Debug, Copy, Default, Deserialize, serde::Serialize)]
 pub enum IsqOrganization {
     #[default]
@@ -538,29 +539,35 @@ pub struct UqffWriteConfig {
     pub repo_id: Option<String>,
 }
 
+/// How a spec names a UQFF to write: an output path, or the path with the ISQ types and report metadata.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Deserialize)]
+#[serde(untagged)]
+pub enum UqffWriteSpec {
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
+    Path(PathBuf),
+    #[cfg_attr(feature = "utoipa", schema(title = "Config"))]
+    Config {
+        #[cfg_attr(feature = "utoipa", schema(value_type = String))]
+        output: PathBuf,
+        #[serde(default)]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Vec<String>))]
+        types: Vec<IsqType>,
+        #[serde(default)]
+        base_model: Option<String>,
+        #[serde(default)]
+        repo_id: Option<String>,
+    },
+}
+
 impl<'de> Deserialize<'de> for UqffWriteConfig {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Path(PathBuf),
-            Config {
-                output: PathBuf,
-                #[serde(default)]
-                types: Vec<IsqType>,
-                #[serde(default)]
-                base_model: Option<String>,
-                #[serde(default)]
-                repo_id: Option<String>,
-            },
-        }
-
-        match Repr::deserialize(deserializer)? {
-            Repr::Path(output) => Ok(Self::from_output(output)),
-            Repr::Config {
+        match UqffWriteSpec::deserialize(deserializer)? {
+            UqffWriteSpec::Path(output) => Ok(Self::from_output(output)),
+            UqffWriteSpec::Config {
                 output,
                 types,
                 base_model,

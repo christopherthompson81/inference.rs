@@ -85,12 +85,7 @@ def declared(header: str):
         r"INFERENCE_API\s+[A-Za-z_][A-Za-z0-9_ *]*?\b(inference_[a-z0-9_]+)\s*\(([^)]*)\)",
         code,
     )
-    return {
-        m.group(1): 0
-        if m.group(2).strip() in ("", "void")
-        else len(m.group(2).split(","))
-        for m in matches
-    }
+    return {m.group(1): 0 if m.group(2).strip() in ("", "void") else len(m.group(2).split(",")) for m in matches}
 
 
 class Coverage(unittest.TestCase):
@@ -102,12 +97,8 @@ class Coverage(unittest.TestCase):
 
     def test_every_entry_point_is_declared_with_its_parameters(self):
         header = declared(self.header)
-        bound = {
-            name: len(argtypes) for name, (_, argtypes) in _native.SIGNATURES.items()
-        }
-        self.assertEqual(
-            sorted(header.keys() - bound.keys()), [], "not declared in _native"
-        )
+        bound = {name: len(argtypes) for name, (_, argtypes) in _native.SIGNATURES.items()}
+        self.assertEqual(sorted(header.keys() - bound.keys()), [], "not declared in _native")
         self.assertEqual(sorted(bound.keys() - header.keys()), [], "not in the header")
         self.assertEqual(
             {n: c for n, c in bound.items() if header[n] != c},
@@ -123,30 +114,20 @@ class Coverage(unittest.TestCase):
                 mismatches.append(f"{name} returns {returns}, bound as {restype}")
             for index, (c_type, bound) in enumerate(zip(params, argtypes)):
                 if bound not in expected(c_type, returned=False):
-                    mismatches.append(
-                        f"{name} parameter {index}: {c_type} bound as {bound}"
-                    )
+                    mismatches.append(f"{name} parameter {index}: {c_type} bound as {bound}")
         self.assertEqual(mismatches, [])
 
     def test_the_package_version_is_the_workspaces(self):
-        root = next(
-            p for p in Path(__file__).resolve().parents if (p / "Cargo.toml").is_file()
-        )
+        root = next(p for p in Path(__file__).resolve().parents if (p / "Cargo.toml").is_file())
         cargo = (root / "Cargo.toml").read_text()
-        workspace = re.search(
-            r'\[workspace\.package\][^\[]*?version = "([^"]+)"', cargo, re.DOTALL
-        )
+        workspace = re.search(r'\[workspace\.package\][^\[]*?version = "([^"]+)"', cargo, re.DOTALL)
         pyproject = (root / "bindings/python/pyproject.toml").read_text()
         project = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
         self.assertEqual(project.group(1), workspace.group(1))
 
     def test_the_package_expects_the_headers_abi_version(self):
         part = {
-            name: int(
-                re.search(
-                    rf"#define INFERENCE_ABI_VERSION_{name} (\d+)", self.header
-                ).group(1)
-            )
+            name: int(re.search(rf"#define INFERENCE_ABI_VERSION_{name} (\d+)", self.header).group(1))
             for name in ("MAJOR", "MINOR", "PATCH")
         }
         self.assertEqual(
@@ -159,9 +140,7 @@ class Coverage(unittest.TestCase):
         if path is None:
             self.skipTest("libinference_ffi is not built")
         library = ctypes.CDLL(str(path))
-        self.assertEqual(
-            [name for name in _native.SIGNATURES if not hasattr(library, name)], []
-        )
+        self.assertEqual([name for name in _native.SIGNATURES if not hasattr(library, name)], [])
 
 
 if __name__ == "__main__":

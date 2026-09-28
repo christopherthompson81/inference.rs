@@ -46,6 +46,7 @@ tokenizers = { workspace = true, features = ["fancy-regex"] }
 tqdm.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+utoipa = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
@@ -59,6 +60,7 @@ cudaforge = { workspace = true, optional = true }
 
 [features]
 pyo3_macros = ["dep:pyo3"]
+utoipa = ["dep:utoipa"]
 cuda = [
     "candle-core/cuda",
     "candle-nn/cuda",

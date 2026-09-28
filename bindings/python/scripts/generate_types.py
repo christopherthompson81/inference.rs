@@ -26,11 +26,7 @@ from typing import Any, Literal, Union
 
 
 def class_name(value: str) -> str:
-    return "".join(
-        part[:1].upper() + part[1:]
-        for part in re.split(r"[^A-Za-z0-9]+", value)
-        if part
-    )
+    return "".join(part[:1].upper() + part[1:] for part in re.split(r"[^A-Za-z0-9]+", value) if part)
 
 
 def attribute(name: str) -> str:
@@ -99,10 +95,27 @@ class Generator:
             base = "Any"
         return f"{base} | None" if nullable and base != "Any" else base
 
+    @staticmethod
+    def external_tag(schema: dict) -> str | None:
+        """The key of an externally tagged variant, `{"Key": {...fields}}`, whose fields become the class."""
+        properties = schema.get("properties") or {}
+        if schema.get("type") != "object" or len(properties) != 1 or schema.get("required") != list(properties):
+            return None
+        ((key, value),) = properties.items()
+        return key if value.get("type") == "object" and "properties" in value else None
+
     def union(self, members: list, owner: str, prop: str) -> str:
         types = []
         for index, member in enumerate(members):
-            tag = self.tag(member)
+            key = self.external_tag(member)
+            if key is not None:
+                name = class_name(owner) + class_name(prop) + class_name(key)
+                self.names.add(name)
+                self.object_class(name, member["properties"][key], external=key)
+                types.append(name)
+                continue
+            # A variant is named by its tag, else its schema title, else its position.
+            tag = self.tag(member) or member.get("title")
             member_prop = class_name(tag) if tag else f"{prop}{index}"
             types.append(self.type_of(member, owner, member_prop))
         unique = list(dict.fromkeys(types))
@@ -130,7 +143,7 @@ class Generator:
         values = schema.get("enum") or []
         return values[0] if len(values) == 1 and isinstance(values[0], str) else None
 
-    def object_class(self, name: str, schema: dict) -> None:
+    def object_class(self, name: str, schema: dict, external: str | None = None) -> None:
         required = set(schema.get("required") or [])
         # Keyword-only, so a regenerated field order cannot silently move positional arguments.
         lines = ["@dataclass(kw_only=True)", f"class {name}:"]
@@ -143,15 +156,13 @@ class Generator:
         for prop, prop_schema in properties:
             python = attribute(prop)
             if python in seen:
-                raise ValueError(
-                    f"{name}: two properties become the attribute {python}"
-                )
+                raise ValueError(f"{name}: two properties become the attribute {python}")
             seen.add(python)
             if python != prop:
                 wire[python] = prop
             annotation = self.type_of(prop_schema, name, class_name(prop))
-            # A single-valued property is a variant's tag, so it defaults to its one value.
-            tag = self.tag_value(prop_schema)
+            # A single-valued `type` is a variant's tag, so it defaults to its one value.
+            tag = self.tag_value(prop_schema) if prop == "type" else None
             if tag is not None:
                 default = f" = {json.dumps(tag)}"
             elif prop in required:
@@ -165,6 +176,9 @@ class Generator:
             lines.append("    pass")
         if wire:
             lines.append(f"    _wire = {wire!r}")
+        if external is not None:
+            # Serialized as {"Key": {...fields}}.
+            lines.append(f"    _external = {external!r}")
         self.blocks.append("\n".join(lines))
 
     def schema(self, name: str, schema: dict) -> None:
@@ -178,11 +192,7 @@ class Generator:
                 member = attribute(value.upper()) if value else "EMPTY"
                 lines.append(f"    {member} = {json.dumps(value)}")
             self.blocks.append("\n".join(lines))
-        elif (
-            schema.get("type") == "object"
-            and "oneOf" not in schema
-            and "anyOf" not in schema
-        ):
+        elif schema.get("type") == "object" and "oneOf" not in schema and "anyOf" not in schema:
             self.object_class(name, schema)
         else:
             self.aliases[name] = self.type_of(schema, name, "")
@@ -208,9 +218,7 @@ class Generator:
         for name in sorted(self.schemas):
             self.schema(name, self.schemas[name])
         aliases = [f"{name} = {self.aliases[name]}" for name in self.ordered_aliases()]
-        return (
-            HEADER + "\n\n\n".join(self.blocks) + "\n\n\n" + "\n".join(aliases) + "\n"
-        )
+        return HEADER + "\n\n\n".join(self.blocks) + "\n\n\n" + "\n".join(aliases) + "\n"
 
 
 def generate() -> str:

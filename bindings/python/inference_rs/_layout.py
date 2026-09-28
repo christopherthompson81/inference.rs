@@ -46,14 +46,10 @@ class LayoutImage:
         row = self.width * BYTES_PER_PIXEL[PixelFormat(self.format)]
         stride = self.stride or row
         if stride < row:
-            raise ValueError(
-                f"stride {self.stride} is shorter than a row of {row} bytes"
-            )
+            raise ValueError(f"stride {self.stride} is shorter than a row of {row} bytes")
         needed = stride * (self.height - 1) + row if self.height else 0
         if len(self.pixels) < needed:
-            raise ValueError(
-                f"{len(self.pixels)} pixel bytes; a {self.width}x{self.height} image needs {needed}"
-            )
+            raise ValueError(f"{len(self.pixels)} pixel bytes; a {self.width}x{self.height} image needs {needed}")
 
 
 @dataclass(frozen=True)
@@ -69,12 +65,8 @@ class LayoutDetection:
 class LayoutModel:
     """A PP-DocLayoutV3 document layout detector. Close it, or use `with`."""
 
-    def __init__(
-        self, model_dir, backend: str | None = None, device: int = 0, threads: int = 0
-    ):
-        config = _native.BackendConfig(
-            c_string_arg(backend, "backend"), device, threads
-        )
+    def __init__(self, model_dir, backend: str | None = None, device: int = 0, threads: int = 0):
+        config = _native.BackendConfig(c_string_arg(backend, "backend"), device, threads)
         model = ctypes.c_void_p()
         check(
             lib.inference_layout_model_load(
@@ -100,14 +92,10 @@ class LayoutModel:
                 labels.append(borrowed(label))
         return labels
 
-    def detect(
-        self, image: LayoutImage, threshold: float = DEFAULT_THRESHOLD
-    ) -> list[LayoutDetection]:
+    def detect(self, image: LayoutImage, threshold: float = DEFAULT_THRESHOLD) -> list[LayoutDetection]:
         return self.detect_batch([image], threshold)[0]
 
-    def detect_batch(
-        self, images: Sequence[LayoutImage], threshold: float = DEFAULT_THRESHOLD
-    ):
+    def detect_batch(self, images: Sequence[LayoutImage], threshold: float = DEFAULT_THRESHOLD):
         """Detects on every image in one batched forward."""
         if not images:
             return []
@@ -162,11 +150,7 @@ class LayoutModel:
                 ),
                 "inference_layout_result_detection",
             )
-            detections.append(
-                LayoutDetection(
-                    class_id.value, borrowed(label), score.value, tuple(box)
-                )
-            )
+            detections.append(LayoutDetection(class_id.value, borrowed(label), score.value, tuple(box)))
         return detections
 
     def close(self):

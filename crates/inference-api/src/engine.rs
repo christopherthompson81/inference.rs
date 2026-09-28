@@ -55,7 +55,7 @@ const INVALID_REQUEST_BODY: &str = "invalid_request_body";
 pub const DEFAULT_MAX_SEQS: usize = 32;
 
 /// What to load and how to run it: the JSON form of the options `inference serve` takes.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EngineSpec {
     pub model: ModelSelected,
@@ -73,12 +73,13 @@ pub struct EngineSpec {
 }
 
 /// Where uploaded skills are kept; requests reference them from the shell tool.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SkillsSpec {
     /// Kept across loads and shareable between engines, each reading it as it was at load; without a root the engine
     /// keeps its skills in a directory of its own that goes away with it.
     #[serde(default)]
+    #[schema(value_type = Option<String>)]
     pub root: Option<std::path::PathBuf>,
 }
 
@@ -108,7 +109,7 @@ pub struct EngineCallbacks {
 }
 
 /// Runtime LoRA adapter management; listing adapters is always allowed.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdapterSpec {
     /// Allow loading and unloading adapters while the engine runs.
@@ -116,6 +117,7 @@ pub struct AdapterSpec {
     pub runtime_updates: bool,
     /// The directory adapters must load from; relative adapter paths resolve under it.
     #[serde(default)]
+    #[schema(value_type = Option<String>)]
     pub root: Option<std::path::PathBuf>,
 }
 
@@ -131,7 +133,7 @@ impl AdapterSpec {
     }
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeSpec {
     /// `auto` (the best available), `cpu`, `cuda:N` or `metal:N`.
@@ -163,7 +165,7 @@ pub struct RuntimeSpec {
     pub token_source: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AgenticSpec {
     #[serde(default)]

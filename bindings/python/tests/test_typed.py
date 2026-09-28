@@ -31,9 +31,7 @@ def chat_request(stream: bool = False) -> t.ChatCompletionRequest:
 
 def strip_nulls(value):
     if isinstance(value, dict):
-        return {
-            key: strip_nulls(item) for key, item in value.items() if item is not None
-        }
+        return {key: strip_nulls(item) for key, item in value.items() if item is not None}
     if isinstance(value, list):
         return [strip_nulls(item) for item in value]
     return value
@@ -46,11 +44,7 @@ def untyped(value, path="value"):
         hints = typing.get_type_hints(type(value), vars(t))
         for f in dataclasses.fields(value):
             item = getattr(value, f.name)
-            expects = [
-                a
-                for a in typing.get_args(hints[f.name]) or (hints[f.name],)
-                if dataclasses.is_dataclass(a)
-            ]
+            expects = [a for a in typing.get_args(hints[f.name]) or (hints[f.name],) if dataclasses.is_dataclass(a)]
             if isinstance(item, dict) and expects:
                 found.append(f"{path}.{f.name}")
             found += untyped(item, f"{path}.{f.name}")
@@ -112,6 +106,27 @@ class Generated(unittest.TestCase):
         self.assertEqual(ir.to_data(Renamed(from_="a")), {"from": "a"})
         self.assertEqual(ir.from_data(Renamed, {"from": "a"}), Renamed(from_="a"))
 
+    def test_externally_tagged_variants_wrap_and_unwrap(self):
+        spec = t.EngineSpec(model=t.ModelSelectedPlain(model_id="org/model"), runtime=t.RuntimeSpec(device="cpu"))
+        data = {"model": {"Plain": {"model_id": "org/model"}}, "runtime": {"device": "cpu"}}
+        self.assertEqual(ir.to_data(spec), data)
+        self.assertEqual(ir.from_data(t.EngineSpec, data), spec)
+        self.assertEqual(json.loads(ir.to_json(spec)), data)
+        self.assertEqual(json.loads(ir.to_json({"model": spec.model})), {"model": data["model"]})
+        # A misspelled or padded tag names no variant, so it stays as it came; exactly, it fits nothing.
+        for model in ({"Plian": {"model_id": "m"}}, {"Plain": {"model_id": "m"}, "extra": 1}):
+            self.assertEqual(ir.from_data(t.ModelSelected, model), model)
+            with self.assertRaises(ValueError):
+                ir.from_data(t.ModelSelectedPlain, model, strict=True)
+
+    def test_loader_enums_carry_the_names_the_engine_accepts(self):
+        self.assertEqual(t.NormalLoaderType.QWEN3.value, "qwen3")
+        spec = t.EngineSpec(model=t.ModelSelectedPlain(model_id="m", arch=t.NormalLoaderType.QWEN3))
+        self.assertEqual(ir.to_data(spec)["model"]["Plain"]["arch"], "qwen3")
+
+    def test_a_dict_spec_loads_like_its_class(self):
+        self.assertEqual(ir.to_data(ir.from_data(t.EngineSpec, json.loads(spec("m")))), json.loads(spec("m")))
+
     def test_tags_default_to_their_value(self):
         self.assertEqual(
             ir.to_data(t.Tool(function=t.Function(name="f"))),
@@ -120,9 +135,7 @@ class Generated(unittest.TestCase):
 
     def test_untagged_unions_pick_the_variant_that_fits(self):
         schema = {"type": "json_schema", "json_schema": {"name": "n", "schema": {}}}
-        self.assertIsInstance(
-            ir.from_data(t.ResponseFormat, schema), t.ResponseFormatJsonSchema
-        )
+        self.assertIsInstance(ir.from_data(t.ResponseFormat, schema), t.ResponseFormatJsonSchema)
         self.assertEqual(ir.from_data(t.StopTokens, ["a", "b"]), ["a", "b"])
 
 
@@ -134,7 +147,12 @@ class TypedEngine(unittest.TestCase):
         model = os.environ.get(MODEL_VARIABLE)
         if not model:
             raise unittest.SkipTest(f"{MODEL_VARIABLE} is not set")
-        cls.engine = ir.Engine(json.loads(spec(model)))
+        cls.engine = ir.Engine(
+            t.EngineSpec(
+                model=t.ModelSelectedMultimodalPlain(model_id=model, dtype=t.ModelDType.F32),
+                runtime=t.RuntimeSpec(device="cpu"),
+            )
+        )
 
     @classmethod
     def tearDownClass(cls):
@@ -150,14 +168,10 @@ class TypedEngine(unittest.TestCase):
 
     def test_real_payloads_round_trip(self):
         raw = self.engine.json
-        self.assert_parsed(
-            t.ChatCompletionResponse, raw.chat(ir.to_json(chat_request()))
-        )
+        self.assert_parsed(t.ChatCompletionResponse, raw.chat(ir.to_json(chat_request())))
         with raw.chat_stream(ir.to_json(chat_request(stream=True))) as stream:
             for event in stream:
-                self.assert_parsed(
-                    t.ChatCompletionChunkResponse, json.dumps(event.data)
-                )
+                self.assert_parsed(t.ChatCompletionChunkResponse, json.dumps(event.data))
         request = t.OpenResponsesCreateRequest(
             model="default",
             input=PROMPT,
@@ -192,25 +206,15 @@ class TypedEngine(unittest.TestCase):
             )
         )
         self.assertIsInstance(message, t.AnthropicMessageResponse)
-        model_id = next(
-            m.id for m in self.engine.list_models().data if m.id != "default"
-        )
-        self.assertEqual(
-            self.engine.unload_model(model_id).status, t.ModelStatus.UNLOADED
-        )
-        self.assertEqual(
-            self.engine.reload_model(model_id).status, t.ModelStatus.LOADED
-        )
+        model_id = next(m.id for m in self.engine.list_models().data if m.id != "default")
+        self.assertEqual(self.engine.unload_model(model_id).status, t.ModelStatus.UNLOADED)
+        self.assertEqual(self.engine.reload_model(model_id).status, t.ModelStatus.LOADED)
         skill_md = b"---\nname: typed-skill\ndescription: A typed upload.\n---\n"
         skill = self.engine.upload_skill([ir.SkillFile("SKILL.md", skill_md)])
         self.assertIsInstance(skill, t.SkillObject)
         self.assertIn(skill.id, [s.id for s in self.engine.list_skills().data])
-        self.assertIsInstance(
-            self.engine.list_skill_versions(skill.id), t.AnthropicSkillVersionListObject
-        )
-        deleted = self.engine.delete_file(
-            self.engine.upload_file(b"x", "x.txt", "user_data").id
-        )
+        self.assertIsInstance(self.engine.list_skill_versions(skill.id), t.AnthropicSkillVersionListObject)
+        deleted = self.engine.delete_file(self.engine.upload_file(b"x", "x.txt", "user_data").id)
         self.assertIsInstance(deleted, t.FileDeleted)
 
     def test_chat_parses_and_agrees_with_its_stream(self):
@@ -246,13 +250,9 @@ class TypedEngine(unittest.TestCase):
     def test_management_calls_return_their_classes(self):
         models = self.engine.list_models()
         self.assertEqual(models.data[0].id, "default")
-        status = self.engine.model_status(
-            next(m.id for m in models.data if m.id != "default")
-        )
+        status = self.engine.model_status(next(m.id for m in models.data if m.id != "default"))
         self.assertEqual(status.status, t.ModelStatus.LOADED)
-        uploaded = self.engine.upload_file(
-            b"a,b\n", "table.csv", "user_data", "text/csv"
-        )
+        uploaded = self.engine.upload_file(b"a,b\n", "table.csv", "user_data", "text/csv")
         self.assertIsInstance(uploaded, t.FileMetadata)
         self.assertIn(uploaded.id, [f.id for f in self.engine.list_files().data])
         with self.assertRaises(ir.InferenceError) as unknown:

@@ -50,9 +50,7 @@ class SkillFile(Structure):
     _fields_ = [("path", c_char_p), ("data", c_void_p), ("len", c_size_t)]
 
 
-TOOL_CALLBACK = CFUNCTYPE(
-    None, c_void_p, c_char_p, c_void_p, c_size_t, c_void_p, c_size_t, c_void_p
-)
+TOOL_CALLBACK = CFUNCTYPE(None, c_void_p, c_char_p, c_void_p, c_size_t, c_void_p, c_size_t, c_void_p)
 SEARCH_CALLBACK = CFUNCTYPE(None, c_void_p, c_void_p, c_size_t, c_void_p)
 
 

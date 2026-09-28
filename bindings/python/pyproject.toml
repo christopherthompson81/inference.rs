@@ -13,6 +13,7 @@ license = "MIT"
 packages = ["inference_rs"]
 
 [tool.ruff]
+line-length = 120
 # Generated from docs/openapi.json; the staleness test compares it with the generator's exact output.
 extend-exclude = ["inference_rs/types.py"]
 # Also when a path names it directly, as an editor formatting on save does.

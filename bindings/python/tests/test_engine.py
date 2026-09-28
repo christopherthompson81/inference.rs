@@ -17,9 +17,7 @@ MAX_TOKENS = 6
 PROMPT = "Reply with the single word: ok"
 POLL_TIMEOUT = 60.0
 IMAGE_FIXTURE = "crates/inference/tests/fixtures/paddleocr_vl/page_00.png"
-SKILL_MD = (
-    "---\nname: csv-summary\ndescription: Summarizes a CSV file.\n---\nRead the file.\n"
-)
+SKILL_MD = "---\nname: csv-summary\ndescription: Summarizes a CSV file.\n---\nRead the file.\n"
 
 
 def spec(model: str) -> str:
@@ -67,12 +65,7 @@ class EngineTest(unittest.TestCase):
             cls.engine.close()
 
     def test_chat_and_stream_agree(self):
-        text = (
-            json.loads(self.engine.chat(chat_request()))["choices"][0]["message"][
-                "content"
-            ]
-            or ""
-        )
+        text = json.loads(self.engine.chat(chat_request()))["choices"][0]["message"]["content"] or ""
         streamed = ""
         with self.engine.chat_stream(chat_request(stream=True)) as stream:
             for event in stream:
@@ -93,16 +86,8 @@ class EngineTest(unittest.TestCase):
                 ]
             )
 
-        by_url = json.loads(
-            self.engine.chat(
-                request("data:image/png;base64," + base64.b64encode(png).decode())
-            )
-        )
-        by_media = json.loads(
-            self.engine.chat(
-                request("media://0"), [ir.MediaAttachment(png, "image/png")]
-            )
-        )
+        by_url = json.loads(self.engine.chat(request("data:image/png;base64," + base64.b64encode(png).decode())))
+        by_media = json.loads(self.engine.chat(request("media://0"), [ir.MediaAttachment(png, "image/png")]))
         self.assertEqual(
             by_url["choices"][0]["message"]["content"],
             by_media["choices"][0]["message"]["content"],
@@ -118,9 +103,7 @@ class EngineTest(unittest.TestCase):
                 "top_k": 1,
             }
         )
-        self.assertEqual(
-            json.loads(self.engine.completion(completion))["object"], "text_completion"
-        )
+        self.assertEqual(json.loads(self.engine.completion(completion))["object"], "text_completion")
         with self.engine.completion_stream(completion) as stream:
             self.assertTrue(all(event.name == "chunk" for event in stream))
 
@@ -133,9 +116,7 @@ class EngineTest(unittest.TestCase):
                 "messages": [{"role": "user", "content": PROMPT}],
             }
         )
-        self.assertEqual(
-            json.loads(self.engine.anthropic_messages(messages))["type"], "message"
-        )
+        self.assertEqual(json.loads(self.engine.anthropic_messages(messages))["type"], "message")
         with self.engine.anthropic_messages_stream(messages) as stream:
             names = []
             while (event := stream.next(POLL_TIMEOUT)) is not None:
@@ -150,16 +131,12 @@ class EngineTest(unittest.TestCase):
             "top_k": 1,
         }
         response_id = json.loads(self.engine.create_response(json.dumps(request)))["id"]
-        self.assertEqual(
-            json.loads(self.engine.get_response(response_id))["id"], response_id
-        )
+        self.assertEqual(json.loads(self.engine.get_response(response_id))["id"], response_id)
         self.engine.delete_response(response_id)
         with self.assertRaises(ir.InferenceError) as missing:
             self.engine.get_response(response_id)
         self.assertEqual(missing.exception.status, ir.Status.NOT_FOUND)
-        with self.engine.response_stream(
-            json.dumps({**request, "stream": True})
-        ) as stream:
+        with self.engine.response_stream(json.dumps({**request, "stream": True})) as stream:
             self.assertEqual(list(stream)[-1].name, "response.completed")
 
     def test_errors_carry_the_envelope(self):
@@ -179,35 +156,23 @@ class EngineTest(unittest.TestCase):
         with self.assertRaises(ir.InferenceError) as malformed:
             self.engine.chat("{not json")
         self.assertEqual(malformed.exception.status, ir.Status.INVALID_REQUEST)
-        self.assertEqual(
-            json.loads(self.engine.list_models())["data"][0]["id"], "default"
-        )
+        self.assertEqual(json.loads(self.engine.list_models())["data"][0]["id"], "default")
         with self.assertRaises(ir.InferenceError) as approval:
-            self.engine.resolve_approval(
-                "never-issued", json.dumps({"decision": "approve"})
-            )
+            self.engine.resolve_approval("never-issued", json.dumps({"decision": "approve"}))
         self.assertEqual(approval.exception.status, ir.Status.NOT_FOUND)
 
     def test_files_round_trip(self):
         contents = b"col_a,col_b\n1,2\n"
-        file_id = json.loads(
-            self.engine.upload_file(contents, "table.csv", "user_data", "text/csv")
-        )["id"]
-        self.assertEqual(
-            self.engine.file_content(file_id), ir.Blob(contents, "text/csv")
-        )
+        file_id = json.loads(self.engine.upload_file(contents, "table.csv", "user_data", "text/csv"))["id"]
+        self.assertEqual(self.engine.file_content(file_id), ir.Blob(contents, "text/csv"))
         self.engine.delete_file(file_id)
         with self.assertRaises(ir.InferenceError) as missing:
             self.engine.file_content(file_id)
         self.assertEqual(missing.exception.status, ir.Status.NOT_FOUND)
-        self.assertIn(
-            "id", json.loads(self.engine.upload_file(b"", "empty.txt", "user_data"))
-        )
+        self.assertIn("id", json.loads(self.engine.upload_file(b"", "empty.txt", "user_data")))
 
     def test_skills_are_stored(self):
-        skill = json.loads(
-            self.engine.upload_skill([ir.SkillFile("SKILL.md", SKILL_MD.encode())])
-        )
+        skill = json.loads(self.engine.upload_skill([ir.SkillFile("SKILL.md", SKILL_MD.encode())]))
         self.assertEqual(skill["name"], "csv-summary")
         self.assertEqual(len(json.loads(self.engine.list_skills())["data"]), 1)
         with self.assertRaises(ir.InferenceError) as bad:

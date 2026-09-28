@@ -243,12 +243,13 @@ pub trait MultimodalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedMode
 // One row per multimodal architecture; the first `cli` name is canonical, the rest are accepted aliases.
 macro_rules! multimodal_loader_types {
     ($($variant:ident {
-        cli: $cli:literal $(| $cli_alias:literal)*,
+        cli: $cli:tt $(| $cli_alias:tt)*,
         hf: $hf:literal $(| $hf_alias:literal)*,
         loader: $loader:ident
         $(, feature: $feature:literal)? $(,)?
     }),* $(,)?) => {
         #[cfg_attr(feature = "pyo3_macros", pyclass(eq, eq_int))]
+        #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
         #[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
         /// The architecture to load the multimodal model as.
         pub enum MultimodalLoaderType {

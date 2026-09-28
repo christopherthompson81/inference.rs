@@ -14,6 +14,27 @@ class AdapterGenerationSelection:
 
 
 @dataclass(kw_only=True)
+class AdapterSpec:
+    """Runtime LoRA adapter management; listing adapters is always allowed."""
+
+    root: str | None = None
+    runtime_updates: bool | None = None
+
+
+class AgentPermission(str, Enum):
+    AUTO = "auto"
+    ASK = "ask"
+    DENY = "deny"
+
+
+@dataclass(kw_only=True)
+class AgenticSpec:
+    agent_permission: AgentPermission | None = None
+    max_tool_rounds: int | None = None
+    tool_dispatch_url: str | None = None
+
+
+@dataclass(kw_only=True)
 class AllowedToolChoiceFunction:
     name: str
     type: Literal["function"] = "function"
@@ -548,6 +569,13 @@ class ContainerFileMetadata:
     source: SourceMeta
 
 
+class DiffusionLoaderType(str, Enum):
+    """The architecture to load the diffusion model as."""
+
+    FLUX = "flux"
+    FLUX_OFFLOADED = "flux-offloaded"
+
+
 @dataclass(kw_only=True)
 class EmbeddingData:
     embedding: EmbeddingVector
@@ -558,6 +586,13 @@ class EmbeddingData:
 class EmbeddingEncodingFormat(str, Enum):
     FLOAT = "float"
     BASE64 = "base64"
+
+
+class EmbeddingLoaderType(str, Enum):
+    """The architecture to load the embedding model as."""
+
+    EMBEDDINGGEMMA = "embeddinggemma"
+    QWEN3EMBEDDING = "qwen3embedding"
 
 
 @dataclass(kw_only=True)
@@ -582,6 +617,18 @@ class EmbeddingResponse:
 class EmbeddingUsage:
     prompt_tokens: int
     total_tokens: int
+
+
+@dataclass(kw_only=True)
+class EngineSpec:
+    """What to load and how to run it: the JSON form of the options `inference serve` takes."""
+
+    adapters: AdapterSpec | None = None
+    agentic: AgenticSpec | None = None
+    model: ModelSelected
+    model_id: str | None = None
+    runtime: RuntimeSpec | None = None
+    skills: SkillsSpec | None = None
 
 
 @dataclass(kw_only=True)
@@ -752,6 +799,11 @@ class InputTokensDetails:
     text_tokens: int | None = None
 
 
+class IsqOrganization(str, Enum):
+    DEFAULT = "default"
+    MOQE = "moqe"
+
+
 @dataclass(kw_only=True)
 class JsonSchemaResponseFormat:
     """JSON Schema for structured responses"""
@@ -794,6 +846,16 @@ class LoraAdapterObject:
 
 
 @dataclass(kw_only=True)
+class LoraAdapterSpec:
+    """Alias and source used to preload a LoRA adapter."""
+
+    alias: str
+    base_model_name: str | None = None
+    revision: str | None = None
+    source: str
+
+
+@dataclass(kw_only=True)
 class LoraResidentGenerationObject:
     active_leases: int
     aliases: list[str]
@@ -801,6 +863,15 @@ class LoraResidentGenerationObject:
     generation: str
     rank: int
     retired: bool
+
+
+@dataclass(kw_only=True)
+class LoraRuntimeConfig:
+    """Admission limits for a dynamic LoRA runtime."""
+
+    max_adapters: int
+    max_bytes: int
+    max_rank: int
 
 
 @dataclass(kw_only=True)
@@ -813,6 +884,15 @@ class Message:
     role: str
     tool_call_id: str | None = None
     tool_calls: list[ToolCall] | None = None
+
+
+class ModelDType(str, Enum):
+    """DType for the model."""
+
+    AUTO = "auto"
+    BF16 = "bf16"
+    F16 = "f16"
+    F32 = "f32"
 
 
 @dataclass(kw_only=True)
@@ -847,6 +927,300 @@ class ModelOperationRequest:
     model_id: str
 
 
+@dataclass(kw_only=True)
+class ModelSelectedRun:
+    """Select a model for running via auto loader"""
+
+    calibration_file: str | None = None
+    dtype: ModelDType | None = None
+    from_uqff: str | None = None
+    hf_cache_path: str | None = None
+    imatrix: str | None = None
+    matformer_config_path: str | None = None
+    matformer_slice_name: str | None = None
+    max_batch_size: int | None = None
+    max_edge: int | None = None
+    max_image_length: int | None = None
+    max_num_images: int | None = None
+    max_seq_len: int | None = None
+    model_id: str
+    organization: IsqOrganization | None = None
+    tokenizer_json: str | None = None
+    topology: str | None = None
+    write_uqff: UqffWriteSpec | None = None
+    _external = 'Run'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedPlain:
+    """Select a plain model, without quantization or adapters"""
+
+    arch: NormalLoaderType | None = None
+    calibration_file: str | None = None
+    dtype: ModelDType | None = None
+    from_uqff: str | None = None
+    hf_cache_path: str | None = None
+    imatrix: str | None = None
+    matformer_config_path: str | None = None
+    matformer_slice_name: str | None = None
+    max_batch_size: int | None = None
+    max_seq_len: int | None = None
+    model_id: str
+    organization: IsqOrganization | None = None
+    tokenizer_json: str | None = None
+    topology: str | None = None
+    write_uqff: UqffWriteSpec | None = None
+    _external = 'Plain'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedXLora:
+    """Select an X-LoRA architecture"""
+
+    arch: NormalLoaderType | None = None
+    dtype: ModelDType
+    from_uqff: str | None = None
+    hf_cache_path: str | None = None
+    max_batch_size: int
+    max_seq_len: int
+    model_id: str | None = None
+    order: str
+    organization: IsqOrganization | None = None
+    tgt_non_granular_index: int | None = None
+    tokenizer_json: str | None = None
+    topology: str | None = None
+    write_uqff: UqffWriteSpec | None = None
+    xlora_model_id: str
+    _external = 'XLora'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedLora:
+    """Select a LoRA architecture"""
+
+    adapters: list[LoraAdapterSpec]
+    arch: NormalLoaderType | None = None
+    calibration_file: str | None = None
+    dtype: ModelDType
+    from_uqff: str | None = None
+    hf_cache_path: str | None = None
+    imatrix: str | None = None
+    matformer_config_path: str | None = None
+    matformer_slice_name: str | None = None
+    max_batch_size: int
+    max_edge: int | None = None
+    max_image_length: int | None = None
+    max_num_images: int | None = None
+    max_seq_len: int
+    model_id: str
+    organization: IsqOrganization | None = None
+    runtime_config: LoraRuntimeConfig
+    tokenizer_json: str | None = None
+    topology: str | None = None
+    write_uqff: UqffWriteSpec | None = None
+    _external = 'Lora'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedGGUF:
+    """Select a GGUF model."""
+
+    calibration_file: str | None = None
+    dtype: ModelDType
+    hf_cache_path: str | None = None
+    imatrix: str | None = None
+    lora_adapters: list[LoraAdapterSpec] | None = None
+    lora_runtime_config: LoraRuntimeConfig | None = None
+    matformer_config_path: str | None = None
+    matformer_slice_name: str | None = None
+    max_batch_size: int
+    max_edge: int | None = None
+    max_image_length: int | None = None
+    max_num_images: int | None = None
+    max_seq_len: int
+    mmproj_filename: str | None = None
+    organization: IsqOrganization | None = None
+    quantized_filename: str
+    quantized_model_id: str
+    tok_model_id: str | None = None
+    tokenizer_json: str | None = None
+    topology: str | None = None
+    write_uqff: UqffWriteSpec | None = None
+    _external = 'GGUF'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedXLoraGGUF:
+    """Select a GGUF model with X-LoRA."""
+
+    calibration_file: str | None = None
+    dtype: ModelDType
+    hf_cache_path: str | None = None
+    imatrix: str | None = None
+    matformer_config_path: str | None = None
+    matformer_slice_name: str | None = None
+    max_batch_size: int
+    max_seq_len: int
+    order: str
+    organization: IsqOrganization | None = None
+    quantized_filename: str
+    quantized_model_id: str
+    tgt_non_granular_index: int | None = None
+    tok_model_id: str | None = None
+    tokenizer_json: str | None = None
+    topology: str | None = None
+    write_uqff: UqffWriteSpec | None = None
+    xlora_model_id: str
+    _external = 'XLoraGGUF'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedLoraGGUF:
+    """Select a GGUF model with LoRA."""
+
+    adapters_model_id: str
+    calibration_file: str | None = None
+    dtype: ModelDType
+    hf_cache_path: str | None = None
+    imatrix: str | None = None
+    matformer_config_path: str | None = None
+    matformer_slice_name: str | None = None
+    max_batch_size: int
+    max_seq_len: int
+    order: str
+    organization: IsqOrganization | None = None
+    quantized_filename: str
+    quantized_model_id: str
+    tok_model_id: str | None = None
+    tokenizer_json: str | None = None
+    topology: str | None = None
+    write_uqff: UqffWriteSpec | None = None
+    _external = 'LoraGGUF'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedGGML:
+    """Select a GGML model."""
+
+    dtype: ModelDType
+    gqa: int
+    max_batch_size: int
+    max_seq_len: int
+    quantized_filename: str
+    quantized_model_id: str
+    tok_model_id: str
+    tokenizer_json: str | None = None
+    topology: str | None = None
+    _external = 'GGML'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedXLoraGGML:
+    """Select a GGML model with X-LoRA."""
+
+    dtype: ModelDType
+    gqa: int
+    max_batch_size: int
+    max_seq_len: int
+    order: str
+    quantized_filename: str
+    quantized_model_id: str
+    tgt_non_granular_index: int | None = None
+    tok_model_id: str | None = None
+    tokenizer_json: str | None = None
+    topology: str | None = None
+    xlora_model_id: str
+    _external = 'XLoraGGML'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedLoraGGML:
+    """Select a GGML model with LoRA."""
+
+    adapters_model_id: str
+    dtype: ModelDType
+    gqa: int
+    max_batch_size: int
+    max_seq_len: int
+    order: str
+    quantized_filename: str
+    quantized_model_id: str
+    tok_model_id: str | None = None
+    tokenizer_json: str | None = None
+    topology: str | None = None
+    _external = 'LoraGGML'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedMultimodalPlain:
+    """Select a multimodal plain model, without quantization or adapters"""
+
+    arch: MultimodalLoaderType | None = None
+    calibration_file: str | None = None
+    dtype: ModelDType | None = None
+    from_uqff: str | None = None
+    hf_cache_path: str | None = None
+    imatrix: str | None = None
+    matformer_config_path: str | None = None
+    matformer_slice_name: str | None = None
+    max_batch_size: int | None = None
+    max_edge: int | None = None
+    max_image_length: int | None = None
+    max_num_images: int | None = None
+    max_seq_len: int | None = None
+    model_id: str
+    organization: IsqOrganization | None = None
+    tokenizer_json: str | None = None
+    topology: str | None = None
+    write_uqff: UqffWriteSpec | None = None
+    _external = 'MultimodalPlain'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedDiffusionPlain:
+    """Select a diffusion model, without quantization or adapters"""
+
+    arch: DiffusionLoaderType
+    dtype: ModelDType
+    model_id: str
+    _external = 'DiffusionPlain'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedSpeech:
+    arch: SpeechLoaderType
+    dac_model_id: str | None = None
+    dtype: ModelDType
+    model_id: str
+    _external = 'Speech'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedMultiModel:
+    """Select multi-model mode with configuration file"""
+
+    config: str
+    default_model_id: str | None = None
+    _external = 'MultiModel'
+
+
+@dataclass(kw_only=True)
+class ModelSelectedEmbedding:
+    """Select an embedding model, without quantization or adapters"""
+
+    arch: EmbeddingLoaderType | None = None
+    calibration_file: str | None = None
+    dtype: ModelDType | None = None
+    from_uqff: str | None = None
+    hf_cache_path: str | None = None
+    imatrix: str | None = None
+    model_id: str
+    tokenizer_json: str | None = None
+    topology: str | None = None
+    write_uqff: UqffWriteSpec | None = None
+    _external = 'Embedding'
+
+
 class ModelStatus(str, Enum):
     LOADED = "loaded"
     UNLOADED = "unloaded"
@@ -859,10 +1233,70 @@ class ModelStatusResponse:
     status: ModelStatus
 
 
+class MultimodalLoaderType(str, Enum):
+    """The architecture to load the multimodal model as."""
+
+    PHI3V = "phi3v"
+    IDEFICS2 = "idefics2"
+    LLAVA_NEXT = "llava_next"
+    LLAVA = "llava"
+    LFM2VL = "lfm2vl"
+    VLLAMA = "vllama"
+    QWEN2VL = "qwen2vl"
+    IDEFICS3 = "idefics3"
+    MINICPMO = "minicpmo"
+    PHI4MM = "phi4mm"
+    QWEN2_5VL = "qwen2_5vl"
+    GEMMA3 = "gemma3"
+    MISTRAL3 = "mistral3"
+    LLAMA4 = "llama4"
+    GEMMA3N = "gemma3n"
+    QWEN3VL = "qwen3vl"
+    QWEN3VLMOE = "qwen3vlmoe"
+    QWEN3_5 = "qwen3_5"
+    QWEN3_5MOE = "qwen3_5moe"
+    VOXTRAL = "voxtral"
+    GEMMA4 = "gemma4"
+    MUSE_GLIMMER = "muse_glimmer"
+    DIFFUSIONGEMMA = "diffusiongemma"
+    PADDLEOCR_VL = "paddleocr_vl"
+
+
 @dataclass(kw_only=True)
 class NamedFunctionToolChoice:
     name: str
     type: ToolType = "function"
+
+
+class NormalLoaderType(str, Enum):
+    """The architecture to load the normal model as."""
+
+    MISTRAL = "mistral"
+    GEMMA = "gemma"
+    MIXTRAL = "mixtral"
+    LLAMA = "llama"
+    PHI2 = "phi2"
+    PHI3 = "phi3"
+    QWEN2 = "qwen2"
+    GEMMA2 = "gemma2"
+    STARCODER2 = "starcoder2"
+    PHI3_5MOE = "phi3.5moe"
+    DEEPSEEKV2 = "deepseekv2"
+    DEEPSEEKV3 = "deepseekv3"
+    QWEN3 = "qwen3"
+    GLM4 = "glm4"
+    GLM4MOELITE = "glm4moelite"
+    GLM4MOE = "glm4moe"
+    QWEN3MOE = "qwen3moe"
+    SMOLLM3 = "smollm3"
+    GRANITEMOEHYBRID = "granitemoehybrid"
+    GPT_OSS = "gpt_oss"
+    HUNYUANV1DENSE = "hunyuanv1dense"
+    HUNYUANV1MOE = "hunyuanv1moe"
+    QWEN3NEXT = "qwen3next"
+    QWEN3_5 = "qwen3_5"
+    LFM2 = "lfm2"
+    LFM2_MOE = "lfm2_moe"
 
 
 @dataclass(kw_only=True)
@@ -1713,6 +2147,21 @@ class ResponsesUsage:
     total_tokens: int
 
 
+@dataclass(kw_only=True)
+class RuntimeSpec:
+    chat_template: str | None = None
+    device: str | None = None
+    isq: str | None = None
+    jinja_explicit: str | None = None
+    max_model_len: int | None = None
+    max_seqs: int | None = None
+    no_kv_cache: bool | None = None
+    paged_attn: bool | None = None
+    prefix_cache_n: int | None = None
+    seed: int | None = None
+    token_source: str | None = None
+
+
 class SearchContextSize(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
@@ -1772,6 +2221,13 @@ class SkillVersionObject:
 
 
 @dataclass(kw_only=True)
+class SkillsSpec:
+    """Where uploaded skills are kept; requests reference them from the shell tool."""
+
+    root: str | None = None
+
+
+@dataclass(kw_only=True)
 class SourceMeta:
     """Which agentic tool produced the file, and when in the session."""
 
@@ -1787,6 +2243,10 @@ class SpeechGenerationRequest:
     input: str
     model: str | None = None
     response_format: AudioResponseFormat
+
+
+class SpeechLoaderType(str, Enum):
+    DIA = "dia"
 
 
 @dataclass(kw_only=True)
@@ -1887,6 +2347,14 @@ class UnloadLoraAdapterRequest:
 
 
 @dataclass(kw_only=True)
+class UqffWriteSpecConfig:
+    base_model: str | None = None
+    output: str
+    repo_id: str | None = None
+    types: list[str] | None = None
+
+
+@dataclass(kw_only=True)
 class UrlCitation:
     """URL citation details"""
 
@@ -1944,6 +2412,7 @@ EmbeddingVector = Union[list[float], str]
 Grammar = Union[GrammarRegex, GrammarJsonSchema, GrammarLlguidance, GrammarLark]
 MessageInnerContent = Union[str, dict[str, str]]
 MessageContent = Union[str, list[dict[str, MessageInnerContent]]]
+ModelSelected = Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedXLora, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedXLoraGGUF, ModelSelectedLoraGGUF, ModelSelectedGGML, ModelSelectedXLoraGGML, ModelSelectedLoraGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedMultiModel, ModelSelectedEmbedding]
 OpenAiCodeInterpreterContainer = Union[str, OpenAiCodeInterpreterAutoContainer]
 OpenAiNamespaceEntry = Union[OpenAiResponsesFunctionTool, Any]
 OpenAiShellEnvironment = Union[OpenAiShellEnvironmentContainerAuto, OpenAiShellEnvironmentLocal, OpenAiShellEnvironmentContainerReference]
@@ -1959,4 +2428,5 @@ ResponsesMessages = Union[list[Message], str]
 StopTokens = Union[list[str], str]
 TextFormat = Union[TextFormatText, TextFormatJsonSchema, TextFormatJsonObject]
 ToolChoice = Union[Literal["none"], Literal["auto"], Literal["required"], AllowedToolsToolChoice, BuiltinToolChoice, Tool, NamedFunctionToolChoice]
+UqffWriteSpec = Union[str, UqffWriteSpecConfig]
 WebSearchUserLocation = WebSearchUserLocationApproximate

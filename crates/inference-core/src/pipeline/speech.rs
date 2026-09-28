@@ -36,6 +36,7 @@ use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
 
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, strum::EnumIter)]
 pub enum SpeechLoaderType {
     #[serde(rename = "dia")]

@@ -36,10 +36,9 @@ class Engine:
     engine. Close it, or use `with`. `json` serves the same operations as JSON strings.
     """
 
-    def __init__(self, spec: str | dict, callbacks: HostCallbacks | None = None):
-        self.json = JsonEngine(
-            spec if isinstance(spec, str) else json.dumps(spec), callbacks
-        )
+    def __init__(self, spec: types.EngineSpec | dict | str, callbacks: HostCallbacks | None = None):
+        """`spec` is what to load and how to run it: an EngineSpec, or its JSON as a dict or string."""
+        self.json = JsonEngine(to_json(spec), callbacks)
 
     abi_version = staticmethod(JsonEngine.abi_version)
     build_version = staticmethod(JsonEngine.build_version)
@@ -58,9 +57,7 @@ class Engine:
         request: types.ChatCompletionRequest | str,
         media: Sequence[MediaAttachment] = (),
     ) -> types.ChatCompletionResponse:
-        return from_json(
-            types.ChatCompletionResponse, self.json.chat(to_json(request), media)
-        )
+        return from_json(types.ChatCompletionResponse, self.json.chat(to_json(request), media))
 
     def chat_stream(
         self,
@@ -70,48 +67,30 @@ class Engine:
         """Events named `chunk` carry a ChatCompletionChunkResponse."""
         return _parsed(self.json.chat_stream(to_json(request), media), CHAT_EVENTS)
 
-    def completion(
-        self, request: types.CompletionRequest | str
-    ) -> types.CompletionResponse:
-        return from_json(
-            types.CompletionResponse, self.json.completion(to_json(request))
-        )
+    def completion(self, request: types.CompletionRequest | str) -> types.CompletionResponse:
+        return from_json(types.CompletionResponse, self.json.completion(to_json(request)))
 
     def completion_stream(self, request: types.CompletionRequest | str) -> Stream:
         """Events named `chunk` carry a CompletionChunkResponse."""
         return _parsed(self.json.completion_stream(to_json(request)), COMPLETION_EVENTS)
 
-    def embeddings(
-        self, request: types.EmbeddingRequest | str
-    ) -> types.EmbeddingResponse:
-        return from_json(
-            types.EmbeddingResponse, self.json.embeddings(to_json(request))
-        )
+    def embeddings(self, request: types.EmbeddingRequest | str) -> types.EmbeddingResponse:
+        return from_json(types.EmbeddingResponse, self.json.embeddings(to_json(request)))
 
-    def anthropic_messages(
-        self, request: types.AnthropicMessagesRequest | str
-    ) -> types.AnthropicMessageResponse:
+    def anthropic_messages(self, request: types.AnthropicMessagesRequest | str) -> types.AnthropicMessageResponse:
         return from_json(
             types.AnthropicMessageResponse,
             self.json.anthropic_messages(to_json(request)),
         )
 
-    def anthropic_messages_stream(
-        self, request: types.AnthropicMessagesRequest | str
-    ) -> Stream:
+    def anthropic_messages_stream(self, request: types.AnthropicMessagesRequest | str) -> Stream:
         """Anthropic stream events, as parsed JSON."""
         return self.json.anthropic_messages_stream(to_json(request))
 
-    def create_response(
-        self, request: types.OpenResponsesCreateRequest | str
-    ) -> types.ResponseResource:
-        return from_json(
-            types.ResponseResource, self.json.create_response(to_json(request))
-        )
+    def create_response(self, request: types.OpenResponsesCreateRequest | str) -> types.ResponseResource:
+        return from_json(types.ResponseResource, self.json.create_response(to_json(request)))
 
-    def response_stream(
-        self, request: types.OpenResponsesCreateRequest | str
-    ) -> Stream:
+    def response_stream(self, request: types.OpenResponsesCreateRequest | str) -> Stream:
         """OpenResponses events, each read as its variant of OpenResponsesStreamEvent."""
         return _parsed(self.json.response_stream(to_json(request)), RESPONSE_EVENTS)
 
@@ -128,48 +107,26 @@ class Engine:
         return from_json(types.ModelObjects, self.json.list_models())
 
     def unload_model(self, model_id: str) -> types.ModelStatusResponse:
-        return from_json(
-            types.ModelStatusResponse, self.json.unload_model(_model(model_id))
-        )
+        return from_json(types.ModelStatusResponse, self.json.unload_model(_model(model_id)))
 
     def reload_model(self, model_id: str) -> types.ModelStatusResponse:
-        return from_json(
-            types.ModelStatusResponse, self.json.reload_model(_model(model_id))
-        )
+        return from_json(types.ModelStatusResponse, self.json.reload_model(_model(model_id)))
 
     def model_status(self, model_id: str) -> types.ModelStatusResponse:
-        return from_json(
-            types.ModelStatusResponse, self.json.model_status(_model(model_id))
-        )
+        return from_json(types.ModelStatusResponse, self.json.model_status(_model(model_id)))
 
-    def list_lora_adapters(
-        self, model: str | None = None
-    ) -> types.LoraAdapterListResponse:
+    def list_lora_adapters(self, model: str | None = None) -> types.LoraAdapterListResponse:
         request = json.dumps({} if model is None else {"model": model})
-        return from_json(
-            types.LoraAdapterListResponse, self.json.list_lora_adapters(request)
-        )
+        return from_json(types.LoraAdapterListResponse, self.json.list_lora_adapters(request))
 
-    def load_lora_adapter(
-        self, request: types.LoadLoraAdapterRequest | str
-    ) -> types.LoraAdapterObject:
-        return from_json(
-            types.LoraAdapterObject, self.json.load_lora_adapter(to_json(request))
-        )
+    def load_lora_adapter(self, request: types.LoadLoraAdapterRequest | str) -> types.LoraAdapterObject:
+        return from_json(types.LoraAdapterObject, self.json.load_lora_adapter(to_json(request)))
 
-    def unload_lora_adapter(
-        self, request: types.UnloadLoraAdapterRequest | str
-    ) -> types.LoraAdapterObject:
-        return from_json(
-            types.LoraAdapterObject, self.json.unload_lora_adapter(to_json(request))
-        )
+    def unload_lora_adapter(self, request: types.UnloadLoraAdapterRequest | str) -> types.LoraAdapterObject:
+        return from_json(types.LoraAdapterObject, self.json.unload_lora_adapter(to_json(request)))
 
-    def image_generation(
-        self, request: types.ImageGenerationRequest | str
-    ) -> types.ImageGenerationResponse:
-        return from_json(
-            types.ImageGenerationResponse, self.json.image_generation(to_json(request))
-        )
+    def image_generation(self, request: types.ImageGenerationRequest | str) -> types.ImageGenerationResponse:
+        return from_json(types.ImageGenerationResponse, self.json.image_generation(to_json(request)))
 
     def speech_generation(self, request: types.SpeechGenerationRequest | str) -> Blob:
         """The audio; its MIME type carries the sample rate and channel count."""
@@ -183,9 +140,7 @@ class Engine:
             self.json.resolve_approval(approval_id, to_json(decision)),
         )
 
-    def upload_file(
-        self, data: bytes, filename: str, purpose: str, mime_type: str | None = None
-    ) -> types.FileMetadata:
+    def upload_file(self, data: bytes, filename: str, purpose: str, mime_type: str | None = None) -> types.FileMetadata:
         return from_json(
             types.FileMetadata,
             self.json.upload_file(data, filename, purpose, mime_type),
@@ -206,19 +161,13 @@ class Engine:
     def upload_skill(self, files: Sequence[SkillFile]) -> types.SkillObject:
         return from_json(types.SkillObject, self.json.upload_skill(files))
 
-    def upload_skill_version(
-        self, skill_id: str, files: Sequence[SkillFile]
-    ) -> types.SkillVersionObject:
-        return from_json(
-            types.SkillVersionObject, self.json.upload_skill_version(skill_id, files)
-        )
+    def upload_skill_version(self, skill_id: str, files: Sequence[SkillFile]) -> types.SkillVersionObject:
+        return from_json(types.SkillVersionObject, self.json.upload_skill_version(skill_id, files))
 
     def list_skills(self) -> types.SkillListObject:
         return from_json(types.SkillListObject, self.json.list_skills())
 
-    def list_skill_versions(
-        self, skill_id: str
-    ) -> types.AnthropicSkillVersionListObject:
+    def list_skill_versions(self, skill_id: str) -> types.AnthropicSkillVersionListObject:
         return from_json(
             types.AnthropicSkillVersionListObject,
             self.json.list_skill_versions(skill_id),

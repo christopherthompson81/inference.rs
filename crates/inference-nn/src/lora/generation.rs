@@ -99,6 +99,7 @@ impl<'de> Deserialize<'de> for AdapterGenerationId {
     }
 }
 
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 /// Alias and source used to preload a LoRA adapter.
 pub struct LoraAdapterSpec {

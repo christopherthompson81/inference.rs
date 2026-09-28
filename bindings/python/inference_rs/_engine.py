@@ -58,9 +58,7 @@ class Stream:
         done = ctypes.c_int32()
         with Lease(self._stream) as stream:
             check(
-                lib.inference_stream_next(
-                    stream, wait, ctypes.byref(event), ctypes.byref(done)
-                ),
+                lib.inference_stream_next(stream, wait, ctypes.byref(event), ctypes.byref(done)),
                 "inference_stream_next",
             )
         if done.value:
@@ -69,9 +67,7 @@ class Stream:
         if not event.value:
             return None
         envelope = json.loads(take_string(event))
-        return StreamEvent(
-            envelope["event"], self.parse(envelope["event"], envelope["data"])
-        )
+        return StreamEvent(envelope["event"], self.parse(envelope["event"], envelope["data"]))
 
     def __iter__(self) -> Iterator[StreamEvent]:
         while (event := self.next()) is not None:
@@ -113,9 +109,7 @@ class JsonEngine:
     callback must not hold the last reference to its engine, which would then be freed on the engine's own thread.
     """
 
-    def __init__(
-        self, spec_json: str, callbacks: _callbacks.HostCallbacks | None = None
-    ):
+    def __init__(self, spec_json: str, callbacks: _callbacks.HostCallbacks | None = None):
         spec = text_arg(spec_json)
         engine = ctypes.c_void_p()
         if callbacks is None:
@@ -141,9 +135,7 @@ class JsonEngine:
             _callbacks.unregister(registration.ids)
             raise
         ids = registration.ids
-        self._handle = Handle(
-            engine.value, lib.inference_engine_free, lambda: _callbacks.unregister(ids)
-        )
+        self._handle = Handle(engine.value, lib.inference_engine_free, lambda: _callbacks.unregister(ids))
         self._finalizer = weakref.finalize(self, self._handle.close)
 
     @staticmethod
@@ -180,9 +172,7 @@ class JsonEngine:
         stream = ctypes.c_void_p()
         with Lease(self._handle) as engine:
             check(
-                getattr(lib, name)(
-                    engine, data, len(data), *extra, ctypes.byref(stream)
-                ),
+                getattr(lib, name)(engine, data, len(data), *extra, ctypes.byref(stream)),
                 name,
             )
             try:
@@ -235,21 +225,15 @@ class JsonEngine:
         response = ctypes.c_void_p()
         with Lease(self._handle) as engine:
             check(
-                lib.inference_chat_with_media(
-                    engine, data, len(data), array, count, ctypes.byref(response)
-                ),
+                lib.inference_chat_with_media(engine, data, len(data), array, count, ctypes.byref(response)),
                 "inference_chat_with_media",
             )
         return take_string(response)
 
-    def chat_stream(
-        self, request_json: str, media: Sequence[MediaAttachment] = ()
-    ) -> Stream:
+    def chat_stream(self, request_json: str, media: Sequence[MediaAttachment] = ()) -> Stream:
         buffers = _Buffers()
         array, count = self._media(media, buffers)
-        return self._stream(
-            "inference_chat_stream_open_with_media", request_json, array, count
-        )
+        return self._stream("inference_chat_stream_open_with_media", request_json, array, count)
 
     def completion(self, request_json: str) -> str:
         return self._call("inference_completion", request_json)
@@ -329,9 +313,7 @@ class JsonEngine:
             )
         return take_string(response)
 
-    def upload_file(
-        self, data: bytes, filename: str, purpose: str, mime_type: str | None = None
-    ) -> str:
+    def upload_file(self, data: bytes, filename: str, purpose: str, mime_type: str | None = None) -> str:
         data = bytes_arg(data)
         response = ctypes.c_void_p()
         with Lease(self._handle) as engine:
@@ -367,9 +349,7 @@ class JsonEngine:
         response = ctypes.c_void_p()
         with Lease(self._handle) as engine:
             check(
-                lib.inference_skill_upload(
-                    engine, array, count, ctypes.byref(response)
-                ),
+                lib.inference_skill_upload(engine, array, count, ctypes.byref(response)),
                 "inference_skill_upload",
             )
         return take_string(response)
@@ -381,9 +361,7 @@ class JsonEngine:
         response = ctypes.c_void_p()
         with Lease(self._handle) as engine:
             check(
-                lib.inference_skill_version_upload(
-                    engine, skill, len(skill), array, count, ctypes.byref(response)
-                ),
+                lib.inference_skill_version_upload(engine, skill, len(skill), array, count, ctypes.byref(response)),
                 "inference_skill_version_upload",
             )
         return take_string(response)

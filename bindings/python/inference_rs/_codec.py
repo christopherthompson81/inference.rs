@@ -20,11 +20,13 @@ def to_data(value):
     """JSON-ready data for a dataclass, enum, list or dict; None fields are left out, as the server's defaults apply."""
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         wire = getattr(type(value), "_wire", {})
-        return {
+        fields = {
             wire.get(f.name, f.name): to_data(getattr(value, f.name))
             for f in dataclasses.fields(value)
             if getattr(value, f.name) is not None
         }
+        external = getattr(type(value), "_external", None)
+        return fields if external is None else {external: fields}
     if isinstance(value, Enum):
         return value.value
     if isinstance(value, list | tuple):
@@ -35,7 +37,7 @@ def to_data(value):
 
 
 def to_json(value) -> str:
-    """A request as JSON; a str is taken to be JSON already."""
+    """A request as JSON: a str is taken to be JSON already; classes, dicts and lists of them are converted."""
     return value if isinstance(value, str) else json.dumps(to_data(value))
 
 
@@ -59,18 +61,10 @@ def from_data(annotation, data, strict: bool = False):
     if origin in (typing.Union, pytypes.UnionType):
         return _union(typing.get_args(annotation), data, strict)
     if data is None:
-        return (
-            None
-            if annotation is type(None)
-            else _off_shape(strict, None, f"null is not {annotation}")
-        )
+        return None if annotation is type(None) else _off_shape(strict, None, f"null is not {annotation}")
     if origin is typing.Literal:
         allowed = typing.get_args(annotation)
-        return (
-            data
-            if data in allowed
-            else _off_shape(strict, data, f"{data!r} is not one of {allowed}")
-        )
+        return data if data in allowed else _off_shape(strict, data, f"{data!r} is not one of {allowed}")
     if origin is list:
         if not isinstance(data, list):
             return _off_shape(strict, data, f"{type(data).__name__} is not a list")
@@ -92,33 +86,28 @@ def from_data(annotation, data, strict: bool = False):
 
 
 def _scalar(annotation, data, strict: bool):
-    if (
-        annotation is float
-        and isinstance(data, int | float)
-        and not isinstance(data, bool)
-    ):
+    if annotation is float and isinstance(data, int | float) and not isinstance(data, bool):
         return float(data)
     if annotation is int and isinstance(data, bool):
         return _off_shape(strict, data, "a boolean is not an integer")
     if isinstance(annotation, type) and not isinstance(data, annotation):
-        return _off_shape(
-            strict, data, f"{type(data).__name__} is not {annotation.__name__}"
-        )
+        return _off_shape(strict, data, f"{type(data).__name__} is not {annotation.__name__}")
     return data
 
 
 def _dataclass(cls, data, strict: bool):
+    external = getattr(cls, "_external", None)
+    if external is not None:
+        if not isinstance(data, dict) or list(data) != [external]:
+            return _off_shape(strict, data, f"{cls.__name__} is written as {{{external!r}: ...}}")
+        data = data[external]
     if not isinstance(data, dict):
-        return _off_shape(
-            strict, data, f"{type(data).__name__} is not a {cls.__name__}"
-        )
+        return _off_shape(strict, data, f"{type(data).__name__} is not a {cls.__name__}")
     wire = getattr(cls, "_wire", {})
     hints = _hints(cls)
     known = {wire.get(f.name, f.name): f for f in dataclasses.fields(cls)}
     if strict and not data.keys() <= known.keys():
-        raise Mismatch(
-            f"{sorted(data.keys() - known.keys())} are not fields of {cls.__name__}"
-        )
+        raise Mismatch(f"{sorted(data.keys() - known.keys())} are not fields of {cls.__name__}")
     values = {}
     for key, f in known.items():
         if key in data:
@@ -130,16 +119,19 @@ def _dataclass(cls, data, strict: bool):
 
 
 def _tagged(members, data):
-    """The variant whose tag default is the data's tag, if exactly one has it."""
+    """The variant the data names: by its `type` tag, or by the one key of an externally tagged variant."""
+    if isinstance(data, dict) and len(data) == 1:
+        (key,) = data
+        external = [member for member in members if getattr(member, "_external", None) == key]
+        if len(external) == 1:
+            return external[0]
     if not isinstance(data, dict) or not isinstance(data.get(TAG), str):
         return None
     matches = [
         member
         for member in members
         if dataclasses.is_dataclass(member)
-        and any(
-            f.name == TAG and f.default == data[TAG] for f in dataclasses.fields(member)
-        )
+        and any(f.name == TAG and f.default == data[TAG] for f in dataclasses.fields(member))
     ]
     return matches[0] if len(matches) == 1 else None
 
@@ -147,11 +139,7 @@ def _tagged(members, data):
 def _union(members, data, strict: bool):
     options = [member for member in members if member is not type(None)]
     if data is None:
-        return (
-            None
-            if len(options) < len(members)
-            else _off_shape(strict, None, "null is not allowed")
-        )
+        return None if len(options) < len(members) else _off_shape(strict, None, "null is not allowed")
     if len(options) == 1:
         return from_data(options[0], data, strict)
     tagged = _tagged(options, data)

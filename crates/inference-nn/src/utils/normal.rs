@@ -8,6 +8,7 @@ use inference_quant::log::once_log_info;
 use serde::{Deserialize, Serialize};
 use tracing::debug;
 
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Copy, Default, Debug, Deserialize, Serialize, PartialEq)]
 #[cfg_attr(feature = "pyo3_macros", pyo3::pyclass(eq, eq_int))]
 /// DType for the model.
