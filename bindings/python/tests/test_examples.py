@@ -181,7 +181,7 @@ from inference_rs.types import ModelSelectedPlain
 from inference_rs import NoSuchThing
 
 with inference_rs.Engine(spec) as engine:
-    engine.chat_strem(request)
+    engine.no_such_method(request)
 inference_rs.types.NoSuchType
 types_module.NormalLoaderType.NO_SUCH_MEMBER
 ModelSelectedPlain(bogus=1)
@@ -189,7 +189,7 @@ ModelSelectedPlain(bogus=1)
         found = problems("probe", source)
         for expected in (
             "inference_rs.NoSuchThing",
-            "Engine.chat_strem",
+            "Engine.no_such_method",
             "inference_rs.types.NoSuchType",
             "NormalLoaderType.NO_SUCH_MEMBER",
             "line 11: ModelSelectedPlain has no field bogus",
