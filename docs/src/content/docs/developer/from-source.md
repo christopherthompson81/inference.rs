@@ -65,7 +65,7 @@ In the quantization crate, some tests run only with a specific backend feature e
 
 ## Python SDK
 
-The Python package is pure Python over `libinference_ffi`, so building it means building that library with the features you want:
+The Python package is pure Python over `libinference_ffi`. `python scripts/release/build_wheels.py [--accelerator cpu|cuda|metal] [--features ...]` builds the library in release and packages it into `target/wheels/`. For development, build the library with the features you want and install the package in place:
 
 ```bash
 cargo build --release -p inference-ffi --features "cuda nccl flash-attn cudnn"

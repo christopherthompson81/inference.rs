@@ -22,6 +22,9 @@ from pathlib import Path
 ABI_VERSION = (0 << 16) | (0 << 8) | 11
 
 NATIVE_DIR_VARIABLE = "INFERENCE_NATIVE_DIR"
+BUNDLED_DIR = "_lib"
+CUDA_PATH_VARIABLE = "CUDA_PATH"
+CUDA_DLL_DIRS = ("bin", "bin/x64")
 # Release first: a consumer that built it has the fast one; tests fall back to the dev build.
 PROFILES = ("release", "debug")
 
@@ -183,10 +186,11 @@ def _file_name() -> str:
 
 
 def search_paths():
-    """INFERENCE_NATIVE_DIR, then the target/ of the checkout this package sits in."""
+    """INFERENCE_NATIVE_DIR, then the library a wheel bundles, then the target/ of the checkout this package sits in."""
     configured = os.environ.get(NATIVE_DIR_VARIABLE)
     if configured:
         yield Path(configured) / _file_name()
+    yield Path(__file__).resolve().parent / BUNDLED_DIR / _file_name()
     for parent in Path(__file__).resolve().parents:
         # The checkout's root; an installed package has none, and probing every parent would be guesswork.
         if (parent / "Cargo.toml").is_file():
@@ -196,6 +200,11 @@ def search_paths():
 
 
 def _load() -> ctypes.CDLL:
+    if sys.platform == "win32" and os.environ.get(CUDA_PATH_VARIABLE):
+        # A library loaded by path finds its own DLLs only in the directories added here, not on PATH.
+        for directory in CUDA_DLL_DIRS:
+            if (Path(os.environ[CUDA_PATH_VARIABLE]) / directory).is_dir():
+                os.add_dll_directory(str(Path(os.environ[CUDA_PATH_VARIABLE]) / directory))
     for path in search_paths():
         if path.is_file():
             return ctypes.CDLL(str(path))

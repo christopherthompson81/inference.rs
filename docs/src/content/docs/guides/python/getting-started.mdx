@@ -31,16 +31,28 @@ The first run downloads the weights into the Hugging Face cache.
 
 ## Installing
 
-inference.rs does not publish wheels yet. Build the library from a checkout, then install the package. Python 3.10 or newer.
+inference.rs does not publish wheels to PyPI yet; build one from a checkout. Python 3.10 or newer.
+
+```bash
+python scripts/release/build_wheels.py                      # CPU, or Metal on Apple silicon
+python scripts/release/build_wheels.py --accelerator cuda   # NVIDIA
+pip install target/wheels/<the wheel it printed>
+```
+
+The wheel bundles a release `libinference_ffi` built for that accelerator (`--features` adds more [cargo features](/reference/cargo-features/), e.g. `flash-attn` or `nccl`); see [hardware support](/reference/hardware-support/) for what each backend covers. It is as portable as that library:
+
+- A Linux CPU wheel is tagged `manylinux_2_N` for the newest glibc its library needs, so a wheel built on a recent distribution only installs on one at least as new.
+- A CUDA wheel is tagged plain `linux` with a `+cuMAJOR.smNN` local version: it needs the CUDA runtime of that major version on the library path and a GPU of that compute capability (set `CUDA_COMPUTE_CAP` to build for another).
+- A Metal wheel targets macOS 15.
+
+To work on the package itself, build the library and install the package in place instead:
 
 ```bash
 cargo build --release -p inference-ffi
 pip install -e bindings/python
 ```
 
-Add `--features cuda` (NVIDIA) or `--features metal` (macOS) to the `cargo build` for GPU support; see [cargo features](/reference/cargo-features/) for the feature flags and [hardware support](/reference/hardware-support/) for what each backend covers.
-
-The package needs no compiled extension; `ctypes` loads the library on first use. It looks in `INFERENCE_NATIVE_DIR` first, then in `target/release` and `target/debug` of the checkout the package sits in, then in the platform's own library search path. To use a library built elsewhere, point the variable at its directory:
+The package needs no compiled extension; `ctypes` loads the library on first use. It looks in `INFERENCE_NATIVE_DIR` first, then for the library a wheel bundles, then in `target/release` and `target/debug` of the checkout the package sits in, then in the platform's own library search path. To use a library built elsewhere, point the variable at its directory:
 
 ```bash
 export INFERENCE_NATIVE_DIR=/path/to/dir/with/libinference_ffi

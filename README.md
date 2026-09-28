@@ -223,11 +223,11 @@ Text, multimodal, speech, image generation, and embedding models across 45+ arch
 ## Python SDK
 
 ```bash
-cargo build --release -p inference-ffi
-pip install -e bindings/python
+python scripts/release/build_wheels.py   # add --accelerator cuda for NVIDIA
+pip install target/wheels/<the wheel it printed>
 ```
 
-In-process inference from Python: a pure-Python package over the engine's C ABI. Load a model with `Engine` and send typed, OpenAI-shaped requests, no server required. Build the library with `--features cuda` or `--features metal` for an accelerator.
+In-process inference from Python: a pure-Python package over the engine's C ABI. Load a model with `Engine` and send typed, OpenAI-shaped requests, no server required. The wheel bundles the engine library, built for CPU, CUDA or Metal.
 
 [Get started](https://docs.mistralrs.dev/guides/python/getting-started/) | [API reference](https://docs.mistralrs.dev/reference/python/) | [Examples](examples/python)
 

@@ -1,14 +1,13 @@
 #!/usr/bin/env python3
-"""
-Build script for inference_rs Python wheels.
-
-Auto-detects platform, architecture, and available accelerators.
-Builds appropriate wheels based on the detected environment.
+"""Build the inference_rs wheel for this machine: the pure-Python package with libinference_ffi bundled in it.
 
 Usage:
-    python scripts/release/build_wheels.py --list                    # Show buildable packages
-    python scripts/release/build_wheels.py --all                     # Build the inference_rs wheel
-    python scripts/release/build_wheels.py -p inference_rs
+    python scripts/release/build_wheels.py                     # release build, accelerator picked for this machine
+    python scripts/release/build_wheels.py --accelerator cuda --features flash-attn
+    python scripts/release/build_wheels.py --library target/release/libinference_ffi.so   # package a built library
+
+The wheel is as portable as its library: a Linux CPU wheel needs the newest glibc the build host's library links
+against, and a CUDA wheel needs the CUDA runtime its library links and a GPU of the compute capability it was built for.
 """
 
 from __future__ import annotations
@@ -20,521 +19,243 @@ import re
 import shutil
 import subprocess
 import sys
-from dataclasses import dataclass
-from enum import Enum
+import tempfile
 from pathlib import Path
-from typing import Optional
 
-# ============================================================================
-# Constants and Configuration
-# ============================================================================
-
-SCRIPT_DIR = Path(__file__).parent.resolve()
-REPO_ROOT = SCRIPT_DIR.parent.parent
-PYPROJECT_PATH = REPO_ROOT / "crates" / "inference-pyo3" / "pyproject.toml"
-CARGO_MANIFEST = REPO_ROOT / "crates" / "inference-pyo3" / "Cargo.toml"
-DOCKERFILE_PATH = REPO_ROOT / "docker" / "Dockerfile.manylinux"
-
-# Releases now publish a single `inference_rs` package (CPU on linux/windows, Metal on macOS) via
-# .github/workflows/release.yml; CUDA wheels ship as release assets. This local helper builds the
-# `inference_rs` wheel for the current platform.
-PACKAGE_NAMES = [
-    "inference_rs",
-]
-
-TRUTHY = {"1", "true", "yes", "on"}
-
-
-class OS(Enum):
-    LINUX = "linux"
-    DARWIN = "darwin"
-    WINDOWS = "windows"
-
-
-class Arch(Enum):
-    X86_64 = "x86_64"
-    AARCH64 = "aarch64"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+PACKAGE_SOURCE = REPO_ROOT / "bindings" / "python"
+PACKAGE_FILES = ("pyproject.toml", "setup.py", "README.md", "inference_rs")
+BUNDLED_DIR = Path("inference_rs") / "_lib"
+DEFAULT_OUT = REPO_ROOT / "target" / "wheels"
+PLATFORM_VARIABLE = "INFERENCE_WHEEL_PLATFORM"
+ACCELERATOR_FEATURES = {"cpu": [], "cuda": ["cuda"], "metal": ["metal"]}
+# Metal needs the macOS 15 SDK's APIs; a CPU build runs on anything Apple still supports.
+MACOS_DEPLOYMENT_TARGETS = {"metal": "15.0", "cpu": "11.0"}
+MIN_SETUPTOOLS = (77, 0)
+GLIBC_VERSION = re.compile(rb"GLIBC_2\.(\d+)")
+CUDART_NEEDED = re.compile(rb"(?:lib)?cudart(?:64_)?\.?(?:so\.)?(\d+)")
+NEEDED_ENTRY = re.compile(r"\(NEEDED\)\s+Shared library: \[([^\]]+)\]")
+# A dev CUDA build loads its kernel libraries from the checkout by absolute path, so it cannot travel.
+CHECKOUT_KERNELS = b"/cuda-kernels/"
+# The libraries every manylinux policy lets a wheel assume; anything else needs a plain linux tag.
+MANYLINUX_LIBRARIES = {
+    "libc.so.6",
+    "libm.so.6",
+    "libdl.so.2",
+    "librt.so.1",
+    "libpthread.so.0",
+    "libgcc_s.so.1",
+    "libstdc++.so.6",
+    "ld-linux-x86-64.so.2",
+    "ld-linux-aarch64.so.1",
+}
 
 
-@dataclass
-class Platform:
-    os: OS
-    arch: Arch
-    has_cuda: bool
-    has_metal: bool
+def library_name() -> str:
+    if sys.platform == "win32":
+        return "inference_ffi.dll"
+    if sys.platform == "darwin":
+        return "libinference_ffi.dylib"
+    return "libinference_ffi.so"
 
 
-@dataclass
-class PackageConfig:
-    name: str
-    features: list[str]
-    supported_os: list[OS]
-    supported_arch: list[Arch]
-    requires_accelerator: Optional[str]  # "cuda", "metal", or None
+def machine() -> str:
+    arch = platform.machine().lower()
+    return {"amd64": "x86_64", "arm64": "aarch64"}.get(arch, arch)
 
 
-# ============================================================================
-# Platform Detection
-# ============================================================================
+def default_accelerator() -> str:
+    if sys.platform == "darwin" and machine() == "aarch64":
+        return "metal"
+    return "cpu"
 
 
-def detect_platform() -> Platform:
-    """Auto-detect OS, architecture, and available accelerators."""
-    # Detect OS
-    system = platform.system().lower()
-    if system == "linux":
-        os_type = OS.LINUX
-    elif system == "darwin":
-        os_type = OS.DARWIN
-    elif system == "windows":
-        os_type = OS.WINDOWS
-    else:
-        raise RuntimeError(f"Unsupported OS: {system}")
-
-    # Detect architecture
-    machine = platform.machine().lower()
-    if machine in ("x86_64", "amd64"):
-        arch = Arch.X86_64
-    elif machine in ("aarch64", "arm64"):
-        arch = Arch.AARCH64
-    else:
-        raise RuntimeError(f"Unsupported architecture: {machine}")
-
-    # Detect CUDA
-    has_cuda = _detect_cuda()
-
-    # Detect Metal (macOS aarch64 only)
-    has_metal = os_type == OS.DARWIN and arch == Arch.AARCH64
-
-    return Platform(os=os_type, arch=arch, has_cuda=has_cuda, has_metal=has_metal)
-
-
-def _detect_cuda() -> bool:
-    """Check if CUDA is available."""
-    # Check for nvidia-smi
-    if shutil.which("nvidia-smi"):
-        try:
-            result = subprocess.run(
-                ["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0 and len(result.stdout.strip()) > 0:
-                return True
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
-
-    # Check for CUDA library paths
-    cuda_paths = [
-        "/usr/local/cuda",
-        "/opt/cuda",
-        os.environ.get("CUDA_HOME", ""),
-        os.environ.get("CUDA_PATH", ""),
-    ]
-    return any(Path(p).exists() for p in cuda_paths if p)
-
-
-def _cuda_version() -> Optional[tuple[int, int]]:
-    """Detect the CUDA toolkit (major, minor) from nvcc, if available."""
-    nvcc = shutil.which("nvcc")
-    if not nvcc:
-        for home in (os.environ.get("CUDA_HOME"), os.environ.get("CUDA_PATH"), "/usr/local/cuda"):
-            cand = Path(home) / "bin" / "nvcc" if home else None
-            if cand and cand.exists():
-                nvcc = str(cand)
-                break
-    if not nvcc:
+def compute_capability() -> str | None:
+    """The SM the CUDA kernels build for: the build scripts read CUDA_COMPUTE_CAP, else the first GPU."""
+    if os.environ.get("CUDA_COMPUTE_CAP"):
+        return os.environ["CUDA_COMPUTE_CAP"].replace(".", "")
+    if not shutil.which("nvidia-smi"):
         return None
-    try:
-        out = subprocess.run([nvcc, "--version"], capture_output=True, text=True, timeout=5)
-        m = re.search(r"release (\d+)\.(\d+)", out.stdout)
-        if m:
-            return (int(m.group(1)), int(m.group(2)))
-    except (subprocess.SubprocessError, FileNotFoundError, OSError):
-        pass
-    return None
+    query = ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"]
+    lines = subprocess.run(
+        query, capture_output=True, text=True, check=False
+    ).stdout.split()
+    return lines[0].replace(".", "") if lines else None
 
 
-def _env_truthy(name: str) -> bool:
-    return os.environ.get(name, "").lower() in TRUTHY
+def needed_libraries(library: Path) -> list[str] | None:
+    if not shutil.which("readelf"):
+        return None
+    dynamic = subprocess.run(
+        ["readelf", "-d", str(library)], capture_output=True, text=True, check=True
+    ).stdout
+    return NEEDED_ENTRY.findall(dynamic)
 
 
-def _detect_nccl() -> bool:
-    if platform.system().lower() != "linux":
-        return False
+def cuda_local_version(data: bytes) -> str:
+    found = CUDART_NEEDED.search(data)
+    if found is None:
+        sys.exit(
+            "the library uses CUDA but names no CUDA runtime to version the wheel by"
+        )
+    sm = compute_capability()
+    if sm is None:
+        sys.exit(
+            "set CUDA_COMPUTE_CAP to the compute capability the library was built for"
+        )
+    return f"cu{found.group(1).decode()}.sm{sm}"
 
-    for home in (
-        os.environ.get("NCCL_ROOT"),
-        os.environ.get("NCCL_HOME"),
-        os.environ.get("CUDA_HOME"),
-        os.environ.get("CUDA_PATH"),
-        "/usr/local/cuda",
+
+def platform_tag(library: Path, accelerator: str) -> str:
+    """The wheel platform the library's own requirements allow."""
+    if sys.platform == "win32":
+        return "win_arm64" if machine() == "aarch64" else "win_amd64"
+    if sys.platform == "darwin":
+        target = os.environ.get(
+            "MACOSX_DEPLOYMENT_TARGET",
+            MACOS_DEPLOYMENT_TARGETS.get(accelerator, "11.0"),
+        )
+        major, _, minor = target.partition(".")
+        return f"macosx_{major}_{minor or '0'}_{'arm64' if machine() == 'aarch64' else 'x86_64'}"
+    needed = needed_libraries(library)
+    if (
+        accelerator == "cuda"
+        or needed is None
+        or not set(needed) <= MANYLINUX_LIBRARIES
     ):
-        if not home:
-            continue
-        root = Path(home)
-        for subdir in ("lib", "lib64", "lib/x86_64-linux-gnu"):
-            if any((root / subdir).glob("libnccl.so*")):
-                return True
+        linked = (
+            ", ".join(sorted(set(needed or []) - MANYLINUX_LIBRARIES))
+            or "unknown libraries"
+        )
+        print(
+            f"note: the library links {linked}, so the wheel claims plain linux, not manylinux"
+        )
+        return f"linux_{machine()}"
+    minors = [int(minor) for minor in GLIBC_VERSION.findall(library.read_bytes())]
+    return f"manylinux_2_{max(minors, default=17)}_{machine()}"
 
-    for libdir in (
-        "/usr/lib/x86_64-linux-gnu",
-        "/usr/lib/aarch64-linux-gnu",
-        "/usr/local/lib",
-        "/usr/local/lib64",
-        "/usr/lib64",
-    ):
-        if any(Path(libdir).glob("libnccl.so*")):
-            return True
 
-    if shutil.which("ldconfig"):
-        try:
-            result = subprocess.run(
-                ["ldconfig", "-p"], capture_output=True, text=True, timeout=5
+def build_library(accelerator: str, features: list[str]) -> Path:
+    features = ACCELERATOR_FEATURES[accelerator] + features
+    command = ["cargo", "build", "--release", "-p", "inference-ffi"]
+    if features:
+        command += ["--features", ",".join(features)]
+    env = dict(os.environ)
+    # Set, even empty, it overrides the checkout's target-cpu=native, so the wheel runs on any CPU of its arch.
+    env.setdefault("RUSTFLAGS", "")
+    if sys.platform == "darwin":
+        env.setdefault(
+            "MACOSX_DEPLOYMENT_TARGET",
+            MACOS_DEPLOYMENT_TARGETS.get(accelerator, "11.0"),
+        )
+    print("+", " ".join(command))
+    subprocess.run(command, check=True, cwd=REPO_ROOT, env=env)
+    return REPO_ROOT / "target" / "release" / library_name()
+
+
+def stage(library: Path, into: Path, local_version: str | None) -> Path:
+    for name in PACKAGE_FILES:
+        source = PACKAGE_SOURCE / name
+        if source.is_dir():
+            shutil.copytree(
+                source,
+                into / name,
+                ignore=shutil.ignore_patterns("__pycache__", "_lib"),
             )
-            return result.returncode == 0 and "libnccl.so" in result.stdout
-        except (subprocess.SubprocessError, FileNotFoundError, OSError):
-            pass
-
-    return False
-
-
-# ============================================================================
-# Package Configuration
-# ============================================================================
-
-
-def get_package_configs() -> dict[str, PackageConfig]:
-    """Define the build configuration for each package."""
-    return {
-        "inference_rs": PackageConfig(
-            name="inference_rs",
-            features=[],  # Features determined by platform
-            supported_os=[OS.LINUX, OS.DARWIN, OS.WINDOWS],
-            supported_arch=[Arch.X86_64, Arch.AARCH64],
-            requires_accelerator=None,
-        ),
-    }
+        elif source.exists():
+            shutil.copy2(source, into / name)
+    (into / BUNDLED_DIR).mkdir()
+    shutil.copy2(library, into / BUNDLED_DIR / library_name())
+    if local_version:
+        pyproject = into / "pyproject.toml"
+        text = re.sub(
+            r'^version = "([^"]+)"',
+            rf'version = "\1+{local_version}"',
+            pyproject.read_text(),
+            flags=re.M,
+        )
+        pyproject.write_text(text)
+    return into
 
 
-def get_features_for_base_package(plat: Platform) -> list[str]:
-    """Get features for the 'inference_rs' base package based on platform."""
-    if plat.os == OS.DARWIN and plat.arch == Arch.AARCH64:
-        return ["metal"]  # macOS aarch64: Metal
-    return []  # linux/windows: CPU (CUDA wheels ship as release assets, not via this path)
+def build_wheel(staged: Path, out: Path, tag: str) -> Path:
+    built = staged.parent / "wheel"
+    # No cache: the staging path is new every build, so a cached wheel would never be reused.
+    command = [
+        sys.executable,
+        "-m",
+        "pip",
+        "wheel",
+        "--no-deps",
+        "--no-build-isolation",
+        "--no-cache-dir",
+    ]
+    command += ["-w", str(built), str(staged)]
+    print("+", " ".join(command), f"({PLATFORM_VARIABLE}={tag})")
+    subprocess.run(command, check=True, env={**os.environ, PLATFORM_VARIABLE: tag})
+    (wheel,) = built.glob("*.whl")
+    out.mkdir(parents=True, exist_ok=True)
+    return Path(shutil.move(wheel, out / wheel.name))
 
 
-def get_buildable_packages(
-    configs: dict[str, PackageConfig], plat: Platform
-) -> list[str]:
-    """Get list of packages that can be built on the current platform."""
-    buildable = []
-
-    for name, cfg in configs.items():
-        # Check OS and arch support
-        if plat.os not in cfg.supported_os:
-            continue
-        if plat.arch not in cfg.supported_arch:
-            continue
-
-        # Check accelerator requirements
-        if cfg.requires_accelerator == "cuda" and not plat.has_cuda:
-            continue
-        if cfg.requires_accelerator == "metal" and not plat.has_metal:
-            continue
-
-        buildable.append(name)
-
-    return buildable
-
-
-# ============================================================================
-# PyProject.toml Modification
-# ============================================================================
-
-
-def modify_pyproject_name(name: str) -> None:
-    """Modify project.name in pyproject.toml."""
-    content = PYPROJECT_PATH.read_text()
-
-    # Use regex to replace the name field
-    new_content = re.sub(
-        r'^name\s*=\s*"[^"]*"',
-        f'name = "{name}"',
-        content,
-        flags=re.MULTILINE,
-    )
-
-    PYPROJECT_PATH.write_text(new_content)
-    print(f"  Set project.name to '{name}'")
-
-
-def restore_pyproject_name() -> None:
-    """Restore project.name to default 'inference_rs'."""
-    modify_pyproject_name("inference_rs")
-
-
-# ============================================================================
-# Build Functions
-# ============================================================================
-
-
-def build_wheel(
-    package_config: PackageConfig,
-    plat: Platform,
-    output_dir: Path,
-) -> Path:
-    """Build a wheel for the given package configuration."""
-    # Determine features
-    if package_config.name == "inference_rs":
-        features = get_features_for_base_package(plat)
-    else:
-        features = package_config.features
-
-    # Create output directory
-    package_output = output_dir / package_config.name
-    package_output.mkdir(parents=True, exist_ok=True)
-
-    # Modify pyproject.toml
-    modify_pyproject_name(package_config.name)
-
+def check_setuptools() -> None:
     try:
-        # Use Docker manylinux ONLY for CPU-only builds on Linux (no features)
-        # CUDA, MKL, and other accelerator builds use native maturin
-        if plat.os == OS.LINUX and not features:
-            _build_with_docker(features, package_output, plat)
-        else:
-            _build_with_maturin(features, package_output, plat)
-    finally:
-        # Always restore pyproject.toml
-        restore_pyproject_name()
-
-    return package_output
-
-
-def _build_with_maturin(features: list[str], output_dir: Path, plat: Platform) -> None:
-    """Build using native maturin."""
-    cmd = [
-        "maturin",
-        "build",
-        "--release",
-        "--strip",
-        "-o",
-        str(output_dir),
-        "-m",
-        str(CARGO_MANIFEST),
-        "--interpreter",
-        "python3.10",
-    ]
-
-    if features:
-        cmd.extend(["--features", ",".join(features)])
-
-    # Skip auditwheel for CUDA builds - don't bundle CUDA shared libraries
-    # Users are expected to have CUDA installed on their system
-    # Note: MKL is statically linked (mkl-static-lp64-iomp) so doesn't need this
-    if "cuda" in features:
-        cmd.extend(["--auditwheel", "skip"])
-
-    env = os.environ.copy()
-    # empty (not generic) suppresses .cargo/config.toml target-cpu=native while keeping the
-    # target baseline; generic drops aes/sha2 on aarch64-apple-darwin, breaking ring's asserts
-    env["RUSTFLAGS"] = ""
-
-    # macOS-specific settings for Metal builds
-    if plat.os == OS.DARWIN and "metal" in features:
-        env["MACOSX_DEPLOYMENT_TARGET"] = "15.0"
-        print("  Setting MACOSX_DEPLOYMENT_TARGET=15.0 for Metal build")
-
-    print(f"  Running: {' '.join(cmd)}")
-    subprocess.run(cmd, check=True, env=env, cwd=REPO_ROOT)
-
-
-def _build_with_docker(features: list[str], output_dir: Path, plat: Platform) -> None:
-    """Build using Docker manylinux container."""
-    # Build docker image if needed
-    print("  Building Docker image...")
-    subprocess.run(
-        [
-            "docker",
-            "build",
-            "-t",
-            "inference-wheelmaker:latest",
-            "-f",
-            "docker/Dockerfile.manylinux",
-            ".",
-        ],
-        cwd=REPO_ROOT,
-        check=True,
-    )
-
-    # Construct maturin command for inside container
-    maturin_args = [
-        "build",
-        "--release",
-        "--strip",
-        "-o",
-        f"/io/wheels/{output_dir.name}",
-        "-m",
-        "crates/inference-pyo3/Cargo.toml",
-        "--interpreter",
-        "python3.10",
-    ]
-
-    if features:
-        maturin_args.extend(["--features", ",".join(features)])
-
-    # Docker command
-    docker_cmd = [
-        "docker",
-        "run",
-        "--rm",
-        "-v",
-        f"{REPO_ROOT}:/io",
-        "-e",
-        "RUSTFLAGS=-C target-cpu=generic",
-    ]
-
-    docker_cmd.extend(["inference-wheelmaker:latest"] + maturin_args)
-
-    print("  Running Docker build with RUSTFLAGS=-C target-cpu=generic")
-    print(f"  Maturin args: {' '.join(maturin_args)}")
-    subprocess.run(docker_cmd, check=True)
-
-    # Fix ownership of target/ directory (Docker creates files as root)
-    import getpass
-
-    user = getpass.getuser()
-    print("  Fixing ownership of target/ directory...")
-    subprocess.run(
-        ["sudo", "chown", "-R", f"{user}:{user}", "target/"], cwd=REPO_ROOT, check=False
-    )
-
-    # Move wheels from repo wheels/ to output_dir
-    docker_wheels_dir = REPO_ROOT / "wheels" / output_dir.name
-    if docker_wheels_dir.exists() and docker_wheels_dir != output_dir:
-        for whl in docker_wheels_dir.glob("*.whl"):
-            dest = output_dir / whl.name
-            shutil.move(str(whl), str(dest))
-            print(f"  Moved {whl.name} to {output_dir}")
-
-
-# ============================================================================
-# Main Entry Point
-# ============================================================================
+        import setuptools
+    except ImportError:
+        sys.exit(
+            f"building a wheel needs setuptools>={'.'.join(map(str, MIN_SETUPTOOLS))} in {sys.executable}"
+        )
+    if (
+        tuple(int(part) for part in setuptools.__version__.split(".")[:2])
+        < MIN_SETUPTOOLS
+    ):
+        sys.exit(
+            f"setuptools {setuptools.__version__} is older than {'.'.join(map(str, MIN_SETUPTOOLS))}"
+        )
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Build inference_rs Python wheels",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Build all packages supported on current platform
-  python scripts/release/build_wheels.py --all
-
-  # Build specific packages
-  python scripts/release/build_wheels.py --packages inference_rs
-
-  # Specify output directory
-  python scripts/release/build_wheels.py --all -o ./dist
-
-  # List what can be built on this platform
-  python scripts/release/build_wheels.py --list
-        """,
-    )
-
-    parser.add_argument(
-        "--packages",
-        "-p",
-        nargs="+",
-        choices=PACKAGE_NAMES,
-        help="Packages to build",
+        description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
     parser.add_argument(
-        "--all",
-        "-a",
-        action="store_true",
-        help="Build all packages supported on current platform",
+        "--accelerator",
+        choices=sorted(ACCELERATOR_FEATURES),
+        default=default_accelerator(),
     )
     parser.add_argument(
-        "--output",
-        "-o",
+        "--features", default="", help="extra inference-ffi features, comma separated"
+    )
+    parser.add_argument(
+        "--library",
         type=Path,
-        default=Path("wheels"),
-        help="Output directory for wheels (default: ./wheels)",
+        help="package this built library instead of building one",
     )
-    parser.add_argument(
-        "--list",
-        "-l",
-        action="store_true",
-        help="List packages that can be built on current platform",
-    )
-
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = parser.parse_args()
+    check_setuptools()
 
-    # Detect platform
-    plat = detect_platform()
-    print(f"Detected platform: {plat.os.value}/{plat.arch.value}")
-    print(f"  CUDA available: {plat.has_cuda}")
-    print(f"  Metal available: {plat.has_metal}")
-
-    # Get package configs
-    configs = get_package_configs()
-
-    # Filter to packages buildable on this platform
-    buildable = get_buildable_packages(configs, plat)
-
-    if args.list:
-        print("\nPackages buildable on this platform:")
-        for name in buildable:
-            cfg = configs[name]
-            features = (
-                cfg.features
-                if cfg.name != "inference_rs"
-                else get_features_for_base_package(plat)
-            )
-            print(f"  - {name} (features: {features or 'none'})")
-        return 0
-
-    # Determine which packages to build
-    if args.packages:
-        to_build = args.packages
-    elif args.all:
-        to_build = buildable
-    else:
-        parser.error(
-            "Specify --packages or --all, or use --list to see available packages"
+    extra = [feature for feature in args.features.split(",") if feature]
+    library = (
+        args.library.resolve()
+        if args.library
+        else build_library(args.accelerator, extra)
+    )
+    data = library.read_bytes()
+    if CHECKOUT_KERNELS in data:
+        sys.exit(
+            "the library loads its CUDA kernels from this checkout (a dev build); package a release build"
         )
-        return 1
-
-    # Validate packages
-    for pkg in to_build:
-        if pkg not in buildable:
-            print(f"Error: {pkg} cannot be built on this platform", file=sys.stderr)
-            print(f"Buildable packages: {buildable}", file=sys.stderr)
-            return 1
-
-    # Build each package
-    args.output.mkdir(parents=True, exist_ok=True)
-
-    for pkg_name in to_build:
-        print(f"\n{'=' * 60}")
-        print(f"Building {pkg_name}")
-        print(f"{'=' * 60}")
-
-        build_wheel(configs[pkg_name], plat, args.output)
-
-    print(f"\n{'=' * 60}")
-    print("All wheels built successfully!")
-    print(f"Output directory: {args.output.absolute()}")
-
-    # List built wheels
-    print("\nBuilt wheels:")
-    for whl in args.output.rglob("*.whl"):
-        print(f"  {whl.relative_to(args.output)}")
-
+    accelerator = "cuda" if b"cudart" in data else args.accelerator
+    local_version = cuda_local_version(data) if accelerator == "cuda" else None
+    with tempfile.TemporaryDirectory(prefix="inference-wheel-") as scratch:
+        staged = Path(scratch) / "package"
+        staged.mkdir()
+        stage(library, staged, local_version)
+        wheel = build_wheel(
+            staged, args.out.resolve(), platform_tag(library, accelerator)
+        )
+    print(wheel)
     return 0
 
 
