@@ -12,14 +12,13 @@ Runnable Python SDK example `llguidance`.
 <!-- needs-header -->
 
 ```python
-from inference_rs import Runner, Which, ChatCompletionRequest
-from json import dumps
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.Plain(
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(
         model_id="microsoft/Phi-3.5-mini-instruct",
     ),
-    num_device_layers=["500"],
 )
 
 # In fact, JSON object can be also defined in the grammar itself, see
@@ -40,27 +39,29 @@ answer_schema = {
 }
 
 grammars = [
-    {"lark_grammar": top_lark},
-    {"name": "myobj", "json_schema": answer_schema},
+    t.GrammarLlguidanceValueGrammars(lark_grammar=top_lark),
+    t.GrammarLlguidanceValueGrammars(name="myobj", json_schema=answer_schema),
 ]
 
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[
-            {
-                "role": "user",
-                "content": "If all dogs are mammals, and all mammals are animals, are dogs animals?",
-            }
-        ],
-        max_tokens=30,
-        temperature=0.1,
-        grammar_type="llguidance",
-        grammar=dumps({"grammars": grammars}),
+with ir.Engine(spec) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(
+                    role="user",
+                    content="If all dogs are mammals, and all mammals are animals, are dogs animals?",
+                )
+            ],
+            max_tokens=30,
+            temperature=0.1,
+            grammar=t.GrammarLlguidance(
+                value=t.GrammarLlguidanceValue(grammars=grammars)
+            ),
+        )
     )
-)
-print(res.choices[0].message.content)
-print(res.usage)
+    print(res.choices[0].message.content)
+    print(res.usage)
 ```
 
 Source: [`examples/python/llguidance.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/llguidance.py)

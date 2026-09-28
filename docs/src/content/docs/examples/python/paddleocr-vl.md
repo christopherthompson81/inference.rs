@@ -23,36 +23,38 @@ The model is task-prompted: "OCR:" (text), "Table Recognition:" (OTSL <fcel>/<nl
 import base64
 from pathlib import Path
 
-from inference_rs import ChatCompletionRequest, MultimodalArchitecture, Runner, Which
+import inference_rs as ir
+from inference_rs import types as t
 
 IMAGE = Path("crates/inference/tests/fixtures/paddleocr_vl/table.png")
 image_url = "data:image/png;base64," + base64.b64encode(IMAGE.read_bytes()).decode()
 
-runner = Runner(
-    which=Which.MultimodalPlain(
+spec = t.EngineSpec(
+    model=t.ModelSelectedMultimodalPlain(
         model_id="PaddlePaddle/PaddleOCR-VL-1.6",
-        arch=MultimodalArchitecture.PaddleOcrVl,
+        arch=t.MultimodalLoaderType.PADDLEOCR_VL,
     ),
 )
 
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "image_url", "image_url": {"url": image_url}},
-                    {"type": "text", "text": "Table Recognition:"},
-                ],
-            }
-        ],
-        max_tokens=512,
-        temperature=0.0,
+with ir.Engine(spec) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(
+                    role="user",
+                    content=[
+                        {"type": "image_url", "image_url": {"url": image_url}},
+                        {"type": "text", "text": "Table Recognition:"},
+                    ],
+                )
+            ],
+            max_tokens=512,
+            temperature=0.0,
+        )
     )
-)
-print(res.choices[0].message.content)
-print(res.usage)
+    print(res.choices[0].message.content)
+    print(res.usage)
 ```
 
 Source: [`examples/python/paddleocr_vl.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/paddleocr_vl.py)

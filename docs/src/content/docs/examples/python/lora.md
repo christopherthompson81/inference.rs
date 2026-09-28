@@ -37,7 +37,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from urllib.request import urlretrieve
 
-from inference_rs import ChatCompletionRequest, LoraAdapterError, Runner, Which
+import inference_rs as ir
+from inference_rs import types as t
 
 
 BASE_MODEL = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -54,17 +55,17 @@ def download_adapter(repo: str, revision: str, directory: Path) -> None:
         urlretrieve(url, directory / filename)
 
 
-def generate(runner: Runner, label: str, adapter=None):
-    response = runner.send_chat_completion_request(
-        ChatCompletionRequest(
+def generate(engine: ir.Engine, label: str, adapter=None):
+    response = engine.chat(
+        t.ChatCompletionRequest(
             messages=[
-                {
-                    "role": "user",
-                    "content": (
+                t.Message(
+                    role="user",
+                    content=(
                         "Explain why checking intermediate steps is useful "
                         "when solving a difficult problem."
                     ),
-                }
+                )
             ],
             model="default",
             max_tokens=160,
@@ -77,9 +78,17 @@ def generate(runner: Runner, label: str, adapter=None):
     return response
 
 
-runner = Runner(which=Which.Lora(model_id=BASE_MODEL))
+spec = t.EngineSpec(
+    model=t.ModelSelectedLora(
+        model_id=BASE_MODEL,
+    ),
+    adapters=t.AdapterSpec(runtime_updates=True),
+)
 
-with TemporaryDirectory(prefix="inference-lora-") as directory:
+with (
+    ir.Engine(spec) as engine,
+    TemporaryDirectory(prefix="inference-lora-") as directory,
+):
     adapter_dir = Path(directory) / "initial"
     replacement_dir = Path(directory) / "replacement"
     adapter_dir.mkdir()
@@ -87,49 +96,61 @@ with TemporaryDirectory(prefix="inference-lora-") as directory:
     download_adapter(ADAPTER_REPO, ADAPTER_REVISION, adapter_dir)
     download_adapter(REPLACEMENT_REPO, REPLACEMENT_REVISION, replacement_dir)
 
-    loaded = runner.load_lora_adapter("production", adapter_dir)
-    status = runner.lora_adapter_status()
-    assert len(status.adapters) == 1
-    assert status.adapters[0].generation == loaded.generation
-    print(f"Loaded {loaded.alias} as generation {loaded.generation}")
+    loaded = engine.load_lora_adapter(
+        t.LoadLoraAdapterRequest(lora_name="production", lora_path=str(adapter_dir))
+    )
+    status = engine.list_lora_adapters()
+    assert len(status.data) == 1
+    assert status.data[0].generation == loaded.generation
+    print(f"Loaded {loaded.id} as generation {loaded.generation}")
     print(f"Resident adapter bytes: {status.resident_bytes}")
 
-    base = generate(runner, "base")
-    alias = generate(runner, "alias", loaded.alias)
-    exact = generate(runner, "exact generation", loaded.exact())
+    base = generate(engine, "base")
+    alias = generate(engine, "alias", loaded.id)
+    exact = generate(
+        engine,
+        "exact generation",
+        t.AdapterGenerationSelection(generation=loaded.generation),
+    )
     assert base.adapter_generation is None
     assert alias.adapter_generation == loaded.generation
     assert exact.adapter_generation == loaded.generation
 
-    replaced = runner.load_lora_adapter(
-        loaded.alias,
-        replacement_dir,
-        load_inplace=True,
-        expected_generation=loaded.generation,
-    )
-    assert replaced.generation != loaded.generation
-    replacement = generate(runner, "replacement", replaced.alias)
-    assert replacement.adapter_generation == replaced.generation
-
-    try:
-        runner.load_lora_adapter(
-            loaded.alias,
-            adapter_dir,
+    replaced = engine.load_lora_adapter(
+        t.LoadLoraAdapterRequest(
+            lora_name=loaded.id,
+            lora_path=str(replacement_dir),
             load_inplace=True,
             expected_generation=loaded.generation,
         )
-    except LoraAdapterError as error:
+    )
+    assert replaced.generation != loaded.generation
+    replacement = generate(engine, "replacement", replaced.id)
+    assert replacement.adapter_generation == replaced.generation
+
+    try:
+        engine.load_lora_adapter(
+            t.LoadLoraAdapterRequest(
+                lora_name=loaded.id,
+                lora_path=str(adapter_dir),
+                load_inplace=True,
+                expected_generation=loaded.generation,
+            )
+        )
+    except ir.InferenceError as error:
         assert error.code == "lora_generation_mismatch"
     else:
         raise AssertionError("stale generation unexpectedly replaced the adapter")
 
-    unloaded = runner.unload_lora_adapter(
-        loaded.alias,
-        expected_generation=replaced.generation,
+    unloaded = engine.unload_lora_adapter(
+        t.UnloadLoraAdapterRequest(
+            lora_name=loaded.id,
+            expected_generation=replaced.generation,
+        )
     )
     assert unloaded.generation == replaced.generation
-    assert runner.list_lora_adapters() == []
-    print(f"Unloaded {unloaded.alias} with generation CAS")
+    assert engine.list_lora_adapters().data == []
+    print(f"Unloaded {unloaded.id} with generation CAS")
 ```
 
 Source: [`examples/python/lora.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/lora.py)

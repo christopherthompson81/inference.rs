@@ -27,18 +27,7 @@ inference run -m google/gemma-4-E4B-it --quant 8 \
 </TabItem>
 <TabItem label="Python">
 
-```python
-from inference_rs import Runner, Which
-
-runner = Runner(
-    which=Which.MultimodalPlain(model_id="google/gemma-4-E4B-it"),
-    in_situ_quant="8",
-    mtp_model="google/gemma-4-E4B-it-assistant",
-    mtp_n_predict=6,
-)
-```
-
-Gemma 4 loads via `Which.MultimodalPlain`; it is currently the only model family with MTP assistant checkpoints.
+The Python SDK does not expose MTP yet: its [engine spec](/reference/python/spec/) has no assistant model field. Use the CLI or the Rust SDK to attach an assistant.
 
 </TabItem>
 <TabItem label="Rust">
@@ -130,4 +119,4 @@ MTP remains exact: accepted output is verified by the target model before it is 
 
 MTP supports batched generation and constrained decoding.
 
-MTP is configured at launch time only (CLI flags, `Runner(...)`, or the model builder). There is no per-request HTTP field to toggle it; load the server with the assistant attached and every request uses it.
+MTP is configured at launch time only (CLI flags or the Rust model builder). There is no per-request HTTP field to toggle it; load the server with the assistant attached and every request uses it.

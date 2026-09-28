@@ -1,11 +1,12 @@
-from inference_rs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
+import inference_rs as ir
+from inference_rs import types as t
 
 
 # Choose a multimodal model that supports both modalities
-runner = Runner(
-    which=Which.MultimodalPlain(
+spec = t.EngineSpec(
+    model=t.ModelSelectedMultimodalPlain(
         model_id="microsoft/Phi-4-multimodal-instruct",
-        arch=MultimodalArchitecture.Phi4MM,
+        arch=t.MultimodalLoaderType.PHI4MM,
     ),
 )
 
@@ -14,32 +15,33 @@ IMAGE_URL = "https://www.allaboutbirds.org/guide/assets/og/528129121-1200px.jpg"
 AUDIO_URL = "https://upload.wikimedia.org/wikipedia/commons/4/42/Bird_singing.ogg"
 
 
-response = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {  # Audio clip
-                        "type": "audio_url",
-                        "audio_url": {"url": AUDIO_URL},
-                    },
-                    {  # Image
-                        "type": "image_url",
-                        "image_url": {"url": IMAGE_URL},
-                    },
-                    {
-                        "type": "text",
-                        "text": "Describe in detail what is happening, referencing both what you hear and what you see.",
-                    },
-                ],
-            }
-        ],
-        max_tokens=256,
-        temperature=0.2,
-        top_p=0.9,
+with ir.Engine(spec) as engine:
+    response = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(
+                    role="user",
+                    content=[
+                        {  # Audio clip
+                            "type": "audio_url",
+                            "audio_url": {"url": AUDIO_URL},
+                        },
+                        {  # Image
+                            "type": "image_url",
+                            "image_url": {"url": IMAGE_URL},
+                        },
+                        {
+                            "type": "text",
+                            "text": "Describe in detail what is happening, referencing both what you hear and what you see.",
+                        },
+                    ],
+                )
+            ],
+            max_tokens=256,
+            temperature=0.2,
+            top_p=0.9,
+        )
     )
-)
 
-print(response.choices[0].message.content)
+    print(response.choices[0].message.content)

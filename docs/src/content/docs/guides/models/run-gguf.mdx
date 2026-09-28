@@ -66,14 +66,16 @@ The SDKs select an exact GGUF artifact:
 <TabItem label="Python">
 
 ```python
-from inference_rs import Runner, Which
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.GGUF(
+spec = t.EngineSpec(
+    model=t.ModelSelectedGGUF(
         quantized_model_id="unsloth/Qwen3-0.6B-GGUF",
         quantized_filename="Qwen3-0.6B-Q4_K_M.gguf",
     )
 )
+engine = ir.Engine(spec)
 ```
 
 [Full Python example](/examples/python/gguf/).
@@ -153,15 +155,17 @@ The SDKs use the same model and projector files:
 <TabItem label="Python">
 
 ```python
-from inference_rs import Runner, Which
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.GGUF(
+spec = t.EngineSpec(
+    model=t.ModelSelectedGGUF(
         quantized_model_id="unsloth/gemma-4-E4B-it-GGUF",
         quantized_filename="gemma-4-E4B-it-Q4_K_M.gguf",
         mmproj_filename="mmproj-BF16.gguf",
     )
 )
+engine = ir.Engine(spec)
 ```
 
 </TabItem>

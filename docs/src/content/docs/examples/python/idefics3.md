@@ -12,43 +12,45 @@ Runnable Python SDK example `idefics3`.
 <!-- needs-header -->
 
 ```python
-from inference_rs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.MultimodalPlain(
+spec = t.EngineSpec(
+    model=t.ModelSelectedMultimodalPlain(
         model_id="HuggingFaceM4/Idefics3-8B-Llama3",
-        arch=MultimodalArchitecture.Idefics3,
+        arch=t.MultimodalLoaderType.IDEFICS3,
     ),
 )
 
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "https://cdn.britannica.com/45/5645-050-B9EC0205/head-treasure-flower-disk-flowers-inflorescence-ray.jpg"
+with ir.Engine(spec) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(
+                    role="user",
+                    content=[
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "https://cdn.britannica.com/45/5645-050-B9EC0205/head-treasure-flower-disk-flowers-inflorescence-ray.jpg"
+                            },
                         },
-                    },
-                    {
-                        "type": "text",
-                        "text": "What is shown in this image?",
-                    },
-                ],
-            },
-        ],
-        max_tokens=256,
-        presence_penalty=1.0,
-        top_p=0.1,
-        temperature=0.1,
+                        {
+                            "type": "text",
+                            "text": "What is shown in this image?",
+                        },
+                    ],
+                )
+            ],
+            max_tokens=256,
+            presence_penalty=1.0,
+            top_p=0.1,
+            temperature=0.1,
+        )
     )
-)
-print(res.choices[0].message.content)
-print(res.usage)
+    print(res.choices[0].message.content)
+    print(res.usage)
 ```
 
 Source: [`examples/python/idefics3.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/idefics3.py)

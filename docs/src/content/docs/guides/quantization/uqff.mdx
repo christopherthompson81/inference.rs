@@ -31,17 +31,19 @@ For locally-stored UQFF files, `-m` can be the local directory and `--from-uqff`
 </TabItem>
 <TabItem label="Python">
 
-`from_uqff` on `Which` takes the shard filename (or a list of shard filenames):
+`from_uqff` on the `ModelSelected` variant takes the shard filename (or several, separated by `;`):
 
 ```python
-from inference_rs import Runner, Which
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.Plain(
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(
         model_id="<repo>",
         from_uqff="q4k-0.uqff",
     ),
 )
+engine = ir.Engine(spec)
 ```
 
 </TabItem>

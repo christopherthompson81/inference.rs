@@ -13,15 +13,15 @@ Runnable Python SDK example `pydantic_schema`.
 
 ```python
 from enum import Enum
-import json
 from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
-from inference_rs import Runner, Which, ChatCompletionRequest
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.Plain(
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(
         model_id="meta-llama/Llama-3.2-3B-Instruct",
     ),
 )
@@ -50,18 +50,18 @@ class Fleet(BaseModel):
 
 fleet_schema = Fleet.model_json_schema()
 
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[{"role": "user", "content": "Give me a sample address."}],
-        max_tokens=256,
-        temperature=0.1,
-        grammar_type="json_schema",
-        grammar=json.dumps(fleet_schema),
+with ir.Engine(spec) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[t.Message(role="user", content="Give me a sample address.")],
+            max_tokens=256,
+            temperature=0.1,
+            grammar=t.GrammarJsonSchema(value=fleet_schema),
+        )
     )
-)
-print(res.choices[0].message.content)
-print(res.usage)
+    print(res.choices[0].message.content)
+    print(res.usage)
 ```
 
 Source: [`examples/python/pydantic_schema.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/pydantic_schema.py)

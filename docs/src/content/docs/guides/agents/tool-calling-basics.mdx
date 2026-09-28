@@ -77,39 +77,44 @@ The caller invokes the real API and sends the result back:
 </TabItem>
 <TabItem label="Python">
 
-Pass OpenAI-compatible tool schemas as JSON strings on `ChatCompletionRequest.tool_schemas`:
+Pass OpenAI-compatible tools as `t.Tool(function=t.Function(...))` on `ChatCompletionRequest.tools`:
 
 ```python
-import json
-from inference_rs import ChatCompletionRequest, Runner, ToolChoice, Which
+import inference_rs as ir
+from inference_rs import types as t
 
-tool_schema = json.dumps({
-    "type": "function",
-    "function": {
-        "name": "get_weather",
-        "description": "Get the current weather for a city.",
-        "strict": True,
-        "parameters": {
-            "type": "object",
-            "properties": {"city": {"type": "string"}},
-            "required": ["city"],
-        },
-    },
-})
-
-runner = Runner(which=Which.Plain(model_id="Qwen/Qwen3-4B"), in_situ_quant="4")
-response = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[{"role": "user", "content": "What's the weather in Tokyo?"}],
-        tool_schemas=[tool_schema],
-        tool_choice=ToolChoice.Auto,
+tools = [
+    t.Tool(
+        function=t.Function(
+            name="get_weather",
+            description="Get the current weather for a city.",
+            strict=True,
+            parameters={
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        )
     )
+]
+
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B"),
+    runtime=t.RuntimeSpec(isq="4"),
 )
-print(response.choices[0].message.tool_calls)
+with ir.Engine(spec) as engine:
+    response = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[t.Message(role="user", content="What's the weather in Tokyo?")],
+            tools=tools,
+            tool_choice="auto",
+        )
+    )
+    print(response.choices[0].message.tool_calls)
 ```
 
-Run the tool yourself and send the result back as a `tool` message, or register a matching `tool_callbacks` entry on `Runner` to have inference.rs execute it server-side.
+Run the tool yourself and send the result back as a `tool` message, or register it as an `ir.HostTool` in `ir.HostCallbacks` on the `Engine` to have inference.rs execute it server-side.
 
 [Full example](/examples/python/tool-call/)
 
@@ -386,7 +391,7 @@ inference serve --enable-search --enable-code-execution -m <model>
 
 `--agent` is shorthand for both flags; see [build an agent](/guides/agents/build-an-agent/). The built-in tools are covered in [web search](/guides/agents/web-search/) and [code execution](/guides/agents/enable-code-execution/).
 
-For custom tools, the cleanest path is to run them as an MCP server and connect inference as a client; see [connect to an MCP server](/guides/agents/connect-mcp-server/). The SDKs can also register custom callbacks directly: Python uses `Runner(tool_callbacks=...)` ([full example](/examples/python/custom-tool-call/)); Rust builders use `with_tool_callback(...)` or `with_tool_callback_and_tool(...)` ([full example](/examples/rust/advanced/tool-callback/)).
+For custom tools, the cleanest path is to run them as an MCP server and connect inference as a client; see [connect to an MCP server](/guides/agents/connect-mcp-server/). The SDKs can also register custom callbacks directly: Python passes `ir.HostCallbacks(tools=[ir.HostTool(definition_json, handler)])` to `ir.Engine` ([full example](/examples/python/custom-tool-call/)); Rust builders use `with_tool_callback(...)` or `with_tool_callback_and_tool(...)` ([full example](/examples/rust/advanced/tool-callback/)).
 
 ## Configuring the tool loop
 
@@ -418,12 +423,14 @@ inference serve --max-tool-rounds 10 -m <model>
 <TabItem label="Python">
 
 ```python
-ChatCompletionRequest(
+t.ChatCompletionRequest(
     model="default",
-    messages=[{"role": "user", "content": "..."}],
+    messages=[t.Message(role="user", content="...")],
     max_tool_rounds=10,
 )
 ```
+
+For an engine-wide default, set `t.EngineSpec(agentic=t.AgenticSpec(max_tool_rounds=10), ...)`.
 
 </TabItem>
 <TabItem label="Rust">

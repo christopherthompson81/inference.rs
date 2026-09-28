@@ -144,20 +144,22 @@ curl -X POST localhost:1234/re_isq \
 </TabItem>
 <TabItem label="Python">
 
-`in_situ_quant` accepts the same values as `--isq`, including numeric shorthands resolved
+`RuntimeSpec.isq` accepts the same values as `--isq`, including numeric shorthands resolved
 against the actual device:
 
 ```python
-from inference_rs import Runner, Which
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.Plain(model_id="microsoft/Phi-3.5-mini-instruct"),
-    in_situ_quant="Q4K",
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(model_id="microsoft/Phi-3.5-mini-instruct"),
+    runtime=t.RuntimeSpec(isq="Q4K"),
 )
+engine = ir.Engine(spec)
 ```
 
-Use `Which.GGUF(...)` with the same `in_situ_quant` argument to requantize a compatible GGUF.
-`Which.GGUF` also accepts `imatrix`, `calibration_file`, `organization`, and `write_uqff`.
+Use `t.ModelSelectedGGUF(...)` with the same `isq` runtime setting to requantize a compatible GGUF.
+`t.ModelSelectedGGUF` also accepts `imatrix`, `calibration_file`, `organization`, and `write_uqff`.
 
 [Full example](/examples/python/isq/)
 

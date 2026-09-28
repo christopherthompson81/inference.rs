@@ -80,6 +80,8 @@ print(response.output_text)
 </TabItem>
 <TabItem label="Python SDK">
 
+This snippet uses the pyo3 package (`crates/inference-pyo3`), which is being retired: the ctypes `inference_rs` package does not support the shell tool yet.
+
 ```python
 from inference_rs import ChatCompletionRequest, Runner, ShellConfig, Which
 

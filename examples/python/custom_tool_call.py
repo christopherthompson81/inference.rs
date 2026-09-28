@@ -1,12 +1,7 @@
 import json
 import os
-from inference_rs import (
-    Runner,
-    Which,
-    ChatCompletionRequest,
-    Architecture,
-    ToolChoice,
-)
+import inference_rs as ir
+from inference_rs import types as t
 
 
 def local_search(query: str):
@@ -31,8 +26,9 @@ def local_search(query: str):
     return results
 
 
-def tool_cb(name: str, args: dict) -> str:
-    if name == "local_search":
+def tool_cb(call: ir.HostToolCall) -> str:
+    if call.name == "local_search":
+        args = json.loads(call.arguments_json)
         return json.dumps(local_search(args.get("query", "")))
     return ""
 
@@ -52,20 +48,22 @@ schema = json.dumps(
     }
 )
 
-runner = Runner(
-    which=Which.Plain(
-        model_id="NousResearch/Hermes-3-Llama-3.1-8B", arch=Architecture.Llama
+with ir.Engine(
+    t.EngineSpec(
+        model=t.ModelSelectedPlain(
+            model_id="NousResearch/Hermes-3-Llama-3.1-8B", arch=t.NormalLoaderType.LLAMA
+        ),
     ),
-    tool_callbacks={"local_search": tool_cb},
-)
-
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[{"role": "user", "content": "Where is Cargo.toml in this repo?"}],
-        max_tokens=64,
-        tool_schemas=[schema],
-        tool_choice=ToolChoice.Auto,
+    ir.HostCallbacks(tools=[ir.HostTool(schema, tool_cb)]),
+) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(role="user", content="Where is Cargo.toml in this repo?")
+            ],
+            max_tokens=64,
+            tool_choice="auto",
+        )
     )
-)
-print(res.choices[0].message.content)
+    print(res.choices[0].message.content)

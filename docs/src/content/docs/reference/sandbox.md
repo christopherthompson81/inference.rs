@@ -168,4 +168,4 @@ A startup warning is logged. With all sandbox layers off, model-generated code a
 
 ## Programmatic use
 
-For end-to-end setup and the Rust/Python `SandboxPolicy` snippets, see [enable code execution](/guides/agents/enable-code-execution/) and [enable shell execution](/guides/agents/enable-shell/). Python types are documented in the [Python API reference](/reference/python/code-execution/). Remember the default: programmatic use is unsandboxed until a `SandboxPolicy` is attached.
+For end-to-end setup and the Rust/Python `SandboxPolicy` snippets, see [enable code execution](/guides/agents/enable-code-execution/) and [enable shell execution](/guides/agents/enable-shell/). Remember the default: programmatic use is unsandboxed until a `SandboxPolicy` is attached.

@@ -50,23 +50,25 @@ curl http://localhost:1234/v1/chat/completions \
 The standard chat-completion API works unchanged. See the [Python example](/examples/python/diffusion-gemma/) (vision input).
 
 ```python
-from inference_rs import ChatCompletionRequest, MultimodalArchitecture, Runner, Which
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.MultimodalPlain(
+spec = t.EngineSpec(
+    model=t.ModelSelectedMultimodalPlain(
         model_id="google/diffusiongemma-26B-A4B-it",
-        arch=MultimodalArchitecture.DiffusionGemma,
+        arch=t.MultimodalLoaderType.DIFFUSIONGEMMA,
     )
 )
 
-response = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[{"role": "user", "content": "Why is the sky blue?"}],
-        max_tokens=1024,
+with ir.Engine(spec) as engine:
+    response = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[t.Message(role="user", content="Why is the sky blue?")],
+            max_tokens=1024,
+        )
     )
-)
-print(response.choices[0].message.content)
+    print(response.choices[0].message.content)
 ```
 
 </TabItem>

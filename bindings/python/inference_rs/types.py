@@ -815,7 +815,7 @@ class JsonSchemaResponseFormat:
 @dataclass(kw_only=True)
 class LoadLoraAdapterRequest:
     expected_generation: str | None = None
-    load_inplace: bool | None = None
+    load_inplace: bool | None = False
     lora_name: str
     lora_path: str
     model: str | None = None
@@ -869,9 +869,9 @@ class LoraResidentGenerationObject:
 class LoraRuntimeConfig:
     """Admission limits for a dynamic LoRA runtime."""
 
-    max_adapters: int
-    max_bytes: int
-    max_rank: int
+    max_adapters: int | None = 16
+    max_bytes: int | None = 8589934592
+    max_rank: int | None = 256
 
 
 @dataclass(kw_only=True)
@@ -932,17 +932,17 @@ class ModelSelectedRun:
     """Select a model for running via auto loader"""
 
     calibration_file: str | None = None
-    dtype: ModelDType | None = None
+    dtype: ModelDType | None = ModelDType.AUTO
     from_uqff: str | None = None
     hf_cache_path: str | None = None
     imatrix: str | None = None
     matformer_config_path: str | None = None
     matformer_slice_name: str | None = None
-    max_batch_size: int | None = None
+    max_batch_size: int | None = 1
     max_edge: int | None = None
     max_image_length: int | None = None
     max_num_images: int | None = None
-    max_seq_len: int | None = None
+    max_seq_len: int | None = 4096
     model_id: str
     organization: IsqOrganization | None = None
     tokenizer_json: str | None = None
@@ -957,14 +957,14 @@ class ModelSelectedPlain:
 
     arch: NormalLoaderType | None = None
     calibration_file: str | None = None
-    dtype: ModelDType | None = None
+    dtype: ModelDType | None = ModelDType.AUTO
     from_uqff: str | None = None
     hf_cache_path: str | None = None
     imatrix: str | None = None
     matformer_config_path: str | None = None
     matformer_slice_name: str | None = None
-    max_batch_size: int | None = None
-    max_seq_len: int | None = None
+    max_batch_size: int | None = 1
+    max_seq_len: int | None = 4096
     model_id: str
     organization: IsqOrganization | None = None
     tokenizer_json: str | None = None
@@ -978,11 +978,11 @@ class ModelSelectedXLora:
     """Select an X-LoRA architecture"""
 
     arch: NormalLoaderType | None = None
-    dtype: ModelDType
+    dtype: ModelDType | None = ModelDType.AUTO
     from_uqff: str | None = None
     hf_cache_path: str | None = None
-    max_batch_size: int
-    max_seq_len: int
+    max_batch_size: int | None = 1
+    max_seq_len: int | None = 4096
     model_id: str | None = None
     order: str
     organization: IsqOrganization | None = None
@@ -998,23 +998,23 @@ class ModelSelectedXLora:
 class ModelSelectedLora:
     """Select a LoRA architecture"""
 
-    adapters: list[LoraAdapterSpec]
+    adapters: list[LoraAdapterSpec] | None = None
     arch: NormalLoaderType | None = None
     calibration_file: str | None = None
-    dtype: ModelDType
+    dtype: ModelDType | None = ModelDType.AUTO
     from_uqff: str | None = None
     hf_cache_path: str | None = None
     imatrix: str | None = None
     matformer_config_path: str | None = None
     matformer_slice_name: str | None = None
-    max_batch_size: int
+    max_batch_size: int | None = 1
     max_edge: int | None = None
     max_image_length: int | None = None
     max_num_images: int | None = None
-    max_seq_len: int
+    max_seq_len: int | None = 4096
     model_id: str
     organization: IsqOrganization | None = None
-    runtime_config: LoraRuntimeConfig
+    runtime_config: LoraRuntimeConfig | None = None
     tokenizer_json: str | None = None
     topology: str | None = None
     write_uqff: UqffWriteSpec | None = None
@@ -1026,18 +1026,18 @@ class ModelSelectedGGUF:
     """Select a GGUF model."""
 
     calibration_file: str | None = None
-    dtype: ModelDType
+    dtype: ModelDType | None = ModelDType.AUTO
     hf_cache_path: str | None = None
     imatrix: str | None = None
     lora_adapters: list[LoraAdapterSpec] | None = None
     lora_runtime_config: LoraRuntimeConfig | None = None
     matformer_config_path: str | None = None
     matformer_slice_name: str | None = None
-    max_batch_size: int
+    max_batch_size: int | None = 1
     max_edge: int | None = None
     max_image_length: int | None = None
     max_num_images: int | None = None
-    max_seq_len: int
+    max_seq_len: int | None = 4096
     mmproj_filename: str | None = None
     organization: IsqOrganization | None = None
     quantized_filename: str
@@ -1054,13 +1054,13 @@ class ModelSelectedXLoraGGUF:
     """Select a GGUF model with X-LoRA."""
 
     calibration_file: str | None = None
-    dtype: ModelDType
+    dtype: ModelDType | None = ModelDType.AUTO
     hf_cache_path: str | None = None
     imatrix: str | None = None
     matformer_config_path: str | None = None
     matformer_slice_name: str | None = None
-    max_batch_size: int
-    max_seq_len: int
+    max_batch_size: int | None = 1
+    max_seq_len: int | None = 4096
     order: str
     organization: IsqOrganization | None = None
     quantized_filename: str
@@ -1080,13 +1080,13 @@ class ModelSelectedLoraGGUF:
 
     adapters_model_id: str
     calibration_file: str | None = None
-    dtype: ModelDType
+    dtype: ModelDType | None = ModelDType.AUTO
     hf_cache_path: str | None = None
     imatrix: str | None = None
     matformer_config_path: str | None = None
     matformer_slice_name: str | None = None
-    max_batch_size: int
-    max_seq_len: int
+    max_batch_size: int | None = 1
+    max_seq_len: int | None = 4096
     order: str
     organization: IsqOrganization | None = None
     quantized_filename: str
@@ -1102,10 +1102,10 @@ class ModelSelectedLoraGGUF:
 class ModelSelectedGGML:
     """Select a GGML model."""
 
-    dtype: ModelDType
+    dtype: ModelDType | None = ModelDType.AUTO
     gqa: int
-    max_batch_size: int
-    max_seq_len: int
+    max_batch_size: int | None = 1
+    max_seq_len: int | None = 4096
     quantized_filename: str
     quantized_model_id: str
     tok_model_id: str
@@ -1118,10 +1118,10 @@ class ModelSelectedGGML:
 class ModelSelectedXLoraGGML:
     """Select a GGML model with X-LoRA."""
 
-    dtype: ModelDType
+    dtype: ModelDType | None = ModelDType.AUTO
     gqa: int
-    max_batch_size: int
-    max_seq_len: int
+    max_batch_size: int | None = 1
+    max_seq_len: int | None = 4096
     order: str
     quantized_filename: str
     quantized_model_id: str
@@ -1138,10 +1138,10 @@ class ModelSelectedLoraGGML:
     """Select a GGML model with LoRA."""
 
     adapters_model_id: str
-    dtype: ModelDType
+    dtype: ModelDType | None = ModelDType.AUTO
     gqa: int
-    max_batch_size: int
-    max_seq_len: int
+    max_batch_size: int | None = 1
+    max_seq_len: int | None = 4096
     order: str
     quantized_filename: str
     quantized_model_id: str
@@ -1157,17 +1157,17 @@ class ModelSelectedMultimodalPlain:
 
     arch: MultimodalLoaderType | None = None
     calibration_file: str | None = None
-    dtype: ModelDType | None = None
+    dtype: ModelDType | None = ModelDType.AUTO
     from_uqff: str | None = None
     hf_cache_path: str | None = None
     imatrix: str | None = None
     matformer_config_path: str | None = None
     matformer_slice_name: str | None = None
-    max_batch_size: int | None = None
+    max_batch_size: int | None = 1
     max_edge: int | None = None
-    max_image_length: int | None = None
-    max_num_images: int | None = None
-    max_seq_len: int | None = None
+    max_image_length: int | None = 1024
+    max_num_images: int | None = 1
+    max_seq_len: int | None = 4096
     model_id: str
     organization: IsqOrganization | None = None
     tokenizer_json: str | None = None
@@ -1181,7 +1181,7 @@ class ModelSelectedDiffusionPlain:
     """Select a diffusion model, without quantization or adapters"""
 
     arch: DiffusionLoaderType
-    dtype: ModelDType
+    dtype: ModelDType | None = ModelDType.AUTO
     model_id: str
     _external = 'DiffusionPlain'
 
@@ -1190,7 +1190,7 @@ class ModelSelectedDiffusionPlain:
 class ModelSelectedSpeech:
     arch: SpeechLoaderType
     dac_model_id: str | None = None
-    dtype: ModelDType
+    dtype: ModelDType | None = ModelDType.AUTO
     model_id: str
     _external = 'Speech'
 
@@ -1210,7 +1210,7 @@ class ModelSelectedEmbedding:
 
     arch: EmbeddingLoaderType | None = None
     calibration_file: str | None = None
-    dtype: ModelDType | None = None
+    dtype: ModelDType | None = ModelDType.AUTO
     from_uqff: str | None = None
     hf_cache_path: str | None = None
     imatrix: str | None = None

@@ -12,29 +12,31 @@ Runnable Python SDK example `embedding_gemma`.
 <!-- needs-header -->
 
 ```python
-from inference_rs import EmbeddingRequest, Runner, Which, EmbeddingArchitecture
+import inference_rs as ir
+from inference_rs import types as t
 
 
 def main() -> None:
-    runner = Runner(
-        which=Which.Embedding(
-            model_id="google/embeddinggemma-300m",
-            arch=EmbeddingArchitecture.EmbeddingGemma,
-        ),
-    )
+    with ir.Engine(
+        t.EngineSpec(
+            model=t.ModelSelectedEmbedding(
+                model_id="google/embeddinggemma-300m",
+                arch=t.EmbeddingLoaderType.EMBEDDINGGEMMA,
+            ),
+        )
+    ) as engine:
+        request = t.EmbeddingRequest(
+            input=[
+                "task: search result | query: What is graphene?",
+                "task: search result | query: Explain superconductors in simple terms.",
+            ],
+            truncate_sequence=True,
+        )
 
-    request = EmbeddingRequest(
-        input=[
-            "task: search result | query: What is graphene?",
-            "task: search result | query: Explain superconductors in simple terms.",
-        ],
-        truncate_sequence=True,
-    )
+        embeddings = engine.embeddings(request)
 
-    embeddings = runner.send_embedding_request(request)
-
-    for index, embedding in enumerate(embeddings):
-        print(f"Embedding {index}: {len(embedding)} dimensions")
+        for item in embeddings.data:
+            print(f"Embedding {item.index}: {len(item.embedding)} dimensions")
 
 
 if __name__ == "__main__":

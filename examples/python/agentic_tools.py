@@ -1,55 +1,41 @@
 """
 Example demonstrating the Python SDK's agentic tool callback system.
 
-The Python SDK lets you register tool callbacks directly on the Runner.
-When combined with max_tool_rounds on the request, the engine automatically
-executes your callbacks and feeds results back to the model in a loop.
+The Python SDK lets you register host tools on the Engine through
+ir.HostCallbacks. When combined with max_tool_rounds on the request, the
+engine automatically executes your callbacks and feeds results back to the
+model in a loop.
 
-You can also set tool_dispatch_url on the request to POST unhandled tool
-calls to an external HTTP endpoint for execution.
+You can also set tool_dispatch_url in the engine spec's agentic section
+(t.AgenticSpec) to POST unhandled tool calls to an external HTTP endpoint for
+execution.
 
 Usage:
     python examples/python/agentic_tools.py
 """
 
 import json
-from inference_rs import (
-    Runner,
-    Which,
-    Architecture,
-    ChatCompletionRequest,
-    ToolChoice,
-)
+import inference_rs as ir
+from inference_rs import types as t
 
 
-def tool_callback(name: str, args: dict) -> str:
+def tool_callback(call: ir.HostToolCall) -> str:
     """Dispatch tool calls to local implementations."""
-    if name == "get_weather":
+    args = json.loads(call.arguments_json)
+    if call.name == "get_weather":
         city = args.get("city", "unknown")
         return json.dumps({"city": city, "temp": 22, "condition": "Sunny"})
-    if name == "calculate":
+    if call.name == "calculate":
         expression = args.get("expression", "0")
         try:
-            result = eval(expression)  # noqa: S307 — example only
+            result = eval(expression)  # noqa: S307 - example only
         except Exception as e:
             result = str(e)
         return json.dumps({"result": result})
-    return json.dumps({"error": f"Unknown tool: {name}"})
+    return json.dumps({"error": f"Unknown tool: {call.name}"})
 
 
 def main():
-    # Register tool callbacks at Runner level — these are available to all requests
-    runner = Runner(
-        which=Which.Plain(
-            model_id="Qwen/Qwen3-4B",
-            arch=Architecture.Qwen3,
-        ),
-        tool_callbacks={
-            "get_weather": tool_callback,
-            "calculate": tool_callback,
-        },
-    )
-
     tools = [
         json.dumps(
             {
@@ -93,25 +79,34 @@ def main():
         ),
     ]
 
-    # max_tool_rounds enables the agentic loop: model calls tools,
-    # engine executes callbacks, feeds results back, repeats.
-    request = ChatCompletionRequest(
-        messages=[
-            {
-                "role": "user",
-                "content": "What's the weather in Tokyo? Also calculate 42 * 17.",
-            }
-        ],
-        model="default",
-        tool_schemas=tools,
-        tool_choice=ToolChoice.Auto,
-        max_tool_rounds=5,
-    )
+    # Register host tools at Engine level - these are offered to all requests
+    with ir.Engine(
+        t.EngineSpec(
+            model=t.ModelSelectedPlain(
+                model_id="Qwen/Qwen3-4B",
+                arch=t.NormalLoaderType.QWEN3,
+            ),
+        ),
+        ir.HostCallbacks(tools=[ir.HostTool(tool, tool_callback) for tool in tools]),
+    ) as engine:
+        # max_tool_rounds enables the agentic loop: model calls tools,
+        # engine executes callbacks, feeds results back, repeats.
+        request = t.ChatCompletionRequest(
+            messages=[
+                t.Message(
+                    role="user",
+                    content="What's the weather in Tokyo? Also calculate 42 * 17.",
+                )
+            ],
+            model="default",
+            tool_choice="auto",
+            max_tool_rounds=5,
+        )
 
-    response = runner.send_chat_completion_request(request)
+        response = engine.chat(request)
 
-    for choice in response.choices:
-        print(choice.message.content)
+        for choice in response.choices:
+            print(choice.message.content)
 
 
 if __name__ == "__main__":

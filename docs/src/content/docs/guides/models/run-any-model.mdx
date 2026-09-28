@@ -23,18 +23,20 @@ inference serve -m Qwen/Qwen3-4B
 <TabItem label="Python">
 
 ```python
-from inference_rs import Runner, Which, ChatCompletionRequest
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(which=Which.Plain(model_id="Qwen/Qwen3-4B"))
+spec = t.EngineSpec(model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B"))
 
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[{"role": "user", "content": "Hello!"}],
-        max_tokens=256,
+with ir.Engine(spec) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[t.Message(role="user", content="Hello!")],
+            max_tokens=256,
+        )
     )
-)
-print(res.choices[0].message.content)
+    print(res.choices[0].message.content)
 ```
 
 `arch` is optional; it is detected from the model config. [Full example](/examples/python/plain/).
@@ -126,7 +128,7 @@ quantization formats, and feature combinations.
 
 ## Forcing an architecture
 
-Auto-detection covers normal checkpoints. For text models with a non-standard config, `--arch` (Python: `arch=Architecture...`) forces the loader; the accepted names are the lowercase forms in the [supported models reference](/reference/supported-models/). Multimodal, speech, embedding, and diffusion architectures are always auto-detected on the CLI.
+Auto-detection covers normal checkpoints. For text models with a non-standard config, `--arch` (Python: `arch=t.NormalLoaderType...`) forces the loader; the accepted names are the lowercase forms in the [supported models reference](/reference/supported-models/). Multimodal, speech, embedding, and diffusion architectures are always auto-detected on the CLI.
 
 ## Chat template overrides
 

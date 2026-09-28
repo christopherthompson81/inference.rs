@@ -1,10 +1,10 @@
-from inference_rs import Runner, Which, ChatCompletionRequest
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.Plain(
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(
         model_id="microsoft/Phi-3.5-mini-instruct",
     ),
-    num_device_layers=["500"],
 )
 
 # see https://github.com/guidance-ai/llguidance/blob/main/docs/syntax.md for docs on syntax
@@ -22,20 +22,20 @@ answer: %json {
 """
 
 
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[
-            {
-                "role": "user",
-                "content": "If all dogs are mammals, and all mammals are animals, are dogs animals?",
-            }
-        ],
-        max_tokens=100,
-        temperature=0.1,
-        grammar_type="lark",
-        grammar=top_lark,
+with ir.Engine(spec) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(
+                    role="user",
+                    content="If all dogs are mammals, and all mammals are animals, are dogs animals?",
+                )
+            ],
+            max_tokens=100,
+            temperature=0.1,
+            grammar=t.GrammarLark(value=top_lark),
+        )
     )
-)
-print(res.choices[0].message.content)
-print(res.usage)
+    print(res.choices[0].message.content)
+    print(res.usage)

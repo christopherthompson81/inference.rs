@@ -71,6 +71,8 @@ The response gains a top-level `files` array with id, name, mime type, size, and
 </TabItem>
 <TabItem label="Python">
 
+This snippet uses the pyo3 package (`crates/inference-pyo3`), which is being retired: the ctypes `inference_rs` package does not support code execution yet.
+
 ```python
 from inference_rs import ChatCompletionRequest, CodeExecutionConfig, RequestedFile, Runner, Which
 

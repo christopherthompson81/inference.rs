@@ -61,35 +61,25 @@ curl -X DELETE http://localhost:1234/v1/sessions/user-42-chat-abc
 </TabItem>
 <TabItem label="Python">
 
-`Runner` exposes the same operations as the HTTP endpoints; each takes an optional `model_id` keyword for multi-model setups:
-
-```python
-from inference_rs import ChatCompletionRequest, Runner, Which
-
-runner = Runner(which=Which.Plain(model_id="Qwen/Qwen3-4B"))
-
-ids = runner.list_session_ids()
-
-exported = runner.export_session("user-42-chat-abc")  # JSON string or None
-if exported is not None:
-    runner.import_session("user-42-chat-new-id", exported)
-
-runner.delete_session("user-42-chat-abc")
-```
+The Python package does not expose session listing, export, import, or delete yet; use the HTTP endpoints for those.
 
 In-process requests reuse agentic state by setting `session_id` on the request:
 
 ```python
-response = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[{"role": "user", "content": "Continue the analysis."}],
-        session_id="user-42-chat-abc",
+import inference_rs as ir
+from inference_rs import types as t
+
+with ir.Engine(t.EngineSpec(model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B"))) as engine:
+    response = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[t.Message(role="user", content="Continue the analysis.")],
+            session_id="user-42-chat-abc",
+        )
     )
-)
 ```
 
-Use HTTP when a Python application also needs the live `agentic_tool_call_progress` timeline (streamed tool-call progress events; see [tool calling](/guides/agents/tool-calling-basics/#response-extensions)).
+`engine.chat_stream(...)` also yields the live `agentic_tool_call_progress` events (streamed tool-call progress; see [tool calling](/guides/agents/tool-calling-basics/#response-extensions)) as parsed JSON, next to the `chunk` events.
 
 </TabItem>
 <TabItem label="Rust">

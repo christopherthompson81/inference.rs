@@ -170,8 +170,8 @@ The Rust API and Python source builds also expose the `cutile` feature. Run the 
 cargo run --release -p inference-examples --example nvfp4 --features cuda,cutile
 ```
 
-For a [Python source build](/developer/from-source/#python-wheels), run
-`maturin develop --release --features cuda,cutile` from `crates/inference-pyo3`.
+For the [Python SDK](/developer/from-source/#python-sdk), build the library with
+`cargo build --release -p inference-ffi --features cuda,cutile`.
 
 Dense and MoE projections are supported. Experts within each projection must share a quantization
 scheme, and input-dimension shards must align to 16 weights. NVFP4 creation through ISQ, NVFP4 UQFF

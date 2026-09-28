@@ -63,17 +63,16 @@ cargo test -p inference-core -p inference-quant -p inference-vision
 
 In the quantization crate, some tests run only with a specific backend feature enabled.
 
-## Python wheels
+## Python SDK
 
-Building the Python SDK from source requires `maturin`:
+The Python package is pure Python over `libinference_ffi`, so building it means building that library with the features you want:
 
 ```bash
-pip install maturin[patchelf]
-cd crates/inference-pyo3
-maturin develop --release --features "cuda nccl flash-attn cudnn"
+cargo build --release -p inference-ffi --features "cuda nccl flash-attn cudnn"
+pip install -e bindings/python
 ```
 
-This installs the package into the current Python environment. `maturin build` produces a redistributable wheel under `target/wheels/`.
+The package finds the library in the checkout's `target/release` (or `target/debug`); set `INFERENCE_NATIVE_DIR` to load it from elsewhere.
 
 ## Version pinning in a consumer crate
 

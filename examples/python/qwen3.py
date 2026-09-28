@@ -1,95 +1,100 @@
-from inference_rs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
+import inference_rs as ir
+from inference_rs import types as t
 
 # Non-MoE model
-runner = Runner(
-    which=Which.MultimodalPlain(
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(
         model_id="https://huggingface.co/Qwen/Qwen3-4B",
-        arch=MultimodalArchitecture.Qwen3,
+        arch=t.NormalLoaderType.QWEN3,
     ),
-    in_situ_quant="Q4K",
+    runtime=t.RuntimeSpec(isq="Q4K"),
 )
 
 # MoE model
-# runner = Runner(
-#     which=Which.MultimodalPlain(
+# spec = t.EngineSpec(
+#     model=t.ModelSelectedPlain(
 #         model_id="https://huggingface.co/Qwen/Qwen3-30B-A3B",
-#         arch=MultimodalArchitecture.Qwen3Moe,
+#         arch=t.NormalLoaderType.QWEN3MOE,
 #     ),
-#     in_situ_quant="Q4K",
+#     runtime=t.RuntimeSpec(isq="Q4K"),
 # )
 
-messages = [
-    {
-        "role": "user",
-        "content": "Hello! How many rs in strawberry?",
-    },
-]
+with ir.Engine(spec) as engine:
+    messages = [
+        t.Message(
+            role="user",
+            content="Hello! How many rs in strawberry?",
+        ),
+    ]
 
-# ------------------------------------------------------------------
-# First question, thinking mode is enabled by default
-# ------------------------------------------------------------------
-completion = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=messages,
-        max_tokens=1024,
-        frequency_penalty=1.0,
-        top_p=0.1,
-        temperature=0,
+    # ------------------------------------------------------------------
+    # First question, thinking mode is enabled by default
+    # ------------------------------------------------------------------
+    completion = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=messages,
+            max_tokens=1024,
+            frequency_penalty=1.0,
+            top_p=0.1,
+            temperature=0,
+        )
     )
-)
-resp = completion.choices[0].message.content
-print(resp)
+    resp = completion.choices[0].message.content
+    print(resp)
 
-messages.append({"role": "assistant", "content": completion.choices[0].message.content})
-
-messages = [
-    {
-        "role": "user",
-        "content": "How many rs in blueberry? /no_think",
-    },
-]
-
-# ------------------------------------------------------------------
-# Second question, disable thinking mode with explicit or /no_think
-# ------------------------------------------------------------------
-completion = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=messages,
-        max_tokens=1024,
-        frequency_penalty=1.0,
-        top_p=0.1,
-        temperature=0,
-        # enable_thinking=False
+    messages.append(
+        t.Message(role="assistant", content=completion.choices[0].message.content)
     )
-)
-resp = completion.choices[0].message.content
-print(resp)
 
+    messages = [
+        t.Message(
+            role="user",
+            content="How many rs in blueberry? /no_think",
+        ),
+    ]
 
-messages.append({"role": "assistant", "content": completion.choices[0].message.content})
-
-messages = [
-    {
-        "role": "user",
-        "content": "Are you sure? /think",
-    },
-]
-
-# ------------------------------------------------------------------
-# Third question, reenable thinking mode with explicit or /think
-# ------------------------------------------------------------------
-completion = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=messages,
-        max_tokens=1024,
-        frequency_penalty=1.0,
-        top_p=0.1,
-        temperature=0,
-        # enable_thinking=False
+    # ------------------------------------------------------------------
+    # Second question, disable thinking mode with explicit or /no_think
+    # ------------------------------------------------------------------
+    completion = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=messages,
+            max_tokens=1024,
+            frequency_penalty=1.0,
+            top_p=0.1,
+            temperature=0,
+            # enable_thinking=False
+        )
     )
-)
-resp = completion.choices[0].message.content
-print(resp)
+    resp = completion.choices[0].message.content
+    print(resp)
+
+    messages.append(
+        t.Message(role="assistant", content=completion.choices[0].message.content)
+    )
+
+    messages = [
+        t.Message(
+            role="user",
+            content="Are you sure? /think",
+        ),
+    ]
+
+    # ------------------------------------------------------------------
+    # Third question, reenable thinking mode with explicit or /think
+    # ------------------------------------------------------------------
+    completion = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=messages,
+            max_tokens=1024,
+            frequency_penalty=1.0,
+            top_p=0.1,
+            temperature=0,
+            # enable_thinking=False
+        )
+    )
+    resp = completion.choices[0].message.content
+    print(resp)

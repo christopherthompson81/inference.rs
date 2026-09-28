@@ -12,42 +12,37 @@ Runnable Python SDK example `web_search`.
 <!-- needs-header -->
 
 ```python
-from inference_rs import (
-    Runner,
-    Which,
-    ChatCompletionRequest,
-    Architecture,
-    WebSearchOptions,
-)
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.Plain(
-        model_id="NousResearch/Hermes-3-Llama-3.1-8B",
-        arch=Architecture.Llama,
-    ),
-    enable_search=True,
-)
-
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[
-            {
-                "role": "user",
-                "content": "Can you show me some code using inference.rs for running Llama 3.2 Vision?",
-            }
-        ],
-        max_tokens=256,
-        presence_penalty=1.0,
-        top_p=0.1,
-        temperature=0.1,
-        web_search_options=WebSearchOptions(
-            search_context_size=None, user_location=None
+with ir.Engine(
+    t.EngineSpec(
+        model=t.ModelSelectedPlain(
+            model_id="NousResearch/Hermes-3-Llama-3.1-8B",
+            arch=t.NormalLoaderType.LLAMA,
         ),
     )
-)
-print(res.choices[0].message.content)
-print(res.usage)
+) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(
+                    role="user",
+                    content="Can you show me some code using inference.rs for running Llama 3.2 Vision?",
+                )
+            ],
+            max_tokens=256,
+            presence_penalty=1.0,
+            top_p=0.1,
+            temperature=0.1,
+            web_search_options=t.WebSearchOptions(
+                search_context_size=None, user_location=None
+            ),
+        )
+    )
+    print(res.choices[0].message.content)
+    print(res.usage)
 ```
 
 Source: [`examples/python/web_search.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/web_search.py)

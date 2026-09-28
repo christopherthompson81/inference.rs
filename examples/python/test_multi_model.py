@@ -3,19 +3,28 @@ Simple test script to verify multi-model functionality in inference.rs
 
 This script tests the core multi-model operations:
 - Listing models
-- Getting/setting default model
 - Sending requests to specific models
 - Model unloading/reloading
 - Model removal (commented out for safety)
 """
 
-from inference_rs import (
-    Runner,
-    Which,
-    ChatCompletionRequest,
-    Architecture,
-)
 import sys
+
+import inference_rs as ir
+from inference_rs import types as t
+
+MODEL_ID = "Qwen/Qwen3-0.6B"
+SPEC = t.EngineSpec(model=t.ModelSelectedPlain(model_id=MODEL_ID))
+# The model list also carries this alias, which the model status/unload/reload calls reject.
+DEFAULT_ALIAS = "default"
+
+
+def listed_models(engine):
+    return [model for model in engine.list_models().data if model.id != DEFAULT_ALIAS]
+
+
+def is_model_loaded(engine, model_id):
+    return engine.model_status(model_id).status == t.ModelStatus.LOADED
 
 
 def test_multi_model_operations():
@@ -23,71 +32,52 @@ def test_multi_model_operations():
     print("Testing Multi-Model Operations\n" + "=" * 50)
 
     try:
-        # Create a simple runner
-        print("1. Creating runner with GPT-2 model...")
-        runner = Runner(
-            which=Which.Plain(
-                model_id="gpt2",
-                arch=Architecture.Gpt2,
-            )
-        )
-        print("   ✓ Runner created successfully")
+        # Create a simple engine
+        print("1. Creating engine with a Qwen3 model...")
+        with ir.Engine(SPEC) as engine:
+            print("   OK Engine created successfully")
 
-        # Test listing models
-        print("\n2. Testing list_models()...")
-        models = runner.list_models()
-        print(f"   ✓ Models found: {models}")
-        assert isinstance(models, list), "list_models should return a list"
-        assert len(models) > 0, "Should have at least one model"
+            # Test listing models
+            print("\n2. Testing list_models()...")
+            models = [model.id for model in listed_models(engine)]
+            print(f"   OK Models found: {models}")
+            assert isinstance(models, list), "list_models should return a list"
+            assert len(models) > 0, "Should have at least one model"
 
-        # Test getting default model
-        print("\n3. Testing get_default_model_id()...")
-        default_model = runner.get_default_model_id()
-        print(f"   ✓ Default model: {default_model}")
+            # Test sending request with a model id
+            print("\n3. Testing chat with a model id...")
+            messages = [
+                t.Message(
+                    role="user", content="Say 'test successful' and nothing else."
+                )
+            ]
 
-        # Test setting default model (if we have multiple models)
-        if len(models) > 1:
-            print("\n4. Testing set_default_model_id()...")
-            new_default = models[1] if models[0] == default_model else models[0]
-            runner.set_default_model_id(new_default)
-            updated_default = runner.get_default_model_id()
-            print(f"   ✓ Changed default from '{default_model}' to '{updated_default}'")
-            assert updated_default == new_default, "Default model should have changed"
-        else:
-            print("\n4. Skipping set_default_model_id() test (only one model loaded)")
+            if models:
+                request = t.ChatCompletionRequest(
+                    messages=messages, model=models[0], max_tokens=10
+                )
+                response = engine.chat(request)
+                print(f"   OK Response received: {response.choices[0].message.content}")
 
-        # Test sending request with model_id
-        print("\n5. Testing send_chat_completion_request with model_id...")
-        messages = [
-            {"role": "user", "content": "Say 'test successful' and nothing else."}
-        ]
-        request = ChatCompletionRequest(
-            messages=messages, model="default", max_tokens=10
-        )
+            # Test listing models with their status
+            print("\n4. Testing list_models() statuses...")
+            models_with_status = [
+                (model.id, model.status) for model in listed_models(engine)
+            ]
+            print(f"   OK Models with status: {models_with_status}")
+            assert isinstance(models_with_status, list), "Should return a list"
 
-        if models:
-            response = runner.send_chat_completion_request(
-                request=request, model_id=models[0]
-            )
-            print(f"   ✓ Response received: {response.choices[0].message.content}")
+            # Test model_status
+            print("\n5. Testing model_status()...")
+            if models:
+                is_loaded = is_model_loaded(engine, models[0])
+                print(f"   OK Model '{models[0]}' loaded: {is_loaded}")
+                assert is_loaded, "Model should be loaded initially"
 
-        # Test list_models_with_status
-        print("\n6. Testing list_models_with_status()...")
-        models_with_status = runner.list_models_with_status()
-        print(f"   ✓ Models with status: {models_with_status}")
-        assert isinstance(models_with_status, list), "Should return a list"
-
-        # Test is_model_loaded
-        print("\n7. Testing is_model_loaded()...")
-        if models:
-            is_loaded = runner.is_model_loaded(models[0])
-            print(f"   ✓ Model '{models[0]}' loaded: {is_loaded}")
-            assert is_loaded, "Model should be loaded initially"
-
-        print("\n✅ All tests passed!")
+        print("\nAll tests passed!")
 
     except Exception as e:
-        print(f"\n❌ Test failed with error: {e}")
+        print(f"\nTest failed with error: {e}")
         import traceback
 
         traceback.print_exc()
@@ -97,46 +87,45 @@ def test_multi_model_operations():
 
 
 def test_model_id_in_requests():
-    """Test that model_id is properly passed in requests."""
+    """Test that the model id is properly passed in requests."""
     print("\n\nTesting Model ID in Requests\n" + "=" * 50)
 
     try:
-        runner = Runner(
-            which=Which.Plain(
-                model_id="gpt2",
-                arch=Architecture.Gpt2,
+        with ir.Engine(SPEC) as engine:
+            models = [model.id for model in listed_models(engine)]
+            if not models:
+                print("No models available to test")
+                return False
+
+            model_id = models[0]
+            print(f"Using model: {model_id}")
+
+            # Test different request types with a model id
+            messages = [t.Message(role="user", content="Hi")]
+
+            # Chat completion
+            print("\n1. Testing chat completion with a model id...")
+            request = t.ChatCompletionRequest(
+                messages=messages, model=model_id, max_tokens=5
             )
-        )
+            response = engine.chat(request)
+            print(f"   OK Chat response: {response.choices[0].message.content}")
 
-        models = runner.list_models()
-        if not models:
-            print("No models available to test")
-            return False
+            # With "default" (should use the default model)
+            print("\n2. Testing chat completion with the default model...")
+            request = t.ChatCompletionRequest(
+                messages=messages, model="default", max_tokens=5
+            )
+            response = engine.chat(request)
+            print(
+                f"   OK Chat response (default): {response.choices[0].message.content}"
+            )
 
-        model_id = models[0]
-        print(f"Using model: {model_id}")
-
-        # Test different request types with model_id
-        messages = [{"role": "user", "content": "Hi"}]
-
-        # Chat completion
-        print("\n1. Testing chat completion with model_id...")
-        request = ChatCompletionRequest(
-            messages=messages, model="default", max_tokens=5
-        )
-        response = runner.send_chat_completion_request(request, model_id=model_id)
-        print(f"   ✓ Chat response: {response.choices[0].message.content}")
-
-        # Without model_id (should use default)
-        print("\n2. Testing chat completion without model_id...")
-        response = runner.send_chat_completion_request(request)
-        print(f"   ✓ Chat response (default): {response.choices[0].message.content}")
-
-        print("\n✅ Model ID request tests passed!")
+        print("\nModel ID request tests passed!")
         return True
 
     except Exception as e:
-        print(f"\n❌ Test failed with error: {e}")
+        print(f"\nTest failed with error: {e}")
         import traceback
 
         traceback.print_exc()
@@ -148,48 +137,42 @@ def test_unload_reload():
     print("\n\nTesting Model Unload/Reload\n" + "=" * 50)
 
     try:
-        runner = Runner(
-            which=Which.Plain(
-                model_id="gpt2",
-                arch=Architecture.Gpt2,
-            )
-        )
+        with ir.Engine(SPEC) as engine:
+            models = [model.id for model in listed_models(engine)]
+            if not models:
+                print("No models available to test")
+                return False
 
-        models = runner.list_models()
-        if not models:
-            print("No models available to test")
-            return False
+            model_id = models[0]
 
-        model_id = models[0]
+            # Check initial status
+            print("1. Checking initial status...")
+            assert is_model_loaded(engine, model_id), "Model should be loaded initially"
+            print(f"   OK Model '{model_id}' is loaded")
 
-        # Check initial status
-        print("1. Checking initial status...")
-        assert runner.is_model_loaded(model_id), "Model should be loaded initially"
-        print(f"   ✓ Model '{model_id}' is loaded")
+            # Unload the model
+            print("\n2. Unloading model...")
+            engine.unload_model(model_id)
+            is_loaded = is_model_loaded(engine, model_id)
+            print(f"   OK Model unloaded. is_model_loaded: {is_loaded}")
 
-        # Unload the model
-        print("\n2. Unloading model...")
-        runner.unload_model(model_id)
-        is_loaded = runner.is_model_loaded(model_id)
-        print(f"   ✓ Model unloaded. is_model_loaded: {is_loaded}")
+            # Check status after unload
+            print("\n3. Checking status after unload...")
+            status = [(model.id, model.status) for model in listed_models(engine)]
+            print(f"   OK Status: {status}")
 
-        # Check status after unload
-        print("\n3. Checking status after unload...")
-        status = runner.list_models_with_status()
-        print(f"   ✓ Status: {status}")
+            # Reload the model
+            print("\n4. Reloading model...")
+            engine.reload_model(model_id)
+            is_loaded = is_model_loaded(engine, model_id)
+            print(f"   OK Model reloaded. is_model_loaded: {is_loaded}")
+            assert is_loaded, "Model should be loaded after reload"
 
-        # Reload the model
-        print("\n4. Reloading model...")
-        runner.reload_model(model_id)
-        is_loaded = runner.is_model_loaded(model_id)
-        print(f"   ✓ Model reloaded. is_model_loaded: {is_loaded}")
-        assert is_loaded, "Model should be loaded after reload"
-
-        print("\n✅ Unload/reload tests passed!")
+        print("\nUnload/reload tests passed!")
         return True
 
     except Exception as e:
-        print(f"\n❌ Test failed with error: {e}")
+        print(f"\nTest failed with error: {e}")
         import traceback
 
         traceback.print_exc()
@@ -201,37 +184,25 @@ def test_error_handling():
     print("\n\nTesting Error Handling\n" + "=" * 50)
 
     try:
-        runner = Runner(
-            which=Which.Plain(
-                model_id="gpt2",
-                arch=Architecture.Gpt2,
+        with ir.Engine(SPEC) as engine:
+            # Test with non-existent model
+            print("1. Testing request to non-existent model...")
+            messages = [t.Message(role="user", content="Hi")]
+            request = t.ChatCompletionRequest(
+                messages=messages, model="non-existent-model"
             )
-        )
 
-        # Test with non-existent model
-        print("1. Testing request to non-existent model...")
-        messages = [{"role": "user", "content": "Hi"}]
-        request = ChatCompletionRequest(messages=messages, model="default")
+            try:
+                engine.chat(request)
+                print("   FAIL Should have raised an error for non-existent model")
+            except ir.InferenceError as e:
+                print(f"   OK Correctly raised error: {type(e).__name__}")
 
-        try:
-            runner.send_chat_completion_request(request, model_id="non-existent-model")
-            print("   ❌ Should have raised an error for non-existent model")
-        except Exception as e:
-            print(f"   ✓ Correctly raised error: {type(e).__name__}")
-
-        # Test setting non-existent model as default
-        print("\n2. Testing set_default_model_id with non-existent model...")
-        try:
-            runner.set_default_model_id("non-existent-model")
-            print("   ❌ Should have raised an error")
-        except Exception as e:
-            print(f"   ✓ Correctly raised error: {type(e).__name__}")
-
-        print("\n✅ Error handling tests passed!")
+        print("\nError handling tests passed!")
         return True
 
     except Exception as e:
-        print(f"\n❌ Test setup failed with error: {e}")
+        print(f"\nTest setup failed with error: {e}")
         return False
 
 
@@ -249,8 +220,8 @@ if __name__ == "__main__":
 
     print("\n" + "=" * 60)
     if all_passed:
-        print("✅ All tests passed!")
+        print("All tests passed!")
         sys.exit(0)
     else:
-        print("❌ Some tests failed!")
+        print("Some tests failed!")
         sys.exit(1)

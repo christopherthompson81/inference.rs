@@ -143,6 +143,21 @@ class Generator:
         values = schema.get("enum") or []
         return values[0] if len(values) == 1 and isinstance(values[0], str) else None
 
+    def default_literal(self, schema: dict) -> str:
+        """The engine's default for an optional field as Python source; `None` when it has none or it isn't a scalar."""
+        value = schema.get("default")
+        if isinstance(value, (bool, int, float)):
+            return repr(value)
+        if not isinstance(value, str):
+            return "None"
+        refs = [s["$ref"] for s in [schema, *schema.get("allOf", []), *schema.get("oneOf", [])] if "$ref" in s]
+        if not refs:
+            return json.dumps(value)
+        enum = refs[0][len(REF_PREFIX) :]
+        if value not in (self.schemas.get(enum, {}).get("enum") or []):
+            return "None"
+        return f"{enum}.{attribute(value.upper()) if value else 'EMPTY'}"
+
     def object_class(self, name: str, schema: dict, external: str | None = None) -> None:
         required = set(schema.get("required") or [])
         # Keyword-only, so a regenerated field order cannot silently move positional arguments.
@@ -168,7 +183,7 @@ class Generator:
             elif prop in required:
                 default = ""
             else:
-                default = " = None"
+                default = f" = {self.default_literal(prop_schema)}"
                 if "| None" not in annotation and annotation != "Any":
                     annotation = f"{annotation} | None"
             lines.append(f"    {python}: {annotation}{default}")

@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
 """
-Render crates/inference-pyo3/inference_rs.pyi as Starlight Markdown pages.
+Render the inference_rs Python package (bindings/python/inference_rs) as Starlight Markdown pages.
 
-The .pyi file is the single source of truth for the Python API. This script
-parses it with `ast` and writes one Markdown file per logical group into
-`docs/src/content/docs/reference/python/`. The Starlight sidebar picks
-them up via its `autogenerate` rule.
+The package's source is the single source of truth for the Python API; its typed classes are generated from the
+server's OpenAPI document. This script parses the modules with `ast` and writes one Markdown file per logical group
+into `docs/src/content/docs/reference/python/`. The Starlight sidebar picks them up via its `autogenerate` rule.
 
 Run from the repo root or the docs directory.
 """
@@ -23,133 +22,155 @@ from textwrap import dedent
 SCRIPT_DIR = Path(__file__).resolve().parent
 WEBSITE_DIR = SCRIPT_DIR.parent
 REPO_DIR = WEBSITE_DIR.parent
-PYI_PATH = REPO_DIR / "crates" / "inference-pyo3" / "inference_rs.pyi"
+PACKAGE_DIR = REPO_DIR / "bindings" / "python" / "inference_rs"
 OUT_DIR = WEBSITE_DIR / "src" / "content" / "docs" / "reference" / "python"
-STUB_REL = "crates/inference-pyo3/inference_rs.pyi"
+STUB_REL = "bindings/python/inference_rs"
 
-# (title, slug, description, [class names to include])
+# (title, slug, description, rule): a rule picks the classes (and type aliases) a page covers, by name.
 GROUPS = [
     (
-        "Runner",
-        "runner",
-        "The main entry point. Load a model and send requests.",
-        [
-            "Runner",
-            "CalibrationStatus",
-            "LoraAdapterError",
-            "LoraAdapterInfo",
-            "LoraResidentGenerationInfo",
-            "LoraRuntimeStatus",
-        ],
+        "Engine",
+        "engine",
+        "Load a model and serve requests; streams, results, errors and host callbacks.",
+        lambda n: (
+            n
+            in {
+                "Engine",
+                "JsonEngine",
+                "Stream",
+                "StreamEvent",
+                "MediaAttachment",
+                "SkillFile",
+                "Blob",
+                "InferenceError",
+                "Status",
+                "HostCallbacks",
+                "HostTool",
+                "HostToolCall",
+            }
+        ),
     ),
     (
-        "Which",
-        "which",
-        "Variants that select which kind of model to load.",
-        ["LoraAdapter", "Which"],
+        "Engine spec",
+        "spec",
+        "What to load and how to run it: EngineSpec, the ModelSelected variants and their options.",
+        lambda n: (
+            n.startswith(
+                (
+                    "EngineSpec",
+                    "RuntimeSpec",
+                    "AgenticSpec",
+                    "AdapterSpec",
+                    "SkillsSpec",
+                    "ModelSelected",
+                )
+            )
+            or n.endswith("LoaderType")
+            or n
+            in {
+                "ModelDType",
+                "IsqOrganization",
+                "UqffWriteSpec",
+                "UqffWriteSpecConfig",
+                "LoraAdapterSpec",
+                "LoraRuntimeConfig",
+                "AgentPermission",
+            }
+        ),
     ),
     (
-        "Requests",
-        "requests",
-        "Request dataclasses passed to Runner methods.",
-        [
-            "LoraAdapterGeneration",
-            "ChatCompletionRequest",
-            "CompletionRequest",
-            "EmbeddingRequest",
-        ],
+        "Chat and completions",
+        "chat",
+        "Chat completion, completion and embedding requests and responses, tools and output formats.",
+        lambda n: n.startswith(
+            (
+                "ChatCompletion",
+                "Completion",
+                "Embedding",
+                "Message",
+                "Tool",
+                "Function",
+                "ResponseFormat",
+                "JsonSchema",
+                "Grammar",
+                "StopTokens",
+                "WebSearch",
+                "ApproximateUserLocation",
+                "SearchContextSize",
+                "OpenAi",
+                "NamedFunction",
+                "AllowedTool",
+                "BuiltinTool",
+                "ReasoningEffort",
+                "PromptTokens",
+                "AdapterGeneration",
+                "AdapterSelection",
+                "SerializedVideo",
+            )
+        ),
     ),
     (
         "Responses",
         "responses",
-        "Response and streaming types returned by the engine.",
-        [
-            "ChatCompletionResponse",
-            "ChatCompletionChunkResponse",
-            "AgenticToolCallRecord",
-            "Choice",
-            "ChunkChoice",
-            "Delta",
-            "ResponseMessage",
-            "CompletionResponse",
-            "CompletionChoice",
-            "Usage",
-            "Logprobs",
-            "ResponseLogprob",
-            "TopLogprob",
-            "ImageGenerationResponse",
-            "ImageChoice",
-            "SpeechGenerationResponse",
-            "ToolCallResponse",
-            "ToolCallType",
-            "CalledFunction",
-        ],
+        "OpenResponses requests, resources and stream events.",
+        lambda n: n.startswith(
+            (
+                "OpenResponses",
+                "Response",
+                "Output",
+                "IncompleteDetails",
+                "IncompleteReason",
+                "InputTokens",
+                "IncludeOption",
+                "ReasoningConfig",
+                "ReasoningSummary",
+                "TextConfig",
+                "TextFormat",
+                "StreamOptions",
+                "TruncationStrategy",
+                "UrlCitation",
+                "FileCitation",
+                "FilePathInfo",
+            )
+        ),
     ),
     (
-        "Enums",
-        "enums",
-        "Architecture, dtype, and option enums.",
-        [
-            "Architecture",
-            "EmbeddingArchitecture",
-            "MultimodalArchitecture",
-            "DiffusionArchitecture",
-            "SpeechLoaderType",
-            "ModelDType",
-            "IsqOrganization",
-            "ImageGenerationResponseFormat",
-            "ToolChoice",
-            "SearchContextSize",
-            "AgentPermission",
-            "CodeExecutionPermission",
-            "NetworkMode",
-            "AgentToolSource",
-            "AgentToolKind",
-            "AgentToolApprovalDecisionKind",
-            "PagedCacheType",
-        ],
+        "Anthropic",
+        "anthropic",
+        "Anthropic Messages requests, responses and skill listings.",
+        lambda n: n.startswith("Anthropic"),
     ),
     (
-        "Search",
-        "search",
-        "Types for web-search tool configuration.",
-        ["WebSearchOptions", "WebSearchUserLocation", "ApproximateUserLocation"],
+        "Models, adapters, files and skills",
+        "management",
+        "Model status, LoRA adapters, files, skills, approvals and the media generation calls.",
+        lambda n: n.startswith(
+            (
+                "Model",
+                "Lora",
+                "LoadLora",
+                "UnloadLora",
+                "File",
+                "ContainerFile",
+                "SourceMeta",
+                "Skill",
+                "Approval",
+                "ImageGeneration",
+                "ImageChoice",
+                "SpeechGeneration",
+                "AudioResponseFormat",
+                "Calibration",
+                "ReIsq",
+                "Tune",
+                "Serialized",
+            )
+        ),
     ),
     (
-        "AnyMoE",
-        "anymoe",
-        "AnyMoE expert and config types.",
-        ["AnyMoeExpertType", "AnyMoeConfig"],
-    ),
-    (
-        "Code and shell execution",
-        "code-execution",
-        "Configuration for the built-in Python and shell executors.",
-        ["SandboxPolicy", "CodeExecutionConfig", "ShellConfig", "ShellSkillMount"],
-    ),
-    (
-        "Agent approvals",
-        "agent-approvals",
-        "Request and decision types for agent action approval callbacks.",
-        ["AgentToolMetadata", "AgentToolApproval", "AgentToolApprovalDecision"],
-    ),
-    (
-        "Files",
-        "files",
-        "Input files and first-class output files surfaced from agentic runs.",
-        ["RequestedFile", "InputFile", "FileSource", "File"],
-    ),
-    (
-        "MCP",
-        "mcp",
-        "MCP client configuration types.",
-        ["McpServerSourcePy", "McpServerConfigPy", "McpClientConfigPy"],
-    ),
-    (
-        "Auto-mapping",
-        "automap",
-        "Hints for automatic device mapping.",
-        ["TextAutoMapParams", "MultimodalAutoMapParams"],
+        "Layout",
+        "layout",
+        "PP-DocLayoutV3 document layout detection.",
+        lambda n: n in {"LayoutModel", "LayoutImage", "LayoutDetection", "PixelFormat"},
     ),
 ]
 
@@ -236,7 +257,6 @@ def _format_signature_block(func_name: str, func: ast.FunctionDef) -> str:
     if len(single) <= SIG_WRAP_THRESHOLD:
         return single
 
-    # Multi-line form with four-space indent for each arg.
     indent = "    "
     multi = [f"{func_name}("]
     for p in parts:
@@ -268,7 +288,6 @@ def _parse_doc_sections(doc: str) -> tuple[str, list[tuple[str, str]], str, str]
     if not doc:
         return "", [], "", ""
 
-    # Find earliest section start.
     sections = []
     for pat in (ARGS_SECTION_RE, RETURNS_SECTION_RE, RAISES_SECTION_RE):
         m = pat.search(doc)
@@ -281,18 +300,14 @@ def _parse_doc_sections(doc: str) -> tuple[str, list[tuple[str, str]], str, str]
     m = ARGS_SECTION_RE.search(doc)
     if m:
         body = dedent(m.group("body")).strip("\n")
-        # Each entry: `name: description` possibly multi-line (continuation
-        # indented deeper). We handle simple `name: desc` per line.
         current_name: str | None = None
         current_desc: list[str] = []
         for line in body.splitlines():
             stripped = line.rstrip()
             if not stripped:
                 continue
-            # top-level entry: starts at col 0 after dedent, matches `name: ...`
             lead_ws = len(line) - len(line.lstrip(" "))
             if lead_ws == 0 and ":" in stripped:
-                # flush previous
                 if current_name is not None:
                     params.append((current_name, " ".join(current_desc).strip()))
                 name, _, rest = stripped.partition(":")
@@ -372,14 +387,11 @@ def _render_function(
     lines.append("```")
     lines.append("")
 
-    # Prefer explicit Args:/Returns:, fall back to free-form summary.
     if summary:
         lines.append(summary)
         lines.append("")
 
     if args:
-        # If we have Args: docs, use a table; otherwise emit a plain "Parameters" list
-        # only when there is anything useful to show beyond the signature.
         if param_docs:
             lines.append(_render_params_table(args, param_docs))
 
@@ -394,6 +406,12 @@ def _render_function(
     return "\n".join(lines)
 
 
+def _default_cell(value: str | None) -> str:
+    if not value:
+        return "required"
+    return "optional" if value == "None" else _md_code_cell(value)
+
+
 def _render_fields_table(owner: str, fields: list[tuple[str, str, str]]) -> str:
     has_default = any(v for _, _, v in fields)
     if has_default:
@@ -403,8 +421,7 @@ def _render_fields_table(owner: str, fields: list[tuple[str, str, str]]) -> str:
         ]
         for name, ftype, value in fields:
             t = _md_code_cell(ftype)
-            d = _md_code_cell(value) if value else "required"
-            lines.append(f"| `{name}` | {t} | {d} |")
+            lines.append(f"| `{name}` | {t} | {_default_cell(value)} |")
     else:
         lines = [
             "| Field | Type |",
@@ -421,7 +438,7 @@ def _render_enum_table(owner: str, values: list[tuple[str, str]]) -> str:
     has_value = any(v for _, v in values)
     if has_value:
         lines = [
-            "Members and their wire/config names where relevant. The members are fieldless PyO3 enum variants and do not expose `.value`.",
+            "Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.",
             "",
             "| Member | Wire/config name |",
             "| --- | --- |",
@@ -485,7 +502,6 @@ def _render_class(
             sub_heading = "#" * (len(heading) + 1)
             lines.append(_render_class(nc, sub_heading, parent=full_name))
 
-    # __init__ first if present, then other methods
     init = [m for m in methods if m.name == "__init__"]
     rest = [m for m in methods if m.name != "__init__"]
     sub_heading = "#" * (len(heading) + 1)
@@ -495,14 +511,18 @@ def _render_class(
     return "\n".join(lines)
 
 
+def _render_alias(name: str, value: ast.expr) -> str:
+    return "\n".join([f"## `{name}`", "", f"One of: `{_unparse(value)}`.", ""])
+
+
 def _render_page(
     title: str,
     description: str,
     class_names: list[str],
     classes_by_name: dict[str, ast.ClassDef],
     order: int,
+    aliases: dict[str, ast.expr],
 ) -> str:
-    # YAML-safe quoting.
     safe_description = description.replace('"', '\\"')
     frontmatter = [
         "---",
@@ -515,11 +535,10 @@ def _render_page(
     ]
     body: list[str] = []
     for name in class_names:
-        cls = classes_by_name.get(name)
-        if cls is None:
-            print(f"warning: class {name!r} not in .pyi", file=sys.stderr)
-            continue
-        body.append(_render_class(cls, heading="##"))
+        if name in aliases:
+            body.append(_render_alias(name, aliases[name]))
+        else:
+            body.append(_render_class(classes_by_name[name], heading="##"))
         body.append("")
 
     footer = [
@@ -541,15 +560,19 @@ def _render_index() -> str:
         "  order: 6",
         "---",
         "",
-        "The `inference_rs` Python package exposes the same engine that powers the `inference` CLI.",
+        "The `inference_rs` Python package runs the same engine as the `inference` CLI, through its C ABI "
+        "(`libinference_ffi`). Specs, requests and responses are dataclasses generated from the server's OpenAPI "
+        "document, so they match what the engine accepts.",
         "",
         "## Install",
         "",
-        "inference.rs does not publish wheels yet; build the package from a checkout (add `--features cuda` or `metal` through `MATURIN_PEP517_ARGS`). See [Python SDK getting started](/guides/python/getting-started/#installing) and [hardware support](/reference/hardware-support/).",
+        "inference.rs does not publish wheels yet; build the library from a checkout (add `--features cuda` or "
+        "`metal`) and install the package. See [Python SDK getting started](/guides/python/getting-started/#installing) "
+        "and [hardware support](/reference/hardware-support/).",
         "",
         "```bash",
-        "pip install ./inference-pyo3                              # CPU",
-        'MATURIN_PEP517_ARGS="--features cuda" pip install ./inference-pyo3',
+        "cargo build --release -p inference-ffi",
+        "pip install -e bindings/python",
         "```",
         "",
         "## Pages",
@@ -573,19 +596,51 @@ def _render_index() -> str:
     return "\n".join(lines)
 
 
-def _collect_classes(tree: ast.Module) -> dict[str, ast.ClassDef]:
-    out: dict[str, ast.ClassDef] = {}
-    for node in tree.body:
-        if isinstance(node, ast.ClassDef):
-            out[node.name] = node
-    return out
+def _collect(
+    trees: list[ast.Module],
+) -> tuple[dict[str, ast.ClassDef], dict[str, ast.expr]]:
+    """Public classes, and module-level type aliases (`Name = Union[...]`), across the package's modules."""
+    classes: dict[str, ast.ClassDef] = {}
+    aliases: dict[str, ast.expr] = {}
+    for tree in trees:
+        for node in tree.body:
+            if isinstance(node, ast.ClassDef) and not node.name.startswith("_"):
+                classes[node.name] = node
+            elif (
+                isinstance(node, ast.Assign)
+                and len(node.targets) == 1
+                and isinstance(node.targets[0], ast.Name)
+                and node.targets[0].id[:1].isupper()
+                and isinstance(node.value, ast.Subscript)
+            ):
+                aliases[node.targets[0].id] = node.value
+    return classes, aliases
 
 
-def _render_pages(classes_by_name: dict[str, ast.ClassDef]) -> dict[str, str]:
+def _exported() -> set[str]:
+    """The names `inference_rs/__init__.py` lists in `__all__`."""
+    for node in ast.parse((PACKAGE_DIR / "__init__.py").read_text()).body:
+        if isinstance(node, ast.Assign) and any(
+            getattr(t, "id", None) == "__all__" for t in node.targets
+        ):
+            return {elt.value for elt in node.value.elts}
+    return set()
+
+
+def _render_pages(
+    classes_by_name: dict[str, ast.ClassDef], aliases: dict[str, ast.expr]
+) -> tuple[dict, list]:
     pages = {"index.md": _render_index()}
-    for i, (title, slug, desc, names) in enumerate(GROUPS, start=2):
-        pages[f"{slug}.md"] = _render_page(title, desc, names, classes_by_name, i)
-    return pages
+    names = sorted(set(classes_by_name) | set(aliases))
+    placed: set[str] = set()
+    for i, (title, slug, desc, rule) in enumerate(GROUPS, start=2):
+        members = [n for n in names if n not in placed and rule(n)]
+        placed |= set(members)
+        pages[f"{slug}.md"] = _render_page(
+            title, desc, members, classes_by_name, i, aliases
+        )
+    uncovered = [n for n in names if n not in placed]
+    return pages, uncovered
 
 
 def _check(pages: dict[str, str]) -> int:
@@ -610,7 +665,7 @@ def _check(pages: dict[str, str]) -> int:
     if drift:
         print(
             f"error: generated Python reference is out of date with {STUB_REL}; "
-            "run `python docs/scripts/render_pyi.py` and commit the result",
+            "run `python docs/scripts/render_python_api.py` and commit the result",
             file=sys.stderr,
         )
         return 1
@@ -623,26 +678,29 @@ def main() -> int:
     parser.add_argument(
         "--check",
         action="store_true",
-        help="verify committed pages match the .pyi instead of writing",
+        help="verify committed pages match the package instead of writing",
     )
     opts = parser.parse_args()
 
-    if not PYI_PATH.exists():
-        print(f"error: {PYI_PATH} does not exist", file=sys.stderr)
-        return 1
-    source = PYI_PATH.read_text()
-    tree = ast.parse(source)
-    classes_by_name = _collect_classes(tree)
-    pages = _render_pages(classes_by_name)
-
-    documented = {n for _, _, _, names in GROUPS for n in names}
-    uncovered = sorted(set(classes_by_name) - documented)
+    classes_by_name, aliases = _collect(
+        [ast.parse(path.read_text()) for path in sorted(PACKAGE_DIR.glob("*.py"))]
+    )
+    # The private modules contribute only what the package exports; `types` is public as a whole.
+    exported = _exported()
+    generated_classes, generated_aliases = _collect(
+        [ast.parse((PACKAGE_DIR / "types.py").read_text())]
+    )
+    classes_by_name = {
+        n: c for n, c in classes_by_name.items() if n in exported
+    } | generated_classes
+    aliases = {n: a for n, a in aliases.items() if n in exported} | generated_aliases
+    pages, uncovered = _render_pages(classes_by_name, aliases)
     if uncovered:
+        # Every public name belongs on a page; a new generated type needs a group rule.
         print(
-            f"note: {len(uncovered)} .pyi classes not covered by any group: "
-            + ", ".join(uncovered),
-            file=sys.stderr,
+            "error: no reference page covers: " + ", ".join(uncovered), file=sys.stderr
         )
+        return 1
 
     if opts.check:
         return _check(pages)

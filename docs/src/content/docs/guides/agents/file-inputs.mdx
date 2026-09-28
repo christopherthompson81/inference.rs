@@ -11,7 +11,7 @@ inference.rs supports OpenAI-compatible user file inputs on the server API and l
 - [`POST /v1/responses`](/reference/http-api-generated/operations/create_response/) `input_file` content parts with `file_id`, `file_data`, or `file_url`.
 - [`POST /v1/chat/completions`](/reference/http-api-generated/operations/chatcompletions/) `file` content parts with `file_id` or `file_data`.
 - Rust SDK [`InputFile`](/reference/rust-sdk/) on `RequestBuilder::with_input_file(...)`.
-- Python SDK [`InputFile`](/reference/python/files/) on `ChatCompletionRequest.input_files`.
+- Python SDK [`Engine.upload_file`](/reference/python/engine/) plus a `file` content part with the returned `file_id`.
 
 Use this when a request needs to analyze or transform user-provided files, or when a Responses shell/Skill workflow should see request files in the session working directory.
 
@@ -93,33 +93,34 @@ print(response.output_text)
 <TabItem label="Python SDK">
 
 ```python
-from inference_rs import Architecture, ChatCompletionRequest, InputFile, Runner, Which
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.Plain(
-        model_id="Qwen/Qwen3-4B",
-        arch=Architecture.Qwen3,
-    ),
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B", arch=t.NormalLoaderType.QWEN3),
 )
+with ir.Engine(spec) as engine:
+    sales = engine.upload_file(
+        b"region,revenue\nnorth,120\nsouth,95\nwest,180\n",
+        "sales.csv",
+        "user_data",
+        "text/csv",
+    )
+    request = t.ChatCompletionRequest(
+        messages=[
+            t.Message(
+                role="user",
+                content=[
+                    {"type": "text", "text": "Which region has the highest revenue? Use the attached CSV."},
+                    {"type": "file", "file": {"file_id": sales.id}},
+                ],
+            )
+        ],
+        model="default",
+    )
 
-sales = InputFile.from_text(
-    "sales.csv",
-    "region,revenue\nnorth,120\nsouth,95\nwest,180\n",
-    "text/csv",
-)
-request = ChatCompletionRequest(
-    messages=[
-        {
-            "role": "user",
-            "content": "Which region has the highest revenue? Use the attached CSV.",
-        }
-    ],
-    model="default",
-    input_files=[sales],
-)
-
-response = runner.send_chat_completion_request(request)
-print(response.choices[0].message.content)
+    response = engine.chat(request)
+    print(response.choices[0].message.content)
 ```
 
 </TabItem>

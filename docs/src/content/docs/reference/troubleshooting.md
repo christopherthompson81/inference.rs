@@ -83,7 +83,11 @@ The session expired (30-minute idle TTL) or was evicted (128-session cap, LRU). 
 
 ### `from inference_rs import Runner` fails with `ImportError`
 
-The wrong wheel was installed. `pip install inference-rs` gives the CPU (Linux/Windows) or Metal (macOS) wheel; for NVIDIA, install a CUDA wheel from the release with `--find-links` and the `+cudaNNN.smNN` matching your driver and GPU. See [Python SDK getting started](/guides/python/getting-started/#installing).
+That is the pyo3 API, which is being retired. The current package has no `Runner`: load a model with `ir.Engine(t.EngineSpec(...))`. Only the shell, code execution, MCP client and AnyMoE snippets still need the pyo3 package, until the new one supports them. See [Python SDK getting started](/guides/python/getting-started/).
+
+### The first engine call fails with `OSError` or an ABI version `RuntimeError`
+
+The package loads `libinference_ffi` on first use. An `OSError` means it found no library: build it with `cargo build --release -p inference-ffi` in the checkout the package is installed from, or set `INFERENCE_NATIVE_DIR` to the directory holding it. A `RuntimeError` naming two ABI versions means the library and the package come from different revisions; rebuild the library from the same checkout. For CUDA or Metal, build it with `--features cuda` or `--features metal`. See [Python SDK getting started](/guides/python/getting-started/#installing).
 
 ## Rust SDK
 

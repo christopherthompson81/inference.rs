@@ -4678,26 +4678,24 @@
       "LoraRuntimeConfig": {
         "type": "object",
         "description": "Admission limits for a dynamic LoRA runtime.",
-        "required": [
-          "max_adapters",
-          "max_rank",
-          "max_bytes"
-        ],
         "properties": {
           "max_adapters": {
             "type": "integer",
             "description": "Maximum loaded aliases and resident generations, including retired generations in use.",
+            "default": 16,
             "minimum": 0
           },
           "max_bytes": {
             "type": "integer",
             "format": "int64",
             "description": "Maximum bytes held by resident adapter tensors.",
+            "default": 8589934592,
             "minimum": 0
           },
           "max_rank": {
             "type": "integer",
             "description": "Maximum rank accepted from an adapter configuration.",
+            "default": 256,
             "minimum": 0
           }
         }
@@ -4929,8 +4927,13 @@
                     "description": "Generate and utilize an imatrix to enhance GGUF quantizations."
                   },
                   "dtype": {
-                    "$ref": "#/components/schemas/ModelDType",
-                    "description": "Model data type. Defaults to `auto`."
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ModelDType",
+                        "description": "Model data type. Defaults to `auto`."
+                      }
+                    ],
+                    "default": "auto"
                   },
                   "from_uqff": {
                     "type": [
@@ -4970,6 +4973,7 @@
                   "max_batch_size": {
                     "type": "integer",
                     "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 1,
                     "minimum": 0
                   },
                   "max_edge": {
@@ -5000,6 +5004,7 @@
                   "max_seq_len": {
                     "type": "integer",
                     "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 4096,
                     "minimum": 0
                   },
                   "model_id": {
@@ -5079,8 +5084,13 @@
                     "description": "Generate and utilize an imatrix to enhance GGUF quantizations.\nIncompatible with `--imatrix/-i`"
                   },
                   "dtype": {
-                    "$ref": "#/components/schemas/ModelDType",
-                    "description": "Model data type. Defaults to `auto`."
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ModelDType",
+                        "description": "Model data type. Defaults to `auto`."
+                      }
+                    ],
+                    "default": "auto"
                   },
                   "from_uqff": {
                     "type": [
@@ -5120,11 +5130,13 @@
                   "max_batch_size": {
                     "type": "integer",
                     "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 1,
                     "minimum": 0
                   },
                   "max_seq_len": {
                     "type": "integer",
                     "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 4096,
                     "minimum": 0
                   },
                   "model_id": {
@@ -5183,10 +5195,7 @@
                 "description": "Select an X-LoRA architecture",
                 "required": [
                   "xlora_model_id",
-                  "order",
-                  "dtype",
-                  "max_seq_len",
-                  "max_batch_size"
+                  "order"
                 ],
                 "properties": {
                   "arch": {
@@ -5201,8 +5210,13 @@
                     ]
                   },
                   "dtype": {
-                    "$ref": "#/components/schemas/ModelDType",
-                    "description": "Model data type. Defaults to `auto`."
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ModelDType",
+                        "description": "Model data type. Defaults to `auto`."
+                      }
+                    ],
+                    "default": "auto"
                   },
                   "from_uqff": {
                     "type": [
@@ -5221,11 +5235,13 @@
                   "max_batch_size": {
                     "type": "integer",
                     "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 1,
                     "minimum": 0
                   },
                   "max_seq_len": {
                     "type": "integer",
                     "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 4096,
                     "minimum": 0
                   },
                   "model_id": {
@@ -5302,12 +5318,7 @@
                 "type": "object",
                 "description": "Select a LoRA architecture",
                 "required": [
-                  "model_id",
-                  "adapters",
-                  "runtime_config",
-                  "dtype",
-                  "max_seq_len",
-                  "max_batch_size"
+                  "model_id"
                 ],
                 "properties": {
                   "adapters": {
@@ -5336,8 +5347,13 @@
                     "description": "Generate and utilize an imatrix to enhance GGUF quantizations."
                   },
                   "dtype": {
-                    "$ref": "#/components/schemas/ModelDType",
-                    "description": "Model data type. Defaults to `auto`."
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ModelDType",
+                        "description": "Model data type. Defaults to `auto`."
+                      }
+                    ],
+                    "default": "auto"
                   },
                   "from_uqff": {
                     "type": [
@@ -5377,6 +5393,7 @@
                   "max_batch_size": {
                     "type": "integer",
                     "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 1,
                     "minimum": 0
                   },
                   "max_edge": {
@@ -5407,6 +5424,7 @@
                   "max_seq_len": {
                     "type": "integer",
                     "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 4096,
                     "minimum": 0
                   },
                   "model_id": {
@@ -5469,10 +5487,7 @@
                 "description": "Select a GGUF model.",
                 "required": [
                   "quantized_model_id",
-                  "quantized_filename",
-                  "dtype",
-                  "max_seq_len",
-                  "max_batch_size"
+                  "quantized_filename"
                 ],
                 "properties": {
                   "calibration_file": {
@@ -5483,8 +5498,13 @@
                     "description": "Calibration file used to generate an imatrix while requantizing the GGUF weights."
                   },
                   "dtype": {
-                    "$ref": "#/components/schemas/ModelDType",
-                    "description": "Model data type. Defaults to `auto`."
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ModelDType",
+                        "description": "Model data type. Defaults to `auto`."
+                      }
+                    ],
+                    "default": "auto"
                   },
                   "hf_cache_path": {
                     "type": [
@@ -5535,6 +5555,7 @@
                   "max_batch_size": {
                     "type": "integer",
                     "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 1,
                     "minimum": 0
                   },
                   "max_edge": {
@@ -5565,6 +5586,7 @@
                   "max_seq_len": {
                     "type": "integer",
                     "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 4096,
                     "minimum": 0
                   },
                   "mmproj_filename": {
@@ -5643,10 +5665,7 @@
                   "quantized_model_id",
                   "quantized_filename",
                   "xlora_model_id",
-                  "order",
-                  "dtype",
-                  "max_seq_len",
-                  "max_batch_size"
+                  "order"
                 ],
                 "properties": {
                   "calibration_file": {
@@ -5657,8 +5676,13 @@
                     "description": "Calibration file used to generate an imatrix while requantizing the GGUF weights."
                   },
                   "dtype": {
-                    "$ref": "#/components/schemas/ModelDType",
-                    "description": "Model data type. Defaults to `auto`."
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ModelDType",
+                        "description": "Model data type. Defaults to `auto`."
+                      }
+                    ],
+                    "default": "auto"
                   },
                   "hf_cache_path": {
                     "type": [
@@ -5691,11 +5715,13 @@
                   "max_batch_size": {
                     "type": "integer",
                     "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 1,
                     "minimum": 0
                   },
                   "max_seq_len": {
                     "type": "integer",
                     "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 4096,
                     "minimum": 0
                   },
                   "order": {
@@ -5783,10 +5809,7 @@
                   "quantized_model_id",
                   "quantized_filename",
                   "adapters_model_id",
-                  "order",
-                  "dtype",
-                  "max_seq_len",
-                  "max_batch_size"
+                  "order"
                 ],
                 "properties": {
                   "adapters_model_id": {
@@ -5801,8 +5824,13 @@
                     "description": "Calibration file used to generate an imatrix while requantizing the GGUF weights."
                   },
                   "dtype": {
-                    "$ref": "#/components/schemas/ModelDType",
-                    "description": "Model data type. Defaults to `auto`."
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ModelDType",
+                        "description": "Model data type. Defaults to `auto`."
+                      }
+                    ],
+                    "default": "auto"
                   },
                   "hf_cache_path": {
                     "type": [
@@ -5835,11 +5863,13 @@
                   "max_batch_size": {
                     "type": "integer",
                     "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 1,
                     "minimum": 0
                   },
                   "max_seq_len": {
                     "type": "integer",
                     "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 4096,
                     "minimum": 0
                   },
                   "order": {
@@ -5915,15 +5945,17 @@
                   "tok_model_id",
                   "quantized_model_id",
                   "quantized_filename",
-                  "gqa",
-                  "dtype",
-                  "max_seq_len",
-                  "max_batch_size"
+                  "gqa"
                 ],
                 "properties": {
                   "dtype": {
-                    "$ref": "#/components/schemas/ModelDType",
-                    "description": "Model data type. Defaults to `auto`."
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ModelDType",
+                        "description": "Model data type. Defaults to `auto`."
+                      }
+                    ],
+                    "default": "auto"
                   },
                   "gqa": {
                     "type": "integer",
@@ -5933,11 +5965,13 @@
                   "max_batch_size": {
                     "type": "integer",
                     "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 1,
                     "minimum": 0
                   },
                   "max_seq_len": {
                     "type": "integer",
                     "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 4096,
                     "minimum": 0
                   },
                   "quantized_filename": {
@@ -5985,15 +6019,17 @@
                   "quantized_filename",
                   "xlora_model_id",
                   "order",
-                  "gqa",
-                  "dtype",
-                  "max_seq_len",
-                  "max_batch_size"
+                  "gqa"
                 ],
                 "properties": {
                   "dtype": {
-                    "$ref": "#/components/schemas/ModelDType",
-                    "description": "Model data type. Defaults to `auto`."
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ModelDType",
+                        "description": "Model data type. Defaults to `auto`."
+                      }
+                    ],
+                    "default": "auto"
                   },
                   "gqa": {
                     "type": "integer",
@@ -6003,11 +6039,13 @@
                   "max_batch_size": {
                     "type": "integer",
                     "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 1,
                     "minimum": 0
                   },
                   "max_seq_len": {
                     "type": "integer",
                     "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 4096,
                     "minimum": 0
                   },
                   "order": {
@@ -6074,10 +6112,7 @@
                   "quantized_filename",
                   "adapters_model_id",
                   "order",
-                  "gqa",
-                  "dtype",
-                  "max_seq_len",
-                  "max_batch_size"
+                  "gqa"
                 ],
                 "properties": {
                   "adapters_model_id": {
@@ -6085,8 +6120,13 @@
                     "description": "Model ID to load LoRA from. This may be a HF hub repo or a local path."
                   },
                   "dtype": {
-                    "$ref": "#/components/schemas/ModelDType",
-                    "description": "Model data type. Defaults to `auto`."
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ModelDType",
+                        "description": "Model data type. Defaults to `auto`."
+                      }
+                    ],
+                    "default": "auto"
                   },
                   "gqa": {
                     "type": "integer",
@@ -6096,11 +6136,13 @@
                   "max_batch_size": {
                     "type": "integer",
                     "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 1,
                     "minimum": 0
                   },
                   "max_seq_len": {
                     "type": "integer",
                     "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 4096,
                     "minimum": 0
                   },
                   "order": {
@@ -6173,8 +6215,13 @@
                     "description": "Generate and utilize an imatrix to enhance GGUF quantizations."
                   },
                   "dtype": {
-                    "$ref": "#/components/schemas/ModelDType",
-                    "description": "Model data type. Defaults to `auto`."
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ModelDType",
+                        "description": "Model data type. Defaults to `auto`."
+                      }
+                    ],
+                    "default": "auto"
                   },
                   "from_uqff": {
                     "type": [
@@ -6214,6 +6261,7 @@
                   "max_batch_size": {
                     "type": "integer",
                     "description": "Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 1,
                     "minimum": 0
                   },
                   "max_edge": {
@@ -6228,16 +6276,19 @@
                   "max_image_length": {
                     "type": "integer",
                     "description": "Maximum expected image size will have this edge length on both edges.\nThis affects automatic device mapping but is not a hard limit.",
+                    "default": 1024,
                     "minimum": 0
                   },
                   "max_num_images": {
                     "type": "integer",
                     "description": "Maximum prompt number of images to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 1,
                     "minimum": 0
                   },
                   "max_seq_len": {
                     "type": "integer",
                     "description": "Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.",
+                    "default": 4096,
                     "minimum": 0
                   },
                   "model_id": {
@@ -6296,8 +6347,7 @@
                 "description": "Select a diffusion model, without quantization or adapters",
                 "required": [
                   "model_id",
-                  "arch",
-                  "dtype"
+                  "arch"
                 ],
                 "properties": {
                   "arch": {
@@ -6305,8 +6355,13 @@
                     "description": "The architecture of the model."
                   },
                   "dtype": {
-                    "$ref": "#/components/schemas/ModelDType",
-                    "description": "Model data type. Defaults to `auto`."
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ModelDType",
+                        "description": "Model data type. Defaults to `auto`."
+                      }
+                    ],
+                    "default": "auto"
                   },
                   "model_id": {
                     "type": "string",
@@ -6326,8 +6381,7 @@
                 "type": "object",
                 "required": [
                   "model_id",
-                  "arch",
-                  "dtype"
+                  "arch"
                 ],
                 "properties": {
                   "arch": {
@@ -6342,8 +6396,13 @@
                     "description": "DAC Model ID to load from. If not provided, this is automatically downloaded from the default path for the model.\nThis may be a HF hub repo or a local path."
                   },
                   "dtype": {
-                    "$ref": "#/components/schemas/ModelDType",
-                    "description": "Model data type. Defaults to `auto`."
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ModelDType",
+                        "description": "Model data type. Defaults to `auto`."
+                      }
+                    ],
+                    "default": "auto"
                   },
                   "model_id": {
                     "type": "string",
@@ -6415,8 +6474,13 @@
                     "description": "Calibration file for imatrix generation."
                   },
                   "dtype": {
-                    "$ref": "#/components/schemas/ModelDType",
-                    "description": "Model data type. Defaults to `auto`."
+                    "oneOf": [
+                      {
+                        "$ref": "#/components/schemas/ModelDType",
+                        "description": "Model data type. Defaults to `auto`."
+                      }
+                    ],
+                    "default": "auto"
                   },
                   "from_uqff": {
                     "type": [

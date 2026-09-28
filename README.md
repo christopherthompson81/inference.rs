@@ -223,10 +223,11 @@ Text, multimodal, speech, image generation, and embedding models across 45+ arch
 ## Python SDK
 
 ```bash
-pip install inference-rs
+cargo build --release -p inference-ffi
+pip install -e bindings/python
 ```
 
-In-process inference from Python: load a model with `Runner` and send OpenAI-shaped requests, no server required. Accelerator-specific wheels (CUDA, Metal, MKL, Accelerate) are listed in the getting-started guide.
+In-process inference from Python: a pure-Python package over the engine's C ABI. Load a model with `Engine` and send typed, OpenAI-shaped requests, no server required. Build the library with `--features cuda` or `--features metal` for an accelerator.
 
 [Get started](https://docs.mistralrs.dev/guides/python/getting-started/) | [API reference](https://docs.mistralrs.dev/reference/python/) | [Examples](examples/python)
 

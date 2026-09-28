@@ -24,16 +24,17 @@ inference serve --paged-attn off -m Qwen/Qwen3-4B
 <TabItem label="Python">
 
 ```python
-from inference_rs import Runner, Which
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.Plain(model_id="Qwen/Qwen3-4B"),
-    pa_gpu_mem=8192,
-    pa_blk_size=32,
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B"),
+    runtime=t.RuntimeSpec(paged_attn=True),
 )
+engine = ir.Engine(spec)
 ```
 
-`paged_attn=True` forces it on, `no_paged_attn=True` forces it off; the `pa_*` arguments mirror the CLI flags. [Full example](/examples/python/paged-attention/).
+`paged_attn=True` forces it on, `False` forces it off, and leaving it unset picks the device default. The Python SDK does not expose the KV cache pool size or block size yet; use the CLI `--pa-*` flags to tune them. [Full example](/examples/python/paged-attention/).
 
 </TabItem>
 <TabItem label="Rust">

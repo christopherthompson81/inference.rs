@@ -9,15 +9,15 @@ inference.rs uses Cargo features to gate platform-specific and optional function
 
 | Feature | Crates | Purpose |
 |---|---|---|
-| `cuda` | `inference-cli`, `inference`, `inference-core`, `inference-server-core`, `inference-api` | NVIDIA CUDA acceleration, including [paged attention](/guides/perf/paged-attention/). |
+| `cuda` | `inference-cli`, `inference`, `inference-core`, `inference-server-core`, `inference-api`, `inference-ffi` | NVIDIA CUDA acceleration, including [paged attention](/guides/perf/paged-attention/). |
 | `cudnn` | as above | cuDNN-accelerated kernels. |
 | `flash-attn` | as above | Flash attention v2 (Ampere+, requires `cuda`). |
-| `flash-attn-v3` | `inference-cli`, `inference-core`, `inference-server-core`, `inference-api` | Flash attention v3 (Hopper, requires `cuda`). Not exposed by the top-level `inference` crate. |
-| `cutile` | `inference-cli`, `inference`, `inference-core`, `inference-pyo3` | cuTile acceleration for quantized linears, MoE, and routed LoRA. Enables `cuda`. Requires CUDA >= 13.2 on Ampere/Ada and Blackwell+, CUDA >= 13.3 on Hopper, and a compatible `tileiras` installation. [NVFP4](/reference/quantization-types/#nvfp4) requires Blackwell and CUDA >= 13.3. See [cuTile setup](/developer/moe-backends/). |
+| `flash-attn-v3` | `inference-cli`, `inference-core`, `inference-server-core`, `inference-api`, `inference-ffi` | Flash attention v3 (Hopper, requires `cuda`). Not exposed by the top-level `inference` crate. |
+| `cutile` | `inference-cli`, `inference`, `inference-core`, `inference-pyo3`, `inference-ffi` | cuTile acceleration for quantized linears, MoE, and routed LoRA. Enables `cuda`. Requires CUDA >= 13.2 on Ampere/Ada and Blackwell+, CUDA >= 13.3 on Hopper, and a compatible `tileiras` installation. [NVFP4](/reference/quantization-types/#nvfp4) requires Blackwell and CUDA >= 13.3. See [cuTile setup](/developer/moe-backends/). |
 | `metal` | as above | Apple Silicon GPU support via Metal. |
 | `accelerate` | as above | Apple Accelerate framework for CPU math. |
 | `mkl` | as above | Intel MKL for CPU math. |
-| `nccl` | `inference-cli`, `inference`, `inference-core`, `inference-server-core`, `inference-api` | NCCL single-machine CUDA multi-GPU support. Requires the NCCL runtime library at build and runtime. |
+| `nccl` | `inference-cli`, `inference`, `inference-core`, `inference-server-core`, `inference-api`, `inference-ffi` | NCCL single-machine CUDA multi-GPU support. Requires the NCCL runtime library at build and runtime. |
 
 Typical combinations:
 
@@ -34,7 +34,7 @@ For Linux CUDA multi-GPU, add `nccl` when NCCL is installed. The Linux installer
 
 | Feature | Crates | Purpose |
 |---|---|---|
-| `code-execution` | `inference-cli`, `inference`, `inference-core`, `inference-server-core`, `inference-api` | Python code execution tool. In `inference-cli` defaults. |
+| `code-execution` | `inference-cli`, `inference`, `inference-core`, `inference-server-core`, `inference-api`, `inference-ffi` | Python code execution tool. In `inference-cli` defaults. |
 | `ring` | as above | Multi-machine ring distributed inference. |
 | `swagger-ui` | `inference-server-core` | Mounts Swagger UI on the HTTP server. On by default in `inference-server-core`. |
 
