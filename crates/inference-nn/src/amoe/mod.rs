@@ -52,28 +52,7 @@ pub trait AnyMoeBaseModelMixin {
             .collect::<Vec<_>>()
     }
     fn finish_training(&mut self, gate_model_id: Option<String>) -> Result<()> {
-        let mut out = HashMap::new();
-        for mlp in self
-            .get_mlps_mut()
-            .iter_mut()
-            .filter(|mlp| mlp.is_moe_layer())
-        {
-            let out_accum = if gate_model_id.is_some() {
-                Some(&mut out)
-            } else {
-                None
-            };
-            mlp.finish_training(out_accum);
-        }
-        if let Some(gate_model_id) = gate_model_id {
-            if !Path::new(&gate_model_id).exists() {
-                fs::create_dir_all(&gate_model_id)?;
-            }
-            let save_path = Path::new(&gate_model_id).join("gate.safetensors");
-            safetensors::save(&out, &save_path)?;
-            info!("Saved gating layers to `{}`", save_path.display());
-        }
-        Ok(())
+        finish_anymoe_training(self.get_mlps_mut(), gate_model_id)
     }
     fn trainable_params(&self) -> usize {
         self.get_mlps()
@@ -103,81 +82,29 @@ pub trait AnyMoeBaseModelMixin {
     ) -> Result<Box<dyn MlpLayer>> {
         candle_core::bail!("Model does not support AnyMoE layers");
     }
-    // get_delta_from_lora_ab! scales by `rank as f64`; LoRA ranks are tiny
-    #[allow(clippy::too_many_arguments, clippy::cast_precision_loss)]
     fn create_anymoe_layers(
         &mut self,
         additional_vbs: Vec<ShardedVarBuilder>,
         config: AnyMoeConfig,
         (prefix, mlp): (String, String),
-        mut layers: Vec<usize>,
+        layers: Vec<usize>,
         expert_type: AnyMoeExpertType,
         gate_vb: Option<ShardedVarBuilder>,
     ) -> Result<()> {
         if !self.amoe_supported() {
             candle_core::bail!("Model does not support AnyMoE layers");
         }
-        if layers.is_empty() {
-            layers = (0..self.get_mlps().len()).collect();
-        }
-        // a repeated layer id would wrap an MoE layer in another one
-        layers.sort_unstable();
-        layers.dedup();
-        let mut experts: Vec<Vec<Box<dyn MlpLayer>>> = layers.iter().map(|_| Vec::new()).collect();
-        {
-            let mlps = self.get_mlps();
-            for vb in additional_vbs {
-                let vb = vb.pp(&prefix);
-                for (row, &layer) in experts.iter_mut().zip(&layers) {
-                    let base = mlps[layer];
-                    let vb_mlp = vb.pp(layer).pp(&mlp);
-                    match expert_type {
-                        AnyMoeExpertType::FineTuned => {
-                            row.push(self.amoe_fine_tuned_expert(layer, base, vb_mlp)?)
-                        }
-                        AnyMoeExpertType::LoraAdapter {
-                            rank,
-                            alpha,
-                            ref target_modules,
-                        } => {
-                            let (hidden, intermediate) =
-                                (base.get_params()[0], base.get_params()[1]);
-                            let mut deltas = Vec::new();
-                            for target in self.amoe_lora_targets() {
-                                deltas.push(if target_modules.iter().any(|m| m == target.name) {
-                                    let (in_d, out_d) = (target.shape)(hidden, intermediate);
-                                    Some(crate::get_delta_from_lora_ab!(
-                                        vb_mlp,
-                                        rank,
-                                        alpha,
-                                        (in_d, out_d),
-                                        target.name
-                                    ))
-                                } else {
-                                    None
-                                });
-                            }
-                            row.push(base.new_added_delta(deltas)?);
-                        }
-                    }
-                }
-            }
-        }
-        let mut mlps = self.get_mlps_mut();
-        for (layer, expert) in layers.into_iter().zip(experts) {
-            let mut experts_all = vec![MlpLayer::clone(&**mlps[layer])];
-            experts_all.extend(expert);
-            let (dtype, device) = mlps[layer].dtype_device();
-            *mlps[layer] = Box::new(MoeMlp::new(
-                experts_all,
-                config.clone(),
-                dtype,
-                &device,
-                layer,
-                gate_vb.as_ref(),
-            )?);
-        }
-        Ok(())
+        let experts = build_anymoe_experts(ExpertSources {
+            mlps: &self.get_mlps(),
+            lora_targets: self.amoe_lora_targets(),
+            fine_tuned: &|layer, base, vb| self.amoe_fine_tuned_expert(layer, base, vb),
+            additional_vbs,
+            prefix: &prefix,
+            mlp: &mlp,
+            layers,
+            expert_type,
+        })?;
+        install_anymoe_layers(self.get_mlps_mut(), experts, config, gate_vb.as_ref())
     }
     fn get_mlps(&self) -> Vec<&dyn MlpLayer> {
         panic!("Model does not support AnyMoE layers");
@@ -188,6 +115,129 @@ pub trait AnyMoeBaseModelMixin {
     fn amoe_supported(&self) -> bool {
         false
     }
+}
+
+// The mixin defaults stay thin so each model's vtable instantiates only a call, not these bodies.
+fn finish_anymoe_training(
+    mlps: Vec<&mut Box<dyn MlpLayer>>,
+    gate_model_id: Option<String>,
+) -> Result<()> {
+    let mut out = HashMap::new();
+    for mlp in mlps.into_iter().filter(|mlp| mlp.is_moe_layer()) {
+        let out_accum = if gate_model_id.is_some() {
+            Some(&mut out)
+        } else {
+            None
+        };
+        mlp.finish_training(out_accum);
+    }
+    if let Some(gate_model_id) = gate_model_id {
+        if !Path::new(&gate_model_id).exists() {
+            fs::create_dir_all(&gate_model_id)?;
+        }
+        let save_path = Path::new(&gate_model_id).join("gate.safetensors");
+        safetensors::save(&out, &save_path)?;
+        info!("Saved gating layers to `{}`", save_path.display());
+    }
+    Ok(())
+}
+
+type FineTunedExpert<'a> =
+    dyn Fn(usize, &dyn MlpLayer, ShardedVarBuilder) -> Result<Box<dyn MlpLayer>> + 'a;
+
+struct ExpertSources<'a> {
+    mlps: &'a [&'a dyn MlpLayer],
+    lora_targets: &'static [AnyMoeLoraTarget],
+    fine_tuned: &'a FineTunedExpert<'a>,
+    additional_vbs: Vec<ShardedVarBuilder>,
+    prefix: &'a str,
+    mlp: &'a str,
+    layers: Vec<usize>,
+    expert_type: AnyMoeExpertType,
+}
+
+// The new experts for each selected layer, in layer order.
+struct AnyMoeExperts {
+    layers: Vec<usize>,
+    experts: Vec<Vec<Box<dyn MlpLayer>>>,
+}
+
+// get_delta_from_lora_ab! scales by `rank as f64`; LoRA ranks are tiny
+#[allow(clippy::cast_precision_loss)]
+fn build_anymoe_experts(sources: ExpertSources<'_>) -> Result<AnyMoeExperts> {
+    let ExpertSources {
+        mlps,
+        lora_targets,
+        fine_tuned,
+        additional_vbs,
+        prefix,
+        mlp,
+        mut layers,
+        expert_type,
+    } = sources;
+    if layers.is_empty() {
+        layers = (0..mlps.len()).collect();
+    }
+    // a repeated layer id would wrap an MoE layer in another one
+    layers.sort_unstable();
+    layers.dedup();
+    let mut experts: Vec<Vec<Box<dyn MlpLayer>>> = layers.iter().map(|_| Vec::new()).collect();
+    for vb in additional_vbs {
+        let vb = vb.pp(prefix);
+        for (row, &layer) in experts.iter_mut().zip(&layers) {
+            let base = mlps[layer];
+            let vb_mlp = vb.pp(layer).pp(mlp);
+            match expert_type {
+                AnyMoeExpertType::FineTuned => row.push(fine_tuned(layer, base, vb_mlp)?),
+                AnyMoeExpertType::LoraAdapter {
+                    rank,
+                    alpha,
+                    ref target_modules,
+                } => {
+                    let (hidden, intermediate) = (base.get_params()[0], base.get_params()[1]);
+                    let mut deltas = Vec::new();
+                    for target in lora_targets {
+                        deltas.push(if target_modules.iter().any(|m| m == target.name) {
+                            let (in_d, out_d) = (target.shape)(hidden, intermediate);
+                            Some(crate::get_delta_from_lora_ab!(
+                                vb_mlp,
+                                rank,
+                                alpha,
+                                (in_d, out_d),
+                                target.name
+                            ))
+                        } else {
+                            None
+                        });
+                    }
+                    row.push(base.new_added_delta(deltas)?);
+                }
+            }
+        }
+    }
+    Ok(AnyMoeExperts { layers, experts })
+}
+
+fn install_anymoe_layers(
+    mut mlps: Vec<&mut Box<dyn MlpLayer>>,
+    AnyMoeExperts { layers, experts }: AnyMoeExperts,
+    config: AnyMoeConfig,
+    gate_vb: Option<&ShardedVarBuilder>,
+) -> Result<()> {
+    for (layer, expert) in layers.into_iter().zip(experts) {
+        let mut experts_all = vec![MlpLayer::clone(&**mlps[layer])];
+        experts_all.extend(expert);
+        let (dtype, device) = mlps[layer].dtype_device();
+        *mlps[layer] = Box::new(MoeMlp::new(
+            experts_all,
+            config.clone(),
+            dtype,
+            &device,
+            layer,
+            gate_vb,
+        )?);
+    }
+    Ok(())
 }
 
 pub trait MlpLayer: Send + Sync + AnyMoeTrainableLayer {

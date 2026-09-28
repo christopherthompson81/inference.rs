@@ -664,3 +664,44 @@ Review follow-ups:
   family crates' `json_config!` (as the normal loaders do): 3,892,700, -25.7k (0.66%); 7.8k of vtable defaults stay.
 - Not moved: the GGML llama and the two quantized X-LoRA models (60.8k together) read GGUF content, LoRA and the
   model-config traits, which live in core; moving them needs those in inference-nn first.
+
+## Run 37 - 2026-09-28
+
+- Question: where does inference-core's LLVM IR sit per function, and do long functions have outsized IR (so splitting
+  them would pay)? Compare IR lines against source lines, and group generic instantiations by their base function.
+- Command: `CARGO_TARGET_DIR=<scratch> cargo llvm-lines -p inference-core --lib --features cuda --sort lines`, at
+  `b0c0c9b9` (after the last three models left core, #98, and the dead-code cleanups #100-#104). Source lengths from
+  brace-matching `fn` bodies; IR per source line computed for core functions with one definition and >= 40 lines.
+- Result: 3,924,564 lines, 79,536 copies (Run 36 end: 3,892,700; this build keeps the moved models' GGUF/X-LoRA
+  construction instantiated in core through `from_gguf::<File>`, 10.6k). No function passes 0.3%.
+  - Long sync functions sit at the crate's typical ~15 IR lines per source line: `MultimodalLoader::
+    load_model_from_path` 12.7k IR / 814 lines, `NormalLoader::load_model_from_path` 10.9k / 651. Splitting them
+    moves IR between functions rather than removing it; only deduplicating copies removes it.
+  - The highest ratios (25-70 per line) are short async functions whose state machines carry their awaits
+    (`snapshot_paged_recurrent_prefix` 69, `handle_daemon_request` 51, `execute_extraction` 32, `execute_search`,
+    `do_reload_model`, the NCCL replicators) and JSON-building GGUF config synthesizers. Each is a few thousand lines
+    at most.
+  - Grouped by base function across instantiations: serde config visitors ~265k (`visit_map` 134k + `visit_seq`
+    70k + `deserialize_struct` 60k over ~140 structs, 6.8%); drop glue 82k over 2,361 types; `create_anymoe_layers`
+    70.7k over 50 impls (1.8%) plus `finish_training` 23.1k over 59; `process_inputs` 59.1k over 23;
+    `load_model_from_path` 38.9k over 9; `layer_sizes_in_bytes` + `non_mapped_size_in_bytes` 39.9k over 55 each.
+- Implication: function length is not the IR lever; per-model monomorphization is. The largest fixable item is still
+  the one Run 17 named: the AnyMoE mixin defaults (`create_anymoe_layers`, `finish_training`) instantiated once per
+  model, which could delegate to one non-generic body (~90k, ~2.3%). The loader consolidation removes duplicated
+  `load_model_from_path` code (worth it for maintenance; IR follows the lines it deletes). serde's per-struct
+  visitors are the biggest block but come with the configs; `visit_seq` exists only for sequence-form input, which
+  configs never use, so a hand-written or map-only deserializer would be the only way to cut it.
+
+## Run 38 - 2026-09-28
+
+- Change: the AnyMoE mixin defaults stay thin. `create_anymoe_layers` gathers the MLP list, LoRA targets and a
+  `&dyn Fn` for fine-tuned experts from `self`, then calls non-generic `build_anymoe_experts` and
+  `install_anymoe_layers`; `finish_training` passes `get_mlps_mut()` to `finish_anymoe_training`. The bodies now
+  compile once, in inference-nn.
+- Command: same `cargo llvm-lines` as Run 37, scratch target.
+- Result: core IR 3,924,564 -> 3,821,632 (-102.9k, -2.6%), 79,536 -> 78,556 copies. `create_anymoe_layers`
+  92.4k -> 19.6k (what is left per model is the wrapper and its closure), `finish_training` 28.1k -> 2.1k.
+- Implication: a little more than Run 17 estimated, since the trait-object vtables core builds instantiate every
+  default once per model. The same shape (mixin default whose body only needs `self` for a few accessors) is worth
+  checking in `DeviceMappedModelLoader`'s `layer_sizes_in_bytes` / `non_mapped_size_in_bytes`, although those are
+  per-loader overrides rather than shared defaults.
