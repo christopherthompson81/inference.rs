@@ -11,7 +11,6 @@ serde_default_fn!(usize, boi_token_id, 255999);
 serde_default_fn!(usize, eoi_token_id, 258882);
 
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct DiffusionGemmaConfig {
     pub text_config: Gemma4TextConfig,
     pub vision_config: Option<Gemma4VisionConfig>,

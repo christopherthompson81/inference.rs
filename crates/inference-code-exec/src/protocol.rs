@@ -41,8 +41,6 @@ pub struct ExecuteResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct ImageOutput {
-    #[allow(dead_code)]
-    pub format: String,
     pub data_base64: String,
 }
 
@@ -75,7 +73,4 @@ impl ExecuteFile {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ResetResponse {
-    #[allow(dead_code)]
-    pub success: bool,
-}
+pub struct ResetResponse {}

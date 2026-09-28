@@ -303,7 +303,6 @@ impl InferenceRsServerRouterBuilder {
             router_max_body_limit,
         );
 
-        #[allow(unused_mut)]
         let mut router = init_router(
             inference,
             self.allowed_origins,

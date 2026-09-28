@@ -1,76 +1,10 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::{DType, Result, Tensor};
 use candle_nn::{Embedding, Module};
 use inference_quant::ShardedVarBuilder;
 
 use crate::layers;
-
-use super::config::ConformerEncoderConfig;
-
-#[allow(unused)]
-pub struct AbsolutePositionalEncoding {
-    pe: Tensor,
-    xscale: f64,
-}
-
-impl AbsolutePositionalEncoding {
-    pub fn new(cfg: &ConformerEncoderConfig, device: &Device) -> Result<Self> {
-        let max_len = 5000;
-
-        let mut pe = Tensor::zeros((max_len, cfg.attention_dim), DType::F32, device)?;
-        let position = Tensor::arange(0u32, max_len as u32, device)?.unsqueeze(1)?;
-
-        let div_term = (Tensor::arange_step(0u32, cfg.attention_dim as u32, 2, device)?
-            .to_dtype(DType::F32)?
-            * -((10000f64).ln() / cfg.attention_dim as f64))?
-            .exp()?;
-
-        let sin = position
-            .to_dtype(DType::F32)?
-            .broadcast_mul(&div_term)?
-            .sin()?;
-        let cos = position
-            .to_dtype(DType::F32)?
-            .broadcast_mul(&div_term)?
-            .cos()?;
-
-        // Interleave
-        let sin_indices = Tensor::from_vec(
-            (0..cfg.attention_dim)
-                .step_by(2)
-                .map(|x| x as u32)
-                .collect(),
-            cfg.attention_dim / 2,
-            device,
-        )?;
-        let cos_indices = Tensor::from_vec(
-            (1..cfg.attention_dim)
-                .step_by(2)
-                .map(|x| x as u32)
-                .collect(),
-            cfg.attention_dim / 2,
-            device,
-        )?;
-        pe = pe.index_add(&sin_indices, &sin, D::Minus1)?;
-        pe = pe.index_add(&cos_indices, &cos, D::Minus1)?;
-        pe = pe.unsqueeze(0)?;
-
-        Ok(Self {
-            pe,
-            xscale: (cfg.attention_dim as f64).sqrt(),
-        })
-    }
-
-    #[allow(unused)]
-    pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        if xs.dim(1)? >= self.pe.dim(1)? {
-            candle_core::bail!("Need to recompute positional embeds");
-        }
-
-        (xs * self.xscale)?.broadcast_add(&self.pe.i((.., ..xs.dim(1)?))?.to_dtype(xs.dtype())?)
-    }
-}
 
 pub struct T5RelativeAttentionLogitBias {
     bias_values: Embedding,

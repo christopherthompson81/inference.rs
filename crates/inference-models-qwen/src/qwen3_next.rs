@@ -168,7 +168,6 @@ impl GdnConfig for Config {
 
 // ====================== Full Attention layer ======================
 
-#[allow(dead_code)]
 struct FullAttention {
     q_proj: Arc<dyn QuantMethod>,
     k_proj: Arc<dyn QuantMethod>,
@@ -676,7 +675,6 @@ impl DecoderLayer {
 
 // ====================== Top-level Model ======================
 
-#[allow(dead_code)]
 pub struct Model {
     embed_tokens: Arc<dyn QuantMethod>,
     layers: Vec<DecoderLayer>,
@@ -688,7 +686,6 @@ pub struct Model {
     device: Device,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
     cfg: ModelConfigMetadata,
-    num_attention_heads: usize,
     max_seq_len: usize,
 }
 
@@ -931,7 +928,6 @@ impl Model {
                 kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
             },
             mapper,
-            num_attention_heads,
             max_seq_len: cfg.max_position_embeddings,
         })
     }

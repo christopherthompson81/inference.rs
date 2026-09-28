@@ -79,7 +79,6 @@ impl GdnConfig for TextConfig {
 
 // ====================== Full Attention layer with MRoPE ======================
 
-#[allow(dead_code)]
 pub(super) struct FullAttention {
     q_proj: Arc<dyn QuantMethod>,
     k_proj: Arc<dyn QuantMethod>,
@@ -89,7 +88,6 @@ pub(super) struct FullAttention {
     pub(super) q_norm: GemmaRmsNorm,
     pub(super) k_norm: GemmaRmsNorm,
     num_heads: usize,
-    num_kv_heads: usize,
     head_dim: usize,
     q_gate_grouped: bool,
     pub(super) rotary_emb: Arc<Qwen3VLRotaryEmbedding>,
@@ -229,7 +227,6 @@ impl FullAttention {
             q_norm,
             k_norm,
             num_heads: num_heads / comm.world_size(),
-            num_kv_heads: (num_kv_heads / comm.world_size()).max(1),
             head_dim,
             q_gate_grouped: packed.is_some(),
             rotary_emb,

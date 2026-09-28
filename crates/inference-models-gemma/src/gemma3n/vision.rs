@@ -19,7 +19,6 @@ pub enum BlockType {
         stride: usize,
         expand_ratio: f64,
         // Odd. Neither MLX nor timm use it.
-        #[allow(unused)]
         is_multiscale: bool,
     },
     UniversalInvertedResidual {
@@ -29,7 +28,6 @@ pub enum BlockType {
         stride: usize,
         expand_ratio: f64,
         // Odd. Neither MLX nor timm use it.
-        #[allow(unused)]
         is_multiscale: bool,
     },
     MultiQueryAttention {
@@ -37,7 +35,6 @@ pub enum BlockType {
         kv_dim: usize,
         kv_stride: usize,
         // Odd. Neither MLX nor timm use it.
-        #[allow(unused)]
         is_multiscale: bool,
     },
 }

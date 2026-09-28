@@ -69,7 +69,6 @@ impl GdnConfig for TextConfig {
 
 // ====================== Full Attention layer with MRoPE ======================
 
-#[allow(dead_code)]
 struct FullAttention {
     q_proj: Arc<dyn QuantMethod>,
     k_proj: Arc<dyn QuantMethod>,

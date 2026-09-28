@@ -17,7 +17,7 @@ use crate::{
     layers::masker::NotACache,
     layers::{embedding, Activation, CausalMasker, Mlp, RmsNorm, RotaryEmbedding, Sdpa},
     model::{EmbeddingModel, IsqModel, NormalLoadingMetadata},
-    paged_attention::{AttentionImplementation, ModelConfigMetadata},
+    paged_attention::AttentionImplementation,
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -296,8 +296,6 @@ pub struct Model {
     sliding_window: Option<usize>,
     device: Device,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
-    #[allow(dead_code)]
-    cfg: ModelConfigMetadata,
 }
 
 impl Model {
@@ -400,18 +398,6 @@ impl Model {
             dtype,
             sliding_window: cfg.sliding_window,
             device: normal_loading_metadata.real_device,
-            cfg: ModelConfigMetadata {
-                max_seq_len: cfg.max_position_embeddings,
-                num_layers: cfg.num_hidden_layers,
-                hidden_size: cfg.hidden_size,
-                num_kv_heads: (cfg.num_key_value_heads / mapper.get_comm_for(0)?.world_size())
-                    .max(1),
-                num_attn_heads: cfg.num_attention_heads / mapper.get_comm_for(0)?.world_size(),
-                sliding_window: cfg.sliding_window,
-                k_head_dim: cfg.head_dim(),
-                v_head_dim: cfg.head_dim(),
-                kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
-            },
             mapper,
         })
     }

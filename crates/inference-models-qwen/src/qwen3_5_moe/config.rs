@@ -20,7 +20,6 @@ pub enum LayerType {
     LinearAttention,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct TextConfig {
     pub head_dim: usize,

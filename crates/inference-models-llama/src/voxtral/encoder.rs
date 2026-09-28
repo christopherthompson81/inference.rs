@@ -211,8 +211,6 @@ pub struct VoxtralEncoder {
     pub(super) layers: Vec<EncoderLayer>,
     pub(super) norm: RmsNorm,
     cache: Arc<Mutex<NormalCache>>,
-    #[allow(dead_code)]
-    num_heads: usize,
     sliding_window: Option<usize>,
     n_layers: usize,
     /// Model dtype (e.g. BF16) for the transformer layers.
@@ -293,7 +291,6 @@ impl VoxtralEncoder {
             layers,
             norm,
             cache: NormalCache::new_sliding(cfg.n_layers, 1_000_000, cfg.sliding_window),
-            num_heads: cfg.n_heads,
             sliding_window: cfg.sliding_window,
             n_layers: cfg.n_layers,
             model_dtype: dtype,
