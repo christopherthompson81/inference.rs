@@ -15,7 +15,7 @@ use crate::{
 /// Image generation endpoint handler.
 #[utoipa::path(
     post,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/images/generations",
     request_body = ImageGenerationRequest,
     responses((status = 200, description = "Image generation", body = inference_core::ImageGenerationResponse))

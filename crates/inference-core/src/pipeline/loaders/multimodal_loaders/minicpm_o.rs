@@ -2,7 +2,7 @@ use super::*;
 
 /// [`MultimodalLoader`] for an MiniCpm-O model.
 ///
-/// [`MultimodalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.MultimodalLoader.html
+/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
 pub struct MiniCpmOLoader;
 
 pub struct MiniCpmOPrefixer;

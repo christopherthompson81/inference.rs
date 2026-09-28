@@ -43,7 +43,7 @@ impl From<TuneProfileRequest> for TuneProfile {
 
 #[utoipa::path(
   get,
-  tag = "Mistral.rs",
+  tag = "inference.rs",
   path = "/v1/models",
   responses(
     (status = 200, description = "Served model info", body = ModelObjects),
@@ -56,7 +56,7 @@ pub async fn models(State(state): ExtractedInferenceRsState) -> Response {
 
 #[utoipa::path(
   get,
-  tag = "Mistral.rs",
+  tag = "inference.rs",
   path = "/health",
   responses((status = 200, description = "Server is healthy"))
 )]
@@ -66,7 +66,7 @@ pub async fn health() -> &'static str {
 
 #[utoipa::path(
   get,
-  tag = "Mistral.rs",
+  tag = "inference.rs",
   path = "/v1/system/info",
   responses((status = 200, description = "Host, device, and build information"))
 )]
@@ -76,7 +76,7 @@ pub async fn system_info() -> Json<inference_core::SystemInfo> {
 
 #[utoipa::path(
   post,
-  tag = "Mistral.rs",
+  tag = "inference.rs",
   path = "/v1/system/doctor",
   responses((status = 200, description = "Environment diagnostics report"))
 )]
@@ -86,7 +86,7 @@ pub async fn system_doctor() -> Json<inference_core::DoctorReport> {
 
 #[utoipa::path(
   post,
-  tag = "Mistral.rs",
+  tag = "inference.rs",
   path = "/re_isq",
   request_body = ReIsqRequest,
   responses(
@@ -125,7 +125,7 @@ fn http_save_cimatrix_path(name: &str) -> Result<std::path::PathBuf, ApiError> {
 
 #[utoipa::path(
   post,
-  tag = "Mistral.rs",
+  tag = "inference.rs",
   path = "/calibration/start",
   responses((status = 200, description = "Begin collecting activation statistics from live traffic.", body = inference_core::CalibrationStatus))
 )]
@@ -136,7 +136,7 @@ pub async fn calibration_start(State(state): ExtractedInferenceRsState) -> Respo
 
 #[utoipa::path(
   get,
-  tag = "Mistral.rs",
+  tag = "inference.rs",
   path = "/calibration/status",
   responses((status = 200, description = "Per-layer calibration collection progress.", body = inference_core::CalibrationStatus))
 )]
@@ -146,7 +146,7 @@ pub async fn calibration_status(State(state): ExtractedInferenceRsState) -> Resp
 
 #[utoipa::path(
   post,
-  tag = "Mistral.rs",
+  tag = "inference.rs",
   path = "/calibration/apply",
   request_body = CalibrationApplyRequest,
   responses((status = 200, description = "Requantize with collected statistics and hot-swap the layers.", body = inference_core::CalibrationStatus))
@@ -182,7 +182,7 @@ fn model_operation_request(
 
 #[utoipa::path(
   post,
-  tag = "Mistral.rs",
+  tag = "inference.rs",
   path = "/v1/models/unload",
   request_body = ModelOperationRequest,
   responses(
@@ -207,7 +207,7 @@ pub async fn unload_model(
 
 #[utoipa::path(
   post,
-  tag = "Mistral.rs",
+  tag = "inference.rs",
   path = "/v1/models/reload",
   request_body = ModelOperationRequest,
   responses(
@@ -232,7 +232,7 @@ pub async fn reload_model(
 
 #[utoipa::path(
   post,
-  tag = "Mistral.rs",
+  tag = "inference.rs",
   path = "/v1/models/status",
   request_body = ModelOperationRequest,
   responses(
@@ -292,7 +292,7 @@ pub struct TuneModelRequest {
 
 #[utoipa::path(
   post,
-  tag = "Mistral.rs",
+  tag = "inference.rs",
   path = "/v1/models/tune",
   request_body = TuneModelRequest,
   responses(
@@ -406,7 +406,7 @@ pub async fn tune_model(payload: Result<Json<TuneModelRequest>, JsonRejection>) 
 /// GET `/v1/sessions/{session_id}`. 404 if the session doesn't exist.
 #[utoipa::path(
     get,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/sessions/{session_id}",
     params(("session_id" = String, Path, description = "Session ID to export")),
     responses(
@@ -424,7 +424,7 @@ pub async fn get_session(
 /// PUT `/v1/sessions/{session_id}`. Replaces any existing session.
 #[utoipa::path(
     put,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/sessions/{session_id}",
     params(("session_id" = String, Path, description = "Session ID to import as")),
     request_body = SerializedSession,
@@ -451,7 +451,7 @@ pub async fn put_session(
 /// DELETE `/v1/sessions/{session_id}`. Idempotent: returns 200 either way.
 #[utoipa::path(
     delete,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/sessions/{session_id}",
     params(("session_id" = String, Path, description = "Session ID to delete")),
     responses((status = 200, description = "Session deleted (or did not exist)"))

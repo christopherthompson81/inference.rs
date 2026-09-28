@@ -13,7 +13,7 @@ use crate::{
 
 #[utoipa::path(
     post,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/agent/approvals/{approval_id}",
     params(("approval_id" = String, Path, description = "Approval ID from the approval-required SSE event")),
     request_body = ApprovalDecisionRequest,

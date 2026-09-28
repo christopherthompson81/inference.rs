@@ -2,7 +2,7 @@ use super::*;
 
 /// [`NormalLoader`] for a Llama model.
 ///
-/// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
+/// [`NormalLoader`]: crate::pipeline::NormalLoader
 pub struct LlamaLoader;
 
 impl NormalModelLoader for LlamaLoader {

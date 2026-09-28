@@ -2,7 +2,7 @@ use super::*;
 
 /// [`NormalLoader`] for a Gemma2 model.
 ///
-/// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
+/// [`NormalLoader`]: crate::pipeline::NormalLoader
 pub struct Gemma2Loader;
 
 impl NormalModelLoader for Gemma2Loader {

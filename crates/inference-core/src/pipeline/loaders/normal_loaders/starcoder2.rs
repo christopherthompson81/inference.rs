@@ -2,7 +2,7 @@ use super::*;
 
 /// [`NormalLoader`] for a Starcoder2 model.
 ///
-/// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
+/// [`NormalLoader`]: crate::pipeline::NormalLoader
 pub struct Starcoder2Loader;
 
 impl NormalModelLoader for Starcoder2Loader {

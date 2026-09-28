@@ -129,7 +129,7 @@ fn anthropic_list_response(
 
 #[utoipa::path(
     post,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/skills",
     responses((status = 200, description = "Skill uploaded", body = SkillObject))
 )]
@@ -153,7 +153,7 @@ pub async fn upload_skill(
 
 #[utoipa::path(
     get,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/skills",
     responses((status = 200, description = "Uploaded skills", body = SkillListObject))
 )]
@@ -198,7 +198,7 @@ pub async fn list_skills(
 
 #[utoipa::path(
     post,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/skills/{skill_id}/versions",
     responses((status = 200, description = "Skill version uploaded", body = SkillVersionObject))
 )]
@@ -225,7 +225,7 @@ pub async fn upload_skill_version(
 
 #[utoipa::path(
     get,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/skills/{skill_id}/versions",
     responses((status = 200, description = "Skill versions", body = AnthropicSkillVersionListObject))
 )]

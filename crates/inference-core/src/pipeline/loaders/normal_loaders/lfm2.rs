@@ -2,7 +2,7 @@ use super::*;
 
 /// [`NormalLoader`] for an LFM2 hybrid attention/short-conv model.
 ///
-/// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
+/// [`NormalLoader`]: crate::pipeline::NormalLoader
 pub struct Lfm2Loader;
 
 impl NormalModelLoader for Lfm2Loader {

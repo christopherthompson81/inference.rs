@@ -5,7 +5,6 @@ extend-exclude = [
     "**/third_party/",
     "examples/server/phi3_duckduckgo_inference.rs.ipynb",
     "crates/inference-cli/static/",
-    "releases/v0.9.3/raw/source/primary_manifest.json",
     "CLAUDE.md",
 ]
 ignore-hidden = false

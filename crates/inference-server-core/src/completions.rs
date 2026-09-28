@@ -143,7 +143,7 @@ impl IntoResponse for CompletionResponder {
 /// OpenAI-compatible completions endpoint handler.
 #[utoipa::path(
     post,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/completions",
     request_body = CompletionRequest,
     responses((

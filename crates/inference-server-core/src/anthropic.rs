@@ -177,7 +177,7 @@ pub(crate) fn anthropic_error_response(error: ApiError) -> axum::response::Respo
 
 #[utoipa::path(
     post,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/messages",
     request_body = AnthropicMessagesRequest,
     responses((status = 200, description = "Anthropic messages", body = AnthropicMessageResponse))
@@ -227,7 +227,7 @@ pub async fn anthropic_messages(
 
 #[utoipa::path(
     post,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/v1/messages/count_tokens",
     request_body = AnthropicMessagesRequest,
     responses((status = 200, description = "Anthropic message token count", body = AnthropicCountTokensResponse))

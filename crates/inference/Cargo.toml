@@ -11,7 +11,6 @@ keywords.workspace = true
 categories.workspace = true
 license.workspace = true
 homepage.workspace = true
-documentation = "https://docs.rs/mistralrs"
 
 [dependencies]
 inference-core.workspace = true
@@ -28,8 +27,6 @@ image.workspace = true
 indexmap.workspace = true
 either.workspace = true
 futures.workspace = true
-reqwest.workspace = true
-tracing.workspace = true
 
 [dev-dependencies]
 indicatif.workspace = true

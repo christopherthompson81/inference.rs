@@ -2,7 +2,7 @@ use super::*;
 
 /// [`NormalLoader`] for a GraniteMoeHybrid model (IBM Granite 4.0).
 ///
-/// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
+/// [`NormalLoader`]: crate::pipeline::NormalLoader
 pub struct GraniteMoeHybridLoader;
 
 impl NormalModelLoader for GraniteMoeHybridLoader {

@@ -249,11 +249,11 @@ pub fn get_openapi_doc(base_path: Option<&str>) -> utoipa::openapi::OpenApi {
             WebSearchUserLocation
         )),
         tags(
-            (name = "Mistral.rs", description = "Mistral.rs API"),
+            (name = "inference.rs", description = "inference.rs API"),
             (name = "LoRA adapters", description = "Dynamic LoRA discovery and lifecycle operations")
         ),
         info(
-            title = "Mistral.rs",
+            title = "inference.rs",
             license(
             name = "MIT",
         )

@@ -9,4 +9,4 @@ The `inference` crate embeds the engine into a Rust program.
 - [Streaming](/guides/rust/streaming/) - handle `Response` variants, tool progress, and cancellation.
 - [Embed in Axum](/guides/rust/embed-in-axum/) - mount the HTTP API inside an existing Axum app.
 - [Rust SDK reference](/reference/rust-sdk/) - summary of the `Model` API.
-- [docs.rs](https://docs.rs/mistralrs) - full API documentation.
+- `cargo doc -p inference --open` - full API documentation, built locally (the crates are not published).

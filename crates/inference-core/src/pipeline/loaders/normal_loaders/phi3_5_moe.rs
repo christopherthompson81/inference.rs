@@ -2,7 +2,7 @@ use super::*;
 
 /// [`NormalLoader`] for a Phi 3.5 MoE model.
 ///
-/// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
+/// [`NormalLoader`]: crate::pipeline::NormalLoader
 pub struct Phi3_5MoELoader;
 
 impl NormalModelLoader for Phi3_5MoELoader {

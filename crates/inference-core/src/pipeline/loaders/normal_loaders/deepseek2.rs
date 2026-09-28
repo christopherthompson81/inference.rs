@@ -2,7 +2,7 @@ use super::*;
 
 /// [`NormalLoader`] for a DeepSeekV2 model.
 ///
-/// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
+/// [`NormalLoader`]: crate::pipeline::NormalLoader
 pub struct DeepSeekV2Loader;
 
 impl NormalModelLoader for DeepSeekV2Loader {

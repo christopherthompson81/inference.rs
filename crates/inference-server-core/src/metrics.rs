@@ -176,7 +176,7 @@ pub fn install_prometheus_recorder() {
 /// Axum handler for `GET /metrics`. Renders the Prometheus exposition format.
 #[utoipa::path(
     get,
-    tag = "Mistral.rs",
+    tag = "inference.rs",
     path = "/metrics",
     responses(
         (status = 200, description = "Prometheus text exposition format", content_type = "text/plain"),

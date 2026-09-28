@@ -2,7 +2,7 @@ use super::*;
 
 /// [`NormalLoader`] for a HunYuanMoEV1 model.
 ///
-/// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
+/// [`NormalLoader`]: crate::pipeline::NormalLoader
 pub struct HunYuanMoEV1Loader;
 
 impl NormalModelLoader for HunYuanMoEV1Loader {

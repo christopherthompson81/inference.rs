@@ -2,9 +2,8 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import starlightOpenAPI, { openAPISidebarGroups } from 'starlight-openapi';
 
-// Deployed at https://docs.mistralrs.dev/
 export default defineConfig({
-  site: 'https://docs.mistralrs.dev',
+  site: 'https://christopherthompson81.github.io/inference.rs',
   base: '/',
   // Allow access over Tailscale.
   vite: { preview: { allowedHosts: ['.ts.net'] } },
@@ -78,11 +77,11 @@ export default defineConfig({
       title: 'inference.rs',
       description: 'Fast, flexible LLM inference engine written in Rust.',
       social: [
-        { icon: 'github', label: 'GitHub', href: 'https://github.com/EricLBuehler/mistral.rs' },
+        { icon: 'github', label: 'GitHub', href: 'https://github.com/christopherthompson81/inference.rs' },
         { icon: 'discord', label: 'Discord', href: 'https://discord.gg/SZrecqK8qw' },
       ],
       editLink: {
-        baseUrl: 'https://github.com/EricLBuehler/mistral.rs/edit/master/docs/',
+        baseUrl: 'https://github.com/christopherthompson81/inference.rs/edit/master/docs/',
       },
       // openapi.json is refreshed by `cargo test -p inference-server-core dump_openapi_json`
       plugins: [

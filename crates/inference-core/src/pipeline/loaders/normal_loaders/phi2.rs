@@ -2,7 +2,7 @@ use super::*;
 
 /// [`NormalLoader`] for a Phi 2 model.
 ///
-/// [`NormalLoader`]: https://docs.rs/mistralrs/latest/mistralrs/struct.NormalLoader.html
+/// [`NormalLoader`]: crate::pipeline::NormalLoader
 pub struct Phi2Loader;
 
 impl NormalModelLoader for Phi2Loader {

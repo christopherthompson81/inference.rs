@@ -5,7 +5,7 @@ description: Verified causes and fixes.
 
 Before debugging setup issues, run `inference doctor`. It reports detected hardware, compiled accelerator features, and Hugging Face connectivity.
 
-For unlisted issues, file an issue on [GitHub](https://github.com/EricLBuehler/mistral.rs/issues) with a reproducer.
+For unlisted issues, file an issue on [GitHub](https://github.com/christopherthompson81/inference.rs/issues) with a reproducer.
 
 ## Installation and build
 
