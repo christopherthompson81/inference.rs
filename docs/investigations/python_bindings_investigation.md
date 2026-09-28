@@ -65,3 +65,50 @@ Review fixes (Run 1):
 - The package shares the import and distribution name `inference_rs` with the pyo3 package, which still builds.
   Decision: keep the name; the next change retires pyo3 and ports its examples, stub and release scripts, so the clash
   lasts only between the two.
+
+## Run 2 - 2026-09-27 19:54
+
+Question: can the package be strongly typed without hand-written classes that drift from the server?
+
+Design:
+- `scripts/generate_types.py` (stdlib) writes `inference_rs/types.py` from `docs/openapi.json`, which utoipa generates
+  from the Rust types and a server test keeps current. String enums become `str` Enums, objects become dataclasses
+  (required fields first; a single-valued `type` Literal is a variant's tag and defaults to its value), `oneOf`
+  becomes a `Union` alias, and inline tagged variants get classes named by their tag (`ResponseFormatJsonSchema`).
+  Aliases are emitted after the classes, in dependency order, since an alias is evaluated when defined. 163 schemas,
+  1.9k lines, ASCII.
+- `_codec.py`: `to_data`/`to_json` drop None fields (the server's defaults apply); `from_data` reads JSON into the
+  classes, ignoring unknown fields and reading a missing required field as None (servers leave some out when empty),
+  except when choosing a union's variant, where the first variant that fits exactly wins and data no variant fits is
+  kept as it came.
+- `Engine` is typed: requests are the classes (or their JSON), responses and stream event data are parsed (chat and
+  completion chunks, OpenResponses events). The JSON-string engine is `JsonEngine`, reachable as `engine.json`.
+  Responses the schema lacked (image generation, delete confirmations) came back as dicts; see the fixes below.
+- A test regenerates the file and compares; `types.py` is excluded from ruff, which would reformat it away from the
+  generator's output.
+
+First run: a hand-built response without `system_fingerprint` failed to parse as required; required fields now read
+as None outside union matching. Result: 27 tests pass, including real chat responses and chunks, the Responses stream
+from `OpenResponsesStreamEventResponseCreated` to `...Completed` with its `ResponseResource`, model status, file
+metadata and typed NotFound errors.
+
+Not typed yet: the engine spec (`ModelSelected` has no schema), Anthropic stream events, and the responses above.
+
+Review fixes (Run 2):
+- Every optional field is a `X | None` union, and unions were always read strictly, so one extra field or a new enum
+  value anywhere inside an optional object turned the whole object (or a whole `response.completed` event) into a
+  dict, silently. A union now drops None and, with one member left, reads it with the caller's leniency; otherwise it
+  picks the variant by its `type` tag, and falls back to strict first-fit only for untagged unions. Lenient reading is
+  consistent: anything off-shape, including null or a wrong type in a required field, is kept as it came; only a
+  union's exact matching raises. Tests: a newer field and reason inside optional objects still parse; real chat,
+  chunk, Responses event, model and file payloads parse with no dict left where a class was expected, and serialize
+  back to their null-stripped JSON.
+- Tags that reference a one-value enum (`Tool.type`, `ToolCall.type`, ...) default to it, like inline tags, so
+  `Tool(function=...)` works; dataclasses are keyword-only, so a regenerated field order cannot move positional
+  arguments.
+- Generator hazards: quotes in descriptions are escaped, `null` in an inline enum becomes `| None`, and two properties
+  that map to one attribute are an error. The `_wire` rename (unused by the schema today) has a codec test.
+- Schema drift: `GET /v1/files` documented a bare array but returns `{object, data}`; the file lists, both delete
+  confirmations and the image generation response now have schemas (`FileListObject`, `ContainerFileListObject`,
+  `FileDeleted`, `ResponseDeleted`, `ImageGenerationResponse`), so those methods are typed too.
+- `force-exclude` keeps ruff off `types.py` even when a path names it. 32 tests pass.

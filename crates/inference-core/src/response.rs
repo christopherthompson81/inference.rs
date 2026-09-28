@@ -275,6 +275,7 @@ generate_repr!(CompletionChunkResponse);
 
 #[cfg_attr(feature = "pyo3_macros", pyclass)]
 #[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct ImageChoice {
     pub url: Option<String>,
@@ -285,6 +286,7 @@ generate_repr!(ImageChoice);
 
 #[cfg_attr(feature = "pyo3_macros", pyclass)]
 #[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, Serialize)]
 pub struct ImageGenerationResponse {
     pub created: u128,

@@ -1,8 +1,10 @@
-"""inference.rs over its C ABI (libinference_ffi): JSON requests in, JSON responses out."""
+"""inference.rs over its C ABI (libinference_ffi), with typed requests and responses from `inference_rs.types`."""
 
+from . import types
 from ._callbacks import HostCallbacks, HostTool, HostToolCall
+from ._codec import from_data, from_json, to_data, to_json
 from ._engine import (
-    Engine,
+    JsonEngine,
     MediaAttachment,
     SkillFile,
     Stream,
@@ -19,6 +21,7 @@ from ._layout import (
     PixelFormat,
 )
 from ._owned import Blob
+from ._typed import Engine
 
 __all__ = [
     "DEFAULT_THRESHOLD",
@@ -28,6 +31,7 @@ __all__ = [
     "HostTool",
     "HostToolCall",
     "InferenceError",
+    "JsonEngine",
     "LayoutDetection",
     "LayoutImage",
     "LayoutModel",
@@ -37,6 +41,11 @@ __all__ = [
     "Status",
     "Stream",
     "StreamEvent",
+    "from_data",
+    "from_json",
     "system_doctor",
     "system_info",
+    "to_data",
+    "to_json",
+    "types",
 ]

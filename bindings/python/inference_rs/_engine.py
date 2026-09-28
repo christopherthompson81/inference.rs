@@ -46,6 +46,8 @@ class Stream:
         self._stream = Handle(pointer, free)
         self._finalizer = weakref.finalize(self, self._stream.close)
         self.done = False
+        # Reads an event's data; the typed engine sets it to parse into the protocol's classes.
+        self.parse = lambda name, data: data
 
     def next(self, timeout: float | None = None) -> StreamEvent | None:
         """The next event within `timeout` seconds; None on a timeout, or at the end (then `done` is True)."""
@@ -67,7 +69,9 @@ class Stream:
         if not event.value:
             return None
         envelope = json.loads(take_string(event))
-        return StreamEvent(envelope["event"], envelope["data"])
+        return StreamEvent(
+            envelope["event"], self.parse(envelope["event"], envelope["data"])
+        )
 
     def __iter__(self) -> Iterator[StreamEvent]:
         while (event := self.next()) is not None:
@@ -102,8 +106,8 @@ class _Buffers:
         return encoded
 
 
-class Engine:
-    """A loaded model serving the HTTP server's JSON requests; failures raise InferenceError with the error JSON.
+class JsonEngine:
+    """A loaded model serving JSON strings, as the HTTP server takes and returns them; see `Engine` for classes.
 
     Calls block and release the GIL, so several threads may share an engine. Close it, or use `with`. A host
     callback must not hold the last reference to its engine, which would then be freed on the engine's own thread.

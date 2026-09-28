@@ -94,7 +94,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-layout/` - Document layout detection (PP-DocLayoutV3) with custom CPU/CUDA kernels
 - `crates/inference-ffi/` - C ABI (`libinference_ffi`, header `include/inference.h`) for bindings in other languages
 - `bindings/csharp/` - .NET bindings over the C ABI (`InferenceRs.slnx`); a new ABI entry point needs its binding, which the coverage test enforces
-- `bindings/python/` - pure-Python ctypes package over the C ABI (`inference_rs`), which replaces the pyo3 package (being retired; both use the name); its coverage test enforces the same
+- `bindings/python/` - pure-Python ctypes package over the C ABI (`inference_rs`), which replaces the pyo3 package (being retired; both use the name); its coverage test enforces the same. Its typed classes (`inference_rs/types.py`) are generated from `docs/openapi.json`: after regenerating that, run `python3 bindings/python/scripts/generate_types.py`
 - Kernel sources live in `<crate>/kernels/{cuda,metal}/` (inference-layout compiles inline sources with NVRTC); each kernel crate's `third_party/README.md` records upstream provenance and license.
 
 ### Key Design Patterns

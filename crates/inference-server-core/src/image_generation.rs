@@ -18,7 +18,7 @@ use crate::{
     tag = "Mistral.rs",
     path = "/v1/images/generations",
     request_body = ImageGenerationRequest,
-    responses((status = 200, description = "Image generation"))
+    responses((status = 200, description = "Image generation", body = inference_core::ImageGenerationResponse))
 )]
 pub async fn image_generation(
     State(state): ExtractedInferenceRsState,

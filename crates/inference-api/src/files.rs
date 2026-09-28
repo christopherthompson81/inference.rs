@@ -70,13 +70,19 @@ pub struct SourceMeta {
     pub turn: usize,
 }
 
-#[derive(Serialize)]
-pub struct FileList<T> {
+#[derive(Serialize, ToSchema)]
+pub struct FileListObject {
     pub object: &'static str,
-    pub data: Vec<T>,
+    pub data: Vec<FileMetadata>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, ToSchema)]
+pub struct ContainerFileListObject {
+    pub object: &'static str,
+    pub data: Vec<ContainerFileMetadata>,
+}
+
+#[derive(Serialize, ToSchema)]
 pub struct FileDeleted {
     pub id: String,
     pub object: &'static str,
@@ -210,11 +216,11 @@ pub fn get_file(state: &SharedInferenceRsState, id: &str) -> Result<FileMetadata
     find(state, id).map(|file| metadata(&file))
 }
 
-pub fn list_files(state: &SharedInferenceRsState) -> Result<FileList<FileMetadata>, ApiError> {
+pub fn list_files(state: &SharedInferenceRsState) -> Result<FileListObject, ApiError> {
     let files = state
         .try_list_files()
         .map_err(|error| store_error(state, error))?;
-    Ok(FileList {
+    Ok(FileListObject {
         object: LIST_OBJECT,
         data: files.iter().map(|file| metadata(file)).collect(),
     })
@@ -276,11 +282,11 @@ pub fn file_content(state: &SharedInferenceRsState, id: &str) -> Result<FileBody
 pub fn list_container_files(
     state: &SharedInferenceRsState,
     container_id: &str,
-) -> Result<FileList<ContainerFileMetadata>, ApiError> {
+) -> Result<ContainerFileListObject, ApiError> {
     let files = state
         .try_list_files()
         .map_err(|error| store_error(state, error))?;
-    Ok(FileList {
+    Ok(ContainerFileListObject {
         object: LIST_OBJECT,
         data: files
             .iter()
