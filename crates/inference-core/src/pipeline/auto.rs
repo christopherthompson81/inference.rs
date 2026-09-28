@@ -503,7 +503,7 @@ impl AutoLoader {
                     .unwrap()
                     .take()
                     .expect("builder taken");
-                let loader = builder.build(tp);
+                let loader = builder.build(tp)?;
                 *guard = Some(loader);
             }
             Detected::Diffusion(tp) => {

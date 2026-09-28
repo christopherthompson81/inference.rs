@@ -72,9 +72,11 @@ pub use inputs_processor::InputProcessorOutput;
 pub(crate) use isq::IsqModelLoader;
 pub use isq::{
     expand_isq_value, expand_uqff_shards, parse_uqff_shard, resolve_uqff_report_output,
-    resolve_uqff_shorthand, IsqModel, IsqOrganization, UqffWriteConfig, UqffWriteSpec,
-    UQFF_MULTI_FILE_DELIMITER,
+    resolve_uqff_shorthand, IsqOrganization, UqffWriteConfig, UQFF_MULTI_FILE_DELIMITER,
 };
+// Named only by the ModelSelected schema attributes.
+#[cfg(feature = "utoipa")]
+pub(crate) use isq::UqffWriteSpec;
 use llguidance::toktrie::TokEnv;
 pub(crate) use loaders::checkpoint_runtime_size;
 #[cfg(feature = "models-gemma")]
@@ -86,12 +88,12 @@ pub use loaders::Starcoder2Loader;
 pub use loaders::{
     AdapterKind, AutoDeviceMapParams, AutoDeviceMapQuantization, AutoEmbeddingLoader,
     AutoMultimodalLoader, AutoNormalLoader, DeviceMappedModelLoader, DiffusionLoaderType,
-    DiffusionModel, DiffusionModelLoader, EmbeddingGemmaLoader, EmbeddingLoaderType,
-    EmbeddingModel, EmbeddingModelLoader, EmbeddingModelPaths, EmbeddingModule,
-    EmbeddingModulePaths, EmbeddingModuleType, FluxLoader, Loader, LocalModelPaths, ModelKind,
-    ModelPaths, MultimodalLoaderType, MultimodalModel, MultimodalModelLoader, NormalLoaderType,
+    DiffusionModel, DiffusionModelLoader, EmbeddingLoaderType, EmbeddingModel,
+    EmbeddingModelLoader, EmbeddingModelPaths, EmbeddingModule, EmbeddingModulePaths,
+    EmbeddingModuleType, FluxLoader, Loader, LocalModelPaths, ModelKind, ModelPaths,
+    MultimodalLoaderType, MultimodalModel, MultimodalModelLoader, NormalLoaderType,
     NormalLoadingMetadata, NormalModel, NormalModelLoader, PrettyName, QuantizationKind,
-    Qwen3EmbeddingLoader, TokenSource,
+    TokenSource,
 };
 #[cfg(feature = "models-llama")]
 pub use loaders::{

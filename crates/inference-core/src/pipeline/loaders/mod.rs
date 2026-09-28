@@ -45,9 +45,8 @@ pub use multimodal_loaders::{
 pub use multimodal_loaders::{Idefics2Loader, LLaVALoader, LLaVANextLoader};
 
 pub use embedding_loaders::{
-    AutoEmbeddingLoader, EmbeddingGemmaLoader, EmbeddingLoaderType, EmbeddingModel,
-    EmbeddingModelLoader, EmbeddingModule, EmbeddingModulePaths, EmbeddingModuleType,
-    Qwen3EmbeddingLoader,
+    AutoEmbeddingLoader, EmbeddingLoaderType, EmbeddingModel, EmbeddingModelLoader,
+    EmbeddingModule, EmbeddingModulePaths, EmbeddingModuleType,
 };
 
 pub use diffusion_loaders::{

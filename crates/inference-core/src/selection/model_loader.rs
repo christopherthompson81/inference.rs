@@ -914,7 +914,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
                 ..base.clone()
             };
             EmbeddingLoaderBuilder::new(options.embedding(), tokenizer_json, Some(model_id))
-                .build(arch)
+                .build(arch)?
         }
     };
     Ok(loader)
