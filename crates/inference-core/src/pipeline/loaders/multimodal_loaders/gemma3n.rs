@@ -867,12 +867,3 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
         Some(vec![NonMappedSubModel::Vision, NonMappedSubModel::Audio])
     }
 }
-
-#[allow(dead_code)]
-pub struct Gemma3nPrefixer;
-
-impl MultimodalPromptPrefixer for Gemma3nPrefixer {
-    fn prefix_image(&self, _image_indexes: Vec<usize>, prompt: &str) -> String {
-        prompt.to_string()
-    }
-}

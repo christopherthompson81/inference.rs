@@ -15,7 +15,7 @@ default-filter = 'binary(paddleocr_vl) | (package(inference-ffi) & test(detectio
 
 # The slowest tests start first so the run ends in a burst instead of a tail of a few long tests.
 [[profile.default.overrides]]
-filter = 'binary(paddleocr_vl) | (package(inference-ffi) & test(detections)) | test(tiktoken)'
+filter = 'binary(paddleocr_vl) | (package(inference-ffi) & test(detections))'
 priority = 100
 
 # RLIMIT_NPROC counts every thread the concurrently running test processes spawn, so this one runs alone.

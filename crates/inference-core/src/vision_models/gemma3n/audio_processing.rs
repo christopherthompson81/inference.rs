@@ -145,22 +145,6 @@ impl AudioProcessor {
         Ok(result[0].clone())
     }
 
-    #[allow(dead_code)]
-    fn apply_preemphasis(&self, samples: &[f32], coeff: f32) -> Vec<f32> {
-        // Retained for potential future use (e.g. non-HTK pre-emphasis) but not
-        // called in the current implementation.
-        if samples.is_empty() {
-            return vec![];
-        }
-
-        let mut out = Vec::with_capacity(samples.len());
-        out.push(samples[0] * (1.0 - coeff));
-        for i in 1..samples.len() {
-            out.push(samples[i] - coeff * samples[i - 1]);
-        }
-        out
-    }
-
     fn compute_mel_spectrogram(
         &self,
         samples: &[f32],

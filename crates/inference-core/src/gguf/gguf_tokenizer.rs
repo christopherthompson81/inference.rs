@@ -744,14 +744,11 @@ mod tests {
     use std::collections::HashMap;
     use tokenizers::Tokenizer;
 
-    #[allow(dead_code)]
     #[derive(Debug)]
     enum TokenizerType {
         /// Mistral v0.1 tokenizer
         Llama,
-        Replit,
         Gpt2,
-        Rwkv,
     }
 
     fn get_gguf_tokenizer(tokenizer: TokenizerType) -> Result<Tokenizer> {
@@ -780,7 +777,6 @@ mod tests {
                 let tokenizer = Tokenizer::from_file(filename).expect("Valid tokenizer");
                 Ok(tokenizer)
             }
-            other => anyhow::bail!("Cannot get testing HF tokenizer for type {other:?}"),
         }
     }
 
@@ -808,7 +804,6 @@ mod tests {
                 let tokenizer_filename = api.get("tokenizer_gpt2.json").unwrap();
                 Ok(Tokenizer::from_file(tokenizer_filename).unwrap())
             }
-            other => anyhow::bail!("Cannot get testing HF tokenizer for type {other:?}"),
         }
     }
 

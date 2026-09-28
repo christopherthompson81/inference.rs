@@ -136,7 +136,6 @@ impl Processor for Gemma4Processor {
             max_patches: self.max_patches,
             audio_seq_length: self.audio_seq_length,
             raw_audio_frame_size: self.raw_audio_frame_size,
-            video_max_soft_tokens: self.video_max_soft_tokens,
             video_max_patches,
             is_unified: self.is_unified,
             supports_images: self.supports_images,
@@ -164,9 +163,6 @@ impl Processor for Gemma4Processor {
     }
 }
 
-// ── Image processor (InputsProcessor + ImagePreProcessor) ──────────────────
-
-#[allow(dead_code)]
 struct Gemma4ImageProcessor {
     patch_size: usize,
     pooling_kernel_size: usize,
@@ -174,7 +170,6 @@ struct Gemma4ImageProcessor {
     max_patches: usize,
     audio_seq_length: usize,
     raw_audio_frame_size: Option<usize>,
-    video_max_soft_tokens: usize,
     video_max_patches: usize,
     is_unified: bool,
     supports_images: bool,
@@ -1828,7 +1823,6 @@ mod tests {
             max_patches: 4,
             audio_seq_length: 4,
             raw_audio_frame_size: None,
-            video_max_soft_tokens: 4,
             video_max_patches: 4,
             is_unified: true,
             supports_images: true,
