@@ -934,7 +934,7 @@ impl CudaTokenBatchSubmission {
 #[cfg(feature = "cuda")]
 struct CudaTokenBatchPlan {
     sampler: Arc<Sampler>,
-    topk_params: Option<Vec<crate::ops::CudaTopKSamplingParams>>,
+    topk_params: Option<Vec<inference_nn::ops::CudaTopKSamplingParams>>,
 }
 
 #[cfg(feature = "cuda")]
@@ -977,7 +977,7 @@ fn prepare_cuda_token_batch(
     let mut topk_params = Vec::with_capacity(seqs.len());
     for seq in seqs {
         if seq.is_finished_paged_attn() {
-            topk_params.push(crate::ops::CudaTopKSamplingParams {
+            topk_params.push(inference_nn::ops::CudaTopKSamplingParams {
                 inverse_temperature: 1.0,
                 top_k: 1,
                 top_p: 1.0,
@@ -1008,7 +1008,7 @@ fn prepare_cuda_token_batch(
                 Sampler::draw_cuda_resident_uniform(&mut rng)
             }
         };
-        topk_params.push(crate::ops::CudaTopKSamplingParams {
+        topk_params.push(inference_nn::ops::CudaTopKSamplingParams {
             inverse_temperature: plan.inverse_temperature,
             top_k,
             top_p: plan.top_p,
@@ -1328,7 +1328,7 @@ fn try_sample_batch_cuda(
             })
             .collect::<Vec<_>>();
         let uniforms = Tensor::from_vec(uniforms, samplers_and_plans.len(), logits.device())?;
-        let output = crate::ops::cuda_categorical_logits_f32_packed_batched(
+        let output = inference_nn::ops::cuda_categorical_logits_f32_packed_batched(
             &logits,
             &inverse_temperatures,
             &uniforms,
@@ -1350,7 +1350,7 @@ fn try_sample_batch_cuda(
         .max()
         .expect("batch is non-empty");
     if !sampling_logprob_required {
-        let output = crate::ops::cuda_topk_ranked_packed_batched(&logits, common_k)?;
+        let output = inference_nn::ops::cuda_topk_ranked_packed_batched(&logits, common_k)?;
         let packed = output.packed.to_vec2::<f32>()?;
         Ok(Some(
             std::iter::zip(std::iter::zip(packed, samplers_and_plans), seqs.iter())
@@ -1367,7 +1367,7 @@ fn try_sample_batch_cuda(
             samplers_and_plans.len(),
             logits.device(),
         )?;
-        let output = crate::ops::cuda_topk_logits_f32_packed_batched(
+        let output = inference_nn::ops::cuda_topk_logits_f32_packed_batched(
             &logits,
             common_k,
             &inverse_temperatures,

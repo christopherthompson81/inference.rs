@@ -6,6 +6,7 @@ use crate::attention::FlashParams;
 use crate::attention::{AttentionMask, SdpaParams};
 use crate::device_map::{DeviceMappedMask, DeviceMapper};
 use crate::gguf::Content;
+use crate::kv_cache::EitherCache;
 use crate::layers::Sdpa;
 use crate::layers::{apply_rotary_q, RmsNorm};
 use crate::layers::{CausalMaskConfig, CausalMasker};
@@ -15,8 +16,7 @@ use crate::lora::LoraConfig;
 use crate::lora::Merge;
 use crate::lora::Ordering;
 use crate::lora::QLoraLinear;
-use crate::pipeline::extract_logits;
-use crate::pipeline::EitherCache;
+use crate::model::extract_logits;
 use crate::utils::progress::{new_multi_progress, NiceProgressBar};
 use candle_core::quantized::QMatMul;
 use candle_core::quantized::QTensor;
@@ -27,8 +27,8 @@ use tqdm::Iter;
 use tracing::info;
 
 use crate::gguf::metadata::ContentMetadata;
-use crate::pipeline::model_config as ModelConfig;
-use crate::pipeline::Cache;
+use crate::gguf::FromAdapterGGUF;
+use crate::kv_cache::Cache;
 use inference_nn::xlora::verify_sanity_adapters;
 use inference_nn::xlora::NonGranularState;
 use inference_nn::xlora::ScalingsMaker;
@@ -257,7 +257,7 @@ fn precomput_freqs_cis(
     Ok((cos, sin))
 }
 
-impl ModelConfig::FromAdapterGGUF for ModelWeights {
+impl FromAdapterGGUF for ModelWeights {
     #[allow(clippy::too_many_arguments)]
     fn from_gguf<R: std::io::Seek + std::io::Read>(
         mut ct: Content<'_, R>,
@@ -607,5 +607,33 @@ impl ScalingsMaker for ModelWeights {
             is_scaling_pass,
             flash_params,
         )
+    }
+}
+
+impl crate::gguf::QuantizedModel for ModelWeights {
+    fn forward_step(&self, inputs: crate::gguf::QuantizedForwardInputs<'_>) -> Result<Tensor> {
+        self.forward(
+            inputs.input_ids,
+            inputs.input_ids_full,
+            inputs.seqlen_offsets,
+            inputs.seqlen_offsets_full,
+            inputs.no_kv_cache,
+            inputs.non_granular_state,
+            inputs.context_lens,
+            inputs.flash_params,
+            inputs.flash_params_full,
+        )
+    }
+    fn cache(&self) -> &EitherCache {
+        &self.cache
+    }
+    fn device(&self) -> &Device {
+        &self.device
+    }
+    fn max_seq_len(&self) -> usize {
+        self.max_seq_len
+    }
+    fn num_hidden_layers(&self) -> usize {
+        self.cache.full().lock().len()
     }
 }

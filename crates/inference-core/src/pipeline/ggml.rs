@@ -27,11 +27,13 @@ use crate::{
     get_mut_arcmutex, get_paths, DeviceMapSetting, PagedAttentionConfig, Pipeline, Topology,
     TryIntoDType,
 };
+#[cfg(feature = "models-llama")]
 use crate::{models::quantized_llama::ModelWeights as QLlama, xlora_models::XLoraQLlama};
 use anyhow::Result;
 use candle_core::quantized::ggml_file;
 use candle_core::{Device, Tensor};
 use hf_hub::{Repo, RepoType};
+use inference_nn::gguf::{QuantizedForwardInputs, QuantizedModel};
 use inference_quant::IsqType;
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
@@ -43,13 +45,8 @@ use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
 use tracing::{debug, info, trace, warn};
 
-enum Model {
-    Llama(Box<QLlama>),
-    XLoraLlama(Box<XLoraQLlama>),
-}
-
 pub struct GGMLPipeline {
-    model: Model,
+    model: Box<dyn QuantizedModel>,
     tokenizer: Arc<Tokenizer>,
     no_kv_cache: bool,
     chat_template: Arc<ChatTemplate>,
@@ -326,17 +323,7 @@ impl Loader for GGMLLoader {
             ModelConfig::ModelParams::new(quant, adapter)
         };
 
-        // Config into model:
-        // NOTE: No architecture to infer like GGUF, Llama model is implicitly matched
-        let model = match self.kind {
-            ModelKind::GgufQuantized { .. } => {
-                Model::Llama(Box::new(QLlama::try_from(model_config)?))
-            }
-            ModelKind::GgufAdapter { .. } => {
-                Model::XLoraLlama(Box::new(XLoraQLlama::try_from(model_config)?))
-            }
-            _ => unreachable!(),
-        };
+        let model = ggml_model(model_config)?;
 
         let tokenizer = get_tokenizer(paths.get_tokenizer_filename(), None)?;
         let gen_conf: Option<GenerationConfig> = paths
@@ -354,15 +341,9 @@ impl Loader for GGMLLoader {
             None,
         );
 
-        let max_seq_len = match model {
-            Model::Llama(ref l) => l.max_seq_len,
-            Model::XLoraLlama(ref xl) => xl.max_seq_len,
-        };
+        let max_seq_len = model.max_seq_len();
         let llg_factory = build_llg_factory(tokenizer.clone())?;
-        let num_hidden_layers = match model {
-            Model::Llama(ref model) => model.cache.normal().0.len(),
-            Model::XLoraLlama(ref model) => model.cache.full().lock().len(),
-        };
+        let num_hidden_layers = model.num_hidden_layers();
         let generation_defaults = gen_conf
             .as_ref()
             .and_then(GenerationConfig::generation_defaults);
@@ -494,19 +475,13 @@ impl CacheManagerMixin for GGMLPipeline {
         Ok(())
     }
     fn cache(&self) -> &EitherCache {
-        match self.model {
-            Model::Llama(ref model) => &model.cache,
-            Model::XLoraLlama(ref model) => &model.cache,
-        }
+        self.model.cache()
     }
 }
 
 impl MetadataMixin for GGMLPipeline {
     fn device(&self) -> Device {
-        match self.model {
-            Model::Llama(ref model) => model.device.clone(),
-            Model::XLoraLlama(ref model) => model.device.clone(),
-        }
+        self.model.device().clone()
     }
     fn tokenizer(&self) -> Option<Arc<Tokenizer>> {
         Some(self.tokenizer.clone())
@@ -559,22 +534,17 @@ impl Pipeline for GGMLPipeline {
             recurrent_batch_kind: _,
             adapter_leases: _adapter_leases,
         } = *inputs.downcast().expect("Downcast failed.");
-        let logits = match self.model {
-            Model::Llama(ref model) => {
-                model.forward(&input_ids, &seqlen_offsets, context_lens, None)?
-            }
-            Model::XLoraLlama(ref model) => model.forward(
-                &input_ids,
-                input_ids_full.as_ref().unwrap_or(&input_ids),
-                &seqlen_offsets,
-                seqlen_offsets_full.as_ref().unwrap_or(&seqlen_offsets),
-                self.no_kv_cache,
-                &self.non_granular_state,
-                context_lens,
-                &flash_meta,
-                flash_meta_full.as_ref().unwrap_or(&flash_meta),
-            )?,
-        };
+        let logits = self.model.forward_step(QuantizedForwardInputs {
+            input_ids: &input_ids,
+            input_ids_full: input_ids_full.as_ref().unwrap_or(&input_ids),
+            seqlen_offsets: &seqlen_offsets,
+            seqlen_offsets_full: seqlen_offsets_full.as_ref().unwrap_or(&seqlen_offsets),
+            no_kv_cache: self.no_kv_cache,
+            non_granular_state: &self.non_granular_state,
+            context_lens,
+            flash_params: &flash_meta,
+            flash_params_full: flash_meta_full.as_ref().unwrap_or(&flash_meta),
+        })?;
         if return_raw_logits {
             Ok(ForwardInputsResult::RawLogits { logits })
         } else {
@@ -598,3 +568,21 @@ impl Pipeline for GGMLPipeline {
 
 // TODO
 impl AnyMoePipelineMixin for GGMLPipeline {}
+
+// GGML files carry no architecture; they are all Llama models.
+#[cfg(feature = "models-llama")]
+fn ggml_model(
+    config: ModelConfig::ModelParams<'_, ModelConfig::ParamsGGML>,
+) -> Result<Box<dyn QuantizedModel>> {
+    Ok(match config {
+        ModelConfig::ModelParams::Quantized(_) => Box::new(QLlama::try_from(config)?),
+        ModelConfig::ModelParams::Adapted(_) => Box::new(XLoraQLlama::try_from(config)?),
+    })
+}
+
+#[cfg(not(feature = "models-llama"))]
+fn ggml_model(
+    _config: ModelConfig::ModelParams<'_, ModelConfig::ParamsGGML>,
+) -> Result<Box<dyn QuantizedModel>> {
+    anyhow::bail!("GGML models are Llama models, which this build leaves out (`models-llama`)")
+}

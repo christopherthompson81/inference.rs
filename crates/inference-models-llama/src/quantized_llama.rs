@@ -10,15 +10,15 @@ use inference_quant::{GgufMatMul, QuantMethod, QuantMethodConfig};
 use crate::attention::{AttentionMask, SdpaParams};
 use crate::device_map::{DeviceMappedMask, DeviceMapper};
 use crate::gguf::metadata::ContentMetadata;
+use crate::gguf::FromGGML;
+use crate::kv_cache::EitherCache;
+use crate::kv_cache::KvCache;
+use crate::kv_cache::NormalCache;
 use crate::layers::masker::PastKvLenCache;
 use crate::layers::{CausalMaskConfig, CausalMasker, QRmsNorm, RotaryEmbedding, Sdpa};
+use crate::model::extract_logits;
 use crate::paged_attention::PagedAttention;
 use crate::paged_attention::PagedAttentionInputMetadata;
-use crate::pipeline::extract_logits;
-use crate::pipeline::model_config as ModelConfig;
-use crate::pipeline::EitherCache;
-use crate::pipeline::KvCache;
-use crate::pipeline::NormalCache;
 use crate::utils::progress::{new_multi_progress, NiceProgressBar};
 // Default fallback for models that don't specify context_length
 const DEFAULT_MAX_SEQ_LEN: u32 = 4096;
@@ -88,8 +88,7 @@ impl LayerWeights {
             (q, k, v)
         };
 
-        let positions =
-            crate::pipeline::text_positions_tensor(start_offsets, q.dim(2)?, q.device())?;
+        let positions = crate::model::text_positions_tensor(start_offsets, q.dim(2)?, q.device())?;
         let (q, k) = self.rotary.forward(&q, &k, &positions)?;
 
         let y = match &self.paged_attn {
@@ -137,7 +136,7 @@ pub struct ModelWeights {
     dtype: DType,
 }
 
-impl ModelConfig::FromGGML for ModelWeights {
+impl FromGGML for ModelWeights {
     fn from_ggml(mut ct: ggml_file::Content, gqa: usize, dtype: DType) -> Result<Self> {
         let head_dim = (ct.hparams.n_embd / ct.hparams.n_head) as usize;
         let rotary = RotaryEmbedding::new_partial(
@@ -373,5 +372,28 @@ impl ModelWeights {
         let x = self.norm.forward(&layer_in)?;
         let x = extract_logits(&x, context_lens)?;
         self.output.forward(&x.contiguous()?)
+    }
+}
+
+impl crate::gguf::QuantizedModel for ModelWeights {
+    fn forward_step(&self, inputs: crate::gguf::QuantizedForwardInputs<'_>) -> Result<Tensor> {
+        self.forward(
+            inputs.input_ids,
+            inputs.seqlen_offsets,
+            inputs.context_lens,
+            None,
+        )
+    }
+    fn cache(&self) -> &EitherCache {
+        &self.cache
+    }
+    fn device(&self) -> &Device {
+        &self.device
+    }
+    fn max_seq_len(&self) -> usize {
+        self.max_seq_len
+    }
+    fn num_hidden_layers(&self) -> usize {
+        self.cache.normal().0.len()
     }
 }

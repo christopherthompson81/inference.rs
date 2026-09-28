@@ -17,12 +17,13 @@ use tqdm::Iter;
 use tracing::info;
 
 use crate::device_map::{DeviceMappedMask, DeviceMapper};
+use crate::kv_cache::{Cache, EitherCache};
 use crate::layers::{CausalMaskConfig, CausalMasker, QRmsNorm, RotaryEmbedding, Sdpa};
-use crate::pipeline::{extract_logits, Cache, EitherCache};
+use crate::model::extract_logits;
 
 use crate::gguf::metadata::ContentMetadata;
-use crate::models::quantized_llama::PropsGGUF;
-use crate::pipeline::model_config as ModelConfig;
+use crate::gguf::{FromAdapterGGML, FromAdapterGGUF};
+use crate::quantized_llama::PropsGGUF;
 use inference_nn::xlora::XLoraClassifier;
 use inference_nn::xlora::{verify_sanity_adapters, NonGranularState, ScalingsMaker, XLoraConfig};
 
@@ -229,8 +230,7 @@ impl LayerWeights {
             (q, k, v)
         };
 
-        let positions =
-            crate::pipeline::text_positions_tensor(start_offsets, q.dim(2)?, q.device())?;
+        let positions = crate::model::text_positions_tensor(start_offsets, q.dim(2)?, q.device())?;
         let (q, k) = self.rotary.forward(&q, &k, &positions)?;
 
         let (k, v) = Cache::update_kv_cache(kv_cache, k, v)?;
@@ -261,7 +261,7 @@ pub struct ModelWeights {
     dtype: DType,
 }
 
-impl ModelConfig::FromAdapterGGML for ModelWeights {
+impl FromAdapterGGML for ModelWeights {
     fn from_ggml(
         mut ct: ggml_file::Content,
         gqa: usize,
@@ -459,7 +459,7 @@ impl ModelConfig::FromAdapterGGML for ModelWeights {
     }
 }
 
-impl ModelConfig::FromAdapterGGUF for ModelWeights {
+impl FromAdapterGGUF for ModelWeights {
     #[allow(clippy::too_many_arguments)]
     fn from_gguf<R: std::io::Seek + std::io::Read>(
         mut ct: Content<'_, R>,
@@ -926,5 +926,33 @@ impl ScalingsMaker for ModelWeights {
             is_scaling_pass,
             flash_params,
         )
+    }
+}
+
+impl crate::gguf::QuantizedModel for ModelWeights {
+    fn forward_step(&self, inputs: crate::gguf::QuantizedForwardInputs<'_>) -> Result<Tensor> {
+        self.forward(
+            inputs.input_ids,
+            inputs.input_ids_full,
+            inputs.seqlen_offsets,
+            inputs.seqlen_offsets_full,
+            inputs.no_kv_cache,
+            inputs.non_granular_state,
+            inputs.context_lens,
+            inputs.flash_params,
+            inputs.flash_params_full,
+        )
+    }
+    fn cache(&self) -> &EitherCache {
+        &self.cache
+    }
+    fn device(&self) -> &Device {
+        &self.device
+    }
+    fn max_seq_len(&self) -> usize {
+        self.max_seq_len
+    }
+    fn num_hidden_layers(&self) -> usize {
+        self.cache.full().lock().len()
     }
 }
