@@ -1,17 +1,7 @@
 <a name="top"></a>
-<!--
-<h1 align="center">
-  inference.rs
-</h1>
--->
+<h1 align="center">inference.rs</h1>
 
-<div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.gif">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/banner-light.gif">
-    <img src="docs/assets/banner-dark.png" alt="inference.rs - Fast, flexible LLM inference." width="100%" style="max-width: 800px;">
-  </picture>
-</div>
+<p align="center"><b>Fast, flexible LLM inference.</b></p>
 
 <p align="center">
   | <a href="https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/index.mdx"><b>Documentation</b></a> | <a href="https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/quickstart.mdx"><b>Quickstart</b></a> | <a href="https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/supported-models.md"><b>Supported models</b></a> | <a href="https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/rust/getting-started.mdx"><b>Rust SDK</b></a> | <a href="https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/python/getting-started.mdx"><b>Python SDK</b></a> |
