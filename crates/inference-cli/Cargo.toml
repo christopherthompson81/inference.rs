@@ -20,6 +20,7 @@ doc = false
 
 [dependencies]
 mimalloc = { workspace = true }
+inference-api = { workspace = true }
 inference-core = { workspace = true }
 inference-server-core = { workspace = true }
 inference = { workspace = true }

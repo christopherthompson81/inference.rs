@@ -2954,6 +2954,7 @@ dependencies = [
  "include_dir",
  "indexmap 2.13.0",
  "inference",
+ "inference-api",
  "inference-core",
  "inference-quant",
  "inference-sandbox",

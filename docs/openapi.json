@@ -10521,6 +10521,21 @@
             },
             "description": "Layers per device, as `--device-layers` takes them: `ORD:NUM` entries, or one count for device 0."
           },
+          "encoder_cache_memory_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Byte budget for cached multimodal encoder outputs.",
+            "minimum": 0
+          },
+          "hf_config_overrides": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "Merged recursively into the model's `config.json` before it loads."
+          },
           "isq": {
             "type": [
               "string",
@@ -10534,12 +10549,43 @@
               "null"
             ]
           },
+          "log": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Appends each request and response to this file."
+          },
+          "max_decode_steps_before_prefill": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Decode steps the scheduler runs before admitting a waiting prefill.",
+            "minimum": 1
+          },
           "max_model_len": {
             "type": [
               "integer",
               "null"
             ],
             "minimum": 0
+          },
+          "max_num_batched_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Most tokens one scheduler step batches across sequences.",
+            "minimum": 1
+          },
+          "max_prefill_chunk_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Longest prompt chunk one prefill step takes.",
+            "minimum": 1
           },
           "max_seqs": {
             "type": [
@@ -10586,6 +10632,13 @@
             ],
             "format": "int64",
             "minimum": 0
+          },
+          "throughput_logging": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Periodic throughput logging; on unless set to false."
           },
           "token_source": {
             "type": [

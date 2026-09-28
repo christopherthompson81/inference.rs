@@ -8,13 +8,19 @@ use axum::middleware;
 use std::path::Path;
 use tracing::{debug, info, warn};
 
+use inference_api::{
+    engine::{
+        AdapterSpec, AgenticSpec, MtpSpec, PagedCacheSpec, RuntimeSpec, SearchSpec, SkillsSpec,
+    },
+    lora_adapters::LoraAdapterApiConfig,
+    skill_store::SkillStore,
+    Engine, EngineSpec,
+};
 use inference_core::{
     initialize_logging, DiffusionLoaderType, McpClientConfig, ModelSelected, PagedCacheType,
-    SpeechLoaderType,
+    SandboxMode, SpeechLoaderType,
 };
 use inference_server_core::{
-    approvals::ApprovalBroker,
-    inference_for_server_builder::InferenceRsForServerBuilder,
     inference_server_router_builder::{InferenceRsServerRouterBuilder, DEFAULT_MAX_BODY_LIMIT},
     lora_adapters::runtime_lora_updates_enabled,
     mcp_server::{create_mcp_router, MCP_PROTOCOL_VERSION, MCP_ROUTE},
@@ -60,113 +66,23 @@ pub async fn run_server(
     apply_quant_resolution(&mut model_type, &global.token_source, &matformer).await?;
     let api_id_override =
         (model_id_of(&model_type) != original_model_id).then_some(original_model_id);
-    let model_selected = convert_to_model_selected(&model_type, &matformer)?;
-    let (max_model_len, hf_config_overrides) = extract_hf_config_settings(&model_type);
-
-    // Extract paged attention settings
-    let (
-        paged_attn,
-        paged_attn_gpu_mem,
-        paged_attn_gpu_mem_usage,
-        paged_ctxt_len,
-        paged_attn_block_size,
-        paged_cache_type,
-    ) = extract_paged_attn_settings(&model_type);
-
-    // Extract device settings
-    let (cpu, device_layers) = extract_device_settings(&model_type);
-
-    // Extract quantization settings
-    let isq = extract_isq_setting(&model_type);
-    let encoder_cache_memory_bytes = extract_encoder_cache_memory_bytes(&model_type)?;
-
-    // Build the InferenceRs instance
-    let mut builder = InferenceRsForServerBuilder::new()
-        .with_model(model_selected)
-        .with_max_seqs(runtime.max_seqs)
-        .with_max_num_batched_tokens(runtime.max_num_batched_tokens)
-        .with_max_prefill_chunk_tokens(runtime.max_prefill_chunk_tokens)
-        .with_max_decode_steps_before_prefill(runtime.max_decode_steps_before_prefill)
-        .with_no_kv_cache(runtime.no_kv_cache)
-        .with_token_source(global.token_source)
-        .with_interactive_mode(false)
-        .with_prefix_cache_n(runtime.prefix_cache_n)
-        .set_paged_attn(paged_attn)
-        .with_cpu(cpu)
-        .with_enable_search(runtime.enable_search)
-        .with_seed_optional(global.seed)
-        .with_log_optional(global.log.as_ref().map(|p| p.to_string_lossy().to_string()))
-        .with_chat_template_optional(
-            runtime
-                .chat_template
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-        )
-        .with_jinja_explicit_optional(
-            runtime
-                .jinja_explicit
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-        )
-        .with_num_device_layers_optional(device_layers)
-        .with_in_situ_quant_optional(isq)
-        .with_model_id_override_optional(api_id_override)
-        .with_paged_attn_gpu_mem_optional(paged_attn_gpu_mem)
-        .with_paged_attn_gpu_mem_usage_optional(paged_attn_gpu_mem_usage)
-        .with_paged_ctxt_len_optional(paged_ctxt_len)
-        .with_paged_attn_block_size_optional(paged_attn_block_size)
-        .with_mtp_config_optional(runtime.mtp_config())
-        .with_max_model_len_optional(max_model_len)
-        .with_hf_config_overrides_optional(hf_config_overrides)
-        .with_paged_attn_cache_type(paged_cache_type);
-
-    if let Some(max_bytes) = encoder_cache_memory_bytes {
-        builder = builder.with_encoder_cache_memory_bytes(max_bytes);
-    }
-
-    if let Some(model) = runtime.search_embedding_model {
-        builder = builder.with_search_embedding_model(model.into());
-    }
-
-    let mcp_client_config = load_mcp_config(runtime.mcp_config.as_deref())?;
-    builder = builder.with_mcp_config_optional(mcp_client_config);
-
-    let sandbox_policy = extract_sandbox_settings(sandbox, &runtime);
-
-    let approval_broker = ApprovalBroker::default();
-
-    #[cfg(feature = "code-execution")]
-    {
-        let config = build_code_exec_config(&runtime, sandbox_policy.clone());
-        builder = builder.with_code_exec_config_optional(config);
-        let shell_config = build_shell_config(&runtime, sandbox_policy);
-        builder = builder.with_shell_config_optional(shell_config);
-    }
-    #[cfg(not(feature = "code-execution"))]
-    let _ = sandbox_policy;
-
-    let inference = builder.build().await?;
-    let inference_for_ui = inference.clone();
-    let inference_for_mcp = inference.clone();
+    let spec = serve_engine_spec(ServeSpecInputs {
+        model_type: &model_type,
+        matformer: &matformer,
+        model_id: api_id_override,
+        runtime: &runtime,
+        server: &server,
+        sandbox,
+        global: &global,
+    })?;
+    let engine = Engine::load(spec).await?;
+    let inference_for_ui = engine.state().clone();
+    let inference_for_mcp = engine.state().clone();
 
     // Build and run the server
     let mut app = InferenceRsServerRouterBuilder::new()
-        .with_inference(inference)
-        .with_max_tool_rounds_optional(server.max_tool_rounds)
-        .with_tool_dispatch_url_optional(server.tool_dispatch_url.clone())
+        .with_engine(&engine)
         .with_observability_config(server.observability_config())
-        .with_agent_permission(runtime.code_exec_permission.into())
-        .with_approval_broker(approval_broker.clone())
-        .with_skills_dir_optional({
-            #[cfg(feature = "code-execution")]
-            {
-                runtime.skills_dir.clone()
-            }
-            #[cfg(not(feature = "code-execution"))]
-            {
-                None
-            }
-        })
         .build()
         .await?;
 
@@ -227,6 +143,142 @@ pub async fn run_server(
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+/// What `serve` needs to describe its engine, resolved from the command line.
+struct ServeSpecInputs<'a> {
+    model_type: &'a ModelType,
+    matformer: &'a MatformerSelection,
+    model_id: Option<String>,
+    runtime: &'a RuntimeOptions,
+    server: &'a ServerOptions,
+    sandbox: SandboxOptions,
+    global: &'a GlobalOptions,
+}
+
+/// The engine `inference serve` loads, as the spec the C ABI and bindings load from.
+fn serve_engine_spec(inputs: ServeSpecInputs) -> Result<EngineSpec> {
+    let (runtime, server, global) = (inputs.runtime, inputs.server, inputs.global);
+    let model_selected = convert_to_model_selected(inputs.model_type, inputs.matformer)?;
+    let (max_model_len, hf_config_overrides) = extract_hf_config_settings(inputs.model_type);
+
+    let (
+        paged_attn,
+        paged_attn_gpu_mem,
+        paged_attn_gpu_mem_usage,
+        paged_ctxt_len,
+        paged_attn_block_size,
+        paged_cache_type,
+    ) = extract_paged_attn_settings(inputs.model_type);
+
+    let (cpu, device_layers) = extract_device_settings(inputs.model_type);
+
+    let isq = extract_isq_setting(inputs.model_type);
+    let encoder_cache_memory_bytes = extract_encoder_cache_memory_bytes(inputs.model_type)?;
+
+    let sandbox_policy = extract_sandbox_settings(inputs.sandbox, runtime);
+    #[cfg(not(feature = "code-execution"))]
+    let _ = sandbox_policy;
+    Ok(EngineSpec {
+        model: model_selected,
+        model_id: inputs.model_id,
+        runtime: RuntimeSpec {
+            device: cpu.then(|| "cpu".to_string()),
+            seed: global.seed,
+            max_seqs: Some(runtime.max_seqs),
+            prefix_cache_n: Some(runtime.prefix_cache_n),
+            no_kv_cache: runtime.no_kv_cache,
+            chat_template: path_string(runtime.chat_template.as_deref()),
+            jinja_explicit: path_string(runtime.jinja_explicit.as_deref()),
+            max_model_len,
+            isq,
+            paged_attn,
+            token_source: Some(global.token_source.to_string()),
+            device_layers,
+            paged_cache: PagedCacheSpec {
+                context_len: paged_ctxt_len,
+                memory_mb: paged_attn_gpu_mem,
+                memory_fraction: paged_attn_gpu_mem_usage,
+                block_size: paged_attn_block_size,
+                cache_type: paged_cache_type,
+            },
+            mtp: mtp_spec(
+                runtime.mtp,
+                runtime.mtp_model.clone(),
+                runtime.mtp_n_predict,
+                runtime.mtp_draft_sampling,
+            ),
+            max_num_batched_tokens: Some(runtime.max_num_batched_tokens.get()),
+            max_prefill_chunk_tokens: Some(runtime.max_prefill_chunk_tokens.get()),
+            max_decode_steps_before_prefill: Some(runtime.max_decode_steps_before_prefill.get()),
+            encoder_cache_memory_bytes,
+            hf_config_overrides,
+            log: global.log.clone(),
+            throughput_logging: None,
+        },
+        agentic: AgenticSpec {
+            max_tool_rounds: server.max_tool_rounds,
+            tool_dispatch_url: server.tool_dispatch_url.clone(),
+            agent_permission: Some(runtime.code_exec_permission.into()),
+            search: runtime.enable_search.then(|| SearchSpec {
+                embedding_model: runtime
+                    .search_embedding_model
+                    .map(Into::into)
+                    .unwrap_or_default(),
+            }),
+            mcp: load_mcp_config(runtime.mcp_config.as_deref())?,
+            #[cfg(feature = "code-execution")]
+            code_execution: build_code_exec_config(runtime, sandbox_policy.clone()),
+            #[cfg(not(feature = "code-execution"))]
+            code_execution: None,
+            #[cfg(feature = "code-execution")]
+            shell: build_shell_config(runtime, sandbox_policy),
+            #[cfg(not(feature = "code-execution"))]
+            shell: None,
+            // The CLI resolves its sandbox into each config's policy, so the spec must not add one.
+            sandbox: SandboxMode::Off,
+        },
+        adapters: adapter_spec_from_env(),
+        skills: SkillsSpec {
+            root: Some(skills_root(runtime)),
+        },
+        anymoe: None,
+    })
+}
+
+fn path_string(path: Option<&Path>) -> Option<String> {
+    path.map(|path| path.to_string_lossy().into_owned())
+}
+
+fn mtp_spec(
+    builtin: bool,
+    model: Option<String>,
+    n_predict: Option<usize>,
+    draft_sampling: crate::args::MtpDraftSamplingArg,
+) -> Option<MtpSpec> {
+    (builtin || model.is_some()).then(|| MtpSpec {
+        model: if builtin { None } else { model },
+        n_predict,
+        draft_sampling: draft_sampling.into(),
+    })
+}
+
+/// Runtime LoRA management from the `INFERENCE_RS_*` environment variables.
+fn adapter_spec_from_env() -> AdapterSpec {
+    let config = LoraAdapterApiConfig::from_env();
+    AdapterSpec {
+        runtime_updates: config.enabled(),
+        root: config.allowed_root().map(Path::to_path_buf),
+    }
+}
+
+fn skills_root(runtime: &RuntimeOptions) -> std::path::PathBuf {
+    #[cfg(feature = "code-execution")]
+    if let Some(dir) = &runtime.skills_dir {
+        return dir.clone();
+    }
+    let _ = runtime;
+    SkillStore::default_root()
 }
 
 /// Bind and spawn the MCP server on its own port, alongside the main HTTP server.
@@ -1448,6 +1500,7 @@ mod tests {
 
     use super::*;
     use crate::args::SandboxMode;
+
     use crate::args::{SandboxNetworkMode, SandboxProfileArg};
 
     fn test_model() -> ModelSourceOptions {
@@ -2690,5 +2743,120 @@ mod tests {
 
         let policy = extract_sandbox_settings(sandbox, &runtime).unwrap();
         assert_eq!(policy.network, NetworkMode::Loopback);
+    }
+
+    fn serve_spec(args: &[&str]) -> EngineSpec {
+        use clap::Parser;
+        let cli = crate::args::Cli::try_parse_from(args).unwrap();
+        let crate::args::Command::Serve {
+            model_type,
+            default_model,
+            server,
+            mut runtime,
+            agent_options,
+            sandbox,
+        } = cli.command
+        else {
+            panic!("not a serve command");
+        };
+        agent_options.apply_to(&mut runtime);
+        let model_type = crate::args::resolve_model_type(model_type, default_model).unwrap();
+        serve_engine_spec(ServeSpecInputs {
+            model_type: &model_type,
+            matformer: &runtime.matformer_selection(),
+            model_id: Some("alias".to_string()),
+            runtime: &runtime,
+            server: &server,
+            sandbox,
+            global: &cli.global,
+        })
+        .unwrap()
+    }
+
+    #[test]
+    fn serve_flags_become_the_engine_spec() {
+        let spec = serve_spec(&[
+            "inference",
+            "--seed",
+            "7",
+            "--log",
+            "requests.log",
+            "serve",
+            "-m",
+            "org/model",
+            "--cpu",
+            "--max-seqs",
+            "4",
+            "--paged-attn",
+            "off",
+            "--pa-block-size",
+            "32",
+            "--isq",
+            "q4k",
+            "--mtp",
+            "--max-tool-rounds",
+            "3",
+            "--enable-search",
+            "--no-kv-cache",
+            "--max-num-batched-tokens",
+            "2048",
+        ]);
+        let rt = &spec.runtime;
+        assert_eq!(spec.model_id.as_deref(), Some("alias"));
+        assert_eq!(rt.device.as_deref(), Some("cpu"));
+        assert_eq!(
+            (rt.seed, rt.max_seqs, rt.no_kv_cache),
+            (Some(7), Some(4), true)
+        );
+        assert_eq!(
+            (rt.paged_attn, rt.paged_cache.block_size),
+            (Some(false), Some(32))
+        );
+        assert_eq!(rt.isq.as_deref(), Some("q4k"));
+        assert!(rt.mtp.as_ref().is_some_and(|mtp| mtp.model.is_none()));
+        assert_eq!(rt.max_num_batched_tokens, Some(2048));
+        assert_eq!(rt.log.as_deref(), Some(Path::new("requests.log")));
+        assert_eq!(rt.token_source.as_deref(), Some("cache"));
+        assert_eq!(spec.agentic.max_tool_rounds, Some(3));
+        assert!(spec.agentic.search.is_some());
+        assert!(spec.skills.root.is_some());
+    }
+
+    #[test]
+    fn an_mtp_assistant_model_and_the_resolved_sandbox_carry_over() {
+        let spec = serve_spec(&[
+            "inference",
+            "serve",
+            "-m",
+            "org/model",
+            "--mtp-model",
+            "org/draft",
+            "--mtp-n-predict",
+            "3",
+        ]);
+        let mtp = spec.runtime.mtp.unwrap();
+        assert_eq!(
+            (mtp.model.as_deref(), mtp.n_predict),
+            (Some("org/draft"), Some(3))
+        );
+        assert_eq!(spec.agentic.sandbox, inference_core::SandboxMode::Off);
+        #[cfg(feature = "code-execution")]
+        {
+            let spec = serve_spec(&[
+                "inference",
+                "serve",
+                "-m",
+                "org/model",
+                "--enable-shell",
+                "--sandbox",
+                "on",
+            ]);
+            let policy = spec
+                .agentic
+                .shell
+                .and_then(|shell| shell.sandbox_policy)
+                .unwrap();
+            assert!(policy.strict);
+        }
     }
 }

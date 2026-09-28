@@ -4,11 +4,7 @@ use axum::{
     body::{to_bytes, Body},
     http::{Request, StatusCode},
 };
-use inference_core::{AutoDeviceMapParams, ModelDType, ModelSelected};
-use inference_server_core::{
-    inference_for_server_builder::InferenceRsForServerBuilder,
-    inference_server_router_builder::InferenceRsServerRouterBuilder,
-};
+use inference_server_core::inference_server_router_builder::InferenceRsServerRouterBuilder;
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
@@ -19,33 +15,15 @@ const MAX_TOKENS: usize = 6;
 // Streamed and non-streamed decodes share the model and greedy sampling, so they must agree exactly.
 const PROMPT: &str = "Reply with the single word: ok";
 
+// Loaded as `inference serve` loads: an EngineSpec through the engine API, served with its policies.
 async fn router(dir: &std::path::Path) -> anyhow::Result<axum::Router> {
-    let state = InferenceRsForServerBuilder::new()
-        .with_model(ModelSelected::MultimodalPlain {
-            model_id: dir.to_string_lossy().into_owned(),
-            tokenizer_json: None,
-            arch: None,
-            dtype: ModelDType::F32,
-            topology: None,
-            write_uqff: None,
-            from_uqff: None,
-            max_edge: None,
-            calibration_file: None,
-            imatrix: None,
-            max_seq_len: AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
-            max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
-            max_num_images: AutoDeviceMapParams::DEFAULT_MAX_NUM_IMAGES,
-            max_image_length: AutoDeviceMapParams::DEFAULT_MAX_IMAGE_LENGTH,
-            hf_cache_path: None,
-            matformer_config_path: None,
-            matformer_slice_name: None,
-            organization: None,
-        })
-        .with_cpu(true)
-        .build()
-        .await?;
+    let spec = serde_json::from_value(json!({
+        "model": {"MultimodalPlain": {"model_id": dir.to_string_lossy(), "dtype": "f32"}},
+        "runtime": {"device": "cpu"},
+    }))?;
+    let engine = inference_api::Engine::load(spec).await?;
     InferenceRsServerRouterBuilder::new()
-        .with_inference(state)
+        .with_engine(&engine)
         .build()
         .await
 }
