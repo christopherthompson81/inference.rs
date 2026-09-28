@@ -36,7 +36,7 @@ use crate::args::{
     GlobalOptions, MatformerSelection, ModelFormat, ModelSourceOptions, ModelType,
     MultimodalOptions, QuantizationOptions, RuntimeOptions, SandboxOptions, ServerOptions,
 };
-use crate::ui::build_ui_router;
+use inference_webui::build_ui_router;
 
 const MEBIBYTE_BYTES: usize = 1024 * 1024;
 
