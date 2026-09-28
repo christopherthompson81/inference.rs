@@ -139,6 +139,18 @@ struct SkillUpload {
     staging_path: PathBuf,
 }
 
+/// The error a skill operation reports; the store's own faults are logged.
+pub fn skill_api_error(error: anyhow::Error) -> ApiError {
+    let api_error = ApiError::from_error(error.as_ref(), ApiErrorKind::Internal);
+    if matches!(
+        api_error.kind,
+        ApiErrorKind::Internal | ApiErrorKind::Unavailable | ApiErrorKind::Overloaded
+    ) {
+        tracing::error!(%error, "skill request failed");
+    }
+    api_error
+}
+
 #[doc(hidden)]
 pub fn invalid_skill_upload(message: impl Into<String>) -> anyhow::Error {
     ApiError::new(
@@ -476,7 +488,7 @@ fn stage_upload(upload: SkillFiles) -> Result<SkillUpload> {
 
     if files.is_empty() {
         return Err(invalid_skill_upload(
-            "Skill upload requires multipart file field `files`.",
+            "Skill upload has no files; it needs at least a SKILL.md.",
         ));
     }
 

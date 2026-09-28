@@ -11,7 +11,7 @@ use inference_core::{
     HfConfigOverrides, InferenceRsBuilder, Loader, McpClientConfig, MemoryGpuConfig,
     ModelLoaderConfig, ModelSelected, MtpConfig, MtpRuntimeConfig, PagedAttentionConfig,
     PagedCacheType, PagedKvModelRequest, SchedulerConfig, SearchCallback, SearchEmbeddingModel,
-    TokenSource,
+    TokenSource, ToolCallbackWithTool,
 };
 use tracing::{debug, info, warn};
 
@@ -286,6 +286,9 @@ pub struct InferenceRsForServerBuilder {
     /// Optional override search callback
     search_callback: Option<Arc<SearchCallback>>,
 
+    /// Host tools the agent loop calls by name
+    tool_callbacks: HashMap<String, ToolCallbackWithTool>,
+
     /// Optional MCP client configuration
     mcp_client_config: Option<McpClientConfig>,
 
@@ -343,6 +346,7 @@ impl Default for InferenceRsForServerBuilder {
             enable_search: defaults::ENABLE_SEARCH,
             search_embedding_model: defaults::SEARCH_EMBEDDING_MODEL,
             search_callback: defaults::SEARCH_CALLBACK,
+            tool_callbacks: HashMap::new(),
             mcp_client_config: None,
             paged_cache_type: defaults::PAGED_CACHE_TYPE,
             mtp_config: defaults::MTP_CONFIG,
@@ -746,6 +750,16 @@ impl InferenceRsForServerBuilder {
         self
     }
 
+    /// Registers a host tool: requests may call it by name and the agent loop runs `callback`.
+    pub fn with_tool_callback(
+        mut self,
+        name: impl Into<String>,
+        callback: ToolCallbackWithTool,
+    ) -> Self {
+        self.tool_callbacks.insert(name.into(), callback);
+        self
+    }
+
     /// Sets the MCP client configuration.
     pub fn with_mcp_config(mut self, mcp_config: McpClientConfig) -> Self {
         self.mcp_client_config = Some(mcp_config);
@@ -905,6 +919,7 @@ impl InferenceRsForServerBuilder {
         .with_prefix_cache_n(self.prefix_cache_n)
         .with_disable_eos_stop(self.disable_eos_stop)
         .with_loader_config(loader_config);
+        builder = with_callbacks(builder, self.search_callback, self.tool_callbacks);
 
         if let Some(id) = self.model_id_override {
             builder = builder.with_model_id(id);
@@ -1096,6 +1111,11 @@ impl InferenceRsForServerBuilder {
         .with_disable_eos_stop(self.disable_eos_stop)
         .with_deferred_daemon_start(true)
         .with_loader_config(first_loader_config);
+        builder = with_callbacks(
+            builder,
+            self.search_callback.clone(),
+            self.tool_callbacks.clone(),
+        );
         if first_primary_id != first_pipeline_name {
             builder = builder.with_model_id(first_primary_id.clone());
         }
@@ -1222,7 +1242,7 @@ impl InferenceRsForServerBuilder {
                 throughput_logging_enabled: !self.interactive_mode,
                 search_embedding_model,
                 search_callback: self.search_callback.clone(),
-                tool_callbacks: HashMap::new(),
+                tool_callbacks: self.tool_callbacks.clone(),
             };
 
             let mut add_model_config = inference_core::AddModelConfig::new(engine_config)
@@ -1524,4 +1544,19 @@ pub fn get_search_embedding_model(
     } else {
         None
     }
+}
+
+// The first model gets its callbacks through the core builder; later models through their engine config.
+fn with_callbacks(
+    mut builder: InferenceRsBuilder,
+    search_callback: Option<Arc<SearchCallback>>,
+    tool_callbacks: HashMap<String, ToolCallbackWithTool>,
+) -> InferenceRsBuilder {
+    if let Some(search_callback) = search_callback {
+        builder = builder.with_search_callback(search_callback);
+    }
+    for (name, callback) in tool_callbacks {
+        builder = builder.with_tool_callback_with_tool(name, callback);
+    }
+    builder
 }

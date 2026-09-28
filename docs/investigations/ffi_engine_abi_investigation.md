@@ -437,3 +437,54 @@ sequence slot until the 5-minute timeout denies it. Accepted differences: an ove
 store insert failure keeps its classified kind instead of always 500. Tests: FFI NULL `data`, NULL `filename`,
 oversized upload, content of a deleted file, NULL approval id; HTTP multipart upload, served content with its
 Content-Type and Content-Disposition, and a missing purpose.
+
+## Run 14 - 2026-09-27 17:38
+
+Design, host callbacks (sketched, then built): callbacks are fixed when the engine loads, because core wires them into
+the engine as it builds (`EngineConfig.tool_callbacks`, the builder's search callback), so the entry point is
+`inference_engine_load_with_callbacks(spec, len, const inference_host_callbacks*, out)`. A host tool is {OpenAI function
+definition JSON, callback, user_data}; one optional search callback replaces the built-in search. A callback answers
+through a library-owned `inference_callback_result*` (`_set` copies text, `_fail` takes a message), so neither side
+frees the other's memory, and returning without either is a failure. Callbacks run on engine worker threads, maybe
+concurrently, may not call back into the engine, and their user_data must outlive the engine.
+
+Change:
+- `inference-ffi/src/callbacks.rs`: the C types and their adapters to core's `ToolCallbackWithTool` and
+  `SearchCallback`. Tool context reaches the callback as {"session_id", "round"}.
+- `EngineCallbacks` and `Engine::load_with_callbacks`; `InferenceRsForServerBuilder::with_tool_callback`.
+- Fix found on the way: the server builder's `with_search_callback` never reached core for the default model (only
+  for models after the first in a multi-model config), so a custom search backend was silently ignored. Both build
+  paths now pass search and tool callbacks through `with_callbacks`.
+- Skills: engine spec `skills: {root}` (the server's default root otherwise); the engine now always has a skill store,
+  so requests can mount uploaded skills. `skill_api_error` is the one mapping for the route and the engine.
+- ABI 0.0.10: `inference_engine_load_with_callbacks`, `inference_callback_result_{set,fail}`,
+  `inference_skill_upload`, `inference_skill_version_upload`, `inference_skills_list`, `inference_skill_versions_list`.
+
+Tests, first run: the callback round trip compared the context JSON as a string and failed on key order (serde_json's
+`preserve_order` is on in this build); it compares values now. Unit: a tool callback gets its name, arguments and
+context and its result comes back; search results parse and a `_fail` message surfaces; a callback that sets nothing
+fails; malformed and NULL tool arrays are refused. ABI: an engine loads with a host tool and chat still works; a
+malformed tool definition is INVALID_ARGUMENT; skill upload, a second version, both lists; SKILL.md without
+frontmatter is INVALID_REQUEST. Not covered: the model calling a host tool or search end to end (needs a model that
+calls tools), and the builder search-callback fix (core exposes no way to observe it short of a search request).
+
+Local CI, first run: clippy `option_if_let_else`-style lint on the `_fail` message; an `if`/`else` now.
+
+Review fixes:
+- Host tool callbacks ran directly inside the async agent task, so a blocking callback held a runtime worker, and
+  the blocking layer's runtime is process-wide: a slow C tool could stall every engine. Core now calls text and
+  multimodal tool callbacks inside `block_in_place`, as it already did for search and the HTTP tool.
+- The tool context's `round` was only set for code execution and shell tools; every custom tool now gets `round` and
+  `tool_name`.
+- Two host tools with one name were silently collapsed; that is now INVALID_ARGUMENT. The header says a built-in tool
+  of the same name replaces a host tool, that host tools ride along on every chat request, and a request declaring
+  the same name is refused.
+- Without `skills.root` every engine shared the temp-dir default root (one bad metadata file there failed every load
+  as LOAD_FAILED, and engines saw each other's uploads only as of load). An engine without a root now owns a
+  temporary directory removed with its last clone; a root that cannot be opened is INVALID_ARGUMENT.
+- `inference_skill_versions_list` returns the same shape as `GET /v1/skills/{id}/versions`; the one-off list type is
+  gone. `Engine::skill_store` reports a missing store instead of panicking (`Engine::new` can be given none).
+- Header: the result handle is valid only during the call, the last `_set`/`_fail` wins, `_set(NULL, 0)` is an empty
+  answer (it used to be ignored and count as no answer), callbacks may block but must not throw or longjmp, and a
+  failed search is logged with no results for the model. `#[doc(hidden)]` is back on `invalid_skill_upload`, and the
+  empty-upload message no longer says "multipart".

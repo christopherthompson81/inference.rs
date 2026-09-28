@@ -11,11 +11,13 @@ use inference_api::{
     blocking::{BlockingEngine, BlockingStream, StreamPoll},
     files::{file_too_large, FileUpload, MAX_FILE_UPLOAD_BYTES},
     media_source::{MediaAttachment, MediaAttachments},
+    skill_store::{skill_api_error, SkillFiles},
     system::{system_doctor_json, system_info_json},
     Engine, EngineLoadError,
 };
 
 use crate::{
+    callbacks::{engine_callbacks, inference_host_callbacks},
     guard, guard_value, inference_status,
     inference_status::{
         INFERENCE_ERR_INVALID_REQUEST, INFERENCE_ERR_LOAD_FAILED, INFERENCE_ERR_NOT_AVAILABLE,
@@ -23,6 +25,15 @@ use crate::{
     },
     Failure, FfiResult,
 };
+
+/// Mirrors `inference_skill_file`.
+#[repr(C)]
+#[allow(non_camel_case_types)]
+pub struct inference_skill_file {
+    pub path: *const c_char,
+    pub data: *const u8,
+    pub len: usize,
+}
 
 /// Mirrors `inference_media`.
 #[repr(C)]
@@ -98,7 +109,11 @@ fn load_failure(error: EngineLoadError) -> Failure {
 }
 
 /// Safety: `data` is NULL (rejected) or valid for `len` bytes.
-unsafe fn arg_bytes<'a>(data: *const c_char, len: usize, name: &str) -> FfiResult<&'a [u8]> {
+pub(crate) unsafe fn arg_bytes<'a>(
+    data: *const c_char,
+    len: usize,
+    name: &str,
+) -> FfiResult<&'a [u8]> {
     if data.is_null() {
         return Err(Failure::invalid(format!("{name} is NULL")));
     }
@@ -159,10 +174,22 @@ pub unsafe extern "C" fn inference_engine_load(
     spec_len: usize,
     out_engine: *mut *mut inference_engine,
 ) -> inference_status {
+    inference_engine_load_with_callbacks(spec, spec_len, std::ptr::null(), out_engine)
+}
+
+/// Safety: as for `inference_engine_load`, with `callbacks` NULL or valid (see `engine_callbacks`).
+#[no_mangle]
+pub unsafe extern "C" fn inference_engine_load_with_callbacks(
+    spec: *const c_char,
+    spec_len: usize,
+    callbacks: *const inference_host_callbacks,
+    out_engine: *mut *mut inference_engine,
+) -> inference_status {
     guard(|| {
         out_arg(out_engine, "out_engine")?;
         let spec = arg_bytes(spec, spec_len, "spec")?;
-        let engine = BlockingEngine::load_json(spec).map_err(load_failure)?;
+        let callbacks = engine_callbacks(callbacks)?;
+        let engine = BlockingEngine::load_json(spec, callbacks).map_err(load_failure)?;
         out_engine.write(Box::into_raw(Box::new(inference_engine { engine })));
         Ok(())
     })
@@ -847,6 +874,118 @@ pub unsafe extern "C" fn inference_file_content(
         |engine, id| {
             let body = engine.engine().file_content(id).map_err(api_failure)?;
             Ok(blob_handle(body.bytes, body.mime_type))
+        },
+    )
+}
+
+/// Safety: `files` is NULL (rejected unless `count` is 0) or valid for `count` entries, each `path` a C string and
+/// `data` valid for `len` bytes.
+unsafe fn arg_skill_files(
+    files: *const inference_skill_file,
+    count: usize,
+) -> FfiResult<SkillFiles> {
+    if files.is_null() && count != 0 {
+        return Err(Failure::invalid("files is NULL but file_count is not 0"));
+    }
+    let mut skill_files = SkillFiles::default();
+    for (index, file) in (0..count).map(|index| (index, &*files.add(index))) {
+        let path = crate::arg_str(file.path, &format!("files[{index}].path"))?.to_string();
+        let bytes = arg_bytes(
+            file.data.cast::<c_char>(),
+            file.len,
+            &format!("files[{index}].data"),
+        )?;
+        skill_files
+            .push(path, bytes.to_vec())
+            .map_err(|error| api_failure(skill_api_error(error)))?;
+    }
+    Ok(skill_files)
+}
+
+/// Safety: `engine` is a live handle, `files` as for `arg_skill_files`, `out_response` valid for a write.
+#[no_mangle]
+pub unsafe extern "C" fn inference_skill_upload(
+    engine: *const inference_engine,
+    files: *const inference_skill_file,
+    file_count: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    guard(|| {
+        out_arg(out_response, "out_response")?;
+        let engine = engine
+            .as_ref()
+            .ok_or_else(|| Failure::invalid("engine is NULL"))?;
+        let files = arg_skill_files(files, file_count)?;
+        let response = engine
+            .engine
+            .engine()
+            .upload_skill_json(files)
+            .map_err(api_failure)?;
+        out_response.write(string_handle(response));
+        Ok(())
+    })
+}
+
+/// Safety: as for `inference_skill_upload`, with `skill_id` valid for `skill_id_len` bytes.
+#[no_mangle]
+pub unsafe extern "C" fn inference_skill_version_upload(
+    engine: *const inference_engine,
+    skill_id: *const c_char,
+    skill_id_len: usize,
+    files: *const inference_skill_file,
+    file_count: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    id_call(
+        engine,
+        (skill_id, skill_id_len, "skill_id"),
+        (out_response, "out_response"),
+        |engine, id| {
+            let files = arg_skill_files(files, file_count)?;
+            engine
+                .engine()
+                .upload_skill_version_json(id, files)
+                .map(string_handle)
+                .map_err(api_failure)
+        },
+    )
+}
+
+/// Safety: `engine` is a live handle and `out_response` valid for a write.
+#[no_mangle]
+pub unsafe extern "C" fn inference_skills_list(
+    engine: *const inference_engine,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    guard(|| {
+        out_arg(out_response, "out_response")?;
+        let engine = engine
+            .as_ref()
+            .ok_or_else(|| Failure::invalid("engine is NULL"))?;
+        let response = engine.engine.engine().skills_json().map_err(api_failure)?;
+        out_response.write(string_handle(response));
+        Ok(())
+    })
+}
+
+/// Safety: `engine` is a live handle, `skill_id` valid for `skill_id_len` bytes, `out_response` valid for a write.
+#[no_mangle]
+pub unsafe extern "C" fn inference_skill_versions_list(
+    engine: *const inference_engine,
+    skill_id: *const c_char,
+    skill_id_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    id_call(
+        engine,
+        (skill_id, skill_id_len, "skill_id"),
+        (out_response, "out_response"),
+        |engine, id| {
+            engine
+                .engine()
+                .skill_versions_json(id)
+                .map(string_handle)
+                .map_err(api_failure)
         },
     )
 }

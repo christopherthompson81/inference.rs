@@ -17,7 +17,8 @@ use axum::{
 };
 
 use crate::skill_store::{
-    invalid_skill_upload, skill_upload_too_large, ANTHROPIC_SKILL_SOURCE, CUSTOM_SKILL_SOURCE,
+    invalid_skill_upload, skill_api_error, skill_upload_too_large, ANTHROPIC_SKILL_SOURCE,
+    CUSTOM_SKILL_SOURCE,
 };
 pub use crate::skill_store::{
     AnthropicSkillListObject, AnthropicSkillObject, AnthropicSkillVersionListObject,
@@ -61,14 +62,7 @@ fn protocol_error_response(mut error: ApiError, anthropic: bool) -> axum::respon
 }
 
 fn skill_error(error: anyhow::Error, anthropic: bool) -> axum::response::Response {
-    let api_error = ApiError::from_error(error.as_ref(), ApiErrorKind::Internal);
-    if matches!(
-        api_error.kind,
-        ApiErrorKind::Internal | ApiErrorKind::Unavailable | ApiErrorKind::Overloaded
-    ) {
-        tracing::error!(%error, "skill request failed");
-    }
-    protocol_error_response(api_error, anthropic)
+    protocol_error_response(skill_api_error(error), anthropic)
 }
 
 fn multipart_rejection_error(error: MultipartRejection) -> ApiError {

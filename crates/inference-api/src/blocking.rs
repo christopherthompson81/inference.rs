@@ -7,7 +7,7 @@ use tokio::runtime::Runtime;
 
 use crate::{
     api_error::ApiError,
-    engine::{Engine, EngineLoadError},
+    engine::{Engine, EngineCallbacks, EngineLoadError},
     generation::SpeechAudio,
     media_source::MediaAttachments,
 };
@@ -39,9 +39,9 @@ pub struct BlockingEngine {
 }
 
 impl BlockingEngine {
-    pub fn load_json(spec: &[u8]) -> Result<Self, EngineLoadError> {
+    pub fn load_json(spec: &[u8], callbacks: EngineCallbacks) -> Result<Self, EngineLoadError> {
         let spec = spec.to_vec();
-        run(async move { Engine::load_json(&spec).await }).map(|engine| Self { engine })
+        run(async move { Engine::load_json(&spec, callbacks).await }).map(|engine| Self { engine })
     }
 
     pub fn engine(&self) -> &Engine {

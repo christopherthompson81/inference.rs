@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 9
+#define INFERENCE_ABI_VERSION_PATCH 10
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -159,7 +159,7 @@ INFERENCE_API inference_status inference_layout_result_detection(const inference
  * Failing engine calls, including INFERENCE_ERR_RUNTIME ones, leave the error JSON in inference_last_error(): the
  * OpenAI envelope, or the Anthropic one for the inference_anthropic_* calls.
  * Freeing the last handle of an engine (the engine or one of its streams) waits up to 10 s for the engine to stop.
- * Not yet on this surface: uploaded skills, and host tool or search callbacks. */
+ */
 
 typedef struct inference_engine inference_engine;
 typedef struct inference_stream inference_stream;
@@ -171,13 +171,59 @@ typedef struct inference_blob inference_blob;
 /* Loads an engine from a JSON spec: {"model": <model selection>, "model_id"?, "runtime"?: {"device": "auto" | "cpu" |
  * "cuda:N" | "metal:N", "seed", "max_seqs", "prefix_cache_n", "no_kv_cache", "chat_template", "jinja_explicit",
  * "max_model_len", "isq", "paged_attn", "token_source"}, "agentic"?: {"max_tool_rounds", "tool_dispatch_url",
- * "agent_permission"}, "adapters"?: {"runtime_updates", "root"}}. The model selection is the ModelSelected JSON, e.g.
- * {"Plain": {"model_id": "org/model"}}.
+ * "agent_permission"}, "adapters"?: {"runtime_updates", "root"}, "skills"?: {"root"}}. The model selection is the
+ * ModelSelected JSON, e.g. {"Plain": {"model_id": "org/model"}}.
  * A malformed spec is INFERENCE_ERR_INVALID_ARGUMENT, a device this build or machine lacks is
  * INFERENCE_ERR_NOT_AVAILABLE, and a model that fails to load is INFERENCE_ERR_LOAD_FAILED. */
 INFERENCE_API inference_status inference_engine_load(const char *spec, size_t spec_len,
                                                     inference_engine **out_engine);
 INFERENCE_API void inference_engine_free(inference_engine *engine);
+
+/* Host callbacks: C functions the agent loop calls. A callback answers through the library-owned result it is given,
+ * with inference_callback_result_set (text, copied; NULL with len 0 is empty, invalid UTF-8 is replaced) or
+ * inference_callback_result_fail; the last call wins, and returning without either is a failure. The result is valid
+ * only during the call, on the calling thread. Callbacks run on engine worker threads, possibly several at once, may
+ * block, must not throw or longjmp, and must not call inference_* engine functions. user_data is passed back untouched
+ * and must stay valid until the engine is freed. */
+typedef struct inference_callback_result inference_callback_result;
+INFERENCE_API void inference_callback_result_set(inference_callback_result *result, const char *data, size_t len);
+/* message may be NULL. */
+INFERENCE_API void inference_callback_result_fail(inference_callback_result *result, const char *message);
+
+/* Runs a host tool. arguments is the JSON the model passed; context is {"session_id", "round"} (the agent loop's
+ * round). The result text is what the model sees; a failure reaches the model as a failed tool call. */
+typedef void (*inference_tool_callback)(void *user_data, const char *tool_name, const char *arguments,
+                                        size_t arguments_len, const char *context, size_t context_len,
+                                        inference_callback_result *result);
+/* Answers a web search with a JSON array of {"title", "description", "url", "content"}. A failure, or JSON that is not
+ * that array, is logged and the model sees no results. */
+typedef void (*inference_search_callback)(void *user_data, const char *query, size_t query_len,
+                                          inference_callback_result *result);
+
+/* definition is the OpenAI function tool JSON ({"type": "function", "function": {"name", "description",
+ * "parameters"}}). Every chat request offers the host tools to the model (and so runs the agent loop); a request that
+ * declares its own tool of the same name is refused. Two host tools may not share a name, and a built-in tool (MCP,
+ * code execution, shell) of the same name replaces a host tool. */
+typedef struct inference_host_tool {
+    const char *definition;
+    size_t definition_len;
+    inference_tool_callback callback;
+    void *user_data;
+} inference_host_tool;
+
+/* tools may be NULL when tool_count is 0; search may be NULL to keep the built-in search. */
+typedef struct inference_host_callbacks {
+    const inference_host_tool *tools;
+    size_t tool_count;
+    inference_search_callback search;
+    void *search_user_data;
+} inference_host_callbacks;
+
+/* inference_engine_load with host callbacks; callbacks may be NULL. A malformed tool is
+ * INFERENCE_ERR_INVALID_ARGUMENT. */
+INFERENCE_API inference_status inference_engine_load_with_callbacks(const char *spec, size_t spec_len,
+                                                                   const inference_host_callbacks *callbacks,
+                                                                   inference_engine **out_engine);
 
 /* Runs a chat completion to its end; out_response receives the chat.completion JSON. "stream" in the request is
  * ignored. */
@@ -323,6 +369,25 @@ INFERENCE_API inference_status inference_file_delete(const inference_engine *eng
                                                     size_t file_id_len, inference_string **out_response);
 INFERENCE_API inference_status inference_file_content(const inference_engine *engine, const char *file_id,
                                                      size_t file_id_len, inference_blob **out_blob);
+
+/* One file of a skill upload: path within the skill (e.g. "SKILL.md", "scripts/run.py") and its bytes. */
+typedef struct inference_skill_file {
+    const char *path;
+    const uint8_t *data;
+    size_t len;
+} inference_skill_file;
+
+/* Skills: a SKILL.md with name and description frontmatter, and the files it references, stored under the spec's
+ * skills.root for requests to mount in the shell tool. Uploads return the skill (or version) JSON; lists return
+ * {"object": "list", "data": [...]}. */
+INFERENCE_API inference_status inference_skill_upload(const inference_engine *engine, const inference_skill_file *files,
+                                                     size_t file_count, inference_string **out_response);
+INFERENCE_API inference_status inference_skill_version_upload(const inference_engine *engine, const char *skill_id,
+                                                             size_t skill_id_len, const inference_skill_file *files,
+                                                             size_t file_count, inference_string **out_response);
+INFERENCE_API inference_status inference_skills_list(const inference_engine *engine, inference_string **out_response);
+INFERENCE_API inference_status inference_skill_versions_list(const inference_engine *engine, const char *skill_id,
+                                                            size_t skill_id_len, inference_string **out_response);
 
 /* Host, device and build information, and environment diagnostics (the /v1/system/info and /v1/system/doctor
  * JSON). They need no engine. */

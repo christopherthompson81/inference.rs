@@ -1111,3 +1111,145 @@ fn files_approvals_and_system_reports() {
     }
     unsafe { inference_engine_free(engine) };
 }
+
+unsafe extern "C" fn unused_tool(
+    _: *mut std::ffi::c_void,
+    _: *const c_char,
+    _: *const c_char,
+    _: usize,
+    _: *const c_char,
+    _: usize,
+    result: *mut inference_ffi::callbacks::inference_callback_result,
+) {
+    inference_ffi::callbacks::inference_callback_result_fail(result, null());
+}
+
+fn skill_files(skill_md: &str) -> [inference_skill_file; 1] {
+    [inference_skill_file {
+        path: c"SKILL.md".as_ptr(),
+        data: skill_md.as_ptr(),
+        len: skill_md.len(),
+    }]
+}
+
+#[test]
+fn host_callbacks_load_and_skills_are_stored() {
+    use inference_ffi::callbacks::*;
+
+    let dir = support::tiny_checkpoint().unwrap();
+    let skills_root = tempfile::tempdir().unwrap();
+    let mut spec: Value = serde_json::from_str(&spec(dir.path())).unwrap();
+    spec["skills"] = json!({"root": skills_root.path()});
+    let spec = spec.to_string();
+    let definition = json!({
+        "type": "function",
+        "function": {"name": "lookup", "description": "Looks a word up.", "parameters": {"type": "object"}},
+    })
+    .to_string();
+    let tools = [inference_host_tool {
+        definition: definition.as_ptr().cast(),
+        definition_len: definition.len(),
+        callback: Some(unused_tool),
+        user_data: null_mut(),
+    }];
+    let callbacks = inference_host_callbacks {
+        tools: tools.as_ptr(),
+        tool_count: tools.len(),
+        search: None,
+        search_user_data: null_mut(),
+    };
+    let mut engine = null_mut();
+    let status = unsafe {
+        inference_engine_load_with_callbacks(
+            spec.as_ptr().cast(),
+            spec.len(),
+            &callbacks,
+            &mut engine,
+        )
+    };
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    // a registered host tool rides along with requests; this model never calls it
+    let (status, _) = chat(engine, &chat_request(false));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+
+    let files = skill_files(
+        "---\nname: csv-summary\ndescription: Summarizes a CSV file.\n---\nRead the file.\n",
+    );
+    let mut response = null_mut();
+    let status =
+        unsafe { inference_skill_upload(engine, files.as_ptr(), files.len(), &mut response) };
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let skill: Value = serde_json::from_str(&take_string(response)).unwrap();
+    assert_eq!(skill["name"], "csv-summary", "{skill}");
+    let skill_id = skill["id"].as_str().unwrap().to_string();
+
+    let files =
+        skill_files("---\nname: csv-summary\ndescription: Summarizes a CSV file, faster.\n---\n");
+    let mut response = null_mut();
+    let status = unsafe {
+        inference_skill_version_upload(
+            engine,
+            skill_id.as_ptr().cast(),
+            skill_id.len(),
+            files.as_ptr(),
+            files.len(),
+            &mut response,
+        )
+    };
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    take_string(response);
+
+    let mut response = null_mut();
+    assert_eq!(
+        unsafe { inference_skills_list(engine, &mut response) },
+        INFERENCE_OK
+    );
+    let skills: Value = serde_json::from_str(&take_string(response)).unwrap();
+    assert_eq!(skills["data"].as_array().unwrap().len(), 1, "{skills}");
+    let mut response = null_mut();
+    let status = unsafe {
+        inference_skill_versions_list(
+            engine,
+            skill_id.as_ptr().cast(),
+            skill_id.len(),
+            &mut response,
+        )
+    };
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let versions: Value = serde_json::from_str(&take_string(response)).unwrap();
+    assert_eq!(versions["data"].as_array().unwrap().len(), 2, "{versions}");
+
+    let files = skill_files("no frontmatter");
+    let mut response = null_mut();
+    let status =
+        unsafe { inference_skill_upload(engine, files.as_ptr(), files.len(), &mut response) };
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{}", last_error());
+    assert!(response.is_null());
+    unsafe { inference_engine_free(engine) };
+
+    let bad_tools = [inference_host_tool {
+        definition: c"not json".as_ptr(),
+        definition_len: 8,
+        callback: Some(unused_tool),
+        user_data: null_mut(),
+    }];
+    let callbacks = inference_host_callbacks {
+        tools: bad_tools.as_ptr(),
+        tool_count: 1,
+        search: None,
+        search_user_data: null_mut(),
+    };
+    let mut engine = null_mut();
+    let status = unsafe {
+        inference_engine_load_with_callbacks(
+            spec.as_ptr().cast(),
+            spec.len(),
+            &callbacks,
+            &mut engine,
+        )
+    };
+    assert_eq!(
+        (status, engine.is_null()),
+        (INFERENCE_ERR_INVALID_ARGUMENT, true)
+    );
+}
