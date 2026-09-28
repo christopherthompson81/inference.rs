@@ -17,3 +17,4 @@ docs/node_modules/
 docs/dist/
 docs/.astro/
 out/
+bindings/python/inference_rs/_lib/

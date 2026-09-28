@@ -7,10 +7,15 @@ name = "inference_rs"
 version = "0.9.3"
 description = "inference.rs over its C ABI (libinference_ffi), with no compiled extension"
 requires-python = ">=3.10"
+readme = "README.md"
 license = "MIT"
 
 [tool.setuptools]
 packages = ["inference_rs"]
+
+[tool.setuptools.package-data]
+# A release wheel bundles libinference_ffi here; a source install has none and loads it from the checkout.
+inference_rs = ["_lib/*"]
 
 [tool.ruff]
 line-length = 120

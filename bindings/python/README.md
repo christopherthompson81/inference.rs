@@ -19,12 +19,19 @@ Engine calls release the GIL, so an engine can serve several threads at once.
 ## Building
 
 ```bash
+python scripts/release/build_wheels.py   # a wheel with the library bundled; --accelerator cuda|metal
+pip install target/wheels/<the wheel it printed>
+```
+
+For work on the package, build the library and install in place:
+
+```bash
 cargo build --release -p inference-ffi   # or a debug build; add --features cuda for CUDA
 pip install -e bindings/python
 ```
 
-The library is found through `INFERENCE_NATIVE_DIR`, then `target/release` and `target/debug` of the checkout the
-package sits in, then the platform's own search.
+The library is found through `INFERENCE_NATIVE_DIR`, then the one a wheel bundles in `inference_rs/_lib`, then
+`target/release` and `target/debug` of the checkout the package sits in, then the platform's own search.
 
 ```python
 import inference_rs as ir
