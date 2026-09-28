@@ -65,12 +65,14 @@ Full examples: [openai_response_format](/examples/server/openai-response-format/
 </TabItem>
 <TabItem label="Python">
 
-The Python SDK takes the schema as a JSON string via `grammar` / `grammar_type`. Derive it from a pydantic model with `model_json_schema()`:
+The Python SDK takes the schema as a `t.GrammarJsonSchema` on `grammar`. Derive it from a pydantic model with `model_json_schema()`:
 
 ```python
-import json
 from pydantic import BaseModel
-from inference_rs import Runner, Which, ChatCompletionRequest
+
+import inference_rs as ir
+from inference_rs import types as t
+
 
 class Address(BaseModel):
     street: str
@@ -78,18 +80,19 @@ class Address(BaseModel):
     state: str
     zip: int
 
-runner = Runner(which=Which.Plain(model_id="Qwen/Qwen3-4B"))
 
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[{"role": "user", "content": "Gimme a sample address."}],
-        grammar_type="json_schema",
-        grammar=json.dumps(Address.model_json_schema()),
+with ir.Engine(t.EngineSpec(model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B"))) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[t.Message(role="user", content="Gimme a sample address.")],
+            grammar=t.GrammarJsonSchema(value=Address.model_json_schema()),
+        )
     )
-)
-print(res.choices[0].message.content)
+    print(res.choices[0].message.content)
 ```
+
+`response_format=t.ResponseFormatJsonSchema(json_schema=t.JsonSchemaResponseFormat(name="address", schema=...))` works too.
 
 Full examples: [pydantic_schema](/examples/python/pydantic-schema/), [json_schema](/examples/python/json-schema/).
 
@@ -151,7 +154,7 @@ Over HTTP, `grammar` is a tagged object (on Chat Completions, Responses, legacy 
 | `lark` | Lark grammar string | Context-free syntax: expressions, DSLs. |
 | `llguidance` | llguidance grammar object | Composed grammars; full control. |
 
-In the Python SDK the same four constraints are selected by `grammar_type` (`"regex"`, `"json_schema"`, `"lark"`, `"llguidance"`) with `grammar` as a string; JSON-encode the `json_schema` and `llguidance` object forms. In Rust, pass a `Constraint` to `RequestBuilder::set_constraint`:
+In the Python SDK the same four constraints are the `grammar` classes `t.GrammarRegex`, `t.GrammarJsonSchema`, `t.GrammarLark`, and `t.GrammarLlguidance`, each with the table's `value` (a dict for `json_schema`, a `t.GrammarLlguidanceValue` for `llguidance`). In Rust, pass a `Constraint` to `RequestBuilder::set_constraint`:
 
 ```rust
 let request = RequestBuilder::new()

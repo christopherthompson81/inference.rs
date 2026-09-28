@@ -12,43 +12,45 @@ Runnable Python SDK example `gemma3n`.
 <!-- needs-header -->
 
 ```python
-from inference_rs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.MultimodalPlain(
-        model_id="google/gemma-3n-E4B-it",
-        arch=MultimodalArchitecture.Gemma3n,
-    ),
-)
-
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="ignore",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "https://upload.wikimedia.org/wikipedia/commons/f/fd/Pink_flower.jpg"
-                        },
-                    },
-                    {
-                        "type": "text",
-                        "text": "Please describe this image.",
-                    },
-                ],
-            }
-        ],
-        max_tokens=256,
-        presence_penalty=1.0,
-        top_p=0.1,
-        temperature=0.1,
+with ir.Engine(
+    t.EngineSpec(
+        model=t.ModelSelectedMultimodalPlain(
+            model_id="google/gemma-3n-E4B-it",
+            arch=t.MultimodalLoaderType.GEMMA3N,
+        ),
     )
-)
-print(res.choices[0].message.content)
-print(res.usage)
+) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(
+                    role="user",
+                    content=[
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "https://upload.wikimedia.org/wikipedia/commons/f/fd/Pink_flower.jpg"
+                            },
+                        },
+                        {
+                            "type": "text",
+                            "text": "Please describe this image.",
+                        },
+                    ],
+                )
+            ],
+            max_tokens=256,
+            presence_penalty=1.0,
+            top_p=0.1,
+            temperature=0.1,
+        )
+    )
+    print(res.choices[0].message.content)
+    print(res.usage)
 ```
 
 Source: [`examples/python/gemma3n.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/gemma3n.py)

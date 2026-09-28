@@ -103,12 +103,14 @@ All parameters are top-level JSON fields on `/v1/chat/completions` and `/v1/comp
 </TabItem>
 <TabItem label="Python">
 
-The same names are fields on `ChatCompletionRequest`:
+The same names are fields on `t.ChatCompletionRequest`:
 
 ```python
-request = ChatCompletionRequest(
+from inference_rs import types as t
+
+request = t.ChatCompletionRequest(
     model="default",
-    messages=[{"role": "user", "content": "Write a haiku."}],
+    messages=[t.Message(role="user", content="Write a haiku.")],
     temperature=0.7,
     top_k=40,
     top_p=0.9,

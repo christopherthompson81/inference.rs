@@ -68,11 +68,17 @@ inference run -m <model> --chat-template my-template.jinja
 <TabItem label="Python">
 
 ```python
-runner = Runner(
-    which=Which.Plain(model_id="<model>"),
-    chat_template="my-template.jinja",   # or a .json file
-    # jinja_explicit="my-template.jinja",
+import inference_rs as ir
+from inference_rs import types as t
+
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(model_id="<model>"),
+    runtime=t.RuntimeSpec(
+        chat_template="my-template.jinja",  # or a .json file
+        # jinja_explicit="my-template.jinja",
+    ),
 )
+engine = ir.Engine(spec)
 ```
 
 </TabItem>

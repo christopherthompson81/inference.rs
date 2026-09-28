@@ -56,9 +56,13 @@ inference serve --topology topology.yaml -m <model>
 <TabItem label="Python">
 
 ```python
-from inference_rs import Runner, Which
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(which=Which.Plain(model_id="<model>", topology="topology.yaml"))
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(model_id="<model>", topology="topology.yaml"),
+)
+engine = ir.Engine(spec)
 ```
 
 </TabItem>

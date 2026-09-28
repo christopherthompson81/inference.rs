@@ -151,6 +151,8 @@ To list uploaded custom Skills with Anthropic-shaped objects, call
 </TabItem>
 <TabItem label="Python SDK">
 
+This snippet uses the pyo3 package (`crates/inference-pyo3`), which is being retired: the ctypes `inference_rs` package does not support shell skills yet.
+
 ```python
 from inference_rs import ChatCompletionRequest, Runner, ShellConfig, ShellSkillMount, Which
 

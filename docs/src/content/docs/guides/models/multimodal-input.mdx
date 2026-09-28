@@ -44,27 +44,31 @@ curl http://localhost:1234/v1/chat/completions \
 <TabItem label="Python">
 
 ```python
-from inference_rs import Runner, Which, ChatCompletionRequest
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.MultimodalPlain(model_id="Qwen/Qwen3-VL-4B-Instruct"),
-    in_situ_quant="4",
+spec = t.EngineSpec(
+    model=t.ModelSelectedMultimodalPlain(model_id="Qwen/Qwen3-VL-4B-Instruct"),
+    runtime=t.RuntimeSpec(isq="4"),
 )
 
-response = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[{
-            "role": "user",
-            "content": [
-                {"type": "image_url", "image_url": {"url": "file:///path/to/photo.jpg"}},
-                {"type": "text", "text": "What do you see in this image?"},
+with ir.Engine(spec) as engine:
+    response = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(
+                    role="user",
+                    content=[
+                        {"type": "image_url", "image_url": {"url": "file:///path/to/photo.jpg"}},
+                        {"type": "text", "text": "What do you see in this image?"},
+                    ],
+                )
             ],
-        }],
-        max_tokens=256,
+            max_tokens=256,
+        )
     )
-)
-print(response.choices[0].message.content)
+    print(response.choices[0].message.content)
 ```
 
 [Full example](/examples/python/qwen3-vl/).
@@ -148,25 +152,29 @@ WAV, MP3, FLAC, and OGG decode natively. Convert other formats with FFmpeg first
 
 ## In-memory images from Python
 
-For bytes or PIL images, encode as base64 and pass a data URL; the engine handles decoding and preprocessing:
+For bytes or PIL images, pass the encoded bytes as a `MediaAttachment` and name it by position with a `media://N` URL; the engine handles decoding and preprocessing, and nothing is base64-encoded. A `data:` URL also works.
 
 ```python
-import base64
 from io import BytesIO
 from PIL import Image
 
 img = Image.open("photo.jpg")
 buf = BytesIO()
 img.save(buf, format="PNG")
-b64 = base64.b64encode(buf.getvalue()).decode("ascii")
 
-messages = [{
-    "role": "user",
-    "content": [
-        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
-        {"type": "text", "text": "Describe this image."},
+request = t.ChatCompletionRequest(
+    model="default",
+    messages=[
+        t.Message(
+            role="user",
+            content=[
+                {"type": "image_url", "image_url": {"url": "media://0"}},
+                {"type": "text", "text": "Describe this image."},
+            ],
+        )
     ],
-}]
+)
+response = engine.chat(request, media=[ir.MediaAttachment(buf.getvalue(), "image/png")])
 ```
 
 ## Mixing modalities in one request
@@ -174,14 +182,16 @@ messages = [{
 Any combination the model supports works in a single message; order matters:
 
 ```python
-messages = [{
-    "role": "user",
-    "content": [
-        {"type": "image_url", "image_url": {"url": "file:///chart.png"}},
-        {"type": "audio_url", "audio_url": {"url": "file:///commentary.wav"}},
-        {"type": "text", "text": "Does the commentary match what the chart shows?"},
-    ],
-}]
+messages = [
+    t.Message(
+        role="user",
+        content=[
+            {"type": "image_url", "image_url": {"url": "file:///chart.png"}},
+            {"type": "audio_url", "audio_url": {"url": "file:///commentary.wav"}},
+            {"type": "text", "text": "Does the commentary match what the chart shows?"},
+        ],
+    )
+]
 ```
 
 Which modalities a given model accepts is listed in the [supported models reference](/reference/supported-models/).

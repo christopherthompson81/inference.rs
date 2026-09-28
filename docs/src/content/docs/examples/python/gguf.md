@@ -19,26 +19,30 @@ Configuration and tokenizer assets are discovered automatically. Set `tok_model_
 override that choice or when the source cannot be identified.
 """
 
-from inference_rs import Runner, Which, ChatCompletionRequest
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.GGUF(
-        quantized_model_id="unsloth/Qwen3-0.6B-GGUF",
-        quantized_filename="Qwen3-0.6B-Q4_K_M.gguf",
+with ir.Engine(
+    t.EngineSpec(
+        model=t.ModelSelectedGGUF(
+            quantized_model_id="unsloth/Qwen3-0.6B-GGUF",
+            quantized_filename="Qwen3-0.6B-Q4_K_M.gguf",
+        )
     )
-)
-
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[
-            {"role": "user", "content": "Tell me a story about the Rust type system."}
-        ],
-        max_tokens=256,
+) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(
+                    role="user", content="Tell me a story about the Rust type system."
+                )
+            ],
+            max_tokens=256,
+        )
     )
-)
-print(res.choices[0].message.content)
-print(res.usage)
+    print(res.choices[0].message.content)
+    print(res.usage)
 ```
 
 Source: [`examples/python/gguf.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/gguf.py)

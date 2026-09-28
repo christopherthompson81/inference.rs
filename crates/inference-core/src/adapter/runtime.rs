@@ -40,6 +40,7 @@ static LORA_ASYNC_LOAD_GATE: OnceLock<Arc<tokio::sync::Semaphore>> = OnceLock::n
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(default)]
 /// Admission limits for a dynamic LoRA runtime.
 pub struct LoraRuntimeConfig {
     /// Maximum loaded aliases and resident generations, including retired generations in use.

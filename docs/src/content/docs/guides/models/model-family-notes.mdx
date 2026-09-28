@@ -48,10 +48,10 @@ curl http://localhost:1234/v1/chat/completions \
 <TabItem label="Python">
 
 ```python
-runner.send_chat_completion_request(
-    ChatCompletionRequest(
+engine.chat(
+    t.ChatCompletionRequest(
         model="default",
-        messages=[{"role": "user", "content": "How many rs are in blueberry?"}],
+        messages=[t.Message(role="user", content="How many rs are in blueberry?")],
         enable_thinking=False,
     )
 )
@@ -81,7 +81,7 @@ inference run --isq 4 --isq-organization moqe -m Qwen/Qwen3-30B-A3B
 
 MoQE also applies when generating UQFF with `inference quantize`. It does not rewrite an already-quantized GGUF or UQFF selected by `--quant`; those weights load as published.
 
-In the Python SDK, pass `organization=IsqOrganization.MoQE` inside `Which.Plain(...)` or `Which.MultimodalPlain(...)`. Expect small output differences between quantization levels: router decisions are sensitive to numerical noise.
+In the Python SDK, pass `organization=t.IsqOrganization.MOQE` inside `t.ModelSelectedPlain(...)` or `t.ModelSelectedMultimodalPlain(...)`, with ISQ set through `t.RuntimeSpec(isq=...)`. Expect small output differences between quantization levels: router decisions are sensitive to numerical noise.
 
 ## MLA models (DeepSeek V2/V3, GLM-4.7-Flash)
 
@@ -174,7 +174,7 @@ The same slice selection is available on every surface:
 
 - CLI: `--matformer-config-path` / `--matformer-slice-name` on `run`, `serve`, and `bench`.
 - TOML configs: `matformer_config_path` / `matformer_slice_name`.
-- Python: `matformer_config_path` / `matformer_slice_name` on the `Which` selectors.
+- Python: `matformer_config_path` / `matformer_slice_name` on `t.ModelSelectedMultimodalPlain` and the other model selectors that carry them.
 - Rust SDK: `with_matformer_config_path` / `with_matformer_slice_name` on the model builders.
 
 Use the full configuration for quality and smaller slices for constrained devices.

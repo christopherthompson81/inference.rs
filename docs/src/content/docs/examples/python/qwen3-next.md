@@ -12,33 +12,35 @@ Runnable Python SDK example `qwen3_next`.
 <!-- needs-header -->
 
 ```python
-from inference_rs import Runner, Which, ChatCompletionRequest, Architecture
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.Plain(
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(
         model_id="Qwen/Qwen3-Coder-Next",
-        arch=Architecture.Qwen3Next,
+        arch=t.NormalLoaderType.QWEN3NEXT,
     ),
-    in_situ_quant="Q4K",
+    runtime=t.RuntimeSpec(isq="Q4K"),
 )
 
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[
-            {
-                "role": "user",
-                "content": "Write a Python function to compute fibonacci numbers.",
-            }
-        ],
-        max_tokens=256,
-        presence_penalty=1.0,
-        top_p=0.1,
-        temperature=0.1,
+with ir.Engine(spec) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(
+                    role="user",
+                    content="Write a Python function to compute fibonacci numbers.",
+                )
+            ],
+            max_tokens=256,
+            presence_penalty=1.0,
+            top_p=0.1,
+            temperature=0.1,
+        )
     )
-)
-print(res.choices[0].message.content)
-print(res.usage)
+    print(res.choices[0].message.content)
+    print(res.usage)
 ```
 
 Source: [`examples/python/qwen3_next.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/qwen3_next.py)

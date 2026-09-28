@@ -42,6 +42,7 @@ pub enum ModelSelected {
 
         /// Model data type. Defaults to `auto`.
         #[serde(default = "default_model_dtype")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
 
         /// Path to a topology YAML file.
@@ -71,10 +72,12 @@ pub enum ModelSelected {
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
         #[serde(default = "default_max_seq_len")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_seq_len))]
         max_seq_len: usize,
 
         /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
         #[serde(default = "default_max_batch_size")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_batch_size))]
         max_batch_size: usize,
 
         /// Maximum prompt number of images to expect for this model. This affects automatic device mapping but is not a hard limit.
@@ -113,6 +116,7 @@ pub enum ModelSelected {
 
         /// Model data type. Defaults to `auto`.
         #[serde(default = "default_model_dtype")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
 
         /// Path to a topology YAML file.
@@ -147,10 +151,12 @@ pub enum ModelSelected {
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
         #[serde(default = "default_max_seq_len")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_seq_len))]
         max_seq_len: usize,
 
         /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
         #[serde(default = "default_max_batch_size")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_batch_size))]
         max_batch_size: usize,
 
         /// Cache path for Hugging Face models downloaded locally
@@ -190,6 +196,8 @@ pub enum ModelSelected {
         arch: Option<NormalLoaderType>,
 
         /// Model data type. Defaults to `auto`.
+        #[serde(default = "default_model_dtype")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
 
         /// Path to a topology YAML file.
@@ -203,9 +211,13 @@ pub enum ModelSelected {
         from_uqff: Option<String>,
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_seq_len")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_seq_len))]
         max_seq_len: usize,
 
         /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_batch_size")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_batch_size))]
         max_batch_size: usize,
 
         /// Cache path for Hugging Face models downloaded locally
@@ -226,15 +238,19 @@ pub enum ModelSelected {
         tokenizer_json: Option<String>,
 
         /// LoRA adapters to preload, each formatted as ALIAS=SOURCE.
+        #[serde(default)]
         adapters: Vec<LoraAdapterSpec>,
 
         /// Dynamic LoRA runtime capacity and rank limits.
+        #[serde(default)]
         runtime_config: LoraRuntimeConfig,
 
         /// The architecture of the model.
         arch: Option<NormalLoaderType>,
 
         /// Model data type. Defaults to `auto`.
+        #[serde(default = "default_model_dtype")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
 
         /// Path to a topology YAML file.
@@ -266,9 +282,13 @@ pub enum ModelSelected {
         max_edge: Option<u32>,
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_seq_len")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_seq_len))]
         max_seq_len: usize,
 
         /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_batch_size")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_batch_size))]
         max_batch_size: usize,
 
         /// Maximum prompt number of images to expect for automatic device mapping.
@@ -323,6 +343,8 @@ pub enum ModelSelected {
         lora_runtime_config: Option<LoraRuntimeConfig>,
 
         /// Model data type. Defaults to `auto`.
+        #[serde(default = "default_model_dtype")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
 
         /// Path to a topology YAML file.
@@ -348,9 +370,13 @@ pub enum ModelSelected {
         max_edge: Option<u32>,
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_seq_len")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_seq_len))]
         max_seq_len: usize,
 
         /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_batch_size")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_batch_size))]
         max_batch_size: usize,
 
         /// Maximum prompt number of images to expect for automatic device mapping.
@@ -402,15 +428,21 @@ pub enum ModelSelected {
         tgt_non_granular_index: Option<usize>,
 
         /// Model data type. Defaults to `auto`.
+        #[serde(default = "default_model_dtype")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
 
         /// Path to a topology YAML file.
         topology: Option<String>,
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_seq_len")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_seq_len))]
         max_seq_len: usize,
 
         /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_batch_size")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_batch_size))]
         max_batch_size: usize,
 
         /// Path to a local `tokenizer.json` file. If specified, it is used over any remote file.
@@ -473,15 +505,21 @@ pub enum ModelSelected {
         order: String,
 
         /// Model data type. Defaults to `auto`.
+        #[serde(default = "default_model_dtype")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
 
         /// Path to a topology YAML file.
         topology: Option<String>,
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_seq_len")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_seq_len))]
         max_seq_len: usize,
 
         /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_batch_size")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_batch_size))]
         max_batch_size: usize,
 
         /// Path to a local `tokenizer.json` file. If specified, it is used over any remote file.
@@ -541,15 +579,21 @@ pub enum ModelSelected {
         gqa: usize,
 
         /// Model data type. Defaults to `auto`.
+        #[serde(default = "default_model_dtype")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
 
         /// Path to a topology YAML file.
         topology: Option<String>,
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_seq_len")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_seq_len))]
         max_seq_len: usize,
 
         /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_batch_size")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_batch_size))]
         max_batch_size: usize,
     },
 
@@ -582,15 +626,21 @@ pub enum ModelSelected {
         gqa: usize,
 
         /// Model data type. Defaults to `auto`.
+        #[serde(default = "default_model_dtype")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
 
         /// Path to a topology YAML file.
         topology: Option<String>,
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_seq_len")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_seq_len))]
         max_seq_len: usize,
 
         /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_batch_size")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_batch_size))]
         max_batch_size: usize,
     },
 
@@ -619,15 +669,21 @@ pub enum ModelSelected {
         gqa: usize,
 
         /// Model data type. Defaults to `auto`.
+        #[serde(default = "default_model_dtype")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
 
         /// Path to a topology YAML file.
         topology: Option<String>,
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_seq_len")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_seq_len))]
         max_seq_len: usize,
 
         /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
+        #[serde(default = "default_max_batch_size")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_batch_size))]
         max_batch_size: usize,
     },
 
@@ -644,6 +700,7 @@ pub enum ModelSelected {
 
         /// Model data type. Defaults to `auto`.
         #[serde(default = "default_model_dtype")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
 
         /// Path to a topology YAML file.
@@ -670,19 +727,23 @@ pub enum ModelSelected {
 
         /// Maximum prompt sequence length to expect for this model. This affects automatic device mapping but is not a hard limit.
         #[serde(default = "default_max_seq_len")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_seq_len))]
         max_seq_len: usize,
 
         /// Maximum prompt batch size to expect for this model. This affects automatic device mapping but is not a hard limit.
         #[serde(default = "default_max_batch_size")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_batch_size))]
         max_batch_size: usize,
 
         /// Maximum prompt number of images to expect for this model. This affects automatic device mapping but is not a hard limit.
         #[serde(default = "default_max_num_images")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_num_images))]
         max_num_images: usize,
 
         /// Maximum expected image size will have this edge length on both edges.
         /// This affects automatic device mapping but is not a hard limit.
         #[serde(default = "default_max_image_length")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_max_image_length))]
         max_image_length: usize,
 
         /// Cache path for Hugging Face models downloaded locally
@@ -709,6 +770,8 @@ pub enum ModelSelected {
         arch: DiffusionLoaderType,
 
         /// Model data type. Defaults to `auto`.
+        #[serde(default = "default_model_dtype")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
     },
 
@@ -724,6 +787,8 @@ pub enum ModelSelected {
         arch: SpeechLoaderType,
 
         /// Model data type. Defaults to `auto`.
+        #[serde(default = "default_model_dtype")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
     },
 
@@ -751,6 +816,7 @@ pub enum ModelSelected {
 
         /// Model data type. Defaults to `auto`.
         #[serde(default = "default_model_dtype")]
+        #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
 
         /// Path to a topology YAML file.

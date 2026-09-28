@@ -10,216 +10,180 @@ sidebar:
 Example demonstrating multi-model usage with inference.rs Python bindings.
 
 This example shows how to:
-1. Load a model using Runner
+1. Load a model using Engine
 2. List available models
-3. Use model_id parameter to target specific models
-4. Manage default model selection
+3. Use the request's model field to target specific models
+4. Check model status
 5. Model loading/unloading operations
 
 Models used:
-- Multimodal: google/gemma-4-E4B-it (MultimodalArchitecture.Gemma4)
-- Text: Qwen/Qwen3-4B (Architecture.Qwen3)
+- Multimodal: google/gemma-4-E4B-it (t.MultimodalLoaderType.GEMMA4)
+- Text: Qwen/Qwen3-4B (t.NormalLoaderType.QWEN3)
 
 ```python
 """
 Example demonstrating multi-model usage with inference.rs Python bindings.
 
 This example shows how to:
-1. Load a model using Runner
+1. Load a model using Engine
 2. List available models
-3. Use model_id parameter to target specific models
-4. Manage default model selection
+3. Use the request's model field to target specific models
+4. Check model status
 5. Model loading/unloading operations
 
 Models used:
-- Multimodal: google/gemma-4-E4B-it (MultimodalArchitecture.Gemma4)
-- Text: Qwen/Qwen3-4B (Architecture.Qwen3)
+- Multimodal: google/gemma-4-E4B-it (t.MultimodalLoaderType.GEMMA4)
+- Text: Qwen/Qwen3-4B (t.NormalLoaderType.QWEN3)
 """
 
-from inference_rs import (
-    Runner,
-    Which,
-    ChatCompletionRequest,
-    Architecture,
-    MultimodalArchitecture,
+import inference_rs as ir
+from inference_rs import types as t
+
+GEMMA_SPEC = t.EngineSpec(
+    model=t.ModelSelectedMultimodalPlain(
+        model_id="google/gemma-4-E4B-it",
+        arch=t.MultimodalLoaderType.GEMMA4,
+    ),
+    runtime=t.RuntimeSpec(isq="Q4K"),
+)
+
+QWEN_SPEC = t.EngineSpec(
+    model=t.ModelSelectedPlain(
+        model_id="Qwen/Qwen3-4B",
+        arch=t.NormalLoaderType.QWEN3,
+    ),
+    runtime=t.RuntimeSpec(isq="Q4K"),
 )
 
 
-# Example 1: Using Runner with model_id parameter for multi-model operations
-def example_runner_with_model_id():
-    """Demonstrate using Runner with model_id in requests."""
+def list_model_ids(engine: ir.Engine):
+    return [model.id for model in engine.list_models().data if model.id != "default"]
 
-    # Create a runner with Gemma 4 E4B multimodal model
-    runner = Runner(
-        which=Which.MultimodalPlain(
-            model_id="google/gemma-4-E4B-it",
-            arch=MultimodalArchitecture.Gemma4,
-        ),
-        in_situ_quant="Q4K",
-    )
 
-    # List available models
-    model_ids = runner.list_models()
-    print("Available models:", model_ids)
+def list_models_with_status(engine: ir.Engine):
+    return [
+        (model.id, model.status)
+        for model in engine.list_models().data
+        if model.id != "default"
+    ]
 
-    # Get default model
-    default_model = runner.get_default_model_id()
-    print(f"Default model: {default_model}")
 
-    # Send request with specific model_id
-    messages = [{"role": "user", "content": "Hello, how are you?"}]
-    request = ChatCompletionRequest(messages=messages, model="default")
+def is_model_loaded(engine: ir.Engine, model_id: str) -> bool:
+    return engine.model_status(model_id).status == t.ModelStatus.LOADED
 
-    if model_ids:
-        # Request to specific model
-        response = runner.send_chat_completion_request(
-            request=request, model_id=model_ids[0]
-        )
-        print(f"Response from {model_ids[0]}:", response.choices[0].message.content)
 
-        # Request without model_id (uses default)
-        response = runner.send_chat_completion_request(request=request)
-        print("Response from default model:", response.choices[0].message.content)
+# Example 1: Using Engine with the model field for multi-model operations
+def example_engine_with_model_id():
+    """Demonstrate targeting a model by id in requests."""
+
+    # Create an engine with Gemma 4 E4B multimodal model
+    with ir.Engine(GEMMA_SPEC) as engine:
+        # List available models
+        model_ids = list_model_ids(engine)
+        print("Available models:", model_ids)
+
+        messages = [t.Message(role="user", content="Hello, how are you?")]
+
+        if model_ids:
+            # Request to specific model
+            response = engine.chat(
+                t.ChatCompletionRequest(messages=messages, model=model_ids[0])
+            )
+            print(f"Response from {model_ids[0]}:", response.choices[0].message.content)
+
+            # Request to "default" (uses default)
+            response = engine.chat(
+                t.ChatCompletionRequest(messages=messages, model="default")
+            )
+            print("Response from default model:", response.choices[0].message.content)
 
 
 # Example 2: Model management operations
 def example_model_management():
     """Demonstrate model management operations."""
 
-    runner = Runner(
-        which=Which.Plain(
-            model_id="Qwen/Qwen3-4B",
-            arch=Architecture.Qwen3,
-        ),
-        in_situ_quant="Q4K",
-    )
+    with ir.Engine(QWEN_SPEC) as engine:
+        # List models with their status
+        print("Initial models with status:", list_models_with_status(engine))
 
-    # List models with their status
-    print("Initial models with status:", runner.list_models_with_status())
-
-    # Get default model
-    current_default = runner.get_default_model_id()
-    print(f"Current default model: {current_default}")
-
-    # Check if a model is loaded
-    model_ids = runner.list_models()
-    if model_ids:
-        is_loaded = runner.is_model_loaded(model_ids[0])
-        print(f"Is {model_ids[0]} loaded? {is_loaded}")
-
-    # In a multi-model setup, you could change the default
-    if model_ids and len(model_ids) > 1:
-        runner.set_default_model_id(model_ids[1])
-        print(f"Changed default model to: {model_ids[1]}")
+        # Check if a model is loaded
+        model_ids = list_model_ids(engine)
+        if model_ids:
+            is_loaded = is_model_loaded(engine, model_ids[0])
+            print(f"Is {model_ids[0]} loaded? {is_loaded}")
 
 
 # Example 3: Model unloading and reloading
 def example_unload_reload():
     """Demonstrate model unloading and reloading."""
 
-    runner = Runner(
-        which=Which.MultimodalPlain(
-            model_id="google/gemma-4-E4B-it",
-            arch=MultimodalArchitecture.Gemma4,
-        ),
-        in_situ_quant="Q4K",
-    )
+    with ir.Engine(GEMMA_SPEC) as engine:
+        model_ids = list_model_ids(engine)
+        if not model_ids:
+            print("No models loaded")
+            return
 
-    model_ids = runner.list_models()
-    if not model_ids:
-        print("No models loaded")
-        return
+        model_id = model_ids[0]
+        print(f"Initial status: {list_models_with_status(engine)}")
 
-    model_id = model_ids[0]
-    print(f"Initial status: {runner.list_models_with_status()}")
+        # Unload the model to free memory
+        # Note: This preserves the model configuration for later reload
+        print(f"Unloading model: {model_id}")
+        engine.unload_model(model_id)
 
-    # Unload the model to free memory
-    # Note: This preserves the model configuration for later reload
-    print(f"Unloading model: {model_id}")
-    runner.unload_model(model_id)
+        # Check status after unload
+        print(f"Status after unload: {list_models_with_status(engine)}")
+        print(f"Is {model_id} loaded? {is_model_loaded(engine, model_id)}")
 
-    # Check status after unload
-    print(f"Status after unload: {runner.list_models_with_status()}")
-    print(f"Is {model_id} loaded? {runner.is_model_loaded(model_id)}")
+        # Reload the model when needed
+        print(f"Reloading model: {model_id}")
+        engine.reload_model(model_id)
 
-    # Reload the model when needed
-    print(f"Reloading model: {model_id}")
-    runner.reload_model(model_id)
-
-    # Check status after reload
-    print(f"Status after reload: {runner.list_models_with_status()}")
+        # Check status after reload
+        print(f"Status after reload: {list_models_with_status(engine)}")
 
 
 # Example 4: Streaming with specific models
 def example_streaming_with_models():
     """Demonstrate streaming responses from specific models."""
 
-    runner = Runner(
-        which=Which.Plain(
-            model_id="Qwen/Qwen3-4B",
-            arch=Architecture.Qwen3,
-        ),
-        in_situ_quant="Q4K",
-    )
+    with ir.Engine(QWEN_SPEC) as engine:
+        messages = [t.Message(role="user", content="Tell me a short story")]
 
-    messages = [{"role": "user", "content": "Tell me a short story"}]
-    request = ChatCompletionRequest(messages=messages, model="default", stream=True)
+        model_ids = list_model_ids(engine)
+        if model_ids:
+            # Stream from specific model
+            request = t.ChatCompletionRequest(
+                messages=messages, model=model_ids[0], stream=True
+            )
 
-    model_ids = runner.list_models()
-    if model_ids:
-        # Stream from specific model
-        stream = runner.send_chat_completion_request(
-            request=request, model_id=model_ids[0]
-        )
-
-        print(f"Streaming from {model_ids[0]}:")
-        for chunk in stream:
-            if chunk.choices[0].delta.content:
-                print(chunk.choices[0].delta.content, end="", flush=True)
-        print()  # New line after streaming
+            print(f"Streaming from {model_ids[0]}:")
+            with engine.chat_stream(request) as stream:
+                for event in stream:
+                    if event.name == "error":
+                        raise RuntimeError(event.data)
+                    if event.name == "chunk":
+                        print(event.data.choices[0].delta.content or "", end="", flush=True)
+            print()  # New line after streaming
 
 
-# Example 5: Multi-model setup with multimodal and text models
+# Example 5: A multimodal model answering a text request
 def example_multi_model_setup():
-    """
-    Example showing a real multi-model setup with multimodal and text models.
-
-    This example loads:
-    - Multimodal model: google/gemma-4-E4B-it
-    - Text model: Qwen/Qwen3-4B
-    """
+    """Load a multimodal model (google/gemma-4-E4B-it) and send it a text request."""
     # Load a multimodal model first
-    runner = Runner(
-        which=Which.MultimodalPlain(
-            model_id="google/gemma-4-E4B-it",
-            arch=MultimodalArchitecture.Gemma4,
-        ),
-        in_situ_quant="Q4K",
-    )
+    with ir.Engine(GEMMA_SPEC) as engine:
+        print("Initial models:", list_model_ids(engine))
 
-    print("Initial models:", runner.list_models())
-
-    # Add a text model dynamically (if add_model is available)
-    # runner.add_model(
-    #     model_id="qwen",
-    #     which=Which.Plain(
-    #         model_id="Qwen/Qwen3-4B",
-    #         arch=Architecture.Qwen3,
-    #     ),
-    #     in_situ_quant="Q4K",
-    # )
-    # print("After add_model:", runner.list_models())
-
-    # Send a request to gemma
-    messages = [{"role": "user", "content": "What is 2 + 2?"}]
-    request = ChatCompletionRequest(messages=messages, model="default")
-    response = runner.send_chat_completion_request(request)
-    print(f"Gemma response: {response.choices[0].message.content}")
+        # Send a request to gemma
+        messages = [t.Message(role="user", content="What is 2 + 2?")]
+        request = t.ChatCompletionRequest(messages=messages, model="default")
+        response = engine.chat(request)
+        print(f"Gemma response: {response.choices[0].message.content}")
 
 
 if __name__ == "__main__":
-    print("=== Multi-Model Example 1: Runner with model_id ===")
-    example_runner_with_model_id()
+    print("=== Multi-Model Example 1: Engine with model_id ===")
+    example_engine_with_model_id()
     print("\n" + "=" * 50 + "\n")
 
     print("=== Multi-Model Example 2: Model Management ===")
@@ -234,7 +198,7 @@ if __name__ == "__main__":
     example_streaming_with_models()
     print("\n" + "=" * 50 + "\n")
 
-    print("=== Multi-Model Example 5: Multi-Model Setup ===")
+    print("=== Multi-Model Example 5: Multimodal Model ===")
     example_multi_model_setup()
 ```
 

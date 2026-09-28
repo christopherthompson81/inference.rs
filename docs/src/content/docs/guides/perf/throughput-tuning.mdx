@@ -36,9 +36,14 @@ inference serve -m Qwen/Qwen3-4B --max-seqs 64
 <TabItem label="Python">
 
 ```python
-from inference_rs import Runner, Which
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(which=Which.Plain(model_id="Qwen/Qwen3-4B"), max_seqs=64)
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B"),
+    runtime=t.RuntimeSpec(max_seqs=64),
+)
+engine = ir.Engine(spec)
 ```
 
 </TabItem>
@@ -54,12 +59,12 @@ let model = inference::ModelBuilder::new("Qwen/Qwen3-4B")
 </TabItem>
 </Tabs>
 
-The default differs by surface:
+The default is the same on every surface:
 
 | Surface | Flag / argument | Default |
 |---|---|---|
 | CLI | `--max-seqs` | 32 |
-| Python | `Runner(max_seqs=...)` | 16 |
+| Python | `t.RuntimeSpec(max_seqs=...)` | 32 |
 | Rust | `.with_max_num_seqs(...)` | 32 |
 
 More running sequences need more KV cache. With paged attention, size the block pool to match: one of `--pa-context-len`, `--pa-memory-mb`, or `--pa-memory-fraction` (default: 90% of available VRAM). If the pool runs out of blocks mid-generation, the scheduler preempts a running sequence, frees its blocks, and requeues it, which costs recomputation.
@@ -104,13 +109,14 @@ inference serve -m Qwen/Qwen3-4B --prefix-cache-n 32
 <TabItem label="Python">
 
 ```python
-from inference_rs import Runner, Which
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.Plain(model_id="Qwen/Qwen3-4B"),
-    prefix_cache_n=32,
-    no_kv_cache=False,
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B"),
+    runtime=t.RuntimeSpec(prefix_cache_n=32, no_kv_cache=False),
 )
+engine = ir.Engine(spec)
 ```
 
 </TabItem>

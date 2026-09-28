@@ -1,25 +1,29 @@
-from inference_rs import Runner, Which, ChatCompletionRequest, Architecture
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.Plain(
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(
         model_id="microsoft/Phi-3.5-MoE-instruct",
-        arch=Architecture.Mistral,
-        organization="moqe",
+        arch=t.NormalLoaderType.PHI3_5MOE,
+        organization=t.IsqOrganization.MOQE,
     ),
-    in_situ_quant="Q4K",
+    runtime=t.RuntimeSpec(isq="Q4K"),
 )
 
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[
-            {"role": "user", "content": "Tell me a story about the Rust type system."}
-        ],
-        max_tokens=256,
-        presence_penalty=1.0,
-        top_p=0.1,
-        temperature=0.1,
+with ir.Engine(spec) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(
+                    role="user", content="Tell me a story about the Rust type system."
+                )
+            ],
+            max_tokens=256,
+            presence_penalty=1.0,
+            top_p=0.1,
+            temperature=0.1,
+        )
     )
-)
-print(res.choices[0].message.content)
-print(res.usage)
+    print(res.choices[0].message.content)
+    print(res.usage)

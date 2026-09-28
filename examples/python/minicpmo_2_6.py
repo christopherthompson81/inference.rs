@@ -1,39 +1,41 @@
-from inference_rs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
+import inference_rs as ir
+from inference_rs import types as t
 
 MODEL_ID = "openbmb/MiniCPM-o-2_6"
 
-runner = Runner(
-    which=Which.MultimodalPlain(
+spec = t.EngineSpec(
+    model=t.ModelSelectedMultimodalPlain(
         model_id=MODEL_ID,
-        arch=MultimodalArchitecture.MiniCpmO,
+        arch=t.MultimodalLoaderType.MINICPMO,
     ),
 )
 
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "https://www.nhmagazine.com/content/uploads/2019/05/mtwashingtonFranconia-2-19-18-108-Edit-Edit.jpg"
+with ir.Engine(spec) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(
+                    role="user",
+                    content=[
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "https://www.nhmagazine.com/content/uploads/2019/05/mtwashingtonFranconia-2-19-18-108-Edit-Edit.jpg"
+                            },
                         },
-                    },
-                    {
-                        "type": "text",
-                        "text": "What is shown in this image? Write a detailed response analyzing the scene.",
-                    },
-                ],
-            }
-        ],
-        max_tokens=256,
-        presence_penalty=1.0,
-        top_p=0.1,
-        temperature=0.1,
+                        {
+                            "type": "text",
+                            "text": "What is shown in this image? Write a detailed response analyzing the scene.",
+                        },
+                    ],
+                )
+            ],
+            max_tokens=256,
+            presence_penalty=1.0,
+            top_p=0.1,
+            temperature=0.1,
+        )
     )
-)
-print(res.choices[0].message.content)
-print(res.usage)
+    print(res.choices[0].message.content)
+    print(res.usage)

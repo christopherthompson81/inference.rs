@@ -1,39 +1,41 @@
-from inference_rs import Runner, Which, ChatCompletionRequest, MultimodalArchitecture
+import inference_rs as ir
+from inference_rs import types as t
 
 MODEL_ID = "Qwen/Qwen2-VL-2B-Instruct"
 
-runner = Runner(
-    which=Which.MultimodalPlain(
+spec = t.EngineSpec(
+    model=t.ModelSelectedMultimodalPlain(
         model_id=MODEL_ID,
-        arch=MultimodalArchitecture.Qwen2VL,
+        arch=t.MultimodalLoaderType.QWEN2VL,
     ),
 )
 
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "image_url",
-                        "image_url": {
-                            "url": "https://www.garden-treasures.com/cdn/shop/products/IMG_6245.jpg"
+with ir.Engine(spec) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(
+                    role="user",
+                    content=[
+                        {
+                            "type": "image_url",
+                            "image_url": {
+                                "url": "https://www.garden-treasures.com/cdn/shop/products/IMG_6245.jpg",
+                            },
                         },
-                    },
-                    {
-                        "type": "text",
-                        "text": "What type of flower is this? Give some fun facts.",
-                    },
-                ],
-            }
-        ],
-        max_tokens=256,
-        presence_penalty=1.0,
-        top_p=0.1,
-        temperature=0.1,
+                        {
+                            "type": "text",
+                            "text": "What type of flower is this? Give some fun facts.",
+                        },
+                    ],
+                )
+            ],
+            max_tokens=256,
+            presence_penalty=1.0,
+            top_p=0.1,
+            temperature=0.1,
+        )
     )
-)
-print(res.choices[0].message.content)
-print(res.usage)
+    print(res.choices[0].message.content)
+    print(res.usage)

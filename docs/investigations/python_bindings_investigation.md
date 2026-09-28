@@ -143,3 +143,44 @@ Review fixes (Run 3):
   to `type` (it had made `ModelSelectedSpeech.arch`, an enum with one member today, silently optional).
 - Tests: a misspelled or padded external tag stays as it came leniently and fits nothing strictly; loader enum
   values serialize as the engine's names. 35 Python tests pass.
+
+## Run 4 - 2026-09-27 (evening)
+
+Question: can every pyo3 example and Python docs snippet move to the ctypes package, and what does the engine spec lack?
+
+Ported 64 examples, both notebooks and 30 guide pages (four agents on examples, three on guides, each validating its
+snippets by building and serializing every spec and request through `ir.to_json` against a stub engine; no model run).
+The Python reference is now rendered from the package (`docs/scripts/render_python_api.py`, grouped into engine,
+spec, chat, responses, anthropic, management and layout pages) instead of the pyo3 `.pyi`.
+
+Findings:
+- Only `Plain` and `Run` gave `dtype`, `max_seq_len` and `max_batch_size` serde defaults; every other `ModelSelected`
+  variant required them, so a GGUF or X-LoRA spec failed to construct without spelling out AUTO/4096/1. All variants
+  default them now, as do Lora's `adapters` and `runtime_config` and `LoraRuntimeConfig`'s fields.
+- No equivalent in the engine spec (dropped, docs say so): paged-attention pool/block size, `num_device_layers`,
+  MTP speculative decoding, `enable_search` (reranking), default-model get/set, session export/import, the approval
+  callback (approvals now arrive as stream events answered by `resolve_approval`).
+- Still on pyo3 until the spec grows them: AnyMoE (3 examples), MCP client, code execution (2), shell (2), online
+  calibration. `tests/test_examples.py` pins that list and fails once one of them is ported without leaving it.
+- Two old examples named the wrong architecture (Mistral-Small-3.1 as Gemma3, Phi-3.5-MoE as Mistral); fixed.
+
+Review fixes (Run 4), from running every example and guide snippet against a stub engine that sent each spec to the
+real `inference_engine_load` and each request to a tiny engine:
+- Seven examples and both notebooks sent `model="<nickname>"` (pyo3 ignored it); the engine answers `model_not_found`
+  for anything but `default` or the real id. `test_multi_model.py` unloaded `default`, which the model calls reject.
+- Stream loops read `event.data.choices` on every event, so an `error` event raised `AttributeError` over the real
+  error; they check `event.name` now.
+- The schema carried no default for serde `default = "fn"` fields; `schema(default = fn)` puts them in, and the type
+  generator now writes a schema's scalar or enum default as the field's Python default (`max_seq_len: int | None =
+  4096`), so the reference shows it and a round trip writes it out.
+- `inference-ffi` only had `cuda`/`metal`; it now passes through every accelerator and functional feature pyo3 had.
+- Stale prose: README, the from-source page and the NVFP4 note still gave pip/maturin steps, and the reference said
+  enum members have no `.value`.
+
+`tests/test_examples.py` resolves names through every import form (`import inference_rs.types as t`, `from
+inference_rs.types import X`, `ir.types.X`), follows engines bound by `with`, assignment or annotation to check method
+names, checks every `t.X(...)` keyword construction, and covers the Python snippets of every guide page that imports
+the package (27 pages, 102 sources). It does not check attributes of responses or positional constructions.
+
+Next: engine spec fields for AnyMoE, MCP, code execution/shell and calibration so the last nine examples port; then
+wheels bundling `libinference_ffi`; then removing the pyo3 crate.

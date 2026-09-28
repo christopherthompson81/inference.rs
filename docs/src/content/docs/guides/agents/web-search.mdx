@@ -51,13 +51,21 @@ Responses requests use OpenAI hosted-tool syntax instead:
 </TabItem>
 <TabItem label="Python">
 
-```python
-from inference_rs import ChatCompletionRequest, Runner, Which
+The Python package has no engine-level search switch: a request with `web_search_options` gets the tool.
 
-runner = Runner(
-    which=Which.Plain(model_id="Qwen/Qwen3-4B"),
-    enable_search=True,
-)
+```python
+import inference_rs as ir
+from inference_rs import types as t
+
+with ir.Engine(t.EngineSpec(model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B"))) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[t.Message(role="user", content="What happened at CES this year?")],
+            web_search_options=t.WebSearchOptions(search_context_size=t.SearchContextSize.MEDIUM),
+        )
+    )
+    print(res.choices[0].message.content)
 ```
 
 </TabItem>
@@ -84,7 +92,7 @@ The built-in search and extraction tools use [strict tool calling](/guides/agent
 
 The neural reranker is opt-in. When a search embedding model is configured, retrieved results pass through a BM25 keyword pre-filter and then an embedding-based reranker before reaching the model. With no embedding model, results go straight to the model unranked.
 
-In the SDKs, enabling search already loads the reranker (EmbeddingGemma by default). On the CLI it is off until you pass `--search-embedding-model`:
+In the Rust SDK, enabling search already loads the reranker (EmbeddingGemma by default). The Python package's engine spec has no search embedding model, so its results are unranked. On the CLI the reranker is off until you pass `--search-embedding-model`:
 
 ```bash
 inference serve --enable-search \
@@ -111,25 +119,33 @@ Fields on `WebSearchOptions`:
 
 ## Custom search backends
 
-The Python and Rust SDKs accept a `search_callback` that replaces the default web search. The callback receives a query string and returns search results. Used for searching internal corpora.
+The Python and Rust SDKs accept a search callback that replaces the default web search. The callback receives a query string and returns search results. Used for searching internal corpora.
 
 <Tabs>
 <TabItem label="Python">
 
-The callback returns a list of dicts with keys `title`, `description`, `url`, and `content`:
+Pass it as `ir.HostCallbacks(search=...)`. It returns a JSON array string of objects with keys `title`, `description`, `url`, and `content`:
 
 ```python
-def my_search(query: str) -> list[dict]:
-    return [
-        {"title": "...", "description": "...", "url": "internal://...", "content": "..."},
-    ]
+import json
 
-runner = Runner(
-    which=Which.Plain(model_id="Qwen/Qwen3-4B"),
-    enable_search=True,
-    search_callback=my_search,
+import inference_rs as ir
+from inference_rs import types as t
+
+
+def my_search(query: str) -> str:
+    return json.dumps([
+        {"title": "...", "description": "...", "url": "internal://...", "content": "..."},
+    ])
+
+
+engine = ir.Engine(
+    t.EngineSpec(model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B")),
+    ir.HostCallbacks(search=my_search),
 )
 ```
+
+Requests still opt in with `web_search_options`.
 
 </TabItem>
 <TabItem label="Rust">

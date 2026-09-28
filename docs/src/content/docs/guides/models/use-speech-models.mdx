@@ -51,32 +51,34 @@ curl http://localhost:1234/v1/chat/completions \
 <TabItem label="Python">
 
 ```python
-from inference_rs import ChatCompletionRequest, MultimodalArchitecture, Runner, Which
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.MultimodalPlain(
+spec = t.EngineSpec(
+    model=t.ModelSelectedMultimodalPlain(
         model_id="mistralai/Voxtral-Mini-4B-Realtime-2602",
-        arch=MultimodalArchitecture.Voxtral,
+        arch=t.MultimodalLoaderType.VOXTRAL,
     )
 )
 
-response = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[
-            {
-                "role": "user",
-                "content": [
-                    {"type": "audio_url", "audio_url": {"url": "file:///absolute/path/clip.wav"}},
-                    {"type": "text", "text": "Transcribe this audio."},
-                ],
-            }
-        ],
-        max_tokens=256,
-        temperature=0,
+with ir.Engine(spec) as engine:
+    response = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(
+                    role="user",
+                    content=[
+                        {"type": "audio_url", "audio_url": {"url": "file:///absolute/path/clip.wav"}},
+                        {"type": "text", "text": "Transcribe this audio."},
+                    ],
+                )
+            ],
+            max_tokens=256,
+            temperature=0,
+        )
     )
-)
-print(response.choices[0].message.content)
+    print(response.choices[0].message.content)
 ```
 
 </TabItem>
@@ -137,28 +139,27 @@ curl http://localhost:1234/v1/audio/speech \
 <TabItem label="Python">
 
 ```python
-import struct
-import wave
 from pathlib import Path
 
-from inference_rs import Runner, SpeechLoaderType, Which
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.Speech(
+spec = t.EngineSpec(
+    model=t.ModelSelectedSpeech(
         model_id="nari-labs/Dia-1.6B",
-        arch=SpeechLoaderType.Dia,
+        arch=t.SpeechLoaderType.DIA,
     )
 )
 
-response = runner.generate_audio("[S1] mistral r s can generate speech locally.")
+with ir.Engine(spec) as engine:
+    audio = engine.speech_generation(
+        t.SpeechGenerationRequest(
+            input="[S1] mistral r s can generate speech locally.",
+            response_format=t.AudioResponseFormat.WAV,
+        )
+    )
 
-output_path = Path("out.wav")
-pcm_ints = [int(max(-32768, min(32767, sample * 32767))) for sample in response.pcm]
-with wave.open(output_path, "wb") as wav:
-    wav.setnchannels(response.channels)
-    wav.setsampwidth(2)
-    wav.setframerate(response.rate)
-    wav.writeframes(b"".join(struct.pack("<h", sample) for sample in pcm_ints))
+Path("out.wav").write_bytes(audio.data)
 ```
 
 </TabItem>

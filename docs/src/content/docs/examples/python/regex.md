@@ -12,27 +12,27 @@ Runnable Python SDK example `regex`.
 <!-- needs-header -->
 
 ```python
-from inference_rs import Runner, Which, ChatCompletionRequest
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.Plain(
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(
         model_id="microsoft/Phi-3.5-mini-instruct",
     ),
-    num_device_layers=["500"],
 )
 
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[{"role": "user", "content": "Tell me a short joke."}],
-        max_tokens=30,
-        temperature=0.1,
-        grammar_type="regex",
-        grammar=r"[0-9A-Z ]+",
+with ir.Engine(spec) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[t.Message(role="user", content="Tell me a short joke.")],
+            max_tokens=30,
+            temperature=0.1,
+            grammar=t.GrammarRegex(value=r"[0-9A-Z ]+"),
+        )
     )
-)
-print(res.choices[0].message.content)
-print(res.usage)
+    print(res.choices[0].message.content)
+    print(res.usage)
 ```
 
 Source: [`examples/python/regex.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/regex.py)

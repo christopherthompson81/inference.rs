@@ -15,29 +15,31 @@ Example of using IBM Granite 4.0 model with inference.rs
 Example of using IBM Granite 4.0 model with inference.rs
 """
 
-from inference_rs import Runner, Which, ChatCompletionRequest, Architecture
+import inference_rs as ir
+from inference_rs import types as t
 
-# Create a Granite model runner
-runner = Runner(
-    which=Which.Plain(
-        model_id="ibm-granite/granite-4.0-tiny-preview",
-        arch=Architecture.GraniteMoeHybrid,
-    ),
-)
-
-# Send a chat completion request
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="granite",
-        messages=[{"role": "user", "content": "What is the capital of France?"}],
-        max_tokens=256,
-        temperature=0.7,
+# Load a Granite model
+with ir.Engine(
+    t.EngineSpec(
+        model=t.ModelSelectedPlain(
+            model_id="ibm-granite/granite-4.0-tiny-preview",
+            arch=t.NormalLoaderType.GRANITEMOEHYBRID,
+        ),
     )
-)
+) as engine:
+    # Send a chat completion request
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[t.Message(role="user", content="What is the capital of France?")],
+            max_tokens=256,
+            temperature=0.7,
+        )
+    )
 
-# Print the response
-print(res.choices[0].message.content)
-print(f"\nUsage: {res.usage}")
+    # Print the response
+    print(res.choices[0].message.content)
+    print(f"\nUsage: {res.usage}")
 ```
 
 Source: [`examples/python/granite.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/granite.py)

@@ -12,13 +12,9 @@ Runnable Python SDK example `custom_search`.
 <!-- needs-header -->
 
 ```python
-from inference_rs import (
-    Runner,
-    Which,
-    ChatCompletionRequest,
-    Architecture,
-    WebSearchOptions,
-)
+import inference_rs as ir
+from inference_rs import types as t
+import json
 import os
 
 
@@ -41,29 +37,31 @@ def local_search(query: str):
                     }
                 )
     results.sort(key=lambda r: r["title"], reverse=True)
-    return results
+    return json.dumps(results)
 
 
-runner = Runner(
-    which=Which.Plain(
-        model_id="NousResearch/Hermes-3-Llama-3.1-8B",
-        arch=Architecture.Llama,
-    ),
-    enable_search=True,
-    search_callback=local_search,
-)
-
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[{"role": "user", "content": "Where is Cargo.toml in this repo?"}],
-        max_tokens=64,
-        web_search_options=WebSearchOptions(
-            search_description="Local filesystem search"
+with ir.Engine(
+    t.EngineSpec(
+        model=t.ModelSelectedPlain(
+            model_id="NousResearch/Hermes-3-Llama-3.1-8B",
+            arch=t.NormalLoaderType.LLAMA,
         ),
+    ),
+    ir.HostCallbacks(search=local_search),
+) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(role="user", content="Where is Cargo.toml in this repo?")
+            ],
+            max_tokens=64,
+            web_search_options=t.WebSearchOptions(
+                search_description="Local filesystem search"
+            ),
+        )
     )
-)
-print(res.choices[0].message.content)
+    print(res.choices[0].message.content)
 ```
 
 Source: [`examples/python/custom_search.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/custom_search.py)

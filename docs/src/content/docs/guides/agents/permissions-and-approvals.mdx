@@ -93,46 +93,40 @@ The approval endpoint returns `{"status":"resolved"}`, `{"status":"queued"}`, or
 </TabItem>
 <TabItem label="Python">
 
-Set `agent_permission` and pass an `agent_approval_callback` on the request. Return `True` or `False` for simple callbacks, or return `AgentToolApprovalDecision` for deny messages and `remember_for_session`.
-
-The callback receives an `AgentToolApproval` with these fields:
-
-- `approval_id`, `session_id`, `round`
-- `tool`: stable tool metadata
-- `arguments_json`
-- `code`: convenience field when the action is Python code
+As over HTTP, `ask` needs a streaming request. Set `agent_permission` on the request (or `t.AgenticSpec(agent_permission=...)` on the engine spec), watch `engine.chat_stream(...)` for `agentic_tool_approval_required` events, and answer each with `engine.resolve_approval(approval_id, t.ApprovalDecisionRequest(...))`. The event's `data` is the parsed JSON payload shown in the HTTP tab.
 
 ```python
-from inference_rs import (
-    AgentPermission,
-    AgentToolApprovalDecision,
-    AgentToolKind,
-    ChatCompletionRequest,
-)
+import inference_rs as ir
+from inference_rs import types as t
 
-def approve(call):
-    print(call.tool.label)
-    if call.tool.kind == AgentToolKind.CodeExecution:
-        print(call.code or "")
-    else:
-        print(call.arguments_json)
-    answer = input("Approve? [y/N/a] ").strip().lower()
-    if answer == "a":
-        return AgentToolApprovalDecision.approve(remember_for_session=True)
-    if answer in {"y", "yes"}:
-        return AgentToolApprovalDecision.approve()
-    return AgentToolApprovalDecision.deny("The user denied this action.")
-
-request = ChatCompletionRequest(
-    model="default",
-    messages=[{"role": "user", "content": "Plot sin(x)."}],
-    enable_code_execution=True,
-    agent_permission=AgentPermission.Ask,
-    agent_approval_callback=approve,
-)
+with ir.Engine(t.EngineSpec(model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B"))) as engine:
+    request = t.ChatCompletionRequest(
+        model="default",
+        messages=[t.Message(role="user", content="Search the web for the latest Rust release.")],
+        web_search_options=t.WebSearchOptions(),
+        agent_permission=t.AgentPermission.ASK,
+        session_id="analysis-demo",
+        stream=True,
+    )
+    with engine.chat_stream(request) as stream:
+        for event in stream:
+            if event.name == "agentic_tool_approval_required":
+                print(event.data["tool"]["label"], event.data["arguments"])
+                answer = input("Approve? [y/N/a] ").strip().lower()
+                if answer in {"y", "yes", "a"}:
+                    decision = t.ApprovalDecisionRequest(
+                        decision=t.ApprovalDecision.APPROVE,
+                        remember_for_session=answer == "a",
+                    )
+                else:
+                    decision = t.ApprovalDecisionRequest(
+                        decision=t.ApprovalDecision.DENY,
+                        message="The user denied this action.",
+                    )
+                engine.resolve_approval(event.data["approval_id"], decision)
+            elif event.name == "chunk":
+                print(event.data.choices[0].delta.content or "", end="", flush=True)
 ```
-
-[Full example](/examples/python/code-execution-approval/)
 
 </TabItem>
 <TabItem label="Rust">

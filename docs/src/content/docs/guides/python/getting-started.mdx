@@ -1,112 +1,100 @@
 ---
 title: Python SDK getting started
-description: Install the inference Python package, load a model in-process, send a chat request, and stream tokens.
+description: Build the engine library, install the inference_rs package, load a model in-process, send a chat request, and stream tokens.
 ---
 
-The Python SDK loads the model in-process and wraps the same Rust engine that backs the `inference` binary.
+The Python SDK loads the model in-process. It is a pure-Python package over `libinference_ffi`, the C ABI of the same Rust engine that backs the `inference` binary.
 
 ```python
-from inference_rs import Runner, Which, ChatCompletionRequest
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.Plain(model_id="Qwen/Qwen3-4B"),
-    in_situ_quant="4",
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B"),
+    runtime=t.RuntimeSpec(isq="4"),
 )
 
-response = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[
-            {"role": "user", "content": "In one sentence, what is Rust known for?"}
-        ],
-        max_tokens=256,
+with ir.Engine(spec) as engine:
+    response = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[
+                t.Message(role="user", content="In one sentence, what is Rust known for?")
+            ],
+            max_tokens=256,
+        )
     )
-)
-
-print(response.choices[0].message.content)
+    print(response.choices[0].message.content)
 ```
 
 The first run downloads the weights into the Hugging Face cache.
 
 ## Installing
 
-`pip install inference-rs` covers CPU (Linux x86_64/aarch64, Windows) and Metal (macOS arm64) - one package; pip picks the wheel for your platform. Python 3.10 or newer.
+inference.rs does not publish wheels yet. Build the library from a checkout, then install the package. Python 3.10 or newer.
 
 ```bash
-pip install inference-rs
+cargo build --release -p inference-ffi
+pip install -e bindings/python
 ```
 
-### NVIDIA GPU (CUDA)
+Add `--features cuda` (NVIDIA) or `--features metal` (macOS) to the `cargo build` for GPU support; see [cargo features](/reference/cargo-features/) for the feature flags and [hardware support](/reference/hardware-support/) for what each backend covers.
 
-CUDA wheels are GitHub release assets because PyPI cannot select by GPU. Pick a wheel version from your driver CUDA level and compute capability:
-
-| Driver reports | Wheel suffix |
-|---|---|
-| CUDA 13.3+ on Hopper / `sm90` | `+cuda133.sm90` |
-| CUDA 13.2+ on Ampere/Ada / `sm80`, `sm86`, `sm89` | `+cuda132.sm{cc}` |
-| CUDA 13.2+ on Blackwell / `sm100`, `sm120`, `sm121` | `+cuda132.sm{cc}` |
-| CUDA 13.1+ on Blackwell / `sm100`, `sm120`, `sm121` | `+cuda131.sm{cc}` |
-| CUDA 13.0+ | `+cuda130.sm{cc}` |
-| CUDA 12.9+ on GB10 / `sm121` | `+cuda129.sm121` |
-| CUDA 12.8+ | `+cuda128.sm{cc}` |
-
-Install with `--find-links` pointed at the release. Replace `0.9.2` / `v0.9.2` with the release you want:
+The package needs no compiled extension; `ctypes` loads the library on first use. It looks in `INFERENCE_NATIVE_DIR` first, then in `target/release` and `target/debug` of the checkout the package sits in, then in the platform's own library search path. To use a library built elsewhere, point the variable at its directory:
 
 ```bash
-pip install "inference-rs==0.9.2+cuda128.sm89" \
-  --find-links https://github.com/EricLBuehler/mistral.rs/releases/expanded_assets/v0.9.2
+export INFERENCE_NATIVE_DIR=/path/to/dir/with/libinference_ffi
 ```
 
-Look up your GPU's compute capability in [hardware support](/reference/hardware-support/). CUDA wheels bundle the CUDA runtime but do not include cuTile. For cuTile acceleration, use a [cuTile-capable CLI binary](/quickstart/) and follow [cuTile setup](/developer/moe-backends/).
-
-All install paths expose the same `from inference_rs import ...` API.
+The package checks the library's ABI version when it loads it and refuses a mismatch, so rebuild the library after updating the checkout.
 
 ## The pieces
 
-[`Runner`](/reference/python/runner/) owns the loaded model. Construction loads the weights; reuse one `Runner` for the lifetime of the process to avoid reloading.
+[`Engine`](/reference/python/engine/) owns the loaded model. Construction loads the weights; reuse one engine for the lifetime of the process to avoid reloading. Close it, or use `with`, to release it.
 
-[`Which`](/reference/python/which/) selects the model loader. `Which.Plain(model_id="...")` is correct for standard text models. Other variants cover multimodal models (`Which.MultimodalPlain`), GGUF checkpoints (`Which.GGUF`), embeddings (`Which.Embedding`), and LoRA adapters (`Which.Lora`).
+[`EngineSpec`](/reference/python/spec/) says what to load and how to run it; it is the JSON form of the options `inference serve` takes. Its `model` is a `ModelSelected` variant. `t.ModelSelectedPlain(model_id="...")` is correct for standard text models. Other variants cover multimodal models (`t.ModelSelectedMultimodalPlain`), GGUF checkpoints (`t.ModelSelectedGGUF`), embeddings (`t.ModelSelectedEmbedding`), and LoRA adapters (`t.ModelSelectedLora`).
 
-`in_situ_quant="4"` is the equivalent of the CLI's `--isq 4`: it applies [ISQ (in-situ quantization)](/reference/quantization-types/), quantizing the weights to 4 bits at load time. Omit it for full precision.
+`runtime=t.RuntimeSpec(isq="4")` is the equivalent of the CLI's `--isq 4`: it applies [ISQ (in-situ quantization)](/reference/quantization-types/), quantizing the weights to 4 bits at load time. Omit it for full precision. `RuntimeSpec` also takes the device (`device="cuda:0"`), seed, chat template, and paged attention settings.
+
+Requests and responses are dataclasses from `inference_rs.types`, generated from the server's OpenAPI document, so they carry the OpenAI field names. Failures raise `ir.InferenceError`, whose `code` is the protocol's error code.
 
 Full example: [plain](/examples/python/plain/).
 
 ## Streaming tokens
 
-Set `stream=True` to receive an iterator of chunks instead of a single response:
+Set `stream=True` and call `chat_stream` to receive events as they are generated:
 
 ```python
-from inference_rs import Runner, Which, ChatCompletionRequest
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.Plain(model_id="Qwen/Qwen3-4B"),
-    in_situ_quant="4",
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B"),
+    runtime=t.RuntimeSpec(isq="4"),
 )
 
-stream = runner.send_chat_completion_request(
-    ChatCompletionRequest(
+with ir.Engine(spec) as engine:
+    request = t.ChatCompletionRequest(
         model="default",
-        messages=[{"role": "user", "content": "Write me a haiku about ownership."}],
+        messages=[t.Message(role="user", content="Write me a haiku about ownership.")],
         max_tokens=128,
         stream=True,
     )
-)
-
-for chunk in stream:
-    delta = chunk.choices[0].delta.content
-    if delta:
-        print(delta, end="", flush=True)
-print()
+    with engine.chat_stream(request) as stream:
+        for event in stream:
+            if event.name == "chunk":
+                print(event.data.choices[0].delta.content or "", end="", flush=True)
+    print()
 ```
 
-Each chunk is a `ChatCompletionChunkResponse` with the OpenAI streaming shape. `choices[0].delta.content` carries one incremental piece of the reply; it can be `None` (for example on the final chunk, which carries `finish_reason`), which is why the example checks `delta` before printing.
+Each event has a `name` and `data`. A `chunk` event's data is a `ChatCompletionChunkResponse` with the OpenAI streaming shape. `choices[0].delta.content` carries one incremental piece of the reply; it can be `None` (for example on the final chunk, which carries `finish_reason`), which is why the example falls back to `""`.
 
 Full example: [streaming](/examples/python/streaming/). For async iteration, FastAPI integration, and mid-stream error handling, see [streaming from Python](/guides/python/streaming/).
 
 ## Notes
 
-The Runner keeps the model in memory for the process lifetime. Requests can be sent sequentially or from multiple threads, all reusing the loaded weights. To swap models, construct a new Runner; the old one releases GPU memory when it goes out of scope.
+The engine keeps the model in memory until it is closed. Requests can be sent sequentially or from multiple threads; engine calls release the GIL, and all of them reuse the loaded weights. To swap models, close the engine and construct a new one.
 
-Chat history is not tracked. Each call to `send_chat_completion_request` is independent; multi-turn conversation means assembling the `messages` list yourself, appending each new user question and prior assistant reply.
+Chat history is not tracked. Each call to `chat` is independent; multi-turn conversation means assembling the `messages` list yourself, appending each new user question and prior assistant reply.
 
 The full Python surface (embeddings, speech, image generation, multimodal requests) is documented in the [Python reference](/reference/python/).

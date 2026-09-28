@@ -12,13 +12,13 @@ Runnable Python SDK example `lark`.
 <!-- needs-header -->
 
 ```python
-from inference_rs import Runner, Which, ChatCompletionRequest
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(
-    which=Which.Plain(
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(
         model_id="microsoft/Phi-3.5-mini-instruct",
     ),
-    num_device_layers=["500"],
 )
 
 # see lark_llg.py for a better way of dealing with JSON and Lark together
@@ -46,18 +46,18 @@ NUMBER: /-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?/
 %ignore WS
 """
 
-res = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="default",
-        messages=[{"role": "user", "content": "Give me a sample address."}],
-        max_tokens=30,
-        temperature=0.1,
-        grammar_type="lark",
-        grammar=json_lark,
+with ir.Engine(spec) as engine:
+    res = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[t.Message(role="user", content="Give me a sample address.")],
+            max_tokens=30,
+            temperature=0.1,
+            grammar=t.GrammarLark(value=json_lark),
+        )
     )
-)
-print(res.choices[0].message.content)
-print(res.usage)
+    print(res.choices[0].message.content)
+    print(res.usage)
 ```
 
 Source: [`examples/python/lark.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/lark.py)

@@ -108,7 +108,9 @@ class Generated(unittest.TestCase):
 
     def test_externally_tagged_variants_wrap_and_unwrap(self):
         spec = t.EngineSpec(model=t.ModelSelectedPlain(model_id="org/model"), runtime=t.RuntimeSpec(device="cpu"))
-        data = {"model": {"Plain": {"model_id": "org/model"}}, "runtime": {"device": "cpu"}}
+        # The engine's defaults are the fields' defaults, so they are written out.
+        plain = {"model_id": "org/model", "dtype": "auto", "max_seq_len": 4096, "max_batch_size": 1}
+        data = {"model": {"Plain": plain}, "runtime": {"device": "cpu"}}
         self.assertEqual(ir.to_data(spec), data)
         self.assertEqual(ir.from_data(t.EngineSpec, data), spec)
         self.assertEqual(json.loads(ir.to_json(spec)), data)
@@ -125,7 +127,12 @@ class Generated(unittest.TestCase):
         self.assertEqual(ir.to_data(spec)["model"]["Plain"]["arch"], "qwen3")
 
     def test_a_dict_spec_loads_like_its_class(self):
-        self.assertEqual(ir.to_data(ir.from_data(t.EngineSpec, json.loads(spec("m")))), json.loads(spec("m")))
+        data = json.loads(spec("m"))
+        written = ir.to_data(ir.from_data(t.EngineSpec, data))
+        model = written["model"]["MultimodalPlain"]
+        defaults = {"max_seq_len": 4096, "max_batch_size": 1, "max_num_images": 1, "max_image_length": 1024}
+        self.assertEqual({key: model.pop(key) for key in defaults}, defaults)
+        self.assertEqual(written, data)
 
     def test_tags_default_to_their_value(self):
         self.assertEqual(
