@@ -11,16 +11,11 @@ pub mod paged_attention {
     use crate::paged_attention::Fp8AttentionScales;
     use crate::paged_attention::PagedAttentionInputMetadata;
 
-    #[allow(dead_code)]
     pub struct PagedAttention {
         fp8_attention_scales: Fp8AttentionScales,
         fp8_attention_scales_calibrated: bool,
-        fp8_q_scale: Tensor,
-        fp8_k_scale: Tensor,
-        fp8_v_scale: Tensor,
     }
 
-    #[allow(dead_code)]
     impl PagedAttention {
         pub fn new(
             _head_dim: usize,
@@ -48,7 +43,6 @@ pub mod paged_attention {
         }
 
         #[allow(clippy::too_many_arguments)]
-        #[allow(unused_variables)]
         pub fn forward(
             &self,
             _query: &Tensor,
@@ -64,7 +58,6 @@ pub mod paged_attention {
             candle_core::bail!("Paged attention requires the CUDA or Metal feature flags.");
         }
 
-        #[allow(unused_variables)]
         pub fn gather_canvas_kv(
             &self,
             _key_cache: &Tensor,
@@ -78,7 +71,6 @@ pub mod paged_attention {
         }
 
         #[allow(clippy::too_many_arguments)]
-        #[allow(unused_variables)]
         pub fn forward_donor_cache(
             &self,
             _query: &Tensor,

@@ -37,14 +37,8 @@ impl MatformerSliceConfig {
 #[derive(Debug, Deserialize)]
 struct CsvRecord {
     name: String,
-    #[serde(rename = "# Layers")]
-    #[allow(dead_code)]
-    num_layers: u32,
     #[serde(rename = "# Effective Params (B)")]
     effective_params: f64,
-    #[serde(rename = "MMLU PT accuracy")]
-    #[allow(dead_code)]
-    mmlu_accuracy: String,
     #[serde(rename = "FFN Hidden Dims")]
     ffn_hidden_dims: String,
     #[serde(rename = "Layers Skipped")]
@@ -185,5 +179,27 @@ mod tests {
     fn test_parse_layers_skipped() {
         let layers = parse_layers_skipped("[20, 21, 22]").unwrap();
         assert_eq!(layers, vec![20, 21, 22]);
+    }
+
+    #[test]
+    fn a_config_with_every_published_column_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("slices.csv");
+        std::fs::write(
+            &path,
+            "name,# Layers,# Effective Params (B),MMLU PT accuracy,FFN Hidden Dims,Layers Skipped\n\
+             Config for 1B,20,1.0,50.0%,\"[2048 * 4, 2048 * 8]\",\"[20, 21]\"\n\
+             Config for 2B,30,2.0,60.0%,\"[2048 * 8, 2048 * 8]\",\n",
+        )
+        .unwrap();
+        let config = MatformerConfig::from_file(&path).unwrap();
+        let small = config.get_slicing("Config for 1B").unwrap();
+        assert_eq!(small.ffn_hidden_dimensions, vec![8192, 16384]);
+        assert_eq!(small.layers_skipped, Some(vec![20, 21]));
+        assert!(config
+            .get_slicing("Config for 2B")
+            .unwrap()
+            .layers_skipped
+            .is_none());
     }
 }

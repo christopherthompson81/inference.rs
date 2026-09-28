@@ -1,7 +1,6 @@
 use super::*;
 
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 pub fn cuda_top1_logits_f32_packed_batched(input: &Tensor) -> Result<Top1LogitsPackedOutput> {
     use candle_core::backend::BackendStorage;
     use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
@@ -1280,7 +1279,6 @@ pub struct CategoricalLogitsPackedOutput {
 }
 
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 pub struct Top1LogitsPackedOutput {
     pub packed: Tensor,
     _workspace: Vec<Tensor>,

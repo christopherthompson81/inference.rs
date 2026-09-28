@@ -2107,13 +2107,13 @@ impl Sampler {
         Ok(())
     }
 
-    #[allow(unused)]
     /// Sample the provided tokens.
     ///
     /// If the temperature is `None`, argmax sampling is used. Otherwise, the selected sampling is used.
     /// With `top-p` sampling, if the `top-p` value is `<= 0.0` or `>= 1.0`, multinomial sampling is used.
     /// `context` is the full token history (prompt + generated); `prompt_len` marks where sampling started.
     #[allow(clippy::too_many_arguments)]
+    #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
     pub fn sample(
         &self,
         logits: Tensor,

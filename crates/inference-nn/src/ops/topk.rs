@@ -173,8 +173,8 @@ pub(super) fn cuda_topk(input: &Tensor, k: usize) -> Result<TopKOutput> {
     })
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone)]
+#[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 struct ArgSort {
     asc: bool,
     last_dim: usize,
@@ -289,7 +289,6 @@ impl candle_core::CustomOp1 for ArgSort {
     }
 }
 
-#[allow(dead_code)]
 pub trait ArgSortOp {
     fn arg_sort(&self, asc: bool) -> Result<Tensor>;
     fn sort(&self, asc: bool) -> Result<(Tensor, Tensor)>;
@@ -343,13 +342,11 @@ impl ArgSortOp for Tensor {
     }
 }
 
-#[allow(dead_code)]
 pub struct TopKOutput {
     pub values: Tensor,
     pub indices: Tensor,
 }
 
-#[allow(dead_code)]
 pub struct TopKLogitsOutput {
     pub values: Tensor,
     pub indices: Tensor,
@@ -359,7 +356,6 @@ pub struct TopKLogitsOutput {
     pub(super) _workspace: Vec<Tensor>,
 }
 
-#[allow(dead_code)]
 pub struct TopKLogitsPackedOutput {
     /// Each row is packed as `[values; indices_as_f32; softmax_denominator; global_max]`.
     pub packed: Tensor,

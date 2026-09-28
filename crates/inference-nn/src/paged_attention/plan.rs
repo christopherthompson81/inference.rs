@@ -9,7 +9,6 @@ use crate::attention::flash_backend_supports_sdpa;
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use crate::flashinfer::{self, FlashInferDecodePlan, FlashInferDecodePlanInput};
 
-#[allow(dead_code)]
 #[derive(Clone, Copy, Debug)]
 pub struct PrefixPrefillPlanInput {
     pub device_is_cuda: bool,
@@ -123,7 +122,6 @@ pub fn fa3_paged_prefill_supported(input: PrefixPrefillPlanInput) -> bool {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[allow(dead_code)]
 pub struct PromptPrefillWorkspaceInput<'a> {
     pub activation_dtype: DType,
     pub cache_dtype: DType,
@@ -142,7 +140,6 @@ pub struct PromptPrefillWorkspaceInput<'a> {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-#[allow(dead_code)]
 pub struct PromptPrefillWorkspace {
     pub bytes: usize,
     pub gather_workspace_bytes: usize,
@@ -456,14 +453,12 @@ fn checked_sum(values: &[usize], name: &str) -> Result<usize> {
     })
 }
 
-#[allow(dead_code)]
 pub fn model_has_donor_paged_cache_layers(model: &(dyn ModelConfigLike + Send + Sync)) -> bool {
     (0..model.num_layers()).any(|layer_idx| {
         model.layer_has_paged_kv_cache(layer_idx) && !model.uses_own_kv_cache_for_layer(layer_idx)
     })
 }
 
-#[allow(dead_code)]
 pub fn prompt_prefill_workspace(
     model: Option<&(dyn ModelConfigLike + Send + Sync)>,
     input: PromptPrefillWorkspaceInput<'_>,
@@ -589,7 +584,6 @@ pub fn prompt_prefill_workspace(
     })
 }
 
-#[allow(dead_code)]
 fn prompt_plan_input(
     model: &(dyn ModelConfigLike + Send + Sync),
     layer_idx: usize,
@@ -642,7 +636,6 @@ fn paged_flash_attention_supports(
         && block_size.is_multiple_of(32)
 }
 
-#[allow(dead_code)]
 pub struct DecodePlanInput {
     pub attention_backend: AttentionBackendKind,
     pub head_size: usize,

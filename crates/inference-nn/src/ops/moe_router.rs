@@ -1,7 +1,6 @@
 use super::*;
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub enum MoeRouterScoreFunction {
     Raw,
     Softmax,
@@ -20,7 +19,6 @@ impl MoeRouterScoreFunction {
 }
 
 #[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
 pub enum MoeRouterSelectedWeight {
     Score,
     Softmax,

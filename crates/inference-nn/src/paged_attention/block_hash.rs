@@ -58,7 +58,6 @@ pub enum ExtraHashKey {
     },
     AdapterGeneration(AdapterGenerationId),
     /// User-provided cache salt for per-request isolation.
-    #[allow(dead_code)]
     CacheSalt(String),
 }
 

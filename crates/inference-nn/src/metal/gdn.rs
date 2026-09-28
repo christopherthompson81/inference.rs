@@ -194,7 +194,6 @@ pub fn gated_delta_rule_recurrence_metal(
 }
 
 #[cfg(not(feature = "metal"))]
-#[allow(dead_code)]
 pub fn gated_delta_rule_recurrence_metal(
     _q: &candle_core::Tensor,
     _k: &candle_core::Tensor,
@@ -298,7 +297,6 @@ pub fn chunked_gated_delta_rule_recurrence_metal(
 }
 
 #[cfg(not(feature = "metal"))]
-#[allow(dead_code)]
 pub fn chunked_gated_delta_rule_recurrence_metal(
     _q: &candle_core::Tensor,
     _k: &candle_core::Tensor,
@@ -480,7 +478,6 @@ pub fn causal_conv1d_metal(
 }
 
 #[cfg(not(feature = "metal"))]
-#[allow(dead_code)]
 pub fn causal_conv1d_metal(
     _x: &candle_core::Tensor,
     _weight: &candle_core::Tensor,
@@ -573,7 +570,6 @@ pub fn fused_gdn_gating_metal(
 }
 
 #[cfg(not(feature = "metal"))]
-#[allow(dead_code)]
 pub fn fused_gdn_gating_metal(
     _b: &candle_core::Tensor,
     _a: &candle_core::Tensor,

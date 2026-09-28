@@ -23,7 +23,6 @@ pub fn metadata_rope_positions<'a>(
         .and_then(|positions| positions.get(&device.location()))
 }
 
-#[allow(dead_code)]
 pub enum ForwardCache<'a> {
     Normal(&'a mut [KvCache]),
     Paged {
@@ -33,7 +32,6 @@ pub enum ForwardCache<'a> {
     None,
 }
 
-#[allow(dead_code)]
 impl<'a> ForwardCache<'a> {
     pub fn from_paged(
         metadata: Option<(&'a [(Tensor, Tensor)], &'a PagedAttentionInputMetadata)>,
@@ -97,7 +95,6 @@ impl<'a> ForwardCache<'a> {
     }
 }
 
-#[allow(dead_code)]
 pub enum ForwardPositions<'a> {
     Text { seqlen_offsets: &'a [usize] },
     Mrope { position_ids: &'a Tensor },
@@ -180,7 +177,6 @@ pub struct ModelForwardContext<'a> {
     requires_full_prefill_queries: bool,
 }
 
-#[allow(dead_code)]
 impl<'a> ModelForwardContext<'a> {
     pub fn new(
         seqlen_offsets: &'a [usize],

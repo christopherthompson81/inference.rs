@@ -275,7 +275,6 @@ impl Drop for PrefixBlockRetentionLease {
 #[derive(Debug)]
 pub struct KVCacheBlock {
     /// Block ID, ranging from 0 to num_gpu_blocks - 1.
-    #[allow(dead_code)]
     pub block_id: usize,
     /// Reference count. 0 means the block is free (in the free list or eviction candidate).
     pub ref_cnt: u32,
@@ -300,12 +299,6 @@ impl KVCacheBlock {
             next_free: NO_LINK,
             is_null: false,
         }
-    }
-
-    /// Check if this block is currently in the free list.
-    #[allow(dead_code)]
-    fn is_in_free_list(&self) -> bool {
-        self.prev_free != NO_LINK || self.next_free != NO_LINK
     }
 
     /// Reset the hash when the block is evicted (reallocated).

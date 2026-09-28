@@ -187,7 +187,6 @@ impl Fa3PrefillPoolBytes {
         }
     }
 
-    #[allow(dead_code)]
     pub fn bytes(self) -> candle_core::Result<usize> {
         checked_workspace_sum(&[
             self.quantized_query,
@@ -299,7 +298,6 @@ pub fn fa3_prefill_workspace_components(
 }
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-#[allow(dead_code)]
 pub fn fa3_prefill_workspace_bytes(
     batch: usize,
     query_len: usize,

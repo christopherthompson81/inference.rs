@@ -175,7 +175,6 @@ pub fn moe_gemm(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(unused)]
 pub fn moe_gemm(
     _: &Tensor,
     _: &Tensor,

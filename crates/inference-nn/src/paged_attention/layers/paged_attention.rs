@@ -797,13 +797,12 @@ pub struct PagedAttention {
     fp8_attention_scales: Fp8AttentionScales,
     fp8_attention_scales_calibrated: bool,
     // read only in the cuda FA3 path
-    #[allow(dead_code)]
+    #[cfg_attr(not(all(feature = "cuda", target_family = "unix")), allow(dead_code))]
     fp8_q_scale: Tensor,
     fp8_k_scale: Tensor,
     fp8_v_scale: Tensor,
 }
 
-#[allow(dead_code)]
 impl PagedAttention {
     pub fn fp8_attention_scales(&self) -> Fp8AttentionScales {
         self.fp8_attention_scales
