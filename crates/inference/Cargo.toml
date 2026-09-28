@@ -30,6 +30,7 @@ futures.workspace = true
 
 [dev-dependencies]
 indicatif.workspace = true
+inference-models-llama.workspace = true
 inference-models-other.workspace = true
 inference-nn.workspace = true
 inference-quant.workspace = true
