@@ -1049,19 +1049,24 @@ impl Model {
     }
 }
 
-// Skip agentic progress, denoising progress and file events; the final response carries the full files list.
+// Tool-call progress and files become the final chat response's `agentic_tool_calls` and `files`.
 async fn final_response(rx: &mut Receiver<Response>) -> crate::error::Result<ResponseOk> {
+    let mut collector = ChatResponseCollector::default();
     loop {
         let response = rx
             .recv()
             .await
-            .ok_or(SdkError::Channel("channel closed unexpectedly".into()))?
-            .as_result()?;
-        match response {
-            ResponseOk::AgenticToolCallProgress { .. }
-            | ResponseOk::BlockDenoisingProgress(_)
-            | ResponseOk::File(_) => continue,
-            response => return Ok(response),
+            .ok_or(SdkError::Channel("channel closed unexpectedly".into()))?;
+        match collector.absorb(response) {
+            None | Some(Response::BlockDenoisingProgress(_)) => continue,
+            Some(Response::Done(response)) => {
+                return Ok(ResponseOk::Done(collector.finish(response)))
+            }
+            Some(Response::ModelError(message, response)) => {
+                let error = ResponseErr::ModelError(message, collector.finish(response));
+                return Err(Box::new(error).into());
+            }
+            Some(response) => return Ok(response.as_result()?),
         }
     }
 }
@@ -1071,7 +1076,7 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn the_final_response_skips_progress_events() {
+    async fn the_final_response_skips_denoising_progress() {
         let (tx, mut rx) = channel(4);
         let progress = BlockDenoisingProgress {
             index: 0,

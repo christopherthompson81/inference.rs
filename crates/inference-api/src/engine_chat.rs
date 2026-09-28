@@ -1,16 +1,14 @@
 //! Chat completions as an engine operation, free of HTTP: the server routes (and later the C ABI) drive these.
 
-use std::{collections::HashMap, ops::Deref, pin::Pin, sync::Arc, task::Poll};
+use std::{ops::Deref, pin::Pin, sync::Arc, task::Poll};
 
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD, Engine};
 use either::Either;
-use image::{codecs::png::PngEncoder, DynamicImage};
 use indexmap::IndexMap;
 use inference_core::{
-    resolve_reasoning_controls, AgentPermission, AgentToolApprovalHandler,
-    AgentToolApprovalNotifier, AgenticToolCallData, AgenticToolCallPhase, AgenticToolCallRecord,
-    ChatCompletionChunkResponse, ChatCompletionResponse, Constraint, InferenceRs, MessageContent,
+    encode_agentic_tool_images, resolve_reasoning_controls, AgentPermission,
+    AgentToolApprovalHandler, AgentToolApprovalNotifier, AgenticToolCallData, AgenticToolCallPhase,
+    ChatCompletionChunkResponse, ChatResponseCollector, Constraint, InferenceRs, MessageContent,
     ModelCategory, NormalRequest, ReasoningEffort, Request, RequestMessage, Response,
     SamplingParams,
 };
@@ -41,24 +39,6 @@ use crate::{
 
 const ASK_REQUIRES_STREAMING: &str =
     "agent_permission \"ask\" requires stream=true, so approval requests can be delivered and answered.";
-// Files past this many stay reachable through the file store but are not embedded in the response body.
-const MAX_FILES_PER_RESPONSE: usize = 64;
-
-fn encode_agentic_tool_images(images: &[DynamicImage]) -> Vec<String> {
-    images
-        .iter()
-        .filter_map(|image| {
-            let mut buffer = Vec::new();
-            match image.write_with_encoder(PngEncoder::new(&mut buffer)) {
-                Ok(()) => Some(STANDARD.encode(buffer)),
-                Err(e) => {
-                    tracing::warn!("failed to encode agentic tool image: {e}");
-                    None
-                }
-            }
-        })
-        .collect()
-}
 
 pub fn serialize_agentic_progress(
     round: usize,
@@ -195,135 +175,6 @@ fn serialize_agentic_data(data: &AgenticToolCallData) -> Value {
                 v["content"] = json!(content);
             }
             v
-        }
-    }
-}
-
-/// Arguments string from a Calling-phase `AgenticToolCallData`.
-fn extract_arguments(data: &AgenticToolCallData) -> String {
-    match data {
-        AgenticToolCallData::CodeExecution {
-            code: Some(code), ..
-        } => serde_json::json!({"code": code}).to_string(),
-        AgenticToolCallData::WebSearch {
-            query: Some(query), ..
-        } => serde_json::json!({"query": query}).to_string(),
-        AgenticToolCallData::Shell { commands, .. } => {
-            serde_json::json!({"commands": commands}).to_string()
-        }
-        AgenticToolCallData::Custom { arguments, .. } => arguments.clone(),
-        _ => String::new(),
-    }
-}
-
-/// Fold progress events into `AgenticToolCallRecord` for non-streaming responses. `pending_args` keeps Calling-phase args keyed by (round, tool_name).
-fn record_agentic_progress(
-    records: &mut Vec<AgenticToolCallRecord>,
-    pending_args: &mut HashMap<(usize, String), String>,
-    round: usize,
-    tool_name: &str,
-    phase: &AgenticToolCallPhase,
-) {
-    match phase {
-        AgenticToolCallPhase::Calling(data) => {
-            pending_args.insert((round, tool_name.to_string()), extract_arguments(data));
-        }
-        AgenticToolCallPhase::Complete(data) => {
-            let arguments = pending_args
-                .remove(&(round, tool_name.to_string()))
-                .unwrap_or_default();
-
-            let (result_content, result_images_base64) = match data {
-                AgenticToolCallData::CodeExecution {
-                    stdout,
-                    stderr,
-                    exception,
-                    images,
-                    ..
-                } => {
-                    let mut content_parts = Vec::new();
-                    if let Some(s) = stdout {
-                        content_parts.push(format!("stdout: {s}"));
-                    }
-                    if let Some(s) = stderr {
-                        content_parts.push(format!("stderr: {s}"));
-                    }
-                    if let Some(e) = exception {
-                        content_parts.push(format!("exception: {e}"));
-                    }
-                    (content_parts.join("\n"), encode_agentic_tool_images(images))
-                }
-                AgenticToolCallData::WebSearch {
-                    results_count,
-                    sources,
-                    ..
-                } => {
-                    let mut parts = Vec::new();
-                    if let Some(n) = results_count {
-                        parts.push(format!("{n} results"));
-                    }
-                    if !sources.is_empty() {
-                        parts.push(format!("sources: {}", sources.join(", ")));
-                    }
-                    let msg = parts.join("\n");
-                    (msg, vec![])
-                }
-                AgenticToolCallData::Shell {
-                    stdout,
-                    stderr,
-                    exit_code,
-                    status,
-                    working_directory,
-                    timed_out,
-                    ..
-                } => {
-                    let mut content = json!({
-                        "stdout": stdout,
-                        "stderr": stderr,
-                        "exit_code": exit_code,
-                        "status": status,
-                        "working_directory": working_directory,
-                        "timed_out": timed_out,
-                    });
-                    if let Some(obj) = content.as_object_mut() {
-                        obj.retain(|_, value| !value.is_null());
-                    }
-                    (content.to_string(), vec![])
-                }
-                AgenticToolCallData::Custom { content, .. } => (content.clone(), vec![]),
-            };
-            records.push(AgenticToolCallRecord {
-                round,
-                name: tool_name.to_string(),
-                arguments,
-                result_content,
-                result_images_base64,
-                file_ids: Vec::new(),
-            });
-        }
-    }
-}
-
-fn attach_agentic_tool_calls(
-    mut response: ChatCompletionResponse,
-    records: Vec<AgenticToolCallRecord>,
-) -> ChatCompletionResponse {
-    if !records.is_empty() {
-        response.agentic_tool_calls = Some(records);
-    }
-    response
-}
-
-/// Fill each record's `file_ids` from files whose `source.round` and `source.tool` match.
-fn stamp_file_ids(records: &mut [AgenticToolCallRecord], files: &[inference_core::File]) {
-    for r in records.iter_mut() {
-        let matched: Vec<String> = files
-            .iter()
-            .filter(|f| f.source.round == r.round && f.source.tool == r.name)
-            .map(|f| f.id.clone())
-            .collect();
-        if !matched.is_empty() {
-            r.file_ids = matched;
         }
     }
 }
@@ -1017,77 +868,32 @@ impl ChatEngine {
 
 /// Waits for a non-streaming chat request's final response, with its agentic tool calls and files attached.
 pub async fn collect_chat(rx: &mut Receiver<Response>, model_override: Option<&str>) -> Response {
-    let mut tool_call_records = Vec::new();
-    let mut pending_args = std::collections::HashMap::new();
-    let mut files: Vec<inference_core::File> = Vec::new();
-
+    let mut collector = ChatResponseCollector::default();
+    let finish = |collector: ChatResponseCollector, response| {
+        let mut response = collector.finish(response);
+        apply_model_override(&mut response.model, model_override);
+        response
+    };
     loop {
-        match rx.recv().await {
-            Some(Response::AgenticToolCallProgress {
-                round,
-                tool_name,
-                phase,
-            }) => record_agentic_progress(
-                &mut tool_call_records,
-                &mut pending_args,
-                round,
-                &tool_name,
-                &phase,
-            ),
+        let Some(response) = rx.recv().await else {
+            return Response::InternalError(
+                anyhow::Error::msg("No response received from the model.").into(),
+            );
+        };
+        match collector.absorb(response) {
+            None | Some(Response::BlockDenoisingProgress(_)) => continue,
             Some(Response::AgenticToolApprovalRequired { .. }) => {
                 return Response::ValidationError(Box::new(JsonError::new(
                     "code execution approval requires a streaming request.".to_string(),
                 )));
             }
-            Some(Response::BlockDenoisingProgress(_)) => continue,
-            Some(Response::File(file)) => {
-                if files.len() < MAX_FILES_PER_RESPONSE {
-                    files.push(file);
-                } else {
-                    tracing::warn!(
-                        "MAX_FILES_PER_RESPONSE ({MAX_FILES_PER_RESPONSE}) reached; remaining files are fetchable via /v1/files/{{id}}",
-                    );
-                }
-            }
-            Some(Response::Done(response)) => {
-                return Response::Done(finish_response(
-                    response,
-                    tool_call_records,
-                    files,
-                    model_override,
-                ));
-            }
+            Some(Response::Done(response)) => return Response::Done(finish(collector, response)),
             Some(Response::ModelError(msg, response)) => {
-                return Response::ModelError(
-                    msg,
-                    finish_response(response, tool_call_records, files, model_override),
-                );
+                return Response::ModelError(msg, finish(collector, response));
             }
             Some(response) => return response,
-            None => {
-                return Response::InternalError(
-                    anyhow::Error::msg("No response received from the model.").into(),
-                );
-            }
         }
     }
-}
-
-fn finish_response(
-    response: ChatCompletionResponse,
-    mut tool_call_records: Vec<AgenticToolCallRecord>,
-    files: Vec<inference_core::File>,
-    model_override: Option<&str>,
-) -> ChatCompletionResponse {
-    if !files.is_empty() {
-        stamp_file_ids(&mut tool_call_records, &files);
-    }
-    let mut response = attach_agentic_tool_calls(response, tool_call_records);
-    if !files.is_empty() {
-        response.files = Some(files);
-    }
-    apply_model_override(&mut response.model, model_override);
-    response
 }
 
 /// One event of a streaming chat request, in the order the engine produced it.

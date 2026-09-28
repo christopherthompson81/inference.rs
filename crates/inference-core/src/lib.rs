@@ -87,6 +87,7 @@ pub use inference_nn::{layers, matformer};
 
 mod adapter;
 mod agent_approval;
+mod chat_collector;
 mod engine;
 mod video_input;
 pub use selection::model_loader::{
@@ -145,6 +146,7 @@ pub use agent_approval::{
     AgentToolApprovalDecision, AgentToolApprovalFuture, AgentToolApprovalHandler,
 };
 pub use amoe::{AnyMoeConfig, AnyMoeExpertType};
+pub use chat_collector::{encode_agentic_tool_images, ChatResponseCollector};
 pub use device_map::{
     DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting, LayerDeviceMapper,
 };
