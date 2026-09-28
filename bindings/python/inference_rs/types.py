@@ -1316,15 +1316,6 @@ class ModelSelectedSpeech:
 
 
 @dataclass(kw_only=True)
-class ModelSelectedMultiModel:
-    """Select multi-model mode with configuration file"""
-
-    config: str
-    default_model_id: str | None = None
-    _external = 'MultiModel'
-
-
-@dataclass(kw_only=True)
 class ModelSelectedEmbedding:
     """Select an embedding model, without quantization or adapters"""
 
@@ -2657,7 +2648,7 @@ Grammar = Union[GrammarRegex, GrammarJsonSchema, GrammarLlguidance, GrammarLark]
 McpServerSource = Union[McpServerSourceHttp, McpServerSourceProcess, McpServerSourceWebSocket]
 MessageInnerContent = Union[str, dict[str, str]]
 MessageContent = Union[str, list[dict[str, MessageInnerContent]]]
-ModelSelected = Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedXLora, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedXLoraGGUF, ModelSelectedLoraGGUF, ModelSelectedGGML, ModelSelectedXLoraGGML, ModelSelectedLoraGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedMultiModel, ModelSelectedEmbedding]
+ModelSelected = Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedXLora, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedXLoraGGUF, ModelSelectedLoraGGUF, ModelSelectedGGML, ModelSelectedXLoraGGML, ModelSelectedLoraGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedEmbedding]
 OpenAiCodeInterpreterContainer = Union[str, OpenAiCodeInterpreterAutoContainer]
 OpenAiNamespaceEntry = Union[OpenAiResponsesFunctionTool, Any]
 OpenAiShellEnvironment = Union[OpenAiShellEnvironmentContainerAuto, OpenAiShellEnvironmentLocal, OpenAiShellEnvironmentContainerReference]

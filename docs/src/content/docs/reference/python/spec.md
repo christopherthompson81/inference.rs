@@ -262,7 +262,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 
 ## `ModelSelected`
 
-One of: `Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedXLora, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedXLoraGGUF, ModelSelectedLoraGGUF, ModelSelectedGGML, ModelSelectedXLoraGGML, ModelSelectedLoraGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedMultiModel, ModelSelectedEmbedding]`.
+One of: `Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedXLora, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedXLoraGGUF, ModelSelectedLoraGGUF, ModelSelectedGGML, ModelSelectedXLoraGGML, ModelSelectedLoraGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedEmbedding]`.
 
 
 ## `ModelSelectedDiffusionPlain`
@@ -410,16 +410,6 @@ Select a GGUF model with LoRA.
 | `tokenizer_json` | `str \| None` | optional |
 | `topology` | `str \| None` | optional |
 | `write_uqff` | `UqffWriteSpec \| None` | optional |
-
-
-## `ModelSelectedMultiModel`
-
-Select multi-model mode with configuration file
-
-| Field | Type | Default |
-| --- | --- | --- |
-| `config` | `str` | required |
-| `default_model_id` | `str \| None` | optional |
 
 
 ## `ModelSelectedMultimodalPlain`

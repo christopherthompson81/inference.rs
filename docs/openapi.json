@@ -6926,35 +6926,6 @@
           },
           {
             "type": "object",
-            "description": "Select multi-model mode with configuration file",
-            "required": [
-              "MultiModel"
-            ],
-            "properties": {
-              "MultiModel": {
-                "type": "object",
-                "description": "Select multi-model mode with configuration file",
-                "required": [
-                  "config"
-                ],
-                "properties": {
-                  "config": {
-                    "type": "string",
-                    "description": "Multi-model configuration file path (JSON format)"
-                  },
-                  "default_model_id": {
-                    "type": [
-                      "string",
-                      "null"
-                    ],
-                    "description": "Default model ID to use when no model is specified in requests"
-                  }
-                }
-              }
-            }
-          },
-          {
-            "type": "object",
             "description": "Select an embedding model, without quantization or adapters",
             "required": [
               "Embedding"

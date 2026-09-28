@@ -91,7 +91,7 @@ detect_os() {
 # Minimum required Rust version
 REQUIRED_RUST_VERSION="1.94"
 RUSTUP_INSTALL_CMD="curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y"
-INFERENCE_RS_REPO_URL="https://github.com/EricLBuehler/mistral.rs"
+INFERENCE_RS_REPO_URL="https://github.com/christopherthompson81/inference.rs"
 INFERENCE_RS_BRANCH="master"
 INFERENCE_RS_CLI_PACKAGE="inference-cli"
 
@@ -484,9 +484,9 @@ PREBUILT_CUDA_SMS_AARCH64="90 100 121"
 PREBUILT_CUDA_VARIANTS="133:1303 132:1302 131:1301 130:1300 129:1209 128:1208"
 # INFERENCE_RS_INSTALL_TAG pins a specific release (e.g. v0.8.9); default is the latest stable release.
 if [ -n "$INFERENCE_RS_INSTALL_TAG" ]; then
-    RELEASE_BASE="https://github.com/EricLBuehler/mistral.rs/releases/download/$MISTRALRS_INSTALL_TAG"
+    RELEASE_BASE="https://github.com/christopherthompson81/inference.rs/releases/download/$INFERENCE_RS_INSTALL_TAG"
 else
-    RELEASE_BASE="https://github.com/EricLBuehler/mistral.rs/releases/latest/download"
+    RELEASE_BASE="https://github.com/christopherthompson81/inference.rs/releases/latest/download"
 fi
 PREBUILT_DIR="$HOME/.inference-rs"
 BIN_DIR="$HOME/.local/bin"
@@ -904,8 +904,8 @@ print_success() {
     echo "  # Run as a local agent (tools, web search, code execution)"
     echo "  inference serve --agent -m google/gemma-4-E4B-it"
     echo ""
-    echo "Docs:     https://docs.mistralrs.dev/"
-    echo "Source:   https://github.com/EricLBuehler/mistral.rs"
+    echo "Docs:     https://github.com/christopherthompson81/inference.rs/tree/master/docs"
+    echo "Source:   https://github.com/christopherthompson81/inference.rs"
     echo ""
     if [ -n "$FFMPEG_SKIPPED" ]; then
         printf "${YELLOW}Note:${NC} FFmpeg was not installed; video input will be unavailable. Install it later to enable video.\n\n"

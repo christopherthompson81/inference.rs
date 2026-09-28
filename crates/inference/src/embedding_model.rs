@@ -179,21 +179,6 @@ impl EmbeddingModelBuilder {
         self
     }
 
-    #[deprecated(
-        note = "Use `UqffEmbeddingModelBuilder` to load a UQFF model instead of the generic `from_uqff`"
-    )]
-    /// Path to read a `.uqff` file from. Other necessary configuration files must be present at this location.
-    ///
-    /// For example, these include:
-    /// - `residual.safetensors`
-    /// - `tokenizer.json`
-    /// - `config.json`
-    /// - More depending on the model
-    pub fn from_uqff(mut self, path: Vec<PathBuf>) -> Self {
-        self.from_uqff = Some(path);
-        self
-    }
-
     /// UQFF output config, or a path to write a `.uqff` file to.
     ///
     /// The parent (part of the path excluding the filename) will determine where any other files

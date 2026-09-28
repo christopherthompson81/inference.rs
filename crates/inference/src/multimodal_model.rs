@@ -122,21 +122,6 @@ impl MultimodalModelBuilder {
         self
     }
 
-    #[deprecated(
-        note = "Use `UqffMultimodalModelBuilder` to load a UQFF model instead of the generic `from_uqff`"
-    )]
-    /// Path to read a `.uqff` file from. Other necessary configuration files must be present at this location.
-    ///
-    /// For example, these include:
-    /// - `residual.safetensors`
-    /// - `tokenizer.json`
-    /// - `config.json`
-    /// - More depending on the model
-    pub fn from_uqff(mut self, path: Vec<PathBuf>) -> Self {
-        self.from_uqff = Some(path);
-        self
-    }
-
     /// Automatically resize and pad images to this maximum edge length. Aspect ratio is preserved.
     /// This is only supported on the Qwen2-VL and Idefics 2 models. Others handle this internally.
     pub fn with_max_edge(mut self, max_edge: u32) -> Self {

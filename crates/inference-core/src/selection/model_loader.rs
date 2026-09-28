@@ -234,9 +234,6 @@ pub fn get_tgt_non_granular_index(model: &ModelSelected) -> Option<usize> {
             tgt_non_granular_index,
             ..
         } => *tgt_non_granular_index,
-        ModelSelected::MultiModel { .. } => {
-            panic!("MultiModel variant should not be used in model loading functions")
-        }
     }
 }
 
@@ -256,9 +253,6 @@ pub fn get_model_dtype(model: &ModelSelected) -> anyhow::Result<ModelDType> {
         | ModelSelected::Run { dtype, .. }
         | ModelSelected::Speech { dtype, .. }
         | ModelSelected::Embedding { dtype, .. } => Ok(*dtype),
-        ModelSelected::MultiModel { .. } => {
-            anyhow::bail!("MultiModel variant should not be used in model loading functions")
-        }
     }
 }
 
@@ -391,9 +385,6 @@ pub fn get_auto_device_map_params(model: &ModelSelected) -> anyhow::Result<AutoD
         ModelSelected::DiffusionPlain { .. }
         | ModelSelected::Speech { .. }
         | ModelSelected::Embedding { .. } => Ok(AutoDeviceMapParams::default_text()),
-        ModelSelected::MultiModel { .. } => {
-            anyhow::bail!("MultiModel variant should not be used in model loading functions")
-        }
     }
 }
 
@@ -924,9 +915,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             };
             EmbeddingLoaderBuilder::new(options.embedding(), tokenizer_json, Some(model_id))
                 .build(arch)
-        }
-        ModelSelected::MultiModel { .. } => {
-            anyhow::bail!("MultiModel variant should not be used in model loading functions")
         }
     };
     Ok(loader)

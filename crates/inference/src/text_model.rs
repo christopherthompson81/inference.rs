@@ -211,24 +211,6 @@ impl TextModelBuilder {
         self
     }
 
-    #[deprecated(
-        note = "Use `UqffTextModelBuilder` to load a UQFF model instead of the generic `from_uqff`"
-    )]
-    /// Path to read a `.uqff` file from. Other necessary configuration files must be present at this location.
-    ///
-    /// For sharded UQFF models, you only need to specify the first shard file
-    /// (e.g., `q4k-0.uqff`). The remaining shards are auto-discovered.
-    ///
-    /// For example, required files include:
-    /// - `residual.safetensors`
-    /// - `tokenizer.json`
-    /// - `config.json`
-    /// - More depending on the model
-    pub fn from_uqff(mut self, path: Vec<PathBuf>) -> Self {
-        self.from_uqff = Some(path);
-        self
-    }
-
     /// Load the text model and return a ready-to-use [`Model`].
     pub async fn build(self) -> anyhow::Result<Model> {
         let (pipeline, scheduler_config, add_model_config) = build_text_pipeline(self).await?;

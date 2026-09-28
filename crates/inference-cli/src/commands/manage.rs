@@ -7,10 +7,10 @@ use std::path::PathBuf;
 
 #[cfg(unix)]
 const INSTALL_SH_URL: &str =
-    "https://raw.githubusercontent.com/EricLBuehler/mistral.rs/refs/heads/master/install.sh";
+    "https://raw.githubusercontent.com/christopherthompson81/inference.rs/refs/heads/master/install.sh";
 #[cfg(windows)]
 const INSTALL_PS1_URL: &str =
-    "https://raw.githubusercontent.com/EricLBuehler/mistral.rs/refs/heads/master/install.ps1";
+    "https://raw.githubusercontent.com/christopherthompson81/inference.rs/refs/heads/master/install.ps1";
 
 fn managed_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".inference-rs"))

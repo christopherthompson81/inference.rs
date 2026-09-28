@@ -250,6 +250,47 @@ fn fallback_isq(raw: &str) -> ResolvedQuant {
     }
 }
 
+pub(crate) fn selected_model_files(
+    model_id: &str,
+    exact_file: Option<&str>,
+    token_source: &TokenSource,
+) -> Result<Option<Vec<String>>> {
+    let path = Path::new(model_id);
+    if path.exists() {
+        if let Some(exact_file) = exact_file {
+            return list_local_gguf_companions(path, exact_file).map(Some);
+        }
+        return list_local_files_recursive(path).map(Some);
+    }
+    Ok(inference_core::probe_hf_repo_files(
+        model_id,
+        "main",
+        token_source,
+    ))
+}
+
+pub(crate) fn model_name_looks_gguf(model_id: &str) -> bool {
+    model_id
+        .rsplit_once('/')
+        .map_or(model_id, |(_, name)| name)
+        .to_ascii_lowercase()
+        .ends_with("-gguf")
+}
+
+pub(crate) fn is_confident_gguf_artifact_repo(model_id: &str, files: &[String]) -> bool {
+    if model_name_looks_gguf(model_id) {
+        return true;
+    }
+    !files.iter().any(|file| {
+        let lower = file.to_ascii_lowercase();
+        lower.ends_with(".uqff")
+            || lower.ends_with(".safetensors")
+            || lower.ends_with(".pth")
+            || lower.ends_with(".pt")
+            || lower.ends_with(".bin")
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1,5 +1,6 @@
 //! Quantize command implementation for UQFF generation
 
+use crate::commands::quant::{is_confident_gguf_artifact_repo, selected_model_files};
 use std::collections::{BTreeMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -190,47 +191,6 @@ fn resolve_gguf_source(
     }
 
     Ok(())
-}
-
-fn selected_model_files(
-    model_id: &str,
-    exact_file: Option<&str>,
-    token_source: &TokenSource,
-) -> Result<Option<Vec<String>>> {
-    let path = Path::new(model_id);
-    if path.exists() {
-        if let Some(exact_file) = exact_file {
-            return crate::commands::quant::list_local_gguf_companions(path, exact_file).map(Some);
-        }
-        return crate::commands::quant::list_local_files_recursive(path).map(Some);
-    }
-    Ok(inference_core::probe_hf_repo_files(
-        model_id,
-        "main",
-        token_source,
-    ))
-}
-
-fn model_name_looks_gguf(model_id: &str) -> bool {
-    model_id
-        .rsplit_once('/')
-        .map_or(model_id, |(_, name)| name)
-        .to_ascii_lowercase()
-        .ends_with("-gguf")
-}
-
-fn is_confident_gguf_artifact_repo(model_id: &str, files: &[String]) -> bool {
-    if model_name_looks_gguf(model_id) {
-        return true;
-    }
-    !files.iter().any(|file| {
-        let lower = file.to_ascii_lowercase();
-        lower.ends_with(".uqff")
-            || lower.ends_with(".safetensors")
-            || lower.ends_with(".pth")
-            || lower.ends_with(".pt")
-            || lower.ends_with(".bin")
-    })
 }
 
 /// Run UQFF quantization and generation, supporting multiple ISQ types.
@@ -432,7 +392,7 @@ base_model_relation: quantized
 
 # `{base_model}`, UQFF quantization
 
-Generated with [inference.rs](https://github.com/EricLBuehler/mistral.rs) {inference_version}. Documentation: [UQFF docs](https://docs.mistralrs.dev/guides/quantization/uqff/).
+Generated with [inference.rs](https://github.com/christopherthompson81/inference.rs) {inference_version}. Documentation: [UQFF docs](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/quantization/uqff.mdx).
 
 1) **Flexible** 🌀: Multiple quantization formats in *one* file format with *one* framework to run them all.
 2) **Versioned**: Embedded semantic-version metadata lets inference.rs detect incompatible artifacts before loading.
@@ -441,16 +401,16 @@ Generated with [inference.rs](https://github.com/EricLBuehler/mistral.rs) {infer
 
 ## Install
 
-Install [inference.rs](https://github.com/EricLBuehler/mistral.rs) ([full guide](https://docs.mistralrs.dev/guides/install/)):
+Install [inference.rs](https://github.com/christopherthompson81/inference.rs) ([full guide](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/quickstart.mdx)):
 
 **Linux/macOS:**
 ```
-curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/EricLBuehler/mistral.rs/master/install.sh | sh
+curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/christopherthompson81/inference.rs/master/install.sh | sh
 ```
 
 **Windows (PowerShell):**
 ```
-irm https://raw.githubusercontent.com/EricLBuehler/mistral.rs/master/install.ps1 | iex
+irm https://raw.githubusercontent.com/christopherthompson81/inference.rs/master/install.ps1 | iex
 ```
 
 ## Examples

@@ -11,4 +11,4 @@ Every page in this section is generated from a runnable example in the repositor
 | --- | --- | --- |
 | Rust SDK | [`examples/rust`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/rust) | 59 |
 | Python SDK | [`examples/python`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python) | 73 |
-| HTTP server | [`examples/server`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server) | 63 |
+| HTTP server | [`examples/server`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/server) | 56 |

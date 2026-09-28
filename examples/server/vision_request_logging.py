@@ -1,3 +1,5 @@
+"""Send an image to any vision model the server loaded, logging the raw HTTP request and response."""
+
 from openai import OpenAI
 import httpx
 import textwrap
@@ -54,7 +56,7 @@ completion = client.chat.completions.create(
             ],
         },
     ],
-    # max_tokens=256,
+    max_tokens=256,
     frequency_penalty=1.0,
     top_p=0.1,
     temperature=0,
