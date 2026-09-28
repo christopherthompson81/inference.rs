@@ -241,12 +241,6 @@ fn get_cuda_compute_capability(ordinal: usize) -> Option<(u32, u32)> {
     }
 }
 
-#[cfg(not(feature = "cuda"))]
-#[allow(dead_code)]
-fn get_cuda_compute_capability(_ordinal: usize) -> Option<(u32, u32)> {
-    None
-}
-
 /// Detect CPU extensions (AVX, AVX2, AVX-512, FMA)
 fn detect_cpu_extensions() -> (bool, bool, bool, bool) {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]

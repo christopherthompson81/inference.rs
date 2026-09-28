@@ -554,7 +554,6 @@ impl DeviceMappedModelLoader for Gemma4Loader {
     }
 }
 
-#[allow(dead_code)]
 pub struct Gemma4Prefixer;
 
 impl MultimodalPromptPrefixer for Gemma4Prefixer {

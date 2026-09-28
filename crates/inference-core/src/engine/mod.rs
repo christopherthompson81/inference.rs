@@ -56,7 +56,7 @@ use tokio::{
 
 use crate::{
     get_mut_arcmutex,
-    pipeline::{ModelCategory, Pipeline},
+    pipeline::Pipeline,
     request::Request,
     sequence::{SequenceRecognizer, SequenceState},
     Constraint,
@@ -760,19 +760,6 @@ impl Engine {
             #[cfg(feature = "cuda")]
             cuda_decode_enabled,
         })
-    }
-
-    /// Returns the maximum supported sequence length for the underlying model, if applicable.
-    #[allow(dead_code)]
-    pub fn max_sequence_length(&self) -> Option<usize> {
-        let pipeline = get_mut_arcmutex!(self.pipeline);
-        let category = pipeline.category();
-
-        if matches!(category, ModelCategory::Diffusion | ModelCategory::Speech) {
-            None
-        } else {
-            Some(pipeline.get_metadata().max_seq_len)
-        }
     }
 
     fn free_finished_scheduler_sequences(&self, scheduler: &mut dyn Scheduler) {

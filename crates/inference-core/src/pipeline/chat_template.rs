@@ -26,7 +26,6 @@ const HARMONY_ALTERNATE_EOS: &[&str] = &[
     "<|channel|>", // Harmony
 ];
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize)]
 pub struct AddedTokensDecoder {
     __type: Option<String>,
@@ -66,7 +65,6 @@ pub struct ChatTemplateValue(
     #[serde(with = "either::serde_untagged")] pub Either<String, Vec<HashMap<String, String>>>,
 );
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize, Default)]
 /// Template for chat models including bos/eos/unk as well as the chat template.
 pub struct ChatTemplate {
@@ -266,7 +264,6 @@ pub fn calculate_eos_tokens(
     eos_toks
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Clone, Deserialize)]
 pub struct GenerationConfig {
     #[serde(default)]

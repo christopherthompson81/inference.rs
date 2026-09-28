@@ -6,7 +6,6 @@ use serde::Deserialize;
 use serde_json::{Map, Value};
 
 #[derive(Deserialize, Debug, Clone, Default)]
-#[allow(dead_code)]
 pub struct PreProcessorConfig {
     // Populated from video_preprocessor_config.json when the repo ships one; never deserialized from this file.
     #[serde(skip)]
@@ -28,7 +27,6 @@ pub struct PreProcessorConfig {
     pub(crate) max_image_size: Option<HashMap<String, u32>>,
     pub(crate) size: Option<HashMap<String, u32>>,
     pub(crate) crop_size: Option<HashMap<String, u32>>,
-    pub(crate) num_img_tokens: Option<usize>,
     pub(crate) num_crops: Option<usize>,
     pub(crate) max_image_tiles: Option<usize>,
     pub(crate) min_pixels: Option<usize>,
@@ -49,8 +47,6 @@ pub struct PreProcessorConfig {
     pub(crate) im_id_start: Option<String>,
     pub(crate) im_id_end: Option<String>,
     pub(crate) dynamic_hd: Option<usize>,
-    #[serde(alias = "image_seq_length")]
-    pub(crate) image_seq_len: Option<usize>,
     pub(crate) pan_and_scan_min_crop_size: Option<usize>,
     pub(crate) pan_and_scan_max_num_crops: Option<usize>,
     pub(crate) pan_and_scan_min_ratio_to_activate: Option<f64>,
@@ -68,7 +64,6 @@ pub struct PreProcessorConfig {
     pub(crate) max_image_tokens: Option<usize>,
     pub(crate) tile_size: Option<usize>,
     pub(crate) use_thumbnail: Option<bool>,
-    pub(crate) return_row_col_info: Option<bool>,
 
     pub(crate) audio_compression_rate: Option<usize>,
     pub(crate) audio_downsample_rate: Option<usize>,
@@ -85,13 +80,11 @@ pub struct PreProcessorConfig {
     pub(crate) max_frequency: Option<f64>,
     pub(crate) mel_floor: Option<f64>,
     pub(crate) min_frequency: Option<f64>,
-    pub(crate) padding_side: Option<String>,
     pub(crate) padding_value: Option<f64>,
     pub(crate) per_bin_mean: Option<Vec<f64>>,
     pub(crate) per_bin_stddev: Option<Vec<f64>>,
     pub(crate) preemphasis: Option<f64>,
     pub(crate) preemphasis_htk_flavor: Option<bool>,
-    pub(crate) return_attention_mask: Option<bool>,
     pub(crate) sampling_rate: Option<usize>,
 }
 
@@ -128,7 +121,6 @@ impl PreProcessorConfig {
     }
 }
 
-#[allow(dead_code)]
 pub(crate) trait ToFilter {
     fn to_filter(self) -> Result<FilterType>;
 }
@@ -151,6 +143,14 @@ impl ToFilter for Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::PreProcessorConfig;
+
+    #[test]
+    fn an_image_seq_length_key_leaves_other_fields_alone() {
+        let json = r#"{"image_seq_length": 256, "pan_and_scan_min_crop_size": 256, "pan_and_scan_max_num_crops": 4}"#;
+        let config: PreProcessorConfig = serde_json::from_str(json).unwrap();
+        assert_eq!(config.pan_and_scan_min_crop_size, Some(256));
+        assert_eq!(config.pan_and_scan_max_num_crops, Some(4));
+    }
 
     #[test]
     fn parses_nested_processor_config_sections() {
