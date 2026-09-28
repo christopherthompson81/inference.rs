@@ -7,11 +7,11 @@ use candle_core::Device;
 use inference_core::{
     get_auto_device_map_params, get_model_dtype, get_tgt_non_granular_index, paged_attn_supported,
     parse_isq_value, plan_paged_kv, reserve_external_mtp_memory_with_runtime, AutoDeviceMapParams,
-    DefaultSchedulerMethod, DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting,
-    HfConfigOverrides, InferenceRsBuilder, Loader, McpClientConfig, MemoryGpuConfig,
-    ModelLoaderConfig, ModelSelected, MtpConfig, MtpRuntimeConfig, PagedAttentionConfig,
-    PagedCacheType, PagedKvModelRequest, SchedulerConfig, SearchCallback, SearchEmbeddingModel,
-    TokenSource, ToolCallbackWithTool,
+    DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting, HfConfigOverrides,
+    InferenceRsBuilder, Loader, McpClientConfig, MemoryGpuConfig, ModelLoaderConfig, ModelSelected,
+    MtpConfig, MtpRuntimeConfig, PagedAttentionConfig, PagedCacheType, PagedKvModelRequest,
+    SchedulerConfig, SchedulerLimits, SearchCallback, SearchEmbeddingModel, TokenSource,
+    ToolCallbackWithTool,
 };
 use tracing::{debug, info, warn};
 
@@ -811,6 +811,38 @@ impl InferenceRsForServerBuilder {
         self
     }
 
+    /// What every model this builder loads shares, short of its loader config.
+    fn shared_model_config(&self) -> inference_core::AddModelConfig {
+        let engine_config = inference_core::EngineConfig {
+            no_kv_cache: self.no_kv_cache,
+            no_prefix_cache: false,
+            prefix_cache_n: self.prefix_cache_n,
+            disable_eos_stop: self.disable_eos_stop,
+            throughput_logging_enabled: !self.interactive_mode,
+            search_embedding_model: get_search_embedding_model(
+                self.enable_search,
+                self.search_embedding_model,
+            ),
+            search_callback: self.search_callback.clone(),
+            tool_callbacks: self.tool_callbacks.clone(),
+        };
+        inference_core::AddModelConfig {
+            engine_config,
+            mcp_client_config: self.mcp_client_config.clone(),
+            loader_config: None,
+            code_exec_config: self.code_exec_config.clone(),
+            shell_config: self.shell_config.clone(),
+        }
+    }
+
+    fn scheduler_limits(&self) -> SchedulerLimits {
+        SchedulerLimits {
+            max_num_batched_tokens: self.max_num_batched_tokens.get(),
+            max_prefill_chunk_tokens: self.max_prefill_chunk_tokens.get(),
+            max_decode_steps_before_prefill: self.max_decode_steps_before_prefill.get(),
+        }
+    }
+
     /// Builds the configured inference.rs instance.
     ///
     /// ### Examples
@@ -838,6 +870,8 @@ impl InferenceRsForServerBuilder {
     /// Build a single-model instance (legacy mode)
     async fn build_single_model(mut self) -> Result<SharedInferenceRsState> {
         let mtp_runtime = MtpRuntimeConfig::new(self.prefix_cache_n);
+        let add_model_config = self.shared_model_config();
+        let limits = self.scheduler_limits();
         let model = self.model.context("Model was None")?;
 
         let tgt_non_granular_index = get_tgt_non_granular_index(&model);
@@ -907,48 +941,18 @@ impl InferenceRsForServerBuilder {
         let pipeline: LoadedPipeline = loader_config.load(&*loader, mtp_runtime).await?;
         info!("Model loaded.");
 
-        let scheduler_config = init_scheduler_config(
-            &cache_config,
-            &pipeline,
-            self.max_seqs,
-            self.max_num_batched_tokens.get(),
-            self.max_prefill_chunk_tokens.get(),
-            self.max_decode_steps_before_prefill.get(),
-        )
-        .await;
-
-        let search_embedding_model =
-            get_search_embedding_model(self.enable_search, self.search_embedding_model);
-
-        let mut builder = InferenceRsBuilder::new(
+        let scheduler_config =
+            SchedulerConfig::for_pipeline(&pipeline, cache_config.is_some(), self.max_seqs, limits)
+                .await?;
+        let mut builder = InferenceRsBuilder::from_config(
             pipeline,
             scheduler_config,
-            !self.interactive_mode,
-            search_embedding_model,
+            add_model_config.with_loader_config(loader_config),
         )
-        .with_opt_log(self.log)
-        .with_no_kv_cache(self.no_kv_cache)
-        .with_prefix_cache_n(self.prefix_cache_n)
-        .with_disable_eos_stop(self.disable_eos_stop)
-        .with_loader_config(loader_config);
-        builder = with_callbacks(builder, self.search_callback, self.tool_callbacks);
-
+        .with_opt_log(self.log);
         if let Some(id) = self.model_id_override {
             builder = builder.with_model_id(id);
         }
-
-        // Add MCP client configuration if provided
-        if let Some(mcp_config) = self.mcp_client_config {
-            builder = builder.with_mcp_client(mcp_config);
-        }
-
-        if let Some(code_exec_config) = self.code_exec_config {
-            builder = builder.with_code_execution(code_exec_config);
-        }
-        if let Some(shell_config) = self.shell_config {
-            builder = builder.with_shell_execution(shell_config);
-        }
-
         let inference = builder.build().await;
 
         Ok(inference)
@@ -957,33 +961,17 @@ impl InferenceRsForServerBuilder {
     /// Build a multi-model instance
     pub async fn build_multi_model(mut self) -> Result<SharedInferenceRsState> {
         let mtp_runtime = MtpRuntimeConfig::new(self.prefix_cache_n);
+        let add_model_config = self.shared_model_config();
+        let limits = self.scheduler_limits();
         if self.models.is_empty() {
             anyhow::bail!("No models configured for multi-model mode");
         }
 
         inference_core::distributed::begin_tensor_parallel_session(self.models.len())?;
 
-        // Use the first model as the base configuration
-        let first_model = &self.models[0];
-        let model = first_model.model.clone();
-        let first_chat_template = first_model
-            .chat_template
-            .clone()
-            .or(self.chat_template.clone());
-        let first_jinja_explicit = first_model
-            .jinja_explicit
-            .clone()
-            .or(self.jinja_explicit.clone());
-        let first_max_model_len = first_model.max_model_len.or(self.max_model_len);
-        let first_hf_config_overrides = first_model
-            .hf_config_overrides
-            .clone()
-            .or(self.hf_config_overrides.clone());
-
-        let tgt_non_granular_index = get_tgt_non_granular_index(&model);
-        let dtype = get_model_dtype(&model)?;
-        let auto_device_map_params = get_auto_device_map_params(&model)?;
-
+        let first = &self.models[0].model;
+        let tgt_non_granular_index = get_tgt_non_granular_index(first);
+        let first_dtype = get_model_dtype(first)?;
         if tgt_non_granular_index.is_some() {
             self.max_seqs = 1;
         }
@@ -993,19 +981,6 @@ impl InferenceRsForServerBuilder {
         } else {
             init_device(self.cpu, self.seed)?
         };
-
-        // Create the first model's pipeline
-        let first_encoder_cache_memory_bytes = first_model
-            .encoder_cache_memory_bytes
-            .map(NonZeroUsize::get)
-            .or(self.encoder_cache_memory_bytes);
-        let mapper = init_mapper(
-            &first_model
-                .num_device_layers
-                .clone()
-                .or(self.num_device_layers.clone()),
-            &auto_device_map_params,
-        )?;
         let paged_attn = configure_paged_attn(&device, self.paged_attn);
 
         let requested_cache_config = init_cache_config(
@@ -1035,166 +1010,37 @@ impl InferenceRsForServerBuilder {
                 *first,
                 self.mtp_config.as_ref(),
                 mtp_runtime,
-                &dtype,
+                &first_dtype,
                 &device,
             )?;
         }
-        let first_cache_config = paged_kv_plan.paged_attn[0];
-
-        let isq = first_model
-            .in_situ_quant
-            .as_ref()
-            .or(self.in_situ_quant.as_ref())
-            .map(|isq| parse_isq_value(isq, Some(&device)).map_err(|e| anyhow::anyhow!("{e}")))
-            .transpose()?;
 
         let mut loaded_model_ids = Vec::new();
         let mut registered_ids = HashSet::new();
-
-        let first_loader_config = ModelLoaderConfig {
-            model_selected: model,
-            token_source: self.token_source.clone(),
-            hf_revision: None,
-            dtype,
-            device: device.clone(),
-            device_map_setting: mapper,
-            isq,
-            paged_attn_config: first_cache_config,
-            silent: false,
-            chat_template: first_chat_template,
-            jinja_explicit: first_jinja_explicit,
-            max_model_len: first_max_model_len,
-            hf_config_overrides: first_hf_config_overrides,
-            mtp_config: self.mtp_config.clone(),
-            encoder_cache_memory_bytes: first_encoder_cache_memory_bytes,
-            overrides: Default::default(),
-        };
-        let loader = first_loader_config.build_loader(self.no_kv_cache)?;
-        inference_instance_info(&*loader);
-        let pipeline: LoadedPipeline = first_loader_config.load(&*loader, mtp_runtime).await?;
-        let first_pipeline_name = pipeline.lock().await.name();
-        let first_primary_id = first_model
-            .alias
-            .clone()
-            .unwrap_or_else(|| first_pipeline_name.clone());
-
-        if !registered_ids.insert(first_primary_id.clone()) {
-            anyhow::bail!(
-                "Model ID conflict: '{}' is already registered (config key: {}).",
-                first_primary_id,
-                first_model.model_id
-            );
-        }
-
-        if first_primary_id == first_pipeline_name {
-            info!(
-                "First model loaded: `{}` (from config key: {})",
-                first_primary_id, first_model.model_id
-            );
-        } else {
-            info!(
-                "First model loaded: `{}` (pipeline: `{}`; config key: {})",
-                first_primary_id, first_pipeline_name, first_model.model_id
-            );
-        }
-        loaded_model_ids.push(first_primary_id.clone());
-
-        let scheduler_config = init_scheduler_config(
-            &first_cache_config,
-            &pipeline,
-            self.max_seqs,
-            self.max_num_batched_tokens.get(),
-            self.max_prefill_chunk_tokens.get(),
-            self.max_decode_steps_before_prefill.get(),
-        )
-        .await;
-        let search_embedding_model =
-            get_search_embedding_model(self.enable_search, self.search_embedding_model);
-        // Create the first InferenceRs instance with the first model
-        let mut builder = InferenceRsBuilder::new(
-            pipeline,
-            scheduler_config.clone(),
-            !self.interactive_mode,
-            search_embedding_model,
-        )
-        .with_opt_log(self.log.clone())
-        .with_no_kv_cache(self.no_kv_cache)
-        .with_prefix_cache_n(self.prefix_cache_n)
-        .with_disable_eos_stop(self.disable_eos_stop)
-        .with_deferred_daemon_start(true)
-        .with_loader_config(first_loader_config);
-        builder = with_callbacks(
-            builder,
-            self.search_callback.clone(),
-            self.tool_callbacks.clone(),
-        );
-        if first_primary_id != first_pipeline_name {
-            builder = builder.with_model_id(first_primary_id.clone());
-        }
-
-        // Add MCP client configuration if provided
-        if let Some(mcp_config) = self.mcp_client_config.clone() {
-            builder = builder.with_mcp_client(mcp_config);
-        }
-
-        if let Some(code_exec_config) = self.code_exec_config.clone() {
-            builder = builder.with_code_execution(code_exec_config);
-        }
-        if let Some(shell_config) = self.shell_config.clone() {
-            builder = builder.with_shell_execution(shell_config);
-        }
-
-        let inference = builder.build().await;
-
-        if let Some(alias) = first_model.alias.as_ref() {
-            if alias != &first_pipeline_name {
-                inference
-                    .register_model_alias(first_pipeline_name.clone(), &first_primary_id)
-                    .map_err(|e| anyhow::anyhow!(e))?;
+        let mut inference: Option<SharedInferenceRsState> = None;
+        for (model_index, model_config) in self.models.iter().enumerate() {
+            if model_index > 0 {
+                info!(
+                    "Loading additional model from config key: {}",
+                    model_config.model_id
+                );
             }
-        }
-
-        // Load additional models
-        for (model_index, model_config) in self.models.iter().enumerate().skip(1) {
-            info!(
-                "Loading additional model from config key: {}",
-                model_config.model_id
-            );
-
             let model = model_config.model.clone();
             let dtype = get_model_dtype(&model)?;
-            let auto_device_map_params = get_auto_device_map_params(&model)?;
-            let chat_template = model_config
-                .chat_template
-                .clone()
-                .or(self.chat_template.clone());
-            let jinja_explicit = model_config
-                .jinja_explicit
-                .clone()
-                .or(self.jinja_explicit.clone());
-            let max_model_len = model_config.max_model_len.or(self.max_model_len);
-            let hf_config_overrides = model_config
-                .hf_config_overrides
-                .clone()
-                .or(self.hf_config_overrides.clone());
-
             let mapper = init_mapper(
                 &model_config
                     .num_device_layers
                     .clone()
                     .or(self.num_device_layers.clone()),
-                &auto_device_map_params,
+                &get_auto_device_map_params(&model)?,
             )?;
-
             let isq = model_config
                 .in_situ_quant
                 .as_ref()
                 .or(self.in_situ_quant.as_ref())
                 .map(|isq| parse_isq_value(isq, Some(&device)).map_err(|e| anyhow::anyhow!("{e}")))
                 .transpose()?;
-
             let paged_attn_config = paged_kv_plan.paged_attn[model_index];
-            // the global MTP setting and its memory reservation belong to the first model only
             let loader_config = ModelLoaderConfig {
                 model_selected: model,
                 token_source: self.token_source.clone(),
@@ -1205,11 +1051,21 @@ impl InferenceRsForServerBuilder {
                 isq,
                 paged_attn_config,
                 silent: false,
-                chat_template,
-                jinja_explicit,
-                max_model_len,
-                hf_config_overrides,
-                mtp_config: None,
+                chat_template: model_config
+                    .chat_template
+                    .clone()
+                    .or(self.chat_template.clone()),
+                jinja_explicit: model_config
+                    .jinja_explicit
+                    .clone()
+                    .or(self.jinja_explicit.clone()),
+                max_model_len: model_config.max_model_len.or(self.max_model_len),
+                hf_config_overrides: model_config
+                    .hf_config_overrides
+                    .clone()
+                    .or(self.hf_config_overrides.clone()),
+                // the global MTP setting and its memory reservation belong to the first model only
+                mtp_config: self.mtp_config.clone().filter(|_| model_index == 0),
                 encoder_cache_memory_bytes: model_config
                     .encoder_cache_memory_bytes
                     .map(NonZeroUsize::get)
@@ -1217,18 +1073,17 @@ impl InferenceRsForServerBuilder {
                 overrides: Default::default(),
             };
             let loader = loader_config.build_loader(self.no_kv_cache)?;
+            if model_index == 0 {
+                inference_instance_info(&*loader);
+            }
             let pipeline: LoadedPipeline = loader_config.load(&*loader, mtp_runtime).await?;
-
-            // Each model gets its own scheduler
-            let scheduler_config = init_scheduler_config(
-                &paged_kv_plan.paged_attn[model_index],
+            let scheduler_config = SchedulerConfig::for_pipeline(
                 &pipeline,
+                paged_attn_config.is_some(),
                 self.max_seqs,
-                self.max_num_batched_tokens.get(),
-                self.max_prefill_chunk_tokens.get(),
-                self.max_decode_steps_before_prefill.get(),
+                limits,
             )
-            .await;
+            .await?;
 
             // Use the pipeline's name() as the canonical ID, but allow an alias.
             let pipeline_name = pipeline.lock().await.name();
@@ -1236,7 +1091,6 @@ impl InferenceRsForServerBuilder {
                 .alias
                 .clone()
                 .unwrap_or_else(|| pipeline_name.clone());
-
             if !registered_ids.insert(primary_id.clone()) {
                 anyhow::bail!(
                     "Model ID conflict: '{}' is already registered (config key: {}).",
@@ -1245,61 +1099,43 @@ impl InferenceRsForServerBuilder {
                 );
             }
 
-            // Add the model to the InferenceRs instance
-            let engine_config = inference_core::EngineConfig {
-                no_kv_cache: self.no_kv_cache,
-                no_prefix_cache: false,
-                prefix_cache_n: self.prefix_cache_n,
-                disable_eos_stop: self.disable_eos_stop,
-                throughput_logging_enabled: !self.interactive_mode,
-                search_embedding_model,
-                search_callback: self.search_callback.clone(),
-                tool_callbacks: self.tool_callbacks.clone(),
-            };
-
-            let mut add_model_config = inference_core::AddModelConfig::new(engine_config)
-                .with_loader_config(loader_config);
-            if let Some(mcp_config) = self.mcp_client_config.clone() {
-                add_model_config = add_model_config.with_mcp_config(mcp_config);
-            }
-            if let Some(code_exec_config) = self.code_exec_config.clone() {
-                add_model_config = add_model_config.with_code_execution(code_exec_config);
-            }
-            if let Some(shell_config) = self.shell_config.clone() {
-                add_model_config = add_model_config.with_shell_execution(shell_config);
-            }
-
-            inference
-                .add_model(
-                    primary_id.clone(),
-                    pipeline,
-                    scheduler_config.clone(),
-                    add_model_config,
-                )
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to add model {}: {}", primary_id, e))?;
-
-            if let Some(alias) = model_config.alias.as_ref() {
-                if alias != &pipeline_name {
+            let config = add_model_config.clone().with_loader_config(loader_config);
+            let inference = match &inference {
+                Some(inference) => {
                     inference
-                        .register_model_alias(pipeline_name.clone(), &primary_id)
-                        .map_err(|e| anyhow::anyhow!(e))?;
+                        .add_model(primary_id.clone(), pipeline, scheduler_config, config)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("Failed to add model {primary_id}: {e}"))?;
+                    inference
                 }
-            }
-
-            if primary_id == pipeline_name {
+                None => {
+                    let mut builder =
+                        InferenceRsBuilder::from_config(pipeline, scheduler_config, config)
+                            .with_opt_log(self.log.clone())
+                            .with_deferred_daemon_start(true);
+                    if primary_id != pipeline_name {
+                        builder = builder.with_model_id(primary_id.clone());
+                    }
+                    inference.insert(builder.build().await)
+                }
+            };
+            if primary_id != pipeline_name {
+                inference
+                    .register_model_alias(pipeline_name.clone(), &primary_id)
+                    .map_err(|e| anyhow::anyhow!(e))?;
                 info!(
-                    "Model `{}` registered successfully (from config key: {})",
-                    primary_id, model_config.model_id
+                    "Model `{}` loaded (pipeline: `{}`; config key: {})",
+                    primary_id, pipeline_name, model_config.model_id
                 );
             } else {
                 info!(
-                    "Model `{}` registered successfully (pipeline: `{}`; config key: {})",
-                    primary_id, pipeline_name, model_config.model_id
+                    "Model `{}` loaded (from config key: {})",
+                    primary_id, model_config.model_id
                 );
             }
             loaded_model_ids.push(primary_id);
         }
+        let inference = inference.expect("at least one model is configured");
 
         // Set the default model if specified
         if let Some(ref default_model_id) = self.default_model_id {
@@ -1491,37 +1327,6 @@ fn init_cache_config(
     }
 }
 
-/// Initializes the scheduler configuration based on cache settings and pipeline metadata.
-async fn init_scheduler_config(
-    cache_config: &Option<PagedAttentionConfig>,
-    pipeline: &LoadedPipeline,
-    args_max_seqs: usize,
-    max_num_batched_tokens: usize,
-    max_prefill_chunk_tokens: usize,
-    max_decode_steps_before_prefill: usize,
-) -> SchedulerConfig {
-    if cache_config.is_some() {
-        // Handle case where we may have device mapping
-        if let Some(ref cache_config) = pipeline.lock().await.get_metadata().cache_config {
-            SchedulerConfig::PagedAttentionMeta {
-                max_num_seqs: args_max_seqs,
-                max_num_batched_tokens,
-                max_prefill_chunk_tokens,
-                max_decode_steps_before_prefill,
-                config: cache_config.clone(),
-            }
-        } else {
-            SchedulerConfig::DefaultScheduler {
-                method: DefaultSchedulerMethod::Fixed(args_max_seqs.try_into().unwrap()),
-            }
-        }
-    } else {
-        SchedulerConfig::DefaultScheduler {
-            method: DefaultSchedulerMethod::Fixed(args_max_seqs.try_into().unwrap()),
-        }
-    }
-}
-
 /// Configures PagedAttention based on two flags.
 ///
 /// This function resolves the tri-state PagedAttention configuration from
@@ -1550,19 +1355,4 @@ pub fn get_search_embedding_model(
     } else {
         None
     }
-}
-
-// The first model gets its callbacks through the core builder; later models through their engine config.
-fn with_callbacks(
-    mut builder: InferenceRsBuilder,
-    search_callback: Option<Arc<SearchCallback>>,
-    tool_callbacks: HashMap<String, ToolCallbackWithTool>,
-) -> InferenceRsBuilder {
-    if let Some(search_callback) = search_callback {
-        builder = builder.with_search_callback(search_callback);
-    }
-    for (name, callback) in tool_callbacks {
-        builder = builder.with_tool_callback_with_tool(name, callback);
-    }
-    builder
 }

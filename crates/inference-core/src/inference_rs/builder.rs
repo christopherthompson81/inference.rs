@@ -54,6 +54,39 @@ impl InferenceRsBuilder {
         }
     }
 
+    /// A builder carrying everything `config` sets, as `InferenceRs::add_model` would apply it to a later model.
+    pub fn from_config(
+        pipeline: Arc<tokio::sync::Mutex<dyn Pipeline>>,
+        method: SchedulerConfig,
+        config: AddModelConfig,
+    ) -> Self {
+        let AddModelConfig {
+            engine_config,
+            mcp_client_config,
+            loader_config,
+            code_exec_config,
+            shell_config,
+        } = config;
+        Self {
+            no_kv_cache: Some(engine_config.no_kv_cache),
+            no_prefix_cache: Some(engine_config.no_prefix_cache),
+            prefix_cache_n: Some(engine_config.prefix_cache_n),
+            disable_eos_stop: Some(engine_config.disable_eos_stop),
+            search_callback: engine_config.search_callback,
+            tool_callbacks: engine_config.tool_callbacks,
+            mcp_client_config,
+            loader_config,
+            code_exec_config,
+            shell_config,
+            ..Self::new(
+                pipeline,
+                method,
+                engine_config.throughput_logging_enabled,
+                engine_config.search_embedding_model,
+            )
+        }
+    }
+
     /// Override the model ID used by InferenceRs. Defaults to the pipeline name.
     pub fn with_model_id(mut self, model_id: impl Into<String>) -> Self {
         self.model_id_override = Some(model_id.into());
