@@ -26,7 +26,7 @@ use crate::{
     engine_embeddings::{embed, EmbeddingError},
     files::{self, FileBody, FileMetadata, FileUpload},
     generation::{generate_image, generate_speech, SpeechAudio},
-    inference_for_server_builder::{parse_device_layers, InferenceRsForServerBuilder},
+    inference_for_server_builder::{parse_device_layers, InferenceRsForServerBuilder, ModelConfig},
     lora_adapters::{
         list_adapters, load_adapter, unload_adapter, ListLoraAdaptersQuery, LoadLoraAdapterRequest,
         LoraAdapterApiConfig, LoraAdapterListResponse, LoraAdapterObject, UnloadLoraAdapterRequest,
@@ -59,6 +59,12 @@ use crate::{
 };
 
 const INVALID_REQUEST_BODY: &str = "invalid_request_body";
+const ONE_MODEL_SOURCE: &str = "give either `model` or a non-empty `models`, not both";
+const DEFAULT_WITHOUT_MODELS: &str =
+    "`default_model_id` picks one of `models`; with `model`, use `model_id`";
+const ANYMOE_WITH_MODELS: &str = "`anymoe` wraps the single `model`; it cannot apply to `models`";
+const MODEL_ID_WITH_MODELS: &str =
+    "`model_id` names `model`; with `models`, give each its own `model_id`";
 const PAGED_CACHE_ONE_SIZE: &str =
     "paged_cache takes at most one of context_len, memory_mb and memory_fraction";
 const CODE_EXECUTION_UNAVAILABLE: &str =
@@ -67,13 +73,21 @@ const CODE_EXECUTION_UNAVAILABLE: &str =
 pub const DEFAULT_MAX_SEQS: usize = 32;
 
 /// What to load and how to run it: the JSON form of the options `inference serve` takes.
-#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 #[serde(deny_unknown_fields)]
 pub struct EngineSpec {
-    pub model: ModelSelected,
-    /// The id requests use for this model; defaults to the model's own id.
+    /// The one model to serve; give `models` instead to serve several.
+    #[serde(default)]
+    pub model: Option<ModelSelected>,
+    /// The id requests use for `model`; defaults to the model's own id.
     #[serde(default)]
     pub model_id: Option<String>,
+    /// Several models served by one engine, each with its own overrides of the runtime settings.
+    #[serde(default)]
+    pub models: Vec<ModelSpec>,
+    /// Which of `models` a request without a `model` goes to; defaults to the first.
+    #[serde(default)]
+    pub default_model_id: Option<String>,
     #[serde(default)]
     pub runtime: RuntimeSpec,
     #[serde(default)]
@@ -85,6 +99,67 @@ pub struct EngineSpec {
     /// Mixes the model's MLPs with expert models' through a trained gate.
     #[serde(default)]
     pub anymoe: Option<AnyMoeSpec>,
+}
+
+/// One of several models an engine serves; unset settings fall back to `runtime`'s.
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelSpec {
+    pub model: ModelSelected,
+    /// The id requests use for this model; defaults to the model's own id.
+    #[serde(default)]
+    pub model_id: Option<String>,
+    #[serde(default)]
+    pub chat_template: Option<String>,
+    #[serde(default)]
+    pub jinja_explicit: Option<String>,
+    #[serde(default)]
+    pub max_model_len: Option<usize>,
+    #[serde(default)]
+    #[schema(value_type = Option<Object>)]
+    pub hf_config_overrides: Option<HfConfigOverrides>,
+    #[serde(default)]
+    pub device_layers: Option<Vec<String>>,
+    #[serde(default)]
+    pub isq: Option<String>,
+    #[serde(default)]
+    pub encoder_cache_memory_bytes: Option<usize>,
+}
+
+impl ModelSpec {
+    fn into_config(self, index: usize) -> Result<ModelConfig, EngineLoadError> {
+        if let Some(device_layers) = &self.device_layers {
+            parse_device_layers(device_layers).map_err(|error| {
+                EngineLoadError::InvalidSpec(format!("models[{index}]: {error:#}"))
+            })?;
+        }
+        let zero = |field: &str| {
+            EngineLoadError::InvalidSpec(format!("models[{index}].{field} must be at least 1"))
+        };
+        if self.max_model_len == Some(0) {
+            return Err(zero("max_model_len"));
+        }
+        if self.encoder_cache_memory_bytes == Some(0) {
+            return Err(zero("encoder_cache_memory_bytes"));
+        }
+        // The builder names a model in its errors by this key; the alias is what requests use.
+        let key = self
+            .model_id
+            .clone()
+            .unwrap_or_else(|| format!("models[{index}]"));
+        let mut config = ModelConfig::new(key, self.model);
+        config.alias = self.model_id;
+        config.chat_template = self.chat_template;
+        config.jinja_explicit = self.jinja_explicit;
+        config.max_model_len = self.max_model_len;
+        config.hf_config_overrides = self.hf_config_overrides;
+        config.num_device_layers = self.device_layers;
+        config.in_situ_quant = self.isq;
+        if let Some(bytes) = self.encoder_cache_memory_bytes {
+            config = config.with_encoder_cache_memory_bytes(bytes);
+        }
+        Ok(config)
+    }
 }
 
 /// Where uploaded skills are kept; requests reference them from the shell tool.
@@ -254,7 +329,7 @@ pub struct MtpSpec {
     pub draft_sampling: MtpDraftSampling,
 }
 
-#[derive(Clone, Copy, Debug, Default, Deserialize, utoipa::ToSchema)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum MtpDraftSampling {
     /// Probabilistic drafting where the model supports it, else greedy.
@@ -350,9 +425,34 @@ impl EngineSpec {
     fn into_builder(self) -> Result<InferenceRsForServerBuilder, EngineLoadError> {
         let invalid = EngineLoadError::InvalidSpec;
         let runtime = self.runtime;
-        let mut builder = InferenceRsForServerBuilder::new()
-            .with_model(self.model)
-            .with_model_id_override_optional(self.model_id)
+        let mut builder = InferenceRsForServerBuilder::new();
+        builder = match (self.model, self.models.is_empty()) {
+            (Some(model), true) => {
+                if self.default_model_id.is_some() {
+                    return Err(invalid(DEFAULT_WITHOUT_MODELS.to_string()));
+                }
+                builder
+                    .with_model(model)
+                    .with_model_id_override_optional(self.model_id)
+            }
+            (None, false) => {
+                if self.model_id.is_some() {
+                    return Err(invalid(MODEL_ID_WITH_MODELS.to_string()));
+                }
+                if self.anymoe.is_some() {
+                    return Err(invalid(ANYMOE_WITH_MODELS.to_string()));
+                }
+                for (index, model) in self.models.into_iter().enumerate() {
+                    builder = builder.add_model_config(model.into_config(index)?);
+                }
+                match self.default_model_id {
+                    Some(id) => builder.with_default_model_id(id),
+                    None => builder,
+                }
+            }
+            _ => return Err(invalid(ONE_MODEL_SOURCE.to_string())),
+        };
+        let mut builder = builder
             .with_no_kv_cache(runtime.no_kv_cache)
             .with_chat_template_optional(runtime.chat_template)
             .with_jinja_explicit_optional(runtime.jinja_explicit)
@@ -1240,6 +1340,53 @@ mod tests {
         assert!(!auto.strict);
         assert!(default_policy(SandboxMode::On).unwrap().strict);
         assert!(default_policy(SandboxMode::Off).is_none());
+    }
+
+    #[test]
+    fn an_engine_serves_one_model_or_a_list_of_them() {
+        let plain = serde_json::json!({"Plain": {"model_id": "org/model"}});
+        let spec = |value: serde_json::Value| serde_json::from_value::<EngineSpec>(value).unwrap();
+        let refused = |value: serde_json::Value| {
+            spec(value)
+                .into_builder()
+                .err()
+                .map(|error| error.to_string())
+                .unwrap_or_default()
+        };
+        assert!(refused(serde_json::json!({})).contains("either `model`"));
+        assert!(
+            refused(serde_json::json!({"model": plain, "models": [{"model": plain}]}))
+                .contains("either `model`")
+        );
+        assert!(
+            refused(serde_json::json!({"models": [{"model": plain}], "model_id": "a"}))
+                .contains("give each its own")
+        );
+        assert!(
+            refused(serde_json::json!({"models": [{"model": plain, "device_layers": ["x"]}]}))
+                .contains("models[0]")
+        );
+        assert!(
+            refused(serde_json::json!({"model": plain, "default_model_id": "a"}))
+                .contains("picks one of")
+        );
+        assert!(
+            refused(serde_json::json!({"models": [{"model": plain, "max_model_len": 0}]}))
+                .contains("models[0].max_model_len")
+        );
+        let anymoe = serde_json::json!({"config": {"hidden_size": 8, "expert_type": "fine_tuned"},
+            "path": "p", "prefix": "model.layers", "mlp": "mlp", "model_ids": ["e"]});
+        assert!(
+            refused(serde_json::json!({"models": [{"model": plain}], "anymoe": anymoe}))
+                .contains("single `model`")
+        );
+        let two = spec(serde_json::json!({
+            "models": [{"model": plain, "model_id": "a", "isq": "q4k"}, {"model": plain, "model_id": "b"}],
+            "default_model_id": "b",
+            "runtime": {"device": "cpu"},
+        }));
+        assert_eq!(two.models.len(), 2);
+        assert!(two.into_builder().is_ok());
     }
 
     #[test]

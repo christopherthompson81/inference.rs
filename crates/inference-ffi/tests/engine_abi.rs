@@ -1430,3 +1430,57 @@ fn online_calibration_collects_from_traffic_and_applies() {
     assert_eq!(status, INFERENCE_OK, "{}", last_error());
     unsafe { inference_engine_free(engine) };
 }
+
+#[test]
+fn one_engine_serves_several_models_by_id() {
+    // Two checkpoints, since each model's own id is also registered as an alias of its request id.
+    let dirs = [
+        support::tiny_checkpoint().unwrap(),
+        support::tiny_checkpoint().unwrap(),
+    ];
+    let model = |dir: &tempfile::TempDir| json!({"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}});
+    let spec = json!({
+        "models": [
+            {"model": model(&dirs[0]), "model_id": "first"},
+            {"model": model(&dirs[1]), "model_id": "second"},
+        ],
+        "default_model_id": "second",
+        "runtime": {"device": "cpu"},
+    });
+    let (status, engine) = load(&spec.to_string());
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+
+    let mut models = null_mut();
+    assert_eq!(
+        unsafe { inference_models_list(engine, &mut models) },
+        INFERENCE_OK
+    );
+    let models: Value = serde_json::from_str(&take_string(models)).unwrap();
+    let ids: Vec<_> = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m["id"].clone())
+        .collect();
+    assert!(
+        ids.contains(&json!("first")) && ids.contains(&json!("second")),
+        "{models}"
+    );
+
+    for id in ["first", "second", "default"] {
+        let mut request: Value = serde_json::from_str(&chat_request(false)).unwrap();
+        request["model"] = json!(id);
+        let (status, response) = chat(engine, &request.to_string());
+        assert_eq!(status, INFERENCE_OK, "{id}: {}", last_error());
+        let response: Value = serde_json::from_str(&response.unwrap()).unwrap();
+        assert_eq!(response["object"], "chat.completion", "{id}");
+        // The response names the model by its checkpoint; "default" goes to the one default_model_id names.
+        let served = if id == "first" { &dirs[0] } else { &dirs[1] };
+        assert_eq!(
+            response["model"],
+            json!(served.path().to_string_lossy()),
+            "{id}"
+        );
+    }
+    unsafe { inference_engine_free(engine) };
+}

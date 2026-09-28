@@ -4234,9 +4234,6 @@
       "EngineSpec": {
         "type": "object",
         "description": "What to load and how to run it: the JSON form of the options `inference serve` takes.",
-        "required": [
-          "model"
-        ],
         "properties": {
           "adapters": {
             "$ref": "#/components/schemas/AdapterSpec"
@@ -4255,15 +4252,37 @@
               }
             ]
           },
+          "default_model_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which of `models` a request without a `model` goes to; defaults to the first."
+          },
           "model": {
-            "$ref": "#/components/schemas/ModelSelected"
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ModelSelected",
+                "description": "The one model to serve; give `models` instead to serve several."
+              }
+            ]
           },
           "model_id": {
             "type": [
               "string",
               "null"
             ],
-            "description": "The id requests use for this model; defaults to the model's own id."
+            "description": "The id requests use for `model`; defaults to the model's own id."
+          },
+          "models": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelSpec"
+            },
+            "description": "Several models served by one engine, each with its own overrides of the runtime settings."
           },
           "runtime": {
             "$ref": "#/components/schemas/RuntimeSpec"
@@ -7020,6 +7039,73 @@
             }
           }
         ]
+      },
+      "ModelSpec": {
+        "type": "object",
+        "description": "One of several models an engine serves; unset settings fall back to `runtime`'s.",
+        "required": [
+          "model"
+        ],
+        "properties": {
+          "chat_template": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "device_layers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "encoder_cache_memory_bytes": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "hf_config_overrides": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "isq": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "jinja_explicit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_model_len": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "model": {
+            "$ref": "#/components/schemas/ModelSelected"
+          },
+          "model_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The id requests use for this model; defaults to the model's own id."
+          }
+        },
+        "additionalProperties": false
       },
       "ModelStatus": {
         "type": "string",

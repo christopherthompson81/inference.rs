@@ -1,27 +1,25 @@
 //! Run inference-cli from a full TOML configuration.
 
 use anyhow::Result;
-use axum::middleware;
 use tracing::info;
 
-use inference_core::initialize_logging;
-use inference_server_core::{
-    inference_for_server_builder::{InferenceRsForServerBuilder, ModelConfig},
-    inference_server_router_builder::{InferenceRsServerRouterBuilder, DEFAULT_MAX_BODY_LIMIT},
-    metrics::{install_prometheus_recorder, observe_http, ObservabilityState},
+use inference_api::{
+    engine::{AdapterSpec, ModelSpec, PagedCacheSpec, RuntimeSpec, SkillsSpec},
+    Engine, EngineSpec,
 };
+use inference_core::initialize_logging;
+use inference_server_core::metrics::install_prometheus_recorder;
 
-use crate::args::{MatformerSelection, RuntimeOptions};
+use crate::args::{
+    GlobalOptions, MatformerSelection, PagedAttentionOptions, RuntimeOptions, SandboxOptions,
+};
 use crate::commands::run::{interactive_mode, InteractiveConfig};
 use crate::commands::serve::{
-    apply_agent_mode, convert_to_model_selected, extract_sandbox_settings, load_mcp_config,
-    log_agent_runtime, log_api_surfaces, spawn_mcp_server, tcp_nodelay_listener,
-    validate_agent_options,
+    adapter_spec_from_env, agentic_spec, apply_agent_mode, convert_to_model_selected,
+    log_agent_runtime, runtime_options_spec, serve_engine, skills_root, validate_agent_options,
+    AgenticInputs,
 };
-#[cfg(feature = "code-execution")]
-use crate::commands::serve::{build_code_exec_config, build_shell_config};
 use crate::config::{load_cli_config, CliConfig};
-use crate::ui::build_ui_router;
 
 /// Execute the CLI using a TOML configuration file.
 pub async fn run_from_config(path: std::path::PathBuf) -> Result<()> {
@@ -54,158 +52,21 @@ async fn run_serve_config(cfg: crate::config::ServeConfig) -> Result<()> {
     validate_agent_options(&runtime)?;
     log_agent_runtime(&runtime, server.max_tool_rounds);
 
-    let (
+    let spec = config_spec(ConfigSpecInputs {
+        models: &models,
+        default_model_id,
+        runtime: &runtime,
         paged_attn,
-        paged_attn_gpu_mem,
-        paged_attn_gpu_mem_usage,
-        paged_ctxt_len,
-        paged_attn_block_size,
-        paged_cache_type,
-    ) = paged_attn.into_builder_flags();
-
-    let (model_configs, cpu) = build_model_configs(&models, &runtime, &global.token_source).await?;
-
-    let mut builder = InferenceRsForServerBuilder::new()
-        .with_max_seqs(runtime.max_seqs)
-        .with_max_num_batched_tokens(runtime.max_num_batched_tokens)
-        .with_max_prefill_chunk_tokens(runtime.max_prefill_chunk_tokens)
-        .with_max_decode_steps_before_prefill(runtime.max_decode_steps_before_prefill)
-        .with_no_kv_cache(runtime.no_kv_cache)
-        .with_token_source(global.token_source)
-        .with_interactive_mode(false)
-        .with_prefix_cache_n(runtime.prefix_cache_n)
-        .set_paged_attn(paged_attn)
-        .with_cpu(cpu)
-        .with_enable_search(runtime.enable_search)
-        .with_seed_optional(global.seed)
-        .with_log_optional(global.log.as_ref().map(|p| p.to_string_lossy().to_string()))
-        .with_chat_template_optional(
-            runtime
-                .chat_template
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-        )
-        .with_jinja_explicit_optional(
-            runtime
-                .jinja_explicit
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-        )
-        .with_paged_attn_gpu_mem_optional(paged_attn_gpu_mem)
-        .with_paged_attn_gpu_mem_usage_optional(paged_attn_gpu_mem_usage)
-        .with_paged_ctxt_len_optional(paged_ctxt_len)
-        .with_paged_attn_block_size_optional(paged_attn_block_size)
-        .with_mtp_config_optional(runtime.mtp_config())
-        .with_paged_attn_cache_type(paged_cache_type);
-
-    for config in model_configs {
-        builder = builder.add_model_config(config);
-    }
-
-    if let Some(default_model_id) = default_model_id {
-        builder = builder.with_default_model_id(default_model_id);
-    }
-
-    if let Some(model) = runtime.search_embedding_model {
-        builder = builder.with_search_embedding_model(model.into());
-    }
-
-    let mcp_client_config = load_mcp_config(runtime.mcp_config.as_deref())?;
-    builder = builder.with_mcp_config_optional(mcp_client_config);
-
-    let sandbox_policy = extract_sandbox_settings(sandbox, &runtime);
-
-    #[cfg(feature = "code-execution")]
-    {
-        builder = builder
-            .with_code_exec_config_optional(build_code_exec_config(
-                &runtime,
-                sandbox_policy.clone(),
-            ))
-            .with_shell_config_optional(build_shell_config(&runtime, sandbox_policy));
-    }
-    #[cfg(not(feature = "code-execution"))]
-    let _ = sandbox_policy;
-
-    let inference = builder.build().await?;
-    let inference_for_ui = inference.clone();
-    let inference_for_mcp = inference.clone();
-
-    let mut app = InferenceRsServerRouterBuilder::new()
-        .with_inference(inference)
-        .with_max_tool_rounds_optional(server.max_tool_rounds)
-        .with_tool_dispatch_url_optional(server.tool_dispatch_url.clone())
-        .with_observability_config(server.observability_config())
-        .with_skills_dir_optional({
-            #[cfg(feature = "code-execution")]
-            {
-                runtime.skills_dir.clone()
-            }
-            #[cfg(not(feature = "code-execution"))]
-            {
-                None
-            }
-        })
-        .build()
-        .await?;
-
-    if !server.no_ui {
-        let enable_code_execution = {
-            #[cfg(feature = "code-execution")]
-            {
-                runtime.enable_code_execution
-            }
-            #[cfg(not(feature = "code-execution"))]
-            {
-                false
-            }
-        };
-        let enable_shell = {
-            #[cfg(feature = "code-execution")]
-            {
-                runtime.enable_shell
-            }
-            #[cfg(not(feature = "code-execution"))]
-            {
-                false
-            }
-        };
-        let ui_observability = ObservabilityState::with_max_body_bytes(
-            server.observability_config(),
-            inference_for_ui.clone(),
-            DEFAULT_MAX_BODY_LIMIT,
-        );
-        let ui_router = build_ui_router(
-            inference_for_ui,
-            runtime.enable_search,
-            runtime.search_embedding_model.map(|m| m.into()),
-            enable_code_execution,
-            enable_shell,
-            server.tool_dispatch_url.clone(),
-        )
-        .await?
-        .layer(middleware::from_fn_with_state(
-            ui_observability,
-            observe_http,
-        ));
-        app = app.nest("/ui", ui_router);
-        info!("UI available at http://{}:{}/ui", server.host, server.port);
-    }
-
-    if let Some(mcp_port) = server.mcp_port {
-        spawn_mcp_server(inference_for_mcp, &server.host, mcp_port, server.port).await?;
-    }
-
-    let listener =
-        tokio::net::TcpListener::bind(format!("{}:{}", server.host, server.port)).await?;
-    let listener = tcp_nodelay_listener(listener);
-
-    info!("Server listening on http://{}:{}", server.host, server.port);
-    log_api_surfaces(&server.host, server.port);
-
-    axum::serve(listener, app).await?;
-
-    Ok(())
+        sandbox,
+        global: &global,
+        max_tool_rounds: server.max_tool_rounds,
+        tool_dispatch_url: server.tool_dispatch_url.clone(),
+        skills_root: Some(skills_root(&runtime)),
+        adapters: adapter_spec_from_env(),
+        throughput_logging: true,
+    })
+    .await?;
+    serve_engine(spec, &server, &runtime).await
 }
 
 async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {
@@ -226,76 +87,22 @@ async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {
     apply_agent_mode(&mut runtime);
     validate_agent_options(&runtime)?;
     log_agent_runtime(&runtime, None);
-    let (
+    let spec = config_spec(ConfigSpecInputs {
+        models: &models,
+        default_model_id: None,
+        runtime: &runtime,
         paged_attn,
-        paged_attn_gpu_mem,
-        paged_attn_gpu_mem_usage,
-        paged_ctxt_len,
-        paged_attn_block_size,
-        paged_cache_type,
-    ) = paged_attn.into_builder_flags();
-
-    let (model_configs, cpu) = build_model_configs(&models, &runtime, &global.token_source).await?;
-
-    let mut builder = InferenceRsForServerBuilder::new()
-        .with_max_seqs(runtime.max_seqs)
-        .with_max_num_batched_tokens(runtime.max_num_batched_tokens)
-        .with_max_prefill_chunk_tokens(runtime.max_prefill_chunk_tokens)
-        .with_max_decode_steps_before_prefill(runtime.max_decode_steps_before_prefill)
-        .with_no_kv_cache(runtime.no_kv_cache)
-        .with_token_source(global.token_source)
-        .with_interactive_mode(true)
-        .with_prefix_cache_n(runtime.prefix_cache_n)
-        .set_paged_attn(paged_attn)
-        .with_cpu(cpu)
-        .with_enable_search(runtime.enable_search)
-        .with_seed_optional(global.seed)
-        .with_log_optional(global.log.as_ref().map(|p| p.to_string_lossy().to_string()))
-        .with_chat_template_optional(
-            runtime
-                .chat_template
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-        )
-        .with_jinja_explicit_optional(
-            runtime
-                .jinja_explicit
-                .as_ref()
-                .map(|p| p.to_string_lossy().to_string()),
-        )
-        .with_paged_attn_gpu_mem_optional(paged_attn_gpu_mem)
-        .with_paged_attn_gpu_mem_usage_optional(paged_attn_gpu_mem_usage)
-        .with_paged_ctxt_len_optional(paged_ctxt_len)
-        .with_paged_attn_block_size_optional(paged_attn_block_size)
-        .with_mtp_config_optional(runtime.mtp_config())
-        .with_paged_attn_cache_type(paged_cache_type);
-
-    for config in model_configs {
-        builder = builder.add_model_config(config);
-    }
-
-    if let Some(model) = runtime.search_embedding_model {
-        builder = builder.with_search_embedding_model(model.into());
-    }
-
-    let mcp_client_config = load_mcp_config(runtime.mcp_config.as_deref())?;
-    builder = builder.with_mcp_config_optional(mcp_client_config);
-
-    let sandbox_policy = extract_sandbox_settings(sandbox, &runtime);
-
-    #[cfg(feature = "code-execution")]
-    {
-        builder = builder
-            .with_code_exec_config_optional(build_code_exec_config(
-                &runtime,
-                sandbox_policy.clone(),
-            ))
-            .with_shell_config_optional(build_shell_config(&runtime, sandbox_policy));
-    }
-    #[cfg(not(feature = "code-execution"))]
-    let _ = sandbox_policy;
-
-    let inference = builder.build().await?;
+        sandbox,
+        global: &global,
+        max_tool_rounds: None,
+        tool_dispatch_url: None,
+        skills_root: None,
+        adapters: Default::default(),
+        throughput_logging: false,
+    })
+    .await?;
+    let engine = Engine::load(spec).await?;
+    let inference = engine.state().clone();
     if let Some(alias) = adapter.as_deref() {
         let adapters = inference.list_lora_adapters(None).await?;
         if !adapters.iter().any(|loaded| loaded.alias == alias) {
@@ -331,14 +138,12 @@ async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {
     Ok(())
 }
 
-async fn build_model_configs(
+async fn build_model_specs(
     models: &[crate::config::ModelEntry],
     runtime: &RuntimeOptions,
     token_source: &inference_core::TokenSource,
-) -> Result<(Vec<ModelConfig>, bool)> {
+) -> Result<(Vec<ModelSpec>, bool)> {
     let mut cpu_setting: Option<bool> = None;
-    let mut configs = Vec::new();
-
     for entry in models {
         if let Some(cpu) = entry.device.cpu {
             match cpu_setting {
@@ -352,9 +157,9 @@ async fn build_model_configs(
             }
         }
     }
-
     let cpu = cpu_setting.unwrap_or(false);
 
+    let mut specs = Vec::new();
     for entry in models {
         let mut model_type = entry.to_model_type(cpu);
         let matformer = MatformerSelection {
@@ -369,45 +174,84 @@ async fn build_model_configs(
         };
         crate::commands::serve::apply_quant_resolution(&mut model_type, token_source, &matformer)
             .await?;
-        let model_selected = convert_to_model_selected(&model_type, &matformer)?;
-
+        let model = convert_to_model_selected(&model_type, &matformer)?;
         let resolved_loader_id = crate::commands::serve::model_id_of(&model_type);
-        let mut config = ModelConfig::new(entry.model_id.clone(), model_selected);
-        if let Some(max_model_len) = entry.max_model_len {
-            config = config.with_max_model_len(max_model_len);
-        }
-        if let Some(overrides) = entry.hf_overrides.clone() {
-            config = config.with_hf_config_overrides(overrides);
-        }
-        if resolved_loader_id != entry.model_id {
-            config = config.with_alias(entry.model_id.clone());
-        }
-
-        if let Some(chat_template) = entry.chat_template.as_ref() {
-            config = config.with_chat_template(chat_template.to_string_lossy().to_string());
-        }
-
-        if let Some(jinja_explicit) = entry.jinja_explicit.as_ref() {
-            config = config.with_jinja_explicit(jinja_explicit.to_string_lossy().to_string());
-        }
-
-        if let Some(device_layers) = entry.device.device_layers.clone() {
-            config = config.with_num_device_layers(device_layers);
-        }
-
-        if let Some(isq) = crate::commands::serve::extract_isq_setting(&model_type) {
-            config = config.with_in_situ_quant(isq);
-        }
-        if let Some(max_bytes) =
-            crate::commands::serve::extract_encoder_cache_memory_bytes(&model_type)?
-        {
-            config = config.with_encoder_cache_memory_bytes(max_bytes);
-        }
-
-        configs.push(config);
+        specs.push(ModelSpec {
+            model,
+            // An entry whose id resolved to another loader id keeps its own as the id requests use.
+            model_id: (resolved_loader_id != entry.model_id).then(|| entry.model_id.clone()),
+            chat_template: entry
+                .chat_template
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            jinja_explicit: entry
+                .jinja_explicit
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            max_model_len: entry.max_model_len,
+            hf_config_overrides: entry.hf_overrides.clone(),
+            device_layers: entry.device.device_layers.clone(),
+            isq: crate::commands::serve::extract_isq_setting(&model_type),
+            encoder_cache_memory_bytes: crate::commands::serve::extract_encoder_cache_memory_bytes(
+                &model_type,
+            )?,
+        });
     }
+    Ok((specs, cpu))
+}
 
-    Ok((configs, cpu))
+/// What a TOML config describes, before its models are resolved.
+struct ConfigSpecInputs<'a> {
+    models: &'a [crate::config::ModelEntry],
+    default_model_id: Option<String>,
+    runtime: &'a RuntimeOptions,
+    paged_attn: PagedAttentionOptions,
+    sandbox: SandboxOptions,
+    global: &'a GlobalOptions,
+    max_tool_rounds: Option<usize>,
+    tool_dispatch_url: Option<String>,
+    skills_root: Option<std::path::PathBuf>,
+    adapters: AdapterSpec,
+    throughput_logging: bool,
+}
+
+/// The engine a TOML config loads: every model it lists, sharing its runtime settings.
+async fn config_spec(inputs: ConfigSpecInputs<'_>) -> Result<EngineSpec> {
+    let (models, cpu) =
+        build_model_specs(inputs.models, inputs.runtime, &inputs.global.token_source).await?;
+    let (paged_attn, memory_mb, memory_fraction, context_len, block_size, cache_type) =
+        inputs.paged_attn.into_builder_flags();
+    let base = RuntimeSpec {
+        device: cpu.then(|| "cpu".to_string()),
+        seed: inputs.global.seed,
+        token_source: Some(inputs.global.token_source.to_string()),
+        log: inputs.global.log.clone(),
+        paged_attn,
+        paged_cache: PagedCacheSpec {
+            context_len,
+            memory_mb,
+            memory_fraction,
+            block_size,
+            cache_type,
+        },
+        ..Default::default()
+    };
+    Ok(EngineSpec {
+        models,
+        default_model_id: inputs.default_model_id,
+        runtime: runtime_options_spec(inputs.runtime, base, inputs.throughput_logging),
+        agentic: agentic_spec(AgenticInputs {
+            runtime: inputs.runtime,
+            sandbox: inputs.sandbox,
+            max_tool_rounds: inputs.max_tool_rounds,
+            tool_dispatch_url: inputs.tool_dispatch_url,
+        })?,
+        adapters: inputs.adapters,
+        skills: SkillsSpec {
+            root: inputs.skills_root,
+        },
+        ..Default::default()
+    })
 }
 
 #[cfg(test)]
@@ -440,7 +284,7 @@ mmproj = "mmproj-BF16.gguf"
             unreachable!()
         };
 
-        let (models, cpu) = build_model_configs(
+        let (models, cpu) = build_model_specs(
             &config.models,
             &config.runtime,
             &inference_core::TokenSource::None,
@@ -481,7 +325,7 @@ lora = [
         };
         assert!(config.models[0].adapter.dynamic_lora_enabled());
 
-        let (models, cpu) = build_model_configs(
+        let (models, cpu) = build_model_specs(
             &config.models,
             &config.runtime,
             &inference_core::TokenSource::None,
@@ -492,5 +336,65 @@ lora = [
         assert!(!cpu);
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_config_serves_each_of_its_models_with_their_own_settings() {
+        let dirs = [0, 1].map(|_| {
+            let dir =
+                std::env::temp_dir().join(format!("inference-config-{}", uuid::Uuid::new_v4()));
+            fs::create_dir_all(&dir).unwrap();
+            dir
+        });
+        let input = format!(
+            r#"
+command = "serve"
+default_model_id = "second"
+
+[paged_attn]
+mode = "off"
+block_size = 32
+
+[[models]]
+model_id = "{}"
+chat_template = "first.jinja"
+
+[[models]]
+model_id = "{}"
+"#,
+            dirs[0].display(),
+            dirs[1].display(),
+        );
+        let CliConfig::Serve(config) = toml::from_str(&input).unwrap() else {
+            unreachable!()
+        };
+        let global = config.global.to_global_options().unwrap();
+        let spec = config_spec(ConfigSpecInputs {
+            models: &config.models,
+            default_model_id: Some("second".to_string()),
+            runtime: &config.runtime,
+            paged_attn: config.paged_attn,
+            sandbox: config.sandbox,
+            global: &global,
+            max_tool_rounds: None,
+            tool_dispatch_url: None,
+            skills_root: None,
+            adapters: Default::default(),
+            throughput_logging: true,
+        })
+        .await
+        .unwrap();
+        assert!(spec.model.is_none());
+        assert_eq!(spec.models.len(), 2);
+        assert_eq!(spec.models[0].chat_template.as_deref(), Some("first.jinja"));
+        assert!(spec.models[1].chat_template.is_none());
+        assert_eq!(spec.default_model_id.as_deref(), Some("second"));
+        assert_eq!(
+            (spec.runtime.paged_attn, spec.runtime.paged_cache.block_size),
+            (Some(false), Some(32))
+        );
+        for dir in dirs {
+            fs::remove_dir_all(dir).unwrap();
+        }
     }
 }

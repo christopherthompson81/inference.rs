@@ -263,7 +263,7 @@ pub async fn run_quantize(mut model_type: QuantizeModelType, global: GlobalOptio
 
     // Loading with write_uqff set writes the files; the engine is shut down once it has.
     let spec = EngineSpec {
-        model: model_selected,
+        model: Some(model_selected),
         model_id: None,
         runtime: RuntimeSpec {
             device: cpu.then(|| "cpu".to_string()),
@@ -274,10 +274,7 @@ pub async fn run_quantize(mut model_type: QuantizeModelType, global: GlobalOptio
             device_layers,
             ..Default::default()
         },
-        agentic: Default::default(),
-        adapters: Default::default(),
-        skills: Default::default(),
-        anymoe: None,
+        ..Default::default()
     };
     let engine = Engine::load(spec).await?;
     engine
