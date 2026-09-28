@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use candle_core::Device;
 use futures::StreamExt;
+use inference_core::selection::quant;
 use inference_core::{
     AgentPermission, AnyMoeSpec, CalibrationAction, CalibrationStatus, ChatCompletionResponse,
     CodeExecutionConfig, CompletionResponse, HfConfigOverrides, ImageGenerationResponse,
@@ -26,7 +27,9 @@ use crate::{
     engine_embeddings::{embed, EmbeddingError},
     files::{self, FileBody, FileMetadata, FileUpload},
     generation::{generate_image, generate_speech, SpeechAudio},
-    inference_for_server_builder::{parse_device_layers, InferenceRsForServerBuilder, ModelConfig},
+    inference_for_server_builder::{
+        defaults, parse_device_layers, InferenceRsForServerBuilder, ModelConfig,
+    },
     lora_adapters::{
         list_adapters, load_adapter, unload_adapter, ListLoraAdaptersQuery, LoadLoraAdapterRequest,
         LoraAdapterApiConfig, LoraAdapterListResponse, LoraAdapterObject, UnloadLoraAdapterRequest,
@@ -69,6 +72,7 @@ const PAGED_CACHE_ONE_SIZE: &str =
     "paged_cache takes at most one of context_len, memory_mb and memory_fraction";
 const CODE_EXECUTION_UNAVAILABLE: &str =
     "code execution and the shell tool need a build with the `code-execution` feature";
+const QUANT_WITH_ISQ: &str = "`quant` picks the quantization itself; drop `isq`";
 // Matches `inference serve`'s default, so an engine loaded from a spec batches like the server.
 pub const DEFAULT_MAX_SEQS: usize = 32;
 
@@ -421,7 +425,66 @@ impl std::fmt::Display for EngineLoadError {
 
 impl std::error::Error for EngineLoadError {}
 
+fn has_quant(model: &ModelSelected) -> bool {
+    matches!(model, ModelSelected::Run { quant: Some(_), .. })
+}
+
+/// Resolves a `Run`'s `quant`; the model keeps the id it was given when resolution changes repository.
+async fn resolve_model_quant(
+    model: ModelSelected,
+    model_id: &mut Option<String>,
+    isq: &mut Option<String>,
+    token_source: &TokenSource,
+    force_cpu: bool,
+) -> Result<ModelSelected, EngineLoadError> {
+    if !has_quant(&model) {
+        return Ok(model);
+    }
+    if isq.is_some() {
+        return Err(EngineLoadError::InvalidSpec(QUANT_WITH_ISQ.to_string()));
+    }
+    let resolved = quant::resolve_model_quant(model, token_source, force_cpu)
+        .await
+        .map_err(EngineLoadError::Load)?;
+    *isq = resolved.isq;
+    if model_id.is_none() {
+        *model_id = resolved.requested_model_id;
+    }
+    Ok(resolved.model)
+}
+
 impl EngineSpec {
+    async fn resolve_quants(&mut self) -> Result<(), EngineLoadError> {
+        let models = self
+            .model
+            .iter()
+            .chain(self.models.iter().map(|spec| &spec.model));
+        if !models.into_iter().any(has_quant) {
+            return Ok(());
+        }
+        let token_source = match &self.runtime.token_source {
+            Some(source) => source.parse().map_err(EngineLoadError::InvalidSpec)?,
+            None => defaults::TOKEN_SOURCE,
+        };
+        // Listed models inherit `runtime.isq`, which would land on top of the resolved weights.
+        if !self.models.is_empty() && self.runtime.isq.is_some() {
+            return Err(EngineLoadError::InvalidSpec(QUANT_WITH_ISQ.to_string()));
+        }
+        let force_cpu = self.runtime.device.as_deref() == Some("cpu");
+        if let Some(model) = self.model.take() {
+            let (model_id, isq) = (&mut self.model_id, &mut self.runtime.isq);
+            self.model =
+                Some(resolve_model_quant(model, model_id, isq, &token_source, force_cpu).await?);
+        }
+        for mut spec in std::mem::take(&mut self.models) {
+            let (model_id, isq) = (&mut spec.model_id, &mut spec.isq);
+            spec.model =
+                resolve_model_quant(spec.model, model_id, isq, &token_source, force_cpu).await?;
+            self.models.push(spec);
+        }
+        Ok(())
+    }
+
     fn into_builder(self) -> Result<InferenceRsForServerBuilder, EngineLoadError> {
         let invalid = EngineLoadError::InvalidSpec;
         let runtime = self.runtime;
@@ -609,6 +672,7 @@ impl Engine {
             agent_permission: spec.agentic.agent_permission,
             approval_broker: Default::default(),
         };
+        spec.resolve_quants().await?;
         let mut builder = spec.into_builder()?;
         if let Some(search) = callbacks.search {
             builder = builder.with_search_callback(search);
@@ -1387,6 +1451,32 @@ mod tests {
         }));
         assert_eq!(two.models.len(), 2);
         assert!(two.into_builder().is_ok());
+    }
+
+    #[tokio::test]
+    async fn a_run_quant_is_resolved_before_the_builder_sees_it() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("model-Q4_K_M.gguf"), []).unwrap();
+        let run =
+            serde_json::json!({"Run": {"model_id": dir.path().to_string_lossy(), "quant": "4"}});
+        let spec = |value: serde_json::Value| serde_json::from_value::<EngineSpec>(value).unwrap();
+
+        let mut single = spec(serde_json::json!({"model": run, "runtime": {"device": "cpu"}}));
+        single.resolve_quants().await.unwrap();
+        assert!(matches!(single.model, Some(ModelSelected::GGUF { .. })));
+        let mut listed = spec(serde_json::json!({"models": [{"model": run, "model_id": "a"}]}));
+        listed.resolve_quants().await.unwrap();
+        assert!(matches!(listed.models[0].model, ModelSelected::GGUF { .. }));
+        assert_eq!(listed.models[0].model_id.as_deref(), Some("a"));
+
+        for mut refused in [
+            spec(serde_json::json!({"model": run, "runtime": {"isq": "q8_0"}})),
+            spec(serde_json::json!({"models": [{"model": run, "isq": "q8_0"}]})),
+            spec(serde_json::json!({"models": [{"model": run}], "runtime": {"isq": "q8_0"}})),
+        ] {
+            let error = refused.resolve_quants().await.unwrap_err().to_string();
+            assert!(error.contains("drop `isq`"), "{error}");
+        }
     }
 
     #[test]

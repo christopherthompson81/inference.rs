@@ -158,6 +158,13 @@ spec = t.EngineSpec(
 engine = ir.Engine(spec)
 ```
 
+`ModelSelectedRun.quant` selects an artifact the way `--quant` does: a published GGUF variant, else a
+prebuilt UQFF, else ISQ at that level. It replaces `isq` and `from_uqff`, so give only one of them:
+
+```python
+spec = t.EngineSpec(model=t.ModelSelectedRun(model_id="google/gemma-4-E4B-it", quant="4"))
+```
+
 Use `t.ModelSelectedGGUF(...)` with the same `isq` runtime setting to requantize a compatible GGUF.
 `t.ModelSelectedGGUF` also accepts `imatrix`, `calibration_file`, `organization`, and `write_uqff`.
 `engine.re_isq("Q8_0")` requantizes a model that loaded with ISQ while it runs, as `POST /re_isq` does.

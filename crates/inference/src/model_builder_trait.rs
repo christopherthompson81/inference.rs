@@ -1061,6 +1061,7 @@ pub async fn build_auto_pipeline(
     let loader_config = ModelLoaderConfig {
         model_selected: ModelSelected::Run {
             model_id: builder.model_id.clone(),
+            quant: None,
             tokenizer_json: builder.tokenizer_json.clone(),
             dtype: builder.dtype,
             topology: builder.topology_path.clone(),

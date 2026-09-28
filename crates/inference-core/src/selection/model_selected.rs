@@ -37,6 +37,11 @@ pub enum ModelSelected {
         /// Model ID to load from. May be a HF hub repo or a local path.
         model_id: String,
 
+        /// A quantization level (`4`, `q4k`, `auto`) resolved against what the repository publishes: one of its
+        /// GGUF files, else a prebuilt UQFF, else ISQ at that level. `Engine::load` resolves it before loading.
+        #[serde(default)]
+        quant: Option<String>,
+
         /// Path to local tokenizer.json file. If specified, it is used over any remote file.
         tokenizer_json: Option<String>,
 

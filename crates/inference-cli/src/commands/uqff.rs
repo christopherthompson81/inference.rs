@@ -16,8 +16,7 @@ use crossterm::{
 };
 use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
 use inference_core::{
-    list_model_files, read_model_file_range, resolve_uqff_shorthand, try_get_model_file,
-    TokenSource,
+    list_model_files, read_model_file_range, resolve_uqff_shorthand, TokenSource,
 };
 use inference_quant::{
     build_uqff_report_from_artifacts, inspect_uqff_artifacts, verify_uqff_artifacts,
@@ -27,6 +26,7 @@ use inference_quant::{
 };
 
 use crate::args::{GlobalOptions, UqffCommand};
+use inference_core::selection::quant::read_existing_uqff_report;
 
 const DEFAULT_REVISION: &str = "main";
 
@@ -447,25 +447,6 @@ fn selected_uqff_report(
         .filter_map(|(index, output)| selected.contains(&index).then_some(output))
         .collect();
     Some(report)
-}
-
-pub(super) async fn read_existing_uqff_report(
-    model_id: &str,
-    revision: &str,
-    files: &[String],
-    token_source: &TokenSource,
-) -> Result<Option<UqffReport>> {
-    if !files.iter().any(|file| file == UQFF_REPORT_JSON) {
-        return Ok(None);
-    }
-    let Some(path) = try_get_model_file(model_id, revision, UQFF_REPORT_JSON, token_source).await?
-    else {
-        return Ok(None);
-    };
-    let data = tokio::fs::read_to_string(&path).await?;
-    serde_json::from_str(&data)
-        .map(Some)
-        .map_err(|e| anyhow!("{}: {e}", path.display()))
 }
 
 fn uqff_group_key(file: &str) -> String {

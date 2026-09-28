@@ -1,6 +1,6 @@
 //! Quantize command implementation for UQFF generation
 
-use crate::commands::quant::{is_confident_gguf_artifact_repo, selected_model_files};
+use inference_core::selection::quant::{is_confident_gguf_artifact_repo, selected_model_files};
 use std::collections::{BTreeMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -138,7 +138,7 @@ fn resolve_gguf_source(
                  explicitly or check repository access."
             )
         })?;
-        if !crate::commands::quant::has_gguf_model_files(files) {
+        if !inference_core::selection::quant::has_gguf_model_files(files) {
             anyhow::bail!(
                 "`--quant {requested}` selects an input GGUF artifact, but `{model_id}` has no \
                  model GGUF files"
@@ -151,7 +151,7 @@ fn resolve_gguf_source(
             );
         }
 
-        let artifact = crate::commands::quant::resolve_gguf_quant(files, requested)?;
+        let artifact = inference_core::selection::quant::resolve_gguf_quant(files, requested)?;
         info!(
             "quantize: --quant {requested} -> input GGUF {} from `{model_id}`",
             artifact.label
@@ -173,7 +173,7 @@ fn resolve_gguf_source(
         {
             if let Some(files) = files.as_ref() {
                 if let Some(projector) =
-                    crate::commands::quant::resolve_gguf_projector(files, model.dtype)?
+                    inference_core::selection::quant::resolve_gguf_projector(files, model.dtype)?
                 {
                     info!(
                         "GGUF: selected {} projector `{}`",
@@ -520,6 +520,7 @@ fn convert_to_model_selected(
                     .model_id
                     .clone()
                     .expect("quantize model source was normalized"),
+                quant: None,
                 tokenizer_json: model
                     .tokenizer
                     .as_ref()

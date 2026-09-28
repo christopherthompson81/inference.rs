@@ -456,6 +456,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
         }
         ModelSelected::Run {
             model_id,
+            quant,
             tokenizer_json,
             dtype: _,
             topology,
@@ -473,6 +474,12 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             matformer_config_path,
             matformer_slice_name,
         } => {
+            if let Some(quant) = quant {
+                anyhow::bail!(
+                    "`quant = {quant}` has to be resolved before loading; `Engine::load` and \
+                     `selection::quant::resolve_model_quant` do it"
+                );
+            }
             let options = SafetensorsOptions {
                 topology: resolve_topology(&inline_topology, topology)?,
                 organization: organization.unwrap_or_default(),
