@@ -168,6 +168,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
 
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 /// Supported MCP server transport sources
 ///
 /// Defines the different ways to connect to MCP servers, each optimized for
@@ -217,12 +218,14 @@ pub enum McpServerSource {
     },
 }
 
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 /// Configuration for MCP client integration
 ///
 /// This structure defines how the MCP client should connect to and manage
 /// multiple MCP servers, including authentication, tool registration, and
 /// execution policies.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct McpClientConfig {
     /// List of MCP servers to connect to
     pub servers: Vec<McpServerConfig>,
@@ -243,12 +246,12 @@ pub struct McpClientConfig {
     pub max_concurrent_calls: Option<usize>,
 }
 
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 /// Configuration for an individual MCP server
 ///
 /// Defines connection parameters, authentication, and tool management
 /// settings for a single MCP server instance.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
 pub struct McpServerConfig {
     /// Unique identifier for this server
     ///

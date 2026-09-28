@@ -84,17 +84,20 @@ inference serve -n "0:44;1:20" -m Qwen/Qwen3-32B --quant 4
 </TabItem>
 <TabItem label="Python">
 
-The Python SDK does not expose `--device-layers` yet. Pin layer ranges to devices with a [topology file](/guides/perf/topology/) instead:
+`t.RuntimeSpec(device_layers=...)` takes the same `ORD:NUM` entries, one per list item:
 
 ```python
 import inference_rs as ir
 from inference_rs import types as t
 
 spec = t.EngineSpec(
-    model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-32B", topology="topology.yaml"),
+    model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-32B"),
+    runtime=t.RuntimeSpec(isq="4", device_layers=["0:44", "1:20"]),
 )
 engine = ir.Engine(spec)
 ```
+
+A [topology file](/guides/perf/topology/) (`t.ModelSelectedPlain(..., topology="topology.yaml")`) pins layer ranges instead.
 
 </TabItem>
 </Tabs>

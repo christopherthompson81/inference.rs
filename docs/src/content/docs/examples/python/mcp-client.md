@@ -24,21 +24,19 @@ to the model during conversations.
 Install the filesystem server first: npx @modelcontextprotocol/server-filesystem . -y
 """
 
-import inference_rs
+import inference_rs as ir
+from inference_rs import types as t
 
 
 def main():
-    # Connect to a local filesystem MCP server
-    mcp_config = inference_rs.McpClientConfigPy(
+    mcp = t.McpClientConfig(
         servers=[
-            inference_rs.McpServerConfigPy(
+            t.McpServerConfig(
                 id="filesystem",
                 name="Filesystem Tools",
-                source=inference_rs.McpServerSourcePy.Process(
+                source=t.McpServerSourceProcess(
                     command="npx",
                     args=["@modelcontextprotocol/server-filesystem", "."],
-                    work_dir=None,
-                    env=None,
                 ),
             )
         ]
@@ -46,31 +44,33 @@ def main():
 
     # Other transport types are also supported:
     #
-    # McpServerSourcePy.Http(url="https://hf.co/mcp", timeout_secs=30, headers=None)
-    # McpServerSourcePy.WebSocket(url="wss://api.example.com/mcp", timeout_secs=30, headers=None)
+    # t.McpServerSourceHttp(url="https://hf.co/mcp", timeout_secs=30)
+    # t.McpServerSourceWebSocket(url="wss://api.example.com/mcp", timeout_secs=30)
     #
-    # For authentication, set bearer_token="your-token".
+    # For authentication, set bearer_token="your-token" on the server config.
     # To avoid tool name conflicts, set tool_prefix="prefix".
 
-    runner = inference_rs.Runner(
-        which=inference_rs.Which.Plain(
-            model_id="Qwen/Qwen3-4B",
-            arch=inference_rs.Architecture.Qwen3,
+    spec = t.EngineSpec(
+        model=t.ModelSelectedPlain(
+            model_id="Qwen/Qwen3-4B", arch=t.NormalLoaderType.QWEN3
         ),
-        mcp_client_config=mcp_config,
+        agentic=t.AgenticSpec(mcp=mcp),
     )
 
-    request = inference_rs.ChatCompletionRequest(
-        model="default",
-        messages=[
-            {"role": "user", "content": "List the files in the current directory."}
-        ],
-        max_tokens=1000,
-        tool_choice=inference_rs.ToolChoice.Auto,
-    )
-
-    response = runner.send_chat_completion_request(request)
-    print(response.choices[0].message.content)
+    with ir.Engine(spec) as engine:
+        response = engine.chat(
+            t.ChatCompletionRequest(
+                model="default",
+                messages=[
+                    t.Message(
+                        role="user", content="List the files in the current directory."
+                    )
+                ],
+                max_tokens=1000,
+                tool_choice="auto",
+            )
+        )
+        print(response.choices[0].message.content)
 
 
 if __name__ == "__main__":

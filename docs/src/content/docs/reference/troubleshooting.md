@@ -83,7 +83,7 @@ The session expired (30-minute idle TTL) or was evicted (128-session cap, LRU). 
 
 ### `from inference_rs import Runner` fails with `ImportError`
 
-That is the pyo3 API, which is being retired. The current package has no `Runner`: load a model with `ir.Engine(t.EngineSpec(...))`. Only the shell, code execution, MCP client and AnyMoE snippets still need the pyo3 package, until the new one supports them. See [Python SDK getting started](/guides/python/getting-started/).
+That is the pyo3 API, which is being retired. The current package has no `Runner`: load a model with `ir.Engine(t.EngineSpec(...))`. Only online calibration still needs the pyo3 package, until the new one supports it. See [Python SDK getting started](/guides/python/getting-started/).
 
 ### The first engine call fails with `OSError` or an ABI version `RuntimeError`
 

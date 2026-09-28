@@ -174,7 +174,7 @@ pub use inference_mcp::{
 pub use inference_models_speech::{utils as speech_utils, SpeechGenerationConfig};
 pub use inference_quant::parse_isq_value;
 pub use inference_quant::{IsqBits, IsqType};
-pub use inference_sandbox::{NetworkMode, SandboxPolicy};
+pub use inference_sandbox::{NetworkMode, SandboxMode, SandboxPolicy, SandboxProfile};
 pub use paged_attention::{MemoryGpuConfig, PagedAttentionConfig, PagedCacheType};
 pub use pipeline::hf::{
     get_model_file, hf_home_dir, hf_hub_cache_dir, hf_token_path, is_hf_hub_offline,
@@ -395,14 +395,20 @@ pub struct LoadOverrides {
 }
 
 /// The AnyMoE layer to build on top of the loaded model.
-#[derive(Clone)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Clone, Debug, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AnyMoeSpec {
     pub config: AnyMoeConfig,
     /// Training data (or gating weights) path.
     pub path: String,
+    /// Prefix of the model's layer modules, e.g. `model.layers`.
     pub prefix: String,
+    /// Name of the MLP module within each layer, e.g. `mlp`.
     pub mlp: String,
     pub model_ids: Vec<String>,
+    /// Layers to apply AnyMoE to; empty applies it to all of them.
+    #[serde(default)]
     pub layers: Vec<usize>,
 }
 

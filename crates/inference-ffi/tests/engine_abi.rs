@@ -180,6 +180,21 @@ fn chat_and_stream_agree_and_errors_carry_openai_bodies() {
 }
 
 #[test]
+fn an_engine_with_tools_and_cache_sizing_serves() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let mut spec: Value = serde_json::from_str(&spec(dir.path())).unwrap();
+    spec["runtime"]["paged_cache"] = json!({"block_size": 32, "cache_type": "auto"});
+    spec["agentic"] = json!({"mcp": {"servers": []}, "shell": {"permission": "deny"}});
+    let (status, engine) = load(&spec.to_string());
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let (status, response) = chat(engine, &chat_request(false));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let response: Value = serde_json::from_str(&response.unwrap()).unwrap();
+    assert_eq!(response["object"], "chat.completion");
+    unsafe { inference_engine_free(engine) };
+}
+
+#[test]
 fn load_failures_are_classified() {
     let (status, engine) = load("{\"model\": 1}");
     assert_eq!(status, INFERENCE_ERR_INVALID_ARGUMENT);
@@ -194,6 +209,22 @@ fn load_failures_are_classified() {
         json!({"model": {"Plain": {"model_id": "org/model"}}, "runtime": {"device": "tpu:0"}});
     assert_eq!(
         load(&bad_device.to_string()).0,
+        INFERENCE_ERR_INVALID_ARGUMENT
+    );
+
+    for runtime in [
+        json!({"device_layers": ["0:8", "0:8"]}),
+        json!({"device_layers": ["eight"]}),
+        json!({"paged_cache": {"context_len": 1024, "memory_mb": 512}}),
+    ] {
+        let spec = json!({"model": {"Plain": {"model_id": "org/model"}}, "runtime": runtime});
+        let (status, engine) = load(&spec.to_string());
+        assert_eq!(status, INFERENCE_ERR_INVALID_ARGUMENT, "{runtime}");
+        assert!(engine.is_null());
+    }
+    let misspelled = json!({"model": {"Plain": {"model_id": "org/model"}}, "agentic": {"shell": {"no_such_policy": {}}}});
+    assert_eq!(
+        load(&misspelled.to_string()).0,
         INFERENCE_ERR_INVALID_ARGUMENT
     );
 

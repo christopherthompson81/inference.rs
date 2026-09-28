@@ -101,7 +101,7 @@ fn anthropic_failure(error: ApiError) -> Failure {
 fn load_failure(error: EngineLoadError) -> Failure {
     match error {
         EngineLoadError::InvalidSpec(_) => Failure::invalid(error.to_string()),
-        EngineLoadError::DeviceUnavailable(_) => {
+        EngineLoadError::Unavailable(_) => {
             Failure::new(INFERENCE_ERR_NOT_AVAILABLE, error.to_string())
         }
         EngineLoadError::Load(_) => Failure::new(INFERENCE_ERR_LOAD_FAILED, error.to_string()),

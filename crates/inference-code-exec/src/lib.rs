@@ -56,17 +56,21 @@ const PYTHON_PREFIX_PROBE: &str = concat!(
     "print(site.getusersitepackages())",
 );
 
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 /// Python code execution config.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CodeExecutionConfig {
     /// Defaults to `python3` (`python` on Windows).
     #[serde(default = "default_python_path")]
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub python_path: PathBuf,
     /// Per-execution timeout. Defaults to 60s.
     #[serde(default = "default_code_exec_timeout_secs")]
     pub timeout_secs: u64,
     /// If `None`, a temp dir is created. Otherwise this is the cwd for the model's code.
     #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
     pub working_directory: Option<PathBuf>,
     /// OS-level sandbox policy. `Some(policy)` enables the platform sandbox
     /// (Linux/macOS) with the given limits; `None` disables it entirely

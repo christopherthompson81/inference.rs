@@ -63,6 +63,17 @@ GROUPS = [
                     "AdapterSpec",
                     "SkillsSpec",
                     "ModelSelected",
+                    "AnyMoe",
+                    "Mcp",
+                    "Mtp",
+                    "PagedCache",
+                    "CodeExecution",
+                    "ShellConfig",
+                    "SandboxPolicy",
+                    "SandboxMode",
+                    "NetworkMode",
+                    "SearchSpec",
+                    "SearchEmbeddingModel",
                 )
             )
             or n.endswith("LoaderType")

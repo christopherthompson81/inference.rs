@@ -79,7 +79,9 @@ def test_multi_model_operations():
 
             # Test listing models with their status
             print("\n4. Testing list_models() statuses...")
-            models_with_status = [(model.id, model.status) for model in listed_models(engine)]
+            models_with_status = [
+                (model.id, model.status) for model in listed_models(engine)
+            ]
             print(f"   OK Models with status: {models_with_status}")
             assert isinstance(models_with_status, list), "Should return a list"
 

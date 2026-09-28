@@ -18,8 +18,8 @@ When inference.rs acts as an [MCP (Model Context Protocol)](/guides/agents/conne
 
 | Field | Type | Default | Purpose |
 |---|---|---|---|
-| `servers` | array | required | List of MCP servers. |
-| `auto_register_tools` | bool | required | Expose every tool from every connected server to the model. Has no serde default; omitting it is a parse error, so always set it (use `true`). |
+| `servers` | array | `[]` | List of MCP servers. |
+| `auto_register_tools` | bool | `true` | Expose every tool from every connected server to the model. |
 | `tool_timeout_secs` | int | 30 | Per-tool-call timeout. |
 | `max_concurrent_calls` | int | 10 | Cap on concurrent MCP calls. |
 
@@ -39,8 +39,8 @@ When inference.rs acts as an [MCP (Model Context Protocol)](/guides/agents/conne
 
 | Field | Type | Required | Purpose |
 |---|---|---|---|
-| `name` | string | effectively yes | Server name. No validation rejects omission (it defaults to an empty string), but the entry is unusable without it. |
-| `source` | object | effectively yes | Transport configuration. Omission defaults to an empty-URL `Http` source, which will not connect. |
+| `name` | string | yes | Server name. |
+| `source` | object | yes | Transport configuration. |
 | `enabled` | bool | no (default `true`) | Disable a server without removing the entry. |
 | `tool_prefix` | string | no (auto-generated `mcp_<uuid>`) | Prefix applied to tool names. |
 | `bearer_token` | string | no | Optional bearer token. |

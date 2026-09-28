@@ -45,29 +45,28 @@ Full schema: [MCP config schema reference](/reference/mcp-config-schema/).
 </TabItem>
 <TabItem label="Python">
 
-This snippet uses the pyo3 package (`crates/inference-pyo3`), which is being retired: the ctypes `inference_rs` package does not support the MCP client yet.
-
 ```python
-import inference_rs
+import inference_rs as ir
+from inference_rs import types as t
 
-mcp_config = inference_rs.McpClientConfigPy(
+mcp = t.McpClientConfig(
     servers=[
-        inference_rs.McpServerConfigPy(
+        t.McpServerConfig(
             id="filesystem",
             name="Filesystem Tools",
-            source=inference_rs.McpServerSourcePy.Process(
+            source=t.McpServerSourceProcess(
                 command="npx",
                 args=["-y", "@modelcontextprotocol/server-filesystem", "/tmp"],
-                work_dir=None,
-                env=None,
             ),
         )
     ],
 )
 
-runner = inference_rs.Runner(
-    which=inference_rs.Which.Plain(model_id="Qwen/Qwen3-4B"),
-    mcp_client_config=mcp_config,
+engine = ir.Engine(
+    t.EngineSpec(
+        model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B"),
+        agentic=t.AgenticSpec(mcp=mcp),
+    )
 )
 ```
 

@@ -225,6 +225,7 @@ serde_default_fn!(usize, default_epochs, 100);
 serde_default_fn!(usize, default_bs, 4);
 serde_default_fn!(bool, default_true, true);
 
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum AnyMoeExpertType {
     #[serde(rename = "fine_tuned")]
@@ -237,7 +238,9 @@ pub enum AnyMoeExpertType {
     },
 }
 
-#[derive(Serialize, Deserialize, Clone)]
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Serialize, Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
 pub struct AnyMoeConfig {
     pub hidden_size: usize,
     #[serde(default = "default_lr")]

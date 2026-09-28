@@ -1,24 +1,19 @@
 """
-Local shell skill mount with the Python SDK.
+Upload a skill to the engine and let the shell tool run it.
 
-The request mounts a local skill directory under `skills/invoice-auditor/`.
+The upload lands in the engine's skill store; a Responses request references
+it from its shell tool, and the engine copies it into the session's working
+directory under `skills/invoice-auditor/`.
 
 Run with:
-    pip install -e inference-rs-pyo3 --features code-execution
     python examples/python/shell_skills.py
 """
 
-from pathlib import Path
-import tempfile
+import inference_rs as ir
+from inference_rs import types as t
 
-from inference_rs import ChatCompletionRequest, Runner, ShellConfig, ShellSkillMount, Which
-
-
-def write_invoice_skill(root: Path) -> Path:
-    skill_dir = root / "invoice-auditor"
-    skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text(
-        """---
+SKILL_FILES = {
+    "SKILL.md": """---
 name: invoice-auditor
 description: Checks invoice line items and totals with a local Python helper.
 ---
@@ -29,19 +24,13 @@ Use `python3 skills/invoice-auditor/check_invoice.py skills/invoice-auditor/invo
 to validate the bundled invoice. Report whether the declared total matches the
 sum of the line items.
 """,
-        encoding="utf-8",
-    )
-    (skill_dir / "invoice.csv").write_text(
-        """item,amount
+    "invoice.csv": """item,amount
 hosting,25.00
 storage,12.50
 support,17.50
 declared_total,55.00
 """,
-        encoding="utf-8",
-    )
-    (skill_dir / "check_invoice.py").write_text(
-        """import csv
+    "check_invoice.py": """import csv
 import sys
 
 with open(sys.argv[1], newline="") as handle:
@@ -53,41 +42,40 @@ print(f"line_total={line_total:.2f}")
 print(f"declared_total={declared:.2f}")
 print("status=match" if line_total == declared else "status=mismatch")
 """,
-        encoding="utf-8",
-    )
-    return skill_dir
+}
 
 
 def main():
-    runner = Runner(
-        which=Which.Plain(model_id="Qwen/Qwen3-4B"),
-        shell_config=ShellConfig(),
+    spec = t.EngineSpec(
+        model=t.ModelSelectedPlain(
+            model_id="Qwen/Qwen3-4B", arch=t.NormalLoaderType.QWEN3
+        ),
+        agentic=t.AgenticSpec(shell=t.ShellConfig()),
     )
 
-    with tempfile.TemporaryDirectory() as temp_dir:
-        skill_dir = write_invoice_skill(Path(temp_dir))
-        response = runner.send_chat_completion_request(
-            ChatCompletionRequest(
+    with ir.Engine(spec) as engine:
+        skill = engine.upload_skill(
+            [ir.SkillFile(path, text.encode()) for path, text in SKILL_FILES.items()]
+        )
+        response = engine.create_response(
+            t.OpenResponsesCreateRequest(
                 model="default",
-                messages=[
-                    {
-                        "role": "user",
-                        "content": "Use the invoice-auditor skill to check the bundled invoice.",
-                    }
-                ],
-                shell_skills=[
-                    ShellSkillMount(
-                        name="invoice-auditor",
-                        description="Checks invoice line items and totals with a local Python helper.",
-                        source_path=skill_dir,
+                input="Use the invoice-auditor skill to check the bundled invoice.",
+                tools=[
+                    t.OpenAiShellTool(
+                        environment=t.OpenAiShellEnvironmentContainerAuto(
+                            skills=[
+                                t.OpenAiShellSkillSkillReference(
+                                    skill_id=skill.id, version="latest"
+                                )
+                            ]
+                        )
                     )
                 ],
                 max_tool_rounds=6,
             )
         )
-
-    for choice in response.choices:
-        print(choice.message.content)
+        print(response.output_text)
 
 
 if __name__ == "__main__":

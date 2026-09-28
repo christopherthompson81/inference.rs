@@ -83,6 +83,16 @@ pub enum SandboxMode {
     Off,
 }
 
+impl From<SandboxMode> for inference_sandbox::SandboxMode {
+    fn from(mode: SandboxMode) -> Self {
+        match mode {
+            SandboxMode::Auto => Self::Auto,
+            SandboxMode::On => Self::On,
+            SandboxMode::Off => Self::Off,
+        }
+    }
+}
+
 #[derive(Clone, Copy, ValueEnum, Default, PartialEq, Eq, Deserialize, Debug)]
 #[serde(rename_all = "kebab-case")]
 pub enum SandboxNetworkMode {

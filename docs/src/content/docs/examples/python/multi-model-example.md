@@ -163,7 +163,11 @@ def example_streaming_with_models():
                     if event.name == "error":
                         raise RuntimeError(event.data)
                     if event.name == "chunk":
-                        print(event.data.choices[0].delta.content or "", end="", flush=True)
+                        print(
+                            event.data.choices[0].delta.content or "",
+                            end="",
+                            flush=True,
+                        )
             print()  # New line after streaming
 
 

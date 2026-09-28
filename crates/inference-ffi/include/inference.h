@@ -168,12 +168,12 @@ typedef struct inference_string inference_string;
 /* Owned bytes (audio, a file's content) and their MIME type. */
 typedef struct inference_blob inference_blob;
 
-/* Loads an engine from a JSON spec: {"model": <model selection>, "model_id"?, "runtime"?: {"device": "auto" | "cpu" |
- * "cuda:N" | "metal:N", "seed", "max_seqs", "prefix_cache_n", "no_kv_cache", "chat_template", "jinja_explicit",
- * "max_model_len", "isq", "paged_attn", "token_source"}, "agentic"?: {"max_tool_rounds", "tool_dispatch_url",
- * "agent_permission"}, "adapters"?: {"runtime_updates", "root"}, "skills"?: {"root"}}. The model selection is the
- * ModelSelected JSON, e.g. {"Plain": {"model_id": "org/model"}}.
- * A malformed spec is INFERENCE_ERR_INVALID_ARGUMENT, a device this build or machine lacks is
+/* Loads an engine from a JSON spec, the EngineSpec schema in docs/openapi.json: {"model": <model selection>,
+ * "model_id"?, "runtime"?, "agentic"?, "adapters"?, "skills"?, "anymoe"?}. "runtime" holds the device ("auto" | "cpu" |
+ * "cuda:N" | "metal:N"), batching, quantization, paged-attention cache sizing and MTP; "agentic" the tool loop's
+ * limits and permission, search reranking, and the MCP client, code execution and shell tools. The model selection is
+ * the ModelSelected JSON, e.g. {"Plain": {"model_id": "org/model"}}.
+ * A malformed spec is INFERENCE_ERR_INVALID_ARGUMENT, a device or feature this build or machine lacks is
  * INFERENCE_ERR_NOT_AVAILABLE, and a model that fails to load is INFERENCE_ERR_LOAD_FAILED. */
 INFERENCE_API inference_status inference_engine_load(const char *spec, size_t spec_len,
                                                     inference_engine **out_engine);
