@@ -152,7 +152,7 @@ impl HqqBits {
     pub(crate) fn bitpack_type(&self) -> impl Fn(Tensor) -> Result<Tensor> {
         match self {
             Self::Eight => |wq: Tensor| -> Result<Tensor> {
-                #[allow(unused_variables)]
+                #[cfg_attr(not(any(feature = "cuda", feature = "metal")), allow(unused_variables))]
                 let device = wq.device();
 
                 #[cfg(feature = "cuda")]
@@ -235,7 +235,7 @@ impl HqqBits {
                 wq.to_dtype(DType::U8)
             },
             Self::Four => |wq_in: Tensor| -> Result<Tensor> {
-                #[allow(unused_variables)]
+                #[cfg_attr(not(any(feature = "cuda", feature = "metal")), allow(unused_variables))]
                 let device = wq_in.device();
 
                 #[cfg(feature = "cuda")]
@@ -329,7 +329,7 @@ impl HqqBits {
                 a.leftshift(4)?.bitwise_or(&b)
             },
             Self::Two => |wq_in: Tensor| -> Result<Tensor> {
-                #[allow(unused_variables)]
+                #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
                 let device = wq_in.device();
 
                 #[cfg(feature = "cuda")]
@@ -478,7 +478,7 @@ impl HqqBits {
                     .bitwise_or(&j)
             },
             Self::One => |wq_in: Tensor| -> Result<Tensor> {
-                #[allow(unused_variables)]
+                #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
                 let device = wq_in.device();
 
                 #[cfg(feature = "cuda")]

@@ -1,7 +1,6 @@
 use candle_core::cuda::cudarc::driver::sys::CUstream;
 use half::{bf16, f16};
 
-#[allow(dead_code)]
 extern "C" {
     pub(crate) fn dequantize_blockwise_f32_int8(
         code: *const f32,

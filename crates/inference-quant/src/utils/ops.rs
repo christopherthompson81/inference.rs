@@ -189,7 +189,6 @@ impl CustomOp1 for Leftshift {
     }
 }
 
-#[allow(dead_code)]
 pub trait LeftshiftOp {
     fn leftshift(&self, n: usize) -> Result<Tensor>;
 }
@@ -790,7 +789,6 @@ impl CustomOp1 for BitWiseUnary {
     }
 }
 
-#[allow(dead_code)]
 pub trait BitWiseOp {
     fn bitwise_and(&self, rhs: &Tensor) -> Result<Tensor>;
     fn bitwise_or(&self, rhs: &Tensor) -> Result<Tensor>;
@@ -816,16 +814,14 @@ impl BitWiseOp for Tensor {
     }
 }
 
-// ────────────────────────────── ArgSort / Sort ────────────────────────────────
-
-#[allow(unused)]
 /// Configuration for an **argsort** (returns indices) operation.
+#[cfg_attr(not(feature = "metal"), allow(dead_code))]
 struct ArgSort {
     axis: usize,
 }
 
-#[allow(unused)]
-/// Configuration for a **sort** (returns re‑ordered values) operation.
+/// Configuration for a **sort** (returns re-ordered values) operation.
+#[cfg_attr(not(feature = "metal"), allow(dead_code))]
 struct Sort {
     axis: usize,
 }
@@ -1140,7 +1136,7 @@ mod cuda_ops_cccl2 {
                     ffi::nonzero_i64(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
                 candle_core::DType::I32 => {
-                    ffi::nonzero_i64(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
+                    ffi::nonzero_i32(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
                 candle_core::DType::I16 => {
                     ffi::nonzero_i16(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
@@ -1212,7 +1208,7 @@ mod cuda_ops_cccl3 {
                     ffi::nonzero_i64(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
                 candle_core::DType::I32 => {
-                    ffi::nonzero_i64(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
+                    ffi::nonzero_i32(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
                 }
                 candle_core::DType::I16 => {
                     ffi::nonzero_i16(d_in, n, num_nonzero, dims, num_dims, d_out, stream)
@@ -1556,7 +1552,6 @@ impl CustomOp1 for CumSum {
     }
 }
 
-#[allow(dead_code)]
 pub trait CumSumOp {
     /// inclusive = false, reverse = false
     fn fast_cumsum<D: Dim>(&self, axis: D) -> Result<Tensor>;
@@ -2201,7 +2196,7 @@ pub fn softmax_with_sinks(
 // Fused flash attention with sinks (Metal)
 // ============================================================================
 
-#[allow(dead_code)]
+#[cfg_attr(not(feature = "metal"), allow(dead_code))]
 struct FlashAttnSinksMetal {
     key: Tensor,
     value: Tensor,
@@ -2425,7 +2420,7 @@ pub fn flash_attn_sinks_metal(
     q.apply_op1_no_bwd(&op)
 }
 
-#[allow(dead_code)]
+#[cfg_attr(not(feature = "metal"), allow(dead_code))]
 struct FlashAttnSinksVarlenMetal {
     key: Tensor,          // [total_kv, num_kv_heads, D]
     value: Tensor,        // [total_kv, num_kv_heads, D]
@@ -4074,6 +4069,17 @@ mod tests {
         .unwrap();
         let b = a.nonzero().unwrap().to_vec2::<u32>().unwrap();
         assert_eq!(b, [[0, 0], [0, 2], [1, 0], [1, 2]]);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn test_nonzero_i32_cuda() {
+        use crate::utils::ops::NonZeroOp;
+        use candle_core::Tensor;
+        let device = candle_core::Device::new_cuda(0).unwrap();
+        let a = Tensor::from_vec(vec![0i32, 5, 0, 0, -3, 0, 0, 7], &[2, 4], &device).unwrap();
+        let b = a.nonzero().unwrap().to_vec2::<u32>().unwrap();
+        assert_eq!(b, [[0, 1], [1, 0], [1, 3]]);
     }
 
     #[test]

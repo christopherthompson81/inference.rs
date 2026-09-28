@@ -20,7 +20,6 @@ use super::{
 
 const DECODE_MAX_M: usize = 128;
 const PREFILL_M_VALUES: [usize; 5] = [256, 512, 1024, 2048, 4096];
-#[allow(dead_code)]
 pub(super) const DEEPGEMM_ACTIVATION_SCALE_M_ALIGNMENT: usize = 4;
 const JIT_SOURCE_HASH: &str = env!("INFERENCE_RS_DEEPGEMM_SOURCE_HASH");
 
@@ -360,7 +359,6 @@ fn serving_bucket(rows: usize) -> Option<usize> {
         .find(|capacity| rows <= *capacity)
 }
 
-#[allow(dead_code)]
 pub(super) fn activation_scale_shape(rows: usize, features: usize) -> Result<[usize; 2]> {
     if rows == 0 || features == 0 || !features.is_multiple_of(FP8_BLOCK_SIZE) {
         candle_core::bail!(
@@ -378,7 +376,6 @@ pub(super) fn activation_scale_shape(rows: usize, features: usize) -> Result<[us
 }
 
 #[cfg(all(feature = "cuda", has_deepgemm_fp8_sm90_provider))]
-#[allow(dead_code)]
 fn validate_prequantized_activation_layout(
     activation: &Tensor,
     activation_scales: &Tensor,
@@ -564,7 +561,6 @@ pub(super) fn matmul(
 }
 
 #[cfg(all(feature = "cuda", has_deepgemm_fp8_sm90_provider))]
-#[allow(dead_code)]
 pub(super) fn matmul_prequantized(
     prepared: &Prepared,
     activation: &Tensor,

@@ -1,7 +1,6 @@
 use candle_core::{CpuStorage, CustomOp1, DType, Result, Tensor};
 use float8::F8E4M3;
 
-#[allow(dead_code)]
 struct Fp8ToDtype {
     target_dtype: DType,
 }
@@ -323,7 +322,6 @@ impl CustomOp1 for DtypeToFp8 {
 }
 
 /// Convert an FP8 tensor to another dtype.
-#[allow(dead_code)]
 pub(crate) fn fp8_to_dtype(input: &Tensor, target_dtype: DType) -> Result<Tensor> {
     if input.dtype() != DType::F8E4M3 {
         candle_core::bail!("Input tensor must be F8E4M3, got {:?}", input.dtype());

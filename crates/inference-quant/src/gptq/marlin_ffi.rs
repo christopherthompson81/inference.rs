@@ -2,7 +2,6 @@ use std::os::raw::c_void;
 
 pub(crate) const HAVE_MARLIN_KERNELS: bool = cfg!(has_marlin_kernels);
 
-#[allow(dead_code)]
 extern "C" {
     pub(crate) fn marlin_gptq_4bit_f16(
         inputs: *const c_void,

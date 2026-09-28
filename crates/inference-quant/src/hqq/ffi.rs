@@ -17,7 +17,6 @@ pub mod eight_bit {
     use half::{bf16, f16};
     use paste::paste;
 
-    #[allow(dead_code)]
     extern "C" {
         dequant_kernel!(u8, f32, 8bit_u8_kernel_f32);
         dequant_kernel!(u8, f16, 8bit_u8_kernel_f16);
@@ -29,7 +28,6 @@ pub mod four_bit {
     use half::{bf16, f16};
     use paste::paste;
 
-    #[allow(dead_code)]
     extern "C" {
         dequant_kernel!(u8, f32, 4bit_u8_kernel_f32);
         dequant_kernel!(u8, f16, 4bit_u8_kernel_f16);
@@ -41,7 +39,6 @@ pub mod three_bit {
     use half::{bf16, f16};
     use paste::paste;
 
-    #[allow(dead_code)]
     extern "C" {
         dequant_kernel!(i32, f32, 3bit_32_kernel_f32);
         dequant_kernel!(i32, f16, 3bit_32_kernel_f16);
@@ -53,7 +50,6 @@ pub mod two_bit {
     use half::{bf16, f16};
     use paste::paste;
 
-    #[allow(dead_code)]
     extern "C" {
         dequant_kernel!(u8, f32, 2bit_u8_kernel_f32);
         dequant_kernel!(u8, f16, 2bit_u8_kernel_f16);
@@ -65,7 +61,6 @@ pub mod one_bit {
     use half::{bf16, f16};
     use paste::paste;
 
-    #[allow(dead_code)]
     extern "C" {
         dequant_kernel!(u8, f32, 1bit_u8_kernel_f32);
         dequant_kernel!(u8, f16, 1bit_u8_kernel_f16);

@@ -3,7 +3,6 @@ use std::sync::{atomic::AtomicUsize, Arc};
 use candle_core::{DType, Device, DeviceLocation, Result, Shape, Tensor};
 use candle_nn::{Linear, Module};
 use float8::F8E4M3;
-use half::f16;
 use safetensors::tensor::Dtype;
 
 use crate::uqff::{UqffHeaderMatch, UqffLayerHeaderView};
@@ -11,13 +10,6 @@ use crate::{
     IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedSerde, QuantizedSerdeType,
     Shard, UqffReader, UqffTensor,
 };
-
-#[cfg(target_feature = "avx")]
-mod avx;
-#[cfg(target_feature = "neon")]
-mod neon;
-#[cfg(target_feature = "simd128")]
-mod simd128;
 
 pub(crate) const QK8_0: usize = 32;
 
@@ -41,16 +33,6 @@ impl BlockF8Q8 {
         }
     }
 }
-
-// Our own BlockQ8_0 with accessible fields for vec_dot kernels.
-// candle_core's BlockQ8_0 has pub(crate) fields we can't access.
-#[derive(Debug, Clone, PartialEq)]
-#[repr(C)]
-pub struct BlockQ8_0 {
-    pub(crate) d: f16,
-    pub(crate) qs: [i8; QK8_0],
-}
-const _: () = assert!(std::mem::size_of::<BlockQ8_0>() == 34);
 
 // ---- GgmlType-like functions ----
 
@@ -95,58 +77,6 @@ fn from_float(xs: &[f32], ys: &mut [BlockF8Q8]) -> Result<()> {
         }
     }
     Ok(())
-}
-
-#[allow(dead_code)]
-#[allow(unreachable_code)]
-fn vec_dot(n: usize, xs: &[BlockF8Q8], ys: &[BlockQ8_0]) -> Result<f32> {
-    #[cfg(target_feature = "avx")]
-    return avx::vec_dot_f8q8_q8_0(n, xs, ys);
-
-    #[cfg(target_feature = "neon")]
-    return neon::vec_dot_f8q8_q8_0(n, xs, ys);
-
-    #[cfg(target_feature = "simd128")]
-    return simd128::vec_dot_f8q8_q8_0(n, xs, ys);
-
-    vec_dot_unopt(n, xs, ys)
-}
-
-#[allow(dead_code)]
-fn vec_dot_unopt(n: usize, xs: &[BlockF8Q8], ys: &[BlockQ8_0]) -> Result<f32> {
-    let qk = QK8_0;
-    if !n.is_multiple_of(QK8_0) {
-        candle_core::bail!("vec_dot_f8q8_q8_0: {n} is not divisible by {qk}")
-    }
-
-    let mut sumf = 0f32;
-    for (xs, ys) in xs.iter().zip(ys.iter()) {
-        let sum_i = xs
-            .qs
-            .iter()
-            .zip(ys.qs.iter())
-            .map(|(&x, &y)| x as i32 * y as i32)
-            .sum::<i32>();
-        sumf += sum_i as f32 * xs.dq_d() * f16::to_f32(ys.d)
-    }
-    Ok(sumf)
-}
-
-#[allow(dead_code)]
-#[allow(unreachable_code)]
-#[allow(unused)]
-#[cfg(feature = "arm-nightly-feat")]
-fn matmul_i8mm(
-    n: usize,
-    xs_0: &[BlockF8Q8],
-    xs_1: &[BlockF8Q8],
-    ys_0: &[BlockQ8_0],
-    ys_1: &[BlockQ8_0],
-) -> Result<[f32; 4]> {
-    #[cfg(target_feature = "neon")]
-    return neon::i8mm_f8q8_q8_0(n, xs_0, xs_1, ys_0, ys_1);
-
-    candle_core::bail!("Unsupported block type for i8mm");
 }
 
 // ---- F8Q8Linear ----
@@ -591,7 +521,6 @@ mod tests {
     #[test]
     fn test_f8q8_block_size() {
         assert_eq!(std::mem::size_of::<BlockF8Q8>(), 33);
-        assert_eq!(std::mem::size_of::<BlockQ8_0>(), 34);
     }
 
     #[test]

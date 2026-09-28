@@ -2,7 +2,6 @@ use std::ffi::c_void;
 
 use candle_core::cuda::cudarc::driver::sys::CUstream;
 
-#[allow(dead_code)]
 extern "C" {
     pub(crate) fn count_nonzero_bf16(d_in: *const c_void, N: u32, stream: CUstream) -> u32;
     pub(crate) fn count_nonzero_f16(d_in: *const c_void, N: u32, stream: CUstream) -> u32;
@@ -76,7 +75,7 @@ extern "C" {
         d_out: *mut c_void,
         stream: CUstream,
     );
-    pub(crate) fn nonzero_i16(
+    pub(crate) fn nonzero_i32(
         d_in: *const c_void,
         N: u32,
         num_nonzero: u32,
@@ -85,7 +84,7 @@ extern "C" {
         d_out: *mut c_void,
         stream: CUstream,
     );
-    pub(crate) fn nonzero_i32(
+    pub(crate) fn nonzero_i16(
         d_in: *const c_void,
         N: u32,
         num_nonzero: u32,
@@ -169,8 +168,6 @@ extern "C" {
     );
 
     pub(crate) fn leftshift_u8(d_in1: *const c_void, d_out: *mut c_void, N: u32, k: i32);
-    pub(crate) fn leftshift_u32(d_in1: *const c_void, d_out: *mut c_void, N: u32, k: i32);
-    pub(crate) fn leftshift_i64(d_in1: *const c_void, d_out: *mut c_void, N: u32, k: i32);
     pub(crate) fn leftshift_i32(d_in1: *const c_void, d_out: *mut c_void, N: u32, k: i32);
 
     // Fused GPT-OSS SwiGLU kernel
@@ -328,6 +325,11 @@ extern "C" {
         activation: i32,
         stream: CUstream,
     );
+    #[cfg(any(
+        test,
+        all(has_cutlass_fp8_sm90_kernels, has_deepgemm_fp8_sm90_provider),
+        all(has_blockwise_fp8_kernels, feature = "cutile")
+    ))]
     pub fn fused_split_glu_quantize_bf16(
         input: *const c_void,
         output: *mut c_void,
