@@ -316,10 +316,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/ContainerFileMetadata"
-                  }
+                  "$ref": "#/components/schemas/ContainerFileListObject"
                 }
               }
             }
@@ -460,10 +457,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/FileMetadata"
-                  }
+                  "$ref": "#/components/schemas/FileListObject"
                 }
               }
             }
@@ -554,7 +548,14 @@
         ],
         "responses": {
           "200": {
-            "description": "File deleted"
+            "description": "File deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/FileDeleted"
+                }
+              }
+            }
           },
           "404": {
             "description": "File not found or expired"
@@ -617,7 +618,14 @@
         },
         "responses": {
           "200": {
-            "description": "Image generation"
+            "description": "Image generation",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImageGenerationResponse"
+                }
+              }
+            }
           }
         }
       }
@@ -1072,7 +1080,14 @@
         ],
         "responses": {
           "200": {
-            "description": "Response deleted"
+            "description": "Response deleted",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResponseDeleted"
+                }
+              }
+            }
           }
         }
       }
@@ -3638,6 +3653,24 @@
           }
         }
       },
+      "ContainerFileListObject": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ContainerFileMetadata"
+            }
+          },
+          "object": {
+            "type": "string"
+          }
+        }
+      },
       "ContainerFileMetadata": {
         "type": "object",
         "description": "OpenAI-compatible container file metadata backed by the same in-process file store.",
@@ -3876,6 +3909,43 @@
               "null"
             ],
             "description": "Quote from the file"
+          }
+        }
+      },
+      "FileDeleted": {
+        "type": "object",
+        "required": [
+          "id",
+          "object",
+          "deleted"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "type": "string"
+          }
+        }
+      },
+      "FileListObject": {
+        "type": "object",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FileMetadata"
+            }
+          },
+          "object": {
+            "type": "string"
           }
         }
       },
@@ -4118,6 +4188,23 @@
           }
         ]
       },
+      "ImageChoice": {
+        "type": "object",
+        "properties": {
+          "b64_json": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "url": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "ImageGenerationRequest": {
         "type": "object",
         "description": "Image generation request",
@@ -4155,6 +4242,25 @@
             "description": "Image width in pixels",
             "example": 1280,
             "minimum": 0
+          }
+        }
+      },
+      "ImageGenerationResponse": {
+        "type": "object",
+        "required": [
+          "created",
+          "data"
+        ],
+        "properties": {
+          "created": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImageChoice"
+            }
           }
         }
       },
@@ -6730,6 +6836,26 @@
           "detailed",
           "auto"
         ]
+      },
+      "ResponseDeleted": {
+        "type": "object",
+        "description": "What deleting a response returns.",
+        "required": [
+          "id",
+          "object",
+          "deleted"
+        ],
+        "properties": {
+          "deleted": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "type": "string"
+          }
+        }
       },
       "ResponseError": {
         "type": "object",

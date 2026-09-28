@@ -59,7 +59,7 @@ class EngineTest(unittest.TestCase):
         cls.model = os.environ.get(MODEL_VARIABLE)
         if not cls.model:
             raise unittest.SkipTest(f"{MODEL_VARIABLE} is not set")
-        cls.engine = ir.Engine(spec(cls.model))
+        cls.engine = ir.JsonEngine(spec(cls.model))
 
     @classmethod
     def tearDownClass(cls):
@@ -215,7 +215,7 @@ class EngineTest(unittest.TestCase):
         self.assertEqual(bad.exception.status, ir.Status.INVALID_REQUEST)
 
     def test_a_stream_outlives_its_engine(self):
-        engine = ir.Engine(spec(self.model))
+        engine = ir.JsonEngine(spec(self.model))
         stream = engine.chat_stream(chat_request(stream=True))
         engine.close()
         self.assertGreater(len(list(stream)), 0)
@@ -235,11 +235,11 @@ class EngineTest(unittest.TestCase):
             tools=[ir.HostTool(definition, lambda call: call.arguments_json)],
             search=lambda query: "[]",
         )
-        with ir.Engine(spec(self.model), callbacks) as engine:
+        with ir.JsonEngine(spec(self.model), callbacks) as engine:
             self.assertIn("choices", json.loads(engine.chat(chat_request())))
         bad = ir.HostCallbacks(tools=[ir.HostTool("not json", lambda call: "")])
         with self.assertRaises(ir.InferenceError) as refused:
-            ir.Engine(spec(self.model), bad)
+            ir.JsonEngine(spec(self.model), bad)
         self.assertEqual(refused.exception.status, ir.Status.INVALID_ARGUMENT)
 
 

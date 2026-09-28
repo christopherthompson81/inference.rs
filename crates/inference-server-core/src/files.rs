@@ -7,7 +7,10 @@ use axum::{
 };
 use inference_core::FILE_PURPOSE_USER_DATA;
 
-pub use crate::files_api::{ContainerFileMetadata, FileMetadata, SourceMeta};
+pub use crate::files_api::{
+    ContainerFileListObject, ContainerFileMetadata, FileDeleted, FileListObject, FileMetadata,
+    SourceMeta,
+};
 use crate::{
     files_api::{self, FileUpload},
     handler_core::{json_response, openai_error_response, ApiError, ApiErrorHttp, ApiErrorKind},
@@ -144,7 +147,7 @@ pub async fn get_file_content(
     tag = "Mistral.rs",
     path = "/v1/files",
     responses(
-        (status = 200, description = "List of file metadata", body = [FileMetadata]),
+        (status = 200, description = "List of file metadata", body = FileListObject),
         (status = 500, description = "Internal server error"),
     )
 )]
@@ -158,7 +161,7 @@ pub async fn list_files(State(state): ExtractedInferenceRsState) -> Response {
     path = "/v1/files/{id}",
     params(("id" = String, Path, description = "File ID")),
     responses(
-        (status = 200, description = "File deleted"),
+        (status = 200, description = "File deleted", body = FileDeleted),
         (status = 404, description = "File not found or expired"),
         (status = 500, description = "Internal server error"),
     )
@@ -176,7 +179,7 @@ pub async fn delete_file(
     path = "/v1/containers/{container_id}/files",
     params(("container_id" = String, Path, description = "Container ID")),
     responses(
-        (status = 200, description = "List of container file metadata", body = [ContainerFileMetadata]),
+        (status = 200, description = "List of container file metadata", body = ContainerFileListObject),
         (status = 500, description = "Internal server error"),
     )
 )]

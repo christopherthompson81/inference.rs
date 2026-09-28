@@ -154,7 +154,7 @@ pub async fn get_response(
     tag = "Mistral.rs",
     path = "/v1/responses/{response_id}",
     params(("response_id" = String, Path, description = "The ID of the response to delete")),
-    responses((status = 200, description = "Response deleted"))
+    responses((status = 200, description = "Response deleted", body = ResponseDeleted))
 )]
 pub async fn delete_response(
     State(state): ExtractedInferenceRsState,
