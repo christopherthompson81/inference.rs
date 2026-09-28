@@ -6,7 +6,6 @@ mod config;
 mod doctor;
 mod login;
 mod manage;
-pub(crate) mod quant;
 mod quantize;
 mod run;
 pub(crate) mod serve;

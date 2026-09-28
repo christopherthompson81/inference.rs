@@ -38,6 +38,7 @@ rand_distr.workspace = true
 regex-automata.workspace = true
 galil-seiferas.workspace = true
 tokio.workspace = true
+walkdir.workspace = true
 tokio-rayon.workspace = true
 rand_isaac.workspace = true
 futures.workspace = true

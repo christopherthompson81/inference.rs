@@ -483,6 +483,7 @@ Select a model for running via auto loader
 | `max_seq_len` | `int \| None` | `4096` |
 | `model_id` | `str` | required |
 | `organization` | `IsqOrganization \| None` | optional |
+| `quant` | `str \| None` | optional |
 | `tokenizer_json` | `str \| None` | optional |
 | `topology` | `str \| None` | optional |
 | `write_uqff` | `UqffWriteSpec \| None` | optional |

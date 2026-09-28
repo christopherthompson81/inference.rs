@@ -349,6 +349,7 @@ pub async fn tune_model(payload: Result<Json<TuneModelRequest>, JsonRejection>) 
 
     let model_selected = ModelSelected::Run {
         model_id: request.model_id.clone(),
+        quant: None,
         tokenizer_json: None,
         dtype,
         topology: None,

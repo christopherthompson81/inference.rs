@@ -5,8 +5,8 @@ use std::{
     sync::LazyLock,
 };
 
+use crate::{ModelDType, GGUF_MULTI_FILE_DELIMITER};
 use anyhow::{bail, Context, Result};
-use inference_core::{ModelDType, GGUF_MULTI_FILE_DELIMITER};
 use regex::Regex;
 use walkdir::WalkDir;
 
@@ -32,7 +32,7 @@ const Q6_PREFERENCE: &[&str] = &["Q6K", "Q6KS", "Q6KL"];
 const Q8_PREFERENCE: &[&str] = &["Q80", "Q8K"];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ResolvedGgufArtifact {
+pub struct ResolvedGgufArtifact {
     pub label: String,
     pub files: Vec<String>,
 }
@@ -69,16 +69,13 @@ enum ProjectorRole {
     Audio,
 }
 
-pub(crate) fn has_gguf_model_files(files: &[String]) -> bool {
+pub fn has_gguf_model_files(files: &[String]) -> bool {
     files
         .iter()
         .any(|file| is_gguf(file) && !is_projector(file) && !is_auxiliary_gguf(file))
 }
 
-pub(crate) fn resolve_gguf_quant(
-    files: &[String],
-    requested: &str,
-) -> Result<ResolvedGgufArtifact> {
+pub fn resolve_gguf_quant(files: &[String], requested: &str) -> Result<ResolvedGgufArtifact> {
     let groups = build_groups(files, ArtifactKind::Model);
     let preferences = quant_preferences(requested)?;
     let primary = groups
@@ -108,7 +105,7 @@ pub(crate) fn resolve_gguf_quant(
             .collect::<Vec<_>>();
         if !iq_matches.is_empty() {
             bail!(
-                "`--quant {requested}` only matched unsupported IQ GGUF artifacts: {}. Choose a \
+                "`quant = {requested}` only matched unsupported IQ GGUF artifacts: {}. Choose a \
                  supported Q/K quant",
                 format_group_choices(&iq_matches)
             );
@@ -116,7 +113,7 @@ pub(crate) fn resolve_gguf_quant(
     }
 
     let available = format_available_groups(groups.values());
-    bail!("No GGUF model files matched `--quant {requested}`. Available GGUF variants: {available}")
+    bail!("No GGUF model files matched `quant = {requested}`. Available GGUF variants: {available}")
 }
 
 fn resolve_gguf_quant_groups(
@@ -205,7 +202,7 @@ fn resolve_gguf_quant_groups(
     Ok(None)
 }
 
-pub(crate) fn resolve_gguf_projector(
+pub fn resolve_gguf_projector(
     files: &[String],
     dtype: ModelDType,
 ) -> Result<Option<ResolvedGgufArtifact>> {
@@ -239,7 +236,7 @@ pub(crate) fn resolve_gguf_projector(
         if role_groups.len() != supported.len() {
             bail!(
                 "Automatic GGUF projector selection cannot mix role-specific and generic \
-                 projectors: {}. Pass `--mmproj` to choose explicitly",
+                 projectors: {}. Name the projector explicitly (`--mmproj`, or `mmproj_filename` in a spec)",
                 format_group_choices(&supported)
             );
         }
@@ -298,7 +295,7 @@ pub(crate) fn resolve_gguf_projector(
     if !unsupported_role_groups.is_empty() {
         bail!(
             "Automatic GGUF projector selection cannot mix a generic projector with unsupported \
-             role-specific IQ artifacts: {}. Pass `--mmproj` to choose explicitly",
+             role-specific IQ artifacts: {}. Name the projector explicitly (`--mmproj`, or `mmproj_filename` in a spec)",
             format_group_choices(&unsupported_role_groups)
         );
     }
@@ -323,14 +320,14 @@ fn select_projector_group<'a>(
         .collect::<Vec<_>>();
     if best.len() != 1 {
         bail!(
-            "Automatic GGUF projector selection is ambiguous: {}. Pass `--mmproj` to choose one",
+            "Automatic GGUF projector selection is ambiguous: {}. Name one explicitly (`--mmproj`, or `mmproj_filename` in a spec)",
             format_group_choices(&best)
         );
     }
     Ok(best[0])
 }
 
-pub(crate) fn list_local_files_recursive(root: &Path) -> Result<Vec<String>> {
+pub fn list_local_files_recursive(root: &Path) -> Result<Vec<String>> {
     if !root.is_dir() {
         return Ok(Vec::new());
     }
@@ -352,7 +349,7 @@ pub(crate) fn list_local_files_recursive(root: &Path) -> Result<Vec<String>> {
     Ok(files)
 }
 
-pub(crate) fn list_local_gguf_companions(root: &Path, exact_file: &str) -> Result<Vec<String>> {
+pub fn list_local_gguf_companions(root: &Path, exact_file: &str) -> Result<Vec<String>> {
     let mut directories = BTreeSet::from([root.to_path_buf()]);
     for filename in exact_file.split(GGUF_MULTI_FILE_DELIMITER).map(str::trim) {
         let path = Path::new(filename);
@@ -510,7 +507,7 @@ fn quant_preferences(requested: &str) -> Result<QuantPreferences> {
         bail!("GGUF quant selection cannot be empty");
     }
     if lowered == "auto" {
-        bail!("`--quant auto` does not select a GGUF artifact; choose a bit width or quant name");
+        bail!("`quant = auto` does not select a GGUF artifact; choose a bit width or quant name");
     }
     if is_iq_quant(&normalize_label(&lowered)) {
         bail!("IQ GGUF formats are not supported; choose a supported Q/K quant");

@@ -1067,6 +1067,7 @@ class ModelSelectedRun:
     max_seq_len: int | None = 4096
     model_id: str
     organization: IsqOrganization | None = None
+    quant: str | None = None
     tokenizer_json: str | None = None
     topology: str | None = None
     write_uqff: UqffWriteSpec | None = None
