@@ -875,6 +875,16 @@ pub enum MtpDraftSamplingArg {
     Probabilistic,
 }
 
+impl From<MtpDraftSamplingArg> for inference_api::engine::MtpDraftSampling {
+    fn from(value: MtpDraftSamplingArg) -> Self {
+        match value {
+            MtpDraftSamplingArg::Auto => Self::Auto,
+            MtpDraftSamplingArg::Greedy => Self::Greedy,
+            MtpDraftSamplingArg::Probabilistic => Self::Probabilistic,
+        }
+    }
+}
+
 impl From<MtpDraftSamplingArg> for inference_core::MtpDraftSamplingMethod {
     fn from(value: MtpDraftSamplingArg) -> Self {
         match value {

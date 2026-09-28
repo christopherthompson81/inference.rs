@@ -6,10 +6,10 @@ use candle_core::Device;
 use futures::StreamExt;
 use inference_core::{
     AgentPermission, AnyMoeSpec, CalibrationAction, CalibrationStatus, ChatCompletionResponse,
-    CodeExecutionConfig, CompletionResponse, ImageGenerationResponse, InferenceRs, McpClientConfig,
-    ModelSelected, MtpConfig, MtpDraftSamplingMethod, PagedCacheType, Response, SandboxMode,
-    SandboxPolicy, SandboxProfile, SearchCallback, SearchEmbeddingModel, SerializedSession,
-    ShellConfig, TokenSource, ToolCallbackWithTool,
+    CodeExecutionConfig, CompletionResponse, HfConfigOverrides, ImageGenerationResponse,
+    InferenceRs, McpClientConfig, ModelSelected, MtpConfig, MtpDraftSamplingMethod, PagedCacheType,
+    Response, SandboxMode, SandboxPolicy, SandboxProfile, SearchCallback, SearchEmbeddingModel,
+    SerializedSession, ShellConfig, TokenSource, ToolCallbackWithTool,
 };
 use serde::Deserialize;
 
@@ -185,6 +185,37 @@ pub struct RuntimeSpec {
     pub paged_cache: PagedCacheSpec,
     #[serde(default)]
     pub mtp: Option<MtpSpec>,
+    /// Most tokens one scheduler step batches across sequences.
+    #[serde(default)]
+    #[schema(minimum = 1)]
+    pub max_num_batched_tokens: Option<usize>,
+    /// Longest prompt chunk one prefill step takes.
+    #[serde(default)]
+    #[schema(minimum = 1)]
+    pub max_prefill_chunk_tokens: Option<usize>,
+    /// Decode steps the scheduler runs before admitting a waiting prefill.
+    #[serde(default)]
+    #[schema(minimum = 1)]
+    pub max_decode_steps_before_prefill: Option<usize>,
+    /// Byte budget for cached multimodal encoder outputs.
+    #[serde(default)]
+    pub encoder_cache_memory_bytes: Option<usize>,
+    /// Merged recursively into the model's `config.json` before it loads.
+    #[serde(default)]
+    #[schema(value_type = Option<Object>)]
+    pub hf_config_overrides: Option<HfConfigOverrides>,
+    /// Appends each request and response to this file.
+    #[serde(default)]
+    #[schema(value_type = Option<String>)]
+    pub log: Option<std::path::PathBuf>,
+    /// Periodic throughput logging; on unless set to false.
+    #[serde(default)]
+    pub throughput_logging: Option<bool>,
+}
+
+fn nonzero(field: &str, value: usize) -> Result<std::num::NonZeroUsize, EngineLoadError> {
+    std::num::NonZeroUsize::new(value)
+        .ok_or_else(|| EngineLoadError::InvalidSpec(format!("runtime.{field} must be at least 1")))
 }
 
 /// How much the paged-attention KV cache holds; at most one of `context_len`, `memory_mb` and `memory_fraction`.
@@ -334,6 +365,27 @@ impl EngineSpec {
             let token_source: TokenSource = token_source.parse().map_err(invalid)?;
             builder = builder.with_token_source(token_source);
         }
+        if let Some(tokens) = runtime.max_num_batched_tokens {
+            builder =
+                builder.with_max_num_batched_tokens(nonzero("max_num_batched_tokens", tokens)?);
+        }
+        if let Some(tokens) = runtime.max_prefill_chunk_tokens {
+            builder =
+                builder.with_max_prefill_chunk_tokens(nonzero("max_prefill_chunk_tokens", tokens)?);
+        }
+        if let Some(steps) = runtime.max_decode_steps_before_prefill {
+            builder = builder.with_max_decode_steps_before_prefill(nonzero(
+                "max_decode_steps_before_prefill",
+                steps,
+            )?);
+        }
+        if let Some(bytes) = runtime.encoder_cache_memory_bytes {
+            builder = builder.with_encoder_cache_memory_bytes(bytes);
+        }
+        builder = builder
+            .with_hf_config_overrides_optional(runtime.hf_config_overrides)
+            .with_log_optional(runtime.log.map(|path| path.to_string_lossy().into_owned()))
+            .with_interactive_mode(!runtime.throughput_logging.unwrap_or(true));
         let paged = runtime.paged_cache;
         let sizes = [
             paged.context_len.is_some(),
@@ -483,6 +535,15 @@ impl Engine {
 
     pub fn state(&self) -> &SharedInferenceRsState {
         &self.chat.state
+    }
+
+    /// The chat policy and skill store an HTTP server over this engine shares.
+    pub fn chat_engine(&self) -> &ChatEngine {
+        &self.chat
+    }
+
+    pub fn adapter_config(&self) -> &LoraAdapterApiConfig {
+        &self.adapters
     }
 
     /// Runs a chat completion to its end; `media` holds the buffers its `media://N` sources name.

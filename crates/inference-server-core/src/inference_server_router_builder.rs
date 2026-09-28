@@ -108,6 +108,9 @@ pub struct InferenceRsServerRouterBuilder {
     /// Server-level agentic defaults
     agentic_defaults: AgenticDefaults,
     skills_dir: Option<std::path::PathBuf>,
+    skill_store: Option<std::sync::Arc<SkillStore>>,
+    // Held by the router so an engine-owned skill directory outlives the engine value the caller passed.
+    engine: Option<inference_api::Engine>,
     observability: ObservabilityConfig,
     lora_adapter_api: LoraAdapterApiConfig,
 }
@@ -125,6 +128,8 @@ impl Default for InferenceRsServerRouterBuilder {
             max_body_limit: None,
             agentic_defaults: AgenticDefaults::default(),
             skills_dir: None,
+            skill_store: None,
+            engine: None,
             observability: ObservabilityConfig::default(),
             lora_adapter_api: LoraAdapterApiConfig::from_env(),
         }
@@ -150,6 +155,18 @@ impl InferenceRsServerRouterBuilder {
     /// Sets the shared inference.rs instance
     pub fn with_inference(mut self, inference: SharedInferenceRsState) -> Self {
         self.inference = Some(inference);
+        self
+    }
+
+    /// Serves a loaded engine: its state, agentic policy, skill store and adapter policy, replacing any set
+    /// before; the `with_*` calls that adjust those still apply when made after it.
+    pub fn with_engine(mut self, engine: &inference_api::Engine) -> Self {
+        let chat = engine.chat_engine();
+        self.inference = Some(chat.state.clone());
+        self.agentic_defaults = chat.agentic.clone();
+        self.skill_store = chat.skill_store.clone();
+        self.lora_adapter_api = engine.adapter_config().clone();
+        self.engine = Some(engine.clone());
         self
     }
 
@@ -292,7 +309,10 @@ impl InferenceRsServerRouterBuilder {
             self.allowed_origins,
             router_max_body_limit,
             self.agentic_defaults,
-            self.skills_dir,
+            SkillSource {
+                store: self.skill_store,
+                dir: self.skills_dir,
+            },
             self.observability,
             lora_adapter_api,
         )?;
@@ -308,9 +328,18 @@ impl InferenceRsServerRouterBuilder {
         }
 
         router = router.layer(middleware::from_fn_with_state(observability, observe_http));
+        if let Some(engine) = self.engine {
+            router = router.layer(Extension(engine));
+        }
 
         Ok(router)
     }
+}
+
+// An engine brings its own store; otherwise the router opens one at the configured directory.
+struct SkillSource {
+    store: Option<std::sync::Arc<SkillStore>>,
+    dir: Option<std::path::PathBuf>,
 }
 
 /// Initializes and configures the underlying axum router with InferenceRs API endpoints.
@@ -322,7 +351,7 @@ fn init_router(
     allowed_origins: Option<Vec<String>>,
     router_max_body_limit: usize,
     agentic_defaults: AgenticDefaults,
-    skills_dir: Option<std::path::PathBuf>,
+    skills: SkillSource,
     observability: ObservabilityConfig,
     lora_adapter_api: LoraAdapterApiConfig,
 ) -> Result<Router> {
@@ -337,9 +366,12 @@ fn init_router(
         AllowOrigin::any()
     };
 
-    let skill_store = std::sync::Arc::new(SkillStore::new(
-        skills_dir.unwrap_or_else(SkillStore::default_root),
-    )?);
+    let skill_store = match skills.store {
+        Some(store) => store,
+        None => std::sync::Arc::new(SkillStore::new(
+            skills.dir.unwrap_or_else(SkillStore::default_root),
+        )?),
+    };
     let metrics_route = if observability.metrics {
         get(metrics)
     } else {

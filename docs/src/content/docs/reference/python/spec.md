@@ -699,9 +699,15 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `chat_template` | `str \| None` | optional |
 | `device` | `str \| None` | optional |
 | `device_layers` | `list[str] \| None` | optional |
+| `encoder_cache_memory_bytes` | `int \| None` | optional |
+| `hf_config_overrides` | `dict[str, Any] \| None` | optional |
 | `isq` | `str \| None` | optional |
 | `jinja_explicit` | `str \| None` | optional |
+| `log` | `str \| None` | optional |
+| `max_decode_steps_before_prefill` | `int \| None` | optional |
 | `max_model_len` | `int \| None` | optional |
+| `max_num_batched_tokens` | `int \| None` | optional |
+| `max_prefill_chunk_tokens` | `int \| None` | optional |
 | `max_seqs` | `int \| None` | optional |
 | `mtp` | `MtpSpec \| None` | optional |
 | `no_kv_cache` | `bool \| None` | optional |
@@ -709,6 +715,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `paged_cache` | `PagedCacheSpec \| None` | optional |
 | `prefix_cache_n` | `int \| None` | optional |
 | `seed` | `int \| None` | optional |
+| `throughput_logging` | `bool \| None` | optional |
 | `token_source` | `str \| None` | optional |
 
 

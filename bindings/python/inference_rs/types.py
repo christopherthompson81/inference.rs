@@ -2309,9 +2309,15 @@ class RuntimeSpec:
     chat_template: str | None = None
     device: str | None = None
     device_layers: list[str] | None = None
+    encoder_cache_memory_bytes: int | None = None
+    hf_config_overrides: dict[str, Any] | None = None
     isq: str | None = None
     jinja_explicit: str | None = None
+    log: str | None = None
+    max_decode_steps_before_prefill: int | None = None
     max_model_len: int | None = None
+    max_num_batched_tokens: int | None = None
+    max_prefill_chunk_tokens: int | None = None
     max_seqs: int | None = None
     mtp: MtpSpec | None = None
     no_kv_cache: bool | None = None
@@ -2319,6 +2325,7 @@ class RuntimeSpec:
     paged_cache: PagedCacheSpec | None = None
     prefix_cache_n: int | None = None
     seed: int | None = None
+    throughput_logging: bool | None = None
     token_source: str | None = None
 
 
