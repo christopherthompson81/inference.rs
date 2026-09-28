@@ -79,11 +79,188 @@ pub async fn run_server(
         adapters: adapter_spec_from_env(),
         throughput_logging: true,
     })?;
+    serve_engine(spec, &server, &runtime).await
+}
+
+/// The model and the runtime settings that come with it, as `serve`, `run` and `bench` all resolve them.
+pub(crate) fn model_spec(
+    model_type: &ModelType,
+    matformer: &MatformerSelection,
+    global: &GlobalOptions,
+) -> Result<(ModelSelected, RuntimeSpec)> {
+    let model = convert_to_model_selected(model_type, matformer)?;
+    let (max_model_len, hf_config_overrides) = extract_hf_config_settings(model_type);
+    let (paged_attn, memory_mb, memory_fraction, context_len, block_size, cache_type) =
+        extract_paged_attn_settings(model_type);
+    let (cpu, device_layers) = extract_device_settings(model_type);
+    let runtime = RuntimeSpec {
+        device: cpu.then(|| "cpu".to_string()),
+        seed: global.seed,
+        max_model_len,
+        isq: extract_isq_setting(model_type),
+        paged_attn,
+        token_source: Some(global.token_source.to_string()),
+        device_layers,
+        paged_cache: PagedCacheSpec {
+            context_len,
+            memory_mb,
+            memory_fraction,
+            block_size,
+            cache_type,
+        },
+        encoder_cache_memory_bytes: extract_encoder_cache_memory_bytes(model_type)?,
+        hf_config_overrides,
+        log: global.log.clone(),
+        ..Default::default()
+    };
+    Ok((model, runtime))
+}
+
+/// What `serve` and `run` need to describe their engine, resolved from the command line.
+pub(crate) struct EngineSpecInputs<'a> {
+    pub model_type: &'a ModelType,
+    pub matformer: &'a MatformerSelection,
+    pub model_id: Option<String>,
+    pub runtime: &'a RuntimeOptions,
+    pub sandbox: SandboxOptions,
+    pub global: &'a GlobalOptions,
+    pub max_tool_rounds: Option<usize>,
+    pub tool_dispatch_url: Option<String>,
+    /// `None` keeps skills in a directory of the engine's own.
+    pub skills_root: Option<std::path::PathBuf>,
+    pub adapters: AdapterSpec,
+    pub throughput_logging: bool,
+}
+
+/// The engine `serve` and `run` load, as the spec the C ABI and bindings load from.
+pub(crate) fn engine_spec(inputs: EngineSpecInputs) -> Result<EngineSpec> {
+    let (model, model_runtime) = model_spec(inputs.model_type, inputs.matformer, inputs.global)?;
+    Ok(EngineSpec {
+        model: Some(model),
+        model_id: inputs.model_id,
+        runtime: runtime_options_spec(inputs.runtime, model_runtime, inputs.throughput_logging),
+        agentic: agentic_spec(AgenticInputs {
+            runtime: inputs.runtime,
+            sandbox: inputs.sandbox,
+            max_tool_rounds: inputs.max_tool_rounds,
+            tool_dispatch_url: inputs.tool_dispatch_url,
+        })?,
+        adapters: inputs.adapters,
+        skills: SkillsSpec {
+            root: inputs.skills_root,
+        },
+        ..Default::default()
+    })
+}
+
+/// `RuntimeOptions`' settings over the model-derived ones in `base`.
+pub(crate) fn runtime_options_spec(
+    runtime: &RuntimeOptions,
+    base: RuntimeSpec,
+    throughput_logging: bool,
+) -> RuntimeSpec {
+    RuntimeSpec {
+        max_seqs: Some(runtime.max_seqs),
+        prefix_cache_n: Some(runtime.prefix_cache_n),
+        no_kv_cache: runtime.no_kv_cache,
+        chat_template: path_string(runtime.chat_template.as_deref()),
+        jinja_explicit: path_string(runtime.jinja_explicit.as_deref()),
+        mtp: mtp_spec(
+            runtime.mtp,
+            runtime.mtp_model.clone(),
+            runtime.mtp_n_predict,
+            runtime.mtp_draft_sampling,
+        ),
+        max_num_batched_tokens: Some(runtime.max_num_batched_tokens.get()),
+        max_prefill_chunk_tokens: Some(runtime.max_prefill_chunk_tokens.get()),
+        max_decode_steps_before_prefill: Some(runtime.max_decode_steps_before_prefill.get()),
+        throughput_logging: Some(throughput_logging),
+        ..base
+    }
+}
+
+pub(crate) struct AgenticInputs<'a> {
+    pub runtime: &'a RuntimeOptions,
+    pub sandbox: SandboxOptions,
+    pub max_tool_rounds: Option<usize>,
+    pub tool_dispatch_url: Option<String>,
+}
+
+/// The tool loop, search, MCP and code-running tools `RuntimeOptions` asks for.
+pub(crate) fn agentic_spec(inputs: AgenticInputs) -> Result<AgenticSpec> {
+    let runtime = inputs.runtime;
+    let sandbox_policy = extract_sandbox_settings(inputs.sandbox, runtime);
+    #[cfg(not(feature = "code-execution"))]
+    let _ = sandbox_policy;
+    Ok(AgenticSpec {
+        max_tool_rounds: inputs.max_tool_rounds,
+        tool_dispatch_url: inputs.tool_dispatch_url,
+        agent_permission: Some(runtime.code_exec_permission.into()),
+        search: runtime.enable_search.then(|| SearchSpec {
+            embedding_model: runtime
+                .search_embedding_model
+                .map(Into::into)
+                .unwrap_or_default(),
+        }),
+        mcp: load_mcp_config(runtime.mcp_config.as_deref())?,
+        #[cfg(feature = "code-execution")]
+        code_execution: build_code_exec_config(runtime, sandbox_policy.clone()),
+        #[cfg(not(feature = "code-execution"))]
+        code_execution: None,
+        #[cfg(feature = "code-execution")]
+        shell: build_shell_config(runtime, sandbox_policy),
+        #[cfg(not(feature = "code-execution"))]
+        shell: None,
+        // The CLI resolves its sandbox into each config's policy, so the spec must not add one.
+        sandbox: SandboxMode::Off,
+    })
+}
+
+fn path_string(path: Option<&Path>) -> Option<String> {
+    path.map(|path| path.to_string_lossy().into_owned())
+}
+
+pub(crate) fn mtp_spec(
+    builtin: bool,
+    model: Option<String>,
+    n_predict: Option<usize>,
+    draft_sampling: crate::args::MtpDraftSamplingArg,
+) -> Option<MtpSpec> {
+    (builtin || model.is_some()).then(|| MtpSpec {
+        model: if builtin { None } else { model },
+        n_predict,
+        draft_sampling: draft_sampling.into(),
+    })
+}
+
+/// Runtime LoRA management from the `INFERENCE_RS_*` environment variables.
+pub(crate) fn adapter_spec_from_env() -> AdapterSpec {
+    let config = LoraAdapterApiConfig::from_env();
+    AdapterSpec {
+        runtime_updates: config.enabled(),
+        root: config.allowed_root().map(Path::to_path_buf),
+    }
+}
+
+pub(crate) fn skills_root(runtime: &RuntimeOptions) -> std::path::PathBuf {
+    #[cfg(feature = "code-execution")]
+    if let Some(dir) = &runtime.skills_dir {
+        return dir.clone();
+    }
+    let _ = runtime;
+    SkillStore::default_root()
+}
+
+/// Loads `spec` and serves it over HTTP, with the web UI and MCP server the options ask for.
+pub(crate) async fn serve_engine(
+    spec: EngineSpec,
+    server: &ServerOptions,
+    runtime: &RuntimeOptions,
+) -> Result<()> {
     let engine = Engine::load(spec).await?;
     let inference_for_ui = engine.state().clone();
     let inference_for_mcp = engine.state().clone();
 
-    // Build and run the server
     let mut app = InferenceRsServerRouterBuilder::new()
         .with_engine(&engine)
         .with_observability_config(server.observability_config())
@@ -147,149 +324,6 @@ pub async fn run_server(
     axum::serve(listener, app).await?;
 
     Ok(())
-}
-
-/// The model and the runtime settings that come with it, as `serve`, `run` and `bench` all resolve them.
-pub(crate) fn model_spec(
-    model_type: &ModelType,
-    matformer: &MatformerSelection,
-    global: &GlobalOptions,
-) -> Result<(ModelSelected, RuntimeSpec)> {
-    let model = convert_to_model_selected(model_type, matformer)?;
-    let (max_model_len, hf_config_overrides) = extract_hf_config_settings(model_type);
-    let (paged_attn, memory_mb, memory_fraction, context_len, block_size, cache_type) =
-        extract_paged_attn_settings(model_type);
-    let (cpu, device_layers) = extract_device_settings(model_type);
-    let runtime = RuntimeSpec {
-        device: cpu.then(|| "cpu".to_string()),
-        seed: global.seed,
-        max_model_len,
-        isq: extract_isq_setting(model_type),
-        paged_attn,
-        token_source: Some(global.token_source.to_string()),
-        device_layers,
-        paged_cache: PagedCacheSpec {
-            context_len,
-            memory_mb,
-            memory_fraction,
-            block_size,
-            cache_type,
-        },
-        encoder_cache_memory_bytes: extract_encoder_cache_memory_bytes(model_type)?,
-        hf_config_overrides,
-        log: global.log.clone(),
-        ..Default::default()
-    };
-    Ok((model, runtime))
-}
-
-/// What `serve` and `run` need to describe their engine, resolved from the command line.
-pub(crate) struct EngineSpecInputs<'a> {
-    pub model_type: &'a ModelType,
-    pub matformer: &'a MatformerSelection,
-    pub model_id: Option<String>,
-    pub runtime: &'a RuntimeOptions,
-    pub sandbox: SandboxOptions,
-    pub global: &'a GlobalOptions,
-    pub max_tool_rounds: Option<usize>,
-    pub tool_dispatch_url: Option<String>,
-    /// `None` keeps skills in a directory of the engine's own.
-    pub skills_root: Option<std::path::PathBuf>,
-    pub adapters: AdapterSpec,
-    pub throughput_logging: bool,
-}
-
-/// The engine `serve` and `run` load, as the spec the C ABI and bindings load from.
-pub(crate) fn engine_spec(inputs: EngineSpecInputs) -> Result<EngineSpec> {
-    let runtime = inputs.runtime;
-    let (model, model_runtime) = model_spec(inputs.model_type, inputs.matformer, inputs.global)?;
-    let sandbox_policy = extract_sandbox_settings(inputs.sandbox, runtime);
-    #[cfg(not(feature = "code-execution"))]
-    let _ = sandbox_policy;
-    Ok(EngineSpec {
-        model,
-        model_id: inputs.model_id,
-        runtime: RuntimeSpec {
-            max_seqs: Some(runtime.max_seqs),
-            prefix_cache_n: Some(runtime.prefix_cache_n),
-            no_kv_cache: runtime.no_kv_cache,
-            chat_template: path_string(runtime.chat_template.as_deref()),
-            jinja_explicit: path_string(runtime.jinja_explicit.as_deref()),
-            mtp: mtp_spec(
-                runtime.mtp,
-                runtime.mtp_model.clone(),
-                runtime.mtp_n_predict,
-                runtime.mtp_draft_sampling,
-            ),
-            max_num_batched_tokens: Some(runtime.max_num_batched_tokens.get()),
-            max_prefill_chunk_tokens: Some(runtime.max_prefill_chunk_tokens.get()),
-            max_decode_steps_before_prefill: Some(runtime.max_decode_steps_before_prefill.get()),
-            throughput_logging: Some(inputs.throughput_logging),
-            ..model_runtime
-        },
-        agentic: AgenticSpec {
-            max_tool_rounds: inputs.max_tool_rounds,
-            tool_dispatch_url: inputs.tool_dispatch_url,
-            agent_permission: Some(runtime.code_exec_permission.into()),
-            search: runtime.enable_search.then(|| SearchSpec {
-                embedding_model: runtime
-                    .search_embedding_model
-                    .map(Into::into)
-                    .unwrap_or_default(),
-            }),
-            mcp: load_mcp_config(runtime.mcp_config.as_deref())?,
-            #[cfg(feature = "code-execution")]
-            code_execution: build_code_exec_config(runtime, sandbox_policy.clone()),
-            #[cfg(not(feature = "code-execution"))]
-            code_execution: None,
-            #[cfg(feature = "code-execution")]
-            shell: build_shell_config(runtime, sandbox_policy),
-            #[cfg(not(feature = "code-execution"))]
-            shell: None,
-            // The CLI resolves its sandbox into each config's policy, so the spec must not add one.
-            sandbox: SandboxMode::Off,
-        },
-        adapters: inputs.adapters,
-        skills: SkillsSpec {
-            root: inputs.skills_root,
-        },
-        anymoe: None,
-    })
-}
-
-fn path_string(path: Option<&Path>) -> Option<String> {
-    path.map(|path| path.to_string_lossy().into_owned())
-}
-
-pub(crate) fn mtp_spec(
-    builtin: bool,
-    model: Option<String>,
-    n_predict: Option<usize>,
-    draft_sampling: crate::args::MtpDraftSamplingArg,
-) -> Option<MtpSpec> {
-    (builtin || model.is_some()).then(|| MtpSpec {
-        model: if builtin { None } else { model },
-        n_predict,
-        draft_sampling: draft_sampling.into(),
-    })
-}
-
-/// Runtime LoRA management from the `INFERENCE_RS_*` environment variables.
-fn adapter_spec_from_env() -> AdapterSpec {
-    let config = LoraAdapterApiConfig::from_env();
-    AdapterSpec {
-        runtime_updates: config.enabled(),
-        root: config.allowed_root().map(Path::to_path_buf),
-    }
-}
-
-fn skills_root(runtime: &RuntimeOptions) -> std::path::PathBuf {
-    #[cfg(feature = "code-execution")]
-    if let Some(dir) = &runtime.skills_dir {
-        return dir.clone();
-    }
-    let _ = runtime;
-    SkillStore::default_root()
 }
 
 /// Bind and spawn the MCP server on its own port, alongside the main HTTP server.

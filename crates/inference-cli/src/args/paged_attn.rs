@@ -74,7 +74,7 @@ pub enum PagedAttnMode {
 }
 
 impl PagedAttentionOptions {
-    /// Convert to the flags expected by InferenceRsForServerBuilder
+    /// The mode (None for auto), memory in MB, memory fraction, context length, block size and cache type.
     pub fn into_builder_flags(self) -> PagedAttnBuilderFlags {
         let enable = match self.mode {
             PagedAttnMode::Auto => None,

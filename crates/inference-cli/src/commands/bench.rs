@@ -28,7 +28,7 @@ fn bench_spec(
     let (model, model_runtime) = model_spec(model_type, &runtime.matformer_selection(), global)?;
 
     Ok(EngineSpec {
-        model,
+        model: Some(model),
         model_id: None,
         runtime: RuntimeSpec {
             // One sequence, no prefix cache, and exactly gen_len tokens, so each measurement is the same work.
@@ -45,10 +45,7 @@ fn bench_spec(
             log: None,
             ..model_runtime
         },
-        agentic: Default::default(),
-        adapters: Default::default(),
-        skills: Default::default(),
-        anymoe: None,
+        ..Default::default()
     })
 }
 

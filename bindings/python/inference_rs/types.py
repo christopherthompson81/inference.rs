@@ -690,8 +690,10 @@ class EngineSpec:
     adapters: AdapterSpec | None = None
     agentic: AgenticSpec | None = None
     anymoe: AnyMoeSpec | None = None
-    model: ModelSelected
+    default_model_id: str | None = None
+    model: ModelSelected | None = None
     model_id: str | None = None
+    models: list[ModelSpec] | None = None
     runtime: RuntimeSpec | None = None
     skills: SkillsSpec | None = None
 
@@ -1330,6 +1332,21 @@ class ModelSelectedEmbedding:
     topology: str | None = None
     write_uqff: UqffWriteSpec | None = None
     _external = 'Embedding'
+
+
+@dataclass(kw_only=True)
+class ModelSpec:
+    """One of several models an engine serves; unset settings fall back to `runtime`'s."""
+
+    chat_template: str | None = None
+    device_layers: list[str] | None = None
+    encoder_cache_memory_bytes: int | None = None
+    hf_config_overrides: dict[str, Any] | None = None
+    isq: str | None = None
+    jinja_explicit: str | None = None
+    max_model_len: int | None = None
+    model: ModelSelected
+    model_id: str | None = None
 
 
 class ModelStatus(str, Enum):

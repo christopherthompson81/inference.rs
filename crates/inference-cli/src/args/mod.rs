@@ -872,16 +872,6 @@ impl From<MtpDraftSamplingArg> for inference_api::engine::MtpDraftSampling {
     }
 }
 
-impl From<MtpDraftSamplingArg> for inference_core::MtpDraftSamplingMethod {
-    fn from(value: MtpDraftSamplingArg) -> Self {
-        match value {
-            MtpDraftSamplingArg::Auto => Self::Auto,
-            MtpDraftSamplingArg::Greedy => Self::Greedy,
-            MtpDraftSamplingArg::Probabilistic => Self::Probabilistic,
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum CodeExecPermissionArg {
@@ -913,19 +903,6 @@ impl RuntimeOptions {
             config_path: self.matformer_config_path.clone(),
             slice_name: self.matformer_slice_name.clone(),
         }
-    }
-
-    pub fn mtp_config(&self) -> Option<inference_core::MtpConfig> {
-        if self.mtp {
-            return Some(
-                inference_core::MtpConfig::builtin(self.mtp_n_predict)
-                    .with_draft_sampling_method(self.mtp_draft_sampling.into()),
-            );
-        }
-        self.mtp_model.clone().map(|model| {
-            inference_core::MtpConfig::new(model, self.mtp_n_predict)
-                .with_draft_sampling_method(self.mtp_draft_sampling.into())
-        })
     }
 }
 
@@ -1549,11 +1526,15 @@ mod tests {
             panic!("expected serve command");
         };
         assert_eq!(
-            runtime
-                .mtp_config()
-                .expect("missing MTP config")
-                .draft_sampling_method,
-            inference_core::MtpDraftSamplingMethod::Auto
+            crate::commands::serve::mtp_spec(
+                runtime.mtp,
+                runtime.mtp_model.clone(),
+                runtime.mtp_n_predict,
+                runtime.mtp_draft_sampling,
+            )
+            .expect("missing MTP spec")
+            .draft_sampling,
+            inference_api::engine::MtpDraftSampling::Auto
         );
 
         let cli = Cli::try_parse_from([
@@ -1571,11 +1552,15 @@ mod tests {
             panic!("expected serve command");
         };
         assert_eq!(
-            runtime
-                .mtp_config()
-                .expect("missing MTP config")
-                .draft_sampling_method,
-            inference_core::MtpDraftSamplingMethod::Probabilistic
+            crate::commands::serve::mtp_spec(
+                runtime.mtp,
+                runtime.mtp_model.clone(),
+                runtime.mtp_n_predict,
+                runtime.mtp_draft_sampling,
+            )
+            .expect("missing MTP spec")
+            .draft_sampling,
+            inference_api::engine::MtpDraftSampling::Probabilistic
         );
 
         let cli = Cli::try_parse_from([
@@ -1593,11 +1578,15 @@ mod tests {
             panic!("expected serve command");
         };
         assert_eq!(
-            runtime
-                .mtp_config()
-                .expect("missing MTP config")
-                .draft_sampling_method,
-            inference_core::MtpDraftSamplingMethod::Greedy
+            crate::commands::serve::mtp_spec(
+                runtime.mtp,
+                runtime.mtp_model.clone(),
+                runtime.mtp_n_predict,
+                runtime.mtp_draft_sampling,
+            )
+            .expect("missing MTP spec")
+            .draft_sampling,
+            inference_api::engine::MtpDraftSampling::Greedy
         );
         assert_eq!(
             RuntimeOptions::default().mtp_draft_sampling,

@@ -138,8 +138,10 @@ What to load and how to run it: the JSON form of the options `inference serve` t
 | `adapters` | `AdapterSpec \| None` | optional |
 | `agentic` | `AgenticSpec \| None` | optional |
 | `anymoe` | `AnyMoeSpec \| None` | optional |
-| `model` | `ModelSelected` | required |
+| `default_model_id` | `str \| None` | optional |
+| `model` | `ModelSelected \| None` | optional |
 | `model_id` | `str \| None` | optional |
+| `models` | `list[ModelSpec] \| None` | optional |
 | `runtime` | `RuntimeSpec \| None` | optional |
 | `skills` | `SkillsSpec \| None` | optional |
 
@@ -562,6 +564,23 @@ Select a GGUF model with X-LoRA.
 | `topology` | `str \| None` | optional |
 | `write_uqff` | `UqffWriteSpec \| None` | optional |
 | `xlora_model_id` | `str` | required |
+
+
+## `ModelSpec`
+
+One of several models an engine serves; unset settings fall back to `runtime`'s.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `chat_template` | `str \| None` | optional |
+| `device_layers` | `list[str] \| None` | optional |
+| `encoder_cache_memory_bytes` | `int \| None` | optional |
+| `hf_config_overrides` | `dict[str, Any] \| None` | optional |
+| `isq` | `str \| None` | optional |
+| `jinja_explicit` | `str \| None` | optional |
+| `max_model_len` | `int \| None` | optional |
+| `model` | `ModelSelected` | required |
+| `model_id` | `str \| None` | optional |
 
 
 ## `MtpDraftSampling`

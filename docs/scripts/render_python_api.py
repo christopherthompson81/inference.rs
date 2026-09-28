@@ -58,6 +58,7 @@ GROUPS = [
             n.startswith(
                 (
                     "EngineSpec",
+                    "ModelSpec",
                     "RuntimeSpec",
                     "AgenticSpec",
                     "AdapterSpec",
