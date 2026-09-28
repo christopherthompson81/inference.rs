@@ -381,8 +381,6 @@ pub struct Tool {
 }
 
 /// Called function with name and arguments
-#[cfg_attr(feature = "pyo3_macros", pyo3::pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CalledFunction {
     pub name: String,

@@ -6,8 +6,6 @@ use std::{
 };
 
 use candle_core::{Device, Error, Result, Tensor};
-#[cfg(feature = "pyo3_macros")]
-use pyo3::pyclass;
 
 use rand::distr::{weighted::WeightedIndex, Distribution};
 use rand_isaac::Isaac64Rng;
@@ -537,8 +535,6 @@ pub struct CudaSpeculativeSamplingPlan {
     pub min_p: f32,
 }
 
-#[cfg_attr(feature = "pyo3_macros", pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 /// Top-n logprobs element
 pub struct TopLogprob {

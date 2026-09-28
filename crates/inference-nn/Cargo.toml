@@ -30,7 +30,6 @@ inference-quant.workspace = true
 itertools.workspace = true
 metrics.workspace = true
 num-traits.workspace = true
-pyo3 = { workspace = true, optional = true }
 rand.workspace = true
 rand_isaac.workspace = true
 rayon.workspace = true
@@ -59,7 +58,6 @@ candle-metal-kernels = { workspace = true, optional = true }
 cudaforge = { workspace = true, optional = true }
 
 [features]
-pyo3_macros = ["dep:pyo3"]
 utoipa = ["dep:utoipa"]
 cuda = [
     "candle-core/cuda",

@@ -9,8 +9,6 @@ use anyhow::{Context, Result};
 
 use hf_hub::api::sync::ApiRepo;
 use inference_quant::ShardedVarBuilder;
-#[cfg(feature = "pyo3_macros")]
-use pyo3::pyclass;
 
 use regex::Regex;
 use serde::Deserialize;
@@ -77,7 +75,6 @@ pub trait DiffusionModelLoader: Send + Sync {
     ) -> Result<Box<dyn DiffusionModel + Send + Sync>>;
 }
 
-#[cfg_attr(feature = "pyo3_macros", pyclass(eq, eq_int))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
 /// The architecture to load the diffusion model as.

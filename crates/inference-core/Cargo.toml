@@ -51,7 +51,6 @@ tokio.workspace = true
 tokio-rayon.workspace = true
 rand_isaac.workspace = true
 futures.workspace = true
-pyo3 = { workspace = true, optional = true }
 indicatif.workspace = true
 async-trait.workspace = true
 strum.workspace = true
@@ -123,7 +122,6 @@ models-llama = ["dep:inference-models-llama"]
 models-other = ["dep:inference-models-other"]
 models-phi = ["dep:inference-models-phi"]
 models-qwen = ["dep:inference-models-qwen"]
-pyo3_macros = ["pyo3", "inference-mcp/pyo3_macros", "inference-nn/pyo3_macros"]
 cuda = [
     "candle-core/cuda",
     "candle-nn/cuda",

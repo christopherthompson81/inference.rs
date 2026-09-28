@@ -159,8 +159,6 @@ pub trait DiffusionModel {
     fn max_seq_len(&self) -> usize;
 }
 
-#[cfg_attr(feature = "pyo3_macros", pyo3::pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct DiffusionGenerationParams {
     pub height: usize,
@@ -205,14 +203,6 @@ impl Default for DiffusionGenerationParams {
             height: 720,
             width: 1280,
         }
-    }
-}
-
-#[cfg(feature = "pyo3_macros")]
-#[pyo3::pymethods]
-impl DiffusionGenerationParams {
-    fn __repr__(&self) -> String {
-        format!("{self:#?}")
     }
 }
 

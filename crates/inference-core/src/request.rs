@@ -2,8 +2,6 @@ use either::Either;
 use indexmap::IndexMap;
 use inference_audio::AudioInput;
 use inference_quant::IsqType;
-#[cfg(feature = "pyo3_macros")]
-use pyo3::{pyclass, pymethods};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -30,7 +28,6 @@ pub enum Constraint {
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
-#[cfg_attr(feature = "pyo3_macros", pyo3::pyclass(eq, eq_int))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 /// Image generation response format
 pub enum ImageGenerationResponseFormat {
@@ -42,7 +39,6 @@ pub type MessageContent = Either<String, Vec<IndexMap<String, Value>>>;
 
 /// Reasoning effort passed to chat templates. `none` is a parse-only alias for `off`.
 #[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
-#[cfg_attr(feature = "pyo3_macros", pyo3::pyclass(eq, eq_int))]
 #[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
     /// Disable reasoning.
@@ -234,7 +230,6 @@ fn default_responder<T>() -> Sender<T> {
     sender
 }
 
-#[cfg_attr(feature = "pyo3_macros", pyo3::pyclass(eq, eq_int))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub enum SearchContextSize {
@@ -247,8 +242,6 @@ pub enum SearchContextSize {
     High,
 }
 
-#[cfg_attr(feature = "pyo3_macros", pyclass(eq))]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ApproximateUserLocation {
@@ -262,21 +255,6 @@ pub struct ApproximateUserLocation {
     pub timezone: Option<String>,
 }
 
-#[cfg(feature = "pyo3_macros")]
-#[pymethods]
-impl ApproximateUserLocation {
-    #[new]
-    fn py_new(city: String, country: String, region: String, timezone: String) -> Self {
-        Self {
-            city: Some(city),
-            country: Some(country),
-            region: Some(region),
-            timezone: Some(timezone),
-        }
-    }
-}
-
-#[cfg_attr(feature = "pyo3_macros", pyclass(eq))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type")]
@@ -287,17 +265,6 @@ pub enum WebSearchUserLocation {
     },
 }
 
-#[cfg(feature = "pyo3_macros")]
-#[pymethods]
-impl WebSearchUserLocation {
-    #[staticmethod]
-    fn approximate(approximate: ApproximateUserLocation) -> Self {
-        Self::Approximate { approximate }
-    }
-}
-
-#[cfg_attr(feature = "pyo3_macros", pyclass(eq))]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct WebSearchOptions {
@@ -323,8 +290,6 @@ pub struct WebSearchOptions {
     pub extract_description: Option<String>,
 }
 
-#[cfg_attr(feature = "pyo3_macros", pyclass(eq))]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct WebSearchFilters {
@@ -334,7 +299,6 @@ pub struct WebSearchFilters {
     pub blocked_domains: Option<Vec<String>>,
 }
 
-#[cfg_attr(feature = "pyo3_macros", pyclass(eq, eq_int))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -343,7 +307,6 @@ pub enum WebSearchContentType {
     Image,
 }
 
-#[cfg_attr(feature = "pyo3_macros", pyclass(eq, eq_int))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -352,8 +315,6 @@ pub enum WebSearchReturnTokenBudget {
     Unlimited,
 }
 
-#[cfg_attr(feature = "pyo3_macros", pyclass(eq))]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
 pub struct WebSearchImageSettings {
@@ -361,36 +322,6 @@ pub struct WebSearchImageSettings {
     pub max_results: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub caption: Option<bool>,
-}
-
-#[cfg(feature = "pyo3_macros")]
-#[pymethods]
-impl WebSearchOptions {
-    #[new]
-    #[pyo3(signature = (
-        search_context_size = None,
-        user_location = None,
-        search_description = None,
-        extract_description = None,
-    ))]
-    fn py_new(
-        search_context_size: Option<SearchContextSize>,
-        user_location: Option<WebSearchUserLocation>,
-        search_description: Option<String>,
-        extract_description: Option<String>,
-    ) -> Self {
-        Self {
-            search_context_size,
-            user_location,
-            filters: None,
-            external_web_access: None,
-            return_token_budget: None,
-            search_content_types: None,
-            image_settings: None,
-            search_description,
-            extract_description,
-        }
-    }
 }
 
 #[derive(Clone, Serialize, Deserialize)]

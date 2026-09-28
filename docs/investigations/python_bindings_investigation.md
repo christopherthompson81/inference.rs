@@ -231,3 +231,11 @@ requests carrying the reason now. Core's tokenize and detokenize panicked the en
 its receiver (reachable from the async Rust API); they log instead.
 
 Next: wheels bundling `libinference_ffi`; then removing the pyo3 crate.
+
+## Run 7 - 2026-09-28
+
+The pyo3 crate is removed. Everything it offered is on the C ABI (runs 4-6) and the wheel builder packages the ctypes
+package with the library (PR #84), so nothing depended on it. Its removal takes out the crate, the `pyo3_macros`
+feature and its attributes in inference-core, inference-nn and inference-mcp (pyclass derives, Python constructors,
+the `generate_repr` macro and a `PyErr` conversion), the pyo3 packages from `Cargo.lock`, and `generate_wheels.sh`.
+Two workspace dependencies nothing used any more (`axum_static`, `hyper`) went with it.

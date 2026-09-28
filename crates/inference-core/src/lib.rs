@@ -23,8 +23,6 @@ pub use lora::Ordering;
 pub use pipeline::CalibrationStatus;
 pub use pipeline::ModelCategory;
 pub use pipeline::Pipeline;
-#[cfg(feature = "pyo3_macros")]
-use pyo3::exceptions::PyValueError;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -651,13 +649,6 @@ pub enum InferenceRsError {
     /// Other error with a message.
     #[error("{0}")]
     Other(String),
-}
-
-#[cfg(feature = "pyo3_macros")]
-impl From<InferenceRsError> for pyo3::PyErr {
-    fn from(value: InferenceRsError) -> Self {
-        PyValueError::new_err(value.to_string())
-    }
 }
 
 /// The InferenceRsBuilder takes the pipeline and a scheduler method and constructs

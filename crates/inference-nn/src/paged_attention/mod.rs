@@ -296,7 +296,6 @@ pub enum AttentionImplementation {
 }
 
 #[derive(Clone, Copy, Debug)]
-#[cfg_attr(feature = "pyo3_macros", pyo3::pyclass)]
 pub enum MemoryGpuConfig {
     MbAmount(usize),
     BestEffortMbAmount {

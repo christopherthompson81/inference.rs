@@ -1,6 +1,4 @@
 /// The type of a tool call (currently only function calls).
-#[cfg_attr(feature = "pyo3_macros", pyo3::pyclass(eq, eq_int))]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Clone, Debug, serde::Serialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolCallType {
@@ -17,8 +15,6 @@ impl std::fmt::Display for ToolCallType {
 
 use inference_mcp::CalledFunction;
 
-#[cfg_attr(feature = "pyo3_macros", pyo3::pyclass)]
-#[cfg_attr(feature = "pyo3_macros", pyo3(get_all))]
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct ToolCallResponse {
     pub index: usize,
