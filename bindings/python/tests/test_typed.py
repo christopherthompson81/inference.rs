@@ -113,8 +113,8 @@ class Generated(unittest.TestCase):
         self.assertEqual(ir.from_data(t.EngineSpec, data), spec)
         self.assertEqual(json.loads(ir.to_json(spec)), data)
         self.assertEqual(json.loads(ir.to_json({"model": spec.model})), {"model": data["model"]})
-        # A misspelled or padded tag names no variant, so it stays as it came; exactly, it fits nothing.
-        for model in ({"Plian": {"model_id": "m"}}, {"Plain": {"model_id": "m"}, "extra": 1}):
+        # An unknown or padded tag names no variant, so it stays as it came; exactly, it fits nothing.
+        for model in ({"NoSuchVariant": {"model_id": "m"}}, {"Plain": {"model_id": "m"}, "extra": 1}):
             self.assertEqual(ir.from_data(t.ModelSelected, model), model)
             with self.assertRaises(ValueError):
                 ir.from_data(t.ModelSelectedPlain, model, strict=True)
