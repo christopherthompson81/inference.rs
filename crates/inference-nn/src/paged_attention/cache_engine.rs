@@ -220,7 +220,7 @@ impl CacheEngine {
                         cache_config.block_size,
                         layer_idx,
                     );
-                    #[allow(unused)]
+                    #[cfg_attr(not(feature = "metal"), allow(unused_variables))]
                     let key_blocks = if let Device::Metal(dev) = &device {
                         #[cfg(feature = "metal")]
                         {
@@ -269,7 +269,7 @@ impl CacheEngine {
                             )?
                         }
                     };
-                    #[allow(unused)]
+                    #[cfg_attr(not(feature = "metal"), allow(unused_variables))]
                     let value_blocks = if let Device::Metal(dev) = &device {
                         #[cfg(feature = "metal")]
                         {
@@ -323,7 +323,7 @@ impl CacheEngine {
                         cache_config.block_size,
                         layer_idx,
                     );
-                    #[allow(unused)]
+                    #[cfg_attr(not(feature = "metal"), allow(unused_variables))]
                     let key_blocks = if let Device::Metal(dev) = &device {
                         #[cfg(feature = "metal")]
                         {
@@ -387,7 +387,7 @@ impl CacheEngine {
                     kv_lora_rank,
                     kpe_head_dim,
                 } => {
-                    #[allow(unused)]
+                    #[cfg_attr(not(feature = "metal"), allow(unused_variables))]
                     let key_blocks = if let Device::Metal(dev) = &device {
                         #[cfg(feature = "metal")]
                         {
@@ -425,7 +425,7 @@ impl CacheEngine {
                             )?
                         }
                     };
-                    #[allow(unused)]
+                    #[cfg_attr(not(feature = "metal"), allow(unused_variables))]
                     let value_blocks = if let Device::Metal(dev) = &device {
                         #[cfg(feature = "metal")]
                         {

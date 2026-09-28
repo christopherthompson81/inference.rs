@@ -101,7 +101,6 @@ pub fn decode_metadata_tensor(
 }
 
 #[derive(Clone, Debug)]
-#[allow(dead_code)]
 pub struct PagedAttentionInputMetadata {
     /// Block tables, windowed when a global sliding_window is set.
     pub block_tables: Option<HashMap<DeviceLocation, Tensor>>,

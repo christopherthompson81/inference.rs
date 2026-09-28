@@ -51,7 +51,6 @@ pub const GDN_CHANNEL_BLOCK_SIZE: usize = 256;
 pub const GDN_DEFERRED_DECODE_MIN_BATCH: usize = 8;
 pub const GDN_DEFERRED_STATE_DEPTH: usize = 4;
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 const GDN_TRANSITION_STAGE_POINTER_SEGMENTS: usize = 10;
 #[cfg(feature = "cuda")]
 const GDN_TRANSITION_PUBLISH_POINTER_SEGMENTS: usize = 3;
@@ -1289,7 +1288,6 @@ enum RecurrenceKernel {
     ValueMajorWarp4,
     ValueMajorWarp8,
     Chunked,
-    #[allow(dead_code)]
     ValueMajorChunked,
 }
 
@@ -1478,7 +1476,6 @@ pub fn warp_gated_delta_rule_recurrence_cuda(
 }
 
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 pub fn vmajor_warp_gated_delta_rule_recurrence_cuda(
     inputs: RecurrenceInputs<'_>,
     state: &mut Tensor,
@@ -1551,7 +1548,6 @@ pub fn vmajor_prefill_gated_delta_rule_recurrence_cuda(
 
 /// Runs chunked prefill against value-major K=V=128 state.
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 pub fn vmajor_chunked_gated_delta_rule_recurrence_cuda(
     inputs: RecurrenceInputs<'_>,
     state: &mut Tensor,
@@ -1561,7 +1557,6 @@ pub fn vmajor_chunked_gated_delta_rule_recurrence_cuda(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(unused)]
 pub fn gated_delta_rule_recurrence_cuda(
     _inputs: RecurrenceInputs<'_>,
     _state: &mut Tensor,
@@ -1571,7 +1566,6 @@ pub fn gated_delta_rule_recurrence_cuda(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(unused)]
 pub fn chunked_gated_delta_rule_recurrence_cuda(
     _inputs: RecurrenceInputs<'_>,
     _state: &mut Tensor,
@@ -1581,7 +1575,6 @@ pub fn chunked_gated_delta_rule_recurrence_cuda(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(unused)]
 pub fn warp_gated_delta_rule_recurrence_cuda(
     _inputs: RecurrenceInputs<'_>,
     _state: &mut Tensor,
@@ -1591,7 +1584,6 @@ pub fn warp_gated_delta_rule_recurrence_cuda(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(unused)]
 pub fn vmajor_warp_gated_delta_rule_recurrence_cuda(
     _inputs: RecurrenceInputs<'_>,
     _state: &mut Tensor,
@@ -1601,7 +1593,6 @@ pub fn vmajor_warp_gated_delta_rule_recurrence_cuda(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(unused)]
 pub fn vmajor_prefill_gated_delta_rule_recurrence_cuda(
     _inputs: RecurrenceInputs<'_>,
     _state: &mut Tensor,
@@ -1612,7 +1603,6 @@ pub fn vmajor_prefill_gated_delta_rule_recurrence_cuda(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(unused)]
 pub fn vmajor_chunked_gated_delta_rule_recurrence_cuda(
     _inputs: RecurrenceInputs<'_>,
     _state: &mut Tensor,
@@ -1797,7 +1787,6 @@ pub fn causal_conv1d_cuda(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(unused)]
 pub fn causal_conv1d_cuda(
     _x: &Tensor,
     _weight: &Tensor,
@@ -2028,7 +2017,7 @@ pub fn prepare_recurrence_inputs_cuda_typed(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(unused, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn prepare_recurrence_inputs_cuda(
     _mixed_qkv: &Tensor,
     _b: &Tensor,
@@ -2622,7 +2611,6 @@ fn flashinfer_sm90_prefill_dispatch(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(unused)]
 pub fn try_fused_vmajor_prefill_recurrence_cuda(
     _launch: FusedPrefillRecurrence<'_>,
 ) -> Result<Option<FusedPrefillOutput>> {
@@ -2845,7 +2833,6 @@ fn fused_decode_recurrence_cuda_impl(launch: GdnDecodeLaunch<'_>) -> Result<Tens
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(unused)]
 pub fn fused_decode_recurrence_cuda(_launch: FusedDecodeRecurrence<'_>) -> Result<Tensor> {
     candle_core::bail!("fused_decode_recurrence_cuda requires the cuda feature")
 }
@@ -3049,12 +3036,10 @@ pub fn speculative_state_commit_cuda(commit: GdnSpeculativeStateCommit<'_>) -> R
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(unused)]
 pub fn speculative_state_commit_cuda(_commit: GdnSpeculativeStateCommit<'_>) -> Result<()> {
     candle_core::bail!("speculative_state_commit_cuda requires the cuda feature")
 }
 
-#[allow(dead_code)]
 pub struct GdnPendingSpeculativeConv<'a> {
     pub conv_input: &'a Tensor,
     pub keep_rows: &'a Tensor,
@@ -3062,7 +3047,6 @@ pub struct GdnPendingSpeculativeConv<'a> {
     pub applied_epochs: &'a Tensor,
 }
 
-#[allow(dead_code)]
 pub struct GdnSpeculativeConvCheckpoints<'a> {
     pub x: &'a Tensor,
     pub weight: &'a Tensor,
@@ -3074,7 +3058,6 @@ pub struct GdnSpeculativeConvCheckpoints<'a> {
 }
 
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 pub fn speculative_conv_checkpoints_cuda(
     context: GdnSpeculativeConvCheckpoints<'_>,
 ) -> Result<Tensor> {
@@ -3310,14 +3293,12 @@ pub fn speculative_conv_checkpoints_cuda(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(unused)]
 pub fn speculative_conv_checkpoints_cuda(
     _context: GdnSpeculativeConvCheckpoints<'_>,
 ) -> Result<Tensor> {
     candle_core::bail!("speculative_conv_checkpoints_cuda requires the cuda feature")
 }
 
-#[allow(dead_code)]
 pub struct GdnPendingSpeculativeRecurrence<'a> {
     pub key_banks: &'a Tensor,
     pub key_bank: &'a Tensor,
@@ -3328,7 +3309,6 @@ pub struct GdnPendingSpeculativeRecurrence<'a> {
     pub applied_epochs: &'a Tensor,
 }
 
-#[allow(dead_code)]
 pub struct GdnSpeculativeRmsNormGate<'a> {
     pub gate: &'a Tensor,
     pub weight: &'a Tensor,
@@ -3337,7 +3317,6 @@ pub struct GdnSpeculativeRmsNormGate<'a> {
     pub quantization: Option<GdnFp8OutputSpec>,
 }
 
-#[allow(dead_code)]
 pub struct GdnSpeculativeRecurrenceCheckpoints<'a> {
     pub mixed_qkv: &'a Tensor,
     pub b: &'a Tensor,
@@ -3359,14 +3338,12 @@ pub struct GdnSpeculativeRecurrenceCheckpoints<'a> {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 pub struct GdnSpeculativeTransitions {
     pub key: Tensor,
     pub delta: Tensor,
     pub decay: Tensor,
 }
 
-#[allow(dead_code)]
 pub struct GdnSpeculativeRecurrenceOutput {
     #[cfg(feature = "cuda")]
     pub output: GdnPostOpOutput,
@@ -3376,7 +3353,6 @@ pub struct GdnSpeculativeRecurrenceOutput {
 }
 
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 pub fn speculative_recurrence_checkpoints_cuda(
     context: GdnSpeculativeRecurrenceCheckpoints<'_>,
 ) -> Result<GdnSpeculativeRecurrenceOutput> {
@@ -3895,7 +3871,6 @@ pub fn speculative_recurrence_checkpoints_cuda(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(unused)]
 pub fn speculative_recurrence_checkpoints_cuda(
     _context: GdnSpeculativeRecurrenceCheckpoints<'_>,
 ) -> Result<GdnSpeculativeRecurrenceOutput> {
@@ -4315,7 +4290,6 @@ pub fn deferred_recurrence_rmsnorm_gate_cuda(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(dead_code)]
 pub fn deferred_recurrence_rmsnorm_gate_cuda(
     _context: GdnDeferredRecurrence<'_>,
 ) -> Result<Tensor> {
@@ -4501,7 +4475,6 @@ pub fn flush_deferred_state_cuda(context: GdnDeferredStateFlush<'_>) -> Result<(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(dead_code)]
 pub fn flush_deferred_state_cuda(_context: GdnDeferredStateFlush<'_>) -> Result<()> {
     candle_core::bail!("flush_deferred_state_cuda requires the cuda feature")
 }
@@ -4532,7 +4505,6 @@ pub struct GdnSpeculativeTransitionCommit<'a> {
 }
 
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 pub fn speculative_transition_commit_batched_cuda(
     commit: GdnSpeculativeTransitionCommit<'_>,
 ) -> Result<()> {
@@ -4751,14 +4723,12 @@ pub fn speculative_transition_commit_batched_cuda(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(dead_code)]
 pub fn speculative_transition_commit_batched_cuda(
     _commit: GdnSpeculativeTransitionCommit<'_>,
 ) -> Result<()> {
     candle_core::bail!("speculative_transition_commit_batched_cuda requires the cuda feature")
 }
 
-#[allow(dead_code)]
 pub struct GdnSpeculativeTransitionStageLayer<'a> {
     pub conv_input: &'a Tensor,
     pub key: &'a Tensor,
@@ -4772,7 +4742,6 @@ pub struct GdnSpeculativeTransitionStageLayer<'a> {
     pub pending_epochs: &'a Tensor,
 }
 
-#[allow(dead_code)]
 pub struct GdnSpeculativeTransitionStage<'a> {
     pub layers: &'a [GdnSpeculativeTransitionStageLayer<'a>],
     pub keep_rows: &'a Tensor,
@@ -4785,7 +4754,6 @@ pub struct GdnSpeculativeTransitionStage<'a> {
 }
 
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 pub fn speculative_transition_stage_batched_cuda(
     stage: GdnSpeculativeTransitionStage<'_>,
 ) -> Result<()> {
@@ -5028,7 +4996,6 @@ pub fn speculative_transition_stage_batched_cuda(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(dead_code)]
 pub fn speculative_transition_stage_batched_cuda(
     _stage: GdnSpeculativeTransitionStage<'_>,
 ) -> Result<()> {
@@ -5183,7 +5150,6 @@ pub fn pending_transition_publish_batched_cuda(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(dead_code)]
 pub fn pending_transition_publish_batched_cuda(
     _publish: GdnPendingTransitionPublish<'_>,
 ) -> Result<()> {
@@ -5470,7 +5436,6 @@ pub fn pending_transition_apply_batched_cuda(apply: GdnPendingTransitionApply<'_
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(dead_code)]
 pub fn pending_transition_apply_batched_cuda(_apply: GdnPendingTransitionApply<'_>) -> Result<()> {
     candle_core::bail!("pending_transition_apply_batched_cuda requires the cuda feature")
 }
@@ -5719,7 +5684,6 @@ pub fn rmsnorm_gated_quantized_cuda(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(unused)]
 pub fn rmsnorm_gated_cuda(
     _x: &Tensor,
     _gate: &Tensor,
@@ -5826,7 +5790,6 @@ pub fn fused_gdn_gating_cuda(
 }
 
 #[cfg(not(feature = "cuda"))]
-#[allow(unused)]
 pub fn fused_gdn_gating_cuda(
     _b: &Tensor,
     _a: &Tensor,

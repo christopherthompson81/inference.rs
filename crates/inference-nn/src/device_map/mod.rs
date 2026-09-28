@@ -2,7 +2,6 @@ mod mappers;
 mod mask;
 mod peer;
 
-#[allow(unused_imports)]
 pub use mappers::NcclPipelineParallelMapper;
 pub use mappers::{DeviceMapper, DummyDeviceMapper, LayerDeviceMapper, NcclDeviceMapper};
 pub use mask::DeviceMappedMask;

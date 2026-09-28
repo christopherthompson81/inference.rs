@@ -13,7 +13,7 @@ use crate::attention::{repeat_kv, SdpaParams};
 ///
 /// Varlen is used when flash_params contains cu_seqlens_k for this device AND
 /// q has batch > 1.
-#[allow(unused_variables, clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub fn sinks_attn(
     q: &Tensor,
     k: &Tensor,
@@ -92,7 +92,10 @@ fn kv_layout_is_packed(dims: &[usize]) -> bool {
 }
 
 /// Non-varlen sinks attention: Q [B, H, q_len, D], K/V [B, kv_H, kv_len, D]
-#[allow(unused_variables)]
+#[cfg_attr(
+    not(any(all(feature = "cuda", target_family = "unix"), feature = "metal")),
+    allow(unused_variables)
+)]
 fn sinks_attn_regular(
     q: &Tensor,
     k: &Tensor,
@@ -136,7 +139,10 @@ fn sinks_attn_regular(
 
 /// Varlen sinks attention: Q [B, H, max_q, D], K/V packed [total_kv, kv_H, D]
 /// or K/V [1, kv_H, total_kv, D] (squeezed+transposed automatically).
-#[allow(unused_variables)]
+#[cfg_attr(
+    not(any(all(feature = "cuda", target_family = "unix"), feature = "metal")),
+    allow(unused_variables)
+)]
 fn sinks_attn_varlen(
     q: &Tensor,
     k: &Tensor,

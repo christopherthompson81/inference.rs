@@ -518,7 +518,6 @@ pub fn calculate_cache_config(
     // Unlike CUDA with dedicated VRAM where unused memory is wasted, Metal's wired
     // buffers compete with the OS and CPU for the same physical RAM.
     // On CUDA, all available memory is used for maximum request concurrency (vLLM approach).
-    #[allow(unused_mut, unused_variables)]
     let mut mem_gpu = min_mem_gpu;
     if device.is_metal() {
         let max_tokens = max_num_tokens.unwrap_or(config.max_seq_len());

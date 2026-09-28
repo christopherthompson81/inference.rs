@@ -19,7 +19,6 @@ pub struct GdnLayerCache {
     pub deferred_state: Option<GdnDeferredStatePool>,
 }
 
-#[allow(dead_code)]
 impl GdnLayerCache {
     pub fn new(cfg: &dyn GdnConfig, dtype: DType, device: &Device) -> Result<Self> {
         let dims = GdnDims::new(cfg);

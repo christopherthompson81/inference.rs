@@ -42,7 +42,6 @@ impl GdnVHeadLayout {
     }
 }
 
-#[allow(dead_code)]
 pub trait GdnConfig {
     fn hidden_size(&self) -> usize;
     fn rms_norm_eps(&self) -> f64;

@@ -1,7 +1,6 @@
 use super::*;
 
 #[cfg(feature = "cuda")]
-#[allow(dead_code)]
 #[allow(clippy::cast_possible_truncation)]
 pub fn cuda_topk_logits_f32(
     input: &Tensor,

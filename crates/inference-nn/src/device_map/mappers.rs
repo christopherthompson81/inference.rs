@@ -256,7 +256,6 @@ impl DeviceMapper for NcclDeviceMapper {
 }
 
 #[derive(Debug)]
-#[allow(dead_code)]
 pub struct NcclPipelineParallelMapper {
     mappings: Vec<(Arc<inference_quant::Comm>, Device)>,
     nm_device: Device,

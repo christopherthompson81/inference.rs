@@ -55,7 +55,6 @@ pub use flash_params::{FlashKMeta, FlashParams};
 
 pub use dispatch::AttentionDispatch;
 
-#[allow(unused)]
 pub use backends::cpu::fast_exp;
 #[cfg(feature = "cuda")]
 use backends::naive::maybe_synchronize;
@@ -256,7 +255,7 @@ impl Sdpa {
     /// - `AttentionMask::CausalFlash`: flash attention with `is_causal = true`
     /// - `AttentionMask::None`: flash if available (decode), else eager without mask
     /// - `AttentionMask::Custom`: CPU fused attention or eager attention with the explicit mask tensor
-    #[allow(unused_variables, clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn run_attention(
         &self,
         q: &Tensor,
@@ -382,7 +381,7 @@ impl Sdpa {
     /// `causal` tells the Metal SDPA-full kernel to enable its upper-triangle skip (`do_causal=true`).
     /// Pass `true` only when the caller's mask is causal-or-stricter.
     /// Pass false` for bidirectional masks (e.g. vision attention).
-    #[allow(unused_variables, clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub fn run_attention_noflash(
         &self,
         q: &Tensor,
@@ -500,7 +499,7 @@ impl Sdpa {
         }
 
         // TODO: bench?
-        #[allow(unused)]
+        #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
         if let (Device::Cuda(_), Some(cublaslt)) = (
             q.device(),
             inference_quant::cublaslt::CUBLASLT_CONTROLLER.get_for_device(q.device()),
@@ -522,8 +521,7 @@ impl Sdpa {
                     mask,
                     |q_chunk, _k, _v, mask_chunk, q_offset| {
                         // cuBLASLt batch matmul implementation requires inputs to be dims3
-                        let (chunk_b_sz, chunk_n_heads, chunk_seq_len, chunk_head_dim) =
-                            q_chunk.dims4()?;
+                        let (chunk_b_sz, chunk_n_heads, chunk_seq_len, _) = q_chunk.dims4()?;
                         let q_flat = q_chunk.flatten(0, 1)?;
 
                         let attention_bias = match mask_chunk {
@@ -536,7 +534,7 @@ impl Sdpa {
                                     vec![chunk_b_sz, chunk_n_heads, chunk_seq_len, k.dim(2)?];
                                 Some(mask.broadcast_as(tgt_shape)?.flatten(0, 1)?)
                             }
-                            Some(mask) => {
+                            Some(_) => {
                                 candle_core::bail!("cublaslt attn mask: rank must be 3 or 4")
                             }
                             None => None,
