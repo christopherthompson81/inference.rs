@@ -223,8 +223,9 @@ pub use sampler::{
     TopLogprob,
 };
 pub use scheduler::{
-    DefaultSchedulerMethod, SchedulerConfig, DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL,
-    DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_PREFILL_CHUNK_TOKENS,
+    DefaultSchedulerMethod, SchedulerConfig, SchedulerLimits,
+    DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_NUM_BATCHED_TOKENS,
+    DEFAULT_MAX_PREFILL_CHUNK_TOKENS,
 };
 pub use search::{SearchCallback, SearchFunctionParameters, SearchResult};
 use serde::Serialize;

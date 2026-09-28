@@ -69,7 +69,53 @@ pub enum SchedulerConfig {
     },
 }
 
+/// How the paged-attention scheduler interleaves prefill and decode.
+#[derive(Clone, Copy, Debug)]
+pub struct SchedulerLimits {
+    pub max_num_batched_tokens: usize,
+    pub max_prefill_chunk_tokens: usize,
+    pub max_decode_steps_before_prefill: usize,
+}
+
+impl Default for SchedulerLimits {
+    fn default() -> Self {
+        Self {
+            max_num_batched_tokens: DEFAULT_MAX_NUM_BATCHED_TOKENS,
+            max_prefill_chunk_tokens: DEFAULT_MAX_PREFILL_CHUNK_TOKENS,
+            max_decode_steps_before_prefill: DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL,
+        }
+    }
+}
+
 impl SchedulerConfig {
+    /// Paged scheduling when it was requested and the loaded pipeline realized a KV cache, else fixed-size batches.
+    pub async fn for_pipeline<P: crate::Pipeline + ?Sized>(
+        pipeline: &Mutex<P>,
+        paged_attn_requested: bool,
+        max_num_seqs: usize,
+        limits: SchedulerLimits,
+    ) -> anyhow::Result<Self> {
+        if paged_attn_requested {
+            if let Some(config) = pipeline.lock().await.get_metadata().cache_config.clone() {
+                return Ok(Self::PagedAttentionMeta {
+                    max_num_seqs,
+                    max_num_batched_tokens: limits.max_num_batched_tokens,
+                    max_prefill_chunk_tokens: limits.max_prefill_chunk_tokens,
+                    max_decode_steps_before_prefill: limits.max_decode_steps_before_prefill,
+                    config,
+                });
+            }
+        }
+        Self::fixed(max_num_seqs)
+    }
+
+    /// Batches of at most `max_num_seqs` sequences, without paged attention.
+    pub fn fixed(max_num_seqs: usize) -> anyhow::Result<Self> {
+        Ok(Self::DefaultScheduler {
+            method: DefaultSchedulerMethod::Fixed(max_num_seqs.try_into()?),
+        })
+    }
+
     pub(crate) fn refresh_paged_cache_config(
         &mut self,
         realized_cache_config: Option<CacheConfig>,

@@ -2,9 +2,9 @@
 
 use candle_core::Device;
 use inference_core::{
-    plan_paged_kv, AddModelConfig, DefaultSchedulerMethod, EngineConfig, IsqType,
-    PagedAttentionConfig, PagedKvModelRequest, Pipeline, SchedulerConfig, SearchCallback,
-    SearchEmbeddingModel, ToolCallbackWithTool,
+    plan_paged_kv, AddModelConfig, EngineConfig, IsqType, PagedAttentionConfig,
+    PagedKvModelRequest, Pipeline, SchedulerConfig, SearchCallback, SearchEmbeddingModel,
+    ToolCallbackWithTool,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
@@ -233,46 +233,15 @@ impl MultiModelBuilder {
             .clone()
             .unwrap_or_else(|| pipeline_name.clone());
 
-        // Create the InferenceRsBuilder for the first model
-        let mut runner_builder = inference_core::InferenceRsBuilder::new(
+        let mut runner_builder = inference_core::InferenceRsBuilder::from_config(
             pipeline,
             scheduler_config,
-            add_model_config.engine_config.throughput_logging_enabled,
-            add_model_config.engine_config.search_embedding_model,
-        );
+            add_model_config,
+        )
+        .with_deferred_daemon_start(true);
         if primary_id != pipeline_name {
             runner_builder = runner_builder.with_model_id(primary_id.clone());
         }
-
-        if let Some(cb) = add_model_config.engine_config.search_callback.clone() {
-            runner_builder = runner_builder.with_search_callback(cb);
-        }
-
-        for (name, callback_with_tool) in &add_model_config.engine_config.tool_callbacks {
-            runner_builder = runner_builder
-                .with_tool_callback_with_tool(name.clone(), callback_with_tool.clone());
-        }
-
-        if let Some(mcp_config) = add_model_config.mcp_client_config.clone() {
-            runner_builder = runner_builder.with_mcp_client(mcp_config);
-        }
-
-        if let Some(loader_config) = add_model_config.loader_config.clone() {
-            runner_builder = runner_builder.with_loader_config(loader_config);
-        }
-
-        if let Some(code_exec_config) = add_model_config.code_exec_config.clone() {
-            runner_builder = runner_builder.with_code_execution(code_exec_config);
-        }
-        if let Some(shell_config) = add_model_config.shell_config.clone() {
-            runner_builder = runner_builder.with_shell_execution(shell_config);
-        }
-
-        runner_builder = runner_builder
-            .with_no_kv_cache(add_model_config.engine_config.no_kv_cache)
-            .with_no_prefix_cache(add_model_config.engine_config.no_prefix_cache)
-            .with_prefix_cache_n(add_model_config.engine_config.prefix_cache_n)
-            .with_deferred_daemon_start(true);
 
         let inference = runner_builder.build().await;
 
@@ -348,12 +317,6 @@ pub(crate) fn resolve_isq_type(
         .transpose()
 }
 
-pub(crate) fn default_scheduler_config(max_num_seqs: usize) -> anyhow::Result<SchedulerConfig> {
-    Ok(SchedulerConfig::DefaultScheduler {
-        method: DefaultSchedulerMethod::Fixed(max_num_seqs.try_into()?),
-    })
-}
-
 fn paged_attn_with_serving_capacity(
     config: Option<PagedAttentionConfig>,
     max_num_seqs: usize,
@@ -363,37 +326,6 @@ fn paged_attn_with_serving_capacity(
         .map(|config| config.with_serving_capacity(max_num_seqs))
         .transpose()?
         .map(|config| config.with_recurrent_prefix_capacity(recurrent_prefix_capacity)))
-}
-
-pub(crate) async fn scheduler_config_from_pipeline<P>(
-    pipeline: &Arc<Mutex<P>>,
-    paged_attn_requested: bool,
-    max_num_seqs: usize,
-) -> anyhow::Result<SchedulerConfig>
-where
-    P: ?Sized + Pipeline,
-{
-    if paged_attn_requested {
-        if let Some(config) = pipeline
-            .lock()
-            .await
-            .get_metadata()
-            .cache_config
-            .as_ref()
-            .cloned()
-        {
-            return Ok(SchedulerConfig::PagedAttentionMeta {
-                max_num_seqs,
-                max_num_batched_tokens: inference_core::DEFAULT_MAX_NUM_BATCHED_TOKENS,
-                max_prefill_chunk_tokens: inference_core::DEFAULT_MAX_PREFILL_CHUNK_TOKENS,
-                max_decode_steps_before_prefill:
-                    inference_core::DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL,
-                config,
-            });
-        }
-    }
-
-    default_scheduler_config(max_num_seqs)
 }
 
 pub(crate) fn build_engine_config(
@@ -433,43 +365,15 @@ pub async fn build_model_from_pipeline(
     scheduler_config: SchedulerConfig,
     add_model_config: AddModelConfig,
 ) -> Model {
-    let mut runner_builder = inference_core::InferenceRsBuilder::new(
-        pipeline,
-        scheduler_config,
-        add_model_config.engine_config.throughput_logging_enabled,
-        add_model_config.engine_config.search_embedding_model,
-    );
-
-    if let Some(cb) = add_model_config.engine_config.search_callback.clone() {
-        runner_builder = runner_builder.with_search_callback(cb);
-    }
-
-    for (name, callback_with_tool) in &add_model_config.engine_config.tool_callbacks {
-        runner_builder =
-            runner_builder.with_tool_callback_with_tool(name.clone(), callback_with_tool.clone());
-    }
-
-    if let Some(mcp_config) = add_model_config.mcp_client_config.clone() {
-        runner_builder = runner_builder.with_mcp_client(mcp_config);
-    }
-
-    if let Some(loader_config) = add_model_config.loader_config.clone() {
-        runner_builder = runner_builder.with_loader_config(loader_config);
-    }
-
-    if let Some(code_exec_config) = add_model_config.code_exec_config.clone() {
-        runner_builder = runner_builder.with_code_execution(code_exec_config);
-    }
-    if let Some(shell_config) = add_model_config.shell_config.clone() {
-        runner_builder = runner_builder.with_shell_execution(shell_config);
-    }
-
-    runner_builder = runner_builder
-        .with_no_kv_cache(add_model_config.engine_config.no_kv_cache)
-        .with_no_prefix_cache(add_model_config.engine_config.no_prefix_cache)
-        .with_prefix_cache_n(add_model_config.engine_config.prefix_cache_n);
-
-    Model::new(runner_builder.build().await)
+    Model::new(
+        inference_core::InferenceRsBuilder::from_config(
+            pipeline,
+            scheduler_config,
+            add_model_config,
+        )
+        .build()
+        .await,
+    )
 }
 
 // The first load and a later reload both go through the stored config, so they build the same pipeline.
@@ -567,10 +471,11 @@ pub(crate) async fn build_text_pipeline_as(
     };
     let pipeline = load_from_config(&loader_config, builder.no_kv_cache, mtp_runtime).await?;
 
-    let scheduler_config = scheduler_config_from_pipeline(
+    let scheduler_config = SchedulerConfig::for_pipeline(
         &pipeline,
         builder.paged_attn_cfg.is_some(),
         builder.max_num_seqs,
+        SchedulerLimits::default(),
     )
     .await?;
     let engine_config = build_engine_config(
@@ -665,10 +570,11 @@ pub async fn build_multimodal_pipeline(
     };
     let pipeline = load_from_config(&loader_config, false, mtp_runtime).await?;
 
-    let scheduler_config = scheduler_config_from_pipeline(
+    let scheduler_config = SchedulerConfig::for_pipeline(
         &pipeline,
         builder.paged_attn_cfg.is_some(),
         builder.max_num_seqs,
+        SchedulerLimits::default(),
     )
     .await?;
     let engine_config = build_engine_config(
@@ -839,10 +745,11 @@ pub(crate) async fn build_gguf_pipeline_as(
     };
     let pipeline = load_from_config(&loader_config, builder.no_kv_cache, mtp_runtime).await?;
 
-    let scheduler_config = scheduler_config_from_pipeline(
+    let scheduler_config = SchedulerConfig::for_pipeline(
         &pipeline,
         builder.paged_attn_cfg.is_some(),
         builder.max_num_seqs,
+        SchedulerLimits::default(),
     )
     .await?;
     let engine_config = build_engine_config(
@@ -906,7 +813,7 @@ pub async fn build_diffusion_pipeline(
 
     Ok((
         pipeline,
-        default_scheduler_config(builder.max_num_seqs)?,
+        SchedulerConfig::fixed(builder.max_num_seqs)?,
         add_model_config,
     ))
 }
@@ -957,7 +864,7 @@ pub async fn build_speech_pipeline(
 
     Ok((
         pipeline,
-        default_scheduler_config(builder.max_num_seqs)?,
+        SchedulerConfig::fixed(builder.max_num_seqs)?,
         add_model_config,
     ))
 }
@@ -1023,7 +930,7 @@ pub async fn build_embedding_pipeline(
 
     Ok((
         pipeline,
-        default_scheduler_config(builder.max_num_seqs)?,
+        SchedulerConfig::fixed(builder.max_num_seqs)?,
         add_model_config,
     ))
 }
@@ -1100,10 +1007,11 @@ pub async fn build_auto_pipeline(
     };
     let pipeline = load_from_config(&loader_config, builder.no_kv_cache, mtp_runtime).await?;
 
-    let scheduler_config = scheduler_config_from_pipeline(
+    let scheduler_config = SchedulerConfig::for_pipeline(
         &pipeline,
         builder.paged_attn_cfg.is_some(),
         builder.max_num_seqs,
+        SchedulerLimits::default(),
     )
     .await?;
     let engine_config = build_engine_config(
