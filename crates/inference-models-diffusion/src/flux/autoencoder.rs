@@ -19,6 +19,22 @@ pub struct Config {
     pub norm_num_groups: usize,
 }
 
+impl Config {
+    /// The autoencoder FLUX.1 dev and schnell share (`ae.safetensors`), for layouts that ship no `vae/config.json`.
+    pub fn flux() -> Self {
+        Self {
+            in_channels: 3,
+            out_channels: 3,
+            block_out_channels: vec![128, 256, 512, 512],
+            layers_per_block: 2,
+            latent_channels: 16,
+            scaling_factor: 0.3611,
+            shift_factor: 0.1159,
+            norm_num_groups: 32,
+        }
+    }
+}
+
 fn scaled_dot_product_attention(q: &Tensor, k: &Tensor, v: &Tensor) -> Result<Tensor> {
     let dim = q.dim(D::Minus1)?;
     let scale_factor = 1.0 / (dim as f64).sqrt();

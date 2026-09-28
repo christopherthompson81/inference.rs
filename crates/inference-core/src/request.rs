@@ -30,8 +30,11 @@ pub enum Constraint {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 /// Image generation response format
+#[serde(rename_all = "snake_case")]
 pub enum ImageGenerationResponseFormat {
+    #[serde(alias = "Url")]
     Url,
+    #[serde(alias = "B64Json")]
     B64Json,
 }
 
@@ -566,6 +569,25 @@ impl Debug for Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_response_formats_use_openai_spellings_and_accept_the_old_ones() {
+        let cases = [
+            ("url", ImageGenerationResponseFormat::Url),
+            ("b64_json", ImageGenerationResponseFormat::B64Json),
+            ("Url", ImageGenerationResponseFormat::Url),
+            ("B64Json", ImageGenerationResponseFormat::B64Json),
+        ];
+        for (spelling, format) in cases {
+            let parsed: ImageGenerationResponseFormat =
+                serde_json::from_value(serde_json::json!(spelling)).unwrap();
+            assert_eq!(parsed, format, "{spelling}");
+        }
+        assert_eq!(
+            serde_json::to_value(ImageGenerationResponseFormat::B64Json).unwrap(),
+            serde_json::json!("b64_json")
+        );
+    }
 
     #[test]
     fn reasoning_effort_parsing_is_canonical() {

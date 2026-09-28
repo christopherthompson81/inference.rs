@@ -4,6 +4,8 @@ use inference_nn::{attention, layers, utils};
 
 mod clip;
 pub mod flux;
+pub mod gguf;
+mod qlinear;
 mod t5;
 
 pub use inference_nn::model::DiffusionGenerationParams;

@@ -46,11 +46,9 @@ pub async fn send_image_responses(
                 image
                     .write_with_encoder(PngEncoder::new(&mut buffer))
                     .expect("Failed to encode image");
-                let encoded = STANDARD.encode(&buffer);
-                let serialized_b64 = format!("data:image/png;base64,{encoded}");
                 ImageChoice {
                     url: None,
-                    b64_json: Some(serialized_b64),
+                    b64_json: Some(STANDARD.encode(&buffer)),
                 }
             }
         };

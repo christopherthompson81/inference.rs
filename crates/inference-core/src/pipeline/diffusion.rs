@@ -1,5 +1,5 @@
 use super::diffusion_processor::{DiffusionProcessor, ModelInputs};
-use super::loaders::{DiffusionModelPaths, DiffusionModelPathsInner};
+use super::loaders::{DiffusionLoad, DiffusionModelPaths, DiffusionModelPathsInner};
 use super::{
     AnyMoePipelineMixin, Cache, CacheManagerMixin, DiffusionLoaderType, DiffusionModel,
     DiffusionModelLoader, EitherCache, FluxLoader, ForwardInputsResult, GeneralMetadata,
@@ -8,7 +8,6 @@ use super::{
 };
 use crate::device_map::{self, DeviceMapper};
 use crate::distributed::{self, use_ring, WorkerTransferData};
-use crate::paged_attention::AttentionImplementation;
 use crate::pipeline::tokens::get_token;
 use crate::pipeline::{ChatTemplate, Modalities, SupportedModality};
 use crate::prefix_cacher::PrefixCacheManagerV2;
@@ -23,6 +22,7 @@ use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
 use image::{DynamicImage, RgbImage};
+use inference_models_diffusion::gguf;
 use inference_quant::log::once_log_info;
 use inference_quant::IsqType;
 use rand_isaac::Isaac64Rng;
@@ -101,12 +101,15 @@ impl Loader for DiffusionLoader {
                 revision.clone(),
             ));
             let model_id = std::path::Path::new(&self.model_id);
-            let filenames = self.inner.get_model_paths(&api, model_id, &revision)?;
-            let config_filenames = self.inner.get_config_filenames(&api, model_id, &revision)?;
-            Ok(Box::new(DiffusionModelPaths(DiffusionModelPathsInner {
-                config_filenames,
-                filenames,
-            })))
+            let inner = match self.inner.local_paths(model_id)? {
+                Some(inner) => inner,
+                None => DiffusionModelPathsInner {
+                    filenames: self.inner.get_model_paths(&api, model_id, &revision)?,
+                    config_filenames: self.inner.get_config_filenames(&api, model_id, &revision)?,
+                    text_encoders: Default::default(),
+                },
+            };
+            Ok(Box::new(DiffusionModelPaths(inner)))
         };
         self.load_model_from_path(
             paths?.as_ref(),
@@ -128,7 +131,7 @@ impl Loader for DiffusionLoader {
         silent: bool,
         mapper: DeviceMapSetting,
         in_situ_quant: Option<IsqType>,
-        mut paged_attn_config: Option<PagedAttentionConfig>,
+        paged_attn_config: Option<PagedAttentionConfig>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let _progress_guard = ProgressScopeGuard::new(silent);
         let paths = &paths
@@ -147,8 +150,6 @@ impl Loader for DiffusionLoader {
 
         if paged_attn_config.is_some() {
             warn!("PagedAttention is not supported for Diffusion models, disabling it.");
-
-            paged_attn_config = None;
         }
 
         if crate::using_flash_attn() {
@@ -180,20 +181,21 @@ impl Loader for DiffusionLoader {
             DeviceMapSetting::dummy().into_mapper(usize::MAX, device, None, &available_devices)?;
         let dtype = mapper.get_min_dtype(dtype)?;
 
-        let attention_mechanism = if paged_attn_config.is_some() {
-            AttentionImplementation::PagedAttention
-        } else {
-            AttentionImplementation::Eager
-        };
-
         let model = match self.kind {
             ModelKind::Normal => {
-                let vbs = paths
+                let (vbs, shapes): (Vec<_>, Vec<_>) = paths
                     .filenames
                     .iter()
                     .zip(self.inner.force_cpu_vb())
                     .map(|(path, force_cpu)| {
                         let dev = if force_cpu { &Device::Cpu } else { device };
+                        if path
+                            .extension()
+                            .is_some_and(|ext| ext == gguf::GGUF_EXTENSION)
+                        {
+                            return gguf::var_builder(path, gguf::flux_native_name, dtype, dev)
+                                .map(|(vb, shapes)| (vb, Some(shapes)));
+                        }
                         from_mmaped_safetensors(
                             vec![path.clone()],
                             Vec::new(),
@@ -205,13 +207,18 @@ impl Loader for DiffusionLoader {
                             |_| true,
                             Arc::new(|_| DeviceForLoadTensor::Base),
                         )
+                        .map(|vb| (vb, None))
                     })
-                    .collect::<candle_core::Result<Vec<_>>>()?;
+                    .collect::<candle_core::Result<Vec<_>>>()?
+                    .into_iter()
+                    .unzip();
 
-                self.inner.load(
+                self.inner.load(DiffusionLoad {
                     configs,
                     vbs,
-                    crate::pipeline::NormalLoadingMetadata {
+                    shapes,
+                    text_encoders: paths.text_encoders.clone(),
+                    metadata: crate::pipeline::NormalLoadingMetadata {
                         mapper,
                         loading_isq: false,
                         real_device: device.clone(),
@@ -219,9 +226,8 @@ impl Loader for DiffusionLoader {
                         matformer_slicing_config: None,
                         rope_pairing: None,
                     },
-                    attention_mechanism,
                     silent,
-                )?
+                })?
             }
             _ => unreachable!(),
         };

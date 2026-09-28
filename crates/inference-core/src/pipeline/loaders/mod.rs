@@ -50,7 +50,7 @@ pub use embedding_loaders::{
 };
 
 pub use diffusion_loaders::{
-    DiffusionLoaderType, DiffusionModel, DiffusionModelLoader, DiffusionModelPaths,
+    DiffusionLoad, DiffusionLoaderType, DiffusionModel, DiffusionModelLoader, DiffusionModelPaths,
     DiffusionModelPathsInner, FluxLoader,
 };
 

@@ -4,12 +4,13 @@
 // https://github.com/huggingface/transformers/blob/main/src/transformers/models/t5/modeling_t5.py
 
 use candle_core::{DType, Device, Module, Result, Tensor, D};
-use candle_nn::{Activation, Embedding, Linear};
+use candle_nn::{Activation, Embedding};
 use inference_quant::ShardedVarBuilder;
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::layers::{clamp_for_f16, dense_embedding, linear_no_bias, MatMul};
+use crate::layers::{clamp_for_f16, dense_embedding, MatMul};
+use crate::qlinear::MaybeQuantLinear;
 
 fn default_relative_attention_max_distance() -> usize {
     128
@@ -162,15 +163,15 @@ impl Module for T5LayerNorm {
 
 #[derive(Debug, Clone)]
 struct T5DenseActDense {
-    wi: Linear,
-    wo: Linear,
+    wi: MaybeQuantLinear,
+    wo: MaybeQuantLinear,
     act: Activation,
 }
 
 impl T5DenseActDense {
     fn load(vb: ShardedVarBuilder, cfg: &Config) -> Result<Self> {
-        let wi = linear_no_bias(cfg.d_model, cfg.d_ff, vb.pp("wi"))?;
-        let wo = linear_no_bias(cfg.d_ff, cfg.d_model, vb.pp("wo"))?;
+        let wi = MaybeQuantLinear::new(cfg.d_model, cfg.d_ff, false, vb.pp("wi"))?;
+        let wo = MaybeQuantLinear::new(cfg.d_ff, cfg.d_model, false, vb.pp("wo"))?;
         Ok(Self {
             wi,
             wo,
@@ -190,17 +191,17 @@ impl Module for T5DenseActDense {
 
 #[derive(Debug, Clone)]
 struct T5DenseGatedActDense {
-    wi_0: Linear,
-    wi_1: Linear,
-    wo: Linear,
+    wi_0: MaybeQuantLinear,
+    wi_1: MaybeQuantLinear,
+    wo: MaybeQuantLinear,
     act: Activation,
 }
 
 impl T5DenseGatedActDense {
     fn load(vb: ShardedVarBuilder, cfg: &Config) -> Result<Self> {
-        let wi_0 = linear_no_bias(cfg.d_model, cfg.d_ff, vb.pp("wi_0"))?;
-        let wi_1 = linear_no_bias(cfg.d_model, cfg.d_ff, vb.pp("wi_1"))?;
-        let wo = linear_no_bias(cfg.d_ff, cfg.d_model, vb.pp("wo"))?;
+        let wi_0 = MaybeQuantLinear::new(cfg.d_model, cfg.d_ff, false, vb.pp("wi_0"))?;
+        let wi_1 = MaybeQuantLinear::new(cfg.d_model, cfg.d_ff, false, vb.pp("wi_1"))?;
+        let wo = MaybeQuantLinear::new(cfg.d_ff, cfg.d_model, false, vb.pp("wo"))?;
         Ok(Self {
             wi_0,
             wi_1,
@@ -255,28 +256,13 @@ impl T5LayerFF {
             variance_epsilon: self.layer_norm.variance_epsilon,
         };
         if let Some(dense) = &mut self.dense_act {
-            dense.wi = Linear::new(
-                dense.wi.weight().to_device(device)?,
-                dense.wi.bias().map(|x| x.to_device(device).unwrap()),
-            );
-            dense.wo = Linear::new(
-                dense.wo.weight().to_device(device)?,
-                dense.wo.bias().map(|x| x.to_device(device).unwrap()),
-            );
+            dense.wi = dense.wi.to_device(device)?;
+            dense.wo = dense.wo.to_device(device)?;
         }
         if let Some(dense) = &mut self.gated_dense_act {
-            dense.wi_0 = Linear::new(
-                dense.wi_0.weight().to_device(device)?,
-                dense.wi_0.bias().map(|x| x.to_device(device).unwrap()),
-            );
-            dense.wi_1 = Linear::new(
-                dense.wi_1.weight().to_device(device)?,
-                dense.wi_1.bias().map(|x| x.to_device(device).unwrap()),
-            );
-            dense.wo = Linear::new(
-                dense.wo.weight().to_device(device)?,
-                dense.wo.bias().map(|x| x.to_device(device).unwrap()),
-            );
+            dense.wi_0 = dense.wi_0.to_device(device)?;
+            dense.wi_1 = dense.wi_1.to_device(device)?;
+            dense.wo = dense.wo.to_device(device)?;
         }
         Ok(())
     }
@@ -296,10 +282,10 @@ impl Module for T5LayerFF {
 
 #[derive(Debug, Clone)]
 struct T5Attention {
-    q: Linear,
-    k: Linear,
-    v: Linear,
-    o: Linear,
+    q: MaybeQuantLinear,
+    k: MaybeQuantLinear,
+    v: MaybeQuantLinear,
+    o: MaybeQuantLinear,
     n_heads: usize,
     d_kv: usize,
     relative_attention_bias: Option<Embedding>,
@@ -317,10 +303,10 @@ impl T5Attention {
         cfg: &Config,
     ) -> Result<Self> {
         let inner_dim = cfg.num_heads * cfg.d_kv;
-        let q = linear_no_bias(cfg.d_model, inner_dim, vb.pp("q"))?;
-        let k = linear_no_bias(cfg.d_model, inner_dim, vb.pp("k"))?;
-        let v = linear_no_bias(cfg.d_model, inner_dim, vb.pp("v"))?;
-        let o = linear_no_bias(inner_dim, cfg.d_model, vb.pp("o"))?;
+        let q = MaybeQuantLinear::new(cfg.d_model, inner_dim, false, vb.pp("q"))?;
+        let k = MaybeQuantLinear::new(cfg.d_model, inner_dim, false, vb.pp("k"))?;
+        let v = MaybeQuantLinear::new(cfg.d_model, inner_dim, false, vb.pp("v"))?;
+        let o = MaybeQuantLinear::new(inner_dim, cfg.d_model, false, vb.pp("o"))?;
         let relative_attention_bias = if has_relative_attention_bias {
             let emb = dense_embedding(
                 cfg.relative_attention_num_buckets,
@@ -493,34 +479,10 @@ impl T5LayerSelfAttention {
     }
 
     fn cast_to(&mut self, device: &Device) -> Result<()> {
-        self.self_attention.q = Linear::new(
-            self.self_attention.q.weight().to_device(device)?,
-            self.self_attention
-                .q
-                .bias()
-                .map(|x| x.to_device(device).unwrap()),
-        );
-        self.self_attention.k = Linear::new(
-            self.self_attention.k.weight().to_device(device)?,
-            self.self_attention
-                .k
-                .bias()
-                .map(|x| x.to_device(device).unwrap()),
-        );
-        self.self_attention.v = Linear::new(
-            self.self_attention.v.weight().to_device(device)?,
-            self.self_attention
-                .v
-                .bias()
-                .map(|x| x.to_device(device).unwrap()),
-        );
-        self.self_attention.o = Linear::new(
-            self.self_attention.o.weight().to_device(device)?,
-            self.self_attention
-                .o
-                .bias()
-                .map(|x| x.to_device(device).unwrap()),
-        );
+        self.self_attention.q = self.self_attention.q.to_device(device)?;
+        self.self_attention.k = self.self_attention.k.to_device(device)?;
+        self.self_attention.v = self.self_attention.v.to_device(device)?;
+        self.self_attention.o = self.self_attention.o.to_device(device)?;
         if let Some(embed) = &mut self.self_attention.relative_attention_bias {
             *embed = Embedding::new(embed.embeddings().to_device(device)?, embed.hidden_size());
         }
@@ -567,34 +529,10 @@ impl T5LayerCrossAttention {
     }
 
     fn cast_to(&mut self, device: &Device) -> Result<()> {
-        self.cross_attention.q = Linear::new(
-            self.cross_attention.q.weight().to_device(device)?,
-            self.cross_attention
-                .q
-                .bias()
-                .map(|x| x.to_device(device).unwrap()),
-        );
-        self.cross_attention.k = Linear::new(
-            self.cross_attention.k.weight().to_device(device)?,
-            self.cross_attention
-                .k
-                .bias()
-                .map(|x| x.to_device(device).unwrap()),
-        );
-        self.cross_attention.v = Linear::new(
-            self.cross_attention.v.weight().to_device(device)?,
-            self.cross_attention
-                .v
-                .bias()
-                .map(|x| x.to_device(device).unwrap()),
-        );
-        self.cross_attention.o = Linear::new(
-            self.cross_attention.o.weight().to_device(device)?,
-            self.cross_attention
-                .o
-                .bias()
-                .map(|x| x.to_device(device).unwrap()),
-        );
+        self.cross_attention.q = self.cross_attention.q.to_device(device)?;
+        self.cross_attention.k = self.cross_attention.k.to_device(device)?;
+        self.cross_attention.v = self.cross_attention.v.to_device(device)?;
+        self.cross_attention.o = self.cross_attention.o.to_device(device)?;
         if let Some(embed) = &mut self.cross_attention.relative_attention_bias {
             *embed = Embedding::new(embed.embeddings().to_device(device)?, embed.hidden_size());
         }

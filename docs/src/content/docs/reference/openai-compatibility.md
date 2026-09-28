@@ -158,7 +158,7 @@ Extensions:
 
 - `prompt`
 - `n`
-- `response_format`: `"Url"` (default; response carries a server-side filename in `url`) or `"B64Json"` (response carries a `data:image/png;base64,...` string in `b64_json`).
+- `response_format`: `"url"` (default; response carries a server-side filename in `url`) or `"b64_json"` (response carries the base64-encoded PNG in `b64_json`).
 
 OpenAI's `size` string (e.g. `"1024x1024"`) is not supported. Use the `height` and `width` fields instead:
 

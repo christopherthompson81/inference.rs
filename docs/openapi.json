@@ -4669,8 +4669,8 @@
         "type": "string",
         "description": "Image generation response format",
         "enum": [
-          "Url",
-          "B64Json"
+          "url",
+          "b64_json"
         ]
       },
       "IncludeOption": {

@@ -1,5 +1,6 @@
 pub use crate::model::DiffusionModel;
 use std::{
+    collections::HashMap,
     fmt::Debug,
     path::{Path, PathBuf},
     str::FromStr,
@@ -16,14 +17,21 @@ use serde::Deserialize;
 use super::{ModelPaths, NormalLoadingMetadata};
 use inference_models_diffusion::flux::{
     self,
-    stepper::{FluxStepper, FluxStepperConfig, FluxStepperLoad, RepoFileFetcher},
+    stepper::{
+        FluxStepper, FluxStepperConfig, FluxStepperLoad, LocalTextEncoders, RepoFileFetcher,
+    },
 };
 
 use crate::{
     api_dir_list, api_get_file,
-    paged_attention::AttentionImplementation,
     pipeline::{hf, paths::AdapterPaths, EmbeddingModulePaths},
 };
+
+const AE_FILE: &str = "ae.safetensors";
+const CLIP_L_FILE: &str = "clip_l.safetensors";
+const FLUX_SAFETENSORS_PATTERN: &str = r"^flux\d+-(schnell|dev)\.safetensors$";
+const FLUX_GGUF_PATTERN: &str = r"^flux\d+-(dev|schnell).*\.gguf$";
+const T5_GGUF_PATTERN: &str = r"^t5.*\.gguf$";
 
 fn hub_file_fetcher() -> Result<RepoFileFetcher> {
     let api = hf_hub::api::sync::ApiBuilder::from_env().build()?;
@@ -63,16 +71,71 @@ pub trait DiffusionModelLoader: Send + Sync {
         model_id: &Path,
         revision: &str,
     ) -> Result<Vec<PathBuf>>;
+    /// The paths of a local layout that needs no hub listing, when `model_id` is one.
+    fn local_paths(&self, _model_id: &Path) -> Result<Option<DiffusionModelPathsInner>> {
+        Ok(None)
+    }
     fn force_cpu_vb(&self) -> Vec<bool>;
-    // `configs` and `vbs` should be corresponding. It is up to the implementer to maintain this invaraint.
-    fn load(
-        &self,
-        configs: Vec<String>,
-        vbs: Vec<ShardedVarBuilder>,
-        normal_loading_metadata: NormalLoadingMetadata,
-        attention_mechanism: AttentionImplementation,
-        silent: bool,
-    ) -> Result<Box<dyn DiffusionModel + Send + Sync>>;
+    fn load(&self, inputs: DiffusionLoad) -> Result<Box<dyn DiffusionModel + Send + Sync>>;
+}
+
+/// Per weight file: `vbs`, `shapes` (GGUF files only) and `configs` (empty when the layout ships none).
+pub struct DiffusionLoad {
+    pub configs: Vec<String>,
+    pub vbs: Vec<ShardedVarBuilder>,
+    pub shapes: Vec<Option<HashMap<String, Vec<usize>>>>,
+    pub text_encoders: LocalTextEncoders,
+    pub metadata: NormalLoadingMetadata,
+    pub silent: bool,
+}
+
+/// The single-file layout: a FLUX GGUF with `ae.safetensors`, and optionally a T5 GGUF and `clip_l.safetensors`.
+struct FluxLocalFiles {
+    transformer: PathBuf,
+    ae: PathBuf,
+    text_encoders: LocalTextEncoders,
+}
+
+fn only_match(names: &[String], regex: &Regex, what: &str, dir: &Path) -> Result<Option<PathBuf>> {
+    let found = names
+        .iter()
+        .filter(|name| regex.is_match(name))
+        .collect::<Vec<_>>();
+    match found.as_slice() {
+        [] => Ok(None),
+        [name] => Ok(Some(dir.join(name))),
+        many => anyhow::bail!(
+            "`{}` holds several {what} files ({many:?}); keep one",
+            dir.display()
+        ),
+    }
+}
+
+fn flux_local_files(dir: &Path) -> Result<Option<FluxLocalFiles>> {
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    let names = std::fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
+        .collect::<Vec<_>>();
+    let Some(transformer) = only_match(&names, &Regex::new(FLUX_GGUF_PATTERN)?, "FLUX GGUF", dir)?
+    else {
+        return Ok(None);
+    };
+    if !names.iter().any(|name| name == AE_FILE) {
+        anyhow::bail!("`{}` has a FLUX GGUF but no `{AE_FILE}`", dir.display());
+    }
+    Ok(Some(FluxLocalFiles {
+        transformer,
+        ae: dir.join(AE_FILE),
+        text_encoders: LocalTextEncoders {
+            t5: only_match(&names, &Regex::new(T5_GGUF_PATTERN)?, "T5 GGUF", dir)?,
+            clip: names
+                .iter()
+                .any(|name| name == CLIP_L_FILE)
+                .then(|| dir.join(CLIP_L_FILE)),
+        },
+    }))
 }
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
@@ -109,7 +172,7 @@ impl DiffusionLoaderType {
     }
 
     fn matches_flux(files: &[String]) -> bool {
-        let flux_regex = Regex::new(r"^flux\\d+-(schnell|dev)\\.safetensors$");
+        let flux_regex = Regex::new(FLUX_SAFETENSORS_PATTERN);
         let Ok(flux_regex) = flux_regex else {
             return false;
         };
@@ -121,7 +184,9 @@ impl DiffusionLoaderType {
             flux_regex.is_match(name)
         });
 
-        has_transformer && has_vae && has_ae && has_flux
+        let gguf_regex = Regex::new(FLUX_GGUF_PATTERN);
+        let has_flux_gguf = gguf_regex.is_ok_and(|regex| files.iter().any(|f| regex.is_match(f)));
+        has_ae && ((has_transformer && has_vae && has_flux) || has_flux_gguf)
     }
 }
 
@@ -129,6 +194,7 @@ impl DiffusionLoaderType {
 pub struct DiffusionModelPathsInner {
     pub config_filenames: Vec<PathBuf>,
     pub filenames: Vec<PathBuf>,
+    pub text_encoders: LocalTextEncoders,
 }
 
 #[derive(Clone, Debug)]
@@ -183,7 +249,7 @@ impl DiffusionModelLoader for FluxLoader {
         model_id: &Path,
         revision: &str,
     ) -> Result<Vec<PathBuf>> {
-        let regex = Regex::new(r"^flux\d+-(schnell|dev)\.safetensors$")?;
+        let regex = Regex::new(FLUX_SAFETENSORS_PATTERN)?;
         let flux_name = api_dir_list!(api, model_id, true, revision)
             .filter(|x| regex.is_match(x))
             .nth(0)
@@ -206,22 +272,47 @@ impl DiffusionModelLoader for FluxLoader {
         // NOTE(EricLBuehler): disgusting way of doing this but the 0th path is the flux, 1 is ae
         Ok(vec![flux_file, ae_file])
     }
+    fn local_paths(&self, model_id: &Path) -> Result<Option<DiffusionModelPathsInner>> {
+        Ok(
+            flux_local_files(model_id)?.map(|files| DiffusionModelPathsInner {
+                config_filenames: Vec::new(),
+                filenames: vec![files.transformer, files.ae],
+                text_encoders: files.text_encoders,
+            }),
+        )
+    }
     fn force_cpu_vb(&self) -> Vec<bool> {
         vec![self.offload, false]
     }
-    fn load(
-        &self,
-        mut configs: Vec<String>,
-        mut vbs: Vec<ShardedVarBuilder>,
-        normal_loading_metadata: NormalLoadingMetadata,
-        _attention_mechanism: AttentionImplementation,
-        silent: bool,
-    ) -> Result<Box<dyn DiffusionModel + Send + Sync>> {
-        let (vae_cfg, vae_vb) = (configs.remove(1), vbs.remove(1));
-        let (flux_cfg, flux_vb) = (configs.remove(0), vbs.remove(0));
-
-        let vae_cfg: flux::autoencoder::Config = serde_json::from_str(&vae_cfg)?;
-        let flux_cfg: flux::model::Config = serde_json::from_str(&flux_cfg)?;
+    fn load(&self, inputs: DiffusionLoad) -> Result<Box<dyn DiffusionModel + Send + Sync>> {
+        let DiffusionLoad {
+            configs,
+            mut vbs,
+            shapes,
+            text_encoders,
+            metadata: normal_loading_metadata,
+            silent,
+        } = inputs;
+        let vae_vb = vbs.remove(1);
+        let flux_vb = vbs.remove(0);
+        if self.offload && flux_vb.weight_source().is_some() {
+            anyhow::bail!("a GGUF FLUX transformer is quantized and cannot be offloaded; use `flux`, not `flux-offloaded`");
+        }
+        let (flux_cfg, vae_cfg) = match configs.as_slice() {
+            [] => (
+                flux::model::Config::from_weights(
+                    shapes[0]
+                        .as_ref()
+                        .context("a FLUX checkpoint without configs must be a GGUF")?,
+                )?,
+                flux::autoencoder::Config::flux(),
+            ),
+            [flux_cfg, vae_cfg] => (
+                serde_json::from_str(flux_cfg)?,
+                serde_json::from_str(vae_cfg)?,
+            ),
+            other => anyhow::bail!("expected the FLUX and VAE configs, got {}", other.len()),
+        };
 
         let flux_dtype = flux_vb.dtype();
         if flux_dtype != vae_vb.dtype() {
@@ -241,7 +332,89 @@ impl DiffusionModelLoader for FluxLoader {
                 silent,
                 offloaded: self.offload,
                 fetch: hub_file_fetcher()?,
+                text_encoders,
             },
         )?))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{flux_local_files, DiffusionLoaderType};
+
+    fn dir_with(files: &[&str]) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        for file in files {
+            std::fs::write(dir.path().join(file), []).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn a_single_file_flux_layout_is_found_with_its_text_encoders() {
+        let dir = dir_with(&[
+            "flux1-dev-Q8_0.gguf",
+            "ae.safetensors",
+            "t5-v1_1-xxl-encoder-Q8_0.gguf",
+            "clip_l.safetensors",
+            "unrelated-model.gguf",
+        ]);
+        let files = flux_local_files(dir.path()).unwrap().unwrap();
+        assert_eq!(files.transformer, dir.path().join("flux1-dev-Q8_0.gguf"));
+        assert_eq!(files.ae, dir.path().join("ae.safetensors"));
+        assert_eq!(
+            files.text_encoders.t5.as_deref(),
+            Some(dir.path().join("t5-v1_1-xxl-encoder-Q8_0.gguf").as_path())
+        );
+        assert_eq!(
+            files.text_encoders.clip.as_deref(),
+            Some(dir.path().join("clip_l.safetensors").as_path())
+        );
+    }
+
+    #[test]
+    fn a_flux_gguf_layout_needs_the_autoencoder_and_one_transformer() {
+        assert!(flux_local_files(dir_with(&["flux1-dev-Q8_0.gguf"]).path()).is_err());
+        let two = dir_with(&[
+            "flux1-dev-Q8_0.gguf",
+            "flux1-schnell-Q4_0.gguf",
+            "ae.safetensors",
+        ]);
+        assert!(flux_local_files(two.path()).is_err());
+        assert!(flux_local_files(dir_with(&["ae.safetensors"]).path())
+            .unwrap()
+            .is_none());
+        assert!(
+            flux_local_files(std::path::Path::new("black-forest-labs/FLUX.1-dev"))
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn a_flux_repo_listing_is_detected() {
+        let files = [
+            "flux1-dev.safetensors",
+            "ae.safetensors",
+            "transformer/config.json",
+            "vae/config.json",
+        ]
+        .map(String::from);
+        assert!(matches!(
+            DiffusionLoaderType::auto_detect_from_files(&files),
+            Some(DiffusionLoaderType::Flux)
+        ));
+        assert!(DiffusionLoaderType::auto_detect_from_files(&files[1..]).is_none());
+        let gguf = [
+            "flux1-dev-Q8_0.gguf",
+            "ae.safetensors",
+            "clip_l.safetensors",
+        ]
+        .map(String::from);
+        assert!(matches!(
+            DiffusionLoaderType::auto_detect_from_files(&gguf),
+            Some(DiffusionLoaderType::Flux)
+        ));
+        assert!(DiffusionLoaderType::auto_detect_from_files(&gguf[..1]).is_none());
     }
 }
