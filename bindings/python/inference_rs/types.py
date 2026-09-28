@@ -30,7 +30,12 @@ class AgentPermission(str, Enum):
 @dataclass(kw_only=True)
 class AgenticSpec:
     agent_permission: AgentPermission | None = None
+    code_execution: CodeExecutionConfig | None = None
     max_tool_rounds: int | None = None
+    mcp: McpClientConfig | None = None
+    sandbox: SandboxMode | None = None
+    search: SearchSpec | None = None
+    shell: ShellConfig | None = None
     tool_dispatch_url: str | None = None
 
 
@@ -289,6 +294,38 @@ class AnthropicWebSearchUserLocation:
     type: str
 
 
+@dataclass(kw_only=True)
+class AnyMoeConfig:
+    batch_size: int | None = None
+    epochs: int | None = None
+    expert_type: AnyMoeExpertType
+    gate_model_id: str | None = None
+    hidden_size: int
+    loss_csv_path: str | None = None
+    lr: float | None = None
+    training: bool | None = None
+
+
+@dataclass(kw_only=True)
+class AnyMoeExpertTypeLoraAdapter:
+    alpha: float
+    rank: int
+    target_modules: list[str]
+    _external = 'lora_adapter'
+
+
+@dataclass(kw_only=True)
+class AnyMoeSpec:
+    """The AnyMoE layer to build on top of the loaded model."""
+
+    config: AnyMoeConfig
+    layers: list[int] | None = None
+    mlp: str
+    model_ids: list[str]
+    path: str
+    prefix: str
+
+
 class ApprovalDecision(str, Enum):
     APPROVE = "approve"
     DENY = "deny"
@@ -460,6 +497,23 @@ class ChatCompletionResponseMessage:
 
 
 @dataclass(kw_only=True)
+class CodeExecutionConfig:
+    """Python code execution config."""
+
+    permission: CodeExecutionPermission | None = None
+    python_path: str | None = None
+    sandbox_policy: SandboxPolicy | None = None
+    timeout_secs: int | None = None
+    working_directory: str | None = None
+
+
+class CodeExecutionPermission(str, Enum):
+    AUTO = "auto"
+    ASK = "ask"
+    DENY = "deny"
+
+
+@dataclass(kw_only=True)
 class CompletionChunkChoice:
     finish_reason: str | None = None
     index: int
@@ -625,6 +679,7 @@ class EngineSpec:
 
     adapters: AdapterSpec | None = None
     agentic: AgenticSpec | None = None
+    anymoe: AnyMoeSpec | None = None
     model: ModelSelected
     model_id: str | None = None
     runtime: RuntimeSpec | None = None
@@ -872,6 +927,60 @@ class LoraRuntimeConfig:
     max_adapters: int | None = 16
     max_bytes: int | None = 8589934592
     max_rank: int | None = 256
+
+
+@dataclass(kw_only=True)
+class McpClientConfig:
+    """Configuration for MCP client integration"""
+
+    auto_register_tools: bool | None = True
+    max_concurrent_calls: int | None = None
+    servers: list[McpServerConfig] | None = None
+    tool_timeout_secs: int | None = None
+
+
+@dataclass(kw_only=True)
+class McpServerConfig:
+    """Configuration for an individual MCP server"""
+
+    bearer_token: str | None = None
+    enabled: bool | None = None
+    id: str | None = None
+    name: str
+    resources: list[str] | None = None
+    source: McpServerSource
+    tool_prefix: str | None = None
+
+
+@dataclass(kw_only=True)
+class McpServerSourceHttp:
+    """HTTP-based MCP server using JSON-RPC over HTTP"""
+
+    headers: dict[str, str] | None = None
+    timeout_secs: int | None = None
+    type: Literal["Http"] = "Http"
+    url: str
+
+
+@dataclass(kw_only=True)
+class McpServerSourceProcess:
+    """Local process-based MCP server using stdin/stdout communication"""
+
+    args: list[str]
+    command: str
+    env: dict[str, str] | None = None
+    type: Literal["Process"] = "Process"
+    work_dir: str | None = None
+
+
+@dataclass(kw_only=True)
+class McpServerSourceWebSocket:
+    """WebSocket-based MCP server for real-time bidirectional communication"""
+
+    headers: dict[str, str] | None = None
+    timeout_secs: int | None = None
+    type: Literal["WebSocket"] = "WebSocket"
+    url: str
 
 
 @dataclass(kw_only=True)
@@ -1233,6 +1342,21 @@ class ModelStatusResponse:
     status: ModelStatus
 
 
+class MtpDraftSampling(str, Enum):
+    AUTO = "auto"
+    GREEDY = "greedy"
+    PROBABILISTIC = "probabilistic"
+
+
+@dataclass(kw_only=True)
+class MtpSpec:
+    """MTP speculative decoding, drafting with an assistant model or the head built into the checkpoint."""
+
+    draft_sampling: MtpDraftSampling | None = None
+    model: str | None = None
+    n_predict: int | None = None
+
+
 class MultimodalLoaderType(str, Enum):
     """The architecture to load the multimodal model as."""
 
@@ -1266,6 +1390,14 @@ class MultimodalLoaderType(str, Enum):
 class NamedFunctionToolChoice:
     name: str
     type: ToolType = "function"
+
+
+class NetworkMode(str, Enum):
+    """Network access permitted to sandboxed processes."""
+
+    NONE = "none"
+    LOOPBACK = "loopback"
+    FULL = "full"
 
 
 class NormalLoaderType(str, Enum):
@@ -1833,6 +1965,22 @@ class OutputTokensDetails:
 
 
 @dataclass(kw_only=True)
+class PagedCacheSpec:
+    """How much the paged-attention KV cache holds; at most one of `context_len`, `memory_mb` and `memory_fraction`."""
+
+    block_size: int | None = None
+    cache_type: PagedCacheType | None = None
+    context_len: int | None = None
+    memory_fraction: float | None = None
+    memory_mb: int | None = None
+
+
+class PagedCacheType(str, Enum):
+    AUTO = "auto"
+    F8E4M3 = "f8e4m3"
+
+
+@dataclass(kw_only=True)
 class PromptTokensDetailsResponse:
     cached_tokens: int
 
@@ -2151,21 +2299,59 @@ class ResponsesUsage:
 class RuntimeSpec:
     chat_template: str | None = None
     device: str | None = None
+    device_layers: list[str] | None = None
     isq: str | None = None
     jinja_explicit: str | None = None
     max_model_len: int | None = None
     max_seqs: int | None = None
+    mtp: MtpSpec | None = None
     no_kv_cache: bool | None = None
     paged_attn: bool | None = None
+    paged_cache: PagedCacheSpec | None = None
     prefix_cache_n: int | None = None
     seed: int | None = None
     token_source: str | None = None
+
+
+class SandboxMode(str, Enum):
+    """Whether tools that run model-written code are sandboxed."""
+
+    AUTO = "auto"
+    ON = "on"
+    OFF = "off"
+
+
+@dataclass(kw_only=True)
+class SandboxPolicy:
+    """Policy applied to a sandboxed process."""
+
+    extra_env: list[str] | None = None
+    extra_fs_read: list[str] | None = None
+    extra_fs_write: list[str] | None = None
+    max_cpu_secs: int | None = 600
+    max_file_sz_mb: int | None = 256
+    max_memory_mb: int | None = 2048
+    max_open_fds: int | None = 1024
+    max_procs: int | None = 64
+    network: NetworkMode | None = NetworkMode.LOOPBACK
+    strict: bool | None = False
 
 
 class SearchContextSize(str, Enum):
     LOW = "low"
     MEDIUM = "medium"
     HIGH = "high"
+
+
+class SearchEmbeddingModel(str, Enum):
+    """Embedding model used for ranking web search results internally."""
+
+    EMBEDDING_GEMMA = "embedding_gemma"
+
+
+@dataclass(kw_only=True)
+class SearchSpec:
+    embedding_model: SearchEmbeddingModel | None = None
 
 
 @dataclass(kw_only=True)
@@ -2184,6 +2370,17 @@ class SerializedVideo:
     frames: list[str]
     sampled_indices: list[int]
     total_num_frames: int
+
+
+@dataclass(kw_only=True)
+class ShellConfig:
+    """Shell execution config."""
+
+    permission: AgentPermission | None = None
+    sandbox_policy: SandboxPolicy | None = None
+    shell_path: str | None = None
+    timeout_secs: int | None = None
+    working_directory: str | None = None
 
 
 @dataclass(kw_only=True)
@@ -2407,9 +2604,11 @@ AdapterSelection = Union[str, AdapterGenerationSelection]
 AllowedToolChoice = Union[AllowedToolChoiceFunction, AllowedToolChoiceWebSearchPreview, AllowedToolChoiceCodeInterpreter, AllowedToolChoiceShell]
 AnthropicMessageContent = Union[str, list[AnthropicContentBlock]]
 AnthropicSystem = Union[str, list[AnthropicContentBlock]]
+AnyMoeExpertType = Union[Literal["fine_tuned"], AnyMoeExpertTypeLoraAdapter]
 EmbeddingInput = Union[str, list[str], list[int], list[list[int]]]
 EmbeddingVector = Union[list[float], str]
 Grammar = Union[GrammarRegex, GrammarJsonSchema, GrammarLlguidance, GrammarLark]
+McpServerSource = Union[McpServerSourceHttp, McpServerSourceProcess, McpServerSourceWebSocket]
 MessageInnerContent = Union[str, dict[str, str]]
 MessageContent = Union[str, list[dict[str, MessageInnerContent]]]
 ModelSelected = Union[ModelSelectedRun, ModelSelectedPlain, ModelSelectedXLora, ModelSelectedLora, ModelSelectedGGUF, ModelSelectedXLoraGGUF, ModelSelectedLoraGGUF, ModelSelectedGGML, ModelSelectedXLoraGGML, ModelSelectedLoraGGML, ModelSelectedMultimodalPlain, ModelSelectedDiffusionPlain, ModelSelectedSpeech, ModelSelectedMultiModel, ModelSelectedEmbedding]

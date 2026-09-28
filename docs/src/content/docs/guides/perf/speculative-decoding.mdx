@@ -27,7 +27,21 @@ inference run -m google/gemma-4-E4B-it --quant 8 \
 </TabItem>
 <TabItem label="Python">
 
-The Python SDK does not expose MTP yet: its [engine spec](/reference/python/spec/) has no assistant model field. Use the CLI or the Rust SDK to attach an assistant.
+```python
+import inference_rs as ir
+from inference_rs import types as t
+
+spec = t.EngineSpec(
+    model=t.ModelSelectedMultimodalPlain(model_id="google/gemma-4-E4B-it"),
+    runtime=t.RuntimeSpec(
+        isq="8",
+        mtp=t.MtpSpec(model="google/gemma-4-E4B-it-assistant", n_predict=6),
+    ),
+)
+engine = ir.Engine(spec)
+```
+
+`t.MtpSpec` mirrors the `--mtp-*` flags: leave `model` unset to load the checkpoint's built-in head (`--mtp`), and `draft_sampling` takes a `t.MtpDraftSampling`.
 
 </TabItem>
 <TabItem label="Rust">
@@ -119,4 +133,4 @@ MTP remains exact: accepted output is verified by the target model before it is 
 
 MTP supports batched generation and constrained decoding.
 
-MTP is configured at launch time only (CLI flags or the Rust model builder). There is no per-request HTTP field to toggle it; load the server with the assistant attached and every request uses it.
+MTP is configured at launch time only (CLI flags, the Python engine spec or the Rust model builder). There is no per-request HTTP field to toggle it; load the server with the assistant attached and every request uses it.

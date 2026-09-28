@@ -20,22 +20,10 @@ EXAMPLES = REPO / "examples" / "python"
 GUIDES = REPO / "docs" / "src" / "content" / "docs"
 PYTHON_BLOCK = re.compile(r"^```python\n(.*?)^```", re.DOTALL | re.MULTILINE)
 PACKAGE = "inference_rs"
-# Sources that still need engine features the C ABI does not offer yet (AnyMoE, MCP client, code execution, shell and
-# calibration configuration); they keep the pyo3 API until it does.
+# Sources that still need engine features the C ABI does not offer yet (calibration operations); they keep the pyo3
+# API until it does.
 PYO3_SOURCES = {
-    "anymoe.py",
-    "anymoe_inference.py",
-    "anymoe_lora.py",
-    "code_execution.py",
-    "code_execution_approval.py",
-    "mcp_client.py",
     "online_calibration.py",
-    "shell.py",
-    "shell_skills.py",
-    "guides/agents/connect-mcp-server.mdx",
-    "guides/agents/enable-code-execution.mdx",
-    "guides/agents/enable-shell.mdx",
-    "guides/agents/skills.mdx",
 }
 
 

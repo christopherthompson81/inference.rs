@@ -1441,12 +1441,60 @@
               }
             ]
           },
+          "code_execution": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CodeExecutionConfig",
+                "description": "The Python code execution tool; needs a build with the `code-execution` feature."
+              }
+            ]
+          },
           "max_tool_rounds": {
             "type": [
               "integer",
               "null"
             ],
             "minimum": 0
+          },
+          "mcp": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/McpClientConfig",
+                "description": "MCP servers whose tools the model may call."
+              }
+            ]
+          },
+          "sandbox": {
+            "$ref": "#/components/schemas/SandboxMode",
+            "description": "Sandboxes code execution and the shell unless their config gives its own policy: `auto` and `on` use the\ndeveloper profile, `off` runs them unsandboxed."
+          },
+          "search": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SearchSpec",
+                "description": "Loads an embedding model that reranks web search results."
+              }
+            ]
+          },
+          "shell": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ShellConfig",
+                "description": "The shell tool, which also runs uploaded skills; needs a build with the `code-execution` feature."
+              }
+            ]
           },
           "tool_dispatch_url": {
             "type": [
@@ -2507,6 +2555,136 @@
           }
         }
       },
+      "AnyMoeConfig": {
+        "type": "object",
+        "required": [
+          "hidden_size",
+          "expert_type"
+        ],
+        "properties": {
+          "batch_size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "epochs": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "expert_type": {
+            "$ref": "#/components/schemas/AnyMoeExpertType"
+          },
+          "gate_model_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "hidden_size": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "loss_csv_path": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "If `training == true`, `loss_csv_path` will not save anything.\nOtherwise, this will save a .csv loss file here."
+          },
+          "lr": {
+            "type": "number",
+            "format": "double"
+          },
+          "training": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "AnyMoeExpertType": {
+        "oneOf": [
+          {
+            "type": "string",
+            "enum": [
+              "fine_tuned"
+            ]
+          },
+          {
+            "type": "object",
+            "required": [
+              "lora_adapter"
+            ],
+            "properties": {
+              "lora_adapter": {
+                "type": "object",
+                "required": [
+                  "rank",
+                  "alpha",
+                  "target_modules"
+                ],
+                "properties": {
+                  "alpha": {
+                    "type": "number",
+                    "format": "double"
+                  },
+                  "rank": {
+                    "type": "integer",
+                    "minimum": 0
+                  },
+                  "target_modules": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ]
+      },
+      "AnyMoeSpec": {
+        "type": "object",
+        "description": "The AnyMoE layer to build on top of the loaded model.",
+        "required": [
+          "config",
+          "path",
+          "prefix",
+          "mlp",
+          "model_ids"
+        ],
+        "properties": {
+          "config": {
+            "$ref": "#/components/schemas/AnyMoeConfig"
+          },
+          "layers": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Layers to apply AnyMoE to; empty applies it to all of them."
+          },
+          "mlp": {
+            "type": "string",
+            "description": "Name of the MLP module within each layer, e.g. `mlp`."
+          },
+          "model_ids": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "path": {
+            "type": "string",
+            "description": "Training data (or gating weights) path."
+          },
+          "prefix": {
+            "type": "string",
+            "description": "Prefix of the model's layer modules, e.g. `model.layers`."
+          }
+        },
+        "additionalProperties": false
+      },
       "ApprovalDecision": {
         "type": "string",
         "enum": [
@@ -3243,6 +3421,52 @@
           }
         }
       },
+      "CodeExecutionConfig": {
+        "type": "object",
+        "description": "Python code execution config.",
+        "properties": {
+          "permission": {
+            "$ref": "#/components/schemas/CodeExecutionPermission"
+          },
+          "python_path": {
+            "type": "string",
+            "description": "Defaults to `python3` (`python` on Windows)."
+          },
+          "sandbox_policy": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SandboxPolicy",
+                "description": "OS-level sandbox policy. `Some(policy)` enables the platform sandbox\n(Linux/macOS) with the given limits; `None` disables it entirely\n(NullSandbox). The CLI/server layer is responsible for choosing."
+              }
+            ]
+          },
+          "timeout_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Per-execution timeout. Defaults to 60s.",
+            "minimum": 0
+          },
+          "working_directory": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "If `None`, a temp dir is created. Otherwise this is the cwd for the model's code."
+          }
+        },
+        "additionalProperties": false
+      },
+      "CodeExecutionPermission": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "ask",
+          "deny"
+        ]
+      },
       "CompletionChunkChoice": {
         "type": "object",
         "required": [
@@ -3976,6 +4200,17 @@
           "agentic": {
             "$ref": "#/components/schemas/AgenticSpec"
           },
+          "anymoe": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/AnyMoeSpec",
+                "description": "Mixes the model's MLPs with expert models' through a trained gate."
+              }
+            ]
+          },
           "model": {
             "$ref": "#/components/schemas/ModelSelected"
           },
@@ -4699,6 +4934,231 @@
             "minimum": 0
           }
         }
+      },
+      "McpClientConfig": {
+        "type": "object",
+        "description": "Configuration for MCP client integration\n\nThis structure defines how the MCP client should connect to and manage\nmultiple MCP servers, including authentication, tool registration, and\nexecution policies.",
+        "properties": {
+          "auto_register_tools": {
+            "type": "boolean",
+            "description": "Whether to automatically register discovered tools with the model\n\nWhen enabled, tools from MCP servers are automatically converted to\nthe internal Tool format and registered for automatic tool calling.",
+            "default": true
+          },
+          "max_concurrent_calls": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Maximum number of concurrent tool calls across all MCP servers\n\nLimits resource usage and prevents overwhelming servers with too many\nsimultaneous requests. Defaults to 10 if not specified.",
+            "default": null,
+            "minimum": 0
+          },
+          "servers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/McpServerConfig"
+            },
+            "description": "List of MCP servers to connect to",
+            "default": []
+          },
+          "tool_timeout_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Timeout for individual tool execution in seconds\n\nControls how long to wait for a tool call to complete before timing out.\nDefaults to 30 seconds if not specified.",
+            "default": null,
+            "minimum": 0
+          }
+        }
+      },
+      "McpServerConfig": {
+        "type": "object",
+        "description": "Configuration for an individual MCP server\n\nDefines connection parameters, authentication, and tool management\nsettings for a single MCP server instance.",
+        "required": [
+          "name",
+          "source"
+        ],
+        "properties": {
+          "bearer_token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional Bearer token for authentication\n\nAutomatically included as `Authorization: Bearer <token>` header\nfor HTTP and WebSocket connections. Process connections typically\ndon't require authentication tokens."
+          },
+          "enabled": {
+            "type": "boolean",
+            "description": "Whether this server should be activated\n\nDisabled servers are ignored during client initialization.\nDefaults to true if not specified."
+          },
+          "id": {
+            "type": "string",
+            "description": "Unique identifier for this server\n\nUsed internally to track connections and route tool calls.\nMust be unique across all servers in a single MCP client configuration.\nDefaults to a UUID if not specified."
+          },
+          "name": {
+            "type": "string",
+            "description": "Human-readable name for this server\n\nUsed for logging, debugging, and user-facing displays."
+          },
+          "resources": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Optional resource URI patterns this server provides\n\nUsed for resource discovery and subscription.\nSupports glob patterns like \"file://**\" for filesystem access."
+          },
+          "source": {
+            "$ref": "#/components/schemas/McpServerSource",
+            "description": "Transport-specific connection configuration"
+          },
+          "tool_prefix": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Optional prefix to add to all tool names from this server\n\nHelps prevent naming conflicts when multiple servers provide\ntools with similar names. For example, with prefix \"web\",\na tool named \"search\" becomes \"web_search\".\nDefaults to a UUID-based prefix if not specified."
+          }
+        }
+      },
+      "McpServerSource": {
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "HTTP-based MCP server using JSON-RPC over HTTP\n\nBest for: Public APIs, RESTful services, servers behind load balancers\nFeatures: SSE support, standard HTTP semantics, easy debugging",
+            "required": [
+              "url",
+              "type"
+            ],
+            "properties": {
+              "headers": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "Optional headers to include in requests (e.g., API keys, custom headers)",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
+              },
+              "timeout_secs": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Optional timeout in seconds for HTTP requests\nDefaults to no timeout if not specified.",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "Http"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "Base URL of the MCP server (http:// or https://)"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Local process-based MCP server using stdin/stdout communication\n\nBest for: Local tools, development servers, sandboxed environments\nFeatures: Process isolation, no network overhead, easy deployment",
+            "required": [
+              "command",
+              "args",
+              "type"
+            ],
+            "properties": {
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Arguments to pass to the command"
+              },
+              "command": {
+                "type": "string",
+                "description": "Command to execute (e.g., \"mcp-server-filesystem\")"
+              },
+              "env": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "Optional environment variables for the process",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "Process"
+                ]
+              },
+              "work_dir": {
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "Optional working directory for the process"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "description": "WebSocket-based MCP server for real-time bidirectional communication\n\nBest for: Interactive applications, real-time data, low-latency requirements\nFeatures: Persistent connections, server-initiated notifications, minimal overhead",
+            "required": [
+              "url",
+              "type"
+            ],
+            "properties": {
+              "headers": {
+                "type": [
+                  "object",
+                  "null"
+                ],
+                "description": "Optional headers for the WebSocket handshake",
+                "additionalProperties": {
+                  "type": "string"
+                },
+                "propertyNames": {
+                  "type": "string"
+                }
+              },
+              "timeout_secs": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "Optional timeout in seconds for connection establishment\nDefaults to no timeout if not specified.",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "WebSocket"
+                ]
+              },
+              "url": {
+                "type": "string",
+                "description": "WebSocket URL (ws:// or wss://)"
+              }
+            }
+          }
+        ],
+        "description": "Supported MCP server transport sources\n\nDefines the different ways to connect to MCP servers, each optimized for\nspecific use cases and deployment scenarios."
       },
       "Message": {
         "type": "object",
@@ -6562,6 +7022,39 @@
           }
         }
       },
+      "MtpDraftSampling": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "greedy",
+          "probabilistic"
+        ]
+      },
+      "MtpSpec": {
+        "type": "object",
+        "description": "MTP speculative decoding, drafting with an assistant model or the head built into the checkpoint.",
+        "properties": {
+          "draft_sampling": {
+            "$ref": "#/components/schemas/MtpDraftSampling"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Assistant model id or path; unset uses the checkpoint's own MTP head."
+          },
+          "n_predict": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Draft tokens proposed per target step.",
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
       "MultimodalLoaderType": {
         "type": "string",
         "description": "The architecture to load the multimodal model as.",
@@ -6606,6 +7099,15 @@
             "$ref": "#/components/schemas/ToolType"
           }
         }
+      },
+      "NetworkMode": {
+        "type": "string",
+        "description": "Network access permitted to sandboxed processes.",
+        "enum": [
+          "none",
+          "loopback",
+          "full"
+        ]
       },
       "NormalLoaderType": {
         "type": "string",
@@ -8636,6 +9138,54 @@
           }
         }
       },
+      "PagedCacheSpec": {
+        "type": "object",
+        "description": "How much the paged-attention KV cache holds; at most one of `context_len`, `memory_mb` and `memory_fraction`.",
+        "properties": {
+          "block_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Tokens per block.",
+            "minimum": 0
+          },
+          "cache_type": {
+            "$ref": "#/components/schemas/PagedCacheType"
+          },
+          "context_len": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Tokens of context to allocate for; without a size the cache takes 90% of free device memory.",
+            "minimum": 0
+          },
+          "memory_fraction": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Fraction of device memory, 0 to 1."
+          },
+          "memory_mb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          }
+        },
+        "additionalProperties": false
+      },
+      "PagedCacheType": {
+        "type": "string",
+        "enum": [
+          "auto",
+          "f8e4m3"
+        ]
+      },
       "PromptTokensDetailsResponse": {
         "type": "object",
         "required": [
@@ -9925,6 +10475,16 @@
             ],
             "description": "`auto` (the best available), `cpu`, `cuda:N` or `metal:N`."
           },
+          "device_layers": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Layers per device, as `--device-layers` takes them: `ORD:NUM` entries, or one count for device 0."
+          },
           "isq": {
             "type": [
               "string",
@@ -9952,6 +10512,16 @@
             ],
             "minimum": 0
           },
+          "mtp": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/MtpSpec"
+              }
+            ]
+          },
           "no_kv_cache": {
             "type": "boolean"
           },
@@ -9961,6 +10531,9 @@
               "null"
             ],
             "description": "Paged attention: unset picks the device default."
+          },
+          "paged_cache": {
+            "$ref": "#/components/schemas/PagedCacheSpec"
           },
           "prefix_cache_n": {
             "type": [
@@ -9988,6 +10561,95 @@
         },
         "additionalProperties": false
       },
+      "SandboxMode": {
+        "type": "string",
+        "description": "Whether tools that run model-written code are sandboxed.",
+        "enum": [
+          "auto",
+          "on",
+          "off"
+        ]
+      },
+      "SandboxPolicy": {
+        "type": "object",
+        "description": "Policy applied to a sandboxed process.",
+        "properties": {
+          "extra_env": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Additional environment variable names allowed through the env scrub.\nAppended to the built-in allowlist (PATH, LANG, ...). Names only,\nvalues come from the parent process's environment.",
+            "default": []
+          },
+          "extra_fs_read": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Additional filesystem paths the sandboxed process may read.\nAppended to the built-in system allowlist.",
+            "default": []
+          },
+          "extra_fs_write": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Additional filesystem paths the sandboxed process may read and write.\nAppended to the per-session workdir.",
+            "default": []
+          },
+          "max_cpu_secs": {
+            "type": "integer",
+            "format": "int64",
+            "description": "CPU-time cap in seconds where resource limits are supported.",
+            "default": 600,
+            "minimum": 0
+          },
+          "max_file_sz_mb": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Maximum file size in MB where resource limits are supported.",
+            "default": 256,
+            "minimum": 0
+          },
+          "max_memory_mb": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Address-space cap in MB where resource limits are supported.",
+            "default": 2048,
+            "minimum": 0
+          },
+          "max_open_fds": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Open file descriptor cap where resource limits are supported.",
+            "default": 1024,
+            "minimum": 0
+          },
+          "max_procs": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Child process cap where resource limits are supported.",
+            "default": 64,
+            "minimum": 0
+          },
+          "network": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/NetworkMode",
+                "description": "Network access granted to sandboxed subprocesses."
+              }
+            ],
+            "default": "loopback"
+          },
+          "strict": {
+            "type": "boolean",
+            "description": "When true, missing requested layers become hard errors.",
+            "default": false
+          }
+        },
+        "additionalProperties": false
+      },
       "SearchContextSize": {
         "type": "string",
         "enum": [
@@ -9995,6 +10657,22 @@
           "medium",
           "high"
         ]
+      },
+      "SearchEmbeddingModel": {
+        "type": "string",
+        "description": "Embedding model used for ranking web search results internally.",
+        "enum": [
+          "embedding_gemma"
+        ]
+      },
+      "SearchSpec": {
+        "type": "object",
+        "properties": {
+          "embedding_model": {
+            "$ref": "#/components/schemas/SearchEmbeddingModel"
+          }
+        },
+        "additionalProperties": false
       },
       "SerializedSession": {
         "type": "object",
@@ -10056,6 +10734,40 @@
             "minimum": 0
           }
         }
+      },
+      "ShellConfig": {
+        "type": "object",
+        "description": "Shell execution config.",
+        "properties": {
+          "permission": {
+            "$ref": "#/components/schemas/AgentPermission"
+          },
+          "sandbox_policy": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SandboxPolicy"
+              }
+            ]
+          },
+          "shell_path": {
+            "type": "string"
+          },
+          "timeout_secs": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "working_directory": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "additionalProperties": false
       },
       "SkillListObject": {
         "type": "object",

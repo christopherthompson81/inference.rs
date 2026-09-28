@@ -184,3 +184,32 @@ the package (27 pages, 102 sources). It does not check attributes of responses o
 
 Next: engine spec fields for AnyMoE, MCP, code execution/shell and calibration so the last nine examples port; then
 wheels bundling `libinference_ffi`; then removing the pyo3 crate.
+
+## Run 5 - 2026-09-28
+
+Question: what does the engine spec need so the last pyo3 examples port, and what does it cost to expose it?
+
+Finding: almost nothing new was needed below the spec. `InferenceRsForServerBuilder` already took MCP, code execution,
+shell, MTP, device layers and paged-cache sizing (the CLI sets them), and `ModelLoaderConfig` already had an
+`overrides.anymoe` slot that wraps the loader; the server builder passed `Default::default()`. The spec gained
+`runtime.{device_layers, paged_cache, mtp}`, `agentic.{search, mcp, code_execution, shell, sandbox}` and `anymoe`,
+and the eight examples plus four guides ported. Only `online_calibration.py` stays on pyo3: calibration is runtime
+operations (begin, status, apply), not configuration, so it needs ABI entry points.
+
+Review fixes:
+- A bare `code_execution`/`shell` config ran model-written code unsandboxed with no approval, where the CLI
+  sandboxes by default. `agentic.sandbox` (auto/on/off, honoring `INFERENCE_RS_SANDBOX`, the resolution now shared
+  with the CLI in `inference_sandbox::SandboxMode`) gives a policy-less config the developer profile.
+- The embedded configs accepted unknown keys, so a misspelled `sandbox_policy` key parsed and the tool ran
+  unsandboxed; code execution, shell, sandbox policy and AnyMoE configs deny unknown fields (MCP stays lenient: its
+  reference JSON has `_comment` keys).
+- `device_layers` parsing panicked on a bad entry (an internal error across the ABI); it returns an error, checked at
+  spec time. Two paged-cache sizes were silently resolved by order, all three turned paged attention off; the spec
+  refuses more than one.
+- `McpServerConfig`'s container `serde(default)` made utoipa evaluate `Default`, writing a random UUID into the schema
+  (and so into `types.py`) on every regeneration; it now has field defaults only.
+- `PagedCacheType` deserialized only `"Auto"`, though the TOML reference documents `auto`; its serde names are
+  lowercase now.
+
+Next: calibration, re-ISQ, tokenize/detokenize, session and default-model operations as ABI entry points, which is
+what the pyo3 `Runner` still has over the ABI; then wheels; then removing pyo3.

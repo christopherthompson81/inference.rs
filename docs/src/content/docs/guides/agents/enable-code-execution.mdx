@@ -15,7 +15,7 @@ The `code-execution` Cargo feature is in the default feature set; binaries built
 
 Server startup makes the tool available. HTTP requests opt into it per request with the OpenAI-compatible `code_interpreter` tool; without that tool, the request stays a plain chat request even when the server has code execution enabled. The web UI sends the tool when its Code Execution toggle is on.
 
-Native SDK users enable code execution on the runner or model builder, then opt in on each request with the SDK request helper: the Python SDK via `Runner(..., code_execution_config=CodeExecutionConfig())` plus `ChatCompletionRequest.enable_code_execution=True`, and the Rust SDK via `.with_code_execution(...)` (shown in the [output-files tabs](#declaring-output-files) below).
+Native SDK users enable code execution on the engine or model builder, then opt in on each request: the Python SDK via `t.AgenticSpec(code_execution=t.CodeExecutionConfig())` on the engine spec plus the same `code_interpreter` tool in the request's `tools`, and the Rust SDK via `.with_code_execution(...)` (shown in the [output-files tabs](#declaring-output-files) below).
 
 ```json
 {
@@ -71,22 +71,26 @@ The response gains a top-level `files` array with id, name, mime type, size, and
 </TabItem>
 <TabItem label="Python">
 
-This snippet uses the pyo3 package (`crates/inference-pyo3`), which is being retired: the ctypes `inference_rs` package does not support code execution yet.
-
 ```python
-from inference_rs import ChatCompletionRequest, CodeExecutionConfig, RequestedFile, Runner, Which
+import inference_rs as ir
+from inference_rs import types as t
 
-runner = Runner(which=Which.Plain(model_id="Qwen/Qwen3-4B"), code_execution_config=CodeExecutionConfig())
-resp = runner.send_chat_completion_request(
-    ChatCompletionRequest(
-        model="Qwen/Qwen3-4B",
-        messages=[{"role": "user", "content": "Plot sin(x) as plot.png."}],
-        enable_code_execution=True,
-        files=[RequestedFile("plot.png", "png")],
-    )
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B"),
+    agentic=t.AgenticSpec(code_execution=t.CodeExecutionConfig()),
 )
-for f in resp.files or []:
-    f.save(f.name)
+with ir.Engine(spec) as engine:
+    resp = engine.chat(
+        t.ChatCompletionRequest(
+            model="default",
+            messages=[t.Message(role="user", content="Plot sin(x) as plot.png.")],
+            tools=[t.OpenAiCodeInterpreterTool(container=t.OpenAiCodeInterpreterAutoContainer())],
+            files=[{"name": "plot.png", "format": "png"}],
+        )
+    )
+    for f in resp.files or []:
+        with open(f["name"], "wb") as out:
+            out.write(engine.file_content(f["id"]).data)
 ```
 
 [Full example](/examples/python/code-execution/)
@@ -157,7 +161,7 @@ Without `--code-exec-workdir`, each session gets a unique `inference-code-<rando
 
 ## Isolation
 
-**The CLI sandboxes by default; the SDKs do not.** The CLI and TOML entry points default to `--sandbox auto`, which enables the OS-level sandbox on Linux and macOS. The programmatic `CodeExecutionConfig` (Python and Rust SDKs) ships with no sandbox by default. It engages only once you attach a `SandboxPolicy`, so embedding apps must choose one explicitly. Layers, limits, threat model, and tuning are documented in the [sandbox reference](/reference/sandbox/).
+**The CLI and the Python SDK sandbox by default; the Rust SDK does not.** The CLI and TOML entry points default to `--sandbox auto`, which enables the OS-level sandbox on Linux and macOS, and the engine spec's `agentic.sandbox` does the same (`"off"` opts out). The Rust SDK's `CodeExecutionConfig` ships with no sandbox by default. It engages only once you attach a `SandboxPolicy`, so embedding apps must choose one explicitly. Layers, limits, threat model, and tuning are documented in the [sandbox reference](/reference/sandbox/).
 
 For deployments where code execution must leave the inference host entirely, use [`--tool-dispatch-url`](/guides/agents/tool-calling-basics/#dispatch-url).
 

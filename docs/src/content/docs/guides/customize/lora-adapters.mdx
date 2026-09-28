@@ -587,8 +587,27 @@ Full examples: [xlora-zephyr](/examples/python/xlora-zephyr/) (Python), [xlora](
 
 AnyMoE composes several compatible fine-tunes of the same base model into a MoE (Mixture of Experts) configuration.
 
-- It is exposed through the Rust SDK (`AnyMoeModelBuilder`); it is not configurable via the CLI, and the Python SDK does not support it yet.
+- It is exposed through the Rust SDK (`AnyMoeModelBuilder`) and the Python engine spec (`t.EngineSpec(anymoe=t.AnyMoeSpec(...))`); it is not configurable via the CLI.
 - Expert checkpoints must share the base model architecture, and a small JSON calibration dataset is required to train the router.
 - Dynamic per-request LoRA cannot wrap an AnyMoE pipeline. LoRA-backed AnyMoE experts remain supported through the AnyMoE expert configuration.
 
-Full examples: [anymoe](/examples/rust/advanced/anymoe/) and [anymoe-lora](/examples/rust/advanced/anymoe-lora/) (Rust).
+```python
+import inference_rs as ir
+from inference_rs import types as t
+
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(model_id="mistralai/Mistral-7B-Instruct-v0.1"),
+    anymoe=t.AnyMoeSpec(
+        config=t.AnyMoeConfig(hidden_size=4096, expert_type="fine_tuned"),
+        path="examples/amoe.json",
+        prefix="model.layers",
+        mlp="mlp",
+        model_ids=["HuggingFaceH4/zephyr-7b-beta"],
+    ),
+)
+engine = ir.Engine(spec)
+```
+
+`path` is the training dataset; set `gate_model_id` and `training=False` on the config to load a pretrained gating layer instead of training one. For LoRA experts, pass `expert_type=t.AnyMoeExpertTypeLoraAdapter(rank=..., alpha=..., target_modules=[...])`.
+
+Full examples: [anymoe](/examples/python/anymoe/), [anymoe-inference](/examples/python/anymoe-inference/) and [anymoe-lora](/examples/python/anymoe-lora/) (Python), [anymoe](/examples/rust/advanced/anymoe/) and [anymoe-lora](/examples/rust/advanced/anymoe-lora/) (Rust).

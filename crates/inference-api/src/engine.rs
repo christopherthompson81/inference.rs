@@ -5,8 +5,10 @@ use std::sync::Arc;
 use candle_core::Device;
 use futures::StreamExt;
 use inference_core::{
-    AgentPermission, ChatCompletionResponse, CompletionResponse, ImageGenerationResponse,
-    InferenceRs, ModelSelected, Response, SearchCallback, TokenSource, ToolCallbackWithTool,
+    AgentPermission, AnyMoeSpec, ChatCompletionResponse, CodeExecutionConfig, CompletionResponse,
+    ImageGenerationResponse, InferenceRs, McpClientConfig, ModelSelected, MtpConfig,
+    MtpDraftSamplingMethod, PagedCacheType, Response, SandboxMode, SandboxPolicy, SandboxProfile,
+    SearchCallback, SearchEmbeddingModel, ShellConfig, TokenSource, ToolCallbackWithTool,
 };
 use serde::Deserialize;
 
@@ -23,7 +25,7 @@ use crate::{
     engine_embeddings::{embed, EmbeddingError},
     files::{self, FileBody, FileMetadata, FileUpload},
     generation::{generate_image, generate_speech, SpeechAudio},
-    inference_for_server_builder::InferenceRsForServerBuilder,
+    inference_for_server_builder::{parse_device_layers, InferenceRsForServerBuilder},
     lora_adapters::{
         list_adapters, load_adapter, unload_adapter, ListLoraAdaptersQuery, LoadLoraAdapterRequest,
         LoraAdapterApiConfig, LoraAdapterListResponse, LoraAdapterObject, UnloadLoraAdapterRequest,
@@ -51,6 +53,10 @@ use crate::{
 };
 
 const INVALID_REQUEST_BODY: &str = "invalid_request_body";
+const PAGED_CACHE_ONE_SIZE: &str =
+    "paged_cache takes at most one of context_len, memory_mb and memory_fraction";
+const CODE_EXECUTION_UNAVAILABLE: &str =
+    "code execution and the shell tool need a build with the `code-execution` feature";
 // Matches `inference serve`'s default, so an engine loaded from a spec batches like the server.
 pub const DEFAULT_MAX_SEQS: usize = 32;
 
@@ -70,6 +76,9 @@ pub struct EngineSpec {
     pub adapters: AdapterSpec,
     #[serde(default)]
     pub skills: SkillsSpec,
+    /// Mixes the model's MLPs with expert models' through a trained gate.
+    #[serde(default)]
+    pub anymoe: Option<AnyMoeSpec>,
 }
 
 /// Where uploaded skills are kept; requests reference them from the shell tool.
@@ -163,6 +172,76 @@ pub struct RuntimeSpec {
     /// `cache`, `none`, `env:VAR`, `literal:TOKEN` or `path:FILE`.
     #[serde(default)]
     pub token_source: Option<String>,
+    /// Layers per device, as `--device-layers` takes them: `ORD:NUM` entries, or one count for device 0.
+    #[serde(default)]
+    pub device_layers: Option<Vec<String>>,
+    #[serde(default)]
+    pub paged_cache: PagedCacheSpec,
+    #[serde(default)]
+    pub mtp: Option<MtpSpec>,
+}
+
+/// How much the paged-attention KV cache holds; at most one of `context_len`, `memory_mb` and `memory_fraction`.
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct PagedCacheSpec {
+    /// Tokens of context to allocate for; without a size the cache takes 90% of free device memory.
+    #[serde(default)]
+    pub context_len: Option<usize>,
+    #[serde(default)]
+    pub memory_mb: Option<usize>,
+    /// Fraction of device memory, 0 to 1.
+    #[serde(default)]
+    pub memory_fraction: Option<f32>,
+    /// Tokens per block.
+    #[serde(default)]
+    pub block_size: Option<usize>,
+    #[serde(default)]
+    pub cache_type: PagedCacheType,
+}
+
+/// MTP speculative decoding, drafting with an assistant model or the head built into the checkpoint.
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct MtpSpec {
+    /// Assistant model id or path; unset uses the checkpoint's own MTP head.
+    #[serde(default)]
+    pub model: Option<String>,
+    /// Draft tokens proposed per target step.
+    #[serde(default)]
+    pub n_predict: Option<usize>,
+    #[serde(default)]
+    pub draft_sampling: MtpDraftSampling,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum MtpDraftSampling {
+    /// Probabilistic drafting where the model supports it, else greedy.
+    #[default]
+    Auto,
+    Greedy,
+    Probabilistic,
+}
+
+impl From<MtpDraftSampling> for MtpDraftSamplingMethod {
+    fn from(sampling: MtpDraftSampling) -> Self {
+        match sampling {
+            MtpDraftSampling::Auto => Self::Auto,
+            MtpDraftSampling::Greedy => Self::Greedy,
+            MtpDraftSampling::Probabilistic => Self::Probabilistic,
+        }
+    }
+}
+
+impl MtpSpec {
+    fn into_config(self) -> MtpConfig {
+        match self.model {
+            Some(model) => MtpConfig::new(model, self.n_predict),
+            None => MtpConfig::builtin(self.n_predict),
+        }
+        .with_draft_sampling_method(self.draft_sampling.into())
+    }
 }
 
 #[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
@@ -174,14 +253,44 @@ pub struct AgenticSpec {
     pub tool_dispatch_url: Option<String>,
     #[serde(default)]
     pub agent_permission: Option<AgentPermission>,
+    /// Loads an embedding model that reranks web search results.
+    #[serde(default)]
+    pub search: Option<SearchSpec>,
+    /// MCP servers whose tools the model may call.
+    #[serde(default)]
+    pub mcp: Option<McpClientConfig>,
+    /// The Python code execution tool; needs a build with the `code-execution` feature.
+    #[serde(default)]
+    pub code_execution: Option<CodeExecutionConfig>,
+    /// The shell tool, which also runs uploaded skills; needs a build with the `code-execution` feature.
+    #[serde(default)]
+    pub shell: Option<ShellConfig>,
+    /// Sandboxes code execution and the shell unless their config gives its own policy: `auto` and `on` use the
+    /// developer profile, `off` runs them unsandboxed.
+    #[serde(default)]
+    pub sandbox: SandboxMode,
+}
+
+fn default_policy(mode: SandboxMode) -> Option<SandboxPolicy> {
+    let mut policy =
+        (mode != SandboxMode::Off).then(|| SandboxProfile::Developer.default_policy())?;
+    policy.strict = mode == SandboxMode::On;
+    Some(policy)
+}
+
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SearchSpec {
+    #[serde(default)]
+    pub embedding_model: SearchEmbeddingModel,
 }
 
 /// Why an engine did not load: the spec itself was unusable, or loading the model failed.
 #[derive(Debug)]
 pub enum EngineLoadError {
     InvalidSpec(String),
-    /// The requested device is not compiled into this build or is not present.
-    DeviceUnavailable(String),
+    /// A device or feature the spec asks for is not compiled into this build or is not present.
+    Unavailable(String),
     Load(anyhow::Error),
 }
 
@@ -189,7 +298,7 @@ impl std::fmt::Display for EngineLoadError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::InvalidSpec(message) => write!(f, "invalid engine spec: {message}"),
-            Self::DeviceUnavailable(message) => write!(f, "device unavailable: {message}"),
+            Self::Unavailable(message) => write!(f, "unavailable: {message}"),
             Self::Load(error) => write!(f, "{error:#}"),
         }
     }
@@ -219,6 +328,53 @@ impl EngineSpec {
             let token_source: TokenSource = token_source.parse().map_err(invalid)?;
             builder = builder.with_token_source(token_source);
         }
+        let paged = runtime.paged_cache;
+        let sizes = [
+            paged.context_len.is_some(),
+            paged.memory_mb.is_some(),
+            paged.memory_fraction.is_some(),
+        ];
+        if sizes.into_iter().filter(|set| *set).count() > 1 {
+            return Err(invalid(PAGED_CACHE_ONE_SIZE.to_string()));
+        }
+        if let Some(device_layers) = &runtime.device_layers {
+            parse_device_layers(device_layers).map_err(|error| invalid(format!("{error:#}")))?;
+        }
+        builder = builder
+            .with_num_device_layers_optional(runtime.device_layers)
+            .with_paged_ctxt_len_optional(paged.context_len)
+            .with_paged_attn_gpu_mem_optional(paged.memory_mb)
+            .with_paged_attn_gpu_mem_usage_optional(paged.memory_fraction)
+            .with_paged_attn_block_size_optional(paged.block_size)
+            .with_paged_attn_cache_type(paged.cache_type)
+            .with_mtp_config_optional(runtime.mtp.map(MtpSpec::into_config))
+            .with_anymoe_optional(self.anymoe);
+        let agentic = self.agentic;
+        if let Some(search) = agentic.search {
+            builder = builder
+                .with_enable_search(true)
+                .with_search_embedding_model(search.embedding_model);
+        }
+        if !cfg!(feature = "code-execution")
+            && (agentic.code_execution.is_some() || agentic.shell.is_some())
+        {
+            return Err(EngineLoadError::Unavailable(
+                CODE_EXECUTION_UNAVAILABLE.to_string(),
+            ));
+        }
+        let sandbox = agentic.sandbox.resolve();
+        let code_execution = agentic.code_execution.map(|mut config| {
+            config.sandbox_policy = config.sandbox_policy.or_else(|| default_policy(sandbox));
+            config
+        });
+        let shell = agentic.shell.map(|mut config| {
+            config.sandbox_policy = config.sandbox_policy.or_else(|| default_policy(sandbox));
+            config
+        });
+        builder = builder
+            .with_mcp_config_optional(agentic.mcp)
+            .with_code_exec_config_optional(code_execution)
+            .with_shell_config_optional(shell);
         builder = match runtime.device.as_deref() {
             None | Some("auto") => builder,
             Some("cpu") => builder.with_cpu(true),
@@ -241,7 +397,7 @@ fn explicit_device(device: &str, seed: Option<u64>) -> Result<Device, EngineLoad
         "metal" => Device::new_metal(ordinal),
         _ => return Err(invalid()),
     }
-    .map_err(|error| EngineLoadError::DeviceUnavailable(format!("{device}: {error}")))?;
+    .map_err(|error| EngineLoadError::Unavailable(format!("device {device}: {error}")))?;
     // An explicit device skips the builder's own device setup, which is where the seed is applied.
     if let Some(seed) = seed {
         device
@@ -855,5 +1011,75 @@ impl ChatStream {
     /// The next event, or `None` once the stream has finished.
     pub async fn next_event(&mut self) -> Option<ChatStreamEvent> {
         self.next().await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_serve_option_the_spec_carries_parses() {
+        let spec: EngineSpec = serde_json::from_value(serde_json::json!({
+            "model": {"Plain": {"model_id": "org/model"}},
+            "runtime": {
+                "device": "cpu",
+                "device_layers": ["0:8", "1:8"],
+                "paged_cache": {"context_len": 4096, "block_size": 32, "cache_type": "f8e4m3"},
+                "mtp": {"n_predict": 2, "draft_sampling": "greedy"},
+            },
+            "agentic": {
+                "search": {},
+                "mcp": {"servers": [{"name": "fs", "source": {"type": "Process", "command": "mcp-fs", "args": []}}]},
+                "code_execution": {"timeout_secs": 5, "sandbox_policy": {"network": "none"}},
+                "shell": {"permission": "ask"},
+            },
+            "anymoe": {
+                "config": {"hidden_size": 8, "expert_type": {"lora_adapter": {"rank": 4, "alpha": 8.0, "target_modules": ["up_proj"]}}},
+                "path": "train.json",
+                "prefix": "model.layers",
+                "mlp": "mlp",
+                "model_ids": ["org/expert"],
+            },
+        }))
+        .unwrap();
+        let mtp = spec.runtime.mtp.as_ref().unwrap();
+        assert!(mtp.model.is_none());
+        assert!(matches!(mtp.draft_sampling, MtpDraftSampling::Greedy));
+        assert_eq!(spec.runtime.paged_cache.cache_type, PagedCacheType::F8E4M3);
+        let policy = spec
+            .agentic
+            .code_execution
+            .as_ref()
+            .unwrap()
+            .sandbox_policy
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            policy.max_procs,
+            inference_core::SandboxPolicy::default().max_procs
+        );
+        assert!(spec.anymoe.as_ref().unwrap().layers.is_empty());
+        let built = spec.into_builder();
+        assert_eq!(built.is_ok(), cfg!(feature = "code-execution"));
+    }
+
+    #[test]
+    fn tools_without_a_policy_are_sandboxed_unless_the_mode_is_off() {
+        let developer = SandboxProfile::Developer.default_policy();
+        let auto = default_policy(SandboxMode::Auto).unwrap();
+        assert_eq!(auto.max_procs, developer.max_procs);
+        assert!(!auto.strict);
+        assert!(default_policy(SandboxMode::On).unwrap().strict);
+        assert!(default_policy(SandboxMode::Off).is_none());
+    }
+
+    #[test]
+    fn an_unknown_option_is_refused() {
+        let spec = serde_json::json!({
+            "model": {"Plain": {"model_id": "org/model"}},
+            "runtime": {"paged_cache": {"no_such_option": 32}},
+        });
+        assert!(serde_json::from_value::<EngineSpec>(spec).is_err());
     }
 }

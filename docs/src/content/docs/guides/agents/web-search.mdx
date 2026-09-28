@@ -51,13 +51,17 @@ Responses requests use OpenAI hosted-tool syntax instead:
 </TabItem>
 <TabItem label="Python">
 
-The Python package has no engine-level search switch: a request with `web_search_options` gets the tool.
+A request with `web_search_options` gets the tool; `t.AgenticSpec(search=t.SearchSpec())` on the engine spec also loads the [reranker](#reranking).
 
 ```python
 import inference_rs as ir
 from inference_rs import types as t
 
-with ir.Engine(t.EngineSpec(model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B"))) as engine:
+spec = t.EngineSpec(
+    model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B"),
+    agentic=t.AgenticSpec(search=t.SearchSpec()),
+)
+with ir.Engine(spec) as engine:
     res = engine.chat(
         t.ChatCompletionRequest(
             model="default",
@@ -92,7 +96,7 @@ The built-in search and extraction tools use [strict tool calling](/guides/agent
 
 The neural reranker is opt-in. When a search embedding model is configured, retrieved results pass through a BM25 keyword pre-filter and then an embedding-based reranker before reaching the model. With no embedding model, results go straight to the model unranked.
 
-In the Rust SDK, enabling search already loads the reranker (EmbeddingGemma by default). The Python package's engine spec has no search embedding model, so its results are unranked. On the CLI the reranker is off until you pass `--search-embedding-model`:
+In the Rust SDK, enabling search already loads the reranker (EmbeddingGemma by default). In Python, `t.AgenticSpec(search=t.SearchSpec())` loads it (`embedding_model` takes a `t.SearchEmbeddingModel`, EmbeddingGemma by default); without it, results are unranked. On the CLI, `--enable-search` loads it, and `--search-embedding-model` picks the model:
 
 ```bash
 inference serve --enable-search \

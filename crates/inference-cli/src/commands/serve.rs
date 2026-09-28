@@ -25,8 +25,7 @@ use crate::args::MultimodalAdapterOptions;
 use crate::args::{
     AdapterOptions, AgentCliOptions, CodeExecPermissionArg, DeviceOptions, FormatOptions,
     GlobalOptions, MatformerSelection, ModelFormat, ModelSourceOptions, ModelType,
-    MultimodalOptions, QuantizationOptions, RuntimeOptions, SandboxMode, SandboxOptions,
-    ServerOptions,
+    MultimodalOptions, QuantizationOptions, RuntimeOptions, SandboxOptions, ServerOptions,
 };
 use crate::ui::build_ui_router;
 
@@ -1235,28 +1234,10 @@ pub(crate) fn extract_sandbox_settings(
     sandbox: SandboxOptions,
     runtime: &RuntimeOptions,
 ) -> Option<inference_sandbox::SandboxPolicy> {
-    let mode = match (
-        sandbox.mode,
-        std::env::var(inference_sandbox::SANDBOX_ENV_VAR).ok(),
-    ) {
-        (SandboxMode::Auto, Some(v)) => match v.to_ascii_lowercase().as_str() {
-            "auto" => SandboxMode::Auto,
-            "on" => SandboxMode::On,
-            "off" => SandboxMode::Off,
-            other => {
-                tracing::warn!(
-                    "ignoring invalid {}={other} (expected auto/on/off)",
-                    inference_sandbox::SANDBOX_ENV_VAR
-                );
-                SandboxMode::Auto
-            }
-        },
-        (mode, _) => mode,
-    };
-
+    let mode = inference_sandbox::SandboxMode::from(sandbox.mode).resolve();
     match mode {
-        SandboxMode::Off => None,
-        SandboxMode::Auto | SandboxMode::On => {
+        inference_sandbox::SandboxMode::Off => None,
+        inference_sandbox::SandboxMode::Auto | inference_sandbox::SandboxMode::On => {
             let profile = sandbox
                 .profile
                 .map(Into::into)
@@ -1274,7 +1255,7 @@ pub(crate) fn extract_sandbox_settings(
             if let Some(network) = sandbox.network {
                 policy.network = network.into();
             }
-            policy.strict = matches!(mode, SandboxMode::On);
+            policy.strict = mode == inference_sandbox::SandboxMode::On;
             Some(policy)
         }
     }
@@ -1504,6 +1485,7 @@ mod tests {
     use std::{fs, num::NonZeroUsize, path::PathBuf};
 
     use super::*;
+    use crate::args::SandboxMode;
     use crate::args::{SandboxNetworkMode, SandboxProfileArg};
 
     fn test_model() -> ModelSourceOptions {

@@ -306,6 +306,8 @@ pub struct InferenceRsForServerBuilder {
     code_exec_config: Option<inference_core::CodeExecutionConfig>,
     /// Shell execution configuration
     shell_config: Option<inference_core::ShellConfig>,
+    /// AnyMoE layer built over the single model
+    anymoe: Option<inference_core::AnyMoeSpec>,
 }
 
 impl Default for InferenceRsForServerBuilder {
@@ -354,6 +356,7 @@ impl Default for InferenceRsForServerBuilder {
             disable_eos_stop: false,
             code_exec_config: None,
             shell_config: None,
+            anymoe: None,
         }
     }
 }
@@ -802,6 +805,12 @@ impl InferenceRsForServerBuilder {
         self
     }
 
+    /// Wraps the single model in an AnyMoE layer.
+    pub fn with_anymoe_optional(mut self, anymoe: Option<inference_core::AnyMoeSpec>) -> Self {
+        self.anymoe = anymoe;
+        self
+    }
+
     /// Builds the configured inference.rs instance.
     ///
     /// ### Examples
@@ -845,7 +854,7 @@ impl InferenceRsForServerBuilder {
             init_device(self.cpu, self.seed)?
         };
 
-        let mapper = init_mapper(&self.num_device_layers, &auto_device_map_params);
+        let mapper = init_mapper(&self.num_device_layers, &auto_device_map_params)?;
         let paged_attn = configure_paged_attn(&device, self.paged_attn);
 
         let cache_config = reserve_external_mtp_memory_with_runtime(
@@ -888,7 +897,10 @@ impl InferenceRsForServerBuilder {
             hf_config_overrides: self.hf_config_overrides,
             mtp_config: self.mtp_config.clone(),
             encoder_cache_memory_bytes: self.encoder_cache_memory_bytes,
-            overrides: Default::default(),
+            overrides: inference_core::LoadOverrides {
+                anymoe: self.anymoe,
+                ..Default::default()
+            },
         };
         let loader = loader_config.build_loader(self.no_kv_cache)?;
         inference_instance_info(&*loader);
@@ -993,7 +1005,7 @@ impl InferenceRsForServerBuilder {
                 .clone()
                 .or(self.num_device_layers.clone()),
             &auto_device_map_params,
-        );
+        )?;
         let paged_attn = configure_paged_attn(&device, self.paged_attn);
 
         let requested_cache_config = init_cache_config(
@@ -1172,7 +1184,7 @@ impl InferenceRsForServerBuilder {
                     .clone()
                     .or(self.num_device_layers.clone()),
                 &auto_device_map_params,
-            );
+            )?;
 
             let isq = model_config
                 .in_situ_quant
@@ -1344,45 +1356,39 @@ fn init_device(force_cpu: bool, seed: Option<u64>) -> Result<candle_core::Device
 }
 
 /// Initializes the device mapping configuration for distributing model layers.
+/// Parses `--device-layers` entries: one layer count for device 0, or `ORD:NUM` per device.
+pub fn parse_device_layers(device_layers: &[String]) -> Result<Vec<DeviceLayerMapMetadata>> {
+    if let [layers] = device_layers {
+        if let Ok(layers) = layers.parse::<usize>() {
+            return Ok(vec![DeviceLayerMapMetadata { ordinal: 0, layers }]);
+        }
+    }
+    let mut mapping: Vec<DeviceLayerMapMetadata> = Vec::new();
+    for entry in device_layers {
+        let parsed = entry
+            .split_once(':')
+            .and_then(|(ord, num)| Some((ord.parse::<usize>().ok()?, num.parse::<usize>().ok()?)));
+        let Some((ordinal, layers)) = parsed else {
+            anyhow::bail!("device layers entry `{entry}` is not ORD:NUM");
+        };
+        if mapping.iter().any(|m| m.ordinal == ordinal) {
+            anyhow::bail!("device layers name ordinal {ordinal} twice");
+        }
+        mapping.push(DeviceLayerMapMetadata { ordinal, layers });
+    }
+    Ok(mapping)
+}
+
 fn init_mapper(
     num_device_layers: &Option<Vec<String>>,
     auto_device_map_params: &AutoDeviceMapParams,
-) -> DeviceMapSetting {
-    // Parse device mapper
-    if let Some(device_layers) = num_device_layers {
-        if device_layers.len() == 1 && device_layers[0].parse::<usize>().is_ok() {
-            let layers = device_layers[0].parse::<usize>().unwrap();
-            DeviceMapSetting::Map(DeviceMapMetadata::from_num_device_layers(vec![
-                DeviceLayerMapMetadata { ordinal: 0, layers },
-            ]))
-        } else {
-            let mut mapping = Vec::new();
-            for layer in device_layers {
-                let split = layer.splitn(2, ':').collect::<Vec<_>>();
-                if split.len() < 2 {
-                    panic!("Expected layer to be of format ORD:NUM, got {layer}");
-                }
-                let ord = split[0]
-                    .parse::<usize>()
-                    .unwrap_or_else(|_| panic!("Failed to parse {} as integer.", split[0]));
-                let num = split[1]
-                    .parse::<usize>()
-                    .unwrap_or_else(|_| panic!("Failed to parse {} as integer.", split[1]));
-                for DeviceLayerMapMetadata { ordinal, layers: _ } in &mapping {
-                    if *ordinal == ord {
-                        panic!("Duplicate ordinal {ord}");
-                    }
-                }
-                mapping.push(DeviceLayerMapMetadata {
-                    ordinal: ord,
-                    layers: num,
-                });
-            }
-            DeviceMapSetting::Map(DeviceMapMetadata::from_num_device_layers(mapping))
-        }
-    } else {
-        DeviceMapSetting::Auto(auto_device_map_params.clone())
-    }
+) -> Result<DeviceMapSetting> {
+    Ok(match num_device_layers {
+        Some(device_layers) => DeviceMapSetting::Map(DeviceMapMetadata::from_num_device_layers(
+            parse_device_layers(device_layers)?,
+        )),
+        None => DeviceMapSetting::Auto(auto_device_map_params.clone()),
+    })
 }
 
 /// Logs hardware feature information and the model's sampling strategy and kind.

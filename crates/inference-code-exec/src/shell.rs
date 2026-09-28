@@ -24,14 +24,18 @@ const REAP_INTERVAL: Duration = Duration::from_secs(300);
 const SESSION_TTL: Duration = Duration::from_secs(3600);
 const DEFAULT_MAX_OUTPUT_LENGTH: usize = 4096;
 
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 /// Shell execution config.
 #[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ShellConfig {
     #[serde(default = "default_shell_path")]
+    #[cfg_attr(feature = "utoipa", schema(value_type = String))]
     pub shell_path: PathBuf,
     #[serde(default = "default_shell_timeout_secs")]
     pub timeout_secs: u64,
     #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
     pub working_directory: Option<PathBuf>,
     #[serde(default)]
     pub sandbox_policy: Option<SandboxPolicy>,

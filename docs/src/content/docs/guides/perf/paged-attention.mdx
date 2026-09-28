@@ -29,12 +29,15 @@ from inference_rs import types as t
 
 spec = t.EngineSpec(
     model=t.ModelSelectedPlain(model_id="Qwen/Qwen3-4B"),
-    runtime=t.RuntimeSpec(paged_attn=True),
+    runtime=t.RuntimeSpec(
+        paged_attn=True,
+        paged_cache=t.PagedCacheSpec(context_len=1024, block_size=32),
+    ),
 )
 engine = ir.Engine(spec)
 ```
 
-`paged_attn=True` forces it on, `False` forces it off, and leaving it unset picks the device default. The Python SDK does not expose the KV cache pool size or block size yet; use the CLI `--pa-*` flags to tune them. [Full example](/examples/python/paged-attention/).
+`paged_attn=True` forces it on, `False` forces it off, and leaving it unset picks the device default. `t.PagedCacheSpec` mirrors the `--pa-*` flags: at most one of `context_len`, `memory_mb` or `memory_fraction` sizes the pool, and `block_size` and `cache_type` tune the cache. [Full example](/examples/python/paged-attention/).
 
 </TabItem>
 <TabItem label="Rust">

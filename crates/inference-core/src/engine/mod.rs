@@ -102,6 +102,7 @@ pub enum EngineInstruction {
     Terminate,
 }
 
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 /// Embedding model used for ranking web search results internally.

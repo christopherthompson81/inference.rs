@@ -104,6 +104,41 @@ pub enum SandboxError {
     Io(#[from] std::io::Error),
 }
 
+/// Whether tools that run model-written code are sandboxed.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SandboxMode {
+    /// Sandboxed on Linux/macOS, unsandboxed on Windows; `INFERENCE_RS_SANDBOX` may override it.
+    #[default]
+    Auto,
+    /// Sandboxed, and missing sandbox layers are errors.
+    On,
+    Off,
+}
+
+impl SandboxMode {
+    /// `Auto` defers to `INFERENCE_RS_SANDBOX` when that names a mode.
+    pub fn resolve(self) -> Self {
+        if self != Self::Auto {
+            return self;
+        }
+        let Ok(value) = std::env::var(SANDBOX_ENV_VAR) else {
+            return self;
+        };
+        match value.to_ascii_lowercase().as_str() {
+            "auto" => Self::Auto,
+            "on" => Self::On,
+            "off" => Self::Off,
+            other => {
+                tracing::warn!("ignoring invalid {SANDBOX_ENV_VAR}={other} (expected auto/on/off)");
+                Self::Auto
+            }
+        }
+    }
+}
+
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 /// Network access permitted to sandboxed processes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -150,8 +185,10 @@ impl SandboxProfile {
     }
 }
 
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 /// Policy applied to a sandboxed process.
 #[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct SandboxPolicy {
     /// Address-space cap in MB where resource limits are supported.
     pub max_memory_mb: u64,
@@ -168,10 +205,12 @@ pub struct SandboxPolicy {
     /// Additional filesystem paths the sandboxed process may read.
     /// Appended to the built-in system allowlist.
     #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Vec<String>))]
     pub extra_fs_read: Vec<PathBuf>,
     /// Additional filesystem paths the sandboxed process may read and write.
     /// Appended to the per-session workdir.
     #[serde(default)]
+    #[cfg_attr(feature = "utoipa", schema(value_type = Vec<String>))]
     pub extra_fs_write: Vec<PathBuf>,
     /// Additional environment variable names allowed through the env scrub.
     /// Appended to the built-in allowlist (PATH, LANG, ...). Names only,
@@ -183,6 +222,7 @@ pub struct SandboxPolicy {
     pub strict: bool,
     /// Per-session writable directory. Filled in by the caller right before
     /// `harden()`.
+    #[serde(skip)]
     pub session_workdir: Option<PathBuf>,
 }
 

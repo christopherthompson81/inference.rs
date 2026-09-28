@@ -24,3 +24,7 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["process", "io-util", "time", "sync", "rt"] }
 uuid = { workspace = true, features = ["v4"] }
 tracing.workspace = true
+utoipa = { workspace = true, optional = true }
+
+[features]
+utoipa = ["dep:utoipa", "inference-mcp/utoipa", "inference-sandbox/utoipa"]

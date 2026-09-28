@@ -30,8 +30,79 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | Field | Type | Default |
 | --- | --- | --- |
 | `agent_permission` | `AgentPermission \| None` | optional |
+| `code_execution` | `CodeExecutionConfig \| None` | optional |
 | `max_tool_rounds` | `int \| None` | optional |
+| `mcp` | `McpClientConfig \| None` | optional |
+| `sandbox` | `SandboxMode \| None` | optional |
+| `search` | `SearchSpec \| None` | optional |
+| `shell` | `ShellConfig \| None` | optional |
 | `tool_dispatch_url` | `str \| None` | optional |
+
+
+## `AnyMoeConfig`
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `batch_size` | `int \| None` | optional |
+| `epochs` | `int \| None` | optional |
+| `expert_type` | `AnyMoeExpertType` | required |
+| `gate_model_id` | `str \| None` | optional |
+| `hidden_size` | `int` | required |
+| `loss_csv_path` | `str \| None` | optional |
+| `lr` | `float \| None` | optional |
+| `training` | `bool \| None` | optional |
+
+
+## `AnyMoeExpertType`
+
+One of: `Union[Literal['fine_tuned'], AnyMoeExpertTypeLoraAdapter]`.
+
+
+## `AnyMoeExpertTypeLoraAdapter`
+
+| Field | Type |
+| --- | --- |
+| `alpha` | `float` |
+| `rank` | `int` |
+| `target_modules` | `list[str]` |
+
+
+## `AnyMoeSpec`
+
+The AnyMoE layer to build on top of the loaded model.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `config` | `AnyMoeConfig` | required |
+| `layers` | `list[int] \| None` | optional |
+| `mlp` | `str` | required |
+| `model_ids` | `list[str]` | required |
+| `path` | `str` | required |
+| `prefix` | `str` | required |
+
+
+## `CodeExecutionConfig`
+
+Python code execution config.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `permission` | `CodeExecutionPermission \| None` | optional |
+| `python_path` | `str \| None` | optional |
+| `sandbox_policy` | `SandboxPolicy \| None` | optional |
+| `timeout_secs` | `int \| None` | optional |
+| `working_directory` | `str \| None` | optional |
+
+
+## `CodeExecutionPermission`
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `CodeExecutionPermission.AUTO` | `'auto'` |
+| `CodeExecutionPermission.ASK` | `'ask'` |
+| `CodeExecutionPermission.DENY` | `'deny'` |
 
 
 ## `DiffusionLoaderType`
@@ -66,6 +137,7 @@ What to load and how to run it: the JSON form of the options `inference serve` t
 | --- | --- | --- |
 | `adapters` | `AdapterSpec \| None` | optional |
 | `agentic` | `AgenticSpec \| None` | optional |
+| `anymoe` | `AnyMoeSpec \| None` | optional |
 | `model` | `ModelSelected` | required |
 | `model_id` | `str \| None` | optional |
 | `runtime` | `RuntimeSpec \| None` | optional |
@@ -103,6 +175,75 @@ Admission limits for a dynamic LoRA runtime.
 | `max_adapters` | `int \| None` | `16` |
 | `max_bytes` | `int \| None` | `8589934592` |
 | `max_rank` | `int \| None` | `256` |
+
+
+## `McpClientConfig`
+
+Configuration for MCP client integration
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `auto_register_tools` | `bool \| None` | `True` |
+| `max_concurrent_calls` | `int \| None` | optional |
+| `servers` | `list[McpServerConfig] \| None` | optional |
+| `tool_timeout_secs` | `int \| None` | optional |
+
+
+## `McpServerConfig`
+
+Configuration for an individual MCP server
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `bearer_token` | `str \| None` | optional |
+| `enabled` | `bool \| None` | optional |
+| `id` | `str \| None` | optional |
+| `name` | `str` | required |
+| `resources` | `list[str] \| None` | optional |
+| `source` | `McpServerSource` | required |
+| `tool_prefix` | `str \| None` | optional |
+
+
+## `McpServerSource`
+
+One of: `Union[McpServerSourceHttp, McpServerSourceProcess, McpServerSourceWebSocket]`.
+
+
+## `McpServerSourceHttp`
+
+HTTP-based MCP server using JSON-RPC over HTTP
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `headers` | `dict[str, str] \| None` | optional |
+| `timeout_secs` | `int \| None` | optional |
+| `type` | `Literal['Http']` | `'Http'` |
+| `url` | `str` | required |
+
+
+## `McpServerSourceProcess`
+
+Local process-based MCP server using stdin/stdout communication
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `args` | `list[str]` | required |
+| `command` | `str` | required |
+| `env` | `dict[str, str] \| None` | optional |
+| `type` | `Literal['Process']` | `'Process'` |
+| `work_dir` | `str \| None` | optional |
+
+
+## `McpServerSourceWebSocket`
+
+WebSocket-based MCP server for real-time bidirectional communication
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `headers` | `dict[str, str] \| None` | optional |
+| `timeout_secs` | `int \| None` | optional |
+| `type` | `Literal['WebSocket']` | `'WebSocket'` |
+| `url` | `str` | required |
 
 
 ## `ModelDType`
@@ -433,6 +574,28 @@ Select a GGUF model with X-LoRA.
 | `xlora_model_id` | `str` | required |
 
 
+## `MtpDraftSampling`
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `MtpDraftSampling.AUTO` | `'auto'` |
+| `MtpDraftSampling.GREEDY` | `'greedy'` |
+| `MtpDraftSampling.PROBABILISTIC` | `'probabilistic'` |
+
+
+## `MtpSpec`
+
+MTP speculative decoding, drafting with an assistant model or the head built into the checkpoint.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `draft_sampling` | `MtpDraftSampling \| None` | optional |
+| `model` | `str \| None` | optional |
+| `n_predict` | `int \| None` | optional |
+
+
 ## `MultimodalLoaderType`
 
 The architecture to load the multimodal model as.
@@ -465,6 +628,19 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `MultimodalLoaderType.MUSE_GLIMMER` | `'muse_glimmer'` |
 | `MultimodalLoaderType.DIFFUSIONGEMMA` | `'diffusiongemma'` |
 | `MultimodalLoaderType.PADDLEOCR_VL` | `'paddleocr_vl'` |
+
+
+## `NetworkMode`
+
+Network access permitted to sandboxed processes.
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `NetworkMode.NONE` | `'none'` |
+| `NetworkMode.LOOPBACK` | `'loopback'` |
+| `NetworkMode.FULL` | `'full'` |
 
 
 ## `NormalLoaderType`
@@ -503,21 +679,109 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `NormalLoaderType.LFM2_MOE` | `'lfm2_moe'` |
 
 
+## `PagedCacheSpec`
+
+How much the paged-attention KV cache holds; at most one of `context_len`, `memory_mb` and `memory_fraction`.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `block_size` | `int \| None` | optional |
+| `cache_type` | `PagedCacheType \| None` | optional |
+| `context_len` | `int \| None` | optional |
+| `memory_fraction` | `float \| None` | optional |
+| `memory_mb` | `int \| None` | optional |
+
+
+## `PagedCacheType`
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `PagedCacheType.AUTO` | `'auto'` |
+| `PagedCacheType.F8E4M3` | `'f8e4m3'` |
+
+
 ## `RuntimeSpec`
 
 | Field | Type | Default |
 | --- | --- | --- |
 | `chat_template` | `str \| None` | optional |
 | `device` | `str \| None` | optional |
+| `device_layers` | `list[str] \| None` | optional |
 | `isq` | `str \| None` | optional |
 | `jinja_explicit` | `str \| None` | optional |
 | `max_model_len` | `int \| None` | optional |
 | `max_seqs` | `int \| None` | optional |
+| `mtp` | `MtpSpec \| None` | optional |
 | `no_kv_cache` | `bool \| None` | optional |
 | `paged_attn` | `bool \| None` | optional |
+| `paged_cache` | `PagedCacheSpec \| None` | optional |
 | `prefix_cache_n` | `int \| None` | optional |
 | `seed` | `int \| None` | optional |
 | `token_source` | `str \| None` | optional |
+
+
+## `SandboxMode`
+
+Whether tools that run model-written code are sandboxed.
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `SandboxMode.AUTO` | `'auto'` |
+| `SandboxMode.ON` | `'on'` |
+| `SandboxMode.OFF` | `'off'` |
+
+
+## `SandboxPolicy`
+
+Policy applied to a sandboxed process.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `extra_env` | `list[str] \| None` | optional |
+| `extra_fs_read` | `list[str] \| None` | optional |
+| `extra_fs_write` | `list[str] \| None` | optional |
+| `max_cpu_secs` | `int \| None` | `600` |
+| `max_file_sz_mb` | `int \| None` | `256` |
+| `max_memory_mb` | `int \| None` | `2048` |
+| `max_open_fds` | `int \| None` | `1024` |
+| `max_procs` | `int \| None` | `64` |
+| `network` | `NetworkMode \| None` | `NetworkMode.LOOPBACK` |
+| `strict` | `bool \| None` | `False` |
+
+
+## `SearchEmbeddingModel`
+
+Embedding model used for ranking web search results internally.
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `SearchEmbeddingModel.EMBEDDING_GEMMA` | `'embedding_gemma'` |
+
+
+## `SearchSpec`
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `embedding_model` | `SearchEmbeddingModel \| None` | optional |
+
+
+## `ShellConfig`
+
+Shell execution config.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `permission` | `AgentPermission \| None` | optional |
+| `sandbox_policy` | `SandboxPolicy \| None` | optional |
+| `shell_path` | `str \| None` | optional |
+| `timeout_secs` | `int \| None` | optional |
+| `working_directory` | `str \| None` | optional |
 
 
 ## `SkillsSpec`
