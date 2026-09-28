@@ -3,7 +3,7 @@
 # [--slim] [--docs] [--bindings]; --models runs the real-checkpoint parity tests on CPU (--cuda keeps one GPU parity check).
 # --slim lints inference-core with no model families and with each family alone, so feature gates stay intact.
 # With --cuda, the GPU-bound CUDA suite runs in the background while the CPU lint and tests run.
-# --bindings builds libinference_ffi and runs the C# binding tests (needs the .NET SDK) on the tiny test checkpoint.
+# --bindings builds libinference_ffi and runs the C# (needs the .NET SDK) and Python binding tests on the tiny checkpoint.
 # --sweep then deletes target/debug artifacts the selected modes no longer use (stale variants pile up otherwise).
 # Build env (CC/CXX/NVCC) and INFERENCE_TEST_* paths belong in ~/.cargo/config.toml [env]; changing one rebuilds deps.
 set -euo pipefail
@@ -42,6 +42,7 @@ SLIM_FAMILIES=("" models-gemma models-llama models-other models-phi models-qwen)
 # --workspace keeps the tests' feature unification, so the cdylib reuses their artifacts instead of rebuilding deps.
 BINDINGS=(build --workspace --lib --example tiny_checkpoint)
 CSHARP=bindings/csharp
+PYTHON=bindings/python
 slim_clippy() { cargo clippy -p inference-core --lib --tests --no-default-features ${1:+--features $1} "${@:2}"; }
 
 if [[ $lint -eq 1 ]]; then
@@ -103,14 +104,20 @@ if [[ $bindings -eq 1 ]]; then
     cargo "${BINDINGS[@]}"
     tiny=$(mktemp -d)
     target/debug/examples/tiny_checkpoint "$tiny" > /dev/null
-    dotnet build "$CSHARP/InferenceRs.slnx" -v quiet
     # The library just built, not a release build a resolver would prefer
     native=$PWD/target/debug
     bindings_failed=0
-    INFERENCE_NATIVE_DIR=$native dotnet run --project "$CSHARP/tests/InferenceRs.BindingCoverage" --no-build \
-        || bindings_failed=1
     INFERENCE_NATIVE_DIR=$native INFERENCE_TEST_TINY_CHECKPOINT=$tiny \
-        dotnet run --project "$CSHARP/tests/InferenceRs.EngineTest" --no-build || bindings_failed=1
+        python3 -m unittest discover -s "$PYTHON/tests" -t "$PYTHON" || bindings_failed=1
+    # A missing or broken .NET SDK fails the C# tests without skipping the Python ones above
+    if dotnet build "$CSHARP/InferenceRs.slnx" -v quiet; then
+        INFERENCE_NATIVE_DIR=$native dotnet run --project "$CSHARP/tests/InferenceRs.BindingCoverage" --no-build \
+            || bindings_failed=1
+        INFERENCE_NATIVE_DIR=$native INFERENCE_TEST_TINY_CHECKPOINT=$tiny \
+            dotnet run --project "$CSHARP/tests/InferenceRs.EngineTest" --no-build || bindings_failed=1
+    else
+        bindings_failed=1
+    fi
     rm -rf "$tiny"
     [[ $bindings_failed -eq 0 ]] || exit 1
 fi
