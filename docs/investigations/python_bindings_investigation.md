@@ -213,3 +213,21 @@ Review fixes:
 
 Next: calibration, re-ISQ, tokenize/detokenize, session and default-model operations as ABI entry points, which is
 what the pyo3 `Runner` still has over the ABI; then wheels; then removing pyo3.
+
+## Run 6 - 2026-09-28
+
+Question: what does the pyo3 `Runner` still do that the ABI can't, and does online calibration work end to end?
+
+The remaining gap was runtime operations: re-ISQ, online calibration, session list/export/import/delete,
+tokenize/detokenize and the max sequence length. They now live in `inference_api::operations`, the HTTP handlers call
+them, and ABI 0.0.11 adds ten entry points; `max_model_len` rides on the model cards. Online calibration on the tiny
+checkpoint loaded with `isq: q8_0`: start tracks 16 layers, one chat collects 990 token rows, apply saves the
+`.cimatrix` and the requantized model still serves. With `online_calibration.py` ported, no example or guide needs
+pyo3.
+
+Findings on the way: calibration and tokenization errors were plain `anyhow` strings the API mapped to a bare
+internal error, so an ABI caller never saw "requires the model to have been loaded with ISQ"; they are invalid
+requests carrying the reason now. Core's tokenize and detokenize panicked the engine thread when the caller dropped
+its receiver (reachable from the async Rust API); they log instead.
+
+Next: wheels bundling `libinference_ffi`; then removing the pyo3 crate.

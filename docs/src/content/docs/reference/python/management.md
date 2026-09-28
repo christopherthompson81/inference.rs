@@ -1,6 +1,6 @@
 ---
 title: Models, adapters, files and skills
-description: "Model status, LoRA adapters, files, skills, approvals and the media generation calls."
+description: "Model status, LoRA adapters, files, skills, approvals, sessions, calibration, tokenization and the media generation calls."
 sidebar:
   order: 7
 ---
@@ -50,8 +50,6 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 
 ## `CalibrationApplyRequest`
 
-Request body for applying online calibration.
-
 | Field | Type | Default |
 | --- | --- | --- |
 | `save_cimatrix` | `str \| None` | optional |
@@ -92,6 +90,22 @@ OpenAI-compatible container file metadata backed by the same in-process file sto
 | `mime_type` | `str` | required |
 | `object` | `str` | required |
 | `source` | `SourceMeta` | required |
+
+
+## `DetokenizeRequest`
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `model` | `str \| None` | optional |
+| `skip_special_tokens` | `bool \| None` | `True` |
+| `tokens` | `list[int]` | required |
+
+
+## `DetokenizeResponse`
+
+| Field | Type |
+| --- | --- |
+| `text` | `str` |
 
 
 ## `FileDeleted`
@@ -231,6 +245,7 @@ Model information metadata about an available mode
 | `adapter_generation` | `str \| None` | optional |
 | `created` | `int` | required |
 | `id` | `str` | required |
+| `max_model_len` | `int \| None` | optional |
 | `mcp_servers_connected` | `int \| None` | optional |
 | `mcp_tools_count` | `int \| None` | optional |
 | `object` | `str` | required |
@@ -286,6 +301,15 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `ggml_type` | `str` |
 
 
+## `ReIsqResponse`
+
+Answered once the requantization is queued behind the requests already running.
+
+| Field | Type |
+| --- | --- |
+| `ggml_type` | `str` |
+
+
 ## `SerializedSession`
 
 Wire format. Images and video frames are base64 PNGs.
@@ -296,6 +320,28 @@ Wire format. Images and video frames are base64 PNGs.
 | `images` | `list[str] \| None` | optional |
 | `messages` | `list[Any]` | required |
 | `videos` | `list[SerializedVideo] \| None` | optional |
+
+
+## `SessionDeleted`
+
+| Field | Type |
+| --- | --- |
+| `deleted` | `bool` |
+| `id` | `str` |
+
+
+## `SessionList`
+
+| Field | Type |
+| --- | --- |
+| `data` | `list[str]` |
+
+
+## `SessionStored`
+
+| Field | Type |
+| --- | --- |
+| `id` | `str` |
 
 
 ## `SkillListObject`
@@ -360,6 +406,22 @@ Speech generation request
 | `input` | `str` | required |
 | `model` | `str \| None` | optional |
 | `response_format` | `AudioResponseFormat` | required |
+
+
+## `TokenizeRequest`
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `add_special_tokens` | `bool \| None` | `True` |
+| `model` | `str \| None` | optional |
+| `text` | `str` | required |
+
+
+## `TokenizeResponse`
+
+| Field | Type |
+| --- | --- |
+| `tokens` | `list[int]` |
 
 
 ## `TuneModelRequest`

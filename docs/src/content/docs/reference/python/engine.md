@@ -149,6 +149,87 @@ delete_response(response_id: str) -> types.ResponseDeleted
 cancel_response(response_id: str) -> types.ResponseResource
 ```
 
+### `Engine.re_isq`
+
+```text
+re_isq(ggml_type: str) -> types.ReIsqResponse
+```
+
+Requantizes a model that loaded with ISQ; answers once the engine has queued it.
+
+### `Engine.calibration_start`
+
+```text
+calibration_start() -> types.CalibrationStatus
+```
+
+Starts collecting activation statistics from the requests the engine serves.
+
+### `Engine.calibration_status`
+
+```text
+calibration_status() -> types.CalibrationStatus
+```
+
+### `Engine.calibration_apply`
+
+```text
+calibration_apply(
+    save_cimatrix: str | None = None,
+) -> types.CalibrationStatus
+```
+
+Requantizes from the collected statistics; returns the status as it stood before.
+
+### `Engine.list_sessions`
+
+```text
+list_sessions() -> types.SessionList
+```
+
+### `Engine.get_session`
+
+```text
+get_session(session_id: str) -> types.SerializedSession
+```
+
+### `Engine.put_session`
+
+```text
+put_session(
+    session_id: str,
+    session: types.SerializedSession | str,
+) -> types.SessionStored
+```
+
+Imports a session under `session_id`, replacing any session there.
+
+### `Engine.delete_session`
+
+```text
+delete_session(session_id: str) -> types.SessionDeleted
+```
+
+### `Engine.tokenize`
+
+```text
+tokenize(
+    text: str,
+    add_special_tokens: bool = True,
+    model: str | None = None,
+) -> list[int]
+```
+
+### `Engine.detokenize`
+
+```text
+detokenize(
+    tokens: Sequence[int],
+    skip_special_tokens: bool = True,
+    model: str | None = None,
+) -> str
+```
+
 ### `Engine.list_models`
 
 ```text
@@ -541,6 +622,12 @@ speech_generation(request_json: str) -> Blob
 
 Speaks text; the blob's MIME type carries the sample rate and channel count.
 
+### `JsonEngine._call2`
+
+```text
+_call2(name: str, first: str, second: str) -> str
+```
+
 ### `JsonEngine.resolve_approval`
 
 ```text
@@ -558,6 +645,66 @@ upload_file(
     purpose: str,
     mime_type: str | None = None,
 ) -> str
+```
+
+### `JsonEngine.re_isq`
+
+```text
+re_isq(request_json: str) -> str
+```
+
+### `JsonEngine.calibration_start`
+
+```text
+calibration_start() -> str
+```
+
+### `JsonEngine.calibration_status`
+
+```text
+calibration_status() -> str
+```
+
+### `JsonEngine.calibration_apply`
+
+```text
+calibration_apply(request_json: str = '{}') -> str
+```
+
+### `JsonEngine.list_sessions`
+
+```text
+list_sessions() -> str
+```
+
+### `JsonEngine.get_session`
+
+```text
+get_session(session_id: str) -> str
+```
+
+### `JsonEngine.put_session`
+
+```text
+put_session(session_id: str, session_json: str) -> str
+```
+
+### `JsonEngine.delete_session`
+
+```text
+delete_session(session_id: str) -> str
+```
+
+### `JsonEngine.tokenize`
+
+```text
+tokenize(request_json: str) -> str
+```
+
+### `JsonEngine.detokenize`
+
+```text
+detokenize(request_json: str) -> str
 ```
 
 ### `JsonEngine.list_files`

@@ -23,6 +23,7 @@ pub mod lora_routing;
 pub mod media_source;
 pub mod models;
 pub mod openai;
+pub mod operations;
 pub mod responses;
 pub mod responses_types;
 #[doc(hidden)]

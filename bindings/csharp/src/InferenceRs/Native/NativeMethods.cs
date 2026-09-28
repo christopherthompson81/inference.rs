@@ -9,7 +9,7 @@ internal static unsafe partial class NativeMethods
     internal const string Library = "inference_ffi";
 
     /// <summary>The ABI these declarations mirror; while it is 0.0.x any other version may differ anywhere.</summary>
-    internal const uint AbiVersion = (0 << 16) | (0 << 8) | 10;
+    internal const uint AbiVersion = (0 << 16) | (0 << 8) | 11;
 
     /// <summary>Refuses a library built for another ABI, before any call into it could misread its memory.</summary>
     internal static void EnsureAbi()
@@ -181,6 +181,44 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(Library)]
     internal static partial InferenceStatus inference_approval_resolve(
         IntPtr engine, byte* approvalId, nuint approvalIdLen, byte* request, nuint requestLen, out IntPtr outResponse);
+
+    // Requantization, online calibration, sessions and tokenization.
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_re_isq(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_calibration_start(IntPtr engine, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_calibration_status(IntPtr engine, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_calibration_apply(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_sessions_list(IntPtr engine, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_session_get(IntPtr engine, byte* id, nuint idLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_session_put(
+        IntPtr engine, byte* id, nuint idLen, byte* session, nuint sessionLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_session_delete(
+        IntPtr engine, byte* id, nuint idLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_tokenize(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_detokenize(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
 
     // Files, skills and system reports.
 

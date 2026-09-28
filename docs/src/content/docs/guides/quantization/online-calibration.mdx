@@ -27,7 +27,7 @@ inference serve -f /path/model-BF16.gguf --isq q4k
 ```
 
 Then drive the lifecycle on the surface of your choice. There is no CLI command for the
-lifecycle itself; it is driven over HTTP or from an SDK against the running server.
+lifecycle itself; it is driven over HTTP against the running server, or from an SDK on the engine it loaded.
 
 <Tabs>
 <TabItem label="HTTP">
@@ -69,10 +69,10 @@ Each method has a `_with_model` variant for multi-model setups. See the
 <TabItem label="Python">
 
 ```python
-runner.begin_calibration()
+engine.calibration_start()
 # ... serve traffic ...
-status = runner.calibration_status()
-runner.apply_calibration(save_cimatrix="traffic.cimatrix")
+status = engine.calibration_status()
+engine.calibration_apply(save_cimatrix="traffic.cimatrix")
 ```
 
 `calibration_status` returns a `CalibrationStatus` with `collecting`, `layers`,

@@ -64,6 +64,7 @@ fn model_object(state: &SharedInferenceRsState, id: String) -> ModelObject {
         tools_available: None,
         mcp_tools_count: None,
         mcp_servers_connected: None,
+        max_model_len: None,
     }
 }
 
@@ -77,17 +78,16 @@ pub fn list_models(state: &SharedInferenceRsState) -> Result<ModelObjects, ApiEr
     for (model_id, status) in models_with_status {
         let mut object = model_object(state, model_id.clone());
         if status == CoreModelStatus::Loaded {
-            let tools_count = state
-                .get_tools_count(Some(&model_id))
-                .map_err(|_| ApiError::internal())?;
-            let has_mcp = state
-                .has_mcp_client(Some(&model_id))
-                .map_err(|_| ApiError::internal())?;
+            // Each lookup takes the engine lock again, so a model unloading meanwhile leaves these unset rather than
+            // failing the list.
+            let tools_count = state.get_tools_count(Some(&model_id)).unwrap_or_default();
+            let has_mcp = state.has_mcp_client(Some(&model_id)).unwrap_or_default();
             if has_mcp || tools_count > 0 {
                 object.tools_available = Some(tools_count > 0);
                 object.mcp_tools_count = Some(tools_count);
                 object.mcp_servers_connected = Some(1);
             }
+            object.max_model_len = state.max_sequence_length(Some(&model_id)).ok().flatten();
         }
         object.status = Some(status.to_string());
         data.push(object);

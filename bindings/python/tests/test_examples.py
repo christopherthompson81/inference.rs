@@ -20,11 +20,6 @@ EXAMPLES = REPO / "examples" / "python"
 GUIDES = REPO / "docs" / "src" / "content" / "docs"
 PYTHON_BLOCK = re.compile(r"^```python\n(.*?)^```", re.DOTALL | re.MULTILINE)
 PACKAGE = "inference_rs"
-# Sources that still need engine features the C ABI does not offer yet (calibration operations); they keep the pyo3
-# API until it does.
-PYO3_SOURCES = {
-    "online_calibration.py",
-}
 
 
 def sources():
@@ -153,13 +148,9 @@ class Examples(unittest.TestCase):
         broken = {}
         for name, source in sources():
             found = problems(name, source)
-            if found and name not in PYO3_SOURCES:
+            if found:
                 broken[name] = found
         self.assertEqual(broken, {})
-
-    def test_the_listed_sources_still_need_the_pyo3_api(self):
-        ported = [name for name, source in sources() if name in PYO3_SOURCES and not problems(name, source)]
-        self.assertEqual(ported, [])
 
     def test_the_checks_catch_what_they_claim_to(self):
         source = """

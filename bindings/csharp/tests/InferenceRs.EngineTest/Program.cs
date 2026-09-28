@@ -38,6 +38,7 @@ internal static class Program
             ErrorsCarryTheEnvelope(engine);
             FilesRoundTrip(engine);
             SkillsAreStored(engine);
+            RuntimeOperations(engine);
         }
         StreamsOutliveTheirEngine(model);
         HostToolsLoadAndBadOnesAreRefused(model);
@@ -162,6 +163,27 @@ internal static class Program
         Check("an unknown model's status is NotFound", unknown?.Status == InferenceStatus.NotFound);
         var approval = Throws(() => engine.ResolveApproval("never-issued", """{"decision": "approve"}"""));
         Check("an unknown approval is NotFound", approval?.Status == InferenceStatus.NotFound);
+    }
+
+    private static void RuntimeOperations(InferenceEngine engine)
+    {
+        var tokens = JsonNode.Parse(engine.Tokenize("""{"text": "Reply with ok"}"""))!["tokens"]!;
+        var detokenize = new JsonObject { ["tokens"] = tokens.DeepClone() }.ToJsonString();
+        // The tiny tokenizer has no decoder, so its word-boundary markers come back as they are.
+        var text = ((string?)JsonNode.Parse(engine.Detokenize(detokenize))!["text"])?.Replace('\u2581', ' ');
+        Check("detokenizing tokens gives the text back", text == "Reply with ok");
+
+        const string session = """{"messages": [{"role": {"Left": "user"}, "content": {"Left": "hi"}}]}""";
+        Check("a session is imported", (string?)JsonNode.Parse(engine.PutSession("cs-session", session))!["id"] == "cs-session");
+        Check("an imported session is listed",
+            JsonNode.Parse(engine.ListSessions())!["data"]!.AsArray().Any(id => (string?)id == "cs-session"));
+        Check("an imported session exports", JsonNode.Parse(engine.GetSession("cs-session"))!["messages"] is JsonArray);
+        Check("a session is deleted", (bool)JsonNode.Parse(engine.DeleteSession("cs-session"))!["deleted"]!);
+        Check("a deleted session is NotFound", Throws(() => engine.GetSession("cs-session"))?.Status == InferenceStatus.NotFound);
+
+        Check("calibration reports its status", JsonNode.Parse(engine.CalibrationStatus())!["collecting"] is not null);
+        var badIsq = Throws(() => engine.ReIsq("""{"ggml_type": "no-such-type"}"""));
+        Check("an unknown ISQ type is InvalidRequest", badIsq?.Status == InferenceStatus.InvalidRequest);
     }
 
     private static void StreamsOutliveTheirEngine(string model)

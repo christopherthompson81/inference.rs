@@ -294,24 +294,26 @@ class JsonEngine:
         """Speaks text; the blob's MIME type carries the sample rate and channel count."""
         return self._blob("inference_speech_generation", request_json)
 
-    def resolve_approval(self, approval_id: str, decision_json: str) -> str:
-        """Answers the approval an agentic_tool_approval_required stream event named."""
-        approval = text_arg(approval_id)
-        decision = text_arg(decision_json)
+    def _call2(self, name: str, first: str, second: str) -> str:
+        first_data, second_data = text_arg(first), text_arg(second)
         response = ctypes.c_void_p()
         with Lease(self._handle) as engine:
             check(
-                lib.inference_approval_resolve(
+                getattr(lib, name)(
                     engine,
-                    approval,
-                    len(approval),
-                    decision,
-                    len(decision),
+                    first_data,
+                    len(first_data),
+                    second_data,
+                    len(second_data),
                     ctypes.byref(response),
                 ),
-                "inference_approval_resolve",
+                name,
             )
         return take_string(response)
+
+    def resolve_approval(self, approval_id: str, decision_json: str) -> str:
+        """Answers the approval an agentic_tool_approval_required stream event named."""
+        return self._call2("inference_approval_resolve", approval_id, decision_json)
 
     def upload_file(self, data: bytes, filename: str, purpose: str, mime_type: str | None = None) -> str:
         data = bytes_arg(data)
@@ -330,6 +332,36 @@ class JsonEngine:
                 "inference_file_upload",
             )
         return take_string(response)
+
+    def re_isq(self, request_json: str) -> str:
+        return self._call("inference_re_isq", request_json)
+
+    def calibration_start(self) -> str:
+        return self._get("inference_calibration_start")
+
+    def calibration_status(self) -> str:
+        return self._get("inference_calibration_status")
+
+    def calibration_apply(self, request_json: str = "{}") -> str:
+        return self._call("inference_calibration_apply", request_json)
+
+    def list_sessions(self) -> str:
+        return self._get("inference_sessions_list")
+
+    def get_session(self, session_id: str) -> str:
+        return self._call("inference_session_get", session_id)
+
+    def put_session(self, session_id: str, session_json: str) -> str:
+        return self._call2("inference_session_put", session_id, session_json)
+
+    def delete_session(self, session_id: str) -> str:
+        return self._call("inference_session_delete", session_id)
+
+    def tokenize(self, request_json: str) -> str:
+        return self._call("inference_tokenize", request_json)
+
+    def detokenize(self, request_json: str) -> str:
+        return self._call("inference_detokenize", request_json)
 
     def list_files(self) -> str:
         return self._get("inference_files_list")

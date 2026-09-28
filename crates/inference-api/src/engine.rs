@@ -5,10 +5,11 @@ use std::sync::Arc;
 use candle_core::Device;
 use futures::StreamExt;
 use inference_core::{
-    AgentPermission, AnyMoeSpec, ChatCompletionResponse, CodeExecutionConfig, CompletionResponse,
-    ImageGenerationResponse, InferenceRs, McpClientConfig, ModelSelected, MtpConfig,
-    MtpDraftSamplingMethod, PagedCacheType, Response, SandboxMode, SandboxPolicy, SandboxProfile,
-    SearchCallback, SearchEmbeddingModel, ShellConfig, TokenSource, ToolCallbackWithTool,
+    AgentPermission, AnyMoeSpec, CalibrationAction, CalibrationStatus, ChatCompletionResponse,
+    CodeExecutionConfig, CompletionResponse, ImageGenerationResponse, InferenceRs, McpClientConfig,
+    ModelSelected, MtpConfig, MtpDraftSamplingMethod, PagedCacheType, Response, SandboxMode,
+    SandboxPolicy, SandboxProfile, SearchCallback, SearchEmbeddingModel, SerializedSession,
+    ShellConfig, TokenSource, ToolCallbackWithTool,
 };
 use serde::Deserialize;
 
@@ -38,6 +39,11 @@ use crate::{
     openai::{
         ChatCompletionRequest, CompletionRequest, EmbeddingRequest, EmbeddingResponse,
         ImageGenerationRequest, ModelObjects, OpenAiToolSurface, SpeechGenerationRequest,
+    },
+    operations::{
+        self, CalibrationApplyRequest, DetokenizeRequest, DetokenizeResponse, ReIsqRequest,
+        ReIsqResponse, SessionDeleted, SessionList, SessionStored, TokenizeRequest,
+        TokenizeResponse,
     },
     responses::{
         cancel_response, collect_response, delete_response, get_response, prepare_response,
@@ -792,6 +798,97 @@ impl Engine {
         request: UnloadLoraAdapterRequest,
     ) -> Result<LoraAdapterObject, ApiError> {
         unload_adapter(self.state(), &self.adapters, request).await
+    }
+
+    /// Requantizes the loaded model to another ISQ type.
+    pub async fn re_isq(&self, request: ReIsqRequest) -> Result<ReIsqResponse, ApiError> {
+        operations::re_isq(self.state(), request).await
+    }
+
+    /// Starts, reports or applies online calibration; applying requantizes from the collected statistics.
+    pub async fn calibration(
+        &self,
+        action: CalibrationAction,
+    ) -> Result<CalibrationStatus, ApiError> {
+        operations::calibration(self.state(), action).await
+    }
+
+    pub fn sessions(&self) -> Result<SessionList, ApiError> {
+        operations::list_sessions(self.state())
+    }
+
+    pub fn session(&self, session_id: &str) -> Result<SerializedSession, ApiError> {
+        operations::export_session(self.state(), session_id)
+    }
+
+    pub fn put_session(
+        &self,
+        session_id: &str,
+        session: SerializedSession,
+    ) -> Result<SessionStored, ApiError> {
+        operations::import_session(self.state(), session_id.to_string(), session)?;
+        Ok(SessionStored {
+            id: session_id.to_string(),
+        })
+    }
+
+    pub fn delete_session(&self, session_id: &str) -> Result<SessionDeleted, ApiError> {
+        operations::delete_session(self.state(), session_id)
+    }
+
+    pub async fn tokenize(&self, request: TokenizeRequest) -> Result<TokenizeResponse, ApiError> {
+        operations::tokenize(self.state(), request).await
+    }
+
+    pub async fn detokenize(
+        &self,
+        request: DetokenizeRequest,
+    ) -> Result<DetokenizeResponse, ApiError> {
+        operations::detokenize(self.state(), request).await
+    }
+
+    pub async fn re_isq_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.re_isq(parse_json(request)?).await?)
+    }
+
+    pub async fn calibration_start_json(&self) -> Result<String, ApiError> {
+        to_json(&self.calibration(CalibrationAction::Start).await?)
+    }
+
+    pub async fn calibration_status_json(&self) -> Result<String, ApiError> {
+        to_json(&self.calibration(CalibrationAction::Status).await?)
+    }
+
+    pub async fn calibration_apply_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let request: CalibrationApplyRequest = parse_json(request)?;
+        let action = CalibrationAction::Apply {
+            save_cimatrix: request.save_cimatrix.map(Into::into),
+        };
+        to_json(&self.calibration(action).await?)
+    }
+
+    pub fn sessions_json(&self) -> Result<String, ApiError> {
+        to_json(&self.sessions()?)
+    }
+
+    pub fn session_json(&self, session_id: &str) -> Result<String, ApiError> {
+        to_json(&self.session(session_id)?)
+    }
+
+    pub fn put_session_json(&self, session_id: &str, session: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.put_session(session_id, parse_json(session)?)?)
+    }
+
+    pub fn delete_session_json(&self, session_id: &str) -> Result<String, ApiError> {
+        to_json(&self.delete_session(session_id)?)
+    }
+
+    pub async fn tokenize_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.tokenize(parse_json(request)?).await?)
+    }
+
+    pub async fn detokenize_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.detokenize(parse_json(request)?).await?)
     }
 
     pub fn models_json(&self) -> Result<String, ApiError> {

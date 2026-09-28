@@ -970,7 +970,7 @@ impl Engine {
                     .response
                     .send(Ok(toks))
                     .await
-                    .expect("Sender disconnected unexpectedly!");
+                    .unwrap_or_else(|_| warn!("Receiver disconnected"));
             }
             Either::Right(text) => {
                 let pipeline = &*get_mut_arcmutex!(self.pipeline);
@@ -981,7 +981,7 @@ impl Engine {
                         request
                             .response
                             .send(Err(anyhow::Error::msg(
-                                "Pipeline does not include a toksnizer.",
+                                "Pipeline does not include a tokenizer.",
                             )))
                             .await
                             .unwrap_or_else(|_| warn!("Receiver disconnected"));
@@ -1004,7 +1004,7 @@ impl Engine {
                     .response
                     .send(Ok(toks.get_ids().to_vec()))
                     .await
-                    .expect("Sender disconnected unexpectedly!");
+                    .unwrap_or_else(|_| warn!("Receiver disconnected"));
             }
         };
     }
@@ -1018,7 +1018,7 @@ impl Engine {
                 request
                     .response
                     .send(Err(anyhow::Error::msg(
-                        "Pipeline does not include a toksnizer.",
+                        "Pipeline does not include a tokenizer.",
                     )))
                     .await
                     .unwrap_or_else(|_| warn!("Receiver disconnected"));
@@ -1041,7 +1041,7 @@ impl Engine {
             .response
             .send(Ok(txt))
             .await
-            .expect("Sender disconnected unexpectedly!");
+            .unwrap_or_else(|_| warn!("Receiver disconnected"));
     }
 }
 
