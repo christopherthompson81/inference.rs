@@ -5,7 +5,9 @@
 
 pub mod config;
 pub mod connector;
+pub mod inputs_processor;
 pub mod merge;
+mod preprocess;
 pub mod rope_index;
 pub mod text;
 pub mod vision;

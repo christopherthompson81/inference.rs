@@ -2,5 +2,4 @@
 
 pub(crate) use inference_models_other::paddleocr_vl::*;
 
-pub(crate) mod inputs_processor;
-pub(crate) mod preprocess;
+pub(crate) mod processor;

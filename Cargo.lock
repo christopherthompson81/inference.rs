@@ -3091,17 +3091,21 @@ dependencies = [
 name = "inference-models-other"
 version = "0.9.3"
 dependencies = [
+ "anyhow",
  "candle-core",
  "candle-nn",
+ "image",
  "indicatif 0.18.3",
  "inference-nn",
  "inference-quant",
+ "itertools 0.14.0",
  "rand 0.9.4",
  "rand_distr",
  "safetensors",
  "serde",
  "serde_json",
  "tempfile",
+ "tokenizers",
  "tracing",
 ]
 

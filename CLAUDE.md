@@ -79,7 +79,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 
 ### Workspace Structure
 - `crates/inference-core/` - Core inference engine, model implementations, pipelines
-- `crates/inference-models-{llama,qwen,gemma,phi,other}/` - Model families (one crate per family, built on `inference-nn`): text models plus the vision models built on their text stacks, each behind an `inference-core` feature (`models-llama`, ...; all on by default). Preprocessing stays in core; `--slim` checks core with each family alone
+- `crates/inference-models-{llama,qwen,gemma,phi,other}/` - Model families (one crate per family, built on `inference-nn`): text models plus the vision models built on their text stacks, each behind an `inference-core` feature (`models-llama`, ...; all on by default). A multimodal model's input processor (a `MultimodalInputsProcessor` over `inference_nn::media_inputs`) lives beside it; its `Processor` (chat template actions) stays in core. `--slim` checks core with each family alone
 - `crates/inference-models-{speech,diffusion}/` - Speech (Dia) and image generation (FLUX) models, always built; their loaders, `SpeechLoaderType`/`DiffusionLoaderType` and request processors stay in core
 - `crates/inference-nn/` - Model-facing building blocks: layers, attention and its metadata, KV/paged caches, GDN, MoE, device mapping, and the CUDA/Metal kernels behind them
 - `crates/inference-cli/` - Unified CLI binary (commands: run, serve, bench, from-config)
@@ -112,7 +112,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 ### Adding New Features
 
 When adding new model architectures:
-1. Implement the model in its family crate, `crates/inference-models-<family>/`; request preprocessing (`inputs_processor.rs`) stays in core under `crates/inference-core/src/vision_models/<model>/` beside a module that re-exports the model
+1. Implement the model in its family crate, `crates/inference-models-<family>/`, with its input processor (`<model>/inputs_processor.rs`); its `Processor` goes in core's `crates/inference-core/src/vision_models/<model>/processor.rs`, beside a module that re-exports the model
 2. Add its loader in `crates/inference-core/src/pipeline/loaders/normal_loaders/` (or `multimodal_loaders/`)
 3. Add one row to `normal_loader_types!` (or `multimodal_loader_types!`) in that directory's `mod.rs`. The row gives
    the CLI name, the HF class, the `model_type` (text only) and the loader, and the enum variant, parsing, display, HF detection and loader

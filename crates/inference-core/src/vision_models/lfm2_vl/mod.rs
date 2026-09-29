@@ -2,5 +2,5 @@
 
 pub(crate) use inference_models_other::lfm2_vl::*;
 
-pub(crate) mod inputs_processor;
-pub(crate) use inputs_processor::Lfm2VlProcessor;
+pub(crate) mod processor;
+pub(crate) use processor::Lfm2VlProcessor;

@@ -87,3 +87,20 @@ cold compile and lib test (the end of the cold build since Run 26 of the build-t
     through `multimodal_mut()`.
 - Next: move the processors into their family crates, one family per PR. Each keeps its `Processor` impl (the chat
   template actions) in core and exports its input processor.
+
+## Run 3 - 2026-09-29
+
+- Change: the first family move. The LFM2-VL and PaddleOCR-VL input processors (and PaddleOCR-VL's `preprocess.rs`)
+  moved into inference-models-other as `<model>/inputs_processor.rs`, with no body changes.
+  - Core keeps each `Processor` impl in a new `vision_models/<model>/processor.rs`.
+  - PaddleOCR-VL's associated token consts became module consts in the family crate, and `Lfm2VlImageProcessor::new`
+    replaced the core constructor.
+  - inference-models-other gains `anyhow`, `image`, `itertools` and `tokenizers`. None of them adds a crate to the
+    build, since inference-nn already depends on each.
+  - Nothing left in the moved code needed core. Every `crate::` path resolved through inference-nn's
+    `media_inputs`, `paged_attention`, `gdn` and `device_map`, which confirms the seam covers these two.
+- Command: `scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`.
+- Result: green (2191 CPU and 2511 CUDA tests). The review found no behaviour change. Three nits were applied: unused
+  `Clone` derives, a split impl block, and the `pub` on `preprocess`.
+- Next: the phi family (phi3, phi4). Its processors additionally use inference-audio, inference-vision, `regex` and
+  `rubato`. The core-size effect will be measured once the larger families have moved; this pair is about 1.6k lines.
