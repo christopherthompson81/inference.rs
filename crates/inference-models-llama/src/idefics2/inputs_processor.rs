@@ -4,144 +4,44 @@ use std::{any::Any, ops::Range, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
 use image::{DynamicImage, GenericImageView};
-use indexmap::IndexMap;
 use inference_vision::{ApplyTransforms, Normalize, Rescale, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
-use crate::paged_attention::PagedAttentionMeta;
-use crate::{
-    device_map::DeviceMapper,
-    paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
-    pipeline::{
-        apply_chat_template, InputProcessorOutput, InputsProcessor, InputsProcessorValidationError,
-        MessagesAction, Processor,
-    },
-    request::ReasoningEffort,
-    sequence::find_image_placeholder_ranges,
-    vision_models::multimodal_layout::{
-        MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
-        RequestMultimodalLayout,
-    },
-    MessageContent, Pipeline, Tool,
-};
-
-use crate::vision_models::media_host::MediaInputsProcessor;
-use crate::vision_models::{
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
     image_processor::{ImagePreProcessor, PreprocessedImages},
+    media::find_image_placeholder_ranges,
     preprocessor_config::{PreProcessorConfig, ToFilter},
-    processor_config::ProcessorConfig,
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, TextInputs,
+    },
 };
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
+use crate::paged_attention::{
+    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
+    PagedAttentionMeta,
+};
+use crate::vision::multimodal_layout::{
+    MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
+    RequestMultimodalLayout,
 };
 
-// Input processor
+const IMAGE_TOKEN: &str = "<image>";
+const SPLIT_IMAGE_COUNT: usize = 5;
+
 pub struct Idefics2ImageProcessor {
     max_edge: Option<u32>,
     image_seq_len: usize,
 }
-// Processor
-pub struct Idefics2Processor {
-    config: ProcessorConfig,
-    preprocessor_config: PreProcessorConfig,
-    fake_image_token: &'static str,
-    image_token: &'static str,
-    max_edge: Option<u32>,
-}
 
-impl Idefics2Processor {
-    pub fn new(
-        config: ProcessorConfig,
-        preprocessor_config: PreProcessorConfig,
-        max_edge: Option<u32>,
-    ) -> Self {
+impl Idefics2ImageProcessor {
+    pub fn new(max_edge: Option<u32>, image_seq_len: usize) -> Self {
         Self {
-            config,
-            preprocessor_config,
-            fake_image_token: "<fake_token_around_image>",
-            image_token: "<image>",
             max_edge,
+            image_seq_len,
         }
     }
 }
-
-impl Processor for Idefics2Processor {
-    fn process(
-        &self,
-        pipeline: &dyn Pipeline,
-        messages: Vec<IndexMap<String, MessageContent>>,
-        add_generation_prompt: bool,
-        add_special_tokens: bool,
-        enable_thinking: Option<bool>,
-        reasoning_effort: Option<ReasoningEffort>,
-        tools: Vec<Tool>,
-    ) -> anyhow::Result<(Vec<u32>, String)> {
-        let mut prompt = apply_chat_template(
-            pipeline,
-            messages,
-            add_generation_prompt,
-            enable_thinking,
-            reasoning_effort,
-            self.template_action(),
-            tools,
-        )?;
-
-        let mut image_str = format!(
-            "{}{}{}",
-            self.fake_image_token,
-            self.image_token.repeat(
-                self.config
-                    .image_seq_len
-                    .expect("Idefics 2 model needs `image_seq_len`")
-            ),
-            self.fake_image_token
-        );
-        if self
-            .preprocessor_config
-            .do_image_splitting
-            .is_some_and(|x| x)
-        {
-            // 4 patches + 1 original
-            image_str = image_str.repeat(5);
-        }
-
-        prompt = prompt.replace(self.image_token, &image_str);
-        // Deal with any adjacent images.
-        prompt = prompt.replace(
-            &format!("{}{}", self.fake_image_token, self.fake_image_token),
-            self.fake_image_token,
-        );
-
-        let Some(tokenizer) = &pipeline.tokenizer() else {
-            anyhow::bail!("Idefics2InputProcessor requires a specified tokenizer.",);
-        };
-        let encoding = tokenizer
-            .encode_fast(prompt.clone(), add_special_tokens)
-            .map_err(anyhow::Error::msg)?;
-        Ok((encoding.get_ids().to_vec(), prompt))
-    }
-
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(Arc::new(Idefics2ImageProcessor {
-            max_edge: self.max_edge,
-            image_seq_len: self
-                .config
-                .image_seq_len
-                .expect("Idefics 2 model needs `image_seq_len`"),
-        })))
-    }
-
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &["<fake_token_around_image>", "<image>", "<end_of_utterance>"]
-    }
-
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::Keep
-    }
-}
-
-const IMAGE_TOKEN: &str = "<image>";
-const SPLIT_IMAGE_COUNT: usize = 5;
 
 fn subimages_per_image(config: &PreProcessorConfig) -> usize {
     if config.do_image_splitting.is_some_and(|enabled| enabled) {
@@ -812,7 +712,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::vision_models::multimodal_layout::MultimodalEncoderOutputs;
+    use crate::vision::multimodal_layout::MultimodalEncoderOutputs;
 
     #[test]
     fn split_images_group_placeholder_spans_by_original_item() {

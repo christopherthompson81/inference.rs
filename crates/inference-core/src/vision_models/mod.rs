@@ -9,8 +9,6 @@ pub(crate) use inference_nn::vision::clip;
 #[cfg(feature = "models-llama")]
 pub(crate) mod idefics2;
 #[cfg(feature = "models-llama")]
-pub(crate) use idefics2::idefics2_input_processor;
-#[cfg(feature = "models-llama")]
 pub(crate) mod llava;
 #[cfg(feature = "models-llama")]
 pub(crate) mod mllama;
@@ -25,11 +23,7 @@ pub(crate) mod qwen2vl;
 #[cfg(feature = "models-llama")]
 pub(crate) use llava::llava15;
 #[cfg(feature = "models-llama")]
-pub(crate) use llava::llava_inputs_processor;
-#[cfg(feature = "models-llama")]
 pub(crate) use llava::llava_next;
-#[cfg(feature = "models-llama")]
-pub(crate) use llava::llava_next_inputs_processor;
 #[cfg(feature = "models-gemma")]
 pub(crate) mod diffusion_gemma;
 #[cfg(feature = "models-gemma")]

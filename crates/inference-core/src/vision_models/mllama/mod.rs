@@ -2,5 +2,5 @@
 
 pub(crate) use inference_models_llama::mllama::*;
 
-pub(crate) mod inputs_processor;
-pub(crate) use inputs_processor::MLlamaProcessor;
+pub(crate) mod processor;
+pub(crate) use processor::MLlamaProcessor;

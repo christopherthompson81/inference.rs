@@ -1,5 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-use crate::paged_attention::block_hash::{MultiModalFeature, MultimodalKind};
+
 use std::sync::Arc;
 use std::{any::Any, ops::Range};
 
@@ -10,73 +10,47 @@ use itertools::Itertools;
 use regex_automata::meta::Regex;
 use tokenizers::Tokenizer;
 
-use crate::device_map::DeviceMapper;
-use crate::paged_attention::PagedAttentionMeta;
-use crate::pipeline::{
-    InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
-    Processor,
-};
-use crate::sequence::build_mm_features_from_ranges;
-use crate::vision_models::image_processor::{self, ImagePreProcessor, PreprocessedImages};
-use crate::vision_models::llava::config::Config as LLaVANextConfig;
-use crate::vision_models::preprocessor_config::{PreProcessorConfig, ToFilter};
-use crate::vision_models::{
-    multimodal_layout::{
-        MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
-        RequestMultimodalLayout,
-    },
-    preprocessor_config,
-};
-
+use super::config::Config as LLaVANextConfig;
 use super::llava_next::LLaVANextVisionSpecificArgs;
 use super::utils::{
     calculate_unpad, divide_to_samples, get_anyres_image_grid_shape, get_num_samples,
     resize_and_pad_image, select_best_resolution, LLaVAImageProcessor,
 };
-use crate::vision_models::media_host::MediaInputsProcessor;
-use inference_nn::media_inputs::processor::TextOnlyInputs;
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, ProcessInputsCall,
-    TextInputs,
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
+    image_processor::{self, ImagePreProcessor, PreprocessedImages},
+    media::build_mm_features_from_ranges,
+    preprocessor_config::{self, PreProcessorConfig, ToFilter},
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, ProcessInputsCall, TextInputs, TextOnlyInputs,
+    },
+};
+use crate::paged_attention::{
+    block_hash::{MultiModalFeature, MultimodalKind},
+    PagedAttentionMeta,
+};
+use crate::vision::multimodal_layout::{
+    MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
+    RequestMultimodalLayout,
 };
 
-pub struct LLaVANextProcessor {
-    inputs_processor: Arc<LLaVANextInputProcessor>,
-}
-
-impl Processor for LLaVANextProcessor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(self.inputs_processor.clone()))
-    }
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[]
-    }
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::FlattenOnlyText
-    }
-}
-
-impl LLaVANextProcessor {
-    pub fn new(config: &str) -> Self {
-        let model_config =
-            serde_json::from_str::<LLaVANextConfig>(config).expect("Failed to parse model config.");
-        let image_tag_splitter = Regex::new(r"<image>").expect("Failed to compile split regex.");
-        let inputs_processor = Arc::new(LLaVANextInputProcessor {
-            image_tag_splitter,
-            model_config: model_config.clone(),
-        });
-        Self { inputs_processor }
-    }
-}
+type LLaVANextPromptTokens = (Vec<i64>, Vec<(usize, usize)>);
 
 pub struct LLaVANextInputProcessor {
     image_tag_splitter: Regex,
     model_config: LLaVANextConfig,
 }
 
-type LLaVANextPromptTokens = (Vec<i64>, Vec<(usize, usize)>);
-
 impl LLaVANextInputProcessor {
+    pub fn new(model_config: LLaVANextConfig) -> Self {
+        let image_tag_splitter = Regex::new(r"<image>").expect("Failed to compile split regex.");
+        Self {
+            image_tag_splitter,
+            model_config,
+        }
+    }
+
     pub fn get_num_image_tokens(cfg: &LLaVANextConfig, image_size: (u32, u32)) -> usize {
         let patch_size = cfg.vision_config.patch_size;
         let image_grid_pinpoints = cfg.image_grid_pinpoints.clone().unwrap();
@@ -738,7 +712,7 @@ mod tests {
 
     use super::*;
     use crate::paged_attention::block_hash::MultimodalAttentionPolicy;
-    use crate::vision_models::multimodal_layout::MultimodalEncoderOutputs;
+    use crate::vision::multimodal_layout::MultimodalEncoderOutputs;
 
     fn feature(item_range: Range<usize>) -> MultiModalFeature {
         MultiModalFeature {

@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::paged_attention::block_hash::{MultimodalAttentionPolicy, MultimodalKind};
 use std::{any::Any, cmp, collections::HashMap, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
@@ -8,28 +7,23 @@ use image::{imageops::FilterType, DynamicImage, GenericImageView};
 use inference_vision::{ApplyTransforms, Normalize, Rescale, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
-use crate::paged_attention::PagedAttentionMeta;
-use crate::{
-    device_map::DeviceMapper,
-    pipeline::{
-        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
-        Processor,
-    },
-    sequence::build_mm_features_from_ranges,
-    vision_models::multimodal_layout::{
-        MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
-        RequestMultimodalLayout,
-    },
-};
-
-use crate::vision_models::media_host::MediaInputsProcessor;
-use crate::vision_models::{
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
     image_processor::{ImagePreProcessor, PreprocessedImages},
+    media::build_mm_features_from_ranges,
     preprocessor_config::{PreProcessorConfig, ToFilter},
-    processor_config::ProcessorConfig,
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, TextInputs,
+    },
 };
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
+use crate::paged_attention::{
+    block_hash::{MultimodalAttentionPolicy, MultimodalKind},
+    PagedAttentionMeta,
+};
+use crate::vision::multimodal_layout::{
+    MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
+    RequestMultimodalLayout,
 };
 
 // 4k resolution as absolute maximum
@@ -43,36 +37,12 @@ pub struct Idefics3ImageProcessor {
     image_seq_len: usize,
 }
 
-pub struct Idefics3Processor {
-    config: ProcessorConfig,
-    max_edge: Option<u32>,
-}
-
-impl Idefics3Processor {
-    pub fn new(
-        config: ProcessorConfig,
-        _preprocessor_config: PreProcessorConfig,
-        max_edge: Option<u32>,
-    ) -> Self {
-        Self { config, max_edge }
-    }
-}
-
-impl Processor for Idefics3Processor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        // Default image_seq_len is 169.
-        Arc::new(MediaInputsProcessor(Arc::new(Idefics3ImageProcessor {
-            max_edge: self.max_edge,
-            image_seq_len: self.config.image_seq_len.unwrap_or(169),
-        })))
-    }
-
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &["<fake_token_around_image>", "<image>", "<end_of_utterance>"]
-    }
-
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::Keep
+impl Idefics3ImageProcessor {
+    pub fn new(max_edge: Option<u32>, image_seq_len: usize) -> Self {
+        Self {
+            max_edge,
+            image_seq_len,
+        }
     }
 }
 
@@ -156,7 +126,7 @@ fn max_image_longest_edge(config: &PreProcessorConfig) -> Result<usize> {
 }
 
 fn image_token_ranges(tokens: &[u32], image_token_id: u32) -> Vec<std::ops::Range<usize>> {
-    crate::sequence::find_image_placeholder_ranges(tokens, image_token_id)
+    crate::media_inputs::media::find_image_placeholder_ranges(tokens, image_token_id)
         .into_iter()
         .map(|(start, len)| start..start + len)
         .collect()

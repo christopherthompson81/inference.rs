@@ -26,6 +26,7 @@ use inference_quant::{NonZeroOp, ShardedVarBuilder};
 use vision::Mistral3VisionModel;
 
 pub mod config;
+pub mod inputs_processor;
 pub mod vision;
 
 struct Mistral3PatchMerger {

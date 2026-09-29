@@ -2,5 +2,8 @@
 
 pub(crate) use inference_models_llama::llama4::*;
 
-pub(crate) mod inputs_processor;
-pub(crate) use inputs_processor::{Llama4ImageProcessor, Llama4Processor, IMAGE_TOKEN};
+pub(crate) use inference_models_llama::llama4::inputs_processor::{
+    Llama4ImageProcessor, IMAGE_TOKEN,
+};
+pub(crate) mod processor;
+pub(crate) use processor::Llama4Processor;

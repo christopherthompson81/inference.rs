@@ -2,5 +2,5 @@
 
 pub(crate) use inference_models_llama::idefics3::*;
 
-pub(crate) mod inputs_processor;
-pub(crate) use inputs_processor::Idefics3Processor;
+pub(crate) mod processor;
+pub(crate) use processor::Idefics3Processor;

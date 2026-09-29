@@ -152,3 +152,34 @@ cold compile and lib test (the end of the cold build since Run 26 of the build-t
   duplicated consts, inline format args, the placement of `new`, a single-use helper). The lint and CPU tests were
   rerun after them.
 - Next: the llama family (llava, mllama, llama4, idefics2/3, mistral3, voxtral), then gemma.
+
+## Run 6 - 2026-09-29
+
+- Change: the llama family moved into inference-models-llama:
+  - LLaVA and LLaVA-Next, with their shared `utils.rs`;
+  - Mllama and Llama 4;
+  - Idefics 2 (`idefics2_input_processor.rs` became `idefics2/inputs_processor.rs`) and Idefics 3;
+  - Mistral 3;
+  - Voxtral, with `audio_processing.rs`.
+
+  Details:
+  - The split was scripted with explicit start and end markers. The removed blocks went into core's `processor.rs`
+    files verbatim, except that struct literals of the family image processors became `new` or `Default` calls.
+  - Unlike the Qwen move, per-call construction was kept wherever the original built a fresh image processor in
+    `inputs_processor()`. That matters for Mllama, whose image processor holds `RwLock` state. Idefics 2 keeps its
+    `process` override (the prompt expansion) in core.
+  - Mllama's `retain_prefix_cached_images` test covers the core `Processor`, so it moved to core's `mllama/processor.rs`.
+  - inference-models-llama gains `image`, `inference-audio`, `inference-vision`, `itertools`, `ordered-float`,
+    `regex-automata`, `rubato` and `tokenizers`.
+  - Core drops `ordered-float`, since Llama 4 was its only user. This is the first core dependency the move removes.
+- Command: `scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`.
+- Result: green (2191 CPU and 2511 CUDA tests). The review found no behaviour change. It checked the special tokens and
+  their order, template actions, `retain_prefix_cached_images`, Idefics 2's `process`, the defaults, and per-call versus
+  shared construction. Its style nits were applied:
+  - an orphaned `// Input processor` banner;
+  - Idefics 2's consts hoisted;
+  - split impl blocks in the two LLaVA files.
+
+  The lint and CPU tests were rerun after them.
+- Next: the gemma family (gemma3, gemma3n, gemma4 with their audio processors). Then measure core's cold compile and
+  IR against build-time Run 40.

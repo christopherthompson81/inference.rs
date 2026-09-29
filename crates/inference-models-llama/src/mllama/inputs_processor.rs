@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::paged_attention::block_hash::MultimodalKind;
 use std::{
     any::Any,
     collections::HashMap,
@@ -16,59 +15,32 @@ use inference_vision::{
 use itertools::Itertools;
 use tokenizers::Tokenizer;
 
-use crate::paged_attention::PagedAttentionMeta;
-use crate::{
-    device_map::DeviceMapper,
-    pipeline::{
-        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
-        Processor,
-    },
-    sequence::{build_mm_features_from_ranges, find_image_placeholder_ranges},
-    vision_models::{
-        image_processor::{ImagePreProcessor, PreprocessedImages},
-        preprocessor_config::{PreProcessorConfig, ToFilter},
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
+    image_processor::{ImagePreProcessor, PreprocessedImages},
+    media::{build_mm_features_from_ranges, find_image_placeholder_ranges},
+    preprocessor_config::{PreProcessorConfig, ToFilter},
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, TextInputs,
     },
 };
+use crate::paged_attention::{block_hash::MultimodalKind, PagedAttentionMeta};
 
 use super::MLlamaSpecificArgs;
-use crate::vision_models::media_host::MediaInputsProcessor;
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
-};
 
-const IMAGE_TOKEN: &str = "<|image|>";
+pub const IMAGE_TOKEN: &str = "<|image|>";
 
-// Input processor
-struct MLlamaImageProcessor {
+pub struct MLlamaImageProcessor {
     // To represent uninitialized, we do this. Should always be init by the time this is read.
     max_image_tiles: RwLock<Option<usize>>,
 }
-// Processor
-pub struct MLlamaProcessor;
 
-impl MLlamaProcessor {
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl Processor for MLlamaProcessor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(Arc::new(MLlamaImageProcessor {
+impl Default for MLlamaImageProcessor {
+    fn default() -> Self {
+        Self {
             max_image_tiles: RwLock::new(None),
-        })))
-    }
-
-    fn retain_prefix_cached_images(&self) -> bool {
-        true
-    }
-
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[IMAGE_TOKEN, "<|python_tag|>"]
-    }
-
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::FlattenOnlyText
+        }
     }
 }
 
@@ -1109,17 +1081,11 @@ impl ImagePreProcessor for MLlamaImageProcessor {
 mod tests {
     use super::{
         convert_sparse_cross_attention_mask_to_dense, get_cross_attention_token_mask_for_query,
-        pad_preprocessed_image_inputs, MLlamaProcessor,
+        pad_preprocessed_image_inputs,
     };
-    use crate::pipeline::Processor;
     use candle_core::{DType, Device, Tensor};
 
     const IMAGE_TOKEN_ID: u32 = 128_256;
-
-    #[test]
-    fn normal_prefix_cache_retains_cross_attention_images() {
-        assert!(MLlamaProcessor.retain_prefix_cached_images());
-    }
 
     #[test]
     fn decode_query_keeps_last_image_visible() {

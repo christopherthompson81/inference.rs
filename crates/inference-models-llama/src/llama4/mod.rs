@@ -28,6 +28,7 @@ use crate::{
 };
 
 pub mod config;
+pub mod inputs_processor;
 pub mod vision;
 
 pub use config::Llama4Config;

@@ -2,4 +2,4 @@
 
 pub(crate) use inference_models_llama::idefics2::*;
 
-pub(crate) mod idefics2_input_processor;
+pub(crate) mod processor;

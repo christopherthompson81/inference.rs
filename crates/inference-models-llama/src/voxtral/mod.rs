@@ -21,8 +21,10 @@ use crate::{
 };
 
 pub mod adapter;
+pub mod audio_processing;
 pub mod config;
 pub mod encoder;
+pub mod inputs_processor;
 
 use adapter::VoxtralTemporalAdapter;
 use config::VoxtralConfig;

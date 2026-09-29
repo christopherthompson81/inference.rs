@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::paged_attention::block_hash::{MultimodalAttentionPolicy, MultimodalKind};
 use std::{any::Any, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
@@ -8,30 +7,26 @@ use image::{DynamicImage, GenericImageView};
 use inference_vision::{ApplyTransforms, Normalize, Rescale, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
-use crate::paged_attention::PagedAttentionMeta;
-use crate::{
-    device_map::DeviceMapper,
-    pipeline::{
-        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
-        Processor,
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
+    image_processor::{ImagePreProcessor, PreprocessedImages},
+    media::build_mm_features_from_ranges,
+    preprocessor_config::{PreProcessorConfig, ToFilter},
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, TextInputs,
     },
-    sequence::build_mm_features_from_ranges,
-    vision_models::{
-        image_processor::{ImagePreProcessor, PreprocessedImages},
-        multimodal_layout::{
-            MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout,
-            PackedMultimodalLayout, RequestMultimodalLayout,
-        },
-        preprocessor_config::{PreProcessorConfig, ToFilter},
-        processor_config::ProcessorConfig,
-    },
+};
+use crate::paged_attention::{
+    block_hash::{MultimodalAttentionPolicy, MultimodalKind},
+    PagedAttentionMeta,
+};
+use crate::vision::multimodal_layout::{
+    MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
+    RequestMultimodalLayout,
 };
 
 use super::Mistral3SpecificArgs;
-use crate::vision_models::media_host::MediaInputsProcessor;
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
-};
 
 fn find_mistral3_image_ranges(
     tokens: &[u32],
@@ -79,7 +74,7 @@ fn cat_padded_mistral3_images(tensors: &[Tensor]) -> Result<Tensor> {
     Tensor::cat(&padded, 0)
 }
 
-struct Mistral3ImageProcessor {
+pub struct Mistral3ImageProcessor {
     image_break_token: String,
     image_end_token: String,
     image_token: String,
@@ -87,12 +82,22 @@ struct Mistral3ImageProcessor {
     spatial_merge_size: usize,
 }
 
-pub struct Mistral3Processor {
-    image_break_token: String,
-    image_end_token: String,
-    image_token: String,
-    patch_size: usize,
-    spatial_merge_size: usize,
+impl Mistral3ImageProcessor {
+    pub fn new(
+        image_break_token: String,
+        image_end_token: String,
+        image_token: String,
+        patch_size: usize,
+        spatial_merge_size: usize,
+    ) -> Self {
+        Self {
+            image_break_token,
+            image_end_token,
+            image_token,
+            patch_size,
+            spatial_merge_size,
+        }
+    }
 }
 
 fn mistral3_packed_layout(
@@ -184,38 +189,6 @@ fn mistral3_packed_layout(
         });
     }
     PackedMultimodalLayout::new(&requests)
-}
-
-impl Mistral3Processor {
-    pub fn new(processor_config: ProcessorConfig) -> Self {
-        Self {
-            image_break_token: processor_config.image_break_token.unwrap().clone(),
-            image_end_token: processor_config.image_end_token.unwrap().clone(),
-            image_token: processor_config.image_token.unwrap().clone(),
-            patch_size: processor_config.patch_size.unwrap(),
-            spatial_merge_size: processor_config.spatial_merge_size.unwrap(),
-        }
-    }
-}
-
-impl Processor for Mistral3Processor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(Arc::new(Mistral3ImageProcessor {
-            image_break_token: self.image_break_token.clone(),
-            image_end_token: self.image_end_token.clone(),
-            image_token: self.image_token.clone(),
-            patch_size: self.patch_size,
-            spatial_merge_size: self.spatial_merge_size,
-        })))
-    }
-
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[]
-    }
-
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::Keep
-    }
 }
 
 impl MultimodalInputsProcessor for Mistral3ImageProcessor {

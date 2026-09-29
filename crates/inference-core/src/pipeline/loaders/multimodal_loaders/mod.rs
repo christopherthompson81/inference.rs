@@ -53,9 +53,9 @@ use crate::vision_models::gemma4::config::Gemma4Config;
 #[cfg(feature = "models-gemma")]
 use crate::vision_models::gemma4::{Gemma4Model, Gemma4Processor, Gemma4ProcessorSettings};
 #[cfg(feature = "models-llama")]
-use crate::vision_models::idefics2::{Config as Idefics2Config, Idefics2};
+use crate::vision_models::idefics2::processor::Idefics2Processor;
 #[cfg(feature = "models-llama")]
-use crate::vision_models::idefics2_input_processor::Idefics2Processor;
+use crate::vision_models::idefics2::{Config as Idefics2Config, Idefics2};
 #[cfg(feature = "models-llama")]
 use crate::vision_models::idefics3::{Idefics3Config, Idefics3Model, Idefics3Processor};
 use crate::vision_models::image_processor::ImagePreProcessor;
@@ -68,13 +68,13 @@ use crate::vision_models::llama4::{
 #[cfg(feature = "models-llama")]
 use crate::vision_models::llava::config::Config as LLaVAConfig;
 #[cfg(feature = "models-llama")]
+use crate::vision_models::llava::{llava_inputs_processor, processor::LLaVAProcessor};
+#[cfg(feature = "models-llama")]
+use crate::vision_models::llava::{llava_next_inputs_processor, processor::LLaVANextProcessor};
+#[cfg(feature = "models-llama")]
 use crate::vision_models::llava15::Model as LLaVA;
 #[cfg(feature = "models-llama")]
-use crate::vision_models::llava_inputs_processor::{self, LLaVAProcessor};
-#[cfg(feature = "models-llama")]
 use crate::vision_models::llava_next::Model as LLaVANext;
-#[cfg(feature = "models-llama")]
-use crate::vision_models::llava_next_inputs_processor::{self, LLaVANextProcessor};
 #[cfg(feature = "models-qwen")]
 use crate::vision_models::minicpmo;
 #[cfg(feature = "models-llama")]
