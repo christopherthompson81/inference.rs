@@ -17,40 +17,34 @@ use itertools::Itertools;
 use ordered_float::NotNan;
 use tokenizers::Tokenizer;
 
-use crate::paged_attention::PagedAttentionMeta;
-use crate::{
-    device_map::DeviceMapper,
-    paged_attention::block_hash::{MultiModalFeature, MultimodalKind},
-    pipeline::{
-        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
-        Processor,
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
+    image_processor::{ImagePreProcessor, PreprocessedImages},
+    media::{build_mm_features_from_ranges, find_image_delimited_ranges},
+    preprocessor_config::PreProcessorConfig,
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, TextInputs,
     },
-    sequence::{build_mm_features_from_ranges, find_image_delimited_ranges},
-    vision_models::{
-        image_processor::{ImagePreProcessor, PreprocessedImages},
-        multimodal_layout::{
-            MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout,
-            PackedMultimodalLayout, RequestMultimodalLayout,
-        },
-        preprocessor_config::PreProcessorConfig,
-        processor_config::ProcessorConfig,
-    },
+};
+use crate::paged_attention::{
+    block_hash::{MultiModalFeature, MultimodalKind},
+    PagedAttentionMeta,
+};
+use crate::vision::multimodal_layout::{
+    MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
+    RequestMultimodalLayout,
 };
 
 use super::Llama4ModelSpecificArgs;
-use crate::vision_models::media_host::MediaInputsProcessor;
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
-};
 
-pub(crate) const IMAGE_TOKEN: &str = "<|image|>";
-const IMAGE_START: &str = "<|image_start|>";
-const IMAGE_END: &str = "<|image_end|>";
-const PATCH: &str = "<|patch|>";
-const TILE_X_SEP: &str = "<|tile_x_separator|>";
-const TILE_Y_SEP: &str = "<|tile_y_separator|>";
+pub const IMAGE_TOKEN: &str = "<|image|>";
+pub const IMAGE_START: &str = "<|image_start|>";
+pub const IMAGE_END: &str = "<|image_end|>";
+pub const PATCH: &str = "<|patch|>";
+pub const TILE_X_SEP: &str = "<|tile_x_separator|>";
+pub const TILE_Y_SEP: &str = "<|tile_y_separator|>";
 
-// Input processor
 pub struct Llama4ImageProcessor {
     pub patch_size: usize,
     pub downsample_ratio: usize,
@@ -62,46 +56,6 @@ impl Llama4ImageProcessor {
             patch_size: patch_size.unwrap_or(14),
             downsample_ratio: (1. / pixel_shuffle_ratio.unwrap_or(0.5).powi(2)).round() as usize,
         }
-    }
-}
-
-// Processor
-pub struct Llama4Processor {
-    patch_size: usize,
-    downsample_ratio: usize,
-}
-
-impl Llama4Processor {
-    pub fn new(cfg: &ProcessorConfig) -> Self {
-        Self {
-            patch_size: cfg.patch_size.unwrap_or(14),
-            downsample_ratio: (1. / cfg.pixel_shuffle_ratio.unwrap_or(0.5).powi(2)).round()
-                as usize,
-        }
-    }
-}
-
-impl Processor for Llama4Processor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(Arc::new(Llama4ImageProcessor {
-            patch_size: self.patch_size,
-            downsample_ratio: self.downsample_ratio,
-        })))
-    }
-
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[
-            IMAGE_START,
-            IMAGE_END,
-            PATCH,
-            TILE_X_SEP,
-            TILE_Y_SEP,
-            IMAGE_TOKEN,
-        ]
-    }
-
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::FlattenOnlyText
     }
 }
 
@@ -1133,7 +1087,7 @@ impl ImagePreProcessor for Llama4ImageProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vision_models::multimodal_layout::MultimodalEncoderOutputs;
+    use crate::vision::multimodal_layout::MultimodalEncoderOutputs;
 
     #[test]
     fn packed_layout_handles_unequal_media_and_text_rows() {

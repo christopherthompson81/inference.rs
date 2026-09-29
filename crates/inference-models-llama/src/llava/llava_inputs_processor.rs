@@ -1,5 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-use crate::paged_attention::block_hash::{MultiModalFeature, MultimodalKind};
+
 use std::any::Any;
 use std::ops::Range;
 use std::sync::Arc;
@@ -12,60 +12,27 @@ use itertools::Itertools;
 use regex_automata::meta::Regex;
 use tokenizers::Tokenizer;
 
+use super::config::Config as LLaVAConfig;
 use super::llava15::LLaVAVisionSpecificArgs;
 use super::utils::{expand2square, LLaVAImageProcessor};
 use crate::device_map::DeviceMapper;
-use crate::paged_attention::PagedAttentionMeta;
-use crate::pipeline::{
-    InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
-    Processor,
-};
-use crate::sequence::build_mm_features_from_ranges;
-use crate::vision_models::image_processor::{self, ImagePreProcessor, PreprocessedImages};
-use crate::vision_models::llava::config::Config as LLaVAConfig;
-use crate::vision_models::media_host::MediaInputsProcessor;
-use crate::vision_models::preprocessor_config::{PreProcessorConfig, ToFilter};
-use crate::vision_models::{
-    multimodal_layout::{
-        MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
-        RequestMultimodalLayout,
+use crate::media_inputs::{
+    image_processor::{self, ImagePreProcessor, PreprocessedImages},
+    media::build_mm_features_from_ranges,
+    preprocessor_config::{self, PreProcessorConfig, ToFilter},
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, ProcessInputsCall, TextInputs, TextOnlyInputs,
     },
-    preprocessor_config,
 };
-use inference_nn::media_inputs::processor::TextOnlyInputs;
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, ProcessInputsCall,
-    TextInputs,
+use crate::paged_attention::{
+    block_hash::{MultiModalFeature, MultimodalKind},
+    PagedAttentionMeta,
 };
-
-pub struct LLaVAProcessor {
-    inputs_processor: Arc<LLaVAInputProcessor>,
-}
-
-impl Processor for LLaVAProcessor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(self.inputs_processor.clone()))
-    }
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[]
-    }
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::FlattenOnlyText
-    }
-}
-
-impl LLaVAProcessor {
-    pub fn new(config: &str) -> Self {
-        let model_config =
-            serde_json::from_str::<LLaVAConfig>(config).expect("Failed to parse model config.");
-        let image_tag_splitter = Regex::new(r"<image>").expect("Failed to compile split regex.");
-        let inputs_processor = Arc::new(LLaVAInputProcessor {
-            image_tag_splitter,
-            model_config: model_config.clone(),
-        });
-        Self { inputs_processor }
-    }
-}
+use crate::vision::multimodal_layout::{
+    MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
+    RequestMultimodalLayout,
+};
 
 pub struct LLaVAInputProcessor {
     image_tag_splitter: Regex,
@@ -73,6 +40,14 @@ pub struct LLaVAInputProcessor {
 }
 
 impl LLaVAInputProcessor {
+    pub fn new(model_config: LLaVAConfig) -> Self {
+        let image_tag_splitter = Regex::new(r"<image>").expect("Failed to compile split regex.");
+        Self {
+            image_tag_splitter,
+            model_config,
+        }
+    }
+
     pub fn get_num_image_tokens(cfg: &LLaVAConfig) -> usize {
         let patch_size = cfg.vision_config.patch_size;
         let patch_per_side = cfg.vision_config.image_size / patch_size;

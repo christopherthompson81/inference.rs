@@ -74,7 +74,6 @@ interprocess.workspace = true
 urlencoding.workspace = true
 scraper.workspace = true
 html2text.workspace = true
-ordered-float.workspace = true
 ahash.workspace = true
 num-traits.workspace = true
 bm25.workspace = true

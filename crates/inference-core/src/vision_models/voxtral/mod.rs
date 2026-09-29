@@ -2,6 +2,5 @@
 
 pub(crate) use inference_models_llama::voxtral::*;
 
-pub(crate) mod audio_processing;
-pub(crate) mod inputs_processor;
-pub(crate) use inputs_processor::VoxtralProcessor;
+pub(crate) mod processor;
+pub(crate) use processor::VoxtralProcessor;

@@ -3,7 +3,7 @@
     clippy::cast_precision_loss,
     clippy::too_many_arguments
 )]
-use crate::vision_models::preprocessor_config::PreProcessorConfig;
+use crate::media_inputs::preprocessor_config::PreProcessorConfig;
 use candle_core::{DType, Device, Result, Tensor};
 use image::{
     imageops::{overlay, FilterType},
@@ -11,7 +11,7 @@ use image::{
 };
 use std::cmp::min;
 
-pub(crate) use inference_models_llama::llava::anyres::{
+pub(crate) use super::anyres::{
     get_anyres_image_grid_shape, get_num_samples, select_best_resolution,
 };
 

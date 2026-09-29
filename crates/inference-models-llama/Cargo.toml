@@ -16,11 +16,19 @@ homepage.workspace = true
 anyhow.workspace = true
 candle-core.workspace = true
 candle-nn.workspace = true
+image.workspace = true
+indicatif.workspace = true
+inference-audio.workspace = true
 inference-nn.workspace = true
 inference-quant.workspace = true
+inference-vision.workspace = true
+itertools.workspace = true
+ordered-float.workspace = true
+regex-automata.workspace = true
+rubato.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-indicatif.workspace = true
+tokenizers.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

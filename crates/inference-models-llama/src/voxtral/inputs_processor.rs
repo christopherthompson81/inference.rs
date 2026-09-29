@@ -5,20 +5,18 @@ use std::{any::Any, sync::Arc};
 use candle_core::{Device, Tensor};
 use tokenizers::Tokenizer;
 
-use crate::paged_attention::PagedAttentionMeta;
-use crate::{
-    device_map::DeviceMapper,
-    paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
-    pipeline::{InputProcessorOutput, InputsProcessor, MessagesAction, Processor},
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::processor::{
+    InputProcessorOutput, InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor,
+    TextInputs,
+};
+use crate::paged_attention::{
+    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
+    PagedAttentionMeta,
 };
 
 use super::audio_processing::VoxtralAudioProcessor;
-use super::config::VoxtralConfig;
 use super::{VoxtralAudioCacheKey, VoxtralAudioRequest, VoxtralSpecificArgs};
-use crate::vision_models::media_host::MediaInputsProcessor;
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
-};
 
 /// BOS token ID for Mistral tekken tokenizer.
 const BOS_TOKEN_ID: u32 = 1;
@@ -28,52 +26,23 @@ const STREAMING_PAD_TOKEN_ID: u32 = 32;
 const N_LEFT_PAD_TOKENS: usize = 32;
 /// Number of delay tokens (transcription_delay_ms / frame_rate alignment).
 const N_DELAY_TOKENS: usize = 6;
-const AUDIO_ENCODER_DOWNSAMPLE_FACTOR: usize = 2;
-
-pub struct VoxtralProcessor {
-    audio_processor: VoxtralAudioProcessor,
-    audio_length_per_tok: usize,
-}
-
-impl VoxtralProcessor {
-    pub fn new(cfg: &VoxtralConfig) -> Self {
-        let enc_args = &cfg.multimodal.whisper_model_args.encoder_args;
-        Self {
-            audio_processor: VoxtralAudioProcessor::new(&enc_args.audio_encoding_args),
-            audio_length_per_tok: AUDIO_ENCODER_DOWNSAMPLE_FACTOR
-                * cfg
-                    .multimodal
-                    .whisper_model_args
-                    .downsample_args
-                    .downsample_factor,
-        }
-    }
-}
 
 /// Number of right-pad silence tokens added to audio (from audio_processing.rs).
 /// Subtracting from the generation cap prevents generating into silence region.
 const N_RIGHT_PAD_TOKENS: usize = 17;
 
-impl Processor for VoxtralProcessor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(Arc::new(VoxtralInputsProcessor {
-            audio_processor: VoxtralAudioProcessor::new_from_processor(&self.audio_processor),
-            audio_length_per_tok: self.audio_length_per_tok,
-        })))
-    }
-
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[]
-    }
-
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::FlattenOnlyText
-    }
-}
-
-struct VoxtralInputsProcessor {
+pub struct VoxtralInputsProcessor {
     audio_processor: VoxtralAudioProcessor,
     audio_length_per_tok: usize,
+}
+
+impl VoxtralInputsProcessor {
+    pub fn new(audio_processor: VoxtralAudioProcessor, audio_length_per_tok: usize) -> Self {
+        Self {
+            audio_processor,
+            audio_length_per_tok,
+        }
+    }
 }
 
 fn audio_prompt_tokens() -> Vec<u32> {

@@ -1,6 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 pub mod config;
+pub mod inputs_processor;
 pub mod vision;
 
 use std::{
