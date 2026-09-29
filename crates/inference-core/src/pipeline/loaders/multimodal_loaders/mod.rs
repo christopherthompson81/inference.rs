@@ -59,8 +59,6 @@ use crate::vision_models::idefics2_input_processor::Idefics2Processor;
 #[cfg(feature = "models-llama")]
 use crate::vision_models::idefics3::{Idefics3Config, Idefics3Model, Idefics3Processor};
 use crate::vision_models::image_processor::ImagePreProcessor;
-#[cfg(feature = "models-phi")]
-use crate::vision_models::inputs_processor::Phi4MMProcessor;
 #[cfg(feature = "models-other")]
 use crate::vision_models::lfm2_vl::{Config as Lfm2VlConfig, Lfm2VlModel, Lfm2VlProcessor};
 #[cfg(feature = "models-llama")]
@@ -92,11 +90,13 @@ use crate::vision_models::paddleocr_vl::config::Config as PaddleOcrVlConfig;
 #[cfg(feature = "models-other")]
 use crate::vision_models::paddleocr_vl::{processor::PaddleOcrVlProcessor, PaddleOcrVlModel};
 #[cfg(feature = "models-phi")]
+use crate::vision_models::phi3::processor::Phi3Processor;
+#[cfg(feature = "models-phi")]
 use crate::vision_models::phi3::{Config as Phi3Config, Model as Phi3, PHI3V_CLIP_CONFIG};
 #[cfg(feature = "models-phi")]
-use crate::vision_models::phi3_inputs_processor::Phi3Processor;
-#[cfg(feature = "models-phi")]
 use crate::vision_models::phi4;
+#[cfg(feature = "models-phi")]
+use crate::vision_models::phi4::processor::Phi4MMProcessor;
 #[cfg(feature = "models-phi")]
 use crate::vision_models::phi4::{Phi4MMConfig, Phi4MMModel, PHI4_MM_VISION_CFG};
 use crate::vision_models::preprocessor_config::PreProcessorConfig;

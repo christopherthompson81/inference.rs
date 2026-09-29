@@ -166,7 +166,7 @@ fn restore_llava_image_markers(
     Ok(tokens)
 }
 
-// Copy from phi3_inputs_processor. different is (1) calculate of num_image_token (2) process_anyres_image (3)image_ids_pad
+// Copy from the Phi-3V inputs processor. different is (1) calculate of num_image_token (2) process_anyres_image (3)image_ids_pad
 impl MultimodalInputsProcessor for LLaVAInputProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,

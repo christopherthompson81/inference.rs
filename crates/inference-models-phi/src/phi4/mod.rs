@@ -30,6 +30,7 @@ use crate::{
 pub mod audio_embedding;
 pub mod config;
 pub mod image_embedding;
+pub mod inputs_processor;
 pub mod mm_embedding;
 pub mod rope;
 

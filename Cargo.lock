@@ -3117,10 +3117,18 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "either",
+ "image",
+ "inference-audio",
  "inference-nn",
  "inference-quant",
+ "inference-vision",
+ "itertools 0.14.0",
+ "regex",
+ "regex-automata",
+ "rubato",
  "serde",
  "tempfile",
+ "tokenizers",
  "tracing",
 ]
 
