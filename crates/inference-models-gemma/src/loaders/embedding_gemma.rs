@@ -1,9 +1,7 @@
 use super::*;
-use inference_models_gemma::embedding_gemma::{EmbeddingGemma, EmbeddingGemmaConfig};
+use crate::embedding_gemma::{EmbeddingGemma, EmbeddingGemmaConfig};
 
-/// [`EmbeddingModelLoader`] for an Embedding Gemma model.
-///
-/// [`EmbeddingModelLoader`]: crate::pipeline::EmbeddingModelLoader
+/// `EmbeddingModelLoader` for an Embedding Gemma model.
 pub struct EmbeddingGemmaLoader;
 
 impl EmbeddingModelLoader for EmbeddingGemmaLoader {
@@ -64,13 +62,13 @@ impl DeviceMappedModelLoader for EmbeddingGemmaLoader {
         config: &str,
         dtype: DType,
         weight_pack_factor: usize,
-        _quantization: Option<&super::super::AutoDeviceMapQuantization<'_>>,
+        _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
         let cfg = EmbeddingGemmaConfig::from_json(config)?;
 
         let elems = {
-            let embed_tokens_pack_factor = super::super::promoted_tensor_pack_factor(
+            let embed_tokens_pack_factor = super::promoted_tensor_pack_factor(
                 _quantization,
                 "embed_tokens.weight",
                 dtype,

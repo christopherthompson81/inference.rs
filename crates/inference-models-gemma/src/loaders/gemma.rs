@@ -1,8 +1,6 @@
 use super::*;
 
-/// [`NormalLoader`] for a Gemma model.
-///
-/// [`NormalLoader`]: crate::pipeline::NormalLoader
+/// `NormalLoader` for a Gemma model.
 pub struct GemmaLoader;
 
 impl NormalModelLoader for GemmaLoader {
@@ -13,9 +11,9 @@ impl NormalModelLoader for GemmaLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::gemma::Config::from_json(config)?;
+        let cfg = crate::gemma::Config::from_json(config)?;
 
-        Ok(Box::new(models::gemma::Model::new(
+        Ok(Box::new(crate::gemma::Model::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -33,9 +31,9 @@ impl NormalModelLoader for GemmaLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::gemma::Config::from_json(config)?;
+        let cfg = crate::gemma::Config::from_json(config)?;
 
-        Ok(Box::new(xlora_models::XLoraGemma::new(
+        Ok(Box::new(crate::xlora::gemma::XLoraModel::new(
             &cfg,
             vb,
             lora_config,
@@ -47,7 +45,7 @@ impl NormalModelLoader for GemmaLoader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::models::gemma::Config::from_json(config)?;
+        let cfg = crate::gemma::Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
 }
@@ -88,7 +86,7 @@ impl DeviceMappedModelLoader for GemmaLoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = crate::models::gemma::Config::from_json(config)?;
+        let cfg = crate::gemma::Config::from_json(config)?;
 
         let elems = {
             let embed_tokens_pack_factor = super::tied_promoted_tensor_pack_factor(
@@ -112,7 +110,7 @@ impl DeviceMappedModelLoader for GemmaLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = crate::models::gemma::Config::from_json(config)?;
+        let cfg = crate::gemma::Config::from_json(config)?;
 
         let per_layer_elems = {
             let input_layernorm = cfg.hidden_size;
@@ -152,7 +150,7 @@ impl DeviceMappedModelLoader for GemmaLoader {
         ])
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = crate::models::gemma::Config::from_json(config)?;
+        let cfg = crate::gemma::Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

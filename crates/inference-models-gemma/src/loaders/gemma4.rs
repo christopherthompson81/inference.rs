@@ -97,46 +97,6 @@ impl MultimodalModelLoader for Gemma4Loader {
     }
 }
 
-impl MultimodalProcessorFactory for Gemma4Loader {
-    fn get_processor(
-        &self,
-        config: &str,
-        processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        let cfg = Gemma4Config::from_json(config).expect("Failed to parse Gemma4Config");
-        let (patch_size, pooling_kernel_size, default_output_length, supports_images) = cfg
-            .vision_config
-            .as_ref()
-            .map_or((16, 1, 0, false), |vision_cfg| {
-                (
-                    vision_cfg.patch_size,
-                    vision_cfg.pooling_kernel_size,
-                    vision_cfg.default_output_length,
-                    true,
-                )
-            });
-        let raw_audio_frame_size = cfg
-            .audio_config
-            .as_ref()
-            .and_then(|audio_cfg| cfg.is_unified().then_some(audio_cfg.input_feat_size()));
-        Arc::new(Gemma4Processor::new(Gemma4ProcessorSettings {
-            processor_config: processor_config.unwrap_or_default(),
-            patch_size,
-            pooling_kernel_size,
-            default_output_length,
-            supports_images,
-            supports_audio: cfg.audio_config.is_some(),
-            raw_audio_frame_size,
-            is_unified: cfg.is_unified(),
-            decode_window: None,
-            bidirectional_attention: cfg.text_config.bidirectional_attention(),
-            vision_attention_on_full_layers: false,
-        }))
-    }
-}
-
 impl IsqModelLoader for Gemma4Loader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[

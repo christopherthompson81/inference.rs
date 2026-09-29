@@ -14,6 +14,7 @@ pub mod gemma2;
 pub mod gemma3;
 pub mod gemma3n;
 pub mod gemma4;
+pub mod loaders;
 pub mod xlora;
 
 inference_nn::json_config!(

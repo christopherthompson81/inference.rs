@@ -1,8 +1,6 @@
 use super::*;
 
-/// [`MultimodalLoader`] for an Gemma 3 model.
-///
-/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
+/// `MultimodalLoader` for an Gemma 3 model.
 pub struct Gemma3Loader;
 
 impl MultimodalModelLoader for Gemma3Loader {
@@ -66,23 +64,6 @@ impl MultimodalModelLoader for Gemma3Loader {
             },
             output: vec![SupportedModality::Text],
         })
-    }
-}
-
-impl MultimodalProcessorFactory for Gemma3Loader {
-    fn get_processor(
-        &self,
-        config: &str,
-        processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        let config = Gemma3Config::from_json(config).unwrap();
-        // Handle the Gemma 3 1b case here
-        Arc::new(Gemma3Processor::new(
-            processor_config.unwrap_or_default(),
-            matches!(config, Gemma3Config::WithVision { .. }),
-        ))
     }
 }
 

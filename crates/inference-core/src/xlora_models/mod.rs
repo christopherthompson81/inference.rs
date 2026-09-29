@@ -1,7 +1,3 @@
-#[cfg(feature = "models-gemma")]
-pub(crate) use inference_models_gemma::xlora::{
-    gemma::XLoraModel as XLoraGemma, gemma2::Model as XLoraGemma2,
-};
 #[cfg(feature = "models-llama")]
 pub(crate) use inference_models_llama::xlora::quantized_llama::ModelWeights as XLoraQLlama;
 #[cfg(feature = "models-phi")]

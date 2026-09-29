@@ -1,4 +1,4 @@
-#[cfg(feature = "models-gemma")]
+#[cfg(all(test, feature = "models-gemma"))]
 pub(crate) use inference_models_gemma::{gemma, gemma2};
 #[cfg(feature = "models-llama")]
 pub(crate) use inference_models_llama::quantized_llama;

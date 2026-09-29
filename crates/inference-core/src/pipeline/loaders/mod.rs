@@ -8,11 +8,7 @@ pub use crate::device_map::AutoDeviceMapParams;
 pub(crate) use checkpoint_inventory::{checkpoint_device_map_sizes, checkpoint_runtime_size};
 use inference_nn::loaders::NonMappedSubModel;
 pub use inference_nn::loaders::{AutoDeviceMapQuantization, DeviceMappedModelLoader};
-pub(crate) use inference_nn::loaders::{
-    QK_ROPE_LAYOUT_CONFIG_KEY, language_model_pack_factors,
-    language_model_pack_factors_with_aliases, promoted_tensor_pack_factor,
-    qk_rope_layout_from_config, tied_promoted_tensor_pack_factor,
-};
+pub(crate) use inference_nn::loaders::{QK_ROPE_LAYOUT_CONFIG_KEY, qk_rope_layout_from_config};
 
 use std::{
     fmt::{self, Debug},

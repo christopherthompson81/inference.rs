@@ -1,9 +1,7 @@
 use super::*;
 use candle_core::Device;
 
-/// [`MultimodalLoader`] for an Gemma 3n model.
-///
-/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
+/// `MultimodalLoader` for an Gemma 3n model.
 pub struct Gemma3nLoader;
 
 impl MultimodalModelLoader for Gemma3nLoader {
@@ -48,22 +46,6 @@ impl MultimodalModelLoader for Gemma3nLoader {
             ],
             output: vec![SupportedModality::Text],
         })
-    }
-}
-
-impl MultimodalProcessorFactory for Gemma3nLoader {
-    fn get_processor(
-        &self,
-        _config: &str,
-        processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        // Handle the Gemma 3 1b case here
-        Arc::new(Gemma3nProcessor::new(
-            processor_config.unwrap_or_default(),
-            true,
-        ))
     }
 }
 
@@ -321,7 +303,7 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
         // Apply matformer slicing if configured
         let text_cfg = if let Some(matformer_cfg) = matformer_config {
             use crate::device_map::DummyDeviceMapper;
-            use crate::vision_models::gemma3n::text::handle_matformer_slicing;
+            use crate::gemma3n::text::handle_matformer_slicing;
 
             let dummy_mapper = DummyDeviceMapper {
                 nm_device: Device::Cpu,
@@ -409,7 +391,7 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
             // NOTE: Vision tower uses only Conv2d layers, NOT Arc<dyn QuantMethod>,
             // so NONE of these should be divided by weight_pack_factor
             let vision_tower_elems = {
-                use crate::vision_models::gemma3n::vision::{
+                use crate::gemma3n::vision::{
                     BlockType, INPUT_CHANNELS, MSFA_EXPANSION_RATIO, MSFA_IN_CHANNELS,
                     MSFA_OUT_CHANNELS, STEM_KERNEL_SIZE, STEM_OUT_CHANNELS, gemma3n_mobilenet_def,
                     make_divisible,
@@ -726,7 +708,7 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
             matformer_config
         {
             use crate::device_map::DummyDeviceMapper;
-            use crate::vision_models::gemma3n::text::handle_matformer_slicing;
+            use crate::gemma3n::text::handle_matformer_slicing;
 
             let dummy_mapper = DummyDeviceMapper {
                 nm_device: Device::Cpu,

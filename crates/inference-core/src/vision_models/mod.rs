@@ -5,8 +5,6 @@ use std::{any::Any, sync::Arc};
 use candle_core::Tensor;
 
 #[cfg(feature = "models-gemma")]
-pub(crate) mod diffusion_gemma;
-#[cfg(feature = "models-gemma")]
 pub(crate) mod gemma3;
 #[cfg(feature = "models-gemma")]
 pub(crate) mod gemma3n;
