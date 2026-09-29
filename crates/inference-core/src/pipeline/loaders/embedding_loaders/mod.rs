@@ -53,7 +53,7 @@ impl EmbeddingLoaderType {
     pub(crate) fn loader(&self) -> Result<Box<dyn EmbeddingModelLoader>> {
         match self {
             #[cfg(feature = "models-gemma")]
-            Self::EmbeddingGemma => Ok(Box::new(EmbeddingGemmaLoader)),
+            Self::EmbeddingGemma => Ok(EmbeddingGemmaLoader::boxed()),
             #[cfg(not(feature = "models-gemma"))]
             Self::EmbeddingGemma => {
                 anyhow::bail!(
@@ -61,7 +61,7 @@ impl EmbeddingLoaderType {
                 )
             }
             #[cfg(feature = "models-qwen")]
-            Self::Qwen3Embedding => Ok(Box::new(Qwen3EmbeddingLoader)),
+            Self::Qwen3Embedding => Ok(Qwen3EmbeddingLoader::boxed()),
             #[cfg(not(feature = "models-qwen"))]
             Self::Qwen3Embedding => {
                 anyhow::bail!(
@@ -211,6 +211,11 @@ where
 }
 
 use inference_nn::bias_if;
+
+#[cfg(feature = "models-gemma")]
+inference_nn::boxed_loaders!(EmbeddingModelLoader: EmbeddingGemmaLoader);
+#[cfg(feature = "models-qwen")]
+inference_nn::boxed_loaders!(EmbeddingModelLoader: Qwen3EmbeddingLoader);
 
 #[cfg(feature = "models-gemma")]
 mod gemma;

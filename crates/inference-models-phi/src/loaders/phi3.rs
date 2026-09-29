@@ -1,8 +1,6 @@
 use super::*;
 
-/// [`NormalLoader`] for a Phi 3 model.
-///
-/// [`NormalLoader`]: crate::pipeline::NormalLoader
+/// `NormalLoader` for a Phi 3 model.
 pub struct Phi3Loader;
 
 impl NormalModelLoader for Phi3Loader {
@@ -13,9 +11,9 @@ impl NormalModelLoader for Phi3Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::phi3::Config::from_json(config)?;
+        let cfg = crate::phi3::Config::from_json(config)?;
 
-        Ok(Box::new(models::phi3::Model::new(
+        Ok(Box::new(crate::phi3::Model::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -33,9 +31,9 @@ impl NormalModelLoader for Phi3Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::phi3::Config::from_json(config)?;
+        let cfg = crate::phi3::Config::from_json(config)?;
 
-        Ok(Box::new(xlora_models::XLoraPhi3::new(
+        Ok(Box::new(crate::xlora::phi3::Model::new(
             &cfg,
             vb,
             lora_config,
@@ -47,7 +45,7 @@ impl NormalModelLoader for Phi3Loader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::models::phi3::Config::from_json(config)?;
+        let cfg = crate::phi3::Config::from_json(config)?;
 
         Ok(Box::new(cfg))
     }
@@ -86,7 +84,7 @@ impl DeviceMappedModelLoader for Phi3Loader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = crate::models::phi3::Config::from_json(config)?;
+        let cfg = crate::phi3::Config::from_json(config)?;
         standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
@@ -105,7 +103,7 @@ impl DeviceMappedModelLoader for Phi3Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = crate::models::phi3::Config::from_json(config)?;
+        let cfg = crate::phi3::Config::from_json(config)?;
 
         let per_layer_elems = {
             let input_layernorm = cfg.hidden_size;
@@ -137,7 +135,7 @@ impl DeviceMappedModelLoader for Phi3Loader {
         ])
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = crate::models::phi3::Config::from_json(config)?;
+        let cfg = crate::phi3::Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

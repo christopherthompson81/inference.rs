@@ -28,15 +28,13 @@ use serde::Deserialize;
     feature = "models-gemma",
     feature = "models-llama",
     feature = "models-other",
-    feature = "models-phi",
     feature = "models-qwen"
 ))]
 use crate::models;
 #[cfg(any(
     feature = "models-gemma",
     feature = "models-llama",
-    feature = "models-other",
-    feature = "models-phi"
+    feature = "models-other"
 ))]
 use crate::xlora_models;
 use crate::xlora_models::XLoraConfig;
@@ -49,7 +47,6 @@ use super::{language_model_pack_factors_with_aliases, AutoDeviceMapQuantization}
 #[cfg(any(
     feature = "models-llama",
     feature = "models-other",
-    feature = "models-phi",
     feature = "models-qwen"
 ))]
 use super::{standard_non_mapped_size_in_bytes, LanguageModelEnds};
@@ -101,7 +98,7 @@ macro_rules! normal_loader_types {
                 match self {
                     $(
                         $(#[cfg(feature = $feature)])?
-                        Self::$variant => Ok(Box::new($loader)),
+                        Self::$variant => Ok($loader::boxed()),
                         $(
                             #[cfg(not(feature = $feature))]
                             Self::$variant => anyhow::bail!(
@@ -199,6 +196,42 @@ normal_loader_types! {
 
 mod auto;
 pub use auto::*;
+#[cfg(feature = "models-gemma")]
+inference_nn::boxed_loaders!(NormalModelLoader: Gemma2Loader, GemmaLoader);
+#[cfg(feature = "models-llama")]
+inference_nn::boxed_loaders!(
+    NormalModelLoader:
+    LlamaLoader,
+    MistralLoader,
+    MixtralLoader,
+    SmolLm3Loader,
+);
+#[cfg(feature = "models-other")]
+inference_nn::boxed_loaders!(
+    NormalModelLoader:
+    DeepSeekV2Loader,
+    DeepSeekV3Loader,
+    GLM4Loader,
+    GLM4MoeLiteLoader,
+    GLM4MoeLoader,
+    GptOssLoader,
+    GraniteMoeHybridLoader,
+    HunYuanDenseV1Loader,
+    HunYuanMoEV1Loader,
+    Lfm2Loader,
+    Starcoder2Loader,
+);
+#[cfg(feature = "models-qwen")]
+inference_nn::boxed_loaders!(
+    NormalModelLoader:
+    Qwen2Loader,
+    Qwen3Loader,
+    Qwen3MoELoader,
+    Qwen3NextLoader,
+    Qwen3_5TextLoader,
+);
+#[cfg(feature = "models-phi")]
+pub use inference_models_phi::loaders::{Phi2Loader, Phi3Loader, Phi3_5MoELoader};
 #[cfg(feature = "models-llama")]
 mod mistral;
 #[cfg(feature = "models-llama")]
@@ -215,14 +248,6 @@ pub use llama::*;
 mod mixtral;
 #[cfg(feature = "models-llama")]
 pub use mixtral::*;
-#[cfg(feature = "models-phi")]
-mod phi2;
-#[cfg(feature = "models-phi")]
-pub use phi2::*;
-#[cfg(feature = "models-phi")]
-mod phi3;
-#[cfg(feature = "models-phi")]
-pub use phi3::*;
 #[cfg(feature = "models-qwen")]
 mod qwen2;
 #[cfg(feature = "models-qwen")]
@@ -235,10 +260,6 @@ pub use gemma2::*;
 mod starcoder2;
 #[cfg(feature = "models-other")]
 pub use starcoder2::*;
-#[cfg(feature = "models-phi")]
-mod phi3_5_moe;
-#[cfg(feature = "models-phi")]
-pub use phi3_5_moe::*;
 #[cfg(feature = "models-other")]
 mod deepseek2;
 #[cfg(feature = "models-other")]

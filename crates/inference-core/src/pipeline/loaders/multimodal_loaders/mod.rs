@@ -35,7 +35,7 @@ use crate::pipeline::isq::IsqModelLoader;
 use crate::pipeline::loaders::AutoDeviceMapParams;
 use crate::pipeline::{Modalities, MultimodalPromptPrefixer, Processor, SupportedModality};
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
-#[cfg(any(feature = "models-llama", feature = "models-phi"))]
+#[cfg(feature = "models-llama")]
 use crate::vision_models::clip::get_clip_vit_num_elems;
 #[cfg(feature = "models-gemma")]
 use crate::vision_models::diffusion_gemma::{DiffusionGemmaConfig, DiffusionGemmaModel};
@@ -88,16 +88,6 @@ use crate::vision_models::muse_glimmer::{
 use crate::vision_models::paddleocr_vl::config::Config as PaddleOcrVlConfig;
 #[cfg(feature = "models-other")]
 use crate::vision_models::paddleocr_vl::{processor::PaddleOcrVlProcessor, PaddleOcrVlModel};
-#[cfg(feature = "models-phi")]
-use crate::vision_models::phi3::processor::Phi3Processor;
-#[cfg(feature = "models-phi")]
-use crate::vision_models::phi3::{Config as Phi3Config, Model as Phi3, PHI3V_CLIP_CONFIG};
-#[cfg(feature = "models-phi")]
-use crate::vision_models::phi4;
-#[cfg(feature = "models-phi")]
-use crate::vision_models::phi4::processor::Phi4MMProcessor;
-#[cfg(feature = "models-phi")]
-use crate::vision_models::phi4::{Phi4MMConfig, Phi4MMModel, PHI4_MM_VISION_CFG};
 use crate::vision_models::preprocessor_config::PreProcessorConfig;
 use crate::vision_models::processor_config::ProcessorConfig;
 #[cfg(feature = "models-qwen")]
@@ -179,7 +169,7 @@ macro_rules! multimodal_loader_types {
                 match self {
                     $(
                         $(#[cfg(feature = $feature)])?
-                        Self::$variant => Ok(Box::new($loader)),
+                        Self::$variant => Ok($loader::boxed()),
                         $(
                             #[cfg(not(feature = $feature))]
                             Self::$variant => anyhow::bail!(
@@ -309,10 +299,42 @@ fn supports_gemma4_incremental_cache(config: &str) -> bool {
 
 mod auto;
 pub use auto::*;
+#[cfg(feature = "models-gemma")]
+inference_nn::boxed_loaders!(
+    MultimodalModelLoader:
+    DiffusionGemmaLoader,
+    Gemma3Loader,
+    Gemma3nLoader,
+    Gemma4Loader,
+);
+#[cfg(feature = "models-llama")]
+inference_nn::boxed_loaders!(
+    MultimodalModelLoader:
+    Idefics2Loader,
+    Idefics3Loader,
+    LLaVALoader,
+    LLaVANextLoader,
+    Mistral3Loader,
+    VLlama4Loader,
+    VLlamaLoader,
+    VoxtralLoader,
+);
+#[cfg(feature = "models-other")]
+inference_nn::boxed_loaders!(MultimodalModelLoader: Lfm2VlLoader, PaddleOcrVlLoader);
+#[cfg(feature = "models-qwen")]
+inference_nn::boxed_loaders!(
+    MultimodalModelLoader:
+    MiniCpmOLoader,
+    MuseGlimmerLoader,
+    Qwen2VLLoader,
+    Qwen2_5VLLoader,
+    Qwen3VLLoader,
+    Qwen3VLMoELoader,
+    Qwen3_5Loader,
+    Qwen3_5MoeLoader,
+);
 #[cfg(feature = "models-phi")]
-mod phi3v;
-#[cfg(feature = "models-phi")]
-pub use phi3v::*;
+pub use inference_models_phi::loaders::{Phi3VLoader, Phi4MMLoader};
 #[cfg(feature = "models-llama")]
 mod idefics2;
 #[cfg(feature = "models-llama")]
@@ -341,10 +363,6 @@ pub use idefics3::*;
 mod minicpm_o;
 #[cfg(feature = "models-qwen")]
 pub use minicpm_o::*;
-#[cfg(feature = "models-phi")]
-mod phi4mm;
-#[cfg(feature = "models-phi")]
-pub use phi4mm::*;
 #[cfg(feature = "models-qwen")]
 mod qwen2_5vl;
 #[cfg(feature = "models-qwen")]

@@ -81,6 +81,7 @@ use llguidance::toktrie::TokEnv;
 pub(crate) use loaders::checkpoint_runtime_size;
 #[cfg(feature = "models-gemma")]
 pub use loaders::GemmaLoader;
+pub(crate) use loaders::MultimodalProcessorFactory;
 #[cfg(feature = "models-qwen")]
 pub use loaders::Qwen2Loader;
 #[cfg(feature = "models-other")]

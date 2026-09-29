@@ -8,6 +8,7 @@ use inference_nn::{
 };
 
 pub mod conformer;
+pub mod loaders;
 pub mod phi2;
 pub mod phi3;
 pub mod phi3_5_moe;
