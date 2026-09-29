@@ -1,8 +1,9 @@
 use super::*;
 
-pub struct MistralLoader;
+/// `NormalLoader` for a SmolLm3 model.
+pub struct SmolLm3Loader;
 
-impl NormalModelLoader for MistralLoader {
+impl NormalModelLoader for SmolLm3Loader {
     fn load(
         &self,
         config: &str,
@@ -10,8 +11,9 @@ impl NormalModelLoader for MistralLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::mistral::Config::from_json(config)?;
-        Ok(Box::new(models::mistral::Model::new(
+        let cfg = crate::smollm3::Config::from_json(config)?;
+
+        Ok(Box::new(crate::smollm3::SmolLm3::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -21,33 +23,23 @@ impl NormalModelLoader for MistralLoader {
     }
     fn load_xlora(
         &self,
-        config: &str,
-        vb: ShardedVarBuilder,
-        lora_config: &[((String, String), LoraConfig)],
-        xlora_config: Option<XLoraConfig>,
-        xlora_ordering: Ordering,
-        normal_loading_metadata: NormalLoadingMetadata,
-        preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
+        _config: &str,
+        _vb: ShardedVarBuilder,
+        _lora_config: &[((String, String), LoraConfig)],
+        _xlora_config: Option<XLoraConfig>,
+        _xlora_ordering: Ordering,
+        _normal_loading_metadata: NormalLoadingMetadata,
+        _preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::mistral::Config::from_json(config)?;
-        Ok(Box::new(xlora_models::XLoraMistral::new(
-            &cfg,
-            vb,
-            lora_config,
-            xlora_config,
-            xlora_ordering,
-            self.is_gptx_for(config, &normal_loading_metadata)?,
-            normal_loading_metadata,
-            preload_adapters,
-        )?))
+        todo!()
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::models::mistral::Config::from_json(config)?;
+        let cfg = crate::smollm3::Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
 }
 
-impl IsqModelLoader for MistralLoader {
+impl IsqModelLoader for SmolLm3Loader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
             r"^model\.embed_tokens\.weight$",
@@ -74,7 +66,7 @@ impl IsqModelLoader for MistralLoader {
     }
 }
 
-impl DeviceMappedModelLoader for MistralLoader {
+impl DeviceMappedModelLoader for SmolLm3Loader {
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -83,7 +75,7 @@ impl DeviceMappedModelLoader for MistralLoader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = crate::models::mistral::Config::from_json(config)?;
+        let cfg = crate::smollm3::Config::from_json(config)?;
         standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
@@ -102,7 +94,7 @@ impl DeviceMappedModelLoader for MistralLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = crate::models::mistral::Config::from_json(config)?;
+        let cfg = crate::smollm3::Config::from_json(config)?;
 
         let per_layer_elems = {
             let input_layernorm = cfg.hidden_size;
@@ -138,7 +130,7 @@ impl DeviceMappedModelLoader for MistralLoader {
         ])
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = crate::models::mistral::Config::from_json(config)?;
+        let cfg = crate::smollm3::Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,
@@ -146,9 +138,9 @@ impl DeviceMappedModelLoader for MistralLoader {
             hidden_size: cfg.hidden_size,
             num_kv_heads: cfg.num_key_value_heads,
             num_attn_heads: cfg.num_attention_heads,
-            sliding_window: cfg.sliding_window,
-            k_head_dim: cfg.head_dim(),
-            v_head_dim: cfg.head_dim(),
+            sliding_window: None,
+            k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+            v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
             kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 

@@ -24,9 +24,9 @@ use crate::pipeline::isq::isq_regexes;
 use regex::Regex;
 use serde::Deserialize;
 
-#[cfg(any(feature = "models-gemma", feature = "models-llama"))]
+#[cfg(feature = "models-gemma")]
 use crate::models;
-#[cfg(any(feature = "models-gemma", feature = "models-llama"))]
+#[cfg(feature = "models-gemma")]
 use crate::xlora_models;
 use crate::xlora_models::XLoraConfig;
 
@@ -35,8 +35,6 @@ use super::{AutoDeviceMapParams, DeviceMappedModelLoader};
 #[cfg(feature = "models-gemma")]
 use super::tied_promoted_tensor_pack_factor;
 use super::AutoDeviceMapQuantization;
-#[cfg(feature = "models-llama")]
-use super::{standard_non_mapped_size_in_bytes, LanguageModelEnds};
 
 pub use inference_nn::loaders::NormalModelLoader;
 
@@ -186,13 +184,9 @@ pub use auto::*;
 #[cfg(feature = "models-gemma")]
 inference_nn::boxed_loaders!(NormalModelLoader: Gemma2Loader, GemmaLoader);
 #[cfg(feature = "models-llama")]
-inference_nn::boxed_loaders!(
-    NormalModelLoader:
-    LlamaLoader,
-    MistralLoader,
-    MixtralLoader,
-    SmolLm3Loader,
-);
+pub use inference_models_llama::loaders::{
+    LlamaLoader, MistralLoader, MixtralLoader, SmolLm3Loader,
+};
 #[cfg(feature = "models-other")]
 pub use inference_models_other::loaders::{
     DeepSeekV2Loader, DeepSeekV3Loader, GLM4Loader, GLM4MoeLiteLoader, GLM4MoeLoader, GptOssLoader,
@@ -204,30 +198,14 @@ pub use inference_models_phi::loaders::{Phi2Loader, Phi3Loader, Phi3_5MoELoader}
 pub use inference_models_qwen::loaders::{
     Qwen2Loader, Qwen3Loader, Qwen3MoELoader, Qwen3NextLoader, Qwen3_5TextLoader,
 };
-#[cfg(feature = "models-llama")]
-mod mistral;
-#[cfg(feature = "models-llama")]
-pub use mistral::*;
 #[cfg(feature = "models-gemma")]
 mod gemma;
 #[cfg(feature = "models-gemma")]
 pub use gemma::*;
-#[cfg(feature = "models-llama")]
-mod llama;
-#[cfg(feature = "models-llama")]
-pub use llama::*;
-#[cfg(feature = "models-llama")]
-mod mixtral;
-#[cfg(feature = "models-llama")]
-pub use mixtral::*;
 #[cfg(feature = "models-gemma")]
 mod gemma2;
 #[cfg(feature = "models-gemma")]
 pub use gemma2::*;
-#[cfg(feature = "models-llama")]
-mod smollm3;
-#[cfg(feature = "models-llama")]
-pub use smollm3::*;
 
 #[cfg(all(
     test,

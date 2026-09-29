@@ -1,10 +1,6 @@
 use super::*;
 
-// ─── Voxtral ────────────────────────────────────────────────────────────────
-
-/// [`MultimodalLoader`] for a Voxtral model.
-///
-/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
+/// `MultimodalLoader` for a Voxtral model.
 pub struct VoxtralLoader;
 
 pub struct VoxtralPrefixer;
@@ -58,19 +54,6 @@ impl MultimodalModelLoader for VoxtralLoader {
     fn default_bos_eos(&self, _config: &str) -> Option<(String, String)> {
         // Mistral tekken tokenizer: <s> = ID 1, </s> = ID 2
         Some(("<s>".to_string(), "</s>".to_string()))
-    }
-}
-
-impl MultimodalProcessorFactory for VoxtralLoader {
-    fn get_processor(
-        &self,
-        model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        let cfg = VoxtralConfig::from_json(model_config).expect("Failed to parse VoxtralConfig");
-        Arc::new(VoxtralProcessor::new(&cfg))
     }
 }
 

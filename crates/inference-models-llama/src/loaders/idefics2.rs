@@ -1,8 +1,6 @@
 use super::*;
 
-/// [`MultimodalLoader`] for an Idefics 2 Vision model.
-///
-/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
+/// `MultimodalLoader` for an Idefics 2 Vision model.
 pub struct Idefics2Loader;
 
 pub struct Idefics2Prefixer;
@@ -22,7 +20,7 @@ impl MultimodalModelLoader for Idefics2Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg = crate::vision_models::idefics2::Config::from_json(config)?;
+        let cfg = crate::idefics2::Config::from_json(config)?;
         Ok(Box::new(Idefics2::new(
             &cfg,
             vb,
@@ -32,7 +30,7 @@ impl MultimodalModelLoader for Idefics2Loader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::vision_models::idefics2::Config::from_json(config)?;
+        let cfg = crate::idefics2::Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
     fn supports_paged_attention(&self, _config: &str) -> bool {
@@ -52,22 +50,6 @@ impl MultimodalModelLoader for Idefics2Loader {
             input: vec![SupportedModality::Text, SupportedModality::Vision],
             output: vec![SupportedModality::Text],
         })
-    }
-}
-
-impl MultimodalProcessorFactory for Idefics2Loader {
-    fn get_processor(
-        &self,
-        _model_config: &str,
-        processor_config: Option<ProcessorConfig>,
-        preprocessor_config: PreProcessorConfig,
-        max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(Idefics2Processor::new(
-            processor_config.unwrap(),
-            preprocessor_config,
-            max_edge,
-        ))
     }
 }
 

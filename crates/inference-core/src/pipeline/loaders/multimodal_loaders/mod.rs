@@ -17,7 +17,7 @@ use serde::Deserialize;
 use super::{DeviceMappedModelLoader, NonMappedSubModel, NormalLoadingMetadata};
 // Loaders call these as `super::X`; they live one level up, in `loaders`.
 use super::language_model_pack_factors;
-#[cfg(any(feature = "models-gemma", feature = "models-llama"))]
+#[cfg(feature = "models-gemma")]
 use super::promoted_tensor_pack_factor;
 use super::{language_model_pack_factors_with_aliases, AutoDeviceMapQuantization};
 
@@ -29,8 +29,6 @@ use crate::pipeline::isq::IsqModelLoader;
 use crate::pipeline::loaders::AutoDeviceMapParams;
 use crate::pipeline::{Modalities, MultimodalPromptPrefixer, Processor, SupportedModality};
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
-#[cfg(feature = "models-llama")]
-use crate::vision_models::clip::get_clip_vit_num_elems;
 #[cfg(feature = "models-gemma")]
 use crate::vision_models::diffusion_gemma::{DiffusionGemmaConfig, DiffusionGemmaModel};
 #[cfg(feature = "models-gemma")]
@@ -45,37 +43,8 @@ use crate::vision_models::gemma3n::{Gemma3nModel, Gemma3nProcessor};
 use crate::vision_models::gemma4::config::Gemma4Config;
 #[cfg(feature = "models-gemma")]
 use crate::vision_models::gemma4::{Gemma4Model, Gemma4Processor, Gemma4ProcessorSettings};
-#[cfg(feature = "models-llama")]
-use crate::vision_models::idefics2::processor::Idefics2Processor;
-#[cfg(feature = "models-llama")]
-use crate::vision_models::idefics2::{Config as Idefics2Config, Idefics2};
-#[cfg(feature = "models-llama")]
-use crate::vision_models::idefics3::{Idefics3Config, Idefics3Model, Idefics3Processor};
-use crate::vision_models::image_processor::ImagePreProcessor;
-#[cfg(feature = "models-llama")]
-use crate::vision_models::llama4::{
-    self, Llama4Config, Llama4ImageProcessor, Llama4Model, Llama4Processor,
-};
-#[cfg(feature = "models-llama")]
-use crate::vision_models::llava::config::Config as LLaVAConfig;
-#[cfg(feature = "models-llama")]
-use crate::vision_models::llava::{llava_inputs_processor, processor::LLaVAProcessor};
-#[cfg(feature = "models-llama")]
-use crate::vision_models::llava::{llava_next_inputs_processor, processor::LLaVANextProcessor};
-#[cfg(feature = "models-llama")]
-use crate::vision_models::llava15::Model as LLaVA;
-#[cfg(feature = "models-llama")]
-use crate::vision_models::llava_next::Model as LLaVANext;
-#[cfg(feature = "models-llama")]
-use crate::vision_models::mistral3::{Mistral3Config, Mistral3Model, Mistral3Processor};
-#[cfg(feature = "models-llama")]
-use crate::vision_models::mllama::{MLlamaConfig, MLlamaModel, MLlamaProcessor};
 use crate::vision_models::preprocessor_config::PreProcessorConfig;
 use crate::vision_models::processor_config::ProcessorConfig;
-#[cfg(feature = "models-llama")]
-use crate::vision_models::voxtral::config::VoxtralConfig;
-#[cfg(feature = "models-llama")]
-use crate::vision_models::voxtral::{VoxtralModel, VoxtralProcessor};
 
 pub use inference_nn::loaders::MultimodalModelLoader;
 
@@ -267,17 +236,10 @@ inference_nn::boxed_loaders!(
     Gemma4Loader,
 );
 #[cfg(feature = "models-llama")]
-inference_nn::boxed_loaders!(
-    MultimodalModelLoader:
-    Idefics2Loader,
-    Idefics3Loader,
-    LLaVALoader,
-    LLaVANextLoader,
-    Mistral3Loader,
-    VLlama4Loader,
-    VLlamaLoader,
-    VoxtralLoader,
-);
+pub use inference_models_llama::loaders::{
+    Idefics2Loader, Idefics3Loader, LLaVALoader, LLaVANextLoader, Mistral3Loader, VLlama4Loader,
+    VLlamaLoader, VoxtralLoader,
+};
 #[cfg(feature = "models-other")]
 pub use inference_models_other::loaders::{Lfm2VlLoader, PaddleOcrVlLoader};
 #[cfg(feature = "models-phi")]
@@ -287,46 +249,14 @@ pub use inference_models_qwen::loaders::{
     MiniCpmOLoader, MuseGlimmerLoader, Qwen2VLLoader, Qwen2_5VLLoader, Qwen3VLLoader,
     Qwen3VLMoELoader, Qwen3_5Loader, Qwen3_5MoeLoader,
 };
-#[cfg(feature = "models-llama")]
-mod idefics2;
-#[cfg(feature = "models-llama")]
-pub use idefics2::*;
-#[cfg(feature = "models-llama")]
-mod llava_next;
-#[cfg(feature = "models-llama")]
-pub use llava_next::*;
-#[cfg(feature = "models-llama")]
-mod llava;
-#[cfg(feature = "models-llama")]
-pub use llava::*;
-#[cfg(feature = "models-llama")]
-mod vllama;
-#[cfg(feature = "models-llama")]
-pub use vllama::*;
-#[cfg(feature = "models-llama")]
-mod idefics3;
-#[cfg(feature = "models-llama")]
-pub use idefics3::*;
 #[cfg(feature = "models-gemma")]
 mod gemma3;
 #[cfg(feature = "models-gemma")]
 pub use gemma3::*;
-#[cfg(feature = "models-llama")]
-mod mistral3;
-#[cfg(feature = "models-llama")]
-pub use mistral3::*;
-#[cfg(feature = "models-llama")]
-mod vllama4;
-#[cfg(feature = "models-llama")]
-pub use vllama4::*;
 #[cfg(feature = "models-gemma")]
 mod gemma3n;
 #[cfg(feature = "models-gemma")]
 pub use gemma3n::*;
-#[cfg(feature = "models-llama")]
-mod voxtral;
-#[cfg(feature = "models-llama")]
-pub use voxtral::*;
 #[cfg(feature = "models-gemma")]
 mod gemma4;
 #[cfg(feature = "models-gemma")]

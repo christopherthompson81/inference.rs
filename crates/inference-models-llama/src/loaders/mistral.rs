@@ -1,11 +1,8 @@
 use super::*;
 
-/// [`NormalLoader`] for a Llama model.
-///
-/// [`NormalLoader`]: crate::pipeline::NormalLoader
-pub struct LlamaLoader;
+pub struct MistralLoader;
 
-impl NormalModelLoader for LlamaLoader {
+impl NormalModelLoader for MistralLoader {
     fn load(
         &self,
         config: &str,
@@ -13,9 +10,8 @@ impl NormalModelLoader for LlamaLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::llama::Config::from_json(config)?;
-
-        Ok(Box::new(models::llama::Llama::new(
+        let cfg = crate::mistral::Config::from_json(config)?;
+        Ok(Box::new(crate::mistral::Model::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -33,9 +29,8 @@ impl NormalModelLoader for LlamaLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::llama::Config::from_json(config)?;
-
-        Ok(Box::new(xlora_models::XLoraLlama::new(
+        let cfg = crate::mistral::Config::from_json(config)?;
+        Ok(Box::new(crate::xlora::mistral::XLoraModel::new(
             &cfg,
             vb,
             lora_config,
@@ -47,12 +42,12 @@ impl NormalModelLoader for LlamaLoader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::models::llama::Config::from_json(config)?;
+        let cfg = crate::mistral::Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
 }
 
-impl IsqModelLoader for LlamaLoader {
+impl IsqModelLoader for MistralLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
             r"^model\.embed_tokens\.weight$",
@@ -79,7 +74,7 @@ impl IsqModelLoader for LlamaLoader {
     }
 }
 
-impl DeviceMappedModelLoader for LlamaLoader {
+impl DeviceMappedModelLoader for MistralLoader {
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -88,7 +83,7 @@ impl DeviceMappedModelLoader for LlamaLoader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = crate::models::llama::Config::from_json(config)?;
+        let cfg = crate::mistral::Config::from_json(config)?;
         standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
@@ -107,7 +102,7 @@ impl DeviceMappedModelLoader for LlamaLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = crate::models::llama::Config::from_json(config)?;
+        let cfg = crate::mistral::Config::from_json(config)?;
 
         let per_layer_elems = {
             let input_layernorm = cfg.hidden_size;
@@ -143,7 +138,7 @@ impl DeviceMappedModelLoader for LlamaLoader {
         ])
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = crate::models::llama::Config::from_json(config)?;
+        let cfg = crate::mistral::Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,
@@ -151,9 +146,9 @@ impl DeviceMappedModelLoader for LlamaLoader {
             hidden_size: cfg.hidden_size,
             num_kv_heads: cfg.num_key_value_heads,
             num_attn_heads: cfg.num_attention_heads,
-            sliding_window: None,
-            k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
-            v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+            sliding_window: cfg.sliding_window,
+            k_head_dim: cfg.head_dim(),
+            v_head_dim: cfg.head_dim(),
             kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 

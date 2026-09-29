@@ -1,19 +1,17 @@
 use super::*;
 
-/// [`MultimodalLoader`] for an LLaVANext Vision model.
-///
-/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
-pub struct LLaVANextLoader;
+/// `MultimodalLoader` for an LLaVA Vision model.
+pub struct LLaVALoader;
 
-pub struct LLaVANextPrefixer;
+pub struct LLaVAPrefixer;
 
-impl MultimodalPromptPrefixer for LLaVANextPrefixer {
+impl MultimodalPromptPrefixer for LLaVAPrefixer {
     fn prefix_image(&self, image_indexes: Vec<usize>, prompt: &str) -> String {
         format!("{}{prompt}", "<image>".repeat(image_indexes.len()))
     }
 }
 
-impl MultimodalModelLoader for LLaVANextLoader {
+impl MultimodalModelLoader for LLaVALoader {
     fn load(
         &self,
         config: &str,
@@ -21,8 +19,8 @@ impl MultimodalModelLoader for LLaVANextLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg = crate::vision_models::llava::config::Config::from_json(config)?;
-        Ok(Box::new(LLaVANext::new(
+        let cfg = crate::llava::config::Config::from_json(config)?;
+        Ok(Box::new(LLaVA::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -34,7 +32,7 @@ impl MultimodalModelLoader for LLaVANextLoader {
         false
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::vision_models::llava::config::Config::from_json(config)?;
+        let cfg = crate::llava::config::Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
     fn supports_paged_attention(&self, _config: &str) -> bool {
@@ -47,7 +45,7 @@ impl MultimodalModelLoader for LLaVANextLoader {
         true
     }
     fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
-        Arc::new(LLaVANextPrefixer)
+        Arc::new(LLaVAPrefixer)
     }
     fn modalities(&self, _config: &str) -> Result<Modalities> {
         Ok(Modalities {
@@ -57,19 +55,7 @@ impl MultimodalModelLoader for LLaVANextLoader {
     }
 }
 
-impl MultimodalProcessorFactory for LLaVANextLoader {
-    fn get_processor(
-        &self,
-        model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(LLaVANextProcessor::new(model_config))
-    }
-}
-
-impl IsqModelLoader for LLaVANextLoader {
+impl IsqModelLoader for LLaVALoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
             r"^language_model\.model\.embed_tokens\.weight$",
@@ -107,7 +93,7 @@ impl IsqModelLoader for LLaVANextLoader {
     }
 }
 
-impl DeviceMappedModelLoader for LLaVANextLoader {
+impl DeviceMappedModelLoader for LLaVALoader {
     fn mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -116,7 +102,7 @@ impl DeviceMappedModelLoader for LLaVANextLoader {
         let AutoDeviceMapParams::Multimodal {
             max_seq_len,
             max_batch_size,
-            max_image_shape,
+            max_image_shape: _,
             max_num_images,
         } = params
         else {
@@ -125,12 +111,8 @@ impl DeviceMappedModelLoader for LLaVANextLoader {
 
         let config = LLaVAConfig::from_json(config)?;
 
-        #[allow(clippy::cast_possible_truncation)]
         let img_seq_len =
-            llava_next_inputs_processor::LLaVANextInputProcessor::get_num_image_tokens(
-                &config,
-                (max_image_shape.0 as u32, max_image_shape.1 as u32),
-            );
+            llava_inputs_processor::LLaVAInputProcessor::get_num_image_tokens(&config);
         let img_seq_len = img_seq_len * max_num_images;
 
         let max_text_attn = {
@@ -150,7 +132,7 @@ impl DeviceMappedModelLoader for LLaVANextLoader {
         let AutoDeviceMapParams::Multimodal {
             max_seq_len: _,
             max_batch_size,
-            max_image_shape,
+            max_image_shape: _,
             max_num_images,
         } = params
         else {
@@ -159,12 +141,8 @@ impl DeviceMappedModelLoader for LLaVANextLoader {
 
         let config = LLaVAConfig::from_json(config)?;
 
-        #[allow(clippy::cast_possible_truncation)]
         let img_seq_len =
-            llava_next_inputs_processor::LLaVANextInputProcessor::get_num_image_tokens(
-                &config,
-                (max_image_shape.0 as u32, max_image_shape.1 as u32),
-            );
+            llava_inputs_processor::LLaVAInputProcessor::get_num_image_tokens(&config);
 
         let max_vision_attn = {
             (max_batch_size * max_num_images)
