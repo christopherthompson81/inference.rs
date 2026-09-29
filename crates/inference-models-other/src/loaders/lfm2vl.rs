@@ -1,11 +1,8 @@
 use super::*;
-use crate::pipeline::loaders::layer_indexed_device;
 
 const TEXT_LAYER_INDEX_PATTERN: &str = r"model\.language_model\.layers\.(\d+)\.";
 
-/// [`MultimodalLoader`] for an LFM2-VL model.
-///
-/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
+/// `MultimodalLoader` for an LFM2-VL model.
 pub struct Lfm2VlLoader;
 
 pub struct Lfm2VlPrefixer;
@@ -100,19 +97,6 @@ impl MultimodalModelLoader for Lfm2VlLoader {
             cfg.text_config.num_hidden_layers,
             loading_isq,
         )
-    }
-}
-
-impl MultimodalProcessorFactory for Lfm2VlLoader {
-    fn get_processor(
-        &self,
-        model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        let cfg = Lfm2VlConfig::from_json(model_config).expect("Failed to parse LFM2-VL config");
-        Arc::new(Lfm2VlProcessor::new(&cfg, &preprocessor_config))
     }
 }
 
@@ -281,14 +265,14 @@ impl DeviceMappedModelLoader for Lfm2VlLoader {
             let ffn_norm = hidden;
             let feed_forward = 3 * hidden * intermediate / weight_pack_factor;
             let operator = match layer_type {
-                crate::models::lfm2::LayerType::Attention => {
+                crate::lfm2::LayerType::Attention => {
                     let q_dim = cfg.num_attention_heads * head_dim;
                     let kv_dim = cfg.num_key_value_heads * head_dim;
                     let projections = (hidden * q_dim + hidden * kv_dim * 2 + q_dim * hidden)
                         / weight_pack_factor;
                     projections + 2 * head_dim
                 }
-                crate::models::lfm2::LayerType::Conv => {
+                crate::lfm2::LayerType::Conv => {
                     let projections = (hidden * 3 * hidden + hidden * hidden) / weight_pack_factor;
                     let conv = hidden * cfg.conv_l_cache;
                     let bias = if cfg.conv_bias { 5 * hidden } else { 0 };

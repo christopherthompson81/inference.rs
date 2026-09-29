@@ -2,15 +2,22 @@ use std::sync::Arc;
 
 use either::Either;
 use indexmap::IndexMap;
+use inference_models_other::loaders::PaddleOcrVlLoader;
 use inference_models_other::paddleocr_vl::inputs_processor::{
     PaddleOcrVlImageProcessor, IMAGE_END, IMAGE_PLACEHOLDER, IMAGE_START,
 };
 use serde_json::Value;
 
 use crate::{
-    pipeline::{processing::default_process, InputsProcessor, MessagesAction, Processor},
+    pipeline::{
+        processing::default_process, InputsProcessor, MessagesAction, MultimodalProcessorFactory,
+        Processor,
+    },
     request::ReasoningEffort,
-    vision_models::media_host::MediaInputsProcessor,
+    vision_models::{
+        media_host::MediaInputsProcessor, preprocessor_config::PreProcessorConfig,
+        processor_config::ProcessorConfig,
+    },
     MessageContent, Tool,
 };
 
@@ -70,5 +77,17 @@ impl Processor for PaddleOcrVlProcessor {
     }
     fn template_action(&self) -> MessagesAction {
         MessagesAction::Keep
+    }
+}
+
+impl MultimodalProcessorFactory for PaddleOcrVlLoader {
+    fn get_processor(
+        &self,
+        _model_config: &str,
+        _processor_config: Option<ProcessorConfig>,
+        _preprocessor_config: PreProcessorConfig,
+        _max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        Arc::new(PaddleOcrVlProcessor)
     }
 }

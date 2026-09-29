@@ -1,11 +1,9 @@
 use super::*;
 
-/// [`NormalLoader`] for a GLM 4 MoE model (GLM-4.5).
-///
-/// [`NormalLoader`]: crate::pipeline::NormalLoader
-pub struct GLM4MoeLoader;
+/// `NormalLoader` for a GLM 4 MoE Lite model (GLM-4.7-Flash).
+pub struct GLM4MoeLiteLoader;
 
-impl NormalModelLoader for GLM4MoeLoader {
+impl NormalModelLoader for GLM4MoeLiteLoader {
     fn load(
         &self,
         config: &str,
@@ -13,8 +11,8 @@ impl NormalModelLoader for GLM4MoeLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::glm4_moe::Glm4MoeConfig::from_json(config)?;
-        Ok(Box::new(models::glm4_moe::Glm4Moe::new(
+        let cfg = crate::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
+        Ok(Box::new(crate::glm4_moe_lite::Glm4MoeLite::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -35,12 +33,12 @@ impl NormalModelLoader for GLM4MoeLoader {
         todo!()
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::models::glm4_moe::Glm4MoeConfig::from_json(config)?;
+        let cfg = crate::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
         Ok(Box::new(cfg))
     }
 }
 
-impl IsqModelLoader for GLM4MoeLoader {
+impl IsqModelLoader for GLM4MoeLiteLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
             r"^model\.embed_tokens\.weight$",
@@ -50,16 +48,18 @@ impl IsqModelLoader for GLM4MoeLoader {
     fn isq_layer_regexes(&self, config: &str) -> Result<Vec<Regex>> {
         let mut data = isq_regexes(&[
             r"lm_head\.(weight|bias)$",
-            // Attention (standard GQA)
-            r"layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
+            // Attention (MLA)
+            r"layers\.(\d+)\.self_attn\.kv_a_proj_with_mqa\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.(kv_b|k_b|v_b)_proj\.(weight|bias)$",
             r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
+            // Q LoRA projections
+            r"layers\.(\d+)\.self_attn\.q_a_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.self_attn\.q_b_proj\.(weight|bias)$",
             r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
         ])?;
-        let cfg = crate::models::glm4_moe::Glm4MoeConfig::from_json(config)?;
+        let cfg = crate::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
         for layer_idx in 0..cfg.num_hidden_layers {
-            if layer_idx >= cfg.first_k_dense_replace {
+            if layer_idx >= cfg.first_k_dense_replace && layer_idx % cfg.moe_layer_freq == 0 {
                 // MoE layer
                 for i in 0..cfg.n_routed_experts {
                     data.extend(isq_regexes(&[
@@ -110,7 +110,7 @@ impl IsqModelLoader for GLM4MoeLoader {
     }
 }
 
-impl DeviceMappedModelLoader for GLM4MoeLoader {
+impl DeviceMappedModelLoader for GLM4MoeLiteLoader {
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -119,7 +119,7 @@ impl DeviceMappedModelLoader for GLM4MoeLoader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = crate::models::glm4_moe::Glm4MoeConfig::from_json(config)?;
+        let cfg = crate::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
         standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
@@ -138,33 +138,34 @@ impl DeviceMappedModelLoader for GLM4MoeLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = crate::models::glm4_moe::Glm4MoeConfig::from_json(config)?;
+        let cfg = crate::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
         let mut per_layer_elems = Vec::new();
 
-        let head_dim = cfg.head_dim();
         for layer_idx in 0..cfg.num_hidden_layers {
             let input_layernorm = cfg.hidden_size;
             let post_attention_layernorm = cfg.hidden_size;
 
-            // Standard GQA attention
-            let q_proj = cfg.hidden_size * cfg.num_attention_heads * head_dim / weight_pack_factor
-                + bias_if!(cfg.attention_bias, cfg.num_attention_heads * head_dim);
-            let k_proj = cfg.hidden_size * cfg.num_key_value_heads * head_dim / weight_pack_factor
-                + bias_if!(cfg.attention_bias, cfg.num_key_value_heads * head_dim);
-            let v_proj = cfg.hidden_size * cfg.num_key_value_heads * head_dim / weight_pack_factor
-                + bias_if!(cfg.attention_bias, cfg.num_key_value_heads * head_dim);
-            let o_proj = cfg.num_attention_heads * head_dim * cfg.hidden_size / weight_pack_factor;
-
-            // QK norm if enabled
-            let qk_norm = if cfg.use_qk_norm {
-                head_dim * 2 // q_norm + k_norm
-            } else {
-                0
+            // Q LoRA projection
+            let q_proj = {
+                let a = cfg.hidden_size * cfg.q_lora_rank / weight_pack_factor;
+                let norm = cfg.q_lora_rank;
+                let b = (cfg.num_attention_heads * cfg.q_head_dim()) * cfg.q_lora_rank
+                    / weight_pack_factor;
+                a + norm + b
             };
+            let kv_a_proj_with_mqa =
+                cfg.hidden_size * (cfg.kv_lora_rank + cfg.qk_rope_head_dim) / weight_pack_factor;
+            let kv_a_layernorm = cfg.kv_lora_rank;
+            let kv_b_proj = cfg.kv_lora_rank
+                * cfg.num_attention_heads
+                * (cfg.q_head_dim() - cfg.qk_rope_head_dim + cfg.v_head_dim)
+                / weight_pack_factor;
+            let o_proj =
+                cfg.num_attention_heads * cfg.v_head_dim * cfg.hidden_size / weight_pack_factor;
 
             let moe_block = {
                 let mut sum = 0;
-                if layer_idx >= cfg.first_k_dense_replace {
+                if layer_idx >= cfg.first_k_dense_replace && layer_idx % cfg.moe_layer_freq == 0 {
                     // MoE layer
                     let h_size = cfg.hidden_size;
                     let gate_proj = h_size * cfg.moe_intermediate_size / weight_pack_factor
@@ -205,10 +206,10 @@ impl DeviceMappedModelLoader for GLM4MoeLoader {
                 input_layernorm
                     + post_attention_layernorm
                     + q_proj
-                    + k_proj
-                    + v_proj
+                    + kv_a_layernorm
+                    + kv_a_proj_with_mqa
+                    + kv_b_proj
                     + o_proj
-                    + qk_norm
                     + moe_block,
             );
         }
@@ -219,18 +220,17 @@ impl DeviceMappedModelLoader for GLM4MoeLoader {
             .collect())
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = crate::models::glm4_moe::Glm4MoeConfig::from_json(config)?;
+        let cfg = crate::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
 
-        let head_dim = cfg.head_dim();
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,
             num_layers: cfg.num_hidden_layers,
             hidden_size: cfg.hidden_size,
-            num_kv_heads: cfg.num_key_value_heads,
+            num_kv_heads: cfg.num_attention_heads,
             num_attn_heads: cfg.num_attention_heads,
             sliding_window: None,
-            k_head_dim: head_dim,
-            v_head_dim: head_dim,
+            k_head_dim: cfg.qk_rope_head_dim + cfg.qk_nope_head_dim,
+            v_head_dim: cfg.v_head_dim,
             kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 

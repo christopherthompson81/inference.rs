@@ -1,8 +1,6 @@
 use super::*;
 
-/// [`NormalLoader`] for an LFM2 hybrid attention/short-conv model.
-///
-/// [`NormalLoader`]: crate::pipeline::NormalLoader
+/// `NormalLoader` for an LFM2 hybrid attention/short-conv model.
 pub struct Lfm2Loader;
 
 impl NormalModelLoader for Lfm2Loader {
@@ -13,9 +11,9 @@ impl NormalModelLoader for Lfm2Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::lfm2::Config::from_json(config)?;
+        let cfg = crate::lfm2::Config::from_json(config)?;
 
-        Ok(Box::new(models::lfm2::Model::new(
+        Ok(Box::new(crate::lfm2::Model::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -37,7 +35,7 @@ impl NormalModelLoader for Lfm2Loader {
     }
 
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::models::lfm2::Config::from_json(config)?;
+        let cfg = crate::lfm2::Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
     fn supports_paged_attention(&self, _config: &str) -> Result<bool> {
@@ -96,7 +94,7 @@ impl DeviceMappedModelLoader for Lfm2Loader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = crate::models::lfm2::Config::from_json(config)?;
+        let cfg = crate::lfm2::Config::from_json(config)?;
         standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
@@ -115,7 +113,7 @@ impl DeviceMappedModelLoader for Lfm2Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = crate::models::lfm2::Config::from_json(config)?;
+        let cfg = crate::lfm2::Config::from_json(config)?;
         let head_dim = cfg.head_dim();
         let hidden = cfg.hidden_size;
         let intermediate = cfg.intermediate_size();
@@ -125,10 +123,10 @@ impl DeviceMappedModelLoader for Lfm2Loader {
             let operator_norm = hidden;
             let ffn_norm = hidden;
             let feed_forward = match cfg.feed_forward_type(layer_idx) {
-                crate::models::lfm2::FeedForwardType::Dense => {
+                crate::lfm2::FeedForwardType::Dense => {
                     3 * hidden * intermediate / weight_pack_factor
                 }
-                crate::models::lfm2::FeedForwardType::Moe => {
+                crate::lfm2::FeedForwardType::Moe => {
                     let gate = hidden * cfg.num_experts;
                     let expert_bias = if cfg.use_expert_bias {
                         cfg.num_experts
@@ -141,14 +139,14 @@ impl DeviceMappedModelLoader for Lfm2Loader {
                 }
             };
             let operator = match layer_type {
-                crate::models::lfm2::LayerType::Attention => {
+                crate::lfm2::LayerType::Attention => {
                     let q_dim = cfg.num_attention_heads * head_dim;
                     let kv_dim = cfg.num_key_value_heads * head_dim;
                     let projections = (hidden * q_dim + hidden * kv_dim * 2 + q_dim * hidden)
                         / weight_pack_factor;
                     projections + 2 * head_dim
                 }
-                crate::models::lfm2::LayerType::Conv => {
+                crate::lfm2::LayerType::Conv => {
                     let projections = (hidden * 3 * hidden + hidden * hidden) / weight_pack_factor;
                     let conv = hidden * cfg.conv_l_cache;
                     let bias = if cfg.conv_bias { 5 * hidden } else { 0 };
@@ -162,7 +160,7 @@ impl DeviceMappedModelLoader for Lfm2Loader {
         Ok(sizes)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = crate::models::lfm2::Config::from_json(config)?;
+        let cfg = crate::lfm2::Config::from_json(config)?;
         let head_dim = cfg.head_dim();
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

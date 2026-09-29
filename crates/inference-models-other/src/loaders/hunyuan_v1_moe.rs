@@ -1,11 +1,9 @@
 use super::*;
 
-/// [`NormalLoader`] for a HunYuanDenseV1 model.
-///
-/// [`NormalLoader`]: crate::pipeline::NormalLoader
-pub struct HunYuanDenseV1Loader;
+/// `NormalLoader` for a HunYuanMoEV1 model.
+pub struct HunYuanMoEV1Loader;
 
-impl NormalModelLoader for HunYuanDenseV1Loader {
+impl NormalModelLoader for HunYuanMoEV1Loader {
     fn load(
         &self,
         config: &str,
@@ -13,9 +11,9 @@ impl NormalModelLoader for HunYuanDenseV1Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::hunyuan_v1_dense::Config::from_json(config)?;
+        let cfg = crate::hunyuan_v1_moe::Config::from_json(config)?;
 
-        Ok(Box::new(models::hunyuan_v1_dense::Model::new(
+        Ok(Box::new(crate::hunyuan_v1_moe::Model::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -36,13 +34,13 @@ impl NormalModelLoader for HunYuanDenseV1Loader {
         todo!()
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::models::hunyuan_v1_dense::Config::from_json(config)?;
+        let cfg = crate::hunyuan_v1_moe::Config::from_json(config)?;
 
         Ok(Box::new(cfg))
     }
 }
 
-impl IsqModelLoader for HunYuanDenseV1Loader {
+impl IsqModelLoader for HunYuanMoEV1Loader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
             r"^model\.embed_tokens\.weight$",
@@ -53,21 +51,42 @@ impl IsqModelLoader for HunYuanDenseV1Loader {
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
             r"lm_head\.(weight|bias)$",
+            // Attention
             r"layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
             r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
             r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
             r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
+            // Dense MLP
             r"layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$",
             r"layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$",
             r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$",
+            // MoE experts
+            r"layers\.(\d+)\.mlp\.shared_mlp\.gate_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.shared_mlp\.up_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.shared_mlp\.down_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.gate_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.up_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
         self.isq_layer_regexes(config)
     }
+    fn isq_layer_regexes_moqe(&self, _config: &str) -> Result<Vec<Regex>> {
+        isq_regexes(&[
+            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.gate_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.up_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.(weight|bias)$",
+            r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
+        ])
+    }
+    fn immediate_isq_predicates_moqe(&self, config: &str) -> Result<Vec<Regex>> {
+        self.isq_layer_regexes_moqe(config)
+    }
 }
 
-impl DeviceMappedModelLoader for HunYuanDenseV1Loader {
+impl DeviceMappedModelLoader for HunYuanMoEV1Loader {
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -76,7 +95,7 @@ impl DeviceMappedModelLoader for HunYuanDenseV1Loader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = models::hunyuan_v1_dense::Config::from_json(config)?;
+        let cfg = crate::hunyuan_v1_moe::Config::from_json(config)?;
         standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
@@ -95,9 +114,11 @@ impl DeviceMappedModelLoader for HunYuanDenseV1Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = models::hunyuan_v1_dense::Config::from_json(config)?;
+        let cfg = crate::hunyuan_v1_moe::Config::from_json(config)?;
         let head_dim = cfg.head_dim();
-        let per_layer_elems = {
+
+        let mut layer_sizes = Vec::new();
+        for layer_idx in 0..cfg.num_hidden_layers {
             let input_layernorm = cfg.hidden_size;
             let post_attention_layernorm = cfg.hidden_size;
 
@@ -110,33 +131,45 @@ impl DeviceMappedModelLoader for HunYuanDenseV1Loader {
             let o_proj = size_q * size_in / weight_pack_factor;
 
             let h_size = cfg.hidden_size;
-            let i_size = cfg.intermediate_size;
-            let gate_proj = h_size * i_size / weight_pack_factor;
-            let up_proj = h_size * i_size / weight_pack_factor;
-            let down_proj = i_size * h_size / weight_pack_factor;
+            let expert_size = {
+                let expert_gate = h_size * cfg.intermediate_size / weight_pack_factor;
+                let expert_up = h_size * cfg.intermediate_size / weight_pack_factor;
+                let expert_down = cfg.intermediate_size * h_size / weight_pack_factor;
+                expert_gate + expert_up + expert_down
+            };
+            let (router_size, mlp_size) = if cfg.uses_moe() {
+                let shared_expert_size = if cfg.use_mixed_mlp_moe {
+                    expert_size * cfg.num_shared_expert.get(layer_idx)
+                } else {
+                    0
+                };
+                (
+                    h_size * cfg.num_experts,
+                    shared_expert_size + expert_size * cfg.num_experts,
+                )
+            } else {
+                (0, expert_size)
+            };
+            let qk_norm = if cfg.use_qk_norm { head_dim * 2 } else { 0 };
 
-            let q_norm = head_dim;
-            let k_norm = head_dim;
-
-            input_layernorm
+            let non_router_elems = input_layernorm
                 + post_attention_layernorm
                 + q_proj
                 + k_proj
                 + v_proj
                 + o_proj
-                + gate_proj
-                + up_proj
-                + down_proj
-                + q_norm
-                + k_norm
-        };
-        Ok(vec![
-            per_layer_elems * dtype.size_in_bytes();
-            cfg.num_hidden_layers
-        ])
+                + mlp_size
+                + qk_norm;
+
+            layer_sizes.push(
+                non_router_elems * dtype.size_in_bytes() + router_size * DType::F32.size_in_bytes(),
+            );
+        }
+
+        Ok(layer_sizes)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = models::hunyuan_v1_dense::Config::from_json(config)?;
+        let cfg = crate::hunyuan_v1_moe::Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

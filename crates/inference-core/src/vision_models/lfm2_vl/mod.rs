@@ -3,4 +3,3 @@
 pub(crate) use inference_models_other::lfm2_vl::*;
 
 pub(crate) mod processor;
-pub(crate) use processor::Lfm2VlProcessor;
