@@ -30,7 +30,7 @@ cargo install --path crates/inference-cli --features <features>
 ### Testing & Quality
 ```bash
 # Run core tests
-cargo test -p inference-core -p inference-protocol -p inference-nn -p inference-models-llama -p inference-models-qwen -p inference-models-gemma -p inference-models-phi -p inference-models-other -p inference-models-speech -p inference-models-diffusion -p inference-quant -p inference-vision
+cargo test -p inference-core -p inference-protocol -p inference-nn -p inference-models-llama -p inference-models-qwen -p inference-models-gemma -p inference-models-phi -p inference-models-other -p inference-models-speech -p inference-models-diffusion -p inference-quant -p inference-vision --features inference-protocol/openai
 
 # Format code (uses rustfmt, ruff, clang-format)
 make fmt
@@ -43,8 +43,9 @@ cargo clippy --workspace --tests --examples -- -D warnings
 
 # Canonical local checks (default: --lint --tests). Use these rather than ad-hoc cargo invocations: each mode always
 # builds the same package/feature set, so artifacts are reused instead of rebuilt per combination.
+# --docs documents only the crates that differ from master (rustdoc is never incremental); --docs-all documents all.
 # --bindings builds libinference_ffi and runs the C# (needs the .NET SDK) and Python binding tests.
-scripts/local_ci.sh [--lint] [--tests] [--cuda] [--models] [--slim] [--docs] [--bindings]
+scripts/local_ci.sh [--lint] [--tests] [--cuda] [--models] [--slim] [--docs|--docs-all] [--bindings]
 
 # Same, then delete target/debug artifacts the selected modes don't use (including on-request example builds).
 scripts/local_ci.sh --lint --tests --cuda --sweep

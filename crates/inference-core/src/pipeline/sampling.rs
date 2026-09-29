@@ -141,12 +141,25 @@ fn streaming_response_logprob(emission: &StreamingEmission) -> crate::ResponseLo
             .unwrap_or_else(|| String::from_utf8_lossy(&emission.bytes).to_string()),
         bytes: Some(emission.bytes.clone()),
         logprob: emission.logprobs.logprob,
-        top_logprobs: emission
-            .logprobs
-            .top_logprobs
-            .clone()
-            .expect("requested logprobs must include top logprobs"),
+        top_logprobs: wire_top_logprobs(
+            emission
+                .logprobs
+                .top_logprobs
+                .as_deref()
+                .expect("requested logprobs must include top logprobs"),
+        ),
     }
+}
+
+/// The sampler's top logprobs as the response carries them; inference-nn keeps its own copy of the type.
+fn wire_top_logprobs(top: &[crate::sampler::TopLogprob]) -> Vec<crate::TopLogprob> {
+    top.iter()
+        .map(|t| crate::TopLogprob {
+            token: t.token,
+            logprob: t.logprob,
+            bytes: t.bytes.clone(),
+        })
+        .collect()
 }
 
 pub(crate) fn cache_finished_sequence(
@@ -534,7 +547,7 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                         token,
                         bytes: logprob.bytes.clone().map(|b| b.into_bytes()),
                         logprob: logprob.logprob,
-                        top_logprobs: logprob.top_logprobs.clone().unwrap(),
+                        top_logprobs: wire_top_logprobs(logprob.top_logprobs.as_deref().unwrap()),
                     };
                     logprobs.push(resp_logprob);
                 }

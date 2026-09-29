@@ -101,6 +101,11 @@ pub fn parse_request(
 
     // Validate that the requested model matches the loaded model
     validate_model_name(&oairequest.model, state.clone())?;
+    let adapter = oairequest
+        .adapter
+        .clone()
+        .map(crate::lora_routing::core_adapter_selection)
+        .transpose()?;
 
     if oairequest.max_tokens == Some(0) {
         anyhow::bail!("max_tokens must be at least 1.");
@@ -174,7 +179,7 @@ pub fn parse_request(
             } else {
                 Some(oairequest.model.clone())
             },
-            adapter: oairequest.adapter.map(Into::into),
+            adapter,
             truncate_sequence: oairequest.truncate_sequence.unwrap_or(false),
             session_id: None,
             files: None,

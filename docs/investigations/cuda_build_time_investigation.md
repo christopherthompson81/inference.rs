@@ -879,3 +879,54 @@ Review follow-ups:
 - Implication: the split does what it should structurally, but at ~3% of core the wall-time gain is inside the
   noise. The larger step is moving inference-api's request types (`openai.rs`, `responses_types`) here too. That
   takes inference-api's lib test (t=201-254 s) off the tail as well.
+
+## Run 45 - 2026-09-28 (night)
+
+- Question: `local_ci.sh --docs` became noticeably slow. Is it serialized, and what does it cost?
+- Command: `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps [--timings]`, timed after `touch`ing one crate's
+  lib.rs; `CARGO_INCREMENTAL=0 cargo check -p <crate> --lib` for comparison.
+- Result, re-documented crates and wall time per touched crate:
+  | Touched crate | Wall | Crates re-documented |
+  |---|---|---|
+  | inference-protocol (PR #118 as merged) | 163 s | 15, including inference-nn and all 7 model crates |
+  | inference-protocol (after the fix below) | 83 s | 7 |
+  | inference-core | 71 s | 6 |
+  | inference-api | 47 s | 4 |
+  | inference-cli | 0.3 s | 0 |
+  | nothing | 0.3 s | 0 |
+- Not serialized: `--timings` shows the 7 rustdoc jobs after a protocol touch all start within 5 s, since each needs
+  only its deps' check metadata (1-3 s). Each job is single-threaded and never incremental:
+  - server-core documents in 36.5 s alone and 80.5 s beside the other six (contention roughly doubles each job);
+  - server-core's non-incremental check alone is 28.4 s, core's 20.4 s.
+
+  Running it in the background beside the GPU suite would only queue it on the target-dir lock behind clippy and the
+  CPU tests.
+- Cause of the 163 s: inference-nn depended on inference-protocol only for `TopLogprob`. Any tool-parser edit
+  re-documented, and recompiled, nn and every model crate.
+- Change:
+  - nn keeps its own `TopLogprob`; core converts at the two places it builds response logprobs.
+  - `AdapterGenerationId` stays in nn; the wire `AdapterGenerationSelection` carries the 64-hex ID as a `String`
+    (its schema was already a string), parsed where the API converts it to the engine's selection.
+  - `--docs` now documents only the crates whose files differ from the merge base with origin/master, where a
+    workspace manifest or lockfile change means all of them (`scripts/doc_targets.py`, unit-tested under
+    `--lint`); `--docs-all` documents every crate.
+
+## Run 46 - 2026-09-28 (night)
+
+- Change:
+  - inference-api's `openai.rs` and `responses_types/` (with `TextConfig`/`TextFormat`) move into inference-protocol
+    behind an `openai` feature.
+  - The API converts the wire `AdapterSelection` in `lora_routing::core_adapter_selection`, since the orphan rule
+    rules out the old `From` impl.
+  - Run 45's fix: inference-nn no longer depends on inference-protocol.
+- Command: the Run 39 cold build, now on an idle machine (load 1.5 at the start), plus
+  `cargo llvm-lines -p inference-core` and `-p inference-api --lib --features cuda`.
+- Result:
+  - Wall 243 s (Run 39: 254 s; Run 26: 241 s); 2,245 unit-seconds (Run 39: 2,318).
+  - inference-protocol lib t=76-85 s, its lib test t=76-89 s: still before inference-nn (t=94 s) and core (t=113 s).
+  - inference-api's lib test t=205-241 s (36 s; Run 39: t=201-254 s, 53 s). It now finishes with the server-core
+    test (t=201-237 s) and the CLI (t=211-243 s), no longer after them.
+  - Core's lib test (t=131-243 s, 112 s) ends the build, as in every run since Run 26.
+  - IR: core 3,486,102 lines, inference-api 1,372,394.
+- Implication: the protocol split is done. The cold build's tail is now core's lib test alone; the next wall-time
+  lever is still shrinking what core compiles (the loaders or the vision preprocessing, Run 40) or its tests.

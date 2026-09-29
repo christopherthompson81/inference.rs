@@ -8,6 +8,7 @@ pub mod enums;
 pub mod events;
 pub mod items;
 pub mod resource;
+pub mod text;
 
 // Re-export commonly used types
 pub use content::{Annotation, InputContent, OutputContent};

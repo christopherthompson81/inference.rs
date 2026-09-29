@@ -4,14 +4,15 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::ToSchema;
 
-use inference_core::ToolChoice;
+use crate::tools::ToolChoice;
 
 use super::{
     enums::{IncompleteReason, ResponseStatus, TruncationStrategy},
     items::OutputItem,
 };
 
-use crate::{openai::OpenAiTool, responses::TextConfig};
+use super::text::TextConfig;
+use crate::openai::OpenAiTool;
 
 /// Usage information for a response
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema, Default)]

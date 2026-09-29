@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Canonical local checks with fixed package/feature sets: scripts/local_ci.sh [--lint] [--tests] [--cuda] [--models]
-# [--slim] [--docs] [--bindings]; --models runs the real-checkpoint parity tests on CPU (--cuda keeps one GPU parity check).
+# [--slim] [--docs|--docs-all] [--bindings]; --models runs the real-checkpoint parity tests on CPU (--cuda keeps one
+# GPU parity check).
 # --slim lints inference-core with no model families and with each family alone, so feature gates stay intact.
 # With --cuda, the GPU-bound CUDA suite runs in the background while the CPU lint and tests run.
 # --bindings builds libinference_ffi and runs the C# (needs the .NET SDK) and Python binding tests on the tiny checkpoint.
+# --docs documents the crates whose files differ from origin/master (rustdoc is never incremental), not their
+# dependents; --docs-all documents every crate.
 # --sweep then deletes target/debug artifacts the selected modes no longer use (stale variants pile up otherwise).
 # Build env (CC/CXX/NVCC) and INFERENCE_TEST_* paths belong in ~/.cargo/config.toml [env]; changing one rebuilds deps.
 set -euo pipefail
@@ -15,6 +18,7 @@ cuda=0
 models=0
 slim=0
 docs=0
+docs_all=0
 bindings=0
 sweep=0
 for arg in "$@"; do
@@ -25,6 +29,7 @@ for arg in "$@"; do
         --models) models=1 ;;
         --slim) slim=1 ;;
         --docs) docs=1 ;;
+        --docs-all) docs=1 docs_all=1 ;;
         --bindings) bindings=1 ;;
         --sweep) sweep=1 ;;
         *) echo "unknown option $arg" >&2; exit 2 ;;
@@ -47,6 +52,7 @@ slim_clippy() { cargo clippy -p inference-core --lib --tests --no-default-featur
 
 if [[ $lint -eq 1 ]]; then
     cargo fmt --all -- --check
+    python3 -m unittest discover -s scripts -p "test_*.py" -q
     # CI's typos job; skipped with a note where the binary is missing so lint still runs everywhere.
     if command -v typos > /dev/null; then typos --config .typos.toml; else echo "typos not installed: cargo install typos-cli" >&2; fi
 fi
@@ -123,9 +129,28 @@ if [[ $bindings -eq 1 ]]; then
     rm -rf "$tiny"
     [[ $bindings_failed -eq 0 ]] || exit 1
 fi
-doc_build() { RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -D warnings" cargo doc --workspace --no-deps "$@"; }
+DOC_TARGETS=()
 if [[ $docs -eq 1 ]]; then
-    doc_build
+    if [[ $docs_all -eq 1 ]]; then
+        DOC_TARGETS=(--workspace)
+    else
+        if ! base=$(git merge-base HEAD origin/master 2> /dev/null); then
+            echo "--docs needs origin/master to diff against; fetch it or pass --docs-all" >&2
+            exit 2
+        fi
+        # An assignment, not `read <<< "$(...)"`, so a failed lookup stops the run instead of documenting nothing
+        targets=$({ git diff --name-only --no-renames "$base"; git ls-files --others --exclude-standard; } |
+            scripts/doc_targets.py)
+        read -ra DOC_TARGETS <<< "$targets"
+    fi
+fi
+doc_build() { RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -D warnings" cargo doc --no-deps "${DOC_TARGETS[@]}" "$@"; }
+if [[ $docs -eq 1 ]]; then
+    if [[ ${#DOC_TARGETS[@]} -eq 0 ]]; then
+        echo "--docs: no crate differs from master, nothing to document"
+    else
+        doc_build
+    fi
 fi
 if [[ $sweep -eq 1 ]]; then
     # No-op rebuilds of exactly what the modes above built; their JSON names every live artifact. A failed replay
@@ -147,7 +172,7 @@ if [[ $sweep -eq 1 ]]; then
             slim_clippy "$family" --message-format=json -- -D warnings >> "$live"
         done
     fi
-    if [[ $docs -eq 1 ]]; then doc_build --message-format=json >> "$live"; fi
+    if [[ ${#DOC_TARGETS[@]} -gt 0 ]]; then doc_build --message-format=json >> "$live"; fi
     if [[ $bindings -eq 1 ]]; then replay "${BINDINGS[@]}"; fi
     scripts/sweep_target.py target/debug < "$live"
 fi

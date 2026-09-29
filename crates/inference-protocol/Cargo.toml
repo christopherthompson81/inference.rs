@@ -33,3 +33,5 @@ uuid = { workspace = true, features = ["v4"] }
 [features]
 code-execution = ["dep:inference-code-exec"]
 utoipa = ["dep:utoipa", "inference-mcp/utoipa"]
+# The HTTP/ABI request types, which always derive their OpenAPI schemas.
+openai = ["utoipa"]

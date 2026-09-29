@@ -1,5 +1,6 @@
 //! The OpenResponses API (<https://www.openresponses.org/>) as an engine operation, free of HTTP.
 
+pub use inference_protocol::responses_types::text::{TextConfig, TextFormat};
 use std::{
     collections::HashMap,
     pin::Pin,
@@ -317,38 +318,6 @@ pub enum ReasoningSummary {
     Detailed,
     /// Auto-select summary level
     Auto,
-}
-
-/// Text output configuration
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
-pub struct TextConfig {
-    /// Format for text output
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<TextFormat>,
-}
-
-/// Text format configuration
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
-#[serde(tag = "type")]
-pub enum TextFormat {
-    /// Plain text output
-    #[serde(rename = "text")]
-    Text,
-    /// JSON output with optional schema
-    #[serde(rename = "json_schema")]
-    JsonSchema {
-        /// Name for the schema
-        name: String,
-        /// JSON Schema definition
-        #[serde(skip_serializing_if = "Option::is_none")]
-        schema: Option<Value>,
-        /// Whether to use strict schema validation
-        #[serde(skip_serializing_if = "Option::is_none")]
-        strict: Option<bool>,
-    },
-    /// JSON object output
-    #[serde(rename = "json_object")]
-    JsonObject,
 }
 
 /// Stream options configuration

@@ -22,10 +22,10 @@ pub mod lora_routing;
 #[doc(hidden)]
 pub mod media_source;
 pub mod models;
-pub mod openai;
+pub use inference_protocol::openai;
 pub mod operations;
 pub mod responses;
-pub mod responses_types;
+pub use inference_protocol::responses_types;
 #[doc(hidden)]
 pub mod sampling;
 pub mod skill_store;
