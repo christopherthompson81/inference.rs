@@ -12,12 +12,11 @@ use tokenizers::Tokenizer;
 
 use crate::device_map::DeviceMapper;
 use crate::paged_attention::PagedAttentionMeta;
-use crate::pipeline::text_models_inputs_processor::{get_completion_input, get_prompt_input};
 use crate::pipeline::{
-    text_models_inputs_processor, InputProcessorOutput, InputsProcessor, InputsProcessorType,
-    InputsProcessorValidationError, MessagesAction, Processor,
+    InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
+    Processor,
 };
-use crate::sequence::{build_mm_features_from_ranges, Sequence};
+use crate::sequence::build_mm_features_from_ranges;
 use crate::vision_models::image_processor::{self, ImagePreProcessor, PreprocessedImages};
 use crate::vision_models::llava::config::Config as LLaVANextConfig;
 use crate::vision_models::preprocessor_config::{PreProcessorConfig, ToFilter};
@@ -26,13 +25,19 @@ use crate::vision_models::{
         MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
         RequestMultimodalLayout,
     },
-    preprocessor_config, ModelInputs,
+    preprocessor_config,
 };
 
 use super::llava_next::LLaVANextVisionSpecificArgs;
 use super::utils::{
     calculate_unpad, divide_to_samples, get_anyres_image_grid_shape, get_num_samples,
     resize_and_pad_image, select_best_resolution, LLaVAImageProcessor,
+};
+use crate::vision_models::media_host::MediaInputsProcessor;
+use inference_nn::media_inputs::processor::TextOnlyInputs;
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, ProcessInputsCall,
+    TextInputs,
 };
 
 pub struct LLaVANextProcessor {
@@ -41,7 +46,7 @@ pub struct LLaVANextProcessor {
 
 impl Processor for LLaVANextProcessor {
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        self.inputs_processor.clone()
+        Arc::new(MediaInputsProcessor(self.inputs_processor.clone()))
     }
     fn get_special_tokens(&self) -> &[&'static str] {
         &[]
@@ -201,7 +206,7 @@ fn llava_next_layout_items(features: &[MultiModalFeature]) -> Result<Vec<Multimo
 }
 
 fn llava_next_packed_layout(
-    input_seqs: &[&mut Sequence],
+    input_seqs: &[&mut dyn MediaSequence],
     query_lens: &[usize],
 ) -> Result<PackedMultimodalLayout> {
     if input_seqs.len() != query_lens.len() {
@@ -227,15 +232,11 @@ fn llava_next_packed_layout(
 }
 
 // Copy from phi3_inputs_processor. different is (1) calculate of num_image_token (2) process_anyres_image (3)image_ids_pad
-impl InputsProcessor for LLaVANextInputProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for LLaVANextInputProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         _device: &Device,
         _other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -250,7 +251,7 @@ impl InputsProcessor for LLaVANextInputProcessor {
         }
 
         for seq in input_seqs.iter_mut() {
-            if seq.multimodal.has_changed_prompt {
+            if seq.multimodal().has_changed_prompt {
                 continue;
             }
             let Some(images) = seq.images() else {
@@ -299,7 +300,7 @@ impl InputsProcessor for LLaVANextInputProcessor {
             }
 
             seq.set_toks_and_reallocate(new_ids, paged_attn_metadata.as_deref_mut());
-            seq.multimodal.has_changed_prompt = true;
+            seq.multimodal_mut().has_changed_prompt = true;
         }
 
         Ok(())
@@ -307,8 +308,9 @@ impl InputsProcessor for LLaVANextInputProcessor {
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -345,42 +347,34 @@ impl InputsProcessor for LLaVANextInputProcessor {
 
         let has_images = input_seqs.iter().any(|seq| seq.has_images());
         if !has_images {
-            return text_models_inputs_processor::TextInputsProcessor
-                .process_inputs(
-                    Some(tokenizer),
+            return host
+                .text_only_inputs(
                     input_seqs,
-                    is_prompt,
-                    is_xlora,
-                    device,
-                    no_kv_cache,
-                    last_n_context_len,
-                    return_raw_logits,
-                    sliding_window,
-                    other_config,
-                    paged_attn_metadata,
-                    mapper,
+                    ProcessInputsCall {
+                        tokenizer: Some(tokenizer),
+                        is_prompt,
+                        is_xlora,
+                        device,
+                        no_kv_cache,
+                        last_n_context_len,
+                        return_raw_logits,
+                        sliding_window,
+                        other_config,
+                        paged_attn_metadata,
+                        mapper,
+                    },
                 )
-                .map(|metadata| {
-                    let InputProcessorOutput {
-                        inputs,
-                        seq_indices,
-                    } = metadata;
-
-                    let text_models_inputs_processor::ModelInputs {
+                .map(|text| {
+                    let TextOnlyInputs {
                         input_ids,
-                        input_ids_full: _,
                         seqlen_offsets,
-                        seqlen_offsets_full: _,
                         context_lens,
                         position_ids,
                         paged_attn_meta,
                         flash_meta,
-                        flash_meta_full: _,
                         recurrent_batch_kind,
-                        adapter_leases,
-                    } = *inputs
-                        .downcast::<text_models_inputs_processor::ModelInputs>()
-                        .expect("Downcast failed.");
+                        seq_indices,
+                    } = text;
 
                     let inputs: Box<dyn Any> = Box::new(ModelInputs {
                         input_ids,
@@ -398,7 +392,6 @@ impl InputsProcessor for LLaVANextInputProcessor {
                         paged_attn_meta,
                         flash_meta,
                         recurrent_batch_kind,
-                        adapter_leases,
                     });
                     InputProcessorOutput {
                         inputs,
@@ -480,7 +473,7 @@ impl InputsProcessor for LLaVANextInputProcessor {
             .zip(input_seqs.iter_mut())
             .zip(image_token_counts)
         {
-            if seq.multimodal.has_changed_prompt {
+            if seq.multimodal().has_changed_prompt {
                 let query = seq
                     .active_prompt_query_range()
                     .unwrap_or(0..seq.get_toks().len());
@@ -536,38 +529,43 @@ impl InputsProcessor for LLaVANextInputProcessor {
             }
 
             seq.set_toks_and_reallocate(new_ids, paged_attn_metadata.as_mut());
-            seq.multimodal.has_changed_prompt = true;
+            seq.multimodal_mut().has_changed_prompt = true;
             toks.push(input_ids);
         }
 
         let metadata = if is_prompt {
-            get_prompt_input(
-                toks.iter().map(Vec::as_slice).collect(),
+            host.prompt_inputs(
+                toks.iter().map(Vec::as_slice).collect::<Vec<_>>().into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )
         } else {
-            get_completion_input(
-                toks.iter().map(Vec::as_slice).collect(),
+            host.completion_inputs(
+                toks.iter().map(Vec::as_slice).collect::<Vec<_>>().into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )
         };
 
-        let text_models_inputs_processor::InnerInputProcessorOutput {
+        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
-                text_models_inputs_processor::InputMetadata {
+                inference_nn::media_inputs::processor::InputMetadata {
                     input,
                     positions,
                     context_lens,
@@ -640,7 +638,6 @@ impl InputsProcessor for LLaVANextInputProcessor {
                 } else {
                     crate::gdn::RecurrentBatchKind::Decode
                 },
-                adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
             }),
             seq_indices,
         })

@@ -20,19 +20,21 @@ use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     device_map::DeviceMapper,
     pipeline::{
-        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
-        MessagesAction, Processor,
+        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
+        Processor,
     },
-    sequence::{build_mm_features_from_ranges, find_image_placeholder_ranges, Sequence},
+    sequence::{build_mm_features_from_ranges, find_image_placeholder_ranges},
     vision_models::{
         image_processor::{ImagePreProcessor, PreprocessedImages},
         preprocessor_config::{PreProcessorConfig, ToFilter},
-        ModelInputs,
     },
 };
 
 use super::MLlamaSpecificArgs;
+use crate::vision_models::media_host::MediaInputsProcessor;
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
+};
 
 const IMAGE_TOKEN: &str = "<|image|>";
 
@@ -52,9 +54,9 @@ impl MLlamaProcessor {
 
 impl Processor for MLlamaProcessor {
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MLlamaImageProcessor {
+        Arc::new(MediaInputsProcessor(Arc::new(MLlamaImageProcessor {
             max_image_tiles: RwLock::new(None),
-        })
+        })))
     }
 
     fn retain_prefix_cached_images(&self) -> bool {
@@ -271,15 +273,11 @@ fn pad_preprocessed_image_inputs(
     ))
 }
 
-impl InputsProcessor for MLlamaImageProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for MLlamaImageProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         _device: &Device,
         _other_config: Option<Arc<dyn Any>>,
         _paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -318,8 +316,9 @@ impl InputsProcessor for MLlamaImageProcessor {
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -345,9 +344,9 @@ impl InputsProcessor for MLlamaImageProcessor {
             ));
         };
 
-        let text_models_inputs_processor::InnerInputProcessorOutput {
+        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
-                text_models_inputs_processor::InputMetadata {
+                inference_nn::media_inputs::processor::InputMetadata {
                     input,
                     positions,
                     context_lens,
@@ -357,34 +356,41 @@ impl InputsProcessor for MLlamaImageProcessor {
                 },
             seq_indices,
         } = if is_prompt {
-            get_prompt_input(
+            host.prompt_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )
             .unwrap()
         } else {
-            get_completion_input(
+            host.completion_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )
             .unwrap()
         };
@@ -432,7 +438,7 @@ impl InputsProcessor for MLlamaImageProcessor {
         };
         let image_counts = input_seqs
             .iter()
-            .map(|seq| seq.multimodal.image_hashes().map_or(0, <[u64]>::len))
+            .map(|seq| seq.multimodal().image_hashes().map_or(0, <[u64]>::len))
             .collect::<Vec<_>>();
         let image_token_counts = input_seqs
             .iter()
@@ -480,10 +486,10 @@ impl InputsProcessor for MLlamaImageProcessor {
 
             for (seq, &num_images) in input_seqs.iter_mut().zip(&n_images_in_images) {
                 let (pixel_values, aspect_ratio_ids, aspect_ratio_mask, num_tiles) = match (
-                    &seq.multimodal.cached_pixel_values,
-                    &seq.multimodal.cached_spatial_shapes,
-                    &seq.multimodal.cached_pixel_attention_mask,
-                    &seq.multimodal.cached_num_crops,
+                    &seq.multimodal().cached_pixel_values,
+                    &seq.multimodal().cached_spatial_shapes,
+                    &seq.multimodal().cached_pixel_attention_mask,
+                    &seq.multimodal().cached_num_crops,
                 ) {
                     (
                         Some(pixel_values),
@@ -526,11 +532,11 @@ impl InputsProcessor for MLlamaImageProcessor {
                         let aspect_ratio_ids = aspect_ratio_ids.unwrap();
                         let aspect_ratio_mask = aspect_ratio_mask.unwrap();
                         let num_tiles = num_tiles.unwrap();
-                        seq.multimodal.cached_pixel_values = Some(pixel_values.clone());
-                        seq.multimodal.cached_spatial_shapes = Some(aspect_ratio_ids.clone());
-                        seq.multimodal.cached_pixel_attention_mask =
+                        seq.multimodal_mut().cached_pixel_values = Some(pixel_values.clone());
+                        seq.multimodal_mut().cached_spatial_shapes = Some(aspect_ratio_ids.clone());
+                        seq.multimodal_mut().cached_pixel_attention_mask =
                             Some(aspect_ratio_mask.clone());
-                        seq.multimodal.cached_num_crops = Some(num_tiles.clone());
+                        seq.multimodal_mut().cached_num_crops = Some(num_tiles.clone());
                         (pixel_values, aspect_ratio_ids, aspect_ratio_mask, num_tiles)
                     }
                 };
@@ -555,8 +561,10 @@ impl InputsProcessor for MLlamaImageProcessor {
 
                 // Build mm_features for position-aware prefix cache hashing
                 if seq.mm_features().is_empty() {
-                    if let Some(hashes) =
-                        seq.multimodal.image_hashes().map(|hashes| hashes.to_vec())
+                    if let Some(hashes) = seq
+                        .multimodal()
+                        .image_hashes()
+                        .map(|hashes| hashes.to_vec())
                     {
                         let ranges = find_image_placeholder_ranges(
                             seq.prompt_position_source_toks(),
@@ -570,14 +578,14 @@ impl InputsProcessor for MLlamaImageProcessor {
                     }
                 }
 
-                seq.multimodal.has_changed_prompt = true;
+                seq.multimodal_mut().has_changed_prompt = true;
             }
 
             // Create cross attn mask
             let future_query_len = if is_prompt {
                 0
             } else {
-                crate::speculative::staging::staged_batch_width(input_seqs).unwrap_or(0)
+                host.staged_batch_width(input_seqs).unwrap_or(0)
             };
             let cross_attention_token_mask = input_seqs
                 .iter()
@@ -624,7 +632,7 @@ impl InputsProcessor for MLlamaImageProcessor {
             input_seqs
                 .iter()
                 .map(|seq| {
-                    seq.multimodal
+                    seq.multimodal()
                         .image_hashes()
                         .map(<[u64]>::to_vec)
                         .unwrap_or_default()
@@ -653,7 +661,6 @@ impl InputsProcessor for MLlamaImageProcessor {
             } else {
                 crate::gdn::RecurrentBatchKind::Decode
             },
-            adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
         });
         Ok(InputProcessorOutput {
             inputs,

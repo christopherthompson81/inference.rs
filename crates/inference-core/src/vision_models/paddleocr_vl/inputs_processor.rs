@@ -15,22 +15,24 @@ use crate::{
     device_map::DeviceMapper,
     paged_attention::block_hash::MultimodalKind,
     pipeline::{
-        processing::default_process,
-        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, MessagesAction, Processor,
+        processing::default_process, InputProcessorOutput, InputsProcessor, MessagesAction,
+        Processor,
     },
     request::ReasoningEffort,
-    sequence::{build_mm_features_from_ranges, find_placeholder_delimited_ranges, Sequence},
+    sequence::{build_mm_features_from_ranges, find_placeholder_delimited_ranges},
     vision_models::{
         image_processor::{ImagePreProcessor, PreprocessedImages},
         preprocessor_config::PreProcessorConfig,
-        ModelInputs,
     },
     MessageContent, Tool,
 };
 
 use super::preprocess::{preprocess_decoded, MERGE};
 use super::PaddleOcrVlVisionSpecificArgs;
+use crate::vision_models::media_host::MediaInputsProcessor;
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
+};
 
 // One image grid row as (t, h, w) in patches.
 type ImageGrid = (usize, usize, usize);
@@ -92,7 +94,7 @@ impl Processor for PaddleOcrVlProcessor {
     }
 
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(PaddleOcrVlImageProcessor)
+        Arc::new(MediaInputsProcessor(Arc::new(PaddleOcrVlImageProcessor)))
     }
     fn get_special_tokens(&self) -> &[&'static str] {
         &[Self::IMAGE_START, Self::IMAGE_PLACEHOLDER, Self::IMAGE_END]
@@ -145,7 +147,7 @@ fn expand_placeholders(text: &str, grids: &[ImageGrid], merge: usize) -> anyhow:
 }
 
 // Placeholders share one id; the span's image hash keeps same-shape images apart and prefix hits off mid-span.
-fn register_image_span(seq: &mut Sequence, ids: &[u32], tokenizer: &Tokenizer) {
+fn register_image_span(seq: &mut dyn MediaSequence, ids: &[u32], tokenizer: &Tokenizer) {
     if !seq.mm_features().is_empty() {
         return;
     }
@@ -183,16 +185,16 @@ impl PaddleOcrVlImageProcessor {
     /// Preprocesses the sequence's images once and expands its placeholders to the grid, registering the image span.
     fn expand_image_prompt(
         &self,
-        seq: &mut Sequence,
+        seq: &mut dyn MediaSequence,
         tokenizer: &Tokenizer,
         config: &PreProcessorConfig,
         device: &Device,
         paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> Result<(Tensor, Vec<ImageGrid>)> {
-        let (pixel_values, row_grids) = match &seq.multimodal.cached_pixel_values {
+        let (pixel_values, row_grids) = match &seq.multimodal().cached_pixel_values {
             Some(cached) => (
                 cached.clone(),
-                grid_rows(seq.multimodal.cached_img_thw.as_ref().unwrap()),
+                grid_rows(seq.multimodal().cached_img_thw.as_ref().unwrap()),
             ),
             None => {
                 let PreprocessedImages {
@@ -206,13 +208,13 @@ impl PaddleOcrVlImageProcessor {
                     device,
                     (usize::MAX, usize::MAX),
                 )?;
-                seq.multimodal.cached_pixel_values = Some(pixel_values.clone());
-                seq.multimodal.cached_img_thw = image_grid_thw.clone();
+                seq.multimodal_mut().cached_pixel_values = Some(pixel_values.clone());
+                seq.multimodal_mut().cached_img_thw = image_grid_thw.clone();
                 (pixel_values, grid_rows(image_grid_thw.as_ref().unwrap()))
             }
         };
 
-        if !seq.multimodal.has_changed_prompt {
+        if !seq.multimodal().has_changed_prompt {
             let detok = tokenizer
                 .decode(seq.get_toks(), false)
                 .expect("Detokenization failed!");
@@ -226,22 +228,18 @@ impl PaddleOcrVlImageProcessor {
             // Before set_toks_and_reallocate: the block hashes it triggers must see the span.
             register_image_span(seq, &ids, tokenizer);
             seq.set_toks_and_reallocate(ids, paged_attn_metadata);
-            seq.multimodal.has_changed_prompt = true;
+            seq.multimodal_mut().has_changed_prompt = true;
         }
         Ok((pixel_values, row_grids))
     }
 }
 
-impl InputsProcessor for PaddleOcrVlImageProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for PaddleOcrVlImageProcessor {
     // The scheduler looks up prefix-cache blocks before process_inputs runs, so it must see the expanded prompt.
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         device: &Device,
         other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -256,7 +254,7 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
         let config: &PreProcessorConfig = config.downcast_ref().expect("Downcast failed.");
         for seq in input_seqs.iter_mut().filter(|seq| seq.has_images()) {
             self.expand_image_prompt(
-                seq,
+                &mut **seq,
                 &tokenizer,
                 config,
                 device,
@@ -268,8 +266,9 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -303,7 +302,7 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
         for (row, seq) in input_seqs.iter_mut().enumerate() {
             let pixel_values = if seq.has_images() {
                 let (pixel_values, _) = self.expand_image_prompt(
-                    seq,
+                    &mut **seq,
                     &tokenizer,
                     config,
                     device,
@@ -319,7 +318,7 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
                 placeholder_runs(seq.prompt_position_source_toks(), id)
             });
             let mut row_grids = seq
-                .multimodal
+                .multimodal()
                 .cached_img_thw
                 .as_ref()
                 .map(grid_rows)
@@ -329,7 +328,7 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
             hashes.push(if row_grids.is_empty() {
                 Vec::new()
             } else {
-                seq.multimodal
+                seq.multimodal()
                     .image_hashes()
                     .map(<[u64]>::to_vec)
                     .unwrap_or_default()
@@ -354,9 +353,9 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
             grids
         };
 
-        let text_models_inputs_processor::InnerInputProcessorOutput {
+        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
-                text_models_inputs_processor::InputMetadata {
+                inference_nn::media_inputs::processor::InputMetadata {
                     input,
                     positions,
                     context_lens,
@@ -366,34 +365,41 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
                 },
             seq_indices,
         } = if is_prompt {
-            get_prompt_input(
+            host.prompt_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )
             .unwrap()
         } else {
-            get_completion_input(
+            host.completion_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )
             .unwrap()
         };
@@ -426,7 +432,6 @@ impl InputsProcessor for PaddleOcrVlImageProcessor {
             }),
             paged_attn_meta,
             flash_meta,
-            adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
             recurrent_batch_kind: if is_prompt {
                 crate::gdn::RecurrentBatchKind::Prefill
             } else {

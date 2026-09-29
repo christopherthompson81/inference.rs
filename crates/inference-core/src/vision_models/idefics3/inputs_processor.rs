@@ -12,24 +12,24 @@ use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     device_map::DeviceMapper,
     pipeline::{
-        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
-        MessagesAction, Processor,
+        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
+        Processor,
     },
-    sequence::{build_mm_features_from_ranges, Sequence},
-    vision_models::{
-        multimodal_layout::{
-            MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout,
-            PackedMultimodalLayout, RequestMultimodalLayout,
-        },
-        ModelInputs,
+    sequence::build_mm_features_from_ranges,
+    vision_models::multimodal_layout::{
+        MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
+        RequestMultimodalLayout,
     },
 };
 
+use crate::vision_models::media_host::MediaInputsProcessor;
 use crate::vision_models::{
     image_processor::{ImagePreProcessor, PreprocessedImages},
     preprocessor_config::{PreProcessorConfig, ToFilter},
     processor_config::ProcessorConfig,
+};
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
 };
 
 // 4k resolution as absolute maximum
@@ -61,10 +61,10 @@ impl Idefics3Processor {
 impl Processor for Idefics3Processor {
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
         // Default image_seq_len is 169.
-        Arc::new(Idefics3ImageProcessor {
+        Arc::new(MediaInputsProcessor(Arc::new(Idefics3ImageProcessor {
             max_edge: self.max_edge,
             image_seq_len: self.config.image_seq_len.unwrap_or(169),
-        })
+        })))
     }
 
     fn get_special_tokens(&self) -> &[&'static str] {
@@ -198,7 +198,7 @@ fn grouped_image_ranges(
 }
 
 fn idefics3_packed_layout(
-    input_seqs: &[&mut Sequence],
+    input_seqs: &[&mut dyn MediaSequence],
     query_lens: &[usize],
     subimage_counts: &[Vec<usize>],
     image_token_id: u32,
@@ -347,15 +347,11 @@ impl Idefics3ImageProcessor {
     }
 }
 
-impl InputsProcessor for Idefics3ImageProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for Idefics3ImageProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         _device: &Device,
         other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -369,7 +365,7 @@ impl InputsProcessor for Idefics3ImageProcessor {
             .token_to_id(IMAGE_TOKEN)
             .ok_or_else(|| anyhow::Error::msg("Idefics3 tokenizer is missing the image token"))?;
         for seq in input_seqs {
-            if !seq.has_images() || seq.multimodal.has_changed_prompt {
+            if !seq.has_images() || seq.multimodal().has_changed_prompt {
                 continue;
             }
             let (rows, cols) =
@@ -413,15 +409,16 @@ impl InputsProcessor for Idefics3ImageProcessor {
                 }
             }
             seq.set_toks_and_reallocate(ids, paged_attn_metadata.as_deref_mut());
-            seq.multimodal.has_changed_prompt = true;
+            seq.multimodal_mut().has_changed_prompt = true;
         }
         Ok(())
     }
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -500,7 +497,7 @@ impl InputsProcessor for Idefics3ImageProcessor {
                 }
                 subimage_counts_by_sequence[seq_idx] = subimage_counts.clone();
 
-                if !seq.multimodal.has_changed_prompt {
+                if !seq.multimodal().has_changed_prompt {
                     let detok = tokenizer
                         .decode(seq.get_toks(), false)
                         .map_err(|error| anyhow::Error::msg(error.to_string()))?;
@@ -549,7 +546,7 @@ impl InputsProcessor for Idefics3ImageProcessor {
                     }
 
                     seq.set_toks_and_reallocate(ids, paged_attn_metadata.as_mut());
-                    seq.multimodal.has_changed_prompt = true;
+                    seq.multimodal_mut().has_changed_prompt = true;
                 }
 
                 // Per-sequence prefix cache trimming of pixel_values and pixel_attention_mask
@@ -584,9 +581,9 @@ impl InputsProcessor for Idefics3ImageProcessor {
             (None, None)
         };
 
-        let text_models_inputs_processor::InnerInputProcessorOutput {
+        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
-                text_models_inputs_processor::InputMetadata {
+                inference_nn::media_inputs::processor::InputMetadata {
                     input,
                     positions,
                     context_lens,
@@ -596,34 +593,41 @@ impl InputsProcessor for Idefics3ImageProcessor {
                 },
             seq_indices,
         } = if is_prompt {
-            get_prompt_input(
+            host.prompt_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )
             .unwrap()
         } else {
-            get_completion_input(
+            host.completion_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )
             .unwrap()
         };
@@ -702,7 +706,6 @@ impl InputsProcessor for Idefics3ImageProcessor {
             } else {
                 crate::gdn::RecurrentBatchKind::Decode
             },
-            adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
         });
         Ok(InputProcessorOutput {
             inputs,

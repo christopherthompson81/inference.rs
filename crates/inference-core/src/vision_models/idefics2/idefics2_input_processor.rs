@@ -13,27 +13,26 @@ use crate::{
     device_map::DeviceMapper,
     paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
     pipeline::{
-        apply_chat_template,
-        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
+        apply_chat_template, InputProcessorOutput, InputsProcessor, InputsProcessorValidationError,
         MessagesAction, Processor,
     },
     request::ReasoningEffort,
-    sequence::{find_image_placeholder_ranges, Sequence},
-    vision_models::{
-        multimodal_layout::{
-            MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout,
-            PackedMultimodalLayout, RequestMultimodalLayout,
-        },
-        ModelInputs,
+    sequence::find_image_placeholder_ranges,
+    vision_models::multimodal_layout::{
+        MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
+        RequestMultimodalLayout,
     },
     MessageContent, Pipeline, Tool,
 };
 
+use crate::vision_models::media_host::MediaInputsProcessor;
 use crate::vision_models::{
     image_processor::{ImagePreProcessor, PreprocessedImages},
     preprocessor_config::{PreProcessorConfig, ToFilter},
     processor_config::ProcessorConfig,
+};
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
 };
 
 // Input processor
@@ -123,13 +122,13 @@ impl Processor for Idefics2Processor {
     }
 
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(Idefics2ImageProcessor {
+        Arc::new(MediaInputsProcessor(Arc::new(Idefics2ImageProcessor {
             max_edge: self.max_edge,
             image_seq_len: self
                 .config
                 .image_seq_len
                 .expect("Idefics 2 model needs `image_seq_len`"),
-        })
+        })))
     }
 
     fn get_special_tokens(&self) -> &[&'static str] {
@@ -262,7 +261,7 @@ fn idefics2_layout_items(
         .collect()
 }
 
-fn prompt_query(seq: &Sequence, query_len: usize) -> Result<Range<usize>> {
+fn prompt_query(seq: &dyn MediaSequence, query_len: usize) -> Result<Range<usize>> {
     if let Some(query) = seq.active_prompt_query_range() {
         if query.len() != query_len {
             candle_core::bail!(
@@ -299,7 +298,7 @@ fn validate_idefics2_image_spans(
 }
 
 fn idefics2_packed_layout(
-    input_seqs: &[&mut Sequence],
+    input_seqs: &[&mut dyn MediaSequence],
     query_lens: &[usize],
     image_token_id: u32,
     subimages_per_image: usize,
@@ -313,7 +312,7 @@ fn idefics2_packed_layout(
         .zip(query_lens)
         .map(|(seq, &query_len)| {
             let tokens = seq.prompt_position_source_toks();
-            let query = prompt_query(seq, query_len)?;
+            let query = prompt_query(&**seq, query_len)?;
             let items = idefics2_layout_items(
                 tokens,
                 seq.mm_features(),
@@ -366,15 +365,11 @@ fn image_item_selection(
     Ok(selection)
 }
 
-impl InputsProcessor for Idefics2ImageProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for Idefics2ImageProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         _device: &Device,
         other_config: Option<Arc<dyn Any>>,
         _paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -407,8 +402,9 @@ impl InputsProcessor for Idefics2ImageProcessor {
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -454,9 +450,9 @@ impl InputsProcessor for Idefics2ImageProcessor {
             }
         }
 
-        let text_models_inputs_processor::InnerInputProcessorOutput {
+        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
-                text_models_inputs_processor::InputMetadata {
+                inference_nn::media_inputs::processor::InputMetadata {
                     input,
                     positions,
                     context_lens,
@@ -466,33 +462,40 @@ impl InputsProcessor for Idefics2ImageProcessor {
                 },
             seq_indices,
         } = if is_prompt {
-            get_prompt_input(
+            host.prompt_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )?
         } else {
-            get_completion_input(
+            host.completion_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )?
         };
         let has_any_images = input_seqs.iter().any(|seq| seq.has_images());
@@ -566,7 +569,7 @@ impl InputsProcessor for Idefics2ImageProcessor {
                     image_sizes_all: _,
                     num_crops: _,
                 } = self.preprocess(
-                    seq.multimodal
+                    seq.multimodal()
                         .clone_images_range(image_range)
                         .expect("Need to have images by this point."),
                     vec![],
@@ -660,7 +663,6 @@ impl InputsProcessor for Idefics2ImageProcessor {
             } else {
                 crate::gdn::RecurrentBatchKind::Decode
             },
-            adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
         });
         Ok(InputProcessorOutput {
             inputs,

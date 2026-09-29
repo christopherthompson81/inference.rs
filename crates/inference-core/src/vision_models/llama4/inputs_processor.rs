@@ -22,11 +22,10 @@ use crate::{
     device_map::DeviceMapper,
     paged_attention::block_hash::{MultiModalFeature, MultimodalKind},
     pipeline::{
-        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
-        MessagesAction, Processor,
+        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
+        Processor,
     },
-    sequence::{build_mm_features_from_ranges, find_image_delimited_ranges, Sequence},
+    sequence::{build_mm_features_from_ranges, find_image_delimited_ranges},
     vision_models::{
         image_processor::{ImagePreProcessor, PreprocessedImages},
         multimodal_layout::{
@@ -35,11 +34,14 @@ use crate::{
         },
         preprocessor_config::PreProcessorConfig,
         processor_config::ProcessorConfig,
-        ModelInputs,
     },
 };
 
 use super::Llama4ModelSpecificArgs;
+use crate::vision_models::media_host::MediaInputsProcessor;
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
+};
 
 pub(crate) const IMAGE_TOKEN: &str = "<|image|>";
 const IMAGE_START: &str = "<|image_start|>";
@@ -81,10 +83,10 @@ impl Llama4Processor {
 
 impl Processor for Llama4Processor {
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(Llama4ImageProcessor {
+        Arc::new(MediaInputsProcessor(Arc::new(Llama4ImageProcessor {
             patch_size: self.patch_size,
             downsample_ratio: self.downsample_ratio,
-        })
+        })))
     }
 
     fn get_special_tokens(&self) -> &[&'static str] {
@@ -299,7 +301,7 @@ fn llama4_image_metadata(
     Ok((hashes, token_counts))
 }
 
-fn llama4_prompt_query(seq: &Sequence, query_len: usize) -> Result<Range<usize>> {
+fn llama4_prompt_query(seq: &dyn MediaSequence, query_len: usize) -> Result<Range<usize>> {
     if let Some(query) = seq.active_prompt_query_range() {
         if query.len() != query_len {
             candle_core::bail!(
@@ -333,7 +335,7 @@ fn validate_llama4_image_spans(query: &Range<usize>, items: &[MultimodalItemLayo
 }
 
 fn llama4_packed_layout(
-    input_seqs: &[&mut Sequence],
+    input_seqs: &[&mut dyn MediaSequence],
     query_lens: &[usize],
     patch_token_id: u32,
 ) -> Result<PackedMultimodalLayout> {
@@ -345,7 +347,7 @@ fn llama4_packed_layout(
         .zip(query_lens)
         .map(|(seq, &query_len)| {
             let tokens = seq.prompt_position_source_toks();
-            let query = llama4_prompt_query(seq, query_len)?;
+            let query = llama4_prompt_query(&**seq, query_len)?;
             let items = llama4_layout_items(tokens, seq.mm_features(), patch_token_id)?;
             validate_llama4_image_spans(&query, &items)?;
             Ok(RequestMultimodalLayout {
@@ -358,15 +360,11 @@ fn llama4_packed_layout(
     PackedMultimodalLayout::new(&requests)
 }
 
-impl InputsProcessor for Llama4ImageProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for Llama4ImageProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         device: &Device,
         other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -379,7 +377,7 @@ impl InputsProcessor for Llama4ImageProcessor {
         for seq in input_seqs.iter_mut() {
             self.prepare_sequence(
                 &tokenizer,
-                seq,
+                &mut **seq,
                 config,
                 device,
                 paged_attn_metadata.as_deref_mut(),
@@ -390,8 +388,9 @@ impl InputsProcessor for Llama4ImageProcessor {
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -424,7 +423,7 @@ impl InputsProcessor for Llama4ImageProcessor {
             for seq in input_seqs.iter_mut() {
                 self.prepare_sequence(
                     &tokenizer,
-                    seq,
+                    &mut **seq,
                     config,
                     device,
                     paged_attn_metadata.as_mut(),
@@ -432,9 +431,9 @@ impl InputsProcessor for Llama4ImageProcessor {
             }
         }
 
-        let text_models_inputs_processor::InnerInputProcessorOutput {
+        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
-                text_models_inputs_processor::InputMetadata {
+                inference_nn::media_inputs::processor::InputMetadata {
                     input,
                     positions,
                     context_lens,
@@ -444,33 +443,40 @@ impl InputsProcessor for Llama4ImageProcessor {
                 },
             seq_indices,
         } = if is_prompt {
-            get_prompt_input(
+            host.prompt_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )?
         } else {
-            get_completion_input(
+            host.completion_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )?
         };
 
@@ -483,11 +489,14 @@ impl InputsProcessor for Llama4ImageProcessor {
         let mut image_token_counts = Vec::new();
         if is_prompt {
             for seq in input_seqs.iter() {
-                let Some(pixel_values) = &seq.multimodal.cached_pixel_values else {
+                let Some(pixel_values) = &seq.multimodal().cached_pixel_values else {
                     continue;
                 };
-                let sequence_tile_counts =
-                    seq.multimodal.cached_num_crops.as_deref().ok_or_else(|| {
+                let sequence_tile_counts = seq
+                    .multimodal()
+                    .cached_num_crops
+                    .as_deref()
+                    .ok_or_else(|| {
                         anyhow::Error::msg("Llama4 cached pixels are missing tile counts")
                     })?;
                 let total_items = seq
@@ -603,7 +612,6 @@ impl InputsProcessor for Llama4ImageProcessor {
             } else {
                 crate::gdn::RecurrentBatchKind::Decode
             },
-            adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
         });
         Ok(InputProcessorOutput {
             inputs,
@@ -616,7 +624,7 @@ impl Llama4ImageProcessor {
     fn prepare_sequence(
         &self,
         tokenizer: &Tokenizer,
-        seq: &mut Sequence,
+        seq: &mut dyn MediaSequence,
         config: &PreProcessorConfig,
         device: &Device,
         paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -627,9 +635,9 @@ impl Llama4ImageProcessor {
         }
 
         let cached = match (
-            &seq.multimodal.cached_pixel_values,
-            &seq.multimodal.cached_spatial_shapes,
-            &seq.multimodal.cached_num_crops,
+            &seq.multimodal().cached_pixel_values,
+            &seq.multimodal().cached_spatial_shapes,
+            &seq.multimodal().cached_num_crops,
         ) {
             (Some(pixel_values), Some(aspect_ratios), Some(tile_counts)) => Some((
                 pixel_values.clone(),
@@ -668,9 +676,9 @@ impl Llama4ImageProcessor {
             let aspect_ratios = aspect_ratio_ids
                 .ok_or_else(|| anyhow::Error::msg("Llama4 preprocessing omitted aspect ratios"))?;
             let tile_counts = llama4_tile_counts(&aspect_ratios)?;
-            seq.multimodal.cached_pixel_values = Some(pixel_values.clone());
-            seq.multimodal.cached_spatial_shapes = Some(aspect_ratios.clone());
-            seq.multimodal.cached_num_crops = Some(tile_counts.clone());
+            seq.multimodal_mut().cached_pixel_values = Some(pixel_values.clone());
+            seq.multimodal_mut().cached_spatial_shapes = Some(aspect_ratios.clone());
+            seq.multimodal_mut().cached_num_crops = Some(tile_counts.clone());
             (pixel_values, aspect_ratios, tile_counts)
         };
 
@@ -681,7 +689,7 @@ impl Llama4ImageProcessor {
         if total_tiles != pixel_values.dim(0)? || aspect_ratios.dim(0)? != tile_counts.len() {
             anyhow::bail!("Llama4 preprocessed image metadata is inconsistent");
         }
-        if seq.multimodal.has_changed_prompt {
+        if seq.multimodal().has_changed_prompt {
             if seq.mm_features().is_empty() {
                 anyhow::bail!("Llama4 expanded prompt is missing its image features");
             }
@@ -741,7 +749,7 @@ impl Llama4ImageProcessor {
         seq.set_initial_prompt(prompt);
         seq.set_mm_features(features);
         seq.set_toks_and_reallocate(ids, paged_attn_metadata);
-        seq.multimodal.has_changed_prompt = true;
+        seq.multimodal_mut().has_changed_prompt = true;
         Ok(())
     }
 

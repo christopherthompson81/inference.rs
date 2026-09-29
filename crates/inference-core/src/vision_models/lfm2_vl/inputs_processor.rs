@@ -12,19 +12,21 @@ use crate::{
     device_map::DeviceMapper,
     paged_attention::block_hash::MultimodalKind,
     pipeline::{
-        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
-        MessagesAction, Processor,
+        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
+        Processor,
     },
-    sequence::{build_mm_features_from_ranges, find_image_delimited_ranges, Sequence},
+    sequence::{build_mm_features_from_ranges, find_image_delimited_ranges},
     vision_models::{
         image_processor::{ImagePreProcessor, PreprocessedImages},
         preprocessor_config::{PreProcessorConfig, ToFilter},
-        ModelInputs,
     },
 };
 
 use super::{config::Config, Lfm2VlSpecificArgs};
+use crate::vision_models::media_host::MediaInputsProcessor;
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
+};
 
 pub(crate) const IMAGE_TOKEN: &str = "<image>";
 const IMAGE_START: &str = "<|image_start|>";
@@ -140,9 +142,9 @@ impl Lfm2VlProcessor {
 
 impl Processor for Lfm2VlProcessor {
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(Lfm2VlImageProcessor {
+        Arc::new(MediaInputsProcessor(Arc::new(Lfm2VlImageProcessor {
             settings: self.settings.clone(),
-        })
+        })))
     }
 
     fn get_special_tokens(&self) -> &[&'static str] {
@@ -456,16 +458,17 @@ impl Lfm2VlImageProcessor {
         Ok(result)
     }
 
-    fn store_cached(seq: &mut Sequence, processed: &PreprocessedForSeq) {
-        seq.multimodal.cached_pixel_values = Some(processed.pixel_values.clone());
-        seq.multimodal.cached_pixel_attention_mask = Some(processed.pixel_attention_mask.clone());
-        seq.multimodal.cached_spatial_shapes = Some(processed.spatial_shapes.clone());
-        seq.multimodal.cached_num_crops = Some(processed.num_crops.clone());
+    fn store_cached(seq: &mut dyn MediaSequence, processed: &PreprocessedForSeq) {
+        seq.multimodal_mut().cached_pixel_values = Some(processed.pixel_values.clone());
+        seq.multimodal_mut().cached_pixel_attention_mask =
+            Some(processed.pixel_attention_mask.clone());
+        seq.multimodal_mut().cached_spatial_shapes = Some(processed.spatial_shapes.clone());
+        seq.multimodal_mut().cached_num_crops = Some(processed.num_crops.clone());
     }
 
     fn cached_or_preprocess(
         &self,
-        seq: &mut Sequence,
+        seq: &mut dyn MediaSequence,
         config: &PreProcessorConfig,
         device: &Device,
     ) -> Result<PreprocessedForSeq> {
@@ -475,10 +478,10 @@ impl Lfm2VlImageProcessor {
             Some(spatial_shapes),
             Some(num_crops),
         ) = (
-            &seq.multimodal.cached_pixel_values,
-            &seq.multimodal.cached_pixel_attention_mask,
-            &seq.multimodal.cached_spatial_shapes,
-            &seq.multimodal.cached_num_crops,
+            &seq.multimodal().cached_pixel_values,
+            &seq.multimodal().cached_pixel_attention_mask,
+            &seq.multimodal().cached_spatial_shapes,
+            &seq.multimodal().cached_num_crops,
         ) {
             return Ok(PreprocessedForSeq {
                 pixel_values: pixel_values.clone(),
@@ -557,11 +560,11 @@ impl Lfm2VlImageProcessor {
     fn maybe_expand_prompt(
         &self,
         tokenizer: &Tokenizer,
-        seq: &mut Sequence,
+        seq: &mut dyn MediaSequence,
         processed: &PreprocessedForSeq,
         paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> anyhow::Result<()> {
-        if seq.multimodal.has_changed_prompt {
+        if seq.multimodal().has_changed_prompt {
             return Ok(());
         }
         let prompt = self.expand_prompt(
@@ -601,20 +604,16 @@ impl Lfm2VlImageProcessor {
             ));
         }
         seq.set_toks_and_reallocate(ids, paged_attn_metadata);
-        seq.multimodal.has_changed_prompt = true;
+        seq.multimodal_mut().has_changed_prompt = true;
         Ok(())
     }
 }
 
-impl InputsProcessor for Lfm2VlImageProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for Lfm2VlImageProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         device: &Device,
         other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -628,13 +627,13 @@ impl InputsProcessor for Lfm2VlImageProcessor {
         let config = other_config.expect("Need a PreProcessorConfig config.");
         let config: &PreProcessorConfig = config.downcast_ref().expect("Downcast failed.");
         for seq in input_seqs {
-            if !seq.has_images() || seq.multimodal.has_changed_prompt {
+            if !seq.has_images() || seq.multimodal().has_changed_prompt {
                 continue;
             }
-            let processed = self.cached_or_preprocess(seq, config, device)?;
+            let processed = self.cached_or_preprocess(&mut **seq, config, device)?;
             self.maybe_expand_prompt(
                 &tokenizer,
-                seq,
+                &mut **seq,
                 &processed,
                 paged_attn_metadata.as_deref_mut(),
             )?;
@@ -644,8 +643,9 @@ impl InputsProcessor for Lfm2VlImageProcessor {
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -678,10 +678,10 @@ impl InputsProcessor for Lfm2VlImageProcessor {
         if !image_sequence_indices.is_empty() {
             for seq_index in image_sequence_indices {
                 let seq = &mut input_seqs[seq_index];
-                let processed = self.cached_or_preprocess(seq, config, device)?;
+                let processed = self.cached_or_preprocess(&mut **seq, config, device)?;
                 self.maybe_expand_prompt(
                     &tokenizer,
-                    seq,
+                    &mut **seq,
                     &processed,
                     paged_attn_metadata.as_mut(),
                 )?;
@@ -706,9 +706,9 @@ impl InputsProcessor for Lfm2VlImageProcessor {
             }
         }
 
-        let text_models_inputs_processor::InnerInputProcessorOutput {
+        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
-                text_models_inputs_processor::InputMetadata {
+                inference_nn::media_inputs::processor::InputMetadata {
                     input,
                     positions,
                     context_lens,
@@ -718,33 +718,40 @@ impl InputsProcessor for Lfm2VlImageProcessor {
                 },
             seq_indices,
         } = if is_prompt {
-            get_prompt_input(
+            host.prompt_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )?
         } else {
-            get_completion_input(
+            host.completion_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )?
         };
 
@@ -781,7 +788,6 @@ impl InputsProcessor for Lfm2VlImageProcessor {
                 } else {
                     crate::gdn::RecurrentBatchKind::Decode
                 },
-                adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
             }),
             seq_indices,
         })

@@ -12,17 +12,12 @@ use crate::{
     device_map::DeviceMapper,
     paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
     pipeline::{
-        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
-        MessagesAction, Processor,
+        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
+        Processor,
     },
-    sequence::Sequence,
-    vision_models::{
-        multimodal_layout::{
-            MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout,
-            PackedMultimodalLayout, RequestMultimodalLayout,
-        },
-        ModelInputs,
+    vision_models::multimodal_layout::{
+        MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
+        RequestMultimodalLayout,
     },
 };
 
@@ -33,6 +28,10 @@ use crate::vision_models::{
 };
 
 use super::{MiniCpmOLegacyMap, MiniCpmOSpecificArgs, MiniCpmOVisualInput};
+use crate::vision_models::media_host::MediaInputsProcessor;
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
+};
 
 const DEFAULT_MAX_SLICE_NUMS: usize = 9;
 const DEFAULT_SCALE_RESOLUTION: usize = 448;
@@ -91,9 +90,9 @@ impl MiniCpmOProcessor {
 
 impl Processor for MiniCpmOProcessor {
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MiniCpmOImageProcessor {
+        Arc::new(MediaInputsProcessor(Arc::new(MiniCpmOImageProcessor {
             config: self.preprocessor_config.clone(),
-        })
+        })))
     }
 
     fn get_special_tokens(&self) -> &[&'static str] {
@@ -271,15 +270,11 @@ fn select_prompt_items(
     Ok(selected)
 }
 
-impl InputsProcessor for MiniCpmOImageProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for MiniCpmOImageProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         _device: &Device,
         _other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -288,15 +283,16 @@ impl InputsProcessor for MiniCpmOImageProcessor {
             anyhow::Error::msg("MiniCpmOImageProcessor requires a specified tokenizer.")
         })?;
         for seq in input_seqs {
-            self.prepare_prompt(&tokenizer, seq, paged_attn_metadata.as_deref_mut())?;
+            self.prepare_prompt(&tokenizer, &mut **seq, paged_attn_metadata.as_deref_mut())?;
         }
         Ok(())
     }
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -327,11 +323,11 @@ impl InputsProcessor for MiniCpmOImageProcessor {
 
         let preserve_images = input_seqs
             .iter()
-            .map(|seq| !seq.multimodal.has_changed_prompt)
+            .map(|seq| !seq.multimodal().has_changed_prompt)
             .collect::<Vec<_>>();
         if is_prompt {
             for seq in input_seqs.iter_mut() {
-                self.prepare_prompt(&tokenizer, seq, paged_attn_metadata.as_mut())?;
+                self.prepare_prompt(&tokenizer, &mut **seq, paged_attn_metadata.as_mut())?;
             }
         }
 
@@ -480,9 +476,9 @@ impl InputsProcessor for MiniCpmOImageProcessor {
             }
         }
 
-        let text_models_inputs_processor::InnerInputProcessorOutput {
+        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
-                text_models_inputs_processor::InputMetadata {
+                inference_nn::media_inputs::processor::InputMetadata {
                     input,
                     positions,
                     context_lens,
@@ -492,33 +488,40 @@ impl InputsProcessor for MiniCpmOImageProcessor {
                 },
             seq_indices,
         } = if is_prompt {
-            get_prompt_input(
+            host.prompt_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )?
         } else {
-            get_completion_input(
+            host.completion_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )?
         };
 
@@ -575,7 +578,6 @@ impl InputsProcessor for MiniCpmOImageProcessor {
             } else {
                 crate::gdn::RecurrentBatchKind::Decode
             },
-            adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
         });
         Ok(InputProcessorOutput {
             inputs,
@@ -618,10 +620,10 @@ impl MiniCpmOImageProcessor {
     fn prepare_prompt(
         &self,
         tokenizer: &Tokenizer,
-        seq: &mut Sequence,
+        seq: &mut dyn MediaSequence,
         paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> anyhow::Result<()> {
-        if seq.multimodal.has_changed_prompt || !seq.has_images() {
+        if seq.multimodal().has_changed_prompt || !seq.has_images() {
             return Ok(());
         }
         let images = seq
@@ -682,7 +684,7 @@ impl MiniCpmOImageProcessor {
         if has_prefill_toks {
             seq.set_prefill_toks(input_ids);
         }
-        seq.multimodal.has_changed_prompt = true;
+        seq.multimodal_mut().has_changed_prompt = true;
         Ok(())
     }
 

@@ -22,12 +22,10 @@ use crate::{
     attention::AttentionMask,
     device_map::DeviceMapper,
     pipeline::{
-        recurrent_batch_kind_for_input,
-        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
-        MessagesAction, Processor,
+        recurrent_batch_kind_for_input, InputProcessorOutput, InputsProcessor,
+        InputsProcessorValidationError, MessagesAction, Processor,
     },
-    sequence::{build_mm_features_from_ranges, find_placeholder_delimited_ranges, Sequence},
+    sequence::{build_mm_features_from_ranges, find_placeholder_delimited_ranges},
     vision_models::{
         image_processor::{ImagePreProcessor, PreprocessedImages},
         multimodal_layout::{
@@ -36,11 +34,14 @@ use crate::{
             RequestMultimodalLayout,
         },
         preprocessor_config::{PreProcessorConfig, ToFilter},
-        ModelInputs,
     },
 };
 
 use super::Qwen2VLVisionSpecificArgs;
+use crate::vision_models::media_host::MediaInputsProcessor;
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
+};
 
 const MAX_MEDIA_ASPECT_RATIO: f64 = 200.0;
 
@@ -67,9 +68,9 @@ impl Qwen2VLProcessor {
 
 impl Processor for Qwen2VLProcessor {
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(Qwen2VLImageProcessor {
+        Arc::new(MediaInputsProcessor(Arc::new(Qwen2VLImageProcessor {
             max_edge: self.max_edge,
-        })
+        })))
     }
 
     fn get_special_tokens(&self) -> &[&'static str] {
@@ -210,7 +211,7 @@ pub(crate) fn find_sequences(nums: &[u32], needle: u32) -> Vec<(usize, usize)> {
     sequences
 }
 
-pub(crate) fn video_hashes(seq: &Sequence) -> Vec<u64> {
+pub(crate) fn video_hashes(seq: &dyn MediaSequence) -> Vec<u64> {
     let hashes = seq
         .clone_videos()
         .unwrap_or_default()
@@ -264,7 +265,7 @@ pub(crate) fn split_media_pixels(
 }
 
 pub(crate) fn select_media_view(
-    seq: &Sequence,
+    seq: &dyn MediaSequence,
     kind: MultimodalKind,
     pixel_values: Option<Tensor>,
     grid_thw: Option<Tensor>,
@@ -342,7 +343,7 @@ pub(crate) fn shift_media_spans(
     Ok(cached)
 }
 
-pub(crate) fn media_data_cached_offset(seq: &Sequence, cached_items: usize) -> usize {
+pub(crate) fn media_data_cached_offset(seq: &dyn MediaSequence, cached_items: usize) -> usize {
     if seq.is_chunked_prefill_view() {
         0
     } else {
@@ -418,7 +419,7 @@ pub(crate) fn select_media_batch(
 }
 
 fn completed_media_grid(
-    seq: &Sequence,
+    seq: &dyn MediaSequence,
     kind: MultimodalKind,
     grid: Option<&Tensor>,
 ) -> Result<Option<Tensor>> {
@@ -474,7 +475,7 @@ impl<'a> PromptMropeConfig<'a> {
 }
 
 fn prompt_mrope(
-    input_seqs: &mut [&mut Sequence],
+    input_seqs: &mut [&mut dyn MediaSequence],
     query_ranges: &[Range<usize>],
     config: PromptMropeConfig<'_>,
 ) -> Result<Tensor> {
@@ -492,14 +493,14 @@ fn prompt_mrope(
     let mut sources = Vec::with_capacity(input_seqs.len());
     for seq in input_seqs.iter_mut() {
         let image_grid = completed_media_grid(
-            seq,
+            &**seq,
             MultimodalKind::Image,
-            seq.multimodal.rope_img_grid_thw.as_ref(),
+            seq.multimodal().rope_img_grid_thw.as_ref(),
         )?;
         let video_grid = completed_media_grid(
-            seq,
+            &**seq,
             MultimodalKind::Video,
-            seq.multimodal.rope_vid_grid_thw.as_ref(),
+            seq.multimodal().rope_vid_grid_thw.as_ref(),
         )?;
         let full_ids = Tensor::new(seq.prompt_position_source_toks(), device)?.unsqueeze(0)?;
         let (positions, deltas) = super::Qwen2VLModel::compute_rope_index(
@@ -515,7 +516,7 @@ fn prompt_mrope(
             position_ids: positions,
             delta: deltas.flatten_all()?.to_vec1::<i64>()?[0],
         };
-        seq.multimodal.mrope_position_delta = Some(source.delta);
+        seq.multimodal_mut().mrope_position_delta = Some(source.delta);
         sources.push(source);
     }
     if packed {
@@ -554,7 +555,7 @@ fn prompt_mrope(
 
 pub(crate) fn apply_mrope_position_deltas(
     position_ids: Vec<usize>,
-    input_seqs: &[&mut Sequence],
+    input_seqs: &[&mut dyn MediaSequence],
 ) -> Result<Vec<usize>> {
     if position_ids.len() != input_seqs.len() {
         anyhow::bail!(
@@ -567,7 +568,7 @@ pub(crate) fn apply_mrope_position_deltas(
         .into_iter()
         .zip(input_seqs)
         .map(|(position, seq)| {
-            apply_mrope_position_delta(position, seq.multimodal.mrope_position_delta.unwrap_or(0))
+            apply_mrope_position_delta(position, seq.multimodal().mrope_position_delta.unwrap_or(0))
         })
         .collect()
 }
@@ -602,7 +603,7 @@ pub(crate) fn qwen2_decode_args(
 }
 
 fn packed_layout(
-    input_seqs: &[&mut Sequence],
+    input_seqs: &[&mut dyn MediaSequence],
     query_lens: &[usize],
     continuous_img_pad: &[Vec<(usize, usize)>],
     continuous_vid_pad: &[Vec<(usize, usize)>],
@@ -631,7 +632,7 @@ fn packed_layout(
                 image_spans.len()
             );
         }
-        let video_hashes = video_hashes(seq);
+        let video_hashes = video_hashes(&**seq);
         if video_hashes.len() != video_spans.len() {
             anyhow::bail!(
                 "Qwen sequence has {} video hashes but {} video spans",
@@ -678,15 +679,11 @@ fn packed_layout(
     Ok(PackedMultimodalLayout::new(&requests)?)
 }
 
-impl InputsProcessor for Qwen2VLImageProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for Qwen2VLImageProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         device: &Device,
         other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -753,11 +750,11 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                 continue;
             }
             let (_, image_grid_thw, video_grid_thw) =
-                if let Some(cached_pixel_values) = &seq.multimodal.cached_pixel_values {
+                if let Some(cached_pixel_values) = &seq.multimodal().cached_pixel_values {
                     (
                         cached_pixel_values.clone(),
-                        seq.multimodal.cached_img_thw.clone(),
-                        seq.multimodal.cached_vid_thw.clone(),
+                        seq.multimodal().cached_img_thw.clone(),
+                        seq.multimodal().cached_vid_thw.clone(),
                     )
                 } else {
                     let image = if seq.has_images() {
@@ -802,9 +799,9 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                         pixels.push(video.pixel_values);
                     }
                     let pixel_values = Tensor::cat(&pixels, 0)?;
-                    seq.multimodal.cached_pixel_values = Some(pixel_values.clone());
-                    seq.multimodal.cached_img_thw = image_grid_thw.clone();
-                    seq.multimodal.cached_vid_thw = video_grid_thw.clone();
+                    seq.multimodal_mut().cached_pixel_values = Some(pixel_values.clone());
+                    seq.multimodal_mut().cached_img_thw = image_grid_thw.clone();
+                    seq.multimodal_mut().cached_vid_thw = video_grid_thw.clone();
                     (pixel_values, image_grid_thw, video_grid_thw)
                 };
             image_grid_thw_accum.push(image_grid_thw);
@@ -812,11 +809,11 @@ impl InputsProcessor for Qwen2VLImageProcessor {
         }
 
         for (idx, seq) in input_seqs.iter_mut().enumerate() {
-            if seq.multimodal.rope_img_grid_thw.is_none() {
-                seq.multimodal.rope_img_grid_thw = image_grid_thw_accum[idx].clone();
+            if seq.multimodal().rope_img_grid_thw.is_none() {
+                seq.multimodal_mut().rope_img_grid_thw = image_grid_thw_accum[idx].clone();
             }
-            if seq.multimodal.rope_vid_grid_thw.is_none() {
-                seq.multimodal.rope_vid_grid_thw = video_grid_thw_accum[idx].clone();
+            if seq.multimodal().rope_vid_grid_thw.is_none() {
+                seq.multimodal_mut().rope_vid_grid_thw = video_grid_thw_accum[idx].clone();
             }
         }
 
@@ -827,7 +824,7 @@ impl InputsProcessor for Qwen2VLImageProcessor {
             .zip(&image_grid_thw_accum)
             .zip(&video_grid_thw_accum)
         {
-            if seq.multimodal.has_changed_prompt {
+            if seq.multimodal().has_changed_prompt {
                 continue;
             }
             let image_rows = seq.clone_images().unwrap_or_default().len();
@@ -839,7 +836,7 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                 );
             }
             let video_rows = seq.clone_videos().unwrap_or_default().len();
-            let video_hashes = video_hashes(seq);
+            let video_hashes = video_hashes(&**seq);
             if video_hashes.len() != video_rows {
                 anyhow::bail!(
                     "Qwen has {video_rows} video rows but {} video hashes",
@@ -867,7 +864,7 @@ impl InputsProcessor for Qwen2VLImageProcessor {
         }
 
         for (detok, seq) in detok_seqs.into_iter().zip(input_seqs.iter_mut()) {
-            if seq.multimodal.has_changed_prompt {
+            if seq.multimodal().has_changed_prompt {
                 continue;
             }
             let toks = tokenizer
@@ -899,7 +896,7 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                     .context("Qwen tokenizer is missing video pad token")?;
                 let video_ranges =
                     find_placeholder_delimited_ranges(&ids, vid_pad_id, start_id, end_id);
-                let hashes = video_hashes(seq);
+                let hashes = video_hashes(&**seq);
                 features.extend(validated_mm_features(
                     &video_ranges,
                     &hashes,
@@ -911,7 +908,7 @@ impl InputsProcessor for Qwen2VLImageProcessor {
             }
 
             seq.set_toks_and_reallocate(ids, paged_attn_metadata.as_deref_mut());
-            seq.multimodal.has_changed_prompt = true;
+            seq.multimodal_mut().has_changed_prompt = true;
         }
 
         Ok(())
@@ -919,8 +916,9 @@ impl InputsProcessor for Qwen2VLImageProcessor {
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -941,9 +939,9 @@ impl InputsProcessor for Qwen2VLImageProcessor {
             return Err(anyhow::Error::msg("Vision model must have kv cache."));
         }
         if !is_prompt {
-            let text_models_inputs_processor::InnerInputProcessorOutput {
+            let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
                 inputs:
-                    text_models_inputs_processor::InputMetadata {
+                    inference_nn::media_inputs::processor::InputMetadata {
                         input,
                         positions,
                         context_lens,
@@ -952,21 +950,26 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                         flash_meta,
                     },
                 seq_indices,
-            } = get_completion_input(
-                input_seqs
-                    .iter()
-                    .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
-                input_seqs,
-                device,
-                no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
-            )
-            .unwrap();
+            } = host
+                .completion_inputs(
+                    input_seqs
+                        .iter()
+                        .map(|seq| seq.get_toks())
+                        .collect::<Vec<_>>()
+                        .into(),
+                    input_seqs,
+                    TextInputs {
+                        device,
+                        last_n_context_len,
+                        return_raw_logits,
+                        paged_attn_metadata: paged_attn_metadata.as_mut(),
+                        mapper,
+                        sliding_window,
+                    },
+                    no_kv_cache,
+                    None,
+                )
+                .unwrap();
             let position_ids = apply_mrope_position_deltas(position_ids, input_seqs)?;
             let args = qwen2_decode_args(&input, input_seqs.iter().map(|seq| seq.len()).collect());
             let inputs: Box<dyn Any> = Box::new(ModelInputs {
@@ -980,9 +983,8 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                 flash_meta,
                 recurrent_batch_kind: recurrent_batch_kind_for_input(
                     false,
-                    crate::speculative::staging::staged_batch_width(input_seqs).is_some(),
+                    host.staged_batch_width(input_seqs).is_some(),
                 ),
-                adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
             });
             return Ok(InputProcessorOutput {
                 inputs,
@@ -995,9 +997,9 @@ impl InputsProcessor for Qwen2VLImageProcessor {
             ));
         };
 
-        let text_models_inputs_processor::InnerInputProcessorOutput {
+        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
-                text_models_inputs_processor::InputMetadata {
+                inference_nn::media_inputs::processor::InputMetadata {
                     input,
                     positions,
                     context_lens,
@@ -1007,34 +1009,41 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                 },
             seq_indices,
         } = if is_prompt {
-            get_prompt_input(
+            host.prompt_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )
             .unwrap()
         } else {
-            get_completion_input(
+            host.completion_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )
             .unwrap()
         };
@@ -1045,10 +1054,10 @@ impl InputsProcessor for Qwen2VLImageProcessor {
             .iter()
             .any(|seq| seq.has_images() || seq.has_videos());
         for seq in input_seqs.iter_mut() {
-            if seq.multimodal.rope_img_grid_thw.is_none()
-                && seq.multimodal.rope_vid_grid_thw.is_none()
+            if seq.multimodal().rope_img_grid_thw.is_none()
+                && seq.multimodal().rope_vid_grid_thw.is_none()
             {
-                seq.multimodal.mrope_position_delta = None;
+                seq.multimodal_mut().mrope_position_delta = None;
             }
         }
         let mut image_item_counts = vec![0usize; input_seqs.len()];
@@ -1085,11 +1094,11 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                     continue;
                 }
                 let (pixel_values, image_grid_thw, video_grid_thw) =
-                    if let Some(cached_pixel_values) = &seq.multimodal.cached_pixel_values {
+                    if let Some(cached_pixel_values) = &seq.multimodal().cached_pixel_values {
                         (
                             cached_pixel_values.clone(),
-                            seq.multimodal.cached_img_thw.clone(),
-                            seq.multimodal.cached_vid_thw.clone(),
+                            seq.multimodal().cached_img_thw.clone(),
+                            seq.multimodal().cached_vid_thw.clone(),
                         )
                     } else {
                         let image = if seq.has_images() {
@@ -1134,17 +1143,17 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                             pixels.push(video.pixel_values);
                         }
                         let pixel_values = Tensor::cat(&pixels, 0)?;
-                        seq.multimodal.cached_pixel_values = Some(pixel_values.clone());
-                        seq.multimodal.cached_img_thw = image_grid_thw.clone();
-                        seq.multimodal.cached_vid_thw = video_grid_thw.clone();
+                        seq.multimodal_mut().cached_pixel_values = Some(pixel_values.clone());
+                        seq.multimodal_mut().cached_img_thw = image_grid_thw.clone();
+                        seq.multimodal_mut().cached_vid_thw = video_grid_thw.clone();
                         (pixel_values, image_grid_thw, video_grid_thw)
                     };
 
-                if seq.multimodal.rope_img_grid_thw.is_none() {
-                    seq.multimodal.rope_img_grid_thw = image_grid_thw.clone();
+                if seq.multimodal().rope_img_grid_thw.is_none() {
+                    seq.multimodal_mut().rope_img_grid_thw = image_grid_thw.clone();
                 }
-                if seq.multimodal.rope_vid_grid_thw.is_none() {
-                    seq.multimodal.rope_vid_grid_thw = video_grid_thw.clone();
+                if seq.multimodal().rope_vid_grid_thw.is_none() {
+                    seq.multimodal_mut().rope_vid_grid_thw = video_grid_thw.clone();
                 }
                 let (image_pixels, video_pixels) = split_media_pixels(
                     &pixel_values,
@@ -1152,9 +1161,9 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                     video_grid_thw.as_ref(),
                 )?;
                 let (image_pixels, image_grid_thw, image_count) =
-                    select_media_view(seq, MultimodalKind::Image, image_pixels, image_grid_thw)?;
+                    select_media_view(&**seq, MultimodalKind::Image, image_pixels, image_grid_thw)?;
                 let (video_pixels, video_grid_thw, video_count) =
-                    select_media_view(seq, MultimodalKind::Video, video_pixels, video_grid_thw)?;
+                    select_media_view(&**seq, MultimodalKind::Video, video_pixels, video_grid_thw)?;
                 image_item_counts[seq_idx] = image_count;
                 video_item_counts[seq_idx] = video_count;
                 if let Some(image_pixels) = image_pixels {
@@ -1176,7 +1185,7 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                     .zip(&video_grid_thw_accum)
                     .enumerate()
                 {
-                    if seq.multimodal.has_changed_prompt {
+                    if seq.multimodal().has_changed_prompt {
                         continue;
                     }
                     let image_rows = image_item_counts[seq_idx];
@@ -1187,7 +1196,7 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                         );
                     }
                     let video_rows = video_item_counts[seq_idx];
-                    let hashes = video_hashes(seq);
+                    let hashes = video_hashes(&**seq);
                     if hashes.len() != video_rows {
                         anyhow::bail!(
                             "Qwen has {video_rows} selected video rows but {} video hashes",
@@ -1224,7 +1233,7 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                     .expect("Detokenization failed!");
                 let ids = toks.get_ids().to_vec();
 
-                if !seq.multimodal.has_changed_prompt {
+                if !seq.multimodal().has_changed_prompt {
                     seq.set_initial_prompt(detok.clone());
 
                     let mut features = Vec::new();
@@ -1250,7 +1259,7 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                             .context("Qwen tokenizer is missing video pad token")?;
                         let video_ranges =
                             find_placeholder_delimited_ranges(&ids, vid_pad_id, start_id, end_id);
-                        let hashes = video_hashes(seq);
+                        let hashes = video_hashes(&**seq);
                         features.extend(validated_mm_features(
                             &video_ranges,
                             &hashes,
@@ -1262,7 +1271,7 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                     }
 
                     seq.set_toks_and_reallocate(ids.clone(), paged_attn_metadata.as_mut());
-                    seq.multimodal.has_changed_prompt = true;
+                    seq.multimodal_mut().has_changed_prompt = true;
                 }
                 all_ids.push(ids.clone());
 
@@ -1377,8 +1386,8 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                     .map_or(seq.prefix_cache_len(), |query| query.start);
                 let cached_images = shift_media_spans(img_pads, local_prefix)?;
                 let cached_videos = shift_media_spans(vid_pads, local_prefix)?;
-                per_seq_cached_images[seq_idx] = media_data_cached_offset(seq, cached_images);
-                per_seq_cached_videos[seq_idx] = media_data_cached_offset(seq, cached_videos);
+                per_seq_cached_images[seq_idx] = media_data_cached_offset(&**seq, cached_images);
+                per_seq_cached_videos[seq_idx] = media_data_cached_offset(&**seq, cached_videos);
                 per_seq_current_images[seq_idx] = img_pads.len();
                 per_seq_current_videos[seq_idx] = vid_pads.len();
             }
@@ -1403,7 +1412,7 @@ impl InputsProcessor for Qwen2VLImageProcessor {
         let rope_img_grid_thw = {
             let grids: Vec<_> = input_seqs
                 .iter()
-                .filter_map(|seq| seq.multimodal.rope_img_grid_thw.clone())
+                .filter_map(|seq| seq.multimodal().rope_img_grid_thw.clone())
                 .collect();
             if grids.is_empty() {
                 None
@@ -1414,7 +1423,7 @@ impl InputsProcessor for Qwen2VLImageProcessor {
         let rope_vid_grid_thw = {
             let grids: Vec<_> = input_seqs
                 .iter()
-                .filter_map(|seq| seq.multimodal.rope_vid_grid_thw.clone())
+                .filter_map(|seq| seq.multimodal().rope_vid_grid_thw.clone())
                 .collect();
             if grids.is_empty() {
                 None
@@ -1435,7 +1444,7 @@ impl InputsProcessor for Qwen2VLImageProcessor {
                 })?;
                 image_hashes.extend_from_slice(selected);
 
-                let hashes = video_hashes(seq);
+                let hashes = video_hashes(&**seq);
                 let cached = per_seq_cached_videos[seq_idx];
                 let current = per_seq_current_videos[seq_idx];
                 let selected = hashes.get(cached..cached + current).ok_or_else(|| {
@@ -1468,8 +1477,8 @@ impl InputsProcessor for Qwen2VLImageProcessor {
         };
         let needs_prompt_mrope = is_prompt
             && input_seqs.iter().any(|seq| {
-                seq.multimodal.rope_img_grid_thw.is_some()
-                    || seq.multimodal.rope_vid_grid_thw.is_some()
+                seq.multimodal().rope_img_grid_thw.is_some()
+                    || seq.multimodal().rope_vid_grid_thw.is_some()
             });
         let prompt_position_ids = if needs_prompt_mrope {
             let image_token_id = tokenizer
@@ -1531,7 +1540,6 @@ impl InputsProcessor for Qwen2VLImageProcessor {
             } else {
                 crate::gdn::RecurrentBatchKind::Decode
             },
-            adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
         });
         Ok(InputProcessorOutput {
             inputs,

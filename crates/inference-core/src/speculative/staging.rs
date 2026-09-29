@@ -7,7 +7,9 @@ pub(crate) enum StagedBatchState {
     Mixed,
 }
 
-pub(crate) fn staged_batch_state(seqs: &[&mut Sequence]) -> StagedBatchState {
+pub(crate) fn staged_batch_state<S: std::ops::Deref<Target = Sequence>>(
+    seqs: &[S],
+) -> StagedBatchState {
     staged_batch_state_from_widths(seqs.iter().map(|seq| seq.active_staged_speculative_len()))
 }
 
@@ -34,7 +36,9 @@ fn staged_batch_state_from_widths(widths: impl IntoIterator<Item = usize>) -> St
     width.map_or(StagedBatchState::None, StagedBatchState::Homogeneous)
 }
 
-pub(crate) fn staged_batch_width(seqs: &[&mut Sequence]) -> Option<usize> {
+pub(crate) fn staged_batch_width<S: std::ops::Deref<Target = Sequence>>(
+    seqs: &[S],
+) -> Option<usize> {
     match staged_batch_state(seqs) {
         StagedBatchState::Homogeneous(width) => Some(width),
         StagedBatchState::None | StagedBatchState::Mixed => None,

@@ -10,7 +10,6 @@ pub(crate) use inference_nn::vision::clip;
 pub(crate) mod idefics2;
 #[cfg(feature = "models-llama")]
 pub(crate) use idefics2::idefics2_input_processor;
-pub(crate) mod image_processor;
 #[cfg(feature = "models-llama")]
 pub(crate) mod llava;
 #[cfg(feature = "models-llama")]
@@ -21,8 +20,6 @@ pub(crate) mod paddleocr_vl;
 pub(crate) mod phi3;
 #[cfg(feature = "models-phi")]
 pub(crate) use phi3::phi3_inputs_processor;
-pub(crate) mod preprocessor_config;
-pub(crate) mod processor_config;
 #[cfg(feature = "models-qwen")]
 pub(crate) mod qwen2_5_vl;
 #[cfg(feature = "models-qwen")]
@@ -70,6 +67,10 @@ pub(crate) mod qwen3_vl_moe;
 #[cfg(feature = "models-llama")]
 pub(crate) mod voxtral;
 
+pub(crate) mod media_host;
+pub(crate) use inference_nn::media_inputs::{
+    image_processor, preprocessor_config, processor_config,
+};
 pub(crate) use inference_nn::vision::multimodal_layout;
 
 use crate::gdn::RecurrentBatchKind;

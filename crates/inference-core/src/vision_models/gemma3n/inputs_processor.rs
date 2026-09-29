@@ -12,11 +12,10 @@ use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     device_map::DeviceMapper,
     pipeline::{
-        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
-        MessagesAction, Processor,
+        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
+        Processor,
     },
-    sequence::{build_mm_features_from_ranges, find_image_placeholder_ranges, Sequence},
+    sequence::{build_mm_features_from_ranges, find_image_placeholder_ranges},
     vision_models::gemma3n::audio_processing::AudioProcessor,
     vision_models::{
         image_processor::{ImagePreProcessor, PreprocessedImages},
@@ -26,11 +25,14 @@ use crate::{
         },
         preprocessor_config::{PreProcessorConfig, ToFilter},
         processor_config::ProcessorConfig,
-        ModelInputs,
     },
 };
 
 use super::{Gemma3nSpecificArgs, AUDIO_TOKEN_ID, IMAGE_TOKEN_ID};
+use crate::vision_models::media_host::MediaInputsProcessor;
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
+};
 
 struct Gemma3nImageProcessor {
     supports_images: bool,
@@ -204,7 +206,7 @@ fn gemma3n_request_layout(
 }
 
 fn gemma3n_packed_layout(
-    input_seqs: &[&mut Sequence],
+    input_seqs: &[&mut dyn MediaSequence],
     query_lens: &[usize],
 ) -> Result<PackedMultimodalLayout> {
     if input_seqs.len() != query_lens.len() {
@@ -260,12 +262,12 @@ impl Gemma3nProcessor {
 
 impl Processor for Gemma3nProcessor {
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(Gemma3nImageProcessor {
+        Arc::new(MediaInputsProcessor(Arc::new(Gemma3nImageProcessor {
             supports_images: self.supports_images,
             supports_audio: self.supports_audio,
             full_image_sequence: self.create_full_image_sequence(),
             audio_seq_length: self.audio_seq_length,
-        })
+        })))
     }
 
     fn get_special_tokens(&self) -> &[&'static str] {
@@ -284,15 +286,11 @@ impl Processor for Gemma3nProcessor {
     }
 }
 
-impl InputsProcessor for Gemma3nImageProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for Gemma3nImageProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         _device: &Device,
         _other_config: Option<Arc<dyn Any>>,
         paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -305,8 +303,9 @@ impl InputsProcessor for Gemma3nImageProcessor {
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -348,9 +347,9 @@ impl InputsProcessor for Gemma3nImageProcessor {
             .map_err(anyhow::Error::new)?
             .flatten();
 
-        let text_models_inputs_processor::InnerInputProcessorOutput {
+        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
-                text_models_inputs_processor::InputMetadata {
+                inference_nn::media_inputs::processor::InputMetadata {
                     input,
                     positions,
                     context_lens,
@@ -360,33 +359,40 @@ impl InputsProcessor for Gemma3nImageProcessor {
                 },
             seq_indices,
         } = if is_prompt {
-            get_prompt_input(
+            host.prompt_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )?
         } else {
-            get_completion_input(
+            host.completion_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )?
         };
 
@@ -446,7 +452,6 @@ impl InputsProcessor for Gemma3nImageProcessor {
             } else {
                 crate::gdn::RecurrentBatchKind::Decode
             },
-            adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
         });
         Ok(InputProcessorOutput {
             inputs,
@@ -459,17 +464,17 @@ impl Gemma3nImageProcessor {
     fn prepare_prompt_plans(
         &self,
         tokenizer: &Tokenizer,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> anyhow::Result<()> {
         for seq in input_seqs {
-            if seq.multimodal.has_changed_prompt && !seq.mm_features().is_empty() {
+            if seq.multimodal().has_changed_prompt && !seq.mm_features().is_empty() {
                 continue;
             }
             let image_count = seq.images().map_or(0, <[_]>::len);
             let audio_count = seq.audios().map_or(0, <[_]>::len);
-            let image_hashes = seq.multimodal.image_hashes().unwrap_or_default().to_vec();
-            let audio_hashes = seq.multimodal.audio_hashes().unwrap_or_default().to_vec();
+            let image_hashes = seq.multimodal().image_hashes().unwrap_or_default().to_vec();
+            let audio_hashes = seq.multimodal().audio_hashes().unwrap_or_default().to_vec();
             if image_hashes.len() != image_count {
                 anyhow::bail!(
                     "Gemma 3n has {image_count} images but {} image hashes",
@@ -555,7 +560,7 @@ impl Gemma3nImageProcessor {
             seq.set_initial_prompt(prompt);
             seq.set_toks_and_reallocate(ids, paged_attn_metadata.as_deref_mut());
             seq.set_mm_features(features);
-            seq.multimodal.has_changed_prompt = true;
+            seq.multimodal_mut().has_changed_prompt = true;
         }
         Ok(())
     }
@@ -564,7 +569,7 @@ impl Gemma3nImageProcessor {
         self.full_image_sequence.matches(IMAGE_TOKEN).count()
     }
 
-    fn active_query(seq: &Sequence) -> Result<Range<usize>> {
+    fn active_query(seq: &dyn MediaSequence) -> Result<Range<usize>> {
         if seq.is_chunked_prefill_view() {
             return seq.active_prompt_query_range().ok_or_else(|| {
                 candle_core::Error::msg("Gemma 3n chunk is missing its active query range")
@@ -576,7 +581,7 @@ impl Gemma3nImageProcessor {
 
     fn process_image_batch(
         &self,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         config: &PreProcessorConfig,
         device: &Device,
     ) -> Result<Option<Gemma3nImageBatch>> {
@@ -591,7 +596,7 @@ impl Gemma3nImageProcessor {
             let active = gemma3n_active_items(
                 seq.mm_features(),
                 MultimodalKind::Image,
-                Self::active_query(seq)?,
+                Self::active_query(&**seq)?,
                 retained.len(),
             )?;
             for item in active {
@@ -636,7 +641,7 @@ impl Gemma3nImageProcessor {
 
     fn process_audio_batch(
         &self,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         config: &PreProcessorConfig,
         device: &Device,
     ) -> Result<Option<Gemma3nAudioBatch>> {
@@ -651,7 +656,7 @@ impl Gemma3nImageProcessor {
             let active = gemma3n_active_items(
                 seq.mm_features(),
                 MultimodalKind::Audio,
-                Self::active_query(seq)?,
+                Self::active_query(&**seq)?,
                 retained.len(),
             )?;
             for item in active {

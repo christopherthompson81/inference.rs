@@ -24,11 +24,10 @@ use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     device_map::DeviceMapper,
     pipeline::{
-        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
-        MessagesAction, Processor,
+        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
+        Processor,
     },
-    sequence::{build_mm_features_from_ranges, Sequence},
+    sequence::build_mm_features_from_ranges,
 };
 
 use crate::vision_models::{
@@ -40,11 +39,16 @@ use crate::vision_models::{
     phi4::Phi4MMVisionSpecificArgs,
     preprocessor_config::PreProcessorConfig,
     processor_config::ProcessorConfig,
-    ModelInputs,
 };
 
 use super::audio_embedding::AUDIO_SPECIAL_TOKEN_ID;
 use super::image_embedding::IMAGE_SPECIAL_TOKEN_ID;
+use crate::vision_models::media_host::MediaInputsProcessor;
+use inference_nn::media_inputs::processor::TextOnlyInputs;
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, ProcessInputsCall,
+    TextInputs,
+};
 
 const COMPATIBLE_IMAGE_SPECIAL_TOKEN_PATTERN: &str = r"<\|image_\d+\|>";
 const COMPATIBLE_AUDIO_SPECIAL_TOKEN_PATTERN: &str = r"<\|audio_\d+\|>";
@@ -235,7 +239,7 @@ fn phi4_request_layout(
 }
 
 fn phi4_packed_layout(
-    input_seqs: &[&mut Sequence],
+    input_seqs: &[&mut dyn MediaSequence],
     query_lens: &[usize],
 ) -> Result<PackedMultimodalLayout> {
     if input_seqs.len() != query_lens.len() {
@@ -291,7 +295,7 @@ impl Phi4MMProcessor {
 
 impl Processor for Phi4MMProcessor {
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        self.inputs_processor.clone()
+        Arc::new(MediaInputsProcessor(self.inputs_processor.clone()))
     }
     fn get_special_tokens(&self) -> &[&'static str] {
         &[]
@@ -301,15 +305,11 @@ impl Processor for Phi4MMProcessor {
     }
 }
 
-impl InputsProcessor for Phi4MMInputsProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for Phi4MMInputsProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         device: &Device,
         other_config: Option<Arc<dyn Any>>,
         paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -324,8 +324,9 @@ impl InputsProcessor for Phi4MMInputsProcessor {
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -366,42 +367,34 @@ impl InputsProcessor for Phi4MMInputsProcessor {
                 .iter()
                 .any(|seq| seq.has_images() || seq.has_audios());
         if !has_media {
-            return text_models_inputs_processor::TextInputsProcessor
-                .process_inputs(
-                    Some(tokenizer.clone()),
+            return host
+                .text_only_inputs(
                     input_seqs,
-                    is_prompt,
-                    is_xlora,
-                    device,
-                    no_kv_cache,
-                    last_n_context_len,
-                    return_raw_logits,
-                    sliding_window,
-                    other_config,
-                    paged_attn_metadata,
-                    mapper,
+                    ProcessInputsCall {
+                        tokenizer: Some(tokenizer.clone()),
+                        is_prompt,
+                        is_xlora,
+                        device,
+                        no_kv_cache,
+                        last_n_context_len,
+                        return_raw_logits,
+                        sliding_window,
+                        other_config,
+                        paged_attn_metadata,
+                        mapper,
+                    },
                 )
-                .map(|metadata| {
-                    let InputProcessorOutput {
-                        inputs,
-                        seq_indices,
-                    } = metadata;
-
-                    let text_models_inputs_processor::ModelInputs {
+                .map(|text| {
+                    let TextOnlyInputs {
                         input_ids,
-                        input_ids_full: _,
                         seqlen_offsets,
-                        seqlen_offsets_full: _,
                         context_lens,
                         position_ids,
                         paged_attn_meta,
                         flash_meta,
-                        flash_meta_full: _,
                         recurrent_batch_kind,
-                        adapter_leases,
-                    } = *inputs
-                        .downcast::<text_models_inputs_processor::ModelInputs>()
-                        .expect("Downcast failed.");
+                        seq_indices,
+                    } = text;
 
                     let inputs: Box<dyn Any> = Box::new(ModelInputs {
                         input_ids,
@@ -425,7 +418,6 @@ impl InputsProcessor for Phi4MMInputsProcessor {
                         paged_attn_meta,
                         flash_meta,
                         recurrent_batch_kind,
-                        adapter_leases,
                     });
                     InputProcessorOutput {
                         inputs,
@@ -446,34 +438,39 @@ impl InputsProcessor for Phi4MMInputsProcessor {
             .collect::<Vec<_>>();
 
         let result = if is_prompt {
-            get_prompt_input(
-                toks.iter().map(Vec::as_slice).collect(),
+            host.prompt_inputs(
+                toks.iter().map(Vec::as_slice).collect::<Vec<_>>().into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )
         } else {
-            get_completion_input(
-                toks.iter().map(Vec::as_slice).collect(),
+            host.completion_inputs(
+                toks.iter().map(Vec::as_slice).collect::<Vec<_>>().into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )
         };
 
         result.and_then(|metadata| {
-            let text_models_inputs_processor::InnerInputProcessorOutput {
+            let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
                 inputs:
-                    text_models_inputs_processor::InputMetadata {
+                    inference_nn::media_inputs::processor::InputMetadata {
                         input,
                         positions,
                         context_lens,
@@ -558,7 +555,6 @@ impl InputsProcessor for Phi4MMInputsProcessor {
                 } else {
                     crate::gdn::RecurrentBatchKind::Decode
                 },
-                adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
             });
             Ok(InputProcessorOutput {
                 inputs,
@@ -572,7 +568,7 @@ impl Phi4MMInputsProcessor {
     fn prepare_prompt_plans(
         &self,
         tokenizer: &Tokenizer,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         device: &Device,
         config: &PreProcessorConfig,
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -583,7 +579,7 @@ impl Phi4MMInputsProcessor {
             Regex::new(COMPATIBLE_AUDIO_SPECIAL_TOKEN_PATTERN).map_err(candle_core::Error::wrap)?;
 
         for seq in input_seqs {
-            if seq.multimodal.has_changed_prompt && !seq.mm_features().is_empty() {
+            if seq.multimodal().has_changed_prompt && !seq.mm_features().is_empty() {
                 continue;
             }
             let images = seq.clone_images().unwrap_or_default();
@@ -593,7 +589,7 @@ impl Phi4MMInputsProcessor {
             }
 
             let raw_image_hashes = suffix_hashes(
-                seq.multimodal.image_hashes().unwrap_or_default(),
+                seq.multimodal().image_hashes().unwrap_or_default(),
                 images.len(),
                 "image",
             )?
@@ -604,7 +600,7 @@ impl Phi4MMInputsProcessor {
                 .map(|(image, &hash)| phi4_image_hash(hash, image))
                 .collect::<Vec<_>>();
             let raw_audio_hashes = suffix_hashes(
-                seq.multimodal.audio_hashes().unwrap_or_default(),
+                seq.multimodal().audio_hashes().unwrap_or_default(),
                 audios.len(),
                 "audio",
             )?
@@ -655,9 +651,9 @@ impl Phi4MMInputsProcessor {
                     .iter()
                     .flat_map(|&(height, width)| [height, width])
                     .collect::<Vec<_>>();
-                seq.multimodal.cached_pixel_values = Some(pixel_values);
-                seq.multimodal.cached_pixel_attention_mask = Some(attention_mask);
-                seq.multimodal.cached_spatial_shapes = Some(Tensor::from_vec(
+                seq.multimodal_mut().cached_pixel_values = Some(pixel_values);
+                seq.multimodal_mut().cached_pixel_attention_mask = Some(attention_mask);
+                seq.multimodal_mut().cached_spatial_shapes = Some(Tensor::from_vec(
                     flattened_sizes,
                     (image_sizes.len(), 2),
                     device,
@@ -711,7 +707,7 @@ impl Phi4MMInputsProcessor {
             seq.set_initial_prompt(expanded_prompt);
             seq.set_toks_and_reallocate(plan.tokens, paged_attn_metadata.as_deref_mut());
             seq.set_mm_features(features);
-            seq.multimodal.has_changed_prompt = true;
+            seq.multimodal_mut().has_changed_prompt = true;
         }
         Ok(())
     }
@@ -749,7 +745,7 @@ impl Phi4MMInputsProcessor {
 
     fn process_image_batch(
         &self,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         config: &PreProcessorConfig,
         device: &Device,
     ) -> Result<Option<Phi4ImageBatch>> {
@@ -764,9 +760,9 @@ impl Phi4MMInputsProcessor {
             }
 
             let cached = match (
-                &seq.multimodal.cached_pixel_values,
-                &seq.multimodal.cached_pixel_attention_mask,
-                &seq.multimodal.cached_spatial_shapes,
+                &seq.multimodal().cached_pixel_values,
+                &seq.multimodal().cached_pixel_attention_mask,
+                &seq.multimodal().cached_spatial_shapes,
             ) {
                 (Some(pixel_values), Some(attention_mask), Some(image_sizes)) => Some((
                     pixel_values.clone(),
@@ -791,7 +787,8 @@ impl Phi4MMInputsProcessor {
                                 )
                             })?
                     } else {
-                        local_uncached_item_start(seq, MultimodalKind::Image, available)..available
+                        local_uncached_item_start(&**seq, MultimodalKind::Image, available)
+                            ..available
                     };
                     let active_hashes: Vec<u64> = if seq.is_chunked_prefill_view() {
                         let active_images = seq.take_images().ok_or_else(|| {
@@ -814,7 +811,7 @@ impl Phi4MMInputsProcessor {
                             );
                         }
                         let raw_hashes = suffix_hashes(
-                            seq.multimodal.image_hashes().unwrap_or_default(),
+                            seq.multimodal().image_hashes().unwrap_or_default(),
                             available,
                             "image",
                         )?;
@@ -841,7 +838,7 @@ impl Phi4MMInputsProcessor {
                         seq.image_hashes().unwrap_or_default()
                     } else {
                         suffix_hashes(
-                            seq.multimodal.image_hashes().unwrap_or_default(),
+                            seq.multimodal().image_hashes().unwrap_or_default(),
                             active_images.len(),
                             "image",
                         )?
@@ -945,7 +942,7 @@ impl Phi4MMInputsProcessor {
 
     fn process_audio_batch(
         &self,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         device: &Device,
     ) -> Result<Option<Phi4AudioBatch>> {
         let mut feature_tensors = Vec::new();
@@ -967,7 +964,7 @@ impl Phi4MMInputsProcessor {
                 seq.audio_hashes().unwrap_or_default()
             } else {
                 suffix_hashes(
-                    seq.multimodal.audio_hashes().unwrap_or_default(),
+                    seq.multimodal().audio_hashes().unwrap_or_default(),
                     available,
                     "audio",
                 )?
@@ -975,7 +972,7 @@ impl Phi4MMInputsProcessor {
             let start = if seq.is_chunked_prefill_view() {
                 0
             } else {
-                local_uncached_item_start(seq, MultimodalKind::Audio, available)
+                local_uncached_item_start(&**seq, MultimodalKind::Audio, available)
             };
             let audios = &audios[start..];
             let raw_hashes = &retained_hashes[start..];
@@ -1319,7 +1316,11 @@ fn phi4_audio_hash(raw_hash: u64, audio: &crate::AudioInput) -> u64 {
     hasher.finish()
 }
 
-fn local_uncached_item_start(seq: &Sequence, kind: MultimodalKind, available: usize) -> usize {
+fn local_uncached_item_start(
+    seq: &dyn MediaSequence,
+    kind: MultimodalKind,
+    available: usize,
+) -> usize {
     let total_items = seq
         .mm_features()
         .iter()

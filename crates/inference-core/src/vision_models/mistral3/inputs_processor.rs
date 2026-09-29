@@ -12,11 +12,10 @@ use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     device_map::DeviceMapper,
     pipeline::{
-        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
-        MessagesAction, Processor,
+        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
+        Processor,
     },
-    sequence::{build_mm_features_from_ranges, Sequence},
+    sequence::build_mm_features_from_ranges,
     vision_models::{
         image_processor::{ImagePreProcessor, PreprocessedImages},
         multimodal_layout::{
@@ -25,11 +24,14 @@ use crate::{
         },
         preprocessor_config::{PreProcessorConfig, ToFilter},
         processor_config::ProcessorConfig,
-        ModelInputs,
     },
 };
 
 use super::Mistral3SpecificArgs;
+use crate::vision_models::media_host::MediaInputsProcessor;
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
+};
 
 fn find_mistral3_image_ranges(
     tokens: &[u32],
@@ -94,7 +96,7 @@ pub struct Mistral3Processor {
 }
 
 fn mistral3_packed_layout(
-    input_seqs: &[&mut Sequence],
+    input_seqs: &[&mut dyn MediaSequence],
     query_lens: &[usize],
     image_sizes_by_sequence: &[Vec<(u32, u32)>],
     image_token_id: u32,
@@ -198,13 +200,13 @@ impl Mistral3Processor {
 
 impl Processor for Mistral3Processor {
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(Mistral3ImageProcessor {
+        Arc::new(MediaInputsProcessor(Arc::new(Mistral3ImageProcessor {
             image_break_token: self.image_break_token.clone(),
             image_end_token: self.image_end_token.clone(),
             image_token: self.image_token.clone(),
             patch_size: self.patch_size,
             spatial_merge_size: self.spatial_merge_size,
-        })
+        })))
     }
 
     fn get_special_tokens(&self) -> &[&'static str] {
@@ -216,15 +218,11 @@ impl Processor for Mistral3Processor {
     }
 }
 
-impl InputsProcessor for Mistral3ImageProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for Mistral3ImageProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         _device: &Device,
         other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -236,13 +234,13 @@ impl InputsProcessor for Mistral3ImageProcessor {
         let config: &PreProcessorConfig = config.downcast_ref().expect("Downcast failed.");
 
         for seq in input_seqs {
-            if !seq.has_images() || seq.multimodal.has_changed_prompt {
+            if !seq.has_images() || seq.multimodal().has_changed_prompt {
                 continue;
             }
             let image_sizes = self.planned_image_sizes(seq.images().unwrap_or_default(), config)?;
             self.prepare_prompt(
                 &tokenizer,
-                seq,
+                &mut **seq,
                 &image_sizes,
                 paged_attn_metadata.as_deref_mut(),
             )?;
@@ -252,8 +250,9 @@ impl InputsProcessor for Mistral3ImageProcessor {
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -324,7 +323,7 @@ impl InputsProcessor for Mistral3ImageProcessor {
 
                 self.prepare_prompt(
                     &tokenizer,
-                    seq,
+                    &mut **seq,
                     &image_sizes_all,
                     paged_attn_metadata.as_mut(),
                 )?;
@@ -359,9 +358,9 @@ impl InputsProcessor for Mistral3ImageProcessor {
             (None, None)
         };
 
-        let text_models_inputs_processor::InnerInputProcessorOutput {
+        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
-                text_models_inputs_processor::InputMetadata {
+                inference_nn::media_inputs::processor::InputMetadata {
                     input,
                     positions,
                     context_lens,
@@ -371,33 +370,40 @@ impl InputsProcessor for Mistral3ImageProcessor {
                 },
             seq_indices,
         } = if is_prompt {
-            get_prompt_input(
+            host.prompt_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )?
         } else {
-            get_completion_input(
+            host.completion_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )?
         };
 
@@ -471,7 +477,6 @@ impl InputsProcessor for Mistral3ImageProcessor {
             } else {
                 crate::gdn::RecurrentBatchKind::Decode
             },
-            adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
         });
         Ok(InputProcessorOutput {
             inputs,
@@ -633,11 +638,11 @@ impl Mistral3ImageProcessor {
     fn prepare_prompt(
         &self,
         tokenizer: &Tokenizer,
-        seq: &mut Sequence,
+        seq: &mut dyn MediaSequence,
         image_sizes: &[(u32, u32)],
         paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> anyhow::Result<()> {
-        if seq.multimodal.has_changed_prompt {
+        if seq.multimodal().has_changed_prompt {
             return Ok(());
         }
 
@@ -679,7 +684,7 @@ impl Mistral3ImageProcessor {
         if has_prefill_toks {
             seq.set_prefill_toks(ids);
         }
-        seq.multimodal.has_changed_prompt = true;
+        seq.multimodal_mut().has_changed_prompt = true;
         Ok(())
     }
 }
