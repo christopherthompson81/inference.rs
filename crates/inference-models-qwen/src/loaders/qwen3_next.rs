@@ -1,8 +1,6 @@
 use super::*;
 
-/// [`NormalLoader`] for a Qwen3Next (Qwen3-Coder-Next) model.
-///
-/// [`NormalLoader`]: crate::pipeline::NormalLoader
+/// `NormalLoader` for a Qwen3Next (Qwen3-Coder-Next) model.
 pub struct Qwen3NextLoader;
 
 impl NormalModelLoader for Qwen3NextLoader {
@@ -13,9 +11,9 @@ impl NormalModelLoader for Qwen3NextLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::qwen3_next::Config::from_json(config)?;
+        let cfg = crate::qwen3_next::Config::from_json(config)?;
 
-        Ok(Box::new(models::qwen3_next::Model::new(
+        Ok(Box::new(crate::qwen3_next::Model::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -36,7 +34,7 @@ impl NormalModelLoader for Qwen3NextLoader {
         anyhow::bail!("Qwen3Next does not support X-LoRA")
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::models::qwen3_next::Config::from_json(config)?;
+        let cfg = crate::qwen3_next::Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
     fn supports_paged_attention(&self, _config: &str) -> Result<bool> {
@@ -89,7 +87,7 @@ impl DeviceMappedModelLoader for Qwen3NextLoader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = crate::models::qwen3_next::Config::from_json(config)?;
+        let cfg = crate::qwen3_next::Config::from_json(config)?;
         standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
@@ -108,7 +106,7 @@ impl DeviceMappedModelLoader for Qwen3NextLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = crate::models::qwen3_next::Config::from_json(config)?;
+        let cfg = crate::qwen3_next::Config::from_json(config)?;
         let layer_types = cfg.layer_types();
         let mut layer_sizes = Vec::with_capacity(cfg.num_hidden_layers);
 
@@ -117,7 +115,7 @@ impl DeviceMappedModelLoader for Qwen3NextLoader {
             let post_attention_layernorm = cfg.hidden_size;
 
             let attn_elems = match layer_type {
-                crate::models::qwen3_next::LayerType::FullAttention => {
+                crate::qwen3_next::LayerType::FullAttention => {
                     let hidden = cfg.hidden_size;
                     let q_dim = cfg.head_dim * cfg.num_attention_heads;
                     let kv_dim = cfg.head_dim * cfg.num_key_value_heads;
@@ -129,7 +127,7 @@ impl DeviceMappedModelLoader for Qwen3NextLoader {
                     let k_norm = cfg.head_dim;
                     q_proj + k_proj + v_proj + o_proj + q_norm + k_norm
                 }
-                crate::models::qwen3_next::LayerType::LinearAttention => {
+                crate::qwen3_next::LayerType::LinearAttention => {
                     let hidden = cfg.hidden_size;
                     let key_dim = cfg.linear_key_dim();
                     let value_dim = cfg.linear_value_dim();
@@ -166,7 +164,7 @@ impl DeviceMappedModelLoader for Qwen3NextLoader {
         Ok(layer_sizes)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = crate::models::qwen3_next::Config::from_json(config)?;
+        let cfg = crate::qwen3_next::Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

@@ -1,13 +1,16 @@
 use std::sync::Arc;
 
+use inference_models_qwen::loaders::MuseGlimmerLoader;
 use inference_models_qwen::muse_glimmer::inputs_processor::{
     MuseGlimmerImageProcessor, IMAGE_END, IMAGE_START, IMAGE_TOKEN, VIDEO_END, VIDEO_SEPARATOR,
     VIDEO_START, VIDEO_TOKEN,
 };
+use inference_models_qwen::muse_glimmer::Config as MuseGlimmerConfig;
 
-use crate::pipeline::{InputsProcessor, MessagesAction, Processor};
+use crate::pipeline::{InputsProcessor, MessagesAction, MultimodalProcessorFactory, Processor};
 use crate::vision_models::media_host::MediaInputsProcessor;
 use crate::vision_models::preprocessor_config::PreProcessorConfig;
+use crate::vision_models::processor_config::ProcessorConfig;
 
 pub struct MuseGlimmerProcessor(Arc<MuseGlimmerImageProcessor>);
 
@@ -44,5 +47,22 @@ impl Processor for MuseGlimmerProcessor {
 
     fn template_action(&self) -> MessagesAction {
         MessagesAction::Keep
+    }
+}
+
+impl MultimodalProcessorFactory for MuseGlimmerLoader {
+    fn get_processor(
+        &self,
+        model_config: &str,
+        _processor_config: Option<ProcessorConfig>,
+        preprocessor_config: PreProcessorConfig,
+        max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        let cfg = MuseGlimmerConfig::from_json(model_config)
+            .expect("Failed to parse Muse-Glimmer config");
+        Arc::new(
+            MuseGlimmerProcessor::new(&preprocessor_config, max_edge, cfg.gguf_collapsed_temporal)
+                .expect("Failed to create Muse-Glimmer processor"),
+        )
     }
 }

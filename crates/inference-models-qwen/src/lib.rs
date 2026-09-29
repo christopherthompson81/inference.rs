@@ -9,6 +9,7 @@ use inference_nn::{
 use inference_nn::{get_mut_arcmutex, serde_default_fn};
 
 pub mod dflash;
+pub mod loaders;
 pub mod minicpmo;
 pub mod muse_glimmer;
 pub mod qwen2;

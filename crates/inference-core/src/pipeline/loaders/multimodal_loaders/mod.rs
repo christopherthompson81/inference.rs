@@ -14,9 +14,6 @@ use crate::pipeline::isq::isq_regexes;
 use regex::Regex;
 use serde::Deserialize;
 
-#[cfg(feature = "models-qwen")]
-use self::minicpmo::{MiniCpmOConfig, MiniCpmOModel, MiniCpmOProcessor};
-
 use super::{DeviceMappedModelLoader, NonMappedSubModel, NormalLoadingMetadata};
 // Loaders call these as `super::X`; they live one level up, in `loaders`.
 use super::language_model_pack_factors;
@@ -26,11 +23,8 @@ use super::{language_model_pack_factors_with_aliases, AutoDeviceMapQuantization}
 
 use crate::attention::ATTENTION_CHUNK_SIZE;
 use crate::device_map::DeviceMapper;
-use crate::layers::Conv3dConfig;
 use crate::matformer::MatformerSliceConfig;
-use crate::paged_attention::{
-    AttentionImplementation, HybridPagedKvCacheConfig, ModelConfigLike, ModelConfigMetadata,
-};
+use crate::paged_attention::{AttentionImplementation, ModelConfigLike, ModelConfigMetadata};
 use crate::pipeline::isq::IsqModelLoader;
 use crate::pipeline::loaders::AutoDeviceMapParams;
 use crate::pipeline::{Modalities, MultimodalPromptPrefixer, Processor, SupportedModality};
@@ -72,45 +66,16 @@ use crate::vision_models::llava::{llava_next_inputs_processor, processor::LLaVAN
 use crate::vision_models::llava15::Model as LLaVA;
 #[cfg(feature = "models-llama")]
 use crate::vision_models::llava_next::Model as LLaVANext;
-#[cfg(feature = "models-qwen")]
-use crate::vision_models::minicpmo;
 #[cfg(feature = "models-llama")]
 use crate::vision_models::mistral3::{Mistral3Config, Mistral3Model, Mistral3Processor};
 #[cfg(feature = "models-llama")]
 use crate::vision_models::mllama::{MLlamaConfig, MLlamaModel, MLlamaProcessor};
-#[cfg(feature = "models-qwen")]
-use crate::vision_models::muse_glimmer::{
-    Config as MuseGlimmerConfig, MuseGlimmerModel, MuseGlimmerProcessor,
-};
 use crate::vision_models::preprocessor_config::PreProcessorConfig;
 use crate::vision_models::processor_config::ProcessorConfig;
-#[cfg(feature = "models-qwen")]
-use crate::vision_models::qwen2_5_vl::{Config as Qwen2_5VLConfig, Qwen2_5VLModel};
-#[cfg(feature = "models-qwen")]
-use crate::vision_models::qwen2vl::{Config as Qwen2VLConfig, Qwen2VLModel, Qwen2VLProcessor};
-#[cfg(feature = "models-qwen")]
-use crate::vision_models::qwen3_5::{Config as Qwen3_5Config, Qwen3_5Model, Qwen3_5Processor};
-#[cfg(feature = "models-qwen")]
-use crate::vision_models::qwen3_5_moe::{
-    Config as Qwen3_5MoeConfig, Qwen3_5MoeModel, Qwen3_5MoeProcessor,
-};
-#[cfg(feature = "models-qwen")]
-use crate::vision_models::qwen3_vl::{Config as Qwen3VLConfig, Qwen3VLModel, Qwen3VLProcessor};
-#[cfg(feature = "models-qwen")]
-use crate::vision_models::qwen3_vl_moe::{
-    Config as Qwen3VLMoEConfig, Qwen3VLMoEModel, Qwen3VLMoEProcessor,
-};
 #[cfg(feature = "models-llama")]
 use crate::vision_models::voxtral::config::VoxtralConfig;
 #[cfg(feature = "models-llama")]
 use crate::vision_models::voxtral::{VoxtralModel, VoxtralProcessor};
-
-// HF Qwen3VLVideoProcessor sampling defaults, shared by the Qwen3-VL/3.5 family.
-const QWEN3_VIDEO_SAMPLING: crate::VideoFrameSampling = crate::VideoFrameSampling::Fps {
-    fps: 2.0,
-    min_frames: 4,
-    max_frames: 768,
-};
 
 pub use inference_nn::loaders::MultimodalModelLoader;
 
@@ -313,22 +278,15 @@ inference_nn::boxed_loaders!(
     VLlamaLoader,
     VoxtralLoader,
 );
-#[cfg(feature = "models-qwen")]
-inference_nn::boxed_loaders!(
-    MultimodalModelLoader:
-    MiniCpmOLoader,
-    MuseGlimmerLoader,
-    Qwen2VLLoader,
-    Qwen2_5VLLoader,
-    Qwen3VLLoader,
-    Qwen3VLMoELoader,
-    Qwen3_5Loader,
-    Qwen3_5MoeLoader,
-);
 #[cfg(feature = "models-other")]
 pub use inference_models_other::loaders::{Lfm2VlLoader, PaddleOcrVlLoader};
 #[cfg(feature = "models-phi")]
 pub use inference_models_phi::loaders::{Phi3VLoader, Phi4MMLoader};
+#[cfg(feature = "models-qwen")]
+pub use inference_models_qwen::loaders::{
+    MiniCpmOLoader, MuseGlimmerLoader, Qwen2VLLoader, Qwen2_5VLLoader, Qwen3VLLoader,
+    Qwen3VLMoELoader, Qwen3_5Loader, Qwen3_5MoeLoader,
+};
 #[cfg(feature = "models-llama")]
 mod idefics2;
 #[cfg(feature = "models-llama")]
@@ -345,22 +303,10 @@ pub use llava::*;
 mod vllama;
 #[cfg(feature = "models-llama")]
 pub use vllama::*;
-#[cfg(feature = "models-qwen")]
-mod qwen2vl;
-#[cfg(feature = "models-qwen")]
-pub use qwen2vl::*;
 #[cfg(feature = "models-llama")]
 mod idefics3;
 #[cfg(feature = "models-llama")]
 pub use idefics3::*;
-#[cfg(feature = "models-qwen")]
-mod minicpm_o;
-#[cfg(feature = "models-qwen")]
-pub use minicpm_o::*;
-#[cfg(feature = "models-qwen")]
-mod qwen2_5vl;
-#[cfg(feature = "models-qwen")]
-pub use qwen2_5vl::*;
 #[cfg(feature = "models-gemma")]
 mod gemma3;
 #[cfg(feature = "models-gemma")]
@@ -377,22 +323,6 @@ pub use vllama4::*;
 mod gemma3n;
 #[cfg(feature = "models-gemma")]
 pub use gemma3n::*;
-#[cfg(feature = "models-qwen")]
-mod qwen3vl;
-#[cfg(feature = "models-qwen")]
-pub use qwen3vl::*;
-#[cfg(feature = "models-qwen")]
-mod qwen3vl_moe;
-#[cfg(feature = "models-qwen")]
-pub use qwen3vl_moe::*;
-#[cfg(feature = "models-qwen")]
-mod qwen3_5;
-#[cfg(feature = "models-qwen")]
-pub use qwen3_5::*;
-#[cfg(feature = "models-qwen")]
-mod qwen3_5_moe;
-#[cfg(feature = "models-qwen")]
-pub use qwen3_5_moe::*;
 #[cfg(feature = "models-llama")]
 mod voxtral;
 #[cfg(feature = "models-llama")]
@@ -401,10 +331,6 @@ pub use voxtral::*;
 mod gemma4;
 #[cfg(feature = "models-gemma")]
 pub use gemma4::*;
-#[cfg(feature = "models-qwen")]
-mod muse_glimmer;
-#[cfg(feature = "models-qwen")]
-pub use muse_glimmer::*;
 #[cfg(feature = "models-gemma")]
 mod diffusion_gemma;
 #[cfg(feature = "models-gemma")]

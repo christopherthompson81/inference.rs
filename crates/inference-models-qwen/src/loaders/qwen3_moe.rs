@@ -1,8 +1,6 @@
 use super::*;
 
-/// [`NormalLoader`] for a Qwen 3 MoE model.
-///
-/// [`NormalLoader`]: crate::pipeline::NormalLoader
+/// `NormalLoader` for a Qwen 3 MoE model.
 pub struct Qwen3MoELoader;
 
 impl NormalModelLoader for Qwen3MoELoader {
@@ -13,9 +11,9 @@ impl NormalModelLoader for Qwen3MoELoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::qwen3_moe::Config::from_json(config)?;
+        let cfg = crate::qwen3_moe::Config::from_json(config)?;
 
-        Ok(Box::new(models::qwen3_moe::Model::new(
+        Ok(Box::new(crate::qwen3_moe::Model::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -36,7 +34,7 @@ impl NormalModelLoader for Qwen3MoELoader {
         todo!()
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::models::qwen3_moe::Config::from_json(config)?;
+        let cfg = crate::qwen3_moe::Config::from_json(config)?;
 
         Ok(Box::new(cfg))
     }
@@ -94,7 +92,7 @@ impl DeviceMappedModelLoader for Qwen3MoELoader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = models::qwen3_moe::Config::from_json(config)?;
+        let cfg = crate::qwen3_moe::Config::from_json(config)?;
         standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
@@ -113,7 +111,7 @@ impl DeviceMappedModelLoader for Qwen3MoELoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = models::qwen3_moe::Config::from_json(config)?;
+        let cfg = crate::qwen3_moe::Config::from_json(config)?;
 
         let mut layer_sizes_in_bytes = Vec::new();
         for layer_idx in 0..cfg.num_hidden_layers {
@@ -170,7 +168,7 @@ impl DeviceMappedModelLoader for Qwen3MoELoader {
         Ok(layer_sizes_in_bytes)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = models::qwen3_moe::Config::from_json(config)?;
+        let cfg = crate::qwen3_moe::Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

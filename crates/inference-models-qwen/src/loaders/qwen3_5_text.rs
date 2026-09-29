@@ -1,12 +1,10 @@
 use super::*;
 
-/// [`NormalLoader`] for the text backbone of a dense Qwen3.5 model.
-///
-/// [`NormalLoader`]: crate::pipeline::NormalLoader
+/// `NormalLoader` for the text backbone of a dense Qwen3.5 model.
 pub struct Qwen3_5TextLoader;
 
-fn parse_qwen35_text_config(config: &str) -> Result<crate::vision_models::qwen3_5::TextConfig> {
-    let cfg = crate::vision_models::qwen3_5::TextConfig::from_json(config)?;
+fn parse_qwen35_text_config(config: &str) -> Result<crate::qwen3_5::TextConfig> {
+    let cfg = crate::qwen3_5::TextConfig::from_json(config)?;
     cfg.validate()?;
     Ok(cfg)
 }
@@ -18,9 +16,10 @@ impl NormalModelLoader for Qwen3_5TextLoader {
         max_model_len: Option<usize>,
     ) -> Result<Cow<'a, str>> {
         match max_model_len {
-            Some(max_model_len) => Ok(Cow::Owned(
-                crate::vision_models::qwen3_5::config::apply_max_model_len(config, max_model_len)?,
-            )),
+            Some(max_model_len) => Ok(Cow::Owned(crate::qwen3_5::config::apply_max_model_len(
+                config,
+                max_model_len,
+            )?)),
             None => Ok(Cow::Borrowed(config)),
         }
     }
@@ -33,16 +32,14 @@ impl NormalModelLoader for Qwen3_5TextLoader {
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
         let cfg = parse_qwen35_text_config(config)?;
-        Ok(Box::new(
-            crate::vision_models::qwen3_5::Qwen3_5TextModel::new(
-                &cfg,
-                vb,
-                cfg.tie_word_embeddings,
-                false,
-                normal_loading_metadata,
-                attention_mechanism,
-            )?,
-        ))
+        Ok(Box::new(crate::qwen3_5::Qwen3_5TextModel::new(
+            &cfg,
+            vb,
+            cfg.tie_word_embeddings,
+            false,
+            normal_loading_metadata,
+            attention_mechanism,
+        )?))
     }
     fn load_xlora(
         &self,
@@ -148,14 +145,14 @@ impl DeviceMappedModelLoader for Qwen3_5TextLoader {
         let mut sizes = Vec::with_capacity(cfg.num_hidden_layers);
         for layer_type in cfg.layer_types() {
             let attention = match layer_type {
-                crate::vision_models::qwen3_5::config::LayerType::FullAttention => {
+                crate::qwen3_5::config::LayerType::FullAttention => {
                     let q_dim = cfg.head_dim * cfg.num_attention_heads;
                     let kv_dim = cfg.head_dim * cfg.num_key_value_heads;
                     (cfg.hidden_size * (q_dim * 2 + kv_dim * 2) + q_dim * cfg.hidden_size)
                         / weight_pack_factor
                         + cfg.head_dim * 2
                 }
-                crate::vision_models::qwen3_5::config::LayerType::LinearAttention => {
+                crate::qwen3_5::config::LayerType::LinearAttention => {
                     let value_dim = cfg.linear_value_dim();
                     let projections = cfg.hidden_size
                         * (cfg.linear_conv_dim() + value_dim + cfg.linear_num_value_heads * 2)
