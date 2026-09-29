@@ -19,6 +19,7 @@ pub mod hunyuan_v1_dense;
 pub mod hunyuan_v1_moe;
 pub mod lfm2;
 pub mod lfm2_vl;
+pub mod loaders;
 pub mod paddleocr_vl;
 pub mod starcoder2;
 pub mod xlora;

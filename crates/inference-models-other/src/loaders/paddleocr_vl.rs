@@ -1,8 +1,6 @@
 use super::*;
 
-/// [`MultimodalLoader`] for a PaddleOCR-VL (1.5, 1.6) model.
-///
-/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
+/// `MultimodalLoader` for a PaddleOCR-VL (1.5, 1.6) model.
 pub struct PaddleOcrVlLoader;
 
 pub struct PaddleOcrVlPrefixer;
@@ -46,18 +44,6 @@ impl MultimodalModelLoader for PaddleOcrVlLoader {
             input: vec![SupportedModality::Text, SupportedModality::Vision],
             output: vec![SupportedModality::Text],
         })
-    }
-}
-
-impl MultimodalProcessorFactory for PaddleOcrVlLoader {
-    fn get_processor(
-        &self,
-        _model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(PaddleOcrVlProcessor)
     }
 }
 

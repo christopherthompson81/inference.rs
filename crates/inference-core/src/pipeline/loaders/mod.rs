@@ -8,7 +8,7 @@ pub use crate::device_map::AutoDeviceMapParams;
 pub(crate) use checkpoint_inventory::{checkpoint_device_map_sizes, checkpoint_runtime_size};
 use inference_nn::loaders::NonMappedSubModel;
 pub(crate) use inference_nn::loaders::{
-    language_model_pack_factors, language_model_pack_factors_with_aliases, layer_indexed_device,
+    language_model_pack_factors, language_model_pack_factors_with_aliases,
     promoted_tensor_pack_factor, qk_rope_layout_from_config, standard_non_mapped_size_in_bytes,
     tied_promoted_tensor_pack_factor, LanguageModelEnds, QK_ROPE_LAYOUT_CONFIG_KEY,
 };

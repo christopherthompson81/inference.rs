@@ -1,8 +1,6 @@
 use super::*;
 
-/// [`NormalLoader`] for a GLM 4 model.
-///
-/// [`NormalLoader`]: crate::pipeline::NormalLoader
+/// `NormalLoader` for a GLM 4 model.
 pub struct GLM4Loader;
 
 impl NormalModelLoader for GLM4Loader {
@@ -13,9 +11,9 @@ impl NormalModelLoader for GLM4Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::glm4::Config::from_json(config)?;
+        let cfg = crate::glm4::Config::from_json(config)?;
 
-        Ok(Box::new(models::glm4::Model::new(
+        Ok(Box::new(crate::glm4::Model::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -36,7 +34,7 @@ impl NormalModelLoader for GLM4Loader {
         todo!()
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::models::glm4::Config::from_json(config)?;
+        let cfg = crate::glm4::Config::from_json(config)?;
 
         Ok(Box::new(cfg))
     }
@@ -77,7 +75,7 @@ impl DeviceMappedModelLoader for GLM4Loader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = models::glm4::Config::from_json(config)?;
+        let cfg = crate::glm4::Config::from_json(config)?;
         standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
@@ -96,7 +94,7 @@ impl DeviceMappedModelLoader for GLM4Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = models::glm4::Config::from_json(config)?;
+        let cfg = crate::glm4::Config::from_json(config)?;
         let per_layer_elems = {
             let input_layernorm = cfg.hidden_size;
             let post_attention_layernorm = cfg.hidden_size * 3; //+post_self_attn_layernorm and post_mlp_layernorm
@@ -131,7 +129,7 @@ impl DeviceMappedModelLoader for GLM4Loader {
         ])
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = models::glm4::Config::from_json(config)?;
+        let cfg = crate::glm4::Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

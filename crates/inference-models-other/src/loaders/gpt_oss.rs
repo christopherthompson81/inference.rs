@@ -1,11 +1,9 @@
 use super::*;
 
-/// [`NormalLoader`] for a HunYuanMoEV1 model.
-///
-/// [`NormalLoader`]: crate::pipeline::NormalLoader
-pub struct HunYuanMoEV1Loader;
+/// `NormalLoader` for a GPT-OSS model.
+pub struct GptOssLoader;
 
-impl NormalModelLoader for HunYuanMoEV1Loader {
+impl NormalModelLoader for GptOssLoader {
     fn load(
         &self,
         config: &str,
@@ -13,9 +11,9 @@ impl NormalModelLoader for HunYuanMoEV1Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::hunyuan_v1_moe::Config::from_json(config)?;
+        let cfg = crate::gpt_oss::Config::from_json(config)?;
 
-        Ok(Box::new(models::hunyuan_v1_moe::Model::new(
+        Ok(Box::new(crate::gpt_oss::Model::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -33,16 +31,15 @@ impl NormalModelLoader for HunYuanMoEV1Loader {
         _normal_loading_metadata: NormalLoadingMetadata,
         _preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        todo!()
+        anyhow::bail!("GPT-OSS does not support X-LoRA")
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::models::hunyuan_v1_moe::Config::from_json(config)?;
-
+        let cfg = crate::gpt_oss::Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
 }
 
-impl IsqModelLoader for HunYuanMoEV1Loader {
+impl IsqModelLoader for GptOssLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
             r"^model\.embed_tokens\.weight$",
@@ -58,18 +55,7 @@ impl IsqModelLoader for HunYuanMoEV1Loader {
             r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
             r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
             r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
-            // Dense MLP
-            r"layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$",
-            // MoE experts
-            r"layers\.(\d+)\.mlp\.shared_mlp\.gate_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.shared_mlp\.up_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.shared_mlp\.down_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.gate_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.up_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
+            r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|gate_proj|up_proj|down_proj)\.weight$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
@@ -77,10 +63,7 @@ impl IsqModelLoader for HunYuanMoEV1Loader {
     }
     fn isq_layer_regexes_moqe(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.gate_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.up_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
+            r"layers\.(\d+)\.mlp\.experts\.(gate_up_proj|gate_proj|up_proj|down_proj)\.weight$",
         ])
     }
     fn immediate_isq_predicates_moqe(&self, config: &str) -> Result<Vec<Regex>> {
@@ -88,7 +71,7 @@ impl IsqModelLoader for HunYuanMoEV1Loader {
     }
 }
 
-impl DeviceMappedModelLoader for HunYuanMoEV1Loader {
+impl DeviceMappedModelLoader for GptOssLoader {
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -97,7 +80,7 @@ impl DeviceMappedModelLoader for HunYuanMoEV1Loader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = models::hunyuan_v1_moe::Config::from_json(config)?;
+        let cfg = crate::gpt_oss::Config::from_json(config)?;
         standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
@@ -116,72 +99,72 @@ impl DeviceMappedModelLoader for HunYuanMoEV1Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = models::hunyuan_v1_moe::Config::from_json(config)?;
-        let head_dim = cfg.head_dim();
+        let cfg = crate::gpt_oss::Config::from_json(config)?;
 
-        let mut layer_sizes = Vec::new();
-        for layer_idx in 0..cfg.num_hidden_layers {
+        let per_layer_elems = {
             let input_layernorm = cfg.hidden_size;
             let post_attention_layernorm = cfg.hidden_size;
 
             let size_in = cfg.hidden_size;
+            let head_dim = cfg.head_dim();
             let size_q = head_dim * cfg.num_attention_heads;
             let size_kv = head_dim * cfg.num_key_value_heads;
-            let q_proj = size_in * size_q / weight_pack_factor;
-            let k_proj = size_in * size_kv / weight_pack_factor;
-            let v_proj = size_in * size_kv / weight_pack_factor;
-            let o_proj = size_q * size_in / weight_pack_factor;
+            let q_proj =
+                size_in * size_q / weight_pack_factor + bias_if!(cfg.attention_bias, size_q);
+            let k_proj =
+                size_in * size_kv / weight_pack_factor + bias_if!(cfg.attention_bias, size_kv);
+            let v_proj =
+                size_in * size_kv / weight_pack_factor + bias_if!(cfg.attention_bias, size_kv);
+            let o_proj =
+                size_q * size_in / weight_pack_factor + bias_if!(cfg.attention_bias, size_in);
 
-            let h_size = cfg.hidden_size;
-            let expert_size = {
-                let expert_gate = h_size * cfg.intermediate_size / weight_pack_factor;
-                let expert_up = h_size * cfg.intermediate_size / weight_pack_factor;
-                let expert_down = cfg.intermediate_size * h_size / weight_pack_factor;
-                expert_gate + expert_up + expert_down
-            };
-            let (router_size, mlp_size) = if cfg.uses_moe() {
-                let shared_expert_size = if cfg.use_mixed_mlp_moe {
-                    expert_size * cfg.num_shared_expert.get(layer_idx)
-                } else {
-                    0
-                };
-                (
-                    h_size * cfg.num_experts,
-                    shared_expert_size + expert_size * cfg.num_experts,
-                )
+            let expert_weights = if matches!(
+                cfg.quantization_config.as_ref(),
+                Some(inference_quant::QuantizedConfig::MXFP4 {})
+            ) {
+                let gate_up = cfg.num_local_experts * cfg.intermediate_size * 2 * cfg.hidden_size;
+                let down = cfg.num_local_experts * cfg.hidden_size * cfg.intermediate_size;
+                gate_up / 2 + down / 2 + gate_up / 32 + down / 32
             } else {
-                (0, expert_size)
+                let projection = cfg.num_local_experts * cfg.hidden_size * cfg.intermediate_size
+                    / weight_pack_factor;
+                projection * 3
             };
-            let qk_norm = if cfg.use_qk_norm { head_dim * 2 } else { 0 };
+            let gate_up_bias = cfg.num_local_experts * cfg.intermediate_size * 2;
+            let down_bias = cfg.num_local_experts * cfg.hidden_size;
+            let router = cfg.hidden_size * cfg.num_local_experts + cfg.num_local_experts;
+            let sinks = cfg.num_attention_heads;
 
-            let non_router_elems = input_layernorm
+            input_layernorm
                 + post_attention_layernorm
                 + q_proj
                 + k_proj
                 + v_proj
                 + o_proj
-                + mlp_size
-                + qk_norm;
-
-            layer_sizes.push(
-                non_router_elems * dtype.size_in_bytes() + router_size * DType::F32.size_in_bytes(),
-            );
-        }
-
-        Ok(layer_sizes)
+                + expert_weights
+                + gate_up_bias
+                + down_bias
+                + router
+                + sinks
+        };
+        Ok(vec![
+            per_layer_elems * dtype.size_in_bytes();
+            cfg.num_hidden_layers
+        ])
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = models::hunyuan_v1_moe::Config::from_json(config)?;
+        let cfg = crate::gpt_oss::Config::from_json(config)?;
 
+        let head_dim = cfg.head_dim();
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,
             num_layers: cfg.num_hidden_layers,
             hidden_size: cfg.hidden_size,
             num_kv_heads: cfg.num_key_value_heads,
             num_attn_heads: cfg.num_attention_heads,
-            sliding_window: None,
-            k_head_dim: cfg.head_dim(),
-            v_head_dim: cfg.head_dim(),
+            sliding_window: cfg.sliding_window,
+            k_head_dim: head_dim,
+            v_head_dim: head_dim,
             kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 

@@ -260,3 +260,25 @@ What in them costs core's compile, and what can leave?
   The review confirmed the moved bodies and factory impls are identical, and that every registry arm has exactly one
   `boxed()`. CLAUDE.md's steps for adding a model now point at the family crate's `loaders/` and `boxed_loaders!`.
 - Next: the other family (PR 3).
+
+## Run 9 - 2026-09-29
+
+- Change: the other family, PR 3.
+  - The DeepSeek V2/V3, GLM-4 (dense, MoE, MoE-lite), GPT-OSS, Granite, Hunyuan (dense, MoE), LFM2, StarCoder2,
+    LFM2-VL and PaddleOCR-VL loaders moved into `inference-models-other/src/loaders/`.
+  - A reusable script did the move, driven by a per-family JSON config: file lists, path maps for core's
+    `vision_models` and `xlora_models` re-exports, and pulling out the factory impls.
+  - The two factory impls stayed in core, in `vision_models/{lfm2_vl,paddleocr_vl}/processor.rs`.
+  - Core's `models::{deepseek2..starcoder2}` is test-only now, so it is gated `cfg(test)`, as for phi. The
+    inference-models-other crate gained `regex`.
+- Command: full CI, then `cargo llvm-lines -p inference-core --lib --features cuda`.
+- Result:
+  - Core went from 2,746,265 to 2,685,720 lines (-60.5k for 13 loaders).
+  - 119 lines of `inference_models_other::loaders` code are left in core, all in the two factory impls.
+  - CI green (2191 CPU and 2511 CUDA tests).
+  - The review found the moved bodies and factory impls unchanged, and every registry arm with exactly one
+    `boxed()`. It also found two problems, both fixed:
+    - A leftover `use layer_indexed_device;` line. The script turned `use crate::pipeline::loaders::X;` into
+      `use X;`; it now drops such lines.
+    - Four stale `models-other` entries in core's `cfg` lists.
+- Next: qwen (PR 4).

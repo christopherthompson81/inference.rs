@@ -1,11 +1,9 @@
 use super::*;
 
-/// [`NormalLoader`] for a GLM 4 MoE Lite model (GLM-4.7-Flash).
-///
-/// [`NormalLoader`]: crate::pipeline::NormalLoader
-pub struct GLM4MoeLiteLoader;
+/// `NormalLoader` for a DeepSeekV2 model.
+pub struct DeepSeekV2Loader;
 
-impl NormalModelLoader for GLM4MoeLiteLoader {
+impl NormalModelLoader for DeepSeekV2Loader {
     fn load(
         &self,
         config: &str,
@@ -13,8 +11,9 @@ impl NormalModelLoader for GLM4MoeLiteLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
-        Ok(Box::new(models::glm4_moe_lite::Glm4MoeLite::new(
+        let cfg = crate::deepseek2::DeepSeekV2Config::from_json(config)?;
+
+        Ok(Box::new(crate::deepseek2::DeepSeekV2::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -35,12 +34,12 @@ impl NormalModelLoader for GLM4MoeLiteLoader {
         todo!()
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
+        let cfg = crate::deepseek2::DeepSeekV2Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
 }
 
-impl IsqModelLoader for GLM4MoeLiteLoader {
+impl IsqModelLoader for DeepSeekV2Loader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
             r"^model\.embed_tokens\.weight$",
@@ -50,20 +49,28 @@ impl IsqModelLoader for GLM4MoeLiteLoader {
     fn isq_layer_regexes(&self, config: &str) -> Result<Vec<Regex>> {
         let mut data = isq_regexes(&[
             r"lm_head\.(weight|bias)$",
-            // Attention (MLA)
+            // Attention
             r"layers\.(\d+)\.self_attn\.kv_a_proj_with_mqa\.(weight|bias)$",
             r"layers\.(\d+)\.self_attn\.(kv_b|k_b|v_b)_proj\.(weight|bias)$",
             r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
-            // Q LoRA projections
-            r"layers\.(\d+)\.self_attn\.q_a_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.self_attn\.q_b_proj\.(weight|bias)$",
             r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
         ])?;
-        let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
+        let cfg = crate::deepseek2::DeepSeekV2Config::from_json(config)?;
+        if cfg.q_lora_rank.is_some() {
+            data.extend(isq_regexes(&[
+                r"layers\.(\d+)\.self_attn\.q_a_proj\.(weight|bias)$",
+                r"layers\.(\d+)\.self_attn\.q_b_proj\.(weight|bias)$",
+            ])?);
+        } else {
+            data.push(Regex::new(
+                r"layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
+            )?);
+        }
         for layer_idx in 0..cfg.num_hidden_layers {
-            if layer_idx >= cfg.first_k_dense_replace && layer_idx % cfg.moe_layer_freq == 0 {
-                // MoE layer
-                for i in 0..cfg.n_routed_experts {
+            if let Some(n_routed_experts) = cfg.n_routed_experts.filter(|_| {
+                layer_idx >= cfg.first_k_dense_replace && layer_idx % cfg.moe_layer_freq == 0
+            }) {
+                for i in 0..n_routed_experts {
                     data.extend(isq_regexes(&[
                         format!(
                             r"layers\.{layer_idx}\.mlp\.experts\.{i}\.gate_proj\.(weight|bias)$"
@@ -74,7 +81,7 @@ impl IsqModelLoader for GLM4MoeLiteLoader {
                         ),
                     ])?);
                 }
-                if cfg.n_shared_experts > 0 {
+                if cfg.n_shared_experts.is_some() {
                     data.extend(isq_regexes(&[
                         format!(
                             r"layers\.{layer_idx}\.mlp\.shared_experts\.gate_proj\.(weight|bias)$"
@@ -88,10 +95,9 @@ impl IsqModelLoader for GLM4MoeLiteLoader {
                     ])?);
                 }
             } else {
-                // Dense MLP layer
                 data.extend(isq_regexes(&[
                     format!(r"layers\.{layer_idx}\.mlp\.gate_proj\.(weight|bias)$"),
-                    format!(r"layers\.{layer_idx}\.mlp\.up_proj\.(weight|bias)$"),
+                    format!(r"layers.{layer_idx}.mlp\.up_proj\.(weight|bias)$"),
                     format!(r"layers\.{layer_idx}\.mlp\.down_proj\.(weight|bias)$"),
                 ])?);
             };
@@ -112,7 +118,7 @@ impl IsqModelLoader for GLM4MoeLiteLoader {
     }
 }
 
-impl DeviceMappedModelLoader for GLM4MoeLiteLoader {
+impl DeviceMappedModelLoader for DeepSeekV2Loader {
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -121,7 +127,7 @@ impl DeviceMappedModelLoader for GLM4MoeLiteLoader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
+        let cfg = crate::deepseek2::DeepSeekV2Config::from_json(config)?;
         standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
@@ -140,60 +146,60 @@ impl DeviceMappedModelLoader for GLM4MoeLiteLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
+        let cfg = crate::deepseek2::DeepSeekV2Config::from_json(config)?;
         let mut per_layer_elems = Vec::new();
 
         for layer_idx in 0..cfg.num_hidden_layers {
             let input_layernorm = cfg.hidden_size;
             let post_attention_layernorm = cfg.hidden_size;
 
-            // Q LoRA projection
-            let q_proj = {
-                let a = cfg.hidden_size * cfg.q_lora_rank / weight_pack_factor;
-                let norm = cfg.q_lora_rank;
-                let b = (cfg.num_attention_heads * cfg.q_head_dim()) * cfg.q_lora_rank
-                    / weight_pack_factor;
-                a + norm + b
+            let q_proj = match cfg.q_lora_rank {
+                Some(lora_rank) => {
+                    let a = cfg.hidden_size * lora_rank;
+                    let norm = lora_rank;
+                    let b = (cfg.num_attention_heads * cfg.q_head_dim()) * lora_rank;
+                    a + norm + b
+                }
+                None => (cfg.num_attention_heads * cfg.q_head_dim()) * cfg.hidden_size,
             };
-            let kv_a_proj_with_mqa =
-                cfg.hidden_size * (cfg.kv_lora_rank + cfg.qk_rope_head_dim) / weight_pack_factor;
+            let kv_a_proj_with_mqa = cfg.hidden_size * (cfg.kv_lora_rank + cfg.qk_rope_head_dim)
+                / weight_pack_factor
+                + bias_if!(cfg.attention_bias, cfg.kv_lora_rank + cfg.qk_rope_head_dim);
             let kv_a_layernorm = cfg.kv_lora_rank;
             let kv_b_proj = cfg.kv_lora_rank
                 * cfg.num_attention_heads
                 * (cfg.q_head_dim() - cfg.qk_rope_head_dim + cfg.v_head_dim)
                 / weight_pack_factor;
-            let o_proj =
-                cfg.num_attention_heads * cfg.v_head_dim * cfg.hidden_size / weight_pack_factor;
+            let o_proj = cfg.num_attention_heads * cfg.v_head_dim * cfg.hidden_size
+                / weight_pack_factor
+                + bias_if!(cfg.attention_bias, cfg.hidden_size);
 
             let moe_block = {
                 let mut sum = 0;
-                if layer_idx >= cfg.first_k_dense_replace && layer_idx % cfg.moe_layer_freq == 0 {
-                    // MoE layer
+                if let Some(n_routed_experts) = cfg.n_routed_experts.filter(|_| {
+                    layer_idx >= cfg.first_k_dense_replace && layer_idx % cfg.moe_layer_freq == 0
+                }) {
                     let h_size = cfg.hidden_size;
-                    let gate_proj = h_size * cfg.moe_intermediate_size / weight_pack_factor
-                        * cfg.n_routed_experts;
-                    let up_proj = h_size * cfg.moe_intermediate_size / weight_pack_factor
-                        * cfg.n_routed_experts;
-                    let down_proj = cfg.moe_intermediate_size * h_size / weight_pack_factor
-                        * cfg.n_routed_experts;
-                    let shared_experts = if cfg.n_shared_experts > 0 {
-                        let gate_proj = h_size * cfg.moe_intermediate_size / weight_pack_factor;
-                        let up_proj = h_size * cfg.moe_intermediate_size / weight_pack_factor;
-                        let down_proj = cfg.moe_intermediate_size * h_size / weight_pack_factor;
+                    let gate_proj =
+                        h_size * cfg.moe_intermediate_size / weight_pack_factor * n_routed_experts;
+                    let up_proj =
+                        h_size * cfg.moe_intermediate_size / weight_pack_factor * n_routed_experts;
+                    let down_proj =
+                        cfg.moe_intermediate_size * h_size / weight_pack_factor * n_routed_experts;
+                    let shared_experts = if let Some(n_shared_experts) = cfg.n_shared_experts {
+                        let gate_proj = h_size * (cfg.intermediate_size * n_shared_experts)
+                            / weight_pack_factor;
+                        let up_proj = h_size * (cfg.intermediate_size * n_shared_experts)
+                            / weight_pack_factor;
+                        let down_proj = (cfg.intermediate_size * n_shared_experts) * h_size
+                            / weight_pack_factor;
                         gate_proj + up_proj + down_proj
                     } else {
                         0
                     };
-                    let gate_weight = cfg.n_routed_experts * cfg.hidden_size;
-                    let e_score_correction_bias = cfg.n_routed_experts;
-                    sum += gate_proj
-                        + up_proj
-                        + down_proj
-                        + shared_experts
-                        + gate_weight
-                        + e_score_correction_bias;
+                    let gate_weight = n_routed_experts * cfg.hidden_size;
+                    sum += gate_proj + up_proj + down_proj + shared_experts + gate_weight;
                 } else {
-                    // Dense MLP layer
                     let h_size = cfg.hidden_size;
                     let i_size = cfg.intermediate_size;
                     let gate_proj = h_size * i_size / weight_pack_factor;
@@ -222,7 +228,7 @@ impl DeviceMappedModelLoader for GLM4MoeLiteLoader {
             .collect())
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
+        let cfg = crate::deepseek2::DeepSeekV2Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

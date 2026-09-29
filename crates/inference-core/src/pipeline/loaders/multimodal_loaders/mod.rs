@@ -58,8 +58,6 @@ use crate::vision_models::idefics2::{Config as Idefics2Config, Idefics2};
 #[cfg(feature = "models-llama")]
 use crate::vision_models::idefics3::{Idefics3Config, Idefics3Model, Idefics3Processor};
 use crate::vision_models::image_processor::ImagePreProcessor;
-#[cfg(feature = "models-other")]
-use crate::vision_models::lfm2_vl::{Config as Lfm2VlConfig, Lfm2VlModel, Lfm2VlProcessor};
 #[cfg(feature = "models-llama")]
 use crate::vision_models::llama4::{
     self, Llama4Config, Llama4ImageProcessor, Llama4Model, Llama4Processor,
@@ -84,10 +82,6 @@ use crate::vision_models::mllama::{MLlamaConfig, MLlamaModel, MLlamaProcessor};
 use crate::vision_models::muse_glimmer::{
     Config as MuseGlimmerConfig, MuseGlimmerModel, MuseGlimmerProcessor,
 };
-#[cfg(feature = "models-other")]
-use crate::vision_models::paddleocr_vl::config::Config as PaddleOcrVlConfig;
-#[cfg(feature = "models-other")]
-use crate::vision_models::paddleocr_vl::{processor::PaddleOcrVlProcessor, PaddleOcrVlModel};
 use crate::vision_models::preprocessor_config::PreProcessorConfig;
 use crate::vision_models::processor_config::ProcessorConfig;
 #[cfg(feature = "models-qwen")]
@@ -319,8 +313,6 @@ inference_nn::boxed_loaders!(
     VLlamaLoader,
     VoxtralLoader,
 );
-#[cfg(feature = "models-other")]
-inference_nn::boxed_loaders!(MultimodalModelLoader: Lfm2VlLoader, PaddleOcrVlLoader);
 #[cfg(feature = "models-qwen")]
 inference_nn::boxed_loaders!(
     MultimodalModelLoader:
@@ -333,6 +325,8 @@ inference_nn::boxed_loaders!(
     Qwen3_5Loader,
     Qwen3_5MoeLoader,
 );
+#[cfg(feature = "models-other")]
+pub use inference_models_other::loaders::{Lfm2VlLoader, PaddleOcrVlLoader};
 #[cfg(feature = "models-phi")]
 pub use inference_models_phi::loaders::{Phi3VLoader, Phi4MMLoader};
 #[cfg(feature = "models-llama")]
@@ -383,10 +377,6 @@ pub use vllama4::*;
 mod gemma3n;
 #[cfg(feature = "models-gemma")]
 pub use gemma3n::*;
-#[cfg(feature = "models-other")]
-mod paddleocr_vl;
-#[cfg(feature = "models-other")]
-pub use paddleocr_vl::*;
 #[cfg(feature = "models-qwen")]
 mod qwen3vl;
 #[cfg(feature = "models-qwen")]
@@ -415,10 +405,6 @@ pub use gemma4::*;
 mod muse_glimmer;
 #[cfg(feature = "models-qwen")]
 pub use muse_glimmer::*;
-#[cfg(feature = "models-other")]
-mod lfm2vl;
-#[cfg(feature = "models-other")]
-pub use lfm2vl::*;
 #[cfg(feature = "models-gemma")]
 mod diffusion_gemma;
 #[cfg(feature = "models-gemma")]

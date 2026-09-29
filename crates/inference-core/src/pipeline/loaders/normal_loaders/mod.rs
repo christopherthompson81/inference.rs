@@ -27,28 +27,19 @@ use serde::Deserialize;
 #[cfg(any(
     feature = "models-gemma",
     feature = "models-llama",
-    feature = "models-other",
     feature = "models-qwen"
 ))]
 use crate::models;
-#[cfg(any(
-    feature = "models-gemma",
-    feature = "models-llama",
-    feature = "models-other"
-))]
+#[cfg(any(feature = "models-gemma", feature = "models-llama"))]
 use crate::xlora_models;
 use crate::xlora_models::XLoraConfig;
 
 use super::{AutoDeviceMapParams, DeviceMappedModelLoader};
 // Loaders reach these through `use super::*` (or as `super::X`); they live one level up, in `loaders`.
-#[cfg(any(feature = "models-gemma", feature = "models-other"))]
+#[cfg(feature = "models-gemma")]
 use super::tied_promoted_tensor_pack_factor;
 use super::{language_model_pack_factors_with_aliases, AutoDeviceMapQuantization};
-#[cfg(any(
-    feature = "models-llama",
-    feature = "models-other",
-    feature = "models-qwen"
-))]
+#[cfg(any(feature = "models-llama", feature = "models-qwen"))]
 use super::{standard_non_mapped_size_in_bytes, LanguageModelEnds};
 
 pub use inference_nn::loaders::NormalModelLoader;
@@ -206,21 +197,6 @@ inference_nn::boxed_loaders!(
     MixtralLoader,
     SmolLm3Loader,
 );
-#[cfg(feature = "models-other")]
-inference_nn::boxed_loaders!(
-    NormalModelLoader:
-    DeepSeekV2Loader,
-    DeepSeekV3Loader,
-    GLM4Loader,
-    GLM4MoeLiteLoader,
-    GLM4MoeLoader,
-    GptOssLoader,
-    GraniteMoeHybridLoader,
-    HunYuanDenseV1Loader,
-    HunYuanMoEV1Loader,
-    Lfm2Loader,
-    Starcoder2Loader,
-);
 #[cfg(feature = "models-qwen")]
 inference_nn::boxed_loaders!(
     NormalModelLoader:
@@ -230,6 +206,11 @@ inference_nn::boxed_loaders!(
     Qwen3NextLoader,
     Qwen3_5TextLoader,
 );
+#[cfg(feature = "models-other")]
+pub use inference_models_other::loaders::{
+    DeepSeekV2Loader, DeepSeekV3Loader, GLM4Loader, GLM4MoeLiteLoader, GLM4MoeLoader, GptOssLoader,
+    GraniteMoeHybridLoader, HunYuanDenseV1Loader, HunYuanMoEV1Loader, Lfm2Loader, Starcoder2Loader,
+};
 #[cfg(feature = "models-phi")]
 pub use inference_models_phi::loaders::{Phi2Loader, Phi3Loader, Phi3_5MoELoader};
 #[cfg(feature = "models-llama")]
@@ -256,42 +237,10 @@ pub use qwen2::*;
 mod gemma2;
 #[cfg(feature = "models-gemma")]
 pub use gemma2::*;
-#[cfg(feature = "models-other")]
-mod starcoder2;
-#[cfg(feature = "models-other")]
-pub use starcoder2::*;
-#[cfg(feature = "models-other")]
-mod deepseek2;
-#[cfg(feature = "models-other")]
-pub use deepseek2::*;
-#[cfg(feature = "models-other")]
-mod deepseek3;
-#[cfg(feature = "models-other")]
-pub use deepseek3::*;
 #[cfg(feature = "models-qwen")]
 mod qwen3;
 #[cfg(feature = "models-qwen")]
 pub use qwen3::*;
-#[cfg(feature = "models-other")]
-mod hunyuan_v1_dense;
-#[cfg(feature = "models-other")]
-pub use hunyuan_v1_dense::*;
-#[cfg(feature = "models-other")]
-mod hunyuan_v1_moe;
-#[cfg(feature = "models-other")]
-pub use hunyuan_v1_moe::*;
-#[cfg(feature = "models-other")]
-mod glm4;
-#[cfg(feature = "models-other")]
-pub use glm4::*;
-#[cfg(feature = "models-other")]
-mod glm4_moe_lite;
-#[cfg(feature = "models-other")]
-pub use glm4_moe_lite::*;
-#[cfg(feature = "models-other")]
-mod glm4_moe;
-#[cfg(feature = "models-other")]
-pub use glm4_moe::*;
 #[cfg(feature = "models-qwen")]
 mod qwen3_moe;
 #[cfg(feature = "models-qwen")]
@@ -300,14 +249,6 @@ pub use qwen3_moe::*;
 mod smollm3;
 #[cfg(feature = "models-llama")]
 pub use smollm3::*;
-#[cfg(feature = "models-other")]
-mod granite;
-#[cfg(feature = "models-other")]
-pub use granite::*;
-#[cfg(feature = "models-other")]
-mod gpt_oss;
-#[cfg(feature = "models-other")]
-pub use gpt_oss::*;
 #[cfg(feature = "models-qwen")]
 mod qwen3_next;
 #[cfg(feature = "models-qwen")]
@@ -316,10 +257,6 @@ pub use qwen3_next::*;
 mod qwen3_5_text;
 #[cfg(feature = "models-qwen")]
 pub use qwen3_5_text::*;
-#[cfg(feature = "models-other")]
-mod lfm2;
-#[cfg(feature = "models-other")]
-pub use lfm2::*;
 
 #[cfg(all(
     test,

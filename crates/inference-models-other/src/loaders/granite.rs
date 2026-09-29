@@ -1,8 +1,6 @@
 use super::*;
 
-/// [`NormalLoader`] for a GraniteMoeHybrid model (IBM Granite 4.0).
-///
-/// [`NormalLoader`]: crate::pipeline::NormalLoader
+/// `NormalLoader` for a GraniteMoeHybrid model (IBM Granite 4.0).
 pub struct GraniteMoeHybridLoader;
 
 impl NormalModelLoader for GraniteMoeHybridLoader {
@@ -13,9 +11,9 @@ impl NormalModelLoader for GraniteMoeHybridLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::granite::Config::from_json(config)?;
+        let cfg = crate::granite::Config::from_json(config)?;
 
-        Ok(Box::new(models::granite::GraniteMoeHybrid::new(
+        Ok(Box::new(crate::granite::GraniteMoeHybrid::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -36,7 +34,7 @@ impl NormalModelLoader for GraniteMoeHybridLoader {
         anyhow::bail!("GraniteMoeHybrid does not support X-LoRA")
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::models::granite::Config::from_json(config)?;
+        let cfg = crate::granite::Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
     fn supports_paged_attention(&self, _config: &str) -> Result<bool> {
@@ -87,7 +85,7 @@ impl DeviceMappedModelLoader for GraniteMoeHybridLoader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = crate::models::granite::Config::from_json(config)?;
+        let cfg = crate::granite::Config::from_json(config)?;
         standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
@@ -106,7 +104,7 @@ impl DeviceMappedModelLoader for GraniteMoeHybridLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = crate::models::granite::Config::from_json(config)?;
+        let cfg = crate::granite::Config::from_json(config)?;
 
         let attention_elems = {
             let size_in = cfg.hidden_size;
@@ -158,15 +156,15 @@ impl DeviceMappedModelLoader for GraniteMoeHybridLoader {
             .into_iter()
             .map(|layer_type| {
                 let operator_elems = match layer_type {
-                    crate::models::granite::GraniteLayerType::Attention => attention_elems,
-                    crate::models::granite::GraniteLayerType::Mamba => mamba_elems,
+                    crate::granite::GraniteLayerType::Attention => attention_elems,
+                    crate::granite::GraniteLayerType::Mamba => mamba_elems,
                 };
                 (common_elems + operator_elems) * dtype.size_in_bytes()
             })
             .collect())
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = crate::models::granite::Config::from_json(config)?;
+        let cfg = crate::granite::Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

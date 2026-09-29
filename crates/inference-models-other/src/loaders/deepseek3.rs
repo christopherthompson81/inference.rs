@@ -1,11 +1,9 @@
 use super::*;
 
-/// [`NormalLoader`] for a DeepSeekV2 model.
-///
-/// [`NormalLoader`]: crate::pipeline::NormalLoader
-pub struct DeepSeekV2Loader;
+/// `NormalLoader` for a DeepSeekV3 model.
+pub struct DeepSeekV3Loader;
 
-impl NormalModelLoader for DeepSeekV2Loader {
+impl NormalModelLoader for DeepSeekV3Loader {
     fn load(
         &self,
         config: &str,
@@ -13,9 +11,8 @@ impl NormalModelLoader for DeepSeekV2Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::deepseek2::DeepSeekV2Config::from_json(config)?;
-
-        Ok(Box::new(models::deepseek2::DeepSeekV2::new(
+        let cfg = crate::deepseek3::DeepSeekV3Config::from_json(config)?;
+        Ok(Box::new(crate::deepseek3::DeepSeekV3::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -36,12 +33,12 @@ impl NormalModelLoader for DeepSeekV2Loader {
         todo!()
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::models::deepseek2::DeepSeekV2Config::from_json(config)?;
+        let cfg = crate::deepseek3::DeepSeekV3Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
 }
 
-impl IsqModelLoader for DeepSeekV2Loader {
+impl IsqModelLoader for DeepSeekV3Loader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
             r"^model\.embed_tokens\.weight$",
@@ -57,7 +54,7 @@ impl IsqModelLoader for DeepSeekV2Loader {
             r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
             r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
         ])?;
-        let cfg = crate::models::deepseek2::DeepSeekV2Config::from_json(config)?;
+        let cfg = crate::deepseek3::DeepSeekV3Config::from_json(config)?;
         if cfg.q_lora_rank.is_some() {
             data.extend(isq_regexes(&[
                 r"layers\.(\d+)\.self_attn\.q_a_proj\.(weight|bias)$",
@@ -120,7 +117,7 @@ impl IsqModelLoader for DeepSeekV2Loader {
     }
 }
 
-impl DeviceMappedModelLoader for DeepSeekV2Loader {
+impl DeviceMappedModelLoader for DeepSeekV3Loader {
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -129,7 +126,7 @@ impl DeviceMappedModelLoader for DeepSeekV2Loader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = crate::models::deepseek2::DeepSeekV2Config::from_json(config)?;
+        let cfg = crate::deepseek3::DeepSeekV3Config::from_json(config)?;
         standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
@@ -148,7 +145,7 @@ impl DeviceMappedModelLoader for DeepSeekV2Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = crate::models::deepseek2::DeepSeekV2Config::from_json(config)?;
+        let cfg = crate::deepseek3::DeepSeekV3Config::from_json(config)?;
         let mut per_layer_elems = Vec::new();
 
         for layer_idx in 0..cfg.num_hidden_layers {
@@ -230,7 +227,7 @@ impl DeviceMappedModelLoader for DeepSeekV2Loader {
             .collect())
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = crate::models::deepseek2::DeepSeekV2Config::from_json(config)?;
+        let cfg = crate::deepseek3::DeepSeekV3Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,
