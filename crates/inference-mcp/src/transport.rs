@@ -181,6 +181,7 @@ impl HttpTransport {
         let timeout = timeout_secs
             .map(Duration::from_secs)
             .unwrap_or(Duration::from_secs(30));
+        crate::tls::install_provider();
         let client = reqwest::Client::builder().timeout(timeout).build()?;
 
         Ok(Self {

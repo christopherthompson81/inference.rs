@@ -236,7 +236,7 @@ pub fn get_search_tools(web_search_options: &WebSearchOptions) -> Result<Vec<Too
 }
 
 fn build_client() -> Result<reqwest::Client> {
-    Ok(reqwest::Client::builder()
+    Ok(crate::remote_fetch::http_client_builder()
         .connect_timeout(SEARCH_CONNECT_TIMEOUT)
         .timeout(SEARCH_REQUEST_TIMEOUT)
         .build()?)

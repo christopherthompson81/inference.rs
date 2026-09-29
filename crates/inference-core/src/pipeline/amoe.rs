@@ -591,7 +591,10 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
                             .map(|url| -> anyhow::Result<DynamicImage> {
                                 let bytes = if url.contains("http") {
                                     // Read from http
-                                    match reqwest::blocking::get(url.clone()) {
+                                    match crate::remote_fetch::blocking_http_client_builder()
+                                        .build()
+                                        .and_then(|client| client.get(url.clone()).send())
+                                    {
                                         Ok(http_resp) => http_resp.bytes()?.to_vec(),
                                         Err(e) => anyhow::bail!(e),
                                     }

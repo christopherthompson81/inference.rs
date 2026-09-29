@@ -17,7 +17,6 @@ schemars.workspace = true
 walkdir.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
-reqwest.workspace = true
 rand.workspace = true
 either.workspace = true
 image.workspace = true

@@ -210,3 +210,32 @@ this Linux CUDA build doesn't compile (Metal, macOS or optional targets).
     `...\config` on Windows, so switching would move existing history files.
 - Open: finding 3 (openai-harmony's unused `image` default formats and its reqwest 0.12). It needs an upstream
   change or a vendored copy.
+
+## Run 3 - 2026-09-28 (night)
+
+- Revisited Run 2's two declines. The fragility argument against ring was overstated: one idempotent install covers
+  every client. With no users, moving the REPL history file costs nothing.
+- Change:
+  - `inference_mcp::tls::install_provider()` installs ring as the process-wide rustls provider, once. It sits in
+    the lowest crate that uses reqwest, which is now built with `rustls-no-provider`.
+  - Core's clients come from `remote_fetch::{http_client_builder, blocking_http_client_builder}`, which install the
+    provider first; the MCP transport calls it directly.
+  - The examples, and their copies on the docs site, use a new SDK `inference::fetch_url` in place of raw
+    `reqwest::get`, and no longer depend on reqwest.
+  - `fetch_url` is a plain client that honours proxy settings, unlike the SSRF-guarded `fetch_limited`, which pins
+    resolved addresses and so ignores proxies.
+- Finding on the way: the Prometheus exporter's default `push-gateway` feature enabled `hyper-rustls/aws-lc-rs` on
+  its own. We only use `install_recorder` (the `/metrics` route renders it), so the exporter now has no default
+  features, which also drops its HTTP listener.
+- Commands:
+  - `cargo tree --workspace --features cuda -e features -i aws-lc-rs` (empty once the exporter was trimmed).
+  - `scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs`.
+- Result: aws-lc-rs and aws-lc-sys are gone from the build graph; ring is the only TLS backend. `directories` is
+  replaced by `dirs::config_dir()`.
+- Tests: the provider install plus async and blocking client builds; a `fetch_url` round trip against a local
+  listener.
+- Checked by hand, not committed because it needs the network: a real HTTPS `fetch_url` and a blocking client GET
+  against huggingface.co both returned 200 over ring.
+- Not addressed, pre-existing: tokio-tungstenite is built without a TLS feature, so `wss://` MCP servers cannot
+  connect even though the docs advertise them. A fix with its rustls feature would also need `install_provider()`
+  before connecting.

@@ -148,6 +148,7 @@
 //! ```
 
 pub mod client;
+pub mod tls;
 pub mod tools;
 pub mod transport;
 pub mod types;

@@ -6,10 +6,37 @@ use std::{
 use anyhow::{Context, Result};
 use reqwest::{header, redirect::Policy, Url};
 
+const URL_FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NetworkPolicy {
     PublicOnly,
     Any,
+}
+
+/// Fetches a URL the caller chose, honouring proxy settings; request-driven fetches go through `fetch_limited`.
+pub async fn fetch_url(url: &str) -> Result<Vec<u8>> {
+    let response = http_client_builder()
+        .connect_timeout(URL_FETCH_CONNECT_TIMEOUT)
+        .build()?
+        .get(url)
+        .send()
+        .await
+        .with_context(|| format!("Failed to fetch {url}"))?
+        .error_for_status()?;
+    Ok(response.bytes().await?.to_vec())
+}
+
+/// A client builder with the TLS provider installed, which every reqwest client needs first.
+pub fn http_client_builder() -> reqwest::ClientBuilder {
+    inference_mcp::tls::install_provider();
+    reqwest::Client::builder()
+}
+
+/// The blocking counterpart of [`http_client_builder`].
+pub fn blocking_http_client_builder() -> reqwest::blocking::ClientBuilder {
+    inference_mcp::tls::install_provider();
+    reqwest::blocking::Client::builder()
 }
 
 pub struct FetchOptions<'a> {
@@ -34,7 +61,7 @@ pub async fn fetch_limited(
 ) -> Result<FetchedResponse> {
     let max_bytes = options.max_bytes;
     for redirect_idx in 0..=options.max_redirects {
-        let mut client = reqwest::Client::builder()
+        let mut client = http_client_builder()
             .timeout(options.timeout)
             .redirect(Policy::none())
             .no_proxy();
@@ -235,6 +262,33 @@ mod tests {
             let url = Url::parse(source).unwrap();
             assert!(validate_remote_url(&url).await.is_err(), "{source}");
         }
+    }
+
+    #[tokio::test]
+    async fn fetch_url_downloads_the_response_body() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        const BODY: &[u8] = b"not really a png";
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/clip.png", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request).await.unwrap();
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                BODY.len()
+            );
+            stream.write_all(head.as_bytes()).await.unwrap();
+            stream.write_all(BODY).await.unwrap();
+        });
+        assert_eq!(fetch_url(&url).await.unwrap(), BODY);
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn blocking_clients_build_with_the_installed_provider() {
+        blocking_http_client_builder().build().unwrap();
     }
 
     #[test]

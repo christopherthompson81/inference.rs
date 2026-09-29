@@ -270,6 +270,7 @@ pub use messages::{
     MultimodalMessages, RequestBuilder, RequestLike, TextMessageRole, TextMessages,
 };
 pub use model::{best_device, Model};
+
 pub use model_builder_trait::{AnyModelBuilder, MultiModelBuilder};
 pub use multimodal_model::{MultimodalModelBuilder, UqffMultimodalModelBuilder};
 pub use speech_model::SpeechModelBuilder;
@@ -366,3 +367,11 @@ pub use inference_macros::tool;
 
 // Re-export schemars for use in tool definitions
 pub use schemars;
+
+/// Downloads an http(s) URL, for example an image or audio clip to put in a request.
+pub async fn fetch_url(url: &str) -> error::Result<Vec<u8>> {
+    // `{:#}` keeps anyhow's context chain (the DNS, TLS or HTTP cause) in the message.
+    inference_core::remote_fetch::fetch_url(url)
+        .await
+        .map_err(|e| error::Error::Fetch(format!("{e:#}").into()))
+}

@@ -424,7 +424,11 @@ async fn read_remote_file_range(
 
 fn range_http_client() -> &'static reqwest::Client {
     static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
-    CLIENT.get_or_init(reqwest::Client::new)
+    CLIENT.get_or_init(|| {
+        crate::remote_fetch::http_client_builder()
+            .build()
+            .expect("the TLS provider is installed, so the default client builds")
+    })
 }
 
 fn model_file_url(model_id: &str, revision: &str, file: &str) -> String {
