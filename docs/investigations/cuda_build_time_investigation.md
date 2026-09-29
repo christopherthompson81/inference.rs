@@ -947,3 +947,32 @@ Review follow-ups:
 - Implication: moving the processors was worth about 7 s of core's lib test, and about 5 s of cold wall time. Core's
   lib test is still the tail, now tied with the CLI test binary. The next lever is still the size of core itself; the
   loaders are the largest part left.
+
+## Run 48 - 2026-09-29
+
+- Question, from watching local CI: why does rustdoc run for so long on a single core after the concurrent part of the
+  run, cycling through crates one at a time?
+- Commands:
+  - `cargo doc --no-deps <targets> --timings`;
+  - `/proc` sampling of the live rustdoc processes and the load average;
+  - `cargo test --workspace --doc`, timed.
+- Result:
+  - The doctests are not it. The whole workspace's doctests take 15.7 s wall and 20 s CPU when warm.
+    - `--merge-doctests yes`, which edition 2024 gives by default, would compile each crate's doctests as one
+      binary. On this toolchain it is unstable, and there is little to win.
+    - An earlier 98 s reading for `-p inference --doc` was a rebuild: `-p` alone resolves features differently.
+  - `--docs` is. With the source changed, `scripts/local_ci.sh --docs` took 40.5 s wall and 81.6 s CPU.
+    - 16 rustdoc processes were alive at once, but the load average stayed at about 2.
+    - Their `%CPU` kept falling as they slept, so the runs were serialized.
+    - An earlier run with `--timings` had 6 crates finishing one after another 15-35 s apart: 107 s wall for 94 s of
+      CPU.
+    - The cause is rustdoc's default cross-crate merge. Each crate reads and rewrites the shared files in
+      `target/doc` (search index, implementor lists) under the doc root's lock.
+  - Documenting all 26 crates into an empty `target/doc` took 21.3 s; into a full one (248 MB), 30.2 s.
+  - `--merge none`, which skips the merge, is unstable.
+  - `--emit dep-info` is stable. rustdoc still runs every doc lint (a planted broken intra-doc link fails with
+    `unresolved link`), but writes no HTML, and so takes no lock. The whole workspace takes 16.7 s wall and 57 s
+    CPU, with every crate in parallel.
+- Change: `local_ci.sh --docs` passes `--emit dep-info`. Rendered docs come from `cargo doc`.
+  - The same changed-source `--docs` run now takes 17.6 s wall (was 40.5 s).
+  - A branch that touches `Cargo.lock` documents `--workspace`, which is now a 17 s pass instead of 30-107 s.

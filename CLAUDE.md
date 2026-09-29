@@ -43,7 +43,8 @@ cargo clippy --workspace --tests --examples -- -D warnings
 
 # Canonical local checks (default: --lint --tests). Use these rather than ad-hoc cargo invocations: each mode always
 # builds the same package/feature set, so artifacts are reused instead of rebuilt per combination.
-# --docs documents only the crates that differ from master (rustdoc is never incremental); --docs-all documents all.
+# --docs checks the docs of the crates that differ from master (rustdoc is never incremental); --docs-all checks all.
+# Neither renders HTML (`cargo doc` does): rendering merges into target/doc under a lock that serialized the runs.
 # --bindings builds libinference_ffi and runs the C# (needs the .NET SDK) and Python binding tests.
 scripts/local_ci.sh [--lint] [--tests] [--cuda] [--models] [--slim] [--docs|--docs-all] [--bindings]
 
