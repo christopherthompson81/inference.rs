@@ -2,9 +2,12 @@ use std::sync::Arc;
 
 use indexmap::IndexMap;
 use inference_models_llama::idefics2::inputs_processor::Idefics2ImageProcessor;
+use inference_models_llama::loaders::Idefics2Loader;
 
 use crate::{
-    pipeline::{apply_chat_template, InputsProcessor, MessagesAction, Processor},
+    pipeline::{
+        apply_chat_template, InputsProcessor, MessagesAction, MultimodalProcessorFactory, Processor,
+    },
     request::ReasoningEffort,
     vision_models::{
         media_host::MediaInputsProcessor, preprocessor_config::PreProcessorConfig,
@@ -108,5 +111,21 @@ impl Processor for Idefics2Processor {
 
     fn template_action(&self) -> MessagesAction {
         MessagesAction::Keep
+    }
+}
+
+impl MultimodalProcessorFactory for Idefics2Loader {
+    fn get_processor(
+        &self,
+        _model_config: &str,
+        processor_config: Option<ProcessorConfig>,
+        preprocessor_config: PreProcessorConfig,
+        max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        Arc::new(Idefics2Processor::new(
+            processor_config.unwrap(),
+            preprocessor_config,
+            max_edge,
+        ))
     }
 }

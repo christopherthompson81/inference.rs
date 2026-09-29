@@ -1,7 +1,9 @@
 #[cfg(feature = "models-gemma")]
 pub(crate) use inference_models_gemma::{gemma, gemma2};
 #[cfg(feature = "models-llama")]
-pub(crate) use inference_models_llama::{llama, mistral, mixtral, quantized_llama, smollm3};
+pub(crate) use inference_models_llama::quantized_llama;
+#[cfg(all(test, feature = "models-llama"))]
+pub(crate) use inference_models_llama::{llama, mistral, mixtral, smollm3};
 #[cfg(all(test, feature = "models-other"))]
 pub(crate) use inference_models_other::{
     deepseek2, deepseek3, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite, hunyuan_v1_dense,

@@ -12,6 +12,7 @@ pub mod idefics3;
 pub mod llama;
 pub mod llama4;
 pub mod llava;
+pub mod loaders;
 pub mod mistral;
 pub mod mistral3;
 pub mod mixtral;

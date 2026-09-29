@@ -306,3 +306,25 @@ What in them costs core's compile, and what can leave?
     `use crate::models`, the lint allows kept on the trimmed modules, and blank lines and import groups in the
     processor files.
 - Next: llama (PR 5).
+
+## Run 11 - 2026-09-29
+
+- Change: the llama family, PR 5. Twelve loaders moved into `inference-models-llama/src/loaders/`:
+  - Llama, Mistral, Mixtral and SmolLM3;
+  - Idefics 2/3, LLaVA, LLaVA-Next, Mllama, Llama 4, Mistral 3 and Voxtral.
+
+  Details:
+  - The script's rewrites covered all but one path: core's `llama4` module had re-exported `IMAGE_TOKEN` at its top
+    level, so `llama4::IMAGE_TOKEN` needed `inputs_processor::`.
+  - The 8 factory impls moved into core's llama `vision_models/<m>/processor.rs` files.
+  - Those modules are now just `mod processor`. Core no longer uses `vision_models::{clip, llava15, llava_next,
+    image_processor}`, the llama xlora aliases or the text-size helpers, so their re-exports are gone.
+  - `models::{llama, mistral, mixtral, smollm3}` is test-only; `quantized_llama` stays for the GGML/GGUF paths.
+- Result:
+  - Core IR fell from 2,621,799 to 2,560,435 lines (-61.4k).
+  - Full CI green (2191 CPU and 2511 CUDA tests).
+  - The review found nothing that breaks or changes behaviour. Its cleanups were applied:
+    - three `cfg` lists that still named llama but now gate only gemma code;
+    - the factory-trait import folded into each file's `pipeline` import;
+    - a box-drawing banner dropped from the Voxtral loader.
+- Next: gemma, the last family (PR 6).

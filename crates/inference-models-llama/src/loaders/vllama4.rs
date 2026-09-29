@@ -2,9 +2,7 @@ use super::*;
 use candle_core::{Device, D};
 use image::{ColorType, DynamicImage};
 
-/// [`MultimodalLoader`] for an Llama Vision model.
-///
-/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
+/// `MultimodalLoader` for an Llama Vision model.
 pub struct VLlama4Loader;
 
 pub struct VLlama4Prefixer;
@@ -13,7 +11,7 @@ impl MultimodalPromptPrefixer for VLlama4Prefixer {
     fn prefix_image(&self, image_indexes: Vec<usize>, prompt: &str) -> String {
         format!(
             "{}{prompt}",
-            llama4::IMAGE_TOKEN.repeat(image_indexes.len())
+            llama4::inputs_processor::IMAGE_TOKEN.repeat(image_indexes.len())
         )
     }
 }
@@ -26,7 +24,7 @@ impl MultimodalModelLoader for VLlama4Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let mut cfg = crate::vision_models::llama4::Llama4Config::from_json(config)?;
+        let mut cfg = crate::llama4::Llama4Config::from_json(config)?;
         cfg.propagate_quantization_config();
         Ok(Box::new(Llama4Model::new(
             &cfg,
@@ -40,7 +38,7 @@ impl MultimodalModelLoader for VLlama4Loader {
         false
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let mut cfg = crate::vision_models::llama4::Llama4Config::from_json(config)?;
+        let mut cfg = crate::llama4::Llama4Config::from_json(config)?;
         cfg.propagate_quantization_config();
         Ok(Box::new(cfg))
     }
@@ -58,18 +56,6 @@ impl MultimodalModelLoader for VLlama4Loader {
             input: vec![SupportedModality::Text, SupportedModality::Vision],
             output: vec![SupportedModality::Text],
         })
-    }
-}
-
-impl MultimodalProcessorFactory for VLlama4Loader {
-    fn get_processor(
-        &self,
-        _model_config: &str,
-        processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(Llama4Processor::new(&processor_config.unwrap_or_default()))
     }
 }
 

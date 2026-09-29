@@ -1,8 +1,9 @@
 use std::sync::Arc;
 
 use inference_models_llama::idefics3::inputs_processor::Idefics3ImageProcessor;
+use inference_models_llama::loaders::Idefics3Loader;
 
-use crate::pipeline::{InputsProcessor, MessagesAction, Processor};
+use crate::pipeline::{InputsProcessor, MessagesAction, MultimodalProcessorFactory, Processor};
 use crate::vision_models::media_host::MediaInputsProcessor;
 use crate::vision_models::preprocessor_config::PreProcessorConfig;
 use crate::vision_models::processor_config::ProcessorConfig;
@@ -37,5 +38,21 @@ impl Processor for Idefics3Processor {
 
     fn template_action(&self) -> MessagesAction {
         MessagesAction::Keep
+    }
+}
+
+impl MultimodalProcessorFactory for Idefics3Loader {
+    fn get_processor(
+        &self,
+        _model_config: &str,
+        processor_config: Option<ProcessorConfig>,
+        preprocessor_config: PreProcessorConfig,
+        max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        Arc::new(Idefics3Processor::new(
+            processor_config.unwrap_or_default(),
+            preprocessor_config,
+            max_edge,
+        ))
     }
 }

@@ -1,8 +1,6 @@
 use super::*;
 
-/// [`MultimodalLoader`] for an Llama Vision model.
-///
-/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
+/// `MultimodalLoader` for an Llama Vision model.
 pub struct VLlamaLoader;
 
 pub struct VLlamaPrefixer;
@@ -21,7 +19,7 @@ impl MultimodalModelLoader for VLlamaLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg = crate::vision_models::mllama::MLlamaConfig::from_json(config)?;
+        let cfg = crate::mllama::MLlamaConfig::from_json(config)?;
         Ok(Box::new(MLlamaModel::new(
             &cfg,
             vb,
@@ -31,7 +29,7 @@ impl MultimodalModelLoader for VLlamaLoader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::vision_models::mllama::MLlamaConfig::from_json(config)?;
+        let cfg = crate::mllama::MLlamaConfig::from_json(config)?;
         Ok(Box::new(cfg))
     }
     fn supports_paged_attention(&self, _config: &str) -> bool {
@@ -51,18 +49,6 @@ impl MultimodalModelLoader for VLlamaLoader {
             input: vec![SupportedModality::Text, SupportedModality::Vision],
             output: vec![SupportedModality::Text],
         })
-    }
-}
-
-impl MultimodalProcessorFactory for VLlamaLoader {
-    fn get_processor(
-        &self,
-        _model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(MLlamaProcessor::new())
     }
 }
 

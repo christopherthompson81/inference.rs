@@ -4,10 +4,6 @@ pub(crate) use inference_models_gemma::xlora::{
 };
 #[cfg(feature = "models-llama")]
 pub(crate) use inference_models_llama::xlora::quantized_llama::ModelWeights as XLoraQLlama;
-#[cfg(feature = "models-llama")]
-pub(crate) use inference_models_llama::xlora::{
-    llama::XLoraLlama, mistral::XLoraModel as XLoraMistral, mixtral::XLoraModel as XLoraMixtral,
-};
 #[cfg(feature = "models-phi")]
 pub(crate) use inference_models_phi::xlora::quantized_phi3::ModelWeights as XLoraQPhi3;
 pub use inference_nn::xlora::NonGranularState;

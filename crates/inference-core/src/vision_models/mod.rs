@@ -4,24 +4,6 @@ use std::{any::Any, sync::Arc};
 
 use candle_core::Tensor;
 
-#[cfg(feature = "models-llama")]
-pub(crate) use inference_nn::vision::clip;
-#[cfg(feature = "models-llama")]
-pub(crate) mod idefics2;
-#[cfg(feature = "models-llama")]
-pub(crate) mod llava;
-#[cfg(feature = "models-llama")]
-pub(crate) mod mllama;
-#[cfg(feature = "models-other")]
-pub(crate) mod paddleocr_vl;
-#[cfg(feature = "models-phi")]
-pub(crate) mod phi3;
-#[cfg(feature = "models-qwen")]
-pub(crate) mod qwen2vl;
-#[cfg(feature = "models-llama")]
-pub(crate) use llava::llava15;
-#[cfg(feature = "models-llama")]
-pub(crate) use llava::llava_next;
 #[cfg(feature = "models-gemma")]
 pub(crate) mod diffusion_gemma;
 #[cfg(feature = "models-gemma")]
@@ -31,28 +13,38 @@ pub(crate) mod gemma3n;
 #[cfg(feature = "models-gemma")]
 pub(crate) mod gemma4;
 #[cfg(feature = "models-llama")]
+pub(crate) mod idefics2;
+#[cfg(feature = "models-llama")]
 pub(crate) mod idefics3;
 #[cfg(feature = "models-other")]
 pub(crate) mod lfm2_vl;
 #[cfg(feature = "models-llama")]
 pub(crate) mod llama4;
+#[cfg(feature = "models-llama")]
+pub(crate) mod llava;
 #[cfg(feature = "models-qwen")]
 pub(crate) mod minicpmo;
 #[cfg(feature = "models-llama")]
 pub(crate) mod mistral3;
+#[cfg(feature = "models-llama")]
+pub(crate) mod mllama;
 #[cfg(feature = "models-qwen")]
 pub(crate) mod muse_glimmer;
+#[cfg(feature = "models-other")]
+pub(crate) mod paddleocr_vl;
+#[cfg(feature = "models-phi")]
+pub(crate) mod phi3;
 #[cfg(feature = "models-phi")]
 pub(crate) mod phi4;
+#[cfg(feature = "models-qwen")]
+pub(crate) mod qwen2vl;
 #[cfg(feature = "models-qwen")]
 pub(crate) mod qwen3_vl;
 #[cfg(feature = "models-llama")]
 pub(crate) mod voxtral;
 
 pub(crate) mod media_host;
-pub(crate) use inference_nn::media_inputs::{
-    image_processor, preprocessor_config, processor_config,
-};
+pub(crate) use inference_nn::media_inputs::{preprocessor_config, processor_config};
 
 use crate::gdn::RecurrentBatchKind;
 

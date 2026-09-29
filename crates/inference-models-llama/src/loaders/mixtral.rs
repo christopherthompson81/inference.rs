@@ -1,11 +1,8 @@
 use super::*;
 
-/// [`NormalLoader`] for a SmolLm3 model.
-///
-/// [`NormalLoader`]: crate::pipeline::NormalLoader
-pub struct SmolLm3Loader;
+pub struct MixtralLoader;
 
-impl NormalModelLoader for SmolLm3Loader {
+impl NormalModelLoader for MixtralLoader {
     fn load(
         &self,
         config: &str,
@@ -13,9 +10,9 @@ impl NormalModelLoader for SmolLm3Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::smollm3::Config::from_json(config)?;
+        let cfg = crate::mixtral::Config::from_json(config)?;
 
-        Ok(Box::new(models::smollm3::SmolLm3::new(
+        Ok(Box::new(crate::mixtral::Model::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -25,23 +22,35 @@ impl NormalModelLoader for SmolLm3Loader {
     }
     fn load_xlora(
         &self,
-        _config: &str,
-        _vb: ShardedVarBuilder,
-        _lora_config: &[((String, String), LoraConfig)],
-        _xlora_config: Option<XLoraConfig>,
-        _xlora_ordering: Ordering,
-        _normal_loading_metadata: NormalLoadingMetadata,
-        _preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
+        config: &str,
+        vb: ShardedVarBuilder,
+        lora_config: &[((String, String), LoraConfig)],
+        xlora_config: Option<XLoraConfig>,
+        xlora_ordering: Ordering,
+        normal_loading_metadata: NormalLoadingMetadata,
+        preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        todo!()
+        let cfg = crate::mixtral::Config::from_json(config)?;
+
+        Ok(Box::new(crate::xlora::mixtral::XLoraModel::new(
+            &cfg,
+            vb,
+            lora_config,
+            xlora_config,
+            xlora_ordering,
+            self.is_gptx_for(config, &normal_loading_metadata)?,
+            normal_loading_metadata,
+            preload_adapters,
+        )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::models::smollm3::Config::from_json(config)?;
+        let cfg = crate::mixtral::Config::from_json(config)?;
+
         Ok(Box::new(cfg))
     }
 }
 
-impl IsqModelLoader for SmolLm3Loader {
+impl IsqModelLoader for MixtralLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
             r"^model\.embed_tokens\.weight$",
@@ -57,18 +66,31 @@ impl IsqModelLoader for SmolLm3Loader {
             r"layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
             r"layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
             r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
-            // MLP
-            r"layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$",
+            // Experts
+            r"layers\.(\d+)\.block_sparse_moe\.gate\.(weight|bias)$",
+            r"layers\.(\d+)\.block_sparse_moe\.experts\.(\d+)\.w1\.(weight|bias)$",
+            r"layers\.(\d+)\.block_sparse_moe\.experts\.(\d+)\.w2\.(weight|bias)$",
+            r"layers\.(\d+)\.block_sparse_moe\.experts\.(\d+)\.w3\.(weight|bias)$",
+            r"layers\.(\d+)\.block_sparse_moe\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
         self.isq_layer_regexes(config)
     }
+    fn isq_layer_regexes_moqe(&self, _config: &str) -> Result<Vec<Regex>> {
+        isq_regexes(&[
+            r"layers\.(\d+)\.block_sparse_moe\.experts\.(\d+)\.w1\.(weight|bias)$",
+            r"layers\.(\d+)\.block_sparse_moe\.experts\.(\d+)\.w2\.(weight|bias)$",
+            r"layers\.(\d+)\.block_sparse_moe\.experts\.(\d+)\.w3\.(weight|bias)$",
+            r"layers\.(\d+)\.block_sparse_moe\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
+        ])
+    }
+    fn immediate_isq_predicates_moqe(&self, config: &str) -> Result<Vec<Regex>> {
+        self.isq_layer_regexes_moqe(config)
+    }
 }
 
-impl DeviceMappedModelLoader for SmolLm3Loader {
+impl DeviceMappedModelLoader for MixtralLoader {
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -77,7 +99,7 @@ impl DeviceMappedModelLoader for SmolLm3Loader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = crate::models::smollm3::Config::from_json(config)?;
+        let cfg = crate::mixtral::Config::from_json(config)?;
         standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
@@ -96,7 +118,7 @@ impl DeviceMappedModelLoader for SmolLm3Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = crate::models::smollm3::Config::from_json(config)?;
+        let cfg = crate::mixtral::Config::from_json(config)?;
 
         let per_layer_elems = {
             let input_layernorm = cfg.hidden_size;
@@ -110,11 +132,16 @@ impl DeviceMappedModelLoader for SmolLm3Loader {
             let v_proj = size_in * size_kv / weight_pack_factor;
             let o_proj = size_q * size_in / weight_pack_factor;
 
-            let h_size = cfg.hidden_size;
-            let i_size = cfg.intermediate_size;
-            let gate_proj = h_size * i_size / weight_pack_factor;
-            let up_proj = h_size * i_size / weight_pack_factor;
-            let down_proj = i_size * h_size / weight_pack_factor;
+            let moe_block = {
+                let gate = cfg.hidden_size * cfg.num_local_experts;
+                // Assume quantizing weight pack factor
+                let w1 = cfg.hidden_size * cfg.intermediate_size / weight_pack_factor;
+                let w2 = cfg.hidden_size * cfg.intermediate_size / weight_pack_factor;
+                let w3 = cfg.hidden_size * cfg.intermediate_size / weight_pack_factor;
+                gate + cfg.num_local_experts * w1
+                    + cfg.num_local_experts * w2
+                    + cfg.num_local_experts * w3
+            };
 
             input_layernorm
                 + post_attention_layernorm
@@ -122,9 +149,7 @@ impl DeviceMappedModelLoader for SmolLm3Loader {
                 + k_proj
                 + v_proj
                 + o_proj
-                + gate_proj
-                + up_proj
-                + down_proj
+                + moe_block
         };
         Ok(vec![
             per_layer_elems * dtype.size_in_bytes();
@@ -132,7 +157,7 @@ impl DeviceMappedModelLoader for SmolLm3Loader {
         ])
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = crate::models::smollm3::Config::from_json(config)?;
+        let cfg = crate::mixtral::Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,
@@ -140,7 +165,7 @@ impl DeviceMappedModelLoader for SmolLm3Loader {
             hidden_size: cfg.hidden_size,
             num_kv_heads: cfg.num_key_value_heads,
             num_attn_heads: cfg.num_attention_heads,
-            sliding_window: None,
+            sliding_window: cfg.sliding_window,
             k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
             v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
             kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,

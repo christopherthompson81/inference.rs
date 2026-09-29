@@ -1,19 +1,17 @@
 use super::*;
 
-/// [`MultimodalLoader`] for an LLaVA Vision model.
-///
-/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
-pub struct LLaVALoader;
+/// `MultimodalLoader` for an Mistral 3 model.
+pub struct Mistral3Loader;
 
-pub struct LLaVAPrefixer;
+pub struct Mistral3Prefixer;
 
-impl MultimodalPromptPrefixer for LLaVAPrefixer {
-    fn prefix_image(&self, image_indexes: Vec<usize>, prompt: &str) -> String {
-        format!("{}{prompt}", "<image>".repeat(image_indexes.len()))
+impl MultimodalPromptPrefixer for Mistral3Prefixer {
+    fn prefix_image(&self, _image_indexes: Vec<usize>, prompt: &str) -> String {
+        prompt.to_string()
     }
 }
 
-impl MultimodalModelLoader for LLaVALoader {
+impl MultimodalModelLoader for Mistral3Loader {
     fn load(
         &self,
         config: &str,
@@ -21,8 +19,9 @@ impl MultimodalModelLoader for LLaVALoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg = crate::vision_models::llava::config::Config::from_json(config)?;
-        Ok(Box::new(LLaVA::new(
+        let mut cfg = crate::mistral3::Mistral3Config::from_json(config)?;
+        cfg.propagate_quantization_config();
+        Ok(Box::new(Mistral3Model::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -30,11 +29,8 @@ impl MultimodalModelLoader for LLaVALoader {
             attention_mechanism,
         )?))
     }
-    fn is_gptx(&self, _config: &str) -> bool {
-        false
-    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::vision_models::llava::config::Config::from_json(config)?;
+        let cfg = crate::mistral3::Mistral3Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
     fn supports_paged_attention(&self, _config: &str) -> bool {
@@ -47,7 +43,7 @@ impl MultimodalModelLoader for LLaVALoader {
         true
     }
     fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
-        Arc::new(LLaVAPrefixer)
+        Arc::new(Mistral3Prefixer)
     }
     fn modalities(&self, _config: &str) -> Result<Modalities> {
         Ok(Modalities {
@@ -57,19 +53,7 @@ impl MultimodalModelLoader for LLaVALoader {
     }
 }
 
-impl MultimodalProcessorFactory for LLaVALoader {
-    fn get_processor(
-        &self,
-        model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(LLaVAProcessor::new(model_config))
-    }
-}
-
-impl IsqModelLoader for LLaVALoader {
+impl IsqModelLoader for Mistral3Loader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
             r"^language_model\.model\.embed_tokens\.weight$",
@@ -107,65 +91,96 @@ impl IsqModelLoader for LLaVALoader {
     }
 }
 
-impl DeviceMappedModelLoader for LLaVALoader {
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+impl DeviceMappedModelLoader for Mistral3Loader {
     fn mapped_max_act_size_elems(
         &self,
         config: &str,
         params: &AutoDeviceMapParams,
     ) -> Result<usize> {
+        let cfg = Mistral3Config::from_json(config)?;
+        let vcfg = &cfg.vision_config;
+        let tcfg = &cfg.text_config;
+
         let AutoDeviceMapParams::Multimodal {
             max_seq_len,
             max_batch_size,
-            max_image_shape: _,
+            max_image_shape: (mut height, mut width),
             max_num_images,
         } = params
         else {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let config = LLaVAConfig::from_json(config)?;
+        let img_seq_len = {
+            // Reshaping algorithm
 
-        let img_seq_len =
-            llava_inputs_processor::LLaVAInputProcessor::get_num_image_tokens(&config);
-        let img_seq_len = img_seq_len * max_num_images;
+            // https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/blob/main/preprocessor_config.json#L29
+            let (max_height, max_width) = (1540, 1540);
+            let ratio = (height as f64 / max_height as f64).max(width as f64 / max_width as f64);
+            if ratio > 1. {
+                height = (height as f64 / ratio).floor() as usize;
+                width = (width as f64 / ratio).floor() as usize;
+            }
 
-        let max_text_attn = {
-            let cfg = &config.text_config;
-            // This model injects the vision information directly into the input embeddings
-            let max_seq_len = img_seq_len + max_seq_len.min(&ATTENTION_CHUNK_SIZE);
-            max_batch_size * cfg.num_attention_heads * max_seq_len * max_seq_len
+            let num_height_tokens = (height - 1) / vcfg.patch_size + 1;
+            let num_width_tokens = (width - 1) / vcfg.patch_size + 1;
+
+            height = num_height_tokens * vcfg.patch_size;
+            width = num_width_tokens * vcfg.patch_size;
+
+            let num_height_tokens = height / vcfg.patch_size;
+            let num_width_tokens = width / vcfg.patch_size;
+
+            (num_width_tokens + 1) * num_height_tokens
         };
 
-        Ok(max_text_attn)
+        // This model injects the vision information directly into the input embeddings
+        let max_seq_len = img_seq_len * max_num_images + *max_seq_len.min(&ATTENTION_CHUNK_SIZE);
+        Ok(max_batch_size * tcfg.num_attention_heads * max_seq_len * max_seq_len)
     }
     fn non_mapped_max_act_size_elems(
         &self,
         config: &str,
         params: &AutoDeviceMapParams,
     ) -> Result<usize> {
+        let cfg = Mistral3Config::from_json(config)?;
+        let cfg = &cfg.vision_config;
+
         let AutoDeviceMapParams::Multimodal {
             max_seq_len: _,
             max_batch_size,
-            max_image_shape: _,
+            max_image_shape: (mut height, mut width),
             max_num_images,
         } = params
         else {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let config = LLaVAConfig::from_json(config)?;
+        let img_seq_len = {
+            // Reshaping algorithm
 
-        let img_seq_len =
-            llava_inputs_processor::LLaVAInputProcessor::get_num_image_tokens(&config);
+            // https://huggingface.co/mistralai/Mistral-Small-3.1-24B-Instruct-2503/blob/main/preprocessor_config.json#L29
+            let (max_height, max_width) = (1540, 1540);
+            let ratio = (height as f64 / max_height as f64).max(width as f64 / max_width as f64);
+            if ratio > 1. {
+                height = (height as f64 / ratio).floor() as usize;
+                width = (width as f64 / ratio).floor() as usize;
+            }
 
-        let max_vision_attn = {
-            (max_batch_size * max_num_images)
-                * config.vision_config.num_attention_heads
-                * img_seq_len
-                * img_seq_len
+            let num_height_tokens = (height - 1) / cfg.patch_size + 1;
+            let num_width_tokens = (width - 1) / cfg.patch_size + 1;
+
+            height = num_height_tokens * cfg.patch_size;
+            width = num_width_tokens * cfg.patch_size;
+
+            let num_height_tokens = height / cfg.patch_size;
+            let num_width_tokens = width / cfg.patch_size;
+
+            (num_width_tokens + 1) * num_height_tokens
         };
 
-        Ok(max_vision_attn)
+        Ok((max_batch_size * max_num_images) * cfg.num_attention_heads * img_seq_len * img_seq_len)
     }
     fn non_mapped_size_in_bytes(
         &self,
@@ -175,39 +190,63 @@ impl DeviceMappedModelLoader for LLaVALoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = LLaVAConfig::from_json(config)?;
+        let cfg = Mistral3Config::from_json(config)?;
+
         let text_elems = {
             let cfg = &cfg.text_config;
-            let embed_tokens_pack_factor = super::promoted_tensor_pack_factor(
-                _quantization,
-                "language_model.model.embed_tokens.weight",
-                dtype,
-                weight_pack_factor,
-            )?;
-            let lm_head_pack_factor = super::promoted_tensor_pack_factor(
-                _quantization,
-                "language_model.lm_head.weight",
-                dtype,
-                1,
-            )?;
+            let (embed_tokens_pack_factor, lm_head_pack_factor) =
+                super::language_model_pack_factors(
+                    _quantization,
+                    "language_model.model.embed_tokens.weight",
+                    "language_model.lm_head.weight",
+                    cfg.tie_word_embeddings,
+                    dtype,
+                    weight_pack_factor,
+                )?;
             let embed_tokens = cfg.hidden_size * cfg.vocab_size / embed_tokens_pack_factor;
-            let lm_head = cfg.hidden_size * cfg.vocab_size / lm_head_pack_factor;
+            let lm_head = if !cfg.tie_word_embeddings {
+                cfg.hidden_size * cfg.vocab_size / lm_head_pack_factor
+            } else {
+                0
+            };
             let norm = cfg.hidden_size;
             embed_tokens + lm_head + norm
         };
 
-        let image_newline = cfg.text_config.hidden_size;
-        let mmproj = {
-            let linear_1 = cfg.vision_config.hidden_size * cfg.text_config.hidden_size
-                + cfg.text_config.hidden_size;
-            let linear_2 = cfg.text_config.hidden_size * cfg.text_config.hidden_size
-                + cfg.text_config.hidden_size;
+        let vision_elems = {
+            let cfg = &cfg.vision_config;
 
-            linear_1 + linear_2
+            let patch_embed = {
+                let conv_cfg = Conv2dConfig {
+                    stride: cfg.patch_size,
+                    ..Default::default()
+                };
+                cfg.num_channels * cfg.hidden_size / conv_cfg.groups
+                    * cfg.patch_size
+                    * cfg.patch_size
+                    * cfg.patch_size
+            };
+            let ln_pre = cfg.hidden_size;
+            let vision_layer = {
+                let attn_norm = cfg.hidden_size;
+                let ffn_norm = cfg.hidden_size;
+
+                let gate = cfg.hidden_size * cfg.intermediate_size;
+                let up = cfg.hidden_size * cfg.intermediate_size;
+                let down = cfg.hidden_size * cfg.intermediate_size;
+
+                let q = cfg.hidden_size * cfg.hidden_size;
+                let k = cfg.hidden_size * cfg.hidden_size;
+                let v = cfg.hidden_size * cfg.hidden_size;
+                let o = cfg.hidden_size * cfg.hidden_size;
+
+                attn_norm + ffn_norm + gate + up + down + q + k + v + o
+            };
+
+            patch_embed + ln_pre + vision_layer * cfg.num_hidden_layers
         };
-        let vision_tower = get_clip_vit_num_elems(&cfg.to_clip_config());
 
-        let elems = text_elems + image_newline + mmproj + vision_tower;
+        let elems = text_elems + vision_elems;
         Ok(elems * dtype.size_in_bytes())
     }
     fn layer_sizes_in_bytes(
@@ -217,9 +256,10 @@ impl DeviceMappedModelLoader for LLaVALoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = LLaVAConfig::from_json(config)?;
+        let cfg = Mistral3Config::from_json(config)?;
+        let cfg = &cfg.text_config;
+
         let per_layer_elems = {
-            let cfg = &cfg.text_config;
             let input_layernorm = cfg.hidden_size;
             let post_attention_layernorm = cfg.hidden_size;
 
@@ -249,15 +289,16 @@ impl DeviceMappedModelLoader for LLaVALoader {
         };
         Ok(vec![
             per_layer_elems * dtype.size_in_bytes();
-            cfg.text_config.num_hidden_layers
+            cfg.num_hidden_layers
         ])
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg = LLaVAConfig::from_json(config)?;
-        Ok(cfg.text_config.num_hidden_layers)
+        let cfg = Mistral3Config::from_json(config)?;
+        let cfg = &cfg.text_config;
+        Ok(cfg.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = LLaVAConfig::from_json(config)?;
+        let cfg = Mistral3Config::from_json(config)?;
         let cfg = &cfg.text_config;
 
         let cfg = ModelConfigMetadata {
@@ -267,8 +308,8 @@ impl DeviceMappedModelLoader for LLaVALoader {
             num_kv_heads: cfg.num_key_value_heads,
             num_attn_heads: cfg.num_attention_heads,
             sliding_window: cfg.sliding_window,
-            k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
-            v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
+            k_head_dim: cfg.head_dim(),
+            v_head_dim: cfg.head_dim(),
             kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 

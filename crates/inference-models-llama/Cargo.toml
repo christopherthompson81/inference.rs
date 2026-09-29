@@ -24,6 +24,7 @@ inference-quant.workspace = true
 inference-vision.workspace = true
 itertools.workspace = true
 ordered-float.workspace = true
+regex.workspace = true
 regex-automata.workspace = true
 rubato.workspace = true
 serde.workspace = true
