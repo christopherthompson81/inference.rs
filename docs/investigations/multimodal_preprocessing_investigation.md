@@ -104,3 +104,24 @@ cold compile and lib test (the end of the cold build since Run 26 of the build-t
   `Clone` derives, a split impl block, and the `pub` on `preprocess`.
 - Next: the phi family (phi3, phi4). Its processors additionally use inference-audio, inference-vision, `regex` and
   `rubato`. The core-size effect will be measured once the larger families have moved; this pair is about 1.6k lines.
+
+## Run 4 - 2026-09-29
+
+- Change: the phi family. The Phi-3V and Phi-4MM input processors moved into inference-models-phi as
+  `phi3_vision/inputs_processor.rs` and `phi4/inputs_processor.rs`; core keeps their `Processor` impls in
+  `vision_models/phi{3,4}/processor.rs`.
+  - `Phi3InputsProcessor` gains `Default`, with the image-tag regex as a const. `Phi4MMInputsProcessor::new` takes the
+    preprocessor config. `DYHD_BASE_RESOLUTION` is pub for core's Phi-4MM loader.
+  - Again every `crate::` path resolved through inference-nn. The only new paths are `inference_audio::AudioInput`
+    and `vision::multimodal_layout`.
+  - inference-models-phi gains `image`, `inference-audio`, `inference-vision`, `itertools`, `regex`,
+    `regex-automata`, `rubato` and `tokenizers`. Unlike Run 3, three of them are not inference-nn dependencies:
+    `inference-vision`, `rubato` and `regex-automata`. So the phi crate now also waits on inference-vision, a small
+    crate over candle-core that builds alongside inference-nn. No core dependency became unused; gemma3n and voxtral
+    still use rubato.
+- Command: `scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`.
+- Result: green (2191 CPU and 2511 CUDA tests). The review found no behaviour change. It had two nits, both applied: a
+  test built the regex by hand in place of `default()`, and a narration comment. The lint and CPU tests were rerun
+  after them.
+- Next: the qwen family (qwen2vl, qwen3_vl, minicpmo, muse_glimmer). qwen2vl's shared helpers serve the other two
+  Qwen processors and muse_glimmer, so all four move together.

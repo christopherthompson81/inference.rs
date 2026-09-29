@@ -1,6 +1,5 @@
 #![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 
-use crate::paged_attention::block_hash::{MultiModalFeature, MultimodalKind};
 use std::{any::Any, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
@@ -10,40 +9,40 @@ use itertools::Itertools;
 use regex_automata::meta::Regex;
 use tokenizers::Tokenizer;
 
-use crate::paged_attention::PagedAttentionMeta;
-use crate::{
-    device_map::DeviceMapper,
-    pipeline::{
-        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
-        Processor,
-    },
-    sequence::build_mm_features_from_ranges,
-};
-
-use crate::vision_models::media_host::MediaInputsProcessor;
-use crate::vision_models::{
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
     image_processor::{ImagePreProcessor, PreprocessedImages},
-    multimodal_layout::{
-        MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
-        RequestMultimodalLayout,
-    },
-    phi3::Phi3VisionSpecificArgs,
+    media::build_mm_features_from_ranges,
     preprocessor_config::PreProcessorConfig,
-    processor_config::ProcessorConfig,
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, ProcessInputsCall, TextInputs, TextOnlyInputs,
+    },
 };
-use inference_nn::media_inputs::processor::TextOnlyInputs;
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, ProcessInputsCall,
-    TextInputs,
+use crate::paged_attention::{
+    block_hash::{MultiModalFeature, MultimodalKind},
+    PagedAttentionMeta,
+};
+use crate::vision::multimodal_layout::{
+    MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
+    RequestMultimodalLayout,
 };
 
-// Input processor
+use super::Phi3VisionSpecificArgs;
+
+const IMAGE_TAG_PATTERN: &str = r"<\|image_\d+\|>";
+
 pub struct Phi3InputsProcessor {
     image_tag_splitter: Regex,
 }
-// Processor
-pub struct Phi3Processor {
-    inputs_processor: Arc<Phi3InputsProcessor>,
+
+impl Default for Phi3InputsProcessor {
+    fn default() -> Self {
+        Self {
+            image_tag_splitter: Regex::new(IMAGE_TAG_PATTERN)
+                .expect("Failed to compile split regex."),
+        }
+    }
 }
 
 type Phi3PromptTokens = (Vec<i64>, Vec<(usize, usize)>);
@@ -184,32 +183,6 @@ fn phi3_packed_layout(
         })
         .collect::<Result<Vec<_>>>()?;
     PackedMultimodalLayout::new(&requests)
-}
-
-impl Phi3Processor {
-    pub(crate) fn new_processor(
-        _: Option<ProcessorConfig>,
-        _: PreProcessorConfig,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(Self {
-            inputs_processor: Arc::new(Phi3InputsProcessor {
-                image_tag_splitter: Regex::new(r"<\|image_\d+\|>")
-                    .expect("Failed to compile split regex."),
-            }),
-        })
-    }
-}
-
-impl Processor for Phi3Processor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(self.inputs_processor.clone()))
-    }
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[]
-    }
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::FlattenOnlyText
-    }
 }
 
 impl MultimodalInputsProcessor for Phi3InputsProcessor {
@@ -774,9 +747,7 @@ mod tests {
 
     use super::*;
     use crate::paged_attention::block_hash::MultimodalAttentionPolicy;
-    use crate::vision_models::multimodal_layout::{
-        MultimodalEncoderOutputs, RequestMultimodalLayout,
-    };
+    use crate::vision::multimodal_layout::{MultimodalEncoderOutputs, RequestMultimodalLayout};
 
     fn feature(item_range: Range<usize>) -> MultiModalFeature {
         MultiModalFeature {
@@ -838,9 +809,7 @@ mod tests {
 
     #[test]
     fn planning_token_count_matches_preprocessor() {
-        let processor = Phi3InputsProcessor {
-            image_tag_splitter: Regex::new(r"<\|image_\d+\|>").unwrap(),
-        };
+        let processor = Phi3InputsProcessor::default();
         let config = PreProcessorConfig {
             num_crops: Some(4),
             ..Default::default()

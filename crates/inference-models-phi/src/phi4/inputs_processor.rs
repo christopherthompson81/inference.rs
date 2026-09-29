@@ -1,6 +1,5 @@
 #![allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 
-use crate::paged_attention::block_hash::{MultiModalFeature, MultimodalKind};
 use std::{
     any::Any,
     collections::{hash_map::DefaultHasher, HashSet},
@@ -11,50 +10,43 @@ use std::{
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use image::{imageops::FilterType, DynamicImage, GenericImage, GenericImageView, Rgba};
+use inference_audio::fft::{plan_forward_f64, Complex32, Complex64};
+use inference_audio::AudioInput;
 use inference_vision::{ApplyTransforms, Normalize, ToTensor, Transforms};
 use regex::Regex;
-use tokenizers::Tokenizer;
-
-use inference_audio::fft::{plan_forward_f64, Complex32, Complex64};
 use rubato::{
     Resampler, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
+use tokenizers::Tokenizer;
 
-use crate::paged_attention::PagedAttentionMeta;
-use crate::{
-    device_map::DeviceMapper,
-    pipeline::{
-        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
-        Processor,
-    },
-    sequence::build_mm_features_from_ranges,
-};
-
-use crate::vision_models::{
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
     image_processor::{ImagePreProcessor, PreprocessedImages},
-    multimodal_layout::{
-        MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
-        RequestMultimodalLayout,
-    },
-    phi4::Phi4MMVisionSpecificArgs,
+    media::build_mm_features_from_ranges,
     preprocessor_config::PreProcessorConfig,
-    processor_config::ProcessorConfig,
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, ProcessInputsCall, TextInputs, TextOnlyInputs,
+    },
+};
+use crate::paged_attention::{
+    block_hash::{MultiModalFeature, MultimodalKind},
+    PagedAttentionMeta,
+};
+use crate::vision::multimodal_layout::{
+    MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
+    RequestMultimodalLayout,
 };
 
 use super::audio_embedding::AUDIO_SPECIAL_TOKEN_ID;
 use super::image_embedding::IMAGE_SPECIAL_TOKEN_ID;
-use crate::vision_models::media_host::MediaInputsProcessor;
-use inference_nn::media_inputs::processor::TextOnlyInputs;
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, ProcessInputsCall,
-    TextInputs,
-};
+use super::Phi4MMVisionSpecificArgs;
 
 const COMPATIBLE_IMAGE_SPECIAL_TOKEN_PATTERN: &str = r"<\|image_\d+\|>";
 const COMPATIBLE_AUDIO_SPECIAL_TOKEN_PATTERN: &str = r"<\|audio_\d+\|>";
 const IMAGE_SPECIAL_TOKEN: &str = "<|endoftext10|>";
 const AUDIO_SPECIAL_TOKEN: &str = "<|endoftext11|>";
-pub(crate) const DYHD_BASE_RESOLUTION: usize = 448;
+pub const DYHD_BASE_RESOLUTION: usize = 448;
 
 const AUDIO_FEATURE_SIZE: usize = 80; // mel bins
 const AUDIO_MEL_SAMPLE_RATE: usize = 16000;
@@ -258,7 +250,6 @@ fn phi4_packed_layout(
     PackedMultimodalLayout::new(&requests)
 }
 
-// Input processor
 pub struct Phi4MMInputsProcessor {
     audio_compression_rate: usize,
     audio_downsample_rate: usize,
@@ -266,42 +257,20 @@ pub struct Phi4MMInputsProcessor {
     eightk_method: String, // "fillzero" or "resample"
 }
 
-// Processor
-pub struct Phi4MMProcessor {
-    inputs_processor: Arc<Phi4MMInputsProcessor>,
-}
-
-impl Phi4MMProcessor {
-    pub(crate) fn new_processor(
-        _: Option<ProcessorConfig>,
-        pre_processor_config: PreProcessorConfig,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(Self {
-            inputs_processor: Arc::new(Phi4MMInputsProcessor {
-                audio_compression_rate: pre_processor_config
-                    .audio_compression_rate
-                    .expect("audio_compression_rate"),
-                audio_downsample_rate: pre_processor_config
-                    .audio_downsample_rate
-                    .expect("audio_downsample_rate"),
-                audio_feat_stride: pre_processor_config
-                    .audio_feat_stride
-                    .expect("audio_feat_stride"),
-                eightk_method: "fillzero".to_string(), // Default to fillzero
-            }),
-        })
-    }
-}
-
-impl Processor for Phi4MMProcessor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(self.inputs_processor.clone()))
-    }
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[]
-    }
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::FlattenOnlyText
+impl Phi4MMInputsProcessor {
+    pub fn new(pre_processor_config: &PreProcessorConfig) -> Self {
+        Self {
+            audio_compression_rate: pre_processor_config
+                .audio_compression_rate
+                .expect("audio_compression_rate"),
+            audio_downsample_rate: pre_processor_config
+                .audio_downsample_rate
+                .expect("audio_downsample_rate"),
+            audio_feat_stride: pre_processor_config
+                .audio_feat_stride
+                .expect("audio_feat_stride"),
+            eightk_method: "fillzero".to_string(),
+        }
     }
 }
 
@@ -712,7 +681,7 @@ impl Phi4MMInputsProcessor {
         Ok(())
     }
 
-    fn audio_token_count(&self, audio: &crate::AudioInput) -> anyhow::Result<usize> {
+    fn audio_token_count(&self, audio: &AudioInput) -> anyhow::Result<usize> {
         if audio.sample_rate < 8000 {
             return Err(InputsProcessorValidationError(format!(
                 "Unsupported sample rate: {}",
@@ -1309,7 +1278,7 @@ fn phi4_image_hash(raw_hash: u64, image: &DynamicImage) -> u64 {
     hasher.finish()
 }
 
-fn phi4_audio_hash(raw_hash: u64, audio: &crate::AudioInput) -> u64 {
+fn phi4_audio_hash(raw_hash: u64, audio: &AudioInput) -> u64 {
     let mut hasher = DefaultHasher::new();
     raw_hash.hash(&mut hasher);
     audio.channels.hash(&mut hasher);
@@ -1717,14 +1686,14 @@ mod tests {
 
     use crate::{
         paged_attention::block_hash::{MultimodalAttentionPolicy, MultimodalKind},
-        vision_models::multimodal_layout::{
+        vision::multimodal_layout::{
             MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
         },
     };
 
     use super::{
         expand_phi4_placeholders, pad_phi4_image_mask, phi4_audio_hash, phi4_image_hash,
-        phi4_request_layout, InputsProcessorValidationError, MultiModalFeature,
+        phi4_request_layout, AudioInput, InputsProcessorValidationError, MultiModalFeature,
         Phi4MMInputsProcessor, AUDIO_SPECIAL_TOKEN_ID, IMAGE_SPECIAL_TOKEN_ID,
     };
 
@@ -1751,7 +1720,7 @@ mod tests {
     }
 
     fn splice(
-        requests: &[crate::vision_models::multimodal_layout::RequestMultimodalLayout],
+        requests: &[crate::vision::multimodal_layout::RequestMultimodalLayout],
         outputs: MultimodalEncoderOutputs,
     ) -> Vec<f32> {
         let layout = PackedMultimodalLayout::new(requests).unwrap();
@@ -1803,7 +1772,7 @@ mod tests {
             audio_feat_stride: 1,
             eightk_method: "fillzero".to_string(),
         };
-        let audio = crate::AudioInput {
+        let audio = AudioInput {
             samples: vec![0.; 399],
             sample_rate: 16000,
             channels: 1,
@@ -1875,12 +1844,12 @@ mod tests {
         let wide = image::DynamicImage::new_rgb8(4, 1);
         let tall = image::DynamicImage::new_rgb8(1, 4);
         assert_ne!(phi4_image_hash(1, &wide), phi4_image_hash(1, &tall));
-        let mono = crate::AudioInput {
+        let mono = AudioInput {
             samples: vec![0.; 4],
             sample_rate: 16000,
             channels: 1,
         };
-        let stereo = crate::AudioInput {
+        let stereo = AudioInput {
             channels: 2,
             ..mono.clone()
         };

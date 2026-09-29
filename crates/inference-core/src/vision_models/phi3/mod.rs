@@ -2,4 +2,4 @@
 
 pub(crate) use inference_models_phi::phi3_vision::*;
 
-pub(crate) mod phi3_inputs_processor;
+pub(crate) mod processor;

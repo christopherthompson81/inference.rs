@@ -3,8 +3,8 @@
 
 use inference_nn::serde_default_fn;
 use inference_nn::{
-    amoe, attention, device_map, gguf, kv_cache, layers, lora, model, moe, ops, paged_attention,
-    speculative, utils, vision,
+    amoe, attention, device_map, gdn, gguf, kv_cache, layers, lora, media_inputs, model, moe, ops,
+    paged_attention, speculative, utils, vision,
 };
 
 pub mod conformer;

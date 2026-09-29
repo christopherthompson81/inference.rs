@@ -2,4 +2,4 @@
 
 pub(crate) use inference_models_phi::phi4::*;
 
-pub(crate) mod inputs_processor;
+pub(crate) mod processor;
