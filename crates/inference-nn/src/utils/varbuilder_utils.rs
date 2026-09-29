@@ -12,8 +12,9 @@ use inference_quant::{safetensors::MmapedSafetensors, ShardedSafeTensors, Sharde
 use regex::Regex;
 
 use crate::lora::LoraConfig;
-use crate::utils::progress::IterWithProgress;
+use crate::utils::progress::{new_multi_progress, NiceProgressBar};
 use derive_new::new;
+use indicatif::MultiProgress;
 
 const INFERENCE_RS_NO_MMAP: &str = "INFERENCE_RS_NO_MMAP";
 
@@ -76,6 +77,32 @@ pub fn from_mmaped_safetensors(
     predicate: impl Fn(String) -> bool + Send + Sync + Clone + 'static,
     get_device_for_tensor: Arc<dyn Fn(String) -> DeviceForLoadTensor + Send + Sync + 'static>,
 ) -> Result<ShardedVarBuilder> {
+    // Erased here so the loading body compiles once rather than once per caller's closure type.
+    load_safetensors(
+        paths,
+        xlora_paths,
+        dtype,
+        base_device,
+        layer_devices,
+        silent,
+        make_dummy_regexes,
+        Arc::new(predicate),
+        get_device_for_tensor,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_safetensors(
+    paths: Vec<PathBuf>,
+    xlora_paths: Vec<PathBuf>,
+    dtype: Option<DType>,
+    base_device: &Device,
+    layer_devices: Vec<Option<Device>>,
+    silent: bool,
+    make_dummy_regexes: Option<Arc<Vec<Regex>>>,
+    predicate: Arc<dyn Fn(String) -> bool + Send + Sync + 'static>,
+    get_device_for_tensor: Arc<dyn Fn(String) -> DeviceForLoadTensor + Send + Sync + 'static>,
+) -> Result<ShardedVarBuilder> {
     let use_no_mmap = std::env::var(INFERENCE_RS_NO_MMAP).is_ok_and(|x| x == "1");
     if xlora_paths.is_empty() && !use_no_mmap {
         if !silent {
@@ -87,86 +114,50 @@ pub fn from_mmaped_safetensors(
                 dtype.unwrap_or(DType::F16),
                 base_device,
                 make_dummy_regexes,
-                Arc::new(predicate),
+                predicate,
             )?
         });
     }
 
+    // One MultiProgress so the per-file bars from the loader threads stack instead of overwriting each other.
+    let progress = (!silent).then(new_multi_progress);
+    let make_dummy: Arc<dyn Fn(&str) -> bool + Send + Sync> = match make_dummy_regexes.clone() {
+        Some(regexes) => Arc::new(move |key| regexes.iter().any(|r| r.is_match(key))),
+        None => Arc::new(|_| false),
+    };
+    let loaders = paths.into_iter().map(|path| (path, None)).chain(
+        xlora_paths
+            .into_iter()
+            .enumerate()
+            .map(|(i, path)| (path, Some(i + 1))),
+    );
     #[allow(clippy::type_complexity)]
-    let mut handles: Vec<JoinHandle<Result<HashMap<String, Tensor>>>> = Vec::new();
-
-    for path in paths {
-        let base_device = base_device.clone();
-        let layer_devices = layer_devices.clone();
-        let get_device_for_tensor = get_device_for_tensor.clone();
-        if let Some(regexes) = make_dummy_regexes.clone() {
+    let handles: Vec<JoinHandle<Result<HashMap<String, Tensor>>>> = loaders
+        .map(|(path, xlora_index)| {
+            let base_device = base_device.clone();
+            let layer_devices = layer_devices.clone();
+            let get_device_for_tensor = get_device_for_tensor.clone();
             let predicate = predicate.clone();
-            handles.push(thread::spawn(Box::new(move || {
-                let loader = Common::new();
-                loader.load_tensors_from_path(
-                    &path,
-                    &base_device,
+            let make_dummy = make_dummy.clone();
+            let progress = progress.clone();
+            thread::spawn(move || {
+                let load = TensorLoad {
+                    path: &path,
+                    base_device: &base_device,
                     layer_devices,
                     get_device_for_tensor,
                     dtype,
-                    silent,
-                    predicate,
-                    |key| regexes.iter().any(|r| r.is_match(key)),
-                )
-            })));
-        } else {
-            let predicate = predicate.clone();
-            handles.push(thread::spawn(Box::new(move || {
-                let loader = Common::new();
-                loader.load_tensors_from_path(
-                    &path,
-                    &base_device,
-                    layer_devices,
-                    get_device_for_tensor,
-                    dtype,
-                    silent,
-                    predicate,
-                    |_| false,
-                )
-            })));
-        }
-    }
-    for (i, path) in xlora_paths.into_iter().enumerate() {
-        let base_device = base_device.clone();
-        let layer_devices = layer_devices.clone();
-        let get_device_for_tensor = get_device_for_tensor.clone();
-        if let Some(regexes) = make_dummy_regexes.clone() {
-            let predicate = predicate.clone();
-            handles.push(thread::spawn(Box::new(move || {
-                let loader = XLora::new(i + 1);
-                loader.load_tensors_from_path(
-                    &path,
-                    &base_device,
-                    layer_devices,
-                    get_device_for_tensor,
-                    dtype,
-                    silent,
-                    predicate,
-                    |key| regexes.iter().any(|r| r.is_match(key)),
-                )
-            })));
-        } else {
-            let predicate = predicate.clone();
-            handles.push(thread::spawn(Box::new(move || {
-                let loader = XLora::new(i + 1);
-                loader.load_tensors_from_path(
-                    &path,
-                    &base_device,
-                    layer_devices,
-                    get_device_for_tensor,
-                    dtype,
-                    silent,
-                    predicate,
-                    |_| false,
-                )
-            })));
-        }
-    }
+                    progress,
+                    predicate: &*predicate,
+                    make_dummy_predicate: &*make_dummy,
+                };
+                match xlora_index {
+                    None => Common::new().load_tensors_from_path(load),
+                    Some(adapter_index) => XLora::new(adapter_index).load_tensors_from_path(load),
+                }
+            })
+        })
+        .collect();
 
     let mut ws = HashMap::new();
     // Wait until all spawned threads have finished loading tensors:
@@ -195,16 +186,16 @@ pub fn load_preload_adapters(
         let mut map = HashMap::new();
         for (name, (path, config)) in paths {
             let loader = Common::new();
-            let loaded_tensors = loader.load_tensors_from_path(
+            let loaded_tensors = loader.load_tensors_from_path(TensorLoad {
                 path,
-                device,
-                vec![None],
-                Arc::new(|_| DeviceForLoadTensor::Base),
-                Some(dtype),
-                silent,
-                |_| true,
-                |_| false,
-            )?;
+                base_device: device,
+                layer_devices: vec![None],
+                get_device_for_tensor: Arc::new(|_| DeviceForLoadTensor::Base),
+                dtype: Some(dtype),
+                progress: (!silent).then(new_multi_progress),
+                predicate: &|_| true,
+                make_dummy_predicate: &|_| false,
+            })?;
 
             // TODO(EricLBuehler): separation of concerns.
             // This is to have WNA16 for GPTQ which is required. No bf16 for GPTQ
@@ -218,20 +209,31 @@ pub fn load_preload_adapters(
     }
 }
 
+/// One checkpoint file to load and how to place and filter its tensors.
+struct TensorLoad<'a> {
+    path: &'a PathBuf,
+    base_device: &'a Device,
+    layer_devices: Vec<Option<Device>>,
+    get_device_for_tensor: Arc<dyn Fn(String) -> DeviceForLoadTensor + Send + Sync + 'static>,
+    dtype: Option<DType>,
+    progress: Option<MultiProgress>,
+    predicate: &'a dyn Fn(String) -> bool,
+    make_dummy_predicate: &'a dyn Fn(&str) -> bool,
+}
+
 // Presently this logic only needs to diverge for X-LoRA support via `get_name_key_pairs()`
 trait LoadTensors {
-    #[allow(clippy::too_many_arguments)]
-    fn load_tensors_from_path(
-        &self,
-        path: &PathBuf,
-        base_device: &Device,
-        layer_devices: Vec<Option<Device>>,
-        get_device_for_tensor: Arc<dyn Fn(String) -> DeviceForLoadTensor + Send + Sync + 'static>,
-        dtype: Option<DType>,
-        is_silent: bool,
-        predicate: impl Fn(String) -> bool,
-        make_dummy_predicate: impl Fn(&str) -> bool,
-    ) -> Result<HashMap<String, Tensor>> {
+    fn load_tensors_from_path(&self, load: TensorLoad<'_>) -> Result<HashMap<String, Tensor>> {
+        let TensorLoad {
+            path,
+            base_device,
+            layer_devices,
+            get_device_for_tensor,
+            dtype,
+            progress,
+            predicate,
+            make_dummy_predicate,
+        } = load;
         let tensors: Box<dyn TensorLoaderBackend> = match path
             .extension()
             .expect("Expected extension")
@@ -257,7 +259,13 @@ trait LoadTensors {
         // Take the filtered list of tensors to load, store with derived lookup key:
         let mut loaded_tensors = HashMap::new();
         if !iter.is_empty() {
-            for (load_name, key_name) in iter.into_iter().with_progress(is_silent) {
+            let pairs: Box<dyn Iterator<Item = (String, String)>> = match &progress {
+                Some(multi) => Box::new(
+                    NiceProgressBar::<_, 'b'>(iter.into_iter(), "Loading", multi).into_iter(),
+                ),
+                None => Box::new(iter.into_iter()),
+            };
+            for (load_name, key_name) in pairs {
                 if !make_dummy_predicate(&load_name) {
                     let dev = match get_device_for_tensor(load_name.clone()) {
                         DeviceForLoadTensor::Base => base_device,

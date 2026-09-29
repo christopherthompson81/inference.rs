@@ -21,7 +21,6 @@ inference-quant.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 indicatif.workspace = true
-tqdm.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

@@ -705,3 +705,135 @@ Review follow-ups:
   default once per model. The same shape (mixin default whose body only needs `self` for a few accessors) is worth
   checking in `DeviceMappedModelLoader`'s `layer_sizes_in_bytes` / `non_mapped_size_in_bytes`, although those are
   per-loader overrides rather than shared defaults.
+
+## Run 39 - 2026-09-28 (evening)
+
+- Question: cold, like-for-like with Run 26, after the last models left core, the dead-code sweeps, the AnyMoE
+  bodies and the step splits (#92-#114)? Is anything outside our crates worth attacking?
+- Command: `CARGO_TARGET_DIR=<scratch> cargo test --no-run --features cuda --workspace --lib --bins --tests --timings`
+  at `19e3ac2b`. Load average ~17 by the end: other work on the machine, so treat this as +-10%.
+- Result: 254 s (Run 26: 241 s), 832 units, 2318 unit-seconds. 36 s of the build has <= 3 units active (was 47 s).
+  - Critical path unchanged in shape: candle-kernels build script t=14-80 s, candle-core t=80-117 s, core lib
+    t=117-193 s (76 s, was 80 s), core lib test t=134-253 s (119 s, was 102 s) ends the build.
+  - Core's lib test also ends the build now (inference-api lib test ends at 244 s, the flux and CLI test binaries at
+    253 s). The core lib test grew with the tests added since (#106-#113) and the machine load.
+- External crates are all off the critical path: they finish before core's lib starts. Dropping one saves CPU
+  (which matters on a loaded machine), not wall time on an idle one. The inventory with exclusive costs is in
+  `dependency_inventory_investigation.md`.
+- Side finding: `inference-audio` is 265 source lines, but its lib takes 39 s (37.7 s of that codegen) and 938k IR
+  lines. The cause is rustfft's planner, instantiated for f32 and f64 with its SSE, AVX and scalar kernels:
+  - f64: 522k lines, used only by Phi-4-multimodal's mel front end, which mirrors numpy's float64 FFT.
+  - SSE: 404k lines, a fallback for x86 CPUs without AVX.
+  - Scalar: 167k lines.
+- Implication: the cold wall time is core's lib test, as in Runs 26-27. Everything else is CPU hygiene, and the
+  largest single item there is our own audio crate's FFT features.
+
+## Run 40 - 2026-09-28 (evening)
+
+- Question: what is left in inference-core by responsibility, and which parts could leave it? Core's lib test (119 s)
+  ends the cold build, so whatever leaves core comes off the critical path.
+- Commands:
+  - `CARGO_TARGET_DIR=<scratch> cargo llvm-lines -p inference-core --lib --features cuda`, with each function
+    grouped by the first `inference_core::<module>` in its name.
+  - Source and test lines per module (tests counted from the first `#[cfg(test)]`, or the whole of a `tests.rs`).
+  - Module coupling from the non-test `crate::<module>` references.
+- Result: 3,812,237 IR lines, 78,388 copies; 141k source lines, of which 38k are tests. 44.4% of the IR names no core
+  item at all (external generics instantiated from core, such as collections, tokio and serde over foreign types).
+  | Responsibility | Modules | Lines (tests) | IR |
+  |---|---|---|---|
+  | Pipeline machinery and loading | pipeline (loaders 21.6k, cuda_graph, multimodal, normal, isq, sampling, chat_template...) | 55.7k (16.9k) | 20.9% (loaders 4.5%) |
+  | Multimodal request preprocessing | vision_models | 24.2k (2.8k) | 8.8% |
+  | GGUF metadata to configs, bindings, tokenizer | gguf | 14.3k (4.4k) | 3.4% |
+  | Engine runtime | engine, scheduler, sequence, prefix_cacher, speculative, distributed, adapter | 26.4k (8.0k) | 13.1% |
+  | Protocol types | request, response, files, tools, reasoning_parsers, chat_collector | 10.3k (3.5k) | 5.0% |
+  | Selection and tuning | selection, tuning, diagnostics, resource_plan | 6.1k (0.9k) | 1.9% |
+  | Services | search, remote_fetch, video_input, block_diffusion, agent_approval | 1.4k (0.1k) | 1.3% |
+  | Facade | inference_rs | 3.0k (1.3k) | 1.4% |
+- Coupling:
+  - The protocol types reference no engine or pipeline module (`request` -> response, files, tools; `tools` ->
+    reasoning_parsers), so they are a leaf.
+  - gguf references vision_models 4 times, pipeline 3 times and models once.
+  - search references pipeline, embedding_models, remote_fetch and engine.
+  - Engine, scheduler, sequence and pipeline reference each other in cycles (scheduler -> engine -> scheduler;
+    pipeline <-> sequence), and vision_models leans on pipeline 24 times and sequence 21 times through the
+    `InputsProcessor` trait.
+- Implication, in order of cost to move:
+  1. The protocol types can become a crate below core as they stand (about 5% of IR and 3.5k test lines).
+  2. gguf needs its few upward references cut.
+  3. The normal loaders need `NormalModelLoader`, `DeviceMappedModelLoader`, `IsqModelLoader` and their helpers
+     moved into inference-nn first; then each family crate could host its own loader rows.
+  4. vision_models and the multimodal loaders need a preprocessing interface that does not take `Sequence`.
+  5. The engine runtime and the pipeline machinery stay together.
+
+## Run 41 - 2026-09-28 (evening)
+
+- Question: before splitting "pipeline machinery and loading" out of core, what inside it can shrink?
+- Command: Run 40's `cargo llvm-lines` output, restricted to functions naming `inference_core::pipeline`. Trait
+  methods are grouped across implementers.
+  - Method bodies were compared across the 55 loaders, with the config type name normalized.
+  - Pipeline methods were compared between `normal.rs`, `multimodal.rs` and the smaller pipelines, using
+    whitespace-normalized similarity ratios.
+- Result: pipeline-named IR is 950k lines. The largest groups:
+  - `Loader::load_model_from_path` 97.6k (1316 copies, over 9 impls and their closures).
+  - `InputsProcessor::process_inputs` 94.3k (the vision processors).
+  - `LoadTensors::load_tensors_from_path` 58.6k (1092 copies).
+  - `load_model_from_hf` 32.3k.
+  - `layer_sizes_in_bytes` 23.5k and `non_mapped_size_in_bytes` 21.0k.
+  - `get_device_for_tensor` 24.7k over about 600 copies (the normal, multimodal and embedding defaults).
+- Findings:
+  1. `load_tensors_from_path` is instantiated once per call site of the safetensors var-builder loader, for both the
+     plain and X-LoRA backends, because the predicate is `impl Fn`. Every `|_| true` is its own type. A `&dyn Fn`
+     predicate leaves two copies (one per backend), in inference-nn; the family crates' call sites benefit too.
+  2. `get_device_for_tensor`'s default builds its `Regex` and closure inside the trait default, so every loader
+     instantiates it. Delegating to a non-generic function of `num_layers` leaves one copy.
+  3. The loaders' `DeviceMappedModelLoader` / `NormalModelLoader` methods are mostly the same body with a different
+     config type. Identical once the config type is normalized:
+     - `is_gptx`: 26 of 57 are `Ok(true)`.
+     - `non_mapped_max_act_size_elems`: 29 of 55 are `Ok(0)`.
+     - `num_layers`: 19 of 55 read `num_hidden_layers`.
+     - `mapped_max_act_size_elems`: 19 of 55 compute batch * heads * min(seq, chunk)^2.
+     - `get_config_repr`: 24 of 57.
+     - `non_mapped_size_in_bytes`: 15 of 55 compute embed + untied head + norm.
+     - `layer_sizes_in_bytes`: llama, mistral and smollm3 are identical, and more share the dense-decoder shape.
+     Defaults derived from `model_config()`, plus a dense-decoder size helper, would remove about 1-1.5k source lines.
+  4. `NormalPipeline` and `MultimodalPipeline` duplicate each other:
+     - 30 methods, 586 lines, are identical apart from whitespace: speculative sampling and attach, CUDA-graph
+       capture bookkeeping and reclaim, calibration, hybrid recurrent snapshots, cache clone, AnyMoE layers,
+       `re_isq_model`.
+     - The CUDA decode-graph path is 74-89% similar: `try_cuda_decode_graph_forward` 187 lines, `forward_step` 129,
+       `capture_cuda_decode_graph_step` 106, `replay_cuda_decode_one_token` 28.
+     - The GGUF, GGML and embedding pipelines repeat about 70 lines each of the short ones.
+     - A shared runtime struct owning the CUDA-graph, speculative and calibration state, with these methods
+       implemented once, would remove roughly 1k lines.
+- Implication: findings 1 and 2 are small edits worth about 75k IR (about 2% of core). Findings 3 and 4 are mainly
+  source (2-2.5k lines) with some IR. All four also shrink what a later move of the loaders or pipelines out of core
+  would carry.
+  - Not cheap: `load_model_from_path` (the loader consolidation concluded, #110), `process_inputs` (per-model vision
+    code), and the config deserializers.
+
+## Run 42 - 2026-09-28 (night)
+
+- Change:
+  - Run 41's findings 1 and 2. The safetensors loader erases its predicate into `Arc<dyn Fn>` before the
+    non-generic body, and its four spawn blocks become one. The `get_device_for_tensor` defaults and lfm2vl call
+    one `layer_indexed_device`.
+  - The self-contained dependency-inventory findings:
+    - rubato and rustfft without default features (scalar FFT kernels);
+    - variantly replaced by two methods;
+    - tqdm replaced by the indicatif-backed `with_progress`;
+    - tokio-test dropped, and futures-util replaced by futures;
+    - strum 0.28, and scraper 0.26 with html2text 0.17 (one html5ever).
+- Command: the same `cargo llvm-lines -p inference-core --lib --features cuda` as Run 40 (scratch target), plus
+  `cargo llvm-lines -p inference-audio --lib`.
+- Result:
+  - Core: 3,812,237 -> 3,585,564 IR lines (-226.7k, -5.9%), 78,388 -> 73,983 copies.
+    - `load_tensors_from_path` no longer appears in core at all (was 58.6k over 1092 copies). Its closures,
+      thread-spawn shims and drop glue went with it, which is why the drop is about three times Run 41's estimate.
+    - `get_device_for_tensor` is 24.7k -> 4.6k.
+  - inference-audio: 938,164 -> 197,540 IR lines (-79%).
+  - Gone from the build graph: syn 1, darling 0.11, uuid 0.8, tqdm, crossterm 0.25 and realfft; strum and
+    html5ever each down to one version.
+  - Full `local_ci.sh --lint --tests --cuda --slim --bindings --docs` green (2188 CPU, 2508 CUDA tests).
+- Not done: moving reqwest 0.13 off aws-lc. With `rustls-no-provider`, reqwest falls back to the process-wide rustls
+  provider and panics if none is installed, so every client path would need an install first. That includes the 8
+  `reqwest::get` calls in the examples, which users copy. That is not worth ~30 s of CPU off the critical path.

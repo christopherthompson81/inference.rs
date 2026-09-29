@@ -22,8 +22,8 @@ use candle_core::quantized::QMatMul;
 use candle_core::quantized::QTensor;
 use candle_core::{DType, Device, Module, Result, Tensor, D};
 use candle_nn::Embedding;
+use inference_nn::utils::progress::IterWithProgress;
 use inference_quant::ShardedVarBuilder;
-use tqdm::Iter;
 use tracing::info;
 
 use crate::gguf::metadata::ContentMetadata;
@@ -387,7 +387,7 @@ impl FromAdapterGGUF for ModelWeights {
         if xlora_config.is_none() {
             // We are now a LoRA model so we must merge the weights
             info!("Merging LoRA adapters.");
-            for layer in layers.iter_mut().tqdm() {
+            for layer in layers.iter_mut().with_progress(false) {
                 layer.attn_qkv.merge_weights()?;
                 layer.attn_output.merge_weights()?;
                 layer.mlp.ffn_down.merge_weights()?;
