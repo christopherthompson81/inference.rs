@@ -9,7 +9,7 @@ use crate::{
     attention::{AttentionMask, SdpaParams},
     kv_cache::EitherCache,
     layers::{Activation, RotaryEmbedding, Sdpa},
-    lora::{linear, LinearLayerLike, LoraConfig, Ordering},
+    lora::{LinearLayerLike, LoraConfig, Ordering, linear},
     model::{IsqModel, NormalLoadingMetadata},
     paged_attention::ModelConfigMetadata,
     utils::progress::NiceProgressBar,
@@ -27,8 +27,8 @@ use tracing::info;
 
 use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
-    layers::{embedding, layer_norm, CausalMasker},
-    model::{extract_logits, NormalModel},
+    layers::{CausalMasker, embedding, layer_norm},
+    model::{NormalModel, extract_logits},
     phi2::Config,
 };
 
@@ -401,7 +401,7 @@ impl Model {
         normal_loading_metadata: NormalLoadingMetadata,
         preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),

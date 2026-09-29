@@ -1,11 +1,11 @@
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::{LayerNorm, VarBuilder};
 
 use super::backbone::HGNetV2Backbone;
 use super::config::PPDocLayoutV3Config;
-use super::decoder::{inverse_sigmoid, DecodeCtx, DecoderLayer, LevelGeom};
+use super::decoder::{DecodeCtx, DecoderLayer, LevelGeom, inverse_sigmoid};
 use super::encoder::HybridEncoder;
-use crate::layers::{linear, ConvNorm, ConvNormSpec, Linear, MlpHead};
+use crate::layers::{ConvNorm, ConvNormSpec, Linear, MlpHead, linear};
 
 const SEQ_CONV: (&str, &str) = ("0", "1");
 const ANCHOR_EPS: f32 = 1e-2;

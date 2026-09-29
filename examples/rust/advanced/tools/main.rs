@@ -8,7 +8,7 @@ use anyhow::Result;
 use inference::{
     Function, IsqBits, ModelBuilder, RequestBuilder, TextMessageRole, Tool, ToolChoice, ToolType,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[derive(serde::Deserialize, Debug, Clone)]
 struct GetWeatherInput {
@@ -16,7 +16,10 @@ struct GetWeatherInput {
 }
 
 fn get_weather(input: GetWeatherInput) -> String {
-    format!("Weather in {}: Temperature: 25C. Wind: calm. Dew point: 10C. Precipitiation: 5cm of rain expected.", input.place)
+    format!(
+        "Weather in {}: Temperature: 25C. Wind: calm. Dew point: 10C. Precipitiation: 5cm of rain expected.",
+        input.place
+    )
 }
 
 #[tokio::main]

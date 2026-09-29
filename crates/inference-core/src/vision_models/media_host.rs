@@ -17,20 +17,20 @@ use inference_nn::model::BlockDenoisingProgressEmitter;
 use tokenizers::Tokenizer;
 
 use crate::{
+    AudioInput,
     device_map::DeviceMapper,
     paged_attention::{
-        block_hash::{MultiModalFeature, MultimodalKind},
         PagedAttentionMeta,
+        block_hash::{MultiModalFeature, MultimodalKind},
     },
     pipeline::{
-        text_models_inputs_processor::{
-            get_completion_input, get_completion_input_windowed, get_prompt_input,
-            ModelInputs as TextModelInputs, TextInputsProcessor,
-        },
         InputProcessorOutput, InputsProcessor, InputsProcessorType,
+        text_models_inputs_processor::{
+            ModelInputs as TextModelInputs, TextInputsProcessor, get_completion_input,
+            get_completion_input_windowed, get_prompt_input,
+        },
     },
     sequence::Sequence,
-    AudioInput,
 };
 
 use super::ModelInputs;

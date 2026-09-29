@@ -494,7 +494,7 @@ pub fn call_kv_append_dual(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::BF16, DType::F16, DType::F32],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;

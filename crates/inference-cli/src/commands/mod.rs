@@ -12,7 +12,7 @@ pub(crate) mod serve;
 mod tune;
 mod uqff;
 
-pub use bench::{run_bench, BenchRunConfig};
+pub use bench::{BenchRunConfig, run_bench};
 pub use cache::{run_cache_delete, run_cache_list};
 pub use config::run_from_config;
 pub use doctor::run_doctor;
@@ -130,9 +130,11 @@ mod tests {
     fn requested_adapter_requires_dynamic_lora() {
         let model = auto_model(AdapterOptions::default());
         let error = normalize_requested_adapter(&model, Some("code")).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("requires a dynamic LoRA runtime"));
+        assert!(
+            error
+                .to_string()
+                .contains("requires a dynamic LoRA runtime")
+        );
     }
 
     #[test]

@@ -16,17 +16,17 @@ use text::Qwen3VLMoETextModel;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     kv_cache::EitherCache,
-    layers::masker::PastKvLenCache,
     layers::CausalMasker,
+    layers::masker::PastKvLenCache,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata},
     paged_attention::{
+        AttentionImplementation, ModelConfigMetadata,
         block_hash::MultimodalKind,
         encoder_cache::{CacheModality, EncoderCacheManager},
-        AttentionImplementation, ModelConfigMetadata,
     },
     qwen3_vl::{
-        concatenate_visual_items, insert_current_visual_outputs, vision::Qwen3VLVisionModel,
-        VisualEncoder,
+        VisualEncoder, concatenate_visual_items, insert_current_visual_outputs,
+        vision::Qwen3VLVisionModel,
     },
     vision::multimodal_layout::{MultimodalEncoderOutputs, PackedMultimodalLayout},
 };
@@ -332,12 +332,12 @@ impl Qwen3VLMoEModel {
                     }
                     if img_offset != img_layer.dim(0)? || vid_offset != vid_layer.dim(0)? {
                         candle_core::bail!(
-                                "DeepStack feature alignment failed for images ({}/{}) or videos ({}/{})",
-                                img_offset,
-                                img_layer.dim(0)?,
-                                vid_offset,
-                                vid_layer.dim(0)?
-                            );
+                            "DeepStack feature alignment failed for images ({}/{}) or videos ({}/{})",
+                            img_offset,
+                            img_layer.dim(0)?,
+                            vid_offset,
+                            vid_layer.dim(0)?
+                        );
                     }
                     let row_refs: Vec<&Tensor> = rows.iter().collect();
                     combined_layers.push(Tensor::stack(&row_refs, 0)?);

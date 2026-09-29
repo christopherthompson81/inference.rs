@@ -89,15 +89,14 @@ impl TextConfig {
                 self.num_hidden_layers
             );
         }
-        if let Some(layer_types) = &self.layer_types {
-            if layer_types.len() != self.num_hidden_layers
-                || !layer_types.contains(&LayerType::FullAttention)
-            {
-                candle_core::bail!(
-                    "Qwen3.5 layer_types must list {} layers with at least one full_attention entry",
-                    self.num_hidden_layers
-                );
-            }
+        if let Some(layer_types) = &self.layer_types
+            && (layer_types.len() != self.num_hidden_layers
+                || !layer_types.contains(&LayerType::FullAttention))
+        {
+            candle_core::bail!(
+                "Qwen3.5 layer_types must list {} layers with at least one full_attention entry",
+                self.num_hidden_layers
+            );
         }
         if self.num_attention_heads == 0
             || self.num_key_value_heads == 0

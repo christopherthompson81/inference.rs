@@ -3,12 +3,12 @@
 use std::{pin::Pin, sync::Arc, task::Poll, time::Duration};
 
 use axum::{
-    extract::{rejection::JsonRejection, Json, Path, State},
-    response::{
-        sse::{Event, KeepAlive, KeepAliveStream},
-        IntoResponse, Sse,
-    },
     Extension,
+    extract::{Json, Path, State, rejection::JsonRejection},
+    response::{
+        IntoResponse, Sse,
+        sse::{Event, KeepAlive, KeepAliveStream},
+    },
 };
 use futures::Stream;
 
@@ -16,15 +16,14 @@ pub use crate::responses_api::{
     OpenResponsesCreateRequest, OpenResponsesStreamEvent, ResponseDeleted,
 };
 use crate::{
-    handler_core::{openai_error_response, ApiError, ApiErrorHttp},
+    handler_core::{ApiError, ApiErrorHttp, openai_error_response},
     responses_api::{
-        cancel_response as cancel, collect_response, delete_response as delete,
-        get_response as get, prepare_response, spawn_background, OpenResponsesStreamer,
-        ResponsesStreamItem,
+        OpenResponsesStreamer, ResponsesStreamItem, cancel_response as cancel, collect_response,
+        delete_response as delete, get_response as get, prepare_response, spawn_background,
     },
     responses_types::resource::ResponseResource,
     skills::SkillStore,
-    streaming::{get_keep_alive_interval, StreamOutcomeHandle},
+    streaming::{StreamOutcomeHandle, get_keep_alive_interval},
     types::ExtractedInferenceRsState,
 };
 
@@ -184,7 +183,7 @@ pub async fn cancel_response(
 #[cfg(test)]
 mod tests {
     use axum::http::StatusCode;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     use super::*;
     use crate::handler_core::ApiErrorKind;

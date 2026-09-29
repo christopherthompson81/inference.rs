@@ -1,9 +1,9 @@
 use std::{
     fmt::Debug,
     sync::{
+        Arc, Mutex,
         atomic::AtomicUsize,
         mpsc::{self, Receiver},
-        Arc, Mutex,
     },
 };
 

@@ -5,7 +5,7 @@ use std::{
 };
 
 use candle_core::cuda_backend::cudarc::driver::{
-    sys, CudaEvent, CudaStream, DevicePtr, PinnedHostSlice,
+    CudaEvent, CudaStream, DevicePtr, PinnedHostSlice, sys,
 };
 use candle_core::{DType, Device, DeviceLocation, Storage, Tensor, Var};
 

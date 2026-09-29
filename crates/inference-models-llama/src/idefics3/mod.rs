@@ -9,7 +9,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 pub use config::Idefics3Config;
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
 use vision::{Idefics3Connector, Idefics3VisionTransformer};
@@ -22,9 +22,9 @@ use crate::{
     llama::Llama,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     paged_attention::{
+        AttentionImplementation, ModelConfigMetadata,
         block_hash::MultimodalKind,
         encoder_cache::{CacheModality, EncoderCacheManager},
-        AttentionImplementation, ModelConfigMetadata,
     },
     utils::unvarbuilder::UnVarBuilder,
     vision::multimodal_layout::{
@@ -231,14 +231,13 @@ impl Idefics3Model {
                             .lock()
                             .expect("encoder cache lock poisoned");
                         for (i, &hash) in image_hashes.iter().enumerate() {
-                            if let Some(cached) = guard.get(CacheModality::Image, hash) {
-                                if cached.len() == subimage_counts[i] {
+                            match guard.get(CacheModality::Image, hash) {
+                                Some(cached) if cached.len() == subimage_counts[i] => {
                                     per_image[i] = Some(cached.to_vec());
-                                } else {
+                                }
+                                _ => {
                                     miss_indices.push(i);
                                 }
-                            } else {
-                                miss_indices.push(i);
                             }
                         }
                     }

@@ -161,7 +161,7 @@ impl CustomOp2 for Fp8BlockwiseDequantize {
         weight_s: &candle_core::CudaStorage,
         weight_l: &candle_core::Layout,
     ) -> Result<(candle_core::CudaStorage, candle_core::Shape)> {
-        use candle_core::{backend::BackendStorage, CudaStorage};
+        use candle_core::{CudaStorage, backend::BackendStorage};
         use half::{bf16, f16};
 
         use crate::{blockwise_fp8::ffi, utils::slice_ptr};
@@ -2143,9 +2143,11 @@ mod tests {
                         );
                     }
                 }
-                assert!(actual_scales[group][rows..scale_stride]
-                    .iter()
-                    .all(|scale| *scale == 0.0));
+                assert!(
+                    actual_scales[group][rows..scale_stride]
+                        .iter()
+                        .all(|scale| *scale == 0.0)
+                );
             }
         }
         Ok(())
@@ -2284,9 +2286,11 @@ mod tests {
 
             let scale_stride = rows.div_ceil(ROW_ALIGNMENT) * ROW_ALIGNMENT;
             assert_eq!(actual_scales.len(), COLUMNS / GROUP_SIZE);
-            assert!(actual_scales
-                .iter()
-                .all(|scales| scales.len() == scale_stride));
+            assert!(
+                actual_scales
+                    .iter()
+                    .all(|scales| scales.len() == scale_stride)
+            );
             for group in 0..COLUMNS / GROUP_SIZE {
                 for row in 0..rows {
                     let start = row * COLUMNS + group * GROUP_SIZE;
@@ -2316,9 +2320,11 @@ mod tests {
                         );
                     }
                 }
-                assert!(actual_scales[group][rows..scale_stride]
-                    .iter()
-                    .all(|scale| *scale == 0.0));
+                assert!(
+                    actual_scales[group][rows..scale_stride]
+                        .iter()
+                        .all(|scale| *scale == 0.0)
+                );
             }
         }
         Ok(())

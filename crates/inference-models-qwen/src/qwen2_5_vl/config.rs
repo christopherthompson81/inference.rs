@@ -161,21 +161,25 @@ mod tests {
 
     #[test]
     fn explicit_layer_types_are_validated() {
-        assert!(resolve_layer_sliding_windows(
-            2,
-            true,
-            Some(256),
-            2,
-            Some(vec![AttentionType::FullAttention]),
-        )
-        .is_err());
-        assert!(resolve_layer_sliding_windows(
-            1,
-            true,
-            None,
-            0,
-            Some(vec![AttentionType::SlidingAttention]),
-        )
-        .is_err());
+        assert!(
+            resolve_layer_sliding_windows(
+                2,
+                true,
+                Some(256),
+                2,
+                Some(vec![AttentionType::FullAttention]),
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_layer_sliding_windows(
+                1,
+                true,
+                None,
+                0,
+                Some(vec![AttentionType::SlidingAttention]),
+            )
+            .is_err()
+        );
     }
 }

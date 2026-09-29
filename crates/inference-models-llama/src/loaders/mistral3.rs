@@ -102,11 +102,11 @@ impl DeviceMappedModelLoader for Mistral3Loader {
         let vcfg = &cfg.vision_config;
         let tcfg = &cfg.text_config;
 
-        let AutoDeviceMapParams::Multimodal {
-            max_seq_len,
-            max_batch_size,
+        let &AutoDeviceMapParams::Multimodal {
+            ref max_seq_len,
+            ref max_batch_size,
             max_image_shape: (mut height, mut width),
-            max_num_images,
+            ref max_num_images,
         } = params
         else {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
@@ -147,11 +147,11 @@ impl DeviceMappedModelLoader for Mistral3Loader {
         let cfg = Mistral3Config::from_json(config)?;
         let cfg = &cfg.vision_config;
 
-        let AutoDeviceMapParams::Multimodal {
+        let &AutoDeviceMapParams::Multimodal {
             max_seq_len: _,
-            max_batch_size,
+            ref max_batch_size,
             max_image_shape: (mut height, mut width),
-            max_num_images,
+            ref max_num_images,
         } = params
         else {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")

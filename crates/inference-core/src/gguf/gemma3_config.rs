@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::quantized::gguf_file::Value as GgufValue;
-use serde_json::{json, Value as JsonValue};
+use serde_json::{Value as JsonValue, json};
 
 use crate::layers::Activation;
 use crate::vision_models::gemma3::config::{Gemma3Config, Gemma3TextConfig};

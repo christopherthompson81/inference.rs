@@ -81,7 +81,7 @@ macro_rules! declare_mmvq_fused_glu {
     };
 }
 
-extern "C" {
+unsafe extern "C" {
     /// Launch Q8_1 quantization kernel
     /// Quantizes f32 input to Q8_1 format for use with quantized matmul kernels.
     pub fn launch_quantize_q8_1(

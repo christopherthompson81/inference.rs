@@ -9,8 +9,8 @@ pub fn cuda_dflash_greedy_select(
     anchors: &Tensor,
 ) -> Result<Tensor> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use candle_core::cuda_backend::CudaStorageSlice;
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use std::ffi::c_void;
 
     const OP: &str = "cuda_dflash_greedy_select";
@@ -221,8 +221,8 @@ pub fn cuda_dflash_sample_select(
     input: DFlashSelectorSampleInput<'_>,
 ) -> Result<DFlashSelectorSampleOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use candle_core::cuda_backend::CudaStorageSlice;
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use std::ffi::c_void;
 
     const OP: &str = "cuda_dflash_sample_select";

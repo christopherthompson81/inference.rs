@@ -263,21 +263,21 @@ pub fn get_openapi_doc(base_path: Option<&str>) -> utoipa::openapi::OpenApi {
 
     let mut doc = ApiDoc::openapi();
 
-    if let Some(prefix) = base_path {
-        if !prefix.is_empty() {
-            let mut prefixed_paths = utoipa::openapi::Paths::default();
+    if let Some(prefix) = base_path
+        && !prefix.is_empty()
+    {
+        let mut prefixed_paths = utoipa::openapi::Paths::default();
 
-            let original_paths = std::mem::take(&mut doc.paths.paths);
+        let original_paths = std::mem::take(&mut doc.paths.paths);
 
-            for (path, item) in original_paths {
-                let prefixed_path = format!("{prefix}{path}");
-                prefixed_paths.paths.insert(prefixed_path, item);
-            }
-
-            prefixed_paths.extensions = doc.paths.extensions.clone();
-
-            doc.paths = prefixed_paths;
+        for (path, item) in original_paths {
+            let prefixed_path = format!("{prefix}{path}");
+            prefixed_paths.paths.insert(prefixed_path, item);
         }
+
+        prefixed_paths.extensions = doc.paths.extensions.clone();
+
+        doc.paths = prefixed_paths;
     }
 
     doc
@@ -336,8 +336,8 @@ mod tests {
         assert_eq!(list_model["in"], "query");
         assert_eq!(list_model["required"], false);
 
-        let load_example = &value["paths"]["/v1/load_lora_adapter"]["post"]["requestBody"]
-            ["content"]["application/json"]["example"];
+        let load_example = &value["paths"]["/v1/load_lora_adapter"]["post"]["requestBody"]["content"]
+            ["application/json"]["example"];
         assert_eq!(
             load_example,
             &serde_json::json!({
@@ -346,16 +346,18 @@ mod tests {
             })
         );
 
-        let unload_example = &value["paths"]["/v1/unload_lora_adapter"]["post"]["requestBody"]
-            ["content"]["application/json"]["example"];
+        let unload_example = &value["paths"]["/v1/unload_lora_adapter"]["post"]["requestBody"]["content"]
+            ["application/json"]["example"];
         assert_eq!(
             unload_example,
             &serde_json::json!({"lora_name": "production"})
         );
 
-        assert!(value["paths"]["/v1/lora_adapters"]["get"]["description"]
-            .as_str()
-            .is_some_and(|description| description.contains("Always registered")));
+        assert!(
+            value["paths"]["/v1/lora_adapters"]["get"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("Always registered"))
+        );
     }
 
     // docs/openapi.json is a committed artifact consumed by the docs site.

@@ -7,7 +7,7 @@ use crate::{
         block_hash::MultimodalKind,
         encoder_cache::{CacheModality, EncoderCacheManager},
     },
-    qwen3_vl::{insert_current_visual_outputs, vision::Qwen3VLVisionModel, VisualEncoder},
+    qwen3_vl::{VisualEncoder, insert_current_visual_outputs, vision::Qwen3VLVisionModel},
     vision::multimodal_layout::{MultimodalEncoderOutputs, PackedMultimodalLayout},
 };
 
@@ -293,9 +293,11 @@ mod tests {
         ]);
 
         let error = apply_packed_visual_layout(input_embeds, &layout, &outputs).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("different DeepStack output counts"));
+        assert!(
+            error
+                .to_string()
+                .contains("different DeepStack output counts")
+        );
         Ok(())
     }
 }

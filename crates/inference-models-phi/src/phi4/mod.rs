@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 use candle_nn::Module;
 use inference_quant::{QuantMethod, ReplicatedLayer, ShardedVarBuilder};
 use mm_embedding::{InputMode, Phi4MMImageAudioEmbedding, Phi4MMPackedInputs};
@@ -20,8 +20,8 @@ use crate::{
     layers::{self, Activation, CausalMasker, RmsNorm},
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata},
     paged_attention::{
-        encoder_cache::EncoderCacheManager, AttentionImplementation, ModelConfigMetadata,
-        PagedAttention,
+        AttentionImplementation, ModelConfigMetadata, PagedAttention,
+        encoder_cache::EncoderCacheManager,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
     vision::multimodal_layout::PackedMultimodalLayout,

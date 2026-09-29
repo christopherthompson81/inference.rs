@@ -3,14 +3,14 @@
 use crate::attention::FlashParams;
 use std::sync::Arc;
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{LayerNorm, LayerNormConfig, Linear, Module};
 use indicatif::MultiProgress;
 use inference_quant::{ColumnParallelLayer, QuantMethod, RowParallelLayer, ShardedVarBuilder};
 
 use crate::{
     attention::{AttentionMask, SdpaParams},
-    layers::{layer_norm, linear_no_bias, Activation, Sdpa},
+    layers::{Activation, Sdpa, layer_norm, linear_no_bias},
     model::IsqModel,
     ops::RepeatInterleaveOp,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},

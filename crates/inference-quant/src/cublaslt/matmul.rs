@@ -1,11 +1,11 @@
+use candle_core::DType;
+use candle_core::cuda::CudaDType;
 use candle_core::cuda::cudarc::cublaslt::result::set_matrix_layout_attribute;
 use candle_core::cuda::cudarc::cublaslt::{result, result::CublasError, sys};
 use candle_core::cuda::cudarc::driver::sys::{CUdevice_attribute, CUdeviceptr, CUstream};
 use candle_core::cuda::cudarc::driver::{
     CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, DriverError,
 };
-use candle_core::cuda::CudaDType;
-use candle_core::DType;
 use core::ffi::c_int;
 use core::mem;
 use float8::F8E4M3;
@@ -405,113 +405,116 @@ pub trait Matmul<T: CublasLTDType>: MatmulShared {
         bias: Option<&B>,
         act: Option<&Activation>,
     ) -> Result<(), CublasError> {
-        let (a_rows, a_cols) = (cfg.k, cfg.m);
-        let (b_rows, b_cols) = (cfg.k, cfg.n);
-        assert!(cfg.transa);
-        assert!(!cfg.transb);
+        unsafe {
+            let (a_rows, a_cols) = (cfg.k, cfg.m);
+            let (b_rows, b_cols) = (cfg.k, cfg.n);
+            assert!(cfg.transa);
+            assert!(!cfg.transb);
 
-        // Matmul description
-        let matmul_desc = MatmulDesc::new(
-            sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
-            sys::cudaDataType_t::CUDA_R_32F,
-        )?;
+            // Matmul description
+            let matmul_desc = MatmulDesc::new(
+                sys::cublasComputeType_t::CUBLAS_COMPUTE_32F,
+                sys::cudaDataType_t::CUDA_R_32F,
+            )?;
 
-        // Set transa
-        matmul_desc.set_transpose(cfg.transa, Matrix::A)?;
-        // Set transb
-        matmul_desc.set_transpose(cfg.transb, Matrix::B)?;
+            // Set transa
+            matmul_desc.set_transpose(cfg.transa, Matrix::A)?;
+            // Set transb
+            matmul_desc.set_transpose(cfg.transb, Matrix::B)?;
 
-        // Creates matrix layouts
-        let a_layout = MatrixLayout::new(Self::matrix_type(), a_rows, a_cols, cfg.lda)?;
-        if let (Some(batch_size), Some(stride_a)) = (cfg.batch_size, cfg.stride_a) {
-            a_layout.set_batch(batch_size, stride_a)?;
+            // Creates matrix layouts
+            let a_layout = MatrixLayout::new(Self::matrix_type(), a_rows, a_cols, cfg.lda)?;
+            if let (Some(batch_size), Some(stride_a)) = (cfg.batch_size, cfg.stride_a) {
+                a_layout.set_batch(batch_size, stride_a)?;
+            }
+
+            let b_layout = MatrixLayout::new(Self::matrix_type(), b_rows, b_cols, cfg.ldb)?;
+            if let (Some(batch_size), Some(stride_b)) = (cfg.batch_size, cfg.stride_b) {
+                b_layout.set_batch(batch_size, stride_b)?;
+            }
+
+            let c_layout =
+                MatrixLayout::new(sys::cudaDataType_t::CUDA_R_16BF, cfg.m, cfg.n, cfg.ldc)?;
+            if let (Some(batch_size), Some(stride_c)) = (cfg.batch_size, cfg.stride_c) {
+                c_layout.set_batch(batch_size, stride_c)?;
+            }
+
+            let out_ty = sys::cudaDataType_t::CUDA_R_16BF;
+            let d_layout = MatrixLayout::new(out_ty, cfg.m, cfg.n, cfg.ldc)?;
+            if let (Some(batch_size), Some(stride_c)) = (cfg.batch_size, cfg.stride_c) {
+                d_layout.set_batch(batch_size, stride_c)?;
+            }
+
+            // Set scale factors for FP8 inputs (dequantization scales)
+            // Note: D_SCALE is NOT set because output is BF16, not FP8.
+            // Setting D_SCALE with BF16 output causes CUBLAS_STATUS_INVALID_VALUE
+            // on some architectures (e.g., Blackwell SM 12.x).
+            let (scale_a, _scale_a_guard) = scale_a.device_ptr(self.stream());
+            let (scale_b, _scale_b_guard) = scale_b.device_ptr(self.stream());
+            let (_scale_d, _scale_d_guard) = scale_d.device_ptr(self.stream());
+            matmul_desc.set_scale_ptr(&scale_a, Matrix::A)?;
+            matmul_desc.set_scale_ptr(&scale_b, Matrix::B)?;
+            // D_SCALE is only valid when D matrix is FP8 (for requantization)
+
+            // Pass amaxd ptr
+            // unsafe {
+            //     result::set_matmul_desc_attribute(
+            //         matmul_desc.handle,
+            //         sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_AMAX_D_POINTER,
+            //         amax_d.device_ptr_mut() as *const CUdeviceptr as *const _,
+            //         mem::size_of::<CUdeviceptr>(),
+            //     )
+            //     ?;
+            // }
+
+            // Epilogue system can be leveraged to fuse add and activation operations
+            let (bias_ptr, _bias_ptr_guard) = bias.map(|b| b.device_ptr(self.stream())).unzip();
+            matmul_desc.set_epilogue(act, bias_ptr.as_ref(), cfg.stride_bias)?;
+
+            // Create matmul heuristic search preferences
+            let matmul_pref = MatmulPref::new()?;
+
+            // Set workspace size
+            matmul_pref.set_workspace_size(self.workspace().size)?;
+
+            // Get heuristic given Config, bias, act and workspace size
+            let heuristic = result::get_matmul_algo_heuristic(
+                *self.handle(),
+                matmul_desc.handle,
+                a_layout.handle,
+                b_layout.handle,
+                c_layout.handle,
+                d_layout.handle,
+                matmul_pref.handle,
+            )?;
+
+            let (out_ptr, _out_guard) = out.device_ptr_mut(self.stream());
+
+            let (a, _a_guard) = a.device_ptr(self.stream());
+            let (b, _b_guard) = b.device_ptr(self.stream());
+            let (c, _c_guard) = c.device_ptr(self.stream());
+            let workspace = &self.workspace().buffer;
+            let (workspace, _workspace_guard) = workspace.device_ptr(self.stream());
+            // Launch matmul kernel
+            result::matmul(
+                *self.handle(),
+                matmul_desc.handle,
+                (&cfg.alpha) as *const _ as *const _,
+                (&cfg.beta) as *const _ as *const _,
+                a as *const _,
+                a_layout.handle,
+                b as *const _,
+                b_layout.handle,
+                c as *const _,
+                c_layout.handle,
+                out_ptr as *mut _,
+                d_layout.handle,
+                (&heuristic.algo) as *const _,
+                workspace as *mut _,
+                self.workspace().size,
+                self.stream().cu_stream() as *mut _,
+            )
         }
-
-        let b_layout = MatrixLayout::new(Self::matrix_type(), b_rows, b_cols, cfg.ldb)?;
-        if let (Some(batch_size), Some(stride_b)) = (cfg.batch_size, cfg.stride_b) {
-            b_layout.set_batch(batch_size, stride_b)?;
-        }
-
-        let c_layout = MatrixLayout::new(sys::cudaDataType_t::CUDA_R_16BF, cfg.m, cfg.n, cfg.ldc)?;
-        if let (Some(batch_size), Some(stride_c)) = (cfg.batch_size, cfg.stride_c) {
-            c_layout.set_batch(batch_size, stride_c)?;
-        }
-
-        let out_ty = sys::cudaDataType_t::CUDA_R_16BF;
-        let d_layout = MatrixLayout::new(out_ty, cfg.m, cfg.n, cfg.ldc)?;
-        if let (Some(batch_size), Some(stride_c)) = (cfg.batch_size, cfg.stride_c) {
-            d_layout.set_batch(batch_size, stride_c)?;
-        }
-
-        // Set scale factors for FP8 inputs (dequantization scales)
-        // Note: D_SCALE is NOT set because output is BF16, not FP8.
-        // Setting D_SCALE with BF16 output causes CUBLAS_STATUS_INVALID_VALUE
-        // on some architectures (e.g., Blackwell SM 12.x).
-        let (scale_a, _scale_a_guard) = scale_a.device_ptr(self.stream());
-        let (scale_b, _scale_b_guard) = scale_b.device_ptr(self.stream());
-        let (_scale_d, _scale_d_guard) = scale_d.device_ptr(self.stream());
-        matmul_desc.set_scale_ptr(&scale_a, Matrix::A)?;
-        matmul_desc.set_scale_ptr(&scale_b, Matrix::B)?;
-        // D_SCALE is only valid when D matrix is FP8 (for requantization)
-
-        // Pass amaxd ptr
-        // unsafe {
-        //     result::set_matmul_desc_attribute(
-        //         matmul_desc.handle,
-        //         sys::cublasLtMatmulDescAttributes_t::CUBLASLT_MATMUL_DESC_AMAX_D_POINTER,
-        //         amax_d.device_ptr_mut() as *const CUdeviceptr as *const _,
-        //         mem::size_of::<CUdeviceptr>(),
-        //     )
-        //     ?;
-        // }
-
-        // Epilogue system can be leveraged to fuse add and activation operations
-        let (bias_ptr, _bias_ptr_guard) = bias.map(|b| b.device_ptr(self.stream())).unzip();
-        matmul_desc.set_epilogue(act, bias_ptr.as_ref(), cfg.stride_bias)?;
-
-        // Create matmul heuristic search preferences
-        let matmul_pref = MatmulPref::new()?;
-
-        // Set workspace size
-        matmul_pref.set_workspace_size(self.workspace().size)?;
-
-        // Get heuristic given Config, bias, act and workspace size
-        let heuristic = result::get_matmul_algo_heuristic(
-            *self.handle(),
-            matmul_desc.handle,
-            a_layout.handle,
-            b_layout.handle,
-            c_layout.handle,
-            d_layout.handle,
-            matmul_pref.handle,
-        )?;
-
-        let (out_ptr, _out_guard) = out.device_ptr_mut(self.stream());
-
-        let (a, _a_guard) = a.device_ptr(self.stream());
-        let (b, _b_guard) = b.device_ptr(self.stream());
-        let (c, _c_guard) = c.device_ptr(self.stream());
-        let workspace = &self.workspace().buffer;
-        let (workspace, _workspace_guard) = workspace.device_ptr(self.stream());
-        // Launch matmul kernel
-        result::matmul(
-            *self.handle(),
-            matmul_desc.handle,
-            (&cfg.alpha) as *const _ as *const _,
-            (&cfg.beta) as *const _ as *const _,
-            a as *const _,
-            a_layout.handle,
-            b as *const _,
-            b_layout.handle,
-            c as *const _,
-            c_layout.handle,
-            out_ptr as *mut _,
-            d_layout.handle,
-            (&heuristic.algo) as *const _,
-            workspace as *mut _,
-            self.workspace().size,
-            self.stream().cu_stream() as *mut _,
-        )
     }
 
     /// Matrix matrix multiplication. See
@@ -529,86 +532,89 @@ pub trait Matmul<T: CublasLTDType>: MatmulShared {
         bias: Option<&I>,
         act: Option<&Activation>,
     ) -> Result<(), CublasError> {
-        let (a_rows, a_cols) = if cfg.transa {
-            (cfg.k, cfg.m)
-        } else {
-            (cfg.m, cfg.k)
-        };
-        let (b_rows, b_cols) = if cfg.transb {
-            (cfg.n, cfg.k)
-        } else {
-            (cfg.k, cfg.n)
-        };
+        unsafe {
+            let (a_rows, a_cols) = if cfg.transa {
+                (cfg.k, cfg.m)
+            } else {
+                (cfg.m, cfg.k)
+            };
+            let (b_rows, b_cols) = if cfg.transb {
+                (cfg.n, cfg.k)
+            } else {
+                (cfg.k, cfg.n)
+            };
 
-        // Creates matrix layouts
-        let a_layout = MatrixLayout::new(Self::matrix_type(), a_rows, a_cols, cfg.lda)?;
-        if let (Some(batch_size), Some(stride_a)) = (cfg.batch_size, cfg.stride_a) {
-            a_layout.set_batch(batch_size, stride_a)?;
+            // Creates matrix layouts
+            let a_layout = MatrixLayout::new(Self::matrix_type(), a_rows, a_cols, cfg.lda)?;
+            if let (Some(batch_size), Some(stride_a)) = (cfg.batch_size, cfg.stride_a) {
+                a_layout.set_batch(batch_size, stride_a)?;
+            }
+
+            let b_layout = MatrixLayout::new(Self::matrix_type(), b_rows, b_cols, cfg.ldb)?;
+            if let (Some(batch_size), Some(stride_b)) = (cfg.batch_size, cfg.stride_b) {
+                b_layout.set_batch(batch_size, stride_b)?;
+            }
+
+            let c_layout = MatrixLayout::new(Self::matrix_type(), cfg.m, cfg.n, cfg.ldc)?;
+            if let (Some(batch_size), Some(stride_c)) = (cfg.batch_size, cfg.stride_c) {
+                c_layout.set_batch(batch_size, stride_c)?;
+            }
+
+            // Matmul description
+            let matmul_desc =
+                MatmulDesc::new(Self::compute_type(), sys::cudaDataType_t::CUDA_R_32F)?;
+
+            // Set transa
+            matmul_desc.set_transpose(cfg.transa, Matrix::A)?;
+            // Set transb
+            matmul_desc.set_transpose(cfg.transb, Matrix::B)?;
+
+            // Epilogue system can be leveraged to fuse add and activation operations
+            let (bias_ptr, _bias_ptr_guard) = bias.map(|b| b.device_ptr(self.stream())).unzip();
+            matmul_desc.set_epilogue(act, bias_ptr.as_ref(), cfg.stride_bias)?;
+
+            // Create matmul heuristic search preferences
+            let matmul_pref = MatmulPref::new()?;
+
+            // Set workspace size
+            matmul_pref.set_workspace_size(self.workspace().size)?;
+
+            // Get heuristic given Config, bias, act and workspace size
+            let heuristic = result::get_matmul_algo_heuristic(
+                *self.handle(),
+                matmul_desc.handle,
+                a_layout.handle,
+                b_layout.handle,
+                c_layout.handle,
+                c_layout.handle,
+                matmul_pref.handle,
+            )?;
+
+            let (a, _a_guard) = a.device_ptr(self.stream());
+            let (b, _b_guard) = b.device_ptr(self.stream());
+            let (c, _c_guard) = c.device_ptr_mut(self.stream());
+            let workspace = &self.workspace().buffer;
+            let (workspace, _workspace_guard) = workspace.device_ptr(self.stream());
+            // Launch matmul kernel
+            result::matmul(
+                *self.handle(),
+                matmul_desc.handle,
+                (&cfg.alpha) as *const _ as *const _,
+                (&cfg.beta) as *const _ as *const _,
+                a as *const _,
+                a_layout.handle,
+                b as *const _,
+                b_layout.handle,
+                c as *const _,
+                c_layout.handle,
+                c as *mut _,
+                c_layout.handle,
+                (&heuristic.algo) as *const _,
+                workspace as *mut _,
+                self.workspace().size,
+                self.stream().cu_stream() as *mut _,
+            )
         }
-
-        let b_layout = MatrixLayout::new(Self::matrix_type(), b_rows, b_cols, cfg.ldb)?;
-        if let (Some(batch_size), Some(stride_b)) = (cfg.batch_size, cfg.stride_b) {
-            b_layout.set_batch(batch_size, stride_b)?;
-        }
-
-        let c_layout = MatrixLayout::new(Self::matrix_type(), cfg.m, cfg.n, cfg.ldc)?;
-        if let (Some(batch_size), Some(stride_c)) = (cfg.batch_size, cfg.stride_c) {
-            c_layout.set_batch(batch_size, stride_c)?;
-        }
-
-        // Matmul description
-        let matmul_desc = MatmulDesc::new(Self::compute_type(), sys::cudaDataType_t::CUDA_R_32F)?;
-
-        // Set transa
-        matmul_desc.set_transpose(cfg.transa, Matrix::A)?;
-        // Set transb
-        matmul_desc.set_transpose(cfg.transb, Matrix::B)?;
-
-        // Epilogue system can be leveraged to fuse add and activation operations
-        let (bias_ptr, _bias_ptr_guard) = bias.map(|b| b.device_ptr(self.stream())).unzip();
-        matmul_desc.set_epilogue(act, bias_ptr.as_ref(), cfg.stride_bias)?;
-
-        // Create matmul heuristic search preferences
-        let matmul_pref = MatmulPref::new()?;
-
-        // Set workspace size
-        matmul_pref.set_workspace_size(self.workspace().size)?;
-
-        // Get heuristic given Config, bias, act and workspace size
-        let heuristic = result::get_matmul_algo_heuristic(
-            *self.handle(),
-            matmul_desc.handle,
-            a_layout.handle,
-            b_layout.handle,
-            c_layout.handle,
-            c_layout.handle,
-            matmul_pref.handle,
-        )?;
-
-        let (a, _a_guard) = a.device_ptr(self.stream());
-        let (b, _b_guard) = b.device_ptr(self.stream());
-        let (c, _c_guard) = c.device_ptr_mut(self.stream());
-        let workspace = &self.workspace().buffer;
-        let (workspace, _workspace_guard) = workspace.device_ptr(self.stream());
-        // Launch matmul kernel
-        result::matmul(
-            *self.handle(),
-            matmul_desc.handle,
-            (&cfg.alpha) as *const _ as *const _,
-            (&cfg.beta) as *const _ as *const _,
-            a as *const _,
-            a_layout.handle,
-            b as *const _,
-            b_layout.handle,
-            c as *const _,
-            c_layout.handle,
-            c as *mut _,
-            c_layout.handle,
-            (&heuristic.algo) as *const _,
-            workspace as *mut _,
-            self.workspace().size,
-            self.stream().cu_stream() as *mut _,
-        )
     }
 }
 

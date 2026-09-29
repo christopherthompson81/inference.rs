@@ -208,7 +208,9 @@ fn launch(
         || args.weight_scales.dims() != scale_shape
         || args.weight_global_scale.dims() != global_shape
     {
-        candle_core::bail!("cuTile NVFP4 requires A16 inputs, U8 packed weights, E4M3 block scales, and F32 global scales with matching dimensions")
+        candle_core::bail!(
+            "cuTile NVFP4 requires A16 inputs, U8 packed weights, E4M3 block scales, and F32 global scales with matching dimensions"
+        )
     }
     if args
         .activation_global_scale
@@ -523,7 +525,7 @@ mod tests {
 
     #[test]
     fn dense_grouping_respects_device_and_weight_capacity() {
-        use super::super::nvfp4_matmul::{dense_geometry, MatmulDevice};
+        use super::super::nvfp4_matmul::{MatmulDevice, dense_geometry};
 
         const ROWS: usize = 128;
         const WIDTH: usize = 8192;
@@ -581,7 +583,7 @@ mod tests {
 
     #[test]
     fn medium_dense_geometry_preserves_untuned_paths() {
-        use super::super::nvfp4_matmul::{dense_geometry, dense_worker_warps, MatmulDevice};
+        use super::super::nvfp4_matmul::{MatmulDevice, dense_geometry, dense_worker_warps};
 
         const N: usize = 1024;
         const K: usize = 4096;
@@ -620,7 +622,7 @@ mod tests {
 
     #[test]
     fn warmup_covers_batch_and_routing_specializations() {
-        use super::super::nvfp4_matmul::{dense_geometry, dense_worker_warps, MatmulDevice};
+        use super::super::nvfp4_matmul::{MatmulDevice, dense_geometry, dense_worker_warps};
 
         for compute_major in [10, 12] {
             for l2_bytes in [0, TEST_L2_BYTES, TEST_L2_BYTES * 4] {
@@ -641,7 +643,10 @@ mod tests {
                         let dense_keys: HashSet<_> =
                             dense_warmup_rows().into_iter().map(dense_key).collect();
                         for rows in 1..=COVERAGE_TOKENS {
-                            assert!(dense_keys.contains(&dense_key(rows)), "dense rows={rows} n={n} k={k} a4={a4} major={compute_major} l2={l2_bytes}");
+                            assert!(
+                                dense_keys.contains(&dense_key(rows)),
+                                "dense rows={rows} n={n} k={k} a4={a4} major={compute_major} l2={l2_bytes}"
+                            );
                         }
                     }
                 }

@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use candle_core::quantized::gguf_file::Value;
 
 const BASE_MODEL_COUNT: &str = "general.base_model.count";
@@ -77,13 +77,13 @@ fn source_hf_base_model_id(
              `{BASE_MODEL_PREFIX}{index}{BASE_MODEL_REPO_URL_SUFFIX}`"
         );
     }
-    if let Some(count) = count {
-        if index >= count {
-            bail!(
-                "GGUF `{label}` base-model index {index} is outside its declared base-model count \
+    if let Some(count) = count
+        && index >= count
+    {
+        bail!(
+            "GGUF `{label}` base-model index {index} is outside its declared base-model count \
                  {count}"
-            );
-        }
+        );
     }
     let Value::String(url) = value else {
         bail!(
@@ -250,10 +250,12 @@ mod tests {
                 Value::String("https://huggingface.co/Qwen/Qwen3.5-4B".to_string()),
             ),
         ]);
-        assert!(infer_hf_base_model_id([("model", &malformed)])
-            .unwrap_err()
-            .to_string()
-            .contains("nonnumeric"));
+        assert!(
+            infer_hf_base_model_id([("model", &malformed)])
+                .unwrap_err()
+                .to_string()
+                .contains("nonnumeric")
+        );
 
         let out_of_range = HashMap::from([
             (BASE_MODEL_COUNT.to_string(), Value::U32(1)),
@@ -262,9 +264,11 @@ mod tests {
                 Value::String("https://huggingface.co/Qwen/Qwen3.5-4B".to_string()),
             ),
         ]);
-        assert!(infer_hf_base_model_id([("model", &out_of_range)])
-            .unwrap_err()
-            .to_string()
-            .contains("outside"));
+        assert!(
+            infer_hf_base_model_id([("model", &out_of_range)])
+                .unwrap_err()
+                .to_string()
+                .contains("outside")
+        );
     }
 }

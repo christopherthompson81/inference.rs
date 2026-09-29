@@ -2,17 +2,17 @@ use std::{
     collections::HashMap,
     fmt,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Mutex, OnceLock,
+        atomic::{AtomicBool, Ordering},
     },
     thread::ThreadId,
 };
 
-use candle_core::cuda::cudarc::driver::{sys, CudaEvent, CudaSlice, CudaStream, DeviceRepr};
+use candle_core::cuda::cudarc::driver::{CudaEvent, CudaSlice, CudaStream, DeviceRepr, sys};
 use candle_core::cuda_backend::{CudaDType, DeviceId, WrapErr};
 use candle_core::{
-    quantized::{GgmlDType, QMatMul, QTensor},
     CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor,
+    quantized::{GgmlDType, QMatMul, QTensor},
 };
 
 use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
@@ -817,13 +817,13 @@ fn check_status(operation: &str, status: i32) -> Result<()> {
 mod tests {
     use std::sync::{Arc, Barrier};
 
-    use candle_core::{quantized::QTensor, DType, Device};
+    use candle_core::{DType, Device, quantized::QTensor};
 
     use super::super::GGUF_AFFINE_MIN_BATCH;
     use super::*;
     use crate::{
-        try_fused_quantized_ffn, try_fused_quantized_gate_up, try_fused_quantized_qkv, GgufMatMul,
-        GluActivationType, QuantMethod,
+        GgufMatMul, GluActivationType, QuantMethod, try_fused_quantized_ffn,
+        try_fused_quantized_gate_up, try_fused_quantized_qkv,
     };
 
     const AFFINE_DTYPES: &[GgmlDType] = &[
@@ -1432,7 +1432,7 @@ mod tests {
 mod ffi {
     use std::ffi::c_void;
 
-    extern "C" {
+    unsafe extern "C" {
         pub fn mrs_gguf_affine_repack_f16(
             format: i32,
             source: *const c_void,

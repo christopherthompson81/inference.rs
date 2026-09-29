@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use inference_models_gemma::gemma3::inputs_processor::{
-    Gemma3ImageProcessor, BOI_TOKEN, EOI_TOKEN, IMAGE_TOKEN,
+    BOI_TOKEN, EOI_TOKEN, Gemma3ImageProcessor, IMAGE_TOKEN,
 };
 
 use crate::pipeline::{InputsProcessor, MessagesAction, Processor};

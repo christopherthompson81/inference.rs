@@ -1,17 +1,17 @@
-use crate::attention::flash_params::make_flash_params;
 use crate::attention::FlashParams;
-use crate::paged_attention::input_metadata::DecodePagedRows;
+use crate::attention::flash_params::make_flash_params;
 use crate::paged_attention::PagedAttentionInputMetadata;
+use crate::paged_attention::input_metadata::DecodePagedRows;
 use std::{
     collections::HashMap,
     fmt,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
-use candle_core::cuda_backend::cudarc::driver::{sys, CudaStream};
+use candle_core::cuda_backend::cudarc::driver::{CudaStream, sys};
 use candle_core::{DType, Device, DeviceLocation, Tensor, Var};
 
 use crate::gdn::RecurrentBatchKind;
@@ -19,11 +19,12 @@ use crate::gdn::RecurrentBatchKind;
 use crate::paged_attention::plan::DecodePlan;
 use crate::{
     flashinfer::{
-        make_fa3_decode_state, Fa3DecodeState, FlashInferMetadata, FlashInferPagedAttentionView,
+        Fa3DecodeState, FlashInferMetadata, FlashInferPagedAttentionView,
         FlashInferPagedAttentionViews, FlashInferPagedKv, FlashInferTilePlan,
+        make_fa3_decode_state,
     },
     paged_attention::{
-        block_table_rows::BlockTableSnapshot, AttentionBackendKind, ModelConfigLike,
+        AttentionBackendKind, ModelConfigLike, block_table_rows::BlockTableSnapshot,
     },
 };
 
@@ -31,10 +32,10 @@ use crate::cuda::phase_timer::CudaPhaseTimer;
 use crate::device_map::DeviceMapper;
 use crate::kv_cache::HybridCache;
 use crate::model::decode_positions_tensor;
+use crate::paged_attention::_PAD_SLOT_ID;
 use crate::paged_attention::input_metadata::{
     DecodePagedRowsGraphKey, PagedDecodeMetadataRequirements,
 };
-use crate::paged_attention::_PAD_SLOT_ID;
 use crate::pipeline::DecodeGraphPrecaptureCtx;
 use crate::speculative::SpeculativeGraphState;
 pub(crate) use inference_nn::cuda::graph_capture::*;
@@ -1330,11 +1331,11 @@ fn drop_cuda_graph_entry_resource<T>(
     release_result: &mut candle_core::Result<()>,
 ) {
     drop(resource);
-    if let Err(err) = stream.context().check_err() {
-        if release_result.is_ok() {
-            *release_result = Err(candle_core::Error::wrap(err)
-                .context(format!("CUDA graph entry {name} release failed")));
-        }
+    if let Err(err) = stream.context().check_err()
+        && release_result.is_ok()
+    {
+        *release_result = Err(candle_core::Error::wrap(err)
+            .context(format!("CUDA graph entry {name} release failed")));
     }
 }
 
@@ -1450,11 +1451,11 @@ impl CudaDecodeGraphState {
             return Ok(None);
         };
         let mut entry = self.entries.remove(pos);
-        if let CudaDecodeGraphReplayInput::Resident(launch) = input {
-            if !launch.matches(&entry) || launch.real_batch != step.real_batch {
-                self.entries.push(entry);
-                return Ok(None);
-            }
+        if let CudaDecodeGraphReplayInput::Resident(launch) = input
+            && (!launch.matches(&entry) || launch.real_batch != step.real_batch)
+        {
+            self.entries.push(entry);
+            return Ok(None);
         }
         let graph_event =
             CudaGraphEventGuard::new(CudaGraphComponent::Target, CudaGraphEvent::Replay);
@@ -2605,9 +2606,11 @@ mod tests {
         assert!(mask[..8 * chunks_per_row].iter().all(|valid| *valid == 1));
         assert!(mask[8 * chunks_per_row..].iter().all(|valid| *valid == 0));
         assert_eq!(rows.slot_mappings[..3], vec![vec![1024]; 3]);
-        assert!(rows.slot_mappings[3..]
-            .iter()
-            .all(|row| row == &[_PAD_SLOT_ID]));
+        assert!(
+            rows.slot_mappings[3..]
+                .iter()
+                .all(|row| row == &[_PAD_SLOT_ID])
+        );
         assert_eq!(
             decode_context_key((*rows).clone()),
             decode_context_key(decode_context_rows(1, 1).padded(8))
@@ -2696,10 +2699,11 @@ mod tests {
         let input_ids = Tensor::zeros((1, 1), DType::U32, &Device::Cpu).unwrap();
         let key =
             CudaDecodeGraphKey::new(&input_ids, &metadata, 32, RecurrentBatchKind::Decode).unwrap();
-        assert!(key
-            .tensors
-            .iter()
-            .all(|tensor| !tensor.name.starts_with("full_")));
+        assert!(
+            key.tensors
+                .iter()
+                .all(|tensor| !tensor.name.starts_with("full_"))
+        );
 
         let (buffers, _) = CudaDecodeGraphMetadataBuffers::new(CudaDecodeGraphMetadataInput {
             metadata: &metadata,
@@ -3178,9 +3182,10 @@ mod tests {
             state_indices: None,
             real_batch: 1,
         };
-        assert!(step
-            .one_token_continuation(step.input_ids.clone())?
-            .is_none());
+        assert!(
+            step.one_token_continuation(step.input_ids.clone())?
+                .is_none()
+        );
         Ok(())
     }
 

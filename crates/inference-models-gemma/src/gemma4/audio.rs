@@ -6,13 +6,13 @@
 //! scale offset, the attention uses an extra `per_dim_key_scale`, and several
 //! projections use optional clipping buffers from the checkpoint.
 
-use candle_core::{bail, DType, Module, Result, Tensor, D};
+use candle_core::{D, DType, Module, Result, Tensor, bail};
 use candle_nn::{Conv1d, Conv2d, Conv2dConfig, LayerNorm, LayerNormConfig, ModuleT};
 use inference_quant::{Convolution, QuantMethod, ShardedVarBuilder};
 use std::sync::Arc;
 
 use crate::{
-    layers::{conv1d_no_bias, conv2d_no_bias, layer_norm, RmsNorm},
+    layers::{RmsNorm, conv1d_no_bias, conv2d_no_bias, layer_norm},
     utils::unvarbuilder::UnVarBuilder,
 };
 

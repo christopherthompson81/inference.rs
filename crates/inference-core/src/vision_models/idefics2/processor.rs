@@ -5,15 +5,15 @@ use inference_models_llama::idefics2::inputs_processor::Idefics2ImageProcessor;
 use inference_models_llama::loaders::Idefics2Loader;
 
 use crate::{
+    MessageContent, Pipeline, Tool,
     pipeline::{
-        apply_chat_template, InputsProcessor, MessagesAction, MultimodalProcessorFactory, Processor,
+        InputsProcessor, MessagesAction, MultimodalProcessorFactory, Processor, apply_chat_template,
     },
     request::ReasoningEffort,
     vision_models::{
         media_host::MediaInputsProcessor, preprocessor_config::PreProcessorConfig,
         processor_config::ProcessorConfig,
     },
-    MessageContent, Pipeline, Tool,
 };
 
 pub struct Idefics2Processor {

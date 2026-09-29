@@ -5,7 +5,7 @@ use inference_core::*;
 use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
 use std::{path::PathBuf, sync::Arc};
-use tokio::sync::mpsc::{channel, Receiver};
+use tokio::sync::mpsc::{Receiver, channel};
 
 use crate::error::Error as SdkError;
 use crate::{EmbeddingRequest, EmbeddingRequestBuilder, RequestLike, TextMessages};
@@ -1060,7 +1060,7 @@ async fn final_response(rx: &mut Receiver<Response>) -> crate::error::Result<Res
         match collector.absorb(response) {
             None | Some(Response::BlockDenoisingProgress(_)) => continue,
             Some(Response::Done(response)) => {
-                return Ok(ResponseOk::Done(collector.finish(response)))
+                return Ok(ResponseOk::Done(collector.finish(response)));
             }
             Some(Response::ModelError(message, response)) => {
                 let error = ResponseErr::ModelError(message, collector.finish(response));

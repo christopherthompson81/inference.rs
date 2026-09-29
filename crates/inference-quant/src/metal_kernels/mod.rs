@@ -15,8 +15,8 @@ use std::{collections::HashMap, sync::OnceLock};
 
 pub mod utils;
 use utils::{
-    get_2d_grid_dims, get_2d_grid_dims_divisor, get_block_dims, linear_split, EncoderParam,
-    EncoderProvider, Output, RawBytesEncoder,
+    EncoderParam, EncoderProvider, Output, RawBytesEncoder, get_2d_grid_dims,
+    get_2d_grid_dims_divisor, get_block_dims, linear_split,
 };
 
 use crate::set_params;

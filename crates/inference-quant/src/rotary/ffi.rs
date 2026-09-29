@@ -1,6 +1,6 @@
 use core::ffi::{c_int, c_long, c_void};
 
-extern "C" {
+unsafe extern "C" {
     pub(crate) fn rotary_embedding(
         query: *const c_void,
         key: *const c_void,

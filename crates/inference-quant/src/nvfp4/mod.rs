@@ -1,12 +1,12 @@
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::{Arc, atomic::AtomicUsize};
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::Linear;
 use float8::F8E4M3;
 
 use crate::{
-    Nvfp4ActivationMode, Nvfp4LinearSpec, QuantMethod, QuantMethodConfig, QuantizeOntoGuard,
-    QuantizedSerde, ScaleConvention, Shard, ShardedVarBuilder, NVFP4_BLOCK_SIZE,
+    NVFP4_BLOCK_SIZE, Nvfp4ActivationMode, Nvfp4LinearSpec, QuantMethod, QuantMethodConfig,
+    QuantizeOntoGuard, QuantizedSerde, ScaleConvention, Shard, ShardedVarBuilder,
 };
 
 #[cfg(all(feature = "cuda", feature = "cutile", has_nvfp4_cutlass_sm121_kernels))]
@@ -109,12 +109,12 @@ impl Nvfp4Layer {
             candle_core::bail!("NVFP4 CUDA inference requires BF16 or F16 output dtype");
         }
         #[cfg(all(feature = "cuda", feature = "cutile"))]
-        if let Device::Cuda(device) = parts.weight.device() {
-            if !crate::cutile::nvfp4_supported(device) {
-                candle_core::bail!(
-                    "NVFP4 CUDA inference requires Blackwell or newer, CUDA 13.3, and a compatible tileiras"
-                );
-            }
+        if let Device::Cuda(device) = parts.weight.device()
+            && !crate::cutile::nvfp4_supported(device)
+        {
+            candle_core::bail!(
+                "NVFP4 CUDA inference requires Blackwell or newer, CUDA 13.3, and a compatible tileiras"
+            );
         }
         #[cfg(not(all(feature = "cuda", feature = "cutile")))]
         if parts.weight.device().is_cuda() {
@@ -162,10 +162,10 @@ impl Nvfp4Layer {
                 candle_core::bail!("NVFP4 input global scale must be F32 with shape {expected:?}");
             }
         }
-        if let Some(bias) = &parts.bias {
-            if bias.dtype() != parts.dtype || bias.dims() != &dims[..dims.len() - 1] {
-                candle_core::bail!("NVFP4 bias must match the output dtype and weight rows");
-            }
+        if let Some(bias) = &parts.bias
+            && (bias.dtype() != parts.dtype || bias.dims() != &dims[..dims.len() - 1])
+        {
+            candle_core::bail!("NVFP4 bias must match the output dtype and weight rows");
         }
         parts.weight = parts.weight.contiguous()?;
         parts.scales = crate::utils::contiguous_fp8(&parts.scales)?;
@@ -269,13 +269,11 @@ impl Nvfp4Layer {
             candle_core::bail!("NVFP4 input dimension {k} must be divisible by {NVFP4_BLOCK_SIZE}");
         }
         let range = crate::shard_range(hints, &dims)?;
-        if let Some((axis, offset, len)) = range {
-            if axis == input_axis
-                && (!offset.is_multiple_of(NVFP4_BLOCK_SIZE)
-                    || !len.is_multiple_of(NVFP4_BLOCK_SIZE))
-            {
-                candle_core::bail!("NVFP4 input shards must align to {NVFP4_BLOCK_SIZE} elements");
-            }
+        if let Some((axis, offset, len)) = range
+            && axis == input_axis
+            && (!offset.is_multiple_of(NVFP4_BLOCK_SIZE) || !len.is_multiple_of(NVFP4_BLOCK_SIZE))
+        {
+            candle_core::bail!("NVFP4 input shards must align to {NVFP4_BLOCK_SIZE} elements");
         }
         let packed_shard = |packing: usize| match range {
             Some((axis, offset, len)) => {
@@ -695,11 +693,7 @@ fn dequant_scale(scale: f32, convention: ScaleConvention) -> Result<f32> {
 
 fn unpack_fp4(bits: u8) -> f32 {
     let magnitude = FP4_VALUES[(bits & 7) as usize];
-    if bits & 8 != 0 {
-        -magnitude
-    } else {
-        magnitude
-    }
+    if bits & 8 != 0 { -magnitude } else { magnitude }
 }
 
 fn quantize_fp4(value: f32) -> f32 {
@@ -897,7 +891,9 @@ impl QuantMethod for Nvfp4Layer {
             || !activation.quantized().device().is_cuda()
             || rows <= 1
         {
-            candle_core::bail!("NVFP4 shared activation does not match this projection's calibration or input shape");
+            candle_core::bail!(
+                "NVFP4 shared activation does not match this projection's calibration or input shape"
+            );
         }
         #[cfg(all(feature = "cuda", feature = "cutile"))]
         {
@@ -1192,10 +1188,12 @@ mod tests {
             );
             assert_eq!(first.forward(&input)?.to_vec2::<f32>()?, before);
             let merged = Nvfp4Layer::merge(vec![first, second])?.unwrap();
-            assert!(merged.constituents[0]
-                .nvfp4_input_calibration()
-                .unwrap()
-                .matches(merged.constituents[1].nvfp4_input_calibration().unwrap()));
+            assert!(
+                merged.constituents[0]
+                    .nvfp4_input_calibration()
+                    .unwrap()
+                    .matches(merged.constituents[1].nvfp4_input_calibration().unwrap())
+            );
         }
         Ok(())
     }
@@ -1220,10 +1218,12 @@ mod tests {
             None,
             QuantizeOntoGuard::new(),
         )?;
-        assert!(reference
-            .nvfp4_input_calibration()
-            .unwrap()
-            .matches(copy.nvfp4_input_calibration().unwrap()));
+        assert!(
+            reference
+                .nvfp4_input_calibration()
+                .unwrap()
+                .matches(copy.nvfp4_input_calibration().unwrap())
+        );
         let unknown = Arc::new(public_calibrated_layer(Tensor::new(1f32, &Device::Cpu)?)?)
             .apply_isq(
                 None,
@@ -1232,10 +1232,12 @@ mod tests {
                 None,
                 QuantizeOntoGuard::new(),
             )?;
-        assert!(!reference
-            .nvfp4_input_calibration()
-            .unwrap()
-            .matches(unknown.nvfp4_input_calibration().unwrap()));
+        assert!(
+            !reference
+                .nvfp4_input_calibration()
+                .unwrap()
+                .matches(unknown.nvfp4_input_calibration().unwrap())
+        );
         Ok(())
     }
 }

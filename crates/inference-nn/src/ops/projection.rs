@@ -52,10 +52,11 @@ pub enum GatedActivationOrder {
 
 pub fn mul_and_act(a: &Tensor, b: &Tensor, act: Activation) -> Result<Tensor> {
     // Check if we can use the fused kernel (works on CUDA, Metal, and CPU)
-    if matches!(a.dtype(), DType::F16 | DType::BF16 | DType::F32) && a.dtype() == b.dtype() {
-        if let Some(activation_type) = glu_activation_type(act) {
-            return inference_quant::fused_glu(a, b, activation_type);
-        }
+    if matches!(a.dtype(), DType::F16 | DType::BF16 | DType::F32)
+        && a.dtype() == b.dtype()
+        && let Some(activation_type) = glu_activation_type(act)
+    {
+        return inference_quant::fused_glu(a, b, activation_type);
     }
 
     a.apply(&act)? * b
@@ -75,10 +76,11 @@ pub fn try_fused_gated_projection(
 
 pub fn mul_and_candle_act(a: &Tensor, b: &Tensor, act: candle_nn::Activation) -> Result<Tensor> {
     // Check if we can use the fused kernel (works on CUDA, Metal, and CPU)
-    if matches!(a.dtype(), DType::F16 | DType::BF16 | DType::F32) && a.dtype() == b.dtype() {
-        if let Some(activation_type) = candle_glu_activation_type(act) {
-            return inference_quant::fused_glu(a, b, activation_type);
-        }
+    if matches!(a.dtype(), DType::F16 | DType::BF16 | DType::F32)
+        && a.dtype() == b.dtype()
+        && let Some(activation_type) = candle_glu_activation_type(act)
+    {
+        return inference_quant::fused_glu(a, b, activation_type);
     }
 
     a.apply(&act)? * b
@@ -126,10 +128,9 @@ pub fn split_mul_and_act_order(
     }
     if order == GatedActivationOrder::GateUp
         && matches!(xs.dtype(), DType::F16 | DType::BF16 | DType::F32)
+        && let Some(activation_type) = glu_activation_type(act)
     {
-        if let Some(activation_type) = glu_activation_type(act) {
-            return inference_quant::fused_split_glu(xs, split_size, activation_type);
-        }
+        return inference_quant::fused_split_glu(xs, split_size, activation_type);
     }
 
     let first = xs.narrow(D::Minus1, 0, split_size)?;
@@ -275,13 +276,13 @@ pub fn quantized_ffn(
         }
     }
 
-    if xs.device().is_cpu() {
-        if let Some(mut out) = inference_quant::try_fused_gemv_shared_lhs_cpu(xs, &[gate, up])? {
-            let rhs = out.pop().unwrap();
-            let lhs = out.pop().unwrap();
-            let inter = mul_and_act(&lhs, &rhs, act)?;
-            return down.forward(&inter);
-        }
+    if xs.device().is_cpu()
+        && let Some(mut out) = inference_quant::try_fused_gemv_shared_lhs_cpu(xs, &[gate, up])?
+    {
+        let rhs = out.pop().unwrap();
+        let lhs = out.pop().unwrap();
+        let inter = mul_and_act(&lhs, &rhs, act)?;
+        return down.forward(&inter);
     }
 
     let lhs = gate.forward(xs)?;
@@ -309,15 +310,14 @@ pub fn qkv_projections(
         return Ok(qkv);
     }
 
-    if xs.device().is_cpu() {
-        if let Some(mut out) =
+    if xs.device().is_cpu()
+        && let Some(mut out) =
             inference_quant::try_fused_gemv_shared_lhs_cpu(xs, &[q_proj, k_proj, v_proj])?
-        {
-            let v = out.pop().unwrap();
-            let k = out.pop().unwrap();
-            let q = out.pop().unwrap();
-            return Ok((q, k, v));
-        }
+    {
+        let v = out.pop().unwrap();
+        let k = out.pop().unwrap();
+        let q = out.pop().unwrap();
+        return Ok((q, k, v));
     }
 
     Ok((

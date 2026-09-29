@@ -1,6 +1,6 @@
-#[cfg(feature = "metal")]
-use candle_core::{backend::BackendStorage, DType};
 use candle_core::{CpuStorage, CustomOp3, Layout, Result, Shape, WithDType};
+#[cfg(feature = "metal")]
+use candle_core::{DType, backend::BackendStorage};
 
 /*
  8 bit

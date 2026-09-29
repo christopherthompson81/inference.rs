@@ -1,8 +1,8 @@
-use inference_core::{LoadOverrides, ModelSelected, Ordering, GGUF_MULTI_FILE_DELIMITER};
+use inference_core::{GGUF_MULTI_FILE_DELIMITER, LoadOverrides, ModelSelected, Ordering};
 
 use crate::{
-    model_builder_trait::{build_gguf_pipeline_as, build_model_from_pipeline, GgufAutoMapDims},
     GgufModelBuilder, Model,
+    model_builder_trait::{GgufAutoMapDims, build_gguf_pipeline_as, build_model_from_pipeline},
 };
 
 /// Wrapper of [`GgufModelBuilder`] for X-LoRA models.

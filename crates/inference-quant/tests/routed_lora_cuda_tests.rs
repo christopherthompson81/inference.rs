@@ -3,18 +3,18 @@
 use std::sync::Arc;
 
 use candle_core::{
+    CudaDevice, D, DType, Device, Result, Tensor,
     cuda::cudarc::driver::{CudaSlice, DevicePtr, DeviceRepr},
-    CudaDevice, DType, Device, Result, Tensor, D,
 };
 use half::{bf16, f16};
 use inference_quant::{
-    add_expert_delta_reference, launch_routed_lora_grouped, with_lora_execution, LoraExecution,
-    LoraExecutionArena, LoraExpertDelta, LoraExpertExecution, LoraExpertInputMode,
+    LoraExecution, LoraExecutionArena, LoraExpertDelta, LoraExpertExecution, LoraExpertInputMode,
     LoraExpertProjection, LoraExpertProjectionNames, LoraExpertProjectionWeights,
     LoraExpertSiteHandle, LoraExpertSiteSpec, LoraExpertWeights, LoraGateUpOrder,
-    LoraLayerRegistry, LoraSiteKey, RoutedLoraAdapterWeight, RoutedLoraCudaMetadata,
-    RoutedLoraCudaWeightTable, RoutedLoraGroupedLaunch, RoutedLoraInputMode,
-    RoutedLoraMetadataLayout, RoutedLoraProjectionLayout, Shard, ROUTED_LORA_WMMA_RANK_CAP,
+    LoraLayerRegistry, LoraSiteKey, ROUTED_LORA_WMMA_RANK_CAP, RoutedLoraAdapterWeight,
+    RoutedLoraCudaMetadata, RoutedLoraCudaWeightTable, RoutedLoraGroupedLaunch,
+    RoutedLoraInputMode, RoutedLoraMetadataLayout, RoutedLoraProjectionLayout, Shard,
+    add_expert_delta_reference, launch_routed_lora_grouped, with_lora_execution,
 };
 
 const NUM_EXPERTS: usize = 4;

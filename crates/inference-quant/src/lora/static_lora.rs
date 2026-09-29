@@ -5,7 +5,7 @@ use candle_nn::Linear;
 use regex::Regex;
 
 use crate::{
-    make_dummy_or_error, QuantMethod, QuantMethodConfig, ShardedVarBuilder, UnquantLinear,
+    QuantMethod, QuantMethodConfig, ShardedVarBuilder, UnquantLinear, make_dummy_or_error,
 };
 
 use super::StaticLoraConfig;

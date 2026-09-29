@@ -1,6 +1,6 @@
 use std::sync::{Arc, OnceLock};
 
-use candle_core::{quantized::GgmlDType, DType, Result, Tensor};
+use candle_core::{DType, Result, Tensor, quantized::GgmlDType};
 use inference_quant::QuantMethod;
 
 use crate::ops::SplitOp;
@@ -276,12 +276,12 @@ mod tests {
     use candle_core::{DType, Device, Tensor};
     use candle_nn::Linear;
     use inference_quant::{
-        maybe_wrap_dynamic_lora, with_lora_execution, LoraExecution, LoraLayerRegistry,
-        LoraLinearSpec, LoraWeights, QuantMethod, QuantMethodConfig, ShardedSafeTensors,
-        UnquantLinear,
+        LoraExecution, LoraLayerRegistry, LoraLinearSpec, LoraWeights, QuantMethod,
+        QuantMethodConfig, ShardedSafeTensors, UnquantLinear, maybe_wrap_dynamic_lora,
+        with_lora_execution,
     };
 
-    use super::{dense_head_forward, supports_indexed_cuda_projection, MlaKvBProjection};
+    use super::{MlaKvBProjection, dense_head_forward, supports_indexed_cuda_projection};
 
     fn layer(weight: Tensor) -> candle_core::Result<Arc<dyn QuantMethod>> {
         Ok(Arc::new(UnquantLinear::new(
@@ -418,12 +418,16 @@ mod tests {
                     .to_string(),
             )
         });
-        assert!(errors
-            .0
-            .contains("split MLA K/V projections do not support active dynamic LoRA adapters"));
-        assert!(errors
-            .1
-            .contains("split MLA K/V projections do not support active dynamic LoRA adapters"));
+        assert!(
+            errors
+                .0
+                .contains("split MLA K/V projections do not support active dynamic LoRA adapters")
+        );
+        assert!(
+            errors
+                .1
+                .contains("split MLA K/V projections do not support active dynamic LoRA adapters")
+        );
         Ok(())
     }
 }

@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use inference_core::remote_fetch::{fetch_limited, FetchOptions, NetworkPolicy};
+use inference_core::remote_fetch::{FetchOptions, NetworkPolicy, fetch_limited};
 use tokio::{fs::File, io::AsyncReadExt};
 use url::Url;
 
@@ -357,9 +357,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(media.bytes, b"image");
-        assert!(load_ui_upload_from_root(url, "image", &root, 4)
-            .await
-            .is_err());
+        assert!(
+            load_ui_upload_from_root(url, "image", &root, 4)
+                .await
+                .is_err()
+        );
     }
 
     #[cfg(unix)]

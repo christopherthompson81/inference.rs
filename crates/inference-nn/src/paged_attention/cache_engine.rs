@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use super::config::{KvCacheLayout, ModelConfigLike};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-use crate::flashinfer::{register_fa3_prefill_caches, Fa3PrefillWorkspaceRegistration};
+use crate::flashinfer::{Fa3PrefillWorkspaceRegistration, register_fa3_prefill_caches};
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 fn cuda_supports_fp8(device: &Device) -> bool {

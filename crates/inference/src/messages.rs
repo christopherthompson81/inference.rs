@@ -10,7 +10,7 @@ use super::*;
 use either::Either;
 use image::DynamicImage;
 use indexmap::IndexMap;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// A type which can be used as a chat request.
 ///

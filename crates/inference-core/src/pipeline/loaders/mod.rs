@@ -7,12 +7,12 @@ mod normal_loaders;
 pub use crate::device_map::AutoDeviceMapParams;
 pub(crate) use checkpoint_inventory::{checkpoint_device_map_sizes, checkpoint_runtime_size};
 use inference_nn::loaders::NonMappedSubModel;
-pub(crate) use inference_nn::loaders::{
-    language_model_pack_factors, language_model_pack_factors_with_aliases,
-    promoted_tensor_pack_factor, qk_rope_layout_from_config, tied_promoted_tensor_pack_factor,
-    QK_ROPE_LAYOUT_CONFIG_KEY,
-};
 pub use inference_nn::loaders::{AutoDeviceMapQuantization, DeviceMappedModelLoader};
+pub(crate) use inference_nn::loaders::{
+    QK_ROPE_LAYOUT_CONFIG_KEY, language_model_pack_factors,
+    language_model_pack_factors_with_aliases, promoted_tensor_pack_factor,
+    qk_rope_layout_from_config, tied_promoted_tensor_pack_factor,
+};
 
 use std::{
     fmt::{self, Debug},
@@ -63,7 +63,7 @@ pub use diffusion_loaders::{
 
 use crate::{DeviceMapSetting, PagedAttentionConfig, TryIntoDType};
 
-use super::{paths::AdapterPaths, Pipeline};
+use super::{Pipeline, paths::AdapterPaths};
 
 const LEGACY_MODEL_OPT_CONFIG: &str = "hf_quant_config.json";
 /// Set on the model config JSON when the checkpoint's built-in MTP head should be loaded.
@@ -141,11 +141,10 @@ fn canonicalize_quantization_config(value: &mut serde_json::Value) -> Result<boo
     if let Some(text) = object
         .get_mut("text_config")
         .and_then(serde_json::Value::as_object_mut)
+        && text.get("quantization_config") != Some(&effective)
     {
-        if text.get("quantization_config") != Some(&effective) {
-            text.insert("quantization_config".to_string(), effective);
-            changed = true;
-        }
+        text.insert("quantization_config".to_string(), effective);
+        changed = true;
     }
     Ok(changed)
 }

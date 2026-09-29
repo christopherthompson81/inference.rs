@@ -409,8 +409,8 @@ unsafe impl candle_core::cuda::cudarc::driver::DeviceRepr for RoutedLoraAdapterW
 mod cuda {
     use super::*;
     use candle_core::{
-        cuda::cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut},
         CudaDevice,
+        cuda::cudarc::driver::{CudaSlice, DevicePtr, DevicePtrMut},
     };
 
     use super::super::moe_cuda_ffi;
@@ -686,46 +686,48 @@ mod cuda {
             token_adapter_slots: u64,
             topk_expert_ids: u64,
         ) -> Result<()> {
-            let stream = self.device.cuda_stream();
-            let (route_pair_ids, _route_pair_ids_guard) =
-                self.route_pair_ids.device_ptr_mut(&stream);
-            let (pair_counts, _pair_counts_guard) = self.pair_counts.device_ptr_mut(&stream);
-            let (pair_offsets, _pair_offsets_guard) = self.pair_offsets.device_ptr_mut(&stream);
-            let (pair_cursors, _pair_cursors_guard) = self.pair_cursors.device_ptr_mut(&stream);
-            let (sorted_route_ids, _sorted_route_ids_guard) =
-                self.sorted_route_ids.device_ptr_mut(&stream);
-            let (block_pair_ids, _block_pair_ids_guard) =
-                self.block_pair_ids.device_ptr_mut(&stream);
-            let (num_active_routes, _num_active_routes_guard) =
-                self.num_active_routes.device_ptr_mut(&stream);
-            let (num_padded_routes, _num_padded_routes_guard) =
-                self.num_padded_routes.device_ptr_mut(&stream);
-            let scan_workspace_bytes = self.scan_workspace.len();
-            let (scan_workspace, _scan_workspace_guard) =
-                self.scan_workspace.device_ptr_mut(&stream);
-            let status = moe_cuda_ffi::launch_routed_lora_build_metadata(
-                token_adapter_slots as *const u32,
-                topk_expert_ids as *const u32,
-                route_pair_ids as *mut u32,
-                pair_counts as *mut u32,
-                pair_offsets as *mut u32,
-                pair_cursors as *mut u32,
-                sorted_route_ids as *mut u32,
-                block_pair_ids as *mut u32,
-                num_active_routes as *mut u32,
-                num_padded_routes as *mut u32,
-                self.layout.num_tokens() as i32,
-                self.layout.top_k() as i32,
-                self.layout.num_experts() as i32,
-                self.layout.num_adapter_slots() as i32,
-                self.layout.block_size() as i32,
-                self.layout.max_padded_routes() as i32,
-                self.layout.max_blocks() as i32,
-                scan_workspace as *mut core::ffi::c_void,
-                scan_workspace_bytes,
-                stream.cu_stream(),
-            );
-            check_status(status, "metadata build")
+            unsafe {
+                let stream = self.device.cuda_stream();
+                let (route_pair_ids, _route_pair_ids_guard) =
+                    self.route_pair_ids.device_ptr_mut(&stream);
+                let (pair_counts, _pair_counts_guard) = self.pair_counts.device_ptr_mut(&stream);
+                let (pair_offsets, _pair_offsets_guard) = self.pair_offsets.device_ptr_mut(&stream);
+                let (pair_cursors, _pair_cursors_guard) = self.pair_cursors.device_ptr_mut(&stream);
+                let (sorted_route_ids, _sorted_route_ids_guard) =
+                    self.sorted_route_ids.device_ptr_mut(&stream);
+                let (block_pair_ids, _block_pair_ids_guard) =
+                    self.block_pair_ids.device_ptr_mut(&stream);
+                let (num_active_routes, _num_active_routes_guard) =
+                    self.num_active_routes.device_ptr_mut(&stream);
+                let (num_padded_routes, _num_padded_routes_guard) =
+                    self.num_padded_routes.device_ptr_mut(&stream);
+                let scan_workspace_bytes = self.scan_workspace.len();
+                let (scan_workspace, _scan_workspace_guard) =
+                    self.scan_workspace.device_ptr_mut(&stream);
+                let status = moe_cuda_ffi::launch_routed_lora_build_metadata(
+                    token_adapter_slots as *const u32,
+                    topk_expert_ids as *const u32,
+                    route_pair_ids as *mut u32,
+                    pair_counts as *mut u32,
+                    pair_offsets as *mut u32,
+                    pair_cursors as *mut u32,
+                    sorted_route_ids as *mut u32,
+                    block_pair_ids as *mut u32,
+                    num_active_routes as *mut u32,
+                    num_padded_routes as *mut u32,
+                    self.layout.num_tokens() as i32,
+                    self.layout.top_k() as i32,
+                    self.layout.num_experts() as i32,
+                    self.layout.num_adapter_slots() as i32,
+                    self.layout.block_size() as i32,
+                    self.layout.max_padded_routes() as i32,
+                    self.layout.max_blocks() as i32,
+                    scan_workspace as *mut core::ffi::c_void,
+                    scan_workspace_bytes,
+                    stream.cu_stream(),
+                );
+                check_status(status, "metadata build")
+            }
         }
     }
 
@@ -807,127 +809,131 @@ mod cuda {
         weights: &RoutedLoraCudaWeightTable,
         launch: RoutedLoraDirectLaunch,
     ) -> Result<()> {
-        check_launch(
-            launch.metadata,
-            launch.projection,
-            weights,
-            launch.weight_slice_offset,
-        )?;
-        if launch.token_adapter_slots == 0 && launch.metadata.num_adapter_slots() != 1 {
-            candle_core::bail!(
-                "null routed LoRA token slots require a single adapter descriptor slot"
+        unsafe {
+            check_launch(
+                launch.metadata,
+                launch.projection,
+                weights,
+                launch.weight_slice_offset,
+            )?;
+            if launch.token_adapter_slots == 0 && launch.metadata.num_adapter_slots() != 1 {
+                candle_core::bail!(
+                    "null routed LoRA token slots require a single adapter descriptor slot"
+                );
+            }
+            let output_splits = launch.output_splits.unwrap_or_else(|| {
+                weights.direct_output_splits(launch.metadata, launch.projection)
+            });
+            if output_splits == 0 || output_splits > u16::MAX as usize {
+                candle_core::bail!("invalid routed LoRA direct output split count");
+            }
+            let stream = weights.device.cuda_stream();
+            let (weight_ptr, _weight_guard) = weights.descriptors.device_ptr(&stream);
+            let descriptor_offset = launch
+                .weight_slice_offset
+                .checked_mul(weights.num_adapter_slots)
+                .and_then(|offset| {
+                    offset.checked_mul(std::mem::size_of::<RoutedLoraAdapterWeight>())
+                })
+                .ok_or_else(|| candle_core::Error::msg("routed LoRA descriptor offset overflow"))?;
+            let weight_ptr = weight_ptr + descriptor_offset as u64;
+            let args = (
+                launch.input,
+                launch.output,
+                weight_ptr,
+                launch.token_adapter_slots,
+                launch.topk_expert_ids,
+                launch.route_input_rows,
+                launch.route_output_rows,
+                launch.route_output_scales,
+                launch.metadata.num_tokens() as i32,
+                launch.metadata.top_k() as i32,
+                launch.metadata.num_experts() as i32,
+                launch.metadata.num_adapter_slots() as i32,
+                launch.projection.num_slices() as i32,
+                launch.projection.input_features() as i32,
+                launch.projection.output_features() as i32,
+                launch.projection.output_row_stride() as i32,
+                launch.projection.output_slice_stride() as i32,
+                launch.projection.max_rank() as i32,
+                launch.projection.input_mode() as i32,
+                output_splits as i32,
+                stream.cu_stream(),
             );
+            let status = match launch.dtype {
+                DType::F32 => moe_cuda_ffi::launch_routed_lora_direct_f32(
+                    args.0 as *const f32,
+                    args.1 as *mut f32,
+                    args.2 as *const RoutedLoraAdapterWeight,
+                    args.3 as *const u32,
+                    args.4 as *const u32,
+                    optional_u32(args.5),
+                    optional_u32(args.6),
+                    optional_f32(args.7),
+                    args.8,
+                    args.9,
+                    args.10,
+                    args.11,
+                    args.12,
+                    args.13,
+                    args.14,
+                    args.15,
+                    args.16,
+                    args.17,
+                    args.18,
+                    args.19,
+                    args.20,
+                ),
+                DType::F16 => moe_cuda_ffi::launch_routed_lora_direct_f16(
+                    args.0 as *const half::f16,
+                    args.1 as *mut half::f16,
+                    args.2 as *const RoutedLoraAdapterWeight,
+                    args.3 as *const u32,
+                    args.4 as *const u32,
+                    optional_u32(args.5),
+                    optional_u32(args.6),
+                    optional_f32(args.7),
+                    args.8,
+                    args.9,
+                    args.10,
+                    args.11,
+                    args.12,
+                    args.13,
+                    args.14,
+                    args.15,
+                    args.16,
+                    args.17,
+                    args.18,
+                    args.19,
+                    args.20,
+                ),
+                DType::BF16 => moe_cuda_ffi::launch_routed_lora_direct_bf16(
+                    args.0 as *const half::bf16,
+                    args.1 as *mut half::bf16,
+                    args.2 as *const RoutedLoraAdapterWeight,
+                    args.3 as *const u32,
+                    args.4 as *const u32,
+                    optional_u32(args.5),
+                    optional_u32(args.6),
+                    optional_f32(args.7),
+                    args.8,
+                    args.9,
+                    args.10,
+                    args.11,
+                    args.12,
+                    args.13,
+                    args.14,
+                    args.15,
+                    args.16,
+                    args.17,
+                    args.18,
+                    args.19,
+                    args.20,
+                ),
+                dtype => candle_core::bail!("routed LoRA CUDA does not support {dtype:?}"),
+            };
+            check_status(status, "direct launch")
         }
-        let output_splits = launch
-            .output_splits
-            .unwrap_or_else(|| weights.direct_output_splits(launch.metadata, launch.projection));
-        if output_splits == 0 || output_splits > u16::MAX as usize {
-            candle_core::bail!("invalid routed LoRA direct output split count");
-        }
-        let stream = weights.device.cuda_stream();
-        let (weight_ptr, _weight_guard) = weights.descriptors.device_ptr(&stream);
-        let descriptor_offset = launch
-            .weight_slice_offset
-            .checked_mul(weights.num_adapter_slots)
-            .and_then(|offset| offset.checked_mul(std::mem::size_of::<RoutedLoraAdapterWeight>()))
-            .ok_or_else(|| candle_core::Error::msg("routed LoRA descriptor offset overflow"))?;
-        let weight_ptr = weight_ptr + descriptor_offset as u64;
-        let args = (
-            launch.input,
-            launch.output,
-            weight_ptr,
-            launch.token_adapter_slots,
-            launch.topk_expert_ids,
-            launch.route_input_rows,
-            launch.route_output_rows,
-            launch.route_output_scales,
-            launch.metadata.num_tokens() as i32,
-            launch.metadata.top_k() as i32,
-            launch.metadata.num_experts() as i32,
-            launch.metadata.num_adapter_slots() as i32,
-            launch.projection.num_slices() as i32,
-            launch.projection.input_features() as i32,
-            launch.projection.output_features() as i32,
-            launch.projection.output_row_stride() as i32,
-            launch.projection.output_slice_stride() as i32,
-            launch.projection.max_rank() as i32,
-            launch.projection.input_mode() as i32,
-            output_splits as i32,
-            stream.cu_stream(),
-        );
-        let status = match launch.dtype {
-            DType::F32 => moe_cuda_ffi::launch_routed_lora_direct_f32(
-                args.0 as *const f32,
-                args.1 as *mut f32,
-                args.2 as *const RoutedLoraAdapterWeight,
-                args.3 as *const u32,
-                args.4 as *const u32,
-                optional_u32(args.5),
-                optional_u32(args.6),
-                optional_f32(args.7),
-                args.8,
-                args.9,
-                args.10,
-                args.11,
-                args.12,
-                args.13,
-                args.14,
-                args.15,
-                args.16,
-                args.17,
-                args.18,
-                args.19,
-                args.20,
-            ),
-            DType::F16 => moe_cuda_ffi::launch_routed_lora_direct_f16(
-                args.0 as *const half::f16,
-                args.1 as *mut half::f16,
-                args.2 as *const RoutedLoraAdapterWeight,
-                args.3 as *const u32,
-                args.4 as *const u32,
-                optional_u32(args.5),
-                optional_u32(args.6),
-                optional_f32(args.7),
-                args.8,
-                args.9,
-                args.10,
-                args.11,
-                args.12,
-                args.13,
-                args.14,
-                args.15,
-                args.16,
-                args.17,
-                args.18,
-                args.19,
-                args.20,
-            ),
-            DType::BF16 => moe_cuda_ffi::launch_routed_lora_direct_bf16(
-                args.0 as *const half::bf16,
-                args.1 as *mut half::bf16,
-                args.2 as *const RoutedLoraAdapterWeight,
-                args.3 as *const u32,
-                args.4 as *const u32,
-                optional_u32(args.5),
-                optional_u32(args.6),
-                optional_f32(args.7),
-                args.8,
-                args.9,
-                args.10,
-                args.11,
-                args.12,
-                args.13,
-                args.14,
-                args.15,
-                args.16,
-                args.17,
-                args.18,
-                args.19,
-                args.20,
-            ),
-            dtype => candle_core::bail!("routed LoRA CUDA does not support {dtype:?}"),
-        };
-        check_status(status, "direct launch")
     }
 
     /// Launches one grouped shrink and one grouped expand across every active adapter/expert pair.
@@ -940,204 +946,209 @@ mod cuda {
         weights: &RoutedLoraCudaWeightTable,
         launch: RoutedLoraGroupedLaunch,
     ) -> Result<()> {
-        check_launch(
-            metadata.layout,
-            launch.projection,
-            weights,
-            launch.weight_slice_offset,
-        )?;
-        let stream = metadata.device.cuda_stream();
-        let (weight_ptr, _weight_guard) = weights.descriptors.device_ptr(&stream);
-        let descriptor_offset = launch
-            .weight_slice_offset
-            .checked_mul(weights.num_adapter_slots)
-            .and_then(|offset| offset.checked_mul(std::mem::size_of::<RoutedLoraAdapterWeight>()))
-            .ok_or_else(|| candle_core::Error::msg("routed LoRA descriptor offset overflow"))?;
-        let weight_ptr = weight_ptr + descriptor_offset as u64;
-        let (sorted_route_ids, _sorted_route_ids_guard) =
-            metadata.sorted_route_ids.device_ptr(&stream);
-        let (block_pair_ids, _block_pair_ids_guard) = metadata.block_pair_ids.device_ptr(&stream);
-        if weights.supports_wmma(launch.projection)
-            && matches!(launch.dtype, DType::F16 | DType::BF16)
-        {
-            let output_splits = weights.wmma_output_splits(metadata.layout, launch.projection);
-            let status = match launch.dtype {
-                DType::F16 => moe_cuda_ffi::launch_routed_lora_grouped_wmma_f16(
+        unsafe {
+            check_launch(
+                metadata.layout,
+                launch.projection,
+                weights,
+                launch.weight_slice_offset,
+            )?;
+            let stream = metadata.device.cuda_stream();
+            let (weight_ptr, _weight_guard) = weights.descriptors.device_ptr(&stream);
+            let descriptor_offset = launch
+                .weight_slice_offset
+                .checked_mul(weights.num_adapter_slots)
+                .and_then(|offset| {
+                    offset.checked_mul(std::mem::size_of::<RoutedLoraAdapterWeight>())
+                })
+                .ok_or_else(|| candle_core::Error::msg("routed LoRA descriptor offset overflow"))?;
+            let weight_ptr = weight_ptr + descriptor_offset as u64;
+            let (sorted_route_ids, _sorted_route_ids_guard) =
+                metadata.sorted_route_ids.device_ptr(&stream);
+            let (block_pair_ids, _block_pair_ids_guard) =
+                metadata.block_pair_ids.device_ptr(&stream);
+            if weights.supports_wmma(launch.projection)
+                && matches!(launch.dtype, DType::F16 | DType::BF16)
+            {
+                let output_splits = weights.wmma_output_splits(metadata.layout, launch.projection);
+                let status = match launch.dtype {
+                    DType::F16 => moe_cuda_ffi::launch_routed_lora_grouped_wmma_f16(
+                        launch.input as *const half::f16,
+                        launch.output as *mut half::f16,
+                        weight_ptr as *const RoutedLoraAdapterWeight,
+                        sorted_route_ids as *const u32,
+                        block_pair_ids as *const u32,
+                        optional_u32(launch.route_input_rows),
+                        optional_u32(launch.route_output_rows),
+                        optional_f32(launch.route_output_scales),
+                        metadata.layout.num_routes() as i32,
+                        metadata.layout.max_blocks() as i32,
+                        metadata.layout.top_k() as i32,
+                        metadata.layout.num_experts() as i32,
+                        metadata.layout.num_adapter_slots() as i32,
+                        launch.projection.num_slices() as i32,
+                        launch.projection.input_features() as i32,
+                        launch.projection.output_features() as i32,
+                        launch.projection.output_row_stride() as i32,
+                        launch.projection.output_slice_stride() as i32,
+                        launch.projection.input_mode() as i32,
+                        output_splits as i32,
+                        stream.cu_stream(),
+                    ),
+                    DType::BF16 => moe_cuda_ffi::launch_routed_lora_grouped_wmma_bf16(
+                        launch.input as *const half::bf16,
+                        launch.output as *mut half::bf16,
+                        weight_ptr as *const RoutedLoraAdapterWeight,
+                        sorted_route_ids as *const u32,
+                        block_pair_ids as *const u32,
+                        optional_u32(launch.route_input_rows),
+                        optional_u32(launch.route_output_rows),
+                        optional_f32(launch.route_output_scales),
+                        metadata.layout.num_routes() as i32,
+                        metadata.layout.max_blocks() as i32,
+                        metadata.layout.top_k() as i32,
+                        metadata.layout.num_experts() as i32,
+                        metadata.layout.num_adapter_slots() as i32,
+                        launch.projection.num_slices() as i32,
+                        launch.projection.input_features() as i32,
+                        launch.projection.output_features() as i32,
+                        launch.projection.output_row_stride() as i32,
+                        launch.projection.output_slice_stride() as i32,
+                        launch.projection.input_mode() as i32,
+                        output_splits as i32,
+                        stream.cu_stream(),
+                    ),
+                    _ => unreachable!(),
+                };
+                return check_status(status, "grouped WMMA");
+            }
+            let shrink_status = match launch.dtype {
+                DType::F32 => moe_cuda_ffi::launch_routed_lora_grouped_shrink_f32(
+                    launch.input as *const f32,
+                    weight_ptr as *const RoutedLoraAdapterWeight,
+                    sorted_route_ids as *const u32,
+                    block_pair_ids as *const u32,
+                    optional_u32(launch.route_input_rows),
+                    launch.hidden as *mut f32,
+                    metadata.layout.num_routes() as i32,
+                    metadata.layout.max_blocks() as i32,
+                    metadata.layout.block_size() as i32,
+                    metadata.layout.top_k() as i32,
+                    metadata.layout.num_experts() as i32,
+                    metadata.layout.num_adapter_slots() as i32,
+                    launch.projection.num_slices() as i32,
+                    launch.projection.input_features() as i32,
+                    launch.projection.max_rank() as i32,
+                    launch.projection.input_mode() as i32,
+                    stream.cu_stream(),
+                ),
+                DType::F16 => moe_cuda_ffi::launch_routed_lora_grouped_shrink_f16(
                     launch.input as *const half::f16,
+                    weight_ptr as *const RoutedLoraAdapterWeight,
+                    sorted_route_ids as *const u32,
+                    block_pair_ids as *const u32,
+                    optional_u32(launch.route_input_rows),
+                    launch.hidden as *mut f32,
+                    metadata.layout.num_routes() as i32,
+                    metadata.layout.max_blocks() as i32,
+                    metadata.layout.block_size() as i32,
+                    metadata.layout.top_k() as i32,
+                    metadata.layout.num_experts() as i32,
+                    metadata.layout.num_adapter_slots() as i32,
+                    launch.projection.num_slices() as i32,
+                    launch.projection.input_features() as i32,
+                    launch.projection.max_rank() as i32,
+                    launch.projection.input_mode() as i32,
+                    stream.cu_stream(),
+                ),
+                DType::BF16 => moe_cuda_ffi::launch_routed_lora_grouped_shrink_bf16(
+                    launch.input as *const half::bf16,
+                    weight_ptr as *const RoutedLoraAdapterWeight,
+                    sorted_route_ids as *const u32,
+                    block_pair_ids as *const u32,
+                    optional_u32(launch.route_input_rows),
+                    launch.hidden as *mut f32,
+                    metadata.layout.num_routes() as i32,
+                    metadata.layout.max_blocks() as i32,
+                    metadata.layout.block_size() as i32,
+                    metadata.layout.top_k() as i32,
+                    metadata.layout.num_experts() as i32,
+                    metadata.layout.num_adapter_slots() as i32,
+                    launch.projection.num_slices() as i32,
+                    launch.projection.input_features() as i32,
+                    launch.projection.max_rank() as i32,
+                    launch.projection.input_mode() as i32,
+                    stream.cu_stream(),
+                ),
+                dtype => candle_core::bail!("routed LoRA CUDA does not support {dtype:?}"),
+            };
+            check_status(shrink_status, "grouped shrink")?;
+
+            let expand_status = match launch.dtype {
+                DType::F32 => moe_cuda_ffi::launch_routed_lora_grouped_expand_f32(
+                    launch.hidden as *const f32,
+                    launch.output as *mut f32,
+                    weight_ptr as *const RoutedLoraAdapterWeight,
+                    sorted_route_ids as *const u32,
+                    block_pair_ids as *const u32,
+                    optional_u32(launch.route_output_rows),
+                    optional_f32(launch.route_output_scales),
+                    metadata.layout.num_routes() as i32,
+                    metadata.layout.max_blocks() as i32,
+                    metadata.layout.block_size() as i32,
+                    metadata.layout.num_experts() as i32,
+                    metadata.layout.num_adapter_slots() as i32,
+                    launch.projection.num_slices() as i32,
+                    launch.projection.output_features() as i32,
+                    launch.projection.output_row_stride() as i32,
+                    launch.projection.output_slice_stride() as i32,
+                    launch.projection.max_rank() as i32,
+                    stream.cu_stream(),
+                ),
+                DType::F16 => moe_cuda_ffi::launch_routed_lora_grouped_expand_f16(
+                    launch.hidden as *const f32,
                     launch.output as *mut half::f16,
                     weight_ptr as *const RoutedLoraAdapterWeight,
                     sorted_route_ids as *const u32,
                     block_pair_ids as *const u32,
-                    optional_u32(launch.route_input_rows),
                     optional_u32(launch.route_output_rows),
                     optional_f32(launch.route_output_scales),
                     metadata.layout.num_routes() as i32,
                     metadata.layout.max_blocks() as i32,
-                    metadata.layout.top_k() as i32,
+                    metadata.layout.block_size() as i32,
                     metadata.layout.num_experts() as i32,
                     metadata.layout.num_adapter_slots() as i32,
                     launch.projection.num_slices() as i32,
-                    launch.projection.input_features() as i32,
                     launch.projection.output_features() as i32,
                     launch.projection.output_row_stride() as i32,
                     launch.projection.output_slice_stride() as i32,
-                    launch.projection.input_mode() as i32,
-                    output_splits as i32,
+                    launch.projection.max_rank() as i32,
                     stream.cu_stream(),
                 ),
-                DType::BF16 => moe_cuda_ffi::launch_routed_lora_grouped_wmma_bf16(
-                    launch.input as *const half::bf16,
+                DType::BF16 => moe_cuda_ffi::launch_routed_lora_grouped_expand_bf16(
+                    launch.hidden as *const f32,
                     launch.output as *mut half::bf16,
                     weight_ptr as *const RoutedLoraAdapterWeight,
                     sorted_route_ids as *const u32,
                     block_pair_ids as *const u32,
-                    optional_u32(launch.route_input_rows),
                     optional_u32(launch.route_output_rows),
                     optional_f32(launch.route_output_scales),
                     metadata.layout.num_routes() as i32,
                     metadata.layout.max_blocks() as i32,
-                    metadata.layout.top_k() as i32,
+                    metadata.layout.block_size() as i32,
                     metadata.layout.num_experts() as i32,
                     metadata.layout.num_adapter_slots() as i32,
                     launch.projection.num_slices() as i32,
-                    launch.projection.input_features() as i32,
                     launch.projection.output_features() as i32,
                     launch.projection.output_row_stride() as i32,
                     launch.projection.output_slice_stride() as i32,
-                    launch.projection.input_mode() as i32,
-                    output_splits as i32,
+                    launch.projection.max_rank() as i32,
                     stream.cu_stream(),
                 ),
-                _ => unreachable!(),
+                dtype => candle_core::bail!("routed LoRA CUDA does not support {dtype:?}"),
             };
-            return check_status(status, "grouped WMMA");
+            check_status(expand_status, "grouped expand")
         }
-        let shrink_status = match launch.dtype {
-            DType::F32 => moe_cuda_ffi::launch_routed_lora_grouped_shrink_f32(
-                launch.input as *const f32,
-                weight_ptr as *const RoutedLoraAdapterWeight,
-                sorted_route_ids as *const u32,
-                block_pair_ids as *const u32,
-                optional_u32(launch.route_input_rows),
-                launch.hidden as *mut f32,
-                metadata.layout.num_routes() as i32,
-                metadata.layout.max_blocks() as i32,
-                metadata.layout.block_size() as i32,
-                metadata.layout.top_k() as i32,
-                metadata.layout.num_experts() as i32,
-                metadata.layout.num_adapter_slots() as i32,
-                launch.projection.num_slices() as i32,
-                launch.projection.input_features() as i32,
-                launch.projection.max_rank() as i32,
-                launch.projection.input_mode() as i32,
-                stream.cu_stream(),
-            ),
-            DType::F16 => moe_cuda_ffi::launch_routed_lora_grouped_shrink_f16(
-                launch.input as *const half::f16,
-                weight_ptr as *const RoutedLoraAdapterWeight,
-                sorted_route_ids as *const u32,
-                block_pair_ids as *const u32,
-                optional_u32(launch.route_input_rows),
-                launch.hidden as *mut f32,
-                metadata.layout.num_routes() as i32,
-                metadata.layout.max_blocks() as i32,
-                metadata.layout.block_size() as i32,
-                metadata.layout.top_k() as i32,
-                metadata.layout.num_experts() as i32,
-                metadata.layout.num_adapter_slots() as i32,
-                launch.projection.num_slices() as i32,
-                launch.projection.input_features() as i32,
-                launch.projection.max_rank() as i32,
-                launch.projection.input_mode() as i32,
-                stream.cu_stream(),
-            ),
-            DType::BF16 => moe_cuda_ffi::launch_routed_lora_grouped_shrink_bf16(
-                launch.input as *const half::bf16,
-                weight_ptr as *const RoutedLoraAdapterWeight,
-                sorted_route_ids as *const u32,
-                block_pair_ids as *const u32,
-                optional_u32(launch.route_input_rows),
-                launch.hidden as *mut f32,
-                metadata.layout.num_routes() as i32,
-                metadata.layout.max_blocks() as i32,
-                metadata.layout.block_size() as i32,
-                metadata.layout.top_k() as i32,
-                metadata.layout.num_experts() as i32,
-                metadata.layout.num_adapter_slots() as i32,
-                launch.projection.num_slices() as i32,
-                launch.projection.input_features() as i32,
-                launch.projection.max_rank() as i32,
-                launch.projection.input_mode() as i32,
-                stream.cu_stream(),
-            ),
-            dtype => candle_core::bail!("routed LoRA CUDA does not support {dtype:?}"),
-        };
-        check_status(shrink_status, "grouped shrink")?;
-
-        let expand_status = match launch.dtype {
-            DType::F32 => moe_cuda_ffi::launch_routed_lora_grouped_expand_f32(
-                launch.hidden as *const f32,
-                launch.output as *mut f32,
-                weight_ptr as *const RoutedLoraAdapterWeight,
-                sorted_route_ids as *const u32,
-                block_pair_ids as *const u32,
-                optional_u32(launch.route_output_rows),
-                optional_f32(launch.route_output_scales),
-                metadata.layout.num_routes() as i32,
-                metadata.layout.max_blocks() as i32,
-                metadata.layout.block_size() as i32,
-                metadata.layout.num_experts() as i32,
-                metadata.layout.num_adapter_slots() as i32,
-                launch.projection.num_slices() as i32,
-                launch.projection.output_features() as i32,
-                launch.projection.output_row_stride() as i32,
-                launch.projection.output_slice_stride() as i32,
-                launch.projection.max_rank() as i32,
-                stream.cu_stream(),
-            ),
-            DType::F16 => moe_cuda_ffi::launch_routed_lora_grouped_expand_f16(
-                launch.hidden as *const f32,
-                launch.output as *mut half::f16,
-                weight_ptr as *const RoutedLoraAdapterWeight,
-                sorted_route_ids as *const u32,
-                block_pair_ids as *const u32,
-                optional_u32(launch.route_output_rows),
-                optional_f32(launch.route_output_scales),
-                metadata.layout.num_routes() as i32,
-                metadata.layout.max_blocks() as i32,
-                metadata.layout.block_size() as i32,
-                metadata.layout.num_experts() as i32,
-                metadata.layout.num_adapter_slots() as i32,
-                launch.projection.num_slices() as i32,
-                launch.projection.output_features() as i32,
-                launch.projection.output_row_stride() as i32,
-                launch.projection.output_slice_stride() as i32,
-                launch.projection.max_rank() as i32,
-                stream.cu_stream(),
-            ),
-            DType::BF16 => moe_cuda_ffi::launch_routed_lora_grouped_expand_bf16(
-                launch.hidden as *const f32,
-                launch.output as *mut half::bf16,
-                weight_ptr as *const RoutedLoraAdapterWeight,
-                sorted_route_ids as *const u32,
-                block_pair_ids as *const u32,
-                optional_u32(launch.route_output_rows),
-                optional_f32(launch.route_output_scales),
-                metadata.layout.num_routes() as i32,
-                metadata.layout.max_blocks() as i32,
-                metadata.layout.block_size() as i32,
-                metadata.layout.num_experts() as i32,
-                metadata.layout.num_adapter_slots() as i32,
-                launch.projection.num_slices() as i32,
-                launch.projection.output_features() as i32,
-                launch.projection.output_row_stride() as i32,
-                launch.projection.output_slice_stride() as i32,
-                launch.projection.max_rank() as i32,
-                stream.cu_stream(),
-            ),
-            dtype => candle_core::bail!("routed LoRA CUDA does not support {dtype:?}"),
-        };
-        check_status(expand_status, "grouped expand")
     }
 
     pub use self::RoutedLoraCudaMetadata as Metadata;
@@ -1148,9 +1159,9 @@ mod cuda {
 
 #[cfg(feature = "cuda")]
 pub use cuda::{
-    launch_routed_lora_direct, launch_routed_lora_grouped, DirectLaunch as RoutedLoraDirectLaunch,
-    GroupedLaunch as RoutedLoraGroupedLaunch, Metadata as RoutedLoraCudaMetadata,
-    WeightTable as RoutedLoraCudaWeightTable,
+    DirectLaunch as RoutedLoraDirectLaunch, GroupedLaunch as RoutedLoraGroupedLaunch,
+    Metadata as RoutedLoraCudaMetadata, WeightTable as RoutedLoraCudaWeightTable,
+    launch_routed_lora_direct, launch_routed_lora_grouped,
 };
 
 #[cfg(test)]

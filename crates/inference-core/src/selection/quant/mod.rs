@@ -4,7 +4,7 @@ mod gguf_discovery;
 
 use std::path::Path;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use tracing::{debug, info, warn};
 
 pub use gguf_discovery::{
@@ -13,9 +13,9 @@ pub use gguf_discovery::{
 };
 
 use crate::{
-    auto_tune, parse_isq_value, parse_uqff_shard, probe_hf_repo_files, resolve_uqff_report_output,
-    resolve_uqff_shorthand, try_get_model_file, AutoTuneRequest, ModelSelected, TokenSource,
-    TuneProfile,
+    AutoTuneRequest, ModelSelected, TokenSource, TuneProfile, auto_tune, parse_isq_value,
+    parse_uqff_shard, probe_hf_repo_files, resolve_uqff_report_output, resolve_uqff_shorthand,
+    try_get_model_file,
 };
 use inference_quant::UqffReport;
 
@@ -63,7 +63,7 @@ pub async fn resolve_model_quant(
                 model,
                 isq: None,
                 requested_model_id: None,
-            })
+            });
         }
     };
     if let ModelSelected::Run {
@@ -363,10 +363,10 @@ fn resolve_uqff_quant(
     files: &[String],
     report: Option<&UqffReport>,
 ) -> Result<Option<String>> {
-    if let Some(report) = report {
-        if let Some(output) = resolve_uqff_report_output(raw, files, report)? {
-            return Ok(Some(output.quant.clone()));
-        }
+    if let Some(report) = report
+        && let Some(output) = resolve_uqff_report_output(raw, files, report)?
+    {
+        return Ok(Some(output.quant.clone()));
     }
     Ok(resolve_uqff_shorthand(raw, files).map(|matched| uqff_shorthand_from_match(&matched)))
 }
@@ -600,9 +600,11 @@ mod tests {
             "config.json".to_string(),
         ];
 
-        assert!(resolve_selected_uqff("8", "org/foo", &files, None)
-            .unwrap()
-            .is_none());
+        assert!(
+            resolve_selected_uqff("8", "org/foo", &files, None)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

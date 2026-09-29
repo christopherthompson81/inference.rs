@@ -91,9 +91,10 @@ pub mod text_models_inputs_processor {
     use tokenizers::Tokenizer;
 
     use crate::{
+        AdapterLease,
         attention::{
-            flash_params::{make_flash_params, packed_rope_positions},
             FlashParams,
+            flash_params::{make_flash_params, packed_rope_positions},
         },
         device_map::DeviceMapper,
         flashinfer::{
@@ -105,15 +106,14 @@ pub mod text_models_inputs_processor {
         gdn::RecurrentBatchKind,
         get_mut_arcmutex,
         paged_attention::{
+            _PAD_SLOT_ID, AttentionBackendKind, PagedAttentionInputMetadata, PagedAttentionMeta,
             block_aligned_sliding_window_start,
             block_hash::MultimodalAttentionPolicy,
             block_table_rows::BlockTableSnapshot,
             input_metadata::{_make_tensor_with_pad, DecodePagedRows},
-            AttentionBackendKind, PagedAttentionInputMetadata, PagedAttentionMeta, _PAD_SLOT_ID,
         },
         pipeline::recurrent_batch_kind_for_input,
         sequence::Sequence,
-        AdapterLease,
     };
 
     use super::{InputProcessorOutput, InputsProcessor, InputsProcessorType};
@@ -976,7 +976,12 @@ pub mod text_models_inputs_processor {
                 for block_pos in block_start..block_end {
                     let block_number = if block_pos / paged_attn_metadata.block_size >= table.len()
                     {
-                        panic!("Block table is too small (completion)! block_pos={} block_size={} table_len={}", block_pos, paged_attn_metadata.block_size, table.len());
+                        panic!(
+                            "Block table is too small (completion)! block_pos={} block_size={} table_len={}",
+                            block_pos,
+                            paged_attn_metadata.block_size,
+                            table.len()
+                        );
                     } else {
                         table
                             .get(block_pos / paged_attn_metadata.block_size)
@@ -1530,7 +1535,7 @@ pub mod text_models_inputs_processor {
         use crate::attention::flash_params::sliding_k_lengths;
         use crate::paged_attention::block_table_rows::BlockTableRows;
         use crate::paged_attention::input_metadata::{
-            cuda_graph_block_table_len_with_cap, PagedDecodeMetadataRequirements,
+            PagedDecodeMetadataRequirements, cuda_graph_block_table_len_with_cap,
         };
 
         fn assert_zero_padded_rows(rows: &[Vec<u32>], prefixes: &[&[u32]]) {

@@ -1,4 +1,4 @@
-use candle_core::{cuda_backend::kernels, Device, Result};
+use candle_core::{Device, Result, cuda_backend::kernels};
 
 const PTX_ENTRY_PREFIX: &str = ".visible .entry ";
 

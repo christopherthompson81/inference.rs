@@ -1538,9 +1538,11 @@ mod tests {
         assert_eq!(batch.cumulative_query_lens(), &[0, 3, 6, 9, 12]);
         assert_eq!(batch.cumulative_kv_lens(), &[0, 14, 28, 42, 56]);
         assert_eq!(batch.slot_mapping()[..3], [11, 12, 13]);
-        assert!(batch.slot_mapping()[3..]
-            .iter()
-            .all(|slot| *slot == crate::paged_attention::_PAD_SLOT_ID));
+        assert!(
+            batch.slot_mapping()[3..]
+                .iter()
+                .all(|slot| *slot == crate::paged_attention::_PAD_SLOT_ID)
+        );
         assert_eq!(
             batch.block_tables().len(),
             4 * pool.config().pages_per_sequence()
@@ -1589,12 +1591,13 @@ mod tests {
         let suffix = pool.plan_context_write(9, 2)?;
         pool.commit_context(&suffix)?;
         assert!(!pool.sequence_query_ready(9));
-        assert!(pool
-            .scratch_batch(&[WindowedKvQuery {
+        assert!(
+            pool.scratch_batch(&[WindowedKvQuery {
                 seq_id: 9,
                 query_len: 1,
             }])
-            .is_err());
+            .is_err()
+        );
 
         let fill_window = pool.plan_context_write(9, 11)?;
         assert_eq!(fill_window.retained_input_range(), 4..11);

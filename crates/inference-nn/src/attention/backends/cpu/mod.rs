@@ -18,8 +18,8 @@ use std::iter::Sum;
 
 use crate::attention::SdpaParams;
 
-pub use elem::fast_exp;
 use elem::ElemOps;
+pub use elem::fast_exp;
 use mask::MaskInfo;
 
 const SINGLE_Q_STACK_DV: usize = 256;

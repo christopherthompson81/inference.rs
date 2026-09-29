@@ -238,10 +238,10 @@ pub use gguf::GgufModelBuilder;
 pub use gguf_lora_model::GgufLoraModelBuilder;
 pub use gguf_xlora_model::GgufXLoraModelBuilder;
 pub use inference_core::{
-    AdapterGenerationId, AdapterSelection, LoraAdapterError, LoraAdapterInfo,
-    LoraAdapterLoadPolicy, LoraAdapterRoute, LoraAdapterSpec, LoraResidentGenerationInfo,
-    LoraRuntimeConfig, LoraRuntimeStatus, DEFAULT_LORA_MAX_ADAPTERS, DEFAULT_LORA_MAX_BYTES,
-    DEFAULT_LORA_MAX_RANK, MAX_LORA_ALIAS_BYTES,
+    AdapterGenerationId, AdapterSelection, DEFAULT_LORA_MAX_ADAPTERS, DEFAULT_LORA_MAX_BYTES,
+    DEFAULT_LORA_MAX_RANK, LoraAdapterError, LoraAdapterInfo, LoraAdapterLoadPolicy,
+    LoraAdapterRoute, LoraAdapterSpec, LoraResidentGenerationInfo, LoraRuntimeConfig,
+    LoraRuntimeStatus, MAX_LORA_ALIAS_BYTES,
 };
 pub use inference_core::{
     AgentPermission, AgentToolApproval, AgentToolApprovalAsyncCallback, AgentToolApprovalCallback,
@@ -251,10 +251,11 @@ pub use inference_core::{
     ShellOptions, ShellSkillMount,
 };
 pub use inference_core::{
-    AgenticToolCallRecord, File, FileContent, FileSource, RequestedFile, MODEL_INLINE_BYTES,
+    AgenticToolCallRecord, File, FileContent, FileSource, MODEL_INLINE_BYTES, RequestedFile,
     WIRE_EMBED_LIMIT_BYTES,
 };
 pub use inference_core::{CalibrationAction, CalibrationStatus};
+pub use inference_core::{INFERENCE_RS_GIT_REVISION, INFERENCE_RS_VERSION};
 pub use inference_core::{
     McpClient, McpClientConfig, McpServerConfig, McpServerSource, McpToolInfo,
 };
@@ -263,13 +264,12 @@ pub use inference_core::{
     ToolCallbackKind, ToolOutput,
 };
 pub use inference_core::{SerializedSession, SerializedVideo};
-pub use inference_core::{INFERENCE_RS_GIT_REVISION, INFERENCE_RS_VERSION};
 pub use lora_model::LoraModelBuilder;
 pub use messages::{
     EmbeddingRequest, EmbeddingRequestBuilder, EmbeddingRequestInput, InputFile,
     MultimodalMessages, RequestBuilder, RequestLike, TextMessageRole, TextMessages,
 };
-pub use model::{best_device, Model};
+pub use model::{Model, best_device};
 
 pub use model_builder_trait::{AnyModelBuilder, MultiModelBuilder};
 pub use multimodal_model::{MultimodalModelBuilder, UqffMultimodalModelBuilder};
@@ -328,7 +328,7 @@ pub use inference_core::ModelCategory;
 pub use inference_core::{SearchEmbeddingModel, SearchFunctionParameters};
 
 // ========== Speech Types ==========
-pub use inference_core::{speech_utils, SpeechLoaderType};
+pub use inference_core::{SpeechLoaderType, speech_utils};
 
 // ========== AnyMoe Types ==========
 pub use inference_core::{AnyMoeConfig, AnyMoeExpertType};

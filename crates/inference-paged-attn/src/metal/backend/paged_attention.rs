@@ -1,6 +1,6 @@
 use candle_core::{
-    backend::BackendStorage, CpuStorage, DType, Layout, MetalStorage, Result, Shape, Storage,
-    Tensor,
+    CpuStorage, DType, Layout, MetalStorage, Result, Shape, Storage, Tensor,
+    backend::BackendStorage,
 };
 
 use crate::metal::{

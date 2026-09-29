@@ -1,5 +1,5 @@
 use image::{
-    imageops::FilterType, DynamicImage, GenericImage, GenericImageView, ImageBuffer, Rgb, Rgba,
+    DynamicImage, GenericImage, GenericImageView, ImageBuffer, Rgb, Rgba, imageops::FilterType,
 };
 
 fn resize_image_to_max_edge(img: &DynamicImage, max_edge: u32) -> DynamicImage {

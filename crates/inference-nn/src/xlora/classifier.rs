@@ -1,6 +1,6 @@
 use crate::layers::{linear, linear_no_bias};
-use candle_core::{DType, Device, Result, Tensor, D};
-use candle_nn::{activation, ops::softmax_last_dim, Dropout, Linear, Module, ModuleT};
+use candle_core::{D, DType, Device, Result, Tensor};
+use candle_nn::{Dropout, Linear, Module, ModuleT, activation, ops::softmax_last_dim};
 use inference_quant::ShardedVarBuilder;
 
 use crate::ops::{TopKLastDimOp, TopKOutput};

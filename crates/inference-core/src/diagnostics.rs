@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Instant;
 
-use hf_hub::{api::sync::ApiBuilder, Cache};
+use hf_hub::{Cache, api::sync::ApiBuilder};
 use serde::{Deserialize, Serialize};
 use sysinfo::{Disks, System};
 
@@ -656,8 +656,13 @@ pub fn run_doctor() -> DoctorReport {
             } else {
                 (
                     DoctorStatus::Warn,
-                    format!("GPU {ord}: cuTile runtime tooling is unavailable; native CUDA and CUTLASS fallbacks remain active."),
-                    Some("Install NVIDIA tileiras and put it on PATH or set CUTILE_TILEIRAS_PATH.".to_string()),
+                    format!(
+                        "GPU {ord}: cuTile runtime tooling is unavailable; native CUDA and CUTLASS fallbacks remain active."
+                    ),
+                    Some(
+                        "Install NVIDIA tileiras and put it on PATH or set CUTILE_TILEIRAS_PATH."
+                            .to_string(),
+                    ),
                 )
             };
             checks.push(DoctorCheck {

@@ -15,16 +15,16 @@ use inference_core::{
     ToolType, Usage, WebSearchOptions, WebSearchUserLocation,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Map, Value};
+use serde_json::{Map, Value, json};
 use tokio::sync::mpsc::Receiver;
 use utoipa::ToSchema;
 
 use crate::{
-    api_error::{boxed_anyhow, ApiError, ApiErrorKind, ModelErrorMessage, INTERNAL_ERROR_MESSAGE},
+    api_error::{ApiError, ApiErrorKind, INTERNAL_ERROR_MESSAGE, ModelErrorMessage, boxed_anyhow},
     dispatch::apply_model_override,
     engine_chat::{
-        serialize_agentic_progress, serialize_approval_required, ChatEngine, DispatchError,
-        PreparedChat, ResponseTap,
+        ChatEngine, DispatchError, PreparedChat, ResponseTap, serialize_agentic_progress,
+        serialize_approval_required,
     },
     openai::{
         ChatCompletionRequest, FunctionCalled, Grammar, Message, MessageContent,
@@ -421,12 +421,10 @@ fn resolve_anthropic_thinking(
         })
         .transpose()?;
 
-    if let (Some(native), Some(extension)) = (native, enable_thinking) {
-        if native != extension {
-            anyhow::bail!(
-                "Anthropic `thinking.type` conflicts with inference.rs `enable_thinking`."
-            );
-        }
+    if let (Some(native), Some(extension)) = (native, enable_thinking)
+        && native != extension
+    {
+        anyhow::bail!("Anthropic `thinking.type` conflicts with inference.rs `enable_thinking`.");
     }
 
     Ok(enable_thinking.or(native))
@@ -459,12 +457,12 @@ fn resolve_anthropic_effort(
         .transpose()?;
     let extension = extension.map(str::parse).transpose()?;
 
-    if let (Some(native), Some(extension)) = (native, extension) {
-        if native != extension {
-            anyhow::bail!(
-                "Anthropic `output_config.effort` conflicts with inference.rs `reasoning_effort`."
-            );
-        }
+    if let (Some(native), Some(extension)) = (native, extension)
+        && native != extension
+    {
+        anyhow::bail!(
+            "Anthropic `output_config.effort` conflicts with inference.rs `reasoning_effort`."
+        );
     }
 
     Ok(extension.or(native))
@@ -552,10 +550,10 @@ impl AnthropicMessagesRequest {
         }
         let mut messages = Vec::new();
 
-        if let Some(system) = self.system {
-            if let Some(system_text) = system_to_text(system)? {
-                messages.push(message_with_text("system", system_text));
-            }
+        if let Some(system) = self.system
+            && let Some(system_text) = system_to_text(system)?
+        {
+            messages.push(message_with_text("system", system_text));
         }
 
         for message in self.messages {

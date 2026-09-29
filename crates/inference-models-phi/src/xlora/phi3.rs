@@ -9,12 +9,12 @@ use crate::{
     attention::{AttentionMask, SdpaParams},
     kv_cache::EitherCache,
     layers::{self, Activation, Sdpa},
-    lora::{linear_no_bias, LinearLayerLike, LoraConfig, Ordering},
+    lora::{LinearLayerLike, LoraConfig, Ordering, linear_no_bias},
     model::{IsqModel, NormalLoadingMetadata},
     paged_attention::ModelConfigMetadata,
     utils::progress::NiceProgressBar,
 };
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use inference_nn::utils::progress::IterWithProgress;
 use inference_quant::{QuantMethod, ShardedVarBuilder};
 use std::{collections::HashMap, sync::Arc};
@@ -23,7 +23,7 @@ use tracing::info;
 use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{CausalMasker, PhiRotaryEmbedding, RmsNorm},
-    model::{extract_logits, NormalModel},
+    model::{NormalModel, extract_logits},
     phi3::Config,
 };
 
@@ -390,7 +390,7 @@ impl Model {
         normal_loading_metadata: NormalLoadingMetadata,
         preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),

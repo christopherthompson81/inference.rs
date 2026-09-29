@@ -16,8 +16,8 @@ use crate::{
     kv_cache::{EitherCache, KvCache, NormalCache},
     layers::masker::PastKvLenCache,
     layers::{
-        embedding_with_legacy_tied_uqff, CausalMasker, Llama3RopeSpec, Llama3RotaryEmbedding,
-        RmsNorm, Sdpa,
+        CausalMasker, Llama3RopeSpec, Llama3RotaryEmbedding, RmsNorm, Sdpa,
+        embedding_with_legacy_tied_uqff,
     },
     model::{IsqModel, ModelForwardContext, NormalLoadingMetadata},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
@@ -383,13 +383,12 @@ fn packed_cross_attention_ranges(
         candle_core::bail!("Mllama packed cross-attention requires physical batch size 1");
     }
     validate_packed_query_lens(query_lens, shape.state_batch, shape.total_tokens)?;
-    if let Some((mask_batch, max_query_len, mask_tokens)) = shape.mask_shape {
-        if mask_batch != shape.state_batch
+    if let Some((mask_batch, max_query_len, mask_tokens)) = shape.mask_shape
+        && (mask_batch != shape.state_batch
             || mask_tokens != shape.state_tokens
-            || query_lens.iter().any(|&len| len > max_query_len)
-        {
-            candle_core::bail!("Mllama packed cross-attention mask is inconsistent");
-        }
+            || query_lens.iter().any(|&len| len > max_query_len))
+    {
+        candle_core::bail!("Mllama packed cross-attention mask is inconsistent");
     }
 
     let mut offset = 0usize;
@@ -749,7 +748,7 @@ impl MLlamaTextModel {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),
@@ -1023,8 +1022,8 @@ impl IsqModel for MLlamaTextModel {
 #[cfg(test)]
 mod tests {
     use super::{
-        pack_full_text_row_mask, packed_cross_attention_ranges, validate_packed_query_lens,
-        PackedCrossAttentionShape,
+        PackedCrossAttentionShape, pack_full_text_row_mask, packed_cross_attention_ranges,
+        validate_packed_query_lens,
     };
     use candle_core::{Device, Tensor};
 

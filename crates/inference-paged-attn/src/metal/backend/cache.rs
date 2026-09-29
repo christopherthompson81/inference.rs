@@ -1,8 +1,8 @@
 use std::{collections::HashMap, iter::zip};
 
 use candle_core::{
-    backend::BackendStorage, CpuStorage, Device, IndexOp, Layout, MetalDevice, MetalStorage,
-    Result, Storage, Tensor, WithDType,
+    CpuStorage, Device, IndexOp, Layout, MetalDevice, MetalStorage, Result, Storage, Tensor,
+    WithDType, backend::BackendStorage,
 };
 
 use crate::metal::kernels;
@@ -231,7 +231,9 @@ pub unsafe fn swap_blocks(
             }
         }
         (src, dst) => {
-            candle_core::bail!("Tensors must be on either the GPU or CPU to swap, got {src:?} (src) and {dst:?} (dst).");
+            candle_core::bail!(
+                "Tensors must be on either the GPU or CPU to swap, got {src:?} (src) and {dst:?} (dst)."
+            );
         }
     }
 

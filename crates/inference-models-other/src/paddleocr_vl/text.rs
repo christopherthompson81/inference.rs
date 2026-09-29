@@ -10,7 +10,7 @@ use crate::device_map::DeviceMapper;
 use crate::kv_cache::KvCache as EngineKvCache;
 use crate::paged_attention::{AttentionImplementation, PagedAttention};
 use crate::utils::unvarbuilder::UnVarBuilder;
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
 };
@@ -526,12 +526,12 @@ impl ErnieTextModel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::layers::masker::{CausalMaskConfig, PastKvLenCache};
     use crate::layers::CausalMasker;
+    use crate::layers::masker::{CausalMaskConfig, PastKvLenCache};
     use candle_core::Var;
     use candle_nn::VarMap;
     use inference_quant::ShardedSafeTensors;
-    use rand::{rngs::StdRng, SeedableRng};
+    use rand::{SeedableRng, rngs::StdRng};
     use rand_distr::{Distribution, Normal};
 
     const TEST_SEED: u64 = 0x5EED_5EED;

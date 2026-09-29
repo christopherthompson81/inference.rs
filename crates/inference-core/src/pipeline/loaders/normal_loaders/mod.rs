@@ -32,9 +32,9 @@ use crate::xlora_models::XLoraConfig;
 
 use super::{AutoDeviceMapParams, DeviceMappedModelLoader};
 // Loaders reach these through `use super::*` (or as `super::X`); they live one level up, in `loaders`.
+use super::AutoDeviceMapQuantization;
 #[cfg(feature = "models-gemma")]
 use super::tied_promoted_tensor_pack_factor;
-use super::AutoDeviceMapQuantization;
 
 pub use inference_nn::loaders::NormalModelLoader;
 
@@ -193,10 +193,10 @@ pub use inference_models_other::loaders::{
     GraniteMoeHybridLoader, HunYuanDenseV1Loader, HunYuanMoEV1Loader, Lfm2Loader, Starcoder2Loader,
 };
 #[cfg(feature = "models-phi")]
-pub use inference_models_phi::loaders::{Phi2Loader, Phi3Loader, Phi3_5MoELoader};
+pub use inference_models_phi::loaders::{Phi2Loader, Phi3_5MoELoader, Phi3Loader};
 #[cfg(feature = "models-qwen")]
 pub use inference_models_qwen::loaders::{
-    Qwen2Loader, Qwen3Loader, Qwen3MoELoader, Qwen3NextLoader, Qwen3_5TextLoader,
+    Qwen2Loader, Qwen3_5TextLoader, Qwen3Loader, Qwen3MoELoader, Qwen3NextLoader,
 };
 #[cfg(feature = "models-gemma")]
 mod gemma;

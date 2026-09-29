@@ -1,6 +1,6 @@
 use std::sync::{Arc, OnceLock};
 
-use candle_core::cuda_backend::cudarc::driver::{sys, CudaEvent, CudaStream};
+use candle_core::cuda_backend::cudarc::driver::{CudaEvent, CudaStream, sys};
 
 const CUDA_PHASE_TIMINGS_ENV: &str = "INFERENCE_RS_CUDA_PHASE_TIMINGS";
 static CUDA_PHASE_TIMINGS_ENABLED: OnceLock<bool> = OnceLock::new();

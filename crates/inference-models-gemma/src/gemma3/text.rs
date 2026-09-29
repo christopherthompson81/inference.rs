@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
-    softcap, ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
+    ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder, softcap,
 };
 
 use crate::kv_cache::EitherCache;
@@ -17,15 +17,15 @@ use crate::model::MultimodalModel;
 use crate::model::NormalLoadingMetadata;
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
-    attention::{flash_backend_supports, AttentionMask, SdpaParams},
+    attention::{AttentionMask, SdpaParams, flash_backend_supports},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
-        embedding_with_legacy_tied_uqff, CausalMaskConfig, CausalMasker, Gemma3RotaryEmbedding,
-        GemmaRmsNorm, Mlp, RotaryEmbedding, Sdpa,
+        CausalMaskConfig, CausalMasker, Gemma3RotaryEmbedding, GemmaRmsNorm, Mlp, RotaryEmbedding,
+        Sdpa, embedding_with_legacy_tied_uqff,
     },
     paged_attention::{
-        block_hash::MultimodalAttentionPolicy, AttentionImplementation, ModelConfigMetadata,
-        PagedAttention,
+        AttentionImplementation, ModelConfigMetadata, PagedAttention,
+        block_hash::MultimodalAttentionPolicy,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -435,7 +435,7 @@ impl TextModel {
         attention_mechanism: AttentionImplementation,
         image_token_index: Option<usize>,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),
@@ -939,7 +939,7 @@ impl AnyMoeBaseModelMixin for TextModel {
 mod tests {
     use candle_core::{Device, Tensor};
 
-    use super::{attention_layers_support_packed_prefill, select_paged_mm_prefix_path, TextModel};
+    use super::{TextModel, attention_layers_support_packed_prefill, select_paged_mm_prefix_path};
 
     #[test]
     fn packed_softcap_requires_flash_v2_support() {

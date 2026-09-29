@@ -84,8 +84,10 @@ mod tests {
     fn ranges_before_the_query_span_do_not_mark_later_chunks_noncausal() {
         let ranges = HashMap::from([(7, vec![(20, 40)])]);
 
-        assert!(make_ranges_tensor(&[7], &ranges, &[0], &[100], &[20])
-            .unwrap()
-            .is_none());
+        assert!(
+            make_ranges_tensor(&[7], &ranges, &[0], &[100], &[20])
+                .unwrap()
+                .is_none()
+        );
     }
 }

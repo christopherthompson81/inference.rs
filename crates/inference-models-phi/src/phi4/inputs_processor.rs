@@ -2,16 +2,16 @@
 
 use std::{
     any::Any,
-    collections::{hash_map::DefaultHasher, HashSet},
+    collections::{HashSet, hash_map::DefaultHasher},
     hash::{Hash, Hasher},
     ops::Range,
     sync::Arc,
 };
 
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
-use image::{imageops::FilterType, DynamicImage, GenericImage, GenericImageView, Rgba};
-use inference_audio::fft::{plan_forward_f64, Complex32, Complex64};
+use image::{DynamicImage, GenericImage, GenericImageView, Rgba, imageops::FilterType};
 use inference_audio::AudioInput;
+use inference_audio::fft::{Complex32, Complex64, plan_forward_f64};
 use inference_vision::{ApplyTransforms, Normalize, ToTensor, Transforms};
 use regex::Regex;
 use rubato::{
@@ -30,17 +30,17 @@ use crate::media_inputs::{
     },
 };
 use crate::paged_attention::{
-    block_hash::{MultiModalFeature, MultimodalKind},
     PagedAttentionMeta,
+    block_hash::{MultiModalFeature, MultimodalKind},
 };
 use crate::vision::multimodal_layout::{
     MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
     RequestMultimodalLayout,
 };
 
+use super::Phi4MMVisionSpecificArgs;
 use super::audio_embedding::AUDIO_SPECIAL_TOKEN_ID;
 use super::image_embedding::IMAGE_SPECIAL_TOKEN_ID;
-use super::Phi4MMVisionSpecificArgs;
 
 const COMPATIBLE_IMAGE_SPECIAL_TOKEN_PATTERN: &str = r"<\|image_\d+\|>";
 const COMPATIBLE_AUDIO_SPECIAL_TOKEN_PATTERN: &str = r"<\|audio_\d+\|>";
@@ -1233,11 +1233,7 @@ impl Phi4MMInputsProcessor {
         // Second compression (qformer)
         let integer = result / downsample_rate;
         let remainder = result % downsample_rate;
-        if remainder == 0 {
-            integer
-        } else {
-            integer + 1
-        }
+        if remainder == 0 { integer } else { integer + 1 }
     }
 
     fn create_audio_attention_mask(
@@ -1692,9 +1688,9 @@ mod tests {
     };
 
     use super::{
-        expand_phi4_placeholders, pad_phi4_image_mask, phi4_audio_hash, phi4_image_hash,
-        phi4_request_layout, AudioInput, InputsProcessorValidationError, MultiModalFeature,
-        Phi4MMInputsProcessor, AUDIO_SPECIAL_TOKEN_ID, IMAGE_SPECIAL_TOKEN_ID,
+        AUDIO_SPECIAL_TOKEN_ID, AudioInput, IMAGE_SPECIAL_TOKEN_ID, InputsProcessorValidationError,
+        MultiModalFeature, Phi4MMInputsProcessor, expand_phi4_placeholders, pad_phi4_image_mask,
+        phi4_audio_hash, phi4_image_hash, phi4_request_layout,
     };
 
     fn feature(
@@ -1757,9 +1753,11 @@ mod tests {
     fn rejects_placeholder_and_media_count_mismatches() {
         let image = IMAGE_SPECIAL_TOKEN_ID as u32;
         let error = expand_phi4_placeholders(&[image], &[], &[]).err().unwrap();
-        assert!(error
-            .downcast_ref::<InputsProcessorValidationError>()
-            .is_some());
+        assert!(
+            error
+                .downcast_ref::<InputsProcessorValidationError>()
+                .is_some()
+        );
         assert!(expand_phi4_placeholders(&[1], &[2], &[]).is_err());
         assert!(expand_phi4_placeholders(&[image], &[0], &[]).is_err());
     }
@@ -1778,9 +1776,11 @@ mod tests {
             channels: 1,
         };
         let error = processor.audio_token_count(&audio).unwrap_err();
-        assert!(error
-            .downcast_ref::<InputsProcessorValidationError>()
-            .is_some());
+        assert!(
+            error
+                .downcast_ref::<InputsProcessorValidationError>()
+                .is_some()
+        );
     }
 
     #[test]
@@ -1999,13 +1999,15 @@ mod tests {
             phi4_request_layout(1, &[1], 0..1, &[feature(MultimodalKind::Image, 1, 0, 0, 1)])
                 .is_err()
         );
-        assert!(phi4_request_layout(
-            1,
-            &[image],
-            0..1,
-            &[feature(MultimodalKind::Image, 1, 0, 0, 2)]
-        )
-        .is_err());
+        assert!(
+            phi4_request_layout(
+                1,
+                &[image],
+                0..1,
+                &[feature(MultimodalKind::Image, 1, 0, 0, 2)]
+            )
+            .is_err()
+        );
         assert!(phi4_request_layout(1, &[image], 0..2, &[]).is_err());
     }
 }

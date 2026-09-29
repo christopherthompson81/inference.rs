@@ -13,8 +13,8 @@
 use std::{
     collections::{HashMap, HashSet},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, Weak,
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 
@@ -1450,12 +1450,14 @@ mod tests {
         let second = retention.retain(&[h1]);
         first.touch();
 
-        assert!(retention
-            .inner
-            .lock()
-            .expect("prefix block retention poisoned")
-            .revoke_oldest(&retention.published_revision)
-            .is_some());
+        assert!(
+            retention
+                .inner
+                .lock()
+                .expect("prefix block retention poisoned")
+                .revoke_oldest(&retention.published_revision)
+                .is_some()
+        );
 
         assert!(first.is_active());
         assert!(!second.is_active());

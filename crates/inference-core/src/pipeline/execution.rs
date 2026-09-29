@@ -16,8 +16,8 @@ use crate::{prefix_cacher::PrefixCacheManagerV2, sequence::Sequence};
 
 #[cfg(feature = "cuda")]
 use super::{
-    sampling::{self, CudaTokenBatchSubmission},
     ForwardInputsResult, ForwardStepResult, Pipeline,
+    sampling::{self, CudaTokenBatchSubmission},
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

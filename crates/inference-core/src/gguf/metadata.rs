@@ -1,15 +1,15 @@
 use anyhow::Result;
-use candle_core::quantized::gguf_file;
 use candle_core::DType;
+use candle_core::quantized::gguf_file;
 use std::fs;
 
+use crate::GGUFArchitecture;
 use crate::attention::ATTENTION_CHUNK_SIZE;
 use crate::device_map::AutoDeviceMapParams;
 use crate::gguf::Content;
 use crate::matformer::MatformerSliceConfig;
 use crate::paged_attention::ModelConfigLike;
 use crate::pipeline::DeviceMappedModelLoader;
-use crate::GGUFArchitecture;
 pub(crate) use inference_nn::gguf::metadata::{ContentConfig, ContentMetadata};
 
 fn info_bytes(info: &gguf_file::TensorInfo) -> usize {

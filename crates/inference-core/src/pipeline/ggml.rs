@@ -1,7 +1,7 @@
 use super::llg::build_llg_factory;
 use super::{
-    get_model_paths, text_models_inputs_processor::ModelInputs, AdapterKind, CacheManager,
-    GeneralMetadata, Loader, ModelKind, ModelPaths, QuantizationKind, TokenSource,
+    AdapterKind, CacheManager, GeneralMetadata, Loader, ModelKind, ModelPaths, QuantizationKind,
+    TokenSource, get_model_paths, text_models_inputs_processor::ModelInputs,
 };
 use super::{
     AnyMoePipelineMixin, CacheManagerMixin, EitherCache, ForwardInputsResult, IsqPipelineMixin,
@@ -11,21 +11,21 @@ use crate::attention::ATTENTION_CHUNK_SIZE;
 use crate::device_map::DeviceMapper;
 use crate::lora::Ordering;
 use crate::pipeline::cache_manager::FullCacheManager;
-use crate::pipeline::chat_template::{calculate_eos_tokens, GenerationConfig};
+use crate::pipeline::chat_template::{GenerationConfig, calculate_eos_tokens};
 use crate::pipeline::model_config as ModelConfig;
 use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::tokenizer::get_tokenizer;
-use crate::pipeline::{get_chat_template, Modalities, SupportedModality};
 use crate::pipeline::{ChatTemplate, LocalModelPaths};
+use crate::pipeline::{Modalities, SupportedModality, get_chat_template};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
-use crate::utils::debug::DeviceRepr;
 use crate::utils::debug::DEBUG;
+use crate::utils::debug::DeviceRepr;
 use crate::utils::progress::ProgressScopeGuard;
 use crate::xlora_models::NonGranularState;
 use crate::{
-    get_mut_arcmutex, get_paths, DeviceMapSetting, PagedAttentionConfig, Pipeline, Topology,
-    TryIntoDType,
+    DeviceMapSetting, PagedAttentionConfig, Pipeline, Topology, TryIntoDType, get_mut_arcmutex,
+    get_paths,
 };
 #[cfg(feature = "models-llama")]
 use crate::{models::quantized_llama::ModelWeights as QLlama, xlora_models::XLoraQLlama};
@@ -294,7 +294,9 @@ impl Loader for GGMLLoader {
                 serde_json::to_string_pretty(&tensors).expect("Serialization failed."),
             )?;
 
-            info!("Debug is enabled, wrote the names and information about each tensor to `inference_ggml_tensors.txt`.");
+            info!(
+                "Debug is enabled, wrote the names and information about each tensor to `inference_ggml_tensors.txt`."
+            );
         }
 
         let _ = if paged_attn_config.is_none() {

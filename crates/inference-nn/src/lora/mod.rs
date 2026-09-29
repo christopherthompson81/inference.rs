@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, fmt::Debug, sync::Arc};
 
-use candle_core::{quantized::QTensor, IndexOp, Result, Tensor, D};
+use candle_core::{D, IndexOp, Result, Tensor, quantized::QTensor};
 use candle_nn::{Linear, Module};
 use inference_quant::ShardedVarBuilder;
 use loralinear::LoraLinear;

@@ -5,8 +5,8 @@ use candle_core::{DType, Result, Tensor};
 use rand::Rng;
 use rand_isaac::Isaac64Rng;
 
-use crate::pipeline::sampling::{finish_or_add_toks_to_seq, sample_sequence};
 use crate::pipeline::Pipeline;
+use crate::pipeline::sampling::{finish_or_add_toks_to_seq, sample_sequence};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 #[cfg(feature = "cuda")]
 use crate::sampler::CudaSpeculativeSamplingPlan;
@@ -503,8 +503,8 @@ fn submit_sparse_rejection_group(
     workspace: &mut Option<crate::cuda::speculative_rejection::CudaSparseRejectionWorkspace>,
 ) -> Result<SparseRejectionDeviceBatchSubmission> {
     use crate::cuda::speculative_rejection::{
-        sparse_rejection_cuda_submit, SparseRejectionMode, SparseRejectionProposalInput,
-        SparseRejectionWorkspaceInput,
+        SparseRejectionMode, SparseRejectionProposalInput, SparseRejectionWorkspaceInput,
+        sparse_rejection_cuda_submit,
     };
 
     let seed = &candidates[group_indices[0]];
@@ -1300,11 +1300,7 @@ async fn finish_verified_step_stochastic(
             );
         }
         let accept_prob = if q_i <= 0.0 {
-            if p_i > 0.0 {
-                1.0
-            } else {
-                0.0
-            }
+            if p_i > 0.0 { 1.0 } else { 0.0 }
         } else {
             (p_i / q_i).min(1.0)
         };
@@ -1519,9 +1515,9 @@ fn accepts_draft(draw: f32, accept_prob: f32) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        accepts_draft, normalize_probs, normalize_sparse_row, packed_target_shape_matches,
+        DeviceVerification, ProposalProbabilityRow, SparseRejectionFallbackUniforms, accepts_draft,
+        normalize_probs, normalize_sparse_row, packed_target_shape_matches,
         partition_device_tokens, stochastic_verification_allowed, validate_device_verification,
-        DeviceVerification, ProposalProbabilityRow, SparseRejectionFallbackUniforms,
     };
 
     #[test]
@@ -1604,10 +1600,10 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn sparse_cuda_fallback_reuses_uniforms_in_input_order() -> candle_core::Result<()> {
-        use super::{decode_sparse_rejection_completion, SparseRejectionPendingCandidate};
+        use super::{SparseRejectionPendingCandidate, decode_sparse_rejection_completion};
         use crate::cuda::speculative_rejection::{
-            SparseRejectionCompletion, SparseRejectionRow, SPARSE_REJECTION_INVALID_VALUE,
-            SPARSE_REJECTION_STATUS_NEEDS_CPU, SPARSE_REJECTION_STATUS_OK,
+            SPARSE_REJECTION_INVALID_VALUE, SPARSE_REJECTION_STATUS_NEEDS_CPU,
+            SPARSE_REJECTION_STATUS_OK, SparseRejectionCompletion, SparseRejectionRow,
         };
 
         let completion = SparseRejectionCompletion {
@@ -1741,62 +1737,70 @@ mod tests {
     #[test]
     fn device_verification_requires_a_continuation_token() {
         assert!(validate_device_verification(None, 7).is_ok());
-        assert!(validate_device_verification(
-            Some(&DeviceVerification::TargetTokens(vec![0; 8])),
-            7
-        )
-        .is_ok());
-        assert!(validate_device_verification(
-            Some(&DeviceVerification::TargetTokens(vec![0; 7])),
-            7
-        )
-        .is_err());
-        assert!(validate_device_verification(
-            Some(&DeviceVerification::SparseRejection {
-                accepted_drafts: 7,
-                continuation_token: 0,
-            }),
-            7
-        )
-        .is_ok());
-        assert!(validate_device_verification(
-            Some(&DeviceVerification::SparseRejection {
-                accepted_drafts: 8,
-                continuation_token: 0,
-            }),
-            7
-        )
-        .is_err());
-        assert!(validate_device_verification(
-            Some(&DeviceVerification::SparseRejectionCpuFallback(
-                SparseRejectionFallbackUniforms {
-                    accept: vec![0.25; 7],
-                    sample: 0.5,
-                },
-            )),
-            7,
-        )
-        .is_ok());
-        assert!(validate_device_verification(
-            Some(&DeviceVerification::SparseRejectionCpuFallback(
-                SparseRejectionFallbackUniforms {
-                    accept: vec![0.25; 6],
-                    sample: 0.5,
-                },
-            )),
-            7,
-        )
-        .is_err());
-        assert!(validate_device_verification(
-            Some(&DeviceVerification::SparseRejectionCpuFallback(
-                SparseRejectionFallbackUniforms {
-                    accept: vec![0.25; 7],
-                    sample: 1.0,
-                },
-            )),
-            7,
-        )
-        .is_err());
+        assert!(
+            validate_device_verification(Some(&DeviceVerification::TargetTokens(vec![0; 8])), 7)
+                .is_ok()
+        );
+        assert!(
+            validate_device_verification(Some(&DeviceVerification::TargetTokens(vec![0; 7])), 7)
+                .is_err()
+        );
+        assert!(
+            validate_device_verification(
+                Some(&DeviceVerification::SparseRejection {
+                    accepted_drafts: 7,
+                    continuation_token: 0,
+                }),
+                7
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_device_verification(
+                Some(&DeviceVerification::SparseRejection {
+                    accepted_drafts: 8,
+                    continuation_token: 0,
+                }),
+                7
+            )
+            .is_err()
+        );
+        assert!(
+            validate_device_verification(
+                Some(&DeviceVerification::SparseRejectionCpuFallback(
+                    SparseRejectionFallbackUniforms {
+                        accept: vec![0.25; 7],
+                        sample: 0.5,
+                    },
+                )),
+                7,
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_device_verification(
+                Some(&DeviceVerification::SparseRejectionCpuFallback(
+                    SparseRejectionFallbackUniforms {
+                        accept: vec![0.25; 6],
+                        sample: 0.5,
+                    },
+                )),
+                7,
+            )
+            .is_err()
+        );
+        assert!(
+            validate_device_verification(
+                Some(&DeviceVerification::SparseRejectionCpuFallback(
+                    SparseRejectionFallbackUniforms {
+                        accept: vec![0.25; 7],
+                        sample: 1.0,
+                    },
+                )),
+                7,
+            )
+            .is_err()
+        );
     }
 
     #[test]

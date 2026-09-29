@@ -16,28 +16,29 @@ use serde::Deserialize;
 
 use crate::{
     agentic::AgenticDefaults,
-    agentic::{resolve_approval, ApprovalDecisionRequest, ApprovalDecisionResponse},
+    agentic::{ApprovalDecisionRequest, ApprovalDecisionResponse, resolve_approval},
     anthropic::{
-        collect_messages, prepare_messages, AnthropicMessageResponse, AnthropicMessagesRequest,
-        AnthropicStream, MessagesFailure,
+        AnthropicMessageResponse, AnthropicMessagesRequest, AnthropicStream, MessagesFailure,
+        collect_messages, prepare_messages,
     },
     api_error::{ApiError, ApiErrorKind, ModelErrorMessage},
-    engine_chat::{collect_chat, ChatEngine, ChatStream, ChatStreamEvent},
-    engine_completion::{collect_completion, prepare_completion, CompletionStream},
-    engine_embeddings::{embed, EmbeddingError},
+    engine_chat::{ChatEngine, ChatStream, ChatStreamEvent, collect_chat},
+    engine_completion::{CompletionStream, collect_completion, prepare_completion},
+    engine_embeddings::{EmbeddingError, embed},
     files::{self, FileBody, FileMetadata, FileUpload},
-    generation::{generate_image, generate_speech, SpeechAudio},
+    generation::{SpeechAudio, generate_image, generate_speech},
     inference_for_server_builder::{
-        defaults, parse_device_layers, InferenceRsForServerBuilder, ModelConfig,
+        InferenceRsForServerBuilder, ModelConfig, defaults, parse_device_layers,
     },
     lora_adapters::{
-        list_adapters, load_adapter, unload_adapter, ListLoraAdaptersQuery, LoadLoraAdapterRequest,
-        LoraAdapterApiConfig, LoraAdapterListResponse, LoraAdapterObject, UnloadLoraAdapterRequest,
+        ListLoraAdaptersQuery, LoadLoraAdapterRequest, LoraAdapterApiConfig,
+        LoraAdapterListResponse, LoraAdapterObject, UnloadLoraAdapterRequest, list_adapters,
+        load_adapter, unload_adapter,
     },
     media_source::MediaAttachments,
     models::{
-        list_models, model_status, reload_model, unload_model, ModelOperationRequest,
-        ModelStatusResponse,
+        ModelOperationRequest, ModelStatusResponse, list_models, model_status, reload_model,
+        unload_model,
     },
     openai::{
         ChatCompletionRequest, CompletionRequest, EmbeddingRequest, EmbeddingResponse,
@@ -49,14 +50,14 @@ use crate::{
         TokenizeResponse,
     },
     responses::{
+        OpenResponsesCreateRequest, OpenResponsesStreamer, PreparedResponse, ResponseDeleted,
         cancel_response, collect_response, delete_response, get_response, prepare_response,
-        spawn_background, OpenResponsesCreateRequest, OpenResponsesStreamer, PreparedResponse,
-        ResponseDeleted,
+        spawn_background,
     },
     responses_types::ResponseResource,
     skill_store::{
-        skill_api_error, AnthropicSkillVersionListObject, AnthropicSkillVersionObject, SkillFiles,
-        SkillListObject, SkillStore,
+        AnthropicSkillVersionListObject, AnthropicSkillVersionObject, SkillFiles, SkillListObject,
+        SkillStore, skill_api_error,
     },
     types::SharedInferenceRsState,
 };

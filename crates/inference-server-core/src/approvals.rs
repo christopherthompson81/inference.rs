@@ -1,6 +1,6 @@
 use axum::{
-    extract::{rejection::JsonRejection, Json, Path},
     Extension,
+    extract::{Json, Path, rejection::JsonRejection},
 };
 
 pub use crate::agentic::{
@@ -8,7 +8,7 @@ pub use crate::agentic::{
 };
 use crate::{
     agentic::resolve_approval,
-    handler_core::{json_response, openai_error_response, ApiError, ApiErrorHttp},
+    handler_core::{ApiError, ApiErrorHttp, json_response, openai_error_response},
 };
 
 #[utoipa::path(
@@ -39,9 +39,9 @@ pub async fn resolve_agent_approval(
 #[cfg(test)]
 mod tests {
     use axum::{
-        body::{to_bytes, Body},
+        body::{Body, to_bytes},
         extract::FromRequest,
-        http::{header::CONTENT_TYPE, Request as HttpRequest, StatusCode},
+        http::{Request as HttpRequest, StatusCode, header::CONTENT_TYPE},
     };
     use std::time::Duration;
 

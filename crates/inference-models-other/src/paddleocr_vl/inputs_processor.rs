@@ -17,10 +17,10 @@ use crate::media_inputs::{
         TextInputs,
     },
 };
-use crate::paged_attention::{block_hash::MultimodalKind, PagedAttentionMeta};
+use crate::paged_attention::{PagedAttentionMeta, block_hash::MultimodalKind};
 
-use super::preprocess::{preprocess_decoded, MERGE};
 use super::PaddleOcrVlVisionSpecificArgs;
+use super::preprocess::{MERGE, preprocess_decoded};
 
 pub const IMAGE_START: &str = "<|IMAGE_START|>";
 pub const IMAGE_PLACEHOLDER: &str = "<|IMAGE_PLACEHOLDER|>";

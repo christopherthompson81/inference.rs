@@ -1,7 +1,7 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::attention::flash_params::make_flash_params;
 use crate::attention::FlashParams;
+use crate::attention::flash_params::make_flash_params;
 use std::{any::Any, fmt::Debug, sync::Arc};
 
 use anyhow::Result;

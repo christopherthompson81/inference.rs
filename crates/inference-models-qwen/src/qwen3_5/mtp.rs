@@ -9,7 +9,7 @@ use crate::attention::FlashParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use std::sync::Arc;
 
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use inference_quant::{QuantMethod, ReplicatedLayer, ShardedVarBuilder};
 
 use crate::{
@@ -17,7 +17,7 @@ use crate::{
     device_map::DeviceMapper,
     layers::{GemmaRmsNorm, Qwen3VLRotaryEmbedding},
     model::NormalLoadingMetadata,
-    paged_attention::{load_fp8_attention_scales, AttentionImplementation, PagedAttention},
+    paged_attention::{AttentionImplementation, PagedAttention, load_fp8_attention_scales},
     utils::unvarbuilder::UnVarBuilder,
 };
 

@@ -2,7 +2,7 @@ use crate::attention::FlashParams;
 use candle_core::{DType, DeviceLocation, Result, Tensor};
 use inference_quant::MatMul;
 
-use crate::attention::{repeat_kv, SdpaParams};
+use crate::attention::{SdpaParams, repeat_kv};
 
 /// Fused attention with per-head sinks.
 ///

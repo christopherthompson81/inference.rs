@@ -8,32 +8,32 @@ use crate::device_map::{DeviceMappedMask, DeviceMapper};
 use crate::gguf::Content;
 use crate::kv_cache::EitherCache;
 use crate::layers::Sdpa;
-use crate::layers::{apply_rotary_q, RmsNorm};
 use crate::layers::{CausalMaskConfig, CausalMasker};
-use crate::lora::get_lora_cfg;
+use crate::layers::{RmsNorm, apply_rotary_q};
 use crate::lora::LinearLayerLike;
 use crate::lora::LoraConfig;
 use crate::lora::Merge;
 use crate::lora::Ordering;
 use crate::lora::QLoraLinear;
+use crate::lora::get_lora_cfg;
 use crate::model::extract_logits;
-use crate::utils::progress::{new_multi_progress, NiceProgressBar};
+use crate::utils::progress::{NiceProgressBar, new_multi_progress};
 use candle_core::quantized::QMatMul;
 use candle_core::quantized::QTensor;
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::Embedding;
 use inference_nn::utils::progress::IterWithProgress;
 use inference_quant::ShardedVarBuilder;
 use tracing::info;
 
-use crate::gguf::metadata::ContentMetadata;
 use crate::gguf::FromAdapterGGUF;
+use crate::gguf::metadata::ContentMetadata;
 use crate::kv_cache::Cache;
-use inference_nn::xlora::verify_sanity_adapters;
 use inference_nn::xlora::NonGranularState;
 use inference_nn::xlora::ScalingsMaker;
 use inference_nn::xlora::XLoraClassifier;
 use inference_nn::xlora::XLoraConfig;
+use inference_nn::xlora::verify_sanity_adapters;
 
 const SUPPORTED_LAYERS: [&str; 5] = [
     "self_attn.qkv_proj",

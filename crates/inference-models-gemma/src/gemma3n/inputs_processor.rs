@@ -18,8 +18,8 @@ use crate::media_inputs::{
     },
 };
 use crate::paged_attention::{
-    block_hash::{MultiModalFeature, MultimodalKind},
     PagedAttentionMeta,
+    block_hash::{MultiModalFeature, MultimodalKind},
 };
 use crate::vision::multimodal_layout::{
     MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
@@ -27,7 +27,7 @@ use crate::vision::multimodal_layout::{
 };
 
 use super::audio_processing::AudioProcessor;
-use super::{Gemma3nSpecificArgs, AUDIO_TOKEN_ID, IMAGE_TOKEN_ID};
+use super::{AUDIO_TOKEN_ID, Gemma3nSpecificArgs, IMAGE_TOKEN_ID};
 
 pub const IMAGE_TOKEN: &str = "<image_soft_token>";
 pub const BOI_TOKEN: &str = "<start_of_image>";
@@ -980,30 +980,36 @@ mod tests {
         grouped.item_range = 0..2;
         assert!(gemma3n_request_layout(1, &tokens, 0..2, &[grouped]).is_err());
 
-        assert!(gemma3n_request_layout(
-            1,
-            &[IMAGE_TOKEN_ID, 7],
-            0..2,
-            &[feature(MultimodalKind::Image, 11, 0, 0, 2)]
-        )
-        .is_err());
-        assert!(gemma3n_request_layout(
-            1,
-            &tokens,
-            0..2,
-            &[feature(MultimodalKind::Video, 11, 0, 0, 2)]
-        )
-        .is_err());
+        assert!(
+            gemma3n_request_layout(
+                1,
+                &[IMAGE_TOKEN_ID, 7],
+                0..2,
+                &[feature(MultimodalKind::Image, 11, 0, 0, 2)]
+            )
+            .is_err()
+        );
+        assert!(
+            gemma3n_request_layout(
+                1,
+                &tokens,
+                0..2,
+                &[feature(MultimodalKind::Video, 11, 0, 0, 2)]
+            )
+            .is_err()
+        );
         assert!(gemma3n_request_layout(1, &tokens, 0..3, &[]).is_err());
-        assert!(gemma3n_active_items(
-            &[
-                feature(MultimodalKind::Image, 11, 0, 0, 1),
-                feature(MultimodalKind::Image, 12, 0, 1, 1),
-            ],
-            MultimodalKind::Image,
-            0..2,
-            1,
-        )
-        .is_err());
+        assert!(
+            gemma3n_active_items(
+                &[
+                    feature(MultimodalKind::Image, 11, 0, 0, 1),
+                    feature(MultimodalKind::Image, 12, 0, 1, 1),
+                ],
+                MultimodalKind::Image,
+                0..2,
+                1,
+            )
+            .is_err()
+        );
     }
 }

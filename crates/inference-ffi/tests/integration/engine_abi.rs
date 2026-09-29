@@ -1,13 +1,13 @@
 //! The engine C ABI end to end on a tiny random-weight PaddleOCR-VL built at test time.
 
-use std::ffi::{c_char, CStr};
+use std::ffi::{CStr, c_char};
 use std::ptr::{null, null_mut};
 
 use base64::Engine as _;
 use inference_ffi::engine::*;
 use inference_ffi::inference_status::{self, *};
 use inference_ffi::*;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[path = "../../../inference/tests/support/paddleocr_vl_tiny.rs"]
 mod support;
@@ -1152,7 +1152,9 @@ unsafe extern "C" fn unused_tool(
     _: usize,
     result: *mut inference_ffi::callbacks::inference_callback_result,
 ) {
-    inference_ffi::callbacks::inference_callback_result_fail(result, null());
+    unsafe {
+        inference_ffi::callbacks::inference_callback_result_fail(result, null());
+    }
 }
 
 fn skill_files(skill_md: &str) -> [inference_skill_file; 1] {

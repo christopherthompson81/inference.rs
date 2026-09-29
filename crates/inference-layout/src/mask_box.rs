@@ -1,4 +1,4 @@
-use candle_core::{CpuStorage, CustomOp1, DType, Layout, Result, Shape, Tensor, D};
+use candle_core::{CpuStorage, CustomOp1, D, DType, Layout, Result, Shape, Tensor};
 
 /// Min-reduction fill for pixels outside the mask in the tensor-op fallback.
 const MASK_MIN_FILL: f64 = 1e9;
@@ -102,8 +102,8 @@ impl CustomOp1 for MaskToBox {
         l: &Layout,
     ) -> Result<(candle_core::CudaStorage, Shape)> {
         use candle_core::cuda_backend::{
-            cudarc::driver::{LaunchConfig, PushKernelArg},
             CudaStorageSlice, WrapErr,
+            cudarc::driver::{LaunchConfig, PushKernelArg},
         };
 
         let (b, q, n) = l.shape().dims3()?;

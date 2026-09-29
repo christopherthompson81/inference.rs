@@ -5,7 +5,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use anyhow::{bail, Context};
+use anyhow::{Context, bail};
 use inference_core::{
     LoraAdapterFiles, LoraAdapterInfo, LoraAdapterLoadPolicy, MAX_LORA_ALIAS_BYTES,
 };
@@ -563,9 +563,11 @@ mod tests {
             rank: 8,
             bytes: 16,
         };
-        assert!(LoraAdapterObject::from_info(info.clone(), false)
-            .source
-            .is_none());
+        assert!(
+            LoraAdapterObject::from_info(info.clone(), false)
+                .source
+                .is_none()
+        );
         assert_eq!(
             LoraAdapterObject::from_info(info, true).source.as_deref(),
             Some("source")

@@ -8,10 +8,10 @@ use tokenizers::InputSequence;
 use image::DynamicImage;
 
 use crate::{
+    ToolCallResponse, ToolCallbackKind, WebSearchOptions, WebSearchReturnTokenBudget,
     get_mut_arcmutex,
     request::SearchContextSize,
     search::{self, ExtractFunctionParameters, SearchFunctionParameters, SearchResult},
-    ToolCallResponse, ToolCallbackKind, WebSearchOptions, WebSearchReturnTokenBudget,
 };
 
 use super::Engine;
@@ -180,71 +180,75 @@ pub(super) async fn execute_search(
     let mut used_results = Vec::new();
     let mut used_len = 0;
 
-    if let Some(search_pipeline) = &mut *get_mut_arcmutex!(engine.search_pipeline) {
-        let ranked_chunks =
-            search::rag::rank_document_chunks(&params.query, &results, search_pipeline).unwrap();
+    match &mut *get_mut_arcmutex!(engine.search_pipeline) {
+        Some(search_pipeline) => {
+            let ranked_chunks =
+                search::rag::rank_document_chunks(&params.query, &results, search_pipeline)
+                    .unwrap();
 
-        if ranked_chunks.is_empty() {
-            for (result, len) in results.iter().zip(result_token_lens.iter()) {
+            if ranked_chunks.is_empty() {
+                for (result, len) in results.iter().zip(result_token_lens.iter()) {
+                    if used_len + len > max_toks {
+                        break;
+                    }
+                    used_len += len;
+                    used_results.push(result.clone());
+                }
+            } else {
+                for chunk in ranked_chunks {
+                    if chunk.token_len == 0 {
+                        continue;
+                    }
+                    if used_len + chunk.token_len > max_toks {
+                        break;
+                    }
+                    used_len += chunk.token_len;
+                    let mut chunk_result = results[chunk.result_index].clone();
+                    chunk_result.content = chunk.content;
+                    used_results.push(chunk_result);
+                }
+            }
+        }
+        _ => {
+            tracing::warn!(
+                "No embedding model loaded; falling back to BM25 ranking for web search results."
+            );
+
+            let docs: Vec<String> = results.iter().map(|res| res.content.clone()).collect();
+            let doc_refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
+            let embedder: Embedder =
+                EmbedderBuilder::with_fit_to_corpus(Language::English, &doc_refs).build();
+
+            let mut scorer = Scorer::<usize>::new();
+            for (i, doc_text) in docs.iter().enumerate() {
+                scorer.upsert(&i, embedder.embed(doc_text));
+            }
+
+            let query_embedding = embedder.embed(&params.query);
+            let mut scored_docs: Vec<ScoredDocument<usize>> = docs
+                .iter()
+                .enumerate()
+                .filter_map(|(i, _)| {
+                    scorer
+                        .score(&i, &query_embedding)
+                        .map(|score| ScoredDocument { id: i, score })
+                })
+                .collect();
+
+            scored_docs.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            for doc in scored_docs {
+                let len = result_token_lens[doc.id];
                 if used_len + len > max_toks {
                     break;
                 }
                 used_len += len;
-                used_results.push(result.clone());
+                used_results.push(results[doc.id].clone());
             }
-        } else {
-            for chunk in ranked_chunks {
-                if chunk.token_len == 0 {
-                    continue;
-                }
-                if used_len + chunk.token_len > max_toks {
-                    break;
-                }
-                used_len += chunk.token_len;
-                let mut chunk_result = results[chunk.result_index].clone();
-                chunk_result.content = chunk.content;
-                used_results.push(chunk_result);
-            }
-        }
-    } else {
-        tracing::warn!(
-            "No embedding model loaded; falling back to BM25 ranking for web search results."
-        );
-
-        let docs: Vec<String> = results.iter().map(|res| res.content.clone()).collect();
-        let doc_refs: Vec<&str> = docs.iter().map(|s| s.as_str()).collect();
-        let embedder: Embedder =
-            EmbedderBuilder::with_fit_to_corpus(Language::English, &doc_refs).build();
-
-        let mut scorer = Scorer::<usize>::new();
-        for (i, doc_text) in docs.iter().enumerate() {
-            scorer.upsert(&i, embedder.embed(doc_text));
-        }
-
-        let query_embedding = embedder.embed(&params.query);
-        let mut scored_docs: Vec<ScoredDocument<usize>> = docs
-            .iter()
-            .enumerate()
-            .filter_map(|(i, _)| {
-                scorer
-                    .score(&i, &query_embedding)
-                    .map(|score| ScoredDocument { id: i, score })
-            })
-            .collect();
-
-        scored_docs.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-
-        for doc in scored_docs {
-            let len = result_token_lens[doc.id];
-            if used_len + len > max_toks {
-                break;
-            }
-            used_len += len;
-            used_results.push(results[doc.id].clone());
         }
     }
 

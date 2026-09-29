@@ -1,8 +1,8 @@
 //! OpenAI-compatible Files routes: HTTP framing over the engine's file store.
 
 use axum::{
-    extract::{multipart::MultipartRejection, Multipart, Path, State},
-    http::{header, StatusCode},
+    extract::{Multipart, Path, State, multipart::MultipartRejection},
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use inference_core::FILE_PURPOSE_USER_DATA;
@@ -13,7 +13,7 @@ pub use crate::files_api::{
 };
 use crate::{
     files_api::{self, FileUpload},
-    handler_core::{json_response, openai_error_response, ApiError, ApiErrorHttp, ApiErrorKind},
+    handler_core::{ApiError, ApiErrorHttp, ApiErrorKind, json_response, openai_error_response},
     types::ExtractedInferenceRsState,
 };
 

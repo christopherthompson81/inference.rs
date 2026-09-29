@@ -8,7 +8,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::{Conv1d, Conv1dConfig, Linear};
 use inference_quant::{
     ColumnParallelLayer, Convolution, QuantMethod, QuantizedConfig, ReplicatedLayer,
@@ -33,8 +33,8 @@ use crate::{
     },
     layers::masker::{CausalMaskConfig, PastKvLenCache},
     layers::{
-        self, embedding_with_legacy_tied_uqff, Activation, CausalMasker, RmsNorm, RotaryEmbedding,
-        Sdpa,
+        self, Activation, CausalMasker, RmsNorm, RotaryEmbedding, Sdpa,
+        embedding_with_legacy_tied_uqff,
     },
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
@@ -1019,7 +1019,7 @@ impl Model {
             );
         }
 
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),
@@ -1201,32 +1201,30 @@ impl Model {
         if has_conv_layers && recurrent_metadata.is_none() {
             candle_core::bail!("Hybrid recurrent metadata is required for LFM2 conv layers");
         }
-        if has_conv_layers {
-            if let Some(query_lens) = packed_query_lens.as_deref() {
-                let recurrent_metadata = recurrent_metadata
-                    .as_ref()
-                    .expect("checked above: LFM2 conv layers require recurrent metadata");
-                if recurrent_metadata.batch_kind() != RecurrentBatchKind::Prefill {
-                    candle_core::bail!("LFM2 packed ShortConv cannot run a decode batch");
-                }
-                let (physical_batch, physical_tokens, _) = x.dims3()?;
-                packed_query_ranges(physical_batch, physical_tokens, query_lens)?;
-                let index_count = recurrent_metadata.state_indices().dims1()?;
-                if index_count != query_lens.len() {
-                    candle_core::bail!(
-                        "LFM2 packed ShortConv has {index_count} recurrent state indices but {} logical sequences",
-                        query_lens.len()
-                    );
-                }
-                if let Some(host_indices) = recurrent_metadata.state_indices_host() {
-                    if host_indices.len() != query_lens.len() {
-                        candle_core::bail!(
-                            "LFM2 packed ShortConv has {} host state indices but {} logical sequences",
-                            host_indices.len(),
-                            query_lens.len()
-                        );
-                    }
-                }
+        if has_conv_layers && let Some(query_lens) = packed_query_lens.as_deref() {
+            let recurrent_metadata = recurrent_metadata
+                .as_ref()
+                .expect("checked above: LFM2 conv layers require recurrent metadata");
+            if recurrent_metadata.batch_kind() != RecurrentBatchKind::Prefill {
+                candle_core::bail!("LFM2 packed ShortConv cannot run a decode batch");
+            }
+            let (physical_batch, physical_tokens, _) = x.dims3()?;
+            packed_query_ranges(physical_batch, physical_tokens, query_lens)?;
+            let index_count = recurrent_metadata.state_indices().dims1()?;
+            if index_count != query_lens.len() {
+                candle_core::bail!(
+                    "LFM2 packed ShortConv has {index_count} recurrent state indices but {} logical sequences",
+                    query_lens.len()
+                );
+            }
+            if let Some(host_indices) = recurrent_metadata.state_indices_host()
+                && host_indices.len() != query_lens.len()
+            {
+                candle_core::bail!(
+                    "LFM2 packed ShortConv has {} host state indices but {} logical sequences",
+                    host_indices.len(),
+                    query_lens.len()
+                );
             }
         }
         let mut hybrid_cache = self.cache.hybrid();
@@ -1451,7 +1449,7 @@ impl AnyMoeBaseModelMixin for Model {}
 
 #[cfg(test)]
 mod tests {
-    use super::{packed_short_conv_ranges, PackedShortConvShape};
+    use super::{PackedShortConvShape, packed_short_conv_ranges};
 
     fn shape() -> PackedShortConvShape {
         PackedShortConvShape {

@@ -1,9 +1,9 @@
 //! Image and speech generation as engine operations, free of HTTP.
 
 use inference_core::{
-    speech_utils::{self, Sample},
     DiffusionGenerationParams, ImageGenerationResponse, InferenceRs, NormalRequest, Request,
     RequestMessage, Response, SamplingParams,
+    speech_utils::{self, Sample},
 };
 
 use crate::{

@@ -9,22 +9,22 @@ use candle_core::{DType, Device, IndexOp, Tensor};
 use futures::future::BoxFuture;
 use rand_isaac::Isaac64Rng;
 
+use super::{
+    CacheBackendMetadata, CacheInstruction, ForwardInputsResult, ForwardStepResult,
+    InputProcessorOutput, Pipeline, SpeculativePromptChunk, SpeculativePromptRow, StepLookahead,
+    StepSubmission, next_pipeline_prompt_chunk_group, prompt_chunk_is_final,
+    prompt_chunks::{PromptChunkPlan, build_prompt_chunk_plan, recurrent_checkpoint_boundary},
+    response, sampling, should_sample_step, should_try_speculative_sampling,
+};
 #[cfg(feature = "cuda")]
 use super::{cuda_graph::CudaDecodeGraphLaunch, execution};
-use super::{
-    next_pipeline_prompt_chunk_group, prompt_chunk_is_final,
-    prompt_chunks::{build_prompt_chunk_plan, recurrent_checkpoint_boundary, PromptChunkPlan},
-    response, sampling, should_sample_step, should_try_speculative_sampling, CacheBackendMetadata,
-    CacheInstruction, ForwardInputsResult, ForwardStepResult, InputProcessorOutput, Pipeline,
-    SpeculativePromptChunk, SpeculativePromptRow, StepLookahead, StepSubmission,
-};
 use crate::{
+    IntervalLogger,
     paged_attention::PagedAttentionMeta,
     pipeline::text_models_inputs_processor::NoncausalMmContext,
     prefix_cacher::PrefixCacheManagerV2,
     scheduler::modality_signature,
     sequence::{SeqStepType, Sequence, SequenceState},
-    IntervalLogger,
 };
 
 /// Moves prompt rows that go on to decode into the completion state once their prompt is done.

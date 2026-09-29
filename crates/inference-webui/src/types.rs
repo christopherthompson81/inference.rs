@@ -207,7 +207,7 @@ pub struct RenameChatRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::{chat_file_path, GenerationParams, ModelGenerationDefaults};
+    use super::{GenerationParams, ModelGenerationDefaults, chat_file_path};
 
     #[test]
     fn chat_paths_stay_inside_chats_dir() {

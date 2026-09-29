@@ -1,5 +1,5 @@
-use anyhow::{bail, Result};
-use candle_core::{quantized::gguf_file::Value, DType};
+use anyhow::{Result, bail};
+use candle_core::{DType, quantized::gguf_file::Value};
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 use std::collections::{BTreeSet, HashMap};
 
@@ -44,10 +44,10 @@ impl<'a> TensorInventory<'a> {
 }
 
 pub(crate) fn build_gemma4_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
-    if let Some(architecture) = metadata_string(archive, "general.architecture")? {
-        if architecture != "gemma4" {
-            bail!("expected Gemma 4 GGUF architecture, found `{architecture}`");
-        }
+    if let Some(architecture) = metadata_string(archive, "general.architecture")?
+        && architecture != "gemma4"
+    {
+        bail!("expected Gemma 4 GGUF architecture, found `{architecture}`");
     }
     build_gemma4_bindings_from_inventory(
         archive
@@ -1096,15 +1096,21 @@ mod tests {
                 1
             ))
         );
-        assert!(bindings
-            .get("model.language_model.layers.0.experts.gate_proj.weight")
-            .is_some());
-        assert!(bindings
-            .get("model.language_model.layers.0.experts.up_proj.weight")
-            .is_some());
-        assert!(bindings
-            .get("model.language_model.layers.0.experts.down_proj.weight")
-            .is_some());
+        assert!(
+            bindings
+                .get("model.language_model.layers.0.experts.gate_proj.weight")
+                .is_some()
+        );
+        assert!(
+            bindings
+                .get("model.language_model.layers.0.experts.up_proj.weight")
+                .is_some()
+        );
+        assert!(
+            bindings
+                .get("model.language_model.layers.0.experts.down_proj.weight")
+                .is_some()
+        );
         Ok(())
     }
 

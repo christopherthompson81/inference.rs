@@ -15,13 +15,13 @@ use float8::F8E4M3;
 use half::{bf16, f16};
 
 use super::tune::{
-    buckets_from_breakpoints, config, cutile_error, tune, Bucket, Prepared, Space, TuneMode,
-    TuneRequest, TunedTable, TUNE_WEIGHT_SETS,
+    Bucket, Prepared, Space, TUNE_WEIGHT_SETS, TuneMode, TuneRequest, TunedTable,
+    buckets_from_breakpoints, config, cutile_error, tune,
 };
 use super::warmup::CutileKernel;
 use super::{catch_cutile_panic, context, device_multiprocessor_count, jit_available};
-use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 use crate::Fp8WeightScaleLayout;
+use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
 const BLOCK_SIZE: usize = 128;
 const TUNE_KERNEL: &str = "fp8_w8a16";

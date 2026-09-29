@@ -1,13 +1,13 @@
 use super::*;
 use crate::{
-    paged_attention::{block_hash::MultimodalKind, PagedCacheType},
+    AudioInput, VideoInput,
+    paged_attention::{PagedCacheType, block_hash::MultimodalKind},
     sampler::{Logprobs, Sampler},
     scheduler::IMAGE_MODALITY,
     sequence::{SeqStepType, SequenceGroup, SequenceRecognizer},
     speculative::SpeculativePrefixReplay,
-    AudioInput, VideoInput,
 };
-use tokio::sync::{mpsc::channel, Mutex as TokioMutex};
+use tokio::sync::{Mutex as TokioMutex, mpsc::channel};
 
 fn test_scheduler() -> PagedAttentionScheduler {
     PagedAttentionScheduler::new(
@@ -366,9 +366,11 @@ fn preemption_caches_hash_appended_after_token_growth() {
     }
     let tokens = get_mut_arcmutex!(seq).get_toks().to_vec();
     let expected_hashes = compute_block_hashes(&tokens, scheduler.block_size, &[], &[]);
-    assert!(get_mut_arcmutex!(scheduler.kv_cache_manager)
-        .allocate_slots(seq_id, tokens.len(), &[])
-        .is_some());
+    assert!(
+        get_mut_arcmutex!(scheduler.kv_cache_manager)
+            .allocate_slots(seq_id, tokens.len(), &[])
+            .is_some()
+    );
 
     scheduler._preempt(seq);
 
@@ -405,12 +407,16 @@ fn finished_done_caches_but_error_only_cleans_up() {
     );
     {
         let mut kv_mgr = get_mut_arcmutex!(scheduler.kv_cache_manager);
-        assert!(kv_mgr
-            .allocate_slots(done_id, done_tokens.len(), &[])
-            .is_some());
-        assert!(kv_mgr
-            .allocate_slots(error_id, error_tokens.len(), &[])
-            .is_some());
+        assert!(
+            kv_mgr
+                .allocate_slots(done_id, done_tokens.len(), &[])
+                .is_some()
+        );
+        assert!(
+            kv_mgr
+                .allocate_slots(error_id, error_tokens.len(), &[])
+                .is_some()
+        );
     }
     {
         let mut seq = get_mut_arcmutex!(done);
@@ -609,16 +615,20 @@ fn closed_response_group_cancels_waiting_prefill_and_decode() {
     );
     get_mut_arcmutex!(prefill).set_state(SequenceState::RunningPrompt);
     get_mut_arcmutex!(prefill).set_recurrent_state_idx(Some(20));
-    assert!(get_mut_arcmutex!(scheduler.kv_cache_manager)
-        .allocate_slots(20, 4, &[])
-        .is_some());
+    assert!(
+        get_mut_arcmutex!(scheduler.kv_cache_manager)
+            .allocate_slots(20, 4, &[])
+            .is_some()
+    );
     scheduler.running.push_back(prefill.clone());
 
     let decode = test_sequence_with_media_sender_and_group(30, 4, (None, None, None), tx, group);
     get_mut_arcmutex!(decode).set_recurrent_state_idx(Some(30));
-    assert!(get_mut_arcmutex!(scheduler.kv_cache_manager)
-        .allocate_slots(30, 4, &[])
-        .is_some());
+    assert!(
+        get_mut_arcmutex!(scheduler.kv_cache_manager)
+            .allocate_slots(30, 4, &[])
+            .is_some()
+    );
     scheduler.running.push_back(decode.clone());
     assert_eq!(
         get_mut_arcmutex!(scheduler.kv_cache_manager).num_active_blocks(),
@@ -723,9 +733,11 @@ fn cache_pressure_discards_staged_prefix_admission_until_retry_succeeds() {
             kv_cache_group_ids: vec![0],
         },
     );
-    assert!(get_mut_arcmutex!(scheduler.kv_cache_manager)
-        .allocate_slots(99, 8, &[])
-        .is_some());
+    assert!(
+        get_mut_arcmutex!(scheduler.kv_cache_manager)
+            .allocate_slots(99, 8, &[])
+            .is_some()
+    );
     let seq = test_sequence(0, 8);
     {
         let mut seq = get_mut_arcmutex!(seq);
@@ -771,9 +783,11 @@ fn disabled_waiting_prompt_preemption_preserves_decode_state() {
 
     let completion = test_sequence(10, 7);
     get_mut_arcmutex!(completion).set_num_computed_tokens(7);
-    assert!(get_mut_arcmutex!(scheduler.kv_cache_manager)
-        .allocate_slots(10, 7, &[])
-        .is_some());
+    assert!(
+        get_mut_arcmutex!(scheduler.kv_cache_manager)
+            .allocate_slots(10, 7, &[])
+            .is_some()
+    );
     scheduler.running.push_back(completion.clone());
 
     let waiting = test_sequence(20, 32);
@@ -1814,11 +1828,13 @@ fn packed_prompt_spans_finish_whole_prompts_within_the_idle_budget() {
 
     assert_eq!(batch.scheduled.len(), 4);
     assert_eq!(scheduler.next_prompt_sequence_id, Some(4));
-    assert!(batch
-        .chunks
-        .unwrap()
-        .iter()
-        .all(|chunk| (chunk.start, chunk.end) == (0, 1024)));
+    assert!(
+        batch
+            .chunks
+            .unwrap()
+            .iter()
+            .all(|chunk| (chunk.start, chunk.end) == (0, 1024))
+    );
 }
 
 #[test]
@@ -1900,11 +1916,13 @@ fn packed_prompt_spans_respect_the_admission_quantum() {
 
     assert_eq!(batch.scheduled.len(), 8);
     assert_eq!(scheduler.next_prompt_sequence_id, Some(8));
-    assert!(batch
-        .chunks
-        .unwrap()
-        .iter()
-        .all(|chunk| (chunk.start, chunk.end) == (0, 512)));
+    assert!(
+        batch
+            .chunks
+            .unwrap()
+            .iter()
+            .all(|chunk| (chunk.start, chunk.end) == (0, 512))
+    );
     assert!(scheduler.completion_is_due());
     scheduler.decode_steps_since_prefill = 1;
     assert!(!scheduler.completion_is_due());
@@ -1950,11 +1968,13 @@ fn packed_prompt_spans_keep_small_aligned_budgets_nonempty() {
     let batch = scheduler.select_prompt_batch(candidates);
 
     assert_eq!(batch.scheduled.len(), 3);
-    assert!(batch
-        .chunks
-        .unwrap()
-        .iter()
-        .all(|chunk| (chunk.start, chunk.end) == (31, 32)));
+    assert!(
+        batch
+            .chunks
+            .unwrap()
+            .iter()
+            .all(|chunk| (chunk.start, chunk.end) == (31, 32))
+    );
 }
 
 #[test]
@@ -2137,12 +2157,14 @@ fn admission_epoch_uses_the_full_budget_for_short_prefills() {
 
     assert_eq!(batch.scheduled.len(), 32);
     assert_eq!(batch.chunk_size, Some(128));
-    assert!(batch
-        .chunks
-        .as_ref()
-        .unwrap()
-        .iter()
-        .all(|chunk| (chunk.start, chunk.end) == (0, 128)));
+    assert!(
+        batch
+            .chunks
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|chunk| (chunk.start, chunk.end) == (0, 128))
+    );
     assert_eq!(
         batch
             .chunks
@@ -2178,12 +2200,14 @@ fn admission_epoch_packs_complete_short_prefills_without_prefix_caching() {
 
     assert_eq!(batch.scheduled.len(), 30);
     assert_eq!(batch.chunk_size, Some(134));
-    assert!(batch
-        .chunks
-        .as_ref()
-        .unwrap()
-        .iter()
-        .all(|chunk| (chunk.start, chunk.end) == (0, 134)));
+    assert!(
+        batch
+            .chunks
+            .as_ref()
+            .unwrap()
+            .iter()
+            .all(|chunk| (chunk.start, chunk.end) == (0, 134))
+    );
     assert_eq!(
         batch
             .chunks
@@ -2242,11 +2266,13 @@ fn admission_epoch_advances_the_rotating_prompt_frontier() {
             .collect::<Vec<_>>(),
         vec![1, 2]
     );
-    assert!(batch
-        .chunks
-        .unwrap()
-        .iter()
-        .all(|chunk| (chunk.start, chunk.end) == (0, 128)));
+    assert!(
+        batch
+            .chunks
+            .unwrap()
+            .iter()
+            .all(|chunk| (chunk.start, chunk.end) == (0, 128))
+    );
 
     let short_tail = test_sequence(3, 1000);
     {
@@ -2721,9 +2747,11 @@ fn lazy_prompt_reservation_pressure_preserves_decode_and_staged_validation() {
     scheduler.scheduler_visible_prompt_chunks = true;
     let completion = test_sequence(0, 8);
     get_mut_arcmutex!(completion).set_num_computed_tokens(8);
-    assert!(get_mut_arcmutex!(scheduler.kv_cache_manager)
-        .allocate_slots(0, 9, &[])
-        .is_some());
+    assert!(
+        get_mut_arcmutex!(scheduler.kv_cache_manager)
+            .allocate_slots(0, 9, &[])
+            .is_some()
+    );
     scheduler.running.push_back(completion);
 
     let prompt = test_sequence(1, 48);

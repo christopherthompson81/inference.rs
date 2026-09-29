@@ -1,7 +1,7 @@
 use crate::attention::AttentionMask;
 use std::sync::{Arc, Mutex, MutexGuard};
 
-use candle_core::{Result, Tensor, D};
+use candle_core::{D, Result, Tensor};
 
 use crate::get_mut_arcmutex;
 
@@ -15,9 +15,9 @@ mod single_cache;
 
 pub use full_cache::{EitherCache, LayerCaches};
 #[cfg(feature = "cuda")]
-pub use hybrid_cache::RecurrentCheckpointStateSnapshot;
-#[cfg(feature = "cuda")]
 pub use hybrid_cache::GDN_PENDING_KEY_BANK_COUNT;
+#[cfg(feature = "cuda")]
+pub use hybrid_cache::RecurrentCheckpointStateSnapshot;
 pub use hybrid_cache::{
     GdnDeferredStatePool, GdnDeferredStateSpec, GdnPendingTransitionPool, GdnPendingTransitionSpec,
 };
@@ -510,10 +510,11 @@ impl Cache {
     /// # Panics
     /// If there is no xlora cache
     pub fn get_scalings_cache(&self) -> MutexGuard<'_, Option<Tensor>> {
-        get_mut_arcmutex!(self
-            .scalings_cache
-            .as_ref()
-            .expect("No X-LoRA scalings cache."))
+        get_mut_arcmutex!(
+            self.scalings_cache
+                .as_ref()
+                .expect("No X-LoRA scalings cache.")
+        )
     }
 
     pub fn is_xlora(&self) -> bool {
@@ -601,7 +602,7 @@ fn try_kv_append_dual_metal(
     k_src: &Tensor,
     v_src: &Tensor,
 ) -> Result<bool> {
-    use candle_core::{backend::BackendStorage, Storage};
+    use candle_core::{Storage, backend::BackendStorage};
 
     // Layout requirements: dim=2, rank=4, source [b=1, n_kv, src_seq, head_dim],
     // dst (cache) [b=1, n_kv, max_seq, head_dim], both BF16/F16/F32.
@@ -702,7 +703,7 @@ fn try_kv_append_rotating_metal(
     k_src: &Tensor,
     v_src: &Tensor,
 ) -> Result<Option<(Tensor, Tensor)>> {
-    use candle_core::{backend::BackendStorage, Storage};
+    use candle_core::{Storage, backend::BackendStorage};
 
     // Decode steady-state only: window is already full, one new token at a time.
     // Anything else falls back so the existing shift-based code handles it.

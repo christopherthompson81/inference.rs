@@ -7,7 +7,7 @@ use std::{
     sync::Arc,
 };
 
-use candle_core::{Context, Device, IndexOp, Result, Tensor, D};
+use candle_core::{Context, D, Device, IndexOp, Result, Tensor};
 use image::DynamicImage;
 use inference_vision::{
     ApplyTensorTransforms, ApplyTransforms, Normalize, Rescale, TensorTransforms, ToTensorNoNorm,
@@ -28,8 +28,8 @@ use crate::media_inputs::{
     },
 };
 use crate::paged_attention::{
-    block_hash::{MultiModalFeature, MultimodalKind},
     PagedAttentionMeta,
+    block_hash::{MultiModalFeature, MultimodalKind},
 };
 use crate::vision::multimodal_layout::{
     MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
@@ -161,15 +161,14 @@ fn llama4_item_selection(
             original_start..total_items,
         ))
     };
-    if let Some((encoded, original)) = &selection {
-        if encoded.start > encoded.end
+    if let Some((encoded, original)) = &selection
+        && (encoded.start > encoded.end
             || encoded.end > encoded_items
             || original.start > original.end
             || original.end > total_items
-            || encoded.len() != original.len()
-        {
-            candle_core::bail!("Llama4 active image range is outside the retained images");
-        }
+            || encoded.len() != original.len())
+    {
+        candle_core::bail!("Llama4 active image range is outside the retained images");
     }
     Ok(selection)
 }

@@ -1,9 +1,9 @@
 use candle_core::{Result, Tensor};
 
 #[cfg(any(feature = "flash-attn", feature = "flash-attn-v3"))]
-use crate::attention::sliding_window_left;
-#[cfg(any(feature = "flash-attn", feature = "flash-attn-v3"))]
 use crate::attention::FlashKMeta;
+#[cfg(any(feature = "flash-attn", feature = "flash-attn-v3"))]
+use crate::attention::sliding_window_left;
 use crate::attention::{FlashParams, SdpaParams};
 
 pub fn flash_backend_supports(head_dim: usize, has_softcap: bool) -> bool {
@@ -279,9 +279,11 @@ mod tests {
 
         let missing_query = varlen_metadata(&q, &params, None).unwrap_err();
 
-        assert!(missing_query
-            .to_string()
-            .contains("packed prefill is missing query metadata"));
+        assert!(
+            missing_query
+                .to_string()
+                .contains("packed prefill is missing query metadata")
+        );
 
         params.cumulative_seqlens_q.insert(
             Device::Cpu.location(),
@@ -289,9 +291,11 @@ mod tests {
         );
         let missing_key = varlen_metadata(&q, &params, None).unwrap_err();
 
-        assert!(missing_key
-            .to_string()
-            .contains("packed prefill is missing key metadata"));
+        assert!(
+            missing_key
+                .to_string()
+                .contains("packed prefill is missing key metadata")
+        );
     }
 
     #[test]

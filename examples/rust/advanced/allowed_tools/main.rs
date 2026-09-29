@@ -9,7 +9,7 @@ use inference::{
     AllowedToolChoice, AllowedToolsMode, AllowedToolsToolChoice, AllowedToolsToolChoiceType,
     Function, IsqBits, ModelBuilder, RequestBuilder, TextMessageRole, Tool, ToolChoice, ToolType,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[tokio::main]
 async fn main() -> Result<()> {

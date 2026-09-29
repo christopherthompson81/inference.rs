@@ -33,7 +33,7 @@ pub fn call_moe_weighted_reduce_flat(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let name = format!("moe_weighted_reduce_flat_{type_string}");

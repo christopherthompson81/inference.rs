@@ -15,7 +15,7 @@ use config::{MLlamaVisionConfig, VisionActivation};
 use text::MLlamaTextModel;
 use vision::MLlamaVisionModel;
 
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 use candle_nn::{Linear, Module};
 use inference_quant::ShardedVarBuilder;
 
@@ -24,12 +24,12 @@ use crate::{
     amoe::AnyMoeBaseModelMixin,
     kv_cache::EitherCache,
     layers::masker::masked_fill,
-    layers::{linear, GetFloatInfo},
+    layers::{GetFloatInfo, linear},
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata},
     ops::RepeatInterleaveOp,
     paged_attention::{
-        encoder_cache::{CacheModality, EncoderCacheManager},
         AttentionImplementation, ModelConfigMetadata,
+        encoder_cache::{CacheModality, EncoderCacheManager},
     },
     utils::unvarbuilder::UnVarBuilder,
 };
@@ -213,10 +213,13 @@ impl MLlamaModel {
                 .lock()
                 .expect("encoder cache lock poisoned");
             for &(batch_idx, image_idx, hash) in &keys {
-                if let Some(cached) = cache.get(CacheModality::Image, hash) {
-                    states[batch_idx][image_idx] = Some(cached[0].clone());
-                } else {
-                    misses.push((batch_idx, image_idx, hash));
+                match cache.get(CacheModality::Image, hash) {
+                    Some(cached) => {
+                        states[batch_idx][image_idx] = Some(cached[0].clone());
+                    }
+                    _ => {
+                        misses.push((batch_idx, image_idx, hash));
+                    }
                 }
             }
         }

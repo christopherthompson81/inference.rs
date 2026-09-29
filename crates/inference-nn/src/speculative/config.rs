@@ -79,7 +79,9 @@ impl MtpConfig {
     /// The assistant checkpoint directory; core resolves hub ids to a local snapshot before attaching.
     pub fn resolve_path(&self) -> candle_core::Result<PathBuf> {
         let Some(model) = &self.model else {
-            candle_core::bail!("this MTP proposer requires a separate assistant model (`--mtp-model`), not the built-in head");
+            candle_core::bail!(
+                "this MTP proposer requires a separate assistant model (`--mtp-model`), not the built-in head"
+            );
         };
         Ok(PathBuf::from(model))
     }

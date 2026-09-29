@@ -1,5 +1,5 @@
 use super::*;
-use candle_core::{Device, IndexOp, D};
+use candle_core::{D, Device, IndexOp};
 
 #[derive(Clone, Copy)]
 struct RecurrenceCase {
@@ -1278,9 +1278,11 @@ fn run_fused_decode_state_case(
         .then(|| Tensor::cat(&[&b_reference, &a_reference], D::Minus1))
         .transpose()?;
     let (b, a) = if let Some(packed_gates) = packed_gates {
-        assert!(!packed_gates
-            .narrow(D::Minus1, 0, num_v_heads)?
-            .is_contiguous());
+        assert!(
+            !packed_gates
+                .narrow(D::Minus1, 0, num_v_heads)?
+                .is_contiguous()
+        );
         (
             packed_gates.narrow(D::Minus1, 0, num_v_heads)?,
             packed_gates.narrow(D::Minus1, num_v_heads, num_v_heads)?,

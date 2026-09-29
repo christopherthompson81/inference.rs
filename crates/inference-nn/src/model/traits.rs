@@ -1,6 +1,6 @@
 use std::{
     any::Any,
-    sync::{atomic::AtomicUsize, Arc, Mutex},
+    sync::{Arc, Mutex, atomic::AtomicUsize},
 };
 
 use candle_core::{Device, Tensor};
@@ -13,7 +13,7 @@ use crate::{
     kv_cache::EitherCache,
     matformer::MatformerSliceConfig,
     model::ModelForwardContext,
-    paged_attention::{encoder_cache::EncoderCacheManager, ModelConfigLike, ModelConfigMetadata},
+    paged_attention::{ModelConfigLike, ModelConfigMetadata, encoder_cache::EncoderCacheManager},
     speculative::SpeculativeTargetMixin,
 };
 

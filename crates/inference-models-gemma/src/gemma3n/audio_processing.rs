@@ -1,7 +1,7 @@
 use anyhow::Result;
 use candle_core::{Device, Tensor};
-use inference_audio::fft::{plan_forward_f32, Complex32};
 use inference_audio::AudioInput;
+use inference_audio::fft::{Complex32, plan_forward_f32};
 use rubato::Resampler;
 
 use crate::media_inputs::preprocessor_config::PreProcessorConfig;

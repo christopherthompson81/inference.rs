@@ -163,12 +163,12 @@ pub(crate) fn parse_atem_tool_calls(message: &str) -> Result<Option<Vec<AtemTool
             let Some(block_calls) = parse_atem_invocations(&message[body_start..body_end])? else {
                 return Ok(None);
             };
-            if let Some(recipient) = recipient {
-                if block_calls.iter().any(|call| call.name != recipient) {
-                    return Err(anyhow::Error::msg(format!(
-                        "Muse Glimmer tool recipient `{recipient}` does not match its invocation"
-                    )));
-                }
+            if let Some(recipient) = recipient
+                && block_calls.iter().any(|call| call.name != recipient)
+            {
+                return Err(anyhow::Error::msg(format!(
+                    "Muse Glimmer tool recipient `{recipient}` does not match its invocation"
+                )));
             }
             calls.extend(block_calls);
         }
@@ -510,18 +510,18 @@ fn strict_value_rule(
     property_index: usize,
     schemas: &mut Vec<GrammarWithLexer>,
 ) -> String {
-    if let Some(values) = schema.get("enum").and_then(Value::as_array) {
-        if values.iter().any(Value::is_string) {
-            let alternatives = values
-                .iter()
-                .map(|value| match value {
-                    Value::String(value) => lark_literal(value),
-                    value => lark_literal(&value.to_string()),
-                })
-                .collect::<Vec<_>>();
-            if !alternatives.is_empty() {
-                return format!("({})", alternatives.join(" | "));
-            }
+    if let Some(values) = schema.get("enum").and_then(Value::as_array)
+        && values.iter().any(Value::is_string)
+    {
+        let alternatives = values
+            .iter()
+            .map(|value| match value {
+                Value::String(value) => lark_literal(value),
+                value => lark_literal(&value.to_string()),
+            })
+            .collect::<Vec<_>>();
+        if !alternatives.is_empty() {
+            return format!("({})", alternatives.join(" | "));
         }
     }
     if let Some(Value::String(value)) = schema.get("const") {

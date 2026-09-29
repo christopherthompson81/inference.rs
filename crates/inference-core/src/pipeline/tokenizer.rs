@@ -1,7 +1,7 @@
 use std::{collections::HashMap, path::Path};
 
 use ahash::AHashMap;
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use base64::Engine;
 use serde::Deserialize;
 use serde_json::Value;
@@ -9,12 +9,12 @@ use tokenizers::{
     decoders::byte_level::ByteLevel as ByteLevelDecoder,
     models::bpe::BpeBuilder,
     pre_tokenizers::{
+        PreTokenizerWrapper,
         byte_level::ByteLevel,
         sequence::Sequence,
         split::{Split, SplitPattern},
-        PreTokenizerWrapper,
     },
-    tokenizer::{self, normalizer::SplitDelimiterBehavior, Tokenizer},
+    tokenizer::{self, Tokenizer, normalizer::SplitDelimiterBehavior},
 };
 
 use super::tiktoken::token_bytes_to_string;
@@ -233,7 +233,7 @@ pub(crate) fn get_tokenizer<P: AsRef<Path> + Clone>(
 #[cfg(test)]
 mod tests {
     use super::repair_tokenizer_json;
-    use serde_json::{json, Value};
+    use serde_json::{Value, json};
 
     #[test]
     fn tokenizer_repair_preserves_bytes_when_vocab_is_complete() {

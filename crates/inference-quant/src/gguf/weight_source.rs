@@ -1,16 +1,16 @@
 use std::{collections::HashMap, sync::Arc};
 
-use candle_core::{quantized::GgmlDType, DType, Device, Error, Result, Shape, Tensor};
-use candle_nn::{var_builder::SimpleBackend, Linear};
+use candle_core::{DType, Device, Error, Result, Shape, Tensor, quantized::GgmlDType};
+use candle_nn::{Linear, var_builder::SimpleBackend};
 
 use super::{
-    archive::{qtensor_from_gguf_data, GgufArchive, GgufEndian},
     GgufMatMul,
+    archive::{GgufArchive, GgufEndian, qtensor_from_gguf_data},
 };
 use crate::{
-    bias_shard, block_pack_factor, shard_range, slice_blocked_data, BiasShard, QuantMethod,
-    QuantMethodConfig, QuantizedWeightSource, Shard, ShardedSafeTensors, ShardedVarBuilder,
-    TensorShapes, UnquantLinear,
+    BiasShard, QuantMethod, QuantMethodConfig, QuantizedWeightSource, Shard, ShardedSafeTensors,
+    ShardedVarBuilder, TensorShapes, UnquantLinear, bias_shard, block_pack_factor, shard_range,
+    slice_blocked_data,
 };
 
 const DIRECT_GGUF_DTYPES: &str =
@@ -1349,7 +1349,7 @@ fn checked_elem_count(shape: &[usize]) -> Result<usize> {
 mod tests {
     use std::io::Write;
 
-    use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
+    use candle_core::quantized::{GgmlDType, QTensor, gguf_file};
     use tempfile::NamedTempFile;
 
     use super::*;

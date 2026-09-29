@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
-use inference_models_qwen::loaders::{Qwen2VLLoader, Qwen2_5VLLoader};
+use inference_models_qwen::loaders::{Qwen2_5VLLoader, Qwen2VLLoader};
 use inference_models_qwen::qwen2vl::inputs_processor::{
-    Qwen2VLImageProcessor, IMAGE_PAD, PLACEHOLDER, VIDEO_PAD,
+    IMAGE_PAD, PLACEHOLDER, Qwen2VLImageProcessor, VIDEO_PAD,
 };
 
 use crate::pipeline::{InputsProcessor, MessagesAction, MultimodalProcessorFactory, Processor};

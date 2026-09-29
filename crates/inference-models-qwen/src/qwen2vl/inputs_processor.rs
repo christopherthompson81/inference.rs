@@ -8,7 +8,7 @@ use std::{
 
 use anyhow::Result;
 use candle_core::{Context, DType, Device, IndexOp, Tensor};
-use image::{imageops::FilterType, DynamicImage, GenericImageView};
+use image::{DynamicImage, GenericImageView, imageops::FilterType};
 use inference_vision::{
     ApplyTensorTransforms, ApplyTransforms, Normalize, TensorTransforms, ToTensor, Transforms,
 };
@@ -27,12 +27,12 @@ use crate::media_inputs::{
 };
 use crate::model::recurrent_batch_kind_for_input;
 use crate::paged_attention::{
-    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
     PagedAttentionMeta,
+    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
 };
 use crate::vision::multimodal_layout::{
-    gather_packed_mrope_positions, MropePositionSource, MultimodalEmbeddingMap,
-    MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout, RequestMultimodalLayout,
+    MropePositionSource, MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout,
+    PackedMultimodalLayout, RequestMultimodalLayout, gather_packed_mrope_positions,
 };
 
 use super::Qwen2VLVisionSpecificArgs;
@@ -1800,44 +1800,50 @@ mod tests {
         let one_grid = Tensor::new(&[[1u32, 2, 2]], &Device::Cpu)?;
         let mut excess = format!("{}{}", IMAGE_PAD, IMAGE_PAD);
         let original = excess.clone();
-        assert!(expand_media_placeholders(
-            &mut excess,
-            IMAGE_PAD,
-            PLACEHOLDER,
-            Some(&one_grid),
-            1,
-            4,
-            MultimodalKind::Image,
-        )
-        .unwrap_err()
-        .is::<InputsProcessorValidationError>());
+        assert!(
+            expand_media_placeholders(
+                &mut excess,
+                IMAGE_PAD,
+                PLACEHOLDER,
+                Some(&one_grid),
+                1,
+                4,
+                MultimodalKind::Image,
+            )
+            .unwrap_err()
+            .is::<InputsProcessorValidationError>()
+        );
         assert_eq!(excess, original);
 
         let mut missing = IMAGE_PAD.to_string();
-        assert!(expand_media_placeholders(
-            &mut missing,
-            IMAGE_PAD,
-            PLACEHOLDER,
-            Some(&grid),
-            2,
-            4,
-            MultimodalKind::Image,
-        )
-        .unwrap_err()
-        .is::<InputsProcessorValidationError>());
+        assert!(
+            expand_media_placeholders(
+                &mut missing,
+                IMAGE_PAD,
+                PLACEHOLDER,
+                Some(&grid),
+                2,
+                4,
+                MultimodalKind::Image,
+            )
+            .unwrap_err()
+            .is::<InputsProcessorValidationError>()
+        );
 
         let mut grid_mismatch = format!("{}{}", IMAGE_PAD, IMAGE_PAD);
-        assert!(!expand_media_placeholders(
-            &mut grid_mismatch,
-            IMAGE_PAD,
-            PLACEHOLDER,
-            Some(&one_grid),
-            2,
-            4,
-            MultimodalKind::Image,
-        )
-        .unwrap_err()
-        .is::<InputsProcessorValidationError>());
+        assert!(
+            !expand_media_placeholders(
+                &mut grid_mismatch,
+                IMAGE_PAD,
+                PLACEHOLDER,
+                Some(&one_grid),
+                2,
+                4,
+                MultimodalKind::Image,
+            )
+            .unwrap_err()
+            .is::<InputsProcessorValidationError>()
+        );
         Ok(())
     }
 
@@ -1845,16 +1851,18 @@ mod tests {
     fn malformed_grid_and_range_hash_cardinality_fail_closed() -> Result<()> {
         let malformed_grid = Tensor::new(&[[1u32, 2]], &Device::Cpu)?;
         let mut text = VIDEO_PAD.to_string();
-        assert!(expand_media_placeholders(
-            &mut text,
-            VIDEO_PAD,
-            PLACEHOLDER,
-            Some(&malformed_grid),
-            1,
-            4,
-            MultimodalKind::Video,
-        )
-        .is_err());
+        assert!(
+            expand_media_placeholders(
+                &mut text,
+                VIDEO_PAD,
+                PLACEHOLDER,
+                Some(&malformed_grid),
+                1,
+                4,
+                MultimodalKind::Video,
+            )
+            .is_err()
+        );
         assert!(validated_mm_features(&[(1, 2), (5, 2)], &[11], MultimodalKind::Image).is_err());
         assert!(validated_mm_features(&[(1, 2)], &[11, 12], MultimodalKind::Image).is_err());
         Ok(())

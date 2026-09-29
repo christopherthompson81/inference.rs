@@ -7,8 +7,8 @@ use anyhow::Result;
 use candle_core::DType;
 use candle_nn::Conv2dConfig;
 use inference_nn::bias_if;
-use inference_quant::log::once_log_debug;
 use inference_quant::ShardedVarBuilder;
+use inference_quant::log::once_log_debug;
 
 use crate::pipeline::isq::isq_regexes;
 use regex::Regex;
@@ -19,7 +19,7 @@ use super::{DeviceMappedModelLoader, NonMappedSubModel, NormalLoadingMetadata};
 use super::language_model_pack_factors;
 #[cfg(feature = "models-gemma")]
 use super::promoted_tensor_pack_factor;
-use super::{language_model_pack_factors_with_aliases, AutoDeviceMapQuantization};
+use super::{AutoDeviceMapQuantization, language_model_pack_factors_with_aliases};
 
 use crate::attention::ATTENTION_CHUNK_SIZE;
 use crate::device_map::DeviceMapper;
@@ -246,8 +246,8 @@ pub use inference_models_other::loaders::{Lfm2VlLoader, PaddleOcrVlLoader};
 pub use inference_models_phi::loaders::{Phi3VLoader, Phi4MMLoader};
 #[cfg(feature = "models-qwen")]
 pub use inference_models_qwen::loaders::{
-    MiniCpmOLoader, MuseGlimmerLoader, Qwen2VLLoader, Qwen2_5VLLoader, Qwen3VLLoader,
-    Qwen3VLMoELoader, Qwen3_5Loader, Qwen3_5MoeLoader,
+    MiniCpmOLoader, MuseGlimmerLoader, Qwen2_5VLLoader, Qwen2VLLoader, Qwen3_5Loader,
+    Qwen3_5MoeLoader, Qwen3VLLoader, Qwen3VLMoELoader,
 };
 #[cfg(feature = "models-gemma")]
 mod gemma3;

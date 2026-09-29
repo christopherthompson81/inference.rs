@@ -1,4 +1,4 @@
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::{Arc, atomic::AtomicUsize};
 
 use candle_core::{DType, Device, Result, Tensor};
 
@@ -7,7 +7,7 @@ use crate::{
     QuantizeOntoGuard, QuantizedSerde, ShardedVarBuilder, UqffTensor,
 };
 
-use super::{add_delta, current_lora_execution, LoraLinearSpec, LoraSiteHandle, LoraSiteKey};
+use super::{LoraLinearSpec, LoraSiteHandle, LoraSiteKey, add_delta, current_lora_execution};
 
 #[derive(Debug)]
 pub(crate) struct DynamicLoraLinear {
@@ -102,19 +102,19 @@ impl QuantMethod for DynamicLoraLinear {
     }
 
     fn embedding_forward_raw(&self, ids: &Tensor) -> Result<Tensor> {
-        if let Some(execution) = current_lora_execution(self.runtime_id) {
-            if execution.site_is_active(&self.site)? {
-                candle_core::bail!("dynamic LoRA does not support embedding linears");
-            }
+        if let Some(execution) = current_lora_execution(self.runtime_id)
+            && execution.site_is_active(&self.site)?
+        {
+            candle_core::bail!("dynamic LoRA does not support embedding linears");
         }
         self.base.embedding_forward_raw(ids)
     }
 
     fn gather_forward_raw(&self, input: &Tensor, indices: &Tensor) -> Result<Tensor> {
-        if let Some(execution) = current_lora_execution(self.runtime_id) {
-            if execution.site_is_active(&self.site)? {
-                candle_core::bail!("dynamic LoRA does not support gather-forward linears");
-            }
+        if let Some(execution) = current_lora_execution(self.runtime_id)
+            && execution.site_is_active(&self.site)?
+        {
+            candle_core::bail!("dynamic LoRA does not support gather-forward linears");
         }
         self.base.gather_forward_raw(input, indices)
     }
@@ -269,7 +269,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        with_lora_execution, LoraExecution, LoraLayerRegistry, LoraWeights, UnquantLinear,
+        LoraExecution, LoraLayerRegistry, LoraWeights, UnquantLinear, with_lora_execution,
     };
 
     struct ProbeLayer {
@@ -473,9 +473,11 @@ mod tests {
             layer.embedding_forward_raw(&ids)
         })
         .expect_err("active embedding LoRA should fail");
-        assert!(error
-            .to_string()
-            .contains("dynamic LoRA does not support embedding linears"));
+        assert!(
+            error
+                .to_string()
+                .contains("dynamic LoRA does not support embedding linears")
+        );
         Ok(())
     }
 
@@ -514,9 +516,11 @@ mod tests {
         {
             let input = Tensor::zeros((1, 32), DType::F32, &Device::Cpu)?;
             assert!(targeted_layer.prepare_gguf_affine_raw(8, DType::F16, &Device::Cpu)?);
-            assert!(targeted_layer
-                .try_gguf_affine_forward_raw(&input)?
-                .is_some());
+            assert!(
+                targeted_layer
+                    .try_gguf_affine_forward_raw(&input)?
+                    .is_some()
+            );
         }
 
         let mut execution = LoraExecution::new(registry.runtime_id(), vec![Some(0)]);
@@ -544,13 +548,17 @@ mod tests {
             {
                 let input = Tensor::zeros((1, 32), DType::F32, &Device::Cpu)?;
                 assert!(!targeted_layer.prepare_gguf_affine_raw(8, DType::F16, &Device::Cpu)?);
-                assert!(targeted_layer
-                    .try_gguf_affine_forward_raw(&input)?
-                    .is_none());
+                assert!(
+                    targeted_layer
+                        .try_gguf_affine_forward_raw(&input)?
+                        .is_none()
+                );
                 assert!(untargeted_layer.prepare_gguf_affine_raw(8, DType::F16, &Device::Cpu)?);
-                assert!(untargeted_layer
-                    .try_gguf_affine_forward_raw(&input)?
-                    .is_some());
+                assert!(
+                    untargeted_layer
+                        .try_gguf_affine_forward_raw(&input)?
+                        .is_some()
+                );
             }
             Ok(())
         })?;

@@ -95,12 +95,11 @@ fn descendants_of(chat: &ChatFile, root: &str) -> HashSet<String> {
     let mut frontier = vec![root.to_string()];
     while let Some(node) = frontier.pop() {
         for m in chat.messages.iter() {
-            if m.parent_id.as_deref() == Some(node.as_str()) {
-                if let Some(id) = &m.id {
-                    if out.insert(id.clone()) {
-                        frontier.push(id.clone());
-                    }
-                }
+            if m.parent_id.as_deref() == Some(node.as_str())
+                && let Some(id) = &m.id
+                && out.insert(id.clone())
+            {
+                frontier.push(id.clone());
             }
         }
     }

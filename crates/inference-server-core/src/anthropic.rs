@@ -3,25 +3,21 @@
 use std::{pin::Pin, sync::Arc, task::Poll, time::Duration};
 
 use axum::{
-    extract::{rejection::JsonRejection, Json, State},
+    Extension,
+    extract::{Json, State, rejection::JsonRejection},
     http,
     response::{
-        sse::{Event, KeepAlive, KeepAliveStream},
         IntoResponse, Sse,
+        sse::{Event, KeepAlive, KeepAliveStream},
     },
-    Extension,
 };
 use either::Either;
 use futures::Stream;
 use inference_core::{
-    is_chat_template_request_error, Request, RequestMessage, TokenizationRequest,
+    Request, RequestMessage, TokenizationRequest, is_chat_template_request_error,
 };
-use tokio::time::{interval_at, Instant, Interval, MissedTickBehavior};
+use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at};
 
-use crate::anthropic_api::{
-    anthropic_error_body, collect_messages, prepare_messages, AnthropicStream,
-    AnthropicStreamEvent, MessagesFailure,
-};
 pub use crate::anthropic_api::{
     AnthropicContainer, AnthropicContentBlock, AnthropicCountTokensResponse, AnthropicError,
     AnthropicErrorBody, AnthropicImageSource, AnthropicJsonOutputFormat, AnthropicMessage,
@@ -30,18 +26,22 @@ pub use crate::anthropic_api::{
     AnthropicThinking, AnthropicTool, AnthropicToolChoice, AnthropicUsage,
     AnthropicWebSearchUserLocation,
 };
+use crate::anthropic_api::{
+    AnthropicStream, AnthropicStreamEvent, MessagesFailure, anthropic_error_body, collect_messages,
+    prepare_messages,
+};
 use crate::{
     agentic::AgenticDefaults,
-    chat_completion::{parse_request, ChatCompletionParseContext},
+    chat_completion::{ChatCompletionParseContext, parse_request},
     engine_chat::{ChatEngine, DispatchError},
     handler_core::{
-        create_response_channel, send_request_with_model, ApiError, ApiErrorHttp, ApiErrorKind,
-        ResponseErrorMessage,
+        ApiError, ApiErrorHttp, ApiErrorKind, ResponseErrorMessage, create_response_channel,
+        send_request_with_model,
     },
-    lora_routing::{resolve_lora_adapter_model, DEFAULT_MODEL_ID},
+    lora_routing::{DEFAULT_MODEL_ID, resolve_lora_adapter_model},
     openai::OpenAiToolSurface,
     skills::SkillStore,
-    streaming::{get_keep_alive_interval, StreamOutcomeHandle},
+    streaming::{StreamOutcomeHandle, get_keep_alive_interval},
     types::ExtractedInferenceRsState,
 };
 
@@ -343,7 +343,7 @@ mod tests {
     use super::*;
     use crate::api_error::INTERNAL_ERROR_MESSAGE;
     use axum::{
-        body::{to_bytes, Body},
+        body::{Body, to_bytes},
         extract::FromRequest,
         http::Request as HttpRequest,
     };

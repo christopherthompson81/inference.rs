@@ -16,28 +16,28 @@ mod reference;
 mod registry;
 
 pub use execution::{
-    has_active_lora_execution, with_lora_execution, with_lora_execution_repeated_row,
-    with_lora_execution_row_range, LoraAdapterWeights, LoraExecution, LoraExecutionArena,
-    LoraExecutionArenaStats, LoraSlotId, LoraWeights,
+    LoraAdapterWeights, LoraExecution, LoraExecutionArena, LoraExecutionArenaStats, LoraSlotId,
+    LoraWeights, has_active_lora_execution, with_lora_execution, with_lora_execution_repeated_row,
+    with_lora_execution_row_range,
 };
 pub use expert::{
-    add_expert_delta_reference, DynamicLoraWeights, LoraExpertDelta, LoraExpertExecution,
-    LoraExpertInputMode, LoraExpertProjection, LoraExpertProjectionNames,
-    LoraExpertProjectionWeights, LoraExpertSiteHandle, LoraExpertSiteSpec, LoraExpertWeights,
-    LoraGateUpOrder,
+    DynamicLoraWeights, LoraExpertDelta, LoraExpertExecution, LoraExpertInputMode,
+    LoraExpertProjection, LoraExpertProjectionNames, LoraExpertProjectionWeights,
+    LoraExpertSiteHandle, LoraExpertSiteSpec, LoraExpertWeights, LoraGateUpOrder,
+    add_expert_delta_reference,
 };
 pub use linear::maybe_wrap_dynamic_lora;
 pub(crate) use linear::maybe_wrap_dynamic_lora_with_key;
-pub use loader::{load_dynamic_lora_weights, plan_dynamic_lora_weights, DynamicLoraLoadPlan};
+pub use loader::{DynamicLoraLoadPlan, load_dynamic_lora_weights, plan_dynamic_lora_weights};
+pub use moe_cuda::{
+    ROUTED_LORA_BASE_SLOT, ROUTED_LORA_BLOCK_SIZE, ROUTED_LORA_MAX_RANK, ROUTED_LORA_WMMA_RANK_CAP,
+    RoutedLoraAdapterWeight, RoutedLoraInputMode, RoutedLoraMetadataLayout,
+    RoutedLoraProjectionLayout,
+};
 #[cfg(feature = "cuda")]
 pub use moe_cuda::{
-    launch_routed_lora_direct, launch_routed_lora_grouped, RoutedLoraCudaMetadata,
-    RoutedLoraCudaWeightTable, RoutedLoraDirectLaunch, RoutedLoraGroupedLaunch,
-};
-pub use moe_cuda::{
-    RoutedLoraAdapterWeight, RoutedLoraInputMode, RoutedLoraMetadataLayout,
-    RoutedLoraProjectionLayout, ROUTED_LORA_BASE_SLOT, ROUTED_LORA_BLOCK_SIZE,
-    ROUTED_LORA_MAX_RANK, ROUTED_LORA_WMMA_RANK_CAP,
+    RoutedLoraCudaMetadata, RoutedLoraCudaWeightTable, RoutedLoraDirectLaunch,
+    RoutedLoraGroupedLaunch, launch_routed_lora_direct, launch_routed_lora_grouped,
 };
 pub use raw::{apply_dynamic_lora_delta, is_dynamic_lora_site_active, register_dynamic_lora_site};
 pub(crate) use registry::LoraParallelism;

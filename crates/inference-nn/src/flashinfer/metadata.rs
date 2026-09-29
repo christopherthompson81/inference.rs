@@ -1,8 +1,8 @@
 use anyhow::Result;
-#[cfg(all(feature = "cuda", target_family = "unix"))]
-use candle_core::cuda_backend::cudarc::driver::{CudaEvent, CudaStream};
 #[cfg(feature = "cuda")]
 use candle_core::DType;
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+use candle_core::cuda_backend::cudarc::driver::{CudaEvent, CudaStream};
 use candle_core::{Device, Tensor};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use candle_core::{DeviceLocation, TensorId};
@@ -20,11 +20,11 @@ use super::{
 };
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use super::{Fa3DecodeBuffers, Fa3DecodeScheduleKey, Fa3DecodeView, Fa3PagedScheduleShape};
-use crate::paged_attention::block_table_rows::BlockTableRows;
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use crate::paged_attention::AttentionBackendKind;
 #[cfg(feature = "cuda")]
 use crate::paged_attention::ModelConfigLike;
+use crate::paged_attention::block_table_rows::BlockTableRows;
 
 // Split-KV decode chunks each (sequence, kv head) context so the grid reaches about this many
 // blocks per SM; grids that are already full keep one 2048-token chunk and skip the partial merge.
@@ -773,10 +773,10 @@ impl Fa3PrefillWorkspace {
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 impl Drop for Fa3PrefillWorkspace {
     fn drop(&mut self) {
-        if self.completion_pending {
-            if let Some(completion) = &self.completion {
-                let _ = completion.synchronize();
-            }
+        if self.completion_pending
+            && let Some(completion) = &self.completion
+        {
+            let _ = completion.synchronize();
         }
     }
 }

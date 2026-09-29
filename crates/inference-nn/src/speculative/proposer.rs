@@ -571,30 +571,36 @@ mod tests {
 
     #[test]
     fn speculative_tap_routing_rejects_inconsistent_packed_metadata() {
-        assert!(SpeculativeTapRouting::new(
-            SpeculativePrefillCaptureLayout::Packed,
-            2,
-            8,
-            &[0, 1],
-            &[(0, 3), (0, 5)],
-        )
-        .is_err());
-        assert!(SpeculativeTapRouting::new(
-            SpeculativePrefillCaptureLayout::Packed,
-            1,
-            9,
-            &[0, 1],
-            &[(0, 3), (0, 5)],
-        )
-        .is_err());
-        assert!(SpeculativeTapRouting::new(
-            SpeculativePrefillCaptureLayout::Packed,
-            1,
-            8,
-            &[1, 0],
-            &[(0, 3), (0, 5)],
-        )
-        .is_err());
+        assert!(
+            SpeculativeTapRouting::new(
+                SpeculativePrefillCaptureLayout::Packed,
+                2,
+                8,
+                &[0, 1],
+                &[(0, 3), (0, 5)],
+            )
+            .is_err()
+        );
+        assert!(
+            SpeculativeTapRouting::new(
+                SpeculativePrefillCaptureLayout::Packed,
+                1,
+                9,
+                &[0, 1],
+                &[(0, 3), (0, 5)],
+            )
+            .is_err()
+        );
+        assert!(
+            SpeculativeTapRouting::new(
+                SpeculativePrefillCaptureLayout::Packed,
+                1,
+                8,
+                &[1, 0],
+                &[(0, 3), (0, 5)],
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -608,16 +614,20 @@ mod tests {
         assert!(
             SpeculativeProposal::with_sparse_probs(vec![2], ids.clone(), probs.clone()).is_err()
         );
-        assert!(SparseSpeculativeProbs::new(
-            ids,
-            Tensor::zeros((2, 3), candle_core::DType::F32, &Device::Cpu).unwrap(),
-        )
-        .is_err());
-        assert!(SparseSpeculativeProbs::new(
-            Tensor::zeros((2, 0), candle_core::DType::U32, &Device::Cpu).unwrap(),
-            Tensor::zeros((2, 0), candle_core::DType::F32, &Device::Cpu).unwrap(),
-        )
-        .is_err());
+        assert!(
+            SparseSpeculativeProbs::new(
+                ids,
+                Tensor::zeros((2, 3), candle_core::DType::F32, &Device::Cpu).unwrap(),
+            )
+            .is_err()
+        );
+        assert!(
+            SparseSpeculativeProbs::new(
+                Tensor::zeros((2, 0), candle_core::DType::U32, &Device::Cpu).unwrap(),
+                Tensor::zeros((2, 0), candle_core::DType::F32, &Device::Cpu).unwrap(),
+            )
+            .is_err()
+        );
     }
 
     #[test]

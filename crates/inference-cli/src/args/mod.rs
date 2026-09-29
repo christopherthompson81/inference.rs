@@ -18,8 +18,8 @@ pub use server::*;
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
 use inference_core::{
-    ReasoningEffort, TokenSource, DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL,
-    DEFAULT_MAX_NUM_BATCHED_TOKENS, DEFAULT_MAX_PREFILL_CHUNK_TOKENS,
+    DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_NUM_BATCHED_TOKENS,
+    DEFAULT_MAX_PREFILL_CHUNK_TOKENS, ReasoningEffort, TokenSource,
 };
 use serde::Deserialize;
 use std::{num::NonZeroUsize, path::PathBuf};
@@ -1234,9 +1234,11 @@ mod tests {
         let missing =
             std::env::temp_dir().join(format!("inference-{}/model.gguf", uuid::Uuid::new_v4()));
         let error = resolve_run_error(&["-f", &missing.to_string_lossy()]);
-        assert!(error
-            .to_string()
-            .contains("does not exist or is not a file"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not exist or is not a file")
+        );
     }
 
     #[test]

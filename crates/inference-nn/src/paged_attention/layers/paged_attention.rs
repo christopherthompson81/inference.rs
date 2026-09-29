@@ -6,9 +6,9 @@ use std::{collections::HashMap, sync::Once};
 use candle_core::{DType, Device, DeviceLocation, Result, Tensor};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use inference_paged_attn::{
-    fa3_fp8_decode, flashinfer_decode, gather_kv_cache_flashinfer, reshape_and_cache_flashinfer,
-    Fa3DecodeParams, FlashInferDecodeScratch, KvCacheScales as FlashInferKvCacheScales,
-    DEFAULT_FP8_KV_CACHE_SCALES,
+    DEFAULT_FP8_KV_CACHE_SCALES, Fa3DecodeParams, FlashInferDecodeScratch,
+    KvCacheScales as FlashInferKvCacheScales, fa3_fp8_decode, flashinfer_decode,
+    gather_kv_cache_flashinfer, reshape_and_cache_flashinfer,
 };
 use inference_paged_attn::{paged_attention, reshape_and_cache};
 
@@ -16,19 +16,18 @@ use inference_paged_attn::{paged_attention, reshape_and_cache};
 use crate::attention::sliding_window_left;
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use crate::flashinfer::{
-    fa3_device_num_sm, fa3_prefill_cache_num_sm, with_fa3_prefill_workspace, Fa3DecodeScheduleKey,
-    Fa3DecodeView, Fa3PagedScheduleShape,
+    Fa3DecodeScheduleKey, Fa3DecodeView, Fa3PagedScheduleShape, fa3_device_num_sm,
+    fa3_prefill_cache_num_sm, with_fa3_prefill_workspace,
 };
 use crate::{
     attention::{AttentionMask, SdpaParams},
     layers::Sdpa,
     paged_attention::{
-        block_aligned_sliding_window_start,
+        _PAD_SLOT_ID, AttentionBackendKind, Fp8AttentionScales, block_aligned_sliding_window_start,
         plan::{
-            gather_prefill_workspace_for_lengths, DecodePlan, DecodePlanInput,
-            GatherPrefillWorkspaceRequest, PrefixPrefillPlan, PrefixPrefillPlanInput,
+            DecodePlan, DecodePlanInput, GatherPrefillWorkspaceRequest, PrefixPrefillPlan,
+            PrefixPrefillPlanInput, gather_prefill_workspace_for_lengths,
         },
-        AttentionBackendKind, Fp8AttentionScales, _PAD_SLOT_ID,
     },
 };
 
@@ -446,11 +445,7 @@ fn select_optional_view<'a, T>(
     full: Option<&'a T>,
     regular: Option<&'a T>,
 ) -> Option<&'a T> {
-    if use_full {
-        full
-    } else {
-        regular
-    }
+    if use_full { full } else { regular }
 }
 
 fn noncausal_mm_view_is_valid(
@@ -1162,28 +1157,29 @@ impl PagedAttention {
             attention_backend,
         };
         let prefill_plan = PrefixPrefillPlan::choose(prefill_plan_input);
-        if matches!(prefill_plan, PrefixPrefillPlan::GatherSdpa) {
-            if let Some(limit) = ctx.input_metadata.prefix_gather_workspace_limit {
-                let v_head_dim =
-                    tensors.value.dims().last().copied().ok_or_else(|| {
-                        candle_core::Error::msg("value tensor has no head dimension")
-                    })?;
-                let required =
-                    gather_prefill_workspace_for_lengths(GatherPrefillWorkspaceRequest {
-                        query_lens: &query_lens,
-                        kv_lens: &kv_lens,
-                        q_heads: ctx.dims.attention_heads,
-                        kv_heads: ctx.dims.key_value_heads,
-                        k_head_dim: ctx.dims.head_size,
-                        v_head_dim,
-                        dtype: tensors.query.dtype(),
-                        plan_input: prefill_plan_input,
-                    })?;
-                if required > limit {
-                    candle_core::bail!(
-                        "prompt KV gather requires {required} bytes, exceeding its preflight workspace limit of {limit} bytes"
-                    );
-                }
+        if matches!(prefill_plan, PrefixPrefillPlan::GatherSdpa)
+            && let Some(limit) = ctx.input_metadata.prefix_gather_workspace_limit
+        {
+            let v_head_dim = tensors
+                .value
+                .dims()
+                .last()
+                .copied()
+                .ok_or_else(|| candle_core::Error::msg("value tensor has no head dimension"))?;
+            let required = gather_prefill_workspace_for_lengths(GatherPrefillWorkspaceRequest {
+                query_lens: &query_lens,
+                kv_lens: &kv_lens,
+                q_heads: ctx.dims.attention_heads,
+                kv_heads: ctx.dims.key_value_heads,
+                k_head_dim: ctx.dims.head_size,
+                v_head_dim,
+                dtype: tensors.query.dtype(),
+                plan_input: prefill_plan_input,
+            })?;
+            if required > limit {
+                candle_core::bail!(
+                    "prompt KV gather requires {required} bytes, exceeding its preflight workspace limit of {limit} bytes"
+                );
             }
         }
         match prefill_plan {
@@ -2335,17 +2331,19 @@ mod tests {
         assert_eq!(default.fp8_attention_scales(), Fp8AttentionScales::UNIT);
         assert!(!default.has_calibrated_fp8_attention_scales());
 
-        assert!(PagedAttention::new_with_fp8_attention_scales(
-            128,
-            &Device::Cpu,
-            None,
-            Some(Fp8AttentionScales {
-                q: 1.0,
-                k: 0.0,
-                v: 1.0,
-            }),
-        )
-        .is_err());
+        assert!(
+            PagedAttention::new_with_fp8_attention_scales(
+                128,
+                &Device::Cpu,
+                None,
+                Some(Fp8AttentionScales {
+                    q: 1.0,
+                    k: 0.0,
+                    v: 1.0,
+                }),
+            )
+            .is_err()
+        );
         Ok(())
     }
 
@@ -3225,8 +3223,8 @@ mod mixed_cached_prefix_tests {
     }
 
     #[test]
-    fn cuda_mixed_cached_prefix_packed_paged_attention_matches_individual_and_reference(
-    ) -> Result<()> {
+    fn cuda_mixed_cached_prefix_packed_paged_attention_matches_individual_and_reference()
+    -> Result<()> {
         let device = Device::new_cuda(0)?;
         let attention = PagedAttention::new(HEAD_DIM, &device, None)?;
         for dtype in [DType::BF16, DType::F16] {
@@ -3265,12 +3263,18 @@ mod mixed_cached_prefix_tests {
                             mixed.is_finite() && separate.is_finite() && reference.is_finite(),
                             "nonfinite {dtype:?} groups={groups} kv={kv_lens:?} index={index}"
                         );
-                        assert!((f64::from(mixed) - reference).abs() <= tolerance,
-                                "mixed/reference {dtype:?} groups={groups} kv={kv_lens:?} index={index}: {mixed} vs {reference}");
-                        assert!((f64::from(separate) - reference).abs() <= tolerance,
-                                "separate/reference {dtype:?} groups={groups} kv={kv_lens:?} index={index}: {separate} vs {reference}");
-                        assert!((f64::from(mixed) - f64::from(separate)).abs() <= tolerance,
-                                "mixed/separate {dtype:?} groups={groups} kv={kv_lens:?} index={index}: {mixed} vs {separate}");
+                        assert!(
+                            (f64::from(mixed) - reference).abs() <= tolerance,
+                            "mixed/reference {dtype:?} groups={groups} kv={kv_lens:?} index={index}: {mixed} vs {reference}"
+                        );
+                        assert!(
+                            (f64::from(separate) - reference).abs() <= tolerance,
+                            "separate/reference {dtype:?} groups={groups} kv={kv_lens:?} index={index}: {separate} vs {reference}"
+                        );
+                        assert!(
+                            (f64::from(mixed) - f64::from(separate)).abs() <= tolerance,
+                            "mixed/separate {dtype:?} groups={groups} kv={kv_lens:?} index={index}: {mixed} vs {separate}"
+                        );
                     }
                 }
             }

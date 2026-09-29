@@ -2,7 +2,7 @@ use std::fmt;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
-use super::{registry::AdapterLease, AdapterGenerationId, DynamicLoraRuntime, LoraAdapterError};
+use super::{AdapterGenerationId, DynamicLoraRuntime, LoraAdapterError, registry::AdapterLease};
 
 #[derive(Clone)]
 /// Adapter selected for one request, by alias or immutable generation.

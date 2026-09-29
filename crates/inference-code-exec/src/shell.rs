@@ -18,7 +18,7 @@ use crate::files::{
 };
 use crate::protocol::ExecuteOutputSpec;
 use crate::tools;
-use crate::{raise_cpu_limit_for_timeout, DEFAULT_SHELL_TIMEOUT_SECS};
+use crate::{DEFAULT_SHELL_TIMEOUT_SECS, raise_cpu_limit_for_timeout};
 
 const REAP_INTERVAL: Duration = Duration::from_secs(300);
 const SESSION_TTL: Duration = Duration::from_secs(3600);
@@ -535,10 +535,10 @@ async fn execute_commands(ctx: &ShellSpawnCtx, work_dir: &Path, args: &ShellArgs
         Ok(child) => child,
         Err(e) => return shell_error_json(&command, work_dir, None, "", &e.to_string()),
     };
-    if let Some(pid) = child.id() {
-        if let Err(e) = ctx.sandbox.attach(pid, &effective_policy) {
-            tracing::warn!("sandbox attach failed for shell pid {pid}: {e}");
-        }
+    if let Some(pid) = child.id()
+        && let Err(e) = ctx.sandbox.attach(pid, &effective_policy)
+    {
+        tracing::warn!("sandbox attach failed for shell pid {pid}: {e}");
     }
 
     match tokio::time::timeout(timeout, child.wait_with_output()).await {

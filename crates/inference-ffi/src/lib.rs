@@ -3,8 +3,8 @@
 #![allow(clippy::missing_safety_doc)]
 
 use std::cell::RefCell;
-use std::ffi::{c_char, CStr, CString};
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::ffi::{CStr, CString, c_char};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use candle_core::Device;
 
@@ -109,18 +109,22 @@ pub(crate) fn guard_value<T>(fallback: T, f: impl FnOnce() -> T) -> T {
 
 /// `const char*` argument to `&str`. Safety: `ptr` is NULL or a NUL-terminated string valid for the call.
 pub(crate) unsafe fn arg_str<'a>(ptr: *const c_char, name: &str) -> FfiResult<&'a str> {
-    if ptr.is_null() {
-        return Err(Failure::invalid(format!("{name} is NULL")));
+    unsafe {
+        if ptr.is_null() {
+            return Err(Failure::invalid(format!("{name} is NULL")));
+        }
+        CStr::from_ptr(ptr)
+            .to_str()
+            .map_err(|_| Failure::invalid(format!("{name} is not valid UTF-8")))
     }
-    CStr::from_ptr(ptr)
-        .to_str()
-        .map_err(|_| Failure::invalid(format!("{name} is not valid UTF-8")))
 }
 
 /// Writes `value` through an optional out-pointer. Safety: `out` is NULL or valid for a write of `T`.
 pub(crate) unsafe fn write_opt<T>(out: *mut T, value: T) {
-    if !out.is_null() {
-        out.write(value);
+    unsafe {
+        if !out.is_null() {
+            out.write(value);
+        }
     }
 }
 
@@ -141,64 +145,66 @@ pub(crate) struct Backend {
 
 /// Safety: `config` is NULL or a valid `inference_backend_config` whose `backend` is NULL or a C string.
 pub(crate) unsafe fn backend_from(config: *const inference_backend_config) -> FfiResult<Backend> {
-    let (name, ordinal, threads) = match config.as_ref() {
-        None => ("cpu", 0, 0),
-        Some(c) => {
-            let name = if c.backend.is_null() {
-                "cpu"
-            } else {
-                arg_str(c.backend, "backend")?
-            };
-            (name, c.device, c.threads)
-        }
-    };
-    let ordinal = usize::try_from(ordinal)
-        .map_err(|_| Failure::invalid(format!("device {ordinal} is negative")))?;
-    let unavailable = |what: &str| {
-        Failure::new(
-            INFERENCE_ERR_NOT_AVAILABLE,
-            format!("this build has no {what} support"),
-        )
-    };
-    let device = match name {
-        "cpu" => Device::Cpu,
-        "cuda" if cfg!(feature = "cuda") => Device::new_cuda(ordinal).map_err(|e| {
+    unsafe {
+        let (name, ordinal, threads) = match config.as_ref() {
+            None => ("cpu", 0, 0),
+            Some(c) => {
+                let name = if c.backend.is_null() {
+                    "cpu"
+                } else {
+                    arg_str(c.backend, "backend")?
+                };
+                (name, c.device, c.threads)
+            }
+        };
+        let ordinal = usize::try_from(ordinal)
+            .map_err(|_| Failure::invalid(format!("device {ordinal} is negative")))?;
+        let unavailable = |what: &str| {
             Failure::new(
                 INFERENCE_ERR_NOT_AVAILABLE,
-                format!("CUDA device {ordinal}: {e}"),
+                format!("this build has no {what} support"),
             )
-        })?,
-        "cuda" => return Err(unavailable("CUDA")),
-        "metal" if cfg!(feature = "metal") => Device::new_metal(ordinal).map_err(|e| {
-            Failure::new(
-                INFERENCE_ERR_NOT_AVAILABLE,
-                format!("Metal device {ordinal}: {e}"),
-            )
-        })?,
-        "metal" => return Err(unavailable("Metal")),
-        other => {
+        };
+        let device = match name {
+            "cpu" => Device::Cpu,
+            "cuda" if cfg!(feature = "cuda") => Device::new_cuda(ordinal).map_err(|e| {
+                Failure::new(
+                    INFERENCE_ERR_NOT_AVAILABLE,
+                    format!("CUDA device {ordinal}: {e}"),
+                )
+            })?,
+            "cuda" => return Err(unavailable("CUDA")),
+            "metal" if cfg!(feature = "metal") => Device::new_metal(ordinal).map_err(|e| {
+                Failure::new(
+                    INFERENCE_ERR_NOT_AVAILABLE,
+                    format!("Metal device {ordinal}: {e}"),
+                )
+            })?,
+            "metal" => return Err(unavailable("Metal")),
+            other => {
+                return Err(Failure::invalid(format!(
+                    "unknown backend {other:?}; expected cpu, cuda or metal"
+                )));
+            }
+        };
+        if threads > MAX_CPU_THREADS {
             return Err(Failure::invalid(format!(
-                "unknown backend {other:?}; expected cpu, cuda or metal"
-            )))
+                "threads {threads} exceeds {MAX_CPU_THREADS}"
+            )));
         }
-    };
-    if threads > MAX_CPU_THREADS {
-        return Err(Failure::invalid(format!(
-            "threads {threads} exceeds {MAX_CPU_THREADS}"
-        )));
+        Ok(Backend {
+            device,
+            cpu_threads: usize::try_from(threads).ok().filter(|&t| t > 0),
+        })
     }
-    Ok(Backend {
-        device,
-        cpu_threads: usize::try_from(threads).ok().filter(|&t| t > 0),
-    })
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn inference_abi_version() -> u32 {
     (ABI_VERSION_MAJOR << 16) | (ABI_VERSION_MINOR << 8) | ABI_VERSION_PATCH
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn inference_build_version() -> *const c_char {
     BUILD_VERSION
         .get_or_init(|| {
@@ -211,7 +217,7 @@ pub extern "C" fn inference_build_version() -> *const c_char {
         .as_ptr()
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn inference_last_error() -> *const c_char {
     // the CString lives in the thread-local until the next call on this thread replaces it
     LAST_ERROR
@@ -219,7 +225,7 @@ pub extern "C" fn inference_last_error() -> *const c_char {
         .unwrap_or(c"".as_ptr())
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn inference_status_string(status: i32) -> *const c_char {
     // an i32, not the enum: C may pass any integer, and an out-of-range Rust enum value is undefined behaviour
     let name: &CStr = match status {

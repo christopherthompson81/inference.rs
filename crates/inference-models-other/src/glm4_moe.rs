@@ -4,7 +4,7 @@ use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use std::sync::Arc;
 
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
@@ -23,7 +23,7 @@ use crate::{
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
-        apply_rotary_q, embedding_with_legacy_tied_uqff, Activation, CausalMasker, Mlp, RmsNorm,
+        Activation, CausalMasker, Mlp, RmsNorm, apply_rotary_q, embedding_with_legacy_tied_uqff,
     },
     moe::{MoEExperts, MoEExpertsConfig},
     ops::TopKLastDimOp,

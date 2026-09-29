@@ -245,23 +245,26 @@ impl MmapedSafetensors {
     ///
     /// The unsafe is inherited from [`memmap2::MmapOptions`].
     pub unsafe fn new<P: AsRef<Path>>(p: P) -> Result<Self> {
-        let p = p.as_ref();
-        let file = std::fs::File::open(p).map_err(|e| Error::from(e).with_path(p))?;
-        let file = memmap2::MmapOptions::new()
-            .map(&file)
-            .map_err(|e| Error::from(e).with_path(p))?;
-        let safetensors = yoke::Yoke::<SafeTensors_<'static>, memmap2::Mmap>::try_attach_to_cart(
-            file,
-            |data: &[u8]| {
-                let st = safetensors::SafeTensors::deserialize(data)
-                    .map_err(|e| Error::from(e).with_path(p))?;
-                Ok::<_, Error>(SafeTensors_(st))
-            },
-        )?;
-        Ok(Self {
-            safetensors: vec![safetensors],
-            routing: None,
-        })
+        unsafe {
+            let p = p.as_ref();
+            let file = std::fs::File::open(p).map_err(|e| Error::from(e).with_path(p))?;
+            let file = memmap2::MmapOptions::new()
+                .map(&file)
+                .map_err(|e| Error::from(e).with_path(p))?;
+            let safetensors =
+                yoke::Yoke::<SafeTensors_<'static>, memmap2::Mmap>::try_attach_to_cart(
+                    file,
+                    |data: &[u8]| {
+                        let st = safetensors::SafeTensors::deserialize(data)
+                            .map_err(|e| Error::from(e).with_path(p))?;
+                        Ok::<_, Error>(SafeTensors_(st))
+                    },
+                )?;
+            Ok(Self {
+                safetensors: vec![safetensors],
+                routing: None,
+            })
+        }
     }
 
     /// Creates a wrapper around multiple memory mapped file and deserialize the safetensors headers.
@@ -272,7 +275,7 @@ impl MmapedSafetensors {
     ///
     /// The unsafe is inherited from [`memmap2::MmapOptions`].
     pub unsafe fn multi<P: AsRef<Path>>(paths: &[P]) -> Result<Self> {
-        Self::multi_impl(paths, false)
+        unsafe { Self::multi_impl(paths, false) }
     }
 
     /// Creates a wrapper around multiple memory mapped files and rejects duplicate tensor names.
@@ -281,44 +284,47 @@ impl MmapedSafetensors {
     ///
     /// The unsafe is inherited from [`memmap2::MmapOptions`].
     pub unsafe fn multi_unique<P: AsRef<Path>>(paths: &[P]) -> Result<Self> {
-        Self::multi_impl(paths, true)
+        unsafe { Self::multi_impl(paths, true) }
     }
 
     unsafe fn multi_impl<P: AsRef<Path>>(paths: &[P], reject_duplicates: bool) -> Result<Self> {
-        let mut routing: HashMap<String, usize> = HashMap::new();
-        let mut safetensors = vec![];
-        for (index, p) in paths.iter().enumerate() {
-            let p = p.as_ref();
-            let file = std::fs::File::open(p).map_err(|e| Error::from(e).with_path(p))?;
-            let file = memmap2::MmapOptions::new()
-                .map(&file)
-                .map_err(|e| Error::from(e).with_path(p))?;
-            let data = yoke::Yoke::<SafeTensors_<'static>, memmap2::Mmap>::try_attach_to_cart(
-                file,
-                |data: &[u8]| {
-                    let st = safetensors::SafeTensors::deserialize(data)
-                        .map_err(|e| Error::from(e).with_path(p))?;
-                    Ok::<_, Error>(SafeTensors_(st))
-                },
-            )?;
-            for k in data.get().0.names() {
-                if let Some(previous_index) = routing.get(k).copied().filter(|_| reject_duplicates)
-                {
-                    let previous = paths[previous_index].as_ref();
-                    candle_core::bail!(
-                        "Duplicate tensor key `{k}` found in `{}` and `{}`.",
-                        previous.display(),
-                        p.display()
-                    );
+        unsafe {
+            let mut routing: HashMap<String, usize> = HashMap::new();
+            let mut safetensors = vec![];
+            for (index, p) in paths.iter().enumerate() {
+                let p = p.as_ref();
+                let file = std::fs::File::open(p).map_err(|e| Error::from(e).with_path(p))?;
+                let file = memmap2::MmapOptions::new()
+                    .map(&file)
+                    .map_err(|e| Error::from(e).with_path(p))?;
+                let data = yoke::Yoke::<SafeTensors_<'static>, memmap2::Mmap>::try_attach_to_cart(
+                    file,
+                    |data: &[u8]| {
+                        let st = safetensors::SafeTensors::deserialize(data)
+                            .map_err(|e| Error::from(e).with_path(p))?;
+                        Ok::<_, Error>(SafeTensors_(st))
+                    },
+                )?;
+                for k in data.get().0.names() {
+                    if let Some(previous_index) =
+                        routing.get(k).copied().filter(|_| reject_duplicates)
+                    {
+                        let previous = paths[previous_index].as_ref();
+                        candle_core::bail!(
+                            "Duplicate tensor key `{k}` found in `{}` and `{}`.",
+                            previous.display(),
+                            p.display()
+                        );
+                    }
+                    routing.insert(k.to_string(), index);
                 }
-                routing.insert(k.to_string(), index);
+                safetensors.push(data)
             }
-            safetensors.push(data)
+            Ok(Self {
+                safetensors,
+                routing: Some(routing),
+            })
         }
-        Ok(Self {
-            safetensors,
-            routing: Some(routing),
-        })
     }
 
     pub fn load(&self, name: &str, dev: &Device, dtype: Option<DType>) -> Result<Tensor> {
@@ -431,25 +437,29 @@ impl ShardedSafeTensors {
         make_dummy_regexes: Option<Arc<Vec<Regex>>>,
         predicate: Arc<dyn Fn(String) -> bool + Send + Sync + 'static>,
     ) -> Result<ShardedVarBuilder> {
-        let tensors = MmapedSafetensors::multi(paths)?;
-        // mirror get()'s gating so tensor_shape never reports a tensor get() would refuse
-        let shapes = tensors
-            .tensors()
-            .into_iter()
-            .filter(|(name, _)| {
-                !matches_dummy_regex(&make_dummy_regexes, name) && predicate(name.to_string())
-            })
-            .map(|(name, view)| (name, view.shape().to_vec()))
-            .collect();
-        let backend = ShardedSafeTensors::Sharded {
-            b: tensors,
-            make_dummy_regexes,
-            predicate,
-        };
-        Ok(
-            ShardedVarBuilder::from_varbuilder(VarBuilderArgs::new_with_args(backend, dtype, dev))
+        unsafe {
+            let tensors = MmapedSafetensors::multi(paths)?;
+            // mirror get()'s gating so tensor_shape never reports a tensor get() would refuse
+            let shapes = tensors
+                .tensors()
+                .into_iter()
+                .filter(|(name, _)| {
+                    !matches_dummy_regex(&make_dummy_regexes, name) && predicate(name.to_string())
+                })
+                .map(|(name, view)| (name, view.shape().to_vec()))
+                .collect();
+            let backend = ShardedSafeTensors::Sharded {
+                b: tensors,
+                make_dummy_regexes,
+                predicate,
+            };
+            Ok(
+                ShardedVarBuilder::from_varbuilder(VarBuilderArgs::new_with_args(
+                    backend, dtype, dev,
+                ))
                 .with_shapes(shapes),
-        )
+            )
+        }
     }
 }
 
@@ -610,12 +620,12 @@ impl Backend for ShardedSafeTensors {
                     make_dummy_regexes,
                     predicate,
                 } => {
-                    if let Some(make_dummy_regexes) = make_dummy_regexes {
-                        if make_dummy_regexes.iter().any(|x| x.is_match(path)) {
-                            return Err(Error::CannotFindTensor {
-                                path: path.to_string(),
-                            });
-                        }
+                    if let Some(make_dummy_regexes) = make_dummy_regexes
+                        && make_dummy_regexes.iter().any(|x| x.is_match(path))
+                    {
+                        return Err(Error::CannotFindTensor {
+                            path: path.to_string(),
+                        });
                     }
                     let should_include = predicate(path.to_string());
                     if !should_include {
@@ -641,7 +651,7 @@ impl Backend for ShardedSafeTensors {
                         Default::default(),
                         dtype,
                         dev,
-                    )
+                    );
                 }
             }
         }
@@ -660,12 +670,12 @@ impl Backend for ShardedSafeTensors {
                     } => {
                         use safetensors::slice::IndexOp;
 
-                        if let Some(make_dummy_regexes) = make_dummy_regexes {
-                            if make_dummy_regexes.iter().any(|x| x.is_match(path)) {
-                                return Err(Error::CannotFindTensor {
-                                    path: path.to_string(),
-                                });
-                            }
+                        if let Some(make_dummy_regexes) = make_dummy_regexes
+                            && make_dummy_regexes.iter().any(|x| x.is_match(path))
+                        {
+                            return Err(Error::CannotFindTensor {
+                                path: path.to_string(),
+                            });
                         }
                         let should_include = predicate(path.to_string());
                         if !should_include {
@@ -736,12 +746,12 @@ impl Backend for ShardedSafeTensors {
                     } => {
                         use safetensors::slice::IndexOp;
 
-                        if let Some(make_dummy_regexes) = make_dummy_regexes {
-                            if make_dummy_regexes.iter().any(|x| x.is_match(path)) {
-                                return Err(Error::CannotFindTensor {
-                                    path: path.to_string(),
-                                });
-                            }
+                        if let Some(make_dummy_regexes) = make_dummy_regexes
+                            && make_dummy_regexes.iter().any(|x| x.is_match(path))
+                        {
+                            return Err(Error::CannotFindTensor {
+                                path: path.to_string(),
+                            });
                         }
                         let should_include = predicate(path.to_string());
                         if !should_include {
@@ -806,12 +816,12 @@ impl Backend for ShardedSafeTensors {
                 make_dummy_regexes,
                 predicate,
             } => {
-                if let Some(make_dummy_regexes) = make_dummy_regexes {
-                    if make_dummy_regexes.iter().any(|x| x.is_match(name)) {
-                        return Err(Error::CannotFindTensor {
-                            path: name.to_string(),
-                        });
-                    }
+                if let Some(make_dummy_regexes) = make_dummy_regexes
+                    && make_dummy_regexes.iter().any(|x| x.is_match(name))
+                {
+                    return Err(Error::CannotFindTensor {
+                        path: name.to_string(),
+                    });
                 }
                 let should_include = predicate(name.to_string());
                 if !should_include {
@@ -835,10 +845,10 @@ impl Backend for ShardedSafeTensors {
                 if let Some(path) = marked_uqff_dummy_tensor(name) {
                     return matches_dummy_regex(make_dummy_regexes, path);
                 }
-                if let Some(make_dummy_regexes) = make_dummy_regexes {
-                    if make_dummy_regexes.iter().any(|x| x.is_match(name)) {
-                        return false;
-                    }
+                if let Some(make_dummy_regexes) = make_dummy_regexes
+                    && make_dummy_regexes.iter().any(|x| x.is_match(name))
+                {
+                    return false;
                 }
                 let should_include = predicate(name.to_string());
                 if !should_include {

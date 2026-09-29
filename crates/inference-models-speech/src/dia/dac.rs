@@ -4,7 +4,7 @@
 //!
 /// An efficient neural codec for compressing/decompressing audio
 ///
-use candle_core::{IndexOp, Result, Tensor, D};
+use candle_core::{D, IndexOp, Result, Tensor};
 use candle_nn::{Conv1d, Conv1dConfig, ConvTranspose1d, ConvTranspose1dConfig, VarBuilder};
 use inference_quant::Convolution;
 

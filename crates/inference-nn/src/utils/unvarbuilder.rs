@@ -3,7 +3,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use candle_core::{quantized::QMatMul, Tensor};
+use candle_core::{Tensor, quantized::QMatMul};
 use candle_nn::{Conv2d, Embedding, LayerNorm, Linear};
 use inference_quant::QuantMethod;
 use itertools::Itertools;

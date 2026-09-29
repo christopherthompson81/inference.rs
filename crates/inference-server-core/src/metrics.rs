@@ -1,17 +1,17 @@
 //! Server observability: access logs, request ids, and Prometheus metrics.
 use axum::{
-    body::{to_bytes, Body},
+    Json,
+    body::{Body, to_bytes},
     extract::{MatchedPath, Request, State},
     http::{
-        header::{HeaderName, CONTENT_LENGTH},
         HeaderMap, HeaderValue,
+        header::{CONTENT_LENGTH, HeaderName},
     },
     middleware::Next,
     response::Response,
-    Json,
 };
 use axum::{
-    http::{header::CONTENT_TYPE, StatusCode},
+    http::{StatusCode, header::CONTENT_TYPE},
     response::IntoResponse,
 };
 use http_body::{Body as HttpBody, Frame};
@@ -25,7 +25,7 @@ use std::time::Instant;
 use tracing::{debug, info};
 
 use crate::{
-    handler_core::{openai_error_response, ApiError, ApiErrorKind, ResponseErrorMessage},
+    handler_core::{ApiError, ApiErrorKind, ResponseErrorMessage, openai_error_response},
     inference_server_router_builder::DEFAULT_MAX_BODY_LIMIT,
     lora_routing::{is_resolvable_lora_adapter_model, list_lora_adapter_models},
     streaming::{StreamOutcome, StreamOutcomeHandle},
@@ -283,19 +283,17 @@ pub async fn observe_http(
     }
     let status = response.status().as_u16().to_string();
 
-    if config.request_id_header {
-        if let Ok(value) = HeaderValue::from_str(&request_id) {
-            response
-                .headers_mut()
-                .insert(HeaderName::from_static(REQUEST_ID_HEADER), value);
-        }
+    if config.request_id_header
+        && let Ok(value) = HeaderValue::from_str(&request_id)
+    {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static(REQUEST_ID_HEADER), value);
     }
-    if anthropic_request {
-        if let Ok(value) = HeaderValue::from_str(&request_id) {
-            response
-                .headers_mut()
-                .insert(HeaderName::from_static(ANTHROPIC_REQUEST_ID_HEADER), value);
-        }
+    if anthropic_request && let Ok(value) = HeaderValue::from_str(&request_id) {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static(ANTHROPIC_REQUEST_ID_HEADER), value);
     }
 
     let completion = RequestCompletion {
@@ -971,9 +969,9 @@ fn rounded_duration_ms(latency_seconds: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        adapter_model_label_is_known, body_too_large_response, is_anthropic_request,
-        model_label_field, normalize_model_label_input, query_model, request_outcome,
-        ModelLabelField, RequestError, StreamEnd, StreamStats,
+        ModelLabelField, RequestError, StreamEnd, StreamStats, adapter_model_label_is_known,
+        body_too_large_response, is_anthropic_request, model_label_field,
+        normalize_model_label_input, query_model, request_outcome,
     };
     use crate::{lora_routing::LoraAdapterModel, streaming::StreamOutcome};
     use axum::{

@@ -28,7 +28,7 @@ pub fn call_mxfp4_matmul(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -91,7 +91,7 @@ pub fn call_mxfp4_vecmat(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -159,7 +159,7 @@ pub fn call_mxfp4_moe_gemm(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;

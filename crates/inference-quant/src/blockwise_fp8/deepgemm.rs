@@ -5,8 +5,8 @@ use std::{
     os::unix::{ffi::OsStrExt, fs::MetadataExt, fs::PermissionsExt},
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -15,7 +15,7 @@ use float8::F8E4M3;
 
 use super::{
     ffi,
-    ops::{fp8_tensor_aligned, fp8_workspace, is_sm90, FP8_BLOCK_SIZE},
+    ops::{FP8_BLOCK_SIZE, fp8_tensor_aligned, fp8_workspace, is_sm90},
 };
 
 const DECODE_MAX_M: usize = 128;

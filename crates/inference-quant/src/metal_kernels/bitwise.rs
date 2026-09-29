@@ -25,7 +25,7 @@ pub fn call_bitwise_not(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::U8, DType::U32, DType::I64, DType::I32],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -62,7 +62,7 @@ pub fn call_bitwise_or(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::U8, DType::U32, DType::I64, DType::I32],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -107,7 +107,7 @@ pub fn call_bitwise_and(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::U8, DType::U32, DType::I64, DType::I32],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -152,7 +152,7 @@ pub fn call_bitwise_xor(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::U8, DType::U32, DType::I64, DType::I32],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -196,7 +196,7 @@ pub fn call_bitwise_leftshift(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::U8, DType::U32, DType::I64, DType::I32],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;

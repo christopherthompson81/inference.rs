@@ -37,8 +37,9 @@ impl candle_core::CustomOp1 for CudaFp8Contiguous {
         layout: &candle_core::Layout,
     ) -> Result<(candle_core::CudaStorage, candle_core::Shape)> {
         use candle_core::cuda_backend::{
+            CudaStorageSlice, SlicePtrOrNull, WrapErr,
             cudarc::driver::{LaunchConfig, PushKernelArg},
-            kernels, CudaStorageSlice, SlicePtrOrNull, WrapErr,
+            kernels,
         };
 
         let dev = &storage.device;

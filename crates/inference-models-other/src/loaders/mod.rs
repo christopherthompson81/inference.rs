@@ -21,8 +21,8 @@ use inference_nn::xlora::XLoraConfig;
 use inference_quant::ShardedVarBuilder;
 use regex::Regex;
 
-use crate::lfm2_vl::{config::Config as Lfm2VlConfig, Lfm2VlModel};
-use crate::paddleocr_vl::{config::Config as PaddleOcrVlConfig, PaddleOcrVlModel};
+use crate::lfm2_vl::{Lfm2VlModel, config::Config as Lfm2VlConfig};
+use crate::paddleocr_vl::{PaddleOcrVlModel, config::Config as PaddleOcrVlConfig};
 
 mod deepseek2;
 mod deepseek3;

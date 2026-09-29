@@ -7,12 +7,12 @@ use std::{
     thread::{self, JoinHandle},
 };
 
-use candle_core::{pickle::PthTensors, DType, Device, Result, Tensor};
-use inference_quant::{safetensors::MmapedSafetensors, ShardedSafeTensors, ShardedVarBuilder};
+use candle_core::{DType, Device, Result, Tensor, pickle::PthTensors};
+use inference_quant::{ShardedSafeTensors, ShardedVarBuilder, safetensors::MmapedSafetensors};
 use regex::Regex;
 
 use crate::lora::LoraConfig;
-use crate::utils::progress::{new_multi_progress, NiceProgressBar};
+use crate::utils::progress::{NiceProgressBar, new_multi_progress};
 use derive_new::new;
 use indicatif::MultiProgress;
 
@@ -240,13 +240,13 @@ trait LoadTensors {
             .to_str()
             .expect("Expected to convert")
         {
-            "safetensors" => Box::new(SafetensorBackend(unsafe {
-                MmapedSafetensors::new(path)?
-            })),
-            "pth" | "pt" | "bin" => Box::new(PickleBackend(
-                candle_core::pickle::PthTensors::new(path, None)?
-            )),
-            other => candle_core::bail!("Unexpected extension `{other}`, this should have been handled by `get_model_paths`."),
+            "safetensors" => Box::new(SafetensorBackend(unsafe { MmapedSafetensors::new(path)? })),
+            "pth" | "pt" | "bin" => Box::new(PickleBackend(candle_core::pickle::PthTensors::new(
+                path, None,
+            )?)),
+            other => candle_core::bail!(
+                "Unexpected extension `{other}`, this should have been handled by `get_model_paths`."
+            ),
         };
 
         // Extracts the tensor name and processes it, filtering tensors and deriving the key name:

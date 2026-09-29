@@ -1,11 +1,11 @@
 //! /v1/chat/completions end to end on a tiny random-weight PaddleOCR-VL, as JSON and as SSE.
 
 use axum::{
-    body::{to_bytes, Body},
+    body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
 use inference_server_core::inference_server_router_builder::InferenceRsServerRouterBuilder;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 #[path = "../../../inference/tests/support/paddleocr_vl_tiny.rs"]
@@ -257,9 +257,11 @@ async fn files_upload_and_serve_their_content() -> anyhow::Result<()> {
         .await?;
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(response.headers()["content-type"], "text/csv");
-    assert!(response.headers()["content-disposition"]
-        .to_str()?
-        .contains("filename=\"table.csv\""));
+    assert!(
+        response.headers()["content-disposition"]
+            .to_str()?
+            .contains("filename=\"table.csv\"")
+    );
     assert_eq!(body_text(response).await?, "a,b\n1,2\n");
 
     let response = app

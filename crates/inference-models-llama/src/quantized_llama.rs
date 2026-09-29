@@ -9,8 +9,8 @@ use inference_quant::{GgufMatMul, QuantMethod, QuantMethodConfig};
 
 use crate::attention::{AttentionMask, SdpaParams};
 use crate::device_map::{DeviceMappedMask, DeviceMapper};
-use crate::gguf::metadata::ContentMetadata;
 use crate::gguf::FromGGML;
+use crate::gguf::metadata::ContentMetadata;
 use crate::kv_cache::EitherCache;
 use crate::kv_cache::KvCache;
 use crate::kv_cache::NormalCache;
@@ -19,7 +19,7 @@ use crate::layers::{CausalMaskConfig, CausalMasker, QRmsNorm, RotaryEmbedding, S
 use crate::model::extract_logits;
 use crate::paged_attention::PagedAttention;
 use crate::paged_attention::PagedAttentionInputMetadata;
-use crate::utils::progress::{new_multi_progress, NiceProgressBar};
+use crate::utils::progress::{NiceProgressBar, new_multi_progress};
 // Default fallback for models that don't specify context_length
 const DEFAULT_MAX_SEQ_LEN: u32 = 4096;
 

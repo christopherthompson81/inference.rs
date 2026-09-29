@@ -29,13 +29,13 @@ use crate::idefics3::{Idefics3Config, Idefics3Model};
 use crate::llama4::inputs_processor::Llama4ImageProcessor;
 use crate::llama4::{self, Llama4Config, Llama4Model};
 use crate::llava::config::Config as LLaVAConfig;
-use crate::llava::llava15::Model as LLaVA;
 use crate::llava::llava_next::Model as LLaVANext;
+use crate::llava::llava15::Model as LLaVA;
 use crate::llava::{llava_inputs_processor, llava_next_inputs_processor};
 use crate::mistral3::{Mistral3Config, Mistral3Model};
 use crate::mllama::{MLlamaConfig, MLlamaModel};
-use crate::voxtral::config::VoxtralConfig;
 use crate::voxtral::VoxtralModel;
+use crate::voxtral::config::VoxtralConfig;
 
 mod idefics2;
 mod idefics3;

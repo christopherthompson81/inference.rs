@@ -1,14 +1,14 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use crate::attention::FlashParams;
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, Embedding, LayerNorm, Module};
 use inference_quant::{Convolution, QuantMethod, ShardedVarBuilder};
 use std::{ops::Mul, sync::Arc};
 
 use crate::{
     attention::{AttentionMask, SdpaParams},
-    layers::{conv2d, dense_embedding, layer_norm, Activation, CausalMasker, Sdpa},
+    layers::{Activation, CausalMasker, Sdpa, conv2d, dense_embedding, layer_norm},
     serde_default_fn,
     utils::unvarbuilder::UnVarBuilder,
 };

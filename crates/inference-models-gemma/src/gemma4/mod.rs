@@ -2,7 +2,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 use config::Gemma4Config;
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
 use text::TextModel;
@@ -15,8 +15,8 @@ use crate::model::NormalLoadingMetadata;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     paged_attention::{
-        encoder_cache::{CacheModality, EncoderCacheManager},
         AttentionImplementation, ModelConfigLike, ModelConfigMetadata,
+        encoder_cache::{CacheModality, EncoderCacheManager},
     },
     speculative::{
         SpeculativeAttachInfo, SpeculativeBatchPlan, SpeculativeConfig, SpeculativeGraphState,
@@ -395,10 +395,13 @@ impl Gemma4Model {
                             .lock()
                             .expect("encoder cache lock poisoned");
                         for (i, &hash) in image_hashes.iter().enumerate() {
-                            if let Some(cached) = guard.get(CacheModality::Image, hash) {
-                                per_image[i] = Some(cached[0].clone());
-                            } else {
-                                miss_indices.push(i);
+                            match guard.get(CacheModality::Image, hash) {
+                                Some(cached) => {
+                                    per_image[i] = Some(cached[0].clone());
+                                }
+                                _ => {
+                                    miss_indices.push(i);
+                                }
                             }
                         }
                     }
@@ -571,10 +574,13 @@ impl Gemma4Model {
                             .lock()
                             .expect("encoder cache lock poisoned");
                         for (i, &hash) in audio_hashes.iter().enumerate() {
-                            if let Some(cached) = guard.get(CacheModality::Audio, hash) {
-                                per_audio[i] = Some(cached[0].clone());
-                            } else {
-                                miss_indices.push(i);
+                            match guard.get(CacheModality::Audio, hash) {
+                                Some(cached) => {
+                                    per_audio[i] = Some(cached[0].clone());
+                                }
+                                _ => {
+                                    miss_indices.push(i);
+                                }
                             }
                         }
                     }
@@ -708,10 +714,13 @@ impl Gemma4Model {
                             .lock()
                             .expect("encoder cache lock poisoned");
                         for (i, &hash) in video_hashes.iter().enumerate() {
-                            if let Some(cached) = guard.get(CacheModality::Video, hash) {
-                                per_frame[i] = Some(cached[0].clone());
-                            } else {
-                                miss_indices.push(i);
+                            match guard.get(CacheModality::Video, hash) {
+                                Some(cached) => {
+                                    per_frame[i] = Some(cached[0].clone());
+                                }
+                                _ => {
+                                    miss_indices.push(i);
+                                }
                             }
                         }
                     }
@@ -1246,9 +1255,9 @@ mod tests {
     use std::{collections::HashMap, sync::Arc};
 
     use candle_core::{DType, Device, Tensor};
-    use inference_quant::{uqff_version_tensors, ShardedSafeTensors, UqffReader, UqffTensor};
+    use inference_quant::{ShardedSafeTensors, UqffReader, UqffTensor, uqff_version_tensors};
 
-    use super::{has_clippable_linear_prefix, Gemma4SpecGraphState};
+    use super::{Gemma4SpecGraphState, has_clippable_linear_prefix};
     use crate::speculative::SpeculativeGraphState;
 
     #[test]

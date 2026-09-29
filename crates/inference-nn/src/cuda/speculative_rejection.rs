@@ -1,21 +1,21 @@
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use candle_core::backend::{BackendDevice, BackendStorage};
-use candle_core::cuda_backend::cudarc::driver::{
-    sys, CudaEvent, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, PinnedHostSlice,
-    ValidAsZeroBits,
-};
 use candle_core::cuda_backend::CudaStorageSlice;
+use candle_core::cuda_backend::cudarc::driver::{
+    CudaEvent, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr, PinnedHostSlice, ValidAsZeroBits,
+    sys,
+};
 use candle_core::{
     CpuStorage, CudaStorage, DType, DeviceLocation, InplaceOp1, Layout, Result, Shape, Storage,
     Tensor,
 };
 
 use crate::ops::{
+    CUDA_TOPK_MAX_K, CudaRankedTopKPackedWorkspace, RankedTopKPackedOutput,
     cuda_topk_ranked_packed_batched, cuda_topk_ranked_packed_batched_with_workspace,
-    CudaRankedTopKPackedWorkspace, RankedTopKPackedOutput, CUDA_TOPK_MAX_K,
 };
 
 use super::ffi;
@@ -945,14 +945,14 @@ pub fn sparse_rejection_cuda_submit(
             }
         }
     }
-    if let SparseRejectionProposalInput::SparseRows { token_ids, probs } = input.proposal {
-        if token_ids.len() != batch || probs.len() != batch {
-            candle_core::bail!(
-                "{OP} expected {batch} sparse proposal rows, got {} token-id and {} probability rows",
-                token_ids.len(),
-                probs.len()
-            );
-        }
+    if let SparseRejectionProposalInput::SparseRows { token_ids, probs } = input.proposal
+        && (token_ids.len() != batch || probs.len() != batch)
+    {
+        candle_core::bail!(
+            "{OP} expected {batch} sparse proposal rows, got {} token-id and {} probability rows",
+            token_ids.len(),
+            probs.len()
+        );
     }
     validate_host_len(
         "inverse temperature",
@@ -1913,20 +1913,24 @@ mod tests {
                 .map(|row| tensors.q_probs.get(row))
                 .collect::<Result<Vec<_>>>()?;
             assert!(dense_cuda_rows(&draft_rows, DType::U32, &[case.drafts], &device)?.is_some());
-            assert!(dense_cuda_rows(
-                &q_token_rows,
-                DType::U32,
-                &[case.drafts, case.q_width],
-                &device
-            )?
-            .is_some());
-            assert!(dense_cuda_rows(
-                &q_prob_rows,
-                DType::F32,
-                &[case.drafts, case.q_width],
-                &device
-            )?
-            .is_some());
+            assert!(
+                dense_cuda_rows(
+                    &q_token_rows,
+                    DType::U32,
+                    &[case.drafts, case.q_width],
+                    &device
+                )?
+                .is_some()
+            );
+            assert!(
+                dense_cuda_rows(
+                    &q_prob_rows,
+                    DType::F32,
+                    &[case.drafts, case.q_width],
+                    &device
+                )?
+                .is_some()
+            );
 
             let mut row_workspace = None;
             let row_submission = sparse_rejection_cuda_submit(
@@ -2199,9 +2203,11 @@ mod tests {
             Ok(_) => candle_core::bail!("categorical sparse rejection accepted BF16 logits"),
             Err(error) => error,
         };
-        assert!(error
-            .to_string()
-            .contains("categorical mode requires F32 target logits"));
+        assert!(
+            error
+                .to_string()
+                .contains("categorical mode requires F32 target logits")
+        );
         Ok(())
     }
 

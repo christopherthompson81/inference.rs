@@ -24,45 +24,47 @@ pub mod split_k {
         partial_ptr: *mut f32, // [SPLITS, numel]
         numel: i32,
     ) {
-        let pid: i32 = get_tile_block_id().0;
-        let iota_b: Tile<i32, { [BLOCK] }> = iota(const_shape![BLOCK]);
-        let base: Tile<i32, { [BLOCK] }> = broadcast_scalar(pid * BLOCK, const_shape![BLOCK]);
-        let offs: Tile<i32, { [BLOCK] }> = iota_b + base;
-        let numel_t: Tile<i32, { [BLOCK] }> = broadcast_scalar(numel, const_shape![BLOCK]);
-        let mask: Tile<bool, { [BLOCK] }> = lt_tile(offs, numel_t);
-        let p0: PointerTile<*mut f32, { [] }> = pointer_to_tile(partial_ptr);
-        let p1: PointerTile<*mut f32, { [1] }> = p0.reshape(const_shape![1]);
-        let p2: PointerTile<*mut f32, { [BLOCK] }> = p1.broadcast(const_shape![BLOCK]);
-        let mut acc: Tile<f32, { [BLOCK] }> = constant(0.0f32, const_shape![BLOCK]);
-        let mut off: Tile<i32, { [BLOCK] }> = offs;
-        for _s in 0i32..SPLITS {
-            let ptrs: PointerTile<*mut f32, { [BLOCK] }> = p2.offset_tile(off);
-            let (v, _): (Tile<f32, { [BLOCK] }>, Token) = load_ptr_tko(
-                ptrs,
+        unsafe {
+            let pid: i32 = get_tile_block_id().0;
+            let iota_b: Tile<i32, { [BLOCK] }> = iota(const_shape![BLOCK]);
+            let base: Tile<i32, { [BLOCK] }> = broadcast_scalar(pid * BLOCK, const_shape![BLOCK]);
+            let offs: Tile<i32, { [BLOCK] }> = iota_b + base;
+            let numel_t: Tile<i32, { [BLOCK] }> = broadcast_scalar(numel, const_shape![BLOCK]);
+            let mask: Tile<bool, { [BLOCK] }> = lt_tile(offs, numel_t);
+            let p0: PointerTile<*mut f32, { [] }> = pointer_to_tile(partial_ptr);
+            let p1: PointerTile<*mut f32, { [1] }> = p0.reshape(const_shape![1]);
+            let p2: PointerTile<*mut f32, { [BLOCK] }> = p1.broadcast(const_shape![BLOCK]);
+            let mut acc: Tile<f32, { [BLOCK] }> = constant(0.0f32, const_shape![BLOCK]);
+            let mut off: Tile<i32, { [BLOCK] }> = offs;
+            for _s in 0i32..SPLITS {
+                let ptrs: PointerTile<*mut f32, { [BLOCK] }> = p2.offset_tile(off);
+                let (v, _): (Tile<f32, { [BLOCK] }>, Token) = load_ptr_tko(
+                    ptrs,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    Some(mask),
+                    Some(0.0f32),
+                    None,
+                    Latency::<0>,
+                );
+                acc = acc + v;
+                off = off + numel_t;
+            }
+            let o0: PointerTile<*mut bf16, { [] }> = pointer_to_tile(out_ptr);
+            let o1: PointerTile<*mut bf16, { [1] }> = o0.reshape(const_shape![1]);
+            let o2: PointerTile<*mut bf16, { [BLOCK] }> = o1.broadcast(const_shape![BLOCK]);
+            let o_ptrs: PointerTile<*mut bf16, { [BLOCK] }> = o2.offset_tile(offs);
+            let acc_bf: Tile<bf16, { [BLOCK] }> = convert_tile(acc);
+            store_ptr_tko(
+                o_ptrs,
+                acc_bf,
                 ordering::Weak,
                 None::<scope::TileBlock>,
                 Some(mask),
-                Some(0.0f32),
                 None,
                 Latency::<0>,
             );
-            acc = acc + v;
-            off = off + numel_t;
         }
-        let o0: PointerTile<*mut bf16, { [] }> = pointer_to_tile(out_ptr);
-        let o1: PointerTile<*mut bf16, { [1] }> = o0.reshape(const_shape![1]);
-        let o2: PointerTile<*mut bf16, { [BLOCK] }> = o1.broadcast(const_shape![BLOCK]);
-        let o_ptrs: PointerTile<*mut bf16, { [BLOCK] }> = o2.offset_tile(offs);
-        let acc_bf: Tile<bf16, { [BLOCK] }> = convert_tile(acc);
-        store_ptr_tko(
-            o_ptrs,
-            acc_bf,
-            ordering::Weak,
-            None::<scope::TileBlock>,
-            Some(mask),
-            None,
-            Latency::<0>,
-        );
     }
 }
 

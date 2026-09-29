@@ -1,4 +1,4 @@
-use super::normal_registry::{schema_for, CanonicalGgufArchitecture, GgufDescriptor};
+use super::normal_registry::{CanonicalGgufArchitecture, GgufDescriptor, schema_for};
 #[cfg(all(
     test,
     feature = "models-gemma",
@@ -7,10 +7,10 @@ use super::normal_registry::{schema_for, CanonicalGgufArchitecture, GgufDescript
     feature = "models-phi",
     feature = "models-qwen"
 ))]
-use super::normal_registry::{NativeModelAdapter, NORMAL_MODEL_ADAPTERS};
-use crate::{gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY, NormalLoaderType};
+use super::normal_registry::{NORMAL_MODEL_ADAPTERS, NativeModelAdapter};
+use crate::{NormalLoaderType, gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY};
 use candle_core::quantized::gguf_file::Value as GgufValue;
-use serde_json::{json, Map as JsonMap, Value as JsonValue};
+use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use std::{collections::HashMap, error::Error, fmt, num::TryFromIntError};
 
 const DEFAULT_ROPE_THETA: f64 = 10_000.0;
@@ -290,13 +290,12 @@ pub(crate) fn normalize_external_normal_config(
     if matches!(
         shape,
         ExternalConfigShape::Nested(NestedTextConfig::Qwen35) | ExternalConfigShape::Qwen35Text
-    ) {
-        if let Some(tie_word_embeddings) = object.get("tie_word_embeddings") {
-            text_config.insert(
-                "tie_word_embeddings".to_string(),
-                tie_word_embeddings.clone(),
-            );
-        }
+    ) && let Some(tie_word_embeddings) = object.get("tie_word_embeddings")
+    {
+        text_config.insert(
+            "tie_word_embeddings".to_string(),
+            tie_word_embeddings.clone(),
+        );
     }
     if matches!(
         architecture,
@@ -360,10 +359,10 @@ fn normal_loader_from_architecture(architecture: &str) -> anyhow::Result<NormalL
         "Mistral3ForConditionalGeneration" => return Ok(NormalLoaderType::Mistral),
         "Lfm2VlForConditionalGeneration" => return Ok(NormalLoaderType::Lfm2),
         "Qwen3_5ForConditionalGeneration" | "Qwen3_5ForCausalLM" => {
-            return Ok(NormalLoaderType::Qwen3_5)
+            return Ok(NormalLoaderType::Qwen3_5);
         }
         "Qwen3_5MoeForConditionalGeneration" | "Qwen3_5MoeForCausalLM" => {
-            return Ok(NormalLoaderType::Qwen3Next)
+            return Ok(NormalLoaderType::Qwen3Next);
         }
         _ => {}
     }
@@ -1109,7 +1108,7 @@ fn build_mistral(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
         Some(scaling_type) => {
             return Err(NormalConfigSynthesisError::new(format!(
                 "Native Mistral standalone config does not implement GGUF RoPE scaling type `{scaling_type}`"
-            )))
+            )));
         }
     };
     config.insert("rope_parameters".into(), rope_parameters);
@@ -1372,9 +1371,11 @@ fn build_glm4_moe_lite(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue
     config.insert("q_lora_rank".into(), json!(q_lora_rank));
     config.insert(
         "num_key_value_heads".into(),
-        json!(metadata
-            .optional_usize("attention.head_count_kv")?
-            .unwrap_or(1)),
+        json!(
+            metadata
+                .optional_usize("attention.head_count_kv")?
+                .unwrap_or(1)
+        ),
     );
     config.insert(
         "n_routed_experts".into(),
@@ -1415,9 +1416,11 @@ fn build_glm4_moe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     insert_common_moe(metadata, &mut config)?;
     config.insert(
         "norm_topk_prob".into(),
-        json!(metadata
-            .optional_bool("expert_weights_norm")?
-            .unwrap_or(true)),
+        json!(
+            metadata
+                .optional_bool("expert_weights_norm")?
+                .unwrap_or(true)
+        ),
     );
     Ok(JsonValue::Object(config))
 }
@@ -1445,9 +1448,11 @@ fn build_qwen3_moe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     );
     config.insert(
         "norm_topk_prob".into(),
-        json!(metadata
-            .optional_bool("expert_weights_norm")?
-            .unwrap_or(true)),
+        json!(
+            metadata
+                .optional_bool("expert_weights_norm")?
+                .unwrap_or(true)
+        ),
     );
     config.insert("decoder_sparse_step".into(), json!(1));
     config.insert(
@@ -1696,9 +1701,11 @@ fn build_hunyuan_moe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> 
     config.insert("moe_random_routing_dropped_token".into(), json!(false));
     config.insert(
         "routed_scaling_factor".into(),
-        json!(metadata
-            .optional_f64("expert_weights_scale")?
-            .unwrap_or(1.0)),
+        json!(
+            metadata
+                .optional_f64("expert_weights_scale")?
+                .unwrap_or(1.0)
+        ),
     );
     config.insert(
         "moe_router_enable_expert_bias".into(),
@@ -1710,9 +1717,11 @@ fn build_hunyuan_moe(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> 
     );
     config.insert(
         "norm_topk_prob".into(),
-        json!(metadata
-            .optional_bool("expert_weights_norm")?
-            .unwrap_or(true)),
+        json!(
+            metadata
+                .optional_bool("expert_weights_norm")?
+                .unwrap_or(true)
+        ),
     );
     config.insert("use_cla".into(), json!(false));
     config.insert("cla_share_factor".into(), JsonValue::Null);
@@ -1789,9 +1798,11 @@ fn build_qwen3_next(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     );
     config.insert(
         "norm_topk_prob".into(),
-        json!(metadata
-            .optional_bool("expert_weights_norm")?
-            .unwrap_or(true)),
+        json!(
+            metadata
+                .optional_bool("expert_weights_norm")?
+                .unwrap_or(true)
+        ),
     );
     config.insert(
         "mlp_only_layers".into(),
@@ -1830,13 +1841,13 @@ fn build_qwen35(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
             metadata.key("rope.freq_base")
         )));
     }
-    if let Some(value_head_dim) = metadata.optional_usize("attention.value_length")? {
-        if value_head_dim != fields.head_dim {
-            return Err(NormalConfigSynthesisError::new(format!(
-                "Qwen3.5 attention key length {} differs from value length {value_head_dim}",
-                fields.head_dim
-            )));
-        }
+    if let Some(value_head_dim) = metadata.optional_usize("attention.value_length")?
+        && value_head_dim != fields.head_dim
+    {
+        return Err(NormalConfigSynthesisError::new(format!(
+            "Qwen3.5 attention key length {} differs from value length {value_head_dim}",
+            fields.head_dim
+        )));
     }
     let mut mrope_section = metadata.required_usize_values("rope.dimension_sections")?;
     while mrope_section.last() == Some(&0) {
@@ -2005,9 +2016,11 @@ fn build_lfm(metadata: &MetadataView<'_>, is_moe: bool) -> SynthesisResult<JsonV
         );
         config.insert(
             "num_dense_layers".into(),
-            json!(metadata
-                .optional_usize("leading_dense_block_count")?
-                .unwrap_or(0)),
+            json!(
+                metadata
+                    .optional_usize("leading_dense_block_count")?
+                    .unwrap_or(0)
+            ),
         );
         config.insert(
             "num_experts".into(),
@@ -2023,15 +2036,19 @@ fn build_lfm(metadata: &MetadataView<'_>, is_moe: bool) -> SynthesisResult<JsonV
         );
         config.insert(
             "norm_topk_prob".into(),
-            json!(metadata
-                .optional_bool("expert_weights_norm")?
-                .unwrap_or(true)),
+            json!(
+                metadata
+                    .optional_bool("expert_weights_norm")?
+                    .unwrap_or(true)
+            ),
         );
         config.insert(
             "routed_scaling_factor".into(),
-            json!(metadata
-                .optional_f64("expert_weights_scale")?
-                .unwrap_or(1.0)),
+            json!(
+                metadata
+                    .optional_f64("expert_weights_scale")?
+                    .unwrap_or(1.0)
+            ),
         );
     } else {
         config.insert("moe_intermediate_size".into(), json!(0));
@@ -2081,9 +2098,11 @@ fn build_deepseek(metadata: &MetadataView<'_>, is_v3: bool) -> SynthesisResult<J
     );
     config.insert(
         "norm_topk_prob".into(),
-        json!(metadata
-            .optional_bool("expert_weights_norm")?
-            .unwrap_or(false)),
+        json!(
+            metadata
+                .optional_bool("expert_weights_norm")?
+                .unwrap_or(false)
+        ),
     );
     Ok(JsonValue::Object(config))
 }
@@ -2126,9 +2145,11 @@ fn deepseek_core_json(
     config.insert("num_attention_heads".into(), json!(num_attention_heads));
     config.insert(
         "routed_scaling_factor".into(),
-        json!(metadata
-            .optional_f64("expert_weights_scale")?
-            .unwrap_or(1.0)),
+        json!(
+            metadata
+                .optional_f64("expert_weights_scale")?
+                .unwrap_or(1.0)
+        ),
     );
     config.insert(
         "moe_layer_freq".into(),
@@ -2136,9 +2157,11 @@ fn deepseek_core_json(
     );
     config.insert(
         "first_k_dense_replace".into(),
-        json!(metadata
-            .optional_usize("leading_dense_block_count")?
-            .unwrap_or(0)),
+        json!(
+            metadata
+                .optional_usize("leading_dense_block_count")?
+                .unwrap_or(0)
+        ),
     );
     config.insert("hidden_act".into(), json!("silu"));
     config.insert(
@@ -2177,9 +2200,11 @@ fn deepseek_core_json(
     );
     config.insert(
         "topk_group".into(),
-        json!(metadata
-            .optional_usize("expert_group_used_count")?
-            .unwrap_or(1)),
+        json!(
+            metadata
+                .optional_usize("expert_group_used_count")?
+                .unwrap_or(1)
+        ),
     );
     Ok(config)
 }
@@ -2206,15 +2231,19 @@ fn insert_common_moe(
     );
     config.insert(
         "first_k_dense_replace".into(),
-        json!(metadata
-            .optional_usize("leading_dense_block_count")?
-            .unwrap_or(0)),
+        json!(
+            metadata
+                .optional_usize("leading_dense_block_count")?
+                .unwrap_or(0)
+        ),
     );
     config.insert(
         "routed_scaling_factor".into(),
-        json!(metadata
-            .optional_f64("expert_weights_scale")?
-            .unwrap_or(1.0)),
+        json!(
+            metadata
+                .optional_f64("expert_weights_scale")?
+                .unwrap_or(1.0)
+        ),
     );
     config.insert(
         "n_group".into(),
@@ -2222,15 +2251,19 @@ fn insert_common_moe(
     );
     config.insert(
         "topk_group".into(),
-        json!(metadata
-            .optional_usize("expert_group_used_count")?
-            .unwrap_or(1)),
+        json!(
+            metadata
+                .optional_usize("expert_group_used_count")?
+                .unwrap_or(1)
+        ),
     );
     config.insert(
         "norm_topk_prob".into(),
-        json!(metadata
-            .optional_bool("expert_weights_norm")?
-            .unwrap_or(false)),
+        json!(
+            metadata
+                .optional_bool("expert_weights_norm")?
+                .unwrap_or(false)
+        ),
     );
     Ok(())
 }
@@ -2316,8 +2349,7 @@ fn deepseek_rope_scaling(metadata: &MetadataView<'_>) -> SynthesisResult<JsonVal
     match metadata.optional_string("rope.scaling.type")? {
         None | Some("none") => Ok(JsonValue::Null),
         Some("yarn") => {
-            let log_multiplier =
-                metadata.required_f64("rope.scaling.yarn_log_multiplier")?;
+            let log_multiplier = metadata.required_f64("rope.scaling.yarn_log_multiplier")?;
             Ok(json!({
                 "type": "yarn",
                 "factor": metadata.required_f64("rope.scaling.factor")?,
@@ -3486,14 +3518,18 @@ mod tests {
 
         validate_normal_config_tensor_inventory(tied, &no_output).unwrap();
         validate_normal_config_tensor_inventory(untied, &with_output).unwrap();
-        assert!(validate_normal_config_tensor_inventory(tied, &with_output)
-            .unwrap_err()
-            .to_string()
-            .contains("tie_word_embeddings"));
-        assert!(validate_normal_config_tensor_inventory(untied, &no_output)
-            .unwrap_err()
-            .to_string()
-            .contains("tie_word_embeddings"));
+        assert!(
+            validate_normal_config_tensor_inventory(tied, &with_output)
+                .unwrap_err()
+                .to_string()
+                .contains("tie_word_embeddings")
+        );
+        assert!(
+            validate_normal_config_tensor_inventory(untied, &no_output)
+                .unwrap_err()
+                .to_string()
+                .contains("tie_word_embeddings")
+        );
         validate_normal_config_tensor_inventory("{}", &with_output).unwrap();
     }
 

@@ -3,8 +3,8 @@ use std::time::{Duration, Instant};
 use candle_core::Device;
 
 use crate::{
-    utils::{debug::DeviceRepr, memory_usage::CudaAllocatorSnapshot},
     MemoryUsage,
+    utils::{debug::DeviceRepr, memory_usage::CudaAllocatorSnapshot},
 };
 
 const BYTES_PER_MIB: usize = 1024 * 1024;

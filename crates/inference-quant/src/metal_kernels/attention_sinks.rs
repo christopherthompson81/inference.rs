@@ -33,7 +33,7 @@ pub fn call_softmax_with_sinks(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -309,7 +309,7 @@ pub fn call_flash_attn_sinks_prefill(
         _ => {
             return Err(MetalKernelError::CompilationError(format!(
                 "flash_attn_sinks: unsupported head_dim={head_dim}"
-            )))
+            )));
         }
     };
 
@@ -399,7 +399,7 @@ pub fn call_flash_attn_sinks_varlen_prefill(
         _ => {
             return Err(MetalKernelError::CompilationError(format!(
                 "flash_attn_sinks_varlen: unsupported head_dim={head_dim}"
-            )))
+            )));
         }
     };
 

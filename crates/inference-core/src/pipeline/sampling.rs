@@ -232,20 +232,20 @@ pub(crate) async fn finish_or_add_toks_to_seq(
 
     // If we can have a tool and we got a tool, stop the sequence early.
     // Doesn't conflict with the logic below because it does the same thing anyway.
-    if let Some(d) = tool_detection_text(seq, hidden_stop.as_deref()) {
-        if let Some(ref mut state) = seq.tool_call_state {
-            let (_tool_use_still_possible, tool_use_is_done) = state
-                .prefix_status(d.as_str())
-                .map_err(candle_core::Error::msg)?;
+    if let Some(d) = tool_detection_text(seq, hidden_stop.as_deref())
+        && let Some(ref mut state) = seq.tool_call_state
+    {
+        let (_tool_use_still_possible, tool_use_is_done) = state
+            .prefix_status(d.as_str())
+            .map_err(candle_core::Error::msg)?;
 
-            if tool_use_is_done && state.stops_after_complete_tool_call() {
-                if let Ok(tools) = state.complete_if_tool_call(d.as_str()) {
-                    if !tools.is_empty() {
-                        seq.set_state(SequenceState::Done(StopReason::Eos));
-                        is_done = Some(StopReason::Eos);
-                    }
-                }
-            }
+        if tool_use_is_done
+            && state.stops_after_complete_tool_call()
+            && let Ok(tools) = state.complete_if_tool_call(d.as_str())
+            && !tools.is_empty()
+        {
+            seq.set_state(SequenceState::Done(StopReason::Eos));
+            is_done = Some(StopReason::Eos);
         }
     };
 
@@ -263,22 +263,22 @@ pub(crate) async fn finish_or_add_toks_to_seq(
             .as_mut()
             .and_then(|state| state.maybe_activate_continuation_grammar(text.as_deref()));
 
-        if let Some(grm) = grm {
-            if let Some(ref factory) = metadata.llg_factory {
-                match crate::pipeline::llg::constraint_from_llg_grammar(factory, grm) {
-                    Ok(matcher) => {
-                        tracing::debug!("Activated tool call grammar");
-                        seq.recognizer = SequenceRecognizer::Llguidance(Box::new(matcher));
-                        if let Some(state) = seq.tool_call_state.as_mut() {
-                            state.mark_grammar_active(false);
-                        }
+        if let Some(grm) = grm
+            && let Some(ref factory) = metadata.llg_factory
+        {
+            match crate::pipeline::llg::constraint_from_llg_grammar(factory, grm) {
+                Ok(matcher) => {
+                    tracing::debug!("Activated tool call grammar");
+                    seq.recognizer = SequenceRecognizer::Llguidance(Box::new(matcher));
+                    if let Some(state) = seq.tool_call_state.as_mut() {
+                        state.mark_grammar_active(false);
                     }
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to build tool call grammar: {e}. \
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Failed to build tool call grammar: {e}. \
                              Continuing without constraint."
-                        );
-                    }
+                    );
                 }
             }
         }
@@ -292,12 +292,12 @@ pub(crate) async fn finish_or_add_toks_to_seq(
     if seq.get_mut_group().is_streaming {
         let mut tool_use_still_possible = false;
         let mut tool_use_is_done = false;
-        if let Some(d) = tool_detection_text(seq, hidden_stop.as_deref()) {
-            if let Some(ref state) = seq.tool_call_state {
-                (tool_use_still_possible, tool_use_is_done) = state
-                    .prefix_status(d.as_str())
-                    .map_err(candle_core::Error::msg)?;
-            }
+        if let Some(d) = tool_detection_text(seq, hidden_stop.as_deref())
+            && let Some(ref state) = seq.tool_call_state
+        {
+            (tool_use_still_possible, tool_use_is_done) = state
+                .prefix_status(d.as_str())
+                .map_err(candle_core::Error::msg)?;
         };
 
         // Send chunks when:
@@ -1475,7 +1475,7 @@ pub async fn sample_sequence(
     }
 
     let bias_if_not_allowed = match &mut seq.recognizer {
-        SequenceRecognizer::Llguidance(ref mut llg) => {
+        SequenceRecognizer::Llguidance(llg) => {
             // llguidance's EOS is <|endoftext|>-style; turn enders like <|im_end|> must pass once the grammar could stop
             let grammar_can_stop =
                 llg.is_stopped() || llg.is_accepting().map_err(candle_core::Error::msg)?;
@@ -1563,15 +1563,13 @@ pub async fn sample_sequence(
         SequenceRecognizer::None => {}
     }
 
-    if let SequenceRecognizer::Llguidance(ref llg) = seq.recognizer {
-        if llg.is_stopped() {
-            if let Some(state) = seq.tool_call_state.as_mut() {
-                if state.clear_active_grammar() {
-                    seq.recognizer = SequenceRecognizer::None;
-                    tracing::debug!("Deactivated tool call grammar (body complete)");
-                }
-            }
-        }
+    if let SequenceRecognizer::Llguidance(ref llg) = seq.recognizer
+        && llg.is_stopped()
+        && let Some(state) = seq.tool_call_state.as_mut()
+        && state.clear_active_grammar()
+    {
+        seq.recognizer = SequenceRecognizer::None;
+        tracing::debug!("Deactivated tool call grammar (body complete)");
     }
 
     Ok(second_logprobs_response)
@@ -1584,7 +1582,7 @@ mod tests {
     use rand::RngCore;
     use rand::SeedableRng;
     use std::{collections::HashMap, sync::Arc};
-    use tokio::sync::{mpsc::channel, Mutex};
+    use tokio::sync::{Mutex, mpsc::channel};
 
     use super::*;
     use crate::tools::{ToolCallState, ToolChoice};
@@ -1905,24 +1903,14 @@ mod tests {
     fn greedy_terminal_prediction_matches_sequence_stop_rules() {
         let mut seq = terminal_test_sequence(vec![], None, false);
         let seqs = [&mut seq];
-        assert!(cuda_token_batch_will_finish_with_metadata(
-            &seqs,
-            &[42],
-            &[true],
-            &[42],
-            1024,
-            false,
-        )
-        .unwrap());
-        assert!(!cuda_token_batch_will_finish_with_metadata(
-            &seqs,
-            &[42],
-            &[true],
-            &[42],
-            1024,
-            true,
-        )
-        .unwrap());
+        assert!(
+            cuda_token_batch_will_finish_with_metadata(&seqs, &[42], &[true], &[42], 1024, false,)
+                .unwrap()
+        );
+        assert!(
+            !cuda_token_batch_will_finish_with_metadata(&seqs, &[42], &[true], &[42], 1024, true,)
+                .unwrap()
+        );
 
         let mut seq = terminal_test_sequence(vec![9], None, false);
         let seqs = [&mut seq];
@@ -1930,15 +1918,10 @@ mod tests {
             cuda_token_batch_will_finish_with_metadata(&seqs, &[9], &[true], &[], 1024, false,)
                 .unwrap()
         );
-        assert!(!cuda_token_batch_will_finish_with_metadata(
-            &seqs,
-            &[9],
-            &[false],
-            &[],
-            1024,
-            false,
-        )
-        .unwrap());
+        assert!(
+            !cuda_token_batch_will_finish_with_metadata(&seqs, &[9], &[false], &[], 1024, false,)
+                .unwrap()
+        );
 
         let mut seq = terminal_test_sequence(vec![], Some(1), false);
         let seqs = [&mut seq];

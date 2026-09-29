@@ -1,7 +1,7 @@
-use candle_core::{backend::BackendStorage, DType, MetalStorage, Result, Shape, Storage, Tensor};
+use candle_core::{DType, MetalStorage, Result, Shape, Storage, Tensor, backend::BackendStorage};
 use inference_quant::metal_kernels::{
-    call_flash_attn_ext_bf16_dk512, call_flash_attn_ext_vec_bf16_dk512,
-    flash_attn_ext_blk_scratch_size, Kernels, FA_NCPSG,
+    FA_NCPSG, Kernels, call_flash_attn_ext_bf16_dk512, call_flash_attn_ext_vec_bf16_dk512,
+    flash_attn_ext_blk_scratch_size,
 };
 
 const HEAD_DIM: usize = 512;

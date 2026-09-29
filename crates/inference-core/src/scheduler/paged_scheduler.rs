@@ -3,31 +3,31 @@
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    sync::{atomic::Ordering, Arc, Mutex},
+    sync::{Arc, Mutex, atomic::Ordering},
 };
 
 use tracing::{info, warn};
 
 use crate::{
+    AdapterGenerationId, Response, TERMINATE_ALL_NEXT_STEP,
     engine::IntervalLogger,
     get_mut_arcmutex,
     paged_attention::{
         block_hash::{
-            adapter_generation_key, clamp_prefix_cache_hit_len, compute_block_hashes,
-            compute_new_block_hashes, BlockHash, MultiModalFeature,
+            BlockHash, MultiModalFeature, adapter_generation_key, clamp_prefix_cache_hit_len,
+            compute_block_hashes, compute_new_block_hashes,
         },
         kv_cache_manager::KVCacheManager,
     },
-    pipeline::prompt_chunks::{build_prompt_chunk_plan, next_prompt_chunk_group, PromptChunkPlan},
+    pipeline::prompt_chunks::{PromptChunkPlan, build_prompt_chunk_plan, next_prompt_chunk_group},
     scheduler::{
-        modality_signature, PagedPrefixCacheValidation, PagedPrefixCacheValidator, Scheduler,
-        SchedulerOutput,
+        PagedPrefixCacheValidation, PagedPrefixCacheValidator, Scheduler, SchedulerOutput,
+        modality_signature,
     },
     sequence::{
-        clamp_prefix_cache_len_for_mm_features, SeqStepType, Sequence, SequenceState, StopReason,
+        SeqStepType, Sequence, SequenceState, StopReason, clamp_prefix_cache_len_for_mm_features,
     },
     speculative::SpeculativePrefixCheckpointPolicy,
-    AdapterGenerationId, Response, TERMINATE_ALL_NEXT_STEP,
 };
 
 use crate::paged_attention::CacheConfig;
@@ -647,10 +647,10 @@ impl PagedAttentionScheduler {
             (*seq_guard.id(), seq_guard.responder(), recurrent_state_idx)
         };
 
-        if let Some(slot_idx) = recurrent_state_idx {
-            if !recurrent_state_released {
-                self.finished_recurrent_slots.push((seq_id, slot_idx));
-            }
+        if let Some(slot_idx) = recurrent_state_idx
+            && !recurrent_state_released
+        {
+            self.finished_recurrent_slots.push((seq_id, slot_idx));
         }
 
         self.waiting_counts.remove(&seq_id);
@@ -667,7 +667,9 @@ impl PagedAttentionScheduler {
     pub fn set_prefix_caching_enabled_sync(&mut self, enabled: bool) {
         self.prefix_caching_enabled = enabled;
         if enabled {
-            info!("Prefix caching enabled (block-level, PagedAttention). Expect higher multi-turn throughput for both text and multimodal.");
+            info!(
+                "Prefix caching enabled (block-level, PagedAttention). Expect higher multi-turn throughput for both text and multimodal."
+            );
         }
     }
 

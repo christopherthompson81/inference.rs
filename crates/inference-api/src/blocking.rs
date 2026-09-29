@@ -2,7 +2,7 @@
 
 use std::{sync::OnceLock, time::Duration};
 
-use futures::{stream::BoxStream, Stream, StreamExt};
+use futures::{Stream, StreamExt, stream::BoxStream};
 use tokio::runtime::Runtime;
 
 use crate::{

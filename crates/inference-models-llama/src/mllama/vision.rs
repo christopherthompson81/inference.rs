@@ -3,7 +3,7 @@
 use crate::attention::FlashParams;
 use std::{ops::Mul, sync::Arc};
 
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, Embedding, LayerNorm, LayerNormConfig, Module};
 use inference_quant::{
     ColumnParallelLayer, Convolution, QuantMethod, RowParallelLayer, ShardedVarBuilder,
@@ -11,7 +11,7 @@ use inference_quant::{
 
 use crate::{
     attention::{AttentionMask, SdpaParams},
-    layers::{conv2d_no_bias, dense_embedding, layer_norm, GetFloatInfo, Sdpa},
+    layers::{GetFloatInfo, Sdpa, conv2d_no_bias, dense_embedding, layer_norm},
     model::IsqModel,
     utils::unvarbuilder::UnVarBuilder,
 };

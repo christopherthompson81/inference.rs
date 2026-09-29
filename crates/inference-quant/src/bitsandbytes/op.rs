@@ -4,12 +4,12 @@ use std::fmt::Debug;
 
 #[cfg(feature = "cuda")]
 use candle_core::cuda::{
-    cudarc::driver::{sys::CUstream, CudaSlice, DeviceRepr, ValidAsZeroBits},
     CudaDevice,
+    cudarc::driver::{CudaSlice, DeviceRepr, ValidAsZeroBits, sys::CUstream},
 };
 
 use candle_core::{
-    backend::BackendStorage, CpuStorage, CustomOp3, Result, Shape, Tensor, WithDType,
+    CpuStorage, CustomOp3, Result, Shape, Tensor, WithDType, backend::BackendStorage,
 };
 
 #[cfg(feature = "cuda")]

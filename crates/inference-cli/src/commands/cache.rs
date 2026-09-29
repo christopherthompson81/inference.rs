@@ -1,7 +1,7 @@
 //! Hugging Face cache management commands
 
 use anyhow::Result;
-use comfy_table::{presets::UTF8_FULL, Cell, ContentArrangement, Table};
+use comfy_table::{Cell, ContentArrangement, Table, presets::UTF8_FULL};
 use std::path::{Path, PathBuf};
 
 /// Get the Hugging Face Hub directory

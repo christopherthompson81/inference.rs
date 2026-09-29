@@ -6,7 +6,7 @@
 //! drafter's own hidden state at consecutive positions.
 
 use crate::attention::FlashParams;
-use std::sync::{atomic::Ordering, Arc};
+use std::sync::{Arc, atomic::Ordering};
 
 use candle_core::{IndexOp, Result, Tensor};
 use rand::Rng;
@@ -20,22 +20,22 @@ use crate::{
         DFlashPreparedContext, DFlashProposalBatch, DFlashSamplingInputs,
     },
     get_mut_arcmutex,
-    layers::masker::CausalMaskConfig,
     layers::CausalMasker,
+    layers::masker::CausalMaskConfig,
     speculative::{
-        paged_rows::make_paged_rows_metadata, proposer::sample_draft_rows, MtpRuntimeConfig,
-        SpeculativeAttachInfo, SpeculativeBatchPlan, SpeculativeCommitRow, SpeculativeConfig,
-        SpeculativeGraphPlan, SpeculativeGraphState, SpeculativeKvCache, SpeculativePrefillCtx,
-        SpeculativePrefixReplay, SpeculativeProposal, SpeculativeProposalBatch,
-        SpeculativeProposeBatchCtx, SpeculativeProposePreparation, SpeculativeProposePrepareCtx,
-        SpeculativeTapRouting, SpeculativeTargetMixin, TargetAttentionInputs,
+        MtpRuntimeConfig, SpeculativeAttachInfo, SpeculativeBatchPlan, SpeculativeCommitRow,
+        SpeculativeConfig, SpeculativeGraphPlan, SpeculativeGraphState, SpeculativeKvCache,
+        SpeculativePrefillCtx, SpeculativePrefixReplay, SpeculativeProposal,
+        SpeculativeProposalBatch, SpeculativeProposeBatchCtx, SpeculativeProposePreparation,
+        SpeculativeProposePrepareCtx, SpeculativeTapRouting, SpeculativeTargetMixin,
+        TargetAttentionInputs, paged_rows::make_paged_rows_metadata, proposer::sample_draft_rows,
     },
 };
 
 use super::{
+    Qwen3_5Model,
     mtp::{MtpAttentionInputs, Qwen3_5MtpHead},
     text::{SpecCapture, SpecGraphState},
-    Qwen3_5Model,
 };
 
 /// vLLM's documented setting for these single-layer MTP heads.
@@ -142,13 +142,13 @@ fn resolve_dflash_n_predict(
             max_drafts + 1
         );
     }
-    if let Some(requested) = requested {
-        if requested != reserved {
-            candle_core::bail!(
-                "requested {requested} draft tokens require {} recurrent checkpoint lanes, but {checkpoint_lanes} lanes were reserved",
-                requested + 1
-            );
-        }
+    if let Some(requested) = requested
+        && requested != reserved
+    {
+        candle_core::bail!(
+            "requested {requested} draft tokens require {} recurrent checkpoint lanes, but {checkpoint_lanes} lanes were reserved",
+            requested + 1
+        );
     }
     Ok(reserved)
 }
@@ -722,16 +722,16 @@ impl Qwen3_5Model {
                     toks.len()
                 );
             }
-            if let Some(tail) = pending_tails.remove(&seq.id()) {
-                if tail.position + 1 < toks.len() {
-                    rows.push(DraftRow {
-                        seq_id: ctx.seq_ids[i],
-                        position: tail.position,
-                        token: toks[tail.position + 1],
-                        mrope: tail.mrope,
-                    });
-                    hidden_rows.push(tail.hidden.to_device(hidden.device())?);
-                }
+            if let Some(tail) = pending_tails.remove(&seq.id())
+                && tail.position + 1 < toks.len()
+            {
+                rows.push(DraftRow {
+                    seq_id: ctx.seq_ids[i],
+                    position: tail.position,
+                    token: toks[tail.position + 1],
+                    mrope: tail.mrope,
+                });
+                hidden_rows.push(tail.hidden.to_device(hidden.device())?);
             }
             for r in 0..count {
                 let position = base_len - count + r;
@@ -1240,7 +1240,7 @@ impl SpeculativeTargetMixin for Qwen3_5Model {
 
 #[cfg(test)]
 mod tests {
-    use super::{capture_view, resolve_dflash_n_predict, SpecCapture};
+    use super::{SpecCapture, capture_view, resolve_dflash_n_predict};
     use candle_core::{DType, Device, Tensor};
 
     #[test]
@@ -1285,8 +1285,10 @@ mod tests {
     fn reserved_dflash_depth_must_fit_the_drafter_block() {
         let error = resolve_dflash_n_predict(None, 8, 9)
             .expect_err("reserved lanes must fit the drafter block");
-        assert!(error
-            .to_string()
-            .contains("reserved 9 recurrent checkpoint lanes"));
+        assert!(
+            error
+                .to_string()
+                .contains("reserved 9 recurrent checkpoint lanes")
+        );
     }
 }

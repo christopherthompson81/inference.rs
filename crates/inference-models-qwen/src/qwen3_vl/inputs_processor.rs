@@ -2,7 +2,7 @@ use std::{any::Any, ops::Range, sync::Arc};
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
-use image::{imageops::FilterType, DynamicImage, GenericImageView};
+use image::{DynamicImage, GenericImageView, imageops::FilterType};
 use inference_vision::{
     ApplyTensorTransforms, ApplyTransforms, Normalize, TensorTransforms, ToTensor, Transforms,
 };
@@ -22,20 +22,19 @@ use crate::media_inputs::{
 };
 use crate::model::recurrent_batch_kind_for_input;
 use crate::paged_attention::{
-    block_hash::{MultimodalAttentionPolicy, MultimodalKind},
     PagedAttentionMeta,
-};
-use crate::qwen2vl::inputs_processor::{
-    apply_mrope_position_deltas, expand_media_placeholders, find_sequences,
-    media_data_cached_offset, qwen2_decode_args, replace_first_occurrence, select_media_batch,
-    select_media_view, shift_media_spans, split_media_pixels, validate_qwen_media_dimensions,
-    validated_mm_features, video_hashes, IMAGE_PAD, PLACEHOLDER, VIDEO_PAD, VISION_END,
-    VISION_START,
+    block_hash::{MultimodalAttentionPolicy, MultimodalKind},
 };
 use crate::qwen2vl::Qwen2VLVisionSpecificArgs;
+use crate::qwen2vl::inputs_processor::{
+    IMAGE_PAD, PLACEHOLDER, VIDEO_PAD, VISION_END, VISION_START, apply_mrope_position_deltas,
+    expand_media_placeholders, find_sequences, media_data_cached_offset, qwen2_decode_args,
+    replace_first_occurrence, select_media_batch, select_media_view, shift_media_spans,
+    split_media_pixels, validate_qwen_media_dimensions, validated_mm_features, video_hashes,
+};
 use crate::vision::multimodal_layout::{
-    gather_packed_mrope_positions, MropePositionSource, MultimodalEmbeddingMap,
-    MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout, RequestMultimodalLayout,
+    MropePositionSource, MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout,
+    PackedMultimodalLayout, RequestMultimodalLayout, gather_packed_mrope_positions,
 };
 
 pub struct Qwen3VLImageProcessor {

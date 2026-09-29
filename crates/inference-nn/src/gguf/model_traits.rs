@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use candle_core::{quantized::ggml_file, DType, Device, Tensor};
+use candle_core::{DType, Device, Tensor, quantized::ggml_file};
 use inference_quant::ShardedVarBuilder;
 
 use super::Content;

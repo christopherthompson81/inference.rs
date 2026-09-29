@@ -7,11 +7,11 @@ use std::{
 use candle_core::{Device, Result, Tensor};
 use safetensors::tensor::Dtype;
 
-use super::{bias_shard, BiasShard};
+use super::{BiasShard, bias_shard};
 use crate::{
-    block_pack_factor, safetensors::MmapedSafetensors, AfqLayer, F8Q8Linear, FP8Linear, GgufMatMul,
-    HqqLayer, MXFP4Layer, QuantMethod, QuantizedSerde, QuantizedSerdeType, QuantizedWeightSource,
-    Shard, UnquantLinear,
+    AfqLayer, F8Q8Linear, FP8Linear, GgufMatMul, HqqLayer, MXFP4Layer, QuantMethod, QuantizedSerde,
+    QuantizedSerdeType, QuantizedWeightSource, Shard, UnquantLinear, block_pack_factor,
+    safetensors::MmapedSafetensors,
 };
 
 pub struct UqffReader {
@@ -530,10 +530,10 @@ impl QuantizedWeightSource for UqffReader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{uqff_version_tensors, IsqType, QuantizedSerdeType, UqffTensor};
+    use crate::{IsqType, QuantizedSerdeType, UqffTensor, uqff_version_tensors};
     use candle_core::{
-        quantized::{GgmlDType, QTensor},
         DType,
+        quantized::{GgmlDType, QTensor},
     };
 
     fn write_afq_layer_with(

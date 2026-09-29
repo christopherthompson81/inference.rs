@@ -1,9 +1,9 @@
 use std::path::PathBuf;
 
 use anyhow::Result;
-use comfy_table::{presets::UTF8_FULL, Cell, Color, ContentArrangement, Table};
+use comfy_table::{Cell, Color, ContentArrangement, Table, presets::UTF8_FULL};
 
-use inference_core::{auto_tune, AutoTuneRequest, FitStatus, ModelSelected, QualityTier};
+use inference_core::{AutoTuneRequest, FitStatus, ModelSelected, QualityTier, auto_tune};
 
 use crate::args::{AdapterOptions, GlobalOptions, MatformerSelection, ModelType, TuneProfileArg};
 
@@ -164,10 +164,10 @@ pub async fn run_tune(
     println!("  {}", result.recommended_command);
     println!();
 
-    if let Some(mode) = &result.paged_attn_mode {
-        if mode != "off" {
-            println!("[INFO] PagedAttention is available (mode: {mode})");
-        }
+    if let Some(mode) = &result.paged_attn_mode
+        && mode != "off"
+    {
+        println!("[INFO] PagedAttention is available (mode: {mode})");
     }
 
     Ok(())
@@ -294,8 +294,10 @@ mod tests {
             ..AdapterOptions::default()
         };
         let error = reject_configured_adapters(&adapter).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("does not account for adapter memory"));
+        assert!(
+            error
+                .to_string()
+                .contains("does not account for adapter memory")
+        );
     }
 }

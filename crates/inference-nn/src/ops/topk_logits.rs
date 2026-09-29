@@ -8,8 +8,8 @@ pub fn cuda_topk_logits_f32(
     temperature: f64,
 ) -> Result<TopKLogitsOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use candle_core::cuda_backend::CudaStorageSlice;
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
 
     if temperature <= 0.0 || !temperature.is_finite() {
         candle_core::bail!("cuda_topk_logits_f32 requires a positive finite temperature");
@@ -168,8 +168,8 @@ pub fn cuda_topk_logits_f32_packed(
     temperature: f64,
 ) -> Result<TopKLogitsPackedOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use candle_core::cuda_backend::CudaStorageSlice;
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
 
     if temperature <= 0.0 || !temperature.is_finite() {
         candle_core::bail!("cuda_topk_logits_f32_packed requires a positive finite temperature");
@@ -493,8 +493,8 @@ pub fn cuda_topk_logits_packed_batched_with_workspace(
     cache: &mut Option<CudaTopKLogitsPackedWorkspace>,
 ) -> Result<TopKLogitsPackedOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
     use candle_core::cuda_backend::CudaStorageSlice;
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
     use std::ffi::c_void;
 
     const OP: &str = "cuda_topk_logits_packed_batched";
@@ -730,8 +730,8 @@ pub fn cuda_topk_ranked_packed_batched_with_workspace(
     cache: &mut Option<CudaRankedTopKPackedWorkspace>,
 ) -> Result<RankedTopKPackedOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
     use candle_core::cuda_backend::CudaStorageSlice;
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
     use std::ffi::c_void;
 
     const OP: &str = "cuda_topk_ranked_packed_batched";
@@ -940,7 +940,7 @@ pub fn metal_topk_logits_packed(
     k: usize,
     temperature: f64,
 ) -> Result<TopKLogitsPackedOutput> {
-    use candle_core::{backend::BackendStorage, MetalStorage, Shape, Storage};
+    use candle_core::{MetalStorage, Shape, Storage, backend::BackendStorage};
 
     const MAX_K: usize = 128;
     const CHUNK_SIZE: usize = 2048;

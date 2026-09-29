@@ -7,11 +7,11 @@ use anyhow::Result;
 use html2text::{config, render::PlainDecorator};
 use scraper::{Html, Selector};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::env::consts::{ARCH, FAMILY, OS};
 use tokenizers::Tokenizer;
 
-use crate::remote_fetch::{fetch_limited, FetchOptions, NetworkPolicy};
+use crate::remote_fetch::{FetchOptions, NetworkPolicy, fetch_limited};
 use crate::{Function, Tool, ToolType, WebSearchOptions, WebSearchUserLocation};
 
 const SEARCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
@@ -85,11 +85,7 @@ pub(crate) fn source_domain(url: &str) -> Option<String> {
         .trim_end_matches('.')
         .to_ascii_lowercase();
     let host = host.strip_prefix("www.").unwrap_or(&host).to_string();
-    if host.is_empty() {
-        None
-    } else {
-        Some(host)
-    }
+    if host.is_empty() { None } else { Some(host) }
 }
 
 pub(crate) fn source_domains<'a>(urls: impl IntoIterator<Item = &'a str>) -> Vec<String> {

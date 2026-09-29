@@ -1,6 +1,6 @@
 use candle_core::{
-    backend::BackendStorage, CpuStorage, CudaStorage, CustomOp3, DType, Layout, Result, Shape,
-    Tensor,
+    CpuStorage, CudaStorage, CustomOp3, DType, Layout, Result, Shape, Tensor,
+    backend::BackendStorage,
 };
 
 pub const MAX_DYNAMIC_CONV_KERNEL_SIZE: usize = 8;

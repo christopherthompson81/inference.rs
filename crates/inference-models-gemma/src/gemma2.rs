@@ -8,8 +8,8 @@ use std::sync::Arc;
 use crate::serde_default_fn;
 use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
-    softcap, ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
-    ShardedVarBuilder,
+    ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
+    ShardedVarBuilder, softcap,
 };
 
 use crate::kv_cache::EitherCache;
@@ -22,9 +22,9 @@ use crate::model::NormalLoadingMetadata;
 use crate::model::NormalModel;
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
-    attention::{flash_backend_supports, AttentionMask, SdpaParams},
+    attention::{AttentionMask, SdpaParams, flash_backend_supports},
     device_map::{DeviceMappedMask, DeviceMapper},
-    layers::{embedding, Activation, CausalMasker, GemmaRmsNorm, Mlp, RotaryEmbedding, Sdpa},
+    layers::{Activation, CausalMasker, GemmaRmsNorm, Mlp, RotaryEmbedding, Sdpa, embedding},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -419,7 +419,7 @@ impl Model {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),

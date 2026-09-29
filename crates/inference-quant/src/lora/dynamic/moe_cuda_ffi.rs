@@ -3,7 +3,7 @@ use half::{bf16, f16};
 
 use super::moe_cuda::RoutedLoraAdapterWeight;
 
-extern "C" {
+unsafe extern "C" {
     pub fn routed_lora_metadata_workspace_size(num_experts: i32, num_adapter_slots: i32) -> usize;
 
     pub fn launch_routed_lora_build_metadata(

@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 
 use crate::{
+    DiffusionLoaderType, LoraAdapterSpec, LoraRuntimeConfig, ModelDType, SpeechLoaderType,
     pipeline::{
         AutoDeviceMapParams, EmbeddingLoaderType, IsqOrganization, MultimodalLoaderType,
         NormalLoaderType, UqffWriteConfig,
     },
-    DiffusionLoaderType, LoraAdapterSpec, LoraRuntimeConfig, ModelDType, SpeechLoaderType,
 };
 
 // Default value functions for serde deserialization
@@ -847,12 +847,12 @@ pub enum ModelSelected {
 
 #[cfg(all(test, feature = "utoipa"))]
 mod tests {
-    use serde::{de::DeserializeOwned, Serialize};
+    use serde::{Serialize, de::DeserializeOwned};
     use strum::IntoEnumIterator;
 
     use crate::{
-        pipeline::{EmbeddingLoaderType, MultimodalLoaderType, NormalLoaderType},
         DiffusionLoaderType, ModelDType, SpeechLoaderType,
+        pipeline::{EmbeddingLoaderType, MultimodalLoaderType, NormalLoaderType},
     };
 
     // The names a schema publishes must be the ones serde writes, and each must parse back.

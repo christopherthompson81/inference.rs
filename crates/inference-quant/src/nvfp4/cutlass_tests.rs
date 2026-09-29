@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use candle_core::{cuda::cudarc::driver::sys, DType, Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor, cuda::cudarc::driver::sys};
 use float8::F8E4M3;
 use half::{bf16, f16};
 
@@ -171,10 +171,12 @@ impl Fixture {
         for column in 0..columns {
             fixture.weight_rows[column].bias = -rounded(fixture.unrounded(0, column, 1.0), dtype);
         }
-        assert!(fixture
-            .weight_rows
-            .windows(2)
-            .all(|rows| rows[0].global != rows[1].global));
+        assert!(
+            fixture
+                .weight_rows
+                .windows(2)
+                .all(|rows| rows[0].global != rows[1].global)
+        );
         assert!(
             (0..columns).any(|column| {
                 let row = &fixture.weight_rows[column];

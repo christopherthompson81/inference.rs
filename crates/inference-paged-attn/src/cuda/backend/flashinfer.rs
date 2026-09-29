@@ -8,7 +8,7 @@ use candle_core::backend::BackendStorage;
 use candle_core::{DType, Result, Storage, Tensor};
 use float8::F8E4M3;
 
-use crate::{KvCacheScales, DEFAULT_FP8_KV_CACHE_SCALES};
+use crate::{DEFAULT_FP8_KV_CACHE_SCALES, KvCacheScales};
 
 fn dtype_code(dtype: DType, op: &str) -> Result<u32> {
     match dtype {

@@ -284,33 +284,36 @@ impl EncoderCacheManager {
         let previous_entries = self.cache.len();
         let previous_logical_bytes = self.cached_logical_bytes;
         // `shift_remove` + re-insert moves the entry to the back.
-        if let Some(entry) = self.cache.shift_remove(&key) {
-            if !is_valid(&entry.outputs) {
-                self.cached_logical_bytes = self
-                    .cached_logical_bytes
-                    .checked_sub(entry.logical_bytes)
-                    .expect("encoder cache byte accounting underflow");
-                self.misses.fetch_add(1, Ordering::Relaxed);
-                metrics::counter!(
-                    ENCODER_CACHE_EVICTIONS_METRIC,
-                    "reason" => INCOMPATIBLE_SHAPE_REASON
-                )
-                .increment(1);
-                update_process_residency(
-                    previous_entries,
-                    self.cache.len(),
-                    previous_logical_bytes,
-                    self.cached_logical_bytes,
-                );
-                return None;
+        match self.cache.shift_remove(&key) {
+            Some(entry) => {
+                if !is_valid(&entry.outputs) {
+                    self.cached_logical_bytes = self
+                        .cached_logical_bytes
+                        .checked_sub(entry.logical_bytes)
+                        .expect("encoder cache byte accounting underflow");
+                    self.misses.fetch_add(1, Ordering::Relaxed);
+                    metrics::counter!(
+                        ENCODER_CACHE_EVICTIONS_METRIC,
+                        "reason" => INCOMPATIBLE_SHAPE_REASON
+                    )
+                    .increment(1);
+                    update_process_residency(
+                        previous_entries,
+                        self.cache.len(),
+                        previous_logical_bytes,
+                        self.cached_logical_bytes,
+                    );
+                    return None;
+                }
+                let cloned = entry.outputs.clone();
+                self.cache.insert(key, entry);
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                Some(cloned)
             }
-            let cloned = entry.outputs.clone();
-            self.cache.insert(key, entry);
-            self.hits.fetch_add(1, Ordering::Relaxed);
-            Some(cloned)
-        } else {
-            self.misses.fetch_add(1, Ordering::Relaxed);
-            None
+            _ => {
+                self.misses.fetch_add(1, Ordering::Relaxed);
+                None
+            }
         }
     }
 
@@ -469,15 +472,16 @@ impl EncoderCacheBatchLookup {
                 deduplicated += 1;
                 continue;
             }
-            if let Some(cached) =
-                guard.get_validated(modality, hash, |outputs| is_valid(index, outputs))
-            {
-                outputs[index] = Some(cached);
-                resolutions.insert(hash, Resolution::Hit(index));
-            } else {
-                let group_idx = miss_groups.len();
-                miss_groups.push(vec![index]);
-                resolutions.insert(hash, Resolution::Miss(group_idx));
+            match guard.get_validated(modality, hash, |outputs| is_valid(index, outputs)) {
+                Some(cached) => {
+                    outputs[index] = Some(cached);
+                    resolutions.insert(hash, Resolution::Hit(index));
+                }
+                _ => {
+                    let group_idx = miss_groups.len();
+                    miss_groups.push(vec![index]);
+                    resolutions.insert(hash, Resolution::Miss(group_idx));
+                }
             }
         }
         drop(guard);

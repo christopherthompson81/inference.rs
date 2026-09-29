@@ -5,8 +5,9 @@ use std::{
     sync::OnceLock,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use hf_hub::{
+    Cache, Repo, RepoType,
     api::{
         sync::{Api, ApiBuilder, ApiError, ApiRepo},
         tokio::{
@@ -14,7 +15,6 @@ use hf_hub::{
             ApiRepo as AsyncApiRepo,
         },
     },
-    Cache, Repo, RepoType,
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::{trace, warn};
@@ -176,13 +176,13 @@ pub fn hf_home_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| dirs::home_dir().map(|home| home.join(".cache").join("huggingface")));
 
-    if let Some(ref dir) = dir {
-        if let Err(err) = fs::create_dir_all(dir) {
-            warn!(
-                "Could not create Hugging Face home directory `{}`: {err}",
-                dir.display()
-            );
-        }
+    if let Some(ref dir) = dir
+        && let Err(err) = fs::create_dir_all(dir)
+    {
+        warn!(
+            "Could not create Hugging Face home directory `{}`: {err}",
+            dir.display()
+        );
     }
 
     dir
@@ -200,13 +200,13 @@ pub fn hf_hub_cache_dir() -> Option<PathBuf> {
         .map(PathBuf::from)
         .or_else(|| hf_home_dir().map(|home| home.join("hub")));
 
-    if let Some(ref dir) = dir {
-        if let Err(err) = fs::create_dir_all(dir) {
-            warn!(
-                "Could not create Hugging Face hub cache directory `{}`: {err}",
-                dir.display()
-            );
-        }
+    if let Some(ref dir) = dir
+        && let Err(err) = fs::create_dir_all(dir)
+    {
+        warn!(
+            "Could not create Hugging Face hub cache directory `{}`: {err}",
+            dir.display()
+        );
     }
 
     dir

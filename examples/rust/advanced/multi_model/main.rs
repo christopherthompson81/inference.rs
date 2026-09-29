@@ -2,7 +2,7 @@
 //!
 //! Run with: `cargo run --release --example multi_model -p inference-examples`
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use inference::{
     IsqBits, MultiModelBuilder, MultimodalModelBuilder, TextMessageRole, TextMessages,
     TextModelBuilder,

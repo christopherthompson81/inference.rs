@@ -242,7 +242,7 @@ use candle_core::cuda::cudarc;
 // NCCL backend implementation
 #[cfg(all(feature = "cuda", feature = "nccl"))]
 mod nccl {
-    use candle_core::{cuda::cudarc, Device, Result};
+    use candle_core::{Device, Result, cuda::cudarc};
 
     #[derive(Debug)]
     pub struct NcclComm {
@@ -512,8 +512,8 @@ mod nccl_ops {
     use std::{fmt::Debug, sync::Arc};
 
     use candle_core::{
-        backend::BackendStorage, cuda::cudarc, CpuStorage, CustomOp1, DType, Layout, Result, Shape,
-        Tensor,
+        CpuStorage, CustomOp1, DType, Layout, Result, Shape, Tensor, backend::BackendStorage,
+        cuda::cudarc,
     };
 
     #[derive(Clone, Debug)]
@@ -825,7 +825,7 @@ mod ring_ops {
     type LeftRight = (SharedTcpStream, SharedTcpStream);
 
     use candle_core::{
-        backend::BackendStorage, CpuStorage, Device, Result, Storage, Tensor, WithDType,
+        CpuStorage, Device, Result, Storage, Tensor, WithDType, backend::BackendStorage,
     };
 
     use super::RingConfig;

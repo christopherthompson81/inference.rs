@@ -58,9 +58,11 @@ fn test_fused_batch_matmul_f8e4m3_nobias() -> Result<()> {
     // FP8 quantization has inherent error; use tolerance based on relative error
     // For 128x128 matmul with FP8 inputs, ~5% relative error is acceptable
     let range = 1.0;
-    assert!(abs_diff
-        .iter()
-        .all(|x| x.iter().all(|y| y.iter().all(|x| *x <= range))));
+    assert!(
+        abs_diff
+            .iter()
+            .all(|x| x.iter().all(|y| y.iter().all(|x| *x <= range)))
+    );
     Ok(())
 }
 
@@ -122,8 +124,10 @@ fn test_fused_batch_matmul_f8e4m3_out_bf16() -> Result<()> {
     // FP8 quantization has inherent error; use tolerance based on relative error
     // For 128x128 matmul with FP8 inputs, ~5% relative error is acceptable
     let range = 1.0;
-    assert!(abs_diff
-        .iter()
-        .all(|x| x.iter().all(|y| y.iter().all(|x| *x <= range))));
+    assert!(
+        abs_diff
+            .iter()
+            .all(|x| x.iter().all(|y| y.iter().all(|x| *x <= range)))
+    );
     Ok(())
 }

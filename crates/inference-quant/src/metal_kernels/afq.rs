@@ -31,7 +31,7 @@ pub fn call_affine_quantize(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let kernel_func = if dequantize {
@@ -138,7 +138,7 @@ pub fn call_afq_embedding(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let name = format!("affine_embedding_{type_string}_gs_{group_size}_b_{bits}");
@@ -402,7 +402,7 @@ pub fn call_afq_qmm(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
 
@@ -549,7 +549,7 @@ pub fn call_afq_qmm_splitk(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let aligned = if n.is_multiple_of(32) {
@@ -635,7 +635,7 @@ pub fn call_afq_gather_qmm_rhs(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
 
@@ -713,7 +713,7 @@ pub fn call_afq_gather_qmm_rhs_gate_up(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
 
@@ -796,7 +796,7 @@ pub fn call_afq_qmm_gate_up(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let aligned = if n.is_multiple_of(32) {
@@ -876,7 +876,7 @@ pub fn call_afq_qmm_qkv(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let name = format!("qmm_t_qkv_{type_string}_gs_{group_size}_b_{bits}");

@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use either::Either;
 use inference::{
-    cross_entropy_loss, parse_isq_value, Constraint, DType, Device, InferenceRs, ModelBuilder,
-    NormalRequest, Request, ResponseOk, SamplingParams, Tensor,
+    Constraint, DType, Device, InferenceRs, ModelBuilder, NormalRequest, Request, ResponseOk,
+    SamplingParams, Tensor, cross_entropy_loss, parse_isq_value,
 };
 use tokio::sync::mpsc::channel;
 

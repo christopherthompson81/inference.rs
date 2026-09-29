@@ -1,10 +1,10 @@
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::{Arc, atomic::AtomicUsize};
 
-use candle_core::{quantized::GgmlDType, DType, Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor, quantized::GgmlDType};
 
 use crate::{
-    get_immediate_isq, pending_layer, ImmediateIsqMatch, ImmediateIsqParams, IsqConsumer,
-    IsqRequest, IsqType, PendingIsqLayer, QuantMethod, ShardedVarBuilder, TrackedModule,
+    ImmediateIsqMatch, ImmediateIsqParams, IsqConsumer, IsqRequest, IsqType, PendingIsqLayer,
+    QuantMethod, ShardedVarBuilder, TrackedModule, get_immediate_isq, pending_layer,
 };
 
 pub enum QuantizationBehavior {
@@ -48,35 +48,35 @@ fn apply_immediate_isq_inner(
         return Ok(layer);
     };
     let prefix = format!("{}.weight", vb.prefix());
-    if let Some(ImmediateIsqMatch {
-        ty,
-        device,
-        promote_default,
-    }) = crate::resolve_immediate_isq(&params, &prefix)
-    {
-        let device = if params.capture == crate::IsqCaptureMode::CaptureAll {
-            Device::Cpu
-        } else {
-            device.unwrap_or_else(|| vb.device().clone())
-        };
-
-        // Capture modes keep the layer unquantized; the resolved ty is recorded for later.
-        let spawn_ty = match params.capture {
-            crate::IsqCaptureMode::Immediate => ty,
-            _ => None,
-        };
-        let module_key = key.unwrap_or_else(|| vb.prefix());
-        let layer = spawn_pending_isq(layer, spawn_ty, device, &params, module_key.clone());
-        vb.tracker().add_module(TrackedModule {
-            key: module_key,
-            ct: layer.clone(),
+    match crate::resolve_immediate_isq(&params, &prefix) {
+        Some(ImmediateIsqMatch {
             ty,
+            device,
             promote_default,
-            shard,
-        });
-        Ok(layer)
-    } else {
-        Ok(layer)
+        }) => {
+            let device = if params.capture == crate::IsqCaptureMode::CaptureAll {
+                Device::Cpu
+            } else {
+                device.unwrap_or_else(|| vb.device().clone())
+            };
+
+            // Capture modes keep the layer unquantized; the resolved ty is recorded for later.
+            let spawn_ty = match params.capture {
+                crate::IsqCaptureMode::Immediate => ty,
+                _ => None,
+            };
+            let module_key = key.unwrap_or_else(|| vb.prefix());
+            let layer = spawn_pending_isq(layer, spawn_ty, device, &params, module_key.clone());
+            vb.tracker().add_module(TrackedModule {
+                key: module_key,
+                ct: layer.clone(),
+                ty,
+                promote_default,
+                shard,
+            });
+            Ok(layer)
+        }
+        _ => Ok(layer),
     }
 }
 
@@ -152,14 +152,14 @@ pub fn quantize_expert_stack_with_bias(
     guard: crate::QuantizeOntoGuard,
 ) -> Result<Arc<dyn QuantMethod>> {
     let (experts, output, _) = stack.dims3()?;
-    if let Some(bias) = &bias {
-        if bias.dims() != [experts, output] {
-            candle_core::bail!(
-                "Stacked expert bias shape {:?} does not match weight shape {:?}; expected [{experts}, {output}].",
-                bias.dims(),
-                stack.dims()
-            );
-        }
+    if let Some(bias) = &bias
+        && bias.dims() != [experts, output]
+    {
+        candle_core::bail!(
+            "Stacked expert bias shape {:?} does not match weight shape {:?}; expected [{experts}, {output}].",
+            bias.dims(),
+            stack.dims()
+        );
     }
     if !ty.supports_stacked_gather() {
         candle_core::bail!(

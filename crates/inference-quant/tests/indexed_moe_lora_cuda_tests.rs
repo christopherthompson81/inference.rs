@@ -1,12 +1,12 @@
 #![cfg(feature = "cuda")]
 
 use candle_core::{
-    quantized::GgmlDType, quantized::QTensor, DType, Device, Result, Storage, Tensor,
+    DType, Device, Result, Storage, Tensor, quantized::GgmlDType, quantized::QTensor,
 };
 use half::f16;
 use inference_quant::{
-    moe_weighted_reduce_flat_same_dtype, IndexedMoeLoraDecode, IndexedMoeLoraWeights,
-    IndexedMoeRouting,
+    IndexedMoeLoraDecode, IndexedMoeLoraWeights, IndexedMoeRouting,
+    moe_weighted_reduce_flat_same_dtype,
 };
 
 fn values(len: usize, phase: f32) -> Vec<f32> {

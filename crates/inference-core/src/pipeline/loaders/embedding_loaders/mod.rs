@@ -20,7 +20,7 @@ use inference_quant::ShardedVarBuilder;
 
 use crate::pipeline::isq::isq_regexes;
 use regex::Regex;
-use serde::{de::Visitor, Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Visitor};
 
 use super::{AutoDeviceMapParams, DeviceMappedModelLoader};
 
@@ -346,9 +346,11 @@ mod tests {
 
     fn assert_promotes_only_embedding_weight(predicates: &[Regex]) {
         assert_eq!(predicates.len(), 1);
-        assert!(predicates
-            .iter()
-            .any(|predicate| predicate.is_match("embed_tokens.weight")));
+        assert!(
+            predicates
+                .iter()
+                .any(|predicate| predicate.is_match("embed_tokens.weight"))
+        );
 
         for name in [
             "lm_head.weight",

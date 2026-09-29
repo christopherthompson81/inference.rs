@@ -5,7 +5,7 @@ pub mod text;
 use crate::attention::FlashParams;
 use std::sync::{Arc, Mutex};
 
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 use candle_nn::{Linear, Module};
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
 use text::TextModel;
@@ -17,9 +17,9 @@ use crate::{
     layers::linear_no_bias,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     paged_attention::{
+        AttentionImplementation, ModelConfigMetadata,
         block_hash::MultimodalKind,
         encoder_cache::{CacheModality, EncoderCacheManager},
-        AttentionImplementation, ModelConfigMetadata,
     },
     utils::unvarbuilder::UnVarBuilder,
     vision::multimodal_layout::{
@@ -172,17 +172,20 @@ impl Llama4Model {
                         .lock()
                         .expect("encoder cache lock poisoned");
                     for (index, &hash) in args.image_hashes.iter().enumerate() {
-                        if let Some(outputs) = cache.get(CacheModality::Image, hash) {
-                            let valid = outputs.len() == 1
-                                && outputs[0].rank() == 2
-                                && outputs[0].dim(0)? == args.image_token_counts[index];
-                            if valid {
-                                per_image[index] = Some(outputs);
-                            } else {
+                        match cache.get(CacheModality::Image, hash) {
+                            Some(outputs) => {
+                                let valid = outputs.len() == 1
+                                    && outputs[0].rank() == 2
+                                    && outputs[0].dim(0)? == args.image_token_counts[index];
+                                if valid {
+                                    per_image[index] = Some(outputs);
+                                } else {
+                                    miss_indices.push(index);
+                                }
+                            }
+                            _ => {
                                 miss_indices.push(index);
                             }
-                        } else {
-                            miss_indices.push(index);
                         }
                     }
                 }

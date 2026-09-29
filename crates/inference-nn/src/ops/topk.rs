@@ -10,8 +10,8 @@ use super::*;
 #[allow(clippy::cast_possible_truncation)]
 pub(super) fn cuda_topk(input: &Tensor, k: usize) -> Result<TopKOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use candle_core::cuda_backend::CudaStorageSlice;
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use std::ffi::c_void;
 
     let input = final_logits_row(input)?;
@@ -202,8 +202,8 @@ impl candle_core::CustomOp1 for ArgSort {
         layout: &candle_core::Layout,
     ) -> Result<(candle_core::CudaStorage, candle_core::Shape)> {
         use candle_core::backend::BackendStorage;
-        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
         use candle_core::cuda_backend::CudaStorageSlice;
+        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 
         let dev = storage.device();
         let elem_count = layout.shape().elem_count();

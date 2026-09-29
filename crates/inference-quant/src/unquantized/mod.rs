@@ -1,17 +1,17 @@
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::{Arc, atomic::AtomicUsize};
 
-use candle_core::{quantized::GgmlDType, DType, Device, DeviceLocation, Result, Shape, Tensor, D};
+use candle_core::{D, DType, Device, DeviceLocation, Result, Shape, Tensor, quantized::GgmlDType};
 use candle_nn::Linear;
 use safetensors::tensor::Dtype;
 
 use crate::uqff::{UqffHeaderMatch, UqffLayerHeaderView};
 use crate::{
-    cublaslt::{maybe_init_cublas_lt_wrapper, CUBLASLT_CONTROLLER},
-    generate_isq, generate_isq_imatrix,
-    hqq::{HqqAxis, HqqBits, HqqConfig, HqqLayer, ISQ_HQQ_DEFAULT_OPT_STEPS, ISQ_HQQ_GROUP_SIZE},
     AfqBits, AfqGroupSize, AfqLayer, FP8Linear, GgufMatMul, ImatrixLayerStats, IsqType,
     QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedSerde, QuantizedSerdeType, Shard,
     UqffReader, UqffTensor,
+    cublaslt::{CUBLASLT_CONTROLLER, maybe_init_cublas_lt_wrapper},
+    generate_isq, generate_isq_imatrix,
+    hqq::{HqqAxis, HqqBits, HqqConfig, HqqLayer, ISQ_HQQ_DEFAULT_OPT_STEPS, ISQ_HQQ_GROUP_SIZE},
 };
 
 #[derive(Debug)]
@@ -795,12 +795,16 @@ mod tests {
         assert_eq!(layer.dtype_and_device().0, DType::BF16);
         assert_eq!(n_quantized.load(std::sync::atomic::Ordering::Relaxed), 0);
         let tensors = layer.serialize_uqff("test.linear", IsqType::AFQ3)?;
-        assert!(tensors
-            .iter()
-            .any(|tensor| tensor.name() == "test.linear.weight"));
-        assert!(tensors
-            .iter()
-            .any(|tensor| tensor.name() == "test.linear.weight.format"));
+        assert!(
+            tensors
+                .iter()
+                .any(|tensor| tensor.name() == "test.linear.weight")
+        );
+        assert!(
+            tensors
+                .iter()
+                .any(|tensor| tensor.name() == "test.linear.weight.format")
+        );
         Ok(())
     }
 

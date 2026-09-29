@@ -2,13 +2,13 @@
 
 use std::sync::{Arc, Mutex};
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{LayerNorm, Linear};
 use inference_quant::{MatMul, ShardedVarBuilder};
 
 use crate::{
     layers::masker::masked_fill,
-    layers::{self, layer_norm, GetFloatInfo},
+    layers::{self, GetFloatInfo, layer_norm},
     utils::unvarbuilder::UnVarBuilder,
 };
 

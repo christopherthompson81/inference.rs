@@ -1,6 +1,6 @@
 use core::ffi::{c_int, c_void};
 
-extern "C" {
+unsafe extern "C" {
     pub(crate) fn run_mha(
         q_ptr: *const c_void,
         k_ptr: *const c_void,

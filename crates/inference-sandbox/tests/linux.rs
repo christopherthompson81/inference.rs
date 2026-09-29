@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use inference_sandbox::{detect, NetworkMode, SandboxPolicy};
+use inference_sandbox::{NetworkMode, SandboxPolicy, detect};
 use tokio::process::Command;
 
 fn workdir() -> PathBuf {
@@ -51,11 +51,7 @@ fn resolve_python_prefixes(python_path: &Path) -> Vec<PathBuf> {
             } else {
                 p
             };
-            if p.exists() {
-                Some(p)
-            } else {
-                None
-            }
+            if p.exists() { Some(p) } else { None }
         })
         .collect()
 }

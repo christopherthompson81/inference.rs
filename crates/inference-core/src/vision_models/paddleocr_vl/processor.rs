@@ -4,21 +4,21 @@ use either::Either;
 use indexmap::IndexMap;
 use inference_models_other::loaders::PaddleOcrVlLoader;
 use inference_models_other::paddleocr_vl::inputs_processor::{
-    PaddleOcrVlImageProcessor, IMAGE_END, IMAGE_PLACEHOLDER, IMAGE_START,
+    IMAGE_END, IMAGE_PLACEHOLDER, IMAGE_START, PaddleOcrVlImageProcessor,
 };
 use serde_json::Value;
 
 use crate::{
+    MessageContent, Tool,
     pipeline::{
-        processing::default_process, InputsProcessor, MessagesAction, MultimodalProcessorFactory,
-        Processor,
+        InputsProcessor, MessagesAction, MultimodalProcessorFactory, Processor,
+        processing::default_process,
     },
     request::ReasoningEffort,
     vision_models::{
         media_host::MediaInputsProcessor, preprocessor_config::PreProcessorConfig,
         processor_config::ProcessorConfig,
     },
-    MessageContent, Tool,
 };
 
 pub struct PaddleOcrVlProcessor;

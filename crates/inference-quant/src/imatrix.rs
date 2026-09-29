@@ -7,7 +7,7 @@ use std::{
 };
 
 use byteorder::{LittleEndian, ReadBytesExt, WriteBytesExt};
-use candle_core::{Context, DType, Device, Result, Tensor, D};
+use candle_core::{Context, D, DType, Device, Result, Tensor};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug)]
@@ -176,13 +176,13 @@ pub struct CollectedImatrixData(pub HashMap<String, Vec<f32>>);
 
 impl CollectedImatrixData {
     pub fn save_imatrix<P: AsRef<Path>>(&self, fname: P) -> Result<()> {
-        if let Some(ext) = fname.as_ref().extension() {
-            if ext != "cimatrix" {
-                candle_core::bail!(
-                    "Expected a .cimatrix file to save collected imatrix data to, got {:?}",
-                    ext
-                );
-            }
+        if let Some(ext) = fname.as_ref().extension()
+            && ext != "cimatrix"
+        {
+            candle_core::bail!(
+                "Expected a .cimatrix file to save collected imatrix data to, got {:?}",
+                ext
+            );
         }
         let mut buf: Vec<u8> = Vec::new();
         let mut cursor = Cursor::new(&mut buf);
@@ -389,7 +389,7 @@ mod tests {
 
     #[test]
     fn apply_isq_routes_rank3_imatrix_per_slab() -> Result<()> {
-        use std::sync::{atomic::AtomicUsize, Arc};
+        use std::sync::{Arc, atomic::AtomicUsize};
         let device = Device::Cpu;
         let stack = Tensor::randn(0f32, 1f32, (2, 8, 256), &device)?;
         // expert 1 gets a wildly skewed importance vector so its blocks must quantize differently

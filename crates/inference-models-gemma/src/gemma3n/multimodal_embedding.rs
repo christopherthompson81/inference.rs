@@ -2,7 +2,7 @@ use candle_core::{DType, Module, Result, Tensor};
 use inference_quant::{QuantMethod, ShardedVarBuilder};
 use std::sync::Arc;
 
-use crate::layers::{dense_embedding, RmsNorm, ScaledEmbedding};
+use crate::layers::{RmsNorm, ScaledEmbedding, dense_embedding};
 
 use super::config::Gemma3nTextConfig;
 

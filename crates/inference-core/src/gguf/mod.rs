@@ -23,8 +23,8 @@ pub(crate) mod qwen_multimodal_bindings;
 
 pub(crate) use chat_template::{get_gguf_chat_template, get_gguf_chat_template_from_metadata};
 pub(crate) use gguf_tokenizer::{
-    convert_gguf_metadata_to_hf_tokenizer, validate_external_gguf_tokenizer,
-    GgufTokenizerConversion,
+    GgufTokenizerConversion, convert_gguf_metadata_to_hf_tokenizer,
+    validate_external_gguf_tokenizer,
 };
 pub(crate) use inference_nn::gguf::Content;
 pub use inference_nn::gguf::GGUFArchitecture;

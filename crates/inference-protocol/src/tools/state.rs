@@ -2,10 +2,10 @@ use anyhow::Result;
 use llguidance::api::TopLevelGrammar;
 
 use crate::tools::{
+    ToolCallFormat, ToolCallResponse, ToolCallingMatcher, ToolChoice,
     strategy::{
         AtemToolCallStrategy, HarmonyToolCallStrategy, TextToolCallStrategy, ToolCallStrategy,
     },
-    ToolCallFormat, ToolCallResponse, ToolCallingMatcher, ToolChoice,
 };
 
 const REQUIRED_TOOL_CALL_DEADLINE_DIVISOR: usize = 4;
@@ -381,9 +381,11 @@ mod tests {
         let tools = vec![tool("get_weather")];
         let mut state = ToolCallState::new(ToolChoice::None, Some(&tools), None).unwrap();
 
-        assert!(state
-            .maybe_activate_continuation_grammar(Some("<tool_call>"))
-            .is_none());
+        assert!(
+            state
+                .maybe_activate_continuation_grammar(Some("<tool_call>"))
+                .is_none()
+        );
     }
 
     #[test]

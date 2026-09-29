@@ -151,17 +151,16 @@ fn repack_padded_core_output(
         candle_core::bail!("padded GDN output has incompatible logical dimensions");
     }
 
-    if let Some(cu_seqlens) = layout.cu_seqlens(output.device())? {
-        if let Some(output) =
+    if let Some(cu_seqlens) = layout.cu_seqlens(output.device())?
+        && let Some(output) =
             crate::cuda::gdn::try_gdn_padded_to_packed_cuda(crate::cuda::gdn::GdnPaddedToPacked {
                 source: &output,
                 cu_seqlens,
                 batch_size,
                 token_count: physical_tokens,
             })?
-        {
-            return Ok(output);
-        }
+    {
+        return Ok(output);
     }
 
     let rows = query_lens
@@ -313,16 +312,16 @@ pub fn try_forward_grouped_packed_gdn(
     }
     let logical_batch = query_lens.len();
     let projected = gdn.project(x, physical_batch, physical_tokens)?;
-    if layout.cuda_ragged_transforms_supported(&projected.b) {
-        if let Some(shape) = padded_core_shape(plan) {
-            let padded_projection = projected.pad_core_packed(layout, shape.seq_len)?;
-            let output =
-                gdn.forward_projected_padded_prefill_core(&padded_projection, cache, layout)?;
-            let output = repack_padded_core_output(output, layout, physical_tokens)?;
-            return gdn
-                .finish_projected_recurrent(output, projected.z)
-                .map(Some);
-        }
+    if layout.cuda_ragged_transforms_supported(&projected.b)
+        && let Some(shape) = padded_core_shape(plan)
+    {
+        let padded_projection = projected.pad_core_packed(layout, shape.seq_len)?;
+        let output =
+            gdn.forward_projected_padded_prefill_core(&padded_projection, cache, layout)?;
+        let output = repack_padded_core_output(output, layout, physical_tokens)?;
+        return gdn
+            .finish_projected_recurrent(output, projected.z)
+            .map(Some);
     }
 
     let mut outputs = Vec::with_capacity(logical_batch);
@@ -375,9 +374,9 @@ mod tests {
     use candle_core::{Device, Tensor};
 
     use super::{
-        gather_tensor_rows, gather_token_rows, packed_gdn_plan, padded_core_shape,
-        repack_padded_core_output, reshape_packed_input, restore_logical_rows,
-        restore_packed_output, uniform_packed_shape, PackedGdnLayout, UniformPackedShape,
+        PackedGdnLayout, UniformPackedShape, gather_tensor_rows, gather_token_rows,
+        packed_gdn_plan, padded_core_shape, repack_padded_core_output, reshape_packed_input,
+        restore_logical_rows, restore_packed_output, uniform_packed_shape,
     };
 
     #[test]
@@ -431,14 +430,16 @@ mod tests {
     #[test]
     fn uniform_packed_reshape_rejects_inconsistent_token_counts() -> candle_core::Result<()> {
         let x = Tensor::zeros((1, 5, 4), candle_core::DType::F32, &Device::Cpu)?;
-        assert!(reshape_packed_input(
-            &x,
-            UniformPackedShape {
-                batch_size: 3,
-                seq_len: 2,
-            },
-        )
-        .is_err());
+        assert!(
+            reshape_packed_input(
+                &x,
+                UniformPackedShape {
+                    batch_size: 3,
+                    seq_len: 2,
+                },
+            )
+            .is_err()
+        );
         Ok(())
     }
 

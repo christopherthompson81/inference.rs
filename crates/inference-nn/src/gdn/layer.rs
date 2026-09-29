@@ -91,17 +91,17 @@ fn exact_ragged_conv_state(
         candle_core::bail!("padded GDN convolution state has incompatible dimensions");
     }
 
-    if let Some(cu_seqlens) = layout.cu_seqlens(padded_input.device())? {
-        if let Some(state) = crate::cuda::gdn::try_gdn_extract_ragged_conv_state_cuda(
+    if let Some(cu_seqlens) = layout.cu_seqlens(padded_input.device())?
+        && let Some(state) = crate::cuda::gdn::try_gdn_extract_ragged_conv_state_cuda(
             crate::cuda::gdn::GdnRaggedConvState {
                 padded_input,
                 initial_state,
                 cu_seqlens,
                 batch_size,
             },
-        )? {
-            return Ok(state);
-        }
+        )?
+    {
+        return Ok(state);
     }
 
     let mut rows = Vec::with_capacity(batch_size);
@@ -1062,7 +1062,7 @@ impl GatedDeltaNet {
             }
             GdnCoreOutput::Normalized(y) => y,
             GdnCoreOutput::Quantized(activation) => {
-                return self.out_proj.forward_quantized(&activation)
+                return self.out_proj.forward_quantized(&activation);
             }
         };
         #[cfg(not(feature = "cuda"))]
@@ -1093,10 +1093,10 @@ mod tests {
     use super::super::config::GdnVHeadLayout;
     use super::super::norm::RmsNormGated;
     use super::super::projection::GdnInputProjection;
-    use super::super::{try_forward_grouped_packed_gdn, GdnLayerCache, PackedGdnLayout};
+    use super::super::{GdnLayerCache, PackedGdnLayout, try_forward_grouped_packed_gdn};
     use super::{
-        index_select_rows, shard_out_proj_input, speculative_checkpoint_dims_supported,
-        speculative_state_commit_dims_supported, GatedDeltaNet, GdnDims,
+        GatedDeltaNet, GdnDims, index_select_rows, shard_out_proj_input,
+        speculative_checkpoint_dims_supported, speculative_state_commit_dims_supported,
     };
     use crate::gdn::RecurrentBatchKind;
     use crate::kv_cache::RecurrentStateLayout;

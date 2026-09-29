@@ -25,7 +25,7 @@ use crate::{
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 
-use super::{rope_positions, LLaVALLM, OrdinaryRoPE};
+use super::{LLaVALLM, OrdinaryRoPE, rope_positions};
 use crate::mistral::Config;
 
 #[derive(Clone)]
@@ -430,7 +430,7 @@ impl Model {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),

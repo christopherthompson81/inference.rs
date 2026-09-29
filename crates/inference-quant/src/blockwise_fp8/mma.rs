@@ -5,7 +5,7 @@ use float8::F8E4M3;
 use half::bf16;
 
 use super::ffi;
-use crate::{utils::slice_ptr, ActivationScaleLayout};
+use crate::{ActivationScaleLayout, utils::slice_ptr};
 
 pub(super) const MMA_GEMV_MAX_ROWS: usize = 32;
 pub(super) const GROUP_SIZE: usize = 128;
@@ -247,8 +247,8 @@ mod tests {
 
     use candle_core::{DType, Device, Result, Tensor};
 
-    use super::{gemv, quantize_activation, GROUP_SIZE};
-    use crate::{blockwise_fp8::ops, ActivationScaleLayout};
+    use super::{GROUP_SIZE, gemv, quantize_activation};
+    use crate::{ActivationScaleLayout, blockwise_fp8::ops};
 
     fn patterned(len: usize, seed: usize, amplitude: f32, offset: f32) -> Vec<f32> {
         (0..len)

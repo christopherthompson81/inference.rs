@@ -18,8 +18,8 @@ use crate::media_inputs::{
     },
 };
 use crate::paged_attention::{
-    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
     PagedAttentionMeta,
+    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
 };
 use crate::vision::multimodal_layout::{
     MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
@@ -252,15 +252,14 @@ fn image_item_selection(
             original_start..total_items,
         ))
     };
-    if let Some((local, original)) = &selection {
-        if local.start > local.end
+    if let Some((local, original)) = &selection
+        && (local.start > local.end
             || local.end > available_items
             || original.start > original.end
             || original.end > total_items
-            || local.len() != original.len()
-        {
-            candle_core::bail!("Idefics2 active image range is outside the retained images");
-        }
+            || local.len() != original.len())
+    {
+        candle_core::bail!("Idefics2 active image range is outside the retained images");
     }
     Ok(selection)
 }
@@ -285,16 +284,16 @@ impl MultimodalInputsProcessor for Idefics2ImageProcessor {
         let subimages_per_image = subimages_per_image(config);
 
         for seq in input_seqs.iter_mut() {
-            if seq.mm_features().is_empty() {
-                if let Some(hashes) = seq.image_hashes().map(<[u64]>::to_vec) {
-                    seq.set_mm_features(idefics2_mm_features(
-                        seq.get_toks(),
-                        image_token_id,
-                        &hashes,
-                        subimages_per_image,
-                        self.image_seq_len,
-                    )?);
-                }
+            if seq.mm_features().is_empty()
+                && let Some(hashes) = seq.image_hashes().map(<[u64]>::to_vec)
+            {
+                seq.set_mm_features(idefics2_mm_features(
+                    seq.get_toks(),
+                    image_token_id,
+                    &hashes,
+                    subimages_per_image,
+                    self.image_seq_len,
+                )?);
             }
         }
         Ok(())
@@ -336,16 +335,16 @@ impl MultimodalInputsProcessor for Idefics2ImageProcessor {
 
         if is_prompt {
             for seq in input_seqs.iter_mut() {
-                if seq.mm_features().is_empty() {
-                    if let Some(hashes) = seq.image_hashes().map(<[u64]>::to_vec) {
-                        seq.set_mm_features(idefics2_mm_features(
-                            seq.prompt_position_source_toks(),
-                            image_token_id,
-                            &hashes,
-                            subimages_per_image,
-                            self.image_seq_len,
-                        )?);
-                    }
+                if seq.mm_features().is_empty()
+                    && let Some(hashes) = seq.image_hashes().map(<[u64]>::to_vec)
+                {
+                    seq.set_mm_features(idefics2_mm_features(
+                        seq.prompt_position_source_toks(),
+                        image_token_id,
+                        &hashes,
+                        subimages_per_image,
+                        self.image_seq_len,
+                    )?);
                 }
             }
         }
@@ -623,7 +622,9 @@ impl ImagePreProcessor for Idefics2ImageProcessor {
                 } else if size.contains_key("height") && size.contains_key("width") {
                     (size["height"] as usize, size["width"] as usize)
                 } else {
-                    candle_core::bail!("Size must be a map of `shortest_edge` and `longest_edge` or `height` and `width`.");
+                    candle_core::bail!(
+                        "Size must be a map of `shortest_edge` and `longest_edge` or `height` and `width`."
+                    );
                 };
 
                 *image = image.resize_exact(w as u32, h as u32, config.resampling.to_filter()?);

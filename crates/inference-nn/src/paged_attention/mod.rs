@@ -35,7 +35,7 @@ pub use config::{
 pub use input_metadata::{PagedAttentionInputMetadata, PagedAttentionMeta};
 pub use kv_cache_manager::KVCacheManager;
 pub use layers::PagedAttention;
-pub use scales::{load_fp8_attention_scales, Fp8AttentionScales};
+pub use scales::{Fp8AttentionScales, load_fp8_attention_scales};
 
 use crate::utils::memory_usage::MemoryUsage;
 use tracing::info;
@@ -73,8 +73,8 @@ pub fn block_aligned_sliding_window_start(
 #[cfg(test)]
 mod tests {
     use super::{
-        block_aligned_sliding_window_start, fit_post_load_cache_budget, MemoryGpuConfig,
-        PagedAttentionConfig, PagedCacheType,
+        MemoryGpuConfig, PagedAttentionConfig, PagedCacheType, block_aligned_sliding_window_start,
+        fit_post_load_cache_budget,
     };
 
     #[test]
@@ -108,9 +108,11 @@ mod tests {
         let error = config
             .with_base_device_memory_reservation(1)
             .expect_err("reservation addition should overflow");
-        assert!(error
-            .to_string()
-            .contains("paged attention device memory reservation overflow"));
+        assert!(
+            error
+                .to_string()
+                .contains("paged attention device memory reservation overflow")
+        );
         Ok(())
     }
 
@@ -170,15 +172,17 @@ mod tests {
             )?,
             35_000
         );
-        assert!(fit_post_load_cache_budget(
-            MemoryGpuConfig::BestEffortMbAmount {
-                target_mb: 40_000,
-                min_mb: Some(36_000),
-            },
-            40_000,
-            35_000,
-        )
-        .is_err());
+        assert!(
+            fit_post_load_cache_budget(
+                MemoryGpuConfig::BestEffortMbAmount {
+                    target_mb: 40_000,
+                    min_mb: Some(36_000),
+                },
+                40_000,
+                35_000,
+            )
+            .is_err()
+        );
         assert!(
             fit_post_load_cache_budget(MemoryGpuConfig::MbAmount(40_000), 40_000, 35_000,).is_err()
         );
@@ -340,12 +344,12 @@ fn fit_post_load_cache_budget(
         MemoryGpuConfig::Utilization(_) => Ok(requested_mb.min(available_mb)),
         MemoryGpuConfig::BestEffortMbAmount { min_mb, .. } => {
             let fitted_mb = requested_mb.min(available_mb);
-            if let Some(minimum) = min_mb {
-                if fitted_mb < minimum {
-                    anyhow::bail!(
-                        "PagedAttention KV cache has {available_mb} MB available, below the required best-effort minimum of {minimum} MB."
-                    );
-                }
+            if let Some(minimum) = min_mb
+                && fitted_mb < minimum
+            {
+                anyhow::bail!(
+                    "PagedAttention KV cache has {available_mb} MB available, below the required best-effort minimum of {minimum} MB."
+                );
             }
             Ok(fitted_mb)
         }
@@ -463,12 +467,12 @@ pub fn calculate_cache_config(
         let mut mem_gpu_mb = match mem_gpu {
             MemoryGpuConfig::MbAmount(v) => v,
             MemoryGpuConfig::BestEffortMbAmount { target_mb, min_mb } => {
-                if let Some(min_mb) = min_mb {
-                    if target_mb < min_mb {
-                        anyhow::bail!(
-                            "Best-effort PagedAttention KV cache target {target_mb} MB is below the required minimum {min_mb} MB."
-                        );
-                    }
+                if let Some(min_mb) = min_mb
+                    && target_mb < min_mb
+                {
+                    anyhow::bail!(
+                        "Best-effort PagedAttention KV cache target {target_mb} MB is below the required minimum {min_mb} MB."
+                    );
                 }
                 target_mb
             }
@@ -536,14 +540,18 @@ pub fn calculate_cache_config(
 
     let num_gpu_blocks = mb_to_blocks!(mem_gpu * SIZE_IN_MB, dtype_size, block_size, config);
     if num_gpu_blocks == 0 {
-        anyhow::bail!("Num GPU blocks is 0. This means there is not enough memory. Either reduce the memory amount/utilization/context size or disable PagedAttention.");
+        anyhow::bail!(
+            "Num GPU blocks is 0. This means there is not enough memory. Either reduce the memory amount/utilization/context size or disable PagedAttention."
+        );
     }
 
     if !silent {
         let available_context_tokens = num_gpu_blocks.saturating_sub(1) * block_size;
         info!("Allocating {mem_gpu} MB for PagedAttention KV cache per GPU");
         info!("PagedAttention KV cache type is {dtype:?}");
-        info!("Using PagedAttention with block size {block_size} and {num_gpu_blocks} GPU blocks: available context length is {available_context_tokens} tokens");
+        info!(
+            "Using PagedAttention with block size {block_size} and {num_gpu_blocks} GPU blocks: available context length is {available_context_tokens} tokens"
+        );
     }
     Ok(CacheConfig {
         block_size,

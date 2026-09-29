@@ -2,15 +2,13 @@
 
 #[cfg(unix)]
 use anyhow::Context;
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use std::path::PathBuf;
 
 #[cfg(unix)]
-const INSTALL_SH_URL: &str =
-    "https://raw.githubusercontent.com/christopherthompson81/inference.rs/refs/heads/master/install.sh";
+const INSTALL_SH_URL: &str = "https://raw.githubusercontent.com/christopherthompson81/inference.rs/refs/heads/master/install.sh";
 #[cfg(windows)]
-const INSTALL_PS1_URL: &str =
-    "https://raw.githubusercontent.com/christopherthompson81/inference.rs/refs/heads/master/install.ps1";
+const INSTALL_PS1_URL: &str = "https://raw.githubusercontent.com/christopherthompson81/inference.rs/refs/heads/master/install.ps1";
 
 fn managed_dir() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".inference-rs"))

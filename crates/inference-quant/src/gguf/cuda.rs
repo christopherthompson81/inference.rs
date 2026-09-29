@@ -11,9 +11,9 @@ use crate::utils::{slice_ptr, slice_ptr_mut_on_stream, slice_ptr_on_stream};
 use candle_core::cuda::cudarc::driver::DeviceRepr;
 use candle_core::cuda_backend::CudaDType;
 use candle_core::{
+    CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor,
     cuda::cudarc::driver::{CudaSlice, DevicePtr},
     quantized::{GgmlDType, QMatMul, QTensor},
-    CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor,
 };
 use half::{bf16, f16};
 

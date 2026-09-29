@@ -1,21 +1,21 @@
 //! The LoRA adapter routes: HTTP framing over the engine's adapter management.
 
 use axum::{
+    Extension, Json,
     extract::{
-        rejection::{JsonRejection, QueryRejection},
         Query, State,
+        rejection::{JsonRejection, QueryRejection},
     },
     response::Response,
-    Extension, Json,
 };
 
 pub use crate::lora_adapters_api::{
-    runtime_lora_updates_enabled, ListLoraAdaptersQuery, LoadLoraAdapterRequest,
-    LoraAdapterApiConfig, LoraAdapterListResponse, LoraAdapterObject, LoraResidentGenerationObject,
-    UnloadLoraAdapterRequest, ALLOW_RUNTIME_LORA_UPDATING_ENV, LORA_ADAPTER_ROOT_ENV,
+    ALLOW_RUNTIME_LORA_UPDATING_ENV, LORA_ADAPTER_ROOT_ENV, ListLoraAdaptersQuery,
+    LoadLoraAdapterRequest, LoraAdapterApiConfig, LoraAdapterListResponse, LoraAdapterObject,
+    LoraResidentGenerationObject, UnloadLoraAdapterRequest, runtime_lora_updates_enabled,
 };
 use crate::{
-    handler_core::{json_response, openai_error_response, ApiError, ApiErrorHttp, ApiErrorKind},
+    handler_core::{ApiError, ApiErrorHttp, ApiErrorKind, json_response, openai_error_response},
     lora_adapters_api::{list_adapters, load_adapter, unload_adapter},
     types::ExtractedInferenceRsState,
 };

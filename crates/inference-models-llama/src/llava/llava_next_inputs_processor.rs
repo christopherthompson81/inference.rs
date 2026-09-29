@@ -13,8 +13,8 @@ use tokenizers::Tokenizer;
 use super::config::Config as LLaVANextConfig;
 use super::llava_next::LLaVANextVisionSpecificArgs;
 use super::utils::{
-    calculate_unpad, divide_to_samples, get_anyres_image_grid_shape, get_num_samples,
-    resize_and_pad_image, select_best_resolution, LLaVAImageProcessor,
+    LLaVAImageProcessor, calculate_unpad, divide_to_samples, get_anyres_image_grid_shape,
+    get_num_samples, resize_and_pad_image, select_best_resolution,
 };
 use crate::device_map::DeviceMapper;
 use crate::media_inputs::{
@@ -27,8 +27,8 @@ use crate::media_inputs::{
     },
 };
 use crate::paged_attention::{
-    block_hash::{MultiModalFeature, MultimodalKind},
     PagedAttentionMeta,
+    block_hash::{MultiModalFeature, MultimodalKind},
 };
 use crate::vision::multimodal_layout::{
     MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
@@ -567,10 +567,10 @@ impl MultimodalInputsProcessor for LLaVANextInputProcessor {
         {
             anyhow::bail!("LLaVA-Next image metadata does not match the selected media");
         }
-        if let Some(pixels) = &pixel_values {
-            if pixels.dim(0)? != num_image_samples.iter().sum::<usize>() {
-                anyhow::bail!("LLaVA-Next pixel samples do not match image metadata");
-            }
+        if let Some(pixels) = &pixel_values
+            && pixels.dim(0)? != num_image_samples.iter().sum::<usize>()
+        {
+            anyhow::bail!("LLaVA-Next pixel samples do not match image metadata");
         }
         let packed_layout = if is_prompt && flash_meta.packed {
             let query_lens = paged_attn_meta

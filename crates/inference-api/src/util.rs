@@ -235,12 +235,14 @@ mod tests {
 
     #[tokio::test]
     async fn server_media_rejects_local_sources() {
-        assert!(parse_image_url_for_server(
-            "resources/rust-logo-32x32.png",
-            &MediaAttachments::default()
-        )
-        .await
-        .is_err());
+        assert!(
+            parse_image_url_for_server(
+                "resources/rust-logo-32x32.png",
+                &MediaAttachments::default()
+            )
+            .await
+            .is_err()
+        );
 
         let absolute_path = std::path::absolute("resources/rust-logo-32x32.png").unwrap();
         let url = format!("file://{}", absolute_path.as_os_str().to_str().unwrap());

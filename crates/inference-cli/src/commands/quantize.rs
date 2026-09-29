@@ -8,9 +8,9 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tracing::{info, warn};
 
-use inference_api::{engine::RuntimeSpec, Engine, EngineSpec};
+use inference_api::{Engine, EngineSpec, engine::RuntimeSpec};
 use inference_core::{
-    expand_isq_value, initialize_logging, IsqType, ModelSelected, TokenSource, UqffWriteConfig,
+    IsqType, ModelSelected, TokenSource, UqffWriteConfig, expand_isq_value, initialize_logging,
 };
 
 use crate::args::{
@@ -170,19 +170,16 @@ fn resolve_gguf_source(
 
         if model.format.mmproj.is_none()
             && (confident_gguf || explicit_multimodal || model.format.direct_file_only)
+            && let Some(files) = files.as_ref()
+            && let Some(projector) =
+                inference_core::selection::quant::resolve_gguf_projector(files, model.dtype)?
         {
-            if let Some(files) = files.as_ref() {
-                if let Some(projector) =
-                    inference_core::selection::quant::resolve_gguf_projector(files, model.dtype)?
-                {
-                    info!(
-                        "GGUF: selected {} projector `{}`",
-                        projector.label,
-                        projector.file_spec()
-                    );
-                    model.format.mmproj = Some(projector.file_spec());
-                }
-            }
+            info!(
+                "GGUF: selected {} projector `{}`",
+                projector.label,
+                projector.file_spec()
+            );
+            model.format.mmproj = Some(projector.file_spec());
         }
 
         if quantized_file.is_empty() {
@@ -300,12 +297,11 @@ pub async fn run_quantize(mut model_type: QuantizeModelType, global: GlobalOptio
             prompt_readme_details(&model_id)
         };
 
-        if !no_readme {
-            if let Err(e) =
+        if !no_readme
+            && let Err(e) =
                 generate_model_card(&base_output, &base_model, repo_id.as_deref(), is_multimodal)
-            {
-                warn!("Failed to generate README.md: {}", e);
-            }
+        {
+            warn!("Failed to generate README.md: {}", e);
         }
 
         print_upload_hint(&base_output, repo_id.as_deref(), &model_id);
@@ -730,7 +726,7 @@ mod tests {
     use clap::Parser;
 
     use super::*;
-    use crate::args::{resolve_quantize_model_type, Cli, Command, ModelType};
+    use crate::args::{Cli, Command, ModelType, resolve_quantize_model_type};
 
     fn parse(args: &[&str]) -> QuantizeModelType {
         let cli = Cli::try_parse_from(

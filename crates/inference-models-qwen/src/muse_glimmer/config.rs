@@ -368,10 +368,11 @@ mod tests {
             (*kind == TextAttentionType::FullAttention) == (index % 4 == 3)
         }));
         let rope = config.text_config.layer_rope_theta()?;
-        assert!(rope
-            .iter()
-            .enumerate()
-            .all(|(index, theta)| (*theta == 0.0) == (index % 4 == 3)));
+        assert!(
+            rope.iter()
+                .enumerate()
+                .all(|(index, theta)| (*theta == 0.0) == (index % 4 == 3))
+        );
         let vision = config.vision_config.layer_types()?;
         assert_eq!(vision.len(), 50);
         assert!(vision.iter().enumerate().all(|(index, kind)| {

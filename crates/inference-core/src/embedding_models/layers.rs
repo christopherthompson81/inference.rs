@@ -1,4 +1,4 @@
-use candle_core::{IndexOp, Result, Tensor, D};
+use candle_core::{D, IndexOp, Result, Tensor};
 use candle_nn::Module;
 use serde::Deserialize;
 

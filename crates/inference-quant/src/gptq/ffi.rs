@@ -1,6 +1,6 @@
 use half::f16;
 
-extern "C" {
+unsafe extern "C" {
     pub(crate) fn reconstruct_exllama(
         b_q_weight: *const u32,
         b_qzeros: *const u32,

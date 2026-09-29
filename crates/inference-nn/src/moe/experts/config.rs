@@ -1,7 +1,7 @@
 use candle_core::{DType, Device, Result};
+use inference_quant::QuantizedConfig;
 #[cfg(feature = "cuda")]
 use inference_quant::log::once_log_info;
-use inference_quant::QuantizedConfig;
 
 use crate::layers::Activation;
 

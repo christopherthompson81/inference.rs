@@ -410,9 +410,9 @@ impl DeviceMappedModelLoader for Gemma3nLoader {
             // so NONE of these should be divided by weight_pack_factor
             let vision_tower_elems = {
                 use crate::vision_models::gemma3n::vision::{
-                    gemma3n_mobilenet_def, make_divisible, BlockType, INPUT_CHANNELS,
-                    MSFA_EXPANSION_RATIO, MSFA_IN_CHANNELS, MSFA_OUT_CHANNELS, STEM_KERNEL_SIZE,
-                    STEM_OUT_CHANNELS,
+                    BlockType, INPUT_CHANNELS, MSFA_EXPANSION_RATIO, MSFA_IN_CHANNELS,
+                    MSFA_OUT_CHANNELS, STEM_KERNEL_SIZE, STEM_OUT_CHANNELS, gemma3n_mobilenet_def,
+                    make_divisible,
                 };
 
                 // Stem: ConvNormAct (Conv2d + RMSNorm)

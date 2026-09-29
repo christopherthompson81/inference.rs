@@ -1,11 +1,11 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 
 use crate::MultimodalLoaderType;
 
 use super::multimodal_binding_utils::{
-    bind_required, bind_required_linear, bind_required_with, validate_architecture,
-    validate_projector, TensorInventory,
+    TensorInventory, bind_required, bind_required_linear, bind_required_with,
+    validate_architecture, validate_projector,
 };
 
 const FAMILY: &str = "Muse-Glimmer";
@@ -192,7 +192,7 @@ mod tests {
         multimodal_binding_utils::binding_sources,
         multimodal_vision_registry::resolve_native_multimodal_gguf, normal_registry::RopePairing,
     };
-    use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
+    use candle_core::quantized::{GgmlDType, QTensor, gguf_file};
     use candle_core::{DType, Device, Tensor};
     use tempfile::NamedTempFile;
 

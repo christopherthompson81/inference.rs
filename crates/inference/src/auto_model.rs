@@ -7,8 +7,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use crate::model_builder_trait::{build_auto_pipeline, build_model_from_pipeline};
 use crate::Model;
+use crate::model_builder_trait::{build_auto_pipeline, build_model_from_pipeline};
 
 #[derive(Clone)]
 /// Configure a model with automatic detection of model type (text, multimodal, embedding, etc.).

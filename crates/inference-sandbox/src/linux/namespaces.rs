@@ -7,13 +7,13 @@ use std::path::Path;
 use std::sync::OnceLock;
 
 use landlock::{
-    path_beneath_rules, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr,
-    RulesetError, ABI,
+    ABI, Access, AccessFs, Ruleset, RulesetAttr, RulesetCreated, RulesetCreatedAttr, RulesetError,
+    path_beneath_rules,
 };
-use nix::fcntl::{open, OFlag};
-use nix::sched::{unshare, CloneFlags};
+use nix::fcntl::{OFlag, open};
+use nix::sched::{CloneFlags, unshare};
 use nix::sys::stat::Mode;
-use nix::unistd::{write, Gid, Uid};
+use nix::unistd::{Gid, Uid, write};
 
 use crate::{NetworkMode, SandboxPolicy};
 
@@ -79,8 +79,8 @@ pub(crate) fn landlock_supported() -> bool {
 }
 
 fn probe_namespace_supported(flags: CloneFlags) -> bool {
-    use nix::sys::wait::{waitpid, WaitStatus};
-    use nix::unistd::{fork, ForkResult};
+    use nix::sys::wait::{WaitStatus, waitpid};
+    use nix::unistd::{ForkResult, fork};
 
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child }) => {
@@ -108,8 +108,8 @@ fn probe_namespace_child(flags: CloneFlags) -> io::Result<()> {
 }
 
 fn probe_landlock_supported() -> bool {
-    use nix::sys::wait::{waitpid, WaitStatus};
-    use nix::unistd::{fork, ForkResult};
+    use nix::sys::wait::{WaitStatus, waitpid};
+    use nix::unistd::{ForkResult, fork};
 
     match unsafe { fork() } {
         Ok(ForkResult::Parent { child }) => {

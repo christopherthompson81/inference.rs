@@ -1,4 +1,4 @@
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::{Arc, atomic::AtomicUsize};
 
 use candle_core::{DType, Device, Result, Shape, Tensor};
 use safetensors::tensor::Dtype;

@@ -1,9 +1,9 @@
 use std::{
     borrow::Cow,
-    sync::{atomic::AtomicUsize, Arc},
+    sync::{Arc, atomic::AtomicUsize},
 };
 
-use candle_core::{quantized::GgmlDType, DType, Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor, quantized::GgmlDType};
 use candle_nn::Linear;
 
 #[cfg(all(feature = "cuda", has_deepgemm_fp8_sm90_provider))]
@@ -22,12 +22,11 @@ mod ffi;
 #[cfg(feature = "cuda")]
 use crate::GluActivationType;
 use crate::{
-    generate_isq, generate_isq_imatrix,
-    hqq::{ISQ_HQQ_DEFAULT_OPT_STEPS, ISQ_HQQ_GROUP_SIZE},
     ActivationQuantizationScheme, ActivationScaleLayout, AfqBits, AfqGroupSize, AfqLayer,
     FP8Linear, Fp8ActivationScheme, GgufMatMul, HqqAxis, HqqBits, HqqConfig, HqqLayer, IsqType,
     QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedActivation, QuantizedConfig,
-    QuantizedSerde, Shard, ShardedVarBuilder, UnquantLinear,
+    QuantizedSerde, Shard, ShardedVarBuilder, UnquantLinear, generate_isq, generate_isq_imatrix,
+    hqq::{ISQ_HQQ_DEFAULT_OPT_STEPS, ISQ_HQQ_GROUP_SIZE},
 };
 
 #[derive(Debug)]
@@ -99,19 +98,17 @@ impl BlockwiseFP8Linear {
         if self.activation_scheme.is_none()
             && self.weight_block_size == [128, 128]
             && matches!(self.dequant_dtype, DType::BF16 | DType::F16)
+            && let (Device::Cuda(dev), Ok((n, k))) = (self.weight.device(), self.weight.dims2())
+            && crate::cutile::fp8_w8a16_supported(dev, n, k, self.dequant_dtype)
         {
-            if let (Device::Cuda(dev), Ok((n, k))) = (self.weight.device(), self.weight.dims2()) {
-                if crate::cutile::fp8_w8a16_supported(dev, n, k, self.dequant_dtype) {
-                    crate::cutile::register_fp8_w8a16_shape(
-                        &self.weight,
-                        &self.weight_scale_inv,
-                        crate::Fp8WeightScaleLayout::Block([128, 128]),
-                        self.dequant_dtype,
-                    );
-                    self.provider = BlockwiseFp8Provider::CutileW8A16;
-                    return Ok(());
-                }
-            }
+            crate::cutile::register_fp8_w8a16_shape(
+                &self.weight,
+                &self.weight_scale_inv,
+                crate::Fp8WeightScaleLayout::Block([128, 128]),
+                self.dequant_dtype,
+            );
+            self.provider = BlockwiseFp8Provider::CutileW8A16;
+            return Ok(());
         }
         if self.activation_scheme != Some(Fp8ActivationScheme::Dynamic) {
             return Ok(());
@@ -177,10 +174,10 @@ impl BlockwiseFP8Linear {
         {
             self.provider = BlockwiseFp8Provider::TensorCoreGemv;
             #[cfg(feature = "cutile")]
-            if let (Device::Cuda(dev), Ok((n, k))) = (self.weight.device(), self.weight.dims2()) {
-                if crate::cutile::fp8_gemm_supported(dev, n, k) {
-                    crate::cutile::register_fp8_gemm_shape(&self.weight, &self.weight_scale_inv);
-                }
+            if let (Device::Cuda(dev), Ok((n, k))) = (self.weight.device(), self.weight.dims2())
+                && crate::cutile::fp8_gemm_supported(dev, n, k)
+            {
+                crate::cutile::register_fp8_gemm_shape(&self.weight, &self.weight_scale_inv);
             }
             TENSOR_CORE_GEMV_PROVIDER_LOG.call_once(|| {
                 tracing::info!(
@@ -1366,7 +1363,7 @@ mod tests {
         has_deepgemm_fp8_sm90_provider
     ))]
     fn copy_cuda_bf16(source: &Tensor, destination: &Tensor) -> Result<()> {
-        use candle_core::{cuda::cudarc::driver::sys, Storage};
+        use candle_core::{Storage, cuda::cudarc::driver::sys};
         use half::bf16;
 
         if source.dims() != destination.dims()
@@ -1663,9 +1660,11 @@ mod tests {
             assert_close(&format!("shape {shape:?}"), &reference, &output)?;
         }
         let small = input_of(&[8, 2 * SPLIT_SIZE], 5)?;
-        assert!(layer
-            .try_forward_fused_split_glu(&small, SPLIT_SIZE, GluActivationType::Silu)?
-            .is_none());
+        assert!(
+            layer
+                .try_forward_fused_split_glu(&small, SPLIT_SIZE, GluActivationType::Silu)?
+                .is_none()
+        );
         Ok(())
     }
 

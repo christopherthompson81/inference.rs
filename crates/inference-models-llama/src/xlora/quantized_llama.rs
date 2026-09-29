@@ -6,10 +6,10 @@ use std::sync::Arc;
 use crate::attention::FlashParams;
 use crate::attention::{AttentionMask, SdpaParams};
 use crate::gguf::Content;
-use crate::lora::{get_lora_cfg, LinearLayerLike, LoraConfig, Merge, Ordering, QLoraLinear};
-use crate::utils::progress::{new_multi_progress, NiceProgressBar};
-use candle_core::quantized::ggml_file;
+use crate::lora::{LinearLayerLike, LoraConfig, Merge, Ordering, QLoraLinear, get_lora_cfg};
+use crate::utils::progress::{NiceProgressBar, new_multi_progress};
 use candle_core::quantized::QMatMul;
+use candle_core::quantized::ggml_file;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::{Embedding, Module};
 use inference_nn::utils::progress::IterWithProgress;
@@ -25,7 +25,7 @@ use crate::gguf::metadata::ContentMetadata;
 use crate::gguf::{FromAdapterGGML, FromAdapterGGUF};
 use crate::quantized_llama::PropsGGUF;
 use inference_nn::xlora::XLoraClassifier;
-use inference_nn::xlora::{verify_sanity_adapters, NonGranularState, ScalingsMaker, XLoraConfig};
+use inference_nn::xlora::{NonGranularState, ScalingsMaker, XLoraConfig, verify_sanity_adapters};
 
 const DEFAULT_MAX_SEQ_LEN: u32 = 4096;
 const SUPPORTED_LAYERS: [&str; 8] = [
@@ -407,7 +407,7 @@ impl FromAdapterGGML for ModelWeights {
                 layer.attention_wq.merge_weights()?;
                 layer.attention_wv.merge_weights()?;
                 match &mut layer.mlp_or_moe {
-                    MlpOrMoe::Mlp(ref mut m) => {
+                    MlpOrMoe::Mlp(m) => {
                         m.feed_forward_w1.merge_weights()?;
                         m.feed_forward_w2.merge_weights()?;
                         m.feed_forward_w3.merge_weights()?;
@@ -697,7 +697,7 @@ impl FromAdapterGGUF for ModelWeights {
                 layer.attention_wq.merge_weights()?;
                 layer.attention_wv.merge_weights()?;
                 match &mut layer.mlp_or_moe {
-                    MlpOrMoe::Mlp(ref mut m) => {
+                    MlpOrMoe::Mlp(m) => {
                         m.feed_forward_w1.merge_weights()?;
                         m.feed_forward_w2.merge_weights()?;
                         m.feed_forward_w3.merge_weights()?;

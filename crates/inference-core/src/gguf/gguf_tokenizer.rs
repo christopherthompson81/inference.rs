@@ -8,18 +8,19 @@ use ahash::AHashMap;
 use anyhow::Result;
 use candle_core::quantized::gguf_file::Value;
 use tokenizers::pre_tokenizers::{
+    PreTokenizerWrapper,
     sequence::Sequence,
     split::{Split, SplitPattern},
-    PreTokenizerWrapper,
 };
 use tokenizers::tokenizer::normalizer::SplitDelimiterBehavior;
 use tokenizers::{
+    AddedToken, DecoderWrapper, ModelWrapper, NormalizerWrapper, Tokenizer,
     decoders::{
         self, byte_fallback::ByteFallback, byte_level::ByteLevel, fuse::Fuse, strip::Strip,
     },
     models::{bpe::BpeBuilder, unigram::Unigram},
-    normalizers::{self, Prepend, Replace, NFC},
-    processors, AddedToken, DecoderWrapper, ModelWrapper, NormalizerWrapper, Tokenizer,
+    normalizers::{self, NFC, Prepend, Replace},
+    processors,
 };
 use tracing::info;
 
@@ -734,13 +735,13 @@ impl TryFrom<Normalizer<'_>> for NormalizerWrapper {
 #[cfg(test)]
 mod tests {
     use super::{
-        bpe_pre_tokenizer_spec, bpe_tokenizer, convert_gguf_metadata_to_hf_tokenizer,
-        gemma4_tokenizer, validate_external_gguf_tokenizer, BpePreTokenizerKind, PropsGGUF,
-        SENTENCEPIECE_UNDERLINE,
+        BpePreTokenizerKind, PropsGGUF, SENTENCEPIECE_UNDERLINE, bpe_pre_tokenizer_spec,
+        bpe_tokenizer, convert_gguf_metadata_to_hf_tokenizer, gemma4_tokenizer,
+        validate_external_gguf_tokenizer,
     };
     use anyhow::Result;
     use candle_core::quantized::gguf_file::Value;
-    use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
+    use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
     use std::collections::HashMap;
     use tokenizers::Tokenizer;
 

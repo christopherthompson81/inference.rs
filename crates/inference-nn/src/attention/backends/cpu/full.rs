@@ -3,10 +3,10 @@ use rayon::prelude::*;
 use std::sync::OnceLock;
 
 use super::{
-    elem::{fast_exp, ElemOps},
+    CpuAttnCtx, SINGLE_Q_STACK_DV,
+    elem::{ElemOps, fast_exp},
     prefetch::prefetch,
     threading::FLASH_ATTN_POOL,
-    CpuAttnCtx, SINGLE_Q_STACK_DV,
 };
 
 // q rows sharing K/V per pass; bounds the online-softmax state kept in registers/stack
@@ -310,11 +310,11 @@ where
             if !block_scored {
                 score_rows(ctx, q_row, k_head, b_i, bs, lo, hi, ctx.scale, tile_row);
             }
-            if !row_binary[j] {
-                if let Some(mrow) = mask_rows[j] {
-                    for kv in lo..hi {
-                        tile_row[kv - bs] += slope * mrow[kv];
-                    }
+            if !row_binary[j]
+                && let Some(mrow) = mask_rows[j]
+            {
+                for kv in lo..hi {
+                    tile_row[kv - bs] += slope * mrow[kv];
                 }
             }
         }

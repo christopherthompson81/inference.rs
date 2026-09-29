@@ -114,11 +114,11 @@ fn adapter_supported(layout: AdapterLayout<'_>, plan: CudaPlan) -> bool {
 
 #[cfg(feature = "cuda")]
 use candle_core::{
-    cuda::{
-        cudarc::driver::{DevicePtrMut, DeviceRepr},
-        CudaDType,
-    },
     CudaDevice, CudaStorage, Result, Shape, Storage, Tensor, WithDType,
+    cuda::{
+        CudaDType,
+        cudarc::driver::{DevicePtrMut, DeviceRepr},
+    },
 };
 #[cfg(feature = "cuda")]
 use half::{bf16, f16};
@@ -163,20 +163,22 @@ impl CudaLoraElement for f16 {
     }
 
     unsafe fn launch(args: CudaLaunch) -> i32 {
-        super::cuda_ffi::launch_dynamic_lora_f16(
-            args.input as *const f16,
-            args.a as *const f16,
-            args.b as *const f16,
-            args.row_indices as *const u32,
-            args.hidden as *mut f16,
-            args.output as *mut f16,
-            args.input_features,
-            args.output_features,
-            args.rank,
-            args.active_rows,
-            args.scale,
-            args.stream,
-        )
+        unsafe {
+            super::cuda_ffi::launch_dynamic_lora_f16(
+                args.input as *const f16,
+                args.a as *const f16,
+                args.b as *const f16,
+                args.row_indices as *const u32,
+                args.hidden as *mut f16,
+                args.output as *mut f16,
+                args.input_features,
+                args.output_features,
+                args.rank,
+                args.active_rows,
+                args.scale,
+                args.stream,
+            )
+        }
     }
 }
 
@@ -187,20 +189,22 @@ impl CudaLoraElement for bf16 {
     }
 
     unsafe fn launch(args: CudaLaunch) -> i32 {
-        super::cuda_ffi::launch_dynamic_lora_bf16(
-            args.input as *const bf16,
-            args.a as *const bf16,
-            args.b as *const bf16,
-            args.row_indices as *const u32,
-            args.hidden as *mut bf16,
-            args.output as *mut bf16,
-            args.input_features,
-            args.output_features,
-            args.rank,
-            args.active_rows,
-            args.scale,
-            args.stream,
-        )
+        unsafe {
+            super::cuda_ffi::launch_dynamic_lora_bf16(
+                args.input as *const bf16,
+                args.a as *const bf16,
+                args.b as *const bf16,
+                args.row_indices as *const u32,
+                args.hidden as *mut bf16,
+                args.output as *mut bf16,
+                args.input_features,
+                args.output_features,
+                args.rank,
+                args.active_rows,
+                args.scale,
+                args.stream,
+            )
+        }
     }
 }
 
@@ -497,8 +501,8 @@ mod tests {
     #[cfg(feature = "cuda")]
     fn check_cuda_dtype(dtype: DType, device: &candle_core::Device) -> candle_core::Result<()> {
         use super::super::{
-            reference::add_delta_reference, LoraLayerRegistry, LoraLinearSpec, LoraSiteKey,
-            LoraWeights,
+            LoraLayerRegistry, LoraLinearSpec, LoraSiteKey, LoraWeights,
+            reference::add_delta_reference,
         };
 
         let registry = LoraLayerRegistry::new();

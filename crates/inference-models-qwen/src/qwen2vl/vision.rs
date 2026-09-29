@@ -1,12 +1,12 @@
 use crate::attention::AttentionMask;
 use std::sync::Arc;
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{LayerNorm, Linear, Module};
 use inference_quant::{ColumnParallelLayer, QuantMethod, ShardedVarBuilder};
 
 use crate::{
-    layers::{self, layer_norm, Activation, Conv3dConfig, Conv3dNoBias, MatMul},
+    layers::{self, Activation, Conv3dConfig, Conv3dNoBias, MatMul, layer_norm},
     ops::RepeatInterleaveOp,
     utils::unvarbuilder::UnVarBuilder,
 };

@@ -15,8 +15,8 @@ mod ffi;
 
 #[cfg(feature = "cuda")]
 use candle_core::{
-    cuda::cudarc::driver::DevicePtrMut, CudaDevice, CudaStorage, DType, Result, Shape, Storage,
-    Tensor,
+    CudaDevice, CudaStorage, DType, Result, Shape, Storage, Tensor,
+    cuda::cudarc::driver::DevicePtrMut,
 };
 
 #[cfg(feature = "cuda")]
@@ -25,8 +25,8 @@ use crate::utils::{get_cuda_device, slice_ptr};
 #[cfg(feature = "cuda")]
 use half::{bf16, f16};
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::LazyLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "cuda")]
 use std::{collections::HashMap, sync::Mutex};
 
@@ -726,7 +726,7 @@ mod policy_tests {
 #[cfg(all(test, feature = "cuda"))]
 mod tests {
     use super::*;
-    use candle_core::{cuda::cudarc::driver::sys, Device};
+    use candle_core::{Device, cuda::cudarc::driver::sys};
     use std::hint::black_box;
 
     const BENCH_BATCH_SIZES: &[usize] = &[1, 2, 4, 8, 16];

@@ -466,7 +466,7 @@ pub fn metal_rms_norm_residual(
     scale: Option<&Tensor>,
     eps: f32,
 ) -> Result<Option<Tensor>> {
-    use candle_core::{backend::BackendStorage, MetalStorage, Shape, Storage};
+    use candle_core::{MetalStorage, Shape, Storage, backend::BackendStorage};
 
     if input.shape() != residual.shape() {
         return Ok(None);

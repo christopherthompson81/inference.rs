@@ -5,7 +5,7 @@ use half::{bf16, f16};
 
 pub(crate) const HAVE_SCALAR_FP8_KERNELS: bool = cfg!(has_scalar_fp8_kernels);
 
-extern "C" {
+unsafe extern "C" {
     pub(crate) fn launch_fp8_to_f32_kernel(
         d_input: *const F8E4M3,
         d_output: *mut f32,

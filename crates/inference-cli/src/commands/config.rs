@@ -4,8 +4,8 @@ use anyhow::Result;
 use tracing::info;
 
 use inference_api::{
-    engine::{AdapterSpec, ModelSpec, PagedCacheSpec, RuntimeSpec, SkillsSpec},
     Engine, EngineSpec,
+    engine::{AdapterSpec, ModelSpec, PagedCacheSpec, RuntimeSpec, SkillsSpec},
 };
 use inference_core::initialize_logging;
 use inference_server_core::metrics::install_prometheus_recorder;
@@ -13,13 +13,13 @@ use inference_server_core::metrics::install_prometheus_recorder;
 use crate::args::{
     GlobalOptions, MatformerSelection, PagedAttentionOptions, RuntimeOptions, SandboxOptions,
 };
-use crate::commands::run::{interactive_mode, InteractiveConfig};
+use crate::commands::run::{InteractiveConfig, interactive_mode};
 use crate::commands::serve::{
-    adapter_spec_from_env, agentic_spec, apply_agent_mode, convert_to_model_selected,
-    log_agent_runtime, runtime_options_spec, serve_engine, skills_root, validate_agent_options,
-    AgenticInputs,
+    AgenticInputs, adapter_spec_from_env, agentic_spec, apply_agent_mode,
+    convert_to_model_selected, log_agent_runtime, runtime_options_spec, serve_engine, skills_root,
+    validate_agent_options,
 };
-use crate::config::{load_cli_config, CliConfig};
+use crate::config::{CliConfig, load_cli_config};
 
 /// Execute the CLI using a TOML configuration file.
 pub async fn run_from_config(path: std::path::PathBuf) -> Result<()> {

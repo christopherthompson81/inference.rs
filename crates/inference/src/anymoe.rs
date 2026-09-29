@@ -1,11 +1,11 @@
 use inference_core::{AnyMoeConfig, AnyMoeSpec, LoadOverrides};
 
 use crate::{
+    GgufModelBuilder, Model, TextModelBuilder,
     model_builder_trait::{
         build_gguf_pipeline_as, build_model_from_pipeline, build_text_pipeline_as, gguf_selection,
         plain_text_selection,
     },
-    GgufModelBuilder, Model, TextModelBuilder,
 };
 
 enum AnyMoeBase {

@@ -2,7 +2,7 @@ use candle_core::{CpuStorage, CustomOp3, Layout, Result, Shape, Tensor};
 use gemm::Parallelism;
 use rayon::prelude::*;
 
-use crate::cpu_direct::{f32_slices, PhasePlanes};
+use crate::cpu_direct::{PhasePlanes, f32_slices};
 
 /// CPU dense conv as one accumulating GEMM per kernel tap over shifted views of the padded input (no im2col buffer).
 pub fn conv2d(

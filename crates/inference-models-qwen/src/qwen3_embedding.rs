@@ -15,7 +15,7 @@ use crate::{
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::masker::NotACache,
-    layers::{embedding, Activation, CausalMasker, Mlp, RmsNorm, RotaryEmbedding, Sdpa},
+    layers::{Activation, CausalMasker, Mlp, RmsNorm, RotaryEmbedding, Sdpa, embedding},
     model::{EmbeddingModel, IsqModel, NormalLoadingMetadata},
     paged_attention::AttentionImplementation,
     serde_default_fn,
@@ -322,7 +322,7 @@ impl Model {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),

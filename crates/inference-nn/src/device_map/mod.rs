@@ -7,7 +7,7 @@ pub use mappers::{DeviceMapper, DummyDeviceMapper, LayerDeviceMapper, NcclDevice
 pub use mask::DeviceMappedMask;
 
 use std::{
-    collections::{hash_map::Entry, HashMap},
+    collections::{HashMap, hash_map::Entry},
     sync::Arc,
 };
 
@@ -110,7 +110,9 @@ impl DeviceMapMetadata {
             .host_layers
             .unwrap_or(model_layers.saturating_sub(n_device_layers));
         if n_device_layers + n_host_layers != model_layers {
-            candle_core::bail!("Expected the total number of GPU ({n_device_layers}) and host layers ({n_host_layers}) to sum to the number of model hidden layers ({model_layers})");
+            candle_core::bail!(
+                "Expected the total number of GPU ({n_device_layers}) and host layers ({n_host_layers}) to sum to the number of model hidden layers ({model_layers})"
+            );
         }
         once_log_info(format!("Model has {model_layers} repeating layers."));
 
@@ -222,7 +224,9 @@ impl DeviceMapSetting {
                 metadata.build_mapper(model_layers, device, topology, all_devices)
             }
             Self::Auto(_) => {
-                candle_core::bail!(".into_mapper does not work on Auto device map, convert it to a Map with the auto device mapper first")
+                candle_core::bail!(
+                    ".into_mapper does not work on Auto device map, convert it to a Map with the auto device mapper first"
+                )
             }
         }
     }
@@ -496,7 +500,7 @@ impl AutoDeviceMapParams {
 mod tests {
     use candle_core::{Device, DeviceLocation};
 
-    use super::{peer::CudaPeerAccess, per_layer_device, LayerDeviceMapper};
+    use super::{LayerDeviceMapper, peer::CudaPeerAccess, per_layer_device};
 
     #[test]
     fn unmapped_layers_fall_back_and_devices_build_once() -> candle_core::Result<()> {

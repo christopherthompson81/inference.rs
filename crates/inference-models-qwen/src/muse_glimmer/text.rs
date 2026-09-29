@@ -2,19 +2,19 @@ use crate::attention::FlashParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{collections::HashMap, sync::Arc};
 
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use inference_quant::{
-    softcap, ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
+    ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder, softcap,
 };
 
 use super::config::{TextAttentionType, TextConfig};
 use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
-    attention::{flash_backend_supports, AttentionMask, SdpaParams},
+    attention::{AttentionMask, SdpaParams, flash_backend_supports},
     device_map::{DeviceMappedMask, DeviceMapper},
     kv_cache::{EitherCache, KvCache, NormalCache, NormalCacheType},
     layers::{
-        embedding_with_legacy_tied_uqff, CausalMaskConfig, CausalMasker, Mlp, RotaryEmbedding, Sdpa,
+        CausalMaskConfig, CausalMasker, Mlp, RotaryEmbedding, Sdpa, embedding_with_legacy_tied_uqff,
     },
     model::{IsqModel, ModelForwardContext, NormalLoadingMetadata},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
@@ -714,10 +714,12 @@ mod tests {
             (&centered[0], expected_centered),
             (&scaled[0], expected_scaled),
         ] {
-            assert!(actual
-                .iter()
-                .zip(expected)
-                .all(|(actual, expected)| (actual - expected).abs() < 1e-6));
+            assert!(
+                actual
+                    .iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| (actual - expected).abs() < 1e-6)
+            );
         }
         Ok(())
     }

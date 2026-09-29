@@ -13,8 +13,8 @@ use float8::F8E4M3;
 use half::bf16;
 
 use super::tune::{
-    buckets_from_breakpoints, config, cutile_error, tune, Bucket, Prepared, Space, TuneMode,
-    TuneRequest, TunedTable, TUNE_WEIGHT_SETS,
+    Bucket, Prepared, Space, TUNE_WEIGHT_SETS, TuneMode, TuneRequest, TunedTable,
+    buckets_from_breakpoints, config, cutile_error, tune,
 };
 use super::warmup::CutileKernel;
 use super::{catch_cutile_panic, context, device_multiprocessor_count, jit_available};
@@ -554,7 +554,7 @@ impl CutileKernel for Fp8GemmKernel {
 mod tests {
     use candle_core::{DType, Device, Result, Tensor};
 
-    use super::{cutile_fp8_gemm, Fp8GemmConfig, FP8_GEMM_BLOCK_ROWS, POLICY, TUNED};
+    use super::{FP8_GEMM_BLOCK_ROWS, Fp8GemmConfig, POLICY, TUNED, cutile_fp8_gemm};
     use crate::blockwise_fp8::{mma, ops};
     use crate::cutile::tune::{Bucket, Source, Tuned};
 

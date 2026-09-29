@@ -1,5 +1,5 @@
-pub(crate) use crate::model::RopePairing;
 use crate::NormalLoaderType;
+pub(crate) use crate::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
 pub(crate) const NORMAL_LOADER_TYPE_COUNT: usize = 26;
@@ -1161,9 +1161,11 @@ mod tests {
             assert!(!adapter.architectures.is_empty());
             assert!(!adapter.layouts.is_empty());
             for architecture in adapter.architectures {
-                assert!(schema_for(*architecture)
-                    .compatible_loaders
-                    .contains(&adapter.loader));
+                assert!(
+                    schema_for(*architecture)
+                        .compatible_loaders
+                        .contains(&adapter.loader)
+                );
             }
         }
     }

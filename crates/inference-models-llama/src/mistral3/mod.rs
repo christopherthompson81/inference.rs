@@ -11,15 +11,15 @@ use crate::{
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     ops::SplitOp,
     paged_attention::{
-        encoder_cache::{CacheModality, EncoderCacheManager},
         AttentionImplementation, ModelConfigMetadata,
+        encoder_cache::{CacheModality, EncoderCacheManager},
     },
     utils::unvarbuilder::UnVarBuilder,
     vision::multimodal_layout::{
         MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
     },
 };
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 use candle_nn::{Linear, Module};
 pub use config::Mistral3Config;
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
@@ -259,15 +259,18 @@ impl Mistral3Model {
                         .lock()
                         .expect("encoder cache lock poisoned");
                     for (i, &hash) in image_hashes.iter().enumerate() {
-                        if let Some(cached) = guard.get(CacheModality::Image, hash) {
-                            per_image.push(cached[0].clone());
-                        } else {
-                            per_image.push(Tensor::zeros(
-                                1,
-                                candle_core::DType::F32,
-                                pixel_values.device(),
-                            )?);
-                            miss_indices.push(i);
+                        match guard.get(CacheModality::Image, hash) {
+                            Some(cached) => {
+                                per_image.push(cached[0].clone());
+                            }
+                            _ => {
+                                per_image.push(Tensor::zeros(
+                                    1,
+                                    candle_core::DType::F32,
+                                    pixel_values.device(),
+                                )?);
+                                miss_indices.push(i);
+                            }
                         }
                     }
                 }

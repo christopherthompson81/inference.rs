@@ -33,11 +33,11 @@
 //! // - get_weather_tool_with_callback() -> (Tool, Arc<ToolCallback>)
 //! ```
 
-use darling::{ast::NestedMeta, FromMeta};
+use darling::{FromMeta, ast::NestedMeta};
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, Expr, FnArg, ItemFn, Lit, Meta, Pat, PatType, Type};
+use syn::{Expr, FnArg, ItemFn, Lit, Meta, Pat, PatType, Type, parse_macro_input};
 
 /// Arguments for the `#[tool]` attribute
 #[derive(Debug, FromMeta)]
@@ -62,17 +62,16 @@ impl ParamArgs {
 
         for attr in attrs {
             if attr.path().is_ident("description") {
-                if let Meta::NameValue(nv) = &attr.meta {
-                    if let Expr::Lit(expr_lit) = &nv.value {
-                        if let Lit::Str(lit_str) = &expr_lit.lit {
-                            args.description = Some(lit_str.value());
-                        }
-                    }
+                if let Meta::NameValue(nv) = &attr.meta
+                    && let Expr::Lit(expr_lit) = &nv.value
+                    && let Lit::Str(lit_str) = &expr_lit.lit
+                {
+                    args.description = Some(lit_str.value());
                 }
-            } else if attr.path().is_ident("default") {
-                if let Meta::NameValue(nv) = &attr.meta {
-                    args.default = Some(nv.value.clone());
-                }
+            } else if attr.path().is_ident("default")
+                && let Meta::NameValue(nv) = &attr.meta
+            {
+                args.default = Some(nv.value.clone());
             }
         }
 
@@ -157,21 +156,21 @@ fn generate_tool_impl(args: ToolArgs, input_fn: ItemFn) -> syn::Result<TokenStre
     let mut required_params = Vec::new();
 
     for arg in &input_fn.sig.inputs {
-        if let FnArg::Typed(PatType { pat, ty, attrs, .. }) = arg {
-            if let Pat::Ident(pat_ident) = pat.as_ref() {
-                let param_name = &pat_ident.ident;
-                let param_args = ParamArgs::from_attrs(attrs);
+        if let FnArg::Typed(PatType { pat, ty, attrs, .. }) = arg
+            && let Pat::Ident(pat_ident) = pat.as_ref()
+        {
+            let param_name = &pat_ident.ident;
+            let param_args = ParamArgs::from_attrs(attrs);
 
-                param_names.push(param_name.clone());
-                param_types.push(ty.as_ref().clone());
-                param_descriptions.push(param_args.description);
-                param_defaults.push(param_args.default);
+            param_names.push(param_name.clone());
+            param_types.push(ty.as_ref().clone());
+            param_descriptions.push(param_args.description);
+            param_defaults.push(param_args.default);
 
-                // Check if the type is Option<T>
-                let is_optional = is_option_type(ty);
-                if !is_optional && param_defaults.last().unwrap().is_none() {
-                    required_params.push(param_name.to_string());
-                }
+            // Check if the type is Option<T>
+            let is_optional = is_option_type(ty);
+            if !is_optional && param_defaults.last().unwrap().is_none() {
+                required_params.push(param_name.to_string());
             }
         }
     }
@@ -392,26 +391,23 @@ fn generate_tool_impl(args: ToolArgs, input_fn: ItemFn) -> syn::Result<TokenStre
 
 /// Check if a type is Option<T>
 fn is_option_type(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
-            return segment.ident == "Option";
-        }
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+    {
+        return segment.ident == "Option";
     }
     false
 }
 
 /// Extract the inner type from Option<T>, returning None if not an Option
 fn extract_option_inner_type(ty: &Type) -> Option<&Type> {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
-            if segment.ident == "Option" {
-                if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                        return Some(inner);
-                    }
-                }
-            }
-        }
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+        && segment.ident == "Option"
+        && let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+    {
+        return Some(inner);
     }
     None
 }

@@ -3,7 +3,7 @@
 use std::{any::Any, ops::Range, sync::Arc};
 
 use candle_core::{Device, IndexOp, Result, Tensor};
-use image::{imageops::FilterType, DynamicImage, GenericImageView};
+use image::{DynamicImage, GenericImageView, imageops::FilterType};
 use inference_vision::{ApplyTransforms, Normalize, ToTensor, Transforms};
 use tokenizers::Tokenizer;
 
@@ -17,8 +17,8 @@ use crate::media_inputs::{
     },
 };
 use crate::paged_attention::{
-    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
     PagedAttentionMeta,
+    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
 };
 use crate::vision::multimodal_layout::{
     MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
@@ -1054,9 +1054,11 @@ mod tests {
     #[test]
     fn prompt_parser_rejects_malformed_delimiters() {
         let error = parse_prompt_items(&[3, 7, 4], TOKEN_IDS).unwrap_err();
-        assert!(error
-            .downcast_ref::<InputsProcessorValidationError>()
-            .is_some());
+        assert!(
+            error
+                .downcast_ref::<InputsProcessorValidationError>()
+                .is_some()
+        );
         assert!(parse_prompt_items(&[1, 7, 3, 2], TOKEN_IDS).is_err());
         assert!(parse_prompt_items(&[1, 7], TOKEN_IDS).is_err());
         assert!(parse_prompt_items(&[1, 2, 4], TOKEN_IDS).is_err());
@@ -1075,9 +1077,11 @@ mod tests {
         assert_eq!(features[1].length, 3);
         assert_eq!(features[1].item_range, 1..2);
         let error = prompt_features(&items, &[11]).unwrap_err();
-        assert!(error
-            .downcast_ref::<InputsProcessorValidationError>()
-            .is_some());
+        assert!(
+            error
+                .downcast_ref::<InputsProcessorValidationError>()
+                .is_some()
+        );
     }
 
     #[test]
@@ -1104,17 +1108,19 @@ mod tests {
             RequestMultimodalLayout {
                 sequence_id: 1,
                 query: 0..6,
-                items: vec![MultimodalItemLayout::new(
-                    key,
-                    0,
-                    1..5,
-                    MultimodalAttentionPolicy::Causal,
-                    vec![
-                        MultimodalEmbeddingMap::contiguous(2..3, 0, 0).unwrap(),
-                        MultimodalEmbeddingMap::contiguous(4..5, 0, 1).unwrap(),
-                    ],
-                )
-                .unwrap()],
+                items: vec![
+                    MultimodalItemLayout::new(
+                        key,
+                        0,
+                        1..5,
+                        MultimodalAttentionPolicy::Causal,
+                        vec![
+                            MultimodalEmbeddingMap::contiguous(2..3, 0, 0).unwrap(),
+                            MultimodalEmbeddingMap::contiguous(4..5, 0, 1).unwrap(),
+                        ],
+                    )
+                    .unwrap(),
+                ],
             },
             RequestMultimodalLayout {
                 sequence_id: 2,

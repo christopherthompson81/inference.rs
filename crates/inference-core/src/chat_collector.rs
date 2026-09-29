@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
-use image::{codecs::png::PngEncoder, DynamicImage};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use image::{DynamicImage, codecs::png::PngEncoder};
 use serde_json::json;
 
 use crate::{
@@ -205,7 +205,7 @@ fn stamp_file_ids(records: &mut [AgenticToolCallRecord], files: &[File]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{files::FileSource, Usage};
+    use crate::{Usage, files::FileSource};
 
     fn response() -> ChatCompletionResponse {
         ChatCompletionResponse {
@@ -260,28 +260,36 @@ mod tests {
             content: content.to_string(),
         };
         let mut collector = ChatResponseCollector::default();
-        assert!(collector
-            .absorb(progress(AgenticToolCallPhase::Calling(data(""))))
-            .is_none());
-        assert!(collector
-            .absorb(progress(AgenticToolCallPhase::Complete(data("found"))))
-            .is_none());
+        assert!(
+            collector
+                .absorb(progress(AgenticToolCallPhase::Calling(data(""))))
+                .is_none()
+        );
+        assert!(
+            collector
+                .absorb(progress(AgenticToolCallPhase::Complete(data("found"))))
+                .is_none()
+        );
         let source = FileSource {
             tool: "lookup".to_string(),
             round: 1,
             turn: 0,
         };
-        assert!(collector
-            .absorb(Response::File(text_file("file_a", source)))
-            .is_none());
+        assert!(
+            collector
+                .absorb(Response::File(text_file("file_a", source)))
+                .is_none()
+        );
         let elsewhere = FileSource {
             tool: "lookup".to_string(),
             round: 2,
             turn: 0,
         };
-        assert!(collector
-            .absorb(Response::File(text_file("file_b", elsewhere)))
-            .is_none());
+        assert!(
+            collector
+                .absorb(Response::File(text_file("file_b", elsewhere)))
+                .is_none()
+        );
         assert!(matches!(
             collector.absorb(Response::InternalError(anyhow::anyhow!("x").into())),
             Some(Response::InternalError(_))

@@ -3,8 +3,8 @@ use std::collections::HashMap;
 use candle_core::{DType, Device, Result, Tensor};
 use float8::F8E4M3;
 use inference_quant::{
-    linear_no_bias, CheckpointLinearSpec, Nvfp4ActivationMode, Nvfp4Layer, Nvfp4LayerParts,
-    Nvfp4LinearSpec, QuantMethod, QuantizedConfig, Shard, ShardedSafeTensors,
+    CheckpointLinearSpec, Nvfp4ActivationMode, Nvfp4Layer, Nvfp4LayerParts, Nvfp4LinearSpec,
+    QuantMethod, QuantizedConfig, Shard, ShardedSafeTensors, linear_no_bias,
 };
 use serde_json::json;
 
@@ -294,11 +294,13 @@ fn malformed_checkpoint_scales_are_rejected() -> Result<()> {
                 format!("{PREFIX}.{}", spec.scale_names.global_scale),
                 Tensor::new(global, &Device::Cpu)?,
             );
-            assert!(format
-                .load(true, Shard::default(), tensors)
-                .unwrap_err()
-                .to_string()
-                .contains("finite and positive"));
+            assert!(
+                format
+                    .load(true, Shard::default(), tensors)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("finite and positive")
+            );
         }
         let mut tensors = format.tensors(true)?;
         tensors.insert(
@@ -311,21 +313,25 @@ fn malformed_checkpoint_scales_are_rejected() -> Result<()> {
             format!("{PREFIX}.{}", spec.scale_names.global_scale),
             Tensor::ones(3, DType::F32, &Device::Cpu)?,
         );
-        assert!(format
-            .load(true, Shard::default(), tensors)
-            .unwrap_err()
-            .to_string()
-            .contains("weight rows"));
+        assert!(
+            format
+                .load(true, Shard::default(), tensors)
+                .unwrap_err()
+                .to_string()
+                .contains("weight rows")
+        );
         let mut tensors = format.tensors(true)?;
         tensors.insert(
             format!("{PREFIX}.{}", spec.scale_names.activation_scale.unwrap()),
             Tensor::ones(2, DType::F32, &Device::Cpu)?,
         );
-        assert!(format
-            .load(true, Shard::default(), tensors)
-            .unwrap_err()
-            .to_string()
-            .contains("input scale"));
+        assert!(
+            format
+                .load(true, Shard::default(), tensors)
+                .unwrap_err()
+                .to_string()
+                .contains("input scale")
+        );
     }
     Ok(())
 }
@@ -479,33 +485,41 @@ fn layer_parts() -> Result<Nvfp4LayerParts> {
 fn public_parts_reject_inconsistent_activation_and_bias_contracts() -> Result<()> {
     let mut parts = layer_parts()?;
     parts.activation = Nvfp4ActivationMode::None;
-    assert!(Nvfp4Layer::from_parts(parts)
-        .unwrap_err()
-        .to_string()
-        .contains("W4A16"));
+    assert!(
+        Nvfp4Layer::from_parts(parts)
+            .unwrap_err()
+            .to_string()
+            .contains("W4A16")
+    );
     let mut parts = layer_parts()?;
     parts.input_scale = None;
-    assert!(Nvfp4Layer::from_parts(parts)
-        .unwrap_err()
-        .to_string()
-        .contains("W4A4"));
+    assert!(
+        Nvfp4Layer::from_parts(parts)
+            .unwrap_err()
+            .to_string()
+            .contains("W4A4")
+    );
     for bias in [
         Tensor::zeros(OUTPUT_DIM + 1, DType::F32, &Device::Cpu)?,
         Tensor::zeros(OUTPUT_DIM, DType::BF16, &Device::Cpu)?,
     ] {
         let mut parts = layer_parts()?;
         parts.bias = Some(bias);
-        assert!(Nvfp4Layer::from_parts(parts)
-            .unwrap_err()
-            .to_string()
-            .contains("bias"));
+        assert!(
+            Nvfp4Layer::from_parts(parts)
+                .unwrap_err()
+                .to_string()
+                .contains("bias")
+        );
     }
     let mut parts = layer_parts()?;
     parts.dtype = DType::U8;
-    assert!(Nvfp4Layer::from_parts(parts)
-        .unwrap_err()
-        .to_string()
-        .contains("output dtype"));
+    assert!(
+        Nvfp4Layer::from_parts(parts)
+            .unwrap_err()
+            .to_string()
+            .contains("output dtype")
+    );
     Ok(())
 }
 
@@ -519,19 +533,23 @@ fn public_parts_reject_invalid_global_values_and_empty_weights() -> Result<()> {
             } else {
                 parts.global_scales = Tensor::full(value, OUTPUT_DIM, &Device::Cpu)?;
             }
-            assert!(Nvfp4Layer::from_parts(parts)
-                .unwrap_err()
-                .to_string()
-                .contains("finite and positive"));
+            assert!(
+                Nvfp4Layer::from_parts(parts)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("finite and positive")
+            );
         }
     }
     for shape in [(0, INPUT_DIM / 2), (OUTPUT_DIM, 0)] {
         let mut parts = layer_parts()?;
         parts.weight = Tensor::zeros(shape, DType::U8, &Device::Cpu)?;
-        assert!(Nvfp4Layer::from_parts(parts)
-            .unwrap_err()
-            .to_string()
-            .contains("nonzero"));
+        assert!(
+            Nvfp4Layer::from_parts(parts)
+                .unwrap_err()
+                .to_string()
+                .contains("nonzero")
+        );
     }
     Ok(())
 }
@@ -547,10 +565,12 @@ fn expert_stacks_reject_inconsistent_bias_presence() -> Result<()> {
             }
             layers.push(Nvfp4Layer::from_parts(parts)?);
         }
-        assert!(Nvfp4Layer::stack(layers)
-            .unwrap_err()
-            .to_string()
-            .contains("bias presence"));
+        assert!(
+            Nvfp4Layer::stack(layers)
+                .unwrap_err()
+                .to_string()
+                .contains("bias presence")
+        );
     }
     Ok(())
 }
@@ -625,11 +645,13 @@ fn invalid_input_shapes_fail_and_empty_batches_keep_output_shapes() -> Result<()
     let layer = Nvfp4Layer::from_parts(layer_parts()?)?;
     for shape in [vec![], vec![INPUT_DIM], vec![1, 0], vec![1, INPUT_DIM / 2]] {
         let input = Tensor::zeros(shape, DType::F32, &Device::Cpu)?;
-        assert!(layer
-            .forward(&input)
-            .unwrap_err()
-            .to_string()
-            .contains("activation shape"));
+        assert!(
+            layer
+                .forward(&input)
+                .unwrap_err()
+                .to_string()
+                .contains("activation shape")
+        );
     }
     let empty = Tensor::zeros((3, 0, INPUT_DIM), DType::F32, &Device::Cpu)?;
     assert_eq!(layer.forward(&empty)?.dims(), [3, 0, OUTPUT_DIM]);
@@ -642,11 +664,13 @@ fn invalid_input_shapes_fail_and_empty_batches_keep_output_shapes() -> Result<()
     );
     let input = Tensor::zeros((1, INPUT_DIM), DType::F32, &Device::Cpu)?;
     let ids = Tensor::zeros((1, 2), DType::I64, &Device::Cpu)?;
-    assert!(experts
-        .gather_forward(&input, &ids)
-        .unwrap_err()
-        .to_string()
-        .contains("indices must be U32"));
+    assert!(
+        experts
+            .gather_forward(&input, &ids)
+            .unwrap_err()
+            .to_string()
+            .contains("indices must be U32")
+    );
     Ok(())
 }
 
@@ -701,18 +725,20 @@ fn stacked_checkpoint_shards_preserve_expert_scale_boundaries() -> Result<()> {
             format!("{PREFIX}.{}", spec.scale_names.global_scale),
             Tensor::from_vec(format.globals(&globals[..2]), 2, &Device::Cpu)?,
         );
-        assert!(Nvfp4Layer::load_stacked(
-            EXPERTS,
-            INPUT_DIM,
-            OUTPUT_DIM,
-            spec,
-            false,
-            Shard::default(),
-            ShardedSafeTensors::wrap(tensors, DType::F32, Device::Cpu).pp(PREFIX),
-        )
-        .unwrap_err()
-        .to_string()
-        .contains("weight rows"));
+        assert!(
+            Nvfp4Layer::load_stacked(
+                EXPERTS,
+                INPUT_DIM,
+                OUTPUT_DIM,
+                spec,
+                false,
+                Shard::default(),
+                ShardedSafeTensors::wrap(tensors, DType::F32, Device::Cpu).pp(PREFIX),
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("weight rows")
+        );
     }
     Ok(())
 }
@@ -844,17 +870,19 @@ fn packed_nvfp4_falls_back_for_distinct_calibrated_input_scales() -> Result<()> 
             DType::F32,
             device.clone(),
         );
-        assert!(ColumnParallelLayer::new_packed(
-            INPUT_DIM,
-            &[OUTPUT_DIM; 2],
-            &["first", "second"],
-            &Some(format.config(true)?),
-            false,
-            &comm,
-            None,
-            vb,
-        )?
-        .is_none());
+        assert!(
+            ColumnParallelLayer::new_packed(
+                INPUT_DIM,
+                &[OUTPUT_DIM; 2],
+                &["first", "second"],
+                &Some(format.config(true)?),
+                false,
+                &comm,
+                None,
+                vb,
+            )?
+            .is_none()
+        );
     }
     Ok(())
 }
@@ -869,34 +897,38 @@ fn packed_nvfp4_keeps_exclusions_and_output_layout_fallbacks() -> Result<()> {
     let tensors = packed_tensors(Format::ModelOpt, false, [INPUT_SCALE; 2])?;
     let vb = ShardedSafeTensors::wrap(tensors.clone(), DType::F32, device.clone());
     let layout = PackedOutputLayout::from_runtime_to_canonical(vec![1, 0, 2, 3])?;
-    assert!(ColumnParallelLayer::new_packed_with_output_layouts(
-        INPUT_DIM,
-        &[OUTPUT_DIM; 2],
-        &["first", "second"],
-        &[layout.clone(), layout],
-        &Some(Format::ModelOpt.config(false)?),
-        false,
-        &comm,
-        None,
-        vb,
-    )?
-    .is_none());
+    assert!(
+        ColumnParallelLayer::new_packed_with_output_layouts(
+            INPUT_DIM,
+            &[OUTPUT_DIM; 2],
+            &["first", "second"],
+            &[layout.clone(), layout],
+            &Some(Format::ModelOpt.config(false)?),
+            false,
+            &comm,
+            None,
+            vb,
+        )?
+        .is_none()
+    );
     let config = serde_json::from_value::<QuantizedConfig>(json!({
         "quant_method": "modelopt", "quant_algo": "W4A16_NVFP4", "group_size": 16,
         "exclude_modules": ["second"]
     }))
     .map_err(candle_core::Error::msg)?;
-    assert!(ColumnParallelLayer::new_packed(
-        INPUT_DIM,
-        &[OUTPUT_DIM; 2],
-        &["first", "second"],
-        &Some(config),
-        false,
-        &comm,
-        None,
-        ShardedSafeTensors::wrap(tensors, DType::F32, device),
-    )?
-    .is_none());
+    assert!(
+        ColumnParallelLayer::new_packed(
+            INPUT_DIM,
+            &[OUTPUT_DIM; 2],
+            &["first", "second"],
+            &Some(config),
+            false,
+            &comm,
+            None,
+            ShardedSafeTensors::wrap(tensors, DType::F32, device),
+        )?
+        .is_none()
+    );
     Ok(())
 }
 
@@ -912,36 +944,40 @@ fn packed_nvfp4_validates_identity_layout_lengths_and_output_shards() -> Result<
         device,
     );
     let config = Some(Format::ModelOpt.config(false)?);
-    assert!(ColumnParallelLayer::new_packed_with_output_layouts(
-        INPUT_DIM,
-        &[OUTPUT_DIM; 2],
-        &["first", "second"],
-        &[
-            PackedOutputLayout::identity(OUTPUT_DIM / 2),
-            PackedOutputLayout::identity(OUTPUT_DIM)
-        ],
-        &config,
-        false,
-        &comm,
-        None,
-        vb.clone(),
-    )
-    .is_err());
+    assert!(
+        ColumnParallelLayer::new_packed_with_output_layouts(
+            INPUT_DIM,
+            &[OUTPUT_DIM; 2],
+            &["first", "second"],
+            &[
+                PackedOutputLayout::identity(OUTPUT_DIM / 2),
+                PackedOutputLayout::identity(OUTPUT_DIM)
+            ],
+            &config,
+            false,
+            &comm,
+            None,
+            vb.clone(),
+        )
+        .is_err()
+    );
     let input_shard = Shard::Simple {
         dim: 1,
         rank: 0,
         world_size: 2,
     };
-    assert!(ColumnParallelLayer::new_packed(
-        INPUT_DIM,
-        &[OUTPUT_DIM; 2],
-        &["first", "second"],
-        &config,
-        false,
-        &comm,
-        Some(&[input_shard; 2]),
-        vb,
-    )
-    .is_err());
+    assert!(
+        ColumnParallelLayer::new_packed(
+            INPUT_DIM,
+            &[OUTPUT_DIM; 2],
+            &["first", "second"],
+            &config,
+            false,
+            &comm,
+            Some(&[input_shard; 2]),
+            vb,
+        )
+        .is_err()
+    );
     Ok(())
 }

@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, RwLock},
 };
 
-use candle_core::{safetensors, DType, Device, Result, Tensor, Var, D};
+use candle_core::{D, DType, Device, Result, Tensor, Var, safetensors};
 use candle_nn::{Linear, ModuleT, VarMap};
 use inference_quant::{ShardedSafeTensors, ShardedVarBuilder};
 use serde::{Deserialize, Serialize};
@@ -16,7 +16,7 @@ pub use inputs::{AnyMoeTrainingInputRow, AnyMoeTrainingInputs, AnyMoeTrainingRes
 use tracing::info;
 
 use crate::{
-    layers::{linear, Activation, MatMul},
+    layers::{Activation, MatMul, linear},
     ops::{TopKLastDimOp, TopKOutput},
     serde_default_fn,
 };

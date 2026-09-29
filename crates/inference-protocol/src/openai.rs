@@ -3,21 +3,21 @@
 use std::{collections::HashMap, ops::Deref};
 
 use crate::{
+    AgentPermission, CodeExecutionPermission, Tool, ToolType,
     request::{
         ApproximateUserLocation, ImageGenerationResponseFormat, LlguidanceGrammar, ReasoningEffort,
         SearchContextSize, WebSearchContentType, WebSearchFilters, WebSearchImageSettings,
         WebSearchOptions, WebSearchReturnTokenBudget, WebSearchUserLocation,
     },
     tools::{AllowedToolChoice, ToolChoice},
-    AgentPermission, CodeExecutionPermission, Tool, ToolType,
 };
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use either::Either;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::{
-    openapi::{schema::SchemaType, ArrayBuilder, ObjectBuilder, OneOfBuilder, RefOr, Schema, Type},
     PartialSchema, ToSchema,
+    openapi::{ArrayBuilder, ObjectBuilder, OneOfBuilder, RefOr, Schema, Type, schema::SchemaType},
 };
 
 /// Inner content structure for messages that can be either a string or key-value pairs
@@ -212,10 +212,10 @@ impl MessageContent {
                 let mut text_parts = Vec::new();
                 for part in parts {
                     for (key, value) in part {
-                        if key == "text" {
-                            if let Either::Left(text) = &**value {
-                                text_parts.push(text.clone());
-                            }
+                        if key == "text"
+                            && let Either::Left(text) = &**value
+                        {
+                            text_parts.push(text.clone());
                         }
                     }
                 }
@@ -767,7 +767,9 @@ fn validate_web_search_filter_domains(label: &str, domains: &Option<Vec<String>>
         .as_ref()
         .is_some_and(|domains| domains.len() > MAX_WEB_SEARCH_FILTER_DOMAINS)
     {
-        bail!("tools[].type=\"web_search\" filters.{label} may contain at most {MAX_WEB_SEARCH_FILTER_DOMAINS} domains.");
+        bail!(
+            "tools[].type=\"web_search\" filters.{label} may contain at most {MAX_WEB_SEARCH_FILTER_DOMAINS} domains."
+        );
     }
     Ok(())
 }

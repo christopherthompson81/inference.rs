@@ -1,8 +1,8 @@
 use std::{env, hint::black_box, time::Instant};
 
-use candle_core::{cuda::cudarc::driver::sys, DType, Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor, cuda::cudarc::driver::sys};
 use float8::F8E4M3;
-use inference_quant::cutile::{cutile_nvfp4, cutile_nvfp4_gather, Nvfp4GemmArgs};
+use inference_quant::cutile::{Nvfp4GemmArgs, cutile_nvfp4, cutile_nvfp4_gather};
 
 const DEFAULT_ITERATIONS: usize = 20;
 const WARMUP_ITERATIONS: usize = 4;

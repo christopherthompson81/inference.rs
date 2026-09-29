@@ -19,21 +19,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc::{Receiver, Sender};
 use utoipa::{
-    openapi::{schema::SchemaType, ArrayBuilder, ObjectBuilder, OneOfBuilder, RefOr, Schema, Type},
     PartialSchema, ToSchema,
+    openapi::{ArrayBuilder, ObjectBuilder, OneOfBuilder, RefOr, Schema, Type, schema::SchemaType},
 };
 use uuid::Uuid;
 
 use crate::{
-    api_error::{boxed_anyhow, ApiError, ApiErrorKind, ModelErrorMessage},
+    api_error::{ApiError, ApiErrorKind, ModelErrorMessage, boxed_anyhow},
     background_tasks::get_background_task_manager,
     cached_responses::get_response_cache,
     dispatch::{create_response_channel, response_model_id, send_request_with_model},
     engine_chat::{
-        parse_request as parse_chat_request, serialize_agentic_progress,
         ChatCompletionParseContext, DispatchError, ResponseTap,
+        parse_request as parse_chat_request, serialize_agentic_progress,
     },
-    lora_routing::{resolve_lora_adapter_model, DEFAULT_MODEL_ID},
+    lora_routing::{DEFAULT_MODEL_ID, resolve_lora_adapter_model},
     openai::{
         AdapterSelection, ChatCompletionRequest, Message, MessageContent, OpenAiNamespaceEntry,
         OpenAiTool, OpenAiToolSurface, ToolCall,
@@ -386,10 +386,10 @@ impl RequestContext {
                 continue;
             };
             for entry in &namespace.tools {
-                if let OpenAiNamespaceEntry::Function(f) = entry {
-                    if namespace.qualified_name(&f.name) == called {
-                        return (f.name.clone(), Some(namespace.name.clone()));
-                    }
+                if let OpenAiNamespaceEntry::Function(f) = entry
+                    && namespace.qualified_name(&f.name) == called
+                {
+                    return (f.name.clone(), Some(namespace.name.clone()));
                 }
             }
         }

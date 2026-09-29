@@ -10,7 +10,7 @@ mod ffi {
     use candle_core::cuda::cudarc::driver::sys::CUstream;
     use core::ffi::c_void;
 
-    extern "C" {
+    unsafe extern "C" {
         pub fn launch_moe_align(
             topk_ids: *const i32,
             sorted_token_ids: *mut i32,

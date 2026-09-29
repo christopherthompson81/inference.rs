@@ -2,8 +2,8 @@
 mod ffi;
 
 use candle_core::{
-    backend::BackendStorage, CpuStorage, CustomOp3, Layout, Result, Shape, Storage, Tensor,
-    WithDType,
+    CpuStorage, CustomOp3, Layout, Result, Shape, Storage, Tensor, WithDType,
+    backend::BackendStorage,
 };
 use rayon::prelude::*;
 
@@ -884,9 +884,9 @@ fn apply_rotary_qk_inner(
 #[cfg(feature = "cuda")]
 mod cuda {
     use candle_core::{
+        CpuStorage, DType, InplaceOp3, Layout, MetalStorage, Result, Storage, Tensor,
         backend::{BackendDevice, BackendStorage},
         cuda_backend::{CudaDType, CudaStorage, CudaStorageSlice},
-        CpuStorage, DType, InplaceOp3, Layout, MetalStorage, Result, Storage, Tensor,
     };
     use half::{bf16, f16};
     use std::ffi::{c_int, c_long};

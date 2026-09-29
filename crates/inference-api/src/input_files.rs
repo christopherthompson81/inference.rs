@@ -1,9 +1,9 @@
 use anyhow::Context;
-use base64::{engine::general_purpose::STANDARD, Engine};
-use inference_core::{File, FileSource, FILE_PURPOSE_USER_DATA};
+use base64::{Engine, engine::general_purpose::STANDARD};
+use inference_core::{FILE_PURPOSE_USER_DATA, File, FileSource};
 
 use crate::media_source::{
-    data_url_mime, decode_data_url_limited, fetch_remote_limited, MAX_MEDIA_BYTES,
+    MAX_MEDIA_BYTES, data_url_mime, decode_data_url_limited, fetch_remote_limited,
 };
 use crate::types::SharedInferenceRsState;
 

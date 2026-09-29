@@ -1,9 +1,11 @@
 use super::isq::{UqffFullSer, UqffWriteConfig, WeightLoadingMode, WeightLoadingState};
 use super::{
-    get_model_paths, AnyMoePipelineMixin, CacheManagerMixin, EitherCache, ForwardInputsResult,
-    GeneralMetadata, IsqPipelineMixin, Loader, MetadataMixin, ModelCategory, ModelKind, ModelPaths,
-    PreProcessingMixin, TokenSource,
+    AnyMoePipelineMixin, CacheManagerMixin, EitherCache, ForwardInputsResult, GeneralMetadata,
+    IsqPipelineMixin, Loader, MetadataMixin, ModelCategory, ModelKind, ModelPaths,
+    PreProcessingMixin, TokenSource, get_model_paths,
 };
+use crate::Modalities;
+use crate::SupportedModality;
 use crate::attention::ATTENTION_CHUNK_SIZE;
 use crate::device_map::DeviceMapper;
 use crate::distributed;
@@ -13,24 +15,22 @@ use crate::embedding_normal_model_loader;
 use crate::embedding_normal_model_loader_sharded;
 use crate::get_embedding_paths;
 use crate::paged_attention::AttentionImplementation;
-use crate::pipeline::sampling::sample_and_add_toks;
-use crate::pipeline::tokenizer::get_tokenizer;
 use crate::pipeline::EmbeddingLoaderType;
 use crate::pipeline::EmbeddingModel;
 use crate::pipeline::EmbeddingModelLoader;
+use crate::pipeline::sampling::sample_and_add_toks;
+use crate::pipeline::tokenizer::get_tokenizer;
 use crate::pipeline::{AutoEmbeddingLoader, EmbeddingModulePaths};
 use crate::pipeline::{ChatTemplate, EmbeddingModelPaths, IsqOrganization, Processor};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::{
-    progress::{new_multi_progress, ProgressScopeGuard},
+    progress::{ProgressScopeGuard, new_multi_progress},
     varbuilder_utils::from_mmaped_safetensors,
 };
-use crate::Modalities;
-use crate::SupportedModality;
 use crate::{
-    get_uqff_paths, DeviceMapSetting, PagedAttentionConfig, Pipeline, Topology, TryIntoDType,
-    GLOBAL_HF_CACHE,
+    DeviceMapSetting, GLOBAL_HF_CACHE, PagedAttentionConfig, Pipeline, Topology, TryIntoDType,
+    get_uqff_paths,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -38,9 +38,9 @@ use candle_core::{Device, Tensor};
 use candle_nn::{Linear, Module};
 use hf_hub::Cache;
 use hf_hub::{Repo, RepoType};
+use inference_quant::IsqType;
 use inference_quant::log::once_log_info;
 use inference_quant::safetensors::MmapedSafetensors;
-use inference_quant::IsqType;
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
 use std::path::{Path, PathBuf};
@@ -409,10 +409,9 @@ impl Loader for EmbeddingLoader {
                     mapped_loader: &*self.inner,
                     weights: distributed::DistributedWeightSource::Paths(paths),
                 })?;
-            let sharded_vb = if let Some(reader) = uqff_reader.clone() {
-                sharded_vb.with_uqff_reader(reader)
-            } else {
-                sharded_vb
+            let sharded_vb = match uqff_reader.clone() {
+                Some(reader) => sharded_vb.with_uqff_reader(reader),
+                _ => sharded_vb,
             };
 
             // Special case for where things can be more optimially loaded.

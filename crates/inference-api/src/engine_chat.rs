@@ -6,29 +6,29 @@ use anyhow::{Context, Result};
 use either::Either;
 use indexmap::IndexMap;
 use inference_core::{
-    encode_agentic_tool_images, resolve_reasoning_controls, AgentPermission,
-    AgentToolApprovalHandler, AgentToolApprovalNotifier, AgenticToolCallData, AgenticToolCallPhase,
-    ChatCompletionChunkResponse, ChatResponseCollector, Constraint, InferenceRs, MessageContent,
-    ModelCategory, NormalRequest, ReasoningEffort, Request, RequestMessage, Response,
-    SamplingParams,
+    AgentPermission, AgentToolApprovalHandler, AgentToolApprovalNotifier, AgenticToolCallData,
+    AgenticToolCallPhase, ChatCompletionChunkResponse, ChatResponseCollector, Constraint,
+    InferenceRs, MessageContent, ModelCategory, NormalRequest, ReasoningEffort, Request,
+    RequestMessage, Response, SamplingParams, encode_agentic_tool_images,
+    resolve_reasoning_controls,
 };
 use itertools::Itertools;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
     agentic::AgenticDefaults,
-    api_error::{boxed_anyhow, ApiError, ApiErrorKind, JsonError, ModelErrorMessage},
+    api_error::{ApiError, ApiErrorKind, JsonError, ModelErrorMessage, boxed_anyhow},
     dispatch::{
         apply_model_override, create_response_channel, response_model_id, send_request_with_model,
     },
-    input_files::{resolve_input_file, InputFileSpec},
-    lora_routing::{resolve_lora_adapter_model, DEFAULT_MODEL_ID},
+    input_files::{InputFileSpec, resolve_input_file},
+    lora_routing::{DEFAULT_MODEL_ID, resolve_lora_adapter_model},
     media_source::MediaAttachments,
     openai::{
-        normalize_chat_completion_tools, normalize_responses_tools, validate_openai_tool_choice,
         ChatCompletionRequest, Grammar, JsonSchemaResponseFormat, Message, MessageInnerContent,
-        OpenAiToolSurface, ResponseFormat,
+        OpenAiToolSurface, ResponseFormat, normalize_chat_completion_tools,
+        normalize_responses_tools, validate_openai_tool_choice,
     },
     sampling::{convert_stop_tokens, get_dry_sampling_params},
     skill_store::SkillStore,
@@ -37,8 +37,7 @@ use crate::{
     video::parse_video_url_for_server,
 };
 
-const ASK_REQUIRES_STREAMING: &str =
-    "agent_permission \"ask\" requires stream=true, so approval requests can be delivered and answered.";
+const ASK_REQUIRES_STREAMING: &str = "agent_permission \"ask\" requires stream=true, so approval requests can be delivered and answered.";
 
 pub fn serialize_agentic_progress(
     round: usize,
@@ -404,9 +403,15 @@ pub async fn parse_request(
                                 Some(MessageInnerContent(Either::Left(x))) if x == "text" => {
                                     items.push(ContentPart::Text {
                                         text: image_message
-                                            .get("text").as_ref()
-                                            .context("Text sub-content must have `text` key.")?.as_ref()
-                                            .left().context("Text sub-content `text` key must be a string.")?.clone(),
+                                            .get("text")
+                                            .as_ref()
+                                            .context("Text sub-content must have `text` key.")?
+                                            .as_ref()
+                                            .left()
+                                            .context(
+                                                "Text sub-content `text` key must be a string.",
+                                            )?
+                                            .clone(),
                                     });
                                 }
                                 Some(MessageInnerContent(Either::Left(x))) if x == "image_url" => {
@@ -458,7 +463,9 @@ pub async fn parse_request(
                                         .context("File sub-content must have `file` key.")?
                                         .as_ref()
                                         .right()
-                                        .context("File sub-content `file` key must be an object.")?;
+                                        .context(
+                                            "File sub-content `file` key must be an object.",
+                                        )?;
                                     let spec = InputFileSpec {
                                         file_id: file.get("file_id").cloned(),
                                         file_data: file.get("file_data").cloned(),
@@ -466,7 +473,10 @@ pub async fn parse_request(
                                         filename: file.get("filename").cloned(),
                                     };
                                     if spec.file_url.is_some()
-                                        && matches!(tool_surface, OpenAiToolSurface::ChatCompletions)
+                                        && matches!(
+                                            tool_surface,
+                                            OpenAiToolSurface::ChatCompletions
+                                        )
                                     {
                                         anyhow::bail!(
                                             "Chat Completions file content does not support `file_url`; use Responses `input_file`."
@@ -474,7 +484,9 @@ pub async fn parse_request(
                                     }
                                     items.push(ContentPart::File { spec });
                                 }
-                                _ => anyhow::bail!("Expected array content sub-content to be one of `text`, `image_url`, `audio_url`, `video_url`, or `file`.")
+                                _ => anyhow::bail!(
+                                    "Expected array content sub-content to be one of `text`, `image_url`, `audio_url`, `video_url`, or `file`."
+                                ),
                             }
                         }
 
@@ -528,38 +540,40 @@ pub async fn parse_request(
                             || !audio_urls_iter.is_empty()
                             || !video_urls_iter.is_empty()
                         {
-                            if let Ok(ModelCategory::Multimodal { prefixer, .. }) =
-                                state.get_model_category(None)
-                            {
-                                let mut prefixed = text_content;
+                            match state.get_model_category(None) {
+                                Ok(ModelCategory::Multimodal { prefixer, .. }) => {
+                                    let mut prefixed = text_content;
 
-                                // Apply image prefixer
-                                if !image_urls_iter.is_empty() {
-                                    let start_idx = image_urls.len();
-                                    let image_indices: Vec<usize> =
-                                        (start_idx..start_idx + image_urls_iter.len()).collect();
-                                    prefixed = prefixer.prefix_image(image_indices, &prefixed);
+                                    // Apply image prefixer
+                                    if !image_urls_iter.is_empty() {
+                                        let start_idx = image_urls.len();
+                                        let image_indices: Vec<usize> = (start_idx
+                                            ..start_idx + image_urls_iter.len())
+                                            .collect();
+                                        prefixed = prefixer.prefix_image(image_indices, &prefixed);
+                                    }
+
+                                    // Apply audio prefixer
+                                    if !audio_urls_iter.is_empty() {
+                                        let start_idx = audio_urls.len();
+                                        let audio_indices: Vec<usize> = (start_idx
+                                            ..start_idx + audio_urls_iter.len())
+                                            .collect();
+                                        prefixed = prefixer.prefix_audio(audio_indices, &prefixed);
+                                    }
+
+                                    // Apply video prefixer
+                                    if !video_urls_iter.is_empty() {
+                                        let start_idx = video_urls.len();
+                                        let video_indices: Vec<usize> = (start_idx
+                                            ..start_idx + video_urls_iter.len())
+                                            .collect();
+                                        prefixed = prefixer.prefix_video(video_indices, &prefixed);
+                                    }
+
+                                    prefixed
                                 }
-
-                                // Apply audio prefixer
-                                if !audio_urls_iter.is_empty() {
-                                    let start_idx = audio_urls.len();
-                                    let audio_indices: Vec<usize> =
-                                        (start_idx..start_idx + audio_urls_iter.len()).collect();
-                                    prefixed = prefixer.prefix_audio(audio_indices, &prefixed);
-                                }
-
-                                // Apply video prefixer
-                                if !video_urls_iter.is_empty() {
-                                    let start_idx = video_urls.len();
-                                    let video_indices: Vec<usize> =
-                                        (start_idx..start_idx + video_urls_iter.len()).collect();
-                                    prefixed = prefixer.prefix_video(video_indices, &prefixed);
-                                }
-
-                                prefixed
-                            } else {
-                                text_content
+                                _ => text_content,
                             }
                         } else {
                             text_content
@@ -684,7 +698,9 @@ pub async fn parse_request(
     let is_streaming = oairequest.stream.unwrap_or(false);
 
     if oairequest.grammar.is_some() && oairequest.response_format.is_some() {
-        anyhow::bail!("Request `grammar` and `response_format` were both provided but are mutually exclusive.")
+        anyhow::bail!(
+            "Request `grammar` and `response_format` were both provided but are mutually exclusive."
+        )
     }
 
     let constraint = match oairequest.grammar {

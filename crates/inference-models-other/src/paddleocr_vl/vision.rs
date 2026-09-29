@@ -4,9 +4,9 @@
 use super::config::VisionConfig;
 use crate::attention::FlashParams;
 use crate::attention::{AttentionMask, SdpaParams};
-use crate::layers::{layer_norm, linear, Sdpa};
+use crate::layers::{Sdpa, layer_norm, linear};
 use crate::utils::unvarbuilder::UnVarBuilder;
-use candle_core::{Device, Result, Tensor, D};
+use candle_core::{D, Device, Result, Tensor};
 use candle_nn::{LayerNorm, Linear, Module};
 use inference_quant::ShardedVarBuilder;
 

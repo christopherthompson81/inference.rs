@@ -3,23 +3,23 @@ mod cuda_bench {
     use std::{env, sync::Arc, time::Instant};
 
     use candle_core::{
-        cuda::cudarc::driver::{sys, DevicePtr, DevicePtrMut},
         DType, Device, Result, Storage, Tensor,
+        cuda::cudarc::driver::{DevicePtr, DevicePtrMut, sys},
     };
     use half::bf16;
     #[cfg(feature = "cutile")]
     use inference_quant::cutile::{
-        try_cutile_routed_lora, try_cutile_routed_lora_no_sort, CutileRoutedLoraLaunch,
-        CutileRoutedLoraStatus,
+        CutileRoutedLoraLaunch, CutileRoutedLoraStatus, try_cutile_routed_lora,
+        try_cutile_routed_lora_no_sort,
     };
     use inference_quant::{
-        add_expert_delta_reference, launch_routed_lora_direct, launch_routed_lora_grouped,
-        with_lora_execution, LoraExecution, LoraExecutionArena, LoraExpertDelta,
-        LoraExpertExecution, LoraExpertInputMode, LoraExpertProjection, LoraExpertProjectionNames,
+        LoraExecution, LoraExecutionArena, LoraExpertDelta, LoraExpertExecution,
+        LoraExpertInputMode, LoraExpertProjection, LoraExpertProjectionNames,
         LoraExpertProjectionWeights, LoraExpertSiteSpec, LoraExpertWeights, LoraLayerRegistry,
         LoraSiteKey, RoutedLoraAdapterWeight, RoutedLoraCudaMetadata, RoutedLoraCudaWeightTable,
         RoutedLoraDirectLaunch, RoutedLoraGroupedLaunch, RoutedLoraInputMode,
-        RoutedLoraMetadataLayout, RoutedLoraProjectionLayout, Shard,
+        RoutedLoraMetadataLayout, RoutedLoraProjectionLayout, Shard, add_expert_delta_reference,
+        launch_routed_lora_direct, launch_routed_lora_grouped, with_lora_execution,
     };
 
     const NUM_EXPERTS: usize = 128;

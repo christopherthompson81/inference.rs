@@ -4,8 +4,8 @@
 pub use crate::model::BlockDenoisingProgressEmitter;
 use {
     crate::{
-        model::BlockDenoisingProgressSink, response::BlockDenoisingProgress, sequence::Sequence,
-        Response,
+        Response, model::BlockDenoisingProgressSink, response::BlockDenoisingProgress,
+        sequence::Sequence,
     },
     std::sync::Arc,
     tokenizers::Tokenizer,

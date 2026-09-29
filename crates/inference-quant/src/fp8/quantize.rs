@@ -60,15 +60,15 @@ impl FP8Linear {
 mod tests {
     #[cfg(not(feature = "metal"))]
     use candle_core::{
-        quantized::{GgmlDType, QTensor},
         DType, Device, Result, Tensor,
+        quantized::{GgmlDType, QTensor},
     };
 
     #[cfg(not(feature = "metal"))]
-    use crate::{fp8::FP8Linear, IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard};
+    use crate::{IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, fp8::FP8Linear};
 
     #[cfg(not(feature = "metal"))]
-    use std::sync::{atomic::AtomicUsize, Arc};
+    use std::sync::{Arc, atomic::AtomicUsize};
 
     #[cfg(not(feature = "metal"))]
     use super::QuantizationResult;
@@ -181,7 +181,7 @@ mod tests {
     #[test]
     #[cfg(feature = "cuda")]
     fn test_cublaslt_matmul() -> Result<()> {
-        use crate::cublaslt::{maybe_init_cublas_lt_wrapper, CUBLASLT_CONTROLLER};
+        use crate::cublaslt::{CUBLASLT_CONTROLLER, maybe_init_cublas_lt_wrapper};
         let dev = Device::new_cuda(0)?;
         if !crate::fp8_tensor_cores(&dev) {
             eprintln!("SKIP: FP8 tensor cores need sm_89+");
@@ -243,7 +243,7 @@ mod tests {
 mod metal_tests {
     use candle_core::{DType, Device, Result, Tensor};
 
-    use crate::{fp8::FP8Linear, QuantMethod, QuantMethodConfig};
+    use crate::{QuantMethod, QuantMethodConfig, fp8::FP8Linear};
 
     #[test]
     fn test_metal_embedding_gathers_multiple_rows_before_dequantizing() -> Result<()> {

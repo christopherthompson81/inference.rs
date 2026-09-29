@@ -6,14 +6,14 @@ use std::sync::Arc;
 use candle_core::{Result, Tensor};
 use rand_isaac::Isaac64Rng;
 
+use crate::IntervalLogger;
+use crate::pipeline::Pipeline;
 use crate::pipeline::sampling::{
     cache_finished_sequence, finish_or_add_toks_to_seq, sample_sequence,
 };
 use crate::pipeline::text_models_inputs_processor::InputMetadata;
-use crate::pipeline::Pipeline;
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::{Sequence, SequenceState};
-use crate::IntervalLogger;
 
 use super::cache::{SpeculativeCacheAccess, SpeculativeCacheGuard, SpeculativeCacheOutcome};
 use super::proposer::{
@@ -21,15 +21,15 @@ use super::proposer::{
     SpeculativeProposeBatchCtx, SpeculativeProposePreparation, SpeculativeProposePrepareCtx,
     SpeculativeTokens,
 };
-use super::staging::{staged_batch_state, StagedBatchState};
+use super::staging::{StagedBatchState, staged_batch_state};
+use super::verifier::{
+    DeviceVerification, VerificationInput, VerificationOutcome, finish_verified_step,
+};
 #[cfg(feature = "cuda")]
 use super::verifier::{
+    GreedyDeviceVerifyInput, SparseRejectionVerifyInput,
     complete_sparse_rejection_device_verify_batch, greedy_device_verify_batch,
     sparse_rejection_device_verify_batch, try_submit_sparse_rejection_device_verify_batch,
-    GreedyDeviceVerifyInput, SparseRejectionVerifyInput,
-};
-use super::verifier::{
-    finish_verified_step, DeviceVerification, VerificationInput, VerificationOutcome,
 };
 use super::{SpeculativeBatchObservation, SpeculativeBatchPlan};
 
@@ -804,8 +804,8 @@ mod tests {
     use candle_core::{Device, Tensor};
 
     use super::{
-        commit_then_publish_verified_batch, complete_after_preparation,
-        materialize_prepared_proposals, PreparedVerification,
+        PreparedVerification, commit_then_publish_verified_batch, complete_after_preparation,
+        materialize_prepared_proposals,
     };
     use crate::speculative::SpeculativeTokens;
 

@@ -644,7 +644,7 @@ impl<T: CacheManagerMixin + MetadataMixin + ?Sized> CacheManager<T> for HybridCa
                     } else {
                         seq.normal_cache()
                     };
-                    if let Some(Some(ref kv)) = seq_cache.get(layer_idx) {
+                    if let Some(Some(kv)) = seq_cache.get(layer_idx) {
                         if template_cache.is_none() {
                             template_cache = Some(kv.clone());
                         }
@@ -707,52 +707,49 @@ impl<T: CacheManagerMixin + MetadataMixin + ?Sized> CacheManager<T> for HybridCa
         for layer_idx in 0..num_layers {
             let layer_cache = hybrid_cache.caches.get(layer_idx).unwrap();
 
-            if let HybridLayerCache::Attention(kv_cache) = layer_cache {
-                if let (Ok(Some(k)), Ok(Some(v))) = (kv_cache.k(), kv_cache.v()) {
-                    let k_chunks = k.chunk(num_seqs, 0).unwrap();
-                    let v_chunks = v.chunk(num_seqs, 0).unwrap();
+            if let HybridLayerCache::Attention(kv_cache) = layer_cache
+                && let (Ok(Some(k)), Ok(Some(v))) = (kv_cache.k(), kv_cache.v())
+            {
+                let k_chunks = k.chunk(num_seqs, 0).unwrap();
+                let v_chunks = v.chunk(num_seqs, 0).unwrap();
 
-                    for (seq_idx, seq) in seqs.iter_mut().enumerate() {
-                        let seq_k = k_chunks.get(seq_idx).unwrap().clone();
-                        let seq_v = v_chunks.get(seq_idx).unwrap().clone();
+                for (seq_idx, seq) in seqs.iter_mut().enumerate() {
+                    let seq_k = k_chunks.get(seq_idx).unwrap().clone();
+                    let seq_v = v_chunks.get(seq_idx).unwrap().clone();
 
-                        let seq_cache = if modify_draft_cache {
-                            seq.normal_draft_cache()
-                        } else {
-                            seq.normal_cache()
-                        };
+                    let seq_cache = if modify_draft_cache {
+                        seq.normal_draft_cache()
+                    } else {
+                        seq.normal_cache()
+                    };
 
-                        // Initialize cache if needed
-                        if seq_cache.get(layer_idx).is_none() || seq_cache[layer_idx].is_none() {
-                            while seq_cache.len() <= layer_idx {
-                                seq_cache.push(None);
-                            }
-                            seq_cache[layer_idx] = Some(kv_cache.clone());
+                    // Initialize cache if needed
+                    if seq_cache.get(layer_idx).is_none() || seq_cache[layer_idx].is_none() {
+                        while seq_cache.len() <= layer_idx {
+                            seq_cache.push(None);
                         }
+                        seq_cache[layer_idx] = Some(kv_cache.clone());
+                    }
 
-                        if let Some(ref mut seq_kv) = seq_cache[layer_idx] {
-                            match (kv_cache, seq_kv) {
-                                (KvCache::Normal { k: src_k, .. }, KvCache::Normal { k, v }) => {
-                                    k.all_data = Some(seq_k);
-                                    k.current_seq_len = src_k.current_seq_len;
-                                    k.capacity_seq_len = src_k.current_seq_len;
-                                    v.all_data = Some(seq_v);
-                                    v.current_seq_len = src_k.current_seq_len;
-                                    v.capacity_seq_len = src_k.current_seq_len;
-                                }
-                                (
-                                    KvCache::Rotating { k: src_k, .. },
-                                    KvCache::Rotating { k, v },
-                                ) => {
-                                    k.all_data = Some(seq_k);
-                                    k.current_seq_len = src_k.current_seq_len;
-                                    k.capacity_seq_len = src_k.current_seq_len;
-                                    v.all_data = Some(seq_v);
-                                    v.current_seq_len = src_k.current_seq_len;
-                                    v.capacity_seq_len = src_k.current_seq_len;
-                                }
-                                _ => {}
+                    if let Some(ref mut seq_kv) = seq_cache[layer_idx] {
+                        match (kv_cache, seq_kv) {
+                            (KvCache::Normal { k: src_k, .. }, KvCache::Normal { k, v }) => {
+                                k.all_data = Some(seq_k);
+                                k.current_seq_len = src_k.current_seq_len;
+                                k.capacity_seq_len = src_k.current_seq_len;
+                                v.all_data = Some(seq_v);
+                                v.current_seq_len = src_k.current_seq_len;
+                                v.capacity_seq_len = src_k.current_seq_len;
                             }
+                            (KvCache::Rotating { k: src_k, .. }, KvCache::Rotating { k, v }) => {
+                                k.all_data = Some(seq_k);
+                                k.current_seq_len = src_k.current_seq_len;
+                                k.capacity_seq_len = src_k.current_seq_len;
+                                v.all_data = Some(seq_v);
+                                v.current_seq_len = src_k.current_seq_len;
+                                v.capacity_seq_len = src_k.current_seq_len;
+                            }
+                            _ => {}
                         }
                     }
                 }

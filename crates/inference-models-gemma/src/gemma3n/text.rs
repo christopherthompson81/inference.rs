@@ -3,30 +3,30 @@ use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{collections::HashMap, sync::Arc};
 
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, IndexOp, Module, Result, Tensor};
 use candle_nn::Linear;
 use inference_quant::{
-    apply_dynamic_lora_delta, is_dynamic_lora_site_active, register_dynamic_lora_site, softcap,
     ColumnParallelLayer, LoraLinearSpec, LoraSiteHandle, QuantMethod, ReplicatedLayer,
-    RowParallelLayer, ShardedVarBuilder,
+    RowParallelLayer, ShardedVarBuilder, apply_dynamic_lora_delta, is_dynamic_lora_site_active,
+    register_dynamic_lora_site, softcap,
 };
 
 use crate::kv_cache::EitherCache;
 use crate::kv_cache::KvCache;
 use crate::kv_cache::NormalCache;
 use crate::kv_cache::NormalCacheType;
-use crate::model::extract_logits;
 use crate::model::IsqModel;
 use crate::model::ModelForwardContext;
 use crate::model::MultimodalModel;
 use crate::model::NormalLoadingMetadata;
+use crate::model::extract_logits;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
-        self, dense_embedding, embedding, embedding_with_legacy_tied_uqff, Activation,
-        CausalMasker, Gemma3RotaryEmbedding, RmsNorm, RotaryEmbedding, ScaledEmbedding, Sdpa,
+        self, Activation, CausalMasker, Gemma3RotaryEmbedding, RmsNorm, RotaryEmbedding,
+        ScaledEmbedding, Sdpa, dense_embedding, embedding, embedding_with_legacy_tied_uqff,
     },
     matformer::MatformerSliceConfig,
     paged_attention::{
@@ -1314,7 +1314,7 @@ impl TextModel {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),
@@ -2059,27 +2059,27 @@ mod tests {
         collections::HashMap,
         io::Write,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
     };
 
     use candle_core::{
-        quantized::{gguf_file, GgmlDType, QTensor},
         DType, Device, Tensor,
+        quantized::{GgmlDType, QTensor, gguf_file},
     };
     use candle_nn::Linear;
     use inference_quant::{
-        create_isq_executor, GgufArchive, GgufBindingMap, GgufTensorBinding, GgufWeightSource,
-        ImmediateIsqConfig, IsqCaptureMode, IsqExecutorConfig, QuantMethod, QuantMethodConfig,
-        QuantizedWeightSource, Shard, ShardedSafeTensors, UnquantLinear,
+        GgufArchive, GgufBindingMap, GgufTensorBinding, GgufWeightSource, ImmediateIsqConfig,
+        IsqCaptureMode, IsqExecutorConfig, QuantMethod, QuantMethodConfig, QuantizedWeightSource,
+        Shard, ShardedSafeTensors, UnquantLinear, create_isq_executor,
     };
     use tempfile::NamedTempFile;
 
     use super::{
-        is_paged_decode_forward, kv_shared_layer_index_for_layout, load_per_layer_token_embedding,
-        sliding_decode_kv_window, KvCacheTopology, PagedAttentionInputMetadata,
-        PerLayerTokenEmbedding, PrefillQuerySelection,
+        KvCacheTopology, PagedAttentionInputMetadata, PerLayerTokenEmbedding,
+        PrefillQuerySelection, is_paged_decode_forward, kv_shared_layer_index_for_layout,
+        load_per_layer_token_embedding, sliding_decode_kv_window,
     };
 
     #[derive(Debug)]

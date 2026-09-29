@@ -17,35 +17,35 @@ mod tune;
 mod warmup;
 
 pub use fp8_gemm::{
-    cutile_fp8_gemm, fp8_gemm_supported, register_fp8_gemm_shape, FP8_GEMM_BLOCK_ROWS,
+    FP8_GEMM_BLOCK_ROWS, cutile_fp8_gemm, fp8_gemm_supported, register_fp8_gemm_shape,
+};
+pub use fp8_w8a8::{
+    CutileFp8W8A8Args, Fp8W8A8Scheme, cutile_fp8_w8a8, fp8_w8a8_supported, register_fp8_w8a8_shape,
 };
 pub use fp8_w8a16::{cutile_fp8_w8a16, fp8_w8a16_supported, register_fp8_w8a16_shape};
-pub use fp8_w8a8::{
-    cutile_fp8_w8a8, fp8_w8a8_supported, register_fp8_w8a8_shape, CutileFp8W8A8Args, Fp8W8A8Scheme,
-};
 pub use fused_moe::{cutile_grouped_gemm, register_moe_shape};
 pub use fused_moe_fp8::{
-    cutile_fused_moe_fp8, fp8_moe_supported, register_moe_fp8_shape, CutileFp8MoeWeights,
-    FP8_MOE_GROUP,
+    CutileFp8MoeWeights, FP8_MOE_GROUP, cutile_fused_moe_fp8, fp8_moe_supported,
+    register_moe_fp8_shape,
 };
 pub use gdn_prefill::{
-    cutile_gdn_prefill, gdn_prefill_supported, GdnPrefillArgs, GDN_PREFILL_CHUNK,
-    GDN_PREFILL_HEAD_DIM,
+    GDN_PREFILL_CHUNK, GDN_PREFILL_HEAD_DIM, GdnPrefillArgs, cutile_gdn_prefill,
+    gdn_prefill_supported,
 };
 pub use nvfp4::{
-    cutile_nvfp4, cutile_nvfp4_gather, cutile_nvfp4_prequantized, cutile_nvfp4_quantize,
-    nvfp4_supported, register_nvfp4_routing, register_nvfp4_shape, Nvfp4GemmArgs,
+    Nvfp4GemmArgs, cutile_nvfp4, cutile_nvfp4_gather, cutile_nvfp4_prequantized,
+    cutile_nvfp4_quantize, nvfp4_supported, register_nvfp4_routing, register_nvfp4_shape,
 };
-pub(crate) use nvfp4_glu::{launch as cutile_nvfp4_glu, GluQuantArgs};
+pub(crate) use nvfp4_glu::{GluQuantArgs, launch as cutile_nvfp4_glu};
 pub use routed_lora::{
+    CUTILE_ROUTED_LORA_MAX_RANK, CutileRoutedLoraConfig, CutileRoutedLoraDeviceKey,
+    CutileRoutedLoraLaunch, CutileRoutedLoraOptimizationHint, CutileRoutedLoraShapeKey,
+    CutileRoutedLoraStatus, CutileRoutedLoraTuningKey, CutileRoutedLoraUnsupported,
     cached_cutile_routed_lora_config, cutile_routed_lora_candidate_configs,
     selected_cutile_routed_lora_config, set_cutile_routed_lora_tuned_config,
-    try_cutile_routed_lora, try_cutile_routed_lora_no_sort, CutileRoutedLoraConfig,
-    CutileRoutedLoraDeviceKey, CutileRoutedLoraLaunch, CutileRoutedLoraOptimizationHint,
-    CutileRoutedLoraShapeKey, CutileRoutedLoraStatus, CutileRoutedLoraTuningKey,
-    CutileRoutedLoraUnsupported, CUTILE_ROUTED_LORA_MAX_RANK,
+    try_cutile_routed_lora, try_cutile_routed_lora_no_sort,
 };
-pub use tune::{TuneMode, TUNE_CACHE_ENV, TUNE_MODE_ENV};
+pub use tune::{TUNE_CACHE_ENV, TUNE_MODE_ENV, TuneMode};
 pub use warmup::warmup_moe_kernels;
 
 fn panic_message(payload: Box<dyn std::any::Any + Send>) -> String {

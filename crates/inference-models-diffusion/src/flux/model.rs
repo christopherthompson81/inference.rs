@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{LayerNorm, RmsNorm};
 
 use crate::qlinear::MaybeQuantLinear;

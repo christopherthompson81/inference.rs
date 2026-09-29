@@ -7,8 +7,8 @@ use crate::paged_attention::PagedAttentionInputMetadata;
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::Module;
 use inference_quant::{
-    linear_no_bias, ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer,
-    RowParallelLayer, ShardedVarBuilder,
+    ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
+    ShardedVarBuilder, linear_no_bias,
 };
 use std::{collections::HashMap, sync::Arc};
 
@@ -17,7 +17,7 @@ use crate::{
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     kv_cache::{EitherCache, KvCache, NormalCache},
-    layers::{embedding_with_legacy_tied_uqff, CausalMasker, Llama3RotaryEmbedding, RmsNorm, Sdpa},
+    layers::{CausalMasker, Llama3RotaryEmbedding, RmsNorm, Sdpa, embedding_with_legacy_tied_uqff},
     model::{IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
@@ -792,7 +792,7 @@ impl TextModel {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),
@@ -1216,18 +1216,20 @@ mod tests {
 
     #[test]
     fn fixed_chunk_mask_rejects_invalid_metadata() {
-        assert!(fixed_chunk_mask_values(
-            &[FixedChunkMaskRow {
-                query_start: 4,
-                query_len: 1,
-                key_start: 5,
-                key_len: 1,
-            }],
-            1,
-            1,
-            4,
-        )
-        .is_err());
+        assert!(
+            fixed_chunk_mask_values(
+                &[FixedChunkMaskRow {
+                    query_start: 4,
+                    query_len: 1,
+                    key_start: 5,
+                    key_len: 1,
+                }],
+                1,
+                1,
+                4,
+            )
+            .is_err()
+        );
 
         let mut metadata = PagedAttentionInputMetadata::dummy(&Device::Cpu).unwrap();
         metadata.query_lens = Some(vec![3]);

@@ -15,11 +15,11 @@ use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use super::{
+    AdapterGenerationId, LoraAdapterInfo, LoraResidentGenerationInfo,
     registry::{
         AdapterBudgetError, AdapterLease, AdapterRegistry, AdapterRegistryError,
         ResidentAdapterGeneration, ResidentBudget,
     },
-    AdapterGenerationId, LoraAdapterInfo, LoraResidentGenerationInfo,
 };
 
 /// Default maximum number of loaded aliases and resident adapter generations.
@@ -281,8 +281,8 @@ impl std::fmt::Debug for DynamicLoraRuntime {
 }
 
 impl DynamicLoraRuntime {
-    pub(crate) fn try_acquire_load_permit(
-    ) -> Result<tokio::sync::OwnedSemaphorePermit, LoraAdapterError> {
+    pub(crate) fn try_acquire_load_permit()
+    -> Result<tokio::sync::OwnedSemaphorePermit, LoraAdapterError> {
         LORA_ASYNC_LOAD_GATE
             .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
             .clone()
@@ -825,9 +825,9 @@ mod tests {
     use candle_core::{DType, Device, Tensor};
     use candle_nn::Linear;
     use inference_quant::{
-        maybe_wrap_dynamic_lora, with_lora_execution, LoraExpertInputMode, LoraExpertProjection,
-        LoraExpertProjectionNames, LoraExpertSiteSpec, LoraLinearSpec, LoraSiteKey, QuantMethod,
-        QuantMethodConfig, Shard, ShardedSafeTensors, UnquantLinear,
+        LoraExpertInputMode, LoraExpertProjection, LoraExpertProjectionNames, LoraExpertSiteSpec,
+        LoraLinearSpec, LoraSiteKey, QuantMethod, QuantMethodConfig, Shard, ShardedSafeTensors,
+        UnquantLinear, maybe_wrap_dynamic_lora, with_lora_execution,
     };
 
     use super::*;

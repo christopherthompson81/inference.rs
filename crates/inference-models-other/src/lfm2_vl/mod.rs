@@ -4,7 +4,7 @@ pub mod config;
 pub mod inputs_processor;
 pub mod vision;
 
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 use candle_nn::{LayerNorm, Linear, Module};
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
 use vision::VisionModel;

@@ -7,24 +7,24 @@ use super::{
     PreProcessingMixin, Processor, TokenSource,
 };
 use crate::device_map::{self, DeviceMapper};
-use crate::distributed::{self, use_ring, WorkerTransferData};
+use crate::distributed::{self, WorkerTransferData, use_ring};
 use crate::pipeline::tokens::get_token;
 use crate::pipeline::{ChatTemplate, Modalities, SupportedModality};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
 use crate::utils::{
-    progress::{new_multi_progress, ProgressScopeGuard},
+    progress::{ProgressScopeGuard, new_multi_progress},
     varbuilder_utils::from_mmaped_safetensors,
 };
 use crate::{DeviceMapSetting, PagedAttentionConfig, Pipeline, TryIntoDType};
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
-use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
+use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use image::{DynamicImage, RgbImage};
 use inference_models_diffusion::gguf;
-use inference_quant::log::once_log_info;
 use inference_quant::IsqType;
+use inference_quant::log::once_log_info;
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
 use std::sync::Arc;

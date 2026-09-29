@@ -2,7 +2,7 @@
 //! torchvision BICUBIC+antialias is not byte-reproducible with CatmullRom, so resized pixels differ slightly.
 
 use candle_core::{Device, Result, Tensor};
-use image::{imageops::FilterType, DynamicImage, GenericImageView};
+use image::{DynamicImage, GenericImageView, imageops::FilterType};
 
 pub const PATCH: usize = 14;
 pub const MERGE: usize = 2;

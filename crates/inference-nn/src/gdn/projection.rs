@@ -1,6 +1,6 @@
 use super::config::GdnDims;
 use super::packed::PackedGdnLayout;
-use candle_core::{Result, Tensor, D};
+use candle_core::{D, Result, Tensor};
 use inference_quant::{
     ActivationQuantizationScheme, ActivationScaleLayout, QuantMethod, QuantizedActivation,
 };
@@ -261,16 +261,17 @@ fn shared_qkv_z(
     qkv: &Arc<dyn QuantMethod>,
     z: &Arc<dyn QuantMethod>,
 ) -> Result<(Tensor, Tensor)> {
-    if let Some(outputs) = inference_quant::try_forward_with_shared_quantized_activation(
+    match inference_quant::try_forward_with_shared_quantized_activation(
         x,
         &[qkv.as_ref(), z.as_ref()],
     )? {
-        let [qkv, z]: [Tensor; 2] = outputs.try_into().map_err(|_| {
-            candle_core::Error::msg("shared GDN projection returned the wrong output count")
-        })?;
-        Ok((qkv, z))
-    } else {
-        Ok((qkv.forward(x)?, z.forward(x)?))
+        Some(outputs) => {
+            let [qkv, z]: [Tensor; 2] = outputs.try_into().map_err(|_| {
+                candle_core::Error::msg("shared GDN projection returned the wrong output count")
+            })?;
+            Ok((qkv, z))
+        }
+        _ => Ok((qkv.forward(x)?, z.forward(x)?)),
     }
 }
 
@@ -708,10 +709,12 @@ mod tests {
         let full_conv = full_conv.to_vec3::<f32>()?;
         assert_eq!(padded_conv[0][..2], full_conv[0][..2]);
         assert_eq!(padded_conv[1], full_conv[0][2..]);
-        assert!(padded_conv[0][2..]
-            .iter()
-            .flatten()
-            .all(|value| *value == 0.0));
+        assert!(
+            padded_conv[0][2..]
+                .iter()
+                .flatten()
+                .all(|value| *value == 0.0)
+        );
         Ok(())
     }
 
@@ -758,10 +761,12 @@ mod tests {
         assert!(conv_input[0][1].iter().all(|value| *value == 0.0));
         assert!(conv_input[0][2].iter().all(|value| *value == 0.0));
         assert!(conv_input[1][2].iter().all(|value| *value == 0.0));
-        assert!(conv_input[2]
-            .iter()
-            .flatten()
-            .all(|value| value.is_finite() && *value != 0.0));
+        assert!(
+            conv_input[2]
+                .iter()
+                .flatten()
+                .all(|value| value.is_finite() && *value != 0.0)
+        );
         Ok(())
     }
 }

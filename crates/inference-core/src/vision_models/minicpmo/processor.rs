@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use inference_models_qwen::loaders::MiniCpmOLoader;
 use inference_models_qwen::minicpmo::inputs_processor::{
-    MiniCpmOImageProcessor, DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_SLICE_END_TOKEN,
-    DEFAULT_SLICE_START_TOKEN, DEFAULT_UNK_TOKEN,
+    DEFAULT_IM_END_TOKEN, DEFAULT_IM_START_TOKEN, DEFAULT_SLICE_END_TOKEN,
+    DEFAULT_SLICE_START_TOKEN, DEFAULT_UNK_TOKEN, MiniCpmOImageProcessor,
 };
 
 use crate::pipeline::{InputsProcessor, MessagesAction, MultimodalProcessorFactory, Processor};

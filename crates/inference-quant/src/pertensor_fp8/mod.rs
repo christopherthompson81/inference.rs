@@ -1,15 +1,14 @@
-use std::sync::{atomic::AtomicUsize, Arc, Mutex};
+use std::sync::{Arc, Mutex, atomic::AtomicUsize};
 
-use candle_core::{quantized::GgmlDType, DType, Device, Result, Tensor};
+use candle_core::{DType, Device, Result, Tensor, quantized::GgmlDType};
 use candle_nn::Linear;
 
 use crate::Fp8WeightScaleLayout;
 use crate::{
-    generate_isq, generate_isq_imatrix,
-    hqq::{ISQ_HQQ_DEFAULT_OPT_STEPS, ISQ_HQQ_GROUP_SIZE},
     AfqBits, AfqGroupSize, AfqLayer, FP8Linear, Fp8ActivationMode, GgufMatMul, HqqAxis, HqqBits,
     HqqConfig, HqqLayer, IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard,
-    QuantizedSerde, UnquantLinear,
+    QuantizedSerde, UnquantLinear, generate_isq, generate_isq_imatrix,
+    hqq::{ISQ_HQQ_DEFAULT_OPT_STEPS, ISQ_HQQ_GROUP_SIZE},
 };
 
 /// E4M3 linear layer with checkpoint-provided scales.
@@ -145,46 +144,42 @@ impl PerTensorFP8Linear {
 
     fn register_cutile(&self) -> bool {
         #[cfg(all(feature = "cuda", feature = "cutile"))]
-        if let Some(weight) = self.weight.as_ref() {
-            if let Device::Cuda(dev) = weight.device() {
-                let [n, k] = self.weight_shape;
-                if self.activation_mode == Fp8ActivationMode::None {
-                    if crate::cutile::fp8_w8a16_supported(dev, n, k, self.dequant_dtype)
-                        && matches!(
-                            self.weight_scale_layout,
-                            Fp8WeightScaleLayout::Tensor
-                                | Fp8WeightScaleLayout::Channel
-                                | Fp8WeightScaleLayout::Block([128, 128])
-                        )
-                    {
-                        crate::cutile::register_fp8_w8a16_shape(
-                            weight,
-                            &self.weight_scale_inv,
-                            self.weight_scale_layout,
-                            self.dequant_dtype,
-                        );
-                        return true;
-                    }
-                } else if matches!(
-                    self.activation_mode,
-                    Fp8ActivationMode::StaticTensor | Fp8ActivationMode::DynamicToken
-                ) && matches!(
-                    self.weight_scale_layout,
-                    Fp8WeightScaleLayout::Tensor | Fp8WeightScaleLayout::Channel
-                ) {
-                    let scheme = crate::cutile::Fp8W8A8Scheme {
-                        weight_scale: self.weight_scale_layout,
-                        activation: self.activation_mode,
-                        output_dtype: self.dequant_dtype,
-                    };
-                    if crate::cutile::fp8_w8a8_supported(dev, n, k, self.dequant_dtype, scheme) {
-                        crate::cutile::register_fp8_w8a8_shape(
-                            weight,
-                            &self.weight_scale_inv,
-                            scheme,
-                        );
-                        return true;
-                    }
+        if let Some(weight) = self.weight.as_ref()
+            && let Device::Cuda(dev) = weight.device()
+        {
+            let [n, k] = self.weight_shape;
+            if self.activation_mode == Fp8ActivationMode::None {
+                if crate::cutile::fp8_w8a16_supported(dev, n, k, self.dequant_dtype)
+                    && matches!(
+                        self.weight_scale_layout,
+                        Fp8WeightScaleLayout::Tensor
+                            | Fp8WeightScaleLayout::Channel
+                            | Fp8WeightScaleLayout::Block([128, 128])
+                    )
+                {
+                    crate::cutile::register_fp8_w8a16_shape(
+                        weight,
+                        &self.weight_scale_inv,
+                        self.weight_scale_layout,
+                        self.dequant_dtype,
+                    );
+                    return true;
+                }
+            } else if matches!(
+                self.activation_mode,
+                Fp8ActivationMode::StaticTensor | Fp8ActivationMode::DynamicToken
+            ) && matches!(
+                self.weight_scale_layout,
+                Fp8WeightScaleLayout::Tensor | Fp8WeightScaleLayout::Channel
+            ) {
+                let scheme = crate::cutile::Fp8W8A8Scheme {
+                    weight_scale: self.weight_scale_layout,
+                    activation: self.activation_mode,
+                    output_dtype: self.dequant_dtype,
+                };
+                if crate::cutile::fp8_w8a8_supported(dev, n, k, self.dequant_dtype, scheme) {
+                    crate::cutile::register_fp8_w8a8_shape(weight, &self.weight_scale_inv, scheme);
+                    return true;
                 }
             }
         }
@@ -684,7 +679,7 @@ mod tests {
     use candle_core::{DType, Device, Result, Tensor};
     use float8::F8E4M3;
 
-    use super::{fp8_w8a16_linear, fp8_w8a8_linear, Fp8W8A8LinearArgs, PerTensorFP8Linear};
+    use super::{Fp8W8A8LinearArgs, PerTensorFP8Linear, fp8_w8a8_linear, fp8_w8a16_linear};
     use crate::{Fp8ActivationMode, Fp8WeightScaleLayout};
 
     #[test]
@@ -732,11 +727,13 @@ mod tests {
             dequant_dtype: DType::F32,
         };
         assert!(fp8_w8a8_linear(args(Fp8ActivationMode::StaticTensor, None)).is_err());
-        assert!(fp8_w8a8_linear(args(
-            Fp8ActivationMode::DynamicToken,
-            Some(Tensor::new(1f32, &device)?),
-        ))
-        .is_err());
+        assert!(
+            fp8_w8a8_linear(args(
+                Fp8ActivationMode::DynamicToken,
+                Some(Tensor::new(1f32, &device)?),
+            ))
+            .is_err()
+        );
         assert!(fp8_w8a8_linear(args(Fp8ActivationMode::DynamicBlock(4), None)).is_err());
         Ok(())
     }

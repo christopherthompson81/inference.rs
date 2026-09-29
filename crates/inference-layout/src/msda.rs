@@ -153,8 +153,8 @@ impl CustomOp3 for MsDeformAttn {
         la: &Layout,
     ) -> Result<(candle_core::CudaStorage, Shape)> {
         use candle_core::cuda_backend::{
-            cudarc::driver::{LaunchConfig, PushKernelArg},
             CudaStorageSlice, WrapErr,
+            cudarc::driver::{LaunchConfig, PushKernelArg},
         };
 
         let g = self.dims(lv, ll, la)?;

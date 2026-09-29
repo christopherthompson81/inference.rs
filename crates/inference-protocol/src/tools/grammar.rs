@@ -7,7 +7,7 @@
 
 use llguidance::api::GrammarWithLexer;
 use llguidance::api::TopLevelGrammar;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::Tool;
 
@@ -286,11 +286,13 @@ mod tests {
             .expect("should match");
         assert_eq!(grm.grammars.len(), 1);
         assert!(grm.grammars[0].json_schema.is_none());
-        assert!(grm.grammars[0]
-            .lark_grammar
-            .as_ref()
-            .unwrap()
-            .contains(r#"start: "[" tool_call"#));
+        assert!(
+            grm.grammars[0]
+                .lark_grammar
+                .as_ref()
+                .unwrap()
+                .contains(r#"start: "[" tool_call"#)
+        );
     }
 
     #[test]

@@ -20,7 +20,7 @@ use crate::model::MultimodalModel;
 use crate::model::NormalLoadingMetadata;
 use crate::paged_attention::block_hash::MultimodalKind;
 use crate::paged_attention::encoder_cache::{
-    cached_encode_images, CacheModality, EncoderCacheManager,
+    CacheModality, EncoderCacheManager, cached_encode_images,
 };
 use crate::paged_attention::{AttentionImplementation, ModelConfigMetadata};
 use crate::utils::unvarbuilder::UnVarBuilder;
@@ -28,7 +28,7 @@ use crate::vision::clip::{ClipConfig, ClipVisionTransformer};
 use crate::vision::multimodal_layout::{
     MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
 };
-use candle_core::{bail, DType, Device, IndexOp, Result, Tensor};
+use candle_core::{DType, Device, IndexOp, Result, Tensor, bail};
 use candle_nn::{Activation, Linear};
 use inference_quant::NonZeroOp;
 use inference_quant::ShardedVarBuilder;

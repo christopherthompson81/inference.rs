@@ -2,7 +2,7 @@
 //!
 //! Run with: `cargo run --release --example error_handling -p inference-examples`
 
-use inference::{error, IsqBits, ModelBuilder, TextMessageRole, TextMessages};
+use inference::{IsqBits, ModelBuilder, TextMessageRole, TextMessages, error};
 
 #[tokio::main]
 async fn main() {

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use inference_models_qwen::loaders::{
-    Qwen3VLLoader, Qwen3VLMoELoader, Qwen3_5Loader, Qwen3_5MoeLoader,
+    Qwen3_5Loader, Qwen3_5MoeLoader, Qwen3VLLoader, Qwen3VLMoELoader,
 };
 use inference_models_qwen::qwen2vl::inputs_processor::{IMAGE_PAD, PLACEHOLDER, VIDEO_PAD};
 use inference_models_qwen::qwen3_vl::inputs_processor::Qwen3VLImageProcessor;

@@ -1,8 +1,9 @@
 use super::llg::build_llg_factory;
 use super::{
-    get_model_paths, paged_attention_memory_reservations, reserve_recurrent_serving_capacity,
-    text_models_inputs_processor::ModelInputs, AdapterKind, CacheManager, DecodeGraphPrecaptureCtx,
-    GeneralMetadata, Loader, ModelKind, ModelPaths, NormalModel, NormalModelLoader, TokenSource,
+    AdapterKind, CacheManager, DecodeGraphPrecaptureCtx, GeneralMetadata, Loader, ModelKind,
+    ModelPaths, NormalModel, NormalModelLoader, TokenSource, get_model_paths,
+    paged_attention_memory_reservations, reserve_recurrent_serving_capacity,
+    text_models_inputs_processor::ModelInputs,
 };
 use super::{
     AnyMoePipelineMixin, CacheManagerMixin, EitherCache, ForwardInputsResult, ForwardStepResult,
@@ -44,47 +45,47 @@ use crate::gdn::RecurrentBatchKind;
 use crate::lora::Ordering;
 #[cfg(feature = "cuda")]
 use crate::paged_attention::PagedAttentionInputMetadata;
-use crate::paged_attention::{calculate_cache_config, AttentionImplementation, CacheEngine};
+use crate::paged_attention::{AttentionImplementation, CacheEngine, calculate_cache_config};
 use crate::pipeline::cache_manager::{FullCacheManager, HybridCacheManager, NormalCacheManager};
-use crate::pipeline::chat_template::{calculate_eos_tokens, BeginEndUnkPadTok, GenerationConfig};
+use crate::pipeline::chat_template::{BeginEndUnkPadTok, GenerationConfig, calculate_eos_tokens};
 #[cfg(feature = "cuda")]
 use crate::pipeline::cuda_graph::{
-    capture_cuda_decode_graph, cuda_decode_graph_batch_kind_supported,
-    cuda_decode_graph_supported_for_model, cuda_decode_graphs_enabled, cuda_graph_batch_bucket,
-    cuda_graph_precapture_batches, cuda_graph_precapture_max_batch, hybrid_graph_slots,
-    install_hybrid_graph_state_indices, record_cuda_graph_dispatch, CudaDecodeGraphCaptureCtx,
-    CudaDecodeGraphKey, CudaDecodeGraphLaunch, CudaDecodeGraphReplay, CudaDecodeGraphReplayInput,
-    CudaDecodeGraphState, CudaGraphComponent, CudaGraphDecodeStep, CudaGraphDecodeStepInputs,
-    CudaGraphDispatchMode, CudaGraphDispatchReason, CudaGraphEvent, CudaGraphEventGuard,
-    CudaGraphPrecaptureInputs,
+    CudaDecodeGraphCaptureCtx, CudaDecodeGraphKey, CudaDecodeGraphLaunch, CudaDecodeGraphReplay,
+    CudaDecodeGraphReplayInput, CudaDecodeGraphState, CudaGraphComponent, CudaGraphDecodeStep,
+    CudaGraphDecodeStepInputs, CudaGraphDispatchMode, CudaGraphDispatchReason, CudaGraphEvent,
+    CudaGraphEventGuard, CudaGraphPrecaptureInputs, capture_cuda_decode_graph,
+    cuda_decode_graph_batch_kind_supported, cuda_decode_graph_supported_for_model,
+    cuda_decode_graphs_enabled, cuda_graph_batch_bucket, cuda_graph_precapture_batches,
+    cuda_graph_precapture_max_batch, hybrid_graph_slots, install_hybrid_graph_state_indices,
+    record_cuda_graph_dispatch,
 };
 use crate::pipeline::isq::{UqffFullSer, UqffWriteConfig, WeightLoadingMode, WeightLoadingState};
 use crate::pipeline::sampling::{sample_and_add_toks, sample_and_add_toks_batched};
 use crate::pipeline::text_models_inputs_processor::InputMetadata;
 use crate::pipeline::tokenizer::get_tokenizer;
-use crate::pipeline::{
-    get_chat_template, Modalities, ModelForwardContext, RecurrentMetadata, SupportedModality,
-};
 use crate::pipeline::{ChatTemplate, LocalModelPaths};
+use crate::pipeline::{
+    Modalities, ModelForwardContext, RecurrentMetadata, SupportedModality, get_chat_template,
+};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::{
-    progress::{new_multi_progress, ProgressScopeGuard},
+    progress::{ProgressScopeGuard, new_multi_progress},
     varbuilder_utils::from_mmaped_safetensors,
 };
 use crate::xlora_models::NonGranularState;
 use crate::{
-    get_mut_arcmutex, get_paths, get_uqff_paths, lora_model_loader, normal_model_loader,
-    xlora_model_loader, DeviceMapSetting, DynamicLoraRuntime, LoraAdapterSpec, LoraRuntimeConfig,
-    PagedAttentionConfig, Pipeline, Topology, TryIntoDType, GLOBAL_HF_CACHE,
+    DeviceMapSetting, DynamicLoraRuntime, GLOBAL_HF_CACHE, LoraAdapterSpec, LoraRuntimeConfig,
+    PagedAttentionConfig, Pipeline, Topology, TryIntoDType, get_mut_arcmutex, get_paths,
+    get_uqff_paths, lora_model_loader, normal_model_loader, xlora_model_loader,
 };
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor, Var};
 use either::Either;
 use hf_hub::Cache;
 use hf_hub::{Repo, RepoType};
-use inference_quant::log::once_log_info;
 use inference_quant::IsqType;
+use inference_quant::log::once_log_info;
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
 use std::fs;
@@ -787,10 +788,9 @@ impl Loader for NormalLoader {
                     mapped_loader: &*self.inner,
                     weights: distributed_weights,
                 })?;
-            let sharded_vb = if let Some(reader) = uqff_reader.clone() {
-                sharded_vb.with_uqff_reader(reader)
-            } else {
-                sharded_vb
+            let sharded_vb = match uqff_reader.clone() {
+                Some(reader) => sharded_vb.with_uqff_reader(reader),
+                _ => sharded_vb,
             };
 
             // Special case for where things can be more optimially loaded.
@@ -1300,10 +1300,10 @@ impl MetadataMixin for NormalPipeline {
                 .lock()
                 .expect("CUDA graph mutex poisoned")
                 .clear();
-            if self.model.cache().is_hybrid() {
-                if let Err(err) = self.model.cache().hybrid().release_graph_pad_slot() {
-                    tracing::error!("Failed to release CUDA graph recurrent pad slot: {err}");
-                }
+            if self.model.cache().is_hybrid()
+                && let Err(err) = self.model.cache().hybrid().release_graph_pad_slot()
+            {
+                tracing::error!("Failed to release CUDA graph recurrent pad slot: {err}");
             }
         }
     }
@@ -1338,7 +1338,9 @@ impl MetadataMixin for NormalPipeline {
                 warn!("CUDA decode graph precapture failed, graphs will be captured lazily: {err}");
             }
             if let Err(err) = self.model.precapture_speculative_cuda_graphs() {
-                warn!("Speculative CUDA graph precapture failed, graphs will be captured lazily: {err}");
+                warn!(
+                    "Speculative CUDA graph precapture failed, graphs will be captured lazily: {err}"
+                );
             }
         }
         #[cfg(not(feature = "cuda"))]
@@ -1929,12 +1931,12 @@ impl NormalPipeline {
         }
         state.disable();
         drop(state);
-        if self.model.cache().is_hybrid() {
-            if let Err(release_err) = self.model.cache().hybrid().release_graph_pad_slot() {
-                tracing::error!(
-                    "Failed to release recurrent graph pad after graph disable: {release_err}"
-                );
-            }
+        if self.model.cache().is_hybrid()
+            && let Err(release_err) = self.model.cache().hybrid().release_graph_pad_slot()
+        {
+            tracing::error!(
+                "Failed to release recurrent graph pad after graph disable: {release_err}"
+            );
         }
         eager_retry_allowed
     }
@@ -2062,11 +2064,15 @@ impl Pipeline for NormalPipeline {
             (Some(cache_engine), Some(meta)) => Some((cache_engine, meta)),
             (Some(_), None) => {
                 // This can happen if Rust-side user code is wrong
-                candle_core::bail!("Forward step expected a PagedAttention input metadata. This was not provided, please ensure that the scheduler config is correctly configured for PagedAttention.")
+                candle_core::bail!(
+                    "Forward step expected a PagedAttention input metadata. This was not provided, please ensure that the scheduler config is correctly configured for PagedAttention."
+                )
             }
             (None, Some(_)) => {
                 // This should never happen but we handle it anyway
-                candle_core::bail!("Forward step got a PagedAttention input metadata but there is no cache engine. Please raise an issue.")
+                candle_core::bail!(
+                    "Forward step got a PagedAttention input metadata but there is no cache engine. Please raise an issue."
+                )
             }
             (None, None) => None,
         };
@@ -2095,7 +2101,7 @@ impl Pipeline for NormalPipeline {
                                     logits: replay.logits,
                                 },
                                 replay.launch,
-                            ))
+                            ));
                         }
                         Ok(None) => {}
                         Err(err) => {
@@ -2134,10 +2140,10 @@ impl Pipeline for NormalPipeline {
                     self.model.forward(&input_ids, &mut ctx)
                 });
                 #[cfg(feature = "cuda")]
-                if eager_result.is_ok() {
-                    if let Some(graph_event) = cuda_graph_eager_fallback.take() {
-                        graph_event.success();
-                    }
+                if eager_result.is_ok()
+                    && let Some(graph_event) = cuda_graph_eager_fallback.take()
+                {
+                    graph_event.success();
                 }
                 eager_result?
             }
@@ -2376,9 +2382,9 @@ impl AnyMoePipelineMixin for NormalPipeline {
 #[cfg(test)]
 mod tests {
     use super::{new_dynamic_lora_registry, normal_model_requires_uniform_prompt_batch};
+    use crate::LoraRuntimeConfig;
     use crate::pipeline::finish_dynamic_lora_runtime;
     use crate::pipeline::{AdapterPaths, LocalModelPaths};
-    use crate::LoraRuntimeConfig;
     use candle_core::{DType, Device};
     use inference_quant::{LoraLayerRegistry, LoraLinearSpec, LoraSiteKey};
     use std::{path::PathBuf, sync::Arc};

@@ -14,7 +14,7 @@ mod ffi {
     use candle_core::cuda::cudarc::driver::sys::CUstream;
     use core::ffi::c_void;
 
-    extern "C" {
+    unsafe extern "C" {
         pub fn launch_cutlass_moe_problem_sizes(
             topk_ids: *const i32,
             problem_sizes1: *mut i32,

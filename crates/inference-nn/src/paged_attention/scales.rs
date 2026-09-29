@@ -121,7 +121,7 @@ mod tests {
     use candle_core::{DType, Device, Tensor};
     use inference_quant::ShardedSafeTensors;
 
-    use super::{load_fp8_attention_scales, Fp8AttentionScales};
+    use super::{Fp8AttentionScales, load_fp8_attention_scales};
 
     fn attention_vb(values: &[(&str, Tensor)]) -> inference_quant::ShardedVarBuilder {
         let tensors = values
@@ -194,18 +194,22 @@ mod tests {
         assert!(load_fp8_attention_scales(&attention_vb(&[("q_scale", q.clone())])).is_err());
         assert!(load_fp8_attention_scales(&attention_vb(&[("k_scale", k.clone())])).is_err());
         assert!(load_fp8_attention_scales(&attention_vb(&[("v_scale", k.clone())])).is_err());
-        assert!(load_fp8_attention_scales(&attention_vb(&[
-            ("q_scale", q.clone()),
-            ("k_scale", k.clone()),
-        ]))
-        .is_err());
-        assert!(load_fp8_attention_scales(&attention_vb(&[
-            ("q_scale", q.clone()),
-            ("k_scale", k.clone()),
-            ("v_scale", q.clone()),
-            ("kv_scale", q),
-        ]))
-        .is_err());
+        assert!(
+            load_fp8_attention_scales(&attention_vb(&[
+                ("q_scale", q.clone()),
+                ("k_scale", k.clone()),
+            ]))
+            .is_err()
+        );
+        assert!(
+            load_fp8_attention_scales(&attention_vb(&[
+                ("q_scale", q.clone()),
+                ("k_scale", k.clone()),
+                ("v_scale", q.clone()),
+                ("kv_scale", q),
+            ]))
+            .is_err()
+        );
     }
 
     #[test]
@@ -245,12 +249,14 @@ mod tests {
                 v: 0.75,
             }
         );
-        assert!(Fp8AttentionScales {
-            q: 1.0,
-            k: 0.0,
-            v: 1.0,
-        }
-        .validate()
-        .is_err());
+        assert!(
+            Fp8AttentionScales {
+                q: 1.0,
+                k: 0.0,
+                v: 1.0,
+            }
+            .validate()
+            .is_err()
+        );
     }
 }

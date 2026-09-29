@@ -2,12 +2,12 @@
 
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::Linear;
 use inference_quant::{
-    apply_immediate_isq, get_immediate_isq, immediate_isq_match, ColumnParallelLayer,
-    IsqCaptureMode, MXFP4Layer, QuantMethod, QuantMethodConfig, QuantizedConfig, ReplicatedLayer,
-    RowParallelLayer, Shard, ShardedVarBuilder, UnquantLinear,
+    ColumnParallelLayer, IsqCaptureMode, MXFP4Layer, QuantMethod, QuantMethodConfig,
+    QuantizedConfig, ReplicatedLayer, RowParallelLayer, Shard, ShardedVarBuilder, UnquantLinear,
+    apply_immediate_isq, get_immediate_isq, immediate_isq_match,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, sync::Arc};
@@ -22,11 +22,11 @@ use crate::model::NormalLoadingMetadata;
 use crate::model::NormalModel;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
-    attention::{sinks_backend_supports, AttentionDispatch, AttentionMask, SdpaParams},
+    attention::{AttentionDispatch, AttentionMask, SdpaParams, sinks_backend_supports},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
-        self, embedding_with_legacy_tied_uqff, CausalMasker, GptOssRotaryEmbedding, RmsNorm,
-        RotaryEmbedding,
+        self, CausalMasker, GptOssRotaryEmbedding, RmsNorm, RotaryEmbedding,
+        embedding_with_legacy_tied_uqff,
     },
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     serde_default_fn,
@@ -351,15 +351,14 @@ fn load_gpt_oss_packed_expert_projection(
     vb: ShardedVarBuilder,
 ) -> Result<Arc<dyn QuantMethod>> {
     let projection_vb = vb.pp(name);
-    if get_immediate_isq().is_some_and(|params| params.capture == IsqCaptureMode::Immediate) {
-        if let Some(target) = immediate_isq_match(&projection_vb).and_then(|matched| matched.ty) {
-            if !MXFP4Layer::supports_stacked_isq(target) {
-                candle_core::bail!(
-                    "Cannot requantize raw GPT-OSS MXFP4 expert `{}` to {target}: that target does not support stacked expert gather. Use a Q*K/Q*_0/Q*_1 target, AFQ, MXFP4, or omit ISQ.",
-                    projection_vb.prefix()
-                );
-            }
-        }
+    if get_immediate_isq().is_some_and(|params| params.capture == IsqCaptureMode::Immediate)
+        && let Some(target) = immediate_isq_match(&projection_vb).and_then(|matched| matched.ty)
+        && !MXFP4Layer::supports_stacked_isq(target)
+    {
+        candle_core::bail!(
+            "Cannot requantize raw GPT-OSS MXFP4 expert `{}` to {target}: that target does not support stacked expert gather. Use a Q*K/Q*_0/Q*_1 target, AFQ, MXFP4, or omit ISQ.",
+            projection_vb.prefix()
+        );
     }
     if let Some(source) = vb.weight_source() {
         let load_device = inference_quant::weight_source_load_device(&projection_vb);
@@ -1006,7 +1005,7 @@ impl AnyMoeBaseModelMixin for Model {}
 mod tests {
     use super::*;
     use inference_quant::{
-        uqff_version_tensors, IsqType, QuantizedSerde, ShardedSafeTensors, UqffReader, UqffTensor,
+        IsqType, QuantizedSerde, ShardedSafeTensors, UqffReader, UqffTensor, uqff_version_tensors,
     };
 
     fn test_tensor<S: Into<candle_core::Shape>>(shape: S) -> Result<Tensor> {

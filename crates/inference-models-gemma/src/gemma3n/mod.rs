@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 use config::Gemma3nConfig;
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
 use text::TextModel;
@@ -18,8 +18,8 @@ use crate::model::NormalLoadingMetadata;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     paged_attention::{
-        encoder_cache::{CacheModality, EncoderCacheManager},
         AttentionImplementation, ModelConfigLike, ModelConfigMetadata,
+        encoder_cache::{CacheModality, EncoderCacheManager},
     },
     utils::unvarbuilder::UnVarBuilder,
     vision::multimodal_layout::{

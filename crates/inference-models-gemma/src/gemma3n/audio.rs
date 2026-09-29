@@ -1,12 +1,12 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use candle_core::{bail, DType, Module, Result, Tensor, D};
+use candle_core::{D, DType, Module, Result, Tensor, bail};
 use candle_nn::{Conv1d, Conv1dConfig, Conv2d, Conv2dConfig, ModuleT};
 use inference_quant::{Convolution, QuantMethod, ShardedVarBuilder};
 use std::sync::Arc;
 
 use crate::{
-    layers::{conv1d_no_bias, conv2d_no_bias, RmsNorm},
+    layers::{RmsNorm, conv1d_no_bias, conv2d_no_bias},
     utils::unvarbuilder::UnVarBuilder,
 };
 
@@ -763,8 +763,12 @@ impl Gemma3nAudioAttention {
                         // Truncate mask to match logits
                         mask = mask.narrow(i, 0, logit_dim)?;
                     } else {
-                        bail!("Mask dimension {} has size {} which is smaller than logits size {} and cannot be broadcast", 
-                              i, mask_dim, logit_dim);
+                        bail!(
+                            "Mask dimension {} has size {} which is smaller than logits size {} and cannot be broadcast",
+                            i,
+                            mask_dim,
+                            logit_dim
+                        );
                     }
                 }
             }

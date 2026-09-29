@@ -3,7 +3,7 @@
 use crate::attention::FlashParams;
 use std::sync::Arc;
 
-use candle_core::{DType, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, IndexOp, Result, Tensor};
 use candle_nn::{BatchNorm, Conv1d, Conv1dConfig, LayerNorm, Linear, ModuleT};
 use inference_quant::{Convolution, QuantMethod, ShardedVarBuilder};
 
@@ -570,10 +570,11 @@ impl ConformerEncoder {
         cfg.finish_nemo_config();
         let embed = NemoConvSubsampling::new(&cfg.nemo_conv_settings, vb.pp("embed"))?;
 
-        assert!(cfg
-            .relative_attention_bias_args
-            .as_ref()
-            .is_some_and(|x| x.tp == "t5"));
+        assert!(
+            cfg.relative_attention_bias_args
+                .as_ref()
+                .is_some_and(|x| x.tp == "t5")
+        );
         let relative_attention_bias_args = cfg.relative_attention_bias_args.as_ref().unwrap();
         let relative_attention_bias_layer = T5RelativeAttentionLogitBias::new(
             cfg.attention_heads / cfg.attention_group_size,

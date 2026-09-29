@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{DType, Result, Tensor, D};
+use candle_core::{D, DType, Result, Tensor};
 use inference_quant::{QuantMethod, ShardedVarBuilder};
 
 use crate::{
@@ -16,7 +16,7 @@ use crate::{
     },
 };
 
-use super::{audio_embedding::AudioEmbedding, image_embedding::ImageEmbedding, Phi4MMConfig};
+use super::{Phi4MMConfig, audio_embedding::AudioEmbedding, image_embedding::ImageEmbedding};
 use crate::paged_attention::block_hash::MultimodalKind;
 
 const MAX_INPUT_ID: f64 = 1e9;

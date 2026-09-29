@@ -4,8 +4,8 @@ use inference_core::{
 };
 
 use crate::{
-    model_builder_trait::{build_model_from_pipeline, build_text_pipeline_as, join_path_list},
     Model, TextModelBuilder,
+    model_builder_trait::{build_model_from_pipeline, build_text_pipeline_as, join_path_list},
 };
 
 /// Wrapper of [`TextModelBuilder`] for LoRA models.

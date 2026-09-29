@@ -1,11 +1,11 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use candle_core::{Result, Tensor, D};
+use candle_core::{D, Result, Tensor};
 use candle_nn::{Conv2d, GroupNorm};
 use inference_quant::{Convolution, ShardedVarBuilder};
 use serde::Deserialize;
 
-use crate::layers::{conv2d, group_norm, MatMul};
+use crate::layers::{MatMul, conv2d, group_norm};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Config {

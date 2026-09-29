@@ -274,34 +274,35 @@ impl InferenceRs {
             return Err("Cannot remove the last model from InferenceRs".to_string());
         }
 
-        if let Some(engine_instance) = engines.remove(&resolved_model_id) {
-            // Send terminate signal to the engine
-            let _ = engine_instance.sender.blocking_send(Request::Terminate);
+        match engines.remove(&resolved_model_id) {
+            Some(engine_instance) => {
+                // Send terminate signal to the engine
+                let _ = engine_instance.sender.blocking_send(Request::Terminate);
 
-            // If this was the default engine, set a new default
-            let mut default_lock = self
-                .default_engine_id
-                .write()
-                .map_err(|_| "Failed to acquire write lock on default_engine_id")?;
-            if let Some(ref default_id) = *default_lock {
-                if default_id == &resolved_model_id {
+                // If this was the default engine, set a new default
+                let mut default_lock = self
+                    .default_engine_id
+                    .write()
+                    .map_err(|_| "Failed to acquire write lock on default_engine_id")?;
+                if let Some(ref default_id) = *default_lock
+                    && default_id == &resolved_model_id
+                {
                     // Set the first available engine as the new default
                     *default_lock = engines.keys().next().cloned();
                 }
+                drop(default_lock);
+                drop(engines);
+
+                // Remove any aliases pointing to the removed model
+                let mut aliases = self
+                    .model_aliases
+                    .write()
+                    .map_err(|_| "Failed to acquire write lock on model_aliases")?;
+                aliases.retain(|_, target| target != &resolved_model_id);
+
+                Ok(())
             }
-            drop(default_lock);
-            drop(engines);
-
-            // Remove any aliases pointing to the removed model
-            let mut aliases = self
-                .model_aliases
-                .write()
-                .map_err(|_| "Failed to acquire write lock on model_aliases")?;
-            aliases.retain(|_, target| target != &resolved_model_id);
-
-            Ok(())
-        } else {
-            Err(format!("Model {resolved_model_id} not found"))
+            _ => Err(format!("Model {resolved_model_id} not found")),
         }
     }
 
@@ -427,15 +428,15 @@ impl InferenceRs {
             .default_engine_id
             .write()
             .map_err(|_| InferenceRsError::EnginePoisoned)?;
-        if let Some(ref default_id) = *default_lock {
-            if default_id == &resolved_model_id {
-                // Set the first available engine as the new default
-                let engines = self
-                    .engines
-                    .read()
-                    .map_err(|_| InferenceRsError::EnginePoisoned)?;
-                *default_lock = engines.keys().next().cloned();
-            }
+        if let Some(ref default_id) = *default_lock
+            && default_id == &resolved_model_id
+        {
+            // Set the first available engine as the new default
+            let engines = self
+                .engines
+                .read()
+                .map_err(|_| InferenceRsError::EnginePoisoned)?;
+            *default_lock = engines.keys().next().cloned();
         }
 
         info!("Model {} unloaded successfully", resolved_model_id);

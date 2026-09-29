@@ -11,8 +11,8 @@ use crate::media_inputs::processor::{
     TextInputs,
 };
 use crate::paged_attention::{
-    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
     PagedAttentionMeta,
+    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
 };
 
 use super::audio_processing::VoxtralAudioProcessor;
@@ -287,13 +287,14 @@ impl MultimodalInputsProcessor for VoxtralInputsProcessor {
             let Some(hashes) = seq.audio_hashes().filter(|hashes| !hashes.is_empty()) else {
                 continue;
             };
-            let mel_index = if let Some(mel) = processed_mels[seq_idx].take() {
-                let index = request_mels.len();
-                mel_lengths.push(mel.dim(1)?);
-                request_mels.push(mel);
-                Some(index)
-            } else {
-                None
+            let mel_index = match processed_mels[seq_idx].take() {
+                Some(mel) => {
+                    let index = request_mels.len();
+                    mel_lengths.push(mel.dim(1)?);
+                    request_mels.push(mel);
+                    Some(index)
+                }
+                _ => None,
             };
             audio_requests.push(VoxtralAudioRequest {
                 logical_index,
@@ -337,7 +338,7 @@ impl MultimodalInputsProcessor for VoxtralInputsProcessor {
 mod tests {
     use candle_core::{Device, Tensor};
 
-    use super::{audio_prompt_feature, batch_mel_features, N_DELAY_TOKENS, N_LEFT_PAD_TOKENS};
+    use super::{N_DELAY_TOKENS, N_LEFT_PAD_TOKENS, audio_prompt_feature, batch_mel_features};
 
     #[test]
     fn grouped_audio_feature_hashes_every_item_and_the_bos() -> anyhow::Result<()> {

@@ -11,7 +11,7 @@ use tokenizers::Tokenizer;
 use tracing::info;
 
 use super::super::isq::load_imatrix_map;
-use super::super::text_models_inputs_processor::{make_prompt_chunk, InputMetadata};
+use super::super::text_models_inputs_processor::{InputMetadata, make_prompt_chunk};
 use super::super::{
     EitherCache, EmbeddingModel, ModelForwardContext, MultimodalModel, NormalModel,
 };

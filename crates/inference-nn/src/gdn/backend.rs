@@ -1,4 +1,4 @@
-use candle_core::{DType, Result, Storage, Tensor, D};
+use candle_core::{D, DType, Result, Storage, Tensor};
 use rayon::prelude::*;
 
 use super::cache::GdnLayerCache;

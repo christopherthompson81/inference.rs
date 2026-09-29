@@ -5,7 +5,7 @@ use crate::layers::masker::CausalMaskConfig;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use std::sync::Arc;
 
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 use candle_nn::Module;
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
@@ -25,12 +25,12 @@ use crate::{
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
-        embedding_with_legacy_tied_uqff, Activation, CausalMasker, DeepSeekV2RopeConfig,
-        DeepSeekV2RotaryEmbedding, Mlp, RmsNorm, Sdpa,
+        Activation, CausalMasker, DeepSeekV2RopeConfig, DeepSeekV2RotaryEmbedding, Mlp, RmsNorm,
+        Sdpa, embedding_with_legacy_tied_uqff,
     },
     mla::{
-        mla_cache_forward, mla_decode_forward, should_use_mla_cache, should_use_mla_decode,
-        MlaKvBProjection, MlaWeights,
+        MlaKvBProjection, MlaWeights, mla_cache_forward, mla_decode_forward, should_use_mla_cache,
+        should_use_mla_decode,
     },
     moe::{MoEExperts, MoEExpertsConfig},
     ops::{SplitOp, TopKLastDimOp},

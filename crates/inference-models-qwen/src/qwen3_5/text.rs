@@ -5,12 +5,12 @@ use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{
     collections::{BTreeMap, HashMap},
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
 };
 
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ActivationQuantizationScheme, ActivationScaleLayout, ColumnParallelLayer, PackedOutputLayout,
     QuantMethod, QuantizedActivation, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
@@ -40,7 +40,7 @@ use crate::{
     layers::{self, CausalMasker, GemmaRmsNorm, Mlp, Qwen3VLRotaryEmbedding, Sdpa, YarnRopeConfig},
     model::{ForwardMaskCache, IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     paged_attention::{
-        load_fp8_attention_scales, AttentionImplementation, ModelConfigMetadata, PagedAttention,
+        AttentionImplementation, ModelConfigMetadata, PagedAttention, load_fp8_attention_scales,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -2393,7 +2393,7 @@ impl Qwen3_5TextModel {
             let indices: Vec<u32> = mask_flat
                 .iter()
                 .enumerate()
-                .filter(|(_, &v)| v > 0.0)
+                .filter(|&(_, &v)| v > 0.0)
                 .map(|(i, _)| {
                     u32::try_from(i).map_err(|_| {
                         candle_core::Error::msg(format!("visual position index {i} exceeds u32"))
@@ -2413,7 +2413,7 @@ impl Qwen3_5TextModel {
             None
         };
 
-        let forward_result = (|| -> Result<Tensor> {
+        (|| -> Result<Tensor> {
             let mut normalized_x = None;
             for (i, layer) in self.layers.iter().enumerate() {
                 xs = self.mapper.map(xs, i)?;
@@ -2431,8 +2431,8 @@ impl Qwen3_5TextModel {
                         let Some(HybridLayerCache::Attention(kv_cache)) = hybrid_cache.get_mut(i)
                         else {
                             candle_core::bail!(
-                            "Hybrid cache layer {i} is not attention for a full-attention layer."
-                        );
+                                "Hybrid cache layer {i} is not attention for a full-attention layer."
+                            );
                         };
                         layer.forward_attention_output(
                             &xs,
@@ -2457,8 +2457,8 @@ impl Qwen3_5TextModel {
                         let Some(HybridLayerCache::Recurrent(pool)) = hybrid_cache.get_mut(i)
                         else {
                             candle_core::bail!(
-                            "Hybrid cache layer {i} is not recurrent for a linear-attention layer."
-                        );
+                                "Hybrid cache layer {i} is not recurrent for a linear-attention layer."
+                            );
                         };
                         let stash_states = stash_replay
                             .then_some(())
@@ -2624,8 +2624,7 @@ impl Qwen3_5TextModel {
                 });
             }
             ctx.lm_head(&*self.lm_head, &xs)
-        })();
-        forward_result
+        })()
     }
 
     fn deepstack_process(
@@ -2837,10 +2836,10 @@ mod tests {
     use inference_nn::skip_without_cuda;
 
     use super::{
-        gdn_transition_keep_rows, group_gdn_replay_batches, recurrent_checkpoint_devices_supported,
-        refresh_gdn_stash_slots, should_stash_gdn_replay, terminal_gdn_transition_slots,
         GdnLayerRollback, GdnLayerStash, GdnReplayBatch, GdnReplayStash, SpecCapture,
-        SpecGraphState,
+        SpecGraphState, gdn_transition_keep_rows, group_gdn_replay_batches,
+        recurrent_checkpoint_devices_supported, refresh_gdn_stash_slots, should_stash_gdn_replay,
+        terminal_gdn_transition_slots,
     };
     use crate::{
         gdn::RecurrentBatchKind,
