@@ -7,7 +7,6 @@ use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use rayon::prelude::*;
 use std::iter::Iterator;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tqdm::Iter;
 
 static PROGRESS_SUPPRESS_COUNT: AtomicUsize = AtomicUsize::new(0);
 
@@ -53,20 +52,21 @@ pub fn new_multi_progress() -> MultiProgress {
     multi
 }
 
-// Optionally display a progress bar via the `tqdm` crate:
-// Usage: `iter.with_progress(true)`
-// Similar to the `iter.tqdm()` feature except this supports opt-in via parameter.
+/// `iter.with_progress(is_silent)` shows a progress bar over the iterator unless silent (or suppressed).
 pub trait IterWithProgress<'a, T>: Iterator<Item = T> + 'a {
     fn with_progress(self, is_silent: bool) -> Box<dyn Iterator<Item = T> + 'a>
     where
         Self: Sized,
     {
-        // TODO: Should `is_silent` instead be referenced as a global read-only state? (`AtomicBool`)
         if is_silent {
-            Box::new(self)
-        } else {
-            Box::new(self.tqdm())
+            return Box::new(self);
         }
+        let bar = match self.size_hint() {
+            (lower, Some(upper)) if lower == upper => ProgressBar::new(upper as u64),
+            _ => ProgressBar::no_length(),
+        };
+        configure_progress_bar(&bar);
+        Box::new(self.progress_with(bar))
     }
 }
 

@@ -20,7 +20,6 @@ inference-quant.workspace = true
 rand_isaac.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-tqdm.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

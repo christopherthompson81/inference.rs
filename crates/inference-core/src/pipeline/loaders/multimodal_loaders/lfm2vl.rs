@@ -1,4 +1,7 @@
 use super::*;
+use crate::pipeline::loaders::layer_indexed_device;
+
+const TEXT_LAYER_INDEX_PATTERN: &str = r"model\.language_model\.layers\.(\d+)\.";
 
 /// [`MultimodalLoader`] for an LFM2-VL model.
 ///
@@ -105,25 +108,12 @@ impl MultimodalModelLoader for Lfm2VlLoader {
         _mapper: &dyn DeviceMapper,
         loading_isq: bool,
     ) -> Result<Arc<dyn Fn(String) -> DeviceForLoadTensor + Send + Sync + 'static>> {
-        if loading_isq {
-            Ok(Arc::new(|_| DeviceForLoadTensor::Base))
-        } else {
-            let re = Regex::new(r"model\.language_model\.layers\.(\d+)\.").unwrap();
-            let cfg: Lfm2VlConfig = serde_json::from_str(config)?;
-            let num_layers = cfg.text_config.num_hidden_layers;
-            Ok(Arc::new(move |name: String| {
-                if let Some(captures) = re.captures(&name) {
-                    captures
-                        .get(1)
-                        .and_then(|m| m.as_str().parse::<usize>().ok())
-                        .map(|l| l.min(num_layers))
-                        .map(DeviceForLoadTensor::Idx)
-                        .unwrap_or(DeviceForLoadTensor::Base)
-                } else {
-                    DeviceForLoadTensor::Base
-                }
-            }))
-        }
+        let cfg: Lfm2VlConfig = serde_json::from_str(config)?;
+        layer_indexed_device(
+            TEXT_LAYER_INDEX_PATTERN,
+            cfg.text_config.num_hidden_layers,
+            loading_isq,
+        )
     }
 }
 

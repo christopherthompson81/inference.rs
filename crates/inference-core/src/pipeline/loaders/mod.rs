@@ -15,10 +15,12 @@ use std::{
     sync::Arc,
 };
 
+use crate::utils::varbuilder_utils::DeviceForLoadTensor;
 use anyhow::Result;
 use as_any::AsAny;
 use candle_core::{DType, Device};
 use inference_quant::{IsqType, QuantizedConfig, QuantizedWeightSource};
+use regex::Regex;
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
@@ -65,6 +67,7 @@ pub(crate) const QK_ROPE_LAYOUT_CONFIG_KEY: &str = "_inference_qk_rope_layout";
 const LEGACY_MODEL_OPT_CONFIG: &str = "hf_quant_config.json";
 /// Set on the model config JSON when the checkpoint's built-in MTP head should be loaded.
 pub const MTP_CONFIG_KEY: &str = "_inference_mtp";
+pub(crate) const LAYER_INDEX_PATTERN: &str = r"\.layers\.(\d+)\.";
 
 pub(crate) fn load_model_config(
     config_path: &std::path::Path,
@@ -789,6 +792,25 @@ fn language_model_pack_factors_with_aliases(
     Ok((embedding, head))
 }
 
+/// Places each tensor on the device of the layer its name indexes (capped at `num_layers`), else the base device.
+pub(crate) fn layer_indexed_device(
+    pattern: &str,
+    num_layers: usize,
+    loading_isq: bool,
+) -> Result<Arc<dyn Fn(String) -> DeviceForLoadTensor + Send + Sync + 'static>> {
+    if loading_isq {
+        return Ok(Arc::new(|_| DeviceForLoadTensor::Base));
+    }
+    let re = Regex::new(pattern)?;
+    Ok(Arc::new(move |name: String| {
+        re.captures(&name)
+            .and_then(|captures| captures.get(1))
+            .and_then(|m| m.as_str().parse::<usize>().ok())
+            .map(|l| DeviceForLoadTensor::Idx(l.min(num_layers)))
+            .unwrap_or(DeviceForLoadTensor::Base)
+    }))
+}
+
 pub trait DeviceMappedModelLoader {
     /// Maximum activation size of non-mapped parts of this model.
     /// Useful for the multimodal models which may prefer to keep the vison components on the GPU.
@@ -1315,5 +1337,28 @@ mod auto_device_map_quantization_tests {
             1
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{layer_indexed_device, DeviceForLoadTensor, LAYER_INDEX_PATTERN};
+
+    #[test]
+    fn layer_tensors_follow_their_layer_and_the_rest_stay_on_the_base_device() {
+        let place = layer_indexed_device(LAYER_INDEX_PATTERN, 4, false).unwrap();
+        let idx = |name: &str| match place(name.to_string()) {
+            DeviceForLoadTensor::Idx(i) => Some(i),
+            DeviceForLoadTensor::Base => None,
+        };
+        assert_eq!(idx("model.layers.2.mlp.up_proj.weight"), Some(2));
+        assert_eq!(idx("model.layers.9.mlp.up_proj.weight"), Some(4));
+        assert_eq!(idx("model.embed_tokens.weight"), None);
+
+        let isq = layer_indexed_device(LAYER_INDEX_PATTERN, 4, true).unwrap();
+        assert!(matches!(
+            isq("model.layers.2.mlp.up_proj.weight".to_string()),
+            DeviceForLoadTensor::Base
+        ));
     }
 }

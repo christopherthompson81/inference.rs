@@ -22,7 +22,7 @@ tracing.workspace = true
 rust-mcp-schema.workspace = true
 reqwest = { workspace = true, features = ["json", "stream"] }
 tokio-tungstenite.workspace = true
-futures-util.workspace = true
+futures.workspace = true
 http.workspace = true
 utoipa = { workspace = true, optional = true }
 uuid = { workspace = true, features = ["v4", "serde"] }
@@ -30,5 +30,3 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 [features]
 utoipa = ["dep:utoipa"]
 
-[dev-dependencies]
-tokio-test = "0.4"

@@ -1,6 +1,6 @@
 use anyhow::Result;
-use futures_util::stream::{SplitSink, SplitStream};
-use futures_util::{SinkExt, StreamExt};
+use futures::stream::{SplitSink, SplitStream};
+use futures::{SinkExt, StreamExt};
 use http::{Request, Uri};
 use serde_json::Value;
 use std::collections::HashMap;
