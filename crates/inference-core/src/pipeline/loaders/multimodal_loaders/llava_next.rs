@@ -37,15 +37,6 @@ impl MultimodalModelLoader for LLaVANextLoader {
         let cfg = crate::vision_models::llava::config::Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
-    fn get_processor(
-        &self,
-        model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(LLaVANextProcessor::new(model_config))
-    }
     fn supports_paged_attention(&self, _config: &str) -> bool {
         true
     }
@@ -63,6 +54,18 @@ impl MultimodalModelLoader for LLaVANextLoader {
             input: vec![SupportedModality::Text, SupportedModality::Vision],
             output: vec![SupportedModality::Text],
         })
+    }
+}
+
+impl MultimodalProcessorFactory for LLaVANextLoader {
+    fn get_processor(
+        &self,
+        model_config: &str,
+        _processor_config: Option<ProcessorConfig>,
+        _preprocessor_config: PreProcessorConfig,
+        _max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        Arc::new(LLaVANextProcessor::new(model_config))
     }
 }
 

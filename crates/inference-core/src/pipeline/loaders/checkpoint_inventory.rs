@@ -11,34 +11,6 @@ pub(crate) struct CheckpointDeviceMapSizes {
     pub(crate) total_model_size_in_bytes: usize,
 }
 
-const NON_MAPPED_COMPONENTS: &[&str] = &[
-    "audio",
-    "audio_model",
-    "audio_tower",
-    "image",
-    "mtp",
-    "visual",
-    "vision",
-    "vision_encoder",
-    "vision_model",
-    "vision_tower",
-];
-
-pub(crate) fn standard_layer_index(tensor_name: &str) -> Option<usize> {
-    let components = tensor_name.split('.').collect::<Vec<_>>();
-    if components
-        .iter()
-        .any(|component| NON_MAPPED_COMPONENTS.contains(component))
-    {
-        return None;
-    }
-    components.windows(2).find_map(|window| {
-        (window[0] == "layers")
-            .then(|| window[1].parse::<usize>().ok())
-            .flatten()
-    })
-}
-
 fn is_float(dtype: SafeDtype) -> bool {
     matches!(
         dtype,
@@ -175,6 +147,7 @@ pub(crate) fn checkpoint_device_map_sizes(
 
 #[cfg(test)]
 mod tests {
+    use inference_nn::loaders::standard_layer_index;
     use std::collections::HashMap;
 
     use safetensors::{serialize_to_file, tensor::TensorView};

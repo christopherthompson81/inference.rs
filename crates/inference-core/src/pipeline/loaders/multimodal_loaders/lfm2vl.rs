@@ -73,16 +73,6 @@ impl MultimodalModelLoader for Lfm2VlLoader {
         let cfg = Lfm2VlConfig::from_json(config)?;
         Ok(Box::new(cfg))
     }
-    fn get_processor(
-        &self,
-        model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        let cfg = Lfm2VlConfig::from_json(model_config).expect("Failed to parse LFM2-VL config");
-        Arc::new(Lfm2VlProcessor::new(&cfg, &preprocessor_config))
-    }
     fn supports_paged_attention(&self, _config: &str) -> bool {
         true
     }
@@ -110,6 +100,19 @@ impl MultimodalModelLoader for Lfm2VlLoader {
             cfg.text_config.num_hidden_layers,
             loading_isq,
         )
+    }
+}
+
+impl MultimodalProcessorFactory for Lfm2VlLoader {
+    fn get_processor(
+        &self,
+        model_config: &str,
+        _processor_config: Option<ProcessorConfig>,
+        preprocessor_config: PreProcessorConfig,
+        _max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        let cfg = Lfm2VlConfig::from_json(model_config).expect("Failed to parse LFM2-VL config");
+        Arc::new(Lfm2VlProcessor::new(&cfg, &preprocessor_config))
     }
 }
 

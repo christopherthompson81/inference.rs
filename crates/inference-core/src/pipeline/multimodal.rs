@@ -593,12 +593,16 @@ impl Loader for MultimodalLoader {
             let processor_config: Option<ProcessorConfig> = processor_config_json
                 .as_deref()
                 .map(|json| serde_json::from_str(json).unwrap());
-            let processor = self.inner.get_processor(
+            let loader_type = match &self.loader_type {
+                Some(loader_type) => loader_type.clone(),
+                None => AutoMultimodalLoader::loader_type(&config)?,
+            };
+            let processor = loader_type.get_processor(
                 &config,
                 processor_config,
                 preprocessor_config.clone(),
                 self.config.max_edge,
-            );
+            )?;
             let tokenizer = match self.prepared_source.as_ref() {
                 Some(source) => {
                     let mut tokenizer = source.tokenizer.clone();

@@ -373,3 +373,46 @@ impl ClipVisionTransformer {
         uvb.to_safetensors()
     }
 }
+
+pub fn get_clip_vit_num_elems(cfg: &ClipConfig) -> usize {
+    let pre_layer_norm = cfg.hidden_size;
+    let final_layer_norm = cfg.hidden_size;
+
+    let num_patches = (cfg.image_size / cfg.patch_size).pow(2);
+    let num_positions = num_patches + 1;
+
+    let class_embedding = cfg.hidden_size;
+
+    let position_ids = num_positions;
+    let position_embedding = num_positions * cfg.hidden_size;
+
+    let conv2dconfig = Conv2dConfig {
+        stride: cfg.patch_size,
+        ..Default::default()
+    };
+    let patch_embedding =
+        cfg.num_channels * cfg.hidden_size / conv2dconfig.groups * cfg.patch_size * cfg.patch_size;
+
+    let encoder_layer_elems = {
+        let layer_norm1 = cfg.hidden_size;
+        let layer_norm2 = cfg.hidden_size;
+
+        let q_proj = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
+        let k_proj = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
+        let v_proj = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
+        let o_proj = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
+
+        let fc1 = cfg.hidden_size * cfg.intermediate_size + cfg.intermediate_size;
+        let fc2 = cfg.intermediate_size * cfg.hidden_size + cfg.hidden_size;
+
+        layer_norm1 + layer_norm2 + q_proj + k_proj + v_proj + o_proj + fc1 + fc2
+    };
+
+    pre_layer_norm
+        + final_layer_norm
+        + class_embedding
+        + position_ids
+        + position_embedding
+        + patch_embedding
+        + cfg.num_hidden_layers * encoder_layer_elems
+}

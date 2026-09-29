@@ -31,15 +31,6 @@ impl MultimodalModelLoader for PaddleOcrVlLoader {
         let config = PaddleOcrVlConfig::from_json(config)?;
         Ok(Box::new(config))
     }
-    fn get_processor(
-        &self,
-        _model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(PaddleOcrVlProcessor)
-    }
     fn supports_paged_attention(&self, _config: &str) -> bool {
         true
     }
@@ -55,6 +46,18 @@ impl MultimodalModelLoader for PaddleOcrVlLoader {
             input: vec![SupportedModality::Text, SupportedModality::Vision],
             output: vec![SupportedModality::Text],
         })
+    }
+}
+
+impl MultimodalProcessorFactory for PaddleOcrVlLoader {
+    fn get_processor(
+        &self,
+        _model_config: &str,
+        _processor_config: Option<ProcessorConfig>,
+        _preprocessor_config: PreProcessorConfig,
+        _max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        Arc::new(PaddleOcrVlProcessor)
     }
 }
 

@@ -1,24 +1,21 @@
-use super::{layer_indexed_device, LAYER_INDEX_PATTERN};
 pub use crate::model::{NormalLoadingMetadata, NormalModel};
 use std::{
     borrow::Cow,
     collections::HashMap,
     fmt::{Debug, Display},
     str::FromStr,
-    sync::Arc,
 };
 
 use crate::{attention::ATTENTION_CHUNK_SIZE, matformer::MatformerSliceConfig};
 
 use crate::{
-    device_map::DeviceMapper,
     lora::{LoraConfig, Ordering},
     paged_attention::{AttentionImplementation, ModelConfigLike, ModelConfigMetadata},
     pipeline::isq::IsqModelLoader,
-    utils::varbuilder_utils::DeviceForLoadTensor,
 };
 use anyhow::Result;
 use candle_core::DType;
+use inference_nn::bias_if;
 use inference_quant::log::once_log_debug;
 
 use inference_quant::ShardedVarBuilder;
@@ -57,92 +54,7 @@ use super::{language_model_pack_factors_with_aliases, AutoDeviceMapQuantization}
 ))]
 use super::{standard_non_mapped_size_in_bytes, LanguageModelEnds};
 
-use crate::gguf::normal_registry::RopePairing;
-
-pub trait NormalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoader {
-    fn load(
-        &self,
-        config: &str,
-        vb: ShardedVarBuilder,
-        normal_loading_metadata: NormalLoadingMetadata,
-        attention_mechanism: AttentionImplementation,
-    ) -> Result<Box<dyn NormalModel + Send + Sync>>;
-    #[allow(clippy::too_many_arguments)]
-    fn load_xlora(
-        &self,
-        config: &str,
-        vb: ShardedVarBuilder,
-        lora_config: &[((String, String), LoraConfig)],
-        xlora_config: Option<XLoraConfig>,
-        xlora_ordering: Ordering,
-        normal_loading_metadata: NormalLoadingMetadata,
-        preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
-    ) -> Result<Box<dyn NormalModel + Send + Sync>>;
-    fn runtime_config<'a>(
-        &self,
-        config: &'a str,
-        max_model_len: Option<usize>,
-    ) -> Result<Cow<'a, str>> {
-        if let Some(max_model_len) = max_model_len {
-            anyhow::bail!("max_model_len={max_model_len} is not supported by this model loader");
-        }
-        Ok(Cow::Borrowed(config))
-    }
-    #[cfg_attr(
-        not(any(
-            feature = "models-gemma",
-            feature = "models-llama",
-            feature = "models-other",
-            feature = "models-phi",
-            feature = "models-qwen"
-        )),
-        allow(dead_code)
-    )]
-    fn is_gptx(&self, _config: &str) -> Result<bool> {
-        Ok(true)
-    }
-    #[cfg_attr(
-        not(any(
-            feature = "models-gemma",
-            feature = "models-llama",
-            feature = "models-other",
-            feature = "models-phi",
-            feature = "models-qwen"
-        )),
-        allow(dead_code)
-    )]
-    fn is_gptx_for(
-        &self,
-        config: &str,
-        normal_loading_metadata: &NormalLoadingMetadata,
-    ) -> Result<bool> {
-        match normal_loading_metadata.rope_pairing {
-            Some(RopePairing::Adjacent) => Ok(false),
-            Some(RopePairing::HalfSplit) => Ok(true),
-            None => match super::qk_rope_layout_from_config(config)? {
-                Some(RopePairing::Adjacent) => Ok(false),
-                Some(RopePairing::HalfSplit) => Ok(true),
-                None => self.is_gptx(config),
-            },
-        }
-    }
-    fn supports_paged_attention(&self, _config: &str) -> Result<bool> {
-        Ok(true)
-    }
-    fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>>;
-    fn get_device_for_tensor(
-        &self,
-        config: &str,
-        _mapper: &dyn DeviceMapper,
-        loading_isq: bool,
-    ) -> Result<Arc<dyn Fn(String) -> DeviceForLoadTensor + Send + Sync + 'static>> {
-        layer_indexed_device(
-            LAYER_INDEX_PATTERN,
-            self.model_config(config)?.num_layers(),
-            loading_isq,
-        )
-    }
-}
+pub use inference_nn::loaders::NormalModelLoader;
 
 // One row per text architecture; everything that names an architecture is generated from it.
 macro_rules! normal_loader_types {
@@ -283,21 +195,6 @@ normal_loader_types! {
     Qwen3_5 { cli: "qwen3_5", hf: "Qwen3_5ForCausalLM", model_type: "qwen3_5_text", loader: Qwen3_5TextLoader, feature: "models-qwen" },
     Lfm2 { cli: "lfm2", hf: "Lfm2ForCausalLM", model_type: "lfm2", loader: Lfm2Loader, feature: "models-other" },
     Lfm2Moe { cli: "lfm2_moe", hf: "Lfm2MoeForCausalLM", model_type: "lfm2_moe", loader: Lfm2Loader, feature: "models-other" },
-}
-
-#[cfg(any(
-    feature = "models-gemma",
-    feature = "models-other",
-    feature = "models-phi"
-))]
-macro_rules! bias_if {
-    ($cond:expr, $size:expr) => {
-        if $cond {
-            $size
-        } else {
-            0
-        }
-    };
 }
 
 mod auto;

@@ -68,6 +68,36 @@ impl MultimodalModelLoader for Gemma4Loader {
         let config = Gemma4Config::from_json(config)?;
         Ok(Box::new(config))
     }
+    fn supports_paged_attention(&self, config: &str) -> bool {
+        supports_gemma4_incremental_cache(config)
+    }
+    fn supports_encoder_cache(&self, _config: &str) -> bool {
+        true
+    }
+    fn supports_prefix_cacher(&self, config: &str) -> bool {
+        supports_gemma4_incremental_cache(config)
+    }
+    fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
+        Arc::new(Gemma4Prefixer)
+    }
+    fn modalities(&self, config: &str) -> Result<Modalities> {
+        let cfg = Gemma4Config::from_json(config)?;
+        let mut input = vec![SupportedModality::Text];
+        if cfg.vision_config.is_some() {
+            input.push(SupportedModality::Vision);
+            input.push(SupportedModality::Video);
+        }
+        if cfg.audio_config.is_some() {
+            input.push(SupportedModality::Audio);
+        }
+        Ok(Modalities {
+            input,
+            output: vec![SupportedModality::Text],
+        })
+    }
+}
+
+impl MultimodalProcessorFactory for Gemma4Loader {
     fn get_processor(
         &self,
         config: &str,
@@ -104,33 +134,6 @@ impl MultimodalModelLoader for Gemma4Loader {
             bidirectional_attention: cfg.text_config.bidirectional_attention(),
             vision_attention_on_full_layers: false,
         }))
-    }
-    fn supports_paged_attention(&self, config: &str) -> bool {
-        supports_gemma4_incremental_cache(config)
-    }
-    fn supports_encoder_cache(&self, _config: &str) -> bool {
-        true
-    }
-    fn supports_prefix_cacher(&self, config: &str) -> bool {
-        supports_gemma4_incremental_cache(config)
-    }
-    fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
-        Arc::new(Gemma4Prefixer)
-    }
-    fn modalities(&self, config: &str) -> Result<Modalities> {
-        let cfg = Gemma4Config::from_json(config)?;
-        let mut input = vec![SupportedModality::Text];
-        if cfg.vision_config.is_some() {
-            input.push(SupportedModality::Vision);
-            input.push(SupportedModality::Video);
-        }
-        if cfg.audio_config.is_some() {
-            input.push(SupportedModality::Audio);
-        }
-        Ok(Modalities {
-            input,
-            output: vec![SupportedModality::Text],
-        })
     }
 }
 

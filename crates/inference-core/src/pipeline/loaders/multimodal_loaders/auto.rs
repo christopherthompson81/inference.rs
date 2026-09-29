@@ -4,13 +4,13 @@ use super::*;
 pub struct AutoMultimodalLoader;
 
 impl AutoMultimodalLoader {
-    fn get_loader(config: &str) -> Result<Box<dyn MultimodalModelLoader>> {
+    pub(crate) fn loader_type(config: &str) -> Result<MultimodalLoaderType> {
         let auto_cfg: AutoMultimodalLoaderConfig = serde_json::from_str(config)?;
 
         // Voxtral: params.json has `multimodal` but no `architectures`
         if auto_cfg.multimodal.is_some() && auto_cfg.architectures.is_empty() {
             once_log_debug("Automatic loader type determined to be `voxtral`");
-            return MultimodalLoaderType::Voxtral.loader();
+            return Ok(MultimodalLoaderType::Voxtral);
         }
 
         if auto_cfg.architectures.len() != 1 {
@@ -21,9 +21,11 @@ impl AutoMultimodalLoader {
         let tp = MultimodalLoaderType::from_causal_lm_name(name)?;
 
         once_log_debug(format!("Automatic loader type determined to be `{tp}`"));
+        Ok(tp)
+    }
 
-        // Delegate to the concrete loader
-        tp.loader()
+    fn get_loader(config: &str) -> Result<Box<dyn MultimodalModelLoader>> {
+        Self::loader_type(config)?.loader()
     }
 }
 
@@ -52,17 +54,6 @@ impl MultimodalModelLoader for AutoMultimodalLoader {
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         Self::get_loader(config)?.get_config_repr(config)
-    }
-    fn get_processor(
-        &self,
-        model_config: &str,
-        proc_cfg: Option<ProcessorConfig>,
-        preproc_cfg: PreProcessorConfig,
-        max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Self::get_loader(model_config)
-            .expect("AutoMultimodalLoader get_loader")
-            .get_processor(model_config, proc_cfg, preproc_cfg, max_edge)
     }
     fn supports_paged_attention(&self, config: &str) -> bool {
         Self::get_loader(config)

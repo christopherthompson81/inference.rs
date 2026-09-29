@@ -5,8 +5,14 @@ mod embedding_loaders;
 mod multimodal_loaders;
 mod normal_loaders;
 pub use crate::device_map::AutoDeviceMapParams;
-use auto_device_map::NonMappedSubModel;
 pub(crate) use checkpoint_inventory::{checkpoint_device_map_sizes, checkpoint_runtime_size};
+use inference_nn::loaders::NonMappedSubModel;
+pub(crate) use inference_nn::loaders::{
+    language_model_pack_factors, language_model_pack_factors_with_aliases, layer_indexed_device,
+    promoted_tensor_pack_factor, qk_rope_layout_from_config, standard_non_mapped_size_in_bytes,
+    tied_promoted_tensor_pack_factor, LanguageModelEnds, QK_ROPE_LAYOUT_CONFIG_KEY,
+};
+pub use inference_nn::loaders::{AutoDeviceMapQuantization, DeviceMappedModelLoader};
 
 use std::{
     fmt::{self, Debug},
@@ -15,13 +21,10 @@ use std::{
     sync::Arc,
 };
 
-use crate::attention::ATTENTION_CHUNK_SIZE;
-use crate::utils::varbuilder_utils::DeviceForLoadTensor;
 use anyhow::Result;
 use as_any::AsAny;
 use candle_core::{DType, Device};
-use inference_quant::{IsqType, QuantizedConfig, QuantizedWeightSource};
-use regex::Regex;
+use inference_quant::{IsqType, QuantizedConfig};
 use serde::Deserialize;
 use tokio::sync::Mutex;
 
@@ -57,18 +60,13 @@ pub use diffusion_loaders::{
     DiffusionModelPathsInner, FluxLoader,
 };
 
-use crate::{
-    matformer::MatformerSliceConfig, paged_attention::ModelConfigLike, DeviceMapMetadata,
-    DeviceMapSetting, PagedAttentionConfig, Topology, TryIntoDType,
-};
+use crate::{DeviceMapSetting, PagedAttentionConfig, TryIntoDType};
 
 use super::{paths::AdapterPaths, Pipeline};
 
-pub(crate) const QK_ROPE_LAYOUT_CONFIG_KEY: &str = "_inference_qk_rope_layout";
 const LEGACY_MODEL_OPT_CONFIG: &str = "hf_quant_config.json";
 /// Set on the model config JSON when the checkpoint's built-in MTP head should be loaded.
 pub const MTP_CONFIG_KEY: &str = "_inference_mtp";
-pub(crate) const LAYER_INDEX_PATTERN: &str = r"\.layers\.(\d+)\.";
 
 pub(crate) fn load_model_config(
     config_path: &std::path::Path,
@@ -195,29 +193,6 @@ pub(crate) fn inject_mtp_config_flag(config: &str) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("model config must be a JSON object"))?;
     object.insert(MTP_CONFIG_KEY.to_string(), serde_json::Value::Bool(true));
     Ok(config.to_string())
-}
-
-pub(crate) fn qk_rope_layout_from_config(
-    config: &str,
-) -> Result<Option<crate::gguf::normal_registry::RopePairing>> {
-    let config: serde_json::Value = serde_json::from_str(config)?;
-    let Some(layout) = config
-        .get(QK_ROPE_LAYOUT_CONFIG_KEY)
-        .and_then(serde_json::Value::as_str)
-    else {
-        return Ok(None);
-    };
-    match layout {
-        "adjacent" => Ok(Some(
-            crate::gguf::normal_registry::RopePairing::Adjacent,
-        )),
-        "half_split" => Ok(Some(
-            crate::gguf::normal_registry::RopePairing::HalfSplit,
-        )),
-        layout => anyhow::bail!(
-            "model config `{QK_ROPE_LAYOUT_CONFIG_KEY}` must be `adjacent` or `half_split`, got `{layout}`"
-        ),
-    }
 }
 
 pub(crate) fn stamp_qk_rope_layout(
@@ -605,341 +580,6 @@ impl QuantizationConfigShim {
     }
 }
 
-#[derive(Clone, Copy)]
-pub struct AutoDeviceMapQuantization<'a> {
-    source: AutoDeviceMapQuantizationSource<'a>,
-    topology: Option<&'a Topology>,
-}
-
-#[derive(Clone, Copy)]
-enum AutoDeviceMapQuantizationSource<'a> {
-    Isq(Option<IsqType>),
-    WeightSource(&'a dyn QuantizedWeightSource),
-}
-
-impl<'a> AutoDeviceMapQuantization<'a> {
-    pub fn isq(isq: Option<IsqType>, topology: Option<&'a Topology>) -> Self {
-        Self {
-            source: AutoDeviceMapQuantizationSource::Isq(isq),
-            topology,
-        }
-    }
-
-    pub fn weight_source(source: &'a dyn QuantizedWeightSource) -> Self {
-        Self {
-            source: AutoDeviceMapQuantizationSource::WeightSource(source),
-            topology: None,
-        }
-    }
-
-    pub fn weight_source_with_topology(
-        source: &'a dyn QuantizedWeightSource,
-        topology: Option<&'a Topology>,
-    ) -> Self {
-        Self {
-            source: AutoDeviceMapQuantizationSource::WeightSource(source),
-            topology,
-        }
-    }
-
-    #[cfg(test)]
-    fn unpromoted_pack_factor_for(
-        &self,
-        name: &str,
-        dtype: DType,
-        fallback: usize,
-    ) -> Result<usize> {
-        self.pack_factor_for_candidates(&[name], dtype, fallback, false)
-    }
-
-    pub fn promoted_pack_factor_for(
-        &self,
-        name: &str,
-        dtype: DType,
-        fallback: usize,
-    ) -> Result<usize> {
-        self.pack_factor_for_candidates(&[name], dtype, fallback, true)
-    }
-
-    pub fn conservative_pack_factor(&self, dtype: DType, fallback: usize) -> usize {
-        let topology_pack_factors = self.topology.into_iter().flat_map(|topology| {
-            topology
-                .layers
-                .iter()
-                .filter_map(|entry| entry.as_ref().and_then(|entry| entry.isq))
-                .chain(topology.patterns.iter().filter_map(|(_, entry)| entry.isq))
-        });
-        topology_pack_factors.fold(fallback, |factor, ty| factor.min(ty.pack_factor(dtype)))
-    }
-
-    pub fn conservative_moqe_pack_factor(
-        &self,
-        dtype: DType,
-        source_pack_factor: usize,
-        target: IsqType,
-    ) -> usize {
-        self.conservative_pack_factor(dtype, source_pack_factor.min(target.pack_factor(dtype)))
-    }
-
-    fn pack_factor_for_candidates(
-        &self,
-        names: &[&str],
-        dtype: DType,
-        fallback: usize,
-        promote_default: bool,
-    ) -> Result<usize> {
-        let topology_ty = names.iter().find_map(|name| {
-            self.topology
-                .and_then(|topology| topology.match_for_name(name))
-                .and_then(|topology| topology.isq)
-        });
-        match self.source {
-            AutoDeviceMapQuantizationSource::WeightSource(source) => {
-                if let Some(ty) = topology_ty {
-                    return Ok(ty.pack_factor(dtype));
-                }
-                for name in names {
-                    if let Some(pack_factor) = source.pack_factor_for(name, dtype)? {
-                        return Ok(pack_factor);
-                    }
-                }
-                Ok(1)
-            }
-            AutoDeviceMapQuantizationSource::Isq(default) => {
-                let ty = topology_ty.or_else(|| {
-                    default.map(|ty| {
-                        if promote_default {
-                            ty.promote_for_sensitive_tensor()
-                        } else {
-                            ty
-                        }
-                    })
-                });
-                Ok(ty.map(|ty| ty.pack_factor(dtype)).unwrap_or(fallback))
-            }
-        }
-    }
-}
-
-fn promoted_tensor_pack_factor(
-    quantization: Option<&AutoDeviceMapQuantization<'_>>,
-    name: &str,
-    dtype: DType,
-    fallback: usize,
-) -> Result<usize> {
-    quantization.map_or(Ok(fallback), |quantization| {
-        quantization.promoted_pack_factor_for(name, dtype, fallback)
-    })
-}
-
-fn tied_promoted_tensor_pack_factor(
-    quantization: Option<&AutoDeviceMapQuantization<'_>>,
-    embedding_name: &str,
-    legacy_head_name: &str,
-    dtype: DType,
-    fallback: usize,
-) -> Result<usize> {
-    quantization.map_or(Ok(fallback), |quantization| match quantization.source {
-        AutoDeviceMapQuantizationSource::WeightSource(_) => quantization
-            .pack_factor_for_candidates(&[embedding_name, legacy_head_name], dtype, fallback, true),
-        AutoDeviceMapQuantizationSource::Isq(_) => {
-            quantization.promoted_pack_factor_for(embedding_name, dtype, fallback)
-        }
-    })
-}
-
-pub(crate) struct LanguageModelEnds {
-    pub(crate) hidden_size: usize,
-    pub(crate) vocab_size: usize,
-    pub(crate) tie_word_embeddings: bool,
-}
-
-/// Embeddings, untied LM head and final norm, the non-mapped weights of a plain decoder.
-pub(crate) fn standard_non_mapped_size_in_bytes(
-    ends: LanguageModelEnds,
-    quantization: Option<&AutoDeviceMapQuantization<'_>>,
-    dtype: DType,
-    weight_pack_factor: usize,
-) -> Result<usize> {
-    let LanguageModelEnds {
-        hidden_size,
-        vocab_size,
-        tie_word_embeddings,
-    } = ends;
-    let (embed_tokens_pack_factor, lm_head_pack_factor) = language_model_pack_factors(
-        quantization,
-        "model.embed_tokens.weight",
-        "lm_head.weight",
-        tie_word_embeddings,
-        dtype,
-        weight_pack_factor,
-    )?;
-    let embed_tokens = hidden_size * vocab_size / embed_tokens_pack_factor;
-    let lm_head = if tie_word_embeddings {
-        0
-    } else {
-        hidden_size * vocab_size / lm_head_pack_factor
-    };
-    Ok((embed_tokens + lm_head + hidden_size) * dtype.size_in_bytes())
-}
-
-fn language_model_pack_factors(
-    quantization: Option<&AutoDeviceMapQuantization<'_>>,
-    embedding_name: &str,
-    head_name: &str,
-    tied: bool,
-    dtype: DType,
-    fallback: usize,
-) -> Result<(usize, usize)> {
-    let embedding = if tied {
-        tied_promoted_tensor_pack_factor(quantization, embedding_name, head_name, dtype, fallback)?
-    } else {
-        promoted_tensor_pack_factor(quantization, embedding_name, dtype, fallback)?
-    };
-    let head = promoted_tensor_pack_factor(quantization, head_name, dtype, fallback)?;
-    Ok((embedding, head))
-}
-
-fn language_model_pack_factors_with_aliases(
-    quantization: Option<&AutoDeviceMapQuantization<'_>>,
-    embedding_names: &[&str],
-    head_names: &[&str],
-    tied: bool,
-    dtype: DType,
-    fallback: usize,
-) -> Result<(usize, usize)> {
-    let embedding = quantization.map_or(Ok(fallback), |quantization| {
-        if tied
-            && matches!(
-                quantization.source,
-                AutoDeviceMapQuantizationSource::WeightSource(_)
-            )
-        {
-            let mut candidates = embedding_names.to_vec();
-            candidates.extend_from_slice(head_names);
-            quantization.pack_factor_for_candidates(&candidates, dtype, fallback, true)
-        } else {
-            quantization.pack_factor_for_candidates(embedding_names, dtype, fallback, true)
-        }
-    })?;
-    let head = quantization.map_or(Ok(fallback), |quantization| {
-        quantization.pack_factor_for_candidates(head_names, dtype, fallback, true)
-    })?;
-    Ok((embedding, head))
-}
-
-/// Places each tensor on the device of the layer its name indexes (capped at `num_layers`), else the base device.
-pub(crate) fn layer_indexed_device(
-    pattern: &str,
-    num_layers: usize,
-    loading_isq: bool,
-) -> Result<Arc<dyn Fn(String) -> DeviceForLoadTensor + Send + Sync + 'static>> {
-    if loading_isq {
-        return Ok(Arc::new(|_| DeviceForLoadTensor::Base));
-    }
-    let re = Regex::new(pattern)?;
-    Ok(Arc::new(move |name: String| {
-        re.captures(&name)
-            .and_then(|captures| captures.get(1))
-            .and_then(|m| m.as_str().parse::<usize>().ok())
-            .map(|l| DeviceForLoadTensor::Idx(l.min(num_layers)))
-            .unwrap_or(DeviceForLoadTensor::Base)
-    }))
-}
-
-pub trait DeviceMappedModelLoader {
-    /// Maximum activation size of non-mapped parts of this model.
-    /// Useful for the multimodal models which may prefer to keep the vison components on the GPU.
-    fn non_mapped_max_act_size_elems(
-        &self,
-        _config: &str,
-        _params: &AutoDeviceMapParams,
-    ) -> Result<usize> {
-        Ok(0)
-    }
-    /// Maximum activation size of mapped parts of the model; the default is a text decoder's attention scores.
-    fn mapped_max_act_size_elems(
-        &self,
-        config: &str,
-        params: &AutoDeviceMapParams,
-    ) -> Result<usize> {
-        let AutoDeviceMapParams::Text {
-            max_seq_len,
-            max_batch_size,
-        } = params
-        else {
-            anyhow::bail!("Expected text AutoDeviceMapParams for this model!")
-        };
-        Ok(max_batch_size
-            * self.model_config(config)?.num_attn_heads()
-            * max_seq_len.min(&ATTENTION_CHUNK_SIZE).pow(2))
-    }
-    /// weight_pack_factor only applies to quantized weights.
-    fn non_mapped_size_in_bytes(
-        &self,
-        config: &str,
-        dtype: DType,
-        weight_pack_factor: usize,
-        quantization: Option<&AutoDeviceMapQuantization<'_>>,
-        matformer_config: Option<&MatformerSliceConfig>,
-    ) -> Result<usize>;
-    /// weight_pack_factor only applies to quantized weights.
-    fn layer_sizes_in_bytes(
-        &self,
-        config: &str,
-        dtype: DType,
-        weight_pack_factor: usize,
-        matformer_config: Option<&MatformerSliceConfig>,
-    ) -> Result<Vec<usize>>;
-    fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
-        None
-    }
-    fn non_mapped_sub_models_for_config(
-        &self,
-        _config: &str,
-    ) -> Result<Option<Vec<NonMappedSubModel>>> {
-        Ok(self.non_mapped_sub_models())
-    }
-    fn num_layers(&self, config: &str) -> Result<usize> {
-        Ok(self.model_config(config)?.num_layers())
-    }
-    fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>>;
-
-    fn checkpoint_layer_index(&self, _config: &str, tensor_name: &str) -> Option<usize> {
-        checkpoint_inventory::standard_layer_index(tensor_name)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn get_device_layers(
-        &self,
-        config: &str,
-        num_layers: usize,
-        layer_sizes_in_bytes: Vec<usize>,
-        non_mapped_size_in_bytes: usize,
-        total_model_size_in_bytes: usize,
-        devices: &[Device],
-        dtype: DType,
-        params: &AutoDeviceMapParams,
-        paged_attn_config: Option<&mut PagedAttentionConfig>,
-    ) -> Result<DeviceMapMetadata>
-    where
-        Self: Sized,
-    {
-        auto_device_map::get_device_layers(
-            self,
-            config,
-            num_layers,
-            layer_sizes_in_bytes,
-            non_mapped_size_in_bytes,
-            total_model_size_in_bytes,
-            devices,
-            dtype,
-            params,
-            paged_attn_config,
-        )
-    }
-}
-
 /// The `Loader` trait abstracts the loading process. The primary entrypoint is the
 /// `load_model` method.
 ///
@@ -1000,7 +640,7 @@ pub trait Loader: Send + Sync {
 }
 
 #[cfg(test)]
-mod auto_device_map_quantization_tests {
+mod model_config_tests {
     use super::*;
 
     #[test]
@@ -1231,185 +871,5 @@ mod auto_device_map_quantization_tests {
         );
         assert!(validate_lora_qk_rope_layout(r#"{"hidden_size":16}"#, true).is_ok());
         Ok(())
-    }
-
-    struct PackFactorWeightSource(usize);
-
-    impl QuantizedWeightSource for PackFactorWeightSource {
-        fn contains(&self, _name: &str) -> bool {
-            true
-        }
-
-        fn load_linear(
-            &self,
-            _key: &str,
-            _device: &Device,
-            _shard: inference_quant::Shard,
-        ) -> candle_core::Result<Option<std::sync::Arc<dyn inference_quant::QuantMethod>>> {
-            unreachable!()
-        }
-
-        fn load_optional_tensor(
-            &self,
-            _name: &str,
-            _device: &Device,
-        ) -> candle_core::Result<Option<candle_core::Tensor>> {
-            unreachable!()
-        }
-
-        fn shard_alignment(&self, _key: &str) -> candle_core::Result<usize> {
-            Ok(1)
-        }
-
-        fn pack_factor(&self, _dtype: DType) -> candle_core::Result<usize> {
-            Ok(self.0)
-        }
-
-        fn pack_factor_for(&self, _key: &str, _dtype: DType) -> candle_core::Result<Option<usize>> {
-            Ok(Some(self.0))
-        }
-    }
-
-    const EMBEDDING: &str = "model.embed_tokens.weight";
-    const HEAD: &str = "lm_head.weight";
-
-    #[test]
-    fn explicit_promotion_and_topology_overrides_resolve_in_estimates() -> Result<()> {
-        let dtype = DType::BF16;
-        for (default, sensitive) in [
-            (IsqType::AFQ4, IsqType::AFQ6),
-            (IsqType::Q4K, IsqType::Q6K),
-            (IsqType::Q5K, IsqType::Q8_0),
-            (IsqType::Q6K, IsqType::Q8_0),
-        ] {
-            let automatic = AutoDeviceMapQuantization::isq(Some(default), None);
-            assert_eq!(
-                automatic.promoted_pack_factor_for(EMBEDDING, dtype, 1)?,
-                sensitive.pack_factor(dtype),
-                "{default}"
-            );
-            assert_eq!(
-                automatic.unpromoted_pack_factor_for(EMBEDDING, dtype, 1)?,
-                default.pack_factor(dtype),
-                "{default}"
-            );
-            assert_eq!(
-                automatic.unpromoted_pack_factor_for(
-                    "model.layers.0.mlp.down_proj.weight",
-                    dtype,
-                    1,
-                )?,
-                default.pack_factor(dtype),
-                "{default}"
-            );
-        }
-
-        let topology = Topology::from_str(
-            "'/^model\\.embed_tokens\\.weight$/':\n  isq: Q2K\n'/^lm_head\\.weight$/':\n  isq: Q8_0\n",
-        )?;
-        let overridden = AutoDeviceMapQuantization::isq(Some(IsqType::Q4K), Some(&topology));
-        assert_eq!(
-            overridden.unpromoted_pack_factor_for(EMBEDDING, dtype, 1)?,
-            IsqType::Q2K.pack_factor(dtype)
-        );
-        assert_eq!(
-            overridden.unpromoted_pack_factor_for(HEAD, dtype, 1)?,
-            IsqType::Q8_0.pack_factor(dtype)
-        );
-        assert_eq!(
-            tied_promoted_tensor_pack_factor(Some(&overridden), EMBEDDING, HEAD, dtype, 1,)?,
-            IsqType::Q2K.pack_factor(dtype)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn topology_only_quantization_uses_fallback_for_unmatched_tensors() -> Result<()> {
-        let dtype = DType::BF16;
-        let topology = Topology::from_str("'/^model\\.embed_tokens\\.weight$/':\n  isq: AFQ8\n")?;
-        let quantization = AutoDeviceMapQuantization::isq(None, Some(&topology));
-        assert_eq!(
-            quantization.unpromoted_pack_factor_for(EMBEDDING, dtype, 1)?,
-            IsqType::AFQ8.pack_factor(dtype)
-        );
-        assert_eq!(quantization.unpromoted_pack_factor_for(HEAD, dtype, 3)?, 3);
-        Ok(())
-    }
-
-    #[test]
-    fn topology_pack_factor_is_conservative_for_mapped_layers() -> Result<()> {
-        let dtype = DType::BF16;
-        let topology = Topology::from_str("'0':\n  isq: Q8_0\n")?;
-        let quantization = AutoDeviceMapQuantization::isq(Some(IsqType::Q2K), Some(&topology));
-        assert_eq!(
-            quantization.conservative_pack_factor(dtype, IsqType::Q2K.pack_factor(dtype)),
-            IsqType::Q8_0.pack_factor(dtype)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn topology_isq_overlays_prepared_weight_source_sizing() -> Result<()> {
-        let dtype = DType::BF16;
-        let source = PackFactorWeightSource(IsqType::Q2K.pack_factor(dtype));
-        let topology = Topology::from_str("'/^model\\.embed_tokens\\.weight$/':\n  isq: Q8_0\n")?;
-        let quantization =
-            AutoDeviceMapQuantization::weight_source_with_topology(&source, Some(&topology));
-
-        assert_eq!(
-            quantization.promoted_pack_factor_for(
-                EMBEDDING,
-                dtype,
-                IsqType::Q2K.pack_factor(dtype),
-            )?,
-            IsqType::Q8_0.pack_factor(dtype)
-        );
-        assert_eq!(
-            quantization.conservative_pack_factor(dtype, source.pack_factor(dtype)?),
-            IsqType::Q8_0.pack_factor(dtype)
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn moqe_sizing_keeps_source_precision_for_the_unquantized_trunk() -> Result<()> {
-        let dtype = DType::BF16;
-        let source_factor = IsqType::Q4K.pack_factor(dtype);
-        let source = PackFactorWeightSource(source_factor);
-        let prepared = AutoDeviceMapQuantization::weight_source(&source);
-        assert_eq!(
-            prepared.conservative_moqe_pack_factor(dtype, source_factor, IsqType::Q2K),
-            source_factor.min(IsqType::Q2K.pack_factor(dtype))
-        );
-
-        let checkpoint = AutoDeviceMapQuantization::isq(None, None);
-        assert_eq!(
-            checkpoint.conservative_moqe_pack_factor(dtype, 1, IsqType::Q2K),
-            1
-        );
-        Ok(())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{layer_indexed_device, DeviceForLoadTensor, LAYER_INDEX_PATTERN};
-
-    #[test]
-    fn layer_tensors_follow_their_layer_and_the_rest_stay_on_the_base_device() {
-        let place = layer_indexed_device(LAYER_INDEX_PATTERN, 4, false).unwrap();
-        let idx = |name: &str| match place(name.to_string()) {
-            DeviceForLoadTensor::Idx(i) => Some(i),
-            DeviceForLoadTensor::Base => None,
-        };
-        assert_eq!(idx("model.layers.2.mlp.up_proj.weight"), Some(2));
-        assert_eq!(idx("model.layers.9.mlp.up_proj.weight"), Some(4));
-        assert_eq!(idx("model.embed_tokens.weight"), None);
-
-        let isq = layer_indexed_device(LAYER_INDEX_PATTERN, 4, true).unwrap();
-        assert!(matches!(
-            isq("model.layers.2.mlp.up_proj.weight".to_string()),
-            DeviceForLoadTensor::Base
-        ));
     }
 }

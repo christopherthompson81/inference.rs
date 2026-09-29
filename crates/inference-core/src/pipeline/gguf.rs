@@ -1266,7 +1266,8 @@ impl Loader for GGUFLoader {
             let total_model_size_in_bytes =
                 layer_sizes_in_bytes.iter().sum::<usize>() + non_mapped_size_in_bytes;
 
-            let new = model.get_device_layers(
+            let new = super::loaders::auto_device_map::get_device_layers(
+                &model,
                 "this is a dummy config!",
                 num_layers,
                 layer_sizes_in_bytes,

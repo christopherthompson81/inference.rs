@@ -1,4 +1,3 @@
-use super::{layer_indexed_device, LAYER_INDEX_PATTERN};
 pub use crate::model::MultimodalModel;
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -7,6 +6,7 @@ use std::{fmt::Debug, str::FromStr};
 use anyhow::Result;
 use candle_core::DType;
 use candle_nn::Conv2dConfig;
+use inference_nn::bias_if;
 use inference_quant::log::once_log_debug;
 use inference_quant::ShardedVarBuilder;
 
@@ -26,7 +26,6 @@ use super::{language_model_pack_factors_with_aliases, AutoDeviceMapQuantization}
 
 use crate::attention::ATTENTION_CHUNK_SIZE;
 use crate::device_map::DeviceMapper;
-use crate::gguf::normal_registry::RopePairing;
 use crate::layers::Conv3dConfig;
 use crate::matformer::MatformerSliceConfig;
 use crate::paged_attention::{
@@ -37,7 +36,7 @@ use crate::pipeline::loaders::AutoDeviceMapParams;
 use crate::pipeline::{Modalities, MultimodalPromptPrefixer, Processor, SupportedModality};
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
 #[cfg(any(feature = "models-llama", feature = "models-phi"))]
-use crate::vision_models::clip::ClipConfig;
+use crate::vision_models::clip::get_clip_vit_num_elems;
 #[cfg(feature = "models-gemma")]
 use crate::vision_models::diffusion_gemma::{DiffusionGemmaConfig, DiffusionGemmaModel};
 #[cfg(feature = "models-gemma")]
@@ -129,45 +128,10 @@ const QWEN3_VIDEO_SAMPLING: crate::VideoFrameSampling = crate::VideoFrameSamplin
     max_frames: 768,
 };
 
-pub trait MultimodalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoader {
-    fn load(
-        &self,
-        config: &str,
-        vb: ShardedVarBuilder,
-        normal_loading_metadata: NormalLoadingMetadata,
-        attention_mechanism: AttentionImplementation,
-    ) -> Result<Box<dyn MultimodalModel + Send + Sync>>;
-    fn runtime_config<'a>(
-        &self,
-        config: &'a str,
-        max_model_len: Option<usize>,
-    ) -> Result<Cow<'a, str>> {
-        if let Some(max_model_len) = max_model_len {
-            anyhow::bail!(
-                "max_model_len={max_model_len} is not supported by this multimodal loader"
-            );
-        }
-        Ok(Cow::Borrowed(config))
-    }
-    fn is_gptx(&self, _config: &str) -> bool {
-        true
-    }
-    fn is_gptx_for(
-        &self,
-        config: &str,
-        normal_loading_metadata: &NormalLoadingMetadata,
-    ) -> Result<bool> {
-        match normal_loading_metadata.rope_pairing {
-            Some(RopePairing::Adjacent) => Ok(false),
-            Some(RopePairing::HalfSplit) => Ok(true),
-            None => match super::qk_rope_layout_from_config(config)? {
-                Some(RopePairing::Adjacent) => Ok(false),
-                Some(RopePairing::HalfSplit) => Ok(true),
-                None => Ok(self.is_gptx(config)),
-            },
-        }
-    }
-    fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>>;
+pub use inference_nn::loaders::MultimodalModelLoader;
+
+/// The chat-template half of a multimodal loader, which stays with the engine's `Processor`.
+pub(crate) trait MultimodalProcessorFactory {
     fn get_processor(
         &self,
         model_config: &str,
@@ -175,52 +139,6 @@ pub trait MultimodalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedMode
         preprocessor_config: PreProcessorConfig,
         max_edge: Option<u32>,
     ) -> Arc<dyn Processor + Send + Sync>;
-    fn supports_paged_attention(&self, config: &str) -> bool;
-    fn supports_encoder_cache(&self, _config: &str) -> bool {
-        false
-    }
-    fn supports_prefix_cacher(&self, _config: &str) -> bool {
-        // Default is false, specific model must override.
-        false
-    }
-    fn auto_device_map_params(
-        &self,
-        _config: &str,
-        params: &AutoDeviceMapParams,
-    ) -> Result<AutoDeviceMapParams> {
-        Ok(params.maybe_promote_to_multimodal())
-    }
-    fn modalities(&self, config: &str) -> Result<Modalities>;
-    fn prefixer(&self, config: &str) -> Arc<dyn MultimodalPromptPrefixer>;
-    /// How to sample frames when decoding video inputs for this model.
-    fn video_frame_sampling(&self, _config: &str) -> crate::VideoFrameSampling {
-        crate::VideoFrameSampling::default()
-    }
-    /// Return a default chat template (Jinja string) for models that don't ship a
-    /// `tokenizer_config.json` or `chat_template.jinja`. Returns `None` by default.
-    /// The `config` parameter is the raw model config JSON, used by `AutoMultimodalLoader`
-    /// to delegate to the correct concrete loader.
-    fn default_chat_template(&self, _config: &str) -> Option<String> {
-        None
-    }
-    /// Return default (bos_token, eos_token) strings for models that don't ship a
-    /// `tokenizer_config.json`. Used to populate the chat template context and
-    /// EOS token detection. Returns `None` by default.
-    fn default_bos_eos(&self, _config: &str) -> Option<(String, String)> {
-        None
-    }
-    fn get_device_for_tensor(
-        &self,
-        config: &str,
-        _mapper: &dyn DeviceMapper,
-        loading_isq: bool,
-    ) -> Result<Arc<dyn Fn(String) -> DeviceForLoadTensor + Send + Sync + 'static>> {
-        layer_indexed_device(
-            LAYER_INDEX_PATTERN,
-            self.model_config(config)?.num_layers(),
-            loading_isq,
-        )
-    }
 }
 
 // One row per multimodal architecture; the first `cli` name is canonical, the rest are accepted aliases.
@@ -262,6 +180,44 @@ macro_rules! multimodal_loader_types {
                     $(
                         $(#[cfg(feature = $feature)])?
                         Self::$variant => Ok(Box::new($loader)),
+                        $(
+                            #[cfg(not(feature = $feature))]
+                            Self::$variant => anyhow::bail!(
+                                "architecture `{}` is not built in; enable the `{}` feature",
+                                $cli,
+                                $feature
+                            ),
+                        )?
+                    )*
+                }
+            }
+
+            #[cfg_attr(
+                not(any(
+                    feature = "models-gemma",
+                    feature = "models-llama",
+                    feature = "models-other",
+                    feature = "models-phi",
+                    feature = "models-qwen"
+                )),
+                allow(unused_variables)
+            )]
+            pub(crate) fn get_processor(
+                &self,
+                model_config: &str,
+                processor_config: Option<ProcessorConfig>,
+                preprocessor_config: PreProcessorConfig,
+                max_edge: Option<u32>,
+            ) -> Result<Arc<dyn Processor + Send + Sync>> {
+                match self {
+                    $(
+                        $(#[cfg(feature = $feature)])?
+                        Self::$variant => Ok($loader.get_processor(
+                            model_config,
+                            processor_config,
+                            preprocessor_config,
+                            max_edge,
+                        )),
                         $(
                             #[cfg(not(feature = $feature))]
                             Self::$variant => anyhow::bail!(
@@ -335,60 +291,6 @@ multimodal_loader_types! {
     },
     DiffusionGemma { cli: "diffusiongemma", hf: "DiffusionGemmaForBlockDiffusion", loader: DiffusionGemmaLoader, feature: "models-gemma" },
     PaddleOcrVl { cli: "paddleocr_vl", hf: "PaddleOCRVLForConditionalGeneration", loader: PaddleOcrVlLoader, feature: "models-other" },
-}
-
-macro_rules! bias_if {
-    ($cond:expr, $size:expr) => {
-        if $cond {
-            $size
-        } else {
-            0
-        }
-    };
-}
-
-#[cfg(any(feature = "models-llama", feature = "models-phi"))]
-fn get_clip_vit_num_elems(cfg: &ClipConfig) -> usize {
-    let pre_layer_norm = cfg.hidden_size;
-    let final_layer_norm = cfg.hidden_size;
-
-    let num_patches = (cfg.image_size / cfg.patch_size).pow(2);
-    let num_positions = num_patches + 1;
-
-    let class_embedding = cfg.hidden_size;
-
-    let position_ids = num_positions;
-    let position_embedding = num_positions * cfg.hidden_size;
-
-    let conv2dconfig = Conv2dConfig {
-        stride: cfg.patch_size,
-        ..Default::default()
-    };
-    let patch_embedding =
-        cfg.num_channels * cfg.hidden_size / conv2dconfig.groups * cfg.patch_size * cfg.patch_size;
-
-    let encoder_layer_elems = {
-        let layer_norm1 = cfg.hidden_size;
-        let layer_norm2 = cfg.hidden_size;
-
-        let q_proj = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
-        let k_proj = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
-        let v_proj = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
-        let o_proj = cfg.hidden_size * cfg.hidden_size + cfg.hidden_size;
-
-        let fc1 = cfg.hidden_size * cfg.intermediate_size + cfg.intermediate_size;
-        let fc2 = cfg.intermediate_size * cfg.hidden_size + cfg.hidden_size;
-
-        layer_norm1 + layer_norm2 + q_proj + k_proj + v_proj + o_proj + fc1 + fc2
-    };
-
-    pre_layer_norm
-        + final_layer_norm
-        + class_embedding
-        + position_ids
-        + position_embedding
-        + patch_embedding
-        + cfg.num_hidden_layers * encoder_layer_elems
 }
 
 #[cfg(feature = "models-gemma")]
