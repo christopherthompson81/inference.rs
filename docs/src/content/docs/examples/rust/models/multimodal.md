@@ -31,20 +31,15 @@ async fn main() -> Result<()> {
         .build()
         .await?;
 
-    let audio_bytes =
-        reqwest::get("https://upload.wikimedia.org/wikipedia/commons/4/42/Bird_singing.ogg")
-            .await?
-            .bytes()
-            .await?
-            .to_vec();
+    let audio_bytes = inference::fetch_url(
+        "https://upload.wikimedia.org/wikipedia/commons/4/42/Bird_singing.ogg",
+    )
+    .await?;
     let audio = AudioInput::from_bytes(&audio_bytes)?;
 
     let image_bytes =
-        reqwest::get("https://www.allaboutbirds.org/guide/assets/og/528129121-1200px.jpg")
-            .await?
-            .bytes()
-            .await?
-            .to_vec();
+        inference::fetch_url("https://www.allaboutbirds.org/guide/assets/og/528129121-1200px.jpg")
+            .await?;
     let image = image::load_from_memory(&image_bytes)?;
 
     let messages = MultimodalMessages::new().add_multimodal_message(

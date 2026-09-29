@@ -99,7 +99,8 @@ either = { version = "1.15.0", features = ["serde"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
 metrics = "0.24.6"
-metrics-exporter-prometheus = "0.18.3"
+# Only the recorder: `/metrics` renders it through our own router, so no listener or push-gateway client.
+metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 futures = "0.3"
 clap = { version = "4.5.54", features = ["derive", "wrap_help"] }
 tokio = { version = "1.49.0", features = ["full", "rt-multi-thread"] }
@@ -120,13 +121,15 @@ image = { version = "0.25.9", default-features = false, features = [
     'tiff',
     'webp',
 ] }
+# Ring rather than aws-lc's C build; clients must come after `inference_mcp::tls::install_provider()`.
 reqwest = { version = "0.13.1", default-features = false, features = [
     "blocking",
-    "rustls",
+    "rustls-no-provider",
     "charset",
     "http2",
 ] }
 base64 = "0.22.1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 tempfile = "3"
 half = "2.7.1"
 rayon = "1.11.0"
@@ -194,7 +197,6 @@ byteorder = "1.5.0"
 yoke = { version = "0.8.1", features = ["derive"] }
 memmap2 = "0.9.9"
 ctrlc = "3.5.1"
-directories = "6.0.0"
 # Need to keep rustyline at 15.0.0 as 16.0.0 has a breaking change that conficts with `ctrlc`'s handling
 rustyline = { version = "15.0.0", default-features = false, features = ["with-file-history"] }
 tower = "0.5"

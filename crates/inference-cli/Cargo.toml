@@ -38,7 +38,6 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 ctrlc = { workspace = true }
 rustyline = { workspace = true }
-directories = { workspace = true }
 axum = { workspace = true }
 either = { workspace = true }
 indexmap = { workspace = true }

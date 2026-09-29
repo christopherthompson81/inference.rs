@@ -463,7 +463,7 @@ fn _http_post(url: &str, payload: &serde_json::Value) -> anyhow::Result<String> 
     let version = env!("CARGO_PKG_VERSION");
     let user_agent = format!("inference/{version} ({OS}; {ARCH}; {FAMILY})");
 
-    let client = reqwest::blocking::Client::new();
+    let client = crate::remote_fetch::blocking_http_client_builder().build()?;
     let response = client
         .post(url)
         .header("User-Agent", &user_agent)

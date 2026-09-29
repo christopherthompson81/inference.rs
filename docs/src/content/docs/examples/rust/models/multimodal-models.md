@@ -60,12 +60,7 @@ async fn main() -> Result<()> {
         .build()
         .await?;
 
-    let bytes = match reqwest::blocking::get(
-        "https://cdn.britannica.com/45/5645-050-B9EC0205/head-treasure-flower-disk-flowers-inflorescence-ray.jpg",
-    ) {
-        Ok(http_resp) => http_resp.bytes()?.to_vec(),
-        Err(e) => anyhow::bail!(e),
-    };
+    let bytes = inference::fetch_url("https://cdn.britannica.com/45/5645-050-B9EC0205/head-treasure-flower-disk-flowers-inflorescence-ray.jpg").await?;
     let image = image::load_from_memory(&bytes)?;
 
     let messages = MultimodalMessages::new().add_image_message(

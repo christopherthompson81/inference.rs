@@ -44,6 +44,10 @@ pub enum Error {
     #[error("json error: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// Fetching a URL failed.
+    #[error("fetch failed: {0}")]
+    Fetch(Box<dyn std::error::Error + Send + Sync>),
+
     /// An unexpected response type was received.
     #[error("unexpected response type: expected {expected}")]
     UnexpectedResponse {

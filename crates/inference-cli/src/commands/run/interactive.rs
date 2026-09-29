@@ -1,6 +1,5 @@
 //! Interactive mode implementation
 
-use directories::ProjectDirs;
 use either::Either;
 use indexmap::IndexMap;
 use inference_core::{
@@ -51,12 +50,10 @@ fn terminate_handler() {
 }
 
 fn history_file_path() -> PathBuf {
-    let proj_dirs = ProjectDirs::from("com", "", "inference.rs")
-        .expect("Could not determine project directories");
-    let config_dir = proj_dirs.config_dir();
-
-    // Ensure the directory exists:
-    fs::create_dir_all(config_dir).expect("Failed to create config directory");
+    let config_dir = dirs::config_dir()
+        .expect("Could not determine the config directory")
+        .join("inference.rs");
+    fs::create_dir_all(&config_dir).expect("Failed to create config directory");
 
     // e.g. ~/.config/inference.rs/history.txt
     config_dir.join("history.txt")
