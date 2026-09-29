@@ -15,6 +15,7 @@ use std::{
     sync::Arc,
 };
 
+use crate::attention::ATTENTION_CHUNK_SIZE;
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
 use anyhow::Result;
 use as_any::AsAny;
@@ -747,6 +748,41 @@ fn tied_promoted_tensor_pack_factor(
     })
 }
 
+pub(crate) struct LanguageModelEnds {
+    pub(crate) hidden_size: usize,
+    pub(crate) vocab_size: usize,
+    pub(crate) tie_word_embeddings: bool,
+}
+
+/// Embeddings, untied LM head and final norm, the non-mapped weights of a plain decoder.
+pub(crate) fn standard_non_mapped_size_in_bytes(
+    ends: LanguageModelEnds,
+    quantization: Option<&AutoDeviceMapQuantization<'_>>,
+    dtype: DType,
+    weight_pack_factor: usize,
+) -> Result<usize> {
+    let LanguageModelEnds {
+        hidden_size,
+        vocab_size,
+        tie_word_embeddings,
+    } = ends;
+    let (embed_tokens_pack_factor, lm_head_pack_factor) = language_model_pack_factors(
+        quantization,
+        "model.embed_tokens.weight",
+        "lm_head.weight",
+        tie_word_embeddings,
+        dtype,
+        weight_pack_factor,
+    )?;
+    let embed_tokens = hidden_size * vocab_size / embed_tokens_pack_factor;
+    let lm_head = if tie_word_embeddings {
+        0
+    } else {
+        hidden_size * vocab_size / lm_head_pack_factor
+    };
+    Ok((embed_tokens + lm_head + hidden_size) * dtype.size_in_bytes())
+}
+
 fn language_model_pack_factors(
     quantization: Option<&AutoDeviceMapQuantization<'_>>,
     embedding_name: &str,
@@ -816,15 +852,28 @@ pub trait DeviceMappedModelLoader {
     /// Useful for the multimodal models which may prefer to keep the vison components on the GPU.
     fn non_mapped_max_act_size_elems(
         &self,
-        config: &str,
-        params: &AutoDeviceMapParams,
-    ) -> Result<usize>;
-    /// Maximum activation size of mapped parts of the model
+        _config: &str,
+        _params: &AutoDeviceMapParams,
+    ) -> Result<usize> {
+        Ok(0)
+    }
+    /// Maximum activation size of mapped parts of the model; the default is a text decoder's attention scores.
     fn mapped_max_act_size_elems(
         &self,
         config: &str,
         params: &AutoDeviceMapParams,
-    ) -> Result<usize>;
+    ) -> Result<usize> {
+        let AutoDeviceMapParams::Text {
+            max_seq_len,
+            max_batch_size,
+        } = params
+        else {
+            anyhow::bail!("Expected text AutoDeviceMapParams for this model!")
+        };
+        Ok(max_batch_size
+            * self.model_config(config)?.num_attn_heads()
+            * max_seq_len.min(&ATTENTION_CHUNK_SIZE).pow(2))
+    }
     /// weight_pack_factor only applies to quantized weights.
     fn non_mapped_size_in_bytes(
         &self,
@@ -851,7 +900,9 @@ pub trait DeviceMappedModelLoader {
     ) -> Result<Option<Vec<NonMappedSubModel>>> {
         Ok(self.non_mapped_sub_models())
     }
-    fn num_layers(&self, config: &str) -> Result<usize>;
+    fn num_layers(&self, config: &str) -> Result<usize> {
+        Ok(self.model_config(config)?.num_layers())
+    }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>>;
 
     fn checkpoint_layer_index(&self, _config: &str, tensor_name: &str) -> Option<usize> {

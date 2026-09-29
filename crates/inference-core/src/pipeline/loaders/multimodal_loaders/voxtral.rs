@@ -32,9 +32,6 @@ impl MultimodalModelLoader for VoxtralLoader {
             attention_mechanism,
         )?))
     }
-    fn is_gptx(&self, _config: &str) -> bool {
-        true
-    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let cfg: VoxtralConfig = serde_json::from_str(config)?;
         Ok(Box::new(cfg))
@@ -227,10 +224,6 @@ impl DeviceMappedModelLoader for VoxtralLoader {
         let per_layer = (attn + mlp + norms) * elem;
 
         Ok(vec![per_layer; cfg.n_layers])
-    }
-    fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: VoxtralConfig = serde_json::from_str(config)?;
-        Ok(cfg.n_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: VoxtralConfig = serde_json::from_str(config)?;

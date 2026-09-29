@@ -31,9 +31,6 @@ impl MultimodalModelLoader for Mistral3Loader {
             attention_mechanism,
         )?))
     }
-    fn is_gptx(&self, _config: &str) -> bool {
-        true
-    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let cfg: crate::vision_models::mistral3::Mistral3Config = serde_json::from_str(config)?;
         Ok(Box::new(cfg))

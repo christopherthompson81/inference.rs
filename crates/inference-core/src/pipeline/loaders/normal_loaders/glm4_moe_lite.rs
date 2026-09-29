@@ -34,9 +34,6 @@ impl NormalModelLoader for GLM4MoeLiteLoader {
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
         todo!()
     }
-    fn is_gptx(&self, _: &str) -> Result<bool> {
-        Ok(true)
-    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
         Ok(Box::new(cfg))
@@ -116,64 +113,25 @@ impl IsqModelLoader for GLM4MoeLiteLoader {
 }
 
 impl DeviceMappedModelLoader for GLM4MoeLiteLoader {
-    fn mapped_max_act_size_elems(
-        &self,
-        config: &str,
-        params: &AutoDeviceMapParams,
-    ) -> Result<usize> {
-        let AutoDeviceMapParams::Text {
-            max_seq_len,
-            max_batch_size,
-        } = params
-        else {
-            anyhow::bail!("Expected text AutoDeviceMapParams for this model!")
-        };
-
-        let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
-
-        Ok(
-            max_batch_size
-                * cfg.num_attention_heads
-                * max_seq_len.min(&ATTENTION_CHUNK_SIZE).pow(2),
-        )
-    }
-    fn non_mapped_max_act_size_elems(
-        &self,
-        _config: &str,
-        _params: &AutoDeviceMapParams,
-    ) -> Result<usize> {
-        Ok(0)
-    }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
         dtype: DType,
         weight_pack_factor: usize,
-        _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
+        quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
         let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
-        let elems = {
-            let (embed_tokens_pack_factor, lm_head_pack_factor) =
-                super::language_model_pack_factors(
-                    _quantization,
-                    "model.embed_tokens.weight",
-                    "lm_head.weight",
-                    cfg.tie_word_embeddings,
-                    dtype,
-                    weight_pack_factor,
-                )?;
-            let embed_tokens = cfg.hidden_size * cfg.vocab_size / embed_tokens_pack_factor;
-            let lm_head = if !cfg.tie_word_embeddings {
-                cfg.hidden_size * cfg.vocab_size / lm_head_pack_factor
-            } else {
-                0
-            };
-            let norm = cfg.hidden_size;
-            embed_tokens + lm_head + norm
-        };
-        Ok(elems * dtype.size_in_bytes())
+        standard_non_mapped_size_in_bytes(
+            LanguageModelEnds {
+                hidden_size: cfg.hidden_size,
+                vocab_size: cfg.vocab_size,
+                tie_word_embeddings: cfg.tie_word_embeddings,
+            },
+            quantization,
+            dtype,
+            weight_pack_factor,
+        )
     }
     fn layer_sizes_in_bytes(
         &self,
@@ -262,10 +220,6 @@ impl DeviceMappedModelLoader for GLM4MoeLiteLoader {
             .into_iter()
             .map(|x| x * dtype.size_in_bytes())
             .collect())
-    }
-    fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
-        Ok(cfg.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg = crate::models::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;

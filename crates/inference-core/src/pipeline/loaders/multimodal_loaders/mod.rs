@@ -151,7 +151,9 @@ pub trait MultimodalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedMode
         }
         Ok(Cow::Borrowed(config))
     }
-    fn is_gptx(&self, config: &str) -> bool;
+    fn is_gptx(&self, _config: &str) -> bool {
+        true
+    }
     fn is_gptx_for(
         &self,
         config: &str,

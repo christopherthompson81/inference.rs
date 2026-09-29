@@ -29,9 +29,6 @@ impl EmbeddingModelLoader for Qwen3EmbeddingLoader {
     fn has_causal_attention(&self, _: &str) -> Result<bool> {
         Ok(true)
     }
-    fn is_gptx(&self, _: &str) -> Result<bool> {
-        Ok(true)
-    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let cfg = Qwen3EmbeddingConfig::from_json(config)?;
 
@@ -64,35 +61,6 @@ impl IsqModelLoader for Qwen3EmbeddingLoader {
 }
 
 impl DeviceMappedModelLoader for Qwen3EmbeddingLoader {
-    fn mapped_max_act_size_elems(
-        &self,
-        config: &str,
-        params: &AutoDeviceMapParams,
-    ) -> Result<usize> {
-        let AutoDeviceMapParams::Text {
-            max_seq_len,
-            max_batch_size,
-        } = params
-        else {
-            anyhow::bail!("Expected text AutoDeviceMapParams for this model!")
-        };
-
-        let cfg = Qwen3EmbeddingConfig::from_json(config)?;
-
-        Ok(
-            max_batch_size
-                * cfg.num_attention_heads
-                * max_seq_len.min(&ATTENTION_CHUNK_SIZE).pow(2),
-        )
-    }
-    fn non_mapped_max_act_size_elems(
-        &self,
-        _config: &str,
-        _params: &AutoDeviceMapParams,
-    ) -> Result<usize> {
-        Ok(0)
-    }
-
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
@@ -161,11 +129,6 @@ impl DeviceMappedModelLoader for Qwen3EmbeddingLoader {
             per_layer_elems * dtype.size_in_bytes();
             cfg.num_hidden_layers
         ])
-    }
-
-    fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg = Qwen3EmbeddingConfig::from_json(config)?;
-        Ok(cfg.num_hidden_layers)
     }
 
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {

@@ -69,9 +69,6 @@ impl MultimodalModelLoader for Lfm2VlLoader {
             attention_mechanism,
         )?))
     }
-    fn is_gptx(&self, _config: &str) -> bool {
-        true
-    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let cfg: Lfm2VlConfig = serde_json::from_str(config)?;
         Ok(Box::new(cfg))

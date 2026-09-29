@@ -133,13 +133,6 @@ impl DeviceMappedModelLoader for AutoNormalLoader {
     ) -> Result<usize> {
         Self::get_loader(config)?.mapped_max_act_size_elems(config, params)
     }
-    fn non_mapped_max_act_size_elems(
-        &self,
-        _config: &str,
-        _params: &AutoDeviceMapParams,
-    ) -> Result<usize> {
-        Ok(0)
-    }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         Self::get_loader(config)?.model_config(config)
     }

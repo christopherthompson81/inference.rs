@@ -39,9 +39,6 @@ impl MultimodalModelLoader for Qwen2VLLoader {
             attention_mechanism,
         )?))
     }
-    fn is_gptx(&self, _config: &str) -> bool {
-        true
-    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let config: Qwen2VLConfig = serde_json::from_str(config)?;
         Ok(Box::new(config))
@@ -287,10 +284,6 @@ impl DeviceMappedModelLoader for Qwen2VLLoader {
             per_layer_elems * dtype.size_in_bytes();
             cfg.num_hidden_layers
         ])
-    }
-    fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: Qwen2VLConfig = serde_json::from_str(config)?;
-        Ok(cfg.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg: Qwen2VLConfig = serde_json::from_str(config)?;

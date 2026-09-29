@@ -45,17 +45,17 @@ use crate::xlora_models;
 use crate::xlora_models::XLoraConfig;
 
 use super::{AutoDeviceMapParams, DeviceMappedModelLoader};
-// Loaders call these as `super::X`; they live one level up, in `loaders`.
+// Loaders reach these through `use super::*` (or as `super::X`); they live one level up, in `loaders`.
+#[cfg(any(feature = "models-gemma", feature = "models-other"))]
+use super::tied_promoted_tensor_pack_factor;
+use super::{language_model_pack_factors_with_aliases, AutoDeviceMapQuantization};
 #[cfg(any(
     feature = "models-llama",
     feature = "models-other",
     feature = "models-phi",
     feature = "models-qwen"
 ))]
-use super::language_model_pack_factors;
-#[cfg(any(feature = "models-gemma", feature = "models-other"))]
-use super::tied_promoted_tensor_pack_factor;
-use super::{language_model_pack_factors_with_aliases, AutoDeviceMapQuantization};
+use super::{standard_non_mapped_size_in_bytes, LanguageModelEnds};
 
 use crate::gguf::normal_registry::RopePairing;
 
@@ -98,7 +98,9 @@ pub trait NormalModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoa
         )),
         allow(dead_code)
     )]
-    fn is_gptx(&self, config: &str) -> Result<bool>;
+    fn is_gptx(&self, _config: &str) -> Result<bool> {
+        Ok(true)
+    }
     #[cfg_attr(
         not(any(
             feature = "models-gemma",
