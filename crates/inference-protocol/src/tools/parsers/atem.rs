@@ -1,4 +1,4 @@
-use candle_core::Result;
+use anyhow::Result;
 use llguidance::api::{GrammarWithLexer, TopLevelGrammar};
 use serde::Serialize;
 use serde_json::Value;
@@ -73,7 +73,7 @@ impl ToolFormatParser for AtemParser {
         };
         serde_json::to_string(&calls)
             .map(Some)
-            .map_err(candle_core::Error::msg)
+            .map_err(anyhow::Error::msg)
     }
 }
 
@@ -165,7 +165,7 @@ pub(crate) fn parse_atem_tool_calls(message: &str) -> Result<Option<Vec<AtemTool
             };
             if let Some(recipient) = recipient {
                 if block_calls.iter().any(|call| call.name != recipient) {
-                    return Err(candle_core::Error::Msg(format!(
+                    return Err(anyhow::Error::msg(format!(
                         "Muse Glimmer tool recipient `{recipient}` does not match its invocation"
                     )));
                 }
@@ -293,7 +293,7 @@ fn parse_atem_invocations(body: &str) -> Result<Option<Vec<AtemToolCall>>> {
         };
         let tag_end = tag_start + tag_end_offset;
         let Some(name) = tag_attribute(&body[tag_start..=tag_end], "name") else {
-            return Err(candle_core::Error::Msg(
+            return Err(anyhow::Error::msg(
                 "Muse Glimmer tool invocation is missing its name".to_string(),
             ));
         };
@@ -337,19 +337,19 @@ fn parse_atem_parameters(body: &str) -> Result<serde_json::Map<String, Value>> {
     while let Some(offset) = body[cursor..].find(PARAMETER_START) {
         let tag_start = cursor + offset;
         let Some(tag_end_offset) = body[tag_start..].find('>') else {
-            return Err(candle_core::Error::Msg(
+            return Err(anyhow::Error::msg(
                 "Muse Glimmer tool parameter has an incomplete opening tag".to_string(),
             ));
         };
         let tag_end = tag_start + tag_end_offset;
         let Some(name) = tag_attribute(&body[tag_start..=tag_end], "name") else {
-            return Err(candle_core::Error::Msg(
+            return Err(anyhow::Error::msg(
                 "Muse Glimmer tool parameter is missing its name".to_string(),
             ));
         };
         let value_start = tag_end + 1;
         let Some(value_end_offset) = body[value_start..].find(PARAMETER_END) else {
-            return Err(candle_core::Error::Msg(
+            return Err(anyhow::Error::msg(
                 "Muse Glimmer tool parameter is missing its closing tag".to_string(),
             ));
         };

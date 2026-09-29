@@ -1,4 +1,4 @@
-use candle_core::Result;
+use anyhow::Result;
 use llguidance::api::TopLevelGrammar;
 
 use crate::tools::{
@@ -51,7 +51,7 @@ impl ToolObligation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub(crate) enum ToolGrammarState {
+pub enum ToolGrammarState {
     #[default]
     Inactive,
     Active {
@@ -59,7 +59,7 @@ pub(crate) enum ToolGrammarState {
     },
 }
 
-pub(crate) struct ToolCallParse {
+pub struct ToolCallParse {
     pub content: Option<String>,
     pub reasoning_content: Option<String>,
     pub tool_calls: Vec<ToolCallResponse>,
@@ -79,7 +79,7 @@ impl ToolCallParse {
     }
 }
 
-pub(crate) struct ToolCallState {
+pub struct ToolCallState {
     matcher: ToolCallingMatcher,
     strategy: Box<dyn ToolCallStrategy>,
     grammar: ToolGrammarState,
@@ -87,7 +87,7 @@ pub(crate) struct ToolCallState {
 }
 
 impl ToolCallState {
-    pub(crate) fn new(
+    pub fn new(
         tool_choice: ToolChoice,
         tools: Option<&[crate::Tool]>,
         preferred_format: Option<ToolCallFormat>,
@@ -112,44 +112,44 @@ impl ToolCallState {
         })
     }
 
-    pub(crate) fn observe_token(&mut self, token: u32, bytes: &[u8]) {
+    pub fn observe_token(&mut self, token: u32, bytes: &[u8]) {
         self.strategy.observe_token(token, bytes);
     }
 
-    pub(crate) fn requires_special_tokens(&self) -> bool {
+    pub fn requires_special_tokens(&self) -> bool {
         true
     }
 
-    pub(crate) fn has_reasoning(&self) -> bool {
+    pub fn has_reasoning(&self) -> bool {
         self.strategy.has_reasoning()
     }
 
-    pub(crate) fn required_tool_call_unsatisfied(&self) -> bool {
+    pub fn required_tool_call_unsatisfied(&self) -> bool {
         self.obligation
             .unsatisfied(self.matcher.requires_tool_call())
     }
 
-    pub(crate) fn content_delta(&mut self) -> Option<String> {
+    pub fn content_delta(&mut self) -> Option<String> {
         self.strategy.content_delta()
     }
 
-    pub(crate) fn reasoning_delta(&mut self) -> Option<String> {
+    pub fn reasoning_delta(&mut self) -> Option<String> {
         self.strategy.reasoning_delta()
     }
 
-    pub(crate) fn content(&self) -> Option<String> {
+    pub fn content(&self) -> Option<String> {
         self.strategy.content()
     }
 
-    pub(crate) fn reasoning_content(&self) -> Option<String> {
+    pub fn reasoning_content(&self) -> Option<String> {
         self.strategy.reasoning_content()
     }
 
-    pub(crate) fn finalize(&mut self) {
+    pub fn finalize(&mut self) {
         self.strategy.finalize();
     }
 
-    pub(crate) fn maybe_activate_continuation_grammar(
+    pub fn maybe_activate_continuation_grammar(
         &mut self,
         text: Option<&str>,
     ) -> Option<TopLevelGrammar> {
@@ -160,7 +160,7 @@ impl ToolCallState {
         self.strategy.continuation_grammar(text, tools)
     }
 
-    pub(crate) fn maybe_force_required_grammar(
+    pub fn maybe_force_required_grammar(
         &mut self,
         remaining: usize,
         max_generation_len: usize,
@@ -183,7 +183,7 @@ impl ToolCallState {
         Some(self.strategy.required_grammar(tools, boundary))
     }
 
-    pub(crate) fn required_tool_call_deadline_status(
+    pub fn required_tool_call_deadline_status(
         generated: usize,
         max_generation_len: usize,
     ) -> (usize, usize, usize) {
@@ -192,14 +192,14 @@ impl ToolCallState {
         (generated, remaining, deadline)
     }
 
-    pub(crate) fn mark_grammar_active(&mut self, forced: bool) {
+    pub fn mark_grammar_active(&mut self, forced: bool) {
         self.grammar = ToolGrammarState::Active { forced };
         if forced {
             self.obligation.mark_forced();
         }
     }
 
-    pub(crate) fn clear_active_grammar(&mut self) -> bool {
+    pub fn clear_active_grammar(&mut self) -> bool {
         let ToolGrammarState::Active { forced } = self.grammar else {
             return false;
         };
@@ -212,7 +212,7 @@ impl ToolCallState {
         true
     }
 
-    pub(crate) fn is_stop_token_blocked(
+    pub fn is_stop_token_blocked(
         &self,
         tok: u32,
         eos_tok: Option<&[u32]>,
@@ -223,15 +223,15 @@ impl ToolCallState {
             && (eos_tok.is_some_and(|tokens| tokens.contains(&tok)) || stop_tokens.contains(&tok))
     }
 
-    pub(crate) fn prefix_status(&self, message_prefix: &str) -> Result<(bool, bool)> {
+    pub fn prefix_status(&self, message_prefix: &str) -> Result<(bool, bool)> {
         self.matcher.prefix_could_be_tool(message_prefix)
     }
 
-    pub(crate) fn stops_after_complete_tool_call(&self) -> bool {
+    pub fn stops_after_complete_tool_call(&self) -> bool {
         self.strategy.stops_after_complete_tool_call()
     }
 
-    pub(crate) fn complete_if_tool_call(
+    pub fn complete_if_tool_call(
         &mut self,
         message: &str,
     ) -> anyhow::Result<Vec<ToolCallResponse>> {
@@ -243,7 +243,7 @@ impl ToolCallState {
         Ok(calls)
     }
 
-    pub(crate) fn parse_streaming(
+    pub fn parse_streaming(
         &mut self,
         content_delta: Option<String>,
         raw_delta: &str,
@@ -274,16 +274,9 @@ impl ToolCallState {
         let parse_text = parser_text.unwrap_or(&visible_text);
         let (tool_use_still_possible, tool_use_is_done) =
             self.matcher.prefix_could_be_tool(parse_text)?;
-        let (mut content, tool_calls) = self
-            .matcher
-            .get_call_with_content(parse_text)
-            .map_err(candle_core::Error::msg)?;
+        let (mut content, tool_calls) = self.matcher.get_call_with_content(parse_text)?;
         if parser_text.is_some() && tool_calls.is_empty() {
-            content = self
-                .matcher
-                .get_call_with_content(&visible_text)
-                .map_err(candle_core::Error::msg)?
-                .0;
+            content = self.matcher.get_call_with_content(&visible_text)?.0;
         }
         if !tool_calls.is_empty() {
             self.obligation
@@ -298,7 +291,7 @@ impl ToolCallState {
         })
     }
 
-    pub(crate) fn finalize_for_response(
+    pub fn finalize_for_response(
         &mut self,
         raw_text: &str,
         parsed_content: Option<String>,
@@ -322,16 +315,9 @@ impl ToolCallState {
 
         let visible_text = parsed_content.unwrap_or_else(|| raw_text.to_string());
         let parse_text = parser_text.unwrap_or(&visible_text);
-        let (mut content, tool_calls) = self
-            .matcher
-            .get_call_with_content(parse_text)
-            .map_err(candle_core::Error::msg)?;
+        let (mut content, tool_calls) = self.matcher.get_call_with_content(parse_text)?;
         if parser_text.is_some() && tool_calls.is_empty() {
-            content = self
-                .matcher
-                .get_call_with_content(&visible_text)
-                .map_err(candle_core::Error::msg)?
-                .0;
+            content = self.matcher.get_call_with_content(&visible_text)?.0;
         }
         if !tool_calls.is_empty() {
             self.obligation
@@ -347,7 +333,7 @@ impl ToolCallState {
     }
 }
 
-pub(crate) fn required_tool_call_deadline_tokens(max_generation_len: usize) -> usize {
+pub fn required_tool_call_deadline_tokens(max_generation_len: usize) -> usize {
     (max_generation_len / REQUIRED_TOOL_CALL_DEADLINE_DIVISOR).clamp(
         REQUIRED_TOOL_CALL_DEADLINE_MIN_TOKENS,
         REQUIRED_TOOL_CALL_DEADLINE_MAX_TOKENS,

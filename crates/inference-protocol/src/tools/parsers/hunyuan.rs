@@ -45,7 +45,7 @@ impl ToolFormatParser for HunyuanParser {
         )
     }
 
-    fn parse(&self, message: &str) -> candle_core::Result<Option<String>> {
+    fn parse(&self, message: &str) -> anyhow::Result<Option<String>> {
         let Some(start) = message.find(START) else {
             return Ok(None);
         };

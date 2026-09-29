@@ -13,6 +13,7 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+inference-protocol.workspace = true
 anyhow.workspace = true
 candle-core.workspace = true
 metrics.workspace = true
@@ -30,7 +31,6 @@ minijinja.workspace = true
 minijinja-contrib.workspace = true
 either.workspace = true
 indexmap.workspace = true
-mime_guess = { workspace = true }
 tracing.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
@@ -83,7 +83,6 @@ inference-audio.workspace = true
 inference-mcp = { workspace = true, features = ["utoipa"] }
 inference-code-exec.workspace = true
 inference-sandbox.workspace = true
-openai-harmony = "0.0.8"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))'.dependencies]
 objc = { workspace = true, optional = true }
@@ -136,7 +135,7 @@ flash-attn-v3 = ["cuda", "inference-nn/flash-attn-v3"]
 accelerate = ["candle-core/accelerate", "candle-nn/accelerate", "inference-quant/accelerate", "inference-nn/accelerate"]
 mkl = ["candle-core/mkl", "candle-nn/mkl"]
 nccl = ["cuda", "inference-quant/nccl"]
-utoipa = ["dep:utoipa", "inference-nn/utoipa", "inference-code-exec/utoipa", "inference-sandbox/utoipa"]
+utoipa = ["dep:utoipa", "inference-protocol/utoipa", "inference-nn/utoipa", "inference-code-exec/utoipa", "inference-sandbox/utoipa"]
 ring = ["inference-quant/ring"]
-code-execution = []
+code-execution = ["inference-protocol/code-execution"]
 

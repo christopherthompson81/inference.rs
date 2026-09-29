@@ -36,7 +36,7 @@ impl ToolFormatParser for MistralNemoParser {
         )
     }
 
-    fn parse(&self, message: &str) -> candle_core::Result<Option<String>> {
+    fn parse(&self, message: &str) -> anyhow::Result<Option<String>> {
         let prefix = "[TOOL_CALLS]";
         if let Some(pos) = message.find(prefix) {
             let rest = &message[pos + prefix.len()..];

@@ -2,7 +2,7 @@
 //!
 //! Format: `<|tool_call_start|>[get_weather(location="Paris")]<|tool_call_end|>`
 
-use candle_core::Result;
+use anyhow::Result;
 use llguidance::api::{GrammarWithLexer, TopLevelGrammar};
 use serde_json::{Map, Number, Value};
 
@@ -86,7 +86,7 @@ fn parse_liquid_tool_calls(message: &str) -> Result<Option<String>> {
             return Ok(None);
         };
         let body = &message[body_start..body_start + rel_end];
-        let parsed = parse_liquid_body(body).map_err(candle_core::Error::msg)?;
+        let parsed = parse_liquid_body(body).map_err(anyhow::Error::msg)?;
         calls.extend(parsed);
         search_start = body_start + rel_end + END.len();
     }
@@ -97,7 +97,7 @@ fn parse_liquid_tool_calls(message: &str) -> Result<Option<String>> {
 
     serde_json::to_string(&calls)
         .map(Some)
-        .map_err(candle_core::Error::msg)
+        .map_err(anyhow::Error::msg)
 }
 
 fn parse_liquid_body(body: &str) -> std::result::Result<Vec<LiquidToolCall>, String> {

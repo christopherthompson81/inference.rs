@@ -2,17 +2,17 @@ pub(crate) mod grammar;
 pub(crate) mod parsers;
 mod request;
 mod response;
-pub(crate) mod state;
+pub mod state;
 pub(crate) mod strategy;
 
-use candle_core::Result;
-pub(crate) use parsers::specialize_required_tool_call_grammar;
-pub(crate) use parsers::ToolCallFormat;
+use anyhow::Result;
+pub use parsers::specialize_required_tool_call_grammar;
+pub use parsers::ToolCallFormat;
 pub use request::*;
 pub use response::*;
 use serde::de::{self, Deserializer, MapAccess, Visitor};
 use serde_json::{Map, Value};
-pub(crate) use state::ToolCallState;
+pub use state::ToolCallState;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
@@ -201,7 +201,7 @@ impl ToolCallingMatcher {
         }
         let raw_prefix = message_prefix;
         let message_prefix = process_model_specific_message(message_prefix)?;
-        let message_prefix = fix_broken_json(&message_prefix).map_err(candle_core::Error::msg)?;
+        let message_prefix = fix_broken_json(&message_prefix)?;
 
         // Check if the prefix could be a JSON serialization of any of the following types.
         let (could_be_tool, is_complete_tool) = [

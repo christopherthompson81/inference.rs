@@ -36,7 +36,7 @@ impl ToolFormatParser for LlamaParser {
         )
     }
 
-    fn parse(&self, message: &str) -> candle_core::Result<Option<String>> {
+    fn parse(&self, message: &str) -> anyhow::Result<Option<String>> {
         let prefix = "<|python_tag|>";
         if let Some(pos) = message.find(prefix) {
             Ok(Some(message[pos + prefix.len()..].to_string()))

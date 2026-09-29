@@ -100,7 +100,7 @@ impl ToolFormatParser for DeepSeekParser {
         }
     }
 
-    fn parse(&self, message: &str) -> candle_core::Result<Option<String>> {
+    fn parse(&self, message: &str) -> anyhow::Result<Option<String>> {
         let re = DEEPSEEK_REGEX.get_or_init(|| {
             Regex::new(
                 r"(?s)<｜tool▁call▁begin｜>function<｜tool▁sep｜>(?P<name>[^\n]+)\n```json\n(?P<json>.+?)\n```<｜tool▁call▁end｜>",
@@ -123,23 +123,22 @@ impl ToolFormatParser for DeepSeekParser {
             let name = caps
                 .name("name")
                 .ok_or("Could not capture function name")
-                .map_err(candle_core::Error::msg)?
+                .map_err(anyhow::Error::msg)?
                 .as_str()
                 .trim()
                 .to_string();
             let json_str = caps
                 .name("json")
                 .ok_or("Could not capture JSON arguments")
-                .map_err(candle_core::Error::msg)?
+                .map_err(anyhow::Error::msg)?
                 .as_str()
                 .trim();
-            let arguments: Value =
-                serde_json::from_str(json_str).map_err(candle_core::Error::msg)?;
+            let arguments: Value = serde_json::from_str(json_str).map_err(anyhow::Error::msg)?;
             calls.push(ToolCall { name, arguments });
         }
 
         Ok(Some(
-            serde_json::to_string(&calls).map_err(candle_core::Error::msg)?,
+            serde_json::to_string(&calls).map_err(anyhow::Error::msg)?,
         ))
     }
 }
