@@ -6,7 +6,7 @@ use inference::{
     Model, ModelDType, MultimodalMessages, MultimodalModelBuilder, RequestBuilder, TextMessageRole,
 };
 
-#[path = "support/paddleocr_vl_tiny.rs"]
+#[path = "../support/paddleocr_vl_tiny.rs"]
 mod support;
 use support::{tiny_checkpoint, FIXTURES};
 

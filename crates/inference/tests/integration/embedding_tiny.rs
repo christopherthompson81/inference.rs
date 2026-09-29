@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use inference::{EmbeddingModelBuilder, IsqType, ModelDType, UqffEmbeddingModelBuilder};
 
-#[path = "support/qwen3_embedding_tiny.rs"]
+#[path = "../support/qwen3_embedding_tiny.rs"]
 mod support;
 use support::tiny_embedding_checkpoint;
 
