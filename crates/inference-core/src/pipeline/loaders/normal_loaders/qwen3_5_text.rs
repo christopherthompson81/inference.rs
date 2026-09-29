@@ -56,9 +56,6 @@ impl NormalModelLoader for Qwen3_5TextLoader {
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
         anyhow::bail!("Qwen3.5 does not support X-LoRA")
     }
-    fn is_gptx(&self, _: &str) -> Result<bool> {
-        Ok(true)
-    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let cfg = parse_qwen35_text_config(config)?;
         Ok(Box::new(cfg))
@@ -108,13 +105,6 @@ impl DeviceMappedModelLoader for Qwen3_5TextLoader {
                 * cfg.num_attention_heads
                 * max_seq_len.min(&ATTENTION_CHUNK_SIZE).pow(2),
         )
-    }
-    fn non_mapped_max_act_size_elems(
-        &self,
-        _config: &str,
-        _params: &AutoDeviceMapParams,
-    ) -> Result<usize> {
-        Ok(0)
     }
 
     fn non_mapped_size_in_bytes(

@@ -64,9 +64,6 @@ impl MultimodalModelLoader for Gemma4Loader {
     ) -> Result<Cow<'a, str>> {
         gemma4_runtime_config(config, max_model_len)
     }
-    fn is_gptx(&self, _config: &str) -> bool {
-        true
-    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let config = Gemma4Config::from_json(config)?;
         Ok(Box::new(config))

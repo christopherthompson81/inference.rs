@@ -53,9 +53,6 @@ impl MultimodalModelLoader for MuseGlimmerLoader {
     ) -> Result<Cow<'a, str>> {
         muse_glimmer_runtime_config(config, max_model_len)
     }
-    fn is_gptx(&self, _config: &str) -> bool {
-        true
-    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         Ok(Box::new(serde_json::from_str::<MuseGlimmerConfig>(config)?))
     }

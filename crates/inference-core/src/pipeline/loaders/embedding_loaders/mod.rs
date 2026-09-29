@@ -8,7 +8,6 @@ use std::{
 };
 
 use crate::{
-    attention::ATTENTION_CHUNK_SIZE,
     matformer::MatformerSliceConfig,
     pipeline::{loaders::auto_device_map::NonMappedSubModel, NormalLoadingMetadata},
 };
@@ -39,7 +38,9 @@ pub trait EmbeddingModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModel
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn EmbeddingModel + Send + Sync>>;
-    fn is_gptx(&self, config: &str) -> Result<bool>;
+    fn is_gptx(&self, _config: &str) -> Result<bool> {
+        Ok(true)
+    }
     fn has_causal_attention(&self, config: &str) -> Result<bool>;
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>>;
     fn get_device_for_tensor(

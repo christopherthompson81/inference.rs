@@ -29,9 +29,6 @@ impl MultimodalModelLoader for Qwen3VLMoELoader {
             attention_mechanism,
         )?))
     }
-    fn is_gptx(&self, _config: &str) -> bool {
-        true
-    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let config: Qwen3VLMoEConfig = serde_json::from_str(config)?;
         Ok(Box::new(config))

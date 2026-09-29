@@ -33,9 +33,6 @@ impl MultimodalModelLoader for MiniCpmOLoader {
             attention_mechanism,
         )?))
     }
-    fn is_gptx(&self, _config: &str) -> bool {
-        true
-    }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let cfg: crate::vision_models::minicpmo::MiniCpmOConfig = serde_json::from_str(config)?;
         Ok(Box::new(cfg))
