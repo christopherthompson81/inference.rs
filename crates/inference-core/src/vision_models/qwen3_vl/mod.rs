@@ -2,5 +2,5 @@
 
 pub(crate) use inference_models_qwen::qwen3_vl::*;
 
-pub(crate) mod inputs_processor;
-pub(crate) use inputs_processor::Qwen3VLProcessor;
+pub(crate) mod processor;
+pub(crate) use processor::Qwen3VLProcessor;

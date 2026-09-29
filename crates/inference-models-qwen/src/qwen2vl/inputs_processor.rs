@@ -1,6 +1,3 @@
-use crate::paged_attention::block_hash::{
-    MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind,
-};
 use std::{
     any::Any,
     collections::hash_map::DefaultHasher,
@@ -17,68 +14,44 @@ use inference_vision::{
 };
 use tokenizers::Tokenizer;
 
-use crate::paged_attention::PagedAttentionMeta;
-use crate::{
-    attention::AttentionMask,
-    device_map::DeviceMapper,
-    pipeline::{
-        recurrent_batch_kind_for_input, InputProcessorOutput, InputsProcessor,
-        InputsProcessorValidationError, MessagesAction, Processor,
+use crate::attention::AttentionMask;
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
+    image_processor::{ImagePreProcessor, PreprocessedImages},
+    media::{build_mm_features_from_ranges, find_placeholder_delimited_ranges},
+    preprocessor_config::{PreProcessorConfig, ToFilter},
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, TextInputs,
     },
-    sequence::{build_mm_features_from_ranges, find_placeholder_delimited_ranges},
-    vision_models::{
-        image_processor::{ImagePreProcessor, PreprocessedImages},
-        multimodal_layout::{
-            gather_packed_mrope_positions, MropePositionSource, MultimodalEmbeddingMap,
-            MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
-            RequestMultimodalLayout,
-        },
-        preprocessor_config::{PreProcessorConfig, ToFilter},
-    },
+};
+use crate::model::recurrent_batch_kind_for_input;
+use crate::paged_attention::{
+    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
+    PagedAttentionMeta,
+};
+use crate::vision::multimodal_layout::{
+    gather_packed_mrope_positions, MropePositionSource, MultimodalEmbeddingMap,
+    MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout, RequestMultimodalLayout,
 };
 
 use super::Qwen2VLVisionSpecificArgs;
-use crate::vision_models::media_host::MediaInputsProcessor;
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
-};
 
 const MAX_MEDIA_ASPECT_RATIO: f64 = 200.0;
 
-// Input processor
-struct Qwen2VLImageProcessor {
-    max_edge: Option<u32>,
-}
-// Processor
-pub struct Qwen2VLProcessor {
+pub const VISION_START: &str = "<|vision_start|>";
+pub const VISION_END: &str = "<|vision_end|>";
+pub const IMAGE_PAD: &str = "<|image_pad|>";
+pub const VIDEO_PAD: &str = "<|video_pad|>";
+pub const PLACEHOLDER: &str = "<|placeholder|>";
+
+pub struct Qwen2VLImageProcessor {
     max_edge: Option<u32>,
 }
 
-impl Qwen2VLProcessor {
-    pub const VISION_START: &str = "<|vision_start|>";
-    pub const VISION_END: &str = "<|vision_end|>";
-    pub const IMAGE_PAD: &str = "<|image_pad|>";
-    pub const VIDEO_PAD: &str = "<|video_pad|>";
-    pub const PLACEHOLDER: &str = "<|placeholder|>";
-
+impl Qwen2VLImageProcessor {
     pub fn new(max_edge: Option<u32>) -> Self {
         Self { max_edge }
-    }
-}
-
-impl Processor for Qwen2VLProcessor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(Arc::new(Qwen2VLImageProcessor {
-            max_edge: self.max_edge,
-        })))
-    }
-
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[Self::IMAGE_PAD, Self::VIDEO_PAD, Self::PLACEHOLDER]
-    }
-
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::FlattenOnlyText
     }
 }
 
@@ -845,8 +818,8 @@ impl MultimodalInputsProcessor for Qwen2VLImageProcessor {
             }
             expand_media_placeholders(
                 text,
-                Qwen2VLProcessor::IMAGE_PAD,
-                Qwen2VLProcessor::PLACEHOLDER,
+                IMAGE_PAD,
+                PLACEHOLDER,
                 image_grid.as_ref(),
                 image_rows,
                 merge_length,
@@ -854,8 +827,8 @@ impl MultimodalInputsProcessor for Qwen2VLImageProcessor {
             )?;
             expand_media_placeholders(
                 text,
-                Qwen2VLProcessor::VIDEO_PAD,
-                Qwen2VLProcessor::PLACEHOLDER,
+                VIDEO_PAD,
+                PLACEHOLDER,
                 video_grid.as_ref(),
                 video_rows,
                 merge_length,
@@ -876,13 +849,13 @@ impl MultimodalInputsProcessor for Qwen2VLImageProcessor {
             if seq.mm_features().is_empty() {
                 let mut features = Vec::new();
                 let start_id = tokenizer
-                    .token_to_id(Qwen2VLProcessor::VISION_START)
+                    .token_to_id(VISION_START)
                     .context("Qwen tokenizer is missing vision start token")?;
                 let end_id = tokenizer
-                    .token_to_id(Qwen2VLProcessor::VISION_END)
+                    .token_to_id(VISION_END)
                     .context("Qwen tokenizer is missing vision end token")?;
                 let img_pad_id = tokenizer
-                    .token_to_id(Qwen2VLProcessor::IMAGE_PAD)
+                    .token_to_id(IMAGE_PAD)
                     .context("Qwen tokenizer is missing image pad token")?;
                 let image_ranges =
                     find_placeholder_delimited_ranges(&ids, img_pad_id, start_id, end_id);
@@ -892,7 +865,7 @@ impl MultimodalInputsProcessor for Qwen2VLImageProcessor {
                     MultimodalKind::Image,
                 )?);
                 let vid_pad_id = tokenizer
-                    .token_to_id(Qwen2VLProcessor::VIDEO_PAD)
+                    .token_to_id(VIDEO_PAD)
                     .context("Qwen tokenizer is missing video pad token")?;
                 let video_ranges =
                     find_placeholder_delimited_ranges(&ids, vid_pad_id, start_id, end_id);
@@ -1205,8 +1178,8 @@ impl MultimodalInputsProcessor for Qwen2VLImageProcessor {
                     }
                     expand_media_placeholders(
                         text,
-                        Qwen2VLProcessor::IMAGE_PAD,
-                        Qwen2VLProcessor::PLACEHOLDER,
+                        IMAGE_PAD,
+                        PLACEHOLDER,
                         image_grid.as_ref(),
                         image_rows,
                         merge_length,
@@ -1214,8 +1187,8 @@ impl MultimodalInputsProcessor for Qwen2VLImageProcessor {
                     )?;
                     expand_media_placeholders(
                         text,
-                        Qwen2VLProcessor::VIDEO_PAD,
-                        Qwen2VLProcessor::PLACEHOLDER,
+                        VIDEO_PAD,
+                        PLACEHOLDER,
                         video_grid.as_ref(),
                         video_rows,
                         merge_length,
@@ -1239,13 +1212,13 @@ impl MultimodalInputsProcessor for Qwen2VLImageProcessor {
                     let mut features = Vec::new();
                     if seq.mm_features().is_empty() {
                         let start_id = tokenizer
-                            .token_to_id(Qwen2VLProcessor::VISION_START)
+                            .token_to_id(VISION_START)
                             .context("Qwen tokenizer is missing vision start token")?;
                         let end_id = tokenizer
-                            .token_to_id(Qwen2VLProcessor::VISION_END)
+                            .token_to_id(VISION_END)
                             .context("Qwen tokenizer is missing vision end token")?;
                         let img_pad_id = tokenizer
-                            .token_to_id(Qwen2VLProcessor::IMAGE_PAD)
+                            .token_to_id(IMAGE_PAD)
                             .context("Qwen tokenizer is missing image pad token")?;
                         let image_ranges =
                             find_placeholder_delimited_ranges(&ids, img_pad_id, start_id, end_id);
@@ -1255,7 +1228,7 @@ impl MultimodalInputsProcessor for Qwen2VLImageProcessor {
                             MultimodalKind::Image,
                         )?);
                         let vid_pad_id = tokenizer
-                            .token_to_id(Qwen2VLProcessor::VIDEO_PAD)
+                            .token_to_id(VIDEO_PAD)
                             .context("Qwen tokenizer is missing video pad token")?;
                         let video_ranges =
                             find_placeholder_delimited_ranges(&ids, vid_pad_id, start_id, end_id);
@@ -1276,13 +1249,13 @@ impl MultimodalInputsProcessor for Qwen2VLImageProcessor {
                 all_ids.push(ids.clone());
 
                 let img_pad = tokenizer
-                    .token_to_id(Qwen2VLProcessor::IMAGE_PAD)
+                    .token_to_id(IMAGE_PAD)
                     .context("Qwen tokenizer is missing image pad token")?;
                 let continuous_img_pad = find_sequences(&ids, img_pad);
                 all_continuous_img_pad.push(continuous_img_pad);
 
                 let vid_pad = tokenizer
-                    .token_to_id(Qwen2VLProcessor::VIDEO_PAD)
+                    .token_to_id(VIDEO_PAD)
                     .context("Qwen tokenizer is missing video pad token")?;
                 let continuous_vid_pad = find_sequences(&ids, vid_pad);
                 all_continuous_vid_pad.push(continuous_vid_pad);
@@ -1482,10 +1455,10 @@ impl MultimodalInputsProcessor for Qwen2VLImageProcessor {
             });
         let prompt_position_ids = if needs_prompt_mrope {
             let image_token_id = tokenizer
-                .token_to_id(Qwen2VLProcessor::IMAGE_PAD)
+                .token_to_id(IMAGE_PAD)
                 .ok_or_else(|| anyhow::Error::msg("Qwen tokenizer is missing image pad token"))?;
             let video_token_id = tokenizer
-                .token_to_id(Qwen2VLProcessor::VIDEO_PAD)
+                .token_to_id(VIDEO_PAD)
                 .ok_or_else(|| anyhow::Error::msg("Qwen tokenizer is missing video pad token"))?;
             let query_ranges = input_seqs
                 .iter()
@@ -1812,33 +1785,25 @@ mod tests {
     #[test]
     fn media_expansion_requires_exact_placeholder_grid_and_media_counts() -> Result<()> {
         let grid = Tensor::new(&[[1u32, 2, 2], [1, 2, 4]], &Device::Cpu)?;
-        let mut text = format!(
-            "a{}b{}c",
-            Qwen2VLProcessor::IMAGE_PAD,
-            Qwen2VLProcessor::IMAGE_PAD
-        );
+        let mut text = format!("a{}b{}c", IMAGE_PAD, IMAGE_PAD);
         expand_media_placeholders(
             &mut text,
-            Qwen2VLProcessor::IMAGE_PAD,
-            Qwen2VLProcessor::PLACEHOLDER,
+            IMAGE_PAD,
+            PLACEHOLDER,
             Some(&grid),
             2,
             4,
             MultimodalKind::Image,
         )?;
-        assert_eq!(text.match_indices(Qwen2VLProcessor::IMAGE_PAD).count(), 3);
+        assert_eq!(text.match_indices(IMAGE_PAD).count(), 3);
 
         let one_grid = Tensor::new(&[[1u32, 2, 2]], &Device::Cpu)?;
-        let mut excess = format!(
-            "{}{}",
-            Qwen2VLProcessor::IMAGE_PAD,
-            Qwen2VLProcessor::IMAGE_PAD
-        );
+        let mut excess = format!("{}{}", IMAGE_PAD, IMAGE_PAD);
         let original = excess.clone();
         assert!(expand_media_placeholders(
             &mut excess,
-            Qwen2VLProcessor::IMAGE_PAD,
-            Qwen2VLProcessor::PLACEHOLDER,
+            IMAGE_PAD,
+            PLACEHOLDER,
             Some(&one_grid),
             1,
             4,
@@ -1848,11 +1813,11 @@ mod tests {
         .is::<InputsProcessorValidationError>());
         assert_eq!(excess, original);
 
-        let mut missing = Qwen2VLProcessor::IMAGE_PAD.to_string();
+        let mut missing = IMAGE_PAD.to_string();
         assert!(expand_media_placeholders(
             &mut missing,
-            Qwen2VLProcessor::IMAGE_PAD,
-            Qwen2VLProcessor::PLACEHOLDER,
+            IMAGE_PAD,
+            PLACEHOLDER,
             Some(&grid),
             2,
             4,
@@ -1861,15 +1826,11 @@ mod tests {
         .unwrap_err()
         .is::<InputsProcessorValidationError>());
 
-        let mut grid_mismatch = format!(
-            "{}{}",
-            Qwen2VLProcessor::IMAGE_PAD,
-            Qwen2VLProcessor::IMAGE_PAD
-        );
+        let mut grid_mismatch = format!("{}{}", IMAGE_PAD, IMAGE_PAD);
         assert!(!expand_media_placeholders(
             &mut grid_mismatch,
-            Qwen2VLProcessor::IMAGE_PAD,
-            Qwen2VLProcessor::PLACEHOLDER,
+            IMAGE_PAD,
+            PLACEHOLDER,
             Some(&one_grid),
             2,
             4,
@@ -1883,11 +1844,11 @@ mod tests {
     #[test]
     fn malformed_grid_and_range_hash_cardinality_fail_closed() -> Result<()> {
         let malformed_grid = Tensor::new(&[[1u32, 2]], &Device::Cpu)?;
-        let mut text = Qwen2VLProcessor::VIDEO_PAD.to_string();
+        let mut text = VIDEO_PAD.to_string();
         assert!(expand_media_placeholders(
             &mut text,
-            Qwen2VLProcessor::VIDEO_PAD,
-            Qwen2VLProcessor::PLACEHOLDER,
+            VIDEO_PAD,
+            PLACEHOLDER,
             Some(&malformed_grid),
             1,
             4,

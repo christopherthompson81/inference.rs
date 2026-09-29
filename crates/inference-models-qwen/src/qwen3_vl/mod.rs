@@ -32,6 +32,7 @@ use crate::{
 };
 
 pub mod config;
+pub mod inputs_processor;
 pub mod text;
 pub mod vision;
 

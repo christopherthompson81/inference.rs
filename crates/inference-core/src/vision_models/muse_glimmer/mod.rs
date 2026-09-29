@@ -2,5 +2,5 @@
 
 pub(crate) use inference_models_qwen::muse_glimmer::*;
 
-pub(crate) mod inputs_processor;
-pub(crate) use inputs_processor::MuseGlimmerProcessor;
+pub(crate) mod processor;
+pub(crate) use processor::MuseGlimmerProcessor;

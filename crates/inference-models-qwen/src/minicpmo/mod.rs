@@ -31,6 +31,7 @@ use self::siglip::SiglipVisionTransformer;
 use crate::vision::siglip;
 
 pub mod config;
+pub mod inputs_processor;
 pub mod resampler;
 
 pub struct MiniCpmOModel {

@@ -3,8 +3,8 @@
 #![deny(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
 use inference_nn::{
-    amoe, attention, cuda, device_map, gdn, kv_cache, layers, model, moe, ops, paged_attention,
-    speculative, utils, vision,
+    amoe, attention, cuda, device_map, gdn, kv_cache, layers, media_inputs, model, moe, ops,
+    paged_attention, speculative, utils, vision,
 };
 use inference_nn::{get_mut_arcmutex, serde_default_fn};
 

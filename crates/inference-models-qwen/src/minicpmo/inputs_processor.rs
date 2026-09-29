@@ -7,43 +7,37 @@ use image::{imageops::FilterType, DynamicImage, GenericImageView};
 use inference_vision::{ApplyTransforms, Normalize, ToTensor, Transforms};
 use tokenizers::Tokenizer;
 
-use crate::paged_attention::PagedAttentionMeta;
-use crate::{
-    device_map::DeviceMapper,
-    paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
-    pipeline::{
-        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
-        Processor,
-    },
-    vision_models::multimodal_layout::{
-        MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
-        RequestMultimodalLayout,
-    },
-};
-
-use crate::vision_models::{
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
     image_processor::{ImagePreProcessor, PreprocessedImages},
     preprocessor_config::PreProcessorConfig,
-    processor_config::ProcessorConfig,
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, TextInputs,
+    },
+};
+use crate::paged_attention::{
+    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
+    PagedAttentionMeta,
+};
+use crate::vision::multimodal_layout::{
+    MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
+    RequestMultimodalLayout,
 };
 
 use super::{MiniCpmOLegacyMap, MiniCpmOSpecificArgs, MiniCpmOVisualInput};
-use crate::vision_models::media_host::MediaInputsProcessor;
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
-};
 
 const DEFAULT_MAX_SLICE_NUMS: usize = 9;
 const DEFAULT_SCALE_RESOLUTION: usize = 448;
 const DEFAULT_PATCH_SIZE: usize = 14;
 const DEFAULT_IMAGE_FEATURE_SIZE: usize = 64;
-const DEFAULT_IM_START_TOKEN: &str = "<image>";
-const DEFAULT_IM_END_TOKEN: &str = "</image>";
+pub const DEFAULT_IM_START_TOKEN: &str = "<image>";
+pub const DEFAULT_IM_END_TOKEN: &str = "</image>";
 const DEFAULT_IM_ID_START: &str = "<image_id>";
 const DEFAULT_IM_ID_END: &str = "</image_id>";
-const DEFAULT_SLICE_START_TOKEN: &str = "<slice>";
-const DEFAULT_SLICE_END_TOKEN: &str = "</slice>";
-const DEFAULT_UNK_TOKEN: &str = "<unk>";
+pub const DEFAULT_SLICE_START_TOKEN: &str = "<slice>";
+pub const DEFAULT_SLICE_END_TOKEN: &str = "</slice>";
+pub const DEFAULT_UNK_TOKEN: &str = "<unk>";
 const DEFAULT_USE_IMAGE_ID: bool = false;
 const DEFAULT_SLICE_MODE: bool = true;
 const RAW_IMAGE_TAG: &str = "(<image>./</image>)";
@@ -72,41 +66,9 @@ pub struct MiniCpmOImageProcessor {
     config: PreProcessorConfig,
 }
 
-pub struct MiniCpmOProcessor {
-    preprocessor_config: PreProcessorConfig,
-}
-
-impl MiniCpmOProcessor {
-    pub fn new(
-        _config: ProcessorConfig,
-        preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Self {
-        Self {
-            preprocessor_config,
-        }
-    }
-}
-
-impl Processor for MiniCpmOProcessor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(Arc::new(MiniCpmOImageProcessor {
-            config: self.preprocessor_config.clone(),
-        })))
-    }
-
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[
-            DEFAULT_IM_START_TOKEN,
-            DEFAULT_IM_END_TOKEN,
-            DEFAULT_SLICE_START_TOKEN,
-            DEFAULT_SLICE_END_TOKEN,
-            DEFAULT_UNK_TOKEN,
-        ]
-    }
-
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::FlattenOnlyText
+impl MiniCpmOImageProcessor {
+    pub fn new(config: PreProcessorConfig) -> Self {
+        Self { config }
     }
 }
 
