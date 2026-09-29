@@ -6,10 +6,9 @@ use std::{
 };
 
 use crate::{matformer::MatformerSliceConfig, pipeline::NormalLoadingMetadata};
-use inference_nn::loaders::NonMappedSubModel;
 
 use crate::{
-    paged_attention::{AttentionImplementation, ModelConfigLike, ModelConfigMetadata},
+    paged_attention::{AttentionImplementation, ModelConfigLike},
     pipeline::isq::IsqModelLoader,
 };
 use anyhow::Result;
@@ -18,7 +17,6 @@ use inference_quant::log::once_log_debug;
 
 use inference_quant::ShardedVarBuilder;
 
-use crate::pipeline::isq::isq_regexes;
 use regex::Regex;
 use serde::{Deserialize, Deserializer, Serialize, de::Visitor};
 
@@ -210,17 +208,10 @@ where
     deserializer.deserialize_str(ModuleTypeVisitor)
 }
 
-use inference_nn::bias_if;
-
 #[cfg(feature = "models-gemma")]
-inference_nn::boxed_loaders!(EmbeddingModelLoader: EmbeddingGemmaLoader);
-
+pub use inference_models_gemma::loaders::EmbeddingGemmaLoader;
 #[cfg(feature = "models-qwen")]
 pub use inference_models_qwen::loaders::Qwen3EmbeddingLoader;
-#[cfg(feature = "models-gemma")]
-mod gemma;
-#[cfg(feature = "models-gemma")]
-pub use gemma::EmbeddingGemmaLoader;
 
 /// Load a model based on the Hugging Face Transformers -CausalLM model class
 pub struct AutoEmbeddingLoader;

@@ -3,9 +3,11 @@ use std::sync::Arc;
 use inference_models_gemma::gemma3n::inputs_processor::{
     AUDIO_TOKEN, BOA_TOKEN, BOI_TOKEN, EOA_TOKEN, EOI_TOKEN, Gemma3nImageProcessor, IMAGE_TOKEN,
 };
+use inference_models_gemma::loaders::Gemma3nLoader;
 
-use crate::pipeline::{InputsProcessor, MessagesAction, Processor};
+use crate::pipeline::{InputsProcessor, MessagesAction, MultimodalProcessorFactory, Processor};
 use crate::vision_models::media_host::MediaInputsProcessor;
+use crate::vision_models::preprocessor_config::PreProcessorConfig;
 use crate::vision_models::processor_config::ProcessorConfig;
 
 pub struct Gemma3nProcessor {
@@ -61,5 +63,20 @@ impl Processor for Gemma3nProcessor {
 
     fn template_action(&self) -> MessagesAction {
         MessagesAction::Keep
+    }
+}
+
+impl MultimodalProcessorFactory for Gemma3nLoader {
+    fn get_processor(
+        &self,
+        _config: &str,
+        processor_config: Option<ProcessorConfig>,
+        _preprocessor_config: PreProcessorConfig,
+        _max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        Arc::new(Gemma3nProcessor::new(
+            processor_config.unwrap_or_default(),
+            true,
+        ))
     }
 }

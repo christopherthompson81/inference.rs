@@ -1,13 +1,16 @@
 use std::sync::Arc;
 
-use inference_models_gemma::gemma4::config::Gemma4BidirectionalAttention;
+use inference_models_gemma::diffusion_gemma::config::DiffusionGemmaConfig;
+use inference_models_gemma::gemma4::config::{Gemma4BidirectionalAttention, Gemma4Config};
 use inference_models_gemma::gemma4::inputs_processor::{
     AUDIO_TOKEN, BOA_TOKEN, BOI_TOKEN, EOA_TOKEN, EOI_TOKEN, Gemma4ImageProcessor, IMAGE_TOKEN,
     VIDEO_TOKEN,
 };
+use inference_models_gemma::loaders::{DiffusionGemmaLoader, Gemma4Loader};
 
-use crate::pipeline::{InputsProcessor, MessagesAction, Processor};
+use crate::pipeline::{InputsProcessor, MessagesAction, MultimodalProcessorFactory, Processor};
 use crate::vision_models::media_host::MediaInputsProcessor;
+use crate::vision_models::preprocessor_config::PreProcessorConfig;
 use crate::vision_models::processor_config::ProcessorConfig;
 
 pub struct Gemma4Processor {
@@ -113,6 +116,83 @@ impl Processor for Gemma4Processor {
 
     fn template_action(&self) -> MessagesAction {
         MessagesAction::KeepWithAudioAfterText
+    }
+}
+
+impl MultimodalProcessorFactory for Gemma4Loader {
+    fn get_processor(
+        &self,
+        config: &str,
+        processor_config: Option<ProcessorConfig>,
+        _preprocessor_config: PreProcessorConfig,
+        _max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        let cfg = Gemma4Config::from_json(config).expect("Failed to parse Gemma4Config");
+        let (patch_size, pooling_kernel_size, default_output_length, supports_images) = cfg
+            .vision_config
+            .as_ref()
+            .map_or((16, 1, 0, false), |vision_cfg| {
+                (
+                    vision_cfg.patch_size,
+                    vision_cfg.pooling_kernel_size,
+                    vision_cfg.default_output_length,
+                    true,
+                )
+            });
+        let raw_audio_frame_size = cfg
+            .audio_config
+            .as_ref()
+            .and_then(|audio_cfg| cfg.is_unified().then_some(audio_cfg.input_feat_size()));
+        Arc::new(Gemma4Processor::new(Gemma4ProcessorSettings {
+            processor_config: processor_config.unwrap_or_default(),
+            patch_size,
+            pooling_kernel_size,
+            default_output_length,
+            supports_images,
+            supports_audio: cfg.audio_config.is_some(),
+            raw_audio_frame_size,
+            is_unified: cfg.is_unified(),
+            decode_window: None,
+            bidirectional_attention: cfg.text_config.bidirectional_attention(),
+            vision_attention_on_full_layers: false,
+        }))
+    }
+}
+
+impl MultimodalProcessorFactory for DiffusionGemmaLoader {
+    fn get_processor(
+        &self,
+        config: &str,
+        processor_config: Option<ProcessorConfig>,
+        _preprocessor_config: PreProcessorConfig,
+        _max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        let cfg =
+            DiffusionGemmaConfig::from_json(config).expect("Failed to parse DiffusionGemmaConfig");
+        let (patch_size, pooling_kernel_size, default_output_length, supports_images) = cfg
+            .vision_config
+            .as_ref()
+            .map_or((16, 1, 0, false), |vision_cfg| {
+                (
+                    vision_cfg.patch_size,
+                    vision_cfg.pooling_kernel_size,
+                    vision_cfg.default_output_length,
+                    true,
+                )
+            });
+        Arc::new(Gemma4Processor::new(Gemma4ProcessorSettings {
+            processor_config: processor_config.unwrap_or_default(),
+            patch_size,
+            pooling_kernel_size,
+            default_output_length,
+            supports_images,
+            supports_audio: false,
+            raw_audio_frame_size: None,
+            is_unified: false,
+            decode_window: Some(cfg.canvas_length),
+            bidirectional_attention: cfg.text_config.bidirectional_attention(),
+            vision_attention_on_full_layers: true,
+        }))
     }
 }
 

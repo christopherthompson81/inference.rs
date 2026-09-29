@@ -328,3 +328,26 @@ What in them costs core's compile, and what can leave?
     - the factory-trait import folded into each file's `pipeline` import;
     - a box-drawing banner dropped from the Voxtral loader.
 - Next: gemma, the last family (PR 6).
+
+## Run 12 - 2026-09-30
+
+- Change: the gemma family, PR 6, the last one. Seven loaders moved into `inference-models-gemma/src/loaders/`:
+  Gemma, Gemma 2, Gemma 3, Gemma 3n, Gemma 4, DiffusionGemma, and the EmbeddingGemma loader (renamed
+  `embedding_gemma.rs`). `supports_gemma4_incremental_cache` moved into the gemma prelude.
+  - The 4 factory impls moved into core's `vision_models/{gemma3,gemma3n,gemma4}/processor.rs`.
+  - No per-model loader is left in core. `cargo fix --lib` removed the imports the loaders had reached through
+    `use super::*`, and the loader tests got explicit imports.
+  - Core's `vision_models/diffusion_gemma` had no users left and was deleted. `models::{gemma, gemma2}` is test-only.
+- Result:
+  - Core IR fell from 2,560,435 to 2,508,386 lines (-52.0k).
+  - The only family loader code left in core is the factory impls (2,193 lines).
+  - Across the series, core IR went from 3,025,589 lines (Run 1) to 2,508,386 (-517k, -17%).
+    - The config deserializers (Run 3) account for 247k of that.
+    - The loaders themselves (Runs 8-12) account for 270k.
+  - Full CI green (2191 CPU and 2511 CUDA tests).
+  - The review found nothing that affects compilation or behaviour. Its nits were applied:
+    - CLAUDE.md's step 2 no longer says some families keep their loaders in core;
+    - step 3 now notes that embedding loaders are listed by hand;
+    - import groups merged in three processor files and two loader modules;
+    - a Gemma 3 comment copied into Gemma 3n dropped.
+- Next: PR 7 moves the per-model loader tests into the family crates, then a cold-build measurement.

@@ -5,44 +5,23 @@ use std::{fmt::Debug, str::FromStr};
 
 use anyhow::Result;
 use candle_core::DType;
-use candle_nn::Conv2dConfig;
-use inference_nn::bias_if;
 use inference_quant::ShardedVarBuilder;
 use inference_quant::log::once_log_debug;
 
-use crate::pipeline::isq::isq_regexes;
 use regex::Regex;
 use serde::Deserialize;
 
-use super::{DeviceMappedModelLoader, NonMappedSubModel, NormalLoadingMetadata};
-// Loaders call these as `super::X`; they live one level up, in `loaders`.
-use super::language_model_pack_factors;
-#[cfg(feature = "models-gemma")]
-use super::promoted_tensor_pack_factor;
-use super::{AutoDeviceMapQuantization, language_model_pack_factors_with_aliases};
+use super::{
+    AutoDeviceMapQuantization, DeviceMappedModelLoader, NonMappedSubModel, NormalLoadingMetadata,
+};
 
-use crate::attention::ATTENTION_CHUNK_SIZE;
 use crate::device_map::DeviceMapper;
 use crate::matformer::MatformerSliceConfig;
-use crate::paged_attention::{AttentionImplementation, ModelConfigLike, ModelConfigMetadata};
+use crate::paged_attention::{AttentionImplementation, ModelConfigLike};
 use crate::pipeline::isq::IsqModelLoader;
 use crate::pipeline::loaders::AutoDeviceMapParams;
-use crate::pipeline::{Modalities, MultimodalPromptPrefixer, Processor, SupportedModality};
+use crate::pipeline::{Modalities, MultimodalPromptPrefixer, Processor};
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
-#[cfg(feature = "models-gemma")]
-use crate::vision_models::diffusion_gemma::{DiffusionGemmaConfig, DiffusionGemmaModel};
-#[cfg(feature = "models-gemma")]
-use crate::vision_models::gemma3::config::Gemma3Config;
-#[cfg(feature = "models-gemma")]
-use crate::vision_models::gemma3::{Gemma3Model, Gemma3Processor};
-#[cfg(feature = "models-gemma")]
-use crate::vision_models::gemma3n::config::{Gemma3nConfig, IntermediateSize};
-#[cfg(feature = "models-gemma")]
-use crate::vision_models::gemma3n::{Gemma3nModel, Gemma3nProcessor};
-#[cfg(feature = "models-gemma")]
-use crate::vision_models::gemma4::config::Gemma4Config;
-#[cfg(feature = "models-gemma")]
-use crate::vision_models::gemma4::{Gemma4Model, Gemma4Processor, Gemma4ProcessorSettings};
 use crate::vision_models::preprocessor_config::PreProcessorConfig;
 use crate::vision_models::processor_config::ProcessorConfig;
 
@@ -211,30 +190,12 @@ multimodal_loader_types! {
     PaddleOcrVl { cli: "paddleocr_vl", hf: "PaddleOCRVLForConditionalGeneration", loader: PaddleOcrVlLoader, feature: "models-other" },
 }
 
-#[cfg(feature = "models-gemma")]
-fn supports_gemma4_incremental_cache(config: &str) -> bool {
-    serde_json::from_str::<serde_json::Value>(config)
-        .ok()
-        .and_then(|config| {
-            config
-                .pointer("/text_config/use_bidirectional_attention")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned)
-        })
-        .as_deref()
-        != Some("all")
-}
-
 mod auto;
 pub use auto::*;
 #[cfg(feature = "models-gemma")]
-inference_nn::boxed_loaders!(
-    MultimodalModelLoader:
-    DiffusionGemmaLoader,
-    Gemma3Loader,
-    Gemma3nLoader,
-    Gemma4Loader,
-);
+pub use inference_models_gemma::loaders::{
+    DiffusionGemmaLoader, Gemma3Loader, Gemma3nLoader, Gemma4Loader,
+};
 #[cfg(feature = "models-llama")]
 pub use inference_models_llama::loaders::{
     Idefics2Loader, Idefics3Loader, LLaVALoader, LLaVANextLoader, Mistral3Loader, VLlama4Loader,
@@ -249,22 +210,6 @@ pub use inference_models_qwen::loaders::{
     MiniCpmOLoader, MuseGlimmerLoader, Qwen2_5VLLoader, Qwen2VLLoader, Qwen3_5Loader,
     Qwen3_5MoeLoader, Qwen3VLLoader, Qwen3VLMoELoader,
 };
-#[cfg(feature = "models-gemma")]
-mod gemma3;
-#[cfg(feature = "models-gemma")]
-pub use gemma3::*;
-#[cfg(feature = "models-gemma")]
-mod gemma3n;
-#[cfg(feature = "models-gemma")]
-pub use gemma3n::*;
-#[cfg(feature = "models-gemma")]
-mod gemma4;
-#[cfg(feature = "models-gemma")]
-pub use gemma4::*;
-#[cfg(feature = "models-gemma")]
-mod diffusion_gemma;
-#[cfg(feature = "models-gemma")]
-pub use diffusion_gemma::*;
 
 #[cfg(all(
     test,

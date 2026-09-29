@@ -1263,7 +1263,7 @@ fn uqff_safetensors_metadata() -> HashMap<String, String> {
     ])
 }
 
-pub(crate) use inference_nn::loaders::{IsqModelLoader, isq_regexes};
+pub(crate) use inference_nn::loaders::IsqModelLoader;
 
 /// Map a layer tracking key to candidate llama.cpp imatrix entries.
 fn gguf_imatrix_names(key: &str) -> Vec<String> {

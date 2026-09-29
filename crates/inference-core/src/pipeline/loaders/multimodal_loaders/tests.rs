@@ -3,11 +3,13 @@ use std::collections::HashMap;
 use super::super::AutoDeviceMapQuantization;
 use super::*;
 use crate::gguf::normal_registry::RopePairing;
+use crate::pipeline::SupportedModality;
 use crate::{
     device_map::DummyDeviceMapper,
     matformer::{MatformerConfig, MatformerSliceConfig, Slice},
 };
 use candle_core::Device;
+use inference_models_gemma::gemma4::config::Gemma4Config;
 use inference_models_qwen::muse_glimmer::Config as MuseGlimmerConfig;
 use inference_quant::IsqType;
 

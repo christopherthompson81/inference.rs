@@ -3,4 +3,3 @@
 pub(crate) use inference_models_gemma::gemma3n::*;
 
 pub(crate) mod processor;
-pub(crate) use processor::Gemma3nProcessor;

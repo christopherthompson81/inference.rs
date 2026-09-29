@@ -3,7 +3,7 @@ use super::*;
 pub struct DiffusionGemmaLoader;
 
 impl DiffusionGemmaLoader {
-    fn is_sliding(tc: &crate::vision_models::gemma4::config::Gemma4TextConfig, i: usize) -> bool {
+    fn is_sliding(tc: &crate::gemma4::config::Gemma4TextConfig, i: usize) -> bool {
         tc.layer_types[i] == "sliding_attention"
     }
 }
@@ -48,43 +48,6 @@ impl MultimodalModelLoader for DiffusionGemmaLoader {
             input,
             output: vec![SupportedModality::Text],
         })
-    }
-}
-
-impl MultimodalProcessorFactory for DiffusionGemmaLoader {
-    fn get_processor(
-        &self,
-        config: &str,
-        processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        let cfg =
-            DiffusionGemmaConfig::from_json(config).expect("Failed to parse DiffusionGemmaConfig");
-        let (patch_size, pooling_kernel_size, default_output_length, supports_images) = cfg
-            .vision_config
-            .as_ref()
-            .map_or((16, 1, 0, false), |vision_cfg| {
-                (
-                    vision_cfg.patch_size,
-                    vision_cfg.pooling_kernel_size,
-                    vision_cfg.default_output_length,
-                    true,
-                )
-            });
-        Arc::new(Gemma4Processor::new(Gemma4ProcessorSettings {
-            processor_config: processor_config.unwrap_or_default(),
-            patch_size,
-            pooling_kernel_size,
-            default_output_length,
-            supports_images,
-            supports_audio: false,
-            raw_audio_frame_size: None,
-            is_unified: false,
-            decode_window: Some(cfg.canvas_length),
-            bidirectional_attention: cfg.text_config.bidirectional_attention(),
-            vision_attention_on_full_layers: true,
-        }))
     }
 }
 

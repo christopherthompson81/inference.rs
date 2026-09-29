@@ -10,31 +10,21 @@ use crate::matformer::MatformerSliceConfig;
 
 use crate::{
     lora::{LoraConfig, Ordering},
-    paged_attention::{AttentionImplementation, ModelConfigLike, ModelConfigMetadata},
+    paged_attention::{AttentionImplementation, ModelConfigLike},
     pipeline::isq::IsqModelLoader,
 };
 use anyhow::Result;
 use candle_core::DType;
-use inference_nn::bias_if;
 use inference_quant::log::once_log_debug;
 
 use inference_quant::ShardedVarBuilder;
 
-use crate::pipeline::isq::isq_regexes;
 use regex::Regex;
 use serde::Deserialize;
 
-#[cfg(feature = "models-gemma")]
-use crate::models;
-#[cfg(feature = "models-gemma")]
-use crate::xlora_models;
 use crate::xlora_models::XLoraConfig;
 
-use super::{AutoDeviceMapParams, DeviceMappedModelLoader};
-// Loaders reach these through `use super::*` (or as `super::X`); they live one level up, in `loaders`.
-use super::AutoDeviceMapQuantization;
-#[cfg(feature = "models-gemma")]
-use super::tied_promoted_tensor_pack_factor;
+use super::{AutoDeviceMapParams, AutoDeviceMapQuantization, DeviceMappedModelLoader};
 
 pub use inference_nn::loaders::NormalModelLoader;
 
@@ -182,7 +172,7 @@ normal_loader_types! {
 mod auto;
 pub use auto::*;
 #[cfg(feature = "models-gemma")]
-inference_nn::boxed_loaders!(NormalModelLoader: Gemma2Loader, GemmaLoader);
+pub use inference_models_gemma::loaders::{Gemma2Loader, GemmaLoader};
 #[cfg(feature = "models-llama")]
 pub use inference_models_llama::loaders::{
     LlamaLoader, MistralLoader, MixtralLoader, SmolLm3Loader,
@@ -198,14 +188,6 @@ pub use inference_models_phi::loaders::{Phi2Loader, Phi3_5MoELoader, Phi3Loader}
 pub use inference_models_qwen::loaders::{
     Qwen2Loader, Qwen3_5TextLoader, Qwen3Loader, Qwen3MoELoader, Qwen3NextLoader,
 };
-#[cfg(feature = "models-gemma")]
-mod gemma;
-#[cfg(feature = "models-gemma")]
-pub use gemma::*;
-#[cfg(feature = "models-gemma")]
-mod gemma2;
-#[cfg(feature = "models-gemma")]
-pub use gemma2::*;
 
 #[cfg(all(
     test,
