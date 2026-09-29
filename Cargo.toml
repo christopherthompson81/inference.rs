@@ -25,6 +25,7 @@ members = [
 
     "crates/inference-audio",
     "crates/inference-mcp",
+    "crates/inference-protocol",
     "crates/inference-macros",
     "crates/inference-code-exec",
     "crates/inference-sandbox",
@@ -56,6 +57,7 @@ default-members = [
 
     "crates/inference-audio",
     "crates/inference-mcp",
+    "crates/inference-protocol",
     "crates/inference-macros",
     "crates/inference-code-exec",
     "crates/inference-sandbox",
@@ -238,6 +240,7 @@ inference-webui = { path = "crates/inference-webui", version = "0.9.3" }
 inference = { path = "crates/inference", version = "0.9.3", default-features = false }
 inference-audio = { path = "crates/inference-audio", version = "0.9.3" }
 inference-mcp = { path = "crates/inference-mcp", version = "0.9.3" }
+inference-protocol = { path = "crates/inference-protocol", version = "0.9.3" }
 inference-macros = { path = "crates/inference-macros", version = "0.9.3" }
 inference-code-exec = { path = "crates/inference-code-exec", version = "0.9.3" }
 inference-sandbox = { path = "crates/inference-sandbox", version = "0.9.3" }

@@ -4,7 +4,7 @@
 //! `<tool_call>{"name":"...", "arguments":{...}}</tool_call>`
 //! `<tool_call><function=NAME><parameter=KEY>VALUE</parameter></function></tool_call>`
 
-use candle_core::Result;
+use anyhow::Result;
 use llguidance::api::TopLevelGrammar;
 use regex::Regex;
 use serde_json::{Map, Value};
@@ -140,17 +140,17 @@ fn parse_qwen_tool_calls(message: &str) -> Result<Option<String>> {
 
     if !xml_calls.is_empty() {
         return Ok(Some(
-            serde_json::to_string(&xml_calls).map_err(candle_core::Error::msg)?,
+            serde_json::to_string(&xml_calls).map_err(anyhow::Error::msg)?,
         ));
     }
 
     match json_calls.len() {
         0 => Ok(None),
         1 => Ok(Some(
-            serde_json::to_string(&json_calls[0]).map_err(candle_core::Error::msg)?,
+            serde_json::to_string(&json_calls[0]).map_err(anyhow::Error::msg)?,
         )),
         _ => Ok(Some(
-            serde_json::to_string(&json_calls).map_err(candle_core::Error::msg)?,
+            serde_json::to_string(&json_calls).map_err(anyhow::Error::msg)?,
         )),
     }
 }

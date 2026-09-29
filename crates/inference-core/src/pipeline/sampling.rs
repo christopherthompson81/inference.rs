@@ -40,7 +40,9 @@ fn parse_text_and_tool_calls(
     let Some(state) = state else {
         return Ok((Some(raw_text.to_string()), Vec::new()));
     };
-    let parsed = state.finalize_for_response(raw_text, None, None, None)?;
+    let parsed = state
+        .finalize_for_response(raw_text, None, None, None)
+        .map_err(candle_core::Error::msg)?;
     Ok((parsed.content, parsed.tool_calls))
 }
 
@@ -57,8 +59,9 @@ fn parse_streaming_text_and_tool_calls(
             Vec::new(),
         ));
     };
-    let parsed =
-        state.parse_streaming(content_delta, raw_delta, None, has_reasoning_parser, false)?;
+    let parsed = state
+        .parse_streaming(content_delta, raw_delta, None, has_reasoning_parser, false)
+        .map_err(candle_core::Error::msg)?;
     Ok((parsed.content, parsed.tool_calls))
 }
 
@@ -218,7 +221,9 @@ pub(crate) async fn finish_or_add_toks_to_seq(
     // Doesn't conflict with the logic below because it does the same thing anyway.
     if let Some(d) = tool_detection_text(seq, hidden_stop.as_deref()) {
         if let Some(ref mut state) = seq.tool_call_state {
-            let (_tool_use_still_possible, tool_use_is_done) = state.prefix_status(d.as_str())?;
+            let (_tool_use_still_possible, tool_use_is_done) = state
+                .prefix_status(d.as_str())
+                .map_err(candle_core::Error::msg)?;
 
             if tool_use_is_done && state.stops_after_complete_tool_call() {
                 if let Ok(tools) = state.complete_if_tool_call(d.as_str()) {
@@ -276,7 +281,9 @@ pub(crate) async fn finish_or_add_toks_to_seq(
         let mut tool_use_is_done = false;
         if let Some(d) = tool_detection_text(seq, hidden_stop.as_deref()) {
             if let Some(ref state) = seq.tool_call_state {
-                (tool_use_still_possible, tool_use_is_done) = state.prefix_status(d.as_str())?;
+                (tool_use_still_possible, tool_use_is_done) = state
+                    .prefix_status(d.as_str())
+                    .map_err(candle_core::Error::msg)?;
             }
         };
 
@@ -333,13 +340,15 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                                 Some(hidden_stop),
                             )
                         });
-                        let parsed = state.parse_streaming(
-                            content_delta.take(),
-                            delta.as_str(),
-                            parser_text.as_deref(),
-                            has_external_reasoning_parser,
-                            is_done.is_some(),
-                        )?;
+                        let parsed = state
+                            .parse_streaming(
+                                content_delta.take(),
+                                delta.as_str(),
+                                parser_text.as_deref(),
+                                has_external_reasoning_parser,
+                                is_done.is_some(),
+                            )
+                            .map_err(candle_core::Error::msg)?;
                         content_delta = parsed.content;
                         let parsed_tool_use_is_done = parsed.tool_use_is_done;
                         let _parsed_tool_use_still_possible = parsed.tool_use_still_possible;
@@ -577,12 +586,14 @@ pub(crate) async fn finish_or_add_toks_to_seq(
                         parser_text.push_str(hidden_stop);
                         parser_text
                     });
-                    state.finalize_for_response(
-                        text.as_str(),
-                        parsed_content,
-                        reasoning_content,
-                        parser_text.as_deref(),
-                    )?
+                    state
+                        .finalize_for_response(
+                            text.as_str(),
+                            parsed_content,
+                            reasoning_content,
+                            parser_text.as_deref(),
+                        )
+                        .map_err(candle_core::Error::msg)?
                 } else {
                     crate::tools::state::ToolCallParse {
                         content: parsed_content.or_else(|| Some(text.clone())),

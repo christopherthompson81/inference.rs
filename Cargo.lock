@@ -2889,6 +2889,7 @@ dependencies = [
  "inference-models-speech",
  "inference-nn",
  "inference-paged-attn",
+ "inference-protocol",
  "inference-quant",
  "inference-sandbox",
  "inference-vision",
@@ -2896,12 +2897,10 @@ dependencies = [
  "itertools 0.14.0",
  "llguidance",
  "metrics",
- "mime_guess",
  "minijinja",
  "minijinja-contrib",
  "num-traits",
  "objc",
- "openai-harmony",
  "ordered-float",
  "rand 0.9.4",
  "rand_distr",
@@ -3173,6 +3172,7 @@ dependencies = [
  "indicatif 0.18.3",
  "inference-flash-attn",
  "inference-paged-attn",
+ "inference-protocol",
  "inference-quant",
  "itertools 0.14.0",
  "metrics",
@@ -3211,6 +3211,31 @@ dependencies = [
  "inference-metal-compile",
  "objc2-metal",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "inference-protocol"
+version = "0.9.3"
+dependencies = [
+ "anyhow",
+ "base64 0.22.1",
+ "either",
+ "image",
+ "indexmap 2.13.0",
+ "inference-code-exec",
+ "inference-mcp",
+ "llguidance",
+ "mime_guess",
+ "openai-harmony",
+ "regex",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "toktrie",
+ "tracing",
+ "utoipa",
+ "uuid",
 ]
 
 [[package]]

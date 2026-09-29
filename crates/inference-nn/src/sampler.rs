@@ -1,5 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
+pub use inference_protocol::response::TopLogprob;
 use std::{
     collections::{HashMap, HashSet},
     sync::{Arc, LazyLock, Mutex},
@@ -533,14 +534,6 @@ pub struct CudaSpeculativeSamplingPlan {
     pub top_k: usize,
     pub top_p: f32,
     pub min_p: f32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-/// Top-n logprobs element
-pub struct TopLogprob {
-    pub token: u32,
-    pub logprob: f32,
-    pub bytes: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

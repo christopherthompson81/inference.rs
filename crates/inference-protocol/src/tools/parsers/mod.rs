@@ -1,7 +1,7 @@
 //! Model-specific tool call format parsers.
 //!
 //! Each model family emits tool calls in a different format.  Parsers are
-//! registered in [`PARSERS`] and tried in order — the first match wins.
+//! registered in `PARSERS` and tried in order; the first match wins.
 
 pub(crate) mod atem;
 mod deepseek;
@@ -14,7 +14,7 @@ mod llama;
 mod mistral_nemo;
 mod qwen;
 
-use candle_core::Result;
+use anyhow::Result;
 use llguidance::api::TopLevelGrammar;
 
 use crate::Tool;

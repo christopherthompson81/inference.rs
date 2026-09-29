@@ -837,3 +837,45 @@ Review follow-ups:
 - Not done: moving reqwest 0.13 off aws-lc. With `rustls-no-provider`, reqwest falls back to the process-wide rustls
   provider and panics if none is installed, so every client path would need an install first. That includes the 8
   `reqwest::get` calls in the examples, which users copy. That is not worth ~30 s of CPU off the critical path.
+
+## Run 43 - 2026-09-28 (night)
+
+- Question: Run 41 finding 4 (`NormalPipeline` / `MultimodalPipeline` duplication). What would sharing it take?
+- Finding:
+  - Of the 57 methods identical between the two files, most are 3-line trait accessors. The larger ones
+    (`amoe_create_layers`, `try_sample_speculative_causal_gen`, `attach_speculative_with_runtime`, `apply_calibration`,
+    `re_isq_model`, the CUDA-graph state methods) are glue over helpers that are already shared: AnyMoE weight
+    loading, the speculative driver, `isq_flow`, `cuda_graph`.
+  - The two model traits share only `cache`, `device`, `config`, `model_config`, `max_seq_len` and the capability
+    flags directly, plus their `IsqModel` / `AnyMoeBaseModelMixin` / `SpeculativeTargetMixin` supertraits.
+  - Sharing the glue needs one of two things. Option a: a common model supertrait, which re-splits every model impl
+    in the five family crates. Option b: a macro stamping the same methods into both impls, which saves no IR and
+    reads worse.
+  - The near-identical CUDA decode-graph path differs exactly at the model forward calls.
+- Implication: the net is roughly 300-400 lines, not the ~1k Run 41 estimated. Not worth doing before unbundling.
+  Revisit if the model traits get a common supertrait for another reason.
+
+## Run 44 - 2026-09-28 (night)
+
+- Change: a new `inference-protocol` crate with no candle dependency holds the wire-protocol half of core:
+  - `tools/`, including the call parsers and grammars;
+  - `reasoning_parsers/` and `files/`;
+  - the data structs of `response.rs` and `request.rs`;
+  - `TopLogprob`, moved from inference-nn.
+
+  Core keeps the `Request`/`Response` channel types and re-exports the rest, so `inference_core::` paths keep working.
+- Question: does the new crate stay off the critical path, even with inference-nn now depending on it for
+  `TopLogprob`? What does core lose?
+- Command: the Run 39 cold `cargo test --no-run --features cuda --workspace --lib --bins --tests --timings`, then
+  `cargo llvm-lines -p inference-core --lib --features cuda` (scratch target).
+- Result:
+  - inference-protocol's lib builds at t=80-83 s and its lib test at t=80-84 s, after its deps (mcp at 56 s, image
+    and harmony) and well before inference-nn's lib (t=99 s) and core's lib (t=119 s). It adds nothing to the
+    critical path, and nn's new dependency on it does not delay nn.
+  - Core IR: 3,585,564 -> 3,485,212 lines (-100.4k, -2.8%), 73,983 -> 71,868 copies. About 184 unit tests move out of
+    core's lib test.
+  - Wall: 259 s (Run 39: 254 s). The measurement is noisy: load reached ~18 because lint runs overlapped the end of
+    the build, and core's lib test still ends it (t=137-258 s).
+- Implication: the split does what it should structurally, but at ~3% of core the wall-time gain is inside the
+  noise. The larger step is moving inference-api's request types (`openai.rs`, `responses_types`) here too. That
+  takes inference-api's lib test (t=201-254 s) off the tail as well.
