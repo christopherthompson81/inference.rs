@@ -81,7 +81,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-core/` - Core inference engine, model implementations, pipelines
 - `crates/inference-models-{llama,qwen,gemma,phi,other}/` - Model families (one crate per family, built on `inference-nn`): text models plus the vision models built on their text stacks, each behind an `inference-core` feature (`models-llama`, ...; all on by default). A multimodal model's input processor (a `MultimodalInputsProcessor` over `inference_nn::media_inputs`) lives beside it; its `Processor` (chat template actions) stays in core. `--slim` checks core with each family alone
 - `crates/inference-models-{speech,diffusion}/` - Speech (Dia) and image generation (FLUX) models, always built; their loaders, `SpeechLoaderType`/`DiffusionLoaderType` and request processors stay in core
-- `crates/inference-nn/` - Model-facing building blocks: layers, attention and its metadata, KV/paged caches, GDN, MoE, device mapping, and the CUDA/Metal kernels behind them
+- `crates/inference-nn/` - Model-facing building blocks: layers, attention and its metadata, KV/paged caches, GDN, MoE, device mapping, the loader traits with their sizing and placement helpers (`loaders`), and the CUDA/Metal kernels behind them
 - `crates/inference-cli/` - Unified CLI binary (commands: run, serve, bench, from-config)
 - `crates/inference-api/` - The engine surface with no HTTP: OpenAI request/response types, request parsing and dispatch, chat as an engine operation, the server/engine builder. The HTTP server builds on it and the C ABI exposes it; add engine features here, not in the server
 - `crates/inference-server-core/` - HTTP server routing, OpenAI API implementation

@@ -38,15 +38,6 @@ impl MultimodalModelLoader for Qwen2_5VLLoader {
         let config = Qwen2_5VLConfig::from_json(config)?;
         Ok(Box::new(config))
     }
-    fn get_processor(
-        &self,
-        _model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(Qwen2VLProcessor::new(max_edge))
-    }
     fn supports_paged_attention(&self, _config: &str) -> bool {
         true
     }
@@ -61,6 +52,18 @@ impl MultimodalModelLoader for Qwen2_5VLLoader {
             input: vec![SupportedModality::Text, SupportedModality::Vision],
             output: vec![SupportedModality::Text],
         })
+    }
+}
+
+impl MultimodalProcessorFactory for Qwen2_5VLLoader {
+    fn get_processor(
+        &self,
+        _model_config: &str,
+        _processor_config: Option<ProcessorConfig>,
+        _preprocessor_config: PreProcessorConfig,
+        max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        Arc::new(Qwen2VLProcessor::new(max_edge))
     }
 }
 

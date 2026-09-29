@@ -1,22 +1,16 @@
-use super::{layer_indexed_device, LAYER_INDEX_PATTERN};
 pub use crate::model::EmbeddingModel;
 use std::{
     fmt::{self, Debug, Display},
     path::PathBuf,
     str::FromStr,
-    sync::Arc,
 };
 
-use crate::{
-    matformer::MatformerSliceConfig,
-    pipeline::{loaders::auto_device_map::NonMappedSubModel, NormalLoadingMetadata},
-};
+use crate::{matformer::MatformerSliceConfig, pipeline::NormalLoadingMetadata};
+use inference_nn::loaders::NonMappedSubModel;
 
 use crate::{
-    device_map::DeviceMapper,
     paged_attention::{AttentionImplementation, ModelConfigLike, ModelConfigMetadata},
     pipeline::isq::IsqModelLoader,
-    utils::varbuilder_utils::DeviceForLoadTensor,
 };
 use anyhow::Result;
 use candle_core::DType;
@@ -30,32 +24,7 @@ use serde::{de::Visitor, Deserialize, Deserializer, Serialize};
 
 use super::{AutoDeviceMapParams, DeviceMappedModelLoader};
 
-pub trait EmbeddingModelLoader: IsqModelLoader + Send + Sync + DeviceMappedModelLoader {
-    fn load(
-        &self,
-        config: &str,
-        vb: ShardedVarBuilder,
-        normal_loading_metadata: NormalLoadingMetadata,
-        attention_mechanism: AttentionImplementation,
-    ) -> Result<Box<dyn EmbeddingModel + Send + Sync>>;
-    fn is_gptx(&self, _config: &str) -> Result<bool> {
-        Ok(true)
-    }
-    fn has_causal_attention(&self, config: &str) -> Result<bool>;
-    fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>>;
-    fn get_device_for_tensor(
-        &self,
-        config: &str,
-        _mapper: &dyn DeviceMapper,
-        loading_isq: bool,
-    ) -> Result<Arc<dyn Fn(String) -> DeviceForLoadTensor + Send + Sync + 'static>> {
-        layer_indexed_device(
-            LAYER_INDEX_PATTERN,
-            self.model_config(config)?.num_layers(),
-            loading_isq,
-        )
-    }
-}
+pub use inference_nn::loaders::EmbeddingModelLoader;
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
@@ -241,15 +210,7 @@ where
     deserializer.deserialize_str(ModuleTypeVisitor)
 }
 
-macro_rules! bias_if {
-    ($cond:expr, $size:expr) => {
-        if $cond {
-            $size
-        } else {
-            0
-        }
-    };
-}
+use inference_nn::bias_if;
 
 #[cfg(feature = "models-gemma")]
 mod gemma;

@@ -66,6 +66,7 @@ pub use ggml::{GGMLLoader, GGMLLoaderBuilder, GGMLSpecificConfig};
 pub use gguf::{GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig};
 pub use hf_config::HfConfigOverrides;
 use image::DynamicImage;
+pub use inference_nn::loaders::{Modalities, MultimodalPromptPrefixer, SupportedModality};
 pub use inputs_processor::InputProcessorOutput;
 pub(crate) use isq::IsqModelLoader;
 pub use isq::{
@@ -634,33 +635,6 @@ fn paged_attention_memory_reservations(
     )
 }
 
-#[derive(Clone, PartialEq, Eq)]
-pub enum SupportedModality {
-    Text,
-    Audio,
-    Vision,
-    Video,
-    Embedding,
-}
-
-impl Debug for SupportedModality {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Text => write!(f, "📝 Text"),
-            Self::Audio => write!(f, "🔊 Audio"),
-            Self::Vision => write!(f, "🖼️ Vision"),
-            Self::Video => write!(f, "🎬 Video"),
-            Self::Embedding => write!(f, "🔢 Embedding"),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct Modalities {
-    pub input: Vec<SupportedModality>,
-    pub output: Vec<SupportedModality>,
-}
-
 pub struct GeneralMetadata {
     pub max_seq_len: usize,
     /// Only None if it doesn't make sense for the model
@@ -887,22 +861,6 @@ impl PartialEq for ModelCategory {
                 _,
             ) => false,
         }
-    }
-}
-
-/// Prepend a vision tag appropriate for the model to the prompt. Image indexing is assumed that start at 0.
-pub trait MultimodalPromptPrefixer: Send + Sync {
-    /// Prefix for inclusion in messages (may do nothing if the chat template handles it).
-    fn prefix_image(&self, _image_indices: Vec<usize>, prompt: &str) -> String {
-        prompt.to_string()
-    }
-    /// Prefix for inclusion in messages (may do nothing if the chat template handles it).
-    fn prefix_audio(&self, _audio_indexes: Vec<usize>, prompt: &str) -> String {
-        prompt.to_string()
-    }
-    /// Prefix for inclusion in messages (may do nothing if the chat template handles it).
-    fn prefix_video(&self, _video_indexes: Vec<usize>, prompt: &str) -> String {
-        prompt.to_string()
     }
 }
 

@@ -222,7 +222,7 @@ impl DeviceMapSetting {
                 metadata.build_mapper(model_layers, device, topology, all_devices)
             }
             Self::Auto(_) => {
-                candle_core::bail!(".into_mapper does not work on Auto device map, convert it to a Map with DeviceMappedModelLoader::get_device_layers")
+                candle_core::bail!(".into_mapper does not work on Auto device map, convert it to a Map with the auto device mapper first")
             }
         }
     }

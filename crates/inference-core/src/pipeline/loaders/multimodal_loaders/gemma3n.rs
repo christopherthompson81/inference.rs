@@ -27,19 +27,6 @@ impl MultimodalModelLoader for Gemma3nLoader {
         let config = Gemma3nConfig::from_json(config)?;
         Ok(Box::new(config))
     }
-    fn get_processor(
-        &self,
-        _config: &str,
-        processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        // Handle the Gemma 3 1b case here
-        Arc::new(Gemma3nProcessor::new(
-            processor_config.unwrap_or_default(),
-            true,
-        ))
-    }
     fn supports_paged_attention(&self, _config: &str) -> bool {
         true
     }
@@ -61,6 +48,22 @@ impl MultimodalModelLoader for Gemma3nLoader {
             ],
             output: vec![SupportedModality::Text],
         })
+    }
+}
+
+impl MultimodalProcessorFactory for Gemma3nLoader {
+    fn get_processor(
+        &self,
+        _config: &str,
+        processor_config: Option<ProcessorConfig>,
+        _preprocessor_config: PreProcessorConfig,
+        _max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        // Handle the Gemma 3 1b case here
+        Arc::new(Gemma3nProcessor::new(
+            processor_config.unwrap_or_default(),
+            true,
+        ))
     }
 }
 

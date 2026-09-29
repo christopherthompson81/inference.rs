@@ -56,20 +56,6 @@ impl MultimodalModelLoader for MuseGlimmerLoader {
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         Ok(Box::new(MuseGlimmerConfig::from_json(config)?))
     }
-    fn get_processor(
-        &self,
-        model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        preprocessor_config: PreProcessorConfig,
-        max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        let cfg = MuseGlimmerConfig::from_json(model_config)
-            .expect("Failed to parse Muse-Glimmer config");
-        Arc::new(
-            MuseGlimmerProcessor::new(&preprocessor_config, max_edge, cfg.gguf_collapsed_temporal)
-                .expect("Failed to create Muse-Glimmer processor"),
-        )
-    }
     fn supports_paged_attention(&self, _config: &str) -> bool {
         true
     }
@@ -114,6 +100,23 @@ impl MultimodalModelLoader for MuseGlimmerLoader {
                 .map(DeviceForLoadTensor::Idx)
                 .unwrap_or(DeviceForLoadTensor::Base)
         }))
+    }
+}
+
+impl MultimodalProcessorFactory for MuseGlimmerLoader {
+    fn get_processor(
+        &self,
+        model_config: &str,
+        _processor_config: Option<ProcessorConfig>,
+        preprocessor_config: PreProcessorConfig,
+        max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        let cfg = MuseGlimmerConfig::from_json(model_config)
+            .expect("Failed to parse Muse-Glimmer config");
+        Arc::new(
+            MuseGlimmerProcessor::new(&preprocessor_config, max_edge, cfg.gguf_collapsed_temporal)
+                .expect("Failed to create Muse-Glimmer processor"),
+        )
     }
 }
 

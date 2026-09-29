@@ -52,15 +52,6 @@ impl MultimodalModelLoader for Phi4MMLoader {
         let cfg = crate::vision_models::phi4::Phi4MMConfig::from_json(config)?;
         Ok(Box::new(cfg))
     }
-    fn get_processor(
-        &self,
-        _model_config: &str,
-        processor_config: Option<ProcessorConfig>,
-        preprocessor_config: PreProcessorConfig,
-        _max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Phi4MMProcessor::new_processor(processor_config, preprocessor_config)
-    }
     fn supports_paged_attention(&self, _config: &str) -> bool {
         true
     }
@@ -82,6 +73,18 @@ impl MultimodalModelLoader for Phi4MMLoader {
             ],
             output: vec![SupportedModality::Text],
         })
+    }
+}
+
+impl MultimodalProcessorFactory for Phi4MMLoader {
+    fn get_processor(
+        &self,
+        _model_config: &str,
+        processor_config: Option<ProcessorConfig>,
+        preprocessor_config: PreProcessorConfig,
+        _max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        Phi4MMProcessor::new_processor(processor_config, preprocessor_config)
     }
 }
 

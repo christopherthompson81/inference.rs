@@ -35,19 +35,6 @@ impl MultimodalModelLoader for Idefics3Loader {
         let cfg = crate::vision_models::idefics3::Idefics3Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
-    fn get_processor(
-        &self,
-        _model_config: &str,
-        processor_config: Option<ProcessorConfig>,
-        preprocessor_config: PreProcessorConfig,
-        max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(Idefics3Processor::new(
-            processor_config.unwrap_or_default(),
-            preprocessor_config,
-            max_edge,
-        ))
-    }
     fn supports_paged_attention(&self, _config: &str) -> bool {
         true
     }
@@ -65,6 +52,22 @@ impl MultimodalModelLoader for Idefics3Loader {
             input: vec![SupportedModality::Text, SupportedModality::Vision],
             output: vec![SupportedModality::Text],
         })
+    }
+}
+
+impl MultimodalProcessorFactory for Idefics3Loader {
+    fn get_processor(
+        &self,
+        _model_config: &str,
+        processor_config: Option<ProcessorConfig>,
+        preprocessor_config: PreProcessorConfig,
+        max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        Arc::new(Idefics3Processor::new(
+            processor_config.unwrap_or_default(),
+            preprocessor_config,
+            max_edge,
+        ))
     }
 }
 

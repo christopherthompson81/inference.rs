@@ -1,5 +1,3 @@
-use std::fmt::{self, Display};
-
 use crate::device_map::AutoDeviceMapParams;
 use crate::paged_attention::{
     calculate_cache_config, device_memory_cap, CacheMemoryReservations, MemoryGpuConfig,
@@ -34,21 +32,6 @@ fn post_load_memory_config(
     match requested {
         MemoryGpuConfig::Utilization(_) if !resolve_utilization_after_load => pre_load_budget,
         _ => requested,
-    }
-}
-
-#[derive(Clone, Debug)]
-pub(crate) enum NonMappedSubModel {
-    Vision,
-    Audio,
-}
-
-impl Display for NonMappedSubModel {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            NonMappedSubModel::Vision => write!(f, "vision"),
-            NonMappedSubModel::Audio => write!(f, "audio"),
-        }
     }
 }
 

@@ -37,19 +37,6 @@ impl MultimodalModelLoader for MiniCpmOLoader {
         let cfg = crate::vision_models::minicpmo::MiniCpmOConfig::from_json(config)?;
         Ok(Box::new(cfg))
     }
-    fn get_processor(
-        &self,
-        _model_config: &str,
-        processor_config: Option<ProcessorConfig>,
-        preprocessor_config: PreProcessorConfig,
-        max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(MiniCpmOProcessor::new(
-            processor_config.unwrap_or_default(),
-            preprocessor_config,
-            max_edge,
-        ))
-    }
     fn supports_paged_attention(&self, _config: &str) -> bool {
         true
     }
@@ -64,6 +51,22 @@ impl MultimodalModelLoader for MiniCpmOLoader {
             input: vec![SupportedModality::Text, SupportedModality::Vision],
             output: vec![SupportedModality::Text],
         })
+    }
+}
+
+impl MultimodalProcessorFactory for MiniCpmOLoader {
+    fn get_processor(
+        &self,
+        _model_config: &str,
+        processor_config: Option<ProcessorConfig>,
+        preprocessor_config: PreProcessorConfig,
+        max_edge: Option<u32>,
+    ) -> Arc<dyn Processor + Send + Sync> {
+        Arc::new(MiniCpmOProcessor::new(
+            processor_config.unwrap_or_default(),
+            preprocessor_config,
+            max_edge,
+        ))
     }
 }
 

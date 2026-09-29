@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use super::super::AutoDeviceMapQuantization;
 use super::*;
+use crate::gguf::normal_registry::RopePairing;
 use crate::{
     device_map::DummyDeviceMapper,
     matformer::{MatformerConfig, MatformerSliceConfig, Slice},
