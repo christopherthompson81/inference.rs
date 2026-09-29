@@ -1,48 +1,44 @@
-use crate::paged_attention::PagedAttentionMeta;
-use crate::video_input::VideoInput;
-use crate::vision_models::media_host::MediaInputsProcessor;
-use crate::{
-    attention::AttentionMask,
-    paged_attention::block_hash::{MultimodalAttentionPolicy, MultimodalKind},
-};
-use crate::{
-    device_map::DeviceMapper,
-    pipeline::{
-        recurrent_batch_kind_for_input, InputProcessorOutput, InputsProcessor,
-        InputsProcessorValidationError, MessagesAction, Processor,
-    },
-    sequence::find_placeholder_delimited_ranges,
-    vision_models::{
-        image_processor::{ImagePreProcessor, PreprocessedImages},
-        multimodal_layout::{
-            gather_packed_mrope_positions, MropePositionSource, MultimodalEmbeddingMap,
-            MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
-            RequestMultimodalLayout,
-        },
-        preprocessor_config::{PreProcessorConfig, ToFilter},
-        qwen2vl::{
-            apply_mrope_position_deltas, expand_media_placeholders, find_sequences,
-            media_data_cached_offset, qwen2_decode_args, replace_first_occurrence,
-            select_media_batch, select_media_view, shift_media_spans, split_media_pixels,
-            validate_qwen_media_dimensions, validated_mm_features, video_hashes,
-            Qwen2VLVisionSpecificArgs,
-        },
-    },
-};
+use std::{any::Any, ops::Range, sync::Arc};
+
 use anyhow::{Context, Result};
 use candle_core::{DType, Device, IndexOp, Tensor};
 use image::{imageops::FilterType, DynamicImage, GenericImageView};
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
-};
 use inference_vision::{
     ApplyTensorTransforms, ApplyTransforms, Normalize, TensorTransforms, ToTensor, Transforms,
 };
-use std::{any::Any, ops::Range, sync::Arc};
 use tokenizers::Tokenizer;
 
-// Input processor
-struct Qwen3VLImageProcessor {
+use crate::attention::AttentionMask;
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
+    image_processor::{ImagePreProcessor, PreprocessedImages},
+    media::find_placeholder_delimited_ranges,
+    preprocessor_config::{PreProcessorConfig, ToFilter},
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, TextInputs,
+    },
+    video::VideoInput,
+};
+use crate::model::recurrent_batch_kind_for_input;
+use crate::paged_attention::{
+    block_hash::{MultimodalAttentionPolicy, MultimodalKind},
+    PagedAttentionMeta,
+};
+use crate::qwen2vl::inputs_processor::{
+    apply_mrope_position_deltas, expand_media_placeholders, find_sequences,
+    media_data_cached_offset, qwen2_decode_args, replace_first_occurrence, select_media_batch,
+    select_media_view, shift_media_spans, split_media_pixels, validate_qwen_media_dimensions,
+    validated_mm_features, video_hashes, IMAGE_PAD, PLACEHOLDER, VIDEO_PAD, VISION_END,
+    VISION_START,
+};
+use crate::qwen2vl::Qwen2VLVisionSpecificArgs;
+use crate::vision::multimodal_layout::{
+    gather_packed_mrope_positions, MropePositionSource, MultimodalEmbeddingMap,
+    MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout, RequestMultimodalLayout,
+};
+
+pub struct Qwen3VLImageProcessor {
     max_edge: Option<u32>,
 }
 
@@ -61,6 +57,10 @@ impl Qwen3VLImageProcessor {
     // HF Qwen3VLVideoProcessor class defaults; the budget covers t*h*w across the whole video.
     const DEFAULT_VIDEO_MIN_PIXELS: usize = 128 * 32 * 32;
     const DEFAULT_VIDEO_MAX_PIXELS: usize = 32 * 32 * 768;
+
+    pub fn new(max_edge: Option<u32>) -> Self {
+        Self { max_edge }
+    }
 
     fn patch_size(config: &PreProcessorConfig) -> usize {
         config.patch_size.unwrap_or(Self::DEFAULT_PATCH_SIZE)
@@ -98,39 +98,6 @@ impl Qwen3VLImageProcessor {
         })
     }
 }
-// Processor
-pub struct Qwen3VLProcessor {
-    max_edge: Option<u32>,
-}
-
-impl Qwen3VLProcessor {
-    pub const VISION_START: &str = "<|vision_start|>";
-    pub const VISION_END: &str = "<|vision_end|>";
-    pub const IMAGE_PAD: &str = "<|image_pad|>";
-    pub const VIDEO_PAD: &str = "<|video_pad|>";
-    pub const PLACEHOLDER: &str = "<|placeholder|>";
-
-    pub fn new(max_edge: Option<u32>) -> Self {
-        Self { max_edge }
-    }
-}
-
-impl Processor for Qwen3VLProcessor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(Arc::new(Qwen3VLImageProcessor {
-            max_edge: self.max_edge,
-        })))
-    }
-
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[Self::IMAGE_PAD, Self::VIDEO_PAD, Self::PLACEHOLDER]
-    }
-
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::Keep
-    }
-}
-
 fn seq_videos_view(seq: &dyn MediaSequence) -> Vec<VideoInput> {
     let videos = seq.clone_videos().unwrap_or_default();
     if !seq.is_chunked_prefill_view() {
@@ -185,7 +152,7 @@ fn expand_video_placeholders(
     if merge_length == 0 || temporal_patch_size == 0 {
         anyhow::bail!("Qwen merge length and temporal patch size must be nonzero");
     }
-    let placeholder_count = text.match_indices(Qwen3VLProcessor::VIDEO_PAD).count();
+    let placeholder_count = text.match_indices(VIDEO_PAD).count();
     let grid_rows = grid.map(|grid| grid.dim(0)).transpose()?.unwrap_or(0);
     if placeholder_count != videos.len() {
         return Err(InputsProcessorValidationError(format!(
@@ -217,19 +184,18 @@ fn expand_video_placeholders(
         }
         let frame_seqlen = frame_patches / merge_length;
         let timestamps = grouped_video_timestamps(video, grid_t, temporal_patch_size)?;
-        let mut replacement =
-            String::with_capacity(grid_t * (frame_seqlen + 2) * Qwen3VLProcessor::VIDEO_PAD.len());
+        let mut replacement = String::with_capacity(grid_t * (frame_seqlen + 2) * VIDEO_PAD.len());
         for timestamp in timestamps {
             replacement.push_str(&format!("<{timestamp:.1} seconds>"));
-            replacement.push_str(Qwen3VLProcessor::VISION_START);
+            replacement.push_str(VISION_START);
             for _ in 0..frame_seqlen {
-                replacement.push_str(Qwen3VLProcessor::PLACEHOLDER);
+                replacement.push_str(PLACEHOLDER);
             }
-            replacement.push_str(Qwen3VLProcessor::VISION_END);
+            replacement.push_str(VISION_END);
         }
-        *text = replace_first_occurrence(text, Qwen3VLProcessor::VIDEO_PAD, &replacement);
+        *text = replace_first_occurrence(text, VIDEO_PAD, &replacement);
     }
-    *text = text.replace(Qwen3VLProcessor::PLACEHOLDER, Qwen3VLProcessor::VIDEO_PAD);
+    *text = text.replace(PLACEHOLDER, VIDEO_PAD);
     Ok(())
 }
 
@@ -664,8 +630,8 @@ impl MultimodalInputsProcessor for Qwen3VLImageProcessor {
             }
             expand_media_placeholders(
                 text,
-                Qwen3VLProcessor::IMAGE_PAD,
-                Qwen3VLProcessor::PLACEHOLDER,
+                IMAGE_PAD,
+                PLACEHOLDER,
                 image_grid.as_ref(),
                 image_rows,
                 merge_length,
@@ -693,13 +659,13 @@ impl MultimodalInputsProcessor for Qwen3VLImageProcessor {
             if seq.mm_features().is_empty() {
                 let mut features = Vec::new();
                 let start_id = tokenizer
-                    .token_to_id(Qwen3VLProcessor::VISION_START)
+                    .token_to_id(VISION_START)
                     .context("Qwen tokenizer is missing vision start token")?;
                 let end_id = tokenizer
-                    .token_to_id(Qwen3VLProcessor::VISION_END)
+                    .token_to_id(VISION_END)
                     .context("Qwen tokenizer is missing vision end token")?;
                 let img_pad_id = tokenizer
-                    .token_to_id(Qwen3VLProcessor::IMAGE_PAD)
+                    .token_to_id(IMAGE_PAD)
                     .context("Qwen tokenizer is missing image pad token")?;
                 let image_ranges =
                     find_placeholder_delimited_ranges(&ids, img_pad_id, start_id, end_id);
@@ -709,7 +675,7 @@ impl MultimodalInputsProcessor for Qwen3VLImageProcessor {
                     MultimodalKind::Image,
                 )?);
                 let vid_pad_id = tokenizer
-                    .token_to_id(Qwen3VLProcessor::VIDEO_PAD)
+                    .token_to_id(VIDEO_PAD)
                     .context("Qwen tokenizer is missing video pad token")?;
                 let video_ranges =
                     find_placeholder_delimited_ranges(&ids, vid_pad_id, start_id, end_id);
@@ -982,8 +948,8 @@ impl MultimodalInputsProcessor for Qwen3VLImageProcessor {
                     }
                     expand_media_placeholders(
                         text,
-                        Qwen3VLProcessor::IMAGE_PAD,
-                        Qwen3VLProcessor::PLACEHOLDER,
+                        IMAGE_PAD,
+                        PLACEHOLDER,
                         image_grid.as_ref(),
                         image_rows,
                         merge_length,
@@ -1014,13 +980,13 @@ impl MultimodalInputsProcessor for Qwen3VLImageProcessor {
                     let mut features = Vec::new();
                     if seq.mm_features().is_empty() {
                         let start_id = tokenizer
-                            .token_to_id(Qwen3VLProcessor::VISION_START)
+                            .token_to_id(VISION_START)
                             .context("Qwen tokenizer is missing vision start token")?;
                         let end_id = tokenizer
-                            .token_to_id(Qwen3VLProcessor::VISION_END)
+                            .token_to_id(VISION_END)
                             .context("Qwen tokenizer is missing vision end token")?;
                         let img_pad_id = tokenizer
-                            .token_to_id(Qwen3VLProcessor::IMAGE_PAD)
+                            .token_to_id(IMAGE_PAD)
                             .context("Qwen tokenizer is missing image pad token")?;
                         let image_ranges =
                             find_placeholder_delimited_ranges(&ids, img_pad_id, start_id, end_id);
@@ -1030,7 +996,7 @@ impl MultimodalInputsProcessor for Qwen3VLImageProcessor {
                             MultimodalKind::Image,
                         )?);
                         let vid_pad_id = tokenizer
-                            .token_to_id(Qwen3VLProcessor::VIDEO_PAD)
+                            .token_to_id(VIDEO_PAD)
                             .context("Qwen tokenizer is missing video pad token")?;
                         let video_ranges =
                             find_placeholder_delimited_ranges(&ids, vid_pad_id, start_id, end_id);
@@ -1055,13 +1021,13 @@ impl MultimodalInputsProcessor for Qwen3VLImageProcessor {
                 all_ids.push(ids.clone());
 
                 let img_pad = tokenizer
-                    .token_to_id(Qwen3VLProcessor::IMAGE_PAD)
+                    .token_to_id(IMAGE_PAD)
                     .context("Qwen tokenizer is missing image pad token")?;
                 let continuous_img_pad = find_sequences(&ids, img_pad);
                 all_continuous_img_pad.push(continuous_img_pad);
 
                 let vid_pad = tokenizer
-                    .token_to_id(Qwen3VLProcessor::VIDEO_PAD)
+                    .token_to_id(VIDEO_PAD)
                     .context("Qwen tokenizer is missing video pad token")?;
                 let continuous_vid_pad = find_sequences(&ids, vid_pad);
                 all_continuous_vid_pad.push(continuous_vid_pad);
@@ -1316,18 +1282,16 @@ impl MultimodalInputsProcessor for Qwen3VLImageProcessor {
         };
         let prompt_position_ids = if needs_full_mrope_input {
             let image_token_id = tokenizer
-                .token_to_id(Qwen3VLProcessor::IMAGE_PAD)
+                .token_to_id(IMAGE_PAD)
                 .ok_or_else(|| anyhow::Error::msg("Qwen tokenizer is missing image pad token"))?;
             let video_token_id = tokenizer
-                .token_to_id(Qwen3VLProcessor::VIDEO_PAD)
+                .token_to_id(VIDEO_PAD)
                 .ok_or_else(|| anyhow::Error::msg("Qwen tokenizer is missing video pad token"))?;
-            let vision_start_token_id = tokenizer
-                .token_to_id(Qwen3VLProcessor::VISION_START)
-                .ok_or_else(|| {
-                    anyhow::Error::msg("Qwen tokenizer is missing vision start token")
-                })?;
+            let vision_start_token_id = tokenizer.token_to_id(VISION_START).ok_or_else(|| {
+                anyhow::Error::msg("Qwen tokenizer is missing vision start token")
+            })?;
             let vision_end_token_id = tokenizer
-                .token_to_id(Qwen3VLProcessor::VISION_END)
+                .token_to_id(VISION_END)
                 .ok_or_else(|| anyhow::Error::msg("Qwen tokenizer is missing vision end token"))?;
             let query_ranges = input_seqs
                 .iter()
@@ -1708,7 +1672,7 @@ impl ImagePreProcessor for Qwen3VLImageProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::vision_models::qwen2vl::inputs_processor::apply_mrope_position_delta;
+    use crate::qwen2vl::inputs_processor::apply_mrope_position_delta;
 
     #[test]
     fn packed_text_only_mrope_restarts_each_logical_sequence() -> Result<()> {
@@ -1800,25 +1764,14 @@ mod tests {
 
     #[test]
     fn video_expansion_emits_timestamped_per_frame_spans() -> Result<()> {
-        let mut text = format!(
-            "hi {}{}{} bye",
-            Qwen3VLProcessor::VISION_START,
-            Qwen3VLProcessor::VIDEO_PAD,
-            Qwen3VLProcessor::VISION_END
-        );
+        let mut text = format!("hi {}{}{} bye", VISION_START, VIDEO_PAD, VISION_END);
         let grid = Tensor::new(&[[2u32, 4, 4]], &Device::Cpu)?;
         expand_video_placeholders(&mut text, Some(&grid), &[test_video(4, 1.0)], 4, 2)?;
 
-        let frame = format!(
-            "{}{}{}",
-            Qwen3VLProcessor::VISION_START,
-            Qwen3VLProcessor::VIDEO_PAD.repeat(4),
-            Qwen3VLProcessor::VISION_END
-        );
+        let frame = format!("{}{}{}", VISION_START, VIDEO_PAD.repeat(4), VISION_END);
         let expected = format!(
             "hi {}<0.5 seconds>{frame}<2.5 seconds>{frame}{} bye",
-            Qwen3VLProcessor::VISION_START,
-            Qwen3VLProcessor::VISION_END
+            VISION_START, VISION_END
         );
         assert_eq!(text, expected);
         Ok(())
@@ -1826,11 +1779,7 @@ mod tests {
 
     #[test]
     fn video_expansion_marks_placeholder_count_as_validation() -> Result<()> {
-        let mut text = format!(
-            "{}{}",
-            Qwen3VLProcessor::VIDEO_PAD,
-            Qwen3VLProcessor::VIDEO_PAD
-        );
+        let mut text = VIDEO_PAD.repeat(2);
         let grid = Tensor::new(&[[1u32, 2, 2]], &Device::Cpu)?;
         let error = expand_video_placeholders(&mut text, Some(&grid), &[test_video(2, 1.0)], 4, 2)
             .unwrap_err();

@@ -1,4 +1,5 @@
 use super::*;
+use crate::vision_models::qwen2vl::inputs_processor::{IMAGE_PAD, VISION_END, VISION_START};
 
 /// [`MultimodalLoader`] for an Qwen2-VL model.
 ///
@@ -11,13 +12,7 @@ impl MultimodalPromptPrefixer for Qwen2VLPrefixer {
     fn prefix_image(&self, image_indexes: Vec<usize>, prompt: &str) -> String {
         format!(
             "{}{prompt}",
-            format!(
-                "{}{}{}",
-                Qwen2VLProcessor::VISION_START,
-                Qwen2VLProcessor::IMAGE_PAD,
-                Qwen2VLProcessor::VISION_END
-            )
-            .repeat(image_indexes.len())
+            format!("{VISION_START}{IMAGE_PAD}{VISION_END}").repeat(image_indexes.len())
         )
     }
 }

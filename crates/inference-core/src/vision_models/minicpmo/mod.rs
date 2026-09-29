@@ -2,5 +2,5 @@
 
 pub(crate) use inference_models_qwen::minicpmo::*;
 
-pub(crate) use inputs_processor::MiniCpmOProcessor;
-pub(crate) mod inputs_processor;
+pub(crate) mod processor;
+pub(crate) use processor::MiniCpmOProcessor;

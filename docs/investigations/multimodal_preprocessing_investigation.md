@@ -125,3 +125,30 @@ cold compile and lib test (the end of the cold build since Run 26 of the build-t
   after them.
 - Next: the qwen family (qwen2vl, qwen3_vl, minicpmo, muse_glimmer). qwen2vl's shared helpers serve the other two
   Qwen processors and muse_glimmer, so all four move together.
+
+## Run 5 - 2026-09-29
+
+- Change: the qwen family. The Qwen2-VL, Qwen3-VL, MiniCPM-o and Muse-Glimmer input processors moved into
+  inference-models-qwen, together with qwen2vl's helpers that the other three share. The Qwen3.5 and MoE variants
+  already alias the Qwen3-VL processor, so they follow.
+  - Core keeps the four `Processor` impls. Each now holds an `Arc` of its family image processor in place of rebuilding
+    it per `inputs_processor()` call; the processors are stateless, so that is equivalent.
+  - The associated token consts became module consts. Qwen3-VL reuses Qwen2-VL's five, which it had duplicated.
+    Muse-Glimmer's settings lost the `Arc` that only served sharing with the core struct.
+  - First test snag: `prefix_cache_invalidation_rebuilds_retained_image_pixels` built a real core `Sequence` with
+    `Sequence::new_waiting`'s 30 arguments.
+    - Outside a chunked-prefill view, every `Sequence` method on that path reduces to a `MultimodalData` call. The cache
+      invalidation under test is `MultimodalData::keep_num_images` itself.
+    - So a test-module `ImageSequence` over `MultimodalData` now implements `MediaSequence`. It keeps the assertion that
+      found the original bug.
+    - The fixture is about 130 lines, because the trait has no defaults. Defaults that forward the media accessors to
+      `multimodal()` would shrink it to about 12 methods; that is worth doing if a second family's tests need a
+      fixture. No other processor test builds a core `Sequence`.
+  - New dependencies for inference-models-qwen: `anyhow` (moved up from dev), `image`, `inference-vision` and
+    `tokenizers`, plus `inference-audio` as a dev-dependency for the fixture's trait signatures.
+- Command: `scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`.
+- Result: green (2191 CPU and 2511 CUDA tests). The review found no behaviour change: the special-token order, template
+  actions, constant strings and Muse-Glimmer's zero-edge check are all preserved. Its nits were applied (the
+  duplicated consts, inline format args, the placement of `new`, a single-use helper). The lint and CPU tests were
+  rerun after them.
+- Next: the llama family (llava, mllama, llama4, idefics2/3, mistral3, voxtral), then gemma.

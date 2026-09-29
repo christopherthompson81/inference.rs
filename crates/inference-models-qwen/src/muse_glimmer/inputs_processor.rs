@@ -6,37 +6,41 @@ use image::{imageops::FilterType, DynamicImage, GenericImageView};
 use inference_vision::{ApplyTransforms, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
-use crate::paged_attention::PagedAttentionMeta;
-use crate::{
-    device_map::DeviceMapper,
-    paged_attention::block_hash::{MultimodalAttentionPolicy, MultimodalKind},
-    pipeline::{
-        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
-        Processor,
-    },
-    sequence::{
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
+    image_processor::{ImagePreProcessor, PreprocessedImages},
+    media::{
         build_mm_features_from_ranges, find_image_delimited_ranges, find_image_placeholder_ranges,
     },
-    video_input::VideoInput,
-    vision_models::{
-        image_processor::{ImagePreProcessor, PreprocessedImages},
-        multimodal_layout::{
-            MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout,
-            PackedMultimodalLayout, RequestMultimodalLayout,
-        },
-        preprocessor_config::{PreProcessorConfig, ToFilter},
-        qwen2vl::{
-            media_data_cached_offset, select_media_batch, select_media_view, shift_media_spans,
-            split_media_pixels, video_hashes,
-        },
+    preprocessor_config::{PreProcessorConfig, ToFilter},
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, TextInputs,
     },
+    video::VideoInput,
+};
+use crate::paged_attention::{
+    block_hash::{MultimodalAttentionPolicy, MultimodalKind},
+    PagedAttentionMeta,
+};
+use crate::qwen2vl::inputs_processor::{
+    media_data_cached_offset, select_media_batch, select_media_view, shift_media_spans,
+    split_media_pixels, video_hashes,
+};
+use crate::vision::multimodal_layout::{
+    MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
+    RequestMultimodalLayout,
 };
 
 use super::MuseGlimmerSpecificArgs;
-use crate::vision_models::media_host::MediaInputsProcessor;
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
-};
+
+pub const IMAGE_TOKEN: &str = "<|patch|>";
+pub const IMAGE_START: &str = "<|image_start|>";
+pub const IMAGE_END: &str = "<|image_end|>";
+pub const VIDEO_TOKEN: &str = "<|video|>";
+pub const VIDEO_START: &str = "<|vid_start|>";
+pub const VIDEO_END: &str = "<|vid_end|>";
+pub const VIDEO_SEPARATOR: &str = "<|vid_frame_separator|>";
 
 const DEFAULT_PATCH_SIZE: usize = 14;
 const DEFAULT_TEMPORAL_PATCH_SIZE: usize = 2;
@@ -49,7 +53,6 @@ const DEFAULT_IMAGE_MEAN: [f64; 3] = [0.5, 0.5, 0.5];
 const DEFAULT_IMAGE_STD: [f64; 3] = [0.5, 0.5, 0.5];
 const DEFAULT_RESCALE_FACTOR: f64 = 1.0 / 255.0;
 
-#[derive(Clone)]
 struct MuseGlimmerProcessorSettings {
     patch_size: usize,
     temporal_patch_size: usize,
@@ -98,25 +101,12 @@ impl MuseGlimmerProcessorSettings {
     }
 }
 
-struct MuseGlimmerImageProcessor {
-    settings: Arc<MuseGlimmerProcessorSettings>,
+pub struct MuseGlimmerImageProcessor {
+    settings: MuseGlimmerProcessorSettings,
     max_edge: Option<u32>,
 }
 
-pub struct MuseGlimmerProcessor {
-    settings: Arc<MuseGlimmerProcessorSettings>,
-    max_edge: Option<u32>,
-}
-
-impl MuseGlimmerProcessor {
-    pub const IMAGE_TOKEN: &str = "<|patch|>";
-    pub const IMAGE_START: &str = "<|image_start|>";
-    pub const IMAGE_END: &str = "<|image_end|>";
-    pub const VIDEO_TOKEN: &str = "<|video|>";
-    pub const VIDEO_START: &str = "<|vid_start|>";
-    pub const VIDEO_END: &str = "<|vid_end|>";
-    pub const VIDEO_SEPARATOR: &str = "<|vid_frame_separator|>";
-
+impl MuseGlimmerImageProcessor {
     pub fn new(
         config: &PreProcessorConfig,
         max_edge: Option<u32>,
@@ -126,37 +116,9 @@ impl MuseGlimmerProcessor {
             anyhow::bail!("Muse-Glimmer maximum image edge must be nonzero");
         }
         Ok(Self {
-            settings: Arc::new(MuseGlimmerProcessorSettings::from_config(
-                config,
-                gguf_collapsed_temporal,
-            )?),
+            settings: MuseGlimmerProcessorSettings::from_config(config, gguf_collapsed_temporal)?,
             max_edge,
         })
-    }
-}
-
-impl Processor for MuseGlimmerProcessor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(Arc::new(MuseGlimmerImageProcessor {
-            settings: self.settings.clone(),
-            max_edge: self.max_edge,
-        })))
-    }
-
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[
-            Self::IMAGE_TOKEN,
-            Self::IMAGE_START,
-            Self::IMAGE_END,
-            Self::VIDEO_TOKEN,
-            Self::VIDEO_START,
-            Self::VIDEO_END,
-            Self::VIDEO_SEPARATOR,
-        ]
-    }
-
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::Keep
     }
 }
 
@@ -239,9 +201,9 @@ fn image_replacements(grid: Option<&Tensor>, merge_length: usize) -> Result<Vec<
             let tokens = validate_grid_tokens(row, merge_length)?;
             Ok(format!(
                 "{}{}{}",
-                MuseGlimmerProcessor::IMAGE_START,
-                MuseGlimmerProcessor::IMAGE_TOKEN.repeat(tokens),
-                MuseGlimmerProcessor::IMAGE_END
+                IMAGE_START,
+                IMAGE_TOKEN.repeat(tokens),
+                IMAGE_END
             ))
         })
         .collect()
@@ -276,14 +238,14 @@ fn video_replacements(
             while timestamps.len() < row[0] {
                 timestamps.push(timestamps.last().copied().unwrap_or(0.0));
             }
-            let mut replacement = MuseGlimmerProcessor::VIDEO_START.to_string();
+            let mut replacement = VIDEO_START.to_string();
             for (index, timestamp) in timestamps.into_iter().enumerate() {
                 replacement.push_str(&format!("Time: {timestamp:.1}s"));
-                replacement.push_str(&MuseGlimmerProcessor::VIDEO_TOKEN.repeat(tokens_per_group));
+                replacement.push_str(&VIDEO_TOKEN.repeat(tokens_per_group));
                 replacement.push_str(if index + 1 == row[0] {
-                    MuseGlimmerProcessor::VIDEO_END
+                    VIDEO_END
                 } else {
-                    MuseGlimmerProcessor::VIDEO_SEPARATOR
+                    VIDEO_SEPARATOR
                 });
             }
             Ok(replacement)
@@ -754,18 +716,10 @@ impl MuseGlimmerImageProcessor {
         if images.len() != image_replacements.len() {
             anyhow::bail!("Muse-Glimmer image grids do not match the supplied images");
         }
-        prompt = replace_occurrences(
-            &prompt,
-            MuseGlimmerProcessor::IMAGE_TOKEN,
-            &image_replacements,
-        )?;
+        prompt = replace_occurrences(&prompt, IMAGE_TOKEN, &image_replacements)?;
         let videos = seq.clone_videos().unwrap_or_default();
         let video_replacements = video_replacements(video_grid.as_ref(), &videos, &self.settings)?;
-        prompt = replace_occurrences(
-            &prompt,
-            MuseGlimmerProcessor::VIDEO_TOKEN,
-            &video_replacements,
-        )?;
+        prompt = replace_occurrences(&prompt, VIDEO_TOKEN, &video_replacements)?;
 
         let ids = tokenizer
             .encode_fast(prompt.clone(), false)
@@ -775,16 +729,16 @@ impl MuseGlimmerImageProcessor {
         seq.set_initial_prompt(prompt);
         if seq.mm_features().is_empty() {
             let image_start = tokenizer
-                .token_to_id(MuseGlimmerProcessor::IMAGE_START)
+                .token_to_id(IMAGE_START)
                 .context("Muse-Glimmer tokenizer is missing image start token")?;
             let image_end = tokenizer
-                .token_to_id(MuseGlimmerProcessor::IMAGE_END)
+                .token_to_id(IMAGE_END)
                 .context("Muse-Glimmer tokenizer is missing image end token")?;
             let video_start = tokenizer
-                .token_to_id(MuseGlimmerProcessor::VIDEO_START)
+                .token_to_id(VIDEO_START)
                 .context("Muse-Glimmer tokenizer is missing video start token")?;
             let video_end = tokenizer
-                .token_to_id(MuseGlimmerProcessor::VIDEO_END)
+                .token_to_id(VIDEO_END)
                 .context("Muse-Glimmer tokenizer is missing video end token")?;
             let image_ranges = find_image_delimited_ranges(&ids, image_start, image_end);
             let video_ranges = find_image_delimited_ranges(&ids, video_start, video_end);
@@ -982,10 +936,10 @@ impl MultimodalInputsProcessor for MuseGlimmerImageProcessor {
         };
 
         let image_token = tokenizer
-            .token_to_id(MuseGlimmerProcessor::IMAGE_TOKEN)
+            .token_to_id(IMAGE_TOKEN)
             .context("Muse-Glimmer tokenizer is missing image token")?;
         let video_token = tokenizer
-            .token_to_id(MuseGlimmerProcessor::VIDEO_TOKEN)
+            .token_to_id(VIDEO_TOKEN)
             .context("Muse-Glimmer tokenizer is missing video token")?;
         let mut image_spans = input_seqs
             .iter()
@@ -1145,18 +1099,14 @@ impl ImagePreProcessor for MuseGlimmerImageProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sequence::Sequence;
+    use crate::media_inputs::media::MultimodalData;
+    use crate::paged_attention::block_hash::MultiModalFeature;
     use candle_core::DType;
-    use std::collections::HashMap;
-    use tokio::sync::{mpsc::channel, Mutex};
+    use inference_audio::AudioInput;
+    use std::ops::Range;
 
-    use crate::{
-        sampler::Sampler,
-        sequence::{SeqStepType, SequenceGroup, SequenceRecognizer},
-    };
-
-    fn settings() -> Arc<MuseGlimmerProcessorSettings> {
-        Arc::new(MuseGlimmerProcessorSettings {
+    fn settings() -> MuseGlimmerProcessorSettings {
+        MuseGlimmerProcessorSettings {
             patch_size: 1,
             temporal_patch_size: 2,
             merge_size: 1,
@@ -1170,60 +1120,139 @@ mod tests {
             do_normalize: false,
             resampling: FilterType::Lanczos3,
             gguf_collapsed_temporal: false,
-        })
+        }
     }
 
-    fn sequence_with_image(image: DynamicImage) -> Sequence {
-        let (tx, _rx) = channel(1);
-        let sampler = Sampler::new(
-            None,
-            0,
-            None,
-            None,
-            None,
-            None,
-            None,
-            32,
-            1.0,
-            0.0,
-            HashMap::new(),
-            vec![],
-        )
-        .unwrap();
-        Sequence::new_waiting(
-            vec![1],
-            "prompt".to_string(),
-            0,
-            0,
-            0,
-            tx,
-            sampler,
-            vec![],
-            vec![],
-            None,
-            false,
-            false,
-            Arc::new(Mutex::new(SequenceGroup::new(1, false, true, None))),
-            0,
-            0,
-            SequenceRecognizer::None,
-            None,
-            None,
-            Some(vec![image]),
-            None,
-            None,
-            None,
-            None,
-            None,
-            SeqStepType::PromptAndDecode,
-            None,
-            None,
-            None,
-            false,
-            false,
-            vec![],
-            None,
-        )
+    // A non-chunked engine sequence reduces to its media state for the paths these tests reach.
+    struct ImageSequence {
+        multimodal: MultimodalData,
+    }
+
+    impl MediaSequence for ImageSequence {
+        fn id(&self) -> &usize {
+            &0
+        }
+        fn len(&self) -> usize {
+            1
+        }
+        fn get_toks(&self) -> &[u32] {
+            &[1]
+        }
+        fn is_chunked_prefill_view(&self) -> bool {
+            false
+        }
+        fn prompt_position_source_toks(&self) -> &[u32] {
+            unreachable!()
+        }
+        fn active_prompt_query_range(&self) -> Option<Range<usize>> {
+            None
+        }
+        fn active_prompt_local_query_range(&self) -> Option<Range<usize>> {
+            None
+        }
+        fn active_multimodal_item_range(&self, _: MultimodalKind) -> Option<Range<usize>> {
+            None
+        }
+        fn active_local_multimodal_item_range(
+            &self,
+            _: MultimodalKind,
+            _: usize,
+        ) -> Option<Range<usize>> {
+            None
+        }
+        fn prefix_cache_len(&self) -> usize {
+            0
+        }
+        fn set_toks_and_reallocate(&mut self, _: Vec<u32>, _: Option<&mut PagedAttentionMeta>) {
+            unreachable!()
+        }
+        fn set_initial_prompt(&mut self, _: String) {
+            unreachable!()
+        }
+        fn get_initial_prompt(&self) -> &str {
+            unreachable!()
+        }
+        fn set_prefill_toks(&mut self, _: Vec<u32>) {
+            unreachable!()
+        }
+        fn has_prefill_toks(&self) -> bool {
+            false
+        }
+        fn set_max_len(&mut self, _: usize) {
+            unreachable!()
+        }
+        fn mm_features(&self) -> &[MultiModalFeature] {
+            self.multimodal.mm_features()
+        }
+        fn set_mm_features(&mut self, features: Vec<MultiModalFeature>) {
+            self.multimodal.set_mm_features(features)
+        }
+        fn count_prefix_cached_mm_items(&self) -> usize {
+            0
+        }
+        fn count_prefix_cached_mm_items_by_kind(&self, _: MultimodalKind) -> usize {
+            0
+        }
+        fn images(&self) -> Option<&[DynamicImage]> {
+            self.multimodal.images()
+        }
+        fn clone_images(&self) -> Option<Vec<DynamicImage>> {
+            self.multimodal.clone_images()
+        }
+        fn take_images(&mut self) -> Option<Vec<DynamicImage>> {
+            self.multimodal.take_images()
+        }
+        fn image_hashes(&self) -> Option<&[u64]> {
+            self.multimodal.image_hashes()
+        }
+        fn has_images(&self) -> bool {
+            self.multimodal.has_images()
+        }
+        fn keep_num_images(&mut self, images_to_keep: usize) {
+            self.multimodal.keep_num_images(images_to_keep)
+        }
+        fn audios(&self) -> Option<&[AudioInput]> {
+            self.multimodal.audios()
+        }
+        fn clone_audios(&self) -> Option<Vec<AudioInput>> {
+            self.multimodal.clone_audios()
+        }
+        fn take_audios(&mut self) -> Option<Vec<AudioInput>> {
+            self.multimodal.take_audios()
+        }
+        fn audio_hashes(&self) -> Option<&[u64]> {
+            self.multimodal.audio_hashes()
+        }
+        fn has_audios(&self) -> bool {
+            self.multimodal.has_audios()
+        }
+        fn videos(&self) -> Option<&[VideoInput]> {
+            self.multimodal.videos()
+        }
+        fn clone_videos(&self) -> Option<Vec<VideoInput>> {
+            self.multimodal.clone_videos()
+        }
+        fn take_videos(&mut self) -> Option<Vec<VideoInput>> {
+            self.multimodal.take_videos()
+        }
+        fn video_hashes(&self) -> Option<&[u64]> {
+            self.multimodal.video_hashes()
+        }
+        fn has_videos(&self) -> bool {
+            self.multimodal.has_videos()
+        }
+        fn multimodal(&self) -> &MultimodalData {
+            &self.multimodal
+        }
+        fn multimodal_mut(&mut self) -> &mut MultimodalData {
+            &mut self.multimodal
+        }
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+        fn as_any_mut(&mut self) -> &mut dyn Any {
+            self
+        }
     }
 
     #[test]
@@ -1255,7 +1284,7 @@ mod tests {
         assert!(error
             .downcast_ref::<InputsProcessorValidationError>()
             .is_some());
-        let error = MuseGlimmerProcessor::new(&PreProcessorConfig::default(), Some(0), false)
+        let error = MuseGlimmerImageProcessor::new(&PreProcessorConfig::default(), Some(0), false)
             .err()
             .unwrap();
         assert!(error
@@ -1328,10 +1357,10 @@ mod tests {
 
     #[test]
     fn gguf_temporal_collapse_rejects_video() -> Result<()> {
-        let mut settings = (*settings()).clone();
+        let mut settings = settings();
         settings.gguf_collapsed_temporal = true;
         let processor = MuseGlimmerImageProcessor {
-            settings: Arc::new(settings),
+            settings,
             max_edge: None,
         };
         let video = VideoInput::from_frames(vec![DynamicImage::new_rgb8(1, 1)], 1.0, None);
@@ -1351,7 +1380,9 @@ mod tests {
             settings: settings(),
             max_edge: None,
         };
-        let mut seq = sequence_with_image(DynamicImage::new_rgb8(1, 1));
+        let mut seq = ImageSequence {
+            multimodal: MultimodalData::new(Some(vec![DynamicImage::new_rgb8(1, 1)]), None, None),
+        };
         processor.cached_media(&mut seq, &Device::Cpu)?;
         seq.multimodal_mut().has_changed_prompt = true;
         seq.keep_num_images(1);
