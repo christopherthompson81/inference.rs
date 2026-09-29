@@ -253,29 +253,31 @@ pub(super) fn fp16_fast() -> bool {
 
 #[target_feature(enable = "fp16,fhm")]
 unsafe fn dot_f16_main(ap: *const u16, bp: *const u16, n: usize) -> f32 {
-    use core::arch::aarch64::*;
-    let acc0: float32x4_t;
-    let acc1: float32x4_t;
-    core::arch::asm!(
-        "movi {a0:v}.4s, #0",
-        "movi {a1:v}.4s, #0",
-        "2:",
-        "ldr {t0:q}, [{ap}], #16",
-        "ldr {t1:q}, [{bp}], #16",
-        "fmlal {a0:v}.4s, {t0:v}.4h, {t1:v}.4h",
-        "fmlal2 {a1:v}.4s, {t0:v}.4h, {t1:v}.4h",
-        "subs {n}, {n}, #8",
-        "b.gt 2b",
-        ap = inout(reg) ap => _,
-        bp = inout(reg) bp => _,
-        n = inout(reg) n => _,
-        a0 = out(vreg) acc0,
-        a1 = out(vreg) acc1,
-        t0 = out(vreg) _,
-        t1 = out(vreg) _,
-        options(nostack, readonly),
-    );
-    vaddvq_f32(vaddq_f32(acc0, acc1))
+    unsafe {
+        use core::arch::aarch64::*;
+        let acc0: float32x4_t;
+        let acc1: float32x4_t;
+        core::arch::asm!(
+            "movi {a0:v}.4s, #0",
+            "movi {a1:v}.4s, #0",
+            "2:",
+            "ldr {t0:q}, [{ap}], #16",
+            "ldr {t1:q}, [{bp}], #16",
+            "fmlal {a0:v}.4s, {t0:v}.4h, {t1:v}.4h",
+            "fmlal2 {a1:v}.4s, {t0:v}.4h, {t1:v}.4h",
+            "subs {n}, {n}, #8",
+            "b.gt 2b",
+            ap = inout(reg) ap => _,
+            bp = inout(reg) bp => _,
+            n = inout(reg) n => _,
+            a0 = out(vreg) acc0,
+            a1 = out(vreg) acc1,
+            t0 = out(vreg) _,
+            t1 = out(vreg) _,
+            options(nostack, readonly),
+        );
+        vaddvq_f32(vaddq_f32(acc0, acc1))
+    }
 }
 
 #[inline(always)]
@@ -304,55 +306,57 @@ unsafe fn dot4_f16_main(
     p3: *const u16,
     n: usize,
 ) -> [f32; 4] {
-    use core::arch::aarch64::*;
-    let a0: float32x4_t;
-    let a1: float32x4_t;
-    let a2: float32x4_t;
-    let a3: float32x4_t;
-    core::arch::asm!(
-        "movi {a0:v}.4s, #0",
-        "movi {a1:v}.4s, #0",
-        "movi {a2:v}.4s, #0",
-        "movi {a3:v}.4s, #0",
-        "2:",
-        "ldr {tq:q}, [{qp}], #16",
-        "ldr {t0:q}, [{p0}], #16",
-        "ldr {t1:q}, [{p1}], #16",
-        "ldr {t2:q}, [{p2}], #16",
-        "ldr {t3:q}, [{p3}], #16",
-        "fmlal {a0:v}.4s, {tq:v}.4h, {t0:v}.4h",
-        "fmlal2 {a0:v}.4s, {tq:v}.4h, {t0:v}.4h",
-        "fmlal {a1:v}.4s, {tq:v}.4h, {t1:v}.4h",
-        "fmlal2 {a1:v}.4s, {tq:v}.4h, {t1:v}.4h",
-        "fmlal {a2:v}.4s, {tq:v}.4h, {t2:v}.4h",
-        "fmlal2 {a2:v}.4s, {tq:v}.4h, {t2:v}.4h",
-        "fmlal {a3:v}.4s, {tq:v}.4h, {t3:v}.4h",
-        "fmlal2 {a3:v}.4s, {tq:v}.4h, {t3:v}.4h",
-        "subs {n}, {n}, #8",
-        "b.gt 2b",
-        qp = inout(reg) qp => _,
-        p0 = inout(reg) p0 => _,
-        p1 = inout(reg) p1 => _,
-        p2 = inout(reg) p2 => _,
-        p3 = inout(reg) p3 => _,
-        n = inout(reg) n => _,
-        a0 = out(vreg) a0,
-        a1 = out(vreg) a1,
-        a2 = out(vreg) a2,
-        a3 = out(vreg) a3,
-        tq = out(vreg) _,
-        t0 = out(vreg) _,
-        t1 = out(vreg) _,
-        t2 = out(vreg) _,
-        t3 = out(vreg) _,
-        options(nostack, readonly),
-    );
-    [
-        vaddvq_f32(a0),
-        vaddvq_f32(a1),
-        vaddvq_f32(a2),
-        vaddvq_f32(a3),
-    ]
+    unsafe {
+        use core::arch::aarch64::*;
+        let a0: float32x4_t;
+        let a1: float32x4_t;
+        let a2: float32x4_t;
+        let a3: float32x4_t;
+        core::arch::asm!(
+            "movi {a0:v}.4s, #0",
+            "movi {a1:v}.4s, #0",
+            "movi {a2:v}.4s, #0",
+            "movi {a3:v}.4s, #0",
+            "2:",
+            "ldr {tq:q}, [{qp}], #16",
+            "ldr {t0:q}, [{p0}], #16",
+            "ldr {t1:q}, [{p1}], #16",
+            "ldr {t2:q}, [{p2}], #16",
+            "ldr {t3:q}, [{p3}], #16",
+            "fmlal {a0:v}.4s, {tq:v}.4h, {t0:v}.4h",
+            "fmlal2 {a0:v}.4s, {tq:v}.4h, {t0:v}.4h",
+            "fmlal {a1:v}.4s, {tq:v}.4h, {t1:v}.4h",
+            "fmlal2 {a1:v}.4s, {tq:v}.4h, {t1:v}.4h",
+            "fmlal {a2:v}.4s, {tq:v}.4h, {t2:v}.4h",
+            "fmlal2 {a2:v}.4s, {tq:v}.4h, {t2:v}.4h",
+            "fmlal {a3:v}.4s, {tq:v}.4h, {t3:v}.4h",
+            "fmlal2 {a3:v}.4s, {tq:v}.4h, {t3:v}.4h",
+            "subs {n}, {n}, #8",
+            "b.gt 2b",
+            qp = inout(reg) qp => _,
+            p0 = inout(reg) p0 => _,
+            p1 = inout(reg) p1 => _,
+            p2 = inout(reg) p2 => _,
+            p3 = inout(reg) p3 => _,
+            n = inout(reg) n => _,
+            a0 = out(vreg) a0,
+            a1 = out(vreg) a1,
+            a2 = out(vreg) a2,
+            a3 = out(vreg) a3,
+            tq = out(vreg) _,
+            t0 = out(vreg) _,
+            t1 = out(vreg) _,
+            t2 = out(vreg) _,
+            t3 = out(vreg) _,
+            options(nostack, readonly),
+        );
+        [
+            vaddvq_f32(a0),
+            vaddvq_f32(a1),
+            vaddvq_f32(a2),
+            vaddvq_f32(a3),
+        ]
+    }
 }
 
 #[inline(always)]
@@ -393,30 +397,32 @@ pub(super) fn dot4_f16(
 // acc (f32) += values (f16) * scale
 #[target_feature(enable = "fp16")]
 unsafe fn mad_f16_main(ap: *mut f32, vp: *const u16, scale: f32, n: usize) {
-    core::arch::asm!(
-        "dup {s:v}.4s, {scale:v}.s[0]",
-        "2:",
-        "ldr {tv:q}, [{vp}], #16",
-        "ldp {t0:q}, {t1:q}, [{ap}]",
-        "fcvtl {lo:v}.4s, {tv:v}.4h",
-        "fcvtl2 {hi:v}.4s, {tv:v}.8h",
-        "fmla {t0:v}.4s, {lo:v}.4s, {s:v}.4s",
-        "fmla {t1:v}.4s, {hi:v}.4s, {s:v}.4s",
-        "stp {t0:q}, {t1:q}, [{ap}], #32",
-        "subs {n}, {n}, #8",
-        "b.gt 2b",
-        ap = inout(reg) ap => _,
-        vp = inout(reg) vp => _,
-        n = inout(reg) n => _,
-        scale = in(vreg) scale,
-        s = out(vreg) _,
-        tv = out(vreg) _,
-        t0 = out(vreg) _,
-        t1 = out(vreg) _,
-        lo = out(vreg) _,
-        hi = out(vreg) _,
-        options(nostack),
-    );
+    unsafe {
+        core::arch::asm!(
+            "dup {s:v}.4s, {scale:v}.s[0]",
+            "2:",
+            "ldr {tv:q}, [{vp}], #16",
+            "ldp {t0:q}, {t1:q}, [{ap}]",
+            "fcvtl {lo:v}.4s, {tv:v}.4h",
+            "fcvtl2 {hi:v}.4s, {tv:v}.8h",
+            "fmla {t0:v}.4s, {lo:v}.4s, {s:v}.4s",
+            "fmla {t1:v}.4s, {hi:v}.4s, {s:v}.4s",
+            "stp {t0:q}, {t1:q}, [{ap}], #32",
+            "subs {n}, {n}, #8",
+            "b.gt 2b",
+            ap = inout(reg) ap => _,
+            vp = inout(reg) vp => _,
+            n = inout(reg) n => _,
+            scale = in(vreg) scale,
+            s = out(vreg) _,
+            tv = out(vreg) _,
+            t0 = out(vreg) _,
+            t1 = out(vreg) _,
+            lo = out(vreg) _,
+            hi = out(vreg) _,
+            options(nostack),
+        );
+    }
 }
 
 #[inline(always)]
@@ -496,31 +502,33 @@ pub(super) fn bf16_fast() -> bool {
 
 #[target_feature(enable = "bf16")]
 unsafe fn dot_bf16_inner(ap: *const u16, bp: *const u16, n: usize) -> f32 {
-    use core::arch::aarch64::*;
-    let acc0: float32x4_t;
-    let acc1: float32x4_t;
-    core::arch::asm!(
-        "movi {a0:v}.4s, #0",
-        "movi {a1:v}.4s, #0",
-        "2:",
-        "ldp {t0:q}, {t2:q}, [{ap}], #32",
-        "ldp {t1:q}, {t3:q}, [{bp}], #32",
-        "bfdot {a0:v}.4s, {t0:v}.8h, {t1:v}.8h",
-        "bfdot {a1:v}.4s, {t2:v}.8h, {t3:v}.8h",
-        "subs {n}, {n}, #16",
-        "b.gt 2b",
-        ap = inout(reg) ap => _,
-        bp = inout(reg) bp => _,
-        n = inout(reg) n => _,
-        a0 = out(vreg) acc0,
-        a1 = out(vreg) acc1,
-        t0 = out(vreg) _,
-        t1 = out(vreg) _,
-        t2 = out(vreg) _,
-        t3 = out(vreg) _,
-        options(nostack, readonly),
-    );
-    vaddvq_f32(vaddq_f32(acc0, acc1))
+    unsafe {
+        use core::arch::aarch64::*;
+        let acc0: float32x4_t;
+        let acc1: float32x4_t;
+        core::arch::asm!(
+            "movi {a0:v}.4s, #0",
+            "movi {a1:v}.4s, #0",
+            "2:",
+            "ldp {t0:q}, {t2:q}, [{ap}], #32",
+            "ldp {t1:q}, {t3:q}, [{bp}], #32",
+            "bfdot {a0:v}.4s, {t0:v}.8h, {t1:v}.8h",
+            "bfdot {a1:v}.4s, {t2:v}.8h, {t3:v}.8h",
+            "subs {n}, {n}, #16",
+            "b.gt 2b",
+            ap = inout(reg) ap => _,
+            bp = inout(reg) bp => _,
+            n = inout(reg) n => _,
+            a0 = out(vreg) acc0,
+            a1 = out(vreg) acc1,
+            t0 = out(vreg) _,
+            t1 = out(vreg) _,
+            t2 = out(vreg) _,
+            t3 = out(vreg) _,
+            options(nostack, readonly),
+        );
+        vaddvq_f32(vaddq_f32(acc0, acc1))
+    }
 }
 
 #[inline(always)]
@@ -548,51 +556,53 @@ unsafe fn dot4_bf16_inner(
     p3: *const u16,
     n: usize,
 ) -> [f32; 4] {
-    use core::arch::aarch64::*;
-    let a0: float32x4_t;
-    let a1: float32x4_t;
-    let a2: float32x4_t;
-    let a3: float32x4_t;
-    core::arch::asm!(
-        "movi {a0:v}.4s, #0",
-        "movi {a1:v}.4s, #0",
-        "movi {a2:v}.4s, #0",
-        "movi {a3:v}.4s, #0",
-        "2:",
-        "ldr {tq:q}, [{qp}], #16",
-        "ldr {t0:q}, [{p0}], #16",
-        "ldr {t1:q}, [{p1}], #16",
-        "ldr {t2:q}, [{p2}], #16",
-        "ldr {t3:q}, [{p3}], #16",
-        "bfdot {a0:v}.4s, {tq:v}.8h, {t0:v}.8h",
-        "bfdot {a1:v}.4s, {tq:v}.8h, {t1:v}.8h",
-        "bfdot {a2:v}.4s, {tq:v}.8h, {t2:v}.8h",
-        "bfdot {a3:v}.4s, {tq:v}.8h, {t3:v}.8h",
-        "subs {n}, {n}, #8",
-        "b.gt 2b",
-        qp = inout(reg) qp => _,
-        p0 = inout(reg) p0 => _,
-        p1 = inout(reg) p1 => _,
-        p2 = inout(reg) p2 => _,
-        p3 = inout(reg) p3 => _,
-        n = inout(reg) n => _,
-        a0 = out(vreg) a0,
-        a1 = out(vreg) a1,
-        a2 = out(vreg) a2,
-        a3 = out(vreg) a3,
-        tq = out(vreg) _,
-        t0 = out(vreg) _,
-        t1 = out(vreg) _,
-        t2 = out(vreg) _,
-        t3 = out(vreg) _,
-        options(nostack, readonly),
-    );
-    [
-        vaddvq_f32(a0),
-        vaddvq_f32(a1),
-        vaddvq_f32(a2),
-        vaddvq_f32(a3),
-    ]
+    unsafe {
+        use core::arch::aarch64::*;
+        let a0: float32x4_t;
+        let a1: float32x4_t;
+        let a2: float32x4_t;
+        let a3: float32x4_t;
+        core::arch::asm!(
+            "movi {a0:v}.4s, #0",
+            "movi {a1:v}.4s, #0",
+            "movi {a2:v}.4s, #0",
+            "movi {a3:v}.4s, #0",
+            "2:",
+            "ldr {tq:q}, [{qp}], #16",
+            "ldr {t0:q}, [{p0}], #16",
+            "ldr {t1:q}, [{p1}], #16",
+            "ldr {t2:q}, [{p2}], #16",
+            "ldr {t3:q}, [{p3}], #16",
+            "bfdot {a0:v}.4s, {tq:v}.8h, {t0:v}.8h",
+            "bfdot {a1:v}.4s, {tq:v}.8h, {t1:v}.8h",
+            "bfdot {a2:v}.4s, {tq:v}.8h, {t2:v}.8h",
+            "bfdot {a3:v}.4s, {tq:v}.8h, {t3:v}.8h",
+            "subs {n}, {n}, #8",
+            "b.gt 2b",
+            qp = inout(reg) qp => _,
+            p0 = inout(reg) p0 => _,
+            p1 = inout(reg) p1 => _,
+            p2 = inout(reg) p2 => _,
+            p3 = inout(reg) p3 => _,
+            n = inout(reg) n => _,
+            a0 = out(vreg) a0,
+            a1 = out(vreg) a1,
+            a2 = out(vreg) a2,
+            a3 = out(vreg) a3,
+            tq = out(vreg) _,
+            t0 = out(vreg) _,
+            t1 = out(vreg) _,
+            t2 = out(vreg) _,
+            t3 = out(vreg) _,
+            options(nostack, readonly),
+        );
+        [
+            vaddvq_f32(a0),
+            vaddvq_f32(a1),
+            vaddvq_f32(a2),
+            vaddvq_f32(a3),
+        ]
+    }
 }
 
 #[inline(always)]
@@ -630,30 +640,32 @@ pub(super) fn dot4_bf16(
 }
 
 unsafe fn mad_bf16_inner(ap: *mut f32, vp: *const u16, scale: f32, n: usize) {
-    core::arch::asm!(
-        "dup {s:v}.4s, {scale:v}.s[0]",
-        "2:",
-        "ldr {tv:q}, [{vp}], #16",
-        "ldp {t0:q}, {t1:q}, [{ap}]",
-        "shll {lo:v}.4s, {tv:v}.4h, #16",
-        "shll2 {hi:v}.4s, {tv:v}.8h, #16",
-        "fmla {t0:v}.4s, {lo:v}.4s, {s:v}.4s",
-        "fmla {t1:v}.4s, {hi:v}.4s, {s:v}.4s",
-        "stp {t0:q}, {t1:q}, [{ap}], #32",
-        "subs {n}, {n}, #8",
-        "b.gt 2b",
-        ap = inout(reg) ap => _,
-        vp = inout(reg) vp => _,
-        n = inout(reg) n => _,
-        scale = in(vreg) scale,
-        s = out(vreg) _,
-        tv = out(vreg) _,
-        t0 = out(vreg) _,
-        t1 = out(vreg) _,
-        lo = out(vreg) _,
-        hi = out(vreg) _,
-        options(nostack),
-    );
+    unsafe {
+        core::arch::asm!(
+            "dup {s:v}.4s, {scale:v}.s[0]",
+            "2:",
+            "ldr {tv:q}, [{vp}], #16",
+            "ldp {t0:q}, {t1:q}, [{ap}]",
+            "shll {lo:v}.4s, {tv:v}.4h, #16",
+            "shll2 {hi:v}.4s, {tv:v}.8h, #16",
+            "fmla {t0:v}.4s, {lo:v}.4s, {s:v}.4s",
+            "fmla {t1:v}.4s, {hi:v}.4s, {s:v}.4s",
+            "stp {t0:q}, {t1:q}, [{ap}], #32",
+            "subs {n}, {n}, #8",
+            "b.gt 2b",
+            ap = inout(reg) ap => _,
+            vp = inout(reg) vp => _,
+            n = inout(reg) n => _,
+            scale = in(vreg) scale,
+            s = out(vreg) _,
+            tv = out(vreg) _,
+            t0 = out(vreg) _,
+            t1 = out(vreg) _,
+            lo = out(vreg) _,
+            hi = out(vreg) _,
+            options(nostack),
+        );
+    }
 }
 
 // acc (f32) += values (bf16) * scale
@@ -737,25 +749,27 @@ unsafe fn pv_chunk_f16(
     p: *const f32,
     kv_n: usize,
 ) {
-    use core::arch::aarch64::*;
-    let nv = cn / 4;
-    let mut a = [vdupq_n_f32(0.0); 16];
-    for (x, ax) in a.iter_mut().enumerate().take(nv) {
-        *ax = vld1q_f32(acc.add(x * 4));
-    }
-    for kv in 0..kv_n {
-        let pv = vdupq_n_f32(*p.add(kv));
-        let vp = v_base.add(kv * v_stride);
-        let mut x = 0;
-        while x + 2 <= nv {
-            let vh = vreinterpretq_f16_u16(vld1q_u16(vp.add(x * 4)));
-            a[x] = vfmaq_f32(a[x], vcvt_f32_f16(vget_low_f16(vh)), pv);
-            a[x + 1] = vfmaq_f32(a[x + 1], vcvt_high_f32_f16(vh), pv);
-            x += 2;
+    unsafe {
+        use core::arch::aarch64::*;
+        let nv = cn / 4;
+        let mut a = [vdupq_n_f32(0.0); 16];
+        for (x, ax) in a.iter_mut().enumerate().take(nv) {
+            *ax = vld1q_f32(acc.add(x * 4));
         }
-    }
-    for (x, ax) in a.iter().enumerate().take(nv) {
-        vst1q_f32(acc.add(x * 4), *ax);
+        for kv in 0..kv_n {
+            let pv = vdupq_n_f32(*p.add(kv));
+            let vp = v_base.add(kv * v_stride);
+            let mut x = 0;
+            while x + 2 <= nv {
+                let vh = vreinterpretq_f16_u16(vld1q_u16(vp.add(x * 4)));
+                a[x] = vfmaq_f32(a[x], vcvt_f32_f16(vget_low_f16(vh)), pv);
+                a[x + 1] = vfmaq_f32(a[x + 1], vcvt_high_f32_f16(vh), pv);
+                x += 2;
+            }
+        }
+        for (x, ax) in a.iter().enumerate().take(nv) {
+            vst1q_f32(acc.add(x * 4), *ax);
+        }
     }
 }
 
