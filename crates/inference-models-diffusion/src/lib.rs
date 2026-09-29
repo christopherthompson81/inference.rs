@@ -9,3 +9,5 @@ mod qlinear;
 mod t5;
 
 pub use inference_nn::model::DiffusionGenerationParams;
+
+inference_nn::json_config!(flux::autoencoder::Config, flux::model::Config);

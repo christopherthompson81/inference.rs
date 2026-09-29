@@ -39,7 +39,7 @@ impl MultimodalModelLoader for Phi4MMLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg: crate::vision_models::phi4::Phi4MMConfig = serde_json::from_str(config)?;
+        let cfg = crate::vision_models::phi4::Phi4MMConfig::from_json(config)?;
         Ok(Box::new(Phi4MMModel::new(
             &cfg,
             vb,
@@ -49,7 +49,7 @@ impl MultimodalModelLoader for Phi4MMLoader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg: crate::vision_models::phi4::Phi4MMConfig = serde_json::from_str(config)?;
+        let cfg = crate::vision_models::phi4::Phi4MMConfig::from_json(config)?;
         Ok(Box::new(cfg))
     }
     fn get_processor(
@@ -126,7 +126,7 @@ impl DeviceMappedModelLoader for Phi4MMLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Phi4MMConfig = serde_json::from_str(config)?;
+        let cfg = Phi4MMConfig::from_json(config)?;
 
         let vcfg = &PHI4_MM_VISION_CFG;
 
@@ -190,7 +190,7 @@ impl DeviceMappedModelLoader for Phi4MMLoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: Phi4MMConfig = serde_json::from_str(config)?;
+        let cfg = Phi4MMConfig::from_json(config)?;
         let elems = {
             let (embed_tokens_pack_factor, lm_head_pack_factor) =
                 super::language_model_pack_factors(
@@ -298,7 +298,7 @@ impl DeviceMappedModelLoader for Phi4MMLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: Phi4MMConfig = serde_json::from_str(config)?;
+        let cfg = Phi4MMConfig::from_json(config)?;
         let per_layer_elems = {
             let input_layernorm = cfg.hidden_size;
             let post_attention_layernorm = cfg.hidden_size;
@@ -328,7 +328,7 @@ impl DeviceMappedModelLoader for Phi4MMLoader {
         ])
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: Phi4MMConfig = serde_json::from_str(config)?;
+        let cfg = Phi4MMConfig::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

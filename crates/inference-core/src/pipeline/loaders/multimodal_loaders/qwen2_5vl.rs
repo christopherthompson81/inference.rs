@@ -25,7 +25,7 @@ impl MultimodalModelLoader for Qwen2_5VLLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg: Qwen2_5VLConfig = serde_json::from_str(config)?;
+        let cfg = Qwen2_5VLConfig::from_json(config)?;
         Ok(Box::new(Qwen2_5VLModel::new(
             &cfg,
             vb,
@@ -35,7 +35,7 @@ impl MultimodalModelLoader for Qwen2_5VLLoader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let config: Qwen2_5VLConfig = serde_json::from_str(config)?;
+        let config = Qwen2_5VLConfig::from_json(config)?;
         Ok(Box::new(config))
     }
     fn get_processor(
@@ -107,7 +107,7 @@ impl DeviceMappedModelLoader for Qwen2_5VLLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Qwen2_5VLConfig = serde_json::from_str(config)?;
+        let cfg = Qwen2_5VLConfig::from_json(config)?;
 
         let img_seq_len = {
             let cfg = &cfg.vision_config;
@@ -141,7 +141,7 @@ impl DeviceMappedModelLoader for Qwen2_5VLLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Qwen2_5VLConfig = serde_json::from_str(config)?;
+        let cfg = Qwen2_5VLConfig::from_json(config)?;
 
         let img_seq_len = {
             let cfg = &cfg.vision_config;
@@ -165,7 +165,7 @@ impl DeviceMappedModelLoader for Qwen2_5VLLoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: Qwen2_5VLConfig = serde_json::from_str(config)?;
+        let cfg = Qwen2_5VLConfig::from_json(config)?;
         let text_elems = {
             let (embed_tokens_pack_factor, lm_head_pack_factor) =
                 super::language_model_pack_factors_with_aliases(
@@ -241,7 +241,7 @@ impl DeviceMappedModelLoader for Qwen2_5VLLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: Qwen2_5VLConfig = serde_json::from_str(config)?;
+        let cfg = Qwen2_5VLConfig::from_json(config)?;
         let per_layer_elems = {
             let input_layernorm = cfg.hidden_size;
             let post_attention_layernorm = cfg.hidden_size;
@@ -276,7 +276,7 @@ impl DeviceMappedModelLoader for Qwen2_5VLLoader {
         ])
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: Qwen2_5VLConfig = serde_json::from_str(config)?;
+        let cfg = Qwen2_5VLConfig::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

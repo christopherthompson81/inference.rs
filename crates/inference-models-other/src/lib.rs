@@ -34,5 +34,7 @@ inference_nn::json_config!(
     hunyuan_v1_dense::Config,
     hunyuan_v1_moe::Config,
     lfm2::Config,
+    lfm2_vl::config::Config,
+    paddleocr_vl::config::Config,
     starcoder2::Config,
 );

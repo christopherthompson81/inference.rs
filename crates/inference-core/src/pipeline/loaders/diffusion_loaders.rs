@@ -308,8 +308,8 @@ impl DiffusionModelLoader for FluxLoader {
                 flux::autoencoder::Config::flux(),
             ),
             [flux_cfg, vae_cfg] => (
-                serde_json::from_str(flux_cfg)?,
-                serde_json::from_str(vae_cfg)?,
+                flux::model::Config::from_json(flux_cfg)?,
+                flux::autoencoder::Config::from_json(vae_cfg)?,
             ),
             other => anyhow::bail!("expected the FLUX and VAE configs, got {}", other.len()),
         };

@@ -20,7 +20,7 @@ impl MultimodalModelLoader for Qwen3VLMoELoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg: Qwen3VLMoEConfig = serde_json::from_str(config)?;
+        let cfg = Qwen3VLMoEConfig::from_json(config)?;
         Ok(Box::new(Qwen3VLMoEModel::new(
             &cfg,
             vb,
@@ -30,7 +30,7 @@ impl MultimodalModelLoader for Qwen3VLMoELoader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let config: Qwen3VLMoEConfig = serde_json::from_str(config)?;
+        let config = Qwen3VLMoEConfig::from_json(config)?;
         Ok(Box::new(config))
     }
     fn get_processor(
@@ -131,7 +131,7 @@ impl DeviceMappedModelLoader for Qwen3VLMoELoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Qwen3VLMoEConfig = serde_json::from_str(config)?;
+        let cfg = Qwen3VLMoEConfig::from_json(config)?;
 
         // For images, grid_t=1. After spatial merging, grid_h and grid_w are reduced.
         let img_seq_len = {
@@ -168,7 +168,7 @@ impl DeviceMappedModelLoader for Qwen3VLMoELoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Qwen3VLMoEConfig = serde_json::from_str(config)?;
+        let cfg = Qwen3VLMoEConfig::from_json(config)?;
 
         // For the vision encoder, before spatial merging
         let img_seq_len = {
@@ -194,7 +194,7 @@ impl DeviceMappedModelLoader for Qwen3VLMoELoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: Qwen3VLMoEConfig = serde_json::from_str(config)?;
+        let cfg = Qwen3VLMoEConfig::from_json(config)?;
         let tie = cfg.tie_word_embeddings;
         let text_elems = {
             let cfg = &cfg.text_config;
@@ -290,7 +290,7 @@ impl DeviceMappedModelLoader for Qwen3VLMoELoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: Qwen3VLMoEConfig = serde_json::from_str(config)?;
+        let cfg = Qwen3VLMoEConfig::from_json(config)?;
         let text_cfg = &cfg.text_config;
 
         let mut layer_sizes = Vec::with_capacity(text_cfg.num_hidden_layers);
@@ -353,12 +353,12 @@ impl DeviceMappedModelLoader for Qwen3VLMoELoader {
         Ok(layer_sizes)
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: Qwen3VLMoEConfig = serde_json::from_str(config)?;
+        let cfg = Qwen3VLMoEConfig::from_json(config)?;
         let cfg = &cfg.text_config;
         Ok(cfg.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: Qwen3VLMoEConfig = serde_json::from_str(config)?;
+        let cfg = Qwen3VLMoEConfig::from_json(config)?;
         let cfg = &cfg.text_config;
 
         let cfg = ModelConfigMetadata {

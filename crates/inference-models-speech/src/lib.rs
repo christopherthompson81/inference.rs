@@ -39,3 +39,5 @@ pub struct SpeechGenerationOutput {
     pub rate: usize,
     pub channels: usize,
 }
+
+inference_nn::json_config!(dia::DiaConfig);

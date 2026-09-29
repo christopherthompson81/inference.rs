@@ -6,7 +6,7 @@ use super::*;
 pub struct Qwen3_5TextLoader;
 
 fn parse_qwen35_text_config(config: &str) -> Result<crate::vision_models::qwen3_5::TextConfig> {
-    let cfg: crate::vision_models::qwen3_5::TextConfig = serde_json::from_str(config)?;
+    let cfg = crate::vision_models::qwen3_5::TextConfig::from_json(config)?;
     cfg.validate()?;
     Ok(cfg)
 }

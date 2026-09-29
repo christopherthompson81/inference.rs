@@ -24,9 +24,18 @@ pub mod qwen3_vl;
 pub mod qwen3_vl_moe;
 
 inference_nn::json_config!(
+    minicpmo::config::MiniCpmOConfig,
+    muse_glimmer::config::Config,
     qwen2::Config,
+    qwen2_5_vl::config::Config,
+    qwen2vl::config::Config,
     qwen3::Config,
+    qwen3_5::config::Config,
+    qwen3_5::config::TextConfig,
+    qwen3_5_moe::config::Config,
+    qwen3_embedding::Config,
     qwen3_moe::Config,
     qwen3_next::Config,
-    qwen3_embedding::Config,
+    qwen3_vl::config::Config,
+    qwen3_vl_moe::config::Config,
 );

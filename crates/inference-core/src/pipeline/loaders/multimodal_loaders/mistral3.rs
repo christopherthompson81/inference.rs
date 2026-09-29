@@ -21,7 +21,7 @@ impl MultimodalModelLoader for Mistral3Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let mut cfg: crate::vision_models::mistral3::Mistral3Config = serde_json::from_str(config)?;
+        let mut cfg = crate::vision_models::mistral3::Mistral3Config::from_json(config)?;
         cfg.propagate_quantization_config();
         Ok(Box::new(Mistral3Model::new(
             &cfg,
@@ -32,7 +32,7 @@ impl MultimodalModelLoader for Mistral3Loader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg: crate::vision_models::mistral3::Mistral3Config = serde_json::from_str(config)?;
+        let cfg = crate::vision_models::mistral3::Mistral3Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
     fn get_processor(
@@ -109,7 +109,7 @@ impl DeviceMappedModelLoader for Mistral3Loader {
         config: &str,
         params: &AutoDeviceMapParams,
     ) -> Result<usize> {
-        let cfg: Mistral3Config = serde_json::from_str(config)?;
+        let cfg = Mistral3Config::from_json(config)?;
         let vcfg = &cfg.vision_config;
         let tcfg = &cfg.text_config;
 
@@ -155,7 +155,7 @@ impl DeviceMappedModelLoader for Mistral3Loader {
         config: &str,
         params: &AutoDeviceMapParams,
     ) -> Result<usize> {
-        let cfg: Mistral3Config = serde_json::from_str(config)?;
+        let cfg = Mistral3Config::from_json(config)?;
         let cfg = &cfg.vision_config;
 
         let AutoDeviceMapParams::Multimodal {
@@ -201,7 +201,7 @@ impl DeviceMappedModelLoader for Mistral3Loader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: Mistral3Config = serde_json::from_str(config)?;
+        let cfg = Mistral3Config::from_json(config)?;
 
         let text_elems = {
             let cfg = &cfg.text_config;
@@ -267,7 +267,7 @@ impl DeviceMappedModelLoader for Mistral3Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: Mistral3Config = serde_json::from_str(config)?;
+        let cfg = Mistral3Config::from_json(config)?;
         let cfg = &cfg.text_config;
 
         let per_layer_elems = {
@@ -304,12 +304,12 @@ impl DeviceMappedModelLoader for Mistral3Loader {
         ])
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: Mistral3Config = serde_json::from_str(config)?;
+        let cfg = Mistral3Config::from_json(config)?;
         let cfg = &cfg.text_config;
         Ok(cfg.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: Mistral3Config = serde_json::from_str(config)?;
+        let cfg = Mistral3Config::from_json(config)?;
         let cfg = &cfg.text_config;
 
         let cfg = ModelConfigMetadata {

@@ -26,7 +26,7 @@ impl MultimodalModelLoader for VLlama4Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let mut cfg: crate::vision_models::llama4::Llama4Config = serde_json::from_str(config)?;
+        let mut cfg = crate::vision_models::llama4::Llama4Config::from_json(config)?;
         cfg.propagate_quantization_config();
         Ok(Box::new(Llama4Model::new(
             &cfg,
@@ -40,7 +40,7 @@ impl MultimodalModelLoader for VLlama4Loader {
         false
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let mut cfg: crate::vision_models::llama4::Llama4Config = serde_json::from_str(config)?;
+        let mut cfg = crate::vision_models::llama4::Llama4Config::from_json(config)?;
         cfg.propagate_quantization_config();
         Ok(Box::new(cfg))
     }
@@ -186,7 +186,7 @@ impl DeviceMappedModelLoader for VLlama4Loader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Llama4Config = serde_json::from_str(config)?;
+        let cfg = Llama4Config::from_json(config)?;
 
         let (_pixels_batch_size, num_text_image_toks) =
             self.run_dummy_processing(&cfg, *height, *width, *max_num_images, *max_batch_size)?;
@@ -210,7 +210,7 @@ impl DeviceMappedModelLoader for VLlama4Loader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Llama4Config = serde_json::from_str(config)?;
+        let cfg = Llama4Config::from_json(config)?;
 
         let (pixels_batch_size, _num_text_image_toks) =
             self.run_dummy_processing(&cfg, *height, *width, *max_num_images, *max_batch_size)?;
@@ -229,7 +229,7 @@ impl DeviceMappedModelLoader for VLlama4Loader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: Llama4Config = serde_json::from_str(config)?;
+        let cfg = Llama4Config::from_json(config)?;
         let tcfg = &cfg.text_config;
 
         let text_elems = {
@@ -313,7 +313,7 @@ impl DeviceMappedModelLoader for VLlama4Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: Llama4Config = serde_json::from_str(config)?;
+        let cfg = Llama4Config::from_json(config)?;
         let tcfg = &cfg.text_config;
 
         let mut per_layer_elems = Vec::new();
@@ -365,11 +365,11 @@ impl DeviceMappedModelLoader for VLlama4Loader {
             .collect())
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: Llama4Config = serde_json::from_str(config)?;
+        let cfg = Llama4Config::from_json(config)?;
         Ok(cfg.text_config.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: Llama4Config = serde_json::from_str(config)?;
+        let cfg = Llama4Config::from_json(config)?;
         let cfg = &cfg.text_config;
 
         let cfg = ModelConfigMetadata {

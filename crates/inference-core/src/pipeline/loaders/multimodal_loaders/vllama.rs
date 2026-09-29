@@ -21,7 +21,7 @@ impl MultimodalModelLoader for VLlamaLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg: crate::vision_models::mllama::MLlamaConfig = serde_json::from_str(config)?;
+        let cfg = crate::vision_models::mllama::MLlamaConfig::from_json(config)?;
         Ok(Box::new(MLlamaModel::new(
             &cfg,
             vb,
@@ -31,7 +31,7 @@ impl MultimodalModelLoader for VLlamaLoader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg: crate::vision_models::mllama::MLlamaConfig = serde_json::from_str(config)?;
+        let cfg = crate::vision_models::mllama::MLlamaConfig::from_json(config)?;
         Ok(Box::new(cfg))
     }
     fn get_processor(
@@ -72,7 +72,7 @@ impl IsqModelLoader for VLlamaLoader {
     }
 
     fn isq_layer_regexes(&self, config: &str) -> Result<Vec<Regex>> {
-        let config: MLlamaConfig = serde_json::from_str(config)?;
+        let config = MLlamaConfig::from_json(config)?;
         let cross_attn_layers = &config.text_config.cross_attention_layers;
         let transformer_layers =
             (0..config.text_config.num_hidden_layers).filter(|i| !cross_attn_layers.contains(i));
@@ -129,7 +129,7 @@ impl DeviceMappedModelLoader for VLlamaLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let config: MLlamaConfig = serde_json::from_str(config)?;
+        let config = MLlamaConfig::from_json(config)?;
 
         let img_seq_len = {
             let cfg = &config.vision_config;
@@ -166,7 +166,7 @@ impl DeviceMappedModelLoader for VLlamaLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let config: MLlamaConfig = serde_json::from_str(config)?;
+        let config = MLlamaConfig::from_json(config)?;
 
         let img_seq_len = {
             let cfg = &config.vision_config;
@@ -189,7 +189,7 @@ impl DeviceMappedModelLoader for VLlamaLoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let config: MLlamaConfig = serde_json::from_str(config)?;
+        let config = MLlamaConfig::from_json(config)?;
         let text_elems = {
             let cfg = &config.text_config;
             let (embed_tokens_pack_factor, lm_head_pack_factor) =
@@ -290,7 +290,7 @@ impl DeviceMappedModelLoader for VLlamaLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let config: MLlamaConfig = serde_json::from_str(config)?;
+        let config = MLlamaConfig::from_json(config)?;
         let cfg = &config.text_config;
 
         let mut layer_sizes = Vec::new();
@@ -338,11 +338,11 @@ impl DeviceMappedModelLoader for VLlamaLoader {
         Ok(layer_sizes)
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let config: MLlamaConfig = serde_json::from_str(config)?;
+        let config = MLlamaConfig::from_json(config)?;
         Ok(config.text_config.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: MLlamaConfig = serde_json::from_str(config)?;
+        let cfg = MLlamaConfig::from_json(config)?;
         let cfg = &cfg.text_config;
 
         let cfg = ModelConfigMetadata {
