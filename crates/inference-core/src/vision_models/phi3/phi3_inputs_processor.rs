@@ -14,13 +14,13 @@ use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     device_map::DeviceMapper,
     pipeline::{
-        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
-        MessagesAction, Processor,
+        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
+        Processor,
     },
-    sequence::{build_mm_features_from_ranges, Sequence},
+    sequence::build_mm_features_from_ranges,
 };
 
+use crate::vision_models::media_host::MediaInputsProcessor;
 use crate::vision_models::{
     image_processor::{ImagePreProcessor, PreprocessedImages},
     multimodal_layout::{
@@ -30,7 +30,11 @@ use crate::vision_models::{
     phi3::Phi3VisionSpecificArgs,
     preprocessor_config::PreProcessorConfig,
     processor_config::ProcessorConfig,
-    ModelInputs,
+};
+use inference_nn::media_inputs::processor::TextOnlyInputs;
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, ProcessInputsCall,
+    TextInputs,
 };
 
 // Input processor
@@ -157,7 +161,7 @@ fn phi3_layout_items(features: &[MultiModalFeature]) -> Result<Vec<MultimodalIte
 }
 
 fn phi3_packed_layout(
-    input_seqs: &[&mut Sequence],
+    input_seqs: &[&mut dyn MediaSequence],
     query_lens: &[usize],
 ) -> Result<PackedMultimodalLayout> {
     if input_seqs.len() != query_lens.len() {
@@ -198,7 +202,7 @@ impl Phi3Processor {
 
 impl Processor for Phi3Processor {
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        self.inputs_processor.clone()
+        Arc::new(MediaInputsProcessor(self.inputs_processor.clone()))
     }
     fn get_special_tokens(&self) -> &[&'static str] {
         &[]
@@ -208,15 +212,11 @@ impl Processor for Phi3Processor {
     }
 }
 
-impl InputsProcessor for Phi3InputsProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for Phi3InputsProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         _device: &Device,
         other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -227,7 +227,7 @@ impl InputsProcessor for Phi3InputsProcessor {
         let config: &PreProcessorConfig = config.downcast_ref().expect("Downcast failed.");
 
         for seq in input_seqs {
-            if seq.multimodal.has_changed_prompt {
+            if seq.multimodal().has_changed_prompt {
                 continue;
             }
             let Some(images) = seq.images() else {
@@ -273,15 +273,16 @@ impl InputsProcessor for Phi3InputsProcessor {
                 .map_err(|error| anyhow::Error::msg(error.to_string()))?;
             seq.set_initial_prompt(prompt);
             seq.set_toks_and_reallocate(new_ids, paged_attn_metadata.as_deref_mut());
-            seq.multimodal.has_changed_prompt = true;
+            seq.multimodal_mut().has_changed_prompt = true;
         }
         Ok(())
     }
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -314,42 +315,34 @@ impl InputsProcessor for Phi3InputsProcessor {
 
         let has_images = input_seqs.iter().any(|seq| seq.has_images());
         if !has_images {
-            return text_models_inputs_processor::TextInputsProcessor
-                .process_inputs(
-                    Some(tokenizer),
+            return host
+                .text_only_inputs(
                     input_seqs,
-                    is_prompt,
-                    is_xlora,
-                    device,
-                    no_kv_cache,
-                    last_n_context_len,
-                    return_raw_logits,
-                    sliding_window,
-                    other_config,
-                    paged_attn_metadata,
-                    mapper,
+                    ProcessInputsCall {
+                        tokenizer: Some(tokenizer),
+                        is_prompt,
+                        is_xlora,
+                        device,
+                        no_kv_cache,
+                        last_n_context_len,
+                        return_raw_logits,
+                        sliding_window,
+                        other_config,
+                        paged_attn_metadata,
+                        mapper,
+                    },
                 )
-                .map(|metadata| {
-                    let InputProcessorOutput {
-                        inputs,
-                        seq_indices,
-                    } = metadata;
-
-                    let text_models_inputs_processor::ModelInputs {
+                .map(|text| {
+                    let TextOnlyInputs {
                         input_ids,
-                        input_ids_full: _,
                         seqlen_offsets,
-                        seqlen_offsets_full: _,
                         context_lens,
                         position_ids,
                         paged_attn_meta,
                         flash_meta,
-                        flash_meta_full: _,
                         recurrent_batch_kind,
-                        adapter_leases,
-                    } = *inputs
-                        .downcast::<text_models_inputs_processor::ModelInputs>()
-                        .expect("Downcast failed.");
+                        seq_indices,
+                    } = text;
 
                     let inputs: Box<dyn Any> = Box::new(ModelInputs {
                         input_ids,
@@ -365,7 +358,6 @@ impl InputsProcessor for Phi3InputsProcessor {
                         paged_attn_meta,
                         flash_meta,
                         recurrent_batch_kind,
-                        adapter_leases,
                     });
                     InputProcessorOutput {
                         inputs,
@@ -432,7 +424,7 @@ impl InputsProcessor for Phi3InputsProcessor {
             .zip(input_seqs.iter_mut())
             .zip(image_token_counts)
         {
-            if seq.multimodal.has_changed_prompt || image_token_counts.is_empty() {
+            if seq.multimodal().has_changed_prompt || image_token_counts.is_empty() {
                 toks.push(seq.get_toks().iter().map(|x| *x as i32 as i64).collect());
                 continue;
             }
@@ -466,38 +458,43 @@ impl InputsProcessor for Phi3InputsProcessor {
                 ));
             }
             seq.set_toks_and_reallocate(new_ids, paged_attn_metadata.as_mut());
-            seq.multimodal.has_changed_prompt = true;
+            seq.multimodal_mut().has_changed_prompt = true;
             toks.push(input_ids);
         }
 
         let metadata = if is_prompt {
-            get_prompt_input(
-                toks.iter().map(Vec::as_slice).collect(),
+            host.prompt_inputs(
+                toks.iter().map(Vec::as_slice).collect::<Vec<_>>().into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )
         } else {
-            get_completion_input(
-                toks.iter().map(Vec::as_slice).collect(),
+            host.completion_inputs(
+                toks.iter().map(Vec::as_slice).collect::<Vec<_>>().into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )
         };
 
-        let text_models_inputs_processor::InnerInputProcessorOutput {
+        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
-                text_models_inputs_processor::InputMetadata {
+                inference_nn::media_inputs::processor::InputMetadata {
                     input,
                     positions,
                     context_lens,
@@ -559,7 +556,6 @@ impl InputsProcessor for Phi3InputsProcessor {
                 } else {
                     crate::gdn::RecurrentBatchKind::Decode
                 },
-                adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
             }),
             seq_indices,
         })

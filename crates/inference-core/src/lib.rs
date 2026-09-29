@@ -89,7 +89,7 @@ mod adapter;
 mod agent_approval;
 mod chat_collector;
 mod engine;
-mod video_input;
+use inference_nn::media_inputs::video as video_input;
 pub use selection::model_loader::{
     get_auto_device_map_params, get_model_dtype, get_tgt_non_granular_index, LoaderBuilder,
 };

@@ -11,13 +11,11 @@ use crate::{
     device_map::DeviceMapper,
     paged_attention::block_hash::{MultimodalAttentionPolicy, MultimodalKind},
     pipeline::{
-        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
-        MessagesAction, Processor,
+        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
+        Processor,
     },
     sequence::{
         build_mm_features_from_ranges, find_image_delimited_ranges, find_image_placeholder_ranges,
-        Sequence,
     },
     video_input::VideoInput,
     vision_models::{
@@ -31,11 +29,14 @@ use crate::{
             media_data_cached_offset, select_media_batch, select_media_view, shift_media_spans,
             split_media_pixels, video_hashes,
         },
-        ModelInputs,
     },
 };
 
 use super::MuseGlimmerSpecificArgs;
+use crate::vision_models::media_host::MediaInputsProcessor;
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
+};
 
 const DEFAULT_PATCH_SIZE: usize = 14;
 const DEFAULT_TEMPORAL_PATCH_SIZE: usize = 2;
@@ -136,10 +137,10 @@ impl MuseGlimmerProcessor {
 
 impl Processor for MuseGlimmerProcessor {
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MuseGlimmerImageProcessor {
+        Arc::new(MediaInputsProcessor(Arc::new(MuseGlimmerImageProcessor {
             settings: self.settings.clone(),
             max_edge: self.max_edge,
-        })
+        })))
     }
 
     fn get_special_tokens(&self) -> &[&'static str] {
@@ -367,7 +368,7 @@ fn shift_video_spans(
 }
 
 fn packed_layout(
-    input_seqs: &[&mut Sequence],
+    input_seqs: &[&mut dyn MediaSequence],
     query_lens: &[usize],
     image_spans: &[Vec<(usize, usize)>],
     video_spans: &[Vec<(usize, usize)>],
@@ -430,7 +431,7 @@ fn packed_layout(
         }
 
         let video_rows = tensor_grid_rows(video_grid.as_ref())?;
-        let hashes = video_hashes(seq);
+        let hashes = video_hashes(&**seq);
         if video_rows.len() != hashes.len() {
             anyhow::bail!("Muse-Glimmer packed video grids do not align with videos");
         }
@@ -694,14 +695,14 @@ impl MuseGlimmerImageProcessor {
 
     fn cached_media(
         &self,
-        seq: &mut Sequence,
+        seq: &mut dyn MediaSequence,
         device: &Device,
     ) -> Result<(Tensor, Option<Tensor>, Option<Tensor>)> {
-        if let Some(pixels) = &seq.multimodal.cached_pixel_values {
+        if let Some(pixels) = &seq.multimodal().cached_pixel_values {
             return Ok((
                 pixels.clone(),
-                seq.multimodal.cached_img_thw.clone(),
-                seq.multimodal.cached_vid_thw.clone(),
+                seq.multimodal().cached_img_thw.clone(),
+                seq.multimodal().cached_vid_thw.clone(),
             ));
         }
         let image = seq
@@ -727,20 +728,20 @@ impl MuseGlimmerImageProcessor {
             anyhow::bail!("Muse-Glimmer media sequence contains no media data");
         }
         let pixels = Tensor::cat(&pixels, 0)?;
-        seq.multimodal.cached_pixel_values = Some(pixels.clone());
-        seq.multimodal.cached_img_thw = image_grid.clone();
-        seq.multimodal.cached_vid_thw = video_grid.clone();
+        seq.multimodal_mut().cached_pixel_values = Some(pixels.clone());
+        seq.multimodal_mut().cached_img_thw = image_grid.clone();
+        seq.multimodal_mut().cached_vid_thw = video_grid.clone();
         Ok((pixels, image_grid, video_grid))
     }
 
     fn expand_sequence(
         &self,
         tokenizer: &Tokenizer,
-        seq: &mut Sequence,
+        seq: &mut dyn MediaSequence,
         device: &Device,
         paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> Result<()> {
-        if seq.multimodal.has_changed_prompt || (!seq.has_images() && !seq.has_videos()) {
+        if seq.multimodal().has_changed_prompt || (!seq.has_images() && !seq.has_videos()) {
             return Ok(());
         }
         let (_, image_grid, video_grid) = self.cached_media(seq, device)?;
@@ -805,13 +806,13 @@ impl MuseGlimmerImageProcessor {
             }
         }
         seq.set_toks_and_reallocate(ids, paged_attn_metadata);
-        seq.multimodal.has_changed_prompt = true;
+        seq.multimodal_mut().has_changed_prompt = true;
         Ok(())
     }
 
     fn prepare_media_batch(
         &self,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         device: &Device,
     ) -> Result<PreparedMediaBatch> {
         let mut image_pixels = Vec::new();
@@ -822,14 +823,14 @@ impl MuseGlimmerImageProcessor {
         let mut video_item_counts = vec![0; input_seqs.len()];
 
         for (index, seq) in input_seqs.iter_mut().enumerate() {
-            let cached = if let Some(pixels) = seq.multimodal.cached_pixel_values.clone() {
+            let cached = if let Some(pixels) = seq.multimodal().cached_pixel_values.clone() {
                 Some((
                     pixels,
-                    seq.multimodal.cached_img_thw.clone(),
-                    seq.multimodal.cached_vid_thw.clone(),
+                    seq.multimodal().cached_img_thw.clone(),
+                    seq.multimodal().cached_vid_thw.clone(),
                 ))
             } else if seq.has_images() || seq.has_videos() {
-                Some(self.cached_media(seq, device)?)
+                Some(self.cached_media(&mut **seq, device)?)
             } else {
                 None
             };
@@ -841,9 +842,9 @@ impl MuseGlimmerImageProcessor {
             let (images, videos) =
                 split_media_pixels(&cached_pixels, image_grid.as_ref(), video_grid.as_ref())?;
             let (images, image_grid, image_count) =
-                select_media_view(seq, MultimodalKind::Image, images, image_grid)?;
+                select_media_view(&**seq, MultimodalKind::Image, images, image_grid)?;
             let (videos, video_grid, video_count) =
-                select_media_view(seq, MultimodalKind::Video, videos, video_grid)?;
+                select_media_view(&**seq, MultimodalKind::Video, videos, video_grid)?;
             image_item_counts[index] = image_count;
             video_item_counts[index] = video_count;
             if let Some(images) = images {
@@ -880,30 +881,32 @@ impl MuseGlimmerImageProcessor {
     }
 }
 
-impl InputsProcessor for MuseGlimmerImageProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for MuseGlimmerImageProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         device: &Device,
         _other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> Result<()> {
         let tokenizer = tokenizer.context("Muse-Glimmer requires a tokenizer")?;
         for seq in input_seqs {
-            self.expand_sequence(&tokenizer, seq, device, paged_attn_metadata.as_deref_mut())?;
+            self.expand_sequence(
+                &tokenizer,
+                &mut **seq,
+                device,
+                paged_attn_metadata.as_deref_mut(),
+            )?;
         }
         Ok(())
     }
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -924,14 +927,14 @@ impl InputsProcessor for MuseGlimmerImageProcessor {
         let tokenizer = tokenizer.context("Muse-Glimmer requires a tokenizer")?;
         if is_prompt {
             for seq in input_seqs.iter_mut() {
-                self.expand_sequence(&tokenizer, seq, device, paged_attn_metadata.as_mut())?;
+                self.expand_sequence(&tokenizer, &mut **seq, device, paged_attn_metadata.as_mut())?;
             }
         }
         let mut media = self.prepare_media_batch(input_seqs, device)?;
 
-        let text_models_inputs_processor::InnerInputProcessorOutput {
+        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
-                text_models_inputs_processor::InputMetadata {
+                inference_nn::media_inputs::processor::InputMetadata {
                     input,
                     positions,
                     context_lens,
@@ -941,27 +944,40 @@ impl InputsProcessor for MuseGlimmerImageProcessor {
                 },
             seq_indices,
         } = if is_prompt {
-            get_prompt_input(
-                input_seqs.iter().map(|seq| seq.get_toks()).collect(),
+            host.prompt_inputs(
+                input_seqs
+                    .iter()
+                    .map(|seq| seq.get_toks())
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )?
         } else {
-            get_completion_input(
-                input_seqs.iter().map(|seq| seq.get_toks()).collect(),
+            host.completion_inputs(
+                input_seqs
+                    .iter()
+                    .map(|seq| seq.get_toks())
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )?
         };
 
@@ -1017,14 +1033,14 @@ impl InputsProcessor for MuseGlimmerImageProcessor {
                     .active_prompt_local_query_range()
                     .map_or(seq.prefix_cache_len(), |query| query.start);
                 let cached = shift_media_spans(&mut image_spans[index], prefix)?;
-                cached_images[index] = media_data_cached_offset(seq, cached);
+                cached_images[index] = media_data_cached_offset(&**seq, cached);
                 current_images[index] = image_spans[index].len();
                 let (cached, current) = shift_video_spans(
                     &mut video_spans[index],
                     media.per_seq_video_grids[index].as_ref(),
                     prefix,
                 )?;
-                cached_videos[index] = media_data_cached_offset(seq, cached);
+                cached_videos[index] = media_data_cached_offset(&**seq, cached);
                 current_videos[index] = current;
             }
             (media.image_pixels, media.image_grid) = select_media_batch(
@@ -1060,7 +1076,7 @@ impl InputsProcessor for MuseGlimmerImageProcessor {
                         .get(cached_images[index]..cached_images[index] + current_images[index])
                         .context("Muse-Glimmer image hashes do not cover the media window")?,
                 );
-                let hashes = video_hashes(seq);
+                let hashes = video_hashes(&**seq);
                 selected_video_hashes.extend_from_slice(
                     hashes
                         .get(cached_videos[index]..cached_videos[index] + current_videos[index])
@@ -1092,7 +1108,6 @@ impl InputsProcessor for MuseGlimmerImageProcessor {
             } else {
                 crate::gdn::RecurrentBatchKind::Decode
             },
-            adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
         });
         Ok(InputProcessorOutput {
             inputs,
@@ -1130,6 +1145,7 @@ impl ImagePreProcessor for MuseGlimmerImageProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sequence::Sequence;
     use candle_core::DType;
     use std::collections::HashMap;
     use tokio::sync::{mpsc::channel, Mutex};
@@ -1337,9 +1353,9 @@ mod tests {
         };
         let mut seq = sequence_with_image(DynamicImage::new_rgb8(1, 1));
         processor.cached_media(&mut seq, &Device::Cpu)?;
-        seq.multimodal.has_changed_prompt = true;
+        seq.multimodal_mut().has_changed_prompt = true;
         seq.keep_num_images(1);
-        assert!(seq.multimodal.cached_pixel_values.is_none());
+        assert!(seq.multimodal().cached_pixel_values.is_none());
 
         let batch = processor.prepare_media_batch(&mut [&mut seq], &Device::Cpu)?;
         assert_eq!(batch.image_pixels.unwrap().dims(), &[1, 6]);

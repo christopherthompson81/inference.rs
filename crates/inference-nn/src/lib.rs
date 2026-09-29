@@ -33,6 +33,7 @@ pub mod kv_cache;
 pub mod layers;
 pub mod lora;
 pub mod matformer;
+pub mod media_inputs;
 pub mod metal;
 pub mod mla;
 pub mod model;

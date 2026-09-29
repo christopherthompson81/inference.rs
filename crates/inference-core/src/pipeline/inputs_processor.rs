@@ -16,14 +16,9 @@ pub enum InputsProcessorType {
     Embedding,
 }
 
-pub struct InputProcessorOutput {
-    pub inputs: Box<dyn Any>,
-    pub seq_indices: Vec<usize>,
-}
-
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub(crate) struct InputsProcessorValidationError(pub(crate) String);
+pub use inference_nn::media_inputs::processor::{
+    InputProcessorOutput, InputsProcessorValidationError,
+};
 
 pub(crate) fn is_inputs_processor_validation_error(error: &anyhow::Error) -> bool {
     error.chain().any(|source| {
@@ -111,7 +106,7 @@ pub mod text_models_inputs_processor {
         get_mut_arcmutex,
         paged_attention::{
             block_aligned_sliding_window_start,
-            block_hash::{noncausal_mm_ranges, MultimodalAttentionPolicy},
+            block_hash::MultimodalAttentionPolicy,
             block_table_rows::BlockTableSnapshot,
             input_metadata::{_make_tensor_with_pad, DecodePagedRows},
             AttentionBackendKind, PagedAttentionInputMetadata, PagedAttentionMeta, _PAD_SLOT_ID,
@@ -122,98 +117,11 @@ pub mod text_models_inputs_processor {
     };
 
     use super::{InputProcessorOutput, InputsProcessor, InputsProcessorType};
+    pub use inference_nn::media_inputs::processor::{
+        InnerInputProcessorOutput, InputMetadata, PromptTokens,
+    };
 
-    pub(crate) trait NoncausalMmContext {
-        fn set_noncausal_mm_context(&mut self, input_seqs: &[&mut Sequence]);
-        fn set_noncausal_mm_context_views(
-            &mut self,
-            input_seqs: &[&mut Sequence],
-            include_full_attention: bool,
-        );
-    }
-
-    impl NoncausalMmContext for PagedAttentionMeta {
-        fn set_noncausal_mm_context(&mut self, input_seqs: &[&mut Sequence]) {
-            self.set_noncausal_mm_context_views(input_seqs, true);
-        }
-
-        fn set_noncausal_mm_context_views(
-            &mut self,
-            input_seqs: &[&mut Sequence],
-            include_full_attention: bool,
-        ) {
-            self.mm_prefix_ranges_by_seq_id.clear();
-            self.full_mm_prefix_ranges_by_seq_id.clear();
-            for seq in input_seqs {
-                let full_ranges = noncausal_mm_ranges(seq.mm_features(), None);
-                if !full_ranges.is_empty() {
-                    if include_full_attention {
-                        self.full_mm_prefix_ranges_by_seq_id
-                            .insert(*seq.id(), full_ranges.clone());
-                    }
-                    self.mm_prefix_ranges_by_seq_id
-                        .insert(*seq.id(), full_ranges);
-                }
-            }
-            self.has_noncausal_mm_context = !self.mm_prefix_ranges_by_seq_id.is_empty()
-                || !self.full_mm_prefix_ranges_by_seq_id.is_empty();
-        }
-    }
-
-    pub struct InputMetadata {
-        pub input: Tensor,
-        pub positions: Vec<usize>,
-        pub context_lens: Vec<(usize, usize)>, // (start index, len)
-        pub position_ids: Vec<usize>,
-        pub paged_attn_meta: Option<PagedAttentionInputMetadata>, // For paged attention
-        pub flash_meta: FlashParams,
-    }
-
-    pub struct InnerInputProcessorOutput {
-        pub inputs: InputMetadata,
-        pub seq_indices: Vec<usize>,
-    }
-
-    /// Prompt token slices of either id type; Phi-3V uses negative placeholder ids, so it needs i64.
-    pub enum PromptTokens<'a> {
-        U32(Vec<&'a [u32]>),
-        I64(Vec<&'a [i64]>),
-    }
-
-    impl PromptTokens<'_> {
-        fn len(&self) -> usize {
-            match self {
-                Self::U32(toks) => toks.len(),
-                Self::I64(toks) => toks.len(),
-            }
-        }
-
-        fn seq_len(&self, i: usize) -> usize {
-            match self {
-                Self::U32(toks) => toks[i].len(),
-                Self::I64(toks) => toks[i].len(),
-            }
-        }
-
-        /// Sequence `i` from `start`, zero-padded to `len` tokens, as a 1-D tensor.
-        fn padded_tensor(
-            &self,
-            i: usize,
-            start: usize,
-            len: usize,
-            device: &Device,
-        ) -> Result<Tensor> {
-            fn pad<T: WithDType>(toks: &[T], len: usize, device: &Device) -> Result<Tensor> {
-                let mut ids = toks.to_vec();
-                ids.resize(len, T::zero());
-                Ok(Tensor::new(ids, device)?)
-            }
-            match self {
-                Self::U32(toks) => pad(&toks[i][start..], len, device),
-                Self::I64(toks) => pad(&toks[i][start..], len, device),
-            }
-        }
-    }
+    pub(crate) use inference_nn::media_inputs::processor::NoncausalMmContext;
 
     pub trait PromptToken: WithDType + Debug {
         fn prompt_tokens(toks: Vec<&[Self]>) -> PromptTokens<'_>;
@@ -963,9 +871,12 @@ pub mod text_models_inputs_processor {
         Ok(Tensor::cat(&[&host, &staged], 1)?)
     }
 
-    fn make_completion_chunk<T: WithDType + From<u32> + Clone + std::fmt::Debug>(
+    fn make_completion_chunk<
+        S: std::ops::Deref<Target = Sequence>,
+        T: WithDType + From<u32> + Clone + std::fmt::Debug,
+    >(
         toks: Vec<&[T]>,
-        input_seqs: &[&mut Sequence],
+        input_seqs: &[S],
         device: &Device,
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
         mapper: Option<&dyn DeviceMapper>,
@@ -1180,11 +1091,10 @@ pub mod text_models_inputs_processor {
         })
     }
 
-    #[cfg(feature = "models-gemma")]
     #[allow(clippy::too_many_arguments)]
-    fn make_completion_prefill_chunk<T: PromptToken>(
+    fn make_completion_prefill_chunk<S: std::ops::Deref<Target = Sequence>, T: PromptToken>(
         toks: Vec<&[T]>,
-        input_seqs: &[&mut Sequence],
+        input_seqs: &[S],
         device: &Device,
         last_n_context_len: Option<(usize, usize)>,
         return_raw_logits: bool,
@@ -1213,9 +1123,9 @@ pub mod text_models_inputs_processor {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn get_prompt_input<T: PromptToken>(
+    pub(crate) fn get_prompt_input<S: std::ops::Deref<Target = Sequence>, T: PromptToken>(
         toks: Vec<&[T]>,
-        input_seqs: &[&mut Sequence],
+        input_seqs: &[S],
         device: &Device,
         last_n_context_len: Option<(usize, usize)>,
         return_raw_logits: bool,
@@ -1252,9 +1162,12 @@ pub mod text_models_inputs_processor {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn get_completion_input<T: PromptToken + From<u32> + Clone>(
+    pub(crate) fn get_completion_input<
+        S: std::ops::Deref<Target = Sequence>,
+        T: PromptToken + From<u32> + Clone,
+    >(
         toks: Vec<&[T]>,
-        input_seqs: &[&mut Sequence],
+        input_seqs: &[S],
         device: &Device,
         no_kv_cache: bool,
         last_n_context_len: Option<(usize, usize)>,
@@ -1293,11 +1206,13 @@ pub mod text_models_inputs_processor {
 
     /// `get_completion_input` for models that consume more than one new token per decode step
     /// (e.g. block diffusion, where each step feeds the last committed canvas to the encoder).
-    #[cfg(feature = "models-gemma")]
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn get_completion_input_windowed<T: PromptToken + From<u32> + Clone>(
+    pub(crate) fn get_completion_input_windowed<
+        S: std::ops::Deref<Target = Sequence>,
+        T: PromptToken + From<u32> + Clone,
+    >(
         toks: Vec<&[T]>,
-        input_seqs: &[&mut Sequence],
+        input_seqs: &[S],
         device: &Device,
         no_kv_cache: bool,
         last_n_context_len: Option<(usize, usize)>,
@@ -1364,8 +1279,8 @@ pub mod text_models_inputs_processor {
         pub adapter_leases: Arc<[Option<AdapterLease>]>,
     }
 
-    fn adapter_leases(
-        input_seqs: &[&mut Sequence],
+    fn adapter_leases<S: std::ops::Deref<Target = Sequence>>(
+        input_seqs: &[S],
         seq_indices: &[usize],
     ) -> Arc<[Option<AdapterLease>]> {
         seq_indices

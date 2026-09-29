@@ -20,21 +20,24 @@ use crate::{
     device_map::DeviceMapper,
     paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
     pipeline::{
-        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
-        MessagesAction, Processor,
+        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
+        Processor,
     },
-    sequence::{find_image_placeholder_ranges, Sequence},
+    sequence::find_image_placeholder_ranges,
     vision_models::{
         image_processor::{ImagePreProcessor, PreprocessedImages},
+        media_host::MediaInputsProcessor,
         multimodal_layout::{
             MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout,
             PackedMultimodalLayout, RequestMultimodalLayout,
         },
         preprocessor_config::{PreProcessorConfig, ToFilter},
         processor_config::ProcessorConfig,
-        ModelInputs,
     },
+};
+
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
 };
 
 use super::Gemma3SpecificArgs;
@@ -193,7 +196,7 @@ fn gemma3_layout_items(
 }
 
 fn gemma3_packed_layout(
-    input_seqs: &[&mut Sequence],
+    input_seqs: &[&mut dyn MediaSequence],
     query_lens: &[usize],
     image_hashes_by_sequence: &[Vec<u64>],
     image_token_id: u32,
@@ -241,10 +244,10 @@ impl Gemma3Processor {
 
 impl Processor for Gemma3Processor {
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(Gemma3ImageProcessor {
+        Arc::new(MediaInputsProcessor(Arc::new(Gemma3ImageProcessor {
             full_image_sequence: self.full_image_sequence.clone(),
             supports_images: self.supports_images,
-        })
+        })))
     }
 
     fn get_special_tokens(&self) -> &[&'static str] {
@@ -256,15 +259,11 @@ impl Processor for Gemma3Processor {
     }
 }
 
-impl InputsProcessor for Gemma3ImageProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for Gemma3ImageProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         device: &Device,
         other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -292,7 +291,7 @@ impl InputsProcessor for Gemma3ImageProcessor {
             if !seq.has_images() {
                 continue;
             }
-            if seq.multimodal.has_changed_prompt {
+            if seq.multimodal().has_changed_prompt {
                 continue;
             }
             let images = seq
@@ -318,8 +317,8 @@ impl InputsProcessor for Gemma3ImageProcessor {
                 num_crops,
             } = self.preprocess(images, vec![], config, device, (usize::MAX, usize::MAX))?;
             let num_crops = num_crops.unwrap();
-            seq.multimodal.cached_pixel_values = Some(pixel_values);
-            seq.multimodal.cached_num_crops = Some(num_crops.clone());
+            seq.multimodal_mut().cached_pixel_values = Some(pixel_values);
+            seq.multimodal_mut().cached_num_crops = Some(num_crops.clone());
 
             let mut prompt = tokenizer
                 .decode(seq.get_toks(), false)
@@ -365,7 +364,7 @@ impl InputsProcessor for Gemma3ImageProcessor {
             }
 
             seq.set_toks_and_reallocate(ids, paged_attn_metadata.as_deref_mut());
-            seq.multimodal.has_changed_prompt = true;
+            seq.multimodal_mut().has_changed_prompt = true;
         }
 
         if let Some(metadata) = paged_attn_metadata.as_ref() {
@@ -380,8 +379,9 @@ impl InputsProcessor for Gemma3ImageProcessor {
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -427,15 +427,18 @@ impl InputsProcessor for Gemma3ImageProcessor {
                     continue;
                 }
                 let is_chunked_view = seq.is_chunked_prefill_view();
-                let cached_pixel_values = seq.multimodal.cached_pixel_values.clone();
+                let cached_pixel_values = seq.multimodal().cached_pixel_values.clone();
                 let (pixel_values, num_crops, uses_full_media_set) =
                     if let Some(cached_pixel_values) = cached_pixel_values {
                         let num_crops =
-                            seq.multimodal.cached_num_crops.clone().ok_or_else(|| {
-                                anyhow::Error::msg(
-                                    "Gemma 3 cached pixels are missing crop metadata",
-                                )
-                            })?;
+                            seq.multimodal_mut()
+                                .cached_num_crops
+                                .clone()
+                                .ok_or_else(|| {
+                                    anyhow::Error::msg(
+                                        "Gemma 3 cached pixels are missing crop metadata",
+                                    )
+                                })?;
                         (cached_pixel_values, num_crops, true)
                     } else {
                         let PreprocessedImages {
@@ -467,13 +470,13 @@ impl InputsProcessor for Gemma3ImageProcessor {
                         let num_crops =
                             num_crops.expect("Gemma 3 preprocessing omitted crop counts");
                         if !is_chunked_view {
-                            seq.multimodal.cached_pixel_values = Some(pixel_values.clone());
-                            seq.multimodal.cached_num_crops = Some(num_crops.clone());
+                            seq.multimodal_mut().cached_pixel_values = Some(pixel_values.clone());
+                            seq.multimodal_mut().cached_num_crops = Some(num_crops.clone());
                         }
                         (pixel_values, num_crops, false)
                     };
 
-                if !seq.multimodal.has_changed_prompt {
+                if !seq.multimodal().has_changed_prompt {
                     let mut prompt = tokenizer
                         .decode(seq.get_toks(), false)
                         .expect("Detokenization failed!");
@@ -513,11 +516,11 @@ impl InputsProcessor for Gemma3ImageProcessor {
                     }
 
                     seq.set_toks_and_reallocate(ids, paged_attn_metadata.as_mut());
-                    seq.multimodal.has_changed_prompt = true;
+                    seq.multimodal_mut().has_changed_prompt = true;
                 }
 
                 let raw_hashes = if is_chunked_view && uses_full_media_set {
-                    seq.multimodal.image_hashes().unwrap_or_default()
+                    seq.multimodal().image_hashes().unwrap_or_default()
                 } else {
                     seq.image_hashes().unwrap_or_default()
                 };
@@ -577,9 +580,9 @@ impl InputsProcessor for Gemma3ImageProcessor {
             None
         };
 
-        let text_models_inputs_processor::InnerInputProcessorOutput {
+        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
-                text_models_inputs_processor::InputMetadata {
+                inference_nn::media_inputs::processor::InputMetadata {
                     input,
                     positions,
                     context_lens,
@@ -589,34 +592,41 @@ impl InputsProcessor for Gemma3ImageProcessor {
                 },
             seq_indices,
         } = if is_prompt {
-            get_prompt_input(
+            host.prompt_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )
             .unwrap()
         } else {
-            get_completion_input(
+            host.completion_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )
             .unwrap()
         };
@@ -680,7 +690,6 @@ impl InputsProcessor for Gemma3ImageProcessor {
             } else {
                 crate::gdn::RecurrentBatchKind::Decode
             },
-            adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
         });
         Ok(InputProcessorOutput {
             inputs,

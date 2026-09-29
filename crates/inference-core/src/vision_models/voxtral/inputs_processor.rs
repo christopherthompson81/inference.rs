@@ -9,17 +9,16 @@ use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     device_map::DeviceMapper,
     paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
-    pipeline::{
-        text_models_inputs_processor::{self, get_completion_input, get_prompt_input},
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, MessagesAction, Processor,
-    },
-    sequence::Sequence,
-    vision_models::ModelInputs,
+    pipeline::{InputProcessorOutput, InputsProcessor, MessagesAction, Processor},
 };
 
 use super::audio_processing::VoxtralAudioProcessor;
 use super::config::VoxtralConfig;
 use super::{VoxtralAudioCacheKey, VoxtralAudioRequest, VoxtralSpecificArgs};
+use crate::vision_models::media_host::MediaInputsProcessor;
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
+};
 
 /// BOS token ID for Mistral tekken tokenizer.
 const BOS_TOKEN_ID: u32 = 1;
@@ -57,10 +56,10 @@ const N_RIGHT_PAD_TOKENS: usize = 17;
 
 impl Processor for VoxtralProcessor {
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(VoxtralInputsProcessor {
+        Arc::new(MediaInputsProcessor(Arc::new(VoxtralInputsProcessor {
             audio_processor: VoxtralAudioProcessor::new_from_processor(&self.audio_processor),
             audio_length_per_tok: self.audio_length_per_tok,
-        })
+        })))
     }
 
     fn get_special_tokens(&self) -> &[&'static str] {
@@ -101,7 +100,7 @@ fn audio_prompt_feature(hashes: Vec<u64>) -> anyhow::Result<MultiModalFeature> {
 }
 
 fn prepare_audio_prompt(
-    seq: &mut Sequence,
+    seq: &mut dyn MediaSequence,
     paged_attn_metadata: Option<&mut PagedAttentionMeta>,
 ) -> anyhow::Result<()> {
     let hashes = seq
@@ -124,7 +123,7 @@ fn prepare_audio_prompt(
     }
 
     seq.set_toks_and_reallocate(audio_prompt_tokens(), paged_attn_metadata);
-    seq.multimodal.has_changed_prompt = true;
+    seq.multimodal_mut().has_changed_prompt = true;
     Ok(())
 }
 
@@ -162,15 +161,11 @@ fn batch_mel_features(mels: &[Tensor]) -> anyhow::Result<Option<Tensor>> {
     Ok(Some(Tensor::cat(&padded, 0)?))
 }
 
-impl InputsProcessor for VoxtralInputsProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for VoxtralInputsProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         _device: &Device,
         _other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -182,10 +177,10 @@ impl InputsProcessor for VoxtralInputsProcessor {
         };
 
         for seq in input_seqs.iter_mut() {
-            if seq.multimodal.has_changed_prompt || !seq.has_audios() {
+            if seq.multimodal().has_changed_prompt || !seq.has_audios() {
                 continue;
             }
-            prepare_audio_prompt(seq, paged_attn_metadata.as_deref_mut())?;
+            prepare_audio_prompt(&mut **seq, paged_attn_metadata.as_deref_mut())?;
         }
 
         Ok(())
@@ -193,8 +188,9 @@ impl InputsProcessor for VoxtralInputsProcessor {
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -225,9 +221,9 @@ impl InputsProcessor for VoxtralInputsProcessor {
             .collect::<Vec<Option<Tensor>>>();
         if is_prompt {
             for (seq_idx, seq) in input_seqs.iter_mut().enumerate() {
-                if !seq.multimodal.has_changed_prompt {
+                if !seq.multimodal().has_changed_prompt {
                     if seq.has_audios() {
-                        prepare_audio_prompt(seq, paged_attn_metadata.as_mut())?;
+                        prepare_audio_prompt(&mut **seq, paged_attn_metadata.as_mut())?;
                     }
                     continue;
                 }
@@ -265,9 +261,9 @@ impl InputsProcessor for VoxtralInputsProcessor {
         }
 
         // Standard text input processing
-        let text_models_inputs_processor::InnerInputProcessorOutput {
+        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
-                text_models_inputs_processor::InputMetadata {
+                inference_nn::media_inputs::processor::InputMetadata {
                     input,
                     positions,
                     context_lens,
@@ -277,33 +273,40 @@ impl InputsProcessor for VoxtralInputsProcessor {
                 },
             seq_indices,
         } = if is_prompt {
-            get_prompt_input(
+            host.prompt_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )?
         } else {
-            get_completion_input(
+            host.completion_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )?
         };
 
@@ -353,7 +356,6 @@ impl InputsProcessor for VoxtralInputsProcessor {
             } else {
                 crate::gdn::RecurrentBatchKind::Decode
             },
-            adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
         });
         Ok(InputProcessorOutput {
             inputs,

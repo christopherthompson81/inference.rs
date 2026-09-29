@@ -1,9 +1,7 @@
 //! Block-diffusion text generation support (e.g. DiffusionGemma): models that commit a
 //! whole denoised block of tokens per engine step instead of sampling one token from logits.
 
-#[cfg(feature = "models-gemma")]
 pub use crate::model::BlockDenoisingProgressEmitter;
-#[cfg(feature = "models-gemma")]
 use {
     crate::{
         model::BlockDenoisingProgressSink, response::BlockDenoisingProgress, sequence::Sequence,
@@ -14,14 +12,12 @@ use {
     tokio::sync::mpsc::Sender,
 };
 
-#[cfg(feature = "models-gemma")]
 struct ResponseProgressSink {
     response_index: usize,
     tokenizer: Arc<Tokenizer>,
     response: Sender<Response>,
 }
 
-#[cfg(feature = "models-gemma")]
 impl BlockDenoisingProgressSink for ResponseProgressSink {
     fn emit(
         &self,
@@ -50,10 +46,9 @@ impl BlockDenoisingProgressSink for ResponseProgressSink {
     }
 }
 
-#[cfg(feature = "models-gemma")]
-pub(crate) fn block_denoising_progress_emitters(
+pub(crate) fn block_denoising_progress_emitters<S: std::ops::Deref<Target = Sequence>>(
     tokenizer: Option<Arc<Tokenizer>>,
-    input_seqs: &[&mut Sequence],
+    input_seqs: &[S],
     seq_indices: &[usize],
     return_raw_logits: bool,
 ) -> Option<Vec<BlockDenoisingProgressEmitter>> {

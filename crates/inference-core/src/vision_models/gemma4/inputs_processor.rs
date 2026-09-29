@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::pipeline::text_models_inputs_processor::NoncausalMmContext;
+use inference_nn::media_inputs::processor::NoncausalMmContext;
 use std::{any::Any, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
@@ -10,20 +10,15 @@ use tokenizers::Tokenizer;
 
 use crate::paged_attention::PagedAttentionMeta;
 use crate::{
-    block_diffusion::block_denoising_progress_emitters,
     device_map::DeviceMapper,
     paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
     pipeline::{
-        recurrent_batch_kind_for_input,
-        text_models_inputs_processor::{
-            self, get_completion_input, get_completion_input_windowed, get_prompt_input,
-        },
-        InputProcessorOutput, InputsProcessor, InputsProcessorType, InputsProcessorValidationError,
-        MessagesAction, Processor,
+        recurrent_batch_kind_for_input, InputProcessorOutput, InputsProcessor,
+        InputsProcessorValidationError, MessagesAction, Processor,
     },
     sequence::{
         build_mm_features_from_ranges, build_mm_features_from_ranges_with_policy,
-        find_image_placeholder_ranges, Sequence,
+        find_image_placeholder_ranges,
     },
     vision_models::gemma4::audio_processing::AudioProcessor,
     vision_models::{
@@ -34,11 +29,14 @@ use crate::{
         },
         preprocessor_config::{PreProcessorConfig, ToFilter},
         processor_config::ProcessorConfig,
-        ModelInputs,
     },
 };
 
 use super::{config::Gemma4BidirectionalAttention, Gemma4SpecificArgs};
+use crate::vision_models::media_host::MediaInputsProcessor;
+use inference_nn::media_inputs::processor::{
+    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
+};
 
 // ── Token constants ────────────────────────────────────────────────────────
 
@@ -129,7 +127,7 @@ impl Processor for Gemma4Processor {
     fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
         let video_max_patches =
             self.video_max_soft_tokens * self.pooling_kernel_size * self.pooling_kernel_size;
-        Arc::new(Gemma4ImageProcessor {
+        Arc::new(MediaInputsProcessor(Arc::new(Gemma4ImageProcessor {
             patch_size: self.patch_size,
             pooling_kernel_size: self.pooling_kernel_size,
             default_output_length: self.default_output_length,
@@ -143,7 +141,7 @@ impl Processor for Gemma4Processor {
             decode_window: self.decode_window,
             bidirectional_attention: self.bidirectional_attention,
             vision_attention_on_full_layers: self.vision_attention_on_full_layers,
-        })
+        })))
     }
 
     fn get_special_tokens(&self) -> &[&'static str] {
@@ -327,7 +325,7 @@ impl Gemma4ImageProcessor {
     fn expand_raw_image_placeholders_for_seq(
         &self,
         tokenizer: &Tokenizer,
-        seq: &mut Sequence,
+        seq: &mut dyn MediaSequence,
         per_image_dims: &[(usize, usize)],
         paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> anyhow::Result<bool> {
@@ -345,7 +343,7 @@ impl Gemma4ImageProcessor {
         if has_prefill_toks {
             seq.set_prefill_toks(ids);
         }
-        seq.multimodal.has_changed_prompt = true;
+        seq.multimodal_mut().has_changed_prompt = true;
         Ok(true)
     }
 
@@ -453,7 +451,7 @@ impl Gemma4ImageProcessor {
     fn expand_raw_audio_placeholders_for_seq(
         &self,
         tokenizer: &Tokenizer,
-        seq: &mut Sequence,
+        seq: &mut dyn MediaSequence,
         token_counts: &[usize],
         paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> anyhow::Result<bool> {
@@ -657,7 +655,7 @@ fn active_placeholder_ranges(
         .collect()
 }
 
-fn active_media_ranges(seq: &Sequence, token_id: u32) -> Vec<(usize, usize)> {
+fn active_media_ranges(seq: &dyn MediaSequence, token_id: u32) -> Vec<(usize, usize)> {
     let query = if seq.is_chunked_prefill_view() {
         seq.active_prompt_query_range()
     } else {
@@ -698,12 +696,12 @@ fn validate_sliding_noncausal_ranges<'a>(
 }
 
 fn rebuild_mm_features(
-    seq: &mut Sequence,
+    seq: &mut dyn MediaSequence,
     bidirectional_attention: Gemma4BidirectionalAttention,
 ) -> anyhow::Result<()> {
     let mut features = Vec::new();
     let image_count = seq.images().map_or(0, <[_]>::len);
-    let image_hashes = seq.multimodal.image_hashes().unwrap_or_default();
+    let image_hashes = seq.multimodal().image_hashes().unwrap_or_default();
     let image_ranges = find_image_placeholder_ranges(seq.get_toks(), IMAGE_TOKEN_ID);
     if image_hashes.len() != image_count || image_ranges.len() != image_count {
         anyhow::bail!(
@@ -720,7 +718,7 @@ fn rebuild_mm_features(
     ));
 
     let audio_count = seq.audios().map_or(0, <[_]>::len);
-    let audio_hashes = seq.multimodal.audio_hashes().unwrap_or_default();
+    let audio_hashes = seq.multimodal().audio_hashes().unwrap_or_default();
     let audio_ranges = find_image_placeholder_ranges(seq.get_toks(), AUDIO_TOKEN_ID);
     if audio_hashes.len() != audio_count || audio_ranges.len() != audio_count {
         anyhow::bail!(
@@ -738,7 +736,7 @@ fn rebuild_mm_features(
     let video_count = seq.videos().map_or(0, |videos| {
         videos.iter().map(|video| video.frames.len()).sum()
     });
-    let video_hashes = seq.multimodal.video_hashes().unwrap_or_default();
+    let video_hashes = seq.multimodal().video_hashes().unwrap_or_default();
     let video_ranges = find_image_placeholder_ranges(seq.get_toks(), VIDEO_TOKEN_ID);
     if video_hashes.len() != video_count || video_ranges.len() != video_count {
         anyhow::bail!(
@@ -790,12 +788,12 @@ fn gemma4_layout_items_from_features(
         .collect()
 }
 
-fn gemma4_layout_items(seq: &Sequence) -> Result<Vec<MultimodalItemLayout>> {
+fn gemma4_layout_items(seq: &dyn MediaSequence) -> Result<Vec<MultimodalItemLayout>> {
     gemma4_layout_items_from_features(seq.mm_features())
 }
 
 fn gemma4_packed_layout(
-    input_seqs: &[&mut Sequence],
+    input_seqs: &[&mut dyn MediaSequence],
     query_lens: &[usize],
 ) -> Result<PackedMultimodalLayout> {
     if input_seqs.len() != query_lens.len() {
@@ -813,7 +811,7 @@ fn gemma4_packed_layout(
             Ok(RequestMultimodalLayout {
                 sequence_id: *seq.id(),
                 query: 0..query_len,
-                items: gemma4_layout_items(seq)?,
+                items: gemma4_layout_items(&**seq)?,
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -822,15 +820,11 @@ fn gemma4_packed_layout(
 
 // ── InputsProcessor ────────────────────────────────────────────────────────
 
-impl InputsProcessor for Gemma4ImageProcessor {
-    fn get_type(&self) -> InputsProcessorType {
-        InputsProcessorType::Vision
-    }
-
+impl MultimodalInputsProcessor for Gemma4ImageProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         _device: &Device,
         other_config: Option<Arc<dyn Any>>,
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
@@ -846,7 +840,7 @@ impl InputsProcessor for Gemma4ImageProcessor {
             ));
         };
         for seq in input_seqs.iter_mut() {
-            if seq.multimodal.has_changed_prompt && !seq.mm_features().is_empty() {
+            if seq.multimodal().has_changed_prompt && !seq.mm_features().is_empty() {
                 continue;
             }
             if seq.has_images() && !self.supports_images {
@@ -861,7 +855,7 @@ impl InputsProcessor for Gemma4ImageProcessor {
                 )
                 .into());
             }
-            let validate_raw_placeholders = !seq.multimodal.has_changed_prompt;
+            let validate_raw_placeholders = !seq.multimodal().has_changed_prompt;
             let raw_audio_placeholder_count =
                 find_image_placeholder_ranges(seq.get_toks(), AUDIO_TOKEN_ID)
                     .iter()
@@ -922,7 +916,7 @@ impl InputsProcessor for Gemma4ImageProcessor {
                     .collect::<Vec<_>>();
                 changed_prompt |= self.expand_raw_audio_placeholders_for_seq(
                     &tokenizer,
-                    seq,
+                    &mut **seq,
                     &token_counts,
                     paged_attn_metadata.as_deref_mut(),
                 )?;
@@ -947,7 +941,7 @@ impl InputsProcessor for Gemma4ImageProcessor {
                     .collect::<Result<Vec<_>>>()?;
                 self.expand_raw_image_placeholders_for_seq(
                     &tokenizer,
-                    seq,
+                    &mut **seq,
                     &per_image_dims,
                     paged_attn_metadata.as_deref_mut(),
                 )?;
@@ -999,7 +993,7 @@ impl InputsProcessor for Gemma4ImageProcessor {
                         .encode_fast(prompt.as_str(), false)
                         .expect("Tokenization failed!");
                     let ids = toks.get_ids().to_vec();
-                    let frame_count = seq.multimodal.video_hashes().map_or(0, <[u64]>::len);
+                    let frame_count = seq.multimodal().video_hashes().map_or(0, <[u64]>::len);
                     let range_count = find_image_placeholder_ranges(&ids, VIDEO_TOKEN_ID).len();
                     if range_count != frame_count {
                         anyhow::bail!(
@@ -1007,12 +1001,12 @@ impl InputsProcessor for Gemma4ImageProcessor {
                         );
                     }
                     seq.set_toks_and_reallocate(ids, paged_attn_metadata.as_deref_mut());
-                    seq.multimodal.has_changed_prompt = true;
+                    seq.multimodal_mut().has_changed_prompt = true;
                 }
             }
 
-            seq.multimodal.has_changed_prompt |= changed_prompt;
-            rebuild_mm_features(seq, self.bidirectional_attention)?;
+            seq.multimodal_mut().has_changed_prompt |= changed_prompt;
+            rebuild_mm_features(&mut **seq, self.bidirectional_attention)?;
         }
 
         Ok(())
@@ -1020,8 +1014,9 @@ impl InputsProcessor for Gemma4ImageProcessor {
 
     fn process_inputs(
         &self,
+        host: &dyn InputsHost,
         tokenizer: Option<Arc<Tokenizer>>,
-        input_seqs: &mut [&mut Sequence],
+        input_seqs: &mut [&mut dyn MediaSequence],
         is_prompt: bool,
         is_xlora: bool,
         device: &Device,
@@ -1056,7 +1051,7 @@ impl InputsProcessor for Gemma4ImageProcessor {
         let has_videos = input_seqs.iter().any(|seq| seq.has_videos());
         let preserve_media = input_seqs
             .iter()
-            .map(|seq| !seq.multimodal.has_changed_prompt)
+            .map(|seq| !seq.multimodal().has_changed_prompt)
             .collect::<Vec<_>>();
 
         let mut changed_sequence_ids = Vec::new();
@@ -1109,7 +1104,7 @@ impl InputsProcessor for Gemma4ImageProcessor {
                         })
                         .collect::<Vec<_>>();
 
-                    if !seq.multimodal.has_changed_prompt {
+                    if !seq.multimodal().has_changed_prompt {
                         let mut prompt = tokenizer
                             .decode(seq.get_toks(), false)
                             .expect("Detokenization failed!");
@@ -1146,7 +1141,7 @@ impl InputsProcessor for Gemma4ImageProcessor {
                     }
 
                     let n_audio = audios.len();
-                    let audio_ranges = active_media_ranges(seq, AUDIO_TOKEN_ID);
+                    let audio_ranges = active_media_ranges(&**seq, AUDIO_TOKEN_ID);
                     let cached_audio_tokens =
                         cached_tokens_for_ranges(seq.prefix_cache_len(), &audio_ranges);
                     let seq_audio_hashes = seq.audio_hashes().unwrap_or(&[]);
@@ -1258,14 +1253,14 @@ impl InputsProcessor for Gemma4ImageProcessor {
 
                 self.expand_raw_image_placeholders_for_seq(
                     &tokenizer,
-                    seq,
+                    &mut **seq,
                     &per_image_dims,
                     paged_attn_metadata.as_mut(),
                 )?;
 
                 // Per-sequence prefix cache trimming of pixel_values
                 let n_images = pixel_values.dim(0).unwrap_or(0);
-                let image_ranges = active_media_ranges(seq, IMAGE_TOKEN_ID);
+                let image_ranges = active_media_ranges(&**seq, IMAGE_TOKEN_ID);
                 let cached_image_tokens =
                     cached_tokens_for_ranges(seq.prefix_cache_len(), &image_ranges);
                 let seq_image_hashes = seq.image_hashes().unwrap_or(&[]);
@@ -1338,7 +1333,7 @@ impl InputsProcessor for Gemma4ImageProcessor {
                 // We must NOT skip when has_changed_prompt is true, because that
                 // means we are on a subsequent chunk of the SAME turn, so the frames
                 // still need to be encoded for the tokens in this chunk.
-                if !seq.multimodal.has_changed_prompt {
+                if !seq.multimodal().has_changed_prompt {
                     let toks = seq.get_toks();
                     let video_ranges = find_image_placeholder_ranges(toks, VIDEO_TOKEN_ID);
                     let already_expanded =
@@ -1438,7 +1433,7 @@ impl InputsProcessor for Gemma4ImageProcessor {
                     // Track per-frame video hashes and cached tokens.
                     // Unlike images (1 hash per image), videos need 1 hash per
                     // frame so the encoder cache can look up individual frames.
-                    let video_ranges = active_media_ranges(seq, VIDEO_TOKEN_ID);
+                    let video_ranges = active_media_ranges(&**seq, VIDEO_TOKEN_ID);
                     let cached_video_tokens =
                         cached_tokens_for_ranges(seq.prefix_cache_len(), &video_ranges);
 
@@ -1513,10 +1508,10 @@ impl InputsProcessor for Gemma4ImageProcessor {
 
         for seq in input_seqs.iter_mut() {
             if seq.mm_features().is_empty() {
-                rebuild_mm_features(seq, self.bidirectional_attention)?;
+                rebuild_mm_features(&mut **seq, self.bidirectional_attention)?;
             }
             if changed_sequence_ids.contains(seq.id()) {
-                seq.multimodal.has_changed_prompt = true;
+                seq.multimodal_mut().has_changed_prompt = true;
             }
         }
         if let Some(metadata) = paged_attn_metadata.as_mut() {
@@ -1529,9 +1524,9 @@ impl InputsProcessor for Gemma4ImageProcessor {
         }
 
         // ── Build final model inputs ───────────────────────────────────────
-        let text_models_inputs_processor::InnerInputProcessorOutput {
+        let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
-                text_models_inputs_processor::InputMetadata {
+                inference_nn::media_inputs::processor::InputMetadata {
                     input,
                     positions,
                     context_lens,
@@ -1541,34 +1536,40 @@ impl InputsProcessor for Gemma4ImageProcessor {
                 },
             seq_indices,
         } = if is_prompt {
-            get_prompt_input(
+            host.prompt_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
             )?
         } else if let Some(decode_window) = self.decode_window {
-            let mut out = get_completion_input_windowed(
+            let mut out = host.completion_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
-                decode_window,
+                Some(decode_window),
             )?;
             // The window is re-encoded context, not parallel decode queries: only the last
             // position's logits matter downstream.
@@ -1580,22 +1581,26 @@ impl InputsProcessor for Gemma4ImageProcessor {
             }
             out
         } else {
-            get_completion_input(
+            host.completion_inputs(
                 input_seqs
                     .iter()
                     .map(|seq| seq.get_toks())
-                    .collect::<Vec<_>>(),
+                    .collect::<Vec<_>>()
+                    .into(),
                 input_seqs,
-                device,
+                TextInputs {
+                    device,
+                    last_n_context_len,
+                    return_raw_logits,
+                    paged_attn_metadata: paged_attn_metadata.as_mut(),
+                    mapper,
+                    sliding_window,
+                },
                 no_kv_cache,
-                last_n_context_len,
-                return_raw_logits,
-                paged_attn_metadata.as_mut(),
-                mapper,
-                sliding_window,
+                None,
             )?
         };
-        let block_denoising_progress = block_denoising_progress_emitters(
+        let block_denoising_progress = host.block_denoising_progress(
             Some(tokenizer.clone()),
             input_seqs,
             &seq_indices,
@@ -1684,9 +1689,8 @@ impl InputsProcessor for Gemma4ImageProcessor {
             flash_meta,
             recurrent_batch_kind: recurrent_batch_kind_for_input(
                 is_prompt,
-                crate::speculative::staging::staged_batch_width(input_seqs).is_some(),
+                host.staged_batch_width(input_seqs).is_some(),
             ),
-            adapter_leases: crate::vision_models::adapter_leases(input_seqs, &seq_indices),
         });
         Ok(InputProcessorOutput {
             inputs,
