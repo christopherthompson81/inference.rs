@@ -5,8 +5,8 @@
 # --slim lints inference-core with no model families and with each family alone, so feature gates stay intact.
 # With --cuda, the GPU-bound CUDA suite runs in the background while the CPU lint and tests run.
 # --bindings builds libinference_ffi and runs the C# (needs the .NET SDK) and Python binding tests on the tiny checkpoint.
-# --docs documents the crates whose files differ from origin/master (rustdoc is never incremental), not their
-# dependents; --docs-all documents every crate.
+# --docs checks the docs of the crates whose files differ from origin/master (rustdoc is never incremental), not their
+# dependents; --docs-all checks every crate. Neither renders HTML; `cargo doc` does.
 # --sweep then deletes target/debug artifacts the selected modes no longer use (stale variants pile up otherwise).
 # Build env (CC/CXX/NVCC) and INFERENCE_TEST_* paths belong in ~/.cargo/config.toml [env]; changing one rebuilds deps.
 set -euo pipefail
@@ -144,7 +144,8 @@ if [[ $docs -eq 1 ]]; then
         read -ra DOC_TARGETS <<< "$targets"
     fi
 fi
-doc_build() { RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -D warnings" cargo doc --no-deps "${DOC_TARGETS[@]}" "$@"; }
+# Checks without rendering: each crate's HTML merge takes target/doc's lock, which serialized the rustdoc runs.
+doc_build() { RUSTDOCFLAGS="${RUSTDOCFLAGS:-} -D warnings --emit dep-info" cargo doc --no-deps "${DOC_TARGETS[@]}" "$@"; }
 if [[ $docs -eq 1 ]]; then
     if [[ ${#DOC_TARGETS[@]} -eq 0 ]]; then
         echo "--docs: no crate differs from master, nothing to document"
