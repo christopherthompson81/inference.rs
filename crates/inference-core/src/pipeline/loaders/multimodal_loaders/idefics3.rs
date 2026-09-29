@@ -22,7 +22,7 @@ impl MultimodalModelLoader for Idefics3Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg: crate::vision_models::idefics3::Idefics3Config = serde_json::from_str(config)?;
+        let cfg = crate::vision_models::idefics3::Idefics3Config::from_json(config)?;
         Ok(Box::new(Idefics3Model::new(
             &cfg,
             vb,
@@ -32,7 +32,7 @@ impl MultimodalModelLoader for Idefics3Loader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg: crate::vision_models::idefics3::Idefics3Config = serde_json::from_str(config)?;
+        let cfg = crate::vision_models::idefics3::Idefics3Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
     fn get_processor(
@@ -138,7 +138,7 @@ impl DeviceMappedModelLoader for Idefics3Loader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Idefics3Config = serde_json::from_str(config)?;
+        let cfg = Idefics3Config::from_json(config)?;
 
         let num_patches = (cfg.vision_config.image_size / cfg.vision_config.patch_size).pow(2);
         let img_seq_len = (num_patches + 1) * max_num_images;
@@ -166,7 +166,7 @@ impl DeviceMappedModelLoader for Idefics3Loader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Idefics3Config = serde_json::from_str(config)?;
+        let cfg = Idefics3Config::from_json(config)?;
 
         let num_patches = (cfg.vision_config.image_size / cfg.vision_config.patch_size).pow(2);
         let img_seq_len = num_patches + 1;
@@ -191,7 +191,7 @@ impl DeviceMappedModelLoader for Idefics3Loader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: Idefics3Config = serde_json::from_str(config)?;
+        let cfg = Idefics3Config::from_json(config)?;
         let text_elems = {
             let cfg = &cfg.text_config;
             let (embed_tokens_pack_factor, lm_head_pack_factor) =
@@ -269,7 +269,7 @@ impl DeviceMappedModelLoader for Idefics3Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: Idefics3Config = serde_json::from_str(config)?;
+        let cfg = Idefics3Config::from_json(config)?;
         let cfg = cfg.text_config;
         let per_layer_elems = {
             let input_layernorm = cfg.hidden_size;
@@ -305,11 +305,11 @@ impl DeviceMappedModelLoader for Idefics3Loader {
         ])
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: Idefics3Config = serde_json::from_str(config)?;
+        let cfg = Idefics3Config::from_json(config)?;
         Ok(cfg.text_config.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: Idefics3Config = serde_json::from_str(config)?;
+        let cfg = Idefics3Config::from_json(config)?;
         let cfg = &cfg.text_config;
 
         let cfg = ModelConfigMetadata {

@@ -25,7 +25,7 @@ impl MultimodalModelLoader for Qwen2VLLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg: Qwen2VLConfig = serde_json::from_str(config)?;
+        let cfg = Qwen2VLConfig::from_json(config)?;
         Ok(Box::new(Qwen2VLModel::new(
             &cfg,
             vb,
@@ -35,7 +35,7 @@ impl MultimodalModelLoader for Qwen2VLLoader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let config: Qwen2VLConfig = serde_json::from_str(config)?;
+        let config = Qwen2VLConfig::from_json(config)?;
         Ok(Box::new(config))
     }
     fn get_processor(
@@ -107,7 +107,7 @@ impl DeviceMappedModelLoader for Qwen2VLLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Qwen2VLConfig = serde_json::from_str(config)?;
+        let cfg = Qwen2VLConfig::from_json(config)?;
 
         // For images, grid_t=1. After spatial merging, grid_h and grid_w are reduced.
         let img_seq_len = {
@@ -143,7 +143,7 @@ impl DeviceMappedModelLoader for Qwen2VLLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Qwen2VLConfig = serde_json::from_str(config)?;
+        let cfg = Qwen2VLConfig::from_json(config)?;
 
         // For the vision encoder, before spatial merging
         let img_seq_len = {
@@ -169,7 +169,7 @@ impl DeviceMappedModelLoader for Qwen2VLLoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: Qwen2VLConfig = serde_json::from_str(config)?;
+        let cfg = Qwen2VLConfig::from_json(config)?;
         let text_elems = {
             let (embed_tokens_pack_factor, lm_head_pack_factor) =
                 super::language_model_pack_factors_with_aliases(
@@ -246,7 +246,7 @@ impl DeviceMappedModelLoader for Qwen2VLLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: Qwen2VLConfig = serde_json::from_str(config)?;
+        let cfg = Qwen2VLConfig::from_json(config)?;
         let per_layer_elems = {
             let input_layernorm = cfg.hidden_size;
             let post_attention_layernorm = cfg.hidden_size;
@@ -281,7 +281,7 @@ impl DeviceMappedModelLoader for Qwen2VLLoader {
         ])
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: Qwen2VLConfig = serde_json::from_str(config)?;
+        let cfg = Qwen2VLConfig::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

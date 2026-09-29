@@ -33,7 +33,7 @@ impl MultimodalModelLoader for Qwen3_5MoeLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
+        let cfg = Qwen3_5MoeConfig::from_json(config)?;
         Ok(Box::new(Qwen3_5MoeModel::new(
             &cfg,
             vb,
@@ -43,7 +43,7 @@ impl MultimodalModelLoader for Qwen3_5MoeLoader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let config: Qwen3_5MoeConfig = serde_json::from_str(config)?;
+        let config = Qwen3_5MoeConfig::from_json(config)?;
         Ok(Box::new(config))
     }
     fn get_processor(
@@ -152,7 +152,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
+        let cfg = Qwen3_5MoeConfig::from_json(config)?;
 
         let img_seq_len = {
             let cfg = &cfg.vision_config;
@@ -185,7 +185,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
+        let cfg = Qwen3_5MoeConfig::from_json(config)?;
 
         let img_seq_len = {
             let cfg = &cfg.vision_config;
@@ -209,7 +209,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
+        let cfg = Qwen3_5MoeConfig::from_json(config)?;
         let tie = cfg.tie_word_embeddings;
         let text_elems = {
             let cfg = &cfg.text_config;
@@ -302,7 +302,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
+        let cfg = Qwen3_5MoeConfig::from_json(config)?;
         let text_cfg = &cfg.text_config;
         let layer_types = text_cfg.layer_types();
 
@@ -385,11 +385,11 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         Ok(layer_sizes)
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
+        let cfg = Qwen3_5MoeConfig::from_json(config)?;
         Ok(cfg.text_config.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: Qwen3_5MoeConfig = serde_json::from_str(config)?;
+        let cfg = Qwen3_5MoeConfig::from_json(config)?;
         let cfg = &cfg.text_config;
 
         let base = ModelConfigMetadata {

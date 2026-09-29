@@ -23,7 +23,7 @@ impl MultimodalModelLoader for VoxtralLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg: VoxtralConfig = serde_json::from_str(config)?;
+        let cfg = VoxtralConfig::from_json(config)?;
         Ok(Box::new(VoxtralModel::new(
             &cfg,
             vb,
@@ -33,7 +33,7 @@ impl MultimodalModelLoader for VoxtralLoader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg: VoxtralConfig = serde_json::from_str(config)?;
+        let cfg = VoxtralConfig::from_json(config)?;
         Ok(Box::new(cfg))
     }
     fn get_processor(
@@ -43,8 +43,7 @@ impl MultimodalModelLoader for VoxtralLoader {
         _preprocessor_config: PreProcessorConfig,
         _max_edge: Option<u32>,
     ) -> Arc<dyn Processor + Send + Sync> {
-        let cfg: VoxtralConfig =
-            serde_json::from_str(model_config).expect("Failed to parse VoxtralConfig");
+        let cfg = VoxtralConfig::from_json(model_config).expect("Failed to parse VoxtralConfig");
         Arc::new(VoxtralProcessor::new(&cfg))
     }
     fn supports_paged_attention(&self, _config: &str) -> bool {
@@ -129,7 +128,7 @@ impl DeviceMappedModelLoader for VoxtralLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: VoxtralConfig = serde_json::from_str(config)?;
+        let cfg = VoxtralConfig::from_json(config)?;
 
         // Audio tokens are prepended: max audio len + text seq len
         // Audio: ~30s at 16kHz = 480k samples, /160 hop = 3000 frames, /2 conv stride = 1500, /4 adapter = 375 tokens
@@ -146,7 +145,7 @@ impl DeviceMappedModelLoader for VoxtralLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: VoxtralConfig = serde_json::from_str(config)?;
+        let cfg = VoxtralConfig::from_json(config)?;
         let enc = &cfg.multimodal.whisper_model_args.encoder_args;
         // Encoder max activation: attention matrix
         // ~3000 mel frames, encoder has 32 heads, seq_len^2
@@ -161,7 +160,7 @@ impl DeviceMappedModelLoader for VoxtralLoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: VoxtralConfig = serde_json::from_str(config)?;
+        let cfg = VoxtralConfig::from_json(config)?;
         let enc = &cfg.multimodal.whisper_model_args.encoder_args;
         let ds = &cfg.multimodal.whisper_model_args.downsample_args;
 
@@ -209,7 +208,7 @@ impl DeviceMappedModelLoader for VoxtralLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: VoxtralConfig = serde_json::from_str(config)?;
+        let cfg = VoxtralConfig::from_json(config)?;
         let elem = dtype.size_in_bytes();
 
         let attn = (cfg.dim * cfg.n_heads * cfg.head_dim
@@ -226,7 +225,7 @@ impl DeviceMappedModelLoader for VoxtralLoader {
         Ok(vec![per_layer; cfg.n_layers])
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: VoxtralConfig = serde_json::from_str(config)?;
+        let cfg = VoxtralConfig::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.model_max_length,

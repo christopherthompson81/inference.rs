@@ -58,7 +58,7 @@ impl FromStr for SpeechLoaderType {
 impl SpeechLoaderType {
     /// Auto-detect speech loader type from a config.json string.
     pub fn auto_detect_from_config(config: &str) -> Option<Self> {
-        if serde_json::from_str::<DiaConfig>(config).is_ok() {
+        if DiaConfig::from_json(config).is_ok() {
             return Some(Self::Dia);
         }
         None
@@ -293,7 +293,7 @@ impl Loader for SpeechLoader {
             inference_quant::IsqCaptureMode::Immediate,
         );
 
-        let cfg: DiaConfig = serde_json::from_str(&std::fs::read_to_string(&paths.config)?)?;
+        let cfg = DiaConfig::from_json(&std::fs::read_to_string(&paths.config)?)?;
 
         #[cfg(feature = "cuda")]
         if let Device::Cuda(dev) = &device {

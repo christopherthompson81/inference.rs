@@ -25,8 +25,7 @@ impl Processor for LLaVAProcessor {
 
 impl LLaVAProcessor {
     pub fn new(config: &str) -> Self {
-        let model_config =
-            serde_json::from_str::<LLaVAConfig>(config).expect("Failed to parse model config.");
+        let model_config = LLaVAConfig::from_json(config).expect("Failed to parse model config.");
         let inputs_processor = Arc::new(LLaVAInputProcessor::new(model_config));
         Self { inputs_processor }
     }
@@ -50,8 +49,7 @@ impl Processor for LLaVANextProcessor {
 
 impl LLaVANextProcessor {
     pub fn new(config: &str) -> Self {
-        let model_config =
-            serde_json::from_str::<LLaVAConfig>(config).expect("Failed to parse model config.");
+        let model_config = LLaVAConfig::from_json(config).expect("Failed to parse model config.");
         let inputs_processor = Arc::new(LLaVANextInputProcessor::new(model_config));
         Self { inputs_processor }
     }

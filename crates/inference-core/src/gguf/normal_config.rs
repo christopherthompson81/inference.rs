@@ -2522,7 +2522,6 @@ fn ratio_f64(
 mod tests {
     use super::*;
     use crate::models;
-    use serde::de::DeserializeOwned;
     use std::collections::HashSet;
     use strum::IntoEnumIterator;
 
@@ -2801,8 +2800,12 @@ mod tests {
         (architecture, metadata, tensors)
     }
 
-    fn assert_deserializes<T: DeserializeOwned>(loader: &NormalLoaderType, config: JsonValue) {
-        if let Err(error) = serde_json::from_value::<T>(config.clone()) {
+    fn assert_deserializes<T>(
+        loader: &NormalLoaderType,
+        config: JsonValue,
+        from_json: fn(&str) -> serde_json::Result<T>,
+    ) {
+        if let Err(error) = from_json(&config.to_string()) {
             panic!("synthesized `{loader}` config did not deserialize: {error}\n{config:#}");
         }
     }
@@ -2810,65 +2813,87 @@ mod tests {
     fn assert_native_config_deserializes(loader: &NormalLoaderType, config: JsonValue) {
         match loader {
             NormalLoaderType::Mistral => {
-                assert_deserializes::<models::mistral::Config>(loader, config)
+                assert_deserializes(loader, config, models::mistral::Config::from_json)
             }
-            NormalLoaderType::Gemma => assert_deserializes::<models::gemma::Config>(loader, config),
+            NormalLoaderType::Gemma => {
+                assert_deserializes(loader, config, models::gemma::Config::from_json)
+            }
             NormalLoaderType::Mixtral => {
-                assert_deserializes::<models::mixtral::Config>(loader, config)
+                assert_deserializes(loader, config, models::mixtral::Config::from_json)
             }
-            NormalLoaderType::Llama => assert_deserializes::<models::llama::Config>(loader, config),
-            NormalLoaderType::Phi2 => assert_deserializes::<models::phi2::Config>(loader, config),
-            NormalLoaderType::Phi3 => assert_deserializes::<models::phi3::Config>(loader, config),
-            NormalLoaderType::Qwen2 => assert_deserializes::<models::qwen2::Config>(loader, config),
+            NormalLoaderType::Llama => {
+                assert_deserializes(loader, config, models::llama::Config::from_json)
+            }
+            NormalLoaderType::Phi2 => {
+                assert_deserializes(loader, config, models::phi2::Config::from_json)
+            }
+            NormalLoaderType::Phi3 => {
+                assert_deserializes(loader, config, models::phi3::Config::from_json)
+            }
+            NormalLoaderType::Qwen2 => {
+                assert_deserializes(loader, config, models::qwen2::Config::from_json)
+            }
             NormalLoaderType::Gemma2 => {
-                assert_deserializes::<models::gemma2::Config>(loader, config)
+                assert_deserializes(loader, config, models::gemma2::Config::from_json)
             }
             NormalLoaderType::Starcoder2 => {
-                assert_deserializes::<models::starcoder2::Config>(loader, config)
+                assert_deserializes(loader, config, models::starcoder2::Config::from_json)
             }
             NormalLoaderType::Phi3_5MoE => {
-                assert_deserializes::<models::phi3_5_moe::Config>(loader, config)
+                assert_deserializes(loader, config, models::phi3_5_moe::Config::from_json)
             }
-            NormalLoaderType::DeepSeekV2 => {
-                assert_deserializes::<models::deepseek2::DeepSeekV2Config>(loader, config)
+            NormalLoaderType::DeepSeekV2 => assert_deserializes(
+                loader,
+                config,
+                models::deepseek2::DeepSeekV2Config::from_json,
+            ),
+            NormalLoaderType::DeepSeekV3 => assert_deserializes(
+                loader,
+                config,
+                models::deepseek3::DeepSeekV3Config::from_json,
+            ),
+            NormalLoaderType::Qwen3 => {
+                assert_deserializes(loader, config, models::qwen3::Config::from_json)
             }
-            NormalLoaderType::DeepSeekV3 => {
-                assert_deserializes::<models::deepseek3::DeepSeekV3Config>(loader, config)
+            NormalLoaderType::GLM4 => {
+                assert_deserializes(loader, config, models::glm4::Config::from_json)
             }
-            NormalLoaderType::Qwen3 => assert_deserializes::<models::qwen3::Config>(loader, config),
-            NormalLoaderType::GLM4 => assert_deserializes::<models::glm4::Config>(loader, config),
-            NormalLoaderType::GLM4MoeLite => {
-                assert_deserializes::<models::glm4_moe_lite::Glm4MoeLiteConfig>(loader, config)
-            }
+            NormalLoaderType::GLM4MoeLite => assert_deserializes(
+                loader,
+                config,
+                models::glm4_moe_lite::Glm4MoeLiteConfig::from_json,
+            ),
             NormalLoaderType::GLM4Moe => {
-                assert_deserializes::<models::glm4_moe::Glm4MoeConfig>(loader, config)
+                assert_deserializes(loader, config, models::glm4_moe::Glm4MoeConfig::from_json)
             }
             NormalLoaderType::Qwen3Moe => {
-                assert_deserializes::<models::qwen3_moe::Config>(loader, config)
+                assert_deserializes(loader, config, models::qwen3_moe::Config::from_json)
             }
             NormalLoaderType::SmolLm3 => {
-                assert_deserializes::<models::smollm3::Config>(loader, config)
+                assert_deserializes(loader, config, models::smollm3::Config::from_json)
             }
             NormalLoaderType::GraniteMoeHybrid => {
-                assert_deserializes::<models::granite::Config>(loader, config)
+                assert_deserializes(loader, config, models::granite::Config::from_json)
             }
             NormalLoaderType::GptOss => {
-                assert_deserializes::<models::gpt_oss::Config>(loader, config)
+                assert_deserializes(loader, config, models::gpt_oss::Config::from_json)
             }
             NormalLoaderType::HunYuanDenseV1 => {
-                assert_deserializes::<models::hunyuan_v1_dense::Config>(loader, config)
+                assert_deserializes(loader, config, models::hunyuan_v1_dense::Config::from_json)
             }
             NormalLoaderType::HunYuanMoEV1 => {
-                assert_deserializes::<models::hunyuan_v1_moe::Config>(loader, config)
+                assert_deserializes(loader, config, models::hunyuan_v1_moe::Config::from_json)
             }
             NormalLoaderType::Qwen3Next => {
-                assert_deserializes::<models::qwen3_next::Config>(loader, config)
+                assert_deserializes(loader, config, models::qwen3_next::Config::from_json)
             }
-            NormalLoaderType::Qwen3_5 => {
-                assert_deserializes::<crate::vision_models::qwen3_5::TextConfig>(loader, config)
-            }
+            NormalLoaderType::Qwen3_5 => assert_deserializes(
+                loader,
+                config,
+                crate::vision_models::qwen3_5::TextConfig::from_json,
+            ),
             NormalLoaderType::Lfm2 | NormalLoaderType::Lfm2Moe => {
-                assert_deserializes::<models::lfm2::Config>(loader, config)
+                assert_deserializes(loader, config, models::lfm2::Config::from_json)
             }
         }
     }
@@ -2931,7 +2956,7 @@ mod tests {
         assert_eq!(config["partial_rotary_factor"], 0.25);
         assert_eq!(config[GDN_V_HEAD_LAYOUT_CONFIG_KEY], "tiled");
         assert_eq!(config["architectures"][0], "Qwen3NextForCausalLM");
-        let native: models::qwen3_next::Config = serde_json::from_value(config.clone()).unwrap();
+        let native = models::qwen3_next::Config::from_json(&config.to_string()).unwrap();
         assert_eq!(
             crate::gdn::GdnConfig::v_head_layout(&native),
             crate::gdn::GdnVHeadLayout::Tiled
@@ -2978,8 +3003,8 @@ mod tests {
             json!([11, 11, 10])
         );
         assert_eq!(config[GDN_V_HEAD_LAYOUT_CONFIG_KEY], "tiled");
-        let native: crate::vision_models::qwen3_5::TextConfig =
-            serde_json::from_value(config.clone()).unwrap();
+        let native =
+            crate::vision_models::qwen3_5::TextConfig::from_json(&config.to_string()).unwrap();
         assert_eq!(
             crate::gdn::GdnConfig::v_head_layout(&native),
             crate::gdn::GdnVHeadLayout::Tiled
@@ -3250,7 +3275,11 @@ mod tests {
         let value: JsonValue = serde_json::from_str(&normalized).unwrap();
         assert!(value.get("vision_config").is_none());
         assert_eq!(value["hidden_size"], 512);
-        assert_deserializes::<models::mistral::Config>(&NormalLoaderType::Mistral, value);
+        assert_deserializes(
+            &NormalLoaderType::Mistral,
+            value,
+            models::mistral::Config::from_json,
+        );
     }
 
     #[test]

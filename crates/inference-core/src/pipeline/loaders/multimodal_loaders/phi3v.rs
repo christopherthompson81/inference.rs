@@ -29,7 +29,7 @@ impl MultimodalModelLoader for Phi3VLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg: crate::vision_models::phi3::Config = serde_json::from_str(config)?;
+        let cfg = crate::vision_models::phi3::Config::from_json(config)?;
         Ok(Box::new(Phi3::new(
             &cfg,
             vb,
@@ -39,7 +39,7 @@ impl MultimodalModelLoader for Phi3VLoader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg: crate::vision_models::phi3::Config = serde_json::from_str(config)?;
+        let cfg = crate::vision_models::phi3::Config::from_json(config)?;
         Ok(Box::new(cfg))
     }
     fn get_processor(
@@ -112,7 +112,7 @@ impl DeviceMappedModelLoader for Phi3VLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Phi3Config = serde_json::from_str(config)?;
+        let cfg = Phi3Config::from_json(config)?;
 
         let vcfg = &PHI3V_CLIP_CONFIG;
 
@@ -143,7 +143,7 @@ impl DeviceMappedModelLoader for Phi3VLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Phi3Config = serde_json::from_str(config)?;
+        let cfg = Phi3Config::from_json(config)?;
 
         let vcfg = &PHI3V_CLIP_CONFIG;
 
@@ -164,7 +164,7 @@ impl DeviceMappedModelLoader for Phi3VLoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: Phi3Config = serde_json::from_str(config)?;
+        let cfg = Phi3Config::from_json(config)?;
         let elems = {
             let (embed_tokens_pack_factor, lm_head_pack_factor) =
                 super::language_model_pack_factors(
@@ -236,7 +236,7 @@ impl DeviceMappedModelLoader for Phi3VLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: Phi3Config = serde_json::from_str(config)?;
+        let cfg = Phi3Config::from_json(config)?;
         let per_layer_elems = {
             let input_layernorm = cfg.hidden_size;
             let post_attention_layernorm = cfg.hidden_size;
@@ -266,7 +266,7 @@ impl DeviceMappedModelLoader for Phi3VLoader {
         ])
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: Phi3Config = serde_json::from_str(config)?;
+        let cfg = Phi3Config::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

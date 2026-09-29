@@ -22,8 +22,15 @@ pub mod voxtral;
 pub mod xlora;
 
 inference_nn::json_config!(
+    idefics2::Config,
+    idefics3::config::Idefics3Config,
+    llama4::config::Llama4Config,
     llama::Config,
+    llava::config::Config,
+    mistral3::config::Mistral3Config,
     mistral::Config,
     mixtral::Config,
+    mllama::config::MLlamaConfig,
     smollm3::Config,
+    voxtral::config::VoxtralConfig,
 );

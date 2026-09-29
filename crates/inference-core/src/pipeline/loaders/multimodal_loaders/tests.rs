@@ -850,7 +850,7 @@ fn muse_glimmer_runtime_config_caps_context() -> Result<()> {
     let config = muse_glimmer_test_config();
     let capped = loader.runtime_config(&config, Some(8192))?;
     assert_eq!(
-        serde_json::from_str::<MuseGlimmerConfig>(&capped)?
+        MuseGlimmerConfig::from_json(&capped)?
             .text_config
             .max_position_embeddings,
         8192

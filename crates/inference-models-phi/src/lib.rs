@@ -15,4 +15,10 @@ pub mod phi3_vision;
 pub mod phi4;
 pub mod xlora;
 
-inference_nn::json_config!(phi2::Config, phi3::Config, phi3_5_moe::Config);
+inference_nn::json_config!(
+    phi2::Config,
+    phi3::Config,
+    phi3_5_moe::Config,
+    phi3_vision::Config,
+    phi4::config::Phi4MMConfig,
+);

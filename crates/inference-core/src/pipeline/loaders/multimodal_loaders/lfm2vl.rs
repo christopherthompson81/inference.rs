@@ -60,7 +60,7 @@ impl MultimodalModelLoader for Lfm2VlLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg: Lfm2VlConfig = serde_json::from_str(config)?;
+        let cfg = Lfm2VlConfig::from_json(config)?;
         Ok(Box::new(Lfm2VlModel::new(
             &cfg,
             vb,
@@ -70,7 +70,7 @@ impl MultimodalModelLoader for Lfm2VlLoader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg: Lfm2VlConfig = serde_json::from_str(config)?;
+        let cfg = Lfm2VlConfig::from_json(config)?;
         Ok(Box::new(cfg))
     }
     fn get_processor(
@@ -80,8 +80,7 @@ impl MultimodalModelLoader for Lfm2VlLoader {
         preprocessor_config: PreProcessorConfig,
         _max_edge: Option<u32>,
     ) -> Arc<dyn Processor + Send + Sync> {
-        let cfg: Lfm2VlConfig =
-            serde_json::from_str(model_config).expect("Failed to parse LFM2-VL config");
+        let cfg = Lfm2VlConfig::from_json(model_config).expect("Failed to parse LFM2-VL config");
         Arc::new(Lfm2VlProcessor::new(&cfg, &preprocessor_config))
     }
     fn supports_paged_attention(&self, _config: &str) -> bool {
@@ -105,7 +104,7 @@ impl MultimodalModelLoader for Lfm2VlLoader {
         _mapper: &dyn DeviceMapper,
         loading_isq: bool,
     ) -> Result<Arc<dyn Fn(String) -> DeviceForLoadTensor + Send + Sync + 'static>> {
-        let cfg: Lfm2VlConfig = serde_json::from_str(config)?;
+        let cfg = Lfm2VlConfig::from_json(config)?;
         layer_indexed_device(
             TEXT_LAYER_INDEX_PATTERN,
             cfg.text_config.num_hidden_layers,
@@ -159,7 +158,7 @@ impl DeviceMappedModelLoader for Lfm2VlLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Lfm2VlConfig = serde_json::from_str(config)?;
+        let cfg = Lfm2VlConfig::from_json(config)?;
         let seq_len =
             max_seq_len.min(&ATTENTION_CHUNK_SIZE) + Self::max_image_seq_len(&cfg) * max_num_images;
         Ok(max_batch_size * cfg.text_config.num_attention_heads * seq_len * seq_len)
@@ -179,7 +178,7 @@ impl DeviceMappedModelLoader for Lfm2VlLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: Lfm2VlConfig = serde_json::from_str(config)?;
+        let cfg = Lfm2VlConfig::from_json(config)?;
         let max_crops = max_num_images * Self::max_crops_per_image(&cfg);
         let max_patches = Self::max_num_patches(&cfg);
         let max_vision_attn = max_batch_size
@@ -204,7 +203,7 @@ impl DeviceMappedModelLoader for Lfm2VlLoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: Lfm2VlConfig = serde_json::from_str(config)?;
+        let cfg = Lfm2VlConfig::from_json(config)?;
         let text = {
             let tc = &cfg.text_config;
             let tied = tc.tie_word_embeddings();
@@ -267,7 +266,7 @@ impl DeviceMappedModelLoader for Lfm2VlLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: Lfm2VlConfig = serde_json::from_str(config)?;
+        let cfg = Lfm2VlConfig::from_json(config)?;
         let cfg = cfg.text_config;
         let head_dim = cfg.head_dim();
         let hidden = cfg.hidden_size;
@@ -301,7 +300,7 @@ impl DeviceMappedModelLoader for Lfm2VlLoader {
         Ok(sizes)
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: Lfm2VlConfig = serde_json::from_str(config)?;
+        let cfg = Lfm2VlConfig::from_json(config)?;
         Ok(cfg.text_config.num_hidden_layers)
     }
 
@@ -309,7 +308,7 @@ impl DeviceMappedModelLoader for Lfm2VlLoader {
         Some(vec![NonMappedSubModel::Vision])
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: Lfm2VlConfig = serde_json::from_str(config)?;
+        let cfg = Lfm2VlConfig::from_json(config)?;
         let tc = cfg.text_config;
         let head_dim = tc.head_dim();
         Ok(Box::new(ModelConfigMetadata {

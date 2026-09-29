@@ -12,7 +12,7 @@ fn muse_glimmer_runtime_config(config: &str, max_model_len: Option<usize>) -> Re
     };
     anyhow::ensure!(max_model_len > 0, "max_model_len must be greater than zero");
 
-    let parsed: MuseGlimmerConfig = serde_json::from_str(config)?;
+    let parsed = MuseGlimmerConfig::from_json(config)?;
     if parsed.text_config.max_position_embeddings <= max_model_len {
         return Ok(Cow::Borrowed(config));
     }
@@ -37,7 +37,7 @@ impl MultimodalModelLoader for MuseGlimmerLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg: MuseGlimmerConfig = serde_json::from_str(config)?;
+        let cfg = MuseGlimmerConfig::from_json(config)?;
         Ok(Box::new(MuseGlimmerModel::new(
             &cfg,
             vb,
@@ -54,7 +54,7 @@ impl MultimodalModelLoader for MuseGlimmerLoader {
         muse_glimmer_runtime_config(config, max_model_len)
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        Ok(Box::new(serde_json::from_str::<MuseGlimmerConfig>(config)?))
+        Ok(Box::new(MuseGlimmerConfig::from_json(config)?))
     }
     fn get_processor(
         &self,
@@ -63,8 +63,8 @@ impl MultimodalModelLoader for MuseGlimmerLoader {
         preprocessor_config: PreProcessorConfig,
         max_edge: Option<u32>,
     ) -> Arc<dyn Processor + Send + Sync> {
-        let cfg: MuseGlimmerConfig =
-            serde_json::from_str(model_config).expect("Failed to parse Muse-Glimmer config");
+        let cfg = MuseGlimmerConfig::from_json(model_config)
+            .expect("Failed to parse Muse-Glimmer config");
         Arc::new(
             MuseGlimmerProcessor::new(&preprocessor_config, max_edge, cfg.gguf_collapsed_temporal)
                 .expect("Failed to create Muse-Glimmer processor"),
@@ -80,7 +80,7 @@ impl MultimodalModelLoader for MuseGlimmerLoader {
         true
     }
     fn modalities(&self, config: &str) -> Result<Modalities> {
-        let cfg: MuseGlimmerConfig = serde_json::from_str(config)?;
+        let cfg = MuseGlimmerConfig::from_json(config)?;
         let mut input = vec![SupportedModality::Text, SupportedModality::Vision];
         if !cfg.gguf_collapsed_temporal {
             input.push(SupportedModality::Video);
@@ -103,7 +103,7 @@ impl MultimodalModelLoader for MuseGlimmerLoader {
             return Ok(Arc::new(|_| DeviceForLoadTensor::Base));
         }
         let re = Regex::new(r"^model\.language_model\.layers\.(\d+)\.")?;
-        let num_layers = serde_json::from_str::<MuseGlimmerConfig>(config)?
+        let num_layers = MuseGlimmerConfig::from_json(config)?
             .text_config
             .num_hidden_layers;
         Ok(Arc::new(move |name: String| {
@@ -152,7 +152,7 @@ impl DeviceMappedModelLoader for MuseGlimmerLoader {
         else {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
-        let cfg: MuseGlimmerConfig = serde_json::from_str(config)?;
+        let cfg = MuseGlimmerConfig::from_json(config)?;
         let vc = &cfg.vision_config;
         let visual_tokens = (max_image_shape.0 / vc.patch_size / vc.merge_size)
             * (max_image_shape.1 / vc.patch_size / vc.merge_size)
@@ -175,7 +175,7 @@ impl DeviceMappedModelLoader for MuseGlimmerLoader {
         else {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
-        let cfg: MuseGlimmerConfig = serde_json::from_str(config)?;
+        let cfg = MuseGlimmerConfig::from_json(config)?;
         let vc = &cfg.vision_config;
         let raw_patches = (max_image_shape.0 / vc.patch_size) * (max_image_shape.1 / vc.patch_size);
         let items = max_batch_size * max_num_images;
@@ -191,7 +191,7 @@ impl DeviceMappedModelLoader for MuseGlimmerLoader {
         quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: MuseGlimmerConfig = serde_json::from_str(config)?;
+        let cfg = MuseGlimmerConfig::from_json(config)?;
         let tc = &cfg.text_config;
         let (embed_pack_factor, head_pack_factor) =
             super::language_model_pack_factors_with_aliases(
@@ -236,7 +236,7 @@ impl DeviceMappedModelLoader for MuseGlimmerLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: MuseGlimmerConfig = serde_json::from_str(config)?;
+        let cfg = MuseGlimmerConfig::from_json(config)?;
         let tc = &cfg.text_config;
         let query_size = tc.num_attention_heads * tc.head_dim;
         let kv_size = tc.num_key_value_heads * tc.head_dim;
@@ -253,7 +253,7 @@ impl DeviceMappedModelLoader for MuseGlimmerLoader {
         Ok(vec![layer; tc.num_hidden_layers])
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        Ok(serde_json::from_str::<MuseGlimmerConfig>(config)?
+        Ok(MuseGlimmerConfig::from_json(config)?
             .text_config
             .num_hidden_layers)
     }
@@ -262,7 +262,7 @@ impl DeviceMappedModelLoader for MuseGlimmerLoader {
         Some(vec![NonMappedSubModel::Vision])
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: MuseGlimmerConfig = serde_json::from_str(config)?;
+        let cfg = MuseGlimmerConfig::from_json(config)?;
         let tc = cfg.text_config;
         Ok(Box::new(ModelConfigMetadata {
             max_seq_len: tc.max_position_embeddings,

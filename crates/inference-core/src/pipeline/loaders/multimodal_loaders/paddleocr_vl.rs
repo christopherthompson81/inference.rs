@@ -19,7 +19,7 @@ impl MultimodalModelLoader for PaddleOcrVlLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg: PaddleOcrVlConfig = serde_json::from_str(config)?;
+        let cfg = PaddleOcrVlConfig::from_json(config)?;
         Ok(Box::new(PaddleOcrVlModel::new(
             &cfg,
             vb,
@@ -28,7 +28,7 @@ impl MultimodalModelLoader for PaddleOcrVlLoader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let config: PaddleOcrVlConfig = serde_json::from_str(config)?;
+        let config = PaddleOcrVlConfig::from_json(config)?;
         Ok(Box::new(config))
     }
     fn get_processor(
@@ -101,7 +101,7 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: PaddleOcrVlConfig = serde_json::from_str(config)?;
+        let cfg = PaddleOcrVlConfig::from_json(config)?;
         let tcfg = cfg.text_config();
         let vcfg = cfg.vision_config();
 
@@ -136,7 +136,7 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg: PaddleOcrVlConfig = serde_json::from_str(config)?;
+        let cfg = PaddleOcrVlConfig::from_json(config)?;
         let vcfg = cfg.vision_config();
 
         // Vision self-attention runs over the full patch grid, before the spatial merge.
@@ -161,7 +161,7 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg: PaddleOcrVlConfig = serde_json::from_str(config)?;
+        let cfg = PaddleOcrVlConfig::from_json(config)?;
         let tcfg = cfg.text_config();
         let vcfg = cfg.vision_config();
 
@@ -213,7 +213,7 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg: PaddleOcrVlConfig = serde_json::from_str(config)?;
+        let cfg = PaddleOcrVlConfig::from_json(config)?;
         let tcfg = cfg.text_config();
         let per_layer_elems = {
             let input_layernorm = tcfg.hidden_size;
@@ -250,11 +250,11 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
         ])
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg: PaddleOcrVlConfig = serde_json::from_str(config)?;
+        let cfg = PaddleOcrVlConfig::from_json(config)?;
         Ok(cfg.text_config().num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg: PaddleOcrVlConfig = serde_json::from_str(config)?;
+        let cfg = PaddleOcrVlConfig::from_json(config)?;
         let tcfg = cfg.text_config();
 
         let meta = ModelConfigMetadata {
