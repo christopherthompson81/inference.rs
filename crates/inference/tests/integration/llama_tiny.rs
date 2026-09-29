@@ -7,7 +7,7 @@ use inference::{
     UqffTextModelBuilder,
 };
 
-#[path = "support/llama_tiny.rs"]
+#[path = "../support/llama_tiny.rs"]
 mod support;
 use support::tiny_llama_checkpoint;
 

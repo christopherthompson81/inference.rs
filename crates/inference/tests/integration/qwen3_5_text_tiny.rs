@@ -4,7 +4,7 @@ use inference::{IsqType, ModelDType, TextModelBuilder};
 use inference_models_qwen::qwen3_5::{Qwen3_5TextModel, TextConfig};
 use inference_nn::paged_attention::AttentionImplementation;
 
-#[path = "support/recording.rs"]
+#[path = "../support/recording.rs"]
 mod recording;
 
 const DECLARED_CONTEXT: u64 = 1024;

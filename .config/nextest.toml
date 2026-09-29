@@ -8,14 +8,14 @@ gpu-model = { max-threads = 6 }
 
 # Real-checkpoint parity tests are integration tests: they run on request (`local_ci.sh --models`), not on every cycle.
 [profile.default]
-default-filter = 'not (binary(paddleocr_vl) | (package(inference-ffi) & test(detections)))'
+default-filter = 'not ((package(inference) & test(/^paddleocr_vl::/)) | (package(inference-ffi) & test(detections)))'
 
 [profile.models]
-default-filter = 'binary(paddleocr_vl) | (package(inference-ffi) & test(detections))'
+default-filter = '(package(inference) & test(/^paddleocr_vl::/)) | (package(inference-ffi) & test(detections))'
 
 # The slowest tests start first so the run ends in a burst instead of a tail of a few long tests.
 [[profile.default.overrides]]
-filter = 'binary(paddleocr_vl) | (package(inference-ffi) & test(detections))'
+filter = '(package(inference) & test(/^paddleocr_vl::/)) | (package(inference-ffi) & test(detections))'
 priority = 100
 
 # RLIMIT_NPROC counts every thread the concurrently running test processes spawn, so this one runs alone.
@@ -28,17 +28,20 @@ threads-required = 'num-test-threads'
 [profile.cuda]
 default-filter = """
 not (
-    (binary(paddleocr_vl) & not (test(=greedy_ids_match_transformers) | test(=gpu::isq_q8_0_keeps_ocr_text)))
+    (
+        (package(inference) & test(/^paddleocr_vl::/))
+        & not (test(=paddleocr_vl::greedy_ids_match_transformers) | test(=paddleocr_vl::gpu::isq_q8_0_keeps_ocr_text))
+    )
     | (package(inference-ffi) & test(detections))
 )
 """
 
 [[profile.cuda.overrides]]
-filter = 'binary(paddleocr_vl)'
+filter = '(package(inference) & test(/^paddleocr_vl::/))'
 test-group = 'gpu-model'
 
 # Real-weight FLUX takes ~18 GB of VRAM, so it runs alone, first so the rest of the suite follows it.
 [[profile.cuda.overrides]]
-filter = 'package(inference-server-core) & binary(flux)'
+filter = 'package(inference-server-core) & test(/^flux::/)'
 threads-required = 'num-test-threads'
 priority = 100

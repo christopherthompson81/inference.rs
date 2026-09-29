@@ -8,7 +8,7 @@ use inference_server_core::inference_server_router_builder::InferenceRsServerRou
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-#[path = "../../inference/tests/support/paddleocr_vl_tiny.rs"]
+#[path = "../../../inference/tests/support/paddleocr_vl_tiny.rs"]
 mod support;
 
 const MAX_TOKENS: usize = 6;

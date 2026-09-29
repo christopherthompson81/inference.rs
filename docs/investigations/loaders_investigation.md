@@ -117,3 +117,49 @@ What in them costs core's compile, and what can leave?
 - CI: `scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep` green (2191 CPU and 2511 CUDA
   tests). After the test-helper change, `--lint --tests --slim` was rerun and is green.
 - Next: lever 2, one integration-test binary per crate for inference, server-core and ffi.
+
+## Run 4 - 2026-09-29
+
+- Change: lever 2. Each crate's integration tests became modules of one binary, `tests/integration/main.rs`:
+  - inference: embedding_tiny, llama_tiny, paddleocr_vl, paddleocr_vl_tiny and qwen3_5_text_tiny;
+  - server-core: chat_route and flux;
+  - ffi: engine_abi, header and layout_abi.
+
+  Details:
+  - The nextest filters that named binaries now name module prefixes: `binary(paddleocr_vl)` became
+    `package(inference) & test(/^paddleocr_vl::/)`, and `binary(flux)` became `test(/^flux::/)`. The exact names gained
+    the prefix. `nextest list` confirms the same selections: the default profile excludes all eight real-checkpoint
+    tests, `models` runs all eight, and `cuda` keeps the two PaddleOCR-VL checks and FLUX.
+  - The fixtures each include the recording helpers, so server-core and ffi can include one fixture alone. So the
+    inference binary allows clippy's `duplicate_mod`.
+- Command: in the shared target, delete the binaries' incremental directories, touch their sources, then
+  `cargo test --no-run --features cuda --workspace --lib --bins --tests --timings`. Only the test binaries rebuild,
+  with nothing else running.
+- Result:
+
+  | | 10 binaries | 3 binaries |
+  |---|---|---|
+  | Unit-seconds | 125 | 40 (-68%) |
+  | User CPU | 210 s | 134 s (-36%) |
+  | Wall | 17.4 s | 13.8 s |
+
+  The merged binaries take 11-13 s each; the largest single binary before was 17 s. The 76 CPU-seconds saved all fall
+  in the cold build's saturated tail (Run 2), where they are worth about 5 s of wall time at 16 cores.
+- CI: `scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep` green (2191 CPU and 2511 CUDA
+  tests). The CPU run now lists the seven real-checkpoint PaddleOCR-VL tests as skipped (18, was 11): nextest used to
+  drop their whole binary without listing it.
+- Next: measure the cold build on these two changes (Run 47 method), then plan lever 3, the loader move.
+
+## Run 5 - 2026-09-29
+
+- Question: what is the cold-build effect of Runs 3 and 4 together?
+- Command: the Run 47 cold build, at 029fa506.
+- Result: inconclusive for wall time.
+  - Wall was 264.8 s (Run 2's master run: 254 s). The machine was loaded by other work: load 8 over the previous 5
+    minutes, and 15 by the end.
+  - Every stage was 7-10% slower, including stages neither change touches: the candle-kernels build script 64 to
+    70 s, candle-core 38 to 42 s, inference-nn 42 to 47 s.
+  - Despite that, core's lib test fell from 111.8 s to 105.4 s. The integration binaries (inference 26 s, server-core
+    30 s, ffi 24 s) now finish with the other tail units, where before there were ten of them.
+- Implication: the isolated measurements in Runs 3 and 4 stand. The cold wall time needs a quiet machine to resolve a
+  change of a few seconds, so re-run it idle before comparing with Run 47.

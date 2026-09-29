@@ -42,9 +42,10 @@ The script:
 
 1. Builds the library.
 2. Checks that its exports match the header (`tests/export_surface.py`).
-3. Runs the Rust ABI tests: `tests/layout_abi.rs` (error paths, pixel formats, batching, handle lifetimes),
-   `tests/engine_abi.rs` (chat and streaming on a tiny random-weight model built at test time) and `tests/header.rs`
-   (the header declares exactly the exports and compiles as C99; these also run in `scripts/local_ci.sh --tests`).
+3. Runs the Rust ABI tests, modules of one binary under `tests/integration/`: `layout_abi.rs` (error paths, pixel
+   formats, batching, handle lifetimes), `engine_abi.rs` (chat and streaming on a tiny random-weight model built at test
+   time) and `header.rs` (the header declares exactly the exports and compiles as C99; these also run in
+   `scripts/local_ci.sh --tests`).
 4. Compiles the C99 consumer (`tests/c/layout_test.c`) with `-Wall -Wextra -Werror -pedantic`.
 5. Diffs the consumer's detections against the Rust `pp_doclayout_v3_detect` example on the same page.
 

@@ -9,7 +9,7 @@ use inference_ffi::inference_status::{self, *};
 use inference_ffi::*;
 use serde_json::{json, Value};
 
-#[path = "../../inference/tests/support/paddleocr_vl_tiny.rs"]
+#[path = "../../../inference/tests/support/paddleocr_vl_tiny.rs"]
 mod support;
 
 const MAX_TOKENS: usize = 6;

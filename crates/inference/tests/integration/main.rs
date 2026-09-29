@@ -1,0 +1,9 @@
+//! The integration tests, one binary so the stack is monomorphized and linked once.
+// Each fixture includes the recording helpers itself, so server-core and ffi can include one fixture alone.
+#![allow(clippy::duplicate_mod)]
+
+mod embedding_tiny;
+mod llama_tiny;
+mod paddleocr_vl;
+mod paddleocr_vl_tiny;
+mod qwen3_5_text_tiny;
