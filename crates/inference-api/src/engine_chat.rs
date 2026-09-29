@@ -233,6 +233,12 @@ pub async fn parse_request(
 
     // Validate that the requested model matches the loaded model
     validate_model_name(&oairequest.model, state.clone())?;
+    // Before any media is fetched, so a malformed generation ID costs no downloads.
+    let adapter = oairequest
+        .adapter
+        .clone()
+        .map(crate::lora_routing::core_adapter_selection)
+        .transpose()?;
 
     let mut enable_thinking = oairequest.enable_thinking;
     let mut reasoning_effort = oairequest.reasoning_effort.clone();
@@ -746,7 +752,7 @@ pub async fn parse_request(
             } else {
                 Some(oairequest.model.clone())
             },
-            adapter: oairequest.adapter.map(Into::into),
+            adapter,
             truncate_sequence: oairequest.truncate_sequence.unwrap_or(false),
         })),
         is_streaming,

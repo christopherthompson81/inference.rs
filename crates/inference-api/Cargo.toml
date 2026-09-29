@@ -13,6 +13,7 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+inference-protocol = { workspace = true, features = ["openai"] }
 anyhow.workspace = true
 base64.workspace = true
 candle-core.workspace = true

@@ -6,6 +6,10 @@ use inference_core::{InferenceRs, InferenceRsError, LoraAdapterInfo, LoraAdapter
 
 use crate::api_error::{ApiError, ApiErrorKind};
 
+// The shape a malformed generation had when the wire type rejected it during deserialization.
+const INVALID_REQUEST_BODY_CODE: &str = "invalid_request_body";
+const ADAPTER_PARAM: &str = "adapter";
+
 pub const DEFAULT_MODEL_ID: &str = "default";
 
 #[derive(Clone, Debug)]
@@ -138,9 +142,60 @@ pub fn resolve_lora_adapter_model(
         .map_err(ApiError::invalid_request)
 }
 
+/// The engine's adapter selection for a request's wire-level one; a malformed generation ID is a bad request.
+pub(crate) fn core_adapter_selection(
+    selection: crate::openai::AdapterSelection,
+) -> anyhow::Result<inference_core::AdapterSelection> {
+    Ok(match selection {
+        crate::openai::AdapterSelection::Alias(alias) => {
+            inference_core::AdapterSelection::alias(alias)
+        }
+        crate::openai::AdapterSelection::Generation(selection) => {
+            let generation = selection.generation.parse().map_err(|_| {
+                ApiError::new(
+                    ApiErrorKind::InvalidRequest,
+                    format!(
+                        "`{}` is not a LoRA adapter generation ID",
+                        selection.generation
+                    ),
+                    Some(INVALID_REQUEST_BODY_CODE),
+                    Some(ADAPTER_PARAM),
+                )
+            })?;
+            inference_core::AdapterSelection::generation(generation)
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adapter_selection_accepts_alias_and_exact_generation() {
+        let alias: crate::openai::AdapterSelection =
+            serde_json::from_value(serde_json::json!("production")).unwrap();
+        let alias = core_adapter_selection(alias).unwrap();
+        assert_eq!(
+            serde_json::to_value(alias).unwrap(),
+            serde_json::json!("production")
+        );
+
+        let generation = inference_core::AdapterGenerationId::from_bytes([0x5a; 32]);
+        let wire = serde_json::json!({"generation": generation.to_string()});
+        let exact: crate::openai::AdapterSelection = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(&exact).unwrap(), wire);
+        let exact = core_adapter_selection(exact).unwrap();
+        assert_eq!(exact.resolved_generation(), Some(generation));
+
+        let malformed =
+            serde_json::from_value(serde_json::json!({"generation": "not-a-generation"}));
+        let err = core_adapter_selection(malformed.unwrap()).unwrap_err();
+        let api_error = err.downcast_ref::<ApiError>().expect("an ApiError");
+        assert_eq!(api_error.kind, ApiErrorKind::InvalidRequest);
+        assert_eq!(api_error.code.as_deref(), Some(INVALID_REQUEST_BODY_CODE));
+        assert_eq!(api_error.param.as_deref(), Some(ADAPTER_PARAM));
+    }
 
     fn route(model_id: &str, alias: &str, generation: u8) -> LoraAdapterRoute {
         LoraAdapterRoute {

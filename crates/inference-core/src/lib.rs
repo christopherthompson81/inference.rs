@@ -222,7 +222,6 @@ pub use resource_plan::{
 pub use response::*;
 pub use sampler::{
     CustomLogitsProcessor, DrySamplingParams, ModelGenerationDefaults, SamplingParams, StopTokens,
-    TopLogprob,
 };
 pub use scheduler::{
     DefaultSchedulerMethod, SchedulerConfig, SchedulerLimits,

@@ -2,15 +2,17 @@
 
 use std::{collections::HashMap, ops::Deref};
 
+use crate::{
+    request::{
+        ApproximateUserLocation, ImageGenerationResponseFormat, LlguidanceGrammar, ReasoningEffort,
+        SearchContextSize, WebSearchContentType, WebSearchFilters, WebSearchImageSettings,
+        WebSearchOptions, WebSearchReturnTokenBudget, WebSearchUserLocation,
+    },
+    tools::{AllowedToolChoice, ToolChoice},
+    AgentPermission, CodeExecutionPermission, Tool, ToolType,
+};
 use anyhow::{bail, Result};
 use either::Either;
-use inference_core::{
-    AdapterGenerationId, AdapterSelection as CoreAdapterSelection, AgentPermission,
-    AllowedToolChoice, ApproximateUserLocation, CodeExecutionPermission,
-    ImageGenerationResponseFormat, LlguidanceGrammar, ReasoningEffort, SearchContextSize, Tool,
-    ToolChoice, ToolType, WebSearchContentType, WebSearchFilters, WebSearchImageSettings,
-    WebSearchOptions, WebSearchReturnTokenBudget, WebSearchUserLocation,
-};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use utoipa::{
@@ -353,7 +355,7 @@ pub struct AdapterGenerationSelection {
         value_type = String,
         example = "5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a"
     )]
-    pub generation: AdapterGenerationId,
+    pub generation: String,
 }
 
 /// A request-scoped LoRA adapter alias or exact immutable generation.
@@ -364,15 +366,6 @@ pub enum AdapterSelection {
     Alias(String),
     /// Pin this exact resident generation.
     Generation(AdapterGenerationSelection),
-}
-
-impl From<AdapterSelection> for CoreAdapterSelection {
-    fn from(selection: AdapterSelection) -> Self {
-        match selection {
-            AdapterSelection::Alias(alias) => Self::alias(alias),
-            AdapterSelection::Generation(selection) => Self::generation(selection.generation),
-        }
-    }
 }
 
 /// Default value helper
@@ -702,7 +695,7 @@ impl OpenAiResponsesFunctionTool {
     fn into_core_tool(self) -> Tool {
         Tool {
             tp: ToolType::Function,
-            function: inference_core::Function {
+            function: crate::Function {
                 description: self.description,
                 name: self.name,
                 parameters: self.parameters,
@@ -1218,7 +1211,7 @@ pub struct ChatCompletionRequest {
     /// Required output files. The runtime asks the model to produce them and surfaces a `File` (or error placeholder) for each.
     #[serde(default)]
     #[schema(value_type = Option<Vec<serde_json::Value>>)]
-    pub files: Option<Vec<inference_core::RequestedFile>>,
+    pub files: Option<Vec<crate::files::RequestedFile>>,
 
     // inference.rs additional
     /// Sample only from the k most likely tokens.
@@ -2150,25 +2143,6 @@ mod tests {
         assert_eq!(chat.seed, Some(42));
         assert_eq!(completion.seed, Some(43));
         assert_eq!(responses.seed, Some(44));
-    }
-
-    #[test]
-    fn adapter_selection_accepts_alias_and_exact_generation() {
-        let alias: AdapterSelection = serde_json::from_value(json!("production")).unwrap();
-        let alias: CoreAdapterSelection = alias.into();
-        assert_eq!(serde_json::to_value(alias).unwrap(), json!("production"));
-
-        let generation = AdapterGenerationId::from_bytes([0x5a; 32]);
-        let wire = json!({"generation": generation.to_string()});
-        let exact: AdapterSelection = serde_json::from_value(wire.clone()).unwrap();
-        assert_eq!(serde_json::to_value(&exact).unwrap(), wire);
-        let exact: CoreAdapterSelection = exact.into();
-        assert_eq!(exact.resolved_generation(), Some(generation));
-
-        assert!(serde_json::from_value::<AdapterSelection>(json!({
-            "generation": "not-a-generation"
-        }))
-        .is_err());
     }
 
     fn assert_tool_roundtrips(value: serde_json::Value) -> OpenAiTool {

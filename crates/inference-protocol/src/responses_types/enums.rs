@@ -1,6 +1,6 @@
 //! Enum types for the OpenResponses API.
 
-pub use inference_core::ReasoningEffort;
+pub use crate::request::ReasoningEffort;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
