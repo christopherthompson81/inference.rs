@@ -282,3 +282,27 @@ What in them costs core's compile, and what can leave?
       `use X;`; it now drops such lines.
     - Four stale `models-other` entries in core's `cfg` lists.
 - Next: qwen (PR 4).
+
+## Run 10 - 2026-09-29
+
+- Change: the qwen family, PR 4. Fourteen loaders moved into `inference-models-qwen/src/loaders/`:
+  - Qwen2, Qwen3, Qwen3-MoE, Qwen3-Next and the Qwen3.5 text loader;
+  - Qwen2-VL, Qwen2.5-VL, Qwen3-VL (dense and MoE), Qwen3.5 (dense and MoE), MiniCPM-o and Muse-Glimmer;
+  - the Qwen3 embedding loader, renamed `qwen3_embedding.rs` because the text loader is also `qwen3.rs`.
+
+  Details:
+  - The mover script gained `src:dst` renames, the embedding module's `pub use m::Loader;` form, and the
+    `super::super::` and `crate::VideoFrameSampling` rewrites.
+  - `QWEN3_VIDEO_SAMPLING` moved into the qwen prelude.
+  - The 8 factory impls moved into core's `vision_models/{qwen2vl,minicpmo,qwen3_vl,muse_glimmer}/processor.rs`. The
+    Qwen3-VL-MoE and Qwen3.5 impls now name `Qwen3VLProcessor` directly; their old names were aliases of it.
+  - Core's `vision_models/{qwen3_5,qwen3_5_moe,qwen3_vl_moe,qwen2_5_vl}` had no users left and were deleted. The other
+    four qwen vision modules keep only `processor`. The GGUF tests name `inference_models_qwen::qwen3_5::TextConfig`,
+    and `models::qwen*` is test-only.
+- Result:
+  - Core IR fell from 2,685,720 to 2,621,799 lines (-63.9k).
+  - Full CI green (2191 CPU and 2511 CUDA tests).
+  - The review found no correctness problems. Its nits were applied: a stale `models-qwen` gate on core's
+    `use crate::models`, the lint allows kept on the trimmed modules, and blank lines and import groups in the
+    processor files.
+- Next: llama (PR 5).

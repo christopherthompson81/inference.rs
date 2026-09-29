@@ -1,9 +1,7 @@
 use super::*;
-use crate::vision_models::qwen2vl::inputs_processor::{IMAGE_PAD, VISION_END, VISION_START};
+use crate::qwen2vl::inputs_processor::{IMAGE_PAD, VISION_END, VISION_START};
 
-/// [`MultimodalLoader`] for an Qwen2-VL model.
-///
-/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
+/// `MultimodalLoader` for an Qwen2-VL model.
 pub struct Qwen2VLLoader;
 
 pub struct Qwen2VLPrefixer;
@@ -52,18 +50,6 @@ impl MultimodalModelLoader for Qwen2VLLoader {
             input: vec![SupportedModality::Text, SupportedModality::Vision],
             output: vec![SupportedModality::Text],
         })
-    }
-}
-
-impl MultimodalProcessorFactory for Qwen2VLLoader {
-    fn get_processor(
-        &self,
-        _model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(Qwen2VLProcessor::new(max_edge))
     }
 }
 

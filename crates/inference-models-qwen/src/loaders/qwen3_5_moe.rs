@@ -1,18 +1,30 @@
 use super::*;
 
-/// [`MultimodalLoader`] for a Qwen3VLMoE model.
-///
-/// [`MultimodalLoader`]: crate::pipeline::MultimodalLoader
-pub struct Qwen3VLMoELoader;
+/// `MultimodalLoader` for a Qwen3.5 MoE (hybrid GDN + full attention) model.
+pub struct Qwen3_5MoeLoader;
 
-pub struct Qwen3VLMoEPrefixer;
+pub struct Qwen3_5MoePrefixer;
 
-impl MultimodalPromptPrefixer for Qwen3VLMoEPrefixer {
+impl MultimodalPromptPrefixer for Qwen3_5MoePrefixer {
     // No-op: With MessagesAction::Keep, the chat template handles image tokens
     // when it sees {"type": "image"} entries in the content.
 }
 
-impl MultimodalModelLoader for Qwen3VLMoELoader {
+impl MultimodalModelLoader for Qwen3_5MoeLoader {
+    fn runtime_config<'a>(
+        &self,
+        config: &'a str,
+        max_model_len: Option<usize>,
+    ) -> Result<Cow<'a, str>> {
+        match max_model_len {
+            Some(max_model_len) => Ok(Cow::Owned(crate::qwen3_5::config::apply_max_model_len(
+                config,
+                max_model_len,
+            )?)),
+            None => Ok(Cow::Borrowed(config)),
+        }
+    }
+
     fn load(
         &self,
         config: &str,
@@ -20,8 +32,8 @@ impl MultimodalModelLoader for Qwen3VLMoELoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg = Qwen3VLMoEConfig::from_json(config)?;
-        Ok(Box::new(Qwen3VLMoEModel::new(
+        let cfg = Qwen3_5MoeConfig::from_json(config)?;
+        Ok(Box::new(Qwen3_5MoeModel::new(
             &cfg,
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
@@ -30,7 +42,7 @@ impl MultimodalModelLoader for Qwen3VLMoELoader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let config = Qwen3VLMoEConfig::from_json(config)?;
+        let config = Qwen3_5MoeConfig::from_json(config)?;
         Ok(Box::new(config))
     }
     fn supports_paged_attention(&self, _config: &str) -> bool {
@@ -43,9 +55,9 @@ impl MultimodalModelLoader for Qwen3VLMoELoader {
         true
     }
     fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
-        Arc::new(Qwen3VLMoEPrefixer)
+        Arc::new(Qwen3_5MoePrefixer)
     }
-    fn video_frame_sampling(&self, _config: &str) -> crate::VideoFrameSampling {
+    fn video_frame_sampling(&self, _config: &str) -> VideoFrameSampling {
         QWEN3_VIDEO_SAMPLING
     }
     fn modalities(&self, _config: &str) -> Result<Modalities> {
@@ -60,19 +72,7 @@ impl MultimodalModelLoader for Qwen3VLMoELoader {
     }
 }
 
-impl MultimodalProcessorFactory for Qwen3VLMoELoader {
-    fn get_processor(
-        &self,
-        _model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        _preprocessor_config: PreProcessorConfig,
-        max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        Arc::new(Qwen3VLMoEProcessor::new(max_edge))
-    }
-}
-
-impl IsqModelLoader for Qwen3VLMoELoader {
+impl IsqModelLoader for Qwen3_5MoeLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
             r"^(language_model\.model|model\.language_model)\.embed_tokens\.weight$",
@@ -83,22 +83,28 @@ impl IsqModelLoader for Qwen3VLMoELoader {
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[
             r"lm_head\.(weight|bias)$",
-            // Attention
+            // Full attention projections
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.self_attn\.k_proj\.(weight|bias)$",
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.self_attn\.v_proj\.(weight|bias)$",
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
-            // MLP (dense layers)
-            r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$",
-            r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$",
-            r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$",
-            // MoE router
-            r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.gate\.(weight|bias)$",
-            // MoE experts - now unpacked into individual experts
+            // GDN linear attention projections
+            r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.linear_attn\.in_proj_qkv\.(weight|bias)$",
+            r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.linear_attn\.in_proj_z\.(weight|bias)$",
+            r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.linear_attn\.in_proj_b\.(weight|bias)$",
+            r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.linear_attn\.in_proj_a\.(weight|bias)$",
+            r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.linear_attn\.out_proj\.(weight|bias)$",
+            // MoE experts
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.experts\.(\d+)\.gate_proj\.(weight|bias)$",
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.experts\.(\d+)\.up_proj\.(weight|bias)$",
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.(weight|bias)$",
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
+            r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.experts\.gate_up_proj\.weight$",
+            r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.experts\.down_proj\.weight$",
+            // Shared expert
+            r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.shared_expert\.gate_proj\.(weight|bias)$",
+            r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.shared_expert\.up_proj\.(weight|bias)$",
+            r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.shared_expert\.down_proj\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
@@ -111,6 +117,8 @@ impl IsqModelLoader for Qwen3VLMoELoader {
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.experts\.(\d+)\.up_proj\.(weight|bias)$",
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.(weight|bias)$",
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
+            r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.experts\.gate_up_proj\.weight$",
+            r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.experts\.down_proj\.weight$",
         ])
     }
     fn immediate_isq_predicates_moqe(&self, config: &str) -> Result<Vec<Regex>> {
@@ -118,7 +126,7 @@ impl IsqModelLoader for Qwen3VLMoELoader {
     }
 }
 
-impl DeviceMappedModelLoader for Qwen3VLMoELoader {
+impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
     fn mapped_max_act_size_elems(
         &self,
         config: &str,
@@ -134,14 +142,11 @@ impl DeviceMappedModelLoader for Qwen3VLMoELoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg = Qwen3VLMoEConfig::from_json(config)?;
+        let cfg = Qwen3_5MoeConfig::from_json(config)?;
 
-        // For images, grid_t=1. After spatial merging, grid_h and grid_w are reduced.
         let img_seq_len = {
             let cfg = &cfg.vision_config;
-            // grid_t is 1 for images (temporal dimension is for video only)
             let grid_t = 1;
-            // After patch embedding and spatial merge, the effective grid dimensions are reduced
             let grid_h = (max_image_shape.0 / cfg.patch_size) / cfg.spatial_merge_size;
             let grid_w = (max_image_shape.1 / cfg.patch_size) / cfg.spatial_merge_size;
             grid_t * grid_h * grid_w * max_num_images
@@ -149,7 +154,6 @@ impl DeviceMappedModelLoader for Qwen3VLMoELoader {
 
         let max_text_attn = {
             let cfg = &cfg.text_config;
-            // This model injects the vision information directly into the input embeddings
             let max_seq_len = img_seq_len + max_seq_len.min(&ATTENTION_CHUNK_SIZE);
             max_batch_size * cfg.num_attention_heads * max_seq_len * max_seq_len
         };
@@ -171,12 +175,10 @@ impl DeviceMappedModelLoader for Qwen3VLMoELoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg = Qwen3VLMoEConfig::from_json(config)?;
+        let cfg = Qwen3_5MoeConfig::from_json(config)?;
 
-        // For the vision encoder, before spatial merging
         let img_seq_len = {
             let cfg = &cfg.vision_config;
-            // grid_t is 1 for images
             let grid_t = 1;
             let grid_h = max_image_shape.0 / cfg.patch_size;
             let grid_w = max_image_shape.1 / cfg.patch_size;
@@ -197,7 +199,7 @@ impl DeviceMappedModelLoader for Qwen3VLMoELoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = Qwen3VLMoEConfig::from_json(config)?;
+        let cfg = Qwen3_5MoeConfig::from_json(config)?;
         let tie = cfg.tie_word_embeddings;
         let text_elems = {
             let cfg = &cfg.text_config;
@@ -230,11 +232,9 @@ impl DeviceMappedModelLoader for Qwen3VLMoELoader {
             let mlp0 = hidden_size * hidden_size + hidden_size;
             let mlp2 = hidden_size * cfg.out_hidden_size + cfg.out_hidden_size;
 
-            // Main merger: norm uses cfg.hidden_size
             let ln_q = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
             let merger = mlp0 + mlp2 + ln_q;
 
-            // Deepstack mergers: norm uses merged hidden_size
             let ds_ln = hidden_size + bias_if!(true, hidden_size);
             let ds_merger = mlp0 + mlp2 + ds_ln;
             let deepstack = cfg.deepstack_visual_indexes.len() * ds_merger;
@@ -267,7 +267,6 @@ impl DeviceMappedModelLoader for Qwen3VLMoELoader {
             let norm1 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
             let norm2 = cfg.hidden_size + bias_if!(true, cfg.hidden_size);
 
-            #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
             let fc1 = cfg.hidden_size * cfg.intermediate_size + cfg.intermediate_size;
             let fc2 = cfg.hidden_size * cfg.intermediate_size + cfg.hidden_size;
 
@@ -293,33 +292,59 @@ impl DeviceMappedModelLoader for Qwen3VLMoELoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = Qwen3VLMoEConfig::from_json(config)?;
+        let cfg = Qwen3_5MoeConfig::from_json(config)?;
         let text_cfg = &cfg.text_config;
+        let layer_types = text_cfg.layer_types();
 
         let mut layer_sizes = Vec::with_capacity(text_cfg.num_hidden_layers);
 
-        for layer_idx in 0..text_cfg.num_hidden_layers {
+        for layer_type in &layer_types {
             let input_layernorm = text_cfg.hidden_size;
             let post_attention_layernorm = text_cfg.hidden_size;
 
-            let size_in = text_cfg.hidden_size;
-            let size_q = text_cfg.head_dim * text_cfg.num_attention_heads;
-            let size_kv = text_cfg.head_dim * text_cfg.num_key_value_heads;
-            let q_proj = size_in * size_q / weight_pack_factor;
-            let k_proj = size_in * size_kv / weight_pack_factor;
-            let v_proj = size_in * size_kv / weight_pack_factor;
-            let o_proj = size_q * size_in / weight_pack_factor;
+            let attn_elems = match layer_type {
+                crate::qwen3_5_moe::config::LayerType::FullAttention => {
+                    let size_in = text_cfg.hidden_size;
+                    let size_q = text_cfg.head_dim * text_cfg.num_attention_heads;
+                    let size_kv = text_cfg.head_dim * text_cfg.num_key_value_heads;
+                    let q_proj = size_in * size_q * 2 / weight_pack_factor;
+                    let k_proj = size_in * size_kv / weight_pack_factor;
+                    let v_proj = size_in * size_kv / weight_pack_factor;
+                    let o_proj = size_q * size_in / weight_pack_factor;
+                    let q_norm = text_cfg.head_dim;
+                    let k_norm = text_cfg.head_dim;
+                    q_proj + k_proj + v_proj + o_proj + q_norm + k_norm
+                }
+                crate::qwen3_5_moe::config::LayerType::LinearAttention => {
+                    let hidden = text_cfg.hidden_size;
+                    let value_dim = text_cfg.linear_value_dim();
+                    let conv_dim = text_cfg.linear_conv_dim();
+                    let in_proj_qkv = hidden * conv_dim / weight_pack_factor;
+                    let in_proj_z = hidden * value_dim / weight_pack_factor;
+                    let in_proj_ba =
+                        hidden * (text_cfg.linear_num_value_heads * 2) / weight_pack_factor;
+                    // out_proj: value_dim -> hidden
+                    let out_proj = value_dim * hidden / weight_pack_factor;
+                    // conv1d weight
+                    let conv1d = conv_dim * text_cfg.linear_conv_kernel_dim;
+                    // dt_bias, A_log, norm weight
+                    let dt_bias = text_cfg.linear_num_value_heads;
+                    let a_log = text_cfg.linear_num_value_heads;
+                    // RmsNormGated over per-head value dim
+                    let norm = text_cfg.linear_value_head_dim;
+                    in_proj_qkv
+                        + in_proj_z
+                        + in_proj_ba
+                        + out_proj
+                        + conv1d
+                        + dt_bias
+                        + a_log
+                        + norm
+                }
+            };
 
-            let q_norm = text_cfg.head_dim;
-            let k_norm = text_cfg.head_dim;
-
-            // Check if this is a MoE layer
-            let is_moe = !text_cfg.mlp_only_layers.contains(&layer_idx)
-                && (text_cfg.num_experts > 0
-                    && (layer_idx + 1) % text_cfg.decoder_sparse_step == 0);
-
-            let mlp_elems = if is_moe {
-                // MoE layer: gate + experts
+            // All layers have MoE
+            let moe_elems = {
                 let gate = text_cfg.hidden_size * text_cfg.num_experts;
                 let per_expert = {
                     let h_size = text_cfg.hidden_size;
@@ -329,26 +354,20 @@ impl DeviceMappedModelLoader for Qwen3VLMoELoader {
                     let down_proj = i_size * h_size / weight_pack_factor;
                     gate_proj + up_proj + down_proj
                 };
-                gate + per_expert * text_cfg.num_experts
-            } else {
-                // Dense MLP layer
-                let h_size = text_cfg.hidden_size;
-                let i_size = text_cfg.intermediate_size;
-                let gate_proj = h_size * i_size / weight_pack_factor;
-                let up_proj = h_size * i_size / weight_pack_factor;
-                let down_proj = i_size * h_size / weight_pack_factor;
-                gate_proj + up_proj + down_proj
+                let shared_expert = {
+                    let h_size = text_cfg.hidden_size;
+                    let i_size = text_cfg.shared_expert_intermediate_size;
+                    let gate_proj = h_size * i_size / weight_pack_factor;
+                    let up_proj = h_size * i_size / weight_pack_factor;
+                    let down_proj = i_size * h_size / weight_pack_factor;
+                    gate_proj + up_proj + down_proj
+                };
+                let shared_expert_gate = text_cfg.hidden_size;
+                gate + per_expert * text_cfg.num_experts + shared_expert + shared_expert_gate
             };
 
-            let per_layer_elems = input_layernorm
-                + post_attention_layernorm
-                + q_proj
-                + k_proj
-                + v_proj
-                + o_proj
-                + q_norm
-                + k_norm
-                + mlp_elems;
+            let per_layer_elems =
+                input_layernorm + post_attention_layernorm + attn_elems + moe_elems;
 
             layer_sizes.push(per_layer_elems * dtype.size_in_bytes());
         }
@@ -356,27 +375,35 @@ impl DeviceMappedModelLoader for Qwen3VLMoELoader {
         Ok(layer_sizes)
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg = Qwen3VLMoEConfig::from_json(config)?;
-        let cfg = &cfg.text_config;
-        Ok(cfg.num_hidden_layers)
+        let cfg = Qwen3_5MoeConfig::from_json(config)?;
+        Ok(cfg.text_config.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = Qwen3VLMoEConfig::from_json(config)?;
+        let cfg = Qwen3_5MoeConfig::from_json(config)?;
         let cfg = &cfg.text_config;
 
-        let cfg = ModelConfigMetadata {
+        let base = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,
             num_layers: cfg.num_hidden_layers,
             hidden_size: cfg.hidden_size,
             num_kv_heads: cfg.num_key_value_heads,
             num_attn_heads: cfg.num_attention_heads,
-            sliding_window: cfg.sliding_window,
+            sliding_window: None,
             k_head_dim: cfg.head_dim,
             v_head_dim: cfg.head_dim,
             kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
-        Ok(Box::new(cfg))
+        let paged_layers = cfg
+            .layer_types()
+            .into_iter()
+            .map(|ty| matches!(ty, crate::qwen3_5_moe::config::LayerType::FullAttention))
+            .collect();
+
+        Ok(Box::new(
+            HybridPagedKvCacheConfig::new(base, paged_layers)
+                .with_uniform_prefix_prefill_attention_features(Default::default()),
+        ))
     }
 
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {

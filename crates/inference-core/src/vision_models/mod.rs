@@ -17,8 +17,6 @@ pub(crate) mod paddleocr_vl;
 #[cfg(feature = "models-phi")]
 pub(crate) mod phi3;
 #[cfg(feature = "models-qwen")]
-pub(crate) mod qwen2_5_vl;
-#[cfg(feature = "models-qwen")]
 pub(crate) mod qwen2vl;
 #[cfg(feature = "models-llama")]
 pub(crate) use llava::llava15;
@@ -47,13 +45,7 @@ pub(crate) mod muse_glimmer;
 #[cfg(feature = "models-phi")]
 pub(crate) mod phi4;
 #[cfg(feature = "models-qwen")]
-pub(crate) mod qwen3_5;
-#[cfg(feature = "models-qwen")]
-pub(crate) mod qwen3_5_moe;
-#[cfg(feature = "models-qwen")]
 pub(crate) mod qwen3_vl;
-#[cfg(feature = "models-qwen")]
-pub(crate) mod qwen3_vl_moe;
 #[cfg(feature = "models-llama")]
 pub(crate) mod voxtral;
 

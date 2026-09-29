@@ -8,6 +8,7 @@ use crate::{
     matformer::{MatformerConfig, MatformerSliceConfig, Slice},
 };
 use candle_core::Device;
+use inference_models_qwen::muse_glimmer::Config as MuseGlimmerConfig;
 use inference_quant::IsqType;
 
 fn matches_any(regexes: &[Regex], name: &str) -> bool {

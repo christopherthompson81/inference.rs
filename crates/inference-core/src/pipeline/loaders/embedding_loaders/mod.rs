@@ -214,17 +214,13 @@ use inference_nn::bias_if;
 
 #[cfg(feature = "models-gemma")]
 inference_nn::boxed_loaders!(EmbeddingModelLoader: EmbeddingGemmaLoader);
-#[cfg(feature = "models-qwen")]
-inference_nn::boxed_loaders!(EmbeddingModelLoader: Qwen3EmbeddingLoader);
 
+#[cfg(feature = "models-qwen")]
+pub use inference_models_qwen::loaders::Qwen3EmbeddingLoader;
 #[cfg(feature = "models-gemma")]
 mod gemma;
 #[cfg(feature = "models-gemma")]
 pub use gemma::EmbeddingGemmaLoader;
-#[cfg(feature = "models-qwen")]
-mod qwen3;
-#[cfg(feature = "models-qwen")]
-pub use qwen3::Qwen3EmbeddingLoader;
 
 /// Load a model based on the Hugging Face Transformers -CausalLM model class
 pub struct AutoEmbeddingLoader;

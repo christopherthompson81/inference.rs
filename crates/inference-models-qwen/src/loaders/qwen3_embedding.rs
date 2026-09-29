@@ -1,53 +1,40 @@
 use super::*;
+use crate::qwen3_embedding::{Config as Qwen3EmbeddingConfig, Model as Qwen3EmbeddingModel};
 
-/// [`NormalLoader`] for a Qwen 2 model.
-///
-/// [`NormalLoader`]: crate::pipeline::NormalLoader
-pub struct Qwen2Loader;
+/// `EmbeddingModelLoader` for a Qwen 3 model.
+pub struct Qwen3EmbeddingLoader;
 
-impl NormalModelLoader for Qwen2Loader {
+impl EmbeddingModelLoader for Qwen3EmbeddingLoader {
     fn load(
         &self,
         config: &str,
         vb: ShardedVarBuilder,
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
-    ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        let cfg = crate::models::qwen2::Config::from_json(config)?;
+    ) -> Result<Box<dyn EmbeddingModel + Send + Sync>> {
+        let cfg = Qwen3EmbeddingConfig::from_json(config)?;
 
-        Ok(Box::new(models::qwen2::Model::new(
+        Ok(Box::new(Qwen3EmbeddingModel::new(
             &cfg,
             vb,
-            self.is_gptx_for(config, &normal_loading_metadata)?,
+            self.is_gptx(config)?,
             normal_loading_metadata,
             attention_mechanism,
         )?))
     }
-    fn load_xlora(
-        &self,
-        _config: &str,
-        _vb: ShardedVarBuilder,
-        _lora_config: &[((String, String), LoraConfig)],
-        _xlora_config: Option<XLoraConfig>,
-        _xlora_ordering: Ordering,
-        _normal_loading_metadata: NormalLoadingMetadata,
-        _preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
-    ) -> Result<Box<dyn NormalModel + Send + Sync>> {
-        todo!()
+    fn has_causal_attention(&self, _: &str) -> Result<bool> {
+        Ok(true)
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let cfg = crate::models::qwen2::Config::from_json(config)?;
+        let cfg = Qwen3EmbeddingConfig::from_json(config)?;
 
         Ok(Box::new(cfg))
     }
 }
 
-impl IsqModelLoader for Qwen2Loader {
+impl IsqModelLoader for Qwen3EmbeddingLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-        isq_regexes(&[
-            r"^model\.embed_tokens\.weight$",
-            r"^lm_head\.(weight|bias)$",
-        ])
+        isq_regexes(&[r"^embed_tokens\.weight$"])
     }
 
     fn isq_layer_regexes(&self, _config: &str) -> Result<Vec<Regex>> {
@@ -62,10 +49,6 @@ impl IsqModelLoader for Qwen2Loader {
             r"layers\.(\d+)\.mlp\.gate_proj\.(weight|bias)$",
             r"layers\.(\d+)\.mlp\.up_proj\.(weight|bias)$",
             r"layers\.(\d+)\.mlp\.down_proj\.(weight|bias)$",
-            // MLP MoE
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.gate_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.up_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.down_proj\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
@@ -73,27 +56,30 @@ impl IsqModelLoader for Qwen2Loader {
     }
 }
 
-impl DeviceMappedModelLoader for Qwen2Loader {
+impl DeviceMappedModelLoader for Qwen3EmbeddingLoader {
     fn non_mapped_size_in_bytes(
         &self,
         config: &str,
         dtype: DType,
         weight_pack_factor: usize,
-        quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
+        _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = crate::models::qwen2::Config::from_json(config)?;
-        standard_non_mapped_size_in_bytes(
-            LanguageModelEnds {
-                hidden_size: cfg.hidden_size,
-                vocab_size: cfg.vocab_size,
-                tie_word_embeddings: cfg.tie_word_embeddings,
-            },
-            quantization,
-            dtype,
-            weight_pack_factor,
-        )
+        let cfg = Qwen3EmbeddingConfig::from_json(config)?;
+        let elems = {
+            let embed_tokens_pack_factor = super::promoted_tensor_pack_factor(
+                _quantization,
+                "embed_tokens.weight",
+                dtype,
+                weight_pack_factor,
+            )?;
+            let embed_tokens = cfg.hidden_size * cfg.vocab_size / embed_tokens_pack_factor;
+            let norm = cfg.hidden_size;
+            embed_tokens + norm
+        };
+        Ok(elems * dtype.size_in_bytes())
     }
+
     fn layer_sizes_in_bytes(
         &self,
         config: &str,
@@ -101,15 +87,14 @@ impl DeviceMappedModelLoader for Qwen2Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = crate::models::qwen2::Config::from_json(config)?;
-
+        let cfg = Qwen3EmbeddingConfig::from_json(config)?;
         let per_layer_elems = {
             let input_layernorm = cfg.hidden_size;
             let post_attention_layernorm = cfg.hidden_size;
 
             let size_in = cfg.hidden_size;
-            let size_q = (cfg.hidden_size / cfg.num_attention_heads) * cfg.num_attention_heads;
-            let size_kv = (cfg.hidden_size / cfg.num_attention_heads) * cfg.num_key_value_heads;
+            let size_q = cfg.head_dim() * cfg.num_attention_heads;
+            let size_kv = cfg.head_dim() * cfg.num_key_value_heads;
             let q_proj = size_in * size_q / weight_pack_factor + size_q;
             let k_proj = size_in * size_kv / weight_pack_factor + size_kv;
             let v_proj = size_in * size_kv / weight_pack_factor + size_kv;
@@ -121,6 +106,9 @@ impl DeviceMappedModelLoader for Qwen2Loader {
             let up_proj = h_size * i_size / weight_pack_factor;
             let down_proj = i_size * h_size / weight_pack_factor;
 
+            let q_norm = cfg.head_dim();
+            let k_norm = cfg.head_dim();
+
             input_layernorm
                 + post_attention_layernorm
                 + q_proj
@@ -130,14 +118,17 @@ impl DeviceMappedModelLoader for Qwen2Loader {
                 + gate_proj
                 + up_proj
                 + down_proj
+                + q_norm
+                + k_norm
         };
         Ok(vec![
             per_layer_elems * dtype.size_in_bytes();
             cfg.num_hidden_layers
         ])
     }
+
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = crate::models::qwen2::Config::from_json(config)?;
+        let cfg = Qwen3EmbeddingConfig::from_json(config)?;
 
         let cfg = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,

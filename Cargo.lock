@@ -3163,6 +3163,7 @@ dependencies = [
  "inference-vision",
  "metrics",
  "rand 0.9.4",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

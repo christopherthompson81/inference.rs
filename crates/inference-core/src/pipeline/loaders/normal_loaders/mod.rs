@@ -6,7 +6,7 @@ use std::{
     str::FromStr,
 };
 
-use crate::{attention::ATTENTION_CHUNK_SIZE, matformer::MatformerSliceConfig};
+use crate::matformer::MatformerSliceConfig;
 
 use crate::{
     lora::{LoraConfig, Ordering},
@@ -24,11 +24,7 @@ use crate::pipeline::isq::isq_regexes;
 use regex::Regex;
 use serde::Deserialize;
 
-#[cfg(any(
-    feature = "models-gemma",
-    feature = "models-llama",
-    feature = "models-qwen"
-))]
+#[cfg(any(feature = "models-gemma", feature = "models-llama"))]
 use crate::models;
 #[cfg(any(feature = "models-gemma", feature = "models-llama"))]
 use crate::xlora_models;
@@ -38,8 +34,8 @@ use super::{AutoDeviceMapParams, DeviceMappedModelLoader};
 // Loaders reach these through `use super::*` (or as `super::X`); they live one level up, in `loaders`.
 #[cfg(feature = "models-gemma")]
 use super::tied_promoted_tensor_pack_factor;
-use super::{language_model_pack_factors_with_aliases, AutoDeviceMapQuantization};
-#[cfg(any(feature = "models-llama", feature = "models-qwen"))]
+use super::AutoDeviceMapQuantization;
+#[cfg(feature = "models-llama")]
 use super::{standard_non_mapped_size_in_bytes, LanguageModelEnds};
 
 pub use inference_nn::loaders::NormalModelLoader;
@@ -197,15 +193,6 @@ inference_nn::boxed_loaders!(
     MixtralLoader,
     SmolLm3Loader,
 );
-#[cfg(feature = "models-qwen")]
-inference_nn::boxed_loaders!(
-    NormalModelLoader:
-    Qwen2Loader,
-    Qwen3Loader,
-    Qwen3MoELoader,
-    Qwen3NextLoader,
-    Qwen3_5TextLoader,
-);
 #[cfg(feature = "models-other")]
 pub use inference_models_other::loaders::{
     DeepSeekV2Loader, DeepSeekV3Loader, GLM4Loader, GLM4MoeLiteLoader, GLM4MoeLoader, GptOssLoader,
@@ -213,6 +200,10 @@ pub use inference_models_other::loaders::{
 };
 #[cfg(feature = "models-phi")]
 pub use inference_models_phi::loaders::{Phi2Loader, Phi3Loader, Phi3_5MoELoader};
+#[cfg(feature = "models-qwen")]
+pub use inference_models_qwen::loaders::{
+    Qwen2Loader, Qwen3Loader, Qwen3MoELoader, Qwen3NextLoader, Qwen3_5TextLoader,
+};
 #[cfg(feature = "models-llama")]
 mod mistral;
 #[cfg(feature = "models-llama")]
@@ -229,34 +220,14 @@ pub use llama::*;
 mod mixtral;
 #[cfg(feature = "models-llama")]
 pub use mixtral::*;
-#[cfg(feature = "models-qwen")]
-mod qwen2;
-#[cfg(feature = "models-qwen")]
-pub use qwen2::*;
 #[cfg(feature = "models-gemma")]
 mod gemma2;
 #[cfg(feature = "models-gemma")]
 pub use gemma2::*;
-#[cfg(feature = "models-qwen")]
-mod qwen3;
-#[cfg(feature = "models-qwen")]
-pub use qwen3::*;
-#[cfg(feature = "models-qwen")]
-mod qwen3_moe;
-#[cfg(feature = "models-qwen")]
-pub use qwen3_moe::*;
 #[cfg(feature = "models-llama")]
 mod smollm3;
 #[cfg(feature = "models-llama")]
 pub use smollm3::*;
-#[cfg(feature = "models-qwen")]
-mod qwen3_next;
-#[cfg(feature = "models-qwen")]
-pub use qwen3_next::*;
-#[cfg(feature = "models-qwen")]
-mod qwen3_5_text;
-#[cfg(feature = "models-qwen")]
-pub use qwen3_5_text::*;
 
 #[cfg(all(
     test,

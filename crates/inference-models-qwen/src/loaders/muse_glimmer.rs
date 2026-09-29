@@ -103,23 +103,6 @@ impl MultimodalModelLoader for MuseGlimmerLoader {
     }
 }
 
-impl MultimodalProcessorFactory for MuseGlimmerLoader {
-    fn get_processor(
-        &self,
-        model_config: &str,
-        _processor_config: Option<ProcessorConfig>,
-        preprocessor_config: PreProcessorConfig,
-        max_edge: Option<u32>,
-    ) -> Arc<dyn Processor + Send + Sync> {
-        let cfg = MuseGlimmerConfig::from_json(model_config)
-            .expect("Failed to parse Muse-Glimmer config");
-        Arc::new(
-            MuseGlimmerProcessor::new(&preprocessor_config, max_edge, cfg.gguf_collapsed_temporal)
-                .expect("Failed to create Muse-Glimmer processor"),
-        )
-    }
-}
-
 impl IsqModelLoader for MuseGlimmerLoader {
     fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
         isq_regexes(&[

@@ -2890,7 +2890,7 @@ mod tests {
             NormalLoaderType::Qwen3_5 => assert_deserializes(
                 loader,
                 config,
-                crate::vision_models::qwen3_5::TextConfig::from_json,
+                inference_models_qwen::qwen3_5::TextConfig::from_json,
             ),
             NormalLoaderType::Lfm2 | NormalLoaderType::Lfm2Moe => {
                 assert_deserializes(loader, config, models::lfm2::Config::from_json)
@@ -3004,7 +3004,7 @@ mod tests {
         );
         assert_eq!(config[GDN_V_HEAD_LAYOUT_CONFIG_KEY], "tiled");
         let native =
-            crate::vision_models::qwen3_5::TextConfig::from_json(&config.to_string()).unwrap();
+            inference_models_qwen::qwen3_5::TextConfig::from_json(&config.to_string()).unwrap();
         assert_eq!(
             crate::gdn::GdnConfig::v_head_layout(&native),
             crate::gdn::GdnVHeadLayout::Tiled
