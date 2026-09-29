@@ -13,8 +13,8 @@
 
 use anyhow::Result;
 use inference::{
-    tool, AgentBuilder, AgentEvent, AgentStopReason, IsqBits, ModelBuilder,
-    PagedAttentionMetaBuilder,
+    AgentBuilder, AgentEvent, AgentStopReason, IsqBits, ModelBuilder, PagedAttentionMetaBuilder,
+    tool,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

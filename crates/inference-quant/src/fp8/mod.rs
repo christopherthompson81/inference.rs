@@ -1,6 +1,6 @@
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::{Arc, atomic::AtomicUsize};
 
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 use candle_nn::{Linear, Module};
 use quantize::QuantizationResult;
 use safetensors::tensor::Dtype;
@@ -9,10 +9,10 @@ mod quantize;
 
 use crate::uqff::{UqffHeaderMatch, UqffLayerHeaderView};
 use crate::{
-    cublaslt::{maybe_init_cublas_lt_wrapper, CUBLASLT_CONTROLLER},
-    utils::{dtype_to_uqff_code, uqff_code_to_dtype},
     IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedSerde, QuantizedSerdeType,
     Shard, UqffReader, UqffTensor,
+    cublaslt::{CUBLASLT_CONTROLLER, maybe_init_cublas_lt_wrapper},
+    utils::{dtype_to_uqff_code, uqff_code_to_dtype},
 };
 
 #[derive(Debug)]

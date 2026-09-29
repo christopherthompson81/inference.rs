@@ -8,22 +8,22 @@ use num_traits::ToPrimitive;
 use serde_json::Value;
 
 use crate::{
+    AgentPermission, AgentToolApproval, AgentToolApprovalCallback, AgentToolApprovalDecision,
+    AgentToolApprovalHandler, AgentToolKind, AgentToolMetadata, AgentToolSource, MessageContent,
+    NormalRequest, RequestMessage, Response, ToolCallResponse, ToolChoice, Usage, WebSearchOptions,
     files::{
-        compose_tool_response_with_files, file_to_tool_input_file, input_files_message,
-        merge_required_outputs_into_args, required_files_tool_addendum, tool_file_to_file, File,
-        RequestedFile,
+        File, RequestedFile, compose_tool_response_with_files, file_to_tool_input_file,
+        input_files_message, merge_required_outputs_into_args, required_files_tool_addendum,
+        tool_file_to_file,
     },
     get_mut_arcmutex,
     pipeline::SupportedModality,
     response::{AgenticToolCallData, AgenticToolCallPhase},
-    search, AgentPermission, AgentToolApproval, AgentToolApprovalCallback,
-    AgentToolApprovalDecision, AgentToolApprovalHandler, AgentToolKind, AgentToolMetadata,
-    AgentToolSource, MessageContent, NormalRequest, RequestMessage, Response, ToolCallResponse,
-    ToolChoice, Usage, WebSearchOptions,
+    search,
 };
 
-use super::file_tools::{do_list_files, do_read_file};
 use super::Engine;
+use super::file_tools::{do_list_files, do_read_file};
 
 /// Default cap on tool-use rounds when the request doesn't set one.
 pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 256;
@@ -1229,13 +1229,13 @@ pub(super) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
         }
     }
 
-    if let Some(addendum) = required_files_tool_addendum(&required_files) {
-        if let Some(tools) = probe.tools.as_mut() {
-            for t in tools.iter_mut() {
-                if is_code_exec_tool(&t.function.name) || is_shell_tool(&t.function.name) {
-                    let desc = t.function.description.get_or_insert_with(String::new);
-                    desc.push_str(&addendum);
-                }
+    if let Some(addendum) = required_files_tool_addendum(&required_files)
+        && let Some(tools) = probe.tools.as_mut()
+    {
+        for t in tools.iter_mut() {
+            if is_code_exec_tool(&t.function.name) || is_shell_tool(&t.function.name) {
+                let desc = t.function.description.get_or_insert_with(String::new);
+                desc.push_str(&addendum);
             }
         }
     }
@@ -1421,10 +1421,8 @@ pub(super) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                                 round_reasoning_content.push_str(reasoning_content);
                             }
                             let is_final = first_choice.finish_reason.is_some();
-                            if is_final {
-                                if let Some(usage) = &chunk.usage {
-                                    usage_accumulator.add(usage);
-                                }
+                            if is_final && let Some(usage) = &chunk.usage {
+                                usage_accumulator.add(usage);
                             }
                             if first_choice.delta.tool_calls.is_none() {
                                 if is_final {
@@ -1534,7 +1532,7 @@ pub(super) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{tools::ToolCallType, CalledFunction};
+    use crate::{CalledFunction, tools::ToolCallType};
 
     #[tokio::test]
     async fn client_disconnect_drops_the_internal_response_bridge() {

@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
-use inference_quant::{linear_b, Convolution, QuantMethod, ShardedVarBuilder};
+use candle_core::{D, DType, Device, IndexOp, Module, Result, Tensor};
+use inference_quant::{Convolution, QuantMethod, ShardedVarBuilder, linear_b};
 
 use crate::attention::AttentionMask;
 use crate::{

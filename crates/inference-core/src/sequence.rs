@@ -1,21 +1,20 @@
 use crate::paged_attention::PagedAttentionMeta;
 use crate::{
-    get_mut_arcmutex, get_mut_group,
+    AdapterGenerationId, AdapterLease, AudioInput, ChatCompletionResponse, PromptTokensDetails,
+    Usage, VideoInput, get_mut_arcmutex, get_mut_group,
     paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
     pipeline::LayerCaches,
     reasoning_parsers::{ReasoningMode, ReasoningParser},
     response::{ChatCompletionChunkResponse, Choice, ChunkChoice, Response, SYSTEM_FINGERPRINT},
     sampler::{Logprobs, Sampler},
     speculative::{SpeculativeProposalDistribution, SpeculativeTokens},
-    AdapterGenerationId, AdapterLease, AudioInput, ChatCompletionResponse, PromptTokensDetails,
-    Usage, VideoInput,
 };
 use crate::{
+    CompletionChunkChoice, CompletionChunkResponse, CompletionResponse, ImageChoice,
+    ImageGenerationResponse, ImageGenerationResponseFormat,
     pipeline::{DiffusionGenerationParams, KvCache},
     response::CompletionChoice,
     tools::ToolCallState,
-    CompletionChunkChoice, CompletionChunkResponse, CompletionResponse, ImageChoice,
-    ImageGenerationResponse, ImageGenerationResponseFormat,
 };
 use candle_core::Tensor;
 use rand::SeedableRng;
@@ -29,12 +28,12 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::{
-    mpsc::{error::SendError, Sender},
     Mutex, MutexGuard,
+    mpsc::{Sender, error::SendError},
 };
 
 pub(crate) use inference_nn::media_inputs::media::{
-    clamp_prefix_cache_len_for_mm_features, MultimodalData,
+    MultimodalData, clamp_prefix_cache_len_for_mm_features,
 };
 
 /// What an image-generation request asked for; the media and input-processor state live in `MultimodalData`.
@@ -916,10 +915,10 @@ impl Sequence {
 
     fn commit_stop_pending_prefix(&mut self, len: usize) {
         debug_assert!(len <= self.stop_pending_bytes.len());
-        if len > 0 {
-            if let Some(parser) = self.reasoning_parser.as_mut() {
-                parser.process_bytes(&self.stop_pending_bytes[..len]);
-            }
+        if len > 0
+            && let Some(parser) = self.reasoning_parser.as_mut()
+        {
+            parser.process_bytes(&self.stop_pending_bytes[..len]);
         }
         self.completion_bytes
             .extend_from_slice(&self.stop_pending_bytes[..len]);
@@ -1994,7 +1993,7 @@ impl SequenceGroup {
 mod tests {
     use super::*;
     use crate::tools::{
-        state::required_tool_call_deadline_tokens, ToolCallFormat, ToolCallState, ToolChoice,
+        ToolCallFormat, ToolCallState, ToolChoice, state::required_tool_call_deadline_tokens,
     };
     use crate::{Function, Tool, ToolType};
     use rand::RngCore;
@@ -2662,11 +2661,12 @@ mod tests {
         let mut seq = seq.prefill_v2_normal(vec![], vec![7, 8], 0);
         seq.set_num_computed_tokens(seq.len());
         seq.update_time_info();
-        assert!(seq
-            .get_mut_group()
-            .get_usage()
-            .prompt_tokens_details
-            .is_none());
+        assert!(
+            seq.get_mut_group()
+                .get_usage()
+                .prompt_tokens_details
+                .is_none()
+        );
     }
 
     #[test]

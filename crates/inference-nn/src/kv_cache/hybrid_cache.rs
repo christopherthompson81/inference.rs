@@ -1452,11 +1452,12 @@ impl HybridCache {
             .iter()
             .filter(|owner| owner.is_some())
             .count();
-        debug_assert!(self
-            .caches
-            .iter()
-            .filter_map(HybridLayerCache::as_recurrent_pool)
-            .all(|pool| pool.capacity() - pool.num_free_slots() == used));
+        debug_assert!(
+            self.caches
+                .iter()
+                .filter_map(HybridLayerCache::as_recurrent_pool)
+                .all(|pool| pool.capacity() - pool.num_free_slots() == used)
+        );
         used
     }
 
@@ -1970,13 +1971,12 @@ impl HybridCache {
             Some(owner) => candle_core::bail!(
                 "cannot release recurrent state slot {slot_idx} for sequence {sequence_id}: owned by {owner:?}"
             ),
-            None
-                if self
-                    .last_released_sequence_owners
-                    .get(slot_idx)
-                    .copied()
-                    .flatten()
-                    == Some(sequence_id) =>
+            None if self
+                .last_released_sequence_owners
+                .get(slot_idx)
+                .copied()
+                .flatten()
+                == Some(sequence_id) =>
             {
                 return Ok(false);
             }
@@ -2328,10 +2328,10 @@ impl HybridCache {
     }
 
     pub fn state_indices_for_device(&self, device: &Device) -> Option<Tensor> {
-        if let Some(indices) = &self.state_indices {
-            if indices.device().same_device(device) {
-                return Some(indices.clone());
-            }
+        if let Some(indices) = &self.state_indices
+            && indices.device().same_device(device)
+        {
+            return Some(indices.clone());
         }
         self.device_state_indices
             .iter()
@@ -2352,10 +2352,10 @@ impl HybridCache {
             Some(HybridLayerCache::Recurrent(pool)) => pool.device().clone(),
             _ => return Ok(None),
         };
-        if let Some(indices) = &self.state_indices {
-            if indices.device().same_device(&device) {
-                return Ok(Some(indices.clone()));
-            }
+        if let Some(indices) = &self.state_indices
+            && indices.device().same_device(&device)
+        {
+            return Ok(Some(indices.clone()));
         }
         if let Some((_, indices)) = self
             .device_state_indices
@@ -2546,9 +2546,11 @@ mod tests {
         };
 
         let error = cache.allocate_seq(10).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("failed to reset recurrent state slot"));
+        assert!(
+            error
+                .to_string()
+                .contains("failed to reset recurrent state slot")
+        );
         assert_eq!(cache.recurrent_slots_used(), 0);
         for layer in [0, 1] {
             let HybridLayerCache::Recurrent(pool) = cache.get(layer).unwrap() else {
@@ -2600,9 +2602,11 @@ mod tests {
         assert!(cache.reserve_recurrent_capacity(17)?);
         assert!(!cache.pristine_zero_slots[slot]);
         assert!(!cache.pristine_zero_slots[deferred_slot]);
-        assert!(cache.pristine_zero_slots[2..]
-            .iter()
-            .all(|&pristine| pristine));
+        assert!(
+            cache.pristine_zero_slots[2..]
+                .iter()
+                .all(|&pristine| pristine)
+        );
 
         cache.reset()?;
         assert_eq!(cache.pristine_zero_slots, vec![true; 17]);
@@ -2896,12 +2900,14 @@ mod tests {
             &[Device::Cpu, Device::Cpu, Device::Cpu],
         )?;
         let depth = crate::cuda::gdn::GDN_DEFERRED_STATE_DEPTH;
-        assert!(cache
-            .reserve_gdn_deferred_state(GdnDeferredStateSpec {
-                num_k_heads: 1,
-                depth: depth - 1,
-            })
-            .is_err());
+        assert!(
+            cache
+                .reserve_gdn_deferred_state(GdnDeferredStateSpec {
+                    num_k_heads: 1,
+                    depth: depth - 1,
+                })
+                .is_err()
+        );
         let spec = GdnDeferredStateSpec {
             num_k_heads: 1,
             depth,
@@ -3058,18 +3064,20 @@ mod tests {
             assert_eq!(pool.conv_state.dims(), &[51, 2, 3]);
             assert_eq!(pool.recurrent_state.dims(), &[51, 2, 2]);
             assert_eq!(pool.num_free_slots(), 17);
-            assert!(pool
-                .conv_state
-                .flatten_all()?
-                .to_vec1::<f32>()?
-                .iter()
-                .all(|value| *value == 0.0));
-            assert!(pool
-                .recurrent_state
-                .flatten_all()?
-                .to_vec1::<f32>()?
-                .iter()
-                .all(|value| *value == 0.0));
+            assert!(
+                pool.conv_state
+                    .flatten_all()?
+                    .to_vec1::<f32>()?
+                    .iter()
+                    .all(|value| *value == 0.0)
+            );
+            assert!(
+                pool.recurrent_state
+                    .flatten_all()?
+                    .to_vec1::<f32>()?
+                    .iter()
+                    .all(|value| *value == 0.0)
+            );
         }
         assert!(cache.configure_checkpoint_lanes(4).is_err());
         assert!(cache.reserve_recurrent_layout(17, 3).is_err());
@@ -3104,9 +3112,11 @@ mod tests {
         assert!(cache.state_indices_host().is_none());
         assert!(cache.logical_state_indices_host().is_none());
         assert!(cache.configure_checkpoint_lanes(2).is_err());
-        assert!(cache
-            .reserve_recurrent_layout(INITIAL_POOL_CAPACITY, 1)
-            .is_err());
+        assert!(
+            cache
+                .reserve_recurrent_layout(INITIAL_POOL_CAPACITY, 1)
+                .is_err()
+        );
         Ok(())
     }
 
@@ -3125,9 +3135,11 @@ mod tests {
             .collect::<Vec<_>>();
 
         let error = cache.reserve_recurrent_layout(usize::MAX, 2).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("recurrent physical capacity overflow"));
+        assert!(
+            error
+                .to_string()
+                .contains("recurrent physical capacity overflow")
+        );
         assert_eq!(cache.recurrent_capacity(), INITIAL_POOL_CAPACITY);
         assert_eq!(cache.checkpoint_lanes(), 1);
         assert_eq!(cache.recurrent_storage_generation(), 0);
@@ -3155,22 +3167,26 @@ mod tests {
             DType::F32,
             &[Device::Cpu],
         )?;
-        assert!(zero_lanes
-            .reserve_recurrent_layout(INITIAL_POOL_CAPACITY, 0)
-            .unwrap_err()
-            .to_string()
-            .contains("must be nonzero"));
+        assert!(
+            zero_lanes
+                .reserve_recurrent_layout(INITIAL_POOL_CAPACITY, 0)
+                .unwrap_err()
+                .to_string()
+                .contains("must be nonzero")
+        );
 
         let mut no_recurrent = HybridCache::new(
             config(vec![HybridLayerType::Attention]),
             DType::F32,
             &[Device::Cpu],
         )?;
-        assert!(no_recurrent
-            .reserve_recurrent_layout(INITIAL_POOL_CAPACITY, 1)
-            .unwrap_err()
-            .to_string()
-            .contains("no recurrent state pool"));
+        assert!(
+            no_recurrent
+                .reserve_recurrent_layout(INITIAL_POOL_CAPACITY, 1)
+                .unwrap_err()
+                .to_string()
+                .contains("no recurrent state pool")
+        );
 
         let mut divergent = HybridCache::new(
             config(vec![HybridLayerType::Recurrent, HybridLayerType::Recurrent]),
@@ -3181,11 +3197,13 @@ mod tests {
             unreachable!()
         };
         pool.capacity -= 1;
-        assert!(divergent
-            .reserve_recurrent_layout(17, 2)
-            .unwrap_err()
-            .to_string()
-            .contains("capacities diverged"));
+        assert!(
+            divergent
+                .reserve_recurrent_layout(17, 2)
+                .unwrap_err()
+                .to_string()
+                .contains("capacities diverged")
+        );
 
         let mut active = HybridCache::new(
             config(vec![HybridLayerType::Recurrent]),
@@ -3194,11 +3212,13 @@ mod tests {
         )?;
         active.allocate_seq(10)?;
         active.recurrent_storage_locked = false;
-        assert!(active
-            .reserve_recurrent_layout(17, 2)
-            .unwrap_err()
-            .to_string()
-            .contains("recurrent slots are allocated"));
+        assert!(
+            active
+                .reserve_recurrent_layout(17, 2)
+                .unwrap_err()
+                .to_string()
+                .contains("recurrent slots are allocated")
+        );
 
         let mut locked = HybridCache::new(
             config(vec![HybridLayerType::Recurrent]),
@@ -3206,11 +3226,13 @@ mod tests {
             &[Device::Cpu],
         )?;
         locked.reserve_recurrent_capacity(INITIAL_POOL_CAPACITY)?;
-        assert!(locked
-            .reserve_recurrent_layout(17, 2)
-            .unwrap_err()
-            .to_string()
-            .contains("already reserved or allocated"));
+        assert!(
+            locked
+                .reserve_recurrent_layout(17, 2)
+                .unwrap_err()
+                .to_string()
+                .contains("already reserved or allocated")
+        );
         Ok(())
     }
 
@@ -3617,11 +3639,13 @@ mod tests {
         assert_eq!(snapshot.committed_lane, 0);
         let mut wrong_mode = snapshot.clone();
         wrong_mode.speculative_storage = RecurrentSpeculativeStorage::FullCheckpoints;
-        assert!(cache
-            .restore_recurrent_checkpoint_state(slot, &wrong_mode)
-            .unwrap_err()
-            .to_string()
-            .contains("storage mismatch"));
+        assert!(
+            cache
+                .restore_recurrent_checkpoint_state(slot, &wrong_mode)
+                .unwrap_err()
+                .to_string()
+                .contains("storage mismatch")
+        );
 
         cache.reset_seq(10, slot)?;
         cache.restore_recurrent_checkpoint_state(slot, &snapshot)?;

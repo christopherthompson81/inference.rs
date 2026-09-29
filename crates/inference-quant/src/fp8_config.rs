@@ -994,7 +994,7 @@ fn compressed_tensors_spec(
         Some(strategy) => {
             return Err(format!(
                 "unsupported compressed-tensors FP8 weight strategy `{strategy}` in group `{name}`"
-            ))
+            ));
         }
     };
 
@@ -1038,28 +1038,27 @@ fn compressed_tensors_spec(
                 (dynamic, strategy) => {
                     return Err(format!(
                         "unsupported compressed-tensors FP8 activation scheme in group `{name}`: dynamic={dynamic:?}, strategy={strategy:?}"
-                    ))
+                    ));
                 }
             }
         }
     };
-    if activation == Fp8ActivationMode::DynamicToken {
-        if let Fp8WeightScaleLayout::Block([_, cols]) = weight_scale {
-            return Err(format!(
-                "compressed-tensors FP8 block group `{name}` requires blockwise activations of size {cols}"
-            ));
-        }
+    if activation == Fp8ActivationMode::DynamicToken
+        && let Fp8WeightScaleLayout::Block([_, cols]) = weight_scale
+    {
+        return Err(format!(
+            "compressed-tensors FP8 block group `{name}` requires blockwise activations of size {cols}"
+        ));
     }
     if let (
         Fp8WeightScaleLayout::Block([_, cols]),
         Fp8ActivationMode::DynamicBlock(activation_cols),
     ) = (weight_scale, activation)
+        && cols != activation_cols
     {
-        if cols != activation_cols {
-            return Err(format!(
-                "compressed-tensors FP8 group `{name}` has weight block width {cols} but activation block width {activation_cols}"
-            ));
-        }
+        return Err(format!(
+            "compressed-tensors FP8 group `{name}` has weight block width {cols} but activation block width {activation_cols}"
+        ));
     }
     if matches!(activation, Fp8ActivationMode::DynamicBlock(_))
         && !matches!(weight_scale, Fp8WeightScaleLayout::Block(_))
@@ -1476,10 +1475,12 @@ mod tests {
             assert_eq!(spec.scale_names.block_scale, "weight_scale");
             assert_eq!(spec.scale_names.global_scale, "weight_global_scale");
             assert_eq!(spec.scale_names.activation_scale, scale_name);
-            assert!(config
-                .resolve_fp8("layer")
-                .unwrap_err()
-                .contains("uses NVFP4"));
+            assert!(
+                config
+                    .resolve_fp8("layer")
+                    .unwrap_err()
+                    .contains("uses NVFP4")
+            );
             assert_eq!(config.resolve_checked("lm_head").unwrap(), None);
         }
     }
@@ -1514,10 +1515,12 @@ mod tests {
                 .unwrap(),
             Some(CheckpointLinearSpec::Fp8(_))
         ));
-        assert!(config
-            .resolve_checked("model.layers.1.mlp.gate_up_proj")
-            .unwrap_err()
-            .contains("different schemes"));
+        assert!(
+            config
+                .resolve_checked("model.layers.1.mlp.gate_up_proj")
+                .unwrap_err()
+                .contains("different schemes")
+        );
     }
 
     #[test]
@@ -1555,9 +1558,11 @@ mod tests {
         ] {
             let mut value_config = base.clone();
             value_config["config_groups"]["group_0"][kind][field] = value;
-            assert!(CheckpointQuantConfig::compressed_tensors(&value_config)
-                .unwrap_err()
-                .contains(expected));
+            assert!(
+                CheckpointQuantConfig::compressed_tensors(&value_config)
+                    .unwrap_err()
+                    .contains(expected)
+            );
         }
     }
 
@@ -1590,11 +1595,13 @@ mod tests {
             assert_eq!(spec.scale_names.activation_scale, scale_name);
             assert_eq!(config.resolve_checked("lm_head").unwrap(), None);
         }
-        assert!(CheckpointQuantConfig::model_opt(&json!({
-            "quant_algo": "NVFP4", "group_size": 32
-        }))
-        .unwrap_err()
-        .contains("group_size=16"));
+        assert!(
+            CheckpointQuantConfig::model_opt(&json!({
+                "quant_algo": "NVFP4", "group_size": 32
+            }))
+            .unwrap_err()
+            .contains("group_size=16")
+        );
     }
 
     #[test]
@@ -1623,10 +1630,12 @@ mod tests {
                 .unwrap(),
             Some(CheckpointLinearSpec::Fp8(_))
         ));
-        assert!(config
-            .resolve_checked("model.layers.0.mlp.experts.1.gate_up_proj")
-            .unwrap_err()
-            .contains("different schemes"));
+        assert!(
+            config
+                .resolve_checked("model.layers.0.mlp.experts.1.gate_up_proj")
+                .unwrap_err()
+                .contains("different schemes")
+        );
         assert_eq!(
             config
                 .resolve_checked("model.layers.0.mlp.experts.2.gate_proj")
@@ -1789,14 +1798,18 @@ mod tests {
         }))
         .unwrap();
         assert!(config.resolve_fp8("model.layers.0.mlp.down_proj").is_err());
-        assert!(config
-            .resolve_fp8("model.layers.0.mlp.down_proj")
-            .unwrap_err()
-            .contains("4-bit `int` weights"));
-        assert!(config
-            .resolve_fp8("model.layers.0.mlp.up_proj")
-            .unwrap()
-            .is_some());
+        assert!(
+            config
+                .resolve_fp8("model.layers.0.mlp.down_proj")
+                .unwrap_err()
+                .contains("4-bit `int` weights")
+        );
+        assert!(
+            config
+                .resolve_fp8("model.layers.0.mlp.up_proj")
+                .unwrap()
+                .is_some()
+        );
     }
 
     #[test]
@@ -2032,10 +2045,12 @@ mod tests {
                 .activation,
             Fp8ActivationMode::DynamicToken
         );
-        assert!(config
-            .resolve_fp8("model.layers.1.mlp.gate_up_proj")
-            .unwrap_err()
-            .contains("different schemes"));
+        assert!(
+            config
+                .resolve_fp8("model.layers.1.mlp.gate_up_proj")
+                .unwrap_err()
+                .contains("different schemes")
+        );
         assert_eq!(
             config
                 .resolve_fp8("model.layers.2.mlp.gate_up_proj")
@@ -2162,38 +2177,48 @@ mod tests {
             );
         }
 
-        assert!(Fp8WeightScaleLayout::Tensor
-            .normalize(Tensor::zeros((1, 1), DType::F32, &device).unwrap(), [1, 1])
-            .is_err());
-        assert!(Fp8WeightScaleLayout::Channel
-            .normalize(
-                Tensor::zeros((1, 896, 1), DType::F32, &device).unwrap(),
-                [896, 896]
-            )
-            .is_err());
-        assert!(Fp8WeightScaleLayout::Block([128, 128])
-            .normalize(
-                Tensor::zeros((1, 7, 7, 1), DType::F32, &device).unwrap(),
-                [896, 896]
-            )
-            .is_err());
-        assert!(Fp8WeightScaleLayout::Block([0, 128])
-            .logical_shape([896, 896])
-            .is_err());
+        assert!(
+            Fp8WeightScaleLayout::Tensor
+                .normalize(Tensor::zeros((1, 1), DType::F32, &device).unwrap(), [1, 1])
+                .is_err()
+        );
+        assert!(
+            Fp8WeightScaleLayout::Channel
+                .normalize(
+                    Tensor::zeros((1, 896, 1), DType::F32, &device).unwrap(),
+                    [896, 896]
+                )
+                .is_err()
+        );
+        assert!(
+            Fp8WeightScaleLayout::Block([128, 128])
+                .normalize(
+                    Tensor::zeros((1, 7, 7, 1), DType::F32, &device).unwrap(),
+                    [896, 896]
+                )
+                .is_err()
+        );
+        assert!(
+            Fp8WeightScaleLayout::Block([0, 128])
+                .logical_shape([896, 896])
+                .is_err()
+        );
 
         let spec = Fp8LinearSpec::new(
             CheckpointDialect::ModelOpt,
             Fp8WeightScaleLayout::Tensor,
             Fp8ActivationMode::StaticTensor,
         );
-        assert!(spec
-            .normalize_activation_scale(Tensor::zeros(1, DType::F16, &device).unwrap())
-            .unwrap()
-            .dims()
-            .is_empty());
-        assert!(spec
-            .normalize_activation_scale(Tensor::zeros((1, 1), DType::F32, &device).unwrap())
-            .is_err());
+        assert!(
+            spec.normalize_activation_scale(Tensor::zeros(1, DType::F16, &device).unwrap())
+                .unwrap()
+                .dims()
+                .is_empty()
+        );
+        assert!(
+            spec.normalize_activation_scale(Tensor::zeros((1, 1), DType::F32, &device).unwrap())
+                .is_err()
+        );
     }
 
     #[test]
@@ -2206,10 +2231,12 @@ mod tests {
         )
         .unwrap();
         assert_eq!(config.resolve_fp8("model.embed_tokens").unwrap(), None);
-        assert!(config
-            .resolve_fp8("model.layers.0.mlp.up_proj")
-            .unwrap()
-            .is_some());
+        assert!(
+            config
+                .resolve_fp8("model.layers.0.mlp.up_proj")
+                .unwrap()
+                .is_some()
+        );
         assert!(CheckpointQuantConfig::native(None, None, Some("e5m2"), &[]).is_err());
     }
 
@@ -2289,9 +2316,11 @@ mod tests {
         };
         let error = checkpoint_linear_b(2, 2, &config, false, Default::default(), vb)
             .expect_err("an excluded native module must not retain a scale");
-        assert!(error
-            .to_string()
-            .contains("unexpectedly has a weight scale"));
+        assert!(
+            error
+                .to_string()
+                .contains("unexpectedly has a weight scale")
+        );
         Ok(())
     }
 
@@ -2421,28 +2450,32 @@ mod tests {
         assert!(tensor_scale_shard([12, 4], &[2], Default::default(), Some(3)).is_err());
         assert!(tensor_scale_shard([12, 4], &[3], Default::default(), Some(3)).is_err());
         assert!(tensor_scale_shard([12, 4], &[3], Default::default(), None).is_err());
-        assert!(tensor_scale_shard(
-            [12, 4],
-            &[3],
-            crate::Shard::Simple {
-                dim: 0,
-                rank: 0,
-                world_size: 0,
-            },
-            Some(3),
-        )
-        .is_err());
-        assert!(tensor_scale_shard(
-            [12, 4],
-            &[3],
-            crate::Shard::Offset {
-                dim: 0,
-                offset: 2,
-                len: 4,
-            },
-            Some(3),
-        )
-        .is_err());
+        assert!(
+            tensor_scale_shard(
+                [12, 4],
+                &[3],
+                crate::Shard::Simple {
+                    dim: 0,
+                    rank: 0,
+                    world_size: 0,
+                },
+                Some(3),
+            )
+            .is_err()
+        );
+        assert!(
+            tensor_scale_shard(
+                [12, 4],
+                &[3],
+                crate::Shard::Offset {
+                    dim: 0,
+                    offset: 2,
+                    len: 4,
+                },
+                Some(3),
+            )
+            .is_err()
+        );
         Ok(())
     }
 }

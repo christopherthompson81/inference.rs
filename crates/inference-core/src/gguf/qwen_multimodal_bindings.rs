@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::quantized::gguf_file::Value;
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 
@@ -823,8 +823,8 @@ mod tests {
     use std::{io::Write, sync::Arc};
 
     use candle_core::{
-        quantized::{gguf_file, GgmlDType, QTensor},
         DType, Device, Tensor,
+        quantized::{GgmlDType, QTensor, gguf_file},
     };
     use inference_quant::{
         ColumnParallelLayer, Comm, GgufWeightSource, Id, QuantizedConfig, QuantizedWeightSource,
@@ -1078,9 +1078,11 @@ mod tests {
             None,
         )?;
         for projection in ["gate", "up", "down"] {
-            assert!(bindings
-                .get(&format!("visual.blocks.0.mlp.{projection}_proj.weight"))
-                .is_some());
+            assert!(
+                bindings
+                    .get(&format!("visual.blocks.0.mlp.{projection}_proj.weight"))
+                    .is_some()
+            );
         }
         assert!(bindings.get("visual.blocks.0.mlp.fc1.weight").is_none());
         Ok(())
@@ -1122,15 +1124,21 @@ mod tests {
             bindings.get("model.visual.blocks.0.attn.qkv.weight"),
             Some(GgufTensorBinding::Tensor(source)) if source == "v.blk.0.attn_qkv.weight"
         ));
-        assert!(bindings
-            .get("model.visual.deepstack_merger_list.0.norm.weight")
-            .is_some());
-        assert!(bindings
-            .get("model.visual.deepstack_merger_list.1.linear_fc2.weight")
-            .is_some());
-        assert!(bindings
-            .get("model.visual.deepstack_merger_list.5.norm.weight")
-            .is_none());
+        assert!(
+            bindings
+                .get("model.visual.deepstack_merger_list.0.norm.weight")
+                .is_some()
+        );
+        assert!(
+            bindings
+                .get("model.visual.deepstack_merger_list.1.linear_fc2.weight")
+                .is_some()
+        );
+        assert!(
+            bindings
+                .get("model.visual.deepstack_merger_list.5.norm.weight")
+                .is_none()
+        );
         Ok(())
     }
 
@@ -1411,11 +1419,13 @@ mod tests {
             normalize_qwen_multimodal_config(&MultimodalLoaderType::Qwen3VL, config)?,
             config
         );
-        assert!(normalize_qwen_multimodal_config(
-            &MultimodalLoaderType::Qwen3_5,
-            r#"{"text_config":null}"#,
-        )
-        .is_err());
+        assert!(
+            normalize_qwen_multimodal_config(
+                &MultimodalLoaderType::Qwen3_5,
+                r#"{"text_config":null}"#,
+            )
+            .is_err()
+        );
         Ok(())
     }
 

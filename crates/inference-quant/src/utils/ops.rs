@@ -1,6 +1,6 @@
 use candle_core::{
-    backend::BackendStorage, shape::Dim, CpuStorage, CustomOp1, CustomOp2, DType, Error, Layout,
-    Result, Shape, Tensor, WithDType,
+    CpuStorage, CustomOp1, CustomOp2, DType, Error, Layout, Result, Shape, Tensor, WithDType,
+    backend::BackendStorage, shape::Dim,
 };
 use rayon::iter::{IndexedParallelIterator, IntoParallelIterator, ParallelIterator};
 use rayon::slice::ParallelSliceMut;
@@ -13,7 +13,7 @@ use std::{
 #[cfg(feature = "cuda")]
 use crate::utils::{ffi, slice_ptr, slice_ptr_mut_on_stream, slice_ptr_on_stream};
 #[cfg(feature = "cuda")]
-use candle_core::cuda::{cudarc::driver::DevicePtr, CudaStorage};
+use candle_core::cuda::{CudaStorage, cudarc::driver::DevicePtr};
 #[cfg(feature = "cuda")]
 use float8::F8E4M3;
 #[cfg(feature = "cuda")]
@@ -1557,7 +1557,7 @@ pub trait CumSumOp {
     fn fast_cumsum<D: Dim>(&self, axis: D) -> Result<Tensor>;
 
     fn fast_cumsum_config<D: Dim>(&self, axis: D, inclusive: bool, reverse: bool)
-        -> Result<Tensor>;
+    -> Result<Tensor>;
 }
 
 impl CumSumOp for Tensor {
@@ -3451,7 +3451,7 @@ mod tests {
 
     #[test]
     fn test_fused_split_glu_cpu_matches_pair() {
-        use super::{fused_glu, fused_split_glu, GluActivationType};
+        use super::{GluActivationType, fused_glu, fused_split_glu};
         use candle_core::{Device, Tensor};
 
         const ROWS: usize = 3;
@@ -3493,7 +3493,7 @@ mod tests {
 
     #[test]
     fn test_fused_sigmoid_glu_matches_candle_extremes() {
-        use super::{fused_glu, GluActivationType};
+        use super::{GluActivationType, fused_glu};
         use candle_core::{Device, Tensor};
 
         let gate = Tensor::new(
@@ -3531,7 +3531,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_fused_split_glu_cuda_scalar_and_vector_paths() {
-        use super::{fused_glu, fused_split_glu, GluActivationType};
+        use super::{GluActivationType, fused_glu, fused_split_glu};
         use candle_core::{DType, Device, Tensor};
 
         const ROWS: usize = 3;
@@ -3593,7 +3593,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_fused_split_glu_fp8_quantization_cuda() {
-        use super::{fused_split_glu, fused_split_glu_quantized_bf16, GluActivationType};
+        use super::{GluActivationType, fused_split_glu, fused_split_glu_quantized_bf16};
         use candle_core::{DType, Device, Tensor};
         use float8::F8E4M3;
 
@@ -3688,7 +3688,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_fused_glu_fp8_quantization_preserves_bf16_rounding_and_row_strides() {
-        use super::{fused_glu, fused_glu_quantized_bf16, GluActivationType};
+        use super::{GluActivationType, fused_glu, fused_glu_quantized_bf16};
         use candle_core::{DType, Device, Tensor};
         use float8::F8E4M3;
 
@@ -3789,7 +3789,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_fused_sigmoid_glu_cuda_row_strides_and_offsets() {
-        use super::{fused_glu, GluActivationType};
+        use super::{GluActivationType, fused_glu};
         use candle_core::{DType, Device, Tensor};
 
         const ROWS: usize = 3;
@@ -4472,7 +4472,7 @@ mod tests {
     #[cfg(feature = "metal")]
     #[test]
     fn test_fused_glu_metal_silu_f32() {
-        use super::{fused_glu, GluActivationType};
+        use super::{GluActivationType, fused_glu};
         use candle_core::Tensor;
 
         let cpu = candle_core::Device::Cpu;
@@ -4511,7 +4511,7 @@ mod tests {
     #[cfg(feature = "metal")]
     #[test]
     fn test_fused_glu_metal_silu_f16() {
-        use super::{fused_glu, GluActivationType};
+        use super::{GluActivationType, fused_glu};
         use candle_core::{DType, Tensor};
 
         let cpu = candle_core::Device::Cpu;
@@ -4564,7 +4564,7 @@ mod tests {
     #[cfg(feature = "metal")]
     #[test]
     fn test_fused_glu_metal_all_activations() {
-        use super::{fused_glu, GluActivationType};
+        use super::{GluActivationType, fused_glu};
         use candle_core::Tensor;
 
         let cpu = candle_core::Device::Cpu;
@@ -4611,7 +4611,7 @@ mod tests {
     #[cfg(feature = "metal")]
     #[test]
     fn test_fused_glu_matches_candle_fallback_bf16() {
-        use super::{fused_glu, GluActivationType};
+        use super::{GluActivationType, fused_glu};
         use candle_core::{DType, Tensor};
 
         let metal = candle_core::Device::new_metal(0).unwrap();
@@ -4677,7 +4677,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_fused_glu_cuda_silu_f32() {
-        use super::{fused_glu, GluActivationType};
+        use super::{GluActivationType, fused_glu};
         use candle_core::Tensor;
 
         let cpu = candle_core::Device::Cpu;
@@ -4716,7 +4716,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_fused_glu_cuda_silu_f16() {
-        use super::{fused_glu, GluActivationType};
+        use super::{GluActivationType, fused_glu};
         use candle_core::{DType, Tensor};
 
         let cpu = candle_core::Device::Cpu;
@@ -4769,7 +4769,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_fused_glu_cuda_all_activations() {
-        use super::{fused_glu, GluActivationType};
+        use super::{GluActivationType, fused_glu};
         use candle_core::Tensor;
 
         let cpu = candle_core::Device::Cpu;
@@ -4814,7 +4814,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn test_fused_glu_matches_candle_fallback_bf16_cuda() {
-        use super::{fused_glu, GluActivationType};
+        use super::{GluActivationType, fused_glu};
         use candle_core::{DType, Tensor};
 
         let cuda = candle_core::Device::new_cuda(0).unwrap();

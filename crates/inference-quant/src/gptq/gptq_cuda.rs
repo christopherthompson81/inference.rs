@@ -6,27 +6,27 @@
 use std::{
     cell::RefCell,
     collections::HashMap,
-    sync::{atomic::AtomicUsize, Arc},
+    sync::{Arc, atomic::AtomicUsize},
 };
 
 use candle_core::{
+    Context, CudaStorage, D, DType, Device, Result, Shape, Storage, Tensor,
     cuda::{
+        CudaStorageSlice, WrapErr,
         cudarc::{
             cublas::{result::hgemm, sys::cublasOperation_t},
             driver::{CudaSlice, DevicePtr},
         },
-        CudaStorageSlice, WrapErr,
     },
-    Context, CudaStorage, DType, Device, Result, Shape, Storage, Tensor, D,
 };
 use half::f16;
 
 use crate::{
+    IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedConfig, QuantizedSerde,
+    ShardedVarBuilder,
     gptq::marlin_backend::{marlin_matmul, marlin_weight_repack},
     has_missing_required_tensors, make_dummy_or_error,
     utils::get_cuda_device,
-    IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedConfig, QuantizedSerde,
-    ShardedVarBuilder,
 };
 
 use super::{

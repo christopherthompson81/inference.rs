@@ -13,7 +13,7 @@
 //! This module provides incremental parsing of Harmony-formatted token streams.
 
 use openai_harmony::{
-    chat::Role, load_harmony_encoding, HarmonyEncoding, HarmonyEncodingName, StreamableParser,
+    HarmonyEncoding, HarmonyEncodingName, StreamableParser, chat::Role, load_harmony_encoding,
 };
 use std::sync::OnceLock;
 use uuid::Uuid;
@@ -182,11 +182,11 @@ impl HarmonyContext {
         let mut delta = HarmonyDelta::default();
 
         // Get current channel from parser
-        if let Some(channel_str) = self.parser.current_channel() {
-            if let Some(channel) = HarmonyChannel::parse(&channel_str) {
-                self.channel = Some(channel);
-                delta.current_channel = Some(channel);
-            }
+        if let Some(channel_str) = self.parser.current_channel()
+            && let Some(channel) = HarmonyChannel::parse(&channel_str)
+        {
+            self.channel = Some(channel);
+            delta.current_channel = Some(channel);
         }
 
         // Check for tool calls via recipient field
@@ -315,11 +315,7 @@ impl HarmonyContext {
         if reasoning.len() > self.sent_reasoning_len {
             let delta = reasoning[self.sent_reasoning_len..].to_string();
             self.sent_reasoning_len = reasoning.len();
-            if delta.is_empty() {
-                None
-            } else {
-                Some(delta)
-            }
+            if delta.is_empty() { None } else { Some(delta) }
         } else {
             None
         }
@@ -331,11 +327,7 @@ impl HarmonyContext {
         if self.accumulated.final_content.len() > self.sent_final_len {
             let delta = self.accumulated.final_content[self.sent_final_len..].to_string();
             self.sent_final_len = self.accumulated.final_content.len();
-            if delta.is_empty() {
-                None
-            } else {
-                Some(delta)
-            }
+            if delta.is_empty() { None } else { Some(delta) }
         } else {
             None
         }

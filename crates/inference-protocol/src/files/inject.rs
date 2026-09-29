@@ -9,8 +9,8 @@ use serde_json::Value;
 use crate::tools::ToolCallResponse;
 
 use super::{
-    format_from_name, mime_for_format, File, FileContent, FileSource, RequestedFile,
-    FILE_PURPOSE_AGENT_OUTPUT, INPUT_FILES_TOTAL_PREVIEW_CHARS, MODEL_INLINE_BYTES,
+    FILE_PURPOSE_AGENT_OUTPUT, File, FileContent, FileSource, INPUT_FILES_TOTAL_PREVIEW_CHARS,
+    MODEL_INLINE_BYTES, RequestedFile, format_from_name, mime_for_format,
 };
 
 /// Convert a `ToolFile` to a `File` with full body. Elision happens later via `File::elide_for_wire`.
@@ -112,21 +112,21 @@ pub fn input_files_message(files: &[File]) -> Option<String> {
             "- {} (id={}, mime={}, bytes={})",
             f.name, f.id, mime, f.bytes
         ));
-        if remaining > 0 {
-            if let Some(preview) = f.preview_str() {
-                let preview = File::truncate_chars(preview, remaining);
-                let used = preview.chars().count();
-                remaining = remaining.saturating_sub(used);
-                out.push_str("\n  Preview:\n");
-                out.push_str(&preview);
-                if f.as_text()
-                    .is_some_and(|text| text.chars().count() > preview.chars().count())
-                {
-                    out.push_str(&format!(
+        if remaining > 0
+            && let Some(preview) = f.preview_str()
+        {
+            let preview = File::truncate_chars(preview, remaining);
+            let used = preview.chars().count();
+            remaining = remaining.saturating_sub(used);
+            out.push_str("\n  Preview:\n");
+            out.push_str(&preview);
+            if f.as_text()
+                .is_some_and(|text| text.chars().count() > preview.chars().count())
+            {
+                out.push_str(&format!(
                         "\n  Preview truncated. Use inference_read_file(file_id=\"{}\", start={}) to continue.",
                         f.id, used
                     ));
-                }
             }
         }
         out.push('\n');

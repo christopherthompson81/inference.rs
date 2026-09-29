@@ -6,8 +6,8 @@ pub mod state;
 pub(crate) mod strategy;
 
 use anyhow::Result;
-pub use parsers::specialize_required_tool_call_grammar;
 pub use parsers::ToolCallFormat;
+pub use parsers::specialize_required_tool_call_grammar;
 pub use request::*;
 pub use response::*;
 use serde::de::{self, Deserializer, MapAccess, Visitor};
@@ -496,9 +496,11 @@ mod tests {
             serde_json::from_value(json!({ "type": "function", "name": "get_weather" })).unwrap();
         let matcher = ToolCallingMatcher::new(choice, Some(&tools)).unwrap();
 
-        assert!(matcher
-            .get_call(r#"{"name":"get_customer","parameters":{}}"#)
-            .is_err());
+        assert!(
+            matcher
+                .get_call(r#"{"name":"get_customer","parameters":{}}"#)
+                .is_err()
+        );
         let calls = matcher
             .get_call(r#"{"name":"get_weather","parameters":{}}"#)
             .unwrap();
@@ -517,9 +519,11 @@ mod tests {
         let matcher = ToolCallingMatcher::new(choice, Some(&tools)).unwrap();
 
         assert!(matcher.requires_tool_call());
-        assert!(matcher
-            .get_call(r#"{"name":"get_customer","parameters":{}}"#)
-            .is_err());
+        assert!(
+            matcher
+                .get_call(r#"{"name":"get_customer","parameters":{}}"#)
+                .is_err()
+        );
         let calls = matcher
             .get_call(r#"{"name":"get_weather","parameters":{}}"#)
             .unwrap();

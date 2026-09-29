@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use super::hunyuan_rope::{effective_rope_theta, RopeScalingConfig};
+use super::hunyuan_rope::{RopeScalingConfig, effective_rope_theta};
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use candle_core::{DType, Device, Module, Result, Tensor};
@@ -23,7 +23,7 @@ use crate::{
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
-        embedding_with_legacy_tied_uqff, Activation, CausalMasker, Mlp, RmsNorm, RotaryEmbedding,
+        Activation, CausalMasker, Mlp, RmsNorm, RotaryEmbedding, embedding_with_legacy_tied_uqff,
     },
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     serde_default_fn,
@@ -374,7 +374,7 @@ impl Model {
             candle_core::bail!("HunYuanDenseV1 classification head is not implemented")
         }
         let rope_theta = cfg.effective_rope_theta()? as f32;
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),

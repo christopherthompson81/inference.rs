@@ -1,5 +1,5 @@
-use candle_core::cuda::cudarc::driver::{DevicePtr, DeviceRepr};
 use candle_core::cuda::CudaDType;
+use candle_core::cuda::cudarc::driver::{DevicePtr, DeviceRepr};
 use float8::F8E4M3;
 use std::ffi::c_int;
 
@@ -180,7 +180,9 @@ impl CublasLTBatchMatmulF8Scalar {
 
         for case in cases {
             if case % 16 != 0 {
-                candle_core::bail!("F8 cuBLASlt matmul must match all cases described here: https://docs.nvidia.com/cuda/cublas/#tensor-core-usage");
+                candle_core::bail!(
+                    "F8 cuBLASlt matmul must match all cases described here: https://docs.nvidia.com/cuda/cublas/#tensor-core-usage"
+                );
             }
         }
 

@@ -6,7 +6,7 @@ pub mod inputs_processor;
 // https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/blob/main/modeling_phi3.py
 use crate::layers::masker::CausalMaskConfig;
 use candle_core::{
-    shape::ShapeWithOneHole, DType, Device, IndexOp, Module, Result, Shape, Tensor, D,
+    D, DType, Device, IndexOp, Module, Result, Shape, Tensor, shape::ShapeWithOneHole,
 };
 use either::Either;
 use inference_quant::{
@@ -29,8 +29,8 @@ use crate::{
     },
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata},
     paged_attention::{
-        encoder_cache::{CacheModality, EncoderCacheManager},
         AttentionImplementation, ModelConfigMetadata, PagedAttention,
+        encoder_cache::{CacheModality, EncoderCacheManager},
     },
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
@@ -704,15 +704,18 @@ impl ImageEmbedding {
                 if n_hashes == bs {
                     let mut guard = encoder_cache.lock().expect("encoder cache lock poisoned");
                     for (i, &hash) in image_hashes.iter().enumerate() {
-                        if let Some(cached) = guard.get(CacheModality::Image, hash) {
-                            let cached = cached.first().ok_or_else(|| {
-                                candle_core::Error::Msg(
-                                    "cached Phi3 image has no encoder output".into(),
-                                )
-                            })?;
-                            per_image_cached[i] = Some(cached.clone());
-                        } else {
-                            miss_indices.push(i);
+                        match guard.get(CacheModality::Image, hash) {
+                            Some(cached) => {
+                                let cached = cached.first().ok_or_else(|| {
+                                    candle_core::Error::Msg(
+                                        "cached Phi3 image has no encoder output".into(),
+                                    )
+                                })?;
+                                per_image_cached[i] = Some(cached.clone());
+                            }
+                            _ => {
+                                miss_indices.push(i);
+                            }
                         }
                     }
                 } else {
@@ -901,23 +904,26 @@ impl ImageEmbedding {
                     {
                         let mut guard = encoder_cache.lock().expect("encoder cache lock poisoned");
                         for (i, &hash) in image_hashes.iter().enumerate() {
-                            if let Some(cached) = guard.get(CacheModality::Image, hash) {
-                                let cached = cached.first().ok_or_else(|| {
-                                    candle_core::Error::Msg(
-                                        "cached Phi3 image has no encoder output".into(),
-                                    )
-                                })?;
-                                let (rows, _) = cached.dims2()?;
-                                if rows != self.num_img_tokens {
-                                    candle_core::bail!(
-                                        "cached Phi3 image has {} rows but metadata requires {}",
-                                        rows,
-                                        self.num_img_tokens
-                                    );
+                            match guard.get(CacheModality::Image, hash) {
+                                Some(cached) => {
+                                    let cached = cached.first().ok_or_else(|| {
+                                        candle_core::Error::Msg(
+                                            "cached Phi3 image has no encoder output".into(),
+                                        )
+                                    })?;
+                                    let (rows, _) = cached.dims2()?;
+                                    if rows != self.num_img_tokens {
+                                        candle_core::bail!(
+                                            "cached Phi3 image has {} rows but metadata requires {}",
+                                            rows,
+                                            self.num_img_tokens
+                                        );
+                                    }
+                                    per_image_features[i] = Some(cached.clone());
                                 }
-                                per_image_features[i] = Some(cached.clone());
-                            } else {
-                                miss_indices.push(i);
+                                _ => {
+                                    miss_indices.push(i);
+                                }
                             }
                         }
                     }

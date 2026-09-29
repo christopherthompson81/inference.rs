@@ -5,7 +5,7 @@ use crate::utils::memory_usage::MemoryUsage;
 use candle_core::{Device, Result, Tensor};
 use inference_quant::MatMul;
 
-use crate::attention::{chunked_attention, SdpaParams};
+use crate::attention::{SdpaParams, chunked_attention};
 
 /// Not *really* sure why this is necessary but it is.
 pub fn maybe_synchronize(device: &Device) -> Result<()> {

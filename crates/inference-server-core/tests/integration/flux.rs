@@ -2,12 +2,12 @@
 #![cfg(feature = "cuda")]
 
 use axum::{
-    body::{to_bytes, Body},
+    body::{Body, to_bytes},
     http::{Request, StatusCode},
 };
-use base64::{engine::general_purpose::STANDARD, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use inference_server_core::inference_server_router_builder::InferenceRsServerRouterBuilder;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 const MODEL_ENV: &str = "INFERENCE_TEST_FLUX_DIR";

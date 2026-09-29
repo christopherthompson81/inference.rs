@@ -7,7 +7,7 @@ use std::{
 };
 
 use candle_core::{Context, DType, Device, Result, Tensor};
-use image::{imageops::FilterType, DynamicImage};
+use image::{DynamicImage, imageops::FilterType};
 use inference_vision::{
     ApplyTensorTransforms, ApplyTransforms, Normalize, Rescale, TensorTransforms, ToTensorNoNorm,
     Transforms,
@@ -25,7 +25,7 @@ use crate::media_inputs::{
         ModelInputs, MultimodalInputsProcessor, TextInputs,
     },
 };
-use crate::paged_attention::{block_hash::MultimodalKind, PagedAttentionMeta};
+use crate::paged_attention::{PagedAttentionMeta, block_hash::MultimodalKind};
 
 use super::MLlamaSpecificArgs;
 
@@ -261,26 +261,24 @@ impl MultimodalInputsProcessor for MLlamaImageProcessor {
         };
         let img_tok_id = tokenizer.encode_fast(IMAGE_TOKEN, false).unwrap().get_ids()[0];
         for seq in input_seqs.iter_mut() {
-            if seq.mm_features().is_empty() {
-                if let Some(hashes) = seq.image_hashes().map(|h| h.to_vec()) {
-                    let ranges = find_image_placeholder_ranges(
-                        seq.prompt_position_source_toks(),
-                        img_tok_id,
-                    );
-                    if ranges.len() != hashes.len() {
-                        return Err(InputsProcessorValidationError(format!(
-                            "Mllama prompt contains {} image tokens but has {} images",
-                            ranges.len(),
-                            hashes.len()
-                        ))
-                        .into());
-                    }
-                    seq.set_mm_features(build_mm_features_from_ranges(
-                        &ranges,
-                        &hashes,
-                        MultimodalKind::Image,
-                    ));
+            if seq.mm_features().is_empty()
+                && let Some(hashes) = seq.image_hashes().map(|h| h.to_vec())
+            {
+                let ranges =
+                    find_image_placeholder_ranges(seq.prompt_position_source_toks(), img_tok_id);
+                if ranges.len() != hashes.len() {
+                    return Err(InputsProcessorValidationError(format!(
+                        "Mllama prompt contains {} image tokens but has {} images",
+                        ranges.len(),
+                        hashes.len()
+                    ))
+                    .into());
                 }
+                seq.set_mm_features(build_mm_features_from_ranges(
+                    &ranges,
+                    &hashes,
+                    MultimodalKind::Image,
+                ));
             }
         }
         Ok(())
@@ -532,22 +530,21 @@ impl MultimodalInputsProcessor for MLlamaImageProcessor {
                 num_tiles_accum.push(num_tiles);
 
                 // Build mm_features for position-aware prefix cache hashing
-                if seq.mm_features().is_empty() {
-                    if let Some(hashes) = seq
+                if seq.mm_features().is_empty()
+                    && let Some(hashes) = seq
                         .multimodal()
                         .image_hashes()
                         .map(|hashes| hashes.to_vec())
-                    {
-                        let ranges = find_image_placeholder_ranges(
-                            seq.prompt_position_source_toks(),
-                            image_token_id,
-                        );
-                        seq.set_mm_features(build_mm_features_from_ranges(
-                            &ranges,
-                            &hashes,
-                            MultimodalKind::Image,
-                        ));
-                    }
+                {
+                    let ranges = find_image_placeholder_ranges(
+                        seq.prompt_position_source_toks(),
+                        image_token_id,
+                    );
+                    seq.set_mm_features(build_mm_features_from_ranges(
+                        &ranges,
+                        &hashes,
+                        MultimodalKind::Image,
+                    ));
                 }
 
                 seq.multimodal_mut().has_changed_prompt = true;
@@ -1179,14 +1176,16 @@ mod tests {
 
     #[test]
     fn dense_mask_rejects_image_cardinality_mismatch() {
-        assert!(convert_sparse_cross_attention_mask_to_dense(
-            vec![vec![(0, 1), (0, 0)]],
-            vec![vec![1]],
-            2,
-            1,
-            &Device::Cpu,
-        )
-        .is_err());
+        assert!(
+            convert_sparse_cross_attention_mask_to_dense(
+                vec![vec![(0, 1), (0, 0)]],
+                vec![vec![1]],
+                2,
+                1,
+                &Device::Cpu,
+            )
+            .is_err()
+        );
     }
 
     #[test]

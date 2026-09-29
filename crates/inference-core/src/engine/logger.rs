@@ -108,7 +108,7 @@ impl IntervalLogger {
 
                 if total_new_seqs != 0 && tokens_processed != 0 {
                     let enc_cache_info =
-                        if let (Some(ref hits), Some(ref misses)) = (&t_enc_hits, &t_enc_misses) {
+                        if let (Some(hits), Some(misses)) = (&t_enc_hits, &t_enc_misses) {
                             let h = hits.load(Ordering::Relaxed);
                             let m = misses.load(Ordering::Relaxed);
                             let total = h + m;

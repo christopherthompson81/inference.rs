@@ -4,7 +4,7 @@ mod profile;
 
 use std::path::Path;
 
-use crate::{env_scrub, EffectiveProtection, NetworkMode, Sandbox, SandboxError, SandboxPolicy};
+use crate::{EffectiveProtection, NetworkMode, Sandbox, SandboxError, SandboxPolicy, env_scrub};
 
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
 

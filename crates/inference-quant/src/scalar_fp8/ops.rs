@@ -56,7 +56,7 @@ impl CustomOp1 for Fp8ToDtype {
         input_s: &candle_core::CudaStorage,
         input_l: &candle_core::Layout,
     ) -> Result<(candle_core::CudaStorage, candle_core::Shape)> {
-        use candle_core::{backend::BackendStorage, CudaStorage};
+        use candle_core::{CudaStorage, backend::BackendStorage};
         use half::{bf16, f16};
 
         use crate::utils::slice_ptr;
@@ -219,7 +219,7 @@ impl CustomOp1 for DtypeToFp8 {
         input_s: &candle_core::CudaStorage,
         input_l: &candle_core::Layout,
     ) -> Result<(candle_core::CudaStorage, candle_core::Shape)> {
-        use candle_core::{backend::BackendStorage, CudaStorage};
+        use candle_core::{CudaStorage, backend::BackendStorage};
         use half::{bf16, f16};
 
         use crate::utils::slice_ptr;

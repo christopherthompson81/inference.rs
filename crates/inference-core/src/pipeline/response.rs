@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use candle_core::Tensor;
-use image::{codecs::png::PngEncoder, DynamicImage};
+use image::{DynamicImage, codecs::png::PngEncoder};
 use uuid::Uuid;
 
 use crate::{
-    sequence::{Sequence, SequenceState, StopReason},
     ImageChoice, ImageGenerationResponse, ImageGenerationResponseFormat,
+    sequence::{Sequence, SequenceState, StopReason},
 };
 
 pub async fn send_image_responses(

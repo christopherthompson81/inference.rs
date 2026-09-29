@@ -88,7 +88,9 @@ impl FlashAttn {
             )
         }
         if num_heads % num_heads_k != 0 {
-            candle_core::bail!("number of k/v heads {num_heads_k} must divide number of heads in query {num_heads}")
+            candle_core::bail!(
+                "number of k/v heads {num_heads_k} must divide number of heads in query {num_heads}"
+            )
         }
 
         let stream = dev.cuda_stream();
@@ -613,7 +615,9 @@ impl FlashAttnVarLen {
             )
         }
         if num_heads % num_heads_k != 0 {
-            candle_core::bail!("number of k/v heads {num_heads_k} must divide number of heads in query {num_heads}")
+            candle_core::bail!(
+                "number of k/v heads {num_heads_k} must divide number of heads in query {num_heads}"
+            )
         }
 
         let nseqlens_q = seqlens_q_layout.shape().dims1()?;
@@ -622,7 +626,9 @@ impl FlashAttnVarLen {
         }
         let nseqlens_k = seqlens_k_layout.shape().dims1()?;
         if nseqlens_k != nseqlens_q {
-            candle_core::bail!("seqlens_q and seqlens_k should have the same number of elements {nseqlens_q} <> {nseqlens_k}")
+            candle_core::bail!(
+                "seqlens_q and seqlens_k should have the same number of elements {nseqlens_q} <> {nseqlens_k}"
+            )
         }
 
         let batch_size = nseqlens_q - 1;

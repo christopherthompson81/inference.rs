@@ -191,10 +191,10 @@ fn parse_liquid_value(raw: &str) -> std::result::Result<Value, String> {
     if let Ok(value) = raw.parse::<u64>() {
         return Ok(Value::Number(value.into()));
     }
-    if let Ok(value) = raw.parse::<f64>() {
-        if let Some(value) = Number::from_f64(value) {
-            return Ok(Value::Number(value));
-        }
+    if let Ok(value) = raw.parse::<f64>()
+        && let Some(value) = Number::from_f64(value)
+    {
+        return Ok(Value::Number(value));
     }
 
     Ok(Value::String(raw.to_string()))
@@ -404,7 +404,7 @@ fn find_matching_delimiter(s: &str, start: usize, open: u8, close: u8) -> Option
 #[cfg(test)]
 mod tests {
     use super::LiquidParser;
-    use crate::tools::parsers::{extract_model_specific_message, ToolFormatParser};
+    use crate::tools::parsers::{ToolFormatParser, extract_model_specific_message};
     use crate::tools::{CalledFunctionParameters, ToolCallingMatcher, ToolChoice};
     use crate::{Function, Tool, ToolType};
 

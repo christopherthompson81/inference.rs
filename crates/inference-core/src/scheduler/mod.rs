@@ -12,8 +12,8 @@ use tokio::sync::Mutex;
 use crate::{
     engine::IntervalLogger,
     paged_attention::{
-        block_hash::{BlockHash, MultimodalKind},
         CacheConfig, KVCacheManager,
+        block_hash::{BlockHash, MultimodalKind},
     },
     sequence::Sequence,
     speculative::SpeculativePrefixCheckpointPolicy,
@@ -95,16 +95,16 @@ impl SchedulerConfig {
         max_num_seqs: usize,
         limits: SchedulerLimits,
     ) -> anyhow::Result<Self> {
-        if paged_attn_requested {
-            if let Some(config) = pipeline.lock().await.get_metadata().cache_config.clone() {
-                return Ok(Self::PagedAttentionMeta {
-                    max_num_seqs,
-                    max_num_batched_tokens: limits.max_num_batched_tokens,
-                    max_prefill_chunk_tokens: limits.max_prefill_chunk_tokens,
-                    max_decode_steps_before_prefill: limits.max_decode_steps_before_prefill,
-                    config,
-                });
-            }
+        if paged_attn_requested
+            && let Some(config) = pipeline.lock().await.get_metadata().cache_config.clone()
+        {
+            return Ok(Self::PagedAttentionMeta {
+                max_num_seqs,
+                max_num_batched_tokens: limits.max_num_batched_tokens,
+                max_prefill_chunk_tokens: limits.max_prefill_chunk_tokens,
+                max_decode_steps_before_prefill: limits.max_decode_steps_before_prefill,
+                config,
+            });
         }
         Self::fixed(max_num_seqs)
     }
@@ -329,9 +329,11 @@ mod tests {
         let mut scheduler = SchedulerConfig::DefaultScheduler {
             method: DefaultSchedulerMethod::Fixed(NonZeroUsize::new(1).unwrap()),
         };
-        assert!(scheduler
-            .refresh_paged_cache_config(Some(cache_config(128)))
-            .is_err());
+        assert!(
+            scheduler
+                .refresh_paged_cache_config(Some(cache_config(128)))
+                .is_err()
+        );
 
         let mut scheduler = SchedulerConfig::PagedAttentionMeta {
             max_num_seqs: 16,

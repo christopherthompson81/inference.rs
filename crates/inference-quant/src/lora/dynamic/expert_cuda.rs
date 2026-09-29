@@ -6,12 +6,12 @@ use std::{
 };
 
 use candle_core::{
-    cuda::{
-        cudarc::driver::{CudaSlice, DevicePtr, DeviceRepr},
-        CudaDType,
-    },
     CpuStorage, CudaDevice, CudaStorage, DType, DeviceLocation, InplaceOp1, Layout, Result,
     Storage, Tensor, WithDType,
+    cuda::{
+        CudaDType,
+        cudarc::driver::{CudaSlice, DevicePtr, DeviceRepr},
+    },
 };
 use half::{bf16, f16};
 
@@ -21,12 +21,12 @@ use super::execution::PreparedExpertAdapters;
 use super::moe_cuda::prefer_small_batch_direct;
 
 use super::{
-    launch_routed_lora_direct, launch_routed_lora_grouped, LoraExecution, LoraExpertDelta,
-    LoraExpertInputMode, LoraExpertProjection, LoraExpertProjectionWeights, LoraExpertSiteHandle,
-    LoraExpertWeights, LoraGateUpOrder, RoutedLoraAdapterWeight, RoutedLoraCudaMetadata,
-    RoutedLoraCudaWeightTable, RoutedLoraDirectLaunch, RoutedLoraGroupedLaunch,
-    RoutedLoraInputMode, RoutedLoraMetadataLayout, RoutedLoraProjectionLayout,
-    ROUTED_LORA_MAX_RANK, ROUTED_LORA_WMMA_RANK_CAP,
+    LoraExecution, LoraExpertDelta, LoraExpertInputMode, LoraExpertProjection,
+    LoraExpertProjectionWeights, LoraExpertSiteHandle, LoraExpertWeights, LoraGateUpOrder,
+    ROUTED_LORA_MAX_RANK, ROUTED_LORA_WMMA_RANK_CAP, RoutedLoraAdapterWeight,
+    RoutedLoraCudaMetadata, RoutedLoraCudaWeightTable, RoutedLoraDirectLaunch,
+    RoutedLoraGroupedLaunch, RoutedLoraInputMode, RoutedLoraMetadataLayout,
+    RoutedLoraProjectionLayout, launch_routed_lora_direct, launch_routed_lora_grouped,
 };
 
 const NAIVE_DIRECT_SPARSITY_FACTOR: usize = 8;
@@ -454,10 +454,10 @@ fn cached_weight_table(
             .map(|(_, adapter)| Arc::downgrade(adapter))
             .collect(),
     });
-    if cache.weight_tables.len() >= EXPERT_CUDA_WEIGHT_CACHE_CAPACITY {
-        if let Some(evicted) = cache.weight_tables.keys().next().cloned() {
-            cache.weight_tables.remove(&evicted);
-        }
+    if cache.weight_tables.len() >= EXPERT_CUDA_WEIGHT_CACHE_CAPACITY
+        && let Some(evicted) = cache.weight_tables.keys().next().cloned()
+    {
+        cache.weight_tables.remove(&evicted);
     }
     cache.weight_tables.insert(key, weights.clone());
     cache.weight_table_uploads += 1;
@@ -657,10 +657,11 @@ fn with_prepared_resource<T>(
     } else {
         0
     };
-    if !cache.resources.contains_key(&key) && cache.resources.len() >= EXPERT_CUDA_CACHE_CAPACITY {
-        if let Some(evicted) = cache.resources.keys().next().copied() {
-            cache.resources.remove(&evicted);
-        }
+    if !cache.resources.contains_key(&key)
+        && cache.resources.len() >= EXPERT_CUDA_CACHE_CAPACITY
+        && let Some(evicted) = cache.resources.keys().next().copied()
+    {
+        cache.resources.remove(&evicted);
     }
     let resource = match cache.resources.entry(key) {
         std::collections::hash_map::Entry::Occupied(entry) => entry.into_mut(),

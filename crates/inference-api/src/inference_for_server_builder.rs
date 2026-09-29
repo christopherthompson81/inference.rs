@@ -5,13 +5,13 @@ use std::{num::NonZeroUsize, sync::Arc};
 use anyhow::{Context, Result};
 use candle_core::Device;
 use inference_core::{
-    get_auto_device_map_params, get_model_dtype, get_tgt_non_granular_index, paged_attn_supported,
-    parse_isq_value, plan_paged_kv, reserve_external_mtp_memory_with_runtime, AutoDeviceMapParams,
-    DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting, HfConfigOverrides,
-    InferenceRsBuilder, Loader, McpClientConfig, MemoryGpuConfig, ModelLoaderConfig, ModelSelected,
-    MtpConfig, MtpRuntimeConfig, PagedAttentionConfig, PagedCacheType, PagedKvModelRequest,
-    SchedulerConfig, SchedulerLimits, SearchCallback, SearchEmbeddingModel, TokenSource,
-    ToolCallbackWithTool,
+    AutoDeviceMapParams, DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting,
+    HfConfigOverrides, InferenceRsBuilder, Loader, McpClientConfig, MemoryGpuConfig,
+    ModelLoaderConfig, ModelSelected, MtpConfig, MtpRuntimeConfig, PagedAttentionConfig,
+    PagedCacheType, PagedKvModelRequest, SchedulerConfig, SchedulerLimits, SearchCallback,
+    SearchEmbeddingModel, TokenSource, ToolCallbackWithTool, get_auto_device_map_params,
+    get_model_dtype, get_tgt_non_granular_index, paged_attn_supported, parse_isq_value,
+    plan_paged_kv, reserve_external_mtp_memory_with_runtime,
 };
 use tracing::{debug, info, warn};
 
@@ -111,8 +111,8 @@ pub mod defaults {
     use std::sync::Arc;
 
     use inference_core::{
-        PagedCacheType, DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_NUM_BATCHED_TOKENS,
-        DEFAULT_MAX_PREFILL_CHUNK_TOKENS,
+        DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_NUM_BATCHED_TOKENS,
+        DEFAULT_MAX_PREFILL_CHUNK_TOKENS, PagedCacheType,
     };
 
     pub const DEVICE: Option<candle_core::Device> = None;
@@ -1194,10 +1194,10 @@ fn init_device(force_cpu: bool, seed: Option<u64>) -> Result<candle_core::Device
 /// Initializes the device mapping configuration for distributing model layers.
 /// Parses `--device-layers` entries: one layer count for device 0, or `ORD:NUM` per device.
 pub fn parse_device_layers(device_layers: &[String]) -> Result<Vec<DeviceLayerMapMetadata>> {
-    if let [layers] = device_layers {
-        if let Ok(layers) = layers.parse::<usize>() {
-            return Ok(vec![DeviceLayerMapMetadata { ordinal: 0, layers }]);
-        }
+    if let [layers] = device_layers
+        && let Ok(layers) = layers.parse::<usize>()
+    {
+        return Ok(vec![DeviceLayerMapMetadata { ordinal: 0, layers }]);
     }
     let mut mapping: Vec<DeviceLayerMapMetadata> = Vec::new();
     for entry in device_layers {

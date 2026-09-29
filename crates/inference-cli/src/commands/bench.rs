@@ -1,11 +1,11 @@
 //! Performance benchmarking command
 
 use anyhow::Result;
-use comfy_table::{presets::UTF8_FULL, Cell, Color, ContentArrangement, Table};
-use inference_api::{engine::RuntimeSpec, Engine, EngineSpec};
+use comfy_table::{Cell, Color, ContentArrangement, Table, presets::UTF8_FULL};
+use inference_api::{Engine, EngineSpec, engine::RuntimeSpec};
 use inference_core::{
-    initialize_logging, AdapterSelection, Constraint, NormalRequest, Request, RequestMessage,
-    Response, SamplingParams,
+    AdapterSelection, Constraint, NormalRequest, Request, RequestMessage, Response, SamplingParams,
+    initialize_logging,
 };
 use std::{
     sync::Arc,

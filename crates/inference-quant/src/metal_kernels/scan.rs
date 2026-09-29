@@ -73,7 +73,7 @@ pub fn call_scan(
                     DType::I64,
                 ],
                 got: other,
-            })
+            });
         }
     };
     name.push_str(&format!("{type_name}_{type_name}"));

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use candle_core::{DType, Device};
-use hf_hub::{api::sync::ApiRepo, Cache, Repo, RepoType};
+use hf_hub::{Cache, Repo, RepoType, api::sync::ApiRepo};
 use serde::{Deserialize, Serialize};
 
 use crate::device_map::{DeviceLayerMapMetadata, DeviceMapMetadata};
@@ -14,7 +14,7 @@ use crate::pipeline::{
 };
 use crate::selection::model_loader::{get_auto_device_map_params, get_model_dtype};
 use crate::{
-    paged_attn_supported, IsqType, ModelSelected, Topology, TryIntoDType, GLOBAL_HF_CACHE,
+    GLOBAL_HF_CACHE, IsqType, ModelSelected, Topology, TryIntoDType, paged_attn_supported,
 };
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -643,14 +643,13 @@ pub fn auto_tune(req: AutoTuneRequest) -> Result<AutoTuneResult> {
     }
 
     // If no preferred candidate fits, recommend the first that fits
-    if recommended_idx.is_none() {
-        if let Some(idx) = tune_candidates
+    if recommended_idx.is_none()
+        && let Some(idx) = tune_candidates
             .iter()
             .position(|c| matches!(c.fit_status, FitStatus::Fits | FitStatus::Hybrid))
-        {
-            tune_candidates[idx].recommended = true;
-            recommended_idx = Some(idx);
-        }
+    {
+        tune_candidates[idx].recommended = true;
+        recommended_idx = Some(idx);
     }
 
     // Build the result

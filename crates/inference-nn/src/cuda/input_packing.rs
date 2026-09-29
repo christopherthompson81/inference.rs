@@ -1,6 +1,6 @@
 use candle_core::{
-    backend::BackendStorage, CpuStorage, CudaStorage, CustomOp1, DType, Layout, Result, Shape,
-    Storage, Tensor,
+    CpuStorage, CudaStorage, CustomOp1, DType, Layout, Result, Shape, Storage, Tensor,
+    backend::BackendStorage,
 };
 
 struct CompletionInputPackOp {

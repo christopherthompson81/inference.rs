@@ -170,11 +170,7 @@ impl Module for BasicLayer {
         let agg = self
             .excite
             .forward(&self.squeeze.forward(&Tensor::cat(&outs, 1)?)?)?;
-        if self.residual {
-            agg + xs
-        } else {
-            Ok(agg)
-        }
+        if self.residual { agg + xs } else { Ok(agg) }
     }
 }
 

@@ -25,9 +25,11 @@ impl KvCacheTopology {
     }
 
     pub fn from_layer_owners(layer_to_owner: Vec<usize>) -> Self {
-        debug_assert!(layer_to_owner
-            .iter()
-            .all(|owner| *owner < layer_to_owner.len()));
+        debug_assert!(
+            layer_to_owner
+                .iter()
+                .all(|owner| *owner < layer_to_owner.len())
+        );
         Self { layer_to_owner }
     }
 

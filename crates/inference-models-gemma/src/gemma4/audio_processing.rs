@@ -1,7 +1,7 @@
 use anyhow::Result;
 use candle_core::{Device, Tensor};
-use inference_audio::fft::{plan_forward_f32, Complex32};
 use inference_audio::AudioInput;
+use inference_audio::fft::{Complex32, plan_forward_f32};
 use rubato::Resampler;
 
 use crate::media_inputs::preprocessor_config::PreProcessorConfig;
@@ -311,10 +311,9 @@ impl AudioProcessor {
                     .as_ref()
                     .and_then(|stddev| stddev.get(mel_idx))
                     .copied()
+                    && stddev != 0.0
                 {
-                    if stddev != 0.0 {
-                        value /= stddev as f32;
-                    }
+                    value /= stddev as f32;
                 }
                 mel_frame[mel_idx] = value;
             }
@@ -459,10 +458,12 @@ mod tests {
         assert!(valid_frame_counts[0] > valid_frame_counts[1]);
 
         let short_mask = mask.get(1).unwrap().to_vec1::<f32>().unwrap();
-        assert!(short_mask
-            .iter()
-            .skip(valid_frame_counts[1])
-            .all(|&value| value == 1.0));
+        assert!(
+            short_mask
+                .iter()
+                .skip(valid_frame_counts[1])
+                .all(|&value| value == 1.0)
+        );
     }
 
     #[test]

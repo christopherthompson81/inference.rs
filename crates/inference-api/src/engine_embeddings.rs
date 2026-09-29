@@ -1,7 +1,7 @@
 //! OpenAI embeddings as an engine operation.
 
-use anyhow::{anyhow, Context, Error as AnyhowError, Result};
-use base64::{prelude::BASE64_STANDARD, Engine};
+use anyhow::{Context, Error as AnyhowError, Result, anyhow};
+use base64::{Engine, prelude::BASE64_STANDARD};
 use futures::future::join_all;
 use inference_core::{
     Constraint, InferenceRs, NormalRequest, Request, RequestMessage, Response, SamplingParams,

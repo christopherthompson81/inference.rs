@@ -2,7 +2,7 @@
 // Each test crate includes this file and uses a different subset of it.
 #![allow(dead_code)]
 
-use inference_models_other::paddleocr_vl::{config::Config, PaddleOcrVlModel};
+use inference_models_other::paddleocr_vl::{PaddleOcrVlModel, config::Config};
 use inference_nn::paged_attention::AttentionImplementation;
 
 #[path = "recording.rs"]

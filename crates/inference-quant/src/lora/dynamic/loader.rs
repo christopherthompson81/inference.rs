@@ -7,10 +7,10 @@ mod expert;
 
 use candle_core::{Result, Tensor};
 
-use crate::{shard_range, LoraConfig, Shard, ShardedVarBuilder};
+use crate::{LoraConfig, Shard, ShardedVarBuilder, shard_range};
 
 use self::expert::{
-    load_expert_site, plan_expert_site, ExpertSiteMeta, GateUpOrder, LoadedExpertProjection,
+    ExpertSiteMeta, GateUpOrder, LoadedExpertProjection, load_expert_site, plan_expert_site,
 };
 use super::{
     DynamicLoraWeights, LoraExpertProjection, LoraExpertProjectionWeights, LoraExpertSiteHandle,

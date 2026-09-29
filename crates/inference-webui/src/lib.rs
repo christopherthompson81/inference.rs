@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use axum::Router;
 use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{Response, StatusCode};
 use axum::routing::{get, get_service, post};
-use axum::Router;
-use include_dir::{include_dir, Dir};
+use include_dir::{Dir, include_dir};
 use indexmap::IndexMap;
 use inference_core::{InferenceRs, ModelCategory, SearchEmbeddingModel, SupportedModality};
 use inference_server_core::route_registry::{RouteInfo, RouteKind};
@@ -177,15 +177,13 @@ pub async fn build_ui_router(
     let mut next_id = 1u32;
     if let Ok(mut dir) = fs::read_dir(&chats_dir).await {
         while let Ok(Some(entry)) = dir.next_entry().await {
-            if let Some(name) = entry.file_name().to_str() {
-                if let Some(num) = name
+            if let Some(name) = entry.file_name().to_str()
+                && let Some(num) = name
                     .strip_prefix("chat_")
                     .and_then(|s| s.strip_suffix(".json"))
-                {
-                    if let Ok(n) = num.parse::<u32>() {
-                        next_id = next_id.max(n + 1);
-                    }
-                }
+                && let Ok(n) = num.parse::<u32>()
+            {
+                next_id = next_id.max(n + 1);
             }
         }
     }

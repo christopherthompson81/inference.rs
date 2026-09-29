@@ -3,7 +3,7 @@
 use crate::attention::AttentionMask;
 use std::sync::{Arc, Mutex};
 
-use candle_core::{Context, DType, Device, Result, Tensor, D};
+use candle_core::{Context, D, DType, Device, Result, Tensor};
 use config::Gemma3Config;
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
 use mmproj::Gemma3MultiModalProjector;
@@ -18,8 +18,8 @@ use crate::{
     amoe::{AnyMoeBaseModelMixin, MlpLayer},
     amoe::{AnyMoeConfig, AnyMoeExpertType},
     paged_attention::{
-        encoder_cache::{cached_encode_images, CacheModality, EncoderCacheManager},
         AttentionImplementation, ModelConfigMetadata,
+        encoder_cache::{CacheModality, EncoderCacheManager, cached_encode_images},
     },
     utils::unvarbuilder::UnVarBuilder,
     vision::multimodal_layout::{

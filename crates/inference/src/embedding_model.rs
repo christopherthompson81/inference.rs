@@ -7,8 +7,8 @@ use std::{
     path::PathBuf,
 };
 
-use crate::model_builder_trait::{build_embedding_pipeline, build_model_from_pipeline};
 use crate::Model;
+use crate::model_builder_trait::{build_embedding_pipeline, build_model_from_pipeline};
 
 #[derive(Clone)]
 /// Configure an embedding model with the various parameters for loading, running, and other inference behaviors.

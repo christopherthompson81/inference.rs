@@ -1,8 +1,8 @@
 use crate::utils::varbuilder_utils::{
-    from_mmaped_safetensors, load_preload_adapters, DeviceForLoadTensor,
+    DeviceForLoadTensor, from_mmaped_safetensors, load_preload_adapters,
 };
 use anyhow::Result;
-use candle_core::{quantized::ggml_file, DType};
+use candle_core::{DType, quantized::ggml_file};
 use inference_quant::ShardedVarBuilder;
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 

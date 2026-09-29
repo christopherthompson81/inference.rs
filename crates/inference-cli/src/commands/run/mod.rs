@@ -3,10 +3,10 @@
 mod interactive;
 
 use interactive::OneshotInput;
-pub(crate) use interactive::{interactive_mode, InteractiveConfig};
+pub(crate) use interactive::{InteractiveConfig, interactive_mode};
 
 use anyhow::Result;
-use inference_core::{resolve_reasoning_controls, ReasoningEffort};
+use inference_core::{ReasoningEffort, resolve_reasoning_controls};
 use tracing::info;
 
 use inference_api::Engine;
@@ -14,8 +14,8 @@ use inference_core::initialize_logging;
 
 use super::normalize_requested_adapter;
 use super::serve::{
-    apply_agent_mode, apply_quant_resolution, engine_spec, log_agent_runtime,
-    validate_agent_options, EngineSpecInputs,
+    EngineSpecInputs, apply_agent_mode, apply_quant_resolution, engine_spec, log_agent_runtime,
+    validate_agent_options,
 };
 use crate::args::{AgentCliOptions, GlobalOptions, ModelType, RuntimeOptions, SandboxOptions};
 

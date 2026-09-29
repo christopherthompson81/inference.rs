@@ -120,10 +120,10 @@ impl PythonSession {
 
         let mut child = cmd.spawn().context("spawn sandboxed Python subprocess")?;
 
-        if let Some(pid) = child.id() {
-            if let Err(e) = sandbox.attach(pid, &effective_policy) {
-                tracing::warn!("sandbox attach failed for pid {pid}: {e}");
-            }
+        if let Some(pid) = child.id()
+            && let Err(e) = sandbox.attach(pid, &effective_policy)
+        {
+            tracing::warn!("sandbox attach failed for pid {pid}: {e}");
         }
 
         let stdin = child
@@ -223,13 +223,13 @@ impl PythonSession {
         self.last_active = Instant::now();
         let work_dir = self.work_dir.clone();
         let work_dir_str = self.work_dir_str();
-        if !self.alive {
-            if let Err(e) = self.respawn().await {
-                return CodeExecResult::error(
-                    &format!("Failed to respawn Python session: {e}"),
-                    &work_dir_str,
-                );
-            }
+        if !self.alive
+            && let Err(e) = self.respawn().await
+        {
+            return CodeExecResult::error(
+                &format!("Failed to respawn Python session: {e}"),
+                &work_dir_str,
+            );
         }
 
         let snapshot = crate::files::snapshot_output_files(&work_dir);

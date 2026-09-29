@@ -8,15 +8,15 @@ mod online;
 mod plan;
 
 pub(crate) use drive::{
-    resolve_imatrix_map, CalibrationCtx, CalibrationDrive, EmbeddingCalibrationDrive,
-    MultimodalCalibrationDrive, NormalCalibrationDrive,
+    CalibrationCtx, CalibrationDrive, EmbeddingCalibrationDrive, MultimodalCalibrationDrive,
+    NormalCalibrationDrive, resolve_imatrix_map,
 };
 pub use online::CalibrationStatus;
 pub(crate) use online::{apply_calibration, begin_calibration, calibration_status};
 pub(crate) use plan::{
+    AutoDeviceMapSizes, AutoDeviceMapSizingInputs, IsqLoadPlan, IsqPlanInputs,
     auto_device_map_sizes, resolve_and_install_isq_plan, resolve_auto_device_map_sizing,
-    resolve_weight_load_dtype, AutoDeviceMapSizes, AutoDeviceMapSizingInputs, IsqLoadPlan,
-    IsqPlanInputs,
+    resolve_weight_load_dtype,
 };
 
 use std::{collections::HashMap, path::PathBuf};
@@ -26,7 +26,7 @@ use candle_core::Tensor;
 use inference_quant::{IsqType, QuantMethod, TrackedModule};
 use tracing::info;
 
-use super::isq::{write_uqff_artifacts, UqffFullSer, UqffWriteConfig, UqffWriteRequest};
+use super::isq::{UqffFullSer, UqffWriteConfig, UqffWriteRequest, write_uqff_artifacts};
 
 /// A UQFF to write once the model is loaded: where, and the tensors and files that are not quantized layers.
 pub(crate) struct UqffArtifact<'a> {

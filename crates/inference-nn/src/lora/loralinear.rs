@@ -8,8 +8,8 @@ use inference_quant::{QuantMethod, QuantMethodConfig, ShardedVarBuilder, Unquant
 use crate::layers::MatMul;
 
 use super::{
-    apply_scalings_to_x, get_maybe_topk_scalings, make_adapter, Adapter, LinearLayerLike,
-    LoraConfig, LoraLinearConfig, Merge,
+    Adapter, LinearLayerLike, LoraConfig, LoraLinearConfig, Merge, apply_scalings_to_x,
+    get_maybe_topk_scalings, make_adapter,
 };
 
 pub struct LoraLinear {

@@ -72,7 +72,7 @@ pub fn layer_indexed_device(
 
 #[cfg(test)]
 mod tests {
-    use super::{layer_indexed_device, DeviceForLoadTensor, LAYER_INDEX_PATTERN};
+    use super::{DeviceForLoadTensor, LAYER_INDEX_PATTERN, layer_indexed_device};
 
     #[test]
     fn layer_tensors_follow_their_layer_and_the_rest_stay_on_the_base_device() {

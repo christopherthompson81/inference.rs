@@ -4,9 +4,9 @@ use anyhow::{Context, Result};
 use either::Either;
 use indexmap::IndexMap;
 
-use crate::{request::ReasoningEffort, MessageContent, Pipeline, Tool};
+use crate::{MessageContent, Pipeline, Tool, request::ReasoningEffort};
 
-use super::{chat_template::apply_chat_template_to, text_models_inputs_processor, InputsProcessor};
+use super::{InputsProcessor, chat_template::apply_chat_template_to, text_models_inputs_processor};
 
 pub enum MessagesAction {
     // For idefics2, others which use the "new" openai format

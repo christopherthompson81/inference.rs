@@ -15,14 +15,14 @@ pub use text::Qwen3_5TextModel;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     kv_cache::EitherCache,
-    layers::masker::PastKvLenCache,
     layers::CausalMasker,
+    layers::masker::PastKvLenCache,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata},
     paged_attention::{
-        encoder_cache::{CacheModality, EncoderCacheManager},
         AttentionImplementation, HybridPagedKvCacheConfig, ModelConfigLike, ModelConfigMetadata,
+        encoder_cache::{CacheModality, EncoderCacheManager},
     },
-    qwen3_vl::{concatenate_visual_items, vision::Qwen3VLVisionModel, VisualEncoder},
+    qwen3_vl::{VisualEncoder, concatenate_visual_items, vision::Qwen3VLVisionModel},
     vision::multimodal_layout::PackedMultimodalLayout,
 };
 
@@ -343,12 +343,12 @@ impl Qwen3_5Model {
                     }
                     if img_offset != img_layer.dim(0)? || vid_offset != vid_layer.dim(0)? {
                         candle_core::bail!(
-                                "DeepStack feature alignment failed for images ({}/{}) or videos ({}/{})",
-                                img_offset,
-                                img_layer.dim(0)?,
-                                vid_offset,
-                                vid_layer.dim(0)?
-                            );
+                            "DeepStack feature alignment failed for images ({}/{}) or videos ({}/{})",
+                            img_offset,
+                            img_layer.dim(0)?,
+                            vid_offset,
+                            vid_layer.dim(0)?
+                        );
                     }
                     let row_refs: Vec<&Tensor> = rows.iter().collect();
                     combined_layers.push(Tensor::stack(&row_refs, 0)?);

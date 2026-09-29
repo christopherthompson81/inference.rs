@@ -3,35 +3,35 @@
 use std::{pin::Pin, sync::Arc, task::Poll, time::Duration};
 
 use axum::{
-    extract::{rejection::JsonRejection, Json, State},
-    response::{
-        sse::{Event, KeepAlive, KeepAliveStream},
-        IntoResponse, Sse,
-    },
     Extension,
+    extract::{Json, State, rejection::JsonRejection},
+    response::{
+        IntoResponse, Sse,
+        sse::{Event, KeepAlive, KeepAliveStream},
+    },
 };
 use inference_core::{ChatCompletionChunkResponse, ChatCompletionResponse, InferenceRs, Response};
 use tokio::sync::mpsc::Receiver;
 
 pub use crate::engine_chat::{
-    parse_request, serialize_agentic_progress, ChatCompletionParseContext,
+    ChatCompletionParseContext, parse_request, serialize_agentic_progress,
 };
 use crate::handler_core::ApiErrorHttp;
 use crate::{
     agentic::AgenticDefaults,
     completion_core::{
-        handle_completion_error, handle_completion_validation_error, BaseCompletionResponder,
+        BaseCompletionResponder, handle_completion_error, handle_completion_validation_error,
     },
-    engine_chat::{collect_chat, ChatEngine, ChatStream, ChatStreamEvent, DispatchError},
+    engine_chat::{ChatEngine, ChatStream, ChatStreamEvent, DispatchError, collect_chat},
     handler_core::{
-        openai_error_from_error, openai_error_response, ApiError, ApiErrorKind, ModelErrorMessage,
+        ApiError, ApiErrorKind, ModelErrorMessage, openai_error_from_error, openai_error_response,
     },
     openai::{
         ChatCompletionChunkResponseBody, ChatCompletionRequest, ChatCompletionResponseBody,
         OpenAiToolSurface,
     },
     skills::SkillStore,
-    streaming::{get_keep_alive_interval, openai_error_event, DoneState, StreamOutcomeHandle},
+    streaming::{DoneState, StreamOutcomeHandle, get_keep_alive_interval, openai_error_event},
     types::{ExtractedInferenceRsState, OnChunkCallback, OnDoneCallback, SharedInferenceRsState},
 };
 

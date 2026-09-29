@@ -4,7 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use reqwest::{header, redirect::Policy, Url};
+use reqwest::{Url, header, redirect::Policy};
 
 const URL_FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 

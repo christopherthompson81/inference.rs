@@ -6,14 +6,14 @@ use std::thread::ThreadId;
 
 use candle_core::cuda::cudarc::driver::{CudaSlice, CudaStream, DevicePtrMut, SyncOnDrop};
 use candle_core::{
-    quantized::{GgmlDType, QTensor},
     CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor,
+    quantized::{GgmlDType, QTensor},
 };
 
 use super::ffi;
 use crate::{
-    utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream},
     GluActivationType,
+    utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream},
 };
 
 const Q8_1_BLOCK_SIZE: usize = 32;

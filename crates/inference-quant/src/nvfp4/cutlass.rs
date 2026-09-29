@@ -1,29 +1,28 @@
 use std::{
     collections::HashMap,
-    ffi::{c_char, c_void, CStr},
+    ffi::{CStr, c_char, c_void},
     sync::{Arc, Mutex, OnceLock},
     thread::ThreadId,
 };
 
 use candle_core::{
-    cuda::{
-        cudarc::driver::{
-            result,
-            sys::{CUdevice_attribute, CUstreamCaptureStatus},
-            CudaSlice,
-        },
-        DeviceId,
-    },
     CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor,
+    cuda::{
+        DeviceId,
+        cudarc::driver::{
+            CudaSlice, result,
+            sys::{CUdevice_attribute, CUstreamCaptureStatus},
+        },
+    },
 };
 use float8::F8E4M3;
 use half::{bf16, f16};
 
 use super::Nvfp4LayerParts;
 use crate::{
+    NVFP4_BLOCK_SIZE, Nvfp4ActivationMode,
     cutile::Nvfp4GemmArgs,
     utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream},
-    Nvfp4ActivationMode, NVFP4_BLOCK_SIZE,
 };
 
 const MIN_ROWS: usize = 1024;

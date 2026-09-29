@@ -2,8 +2,8 @@ use candle_core::{DType, Device, Result, Shape, Tensor};
 
 #[cfg(feature = "cuda")]
 use candle_core::{
-    cuda::{cudarc::driver::DevicePtr, CudaStorageSlice},
     CudaStorage, Storage,
+    cuda::{CudaStorageSlice, cudarc::driver::DevicePtr},
 };
 
 #[cfg(feature = "metal")]
@@ -15,14 +15,14 @@ use half::{bf16, f16};
 use safetensors::tensor::Dtype;
 use std::{
     num::NonZeroUsize,
-    sync::{atomic::AtomicUsize, Arc},
+    sync::{Arc, atomic::AtomicUsize},
 };
 
 use crate::uqff::{UqffHeaderMatch, UqffLayerHeaderView};
 use crate::{
-    utils::{BitWiseOp, LeftshiftOp},
     IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedSerde, QuantizedSerdeType,
     Shard, UnquantLinear, UqffReader, UqffTensor,
+    utils::{BitWiseOp, LeftshiftOp},
 };
 
 #[cfg(feature = "cuda")]
@@ -149,7 +149,7 @@ impl TryFrom<usize> for HqqBits {
 
 impl HqqBits {
     // https://github.com/mobiusml/hqq/blob/306e30d9400629523c8e0af70101d8d7073cb3d5/hqq/core/bitpack.py#L10
-    pub(crate) fn bitpack_type(&self) -> impl Fn(Tensor) -> Result<Tensor> {
+    pub(crate) fn bitpack_type(&self) -> impl Fn(Tensor) -> Result<Tensor> + use<> {
         match self {
             Self::Eight => |wq: Tensor| -> Result<Tensor> {
                 #[cfg_attr(not(any(feature = "cuda", feature = "metal")), allow(unused_variables))]
@@ -1339,14 +1339,14 @@ impl QuantizedSerde for HqqLayer {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{atomic::AtomicUsize, Arc};
+    use std::sync::{Arc, atomic::AtomicUsize};
 
     use candle_core::{DType, Device, Result, Tensor};
 
     use super::{HqqAxis, HqqBits, HqqConfig, HqqLayer};
     use crate::{
-        uqff_version_tensors, IsqType, QuantMethod, QuantizeOntoGuard, QuantizedSerde, Shard,
-        UqffReader,
+        IsqType, QuantMethod, QuantizeOntoGuard, QuantizedSerde, Shard, UqffReader,
+        uqff_version_tensors,
     };
 
     const TEST_VOCAB_SIZE: usize = 96;

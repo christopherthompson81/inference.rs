@@ -13,10 +13,10 @@
 use candle_core::Device;
 use engine::Engine;
 pub use engine::{
+    DEFAULT_MAX_TOOL_ROUNDS, ENGINE_INSTRUCTIONS, EngineInstruction, IntervalLogger,
+    SearchEmbeddingModel, TERMINATE_ALL_NEXT_STEP,
     agentic_session::{AgenticSessionStore, SerializedSession, SerializedVideo},
     get_engine_terminate_flag, reset_engine_terminate_flag, should_terminate_engine_sequences,
-    EngineInstruction, IntervalLogger, SearchEmbeddingModel, DEFAULT_MAX_TOOL_ROUNDS,
-    ENGINE_INSTRUCTIONS, TERMINATE_ALL_NEXT_STEP,
 };
 use hf_hub::Cache;
 pub use lora::Ordering;
@@ -36,7 +36,7 @@ use std::{
     thread::{self, JoinHandle},
     time::{SystemTime, UNIX_EPOCH},
 };
-use tokio::sync::mpsc::{channel, Sender};
+use tokio::sync::mpsc::{Sender, channel};
 use tracing::{debug, info, warn};
 
 fn build_engine_runtime() -> Runtime {
@@ -91,10 +91,10 @@ mod chat_collector;
 mod engine;
 use inference_nn::media_inputs::video as video_input;
 pub use selection::model_loader::{
-    get_auto_device_map_params, get_model_dtype, get_tgt_non_granular_index, LoaderBuilder,
+    LoaderBuilder, get_auto_device_map_params, get_model_dtype, get_tgt_non_granular_index,
 };
 pub use video_input::{
-    sample_frame_indices, VideoFrameSampling, VideoInput, DEFAULT_VIDEO_FRAME_LIMIT,
+    DEFAULT_VIDEO_FRAME_LIMIT, VideoFrameSampling, VideoInput, sample_frame_indices,
 };
 mod embedding_models;
 mod search;
@@ -124,42 +124,43 @@ mod vision_models;
 mod xlora_models;
 
 pub use diagnostics::{
-    check_hf_gated_access, collect_system_info, run_doctor, BuildInfo, CpuInfo, DeviceInfo,
-    DoctorCheck, DoctorReport, DoctorStatus, HfConnectivityInfo, MemoryInfo, SystemInfo,
+    BuildInfo, CpuInfo, DeviceInfo, DoctorCheck, DoctorReport, DoctorStatus, HfConnectivityInfo,
+    MemoryInfo, SystemInfo, check_hf_gated_access, collect_system_info, run_doctor,
 };
 mod tuning;
 pub use tuning::{
-    auto_tune, AutoTuneRequest, AutoTuneResult, FitStatus, QualityTier, TuneCandidate, TuneProfile,
+    AutoTuneRequest, AutoTuneResult, FitStatus, QualityTier, TuneCandidate, TuneProfile, auto_tune,
 };
 
 pub(crate) use adapter::AdapterLease;
 #[doc(hidden)]
 pub use adapter::DynamicLoraRuntime;
 pub use adapter::{
-    AdapterGenerationId, AdapterGenerationParseError, AdapterSelection, LoraAdapterError,
-    LoraAdapterFiles, LoraAdapterInfo, LoraAdapterLoadPolicy, LoraAdapterRoute, LoraAdapterSpec,
+    AdapterGenerationId, AdapterGenerationParseError, AdapterSelection, DEFAULT_LORA_MAX_ADAPTERS,
+    DEFAULT_LORA_MAX_BYTES, DEFAULT_LORA_MAX_RANK, LoraAdapterError, LoraAdapterFiles,
+    LoraAdapterInfo, LoraAdapterLoadPolicy, LoraAdapterRoute, LoraAdapterSpec,
     LoraAdapterSpecParseError, LoraResidentGenerationInfo, LoraRuntimeConfig, LoraRuntimeStatus,
-    DEFAULT_LORA_MAX_ADAPTERS, DEFAULT_LORA_MAX_BYTES, DEFAULT_LORA_MAX_RANK, MAX_LORA_ALIAS_BYTES,
+    MAX_LORA_ALIAS_BYTES,
 };
 pub use agent_approval::{
     AgentToolApproval, AgentToolApprovalAsyncCallback, AgentToolApprovalCallback,
     AgentToolApprovalDecision, AgentToolApprovalFuture, AgentToolApprovalHandler,
 };
 pub use amoe::{AnyMoeConfig, AnyMoeExpertType};
-pub use chat_collector::{encode_agentic_tool_images, ChatResponseCollector};
+pub use chat_collector::{ChatResponseCollector, encode_agentic_tool_images};
 pub use device_map::{
     DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting, LayerDeviceMapper,
 };
 pub use files::{
-    format_from_name, is_text_mime, mime_for_format, File, FileContent, FileSource, FileStore,
-    RequestedFile, FILE_PURPOSE_AGENT_OUTPUT, FILE_PURPOSE_USER_DATA, MODEL_INLINE_BYTES,
-    WIRE_EMBED_LIMIT_BYTES,
+    FILE_PURPOSE_AGENT_OUTPUT, FILE_PURPOSE_USER_DATA, File, FileContent, FileSource, FileStore,
+    MODEL_INLINE_BYTES, RequestedFile, WIRE_EMBED_LIMIT_BYTES, format_from_name, is_text_mime,
+    mime_for_format,
 };
-pub use gguf::{GGUFArchitecture, GGUF_MULTI_FILE_DELIMITER};
+pub use gguf::{GGUF_MULTI_FILE_DELIMITER, GGUFArchitecture};
 pub use inference_audio::AudioInput;
 pub use inference_code_exec::{
-    CodeExecutionApproval, CodeExecutionApprovalCallback, CodeExecutionConfig, ShellConfig,
-    DEFAULT_CODE_EXEC_TIMEOUT_SECS, DEFAULT_SHELL_TIMEOUT_SECS,
+    CodeExecutionApproval, CodeExecutionApprovalCallback, CodeExecutionConfig,
+    DEFAULT_CODE_EXEC_TIMEOUT_SECS, DEFAULT_SHELL_TIMEOUT_SECS, ShellConfig,
 };
 pub use inference_mcp::{
     AgentPermission, AgentToolApprovalNotifier, AgentToolApprovalRequest, AgentToolKind,
@@ -171,35 +172,36 @@ pub use inference_mcp::{
 pub use inference_mcp::{
     McpClient, McpClientConfig, McpServerConfig, McpServerSource, McpToolInfo,
 };
-pub use inference_models_speech::{utils as speech_utils, SpeechGenerationConfig};
+pub use inference_models_speech::{SpeechGenerationConfig, utils as speech_utils};
 pub use inference_quant::parse_isq_value;
 pub use inference_quant::{IsqBits, IsqType};
 pub use inference_sandbox::{NetworkMode, SandboxMode, SandboxPolicy, SandboxProfile};
 pub use paged_attention::{MemoryGpuConfig, PagedAttentionConfig, PagedCacheType};
-pub use pipeline::hf::{
-    get_model_file, hf_home_dir, hf_hub_cache_dir, hf_token_path, is_hf_hub_offline,
-    list_model_files, probe_hf_repo_files, read_model_file_range, try_get_model_file,
-    HF_HUB_OFFLINE_ENV,
-};
 #[cfg(feature = "models-gemma")]
 pub use pipeline::GemmaLoader;
 #[cfg(feature = "models-qwen")]
 pub use pipeline::Qwen2Loader;
 #[cfg(feature = "models-other")]
 pub use pipeline::Starcoder2Loader;
+pub use pipeline::hf::{
+    HF_HUB_OFFLINE_ENV, get_model_file, hf_home_dir, hf_hub_cache_dir, hf_token_path,
+    is_hf_hub_offline, list_model_files, probe_hf_repo_files, read_model_file_range,
+    try_get_model_file,
+};
 pub use pipeline::{
-    chat_template::{is_chat_template_request_error, ChatTemplate},
+    AdapterPaths, AnyMoeLoader, AnyMoePipeline, AutoDeviceMapParams, AutoLoader, AutoLoaderBuilder,
+    DiffusionGenerationParams, DiffusionLoader, DiffusionLoaderBuilder, DiffusionLoaderType,
+    EmbeddingLoader, EmbeddingLoaderBuilder, EmbeddingLoaderType, EmbeddingModelPaths,
+    EmbeddingSpecificConfig, GGMLLoader, GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoader,
+    GGUFLoaderBuilder, GGUFSpecificConfig, HfConfigOverrides, IsqOrganization, Loader,
+    LocalModelPaths, Modalities, ModelKind, ModelPaths, MultimodalLoader, MultimodalLoaderBuilder,
+    MultimodalLoaderType, MultimodalPromptPrefixer, MultimodalSpecificConfig, NormalLoader,
+    NormalLoaderBuilder, NormalLoaderType, NormalSpecificConfig, ResolvedLoraAdapter, SpeechLoader,
+    SpeechLoaderType, SpeechPipeline, SupportedModality, TokenSource, UQFF_MULTI_FILE_DELIMITER,
+    UqffWriteConfig,
+    chat_template::{ChatTemplate, is_chat_template_request_error},
     expand_isq_value, expand_uqff_shards, parse_uqff_shard, resolve_uqff_report_output,
-    resolve_uqff_shorthand, AdapterPaths, AnyMoeLoader, AnyMoePipeline, AutoDeviceMapParams,
-    AutoLoader, AutoLoaderBuilder, DiffusionGenerationParams, DiffusionLoader,
-    DiffusionLoaderBuilder, DiffusionLoaderType, EmbeddingLoader, EmbeddingLoaderBuilder,
-    EmbeddingLoaderType, EmbeddingModelPaths, EmbeddingSpecificConfig, GGMLLoader,
-    GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig,
-    HfConfigOverrides, IsqOrganization, Loader, LocalModelPaths, Modalities, ModelKind, ModelPaths,
-    MultimodalLoader, MultimodalLoaderBuilder, MultimodalLoaderType, MultimodalPromptPrefixer,
-    MultimodalSpecificConfig, NormalLoader, NormalLoaderBuilder, NormalLoaderType,
-    NormalSpecificConfig, ResolvedLoraAdapter, SpeechLoader, SpeechLoaderType, SpeechPipeline,
-    SupportedModality, TokenSource, UqffWriteConfig, UQFF_MULTI_FILE_DELIMITER,
+    resolve_uqff_shorthand,
 };
 #[cfg(feature = "models-llama")]
 pub use pipeline::{
@@ -208,31 +210,30 @@ pub use pipeline::{
 #[cfg(feature = "models-phi")]
 pub use pipeline::{Phi2Loader, Phi3Loader, Phi3VLoader};
 pub use request::{
-    resolve_reasoning_controls, ApproximateUserLocation, CalibrationAction, CalibrationRequest,
-    Constraint, DetokenizationRequest, ImageGenerationResponseFormat, LlguidanceGrammar,
-    MessageContent, NormalRequest, ReasoningControlError, ReasoningEffort,
+    ApproximateUserLocation, CalibrationAction, CalibrationRequest, Constraint,
+    DEFAULT_ENABLE_THINKING, DetokenizationRequest, ImageGenerationResponseFormat,
+    LlguidanceGrammar, MessageContent, NormalRequest, ReasoningControlError, ReasoningEffort,
     ReasoningEffortParseError, Request, RequestMessage, ResolvedReasoningControls,
     SearchContextSize, TokenizationRequest, WebSearchContentType, WebSearchFilters,
     WebSearchImageSettings, WebSearchOptions, WebSearchReturnTokenBudget, WebSearchUserLocation,
-    DEFAULT_ENABLE_THINKING,
+    resolve_reasoning_controls,
 };
 pub use resource_plan::{
-    plan_paged_kv, PagedKvModelRequest, PagedKvPlan, PagedKvPolicy, RuntimeResourcePlanOptions,
+    PagedKvModelRequest, PagedKvPlan, PagedKvPolicy, RuntimeResourcePlanOptions, plan_paged_kv,
 };
 pub use response::*;
 pub use sampler::{
     CustomLogitsProcessor, DrySamplingParams, ModelGenerationDefaults, SamplingParams, StopTokens,
 };
 pub use scheduler::{
-    DefaultSchedulerMethod, SchedulerConfig, SchedulerLimits,
     DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_NUM_BATCHED_TOKENS,
-    DEFAULT_MAX_PREFILL_CHUNK_TOKENS,
+    DEFAULT_MAX_PREFILL_CHUNK_TOKENS, DefaultSchedulerMethod, SchedulerConfig, SchedulerLimits,
 };
 pub use search::{SearchCallback, SearchFunctionParameters, SearchResult};
 use serde::Serialize;
 pub use speculative::{
-    reserve_external_mtp_memory, reserve_external_mtp_memory_with_runtime, MtpConfig,
-    MtpDraftSamplingMethod, MtpRuntimeConfig, SpeculativeConfig,
+    MtpConfig, MtpDraftSamplingMethod, MtpRuntimeConfig, SpeculativeConfig,
+    reserve_external_mtp_memory, reserve_external_mtp_memory_with_runtime,
 };
 use tokio::runtime::Runtime;
 pub use tools::{
@@ -242,8 +243,8 @@ pub use tools::{
 };
 pub use topology::{LayerTopology, Topology};
 pub use utils::debug::{
-    default_inference_filter, initialize_inference_logging, initialize_logging,
-    initialize_logging_with_filter, LogVerbosity,
+    LogVerbosity, default_inference_filter, initialize_inference_logging, initialize_logging,
+    initialize_logging_with_filter,
 };
 pub use utils::memory_usage::MemoryUsage;
 pub use utils::normal::{ModelDType, TryIntoDType};

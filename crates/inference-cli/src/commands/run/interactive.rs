@@ -3,13 +3,13 @@
 use either::Either;
 use indexmap::IndexMap;
 use inference_core::{
-    speech_utils, AdapterSelection, AgentPermission, AgentToolKind, Constraint,
-    DiffusionGenerationParams, DrySamplingParams, ImageGenerationResponseFormat, InferenceRs,
-    MessageContent, ModelCategory, NormalRequest, ReasoningEffort, Request, RequestMessage,
-    Response, ResponseOk, SamplingParams, Usage, WebSearchOptions, TERMINATE_ALL_NEXT_STEP,
+    AdapterSelection, AgentPermission, AgentToolKind, Constraint, DiffusionGenerationParams,
+    DrySamplingParams, ImageGenerationResponseFormat, InferenceRs, MessageContent, ModelCategory,
+    NormalRequest, ReasoningEffort, Request, RequestMessage, Response, ResponseOk, SamplingParams,
+    TERMINATE_ALL_NEXT_STEP, Usage, WebSearchOptions, speech_utils,
 };
 use regex::Regex;
-use rustyline::{error::ReadlineError, history::History, DefaultEditor, Editor, Helper};
+use rustyline::{DefaultEditor, Editor, Helper, error::ReadlineError, history::History};
 use serde_json::Value;
 #[cfg(feature = "code-execution")]
 use std::collections::VecDeque;
@@ -17,10 +17,10 @@ use std::{
     fs,
     io::{self, Write},
     path::PathBuf,
-    sync::{atomic::Ordering, Arc, LazyLock, Mutex},
+    sync::{Arc, LazyLock, Mutex, atomic::Ordering},
     time::Instant,
 };
-use tokio::sync::mpsc::{channel, Receiver};
+use tokio::sync::mpsc::{Receiver, channel};
 use tracing::{error, info};
 
 use inference_server_core::util;
@@ -349,7 +349,9 @@ async fn oneshot_multimodal(inference: Arc<InferenceRs>, ctx: OneshotCtx, input:
             video_sampling,
         } => (prefixer, *video_sampling),
         _ => {
-            error!("--image/--video/--audio require a multimodal model, but the loaded model is not multimodal.");
+            error!(
+                "--image/--video/--audio require a multimodal model, but the loaded model is not multimodal."
+            );
             return;
         }
     };
@@ -543,10 +545,10 @@ fn print_stats(
                     prefix_hits, prefix_total
                 );
             }
-            if let Some((hits, misses)) = logger.encoder_cache_stats() {
-                if hits + misses > 0 {
-                    println!("Encoder cache: {}/{} hits", hits, hits + misses);
-                }
+            if let Some((hits, misses)) = logger.encoder_cache_stats()
+                && hits + misses > 0
+            {
+                println!("Encoder cache: {}/{} hits", hits, hits + misses);
             }
         }
         println!("Sampling: {}", format_sampling_params(sampling_params));
@@ -933,7 +935,9 @@ async fn text_interactive_mode(
                 let parsed = match &prompt_trimmed.split(SYSTEM_CMD).collect::<Vec<_>>()[..] {
                     &["", a] => a.trim(),
                     _ => {
-                        println!("Error: Setting the system command should be done with this format: `{SYSTEM_CMD} This is a system message.`");
+                        println!(
+                            "Error: Setting the system command should be done with this format: `{SYSTEM_CMD} This is a system message.`"
+                        );
                         continue;
                     }
                 };
@@ -1314,13 +1318,12 @@ pub(super) fn agent_approval_callback() -> inference_core::AgentToolApprovalCall
 
         #[cfg(feature = "code-execution")]
         {
-            if matches!(approval.tool.kind, AgentToolKind::CodeExecution) {
-                if let Some(code) = approval.arguments.get("code").and_then(|v| v.as_str()) {
-                    if !take_code_call(&RENDERED_CODE_CALLS, code) {
-                        remember_code_call(&APPROVAL_RENDERED_CODE_CALLS, code);
-                        print_code_call_panel(&approval.tool.label, code);
-                    }
-                }
+            if matches!(approval.tool.kind, AgentToolKind::CodeExecution)
+                && let Some(code) = approval.arguments.get("code").and_then(|v| v.as_str())
+                && !take_code_call(&RENDERED_CODE_CALLS, code)
+            {
+                remember_code_call(&APPROVAL_RENDERED_CODE_CALLS, code);
+                print_code_call_panel(&approval.tool.label, code);
             }
         }
 
@@ -1329,22 +1332,21 @@ pub(super) fn agent_approval_callback() -> inference_core::AgentToolApprovalCall
         println!("{divider}{}", "─".repeat(pad));
         println!("│ session: {}", approval.session_id);
         println!("│ tool: {}", approval.tool.label);
-        if matches!(approval.tool.kind, AgentToolKind::Shell) {
-            if let Some(commands) = approval
+        if matches!(approval.tool.kind, AgentToolKind::Shell)
+            && let Some(commands) = approval
                 .arguments
                 .get("commands")
                 .and_then(|v| v.as_array())
-            {
-                let commands = commands
-                    .iter()
-                    .filter_map(|v| v.as_str())
-                    .collect::<Vec<_>>();
-                if !commands.is_empty() {
-                    println!("│ commands:");
-                    for command in commands {
-                        for line in command.lines() {
-                            println!("│   {line}");
-                        }
+        {
+            let commands = commands
+                .iter()
+                .filter_map(|v| v.as_str())
+                .collect::<Vec<_>>();
+            if !commands.is_empty() {
+                println!("│ commands:");
+                for command in commands {
+                    for line in command.lines() {
+                        println!("│   {line}");
                     }
                 }
             }
@@ -1613,7 +1615,9 @@ async fn multimodal_interactive_mode(
                 let parsed = match &prompt_trimmed.split(SYSTEM_CMD).collect::<Vec<_>>()[..] {
                     &["", a] => a.trim(),
                     _ => {
-                        println!("Error: Setting the system command should be done with this format: `{SYSTEM_CMD} This is a system message.`");
+                        println!(
+                            "Error: Setting the system command should be done with this format: `{SYSTEM_CMD} This is a system message.`"
+                        );
                         continue;
                     }
                 };
@@ -1849,7 +1853,9 @@ async fn audio_interactive_mode(
     _agent_approval_callback: Option<inference_core::AgentToolApprovalCallback>,
     _enable_thinking: Option<bool>,
 ) {
-    error!("Audio models are not supported in `inference run`. Use `inference serve` and the OpenAI-compatible /v1/chat/completions endpoint instead.");
+    error!(
+        "Audio models are not supported in `inference run`. Use `inference serve` and the OpenAI-compatible /v1/chat/completions endpoint instead."
+    );
 }
 
 async fn diffusion_interactive_mode(

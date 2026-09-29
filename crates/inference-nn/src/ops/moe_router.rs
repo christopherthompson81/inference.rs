@@ -160,8 +160,8 @@ pub fn cuda_moe_router_topk(
     expert_scale: Option<&Tensor>,
 ) -> Result<TopKOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use candle_core::cuda_backend::CudaStorageSlice;
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use std::ffi::c_void;
 
     let logits = logits.contiguous()?;
@@ -181,17 +181,17 @@ pub fn cuda_moe_router_topk(
     }
 
     let selection_bias = selection_bias.map(Tensor::contiguous).transpose()?;
-    if let Some(selection_bias) = &selection_bias {
-        if selection_bias.dtype() != DType::F32 || selection_bias.elem_count() != n_experts {
-            candle_core::bail!("cuda_moe_router_topk selection_bias must be F32 [n_experts]");
-        }
+    if let Some(selection_bias) = &selection_bias
+        && (selection_bias.dtype() != DType::F32 || selection_bias.elem_count() != n_experts)
+    {
+        candle_core::bail!("cuda_moe_router_topk selection_bias must be F32 [n_experts]");
     }
 
     let expert_scale = expert_scale.map(Tensor::contiguous).transpose()?;
-    if let Some(expert_scale) = &expert_scale {
-        if expert_scale.dtype() != DType::F32 || expert_scale.elem_count() != n_experts {
-            candle_core::bail!("cuda_moe_router_topk expert_scale must be F32 [n_experts]");
-        }
+    if let Some(expert_scale) = &expert_scale
+        && (expert_scale.dtype() != DType::F32 || expert_scale.elem_count() != n_experts)
+    {
+        candle_core::bail!("cuda_moe_router_topk expert_scale must be F32 [n_experts]");
     }
     let selection_bias_storage_and_layout = selection_bias.as_ref().map(|t| t.storage_and_layout());
     let expert_scale_storage_and_layout = expert_scale.as_ref().map(|t| t.storage_and_layout());

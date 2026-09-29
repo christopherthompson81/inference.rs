@@ -25,17 +25,17 @@ pub use ops::gptoss_swiglu_fused;
 pub use ops::gptoss_swiglu_interleaved;
 pub use ops::softcap;
 pub use ops::softmax_with_sinks;
-pub use ops::{fused_glu, fused_split_glu, GluActivationType};
 pub use ops::{BitWiseOp, CumSumOp, LeftshiftOp, NonZeroOp, SortOp};
+pub use ops::{GluActivationType, fused_glu, fused_split_glu};
 pub(crate) use uqff::{data_to_bytes, dtype_to_uqff_code, uqff_code_to_dtype};
 
 #[cfg(feature = "cuda")]
 use candle_core::{
+    CudaDevice, Device, Tensor,
     cuda::cudarc::{
         self,
         driver::{CudaSlice, CudaStream, DevicePtr, DevicePtrMut, DeviceRepr},
     },
-    CudaDevice, Device, Tensor,
 };
 
 #[cfg(feature = "cuda")]

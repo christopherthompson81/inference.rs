@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::Linear;
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
@@ -31,7 +31,7 @@ use crate::{
     model::{IsqModel, ModelForwardContext, NormalLoadingMetadata},
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{
-        load_fp8_attention_scales, AttentionImplementation, ModelConfigMetadata, PagedAttention,
+        AttentionImplementation, ModelConfigMetadata, PagedAttention, load_fp8_attention_scales,
     },
     qwen3_5::packed_gdn::{forward_packed_gdn, packed_gdn_layout},
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
@@ -770,7 +770,7 @@ impl Qwen3_5MoeTextModel {
             let indices: Vec<u32> = mask_flat
                 .iter()
                 .enumerate()
-                .filter(|(_, &v)| v > 0.0)
+                .filter(|&(_, &v)| v > 0.0)
                 .map(|(i, _)| i as u32)
                 .collect();
             if indices.is_empty() {
@@ -846,10 +846,9 @@ impl Qwen3_5MoeTextModel {
             // Integrate DeepStack visual features when provided
             if let (Some((idx, idx_expanded)), Some(deepstack)) =
                 (&deepstack_indices, deepstack_visual_embeds)
+                && i < deepstack.len()
             {
-                if i < deepstack.len() {
-                    xs = self.deepstack_process(xs, idx, idx_expanded, &deepstack[i])?;
-                }
+                xs = self.deepstack_process(xs, idx, idx_expanded, &deepstack[i])?;
             }
         }
         let xs = xs.to_device(&self.device)?;
@@ -996,9 +995,11 @@ mod tests {
             Ok(_) => panic!("alternate namespace must be rejected"),
             Err(error) => error,
         };
-        assert!(error
-            .to_string()
-            .contains("requires canonical `model.language_model.*`"));
+        assert!(
+            error
+                .to_string()
+                .contains("requires canonical `model.language_model.*`")
+        );
         Ok(())
     }
 }

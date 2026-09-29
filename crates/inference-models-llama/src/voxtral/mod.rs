@@ -14,7 +14,7 @@ use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
     kv_cache::{EitherCache, KvCache, NormalCache},
     layers::masker::PastKvLenCache,
-    layers::{embedding, CausalMasker, RmsNorm, RotaryEmbedding},
+    layers::{CausalMasker, RmsNorm, RotaryEmbedding, embedding},
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
@@ -1025,8 +1025,8 @@ mod tests {
     use candle_core::{Device, Tensor};
 
     use super::{
-        adapter_output_len, condition_audio_embeddings, encoder_output_len, reset_audio_cache,
-        validate_audio_request_layout, VoxtralAudioCacheKey, VoxtralAudioRequest,
+        VoxtralAudioCacheKey, VoxtralAudioRequest, adapter_output_len, condition_audio_embeddings,
+        encoder_output_len, reset_audio_cache, validate_audio_request_layout,
     };
 
     fn key(sequence_id: usize, hashes: &[u64]) -> VoxtralAudioCacheKey {
@@ -1139,20 +1139,24 @@ mod tests {
                 mel_index: Some(1),
             },
         ];
-        assert!(validate_audio_request_layout(2, 2, &duplicate)
-            .unwrap_err()
-            .to_string()
-            .contains("duplicated"));
+        assert!(
+            validate_audio_request_layout(2, 2, &duplicate)
+                .unwrap_err()
+                .to_string()
+                .contains("duplicated")
+        );
 
         let missing = vec![VoxtralAudioRequest {
             logical_index: 0,
             key: key(1, &[10]),
             mel_index: Some(0),
         }];
-        assert!(validate_audio_request_layout(2, 2, &missing)
-            .unwrap_err()
-            .to_string()
-            .contains("row 1 has no request metadata"));
+        assert!(
+            validate_audio_request_layout(2, 2, &missing)
+                .unwrap_err()
+                .to_string()
+                .contains("row 1 has no request metadata")
+        );
     }
 
     #[test]

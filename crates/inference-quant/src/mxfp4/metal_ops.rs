@@ -1,4 +1,4 @@
-use candle_core::{backend::BackendStorage, MetalStorage, Result, Shape, Storage, Tensor};
+use candle_core::{MetalStorage, Result, Shape, Storage, Tensor, backend::BackendStorage};
 
 use super::MXFP4_BLOCK_SIZE;
 

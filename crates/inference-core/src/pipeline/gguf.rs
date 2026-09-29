@@ -1,7 +1,7 @@
 use super::llg::build_llg_factory;
 use super::{
-    get_model_paths, text_models_inputs_processor::ModelInputs, AdapterKind, CacheManager,
-    GeneralMetadata, Loader, ModelKind, ModelPaths, PrettyName, QuantizationKind, TokenSource,
+    AdapterKind, CacheManager, GeneralMetadata, Loader, ModelKind, ModelPaths, PrettyName,
+    QuantizationKind, TokenSource, get_model_paths, text_models_inputs_processor::ModelInputs,
 };
 use super::{
     AnyMoePipelineMixin, CacheManagerMixin, EitherCache, ForwardInputsResult, IsqPipelineMixin,
@@ -10,7 +10,9 @@ use super::{
 use crate::device_map::{self, DeviceMapper};
 use crate::distributed::WorkerTransferData;
 use crate::gguf::metadata::{ContentConfig, GgufDeviceMapLoaderInner};
+use crate::gguf::{Content, GGUFArchitecture};
 use crate::gguf::{
+    GgufTokenizerConversion,
     base_model::infer_hf_base_model_id,
     convert_gguf_metadata_to_hf_tokenizer, get_gguf_chat_template,
     get_gguf_chat_template_from_metadata,
@@ -22,12 +24,12 @@ use crate::gguf::{
         normal_loader_hint_from_external_config, normalize_external_normal_config,
         synthesize_normal_config, validate_normal_config_tensor_inventory,
     },
-    normal_registry::{resolve_native_adapter, GgufDescriptor, RopePairing},
+    normal_registry::{GgufDescriptor, RopePairing, resolve_native_adapter},
     qwen_multimodal_bindings::{
         build_qwen_multimodal_bindings, normalize_qwen_multimodal_config,
         qwen_multimodal_loader_type,
     },
-    validate_external_gguf_tokenizer, GgufTokenizerConversion,
+    validate_external_gguf_tokenizer,
 };
 #[cfg(feature = "models-gemma")]
 use crate::gguf::{
@@ -37,12 +39,12 @@ use crate::gguf::{
         prepare_gemma3_text_config,
     },
 };
-use crate::gguf::{Content, GGUFArchitecture};
 use crate::lora::Ordering;
+use crate::pipeline::ChatTemplate;
 use crate::pipeline::cache_manager::FullCacheManager;
-use crate::pipeline::chat_template::{calculate_eos_tokens, BeginEndUnkPadTok, GenerationConfig};
+use crate::pipeline::chat_template::{BeginEndUnkPadTok, GenerationConfig, calculate_eos_tokens};
 use crate::pipeline::hf::{build_api, get_file, list_repo_files};
-use crate::pipeline::loaders::{stamp_qk_rope_layout, DeviceMappedModelLoader};
+use crate::pipeline::loaders::{DeviceMappedModelLoader, stamp_qk_rope_layout};
 use crate::pipeline::model_config as ModelConfig;
 use crate::pipeline::multimodal::{
     MultimodalLoaderBuilder, MultimodalSpecificConfig, PreparedMultimodalSource,
@@ -50,8 +52,7 @@ use crate::pipeline::multimodal::{
 use crate::pipeline::normal::{NormalLoaderBuilder, NormalSpecificConfig, PreparedNormalSource};
 use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::tokenizer::get_tokenizer;
-use crate::pipeline::ChatTemplate;
-use crate::pipeline::{get_chat_template, Modalities, SupportedModality};
+use crate::pipeline::{Modalities, SupportedModality, get_chat_template};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::progress::ProgressScopeGuard;
@@ -61,11 +62,11 @@ use crate::xlora_models::XLoraQLlama;
 #[cfg(feature = "models-phi")]
 use crate::xlora_models::XLoraQPhi3;
 use crate::{
-    distributed, get_mut_arcmutex, get_paths_gguf, DeviceMapSetting, LocalModelPaths,
-    LoraAdapterSpec, LoraRuntimeConfig, MultimodalLoaderType, PagedAttentionConfig, Pipeline,
-    Topology, TryIntoDType, UqffWriteConfig, GLOBAL_HF_CACHE,
+    DeviceMapSetting, GLOBAL_HF_CACHE, LocalModelPaths, LoraAdapterSpec, LoraRuntimeConfig,
+    MultimodalLoaderType, PagedAttentionConfig, Pipeline, Topology, TryIntoDType, UqffWriteConfig,
+    distributed, get_mut_arcmutex, get_paths_gguf,
 };
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::{Device, Tensor};
 use either::Either;
 use hf_hub::{Repo, RepoType};
@@ -521,7 +522,7 @@ impl GGUFLoader {
                         "Failed to load tokenizer from model assets `{}`",
                         path.display()
                     )
-                })
+                });
             }
             Err(error) => Err(error),
         };
@@ -998,7 +999,7 @@ impl GGUFLoader {
                 return Err(error).context(
                     "Cannot infer original model assets from GGUF base-model metadata; pass \
                      `--tok-model-id <original-model-id>` to override it",
-                )
+                );
             }
             Err(error) => {
                 warn!(
@@ -1357,20 +1358,20 @@ impl Loader for GGUFLoader {
         let llg_factory = build_llg_factory(tokenizer.clone())?;
         let num_hidden_layers = model.num_hidden_layers();
 
-        if chat_template.bos_token.is_none() {
-            if let Some(v) = bos {
-                chat_template.bos_token = Some(BeginEndUnkPadTok(Either::Left(v)));
-            }
+        if chat_template.bos_token.is_none()
+            && let Some(v) = bos
+        {
+            chat_template.bos_token = Some(BeginEndUnkPadTok(Either::Left(v)));
         }
-        if chat_template.eos_token.is_none() {
-            if let Some(v) = eos {
-                chat_template.eos_token = Some(BeginEndUnkPadTok(Either::Left(v)));
-            }
+        if chat_template.eos_token.is_none()
+            && let Some(v) = eos
+        {
+            chat_template.eos_token = Some(BeginEndUnkPadTok(Either::Left(v)));
         }
-        if chat_template.unk_token.is_none() {
-            if let Some(v) = unk {
-                chat_template.unk_token = Some(BeginEndUnkPadTok(Either::Left(v)));
-            }
+        if chat_template.unk_token.is_none()
+            && let Some(v) = unk
+        {
+            chat_template.unk_token = Some(BeginEndUnkPadTok(Either::Left(v)));
         }
 
         let generation_defaults = gen_conf
@@ -1577,18 +1578,18 @@ fn adapted_gguf_model<R: std::io::Seek + std::io::Read>(
 #[cfg(test)]
 mod tests {
     use super::{
+        DynamicLoraConfig, GGUFSpecificConfig, GgufTokenizerConversion, TokenizerFallback,
         preferred_hf_config, prepare_native_multimodal_config, requires_multimodal_projector,
         resolve_tokenizer_candidate, validate_legacy_gguf_adapter_qk_layout,
-        validate_native_dynamic_lora, DynamicLoraConfig, GGUFSpecificConfig,
-        GgufTokenizerConversion, TokenizerFallback,
+        validate_native_dynamic_lora,
     };
     use crate::{
-        gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY,
-        gguf::{normal_registry::RopePairing, GGUFArchitecture},
         MultimodalLoaderType,
+        gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY,
+        gguf::{GGUFArchitecture, normal_registry::RopePairing},
     };
     use std::path::{Path, PathBuf};
-    use tokenizers::{models::bpe::BPE, Tokenizer};
+    use tokenizers::{Tokenizer, models::bpe::BPE};
 
     fn tokenizer_conversion(marker: &str) -> GgufTokenizerConversion {
         GgufTokenizerConversion {
@@ -1623,12 +1624,10 @@ mod tests {
         let error = error.to_string();
         assert!(error.contains("converter-permuted adjacent RoPE order"));
         assert!(error.contains("original safetensors model"));
-        assert!(validate_native_dynamic_lora(
-            Some(&dynamic_lora),
-            RopePairing::HalfSplit,
-            "qwen35",
-        )
-        .is_ok());
+        assert!(
+            validate_native_dynamic_lora(Some(&dynamic_lora), RopePairing::HalfSplit, "qwen35",)
+                .is_ok()
+        );
         assert!(validate_native_dynamic_lora(None, RopePairing::Adjacent, "llama").is_ok());
     }
 
@@ -1636,9 +1635,11 @@ mod tests {
     fn legacy_gguf_adapters_reject_adjacent_qk_layouts() {
         for architecture in [GGUFArchitecture::Llama, GGUFArchitecture::Mistral3] {
             let error = validate_legacy_gguf_adapter_qk_layout(architecture).unwrap_err();
-            assert!(error
-                .to_string()
-                .contains("converter-permuted adjacent RoPE order"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("converter-permuted adjacent RoPE order")
+            );
         }
         assert!(validate_legacy_gguf_adapter_qk_layout(GGUFArchitecture::Phi3).is_ok());
     }

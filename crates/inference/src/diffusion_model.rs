@@ -1,7 +1,7 @@
 use inference_core::*;
 
-use crate::model_builder_trait::{build_diffusion_pipeline, build_model_from_pipeline};
 use crate::Model;
+use crate::model_builder_trait::{build_diffusion_pipeline, build_model_from_pipeline};
 
 /// Configure a diffusion model (image generation) with the various parameters for loading, running, and other inference behaviors.
 pub struct DiffusionModelBuilder {

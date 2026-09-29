@@ -12,13 +12,13 @@ mod projection;
 mod weights;
 
 pub use cache::GdnLayerCache;
-pub use config::{GdnConfig, GdnStateDType, GdnVHeadLayout, GDN_V_HEAD_LAYOUT_CONFIG_KEY};
+pub use config::{GDN_V_HEAD_LAYOUT_CONFIG_KEY, GdnConfig, GdnStateDType, GdnVHeadLayout};
 pub use layer::GdnForwardContext;
 pub use layer::{
     GatedDeltaNet, GdnForwardStash, GdnSpeculativeStash, GdnTransitionCommitConfig,
     GdnTransitionStash,
 };
-pub use packed::{try_forward_grouped_packed_gdn, PackedGdnLayout};
+pub use packed::{PackedGdnLayout, try_forward_grouped_packed_gdn};
 pub use weights::GdnInputProjectionKind;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -284,11 +284,11 @@ fn lark_string(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_qwen_tool_calls, QwenParser};
-    use crate::tools::parsers::{specialize_required_tool_call_grammar, ToolFormatParser};
+    use super::{QwenParser, parse_qwen_tool_calls};
+    use crate::tools::parsers::{ToolFormatParser, specialize_required_tool_call_grammar};
     use inference_mcp::{Function, ToolType};
-    use serde_json::json;
     use serde_json::Value;
+    use serde_json::json;
     use std::collections::HashMap;
     use std::sync::Arc;
 

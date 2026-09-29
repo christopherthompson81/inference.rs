@@ -1,25 +1,24 @@
 use crate::{
-    distributed,
+    SchedulerConfig, distributed,
     paged_attention::{block_hash::BlockHash, block_pool::PrefixBlockRetentionRevocationMonitor},
     pipeline::{
+        CacheBackendMetadata, CacheInstruction, DecodeGraphPrecaptureCtx,
+        RECURRENT_GRAPH_PAD_SLOTS, StepLookahead,
         llg::{constraint_from_llg_grammar, llg_grammar_from_constraint},
         prompt_chunks::effective_recurrent_prefix_boundary,
-        CacheBackendMetadata, CacheInstruction, DecodeGraphPrecaptureCtx, StepLookahead,
-        RECURRENT_GRAPH_PAD_SLOTS,
     },
     prefix_cacher::{PagedPrefixCheckpoint, PrefixCacheManagerV2},
     scheduler::{
-        modality_signature, DefaultSchedulerMethod, DefaultSchedulerOutput,
-        PagedPrefixCacheValidation, PagedPrefixCacheValidator, Scheduler, SchedulerOutput,
+        DefaultSchedulerMethod, DefaultSchedulerOutput, PagedPrefixCacheValidation,
+        PagedPrefixCacheValidator, Scheduler, SchedulerOutput, modality_signature,
     },
     search::{self, rag::SearchPipeline},
     sequence::{SeqStepType, Sequence, StopReason},
     tools,
     utils::debug::DEBUG,
-    SchedulerConfig,
 };
 use inference_quant::RingConfig;
-use interprocess::local_socket::{traits::Listener, ListenerOptions};
+use interprocess::local_socket::{ListenerOptions, traits::Listener};
 use llguidance::ParserFactory;
 pub use logger::IntervalLogger;
 use paged_step::PagedStepCtx;
@@ -33,26 +32,25 @@ use std::{
     net::TcpListener,
     str::FromStr,
     sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, LazyLock,
+        atomic::{AtomicBool, AtomicUsize, Ordering},
     },
     time::Instant,
 };
 use tokio::{
     select,
     sync::{
-        mpsc::{error::TryRecvError, Receiver, Sender},
         Mutex, Notify,
+        mpsc::{Receiver, Sender, error::TryRecvError},
     },
     task::JoinHandle,
 };
 
 use crate::{
-    get_mut_arcmutex,
+    Constraint, get_mut_arcmutex,
     pipeline::Pipeline,
     request::Request,
     sequence::{SequenceRecognizer, SequenceState},
-    Constraint,
 };
 
 mod add_request;
@@ -85,7 +83,7 @@ fn record_paged_recurrent_prefix_validation(outcome: &'static str, reason: &'sta
 use self::cuda_decode::CudaDecodeCompletionWorker;
 #[cfg(feature = "cuda")]
 use crate::pipeline::execution::{
-    submit_decode_tail, CudaDecodeTail, CudaStepCompletion, CudaStepSubmission, CudaTailSubmission,
+    CudaDecodeTail, CudaStepCompletion, CudaStepSubmission, CudaTailSubmission, submit_decode_tail,
 };
 #[cfg(feature = "cuda")]
 use crate::response::Response;
@@ -166,10 +164,10 @@ pub fn should_terminate_engine_sequences() -> bool {
     }
     // Then check engine-specific flag
     let thread_id = std::thread::current().id();
-    if let Ok(flags) = ENGINE_TERMINATE_FLAGS.lock() {
-        if let Some(flag) = flags.get(&thread_id) {
-            return flag.load(Ordering::SeqCst);
-        }
+    if let Ok(flags) = ENGINE_TERMINATE_FLAGS.lock()
+        && let Some(flag) = flags.get(&thread_id)
+    {
+        return flag.load(Ordering::SeqCst);
     }
     false
 }
@@ -177,10 +175,10 @@ pub fn should_terminate_engine_sequences() -> bool {
 /// Reset termination flags for the current engine.
 pub fn reset_engine_terminate_flag() {
     let thread_id = std::thread::current().id();
-    if let Ok(flags) = ENGINE_TERMINATE_FLAGS.lock() {
-        if let Some(flag) = flags.get(&thread_id) {
-            flag.store(false, Ordering::SeqCst);
-        }
+    if let Ok(flags) = ENGINE_TERMINATE_FLAGS.lock()
+        && let Some(flag) = flags.get(&thread_id)
+    {
+        flag.store(false, Ordering::SeqCst);
     }
 }
 
@@ -403,39 +401,39 @@ impl PagedPrefixCacheValidator for HybridPagedPrefixValidator {
             pipeline.speculative_prefix_checkpoint_policy()
         };
         let uses_auxiliary_state = prefix_policy.uses_auxiliary_state(modality_signature(seq));
-        if uses_auxiliary_state {
-            if let Some(boundary) = effective_recurrent_prefix_boundary(
+        if uses_auxiliary_state
+            && let Some(boundary) = effective_recurrent_prefix_boundary(
                 cached_tokens,
                 0,
                 block_size,
                 prefix_policy.replay_for(modality_signature(seq)),
                 seq.mm_features(),
-            ) {
-                let n_blocks = boundary / block_size;
-                let current_owner = block_hashes.last().copied();
-                let checkpoint = current_owner.and_then(|_| {
-                    get_mut_arcmutex!(self.prefix_cacher)
-                        .peek_paged_recurrent_prefix(&block_hashes[..n_blocks])
-                });
-                if let Some(checkpoint) = checkpoint {
-                    if checkpoint.auxiliary.is_some() {
-                        let replay_tokens = get_mut_arcmutex!(self.pipeline)
-                            .speculative_prefix_replay()
-                            .replay_tokens(boundary);
-                        return Ok(self.stage_recurrent_restore(HybridPrefixRestore {
-                            sequence_id,
-                            slot_idx,
-                            cached_tokens: boundary,
-                            checkpoint,
-                            prefix_key: block_hashes[..n_blocks].to_vec(),
-                            current_owner: current_owner
-                                .expect("recurrent prefix owner requires a full block"),
-                            restore_auxiliary: true,
-                            replay_tokens_avoided: replay_tokens,
-                            record_auxiliary_miss: false,
-                        }));
-                    }
-                }
+            )
+        {
+            let n_blocks = boundary / block_size;
+            let current_owner = block_hashes.last().copied();
+            let checkpoint = current_owner.and_then(|_| {
+                get_mut_arcmutex!(self.prefix_cacher)
+                    .peek_paged_recurrent_prefix(&block_hashes[..n_blocks])
+            });
+            if let Some(checkpoint) = checkpoint
+                && checkpoint.auxiliary.is_some()
+            {
+                let replay_tokens = get_mut_arcmutex!(self.pipeline)
+                    .speculative_prefix_replay()
+                    .replay_tokens(boundary);
+                return Ok(self.stage_recurrent_restore(HybridPrefixRestore {
+                    sequence_id,
+                    slot_idx,
+                    cached_tokens: boundary,
+                    checkpoint,
+                    prefix_key: block_hashes[..n_blocks].to_vec(),
+                    current_owner: current_owner
+                        .expect("recurrent prefix owner requires a full block"),
+                    restore_auxiliary: true,
+                    replay_tokens_avoided: replay_tokens,
+                    record_auxiliary_miss: false,
+                }));
             }
         }
         let record_auxiliary_miss = uses_auxiliary_state;
@@ -518,12 +516,12 @@ impl PagedPrefixCacheValidator for HybridPagedPrefixValidator {
     ) -> candle_core::Result<bool> {
         let mut pipeline = get_mut_arcmutex!(self.pipeline);
         pipeline.release_speculative_sequences(&[sequence_id])?;
-        let recurrent_result = if pipeline.cache().is_hybrid() {
+
+        if pipeline.cache().is_hybrid() {
             pipeline.cache().hybrid().release_seq(sequence_id, slot_idx)
         } else {
             Ok(false)
-        };
-        recurrent_result
+        }
     }
 }
 
@@ -892,11 +890,11 @@ impl Engine {
     }
 
     async fn dispatch_prepared_request(self: &Arc<Self>, mut request: Request) -> bool {
-        if let Request::Normal(request) = &mut request {
-            if let Some(duration) = request.take_queue_duration() {
-                metrics::histogram!(crate::REQUEST_QUEUE_DURATION_METRIC)
-                    .record(duration.as_secs_f64());
-            }
+        if let Request::Normal(request) = &mut request
+            && let Some(duration) = request.take_queue_duration()
+        {
+            metrics::histogram!(crate::REQUEST_QUEUE_DURATION_METRIC)
+                .record(duration.as_secs_f64());
         }
         self.replicate_request_to_daemons(&request);
         if matches!(request, Request::Terminate) {
@@ -1425,10 +1423,10 @@ impl Engine {
 
     #[cfg(feature = "cuda")]
     fn drain_cuda_decode_lease(&self, lease: Option<CudaDecodeBatchLease>) {
-        if let Some(lease) = lease {
-            if let Err(err) = self.drain_cuda_decode_batch(lease) {
-                tracing::warn!("Failed to drain the CUDA decode tail: {err}");
-            }
+        if let Some(lease) = lease
+            && let Err(err) = self.drain_cuda_decode_batch(lease)
+        {
+            tracing::warn!("Failed to drain the CUDA decode tail: {err}");
         }
     }
 
@@ -1616,10 +1614,10 @@ impl Engine {
             if TERMINATE_ALL_NEXT_STEP.load(Ordering::SeqCst) {
                 self.replicate_request_to_daemons(&Request::TerminateAllSeqsNextStep);
                 #[cfg(feature = "cuda")]
-                if let Some(lease) = cuda_decode_lease.take() {
-                    if !self.cancel_cuda_decode_lease(lease).await {
-                        continue 'lp;
-                    }
+                if let Some(lease) = cuda_decode_lease.take()
+                    && !self.cancel_cuda_decode_lease(lease).await
+                {
+                    continue 'lp;
                 }
             }
 

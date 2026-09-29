@@ -4,7 +4,7 @@
 // https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/blob/main/modeling_phi3.py
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use inference_quant::{QuantMethod, QuantizedConfig, ReplicatedLayer, ShardedVarBuilder};
 use std::{collections::HashMap, sync::Arc};
 
@@ -20,8 +20,8 @@ use crate::{
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
-        embedding_with_legacy_tied_uqff, Activation, CausalMasker, PhiRopeConfig,
-        PhiRopeScalingConfig, PhiRotaryEmbedding, RmsNorm,
+        Activation, CausalMasker, PhiRopeConfig, PhiRopeScalingConfig, PhiRotaryEmbedding, RmsNorm,
+        embedding_with_legacy_tied_uqff,
     },
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     serde_default_fn,
@@ -376,7 +376,7 @@ impl Model {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),

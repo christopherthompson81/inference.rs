@@ -15,18 +15,18 @@ use vision::Qwen2VLVisionModel;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     kv_cache::EitherCache,
-    layers::masker::PastKvLenCache,
     layers::CausalMasker,
+    layers::masker::PastKvLenCache,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata},
     paged_attention::{
+        AttentionImplementation, ModelConfigMetadata,
         block_hash::MultimodalKind,
         encoder_cache::{CacheModality, EncoderCacheManager},
-        AttentionImplementation, ModelConfigMetadata,
     },
     utils::unvarbuilder::UnVarBuilder,
     vision::multimodal_layout::{
-        gather_packed_mrope_positions, MropePositionSource, MultimodalEncoderKey,
-        MultimodalEncoderOutputs, PackedMultimodalLayout,
+        MropePositionSource, MultimodalEncoderKey, MultimodalEncoderOutputs,
+        PackedMultimodalLayout, gather_packed_mrope_positions,
     },
 };
 
@@ -139,10 +139,13 @@ impl Qwen2VLModel {
                 .lock()
                 .expect("encoder cache lock poisoned");
             for (index, &hash) in hashes.iter().enumerate() {
-                if let Some(cached) = cache.get(modality, hash) {
-                    outputs[index] = Some(cached[0].clone());
-                } else {
-                    misses.push(index);
+                match cache.get(modality, hash) {
+                    Some(cached) => {
+                        outputs[index] = Some(cached[0].clone());
+                    }
+                    _ => {
+                        misses.push(index);
+                    }
                 }
             }
         }

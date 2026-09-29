@@ -2,8 +2,8 @@ use anyhow::Result;
 use inference_quant::{GgufArchive, GgufBindingMap};
 
 use super::multimodal_binding_utils::{
-    bind_llama_text, bind_required, bind_required_linear, validate_architecture,
-    validate_projector, TensorInventory,
+    TensorInventory, bind_llama_text, bind_required, bind_required_linear, validate_architecture,
+    validate_projector,
 };
 
 const FAMILY: &str = "Idefics3/SmolVLM";

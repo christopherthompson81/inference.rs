@@ -2,9 +2,8 @@ use anyhow::Result;
 use inference_quant::{GgufArchive, GgufBindingMap};
 
 use super::multimodal_binding_utils::{
-    bind_llama_text, bind_required, bind_required_linear, bind_required_with,
+    TensorInventory, bind_llama_text, bind_required, bind_required_linear, bind_required_with,
     inverse_llama_permute, metadata_usize, validate_architecture, validate_projector,
-    TensorInventory,
 };
 
 const FAMILY: &str = "Mistral 3/Pixtral";

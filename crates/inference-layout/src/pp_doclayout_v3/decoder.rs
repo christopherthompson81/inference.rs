@@ -1,9 +1,9 @@
-use candle_core::{DType, Module, Result, Tensor, D};
+use candle_core::{D, DType, Module, Result, Tensor};
 use candle_nn::{LayerNorm, VarBuilder};
 
 use super::config::PPDocLayoutV3Config;
 use super::encoder::{Mlp, SelfAttention};
-use crate::layers::{linear, Linear};
+use crate::layers::{Linear, linear};
 
 /// Flattened multi-level feature memory layout.
 #[derive(Debug, Clone)]

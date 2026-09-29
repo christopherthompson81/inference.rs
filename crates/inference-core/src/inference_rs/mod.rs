@@ -80,17 +80,19 @@ impl EngineInstance {
     }
 
     fn join(&mut self) {
-        if let Some(handle) = self.engine_handler.take() {
-            if handle.join().is_err() {
-                warn!("Engine thread panicked during shutdown.");
-            }
+        if let Some(handle) = self.engine_handler.take()
+            && handle.join().is_err()
+        {
+            warn!("Engine thread panicked during shutdown.");
         }
     }
 
     fn join_until(&mut self, deadline: Instant) {
         while !self.is_finished() {
             if Instant::now() >= deadline {
-                warn!("Engine thread did not stop within {ENGINE_DROP_JOIN_TIMEOUT:?}; not waiting for it.");
+                warn!(
+                    "Engine thread did not stop within {ENGINE_DROP_JOIN_TIMEOUT:?}; not waiting for it."
+                );
                 return;
             }
             std::thread::sleep(ENGINE_DROP_POLL_INTERVAL);
@@ -250,17 +252,17 @@ impl InferenceRs {
         let engine = engines
             .get(&model_id)
             .ok_or_else(|| InferenceRsError::ModelNotFound(model_id.clone()))?;
-        if let Request::Normal(request) = request {
-            if let Some(selection) = request.adapter.as_mut() {
-                let runtime = engine.adapter_runtime.as_ref().ok_or_else(|| {
-                    LoraAdapterError::RuntimeUnavailable {
-                        model_id: model_id.clone(),
-                    }
-                })?;
-                selection.pin(runtime)?;
-                if let Some(generation) = selection.resolved_generation() {
-                    debug!(model_id, %generation, "admitted LoRA adapter request");
+        if let Request::Normal(request) = request
+            && let Some(selection) = request.adapter.as_mut()
+        {
+            let runtime = engine.adapter_runtime.as_ref().ok_or_else(|| {
+                LoraAdapterError::RuntimeUnavailable {
+                    model_id: model_id.clone(),
                 }
+            })?;
+            selection.pin(runtime)?;
+            if let Some(generation) = selection.resolved_generation() {
+                debug!(model_id, %generation, "admitted LoRA adapter request");
             }
         }
         Ok(engine.sender.clone())
@@ -500,7 +502,9 @@ impl InferenceRs {
                         "Failed to initialize MCP client with {} configured servers: {}",
                         total_servers, e
                     );
-                    warn!("Continuing without MCP functionality. Check your MCP configuration and server availability.");
+                    warn!(
+                        "Continuing without MCP functionality. Check your MCP configuration and server availability."
+                    );
                 }
             }
         }
@@ -567,13 +571,19 @@ impl InferenceRs {
                             }
                         );
                         if !effective.fs_isolated || !effective.network_isolated {
-                            warn!("  Some layers are inactive on this host. Use --sandbox on to make missing layers a hard error.");
+                            warn!(
+                                "  Some layers are inactive on this host. Use --sandbox on to make missing layers a hard error."
+                            );
                         }
                     } else {
                         warn!("  Sandbox: OFF. Network and filesystem are NOT restricted.");
-                        warn!("  Pass a sandbox_policy (or --sandbox on at the CLI) to enable isolation.");
+                        warn!(
+                            "  Pass a sandbox_policy (or --sandbox on at the CLI) to enable isolation."
+                        );
                     }
-                    warn!("  See: https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/sandbox.md");
+                    warn!(
+                        "  See: https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/sandbox.md"
+                    );
                     warn!("============================================================");
                     info!("Code execution initialized with {count} tools");
                 }
@@ -625,7 +635,9 @@ impl InferenceRs {
                     } else {
                         warn!("  Sandbox: OFF. Network and filesystem are NOT restricted.");
                     }
-                    warn!("  See: https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/sandbox.md");
+                    warn!(
+                        "  See: https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/sandbox.md"
+                    );
                     warn!("============================================================");
                     info!("Shell execution initialized with {count} tool");
                 }

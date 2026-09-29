@@ -6,7 +6,7 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::time::Duration;
 use tokio::net::TcpStream;
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
 /// Transport layer for MCP communication
 #[async_trait::async_trait]
@@ -933,10 +933,10 @@ impl McpTransport for WebSocketTransport {
                     let response_body: Value = serde_json::from_str(&text)?;
 
                     // Check if this is the response to our request
-                    if let Some(response_id) = response_body.get("id").and_then(|v| v.as_u64()) {
-                        if response_id == id {
-                            return extract_jsonrpc_result(response_body);
-                        }
+                    if let Some(response_id) = response_body.get("id").and_then(|v| v.as_u64())
+                        && response_id == id
+                    {
+                        return extract_jsonrpc_result(response_body);
                     }
                     // If it's not our response, continue reading
                 }

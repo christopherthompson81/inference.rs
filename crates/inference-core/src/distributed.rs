@@ -175,8 +175,8 @@ pub fn nccl_daemon_replicator(request_sender: Sender<Request>) {
     std::thread::spawn(move || {
         let rt = Runtime::new().unwrap();
         rt.block_on(async move {
-            use interprocess::local_socket::traits::Stream;
             use interprocess::local_socket::Stream as LocalStream;
+            use interprocess::local_socket::traits::Stream;
 
             let dispatch = move |req| -> LocalBoxFuture<'static, Result<(), String>> {
                 let request_sender = request_sender.clone();
@@ -221,8 +221,8 @@ pub fn nccl_daemon_replicator_inference(inference: Arc<crate::InferenceRs>) {
     std::thread::spawn(move || {
         let rt = Runtime::new().unwrap();
         rt.block_on(async move {
-            use interprocess::local_socket::traits::Stream;
             use interprocess::local_socket::Stream as LocalStream;
+            use interprocess::local_socket::traits::Stream;
 
             let dispatch = move |req| -> LocalBoxFuture<'static, Result<(), String>> {
                 let inference = inference.clone();
@@ -611,7 +611,9 @@ pub(crate) fn prepare_distributed_mapper(
     }
 
     if global_world_size < local_world_size || global_world_size % local_world_size != 0 {
-        anyhow::bail!("Global world size {global_world_size} must both be at least and divide the local world size {local_world_size}");
+        anyhow::bail!(
+            "Global world size {global_world_size} must both be at least and divide the local world size {local_world_size}"
+        );
     }
 
     // Sharded layers would serialize as rank-local slices.

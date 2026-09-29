@@ -1,7 +1,7 @@
 use crate::device_map::AutoDeviceMapParams;
 use crate::paged_attention::{
-    calculate_cache_config, device_memory_cap, CacheMemoryReservations, MemoryGpuConfig,
-    ModelConfigLike, DEFAULT_PAGED_ATTENTION_BLOCK_SIZE,
+    CacheMemoryReservations, DEFAULT_PAGED_ATTENTION_BLOCK_SIZE, MemoryGpuConfig, ModelConfigLike,
+    calculate_cache_config, device_memory_cap,
 };
 use crate::utils::debug::DeviceRepr;
 use crate::{DeviceLayerMapMetadata, DeviceMapMetadata, MemoryUsage, PagedAttentionConfig};
@@ -364,7 +364,11 @@ pub fn get_device_layers(
         let over = b_to_mb!(remaining);
         anyhow::bail!(
             "This model does not fit on the devices {:?}, and exceeds total capacity by {}MB. Auto device mapping params: {params}",
-            avail_copy.iter().rev().map(|(a, d)| format!("{} (avail: {}MB)", d.device_pretty_repr(), b_to_mb!(a))).collect::<Vec<_>>(),
+            avail_copy
+                .iter()
+                .rev()
+                .map(|(a, d)| format!("{} (avail: {}MB)", d.device_pretty_repr(), b_to_mb!(a)))
+                .collect::<Vec<_>>(),
             over
         );
     }

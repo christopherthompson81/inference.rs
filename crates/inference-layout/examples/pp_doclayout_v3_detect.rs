@@ -3,7 +3,7 @@
 use anyhow::Result;
 use candle_core::Device;
 use clap::Parser;
-use inference_layout::pp_doclayout_v3::{PPDocLayoutV3Detector, DEFAULT_THRESHOLD};
+use inference_layout::pp_doclayout_v3::{DEFAULT_THRESHOLD, PPDocLayoutV3Detector};
 
 #[derive(Parser)]
 struct Args {

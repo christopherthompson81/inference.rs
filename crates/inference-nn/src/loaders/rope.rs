@@ -13,12 +13,8 @@ pub fn qk_rope_layout_from_config(config: &str) -> Result<Option<RopePairing>> {
         return Ok(None);
     };
     match layout {
-        "adjacent" => Ok(Some(
-            RopePairing::Adjacent,
-        )),
-        "half_split" => Ok(Some(
-            RopePairing::HalfSplit,
-        )),
+        "adjacent" => Ok(Some(RopePairing::Adjacent)),
+        "half_split" => Ok(Some(RopePairing::HalfSplit)),
         layout => anyhow::bail!(
             "model config `{QK_ROPE_LAYOUT_CONFIG_KEY}` must be `adjacent` or `half_split`, got `{layout}`"
         ),

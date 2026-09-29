@@ -3,8 +3,8 @@ use super::*;
 #[cfg(feature = "cuda")]
 pub fn cuda_top1_logits_f32_packed_batched(input: &Tensor) -> Result<Top1LogitsPackedOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use candle_core::cuda_backend::CudaStorageSlice;
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
 
     const OP: &str = "cuda_top1_logits_f32_packed_batched";
     if input.dtype() != DType::F32 {
@@ -119,8 +119,8 @@ pub fn cuda_categorical_logits_f32_packed_batched(
     uniforms: &Tensor,
 ) -> Result<CategoricalLogitsPackedOutput> {
     use candle_core::backend::BackendStorage;
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use candle_core::cuda_backend::CudaStorageSlice;
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
 
     const OP: &str = "cuda_categorical_logits_f32_packed_batched";
     if input.dtype() != DType::F32
@@ -471,7 +471,7 @@ fn new_cuda_async_token_slot(
     dev: &candle_core::CudaDevice,
     capacity_rows: usize,
 ) -> Result<CudaAsyncTokenSlot> {
-    use candle_core::cuda_backend::cudarc::driver::{sys, DevicePtrMut};
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtrMut, sys};
     use candle_core::cuda_backend::{CudaStorage, CudaStorageSlice};
 
     let stream = dev.cuda_stream();
@@ -559,8 +559,8 @@ impl CudaAsyncTokenRing {
         nrows: usize,
         op: &'static str,
     ) -> Result<CudaAsyncTokenReservation> {
-        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
         use candle_core::cuda_backend::CudaStorageSlice;
+        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 
         let stream = input.device().as_cuda_device()?.cuda_stream();
         let slot_index = (0..CUDA_ASYNC_TOKEN_RING_SLOTS)
@@ -646,16 +646,14 @@ impl CudaAsyncTokenRing {
     }
 
     pub(super) fn abort(&mut self, reservation: &CudaAsyncTokenReservation) {
-        if reservation.workspace_id == self.id {
-            if let Some(slot) = self.slots.get_mut(reservation.slot) {
-                if slot
-                    .pending
-                    .as_ref()
-                    .is_some_and(|pending| pending.generation == reservation.generation)
-                {
-                    slot.pending = None;
-                }
-            }
+        if reservation.workspace_id == self.id
+            && let Some(slot) = self.slots.get_mut(reservation.slot)
+            && slot
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.generation == reservation.generation)
+        {
+            slot.pending = None;
         }
     }
 
@@ -896,8 +894,8 @@ fn cuda_top1_logits_submit_inner(
     options: CudaTop1SubmitOptions<'_>,
 ) -> Result<CudaTop1Submission> {
     use candle_core::backend::{BackendDevice, BackendStorage};
-    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use candle_core::cuda_backend::CudaStorageSlice;
+    use candle_core::cuda_backend::cudarc::driver::{DevicePtr, DevicePtrMut};
     use std::ffi::c_void;
 
     let CudaTop1SubmitOptions {

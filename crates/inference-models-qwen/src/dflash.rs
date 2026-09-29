@@ -11,27 +11,28 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::{Arc, Mutex};
 
+use candle_core::{D, DType, Device, IndexOp, Module, Result, Tensor};
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
 use candle_core::{
-    cuda_backend::cudarc::driver::{sys, CudaStream},
     Var,
+    cuda_backend::cudarc::driver::{CudaStream, sys},
 };
-use candle_core::{DType, Device, IndexOp, Module, Result, Tensor, D};
 use inference_quant::{
     IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, ShardedVarBuilder, UnquantLinear,
 };
 use serde::Deserialize;
 
 use crate::kv_cache::PagedAuxiliaryPrefixState;
-use crate::layers::{yarn_inv_freq_and_attention_factor, RmsNorm, YarnRopeConfig};
+use crate::layers::{RmsNorm, YarnRopeConfig, yarn_inv_freq_and_attention_factor};
 use crate::speculative::{MtpConfig, MtpDraftSamplingMethod, SpeculativePrefixReplay};
-use crate::utils::varbuilder_utils::{from_mmaped_safetensors, DeviceForLoadTensor};
+use crate::utils::varbuilder_utils::{DeviceForLoadTensor, from_mmaped_safetensors};
 
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
 use crate::cuda::graph_capture::{
-    record_cuda_graph_dispatch, record_cuda_graph_evictions, record_cuda_graph_resident_entries,
-    take_cuda_graph_capacity_eviction, CudaGraphComponent, CudaGraphDispatchMode,
-    CudaGraphDispatchReason, CudaGraphEvent, CudaGraphEventGuard, CudaGraphEvictionReason,
+    CudaGraphComponent, CudaGraphDispatchMode, CudaGraphDispatchReason, CudaGraphEvent,
+    CudaGraphEventGuard, CudaGraphEvictionReason, record_cuda_graph_dispatch,
+    record_cuda_graph_evictions, record_cuda_graph_resident_entries,
+    take_cuda_graph_capacity_eviction,
 };
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
 use crate::cuda::phase_timer::CudaPhaseTimer;
@@ -295,12 +296,12 @@ impl DFlashConfig {
                 })
             })
             .transpose()?;
-        if let (Some(rope_type), Some(legacy_type)) = (rope_type, legacy_type) {
-            if rope_type != legacy_type {
-                candle_core::bail!(
-                    "DFlash rope_parameters.rope_type `{rope_type}` conflicts with legacy type `{legacy_type}`"
-                );
-            }
+        if let (Some(rope_type), Some(legacy_type)) = (rope_type, legacy_type)
+            && rope_type != legacy_type
+        {
+            candle_core::bail!(
+                "DFlash rope_parameters.rope_type `{rope_type}` conflicts with legacy type `{legacy_type}`"
+            );
         }
         let rope_type = rope_type.or(legacy_type).unwrap_or("default");
         if rope_type != "default" {
@@ -2205,12 +2206,12 @@ impl DFlashDraftModel {
             );
         }
         let target_layer_ids = cfg.target_layer_ids()?;
-        if let Some(max) = target_layer_ids.iter().max() {
-            if *max >= target_num_layers {
-                candle_core::bail!(
-                    "DFlash taps target layer {max} but the target has {target_num_layers} layers"
-                );
-            }
+        if let Some(max) = target_layer_ids.iter().max()
+            && *max >= target_num_layers
+        {
+            candle_core::bail!(
+                "DFlash taps target layer {max} but the target has {target_num_layers} layers"
+            );
         }
         let head_dim = cfg.head_dim();
         let (inv_freq, rope_attention_factor) = match cfg.yarn_rope_config(yarn_rope_config)? {
@@ -3495,20 +3496,21 @@ impl DFlashDraftModel {
                 None => None,
             };
             let gate_up = layer.gate_up_proj.forward(&x)?;
-            let mut out = if let Some(output) = crate::ops::try_fused_split_glu_quantized_forward(
+            let mut out = match crate::ops::try_fused_split_glu_quantized_forward(
                 &gate_up,
                 self.intermediate_size,
                 crate::layers::Activation::Silu,
                 &*layer.down_proj,
             )? {
-                output
-            } else {
-                let inter = crate::ops::split_mul_and_act(
-                    &gate_up,
-                    self.intermediate_size,
-                    crate::layers::Activation::Silu,
-                )?;
-                layer.down_proj.forward(&inter)?
+                Some(output) => output,
+                _ => {
+                    let inter = crate::ops::split_mul_and_act(
+                        &gate_up,
+                        self.intermediate_size,
+                        crate::layers::Activation::Silu,
+                    )?;
+                    layer.down_proj.forward(&inter)?
+                }
             };
             if let (Some(conv), Some(kernel)) = (&layer.mlp_conv, mlp_kernel) {
                 out = conv.finish(&out, &kernel)?;
@@ -3740,12 +3742,11 @@ impl DFlashDraftModel {
         if anchors.len() != batch {
             candle_core::bail!("DFlash anchors do not match draft rows");
         }
-        if let Some(sampling) = sampling {
-            if sampling.inverse_temperatures.len() != batch
-                || sampling.uniforms.len() != batch * positions
-            {
-                candle_core::bail!("DFlash selector sampling inputs do not match draft rows");
-            }
+        if let Some(sampling) = sampling
+            && (sampling.inverse_temperatures.len() != batch
+                || sampling.uniforms.len() != batch * positions)
+        {
+            candle_core::bail!("DFlash selector sampling inputs do not match draft rows");
         }
         let mut logits = lm_head.forward(hidden)?;
         if (self.output_multiplier - 1.0).abs() > f64::EPSILON {
@@ -3878,27 +3879,27 @@ mod tests {
     use inference_nn::skip_without_cuda;
     use std::{collections::HashSet, sync::Arc};
 
-    use candle_core::{Device, Result, Tensor, D};
+    use candle_core::{D, Device, Result, Tensor};
     use inference_quant::QuantMethod;
 
     use super::{
-        contiguous_row_range, copy_dflash_graph_output_rows, dflash_adaptive_env_value,
-        dflash_adaptive_supported, dflash_graph_host_rows, dflash_graph_plans,
-        dflash_graph_positions_fit, dflash_graph_precapture_shapes, dflash_prefix_replay,
-        dflash_rope_from_positions, drain_dflash_lru_entries, gather_ctx_taps, linear_from_weight,
-        resolve_dflash_sampling_policy, select_ctx_kv_rows, select_dflash_depth,
-        update_dormant_sequences, DFlashConfig, DFlashGraphHostInput, DFlashSamplingInputs,
-        DFlashSequenceEviction, ADAPT_FULL_DEPTH_MAX_BATCH,
+        ADAPT_FULL_DEPTH_MAX_BATCH, DFlashConfig, DFlashGraphHostInput, DFlashSamplingInputs,
+        DFlashSequenceEviction, contiguous_row_range, copy_dflash_graph_output_rows,
+        dflash_adaptive_env_value, dflash_adaptive_supported, dflash_graph_host_rows,
+        dflash_graph_plans, dflash_graph_positions_fit, dflash_graph_precapture_shapes,
+        dflash_prefix_replay, dflash_rope_from_positions, drain_dflash_lru_entries,
+        gather_ctx_taps, linear_from_weight, resolve_dflash_sampling_policy, select_ctx_kv_rows,
+        select_dflash_depth, update_dormant_sequences,
     };
+    #[cfg(feature = "cuda")]
+    use super::{CandidateSelectorCudaSpec, validate_candidate_selector_cuda};
     #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
     use super::{release_dflash_cuda_graph_resources, windowed_kv_checkpoint_capacity};
     #[cfg(feature = "cuda")]
-    use super::{validate_candidate_selector_cuda, CandidateSelectorCudaSpec};
-    #[cfg(feature = "cuda")]
     use crate::cuda::graph_capture::{
-        cuda_graph_precapture_batches, CudaGraphComponent, CUDA_GRAPH_MAX_BATCH_BUCKET,
+        CUDA_GRAPH_MAX_BATCH_BUCKET, CudaGraphComponent, cuda_graph_precapture_batches,
     };
-    use crate::layers::{yarn_inv_freq_and_attention_factor, YarnRopeConfig};
+    use crate::layers::{YarnRopeConfig, yarn_inv_freq_and_attention_factor};
     use crate::speculative::MtpDraftSamplingMethod;
     use crate::speculative::{SpeculativeGraphPlan, SpeculativePrefixReplay};
 
@@ -3958,9 +3959,11 @@ mod tests {
             Err("a DFlash2 checkpoint with a candidate selector is required".to_string()),
         )
         .expect_err("probabilistic drafting must not silently use greedy selection");
-        assert!(missing
-            .to_string()
-            .contains("DFlash2 checkpoint with a candidate selector is required"));
+        assert!(
+            missing
+                .to_string()
+                .contains("DFlash2 checkpoint with a candidate selector is required")
+        );
 
         let unsupported = resolve_dflash_sampling_policy(
             MtpDraftSamplingMethod::Probabilistic,
@@ -4286,11 +4289,11 @@ mod tests {
     #[test]
     fn graph_release_waits_for_detached_output_copies() -> anyhow::Result<()> {
         skip_without_cuda!();
-        use candle_core::{cuda_backend::cudarc::driver::sys, Var};
+        use candle_core::{Var, cuda_backend::cudarc::driver::sys};
 
         use crate::cuda::graph_capture::{
-            disable_event_tracking_for_capture, prepare_cuda_graph_memory_pool,
-            restore_event_tracking_after_capture, CudaGraphHandle, CudaGraphHostStaging,
+            CudaGraphHandle, CudaGraphHostStaging, disable_event_tracking_for_capture,
+            prepare_cuda_graph_memory_pool, restore_event_tracking_after_capture,
         };
 
         let device = Device::new_cuda(0)?;
@@ -4408,9 +4411,11 @@ mod tests {
         let error = cfg
             .yarn_rope_config(Some(&qwen35_target_yarn()))
             .expect_err("YaRN must validate the draft's native context");
-        assert!(error
-            .to_string()
-            .contains("max_position_embeddings is required"));
+        assert!(
+            error
+                .to_string()
+                .contains("max_position_embeddings is required")
+        );
         Ok(())
     }
 
@@ -4425,9 +4430,11 @@ mod tests {
             let error = cfg
                 .validate_rope_type()
                 .expect_err("draft-side scaling must not be silently ignored");
-            assert!(error
-                .to_string()
-                .contains("configure RoPE scaling on the target"));
+            assert!(
+                error
+                    .to_string()
+                    .contains("configure RoPE scaling on the target")
+            );
         }
     }
 
@@ -4491,11 +4498,11 @@ mod tests {
     #[test]
     fn graph_rope_replays_mixed_long_positions_on_cuda() -> anyhow::Result<()> {
         skip_without_cuda!();
-        use candle_core::{cuda_backend::cudarc::driver::sys, Var};
+        use candle_core::{Var, cuda_backend::cudarc::driver::sys};
 
         use crate::cuda::graph_capture::{
-            disable_event_tracking_for_capture, prepare_cuda_graph_memory_pool,
-            restore_event_tracking_after_capture, CudaGraphHandle,
+            CudaGraphHandle, disable_event_tracking_for_capture, prepare_cuda_graph_memory_pool,
+            restore_event_tracking_after_capture,
         };
 
         const BATCH: usize = 16;
@@ -4630,7 +4637,9 @@ mod tests {
         assert!(rows.selector_uniforms.is_none());
         assert_eq!(
             rows.rope_indices,
-            [100, 101, 102, 103, 200, 201, 202, 203, 200, 201, 202, 203, 200, 201, 202, 203,]
+            [
+                100, 101, 102, 103, 200, 201, 202, 203, 200, 201, 202, 203, 200, 201, 202, 203,
+            ]
         );
         Ok(())
     }

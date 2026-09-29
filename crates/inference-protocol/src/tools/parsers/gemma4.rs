@@ -6,8 +6,8 @@ use anyhow::Result;
 use llguidance::api::{GrammarWithLexer, TopLevelGrammar};
 use serde_json::Value;
 
-use super::gemma4_strict::GemmaLarkBuilder;
 use super::ToolFormatParser;
+use super::gemma4_strict::GemmaLarkBuilder;
 use crate::Tool;
 
 /// Gemma 4 string delimiter token.
@@ -201,10 +201,10 @@ fn parse_gemma4_value(s: &str) -> std::result::Result<Value, String> {
     if let Ok(n) = s.parse::<i64>() {
         return Ok(Value::Number(n.into()));
     }
-    if let Ok(n) = s.parse::<f64>() {
-        if let Some(n) = serde_json::Number::from_f64(n) {
-            return Ok(Value::Number(n));
-        }
+    if let Ok(n) = s.parse::<f64>()
+        && let Some(n) = serde_json::Number::from_f64(n)
+    {
+        return Ok(Value::Number(n));
     }
 
     // Fallback: treat as unquoted string

@@ -28,7 +28,7 @@ pub fn call_fp8_to_dtype(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -62,7 +62,7 @@ pub fn call_dtype_to_fp8(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -98,7 +98,7 @@ pub fn call_fp8_pertensor_dequant(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;

@@ -8,7 +8,7 @@ use crate::{
     gdn::RecurrentBatchKind,
     kv_cache::KvCache,
     layers::masker::PastKvLenCache,
-    paged_attention::{block_hash::MultimodalAttentionPolicy, PagedAttentionInputMetadata},
+    paged_attention::{PagedAttentionInputMetadata, block_hash::MultimodalAttentionPolicy},
 };
 
 pub type DeviceTensorMap = HashMap<DeviceLocation, Tensor>;

@@ -2,9 +2,9 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use either::Either;
-use image::{codecs::png::PngEncoder, DynamicImage};
+use image::{DynamicImage, codecs::png::PngEncoder};
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 

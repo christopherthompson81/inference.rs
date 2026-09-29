@@ -5,7 +5,7 @@
 use llguidance::api::TopLevelGrammar;
 
 use super::ToolFormatParser;
-use crate::{tools::CalledFunctionParameters, Tool};
+use crate::{Tool, tools::CalledFunctionParameters};
 
 const PREFIX: &str = "<tool_calls";
 const START: &str = "<tool_calls>";
@@ -67,7 +67,7 @@ impl ToolFormatParser for HunyuanParser {
 #[cfg(test)]
 mod tests {
     use super::HunyuanParser;
-    use crate::tools::parsers::{extract_model_specific_message, ToolFormatParser};
+    use crate::tools::parsers::{ToolFormatParser, extract_model_specific_message};
 
     #[test]
     fn parses_parallel_tool_calls() {

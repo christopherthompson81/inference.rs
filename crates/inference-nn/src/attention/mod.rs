@@ -421,8 +421,7 @@ impl Sdpa {
             && seq_len == 1
             && mask.is_some()
             && sdpa_params.softcap.is_none_or(|x| x == 1.0)
-        {
-            if let Some(out) =
+            && let Some(out) =
                 crate::attention::backends::metal_flash_attn::try_flash_attn_ext_vec_bf16_dk512(
                     q,
                     k,
@@ -430,9 +429,8 @@ impl Sdpa {
                     mask,
                     sdpa_params.softmax_scale,
                 )?
-            {
-                return Ok(out);
-            }
+        {
+            return Ok(out);
         }
         if [q, k, v].into_iter().all(|x| x.device().is_metal())
             && head_dim == 512
@@ -443,20 +441,17 @@ impl Sdpa {
             && v.dtype() == DType::BF16
             && seq_len > 8
             && sdpa_params.softcap.is_none_or(|x| x == 1.0)
+            && let Some(mask) = mask
+            && let Some(out) =
+                crate::attention::backends::metal_flash_attn::try_flash_attn_ext_bf16_dk512(
+                    q,
+                    k,
+                    v,
+                    mask,
+                    sdpa_params.softmax_scale,
+                )?
         {
-            if let Some(mask) = mask {
-                if let Some(out) =
-                    crate::attention::backends::metal_flash_attn::try_flash_attn_ext_bf16_dk512(
-                        q,
-                        k,
-                        v,
-                        mask,
-                        sdpa_params.softmax_scale,
-                    )?
-                {
-                    return Ok(out);
-                }
-            }
+            return Ok(out);
         }
 
         if [q, k, v].into_iter().all(|x| x.device().is_metal())
@@ -615,7 +610,7 @@ impl Sdpa {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use candle_core::{Result as CandleResult, D};
+    use candle_core::{D, Result as CandleResult};
 
     const EPS: f32 = 1e-4;
 

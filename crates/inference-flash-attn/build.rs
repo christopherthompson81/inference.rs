@@ -181,11 +181,11 @@ mod cuda_build {
             .arg(&header_hash_arg);
 
         let mut is_target_msvc = false;
-        if let Ok(target) = std::env::var("TARGET") {
-            if target.contains("msvc") {
-                is_target_msvc = true;
-                builder = builder.arg("-D_USE_MATH_DEFINES");
-            }
+        if let Ok(target) = std::env::var("TARGET")
+            && target.contains("msvc")
+        {
+            is_target_msvc = true;
+            builder = builder.arg("-D_USE_MATH_DEFINES");
         }
 
         if !is_target_msvc {

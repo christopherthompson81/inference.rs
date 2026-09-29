@@ -7,12 +7,12 @@ use std::{
 };
 
 use axum::{
-    extract::{rejection::JsonRejection, Json, State},
-    response::{
-        sse::{Event, KeepAlive, KeepAliveStream},
-        IntoResponse, Sse,
-    },
     Extension,
+    extract::{Json, State, rejection::JsonRejection},
+    response::{
+        IntoResponse, Sse,
+        sse::{Event, KeepAlive, KeepAliveStream},
+    },
 };
 use inference_core::{CompletionChunkResponse, CompletionResponse, InferenceRs, Response};
 use tokio::sync::mpsc::Receiver;
@@ -20,18 +20,18 @@ use tokio::sync::mpsc::Receiver;
 pub use crate::engine_completion::parse_request;
 use crate::{
     completion_core::{
-        handle_completion_error, handle_completion_validation_error, BaseCompletionResponder,
+        BaseCompletionResponder, handle_completion_error, handle_completion_validation_error,
     },
     engine_chat::DispatchError,
     engine_completion::{
-        collect_completion, prepare_completion, CompletionStream, CompletionStreamEvent,
+        CompletionStream, CompletionStreamEvent, collect_completion, prepare_completion,
     },
     handler_core::{
-        openai_error_from_error, openai_error_response, ApiError, ApiErrorHttp, ApiErrorKind,
-        ModelErrorMessage,
+        ApiError, ApiErrorHttp, ApiErrorKind, ModelErrorMessage, openai_error_from_error,
+        openai_error_response,
     },
     openai::{CompletionChunkResponseBody, CompletionRequest, CompletionResponseBody},
-    streaming::{get_keep_alive_interval, openai_error_event, DoneState, StreamOutcomeHandle},
+    streaming::{DoneState, StreamOutcomeHandle, get_keep_alive_interval, openai_error_event},
     types::{ExtractedInferenceRsState, OnChunkCallback, OnDoneCallback, SharedInferenceRsState},
 };
 

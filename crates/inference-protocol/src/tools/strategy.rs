@@ -1,9 +1,9 @@
 use llguidance::api::TopLevelGrammar;
 
 use crate::{
-    reasoning_parsers::{HarmonyContext, HarmonyToolCall},
-    tools::{parsers, ToolCallFormat, ToolCallResponse, ToolCallType},
     Tool,
+    reasoning_parsers::{HarmonyContext, HarmonyToolCall},
+    tools::{ToolCallFormat, ToolCallResponse, ToolCallType, parsers},
 };
 use inference_mcp::CalledFunction;
 use std::{borrow::Cow, collections::HashMap};

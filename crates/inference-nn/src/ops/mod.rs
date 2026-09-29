@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use candle_core::{shape::Dim, DType, Result, Tensor, D};
+use candle_core::{D, DType, Result, Tensor, shape::Dim};
 
 #[cfg(feature = "cuda")]
 use crate::cuda::ffi;

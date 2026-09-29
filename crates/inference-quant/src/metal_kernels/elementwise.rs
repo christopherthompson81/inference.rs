@@ -27,7 +27,7 @@ pub fn call_fused_glu(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -69,7 +69,7 @@ pub fn call_softcap(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;

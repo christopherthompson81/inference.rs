@@ -14,19 +14,19 @@ use half::bf16;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 
+use crate::GluActivationType;
 use crate::blockwise_fp8::mma::quantize_activation_padded;
 use crate::moe::cuda::{moe_align, moe_sum_bf16};
 use crate::utils::{fused_split_glu_quantized_bf16, slice_ptr_mut_on_stream, slice_ptr_on_stream};
-use crate::GluActivationType;
 
-use super::fused_moe::{warmup_token_counts_for, MoeAlign};
+use super::fused_moe::{MoeAlign, warmup_token_counts_for};
 use super::split_k::reduce_split_k;
 use super::tune::{
-    cutile_error, tune, Bucket, Prepared, Space, TuneMode, TuneRequest, TuneRouting, TunedTable,
-    TUNE_WEIGHT_SETS,
+    Bucket, Prepared, Space, TUNE_WEIGHT_SETS, TuneMode, TuneRequest, TuneRouting, TunedTable,
+    cutile_error, tune,
 };
 use super::warmup::CutileKernel;
-use super::{catch_cutile_panic, context, MoeShapeKey, MoeTileConfig};
+use super::{MoeShapeKey, MoeTileConfig, catch_cutile_panic, context};
 
 /// Scale group along K and N; the kernel steps K one group at a time so every partial product is
 /// scaled by a single (row, group) pair before it joins the accumulator.
@@ -71,68 +71,27 @@ pub mod fused_moe_fp8 {
         num_valid_tokens: i32,
         a_scale_stride: i32,
     ) {
-        let pid_all: i32 = get_tile_block_id().0;
-        let split: i32 = pid_all % SPLIT_K;
-        let pid: i32 = pid_all / SPLIT_K;
-        let num_pid_m: i32 = ceil_div(em, BM);
-        let num_pid_n: i32 = ceil_div(n_size, BN);
-        let num_pid_in_group: i32 = GROUP_M * num_pid_n;
-        let group_id: i32 = pid / num_pid_in_group;
-        let first_pid_m: i32 = group_id * GROUP_M;
-        let group_size_m: i32 = {
-            let rem = num_pid_m - first_pid_m;
-            if rem < GROUP_M {
-                rem
-            } else {
-                GROUP_M
-            }
-        };
-        let pid_m: i32 = first_pid_m + ((pid % num_pid_in_group) % group_size_m);
-        let pid_n: i32 = (pid % num_pid_in_group) / group_size_m;
+        unsafe {
+            let pid_all: i32 = get_tile_block_id().0;
+            let split: i32 = pid_all % SPLIT_K;
+            let pid: i32 = pid_all / SPLIT_K;
+            let num_pid_m: i32 = ceil_div(em, BM);
+            let num_pid_n: i32 = ceil_div(n_size, BN);
+            let num_pid_in_group: i32 = GROUP_M * num_pid_n;
+            let group_id: i32 = pid / num_pid_in_group;
+            let first_pid_m: i32 = group_id * GROUP_M;
+            let group_size_m: i32 = {
+                let rem = num_pid_m - first_pid_m;
+                if rem < GROUP_M { rem } else { GROUP_M }
+            };
+            let pid_m: i32 = first_pid_m + ((pid % num_pid_in_group) % group_size_m);
+            let pid_n: i32 = (pid % num_pid_in_group) / group_size_m;
 
-        let ntpp_p0: PointerTile<*mut i32, { [] }> = pointer_to_tile(num_tokens_post_padded_ptr);
-        let ntpp_p1: PointerTile<*mut i32, { [1] }> = ntpp_p0.reshape(const_shape![1]);
-        let (ntpp_t, _): (Tile<i32, { [1] }>, Token) = load_ptr_tko(
-            ntpp_p1,
-            ordering::Weak,
-            None::<scope::TileBlock>,
-            None,
-            None,
-            None,
-            Latency::<0>,
-        );
-        let ntpp_s: Tile<i32, { [] }> = ntpp_t.reshape(const_shape![]);
-        let ntpp: i32 = tile_to_scalar(ntpp_s);
-
-        if pid_m * BM < ntpp {
-            let iota_m: Tile<i32, { [BM] }> = iota(const_shape![BM]);
-            let base_m: Tile<i32, { [BM] }> = broadcast_scalar(pid_m * BM, const_shape![BM]);
-            let offs_token_id: Tile<i32, { [BM] }> = iota_m + base_m;
-            let em_t: Tile<i32, { [BM] }> = broadcast_scalar(em, const_shape![BM]);
-            let id_inb: Tile<bool, { [BM] }> = lt_tile(offs_token_id, em_t);
-
-            let sids_p0: PointerTile<*mut i32, { [] }> = pointer_to_tile(sorted_token_ids_ptr);
-            let sids_p1: PointerTile<*mut i32, { [1] }> = sids_p0.reshape(const_shape![1]);
-            let sids_p2: PointerTile<*mut i32, { [BM] }> = sids_p1.broadcast(const_shape![BM]);
-            let sids_ptrs: PointerTile<*mut i32, { [BM] }> = sids_p2.offset_tile(offs_token_id);
-            let (offs_token, _): (Tile<i32, { [BM] }>, Token) = load_ptr_tko(
-                sids_ptrs,
-                ordering::Weak,
-                None::<scope::TileBlock>,
-                Some(id_inb),
-                Some(num_valid_tokens),
-                None,
-                Latency::<0>,
-            );
-            let nvt_t: Tile<i32, { [BM] }> = broadcast_scalar(num_valid_tokens, const_shape![BM]);
-            let token_mask: Tile<bool, { [BM] }> = lt_tile(offs_token, nvt_t);
-
-            let eid_p0: PointerTile<*mut i32, { [] }> = pointer_to_tile(expert_ids_ptr);
-            let eid_p1: PointerTile<*mut i32, { [1] }> = eid_p0.reshape(const_shape![1]);
-            let pid_m_t: Tile<i32, { [1] }> = broadcast_scalar(pid_m, const_shape![1]);
-            let eid_p2: PointerTile<*mut i32, { [1] }> = eid_p1.offset_tile(pid_m_t);
-            let (eid_t, _): (Tile<i32, { [1] }>, Token) = load_ptr_tko(
-                eid_p2,
+            let ntpp_p0: PointerTile<*mut i32, { [] }> =
+                pointer_to_tile(num_tokens_post_padded_ptr);
+            let ntpp_p1: PointerTile<*mut i32, { [1] }> = ntpp_p0.reshape(const_shape![1]);
+            let (ntpp_t, _): (Tile<i32, { [1] }>, Token) = load_ptr_tko(
+                ntpp_p1,
                 ordering::Weak,
                 None::<scope::TileBlock>,
                 None,
@@ -140,179 +99,294 @@ pub mod fused_moe_fp8 {
                 None,
                 Latency::<0>,
             );
-            let eid_s: Tile<i32, { [] }> = eid_t.reshape(const_shape![]);
-            let off_experts: i32 = tile_to_scalar(eid_s);
+            let ntpp_s: Tile<i32, { [] }> = ntpp_t.reshape(const_shape![]);
+            let ntpp: i32 = tile_to_scalar(ntpp_s);
 
-            let iota_n: Tile<i32, { [BN] }> = iota(const_shape![BN]);
-            let base_n: Tile<i32, { [BN] }> = broadcast_scalar(pid_n * BN, const_shape![BN]);
-            let offs_cn: Tile<i32, { [BN] }> = iota_n + base_n;
+            if pid_m * BM < ntpp {
+                let iota_m: Tile<i32, { [BM] }> = iota(const_shape![BM]);
+                let base_m: Tile<i32, { [BM] }> = broadcast_scalar(pid_m * BM, const_shape![BM]);
+                let offs_token_id: Tile<i32, { [BM] }> = iota_m + base_m;
+                let em_t: Tile<i32, { [BM] }> = broadcast_scalar(em, const_shape![BM]);
+                let id_inb: Tile<bool, { [BM] }> = lt_tile(offs_token_id, em_t);
 
-            let ot_col: Tile<i32, { [BM, 1] }> = offs_token.reshape(const_shape![BM, 1]);
-            let ot_2d: Tile<i32, { [BM, BN] }> = ot_col.broadcast(const_shape![BM, BN]);
-            let n_2d: Tile<i32, { [BM, BN] }> = broadcast_scalar(n_size, const_shape![BM, BN]);
-            let ot_n: Tile<i32, { [BM, BN] }> = muli(ot_2d, n_2d, overflow::NoSignedWrap);
-            let cn_row: Tile<i32, { [1, BN] }> = offs_cn.reshape(const_shape![1, BN]);
-            let cn_2d: Tile<i32, { [BM, BN] }> = cn_row.broadcast(const_shape![BM, BN]);
-            let c_off: Tile<i32, { [BM, BN] }> = ot_n + cn_2d;
-            let c_base0: PointerTile<*mut bf16, { [] }> = pointer_to_tile(out_ptr);
-            let c_base1: PointerTile<*mut bf16, { [1, 1] }> = c_base0.reshape(const_shape![1, 1]);
-            let c_base2: PointerTile<*mut bf16, { [BM, BN] }> =
-                c_base1.broadcast(const_shape![BM, BN]);
-            let c_ptrs: PointerTile<*mut bf16, { [BM, BN] }> = c_base2.offset_tile(c_off);
-            let tm_col: Tile<bool, { [BM, 1] }> = token_mask.reshape(const_shape![BM, 1]);
-            let c_mask: Tile<bool, { [BM, BN] }> = tm_col.broadcast(const_shape![BM, BN]);
-            let p_base0: PointerTile<*mut f32, { [] }> = pointer_to_tile(partial_ptr);
-            let p_base1: PointerTile<*mut f32, { [1, 1] }> = p_base0.reshape(const_shape![1, 1]);
-            let p_base2: PointerTile<*mut f32, { [BM, BN] }> =
-                p_base1.broadcast(const_shape![BM, BN]);
-            let slice_off: Tile<i32, { [BM, BN] }> =
-                broadcast_scalar(split * (num_valid_tokens * n_size), const_shape![BM, BN]);
-            let p_ptrs: PointerTile<*mut f32, { [BM, BN] }> =
-                p_base2.offset_tile(c_off + slice_off);
-            if off_experts == -1 {
-                if SPLIT_K > 1 {
-                    let zeros: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]);
-                    store_ptr_tko(
-                        p_ptrs,
-                        zeros,
-                        ordering::Weak,
-                        None::<scope::TileBlock>,
-                        Some(c_mask),
-                        None,
-                        Latency::<0>,
-                    );
-                } else {
-                    let zeros: Tile<bf16, { [BM, BN] }> =
-                        constant(bf16::ZERO, const_shape![BM, BN]);
-                    store_ptr_tko(
-                        c_ptrs,
-                        zeros,
-                        ordering::Weak,
-                        None::<scope::TileBlock>,
-                        Some(c_mask),
-                        None,
-                        Latency::<0>,
-                    );
-                }
-            } else {
-                let top_k_t: Tile<i32, { [BM] }> = broadcast_scalar(TOP_K, const_shape![BM]);
-                let a_row: Tile<i32, { [BM] }> = offs_token / top_k_t;
-                // padding rows read row 0 so the gathers stay in bounds; the C store drops them
-                let zero_row: Tile<i32, { [BM] }> = broadcast_scalar(0i32, const_shape![BM]);
-                let safe_row: Tile<i32, { [BM] }> = select(token_mask, a_row, zero_row);
-                let k_t_bm: Tile<i32, { [BM] }> = broadcast_scalar(k_size, const_shape![BM]);
-                let a_row_off: Tile<i32, { [BM] }> = muli(safe_row, k_t_bm, overflow::NoSignedWrap);
-                let be: i32 = off_experts * (k_size * n_size);
-                let a_base0: PointerTile<*mut f8e4m3fn, { [] }> = pointer_to_tile(a_ptr);
-                let a_base1: PointerTile<*mut f8e4m3fn, { [1, 1] }> =
-                    a_base0.reshape(const_shape![1, 1]);
-                let a_base2: PointerTile<*mut f8e4m3fn, { [BM, BK] }> =
-                    a_base1.broadcast(const_shape![BM, BK]);
-                let b_base0: PointerTile<*mut f8e4m3fn, { [] }> = pointer_to_tile(b_ptr);
-                let b_base1: PointerTile<*mut f8e4m3fn, { [1, 1] }> =
-                    b_base0.reshape(const_shape![1, 1]);
-                let b_base2: PointerTile<*mut f8e4m3fn, { [BK, BN] }> =
-                    b_base1.broadcast(const_shape![BK, BN]);
-                let iota_k: Tile<i32, { [BK] }> = iota(const_shape![BK]);
-                let ar_col: Tile<i32, { [BM, 1] }> = a_row_off.reshape(const_shape![BM, 1]);
-                let ar_2d: Tile<i32, { [BM, BK] }> = ar_col.broadcast(const_shape![BM, BK]);
-                let ok_row: Tile<i32, { [1, BK] }> = iota_k.reshape(const_shape![1, BK]);
-                let ok_2d_a: Tile<i32, { [BM, BK] }> = ok_row.broadcast(const_shape![BM, BK]);
-                let a_off: Tile<i32, { [BM, BK] }> = ar_2d + ok_2d_a;
-                let mut a_ptrs: PointerTile<*mut f8e4m3fn, { [BM, BK] }> =
-                    a_base2.offset_tile(a_off);
-                // ENK [E, N, K]: B[e, n, k] = be + n * k_size + k
-                let be_2d: Tile<i32, { [BK, BN] }> = broadcast_scalar(be, const_shape![BK, BN]);
-                let ok_col: Tile<i32, { [BK, 1] }> = iota_k.reshape(const_shape![BK, 1]);
-                let ok_2d_b: Tile<i32, { [BK, BN] }> = ok_col.broadcast(const_shape![BK, BN]);
-                let obn_row: Tile<i32, { [1, BN] }> = offs_cn.reshape(const_shape![1, BN]);
-                let obn_2d: Tile<i32, { [BK, BN] }> = obn_row.broadcast(const_shape![BK, BN]);
-                let k_2d_b: Tile<i32, { [BK, BN] }> =
-                    broadcast_scalar(k_size, const_shape![BK, BN]);
-                let obn_k: Tile<i32, { [BK, BN] }> = muli(obn_2d, k_2d_b, overflow::NoSignedWrap);
-                let b_off_a: Tile<i32, { [BK, BN] }> = be_2d + obn_k;
-                let b_off: Tile<i32, { [BK, BN] }> = b_off_a + ok_2d_b;
-                let mut b_ptrs: PointerTile<*mut f8e4m3fn, { [BK, BN] }> =
-                    b_base2.offset_tile(b_off);
-                let a_step: Tile<i32, { [BM, BK] }> = broadcast_scalar(BK, const_shape![BM, BK]);
-                let b_step: Tile<i32, { [BK, BN] }> = broadcast_scalar(BK, const_shape![BK, BN]);
+                let sids_p0: PointerTile<*mut i32, { [] }> = pointer_to_tile(sorted_token_ids_ptr);
+                let sids_p1: PointerTile<*mut i32, { [1] }> = sids_p0.reshape(const_shape![1]);
+                let sids_p2: PointerTile<*mut i32, { [BM] }> = sids_p1.broadcast(const_shape![BM]);
+                let sids_ptrs: PointerTile<*mut i32, { [BM] }> = sids_p2.offset_tile(offs_token_id);
+                let (offs_token, _): (Tile<i32, { [BM] }>, Token) = load_ptr_tko(
+                    sids_ptrs,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    Some(id_inb),
+                    Some(num_valid_tokens),
+                    None,
+                    Latency::<0>,
+                );
+                let nvt_t: Tile<i32, { [BM] }> =
+                    broadcast_scalar(num_valid_tokens, const_shape![BM]);
+                let token_mask: Tile<bool, { [BM] }> = lt_tile(offs_token, nvt_t);
 
-                // activation scales: [K / BK, stride] group-major, one column per token row
-                let xs_p0: PointerTile<*mut f32, { [] }> = pointer_to_tile(a_scale_ptr);
-                let xs_p1: PointerTile<*mut f32, { [1] }> = xs_p0.reshape(const_shape![1]);
-                let xs_p2: PointerTile<*mut f32, { [BM] }> = xs_p1.broadcast(const_shape![BM]);
-                let xs_step: Tile<i32, { [BM] }> =
-                    broadcast_scalar(a_scale_stride, const_shape![BM]);
-                let mut xs_off: Tile<i32, { [BM] }> = safe_row;
-                // weight scales: [E, N / 128, K / 128], one value per 128-column block of this tile
-                let k_groups: i32 = k_size / 128;
-                let n_groups: i32 = n_size / 128;
-                let blk_bn: Tile<i32, { [BN] }> = broadcast_scalar(128i32, const_shape![BN]);
-                let cn_group: Tile<i32, { [BN] }> = offs_cn / blk_bn;
-                let kg_bn: Tile<i32, { [BN] }> = broadcast_scalar(k_groups, const_shape![BN]);
-                let ws_row: Tile<i32, { [BN] }> = muli(cn_group, kg_bn, overflow::NoSignedWrap);
-                let ws_base: Tile<i32, { [BN] }> =
-                    broadcast_scalar(off_experts * (n_groups * k_groups), const_shape![BN]);
-                let mut ws_off: Tile<i32, { [BN] }> = ws_base + ws_row;
-                let ws_p0: PointerTile<*mut f32, { [] }> = pointer_to_tile(b_scale_ptr);
-                let ws_p1: PointerTile<*mut f32, { [1] }> = ws_p0.reshape(const_shape![1]);
-                let ws_p2: PointerTile<*mut f32, { [BN] }> = ws_p1.broadcast(const_shape![BN]);
-                let ws_step: Tile<i32, { [BN] }> = broadcast_scalar(1i32, const_shape![BN]);
-                let zero_bm: Tile<f32, { [BM] }> = constant(0.0f32, const_shape![BM]);
-                let zero_acc: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]);
+                let eid_p0: PointerTile<*mut i32, { [] }> = pointer_to_tile(expert_ids_ptr);
+                let eid_p1: PointerTile<*mut i32, { [1] }> = eid_p0.reshape(const_shape![1]);
+                let pid_m_t: Tile<i32, { [1] }> = broadcast_scalar(pid_m, const_shape![1]);
+                let eid_p2: PointerTile<*mut i32, { [1] }> = eid_p1.offset_tile(pid_m_t);
+                let (eid_t, _): (Tile<i32, { [1] }>, Token) = load_ptr_tko(
+                    eid_p2,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    None,
+                    None,
+                    None,
+                    Latency::<0>,
+                );
+                let eid_s: Tile<i32, { [] }> = eid_t.reshape(const_shape![]);
+                let off_experts: i32 = tile_to_scalar(eid_s);
 
-                let mut acc: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]);
-                let kt: i32 = k_size / BK / SPLIT_K;
-                let k_begin: i32 = split * kt;
-                let a_skip: Tile<i32, { [BM, BK] }> =
-                    broadcast_scalar(k_begin * BK, const_shape![BM, BK]);
-                let b_skip: Tile<i32, { [BK, BN] }> =
-                    broadcast_scalar(k_begin * BK, const_shape![BK, BN]);
-                let xs_skip: Tile<i32, { [BM] }> =
-                    broadcast_scalar(k_begin * a_scale_stride, const_shape![BM]);
-                let ws_skip: Tile<i32, { [BN] }> = broadcast_scalar(k_begin, const_shape![BN]);
-                a_ptrs = a_ptrs.offset_tile(a_skip);
-                b_ptrs = b_ptrs.offset_tile(b_skip);
-                xs_off = xs_off + xs_skip;
-                ws_off = ws_off + ws_skip;
-                for _kk in 0i32..kt {
-                    // the latency hint is a type-level literal, so the generic picks among fixed values
-                    let a_tile: Tile<f8e4m3fn, { [BM, BK] }> = if LATENCY >= 4 {
-                        let (t, _): (Tile<f8e4m3fn, { [BM, BK] }>, Token) = load_ptr_tko(
-                            a_ptrs,
+                let iota_n: Tile<i32, { [BN] }> = iota(const_shape![BN]);
+                let base_n: Tile<i32, { [BN] }> = broadcast_scalar(pid_n * BN, const_shape![BN]);
+                let offs_cn: Tile<i32, { [BN] }> = iota_n + base_n;
+
+                let ot_col: Tile<i32, { [BM, 1] }> = offs_token.reshape(const_shape![BM, 1]);
+                let ot_2d: Tile<i32, { [BM, BN] }> = ot_col.broadcast(const_shape![BM, BN]);
+                let n_2d: Tile<i32, { [BM, BN] }> = broadcast_scalar(n_size, const_shape![BM, BN]);
+                let ot_n: Tile<i32, { [BM, BN] }> = muli(ot_2d, n_2d, overflow::NoSignedWrap);
+                let cn_row: Tile<i32, { [1, BN] }> = offs_cn.reshape(const_shape![1, BN]);
+                let cn_2d: Tile<i32, { [BM, BN] }> = cn_row.broadcast(const_shape![BM, BN]);
+                let c_off: Tile<i32, { [BM, BN] }> = ot_n + cn_2d;
+                let c_base0: PointerTile<*mut bf16, { [] }> = pointer_to_tile(out_ptr);
+                let c_base1: PointerTile<*mut bf16, { [1, 1] }> =
+                    c_base0.reshape(const_shape![1, 1]);
+                let c_base2: PointerTile<*mut bf16, { [BM, BN] }> =
+                    c_base1.broadcast(const_shape![BM, BN]);
+                let c_ptrs: PointerTile<*mut bf16, { [BM, BN] }> = c_base2.offset_tile(c_off);
+                let tm_col: Tile<bool, { [BM, 1] }> = token_mask.reshape(const_shape![BM, 1]);
+                let c_mask: Tile<bool, { [BM, BN] }> = tm_col.broadcast(const_shape![BM, BN]);
+                let p_base0: PointerTile<*mut f32, { [] }> = pointer_to_tile(partial_ptr);
+                let p_base1: PointerTile<*mut f32, { [1, 1] }> =
+                    p_base0.reshape(const_shape![1, 1]);
+                let p_base2: PointerTile<*mut f32, { [BM, BN] }> =
+                    p_base1.broadcast(const_shape![BM, BN]);
+                let slice_off: Tile<i32, { [BM, BN] }> =
+                    broadcast_scalar(split * (num_valid_tokens * n_size), const_shape![BM, BN]);
+                let p_ptrs: PointerTile<*mut f32, { [BM, BN] }> =
+                    p_base2.offset_tile(c_off + slice_off);
+                if off_experts == -1 {
+                    if SPLIT_K > 1 {
+                        let zeros: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]);
+                        store_ptr_tko(
+                            p_ptrs,
+                            zeros,
                             ordering::Weak,
                             None::<scope::TileBlock>,
+                            Some(c_mask),
                             None,
-                            None,
-                            None,
-                            Latency::<4>,
+                            Latency::<0>,
                         );
-                        t
-                    } else if LATENCY >= 2 {
-                        let (t, _): (Tile<f8e4m3fn, { [BM, BK] }>, Token) = load_ptr_tko(
-                            a_ptrs,
-                            ordering::Weak,
-                            None::<scope::TileBlock>,
-                            None,
-                            None,
-                            None,
-                            Latency::<2>,
-                        );
-                        t
-                    } else if LATENCY == 1 {
-                        let (t, _): (Tile<f8e4m3fn, { [BM, BK] }>, Token) = load_ptr_tko(
-                            a_ptrs,
-                            ordering::Weak,
-                            None::<scope::TileBlock>,
-                            None,
-                            None,
-                            None,
-                            Latency::<1>,
-                        );
-                        t
                     } else {
-                        let (t, _): (Tile<f8e4m3fn, { [BM, BK] }>, Token) = load_ptr_tko(
-                            a_ptrs,
+                        let zeros: Tile<bf16, { [BM, BN] }> =
+                            constant(bf16::ZERO, const_shape![BM, BN]);
+                        store_ptr_tko(
+                            c_ptrs,
+                            zeros,
+                            ordering::Weak,
+                            None::<scope::TileBlock>,
+                            Some(c_mask),
+                            None,
+                            Latency::<0>,
+                        );
+                    }
+                } else {
+                    let top_k_t: Tile<i32, { [BM] }> = broadcast_scalar(TOP_K, const_shape![BM]);
+                    let a_row: Tile<i32, { [BM] }> = offs_token / top_k_t;
+                    // padding rows read row 0 so the gathers stay in bounds; the C store drops them
+                    let zero_row: Tile<i32, { [BM] }> = broadcast_scalar(0i32, const_shape![BM]);
+                    let safe_row: Tile<i32, { [BM] }> = select(token_mask, a_row, zero_row);
+                    let k_t_bm: Tile<i32, { [BM] }> = broadcast_scalar(k_size, const_shape![BM]);
+                    let a_row_off: Tile<i32, { [BM] }> =
+                        muli(safe_row, k_t_bm, overflow::NoSignedWrap);
+                    let be: i32 = off_experts * (k_size * n_size);
+                    let a_base0: PointerTile<*mut f8e4m3fn, { [] }> = pointer_to_tile(a_ptr);
+                    let a_base1: PointerTile<*mut f8e4m3fn, { [1, 1] }> =
+                        a_base0.reshape(const_shape![1, 1]);
+                    let a_base2: PointerTile<*mut f8e4m3fn, { [BM, BK] }> =
+                        a_base1.broadcast(const_shape![BM, BK]);
+                    let b_base0: PointerTile<*mut f8e4m3fn, { [] }> = pointer_to_tile(b_ptr);
+                    let b_base1: PointerTile<*mut f8e4m3fn, { [1, 1] }> =
+                        b_base0.reshape(const_shape![1, 1]);
+                    let b_base2: PointerTile<*mut f8e4m3fn, { [BK, BN] }> =
+                        b_base1.broadcast(const_shape![BK, BN]);
+                    let iota_k: Tile<i32, { [BK] }> = iota(const_shape![BK]);
+                    let ar_col: Tile<i32, { [BM, 1] }> = a_row_off.reshape(const_shape![BM, 1]);
+                    let ar_2d: Tile<i32, { [BM, BK] }> = ar_col.broadcast(const_shape![BM, BK]);
+                    let ok_row: Tile<i32, { [1, BK] }> = iota_k.reshape(const_shape![1, BK]);
+                    let ok_2d_a: Tile<i32, { [BM, BK] }> = ok_row.broadcast(const_shape![BM, BK]);
+                    let a_off: Tile<i32, { [BM, BK] }> = ar_2d + ok_2d_a;
+                    let mut a_ptrs: PointerTile<*mut f8e4m3fn, { [BM, BK] }> =
+                        a_base2.offset_tile(a_off);
+                    // ENK [E, N, K]: B[e, n, k] = be + n * k_size + k
+                    let be_2d: Tile<i32, { [BK, BN] }> = broadcast_scalar(be, const_shape![BK, BN]);
+                    let ok_col: Tile<i32, { [BK, 1] }> = iota_k.reshape(const_shape![BK, 1]);
+                    let ok_2d_b: Tile<i32, { [BK, BN] }> = ok_col.broadcast(const_shape![BK, BN]);
+                    let obn_row: Tile<i32, { [1, BN] }> = offs_cn.reshape(const_shape![1, BN]);
+                    let obn_2d: Tile<i32, { [BK, BN] }> = obn_row.broadcast(const_shape![BK, BN]);
+                    let k_2d_b: Tile<i32, { [BK, BN] }> =
+                        broadcast_scalar(k_size, const_shape![BK, BN]);
+                    let obn_k: Tile<i32, { [BK, BN] }> =
+                        muli(obn_2d, k_2d_b, overflow::NoSignedWrap);
+                    let b_off_a: Tile<i32, { [BK, BN] }> = be_2d + obn_k;
+                    let b_off: Tile<i32, { [BK, BN] }> = b_off_a + ok_2d_b;
+                    let mut b_ptrs: PointerTile<*mut f8e4m3fn, { [BK, BN] }> =
+                        b_base2.offset_tile(b_off);
+                    let a_step: Tile<i32, { [BM, BK] }> =
+                        broadcast_scalar(BK, const_shape![BM, BK]);
+                    let b_step: Tile<i32, { [BK, BN] }> =
+                        broadcast_scalar(BK, const_shape![BK, BN]);
+
+                    // activation scales: [K / BK, stride] group-major, one column per token row
+                    let xs_p0: PointerTile<*mut f32, { [] }> = pointer_to_tile(a_scale_ptr);
+                    let xs_p1: PointerTile<*mut f32, { [1] }> = xs_p0.reshape(const_shape![1]);
+                    let xs_p2: PointerTile<*mut f32, { [BM] }> = xs_p1.broadcast(const_shape![BM]);
+                    let xs_step: Tile<i32, { [BM] }> =
+                        broadcast_scalar(a_scale_stride, const_shape![BM]);
+                    let mut xs_off: Tile<i32, { [BM] }> = safe_row;
+                    // weight scales: [E, N / 128, K / 128], one value per 128-column block of this tile
+                    let k_groups: i32 = k_size / 128;
+                    let n_groups: i32 = n_size / 128;
+                    let blk_bn: Tile<i32, { [BN] }> = broadcast_scalar(128i32, const_shape![BN]);
+                    let cn_group: Tile<i32, { [BN] }> = offs_cn / blk_bn;
+                    let kg_bn: Tile<i32, { [BN] }> = broadcast_scalar(k_groups, const_shape![BN]);
+                    let ws_row: Tile<i32, { [BN] }> = muli(cn_group, kg_bn, overflow::NoSignedWrap);
+                    let ws_base: Tile<i32, { [BN] }> =
+                        broadcast_scalar(off_experts * (n_groups * k_groups), const_shape![BN]);
+                    let mut ws_off: Tile<i32, { [BN] }> = ws_base + ws_row;
+                    let ws_p0: PointerTile<*mut f32, { [] }> = pointer_to_tile(b_scale_ptr);
+                    let ws_p1: PointerTile<*mut f32, { [1] }> = ws_p0.reshape(const_shape![1]);
+                    let ws_p2: PointerTile<*mut f32, { [BN] }> = ws_p1.broadcast(const_shape![BN]);
+                    let ws_step: Tile<i32, { [BN] }> = broadcast_scalar(1i32, const_shape![BN]);
+                    let zero_bm: Tile<f32, { [BM] }> = constant(0.0f32, const_shape![BM]);
+                    let zero_acc: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]);
+
+                    let mut acc: Tile<f32, { [BM, BN] }> = constant(0.0f32, const_shape![BM, BN]);
+                    let kt: i32 = k_size / BK / SPLIT_K;
+                    let k_begin: i32 = split * kt;
+                    let a_skip: Tile<i32, { [BM, BK] }> =
+                        broadcast_scalar(k_begin * BK, const_shape![BM, BK]);
+                    let b_skip: Tile<i32, { [BK, BN] }> =
+                        broadcast_scalar(k_begin * BK, const_shape![BK, BN]);
+                    let xs_skip: Tile<i32, { [BM] }> =
+                        broadcast_scalar(k_begin * a_scale_stride, const_shape![BM]);
+                    let ws_skip: Tile<i32, { [BN] }> = broadcast_scalar(k_begin, const_shape![BN]);
+                    a_ptrs = a_ptrs.offset_tile(a_skip);
+                    b_ptrs = b_ptrs.offset_tile(b_skip);
+                    xs_off = xs_off + xs_skip;
+                    ws_off = ws_off + ws_skip;
+                    for _kk in 0i32..kt {
+                        // the latency hint is a type-level literal, so the generic picks among fixed values
+                        let a_tile: Tile<f8e4m3fn, { [BM, BK] }> = if LATENCY >= 4 {
+                            let (t, _): (Tile<f8e4m3fn, { [BM, BK] }>, Token) = load_ptr_tko(
+                                a_ptrs,
+                                ordering::Weak,
+                                None::<scope::TileBlock>,
+                                None,
+                                None,
+                                None,
+                                Latency::<4>,
+                            );
+                            t
+                        } else if LATENCY >= 2 {
+                            let (t, _): (Tile<f8e4m3fn, { [BM, BK] }>, Token) = load_ptr_tko(
+                                a_ptrs,
+                                ordering::Weak,
+                                None::<scope::TileBlock>,
+                                None,
+                                None,
+                                None,
+                                Latency::<2>,
+                            );
+                            t
+                        } else if LATENCY == 1 {
+                            let (t, _): (Tile<f8e4m3fn, { [BM, BK] }>, Token) = load_ptr_tko(
+                                a_ptrs,
+                                ordering::Weak,
+                                None::<scope::TileBlock>,
+                                None,
+                                None,
+                                None,
+                                Latency::<1>,
+                            );
+                            t
+                        } else {
+                            let (t, _): (Tile<f8e4m3fn, { [BM, BK] }>, Token) = load_ptr_tko(
+                                a_ptrs,
+                                ordering::Weak,
+                                None::<scope::TileBlock>,
+                                None,
+                                None,
+                                None,
+                                Latency::<0>,
+                            );
+                            t
+                        };
+                        let b_tile: Tile<f8e4m3fn, { [BK, BN] }> = if LATENCY >= 4 {
+                            let (t, _): (Tile<f8e4m3fn, { [BK, BN] }>, Token) = load_ptr_tko(
+                                b_ptrs,
+                                ordering::Weak,
+                                None::<scope::TileBlock>,
+                                None,
+                                None,
+                                None,
+                                Latency::<4>,
+                            );
+                            t
+                        } else if LATENCY >= 2 {
+                            let (t, _): (Tile<f8e4m3fn, { [BK, BN] }>, Token) = load_ptr_tko(
+                                b_ptrs,
+                                ordering::Weak,
+                                None::<scope::TileBlock>,
+                                None,
+                                None,
+                                None,
+                                Latency::<2>,
+                            );
+                            t
+                        } else if LATENCY == 1 {
+                            let (t, _): (Tile<f8e4m3fn, { [BK, BN] }>, Token) = load_ptr_tko(
+                                b_ptrs,
+                                ordering::Weak,
+                                None::<scope::TileBlock>,
+                                None,
+                                None,
+                                None,
+                                Latency::<1>,
+                            );
+                            t
+                        } else {
+                            let (t, _): (Tile<f8e4m3fn, { [BK, BN] }>, Token) = load_ptr_tko(
+                                b_ptrs,
+                                ordering::Weak,
+                                None::<scope::TileBlock>,
+                                None,
+                                None,
+                                None,
+                                Latency::<0>,
+                            );
+                            t
+                        };
+                        let part: Tile<f32, { [BM, BN] }> = mmaf(a_tile, b_tile, zero_acc);
+                        let xs_ptrs: PointerTile<*mut f32, { [BM] }> = xs_p2.offset_tile(xs_off);
+                        let (sx_load, _): (Tile<f32, { [BM] }>, Token) = load_ptr_tko(
+                            xs_ptrs,
+                            ordering::Weak,
+                            None::<scope::TileBlock>,
+                            Some(token_mask),
+                            Some(0.0f32),
+                            None,
+                            Latency::<0>,
+                        );
+                        let sx: Tile<f32, { [BM] }> = select(token_mask, sx_load, zero_bm);
+                        let ws_ptrs: PointerTile<*mut f32, { [BN] }> = ws_p2.offset_tile(ws_off);
+                        let (sw, _): (Tile<f32, { [BN] }>, Token) = load_ptr_tko(
+                            ws_ptrs,
                             ordering::Weak,
                             None::<scope::TileBlock>,
                             None,
@@ -320,128 +394,61 @@ pub mod fused_moe_fp8 {
                             None,
                             Latency::<0>,
                         );
-                        t
-                    };
-                    let b_tile: Tile<f8e4m3fn, { [BK, BN] }> = if LATENCY >= 4 {
-                        let (t, _): (Tile<f8e4m3fn, { [BK, BN] }>, Token) = load_ptr_tko(
-                            b_ptrs,
+                        let sx_2d: Tile<f32, { [BM, BN] }> = sx
+                            .reshape(const_shape![BM, 1])
+                            .broadcast(const_shape![BM, BN]);
+                        let sw_2d: Tile<f32, { [BM, BN] }> = sw
+                            .reshape(const_shape![1, BN])
+                            .broadcast(const_shape![BM, BN]);
+                        let scaled: Tile<f32, { [BM, BN] }> = part * sx_2d * sw_2d;
+                        acc = acc + scaled;
+                        a_ptrs = a_ptrs.offset_tile(a_step);
+                        b_ptrs = b_ptrs.offset_tile(b_step);
+                        xs_off = xs_off + xs_step;
+                        ws_off = ws_off + ws_step;
+                    }
+                    if MUL_ROUTED_WEIGHT != 0 {
+                        let w_p0: PointerTile<*mut f32, { [] }> = pointer_to_tile(topk_weights_ptr);
+                        let w_p1: PointerTile<*mut f32, { [1] }> = w_p0.reshape(const_shape![1]);
+                        let w_p2: PointerTile<*mut f32, { [BM] }> =
+                            w_p1.broadcast(const_shape![BM]);
+                        let w_ptrs: PointerTile<*mut f32, { [BM] }> = w_p2.offset_tile(offs_token);
+                        let (moe_w, _): (Tile<f32, { [BM] }>, Token) = load_ptr_tko(
+                            w_ptrs,
                             ordering::Weak,
                             None::<scope::TileBlock>,
-                            None,
-                            None,
-                            None,
-                            Latency::<4>,
-                        );
-                        t
-                    } else if LATENCY >= 2 {
-                        let (t, _): (Tile<f8e4m3fn, { [BK, BN] }>, Token) = load_ptr_tko(
-                            b_ptrs,
-                            ordering::Weak,
-                            None::<scope::TileBlock>,
-                            None,
-                            None,
-                            None,
-                            Latency::<2>,
-                        );
-                        t
-                    } else if LATENCY == 1 {
-                        let (t, _): (Tile<f8e4m3fn, { [BK, BN] }>, Token) = load_ptr_tko(
-                            b_ptrs,
-                            ordering::Weak,
-                            None::<scope::TileBlock>,
-                            None,
-                            None,
-                            None,
-                            Latency::<1>,
-                        );
-                        t
-                    } else {
-                        let (t, _): (Tile<f8e4m3fn, { [BK, BN] }>, Token) = load_ptr_tko(
-                            b_ptrs,
-                            ordering::Weak,
-                            None::<scope::TileBlock>,
-                            None,
-                            None,
+                            Some(token_mask),
+                            Some(0.0f32),
                             None,
                             Latency::<0>,
                         );
-                        t
-                    };
-                    let part: Tile<f32, { [BM, BN] }> = mmaf(a_tile, b_tile, zero_acc);
-                    let xs_ptrs: PointerTile<*mut f32, { [BM] }> = xs_p2.offset_tile(xs_off);
-                    let (sx_load, _): (Tile<f32, { [BM] }>, Token) = load_ptr_tko(
-                        xs_ptrs,
-                        ordering::Weak,
-                        None::<scope::TileBlock>,
-                        Some(token_mask),
-                        Some(0.0f32),
-                        None,
-                        Latency::<0>,
-                    );
-                    let sx: Tile<f32, { [BM] }> = select(token_mask, sx_load, zero_bm);
-                    let ws_ptrs: PointerTile<*mut f32, { [BN] }> = ws_p2.offset_tile(ws_off);
-                    let (sw, _): (Tile<f32, { [BN] }>, Token) = load_ptr_tko(
-                        ws_ptrs,
-                        ordering::Weak,
-                        None::<scope::TileBlock>,
-                        None,
-                        None,
-                        None,
-                        Latency::<0>,
-                    );
-                    let sx_2d: Tile<f32, { [BM, BN] }> = sx
-                        .reshape(const_shape![BM, 1])
-                        .broadcast(const_shape![BM, BN]);
-                    let sw_2d: Tile<f32, { [BM, BN] }> = sw
-                        .reshape(const_shape![1, BN])
-                        .broadcast(const_shape![BM, BN]);
-                    let scaled: Tile<f32, { [BM, BN] }> = part * sx_2d * sw_2d;
-                    acc = acc + scaled;
-                    a_ptrs = a_ptrs.offset_tile(a_step);
-                    b_ptrs = b_ptrs.offset_tile(b_step);
-                    xs_off = xs_off + xs_step;
-                    ws_off = ws_off + ws_step;
-                }
-                if MUL_ROUTED_WEIGHT != 0 {
-                    let w_p0: PointerTile<*mut f32, { [] }> = pointer_to_tile(topk_weights_ptr);
-                    let w_p1: PointerTile<*mut f32, { [1] }> = w_p0.reshape(const_shape![1]);
-                    let w_p2: PointerTile<*mut f32, { [BM] }> = w_p1.broadcast(const_shape![BM]);
-                    let w_ptrs: PointerTile<*mut f32, { [BM] }> = w_p2.offset_tile(offs_token);
-                    let (moe_w, _): (Tile<f32, { [BM] }>, Token) = load_ptr_tko(
-                        w_ptrs,
-                        ordering::Weak,
-                        None::<scope::TileBlock>,
-                        Some(token_mask),
-                        Some(0.0f32),
-                        None,
-                        Latency::<0>,
-                    );
-                    let moe_w_2d: Tile<f32, { [BM, BN] }> = moe_w
-                        .reshape(const_shape![BM, 1])
-                        .broadcast(const_shape![BM, BN]);
-                    acc = acc * moe_w_2d;
-                }
-                if SPLIT_K > 1 {
-                    store_ptr_tko(
-                        p_ptrs,
-                        acc,
-                        ordering::Weak,
-                        None::<scope::TileBlock>,
-                        Some(c_mask),
-                        None,
-                        Latency::<0>,
-                    );
-                } else {
-                    let acc_bf: Tile<bf16, { [BM, BN] }> = convert_tile(acc);
-                    store_ptr_tko(
-                        c_ptrs,
-                        acc_bf,
-                        ordering::Weak,
-                        None::<scope::TileBlock>,
-                        Some(c_mask),
-                        None,
-                        Latency::<0>,
-                    );
+                        let moe_w_2d: Tile<f32, { [BM, BN] }> = moe_w
+                            .reshape(const_shape![BM, 1])
+                            .broadcast(const_shape![BM, BN]);
+                        acc = acc * moe_w_2d;
+                    }
+                    if SPLIT_K > 1 {
+                        store_ptr_tko(
+                            p_ptrs,
+                            acc,
+                            ordering::Weak,
+                            None::<scope::TileBlock>,
+                            Some(c_mask),
+                            None,
+                            Latency::<0>,
+                        );
+                    } else {
+                        let acc_bf: Tile<bf16, { [BM, BN] }> = convert_tile(acc);
+                        store_ptr_tko(
+                            c_ptrs,
+                            acc_bf,
+                            ordering::Weak,
+                            None::<scope::TileBlock>,
+                            Some(c_mask),
+                            None,
+                            Latency::<0>,
+                        );
+                    }
                 }
             }
         }
@@ -1174,11 +1181,11 @@ impl CutileKernel for FusedMoeFp8Kernel {
 mod tests {
     use candle_core::{DType, Device, Result, Tensor};
 
-    use super::{cutile_fused_moe_fp8, CutileFp8MoeWeights, FP8_MOE_GROUP};
     use super::{Bucket, MoeTileConfig};
+    use super::{CutileFp8MoeWeights, FP8_MOE_GROUP, cutile_fused_moe_fp8};
+    use crate::GluActivationType;
     use crate::blockwise_fp8::ops;
     use crate::cutile::tune::{Source, Tuned};
-    use crate::GluActivationType;
 
     fn patterned(len: usize, seed: usize, amplitude: f32, offset: f32) -> Vec<f32> {
         (0..len)

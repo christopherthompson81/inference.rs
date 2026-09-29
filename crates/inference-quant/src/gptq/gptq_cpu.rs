@@ -1,9 +1,9 @@
 use crate::{
-    has_missing_required_tensors, make_dummy_or_error, IsqType, QuantMethod, QuantMethodConfig,
-    QuantizeOntoGuard, QuantizedConfig, QuantizedSerde, ShardedVarBuilder,
+    IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedConfig, QuantizedSerde,
+    ShardedVarBuilder, has_missing_required_tensors, make_dummy_or_error,
 };
 use candle_core::{DType, Device, Result, Tensor};
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::{Arc, atomic::AtomicUsize};
 
 #[derive(Debug)]
 pub struct GptqLayer;
@@ -166,14 +166,16 @@ mod tests {
     fn unsupported_cpu_gptq_methods_return_errors() {
         let layer = Arc::new(GptqLayer);
         assert!(layer.dequantize_w().is_err());
-        assert!(layer
-            .apply_isq(
-                None,
-                Device::Cpu,
-                &AtomicUsize::new(0),
-                None,
-                QuantizeOntoGuard::new(),
-            )
-            .is_err());
+        assert!(
+            layer
+                .apply_isq(
+                    None,
+                    Device::Cpu,
+                    &AtomicUsize::new(0),
+                    None,
+                    QuantizeOntoGuard::new(),
+                )
+                .is_err()
+        );
     }
 }

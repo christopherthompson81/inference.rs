@@ -1,12 +1,12 @@
 #![cfg(feature = "cuda")]
 
 use candle_core::{
-    quantized::{GgmlDType, QTensor},
     Device, Result, Storage, Tensor,
+    quantized::{GgmlDType, QTensor},
 };
 use inference_quant::{
-    grouped_moe_mmq, grouped_moe_mmq_from_glu_packed, grouped_moe_mmq_from_glu_sorted_pair,
-    grouped_moe_mmq_pair_packed, moe_dispatch_build, GluActivationType,
+    GluActivationType, grouped_moe_mmq, grouped_moe_mmq_from_glu_packed,
+    grouped_moe_mmq_from_glu_sorted_pair, grouped_moe_mmq_pair_packed, moe_dispatch_build,
 };
 
 const NUM_EXPERTS: usize = 3;

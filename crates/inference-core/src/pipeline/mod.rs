@@ -2,7 +2,7 @@ mod amoe;
 mod auto;
 pub(crate) mod cache_manager;
 pub(crate) use crate::model::{
-    recurrent_batch_kind_for_input, ModelForwardContext, RecurrentMetadata,
+    ModelForwardContext, RecurrentMetadata, recurrent_batch_kind_for_input,
 };
 pub use cache_manager::CacheManager;
 pub mod chat_template;
@@ -41,6 +41,8 @@ mod tiktoken;
 pub(crate) mod tokenizer;
 mod tokens;
 
+use crate::IntervalLogger;
+use crate::PagedAttentionConfig;
 use crate::amoe::{AnyMoeConfig, AnyMoeExpertType, AnyMoeTrainingInputs, AnyMoeTrainingResult};
 use crate::attention::FlashParams;
 use crate::device_map::DeviceMapper;
@@ -52,8 +54,6 @@ use crate::paged_attention::{
     ModelConfigLike,
 };
 use crate::prefix_cacher::PrefixCacheManagerV2;
-use crate::IntervalLogger;
-use crate::PagedAttentionConfig;
 pub use amoe::{AnyMoeLoader, AnyMoePipeline};
 pub use auto::{AutoLoader, AutoLoaderBuilder};
 use chat_template::ChatTemplate;
@@ -70,15 +70,14 @@ pub use inference_nn::loaders::{Modalities, MultimodalPromptPrefixer, SupportedM
 pub use inputs_processor::InputProcessorOutput;
 pub(crate) use isq::IsqModelLoader;
 pub use isq::{
-    expand_isq_value, expand_uqff_shards, parse_uqff_shard, resolve_uqff_report_output,
-    resolve_uqff_shorthand, IsqOrganization, UqffWriteConfig, UQFF_MULTI_FILE_DELIMITER,
+    IsqOrganization, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig, expand_isq_value,
+    expand_uqff_shards, parse_uqff_shard, resolve_uqff_report_output, resolve_uqff_shorthand,
 };
 pub(crate) use step::start_decoding_prompt_rows;
 // Named only by the ModelSelected schema attributes.
 #[cfg(feature = "utoipa")]
 pub(crate) use isq::UqffWriteSpec;
 use llguidance::toktrie::TokEnv;
-pub(crate) use loaders::checkpoint_runtime_size;
 #[cfg(feature = "models-gemma")]
 pub use loaders::GemmaLoader;
 pub(crate) use loaders::MultimodalProcessorFactory;
@@ -86,6 +85,7 @@ pub(crate) use loaders::MultimodalProcessorFactory;
 pub use loaders::Qwen2Loader;
 #[cfg(feature = "models-other")]
 pub use loaders::Starcoder2Loader;
+pub(crate) use loaders::checkpoint_runtime_size;
 pub use loaders::{
     AdapterKind, AutoDeviceMapParams, AutoDeviceMapQuantization, AutoEmbeddingLoader,
     AutoMultimodalLoader, AutoNormalLoader, DeviceMappedModelLoader, DiffusionLoaderType,
@@ -168,7 +168,7 @@ use inference_quant::IsqType;
 pub use multimodal::{MultimodalLoader, MultimodalLoaderBuilder, MultimodalSpecificConfig};
 pub use normal::{NormalLoader, NormalLoaderBuilder, NormalSpecificConfig};
 pub(crate) use paths::{
-    get_adapter_paths, get_chat_template, get_model_paths, AdapterPathOptions, XLoraPreload,
+    AdapterPathOptions, XLoraPreload, get_adapter_paths, get_chat_template, get_model_paths,
 };
 pub use paths::{AdapterPaths, ResolvedLoraAdapter};
 #[cfg(feature = "models-llama")]
@@ -179,8 +179,8 @@ pub use speech::{SpeechLoader, SpeechLoaderType, SpeechPipeline};
 use std::any::Any;
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use tokenizers::Tokenizer;
@@ -189,15 +189,15 @@ use anyhow::Result;
 use candle_core::{DType, Device, DeviceLocation, IndexOp, Tensor, Var};
 
 use crate::paged_attention::block_hash::{
-    adapter_generation_key, compute_block_hashes, MultimodalAttentionPolicy,
+    MultimodalAttentionPolicy, adapter_generation_key, compute_block_hashes,
 };
 use crate::sequence::Sequence;
 
-use prompt_chunks::{next_prompt_chunk_group, PromptChunkPlan};
+use prompt_chunks::{PromptChunkPlan, next_prompt_chunk_group};
 
 pub(crate) use self::inputs_processor::is_inputs_processor_validation_error;
 pub use self::inputs_processor::{
-    text_models_inputs_processor, InputsProcessor, InputsProcessorType,
+    InputsProcessor, InputsProcessorType, text_models_inputs_processor,
 };
 use crate::paged_attention::PagedAttentionMeta;
 
@@ -352,11 +352,7 @@ struct RecurrentCheckpointBudget {
 }
 
 fn effective_recurrent_checkpoint_lanes(requested: usize, supported: bool) -> usize {
-    if supported {
-        requested
-    } else {
-        1
-    }
+    if supported { requested } else { 1 }
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
@@ -1366,25 +1362,25 @@ mod tests {
     use crate::model::decode_positions_tensor;
 
     use super::{
+        CacheMemoryReservations, ModelForwardContext, RecurrentCheckpointBudget,
         add_recurrent_prefix_memory_reservations, automatic_recurrent_checkpoint_lane_budget,
         effective_recurrent_checkpoint_lanes, next_pipeline_prompt_chunk_group,
         paged_attention_memory_reservations, prompt_chunk_is_final, recurrent_batch_kind_for_input,
         recurrent_kv_floor_bytes, reserve_recurrent_serving_capacity, resolve_lora_execution,
-        should_sample_step, should_try_speculative_sampling, CacheMemoryReservations,
-        ModelForwardContext, RecurrentCheckpointBudget,
+        should_sample_step, should_try_speculative_sampling,
     };
     use crate::gdn::RecurrentBatchKind;
     use crate::model::{ForwardCache, LogitsSelection};
     use crate::{
+        MemoryGpuConfig, MessageContent, PagedAttentionConfig, PagedCacheType,
         attention::FlashParams,
         kv_cache::{
             EitherCache, HybridCache, HybridCacheConfig, HybridLayerType, RecurrentLayerConfig,
             RecurrentStateSpec,
         },
-        paged_attention::block_hash::MultimodalAttentionPolicy,
         paged_attention::PagedAttentionInputMetadata,
+        paged_attention::block_hash::MultimodalAttentionPolicy,
         pipeline::prompt_chunks::PromptChunkPlan,
-        MemoryGpuConfig, MessageContent, PagedAttentionConfig, PagedCacheType,
     };
     use candle_core::{Device, DeviceLocation, Tensor};
     use either::Either;
@@ -1789,9 +1785,11 @@ mod tests {
         );
         let error =
             resolve_lora_execution(None, &input_ids, None, &flash_meta, &[None]).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("adapter lease count 1 does not match model batch size 2"));
+        assert!(
+            error
+                .to_string()
+                .contains("adapter lease count 1 does not match model batch size 2")
+        );
         Ok(())
     }
 
@@ -1803,21 +1801,25 @@ mod tests {
         let mut paged_meta = PagedAttentionInputMetadata::dummy(&Device::Cpu)?;
         paged_meta.query_lens = Some(vec![2, 3]);
 
-        assert!(resolve_lora_execution(
-            None,
-            &input_ids,
-            Some(&paged_meta),
-            &flash_meta,
-            &[None, None],
-        )?
-        .is_none());
+        assert!(
+            resolve_lora_execution(
+                None,
+                &input_ids,
+                Some(&paged_meta),
+                &flash_meta,
+                &[None, None],
+            )?
+            .is_none()
+        );
 
         let error =
             resolve_lora_execution(None, &input_ids, Some(&paged_meta), &flash_meta, &[None])
                 .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("adapter lease count 1 does not match packed logical sequence count 2"));
+        assert!(
+            error
+                .to_string()
+                .contains("adapter lease count 1 does not match packed logical sequence count 2")
+        );
 
         paged_meta.query_lens = Some(vec![2, 2]);
         let error = resolve_lora_execution(
@@ -1899,9 +1901,11 @@ mod tests {
 
         let error = context.text_positions(&Device::Cpu, 1).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("packed prefill is missing RoPE positions"));
+        assert!(
+            error
+                .to_string()
+                .contains("packed prefill is missing RoPE positions")
+        );
     }
 
     #[test]
@@ -1995,17 +1999,53 @@ mod tests {
     fn test_chat_templates() {
         let templates = [
             // ChatML: https://huggingface.co/teknium/OpenHermes-2.5-Mistral-7B
-            (true, "<s>", "</s>", "<unk>", "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}"),
+            (
+                true,
+                "<s>",
+                "</s>",
+                "<unk>",
+                "{% for message in messages %}{{'<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>' + '\n'}}{% endfor %}{% if add_generation_prompt %}{{ '<|im_start|>assistant\n' }}{% endif %}",
+            ),
             // mistralai/Mistral-7B-Instruct-v0.1
-            (false, "<s>", "</s>", "<unk>", "{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token + ' ' }}{% else %}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}"),
+            (
+                false,
+                "<s>",
+                "</s>",
+                "<unk>",
+                "{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token + ' ' }}{% else %}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}",
+            ),
             // meta-llama/Llama-2-13b-chat-hf
-            (true, "<s>", "</s>", "<unk>", "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 and system_message != false %}{% set content = '<<SYS>>\\n' + system_message + '\\n<</SYS>>\\n\\n' + message['content'] %}{% else %}{% set content = message['content'] %}{% endif %}{% if message['role'] == 'user' %}{{ bos_token + '[INST] ' + content.strip() + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ ' '  + content.strip() + ' ' + eos_token }}{% endif %}{% endfor %}"),
+            (
+                true,
+                "<s>",
+                "</s>",
+                "<unk>",
+                "{% if messages[0]['role'] == 'system' %}{% set loop_messages = messages[1:] %}{% set system_message = messages[0]['content'] %}{% else %}{% set loop_messages = messages %}{% set system_message = false %}{% endif %}{% for message in loop_messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if loop.index0 == 0 and system_message != false %}{% set content = '<<SYS>>\\n' + system_message + '\\n<</SYS>>\\n\\n' + message['content'] %}{% else %}{% set content = message['content'] %}{% endif %}{% if message['role'] == 'user' %}{{ bos_token + '[INST] ' + content.strip() + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ ' '  + content.strip() + ' ' + eos_token }}{% endif %}{% endfor %}",
+            ),
             // mistralai/Mixtral-8x7B-Instruct-v0.1
-            (false, "<s>", "</s>", "<unk>", "{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token}}{% else %}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}"),
+            (
+                false,
+                "<s>",
+                "</s>",
+                "<unk>",
+                "{{ bos_token }}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if message['role'] == 'user' %}{{ '[INST] ' + message['content'] + ' [/INST]' }}{% elif message['role'] == 'assistant' %}{{ message['content'] + eos_token}}{% else %}{{ raise_exception('Only user and assistant roles are supported!') }}{% endif %}{% endfor %}",
+            ),
             // google/gemma-7b-it
-            (false, "<bos>", "<eos>", "<unk>", "{{ bos_token }}{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if (message['role'] == 'assistant') %}{% set role = 'model' %}{% else %}{% set role = message['role'] %}{% endif %}{{ '<start_of_turn>' + role + '\n' + message['content'] | trim + '<end_of_turn>\n' }}{% endfor %}{% if add_generation_prompt %}{{'<start_of_turn>model\n'}}{% endif %}"),
+            (
+                false,
+                "<bos>",
+                "<eos>",
+                "<unk>",
+                "{{ bos_token }}{% if messages[0]['role'] == 'system' %}{{ raise_exception('System role not supported') }}{% endif %}{% for message in messages %}{% if (message['role'] == 'user') != (loop.index0 % 2 == 0) %}{{ raise_exception('Conversation roles must alternate user/assistant/user/assistant/...') }}{% endif %}{% if (message['role'] == 'assistant') %}{% set role = 'model' %}{% else %}{% set role = message['role'] %}{% endif %}{{ '<start_of_turn>' + role + '\n' + message['content'] | trim + '<end_of_turn>\n' }}{% endfor %}{% if add_generation_prompt %}{{'<start_of_turn>model\n'}}{% endif %}",
+            ),
             // HuggingFaceM4/idefics2-8b-chatty
-            (true, "<s>", "</s>", "<unk>", "{% for message in messages %}{{message['role'].capitalize()}}{% if message['content'][0]['type'] == 'image' %}{{':'}}{% else %}{{': '}}{% endif %}{% for line in message['content'] %}{% if line['type'] == 'text' %}{{line['text']}}{% elif line['type'] == 'image' %}{{ '<image>' }}{% endif %}{% endfor %}<end_of_utterance>\n{% endfor %}{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}"),
+            (
+                true,
+                "<s>",
+                "</s>",
+                "<unk>",
+                "{% for message in messages %}{{message['role'].capitalize()}}{% if message['content'][0]['type'] == 'image' %}{{':'}}{% else %}{{': '}}{% endif %}{% for line in message['content'] %}{% if line['type'] == 'text' %}{{line['text']}}{% elif line['type'] == 'image' %}{{ '<image>' }}{% endif %}{% endfor %}<end_of_utterance>\n{% endfor %}{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}",
+            ),
         ];
         let expected_outputs = [
             // ChatML: https://huggingface.co/teknium/OpenHermes-2.5-Mistral-7B
@@ -2054,7 +2094,13 @@ mod tests {
     fn test_image_chat_templates() {
         let templates = [
             // HuggingFaceM4/idefics2-8b-chatty
-            (true, "<s>", "</s>", "<unk>", "{% for message in messages %}{{message['role'].capitalize()}}{% if message['content'][0]['type'] == 'image' %}{{':'}}{% else %}{{': '}}{% endif %}{% for line in message['content'] %}{% if line['type'] == 'text' %}{{line['text']}}{% elif line['type'] == 'image' %}{{ '<image>' }}{% endif %}{% endfor %}<end_of_utterance>\n{% endfor %}{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}"),
+            (
+                true,
+                "<s>",
+                "</s>",
+                "<unk>",
+                "{% for message in messages %}{{message['role'].capitalize()}}{% if message['content'][0]['type'] == 'image' %}{{':'}}{% else %}{{': '}}{% endif %}{% for line in message['content'] %}{% if line['type'] == 'text' %}{{line['text']}}{% elif line['type'] == 'image' %}{{ '<image>' }}{% endif %}{% endfor %}<end_of_utterance>\n{% endfor %}{% if add_generation_prompt %}{{ 'Assistant:' }}{% endif %}",
+            ),
         ];
         let expected_outputs = [
             // HuggingFaceM4/idefics2-8b-chatty

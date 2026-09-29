@@ -9,7 +9,7 @@ use crate::{
     attention::{AttentionMask, SdpaParams},
     kv_cache::EitherCache,
     layers::{self, Activation, GemmaRmsNorm, RotaryEmbedding, Sdpa},
-    lora::{linear_b as linear, LinearLayerLike, LoraConfig, Ordering},
+    lora::{LinearLayerLike, LoraConfig, Ordering, linear_b as linear},
     model::{IsqModel, NormalLoadingMetadata},
     paged_attention::ModelConfigMetadata,
     utils::progress::NiceProgressBar,
@@ -24,7 +24,7 @@ use crate::{
     gemma::Config,
     kv_cache::Cache,
     layers::CausalMasker,
-    model::{extract_logits, NormalModel},
+    model::{NormalModel, extract_logits},
 };
 
 use inference_nn::xlora::{NonGranularState, ScalingsMaker, XLoraClassifier, XLoraConfig};
@@ -424,7 +424,7 @@ impl XLoraModel {
         normal_loading_metadata: NormalLoadingMetadata,
         preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),

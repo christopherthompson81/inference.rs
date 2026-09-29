@@ -1,6 +1,6 @@
 //! C ABI tests; model-backed ones need `INFERENCE_TEST_LAYOUT_MODEL` (HF dir) and `INFERENCE_TEST_LAYOUT_IMAGE`.
 
-use std::ffi::{c_char, CStr, CString};
+use std::ffi::{CStr, CString, c_char};
 use std::ptr::{null, null_mut};
 
 use inference_ffi::inference_status::{self, *};
@@ -171,38 +171,42 @@ struct Detection {
 }
 
 unsafe fn collect(result: *const inference_layout_result) -> Vec<Detection> {
-    (0..inference_layout_result_count(result))
-        .map(|i| {
-            let mut d = Detection {
-                class_id: -1,
-                label: String::new(),
-                score: 0.,
-                bbox: [0.; 4],
-            };
-            let mut label: *const c_char = null();
-            let st = inference_layout_result_detection(
-                result,
-                i,
-                &mut d.class_id,
-                &mut label,
-                &mut d.score,
-                d.bbox.as_mut_ptr(),
-            );
-            assert_eq!(st, INFERENCE_OK);
-            d.label = CStr::from_ptr(label).to_str().unwrap().to_string();
-            d
-        })
-        .collect()
+    unsafe {
+        (0..inference_layout_result_count(result))
+            .map(|i| {
+                let mut d = Detection {
+                    class_id: -1,
+                    label: String::new(),
+                    score: 0.,
+                    bbox: [0.; 4],
+                };
+                let mut label: *const c_char = null();
+                let st = inference_layout_result_detection(
+                    result,
+                    i,
+                    &mut d.class_id,
+                    &mut label,
+                    &mut d.score,
+                    d.bbox.as_mut_ptr(),
+                );
+                assert_eq!(st, INFERENCE_OK);
+                d.label = CStr::from_ptr(label).to_str().unwrap().to_string();
+                d
+            })
+            .collect()
+    }
 }
 
 unsafe fn detect(model: *const inference_layout_model, img: &inference_image) -> Vec<Detection> {
-    let mut result = null_mut();
-    let st: inference_status =
-        inference_layout_detect(model, img, INFERENCE_LAYOUT_DEFAULT_THRESHOLD, &mut result);
-    assert_eq!(st, INFERENCE_OK, "{}", last_error());
-    let dets = collect(result);
-    inference_layout_result_free(result);
-    dets
+    unsafe {
+        let mut result = null_mut();
+        let st: inference_status =
+            inference_layout_detect(model, img, INFERENCE_LAYOUT_DEFAULT_THRESHOLD, &mut result);
+        assert_eq!(st, INFERENCE_OK, "{}", last_error());
+        let dets = collect(result);
+        inference_layout_result_free(result);
+        dets
+    }
 }
 
 fn same(a: &[Detection], b: &[Detection]) {

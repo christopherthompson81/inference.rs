@@ -2,7 +2,7 @@
 
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::Linear;
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
@@ -17,8 +17,8 @@ use std::{
 
 use crate::gdn::RecurrentBatchKind;
 use crate::gdn::{
-    try_forward_grouped_packed_gdn, GatedDeltaNet, GdnConfig, GdnInputProjectionKind,
-    GdnLayerCache, GdnStateDType, GdnVHeadLayout, PackedGdnLayout,
+    GatedDeltaNet, GdnConfig, GdnInputProjectionKind, GdnLayerCache, GdnStateDType, GdnVHeadLayout,
+    PackedGdnLayout, try_forward_grouped_packed_gdn,
 };
 use crate::kv_cache::EitherCache;
 use crate::kv_cache::KvCache;
@@ -36,8 +36,8 @@ use crate::{
     },
     layers::masker::PastKvLenCache,
     layers::{
-        contains_tensor_or_weight_source, embedding_with_legacy_tied_uqff, linear_no_bias,
-        CausalMasker, GemmaRmsNorm, RotaryEmbedding,
+        CausalMasker, GemmaRmsNorm, RotaryEmbedding, contains_tensor_or_weight_source,
+        embedding_with_legacy_tied_uqff, linear_no_bias,
     },
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
@@ -634,33 +634,44 @@ impl DecoderLayer {
                 );
             }
 
-            if let Some(output) = try_forward_grouped_packed_gdn(gdn, &x, cache, layout)? {
-                output
-            } else {
-                let mut outputs = Vec::with_capacity(segments.len());
-                let mut next_conv_states = Vec::with_capacity(segments.len());
-                let mut next_recurrent_states = Vec::with_capacity(segments.len());
-                for segment in segments {
-                    let segment_x =
-                        x.narrow(1, segment.token_range.start, segment.token_range.len())?;
-                    let mut segment_cache = GdnLayerCache {
-                        conv_state: cache.conv_state.narrow(0, segment.state_index, 1)?,
-                        recurrent_state: cache.recurrent_state.narrow(0, segment.state_index, 1)?,
-                        state_layout: cache.state_layout,
-                        slots: None,
-                        pending_transitions: None,
-                        deferred_state: None,
-                    };
-                    outputs.push(inference_quant::with_lora_execution_row_range(
-                        segment.token_range.clone(),
-                        || gdn.forward(&segment_x, &mut segment_cache, RecurrentBatchKind::Prefill),
-                    )?);
-                    next_conv_states.push(segment_cache.conv_state);
-                    next_recurrent_states.push(segment_cache.recurrent_state);
+            match try_forward_grouped_packed_gdn(gdn, &x, cache, layout)? {
+                Some(output) => output,
+                _ => {
+                    let mut outputs = Vec::with_capacity(segments.len());
+                    let mut next_conv_states = Vec::with_capacity(segments.len());
+                    let mut next_recurrent_states = Vec::with_capacity(segments.len());
+                    for segment in segments {
+                        let segment_x =
+                            x.narrow(1, segment.token_range.start, segment.token_range.len())?;
+                        let mut segment_cache = GdnLayerCache {
+                            conv_state: cache.conv_state.narrow(0, segment.state_index, 1)?,
+                            recurrent_state: cache.recurrent_state.narrow(
+                                0,
+                                segment.state_index,
+                                1,
+                            )?,
+                            state_layout: cache.state_layout,
+                            slots: None,
+                            pending_transitions: None,
+                            deferred_state: None,
+                        };
+                        outputs.push(inference_quant::with_lora_execution_row_range(
+                            segment.token_range.clone(),
+                            || {
+                                gdn.forward(
+                                    &segment_x,
+                                    &mut segment_cache,
+                                    RecurrentBatchKind::Prefill,
+                                )
+                            },
+                        )?);
+                        next_conv_states.push(segment_cache.conv_state);
+                        next_recurrent_states.push(segment_cache.recurrent_state);
+                    }
+                    cache.conv_state = Tensor::cat(&next_conv_states, 0)?;
+                    cache.recurrent_state = Tensor::cat(&next_recurrent_states, 0)?;
+                    Tensor::cat(&outputs, 1)?
                 }
-                cache.conv_state = Tensor::cat(&next_conv_states, 0)?;
-                cache.recurrent_state = Tensor::cat(&next_recurrent_states, 0)?;
-                Tensor::cat(&outputs, 1)?
             }
         } else {
             gdn.forward(&x, cache, batch_kind)?
@@ -700,7 +711,7 @@ impl Model {
         let vb_m = vb.pp("model");
         let vb_lm_head = vb.pp("lm_head");
 
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),
@@ -963,36 +974,34 @@ impl Model {
                 "Hybrid recurrent metadata is required for linear-attention layers."
             );
         }
-        if has_linear_attention {
-            if let Some(layout) = packed_layout.as_ref() {
-                let query_lens = layout.query_lens();
-                if !ctx.is_first_prompt_chunk() {
-                    candle_core::bail!("Qwen3-Next packed GDN requires the first prompt chunk");
-                }
-                let recurrent_metadata = recurrent_metadata
-                    .as_ref()
-                    .expect("checked above: linear-attention layers require recurrent metadata");
-                if recurrent_metadata.batch_kind() != RecurrentBatchKind::Prefill {
-                    candle_core::bail!("Qwen3-Next packed GDN cannot run a decode batch");
-                }
-                let (physical_batch, physical_tokens, _) = x.dims3()?;
-                packed_gdn_segments(physical_batch, physical_tokens, query_lens)?;
-                let index_count = recurrent_metadata.state_indices().dims1()?;
-                if index_count != query_lens.len() {
-                    candle_core::bail!(
-                        "Qwen3-Next packed GDN has {index_count} state indices but {} logical sequences",
-                        query_lens.len()
-                    );
-                }
-                if let Some(host_indices) = recurrent_metadata.state_indices_host() {
-                    if host_indices.len() != query_lens.len() {
-                        candle_core::bail!(
-                            "Qwen3-Next packed GDN has {} host state indices but {} logical sequences",
-                            host_indices.len(),
-                            query_lens.len()
-                        );
-                    }
-                }
+        if has_linear_attention && let Some(layout) = packed_layout.as_ref() {
+            let query_lens = layout.query_lens();
+            if !ctx.is_first_prompt_chunk() {
+                candle_core::bail!("Qwen3-Next packed GDN requires the first prompt chunk");
+            }
+            let recurrent_metadata = recurrent_metadata
+                .as_ref()
+                .expect("checked above: linear-attention layers require recurrent metadata");
+            if recurrent_metadata.batch_kind() != RecurrentBatchKind::Prefill {
+                candle_core::bail!("Qwen3-Next packed GDN cannot run a decode batch");
+            }
+            let (physical_batch, physical_tokens, _) = x.dims3()?;
+            packed_gdn_segments(physical_batch, physical_tokens, query_lens)?;
+            let index_count = recurrent_metadata.state_indices().dims1()?;
+            if index_count != query_lens.len() {
+                candle_core::bail!(
+                    "Qwen3-Next packed GDN has {index_count} state indices but {} logical sequences",
+                    query_lens.len()
+                );
+            }
+            if let Some(host_indices) = recurrent_metadata.state_indices_host()
+                && host_indices.len() != query_lens.len()
+            {
+                candle_core::bail!(
+                    "Qwen3-Next packed GDN has {} host state indices but {} logical sequences",
+                    host_indices.len(),
+                    query_lens.len()
+                );
             }
         }
         let mut hybrid_cache = self.kv_cache.hybrid();
@@ -1208,8 +1217,8 @@ mod tests {
     };
 
     use super::{
-        gdn_input_projection_kind, packed_gdn_segments, validate_packed_gdn_state_rows,
-        GdnInputProjectionKind, PackedGdnSegment,
+        GdnInputProjectionKind, PackedGdnSegment, gdn_input_projection_kind, packed_gdn_segments,
+        validate_packed_gdn_state_rows,
     };
 
     struct ProjectionWeightSource(HashSet<String>);

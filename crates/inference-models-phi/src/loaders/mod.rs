@@ -23,7 +23,7 @@ use inference_quant::ShardedVarBuilder;
 use regex::Regex;
 
 use crate::phi3_vision::{Config as Phi3Config, Model as Phi3, PHI3V_CLIP_CONFIG};
-use crate::phi4::{self, Phi4MMConfig, Phi4MMModel, PHI4_MM_VISION_CFG};
+use crate::phi4::{self, PHI4_MM_VISION_CFG, Phi4MMConfig, Phi4MMModel};
 
 mod phi2;
 mod phi3;

@@ -5,8 +5,8 @@ use crate::layers::masker::CausalMaskConfig;
 use candle_core::{DType, Device, IndexOp, Result, Tensor};
 use candle_nn::Module;
 use inference_quant::{
-    apply_immediate_isq, should_apply_immediate_isq, ColumnParallelLayer, QuantMethod,
-    QuantizedConfig, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
+    ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
+    ShardedVarBuilder, apply_immediate_isq, should_apply_immediate_isq,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -31,7 +31,7 @@ use crate::{
         HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, RecurrentLayerConfig,
     },
     layers::masker::PastKvLenCache,
-    layers::{embedding_with_legacy_tied_uqff, CausalMasker, RmsNorm, RotaryEmbedding},
+    layers::{CausalMasker, RmsNorm, RotaryEmbedding, embedding_with_legacy_tied_uqff},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
@@ -1886,7 +1886,7 @@ impl GraniteMoeHybrid {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),
@@ -1933,16 +1933,15 @@ impl GraniteMoeHybrid {
 
         // Build RoPE embeddings per device (only if position embeddings are used)
         // Note: granite rope_type scaling is not yet supported, using default rope
-        if use_position_embeddings {
-            if let Some(GraniteRopeConfig {
+        if use_position_embeddings
+            && let Some(GraniteRopeConfig {
                 rope_type: GraniteRopeType::Granite,
                 ..
             }) = &cfg.rope_scaling
-            {
-                tracing::warn!(
-                    "Granite-style rope scaling is not yet fully supported. Using default rope scaling."
-                );
-            }
+        {
+            tracing::warn!(
+                "Granite-style rope scaling is not yet fully supported. Using default rope scaling."
+            );
         }
 
         let mut ropes = HashMap::new();
@@ -2145,34 +2144,30 @@ impl GraniteMoeHybrid {
         } else {
             None
         };
-        if has_mamba_layers {
-            if let Some(query_lens) = packed_query_lens.as_deref() {
-                let metadata = recurrent_metadata.as_ref().ok_or_else(|| {
-                    candle_core::Error::msg(
-                        "Granite packed Mamba requires hybrid recurrent metadata",
-                    )
-                })?;
-                if metadata.batch_kind() != RecurrentBatchKind::Prefill {
-                    candle_core::bail!("Granite packed Mamba cannot run a decode batch");
-                }
-                let (physical_batch, physical_tokens, _) = x.dims3()?;
-                packed_mamba_query_ranges(physical_batch, physical_tokens, query_lens)?;
-                let index_count = metadata.state_indices().dims1()?;
-                if index_count != query_lens.len() {
-                    candle_core::bail!(
-                        "Granite packed Mamba has {index_count} recurrent state indices but {} logical sequences",
-                        query_lens.len()
-                    );
-                }
-                if let Some(host_indices) = metadata.state_indices_host() {
-                    if host_indices.len() != query_lens.len() {
-                        candle_core::bail!(
-                            "Granite packed Mamba has {} host state indices but {} logical sequences",
-                            host_indices.len(),
-                            query_lens.len()
-                        );
-                    }
-                }
+        if has_mamba_layers && let Some(query_lens) = packed_query_lens.as_deref() {
+            let metadata = recurrent_metadata.as_ref().ok_or_else(|| {
+                candle_core::Error::msg("Granite packed Mamba requires hybrid recurrent metadata")
+            })?;
+            if metadata.batch_kind() != RecurrentBatchKind::Prefill {
+                candle_core::bail!("Granite packed Mamba cannot run a decode batch");
+            }
+            let (physical_batch, physical_tokens, _) = x.dims3()?;
+            packed_mamba_query_ranges(physical_batch, physical_tokens, query_lens)?;
+            let index_count = metadata.state_indices().dims1()?;
+            if index_count != query_lens.len() {
+                candle_core::bail!(
+                    "Granite packed Mamba has {index_count} recurrent state indices but {} logical sequences",
+                    query_lens.len()
+                );
+            }
+            if let Some(host_indices) = metadata.state_indices_host()
+                && host_indices.len() != query_lens.len()
+            {
+                candle_core::bail!(
+                    "Granite packed Mamba has {} host state indices but {} logical sequences",
+                    host_indices.len(),
+                    query_lens.len()
+                );
             }
         }
         let recurrent_batch_kind = recurrent_metadata

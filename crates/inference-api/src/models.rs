@@ -6,7 +6,7 @@ use utoipa::ToSchema;
 
 use crate::{
     api_error::{ApiError, ApiErrorKind},
-    lora_routing::{list_lora_adapter_models, DEFAULT_MODEL_ID},
+    lora_routing::{DEFAULT_MODEL_ID, list_lora_adapter_models},
     openai::{ModelObject, ModelObjects},
     types::SharedInferenceRsState,
 };

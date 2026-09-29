@@ -1,4 +1,4 @@
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 #[cfg(feature = "cuda")]
 use inference_quant::QuantizedActivation;
 use inference_quant::ShardedVarBuilder;

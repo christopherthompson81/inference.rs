@@ -7,16 +7,16 @@ use candle_core::{Device, DeviceLocation, Tensor, WithDType};
 
 use crate::{
     flashinfer::{
+        FlashInferMetadata, FlashInferPagedAttentionView, FlashInferPagedAttentionViews,
         decode_split_capacity_pages as flashinfer_decode_split_capacity_pages,
         decode_split_pages as flashinfer_decode_split_pages, flashinfer_metadata,
         flashinfer_paged_kv, flashinfer_tile_plan, flashinfer_view, make_paged_kv_decode_tensors,
-        make_paged_kv_decode_tensors_from_lens, make_paged_kv_tensors, FlashInferMetadata,
-        FlashInferPagedAttentionView, FlashInferPagedAttentionViews,
+        make_paged_kv_decode_tensors_from_lens, make_paged_kv_tensors,
     },
     paged_attention::{
+        _PAD_SLOT_ID, AttentionBackendKind, KVCacheManager,
         block_hash::MultimodalAttentionPolicy,
         block_table_rows::{BlockTableRanges, BlockTableRows, BlockTableSnapshot},
-        AttentionBackendKind, KVCacheManager, _PAD_SLOT_ID,
     },
 };
 
@@ -693,10 +693,11 @@ impl DecodePagedRows {
     #[cfg(feature = "cuda")]
     pub fn graph_key(&self) -> DecodePagedRowsGraphKey {
         let batch_size = self.batch_size();
-        assert!(self
-            .slot_mappings
-            .iter()
-            .all(|slots| slots.len() == self.query_len));
+        assert!(
+            self.slot_mappings
+                .iter()
+                .all(|slots| slots.len() == self.query_len)
+        );
         assert_eq!(self.block_tables.len(), batch_size * self.query_len);
         assert_eq!(self.context_lens.len(), batch_size * self.query_len);
         assert_eq!(self.full_context_lens.len(), batch_size * self.query_len);

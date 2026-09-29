@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use inference_models_llama::llama4::inputs_processor::{
-    Llama4ImageProcessor, IMAGE_END, IMAGE_START, IMAGE_TOKEN, PATCH, TILE_X_SEP, TILE_Y_SEP,
+    IMAGE_END, IMAGE_START, IMAGE_TOKEN, Llama4ImageProcessor, PATCH, TILE_X_SEP, TILE_Y_SEP,
 };
 use inference_models_llama::loaders::VLlama4Loader;
 

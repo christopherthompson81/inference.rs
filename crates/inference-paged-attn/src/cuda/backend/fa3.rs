@@ -112,11 +112,11 @@ pub fn fa3_prepare_paged_metadata(
 ) -> Result<()> {
     use crate::cuda::backend::slice_ptr_on_stream;
     use crate::cuda::ffi::{
-        fa3_fp8_decode_prepare, fa3_fp8_paged_materialize_metadata, Fa3Fp8DecodeScheduleParams,
+        Fa3Fp8DecodeScheduleParams, fa3_fp8_decode_prepare, fa3_fp8_paged_materialize_metadata,
     };
+    use candle_core::Storage;
     use candle_core::backend::BackendStorage;
     use candle_core::cuda_backend::CudaStorageSlice;
-    use candle_core::Storage;
 
     if schedule.batch_size == 0
         || schedule.query_len == 0
@@ -318,10 +318,10 @@ pub fn fa3_prepare_paged_metadata(
 pub fn fa3_fp8_decode(params: Fa3DecodeParams<'_>) -> Result<Tensor> {
     use crate::cuda::backend::slice_ptr_on_stream;
     use crate::cuda::ffi::{
-        fa3_bf16_to_e4m3_static, fa3_fp8_decode_run, Fa3Fp8DecodeParams, Fa3Fp8DecodeScheduleParams,
+        Fa3Fp8DecodeParams, Fa3Fp8DecodeScheduleParams, fa3_bf16_to_e4m3_static, fa3_fp8_decode_run,
     };
-    use candle_core::backend::BackendStorage;
     use candle_core::Storage;
+    use candle_core::backend::BackendStorage;
     use float8::F8E4M3;
 
     let Fa3DecodeParams {
@@ -629,8 +629,8 @@ mod tests {
 
     #[cfg(has_fa3_fp8_paged)]
     use super::{
-        fa3_fp8_decode, fa3_prepare_decode_metadata, fa3_prepare_paged_metadata, Fa3DecodeMetadata,
-        Fa3DecodeParams, Fa3DecodeSchedule,
+        Fa3DecodeMetadata, Fa3DecodeParams, Fa3DecodeSchedule, fa3_fp8_decode,
+        fa3_prepare_decode_metadata, fa3_prepare_paged_metadata,
     };
     #[cfg(has_fa3_fp8_paged)]
     use candle_core::{DType, Device, Result, Tensor};
@@ -967,11 +967,13 @@ mod tests {
     #[test]
     fn metadata_layout_rejects_empty_and_out_of_range_rows() {
         assert!(!Fa3PagedMetadataLayout::decode(0).valid());
-        assert!(!Fa3PagedMetadataLayout {
-            source_rows_per_sequence: 2,
-            source_row_offset: 2,
-        }
-        .valid());
+        assert!(
+            !Fa3PagedMetadataLayout {
+                source_rows_per_sequence: 2,
+                source_row_offset: 2,
+            }
+            .valid()
+        );
     }
 
     #[cfg(has_fa3_fp8_paged)]

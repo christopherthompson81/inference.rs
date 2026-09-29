@@ -2,7 +2,7 @@ use std::ffi::c_void;
 
 use candle_core::cuda::cudarc::driver::sys::CUstream;
 
-extern "C" {
+unsafe extern "C" {
     pub(crate) fn count_nonzero_bf16(d_in: *const c_void, N: u32, stream: CUstream) -> u32;
     pub(crate) fn count_nonzero_f16(d_in: *const c_void, N: u32, stream: CUstream) -> u32;
     pub(crate) fn count_nonzero_f32(d_in: *const c_void, N: u32, stream: CUstream) -> u32;

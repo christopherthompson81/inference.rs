@@ -140,10 +140,10 @@ impl SortScratchCache {
         let mut order_guard = self.order.write().unwrap();
 
         // Evict least‑recently used if we’re at capacity
-        if map_guard.len() == self.cap {
-            if let Some(oldest) = order_guard.pop_front() {
-                map_guard.remove(&oldest);
-            }
+        if map_guard.len() == self.cap
+            && let Some(oldest) = order_guard.pop_front()
+        {
+            map_guard.remove(&oldest);
         }
 
         // Allocate fresh buffers
@@ -267,11 +267,7 @@ fn call_copy_gpu_inplace(
         CopyType::Vector => work_per_thread_for_dtype(ty),
         CopyType::General => {
             if shape.len() > MAX_COPY_SPECIALIZED_DIMS {
-                if large {
-                    4
-                } else {
-                    2
-                }
+                if large { 4 } else { 2 }
             } else {
                 1
             }

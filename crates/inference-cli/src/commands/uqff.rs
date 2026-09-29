@@ -6,7 +6,7 @@ use std::{
     path::PathBuf,
 };
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use crossterm::{
     cursor,
     event::{self, Event, KeyCode, KeyEvent, KeyModifiers},
@@ -14,15 +14,15 @@ use crossterm::{
     style::{Color, ResetColor, SetBackgroundColor, SetForegroundColor},
     terminal::{self, ClearType},
 };
-use fuzzy_matcher::{skim::SkimMatcherV2, FuzzyMatcher};
+use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
 use inference_core::{
-    list_model_files, read_model_file_range, resolve_uqff_shorthand, TokenSource,
+    TokenSource, list_model_files, read_model_file_range, resolve_uqff_shorthand,
 };
 use inference_quant::{
-    build_uqff_report_from_artifacts, inspect_uqff_artifacts, verify_uqff_artifacts,
-    write_uqff_report, QuantizedSerdeType, UqffArtifactFile, UqffArtifactGroup, UqffArtifacts,
+    QuantizedSerdeType, UQFF_REPORT_JSON, UqffArtifactFile, UqffArtifactGroup, UqffArtifacts,
     UqffGeneratedBy, UqffInspection, UqffMetadataSummary, UqffReport, UqffReportOptions,
-    UqffTensorSummary, UqffVerifyOptions, UQFF_REPORT_JSON,
+    UqffTensorSummary, UqffVerifyOptions, build_uqff_report_from_artifacts, inspect_uqff_artifacts,
+    verify_uqff_artifacts, write_uqff_report,
 };
 
 use crate::args::{GlobalOptions, UqffCommand};
@@ -455,10 +455,10 @@ fn uqff_group_key(file: &str) -> String {
         .map_or(file, |(_, name)| name)
         .strip_suffix(".uqff")
         .unwrap_or(file);
-    if let Some((prefix, suffix)) = stem.rsplit_once('-') {
-        if suffix.chars().all(|ch| ch.is_ascii_digit()) {
-            return prefix.to_string();
-        }
+    if let Some((prefix, suffix)) = stem.rsplit_once('-')
+        && suffix.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return prefix.to_string();
     }
     stem.to_string()
 }
@@ -1059,11 +1059,10 @@ fn flatten_node(node: &TreeNode, depth: usize, flattened: &mut Vec<(TreeNode, us
     if let TreeNode::Group {
         children, expanded, ..
     } = node
+        && *expanded
     {
-        if *expanded {
-            for child in children {
-                flatten_node(child, depth + 1, flattened);
-            }
+        for child in children {
+            flatten_node(child, depth + 1, flattened);
         }
     }
 }
@@ -1090,10 +1089,10 @@ fn toggle_node_by_index_inner(
         if let TreeNode::Group {
             children, expanded, ..
         } = node
+            && *expanded
+            && toggle_node_by_index_inner(target_idx, children, current_idx)
         {
-            if *expanded && toggle_node_by_index_inner(target_idx, children, current_idx) {
-                return true;
-            }
+            return true;
         }
     }
     false

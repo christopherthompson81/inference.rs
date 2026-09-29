@@ -65,7 +65,7 @@ impl ReasoningEffort {
 #[cfg(feature = "utoipa")]
 impl utoipa::PartialSchema for ReasoningEffort {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
-        use utoipa::openapi::{schema::SchemaType, ObjectBuilder, RefOr, Schema, Type};
+        use utoipa::openapi::{ObjectBuilder, RefOr, Schema, Type, schema::SchemaType};
 
         RefOr::T(Schema::Object(
             ObjectBuilder::new()
@@ -157,10 +157,10 @@ pub fn resolve_reasoning_controls(
 ) -> Result<ResolvedReasoningControls, ReasoningControlError> {
     let enable_thinking = match (enable_thinking, reasoning_effort) {
         (Some(true), Some(ReasoningEffort::Off)) => {
-            return Err(ReasoningControlError::OffWithThinkingEnabled)
+            return Err(ReasoningControlError::OffWithThinkingEnabled);
         }
         (Some(false), Some(effort)) if !effort.is_off() => {
-            return Err(ReasoningControlError::EffortWithThinkingDisabled(effort))
+            return Err(ReasoningControlError::EffortWithThinkingDisabled(effort));
         }
         (_, Some(effort)) => !effort.is_off(),
         (enable_thinking, None) => enable_thinking.unwrap_or(DEFAULT_ENABLE_THINKING),

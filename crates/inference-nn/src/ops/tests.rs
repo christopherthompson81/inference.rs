@@ -5,8 +5,8 @@ use std::{collections::HashMap, sync::Arc};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::Linear;
 use inference_quant::{
-    maybe_wrap_dynamic_lora, with_lora_execution, LoraExecution, LoraLayerRegistry, LoraLinearSpec,
-    LoraWeights, QuantMethod, QuantMethodConfig, ShardedSafeTensors, UnquantLinear,
+    LoraExecution, LoraLayerRegistry, LoraLinearSpec, LoraWeights, QuantMethod, QuantMethodConfig,
+    ShardedSafeTensors, UnquantLinear, maybe_wrap_dynamic_lora, with_lora_execution,
 };
 
 use super::MergedDenseProjection;
@@ -543,8 +543,11 @@ fn cuda_qk_norm_rope_positions_preserves_projection_layout() -> candle_core::Res
                             for (index, (actual, expected)) in
                                 values(actual)?.into_iter().zip(expected).enumerate()
                             {
-                                assert!((actual - expected).abs() <= tolerance * expected.abs().max(1.0),
-                                        "{dtype:?} token_major={token_major} neox={is_neox} with_k={with_k} output[{index}]={actual}, expected={expected}");
+                                assert!(
+                                    (actual - expected).abs()
+                                        <= tolerance * expected.abs().max(1.0),
+                                    "{dtype:?} token_major={token_major} neox={is_neox} with_k={with_k} output[{index}]={actual}, expected={expected}"
+                                );
                             }
                         }
                     }
@@ -906,12 +909,14 @@ fn cuda_resident_topk_sampling_reuses_ring_and_destination() -> candle_core::Res
         &mut workspace,
     )?;
     assert_ne!(first_slot, second.token.reservation.slot);
-    assert!(super::cuda_topk_sampling_submit_batched(
-        &Tensor::zeros((BATCH, 4), DType::F32, &device)?,
-        &first_params,
-        &mut workspace,
-    )
-    .is_err());
+    assert!(
+        super::cuda_topk_sampling_submit_batched(
+            &Tensor::zeros((BATCH, 4), DType::F32, &device)?,
+            &first_params,
+            &mut workspace,
+        )
+        .is_err()
+    );
     super::cuda_topk_sampling_device_tokens_release_after(
         workspace.as_mut().unwrap(),
         &second,
@@ -990,11 +995,13 @@ fn cuda_async_top1_queues_two_submissions_and_reuses_slots() -> candle_core::Res
     let second = super::cuda_top1_logits_submit_batched(&second, &mut workspace)?;
 
     assert_ne!(first_slot, second.token.reservation.slot);
-    assert!(super::cuda_top1_logits_submit_batched(
-        &Tensor::zeros((2, 3), DType::F32, &device)?,
-        &mut workspace,
-    )
-    .is_err());
+    assert!(
+        super::cuda_top1_logits_submit_batched(
+            &Tensor::zeros((2, 3), DType::F32, &device)?,
+            &mut workspace,
+        )
+        .is_err()
+    );
     let first_tokens = super::cuda_top1_submission_complete(workspace.as_mut().unwrap(), &first)?
         .token_ids()
         .to_vec();
@@ -1292,9 +1299,11 @@ fn cuda_batched_topk_workspace_reuses_and_grows() -> candle_core::Result<()> {
         Ok(_) => candle_core::bail!("row temperature shape mismatch must fail"),
         Err(error) => error,
     };
-    assert!(error
-        .to_string()
-        .contains("inverse temperatures with shape"));
+    assert!(
+        error
+            .to_string()
+            .contains("inverse temperatures with shape")
+    );
     Ok(())
 }
 
@@ -1439,9 +1448,11 @@ fn cuda_ranked_topk_radix_preserves_special_value_contract() -> candle_core::Res
         );
         assert!(values[0].is_infinite() && values[0].is_sign_positive());
         assert_eq!(&indices[8..], &[0.0; K - 8]);
-        assert!(values[8..]
-            .iter()
-            .all(|value| value.is_infinite() && value.is_sign_negative()));
+        assert!(
+            values[8..]
+                .iter()
+                .all(|value| value.is_infinite() && value.is_sign_negative())
+        );
     }
     Ok(())
 }
@@ -1687,9 +1698,11 @@ fn cuda_dflash_sample_selector_marks_invalid_sampling_params() -> candle_core::R
         output.tokens.to_vec2::<u32>()?,
         [vec![super::CUDA_DFLASH_SELECTOR_INVALID_TOKEN]]
     );
-    assert!(output.candidate_probs.to_vec3::<f32>()?[0][0]
-        .iter()
-        .all(|probability| probability.is_nan()));
+    assert!(
+        output.candidate_probs.to_vec3::<f32>()?[0][0]
+            .iter()
+            .all(|probability| probability.is_nan())
+    );
     Ok(())
 }
 

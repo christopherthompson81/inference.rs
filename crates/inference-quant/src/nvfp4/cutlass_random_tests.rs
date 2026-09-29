@@ -207,10 +207,11 @@ fn native_decode_arbitrary_data_matches_cutile_and_sampled_fp64_bounds() -> Resu
                     .to_scalar::<f32>()?,
             };
             assert!(host.activation_global.is_finite() && host.activation_global > 0.0);
-            assert!(host
-                .weight_globals
-                .iter()
-                .all(|value| value.is_finite() && *value > 0.0));
+            assert!(
+                host.weight_globals
+                    .iter()
+                    .all(|value| value.is_finite() && *value > 0.0)
+            );
             assert!(host.activation_scales.iter().all(|value| {
                 let value = value.to_f32();
                 value.is_finite() && value >= 0.0
@@ -229,9 +230,11 @@ fn native_decode_arbitrary_data_matches_cutile_and_sampled_fp64_bounds() -> Resu
                         .sum()
                 })
                 .collect();
-            assert!(activation_l1
-                .iter()
-                .all(|value| value.is_finite() && *value > 0.0));
+            assert!(
+                activation_l1
+                    .iter()
+                    .all(|value| value.is_finite() && *value > 0.0)
+            );
             let weight_max: Vec<f64> = host
                 .weight_scales
                 .as_chunks::<SCALE_COLUMNS>()
@@ -261,8 +264,10 @@ fn native_decode_arbitrary_data_matches_cutile_and_sampled_fp64_bounds() -> Resu
                     ) + host.rounding_radius(accepted),
                 );
                 let gap = (actual as f64 - accepted as f64).abs();
-                assert!(gap <= bound,
-                "dtype={dtype:?} row={row} column={column} native={actual} cutile={accepted} gap={gap} bound={bound}");
+                assert!(
+                    gap <= bound,
+                    "dtype={dtype:?} row={row} column={column} native={actual} cutile={accepted} gap={gap} bound={bound}"
+                );
                 maximum_gap = maximum_gap.max(gap);
                 maximum_bound_fraction = maximum_bound_fraction.max(gap / bound);
             }
@@ -290,16 +295,19 @@ fn native_decode_arbitrary_data_matches_cutile_and_sampled_fp64_bounds() -> Resu
                             ) + fp64_radius,
                         );
                         let gap = (actual as f64 - reference).abs();
-                        assert!(gap <= bound,
-                        "{name} dtype={dtype:?} row={row} column={column} actual={actual} fp64={reference} gap={gap} bound={bound}");
+                        assert!(
+                            gap <= bound,
+                            "{name} dtype={dtype:?} row={row} column={column} actual={actual} fp64={reference} gap={gap} bound={bound}"
+                        );
                         maximum_reference_gap = maximum_reference_gap.max(gap);
                     }
                 }
             }
             eprintln!(
-            "NVFP4 arbitrary {dtype:?} rows={rows}: outputs={} fp64_samples={} max_native_cutile_gap={maximum_gap} max_pair_bound_fraction={maximum_bound_fraction} max_fp64_gap={maximum_reference_gap}",
-            rows * COLUMNS, sample_rows.len() * SAMPLE_COLUMNS.len()
-        );
+                "NVFP4 arbitrary {dtype:?} rows={rows}: outputs={} fp64_samples={} max_native_cutile_gap={maximum_gap} max_pair_bound_fraction={maximum_bound_fraction} max_fp64_gap={maximum_reference_gap}",
+                rows * COLUMNS,
+                sample_rows.len() * SAMPLE_COLUMNS.len()
+            );
             device.synchronize()?;
         }
     }

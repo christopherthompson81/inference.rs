@@ -7,7 +7,7 @@ use crate::{
     attention::{AttentionMask, SdpaParams},
     kv_cache::EitherCache,
     layers::{Llama3RotaryEmbedding, Sdpa},
-    lora::{linear_no_bias as linear, LinearLayerLike, LoraConfig, Ordering},
+    lora::{LinearLayerLike, LoraConfig, Ordering, linear_no_bias as linear},
     model::IsqModel,
     paged_attention::ModelConfigMetadata,
     utils::progress::NiceProgressBar,
@@ -22,9 +22,9 @@ use tracing::info;
 use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
     kv_cache::LayerCaches,
-    layers::{embedding, CausalMasker, RmsNorm},
+    layers::{CausalMasker, RmsNorm, embedding},
     llama::Config,
-    model::{extract_logits, NormalLoadingMetadata, NormalModel},
+    model::{NormalLoadingMetadata, NormalModel, extract_logits},
 };
 
 use inference_nn::xlora::{NonGranularState, ScalingsMaker, XLoraClassifier, XLoraConfig};
@@ -531,7 +531,7 @@ impl XLoraLlama {
         normal_loading_metadata: NormalLoadingMetadata,
         preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),

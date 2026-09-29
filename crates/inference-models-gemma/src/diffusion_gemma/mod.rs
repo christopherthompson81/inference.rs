@@ -5,7 +5,7 @@ pub mod generation;
 
 use std::sync::Arc;
 
-use candle_core::{DType, Module, Result, Tensor, D};
+use candle_core::{D, DType, Module, Result, Tensor};
 use inference_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
 
 use crate::model::ModelForwardContext;
@@ -378,13 +378,13 @@ impl crate::model::MultimodalModel for DiffusionGemmaModel {
             return Tensor::from_vec(Vec::<u32>::new(), (b_sz, 0), &candle_core::Device::Cpu);
         }
 
-        if let Ok(dump_path) = std::env::var("INFERENCE_RS_DIFFUSION_DEBUG_DUMP") {
-            if input_ids.dim(1)? > 1 {
-                input_ids
-                    .to_dtype(DType::I64)?
-                    .to_device(&candle_core::Device::Cpu)?
-                    .write_npy(format!("{dump_path}.prompt_ids.npy"))?;
-            }
+        if let Ok(dump_path) = std::env::var("INFERENCE_RS_DIFFUSION_DEBUG_DUMP")
+            && input_ids.dim(1)? > 1
+        {
+            input_ids
+                .to_dtype(DType::I64)?
+                .to_device(&candle_core::Device::Cpu)?
+                .write_npy(format!("{dump_path}.prompt_ids.npy"))?;
         }
 
         // The whole batch denoises in lockstep: the scheduler buckets sequences by context

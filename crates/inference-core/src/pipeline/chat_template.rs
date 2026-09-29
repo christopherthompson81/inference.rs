@@ -4,13 +4,13 @@ use anyhow::Result;
 use either::Either;
 use indexmap::IndexMap;
 use itertools::Itertools;
-use minijinja::{context, value::Kwargs, Environment, Error, ErrorKind, Value};
+use minijinja::{Environment, Error, ErrorKind, Value, context, value::Kwargs};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokenizers::Tokenizer;
 use tracing::{trace, warn};
 
-use crate::{tools::ToolCallFormat, MessageContent, ModelGenerationDefaults, Tool};
+use crate::{MessageContent, ModelGenerationDefaults, Tool, tools::ToolCallFormat};
 
 const SUPPORTED_ALTERNATE_EOS: &[&str] = &[
     "<|im_end|>",      // Handle ChatML case
@@ -207,7 +207,9 @@ pub fn calculate_eos_tokens(
             };
             for id in ids {
                 let Ok(s) = tokenizer.decode(&[id], false) else {
-                    warn!("Ignoring generation config EOS token id {id}: not in the tokenizer vocabulary");
+                    warn!(
+                        "Ignoring generation config EOS token id {id}: not in the tokenizer vocabulary"
+                    );
                     continue;
                 };
                 if !eos_tok_ids.contains(&s) {
@@ -298,17 +300,17 @@ impl GenerationConfig {
     pub fn from_model_config(config_json: &str) -> Option<Self> {
         let raw: serde_json::Value = serde_json::from_str(config_json).ok()?;
         let mut conf: GenerationConfig = serde_json::from_value(raw.clone()).ok()?;
-        if let Some(nested) = raw.get("text_config").cloned() {
-            if let Ok(nested) = serde_json::from_value::<GenerationConfig>(nested) {
-                conf.bos_token_id = conf.bos_token_id.or(nested.bos_token_id);
-                conf.eos_token_id = conf.eos_token_id.or(nested.eos_token_id);
-                conf.do_sample = conf.do_sample.or(nested.do_sample);
-                conf.temperature = conf.temperature.or(nested.temperature);
-                conf.top_k = conf.top_k.or(nested.top_k);
-                conf.top_p = conf.top_p.or(nested.top_p);
-                conf.min_p = conf.min_p.or(nested.min_p);
-                conf.repetition_penalty = conf.repetition_penalty.or(nested.repetition_penalty);
-            }
+        if let Some(nested) = raw.get("text_config").cloned()
+            && let Ok(nested) = serde_json::from_value::<GenerationConfig>(nested)
+        {
+            conf.bos_token_id = conf.bos_token_id.or(nested.bos_token_id);
+            conf.eos_token_id = conf.eos_token_id.or(nested.eos_token_id);
+            conf.do_sample = conf.do_sample.or(nested.do_sample);
+            conf.temperature = conf.temperature.or(nested.temperature);
+            conf.top_k = conf.top_k.or(nested.top_k);
+            conf.top_p = conf.top_p.or(nested.top_p);
+            conf.min_p = conf.min_p.or(nested.min_p);
+            conf.repetition_penalty = conf.repetition_penalty.or(nested.repetition_penalty);
         }
         conf.max_new_tokens = None;
         conf.max_length = None;
@@ -367,35 +369,38 @@ impl GenerationConfig {
 }
 
 fn tojson(value: Value, kwargs: Kwargs) -> Result<Value, Error> {
-    if let Ok(indent) = kwargs.get::<usize>("indent") {
-        // Cap the indent: it feeds `b" ".repeat(indent)`, so an attacker-controlled template could request a huge allocation or capacity-overflow panic.
-        const MAX_INDENT: usize = 256;
-        if indent > MAX_INDENT {
-            return Err(Error::new(
-                ErrorKind::InvalidOperation,
-                format!("tojson `indent` of {indent} exceeds the maximum of {MAX_INDENT}"),
-            ));
+    match kwargs.get::<usize>("indent") {
+        Ok(indent) => {
+            // Cap the indent: it feeds `b" ".repeat(indent)`, so an attacker-controlled template could request a huge allocation or capacity-overflow panic.
+            const MAX_INDENT: usize = 256;
+            if indent > MAX_INDENT {
+                return Err(Error::new(
+                    ErrorKind::InvalidOperation,
+                    format!("tojson `indent` of {indent} exceeds the maximum of {MAX_INDENT}"),
+                ));
+            }
+            let mut buf = Vec::new();
+            let repeat = b" ".repeat(indent);
+            let formatter = serde_json::ser::PrettyFormatter::with_indent(&repeat);
+            let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
+            value.serialize(&mut ser).map_err(|err| {
+                Error::new(ErrorKind::BadSerialization, "cannot serialize to JSON").with_source(err)
+            })?;
+            String::from_utf8(buf).map_err(|err| {
+                Error::new(ErrorKind::BadSerialization, "cannot serialize to JSON").with_source(err)
+            })
         }
-        let mut buf = Vec::new();
-        let repeat = b" ".repeat(indent);
-        let formatter = serde_json::ser::PrettyFormatter::with_indent(&repeat);
-        let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
-        value.serialize(&mut ser).map_err(|err| {
-            Error::new(ErrorKind::BadSerialization, "cannot serialize to JSON").with_source(err)
-        })?;
-        String::from_utf8(buf).map_err(|err| {
-            Error::new(ErrorKind::BadSerialization, "cannot serialize to JSON").with_source(err)
-        })
-    } else {
-        // Python's json.dumps default separators, which is what HF templates were rendered with
-        let mut buf = Vec::new();
-        let mut ser = serde_json::Serializer::with_formatter(&mut buf, PythonCompactFormatter);
-        value.serialize(&mut ser).map_err(|err| {
-            Error::new(ErrorKind::BadSerialization, "cannot serialize to JSON").with_source(err)
-        })?;
-        String::from_utf8(buf).map_err(|err| {
-            Error::new(ErrorKind::BadSerialization, "cannot serialize to JSON").with_source(err)
-        })
+        _ => {
+            // Python's json.dumps default separators, which is what HF templates were rendered with
+            let mut buf = Vec::new();
+            let mut ser = serde_json::Serializer::with_formatter(&mut buf, PythonCompactFormatter);
+            value.serialize(&mut ser).map_err(|err| {
+                Error::new(ErrorKind::BadSerialization, "cannot serialize to JSON").with_source(err)
+            })?;
+            String::from_utf8(buf).map_err(|err| {
+                Error::new(ErrorKind::BadSerialization, "cannot serialize to JSON").with_source(err)
+            })
+        }
     }
     .map_err(|err| {
         Error::new(ErrorKind::InvalidOperation, "cannot serialize to JSON").with_source(err)
@@ -444,7 +449,7 @@ fn strftime_now(fmt: String) -> Result<String, minijinja::Error> {
     Ok(date_string)
 }
 
-use crate::request::{resolve_reasoning_controls, ReasoningEffort};
+use crate::request::{ReasoningEffort, resolve_reasoning_controls};
 
 /// Check if a chat template uses Gemma 4 tool call tokens.
 fn is_gemma4_tool_template(template: &str) -> bool {
@@ -523,12 +528,11 @@ fn parse_tool_call_arguments(messages: &mut [IndexMap<String, MessageContent>]) 
             let Some(serde_json::Value::Object(func)) = tc.get_mut("function") else {
                 continue;
             };
-            if let Some(serde_json::Value::String(json_str)) = func.get("arguments") {
-                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str) {
-                    if parsed.is_object() {
-                        func.insert("arguments".to_string(), parsed);
-                    }
-                }
+            if let Some(serde_json::Value::String(json_str)) = func.get("arguments")
+                && let Ok(parsed) = serde_json::from_str::<serde_json::Value>(json_str)
+                && parsed.is_object()
+            {
+                func.insert("arguments".to_string(), parsed);
             }
         }
     }
@@ -904,12 +908,11 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        apply_chat_template_to, calculate_eos_tokens, preprocess_gemma4_tool_messages,
-        template_tool_call_format, ChatTemplate, ChatTemplateValue, GenerationConfig,
-        ReasoningEffort,
+        ChatTemplate, ChatTemplateValue, GenerationConfig, ReasoningEffort, apply_chat_template_to,
+        calculate_eos_tokens, preprocess_gemma4_tool_messages, template_tool_call_format,
     };
     use crate::{
-        tools::ToolCallFormat, Function, MessageContent, Tool, ToolType, DEFAULT_ENABLE_THINKING,
+        DEFAULT_ENABLE_THINKING, Function, MessageContent, Tool, ToolType, tools::ToolCallFormat,
     };
     use tokenizers::Tokenizer;
 
@@ -1343,7 +1346,7 @@ mod tests {
             assistant_message_with_tool_calls(),
         ];
         // Before: arguments is a JSON string
-        if let Some(Either::Right(ref tcs)) = messages[1].get("tool_calls") {
+        if let Some(Either::Right(tcs)) = messages[1].get("tool_calls") {
             let func = tcs[0].get("function").unwrap();
             assert!(func.get("arguments").unwrap().is_string());
         }
@@ -1351,7 +1354,7 @@ mod tests {
         super::parse_tool_call_arguments(&mut messages);
 
         // After: arguments should be a parsed object
-        if let Some(Either::Right(ref tcs)) = messages[1].get("tool_calls") {
+        if let Some(Either::Right(tcs)) = messages[1].get("tool_calls") {
             let func = tcs[0].get("function").unwrap();
             let args = func.get("arguments").unwrap();
             assert!(args.is_object(), "arguments should be parsed to object");

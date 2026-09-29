@@ -2,7 +2,7 @@ use candle_core::{Device, Module, Result, Tensor};
 use candle_nn::{Activation, LayerNorm, VarBuilder};
 
 use super::config::PPDocLayoutV3Config;
-use crate::layers::{linear, ConvNorm, ConvNormSpec, Linear, RTDETR_CONV};
+use crate::layers::{ConvNorm, ConvNormSpec, Linear, RTDETR_CONV, linear};
 
 const CSP_BLOCKS: usize = 3;
 

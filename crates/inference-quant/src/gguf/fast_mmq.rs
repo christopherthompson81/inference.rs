@@ -10,14 +10,14 @@ use candle_core::cuda::cudarc::driver::{
 };
 use candle_core::cuda_backend::CudaDType;
 use candle_core::{
-    quantized::{GgmlDType, QTensor},
     CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor,
+    quantized::{GgmlDType, QTensor},
 };
 
 use super::ffi;
 use crate::{
-    utils::{slice_ptr, slice_ptr_mut_on_stream, slice_ptr_on_stream},
     GluActivationType,
+    utils::{slice_ptr, slice_ptr_mut_on_stream, slice_ptr_on_stream},
 };
 
 const QK8_1: usize = 32;

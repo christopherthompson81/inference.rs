@@ -5,7 +5,7 @@ use std::{
     sync::Arc,
 };
 
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 use candle_nn::Module;
 use inference_quant::ShardedVarBuilder;
 use tokenizers::Tokenizer;
@@ -14,11 +14,11 @@ use tracing::info;
 use inference_nn::model::DiffusionModel;
 
 use crate::{
+    DiffusionGenerationParams,
     clip::text::{ClipConfig, ClipTextTransformer},
     flux,
     t5::{self, T5EncoderModel},
-    utils::varbuilder_utils::{from_mmaped_safetensors, DeviceForLoadTensor},
-    DiffusionGenerationParams,
+    utils::varbuilder_utils::{DeviceForLoadTensor, from_mmaped_safetensors},
 };
 
 use super::{autoencoder::AutoEncoder, model::Flux};
@@ -240,7 +240,9 @@ impl DiffusionModel for FluxStepper {
         if !self.is_guidance {
             match t5_input_ids.dim(1)?.cmp(&256) {
                 Ordering::Greater => {
-                    candle_core::bail!("T5 embedding length greater than 256, please shrink the prompt or use the -dev (with guidance distillation) version.")
+                    candle_core::bail!(
+                        "T5 embedding length greater than 256, please shrink the prompt or use the -dev (with guidance distillation) version."
+                    )
                 }
                 Ordering::Less | Ordering::Equal => {
                     t5_input_ids =
@@ -321,10 +323,6 @@ impl DiffusionModel for FluxStepper {
     }
 
     fn max_seq_len(&self) -> usize {
-        if self.is_guidance {
-            usize::MAX
-        } else {
-            256
-        }
+        if self.is_guidance { usize::MAX } else { 256 }
     }
 }

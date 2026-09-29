@@ -4,7 +4,7 @@ use candle_core::{Result, Tensor};
 
 use crate::{
     gdn::RecurrentBatchKind,
-    gdn::{try_forward_grouped_packed_gdn, GatedDeltaNet, GdnLayerCache, PackedGdnLayout},
+    gdn::{GatedDeltaNet, GdnLayerCache, PackedGdnLayout, try_forward_grouped_packed_gdn},
     model::ModelForwardContext,
 };
 
@@ -99,14 +99,14 @@ pub fn packed_gdn_layout(
             query_lens.len()
         );
     }
-    if let Some(host_indices) = recurrent_metadata.state_indices_host() {
-        if host_indices.len() != query_lens.len() {
-            candle_core::bail!(
-                "Qwen3.5 packed GDN has {} host state indices but {} logical sequences",
-                host_indices.len(),
-                query_lens.len()
-            );
-        }
+    if let Some(host_indices) = recurrent_metadata.state_indices_host()
+        && host_indices.len() != query_lens.len()
+    {
+        candle_core::bail!(
+            "Qwen3.5 packed GDN has {} host state indices but {} logical sequences",
+            host_indices.len(),
+            query_lens.len()
+        );
     }
     Ok(Some(PackedGdnLayout::new(
         query_lens,
@@ -178,7 +178,7 @@ pub fn forward_packed_gdn(
 
 #[cfg(test)]
 mod tests {
-    use super::{packed_gdn_segments, validate_packed_gdn_state_rows, PackedGdnSegment};
+    use super::{PackedGdnSegment, packed_gdn_segments, validate_packed_gdn_state_rows};
 
     #[test]
     fn unequal_queries_map_to_matching_state_rows() {

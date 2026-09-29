@@ -17,19 +17,19 @@ pub use weight_source::{
 };
 
 use candle_core::{
-    quantized::{ggml_file::qtensor_from_ggml, GgmlDType, QMatMul, QStorage, QTensor},
     DType, Device, Result, Shape, Tensor,
+    quantized::{GgmlDType, QMatMul, QStorage, QTensor, ggml_file::qtensor_from_ggml},
 };
 use candle_nn::{Linear, Module};
 use safetensors::tensor::Dtype;
 #[cfg(all(feature = "cuda", has_marlin_kernels))]
 use std::sync::OnceLock;
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::{Arc, atomic::AtomicUsize};
 
 use crate::uqff::{UqffHeaderMatch, UqffLayerHeaderView};
 use crate::{
-    generate_isq, generate_isq_imatrix, IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard,
-    QuantizedSerde, QuantizedSerdeType, Shard, UqffReader, UqffTensor,
+    IsqType, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedSerde, QuantizedSerdeType,
+    Shard, UqffReader, UqffTensor, generate_isq, generate_isq_imatrix,
 };
 
 #[cfg(feature = "cuda")]
@@ -222,13 +222,14 @@ impl GgufMatMul {
             dtype,
             GgmlDType::Q2K | GgmlDType::Q3K | GgmlDType::Q4K | GgmlDType::Q5K | GgmlDType::Q6K
         );
-        if let Some(v) = imatrix {
-            if v.len() != in_dim && v.len() != num_experts * in_dim {
-                crate::log::once_log_warn(format!(
-                    "Expert stack imatrix length {} matches neither in_dim {in_dim} nor {num_experts}x{in_dim}; quantizing without it.",
-                    v.len()
-                ));
-            }
+        if let Some(v) = imatrix
+            && v.len() != in_dim
+            && v.len() != num_experts * in_dim
+        {
+            crate::log::once_log_warn(format!(
+                "Expert stack imatrix length {} matches neither in_dim {in_dim} nor {num_experts}x{in_dim}; quantizing without it.",
+                v.len()
+            ));
         }
 
         let mut bytes = Vec::new();
@@ -450,15 +451,14 @@ impl QuantMethod for GgufMatMul {
             if let Some(out) = self.try_fast_forward(a)? {
                 return self.add_bias(out);
             }
-            if let QMatMul::QTensor(weight) = &self.w {
-                if weight.device().is_cuda()
-                    && matches!(weight.dtype(), GgmlDType::Q8_1 | GgmlDType::Q8K)
-                {
-                    candle_core::bail!(
-                        "CUDA {:?} weights require the packed GGUF affine backend with a tile-compatible shape",
-                        weight.dtype()
-                    );
-                }
+            if let QMatMul::QTensor(weight) = &self.w
+                && weight.device().is_cuda()
+                && matches!(weight.dtype(), GgmlDType::Q8_1 | GgmlDType::Q8K)
+            {
+                candle_core::bail!(
+                    "CUDA {:?} weights require the packed GGUF affine backend with a tile-compatible shape",
+                    weight.dtype()
+                );
             }
         }
 
@@ -558,10 +558,10 @@ impl QuantMethod for GgufMatMul {
             return None;
         }
         // cpu handles bf16 activations natively (widened once inside the packed matmul)
-        if let QMatMul::QTensor(qt) = &self.w {
-            if qt.device().is_cpu() {
-                return None;
-            }
+        if let QMatMul::QTensor(qt) = &self.w
+            && qt.device().is_cpu()
+        {
+            return None;
         }
         Some(DType::F32)
     }
@@ -639,18 +639,17 @@ impl QuantMethod for GgufMatMul {
         guard: QuantizeOntoGuard,
     ) -> Result<Arc<dyn QuantMethod>> {
         if let Some(dtype) = dtype {
-            if imatrix_weight.is_none() {
-                if let QMatMul::QTensor(q) = &self.w {
-                    if IsqType::try_from(q.dtype()).ok() == Some(dtype) {
-                        let w = QMatMul::QTensor(Self::qtensor_to_device(q, &device)?);
-                        let b = self
-                            .b
-                            .as_ref()
-                            .map(|bias| bias.to_device(&device))
-                            .transpose()?;
-                        return Ok(Arc::new(GgufMatMul::from_parts(w, b, self.stats.clone())));
-                    }
-                }
+            if imatrix_weight.is_none()
+                && let QMatMul::QTensor(q) = &self.w
+                && IsqType::try_from(q.dtype()).ok() == Some(dtype)
+            {
+                let w = QMatMul::QTensor(Self::qtensor_to_device(q, &device)?);
+                let b = self
+                    .b
+                    .as_ref()
+                    .map(|bias| bias.to_device(&device))
+                    .transpose()?;
+                return Ok(Arc::new(GgufMatMul::from_parts(w, b, self.stats.clone())));
             }
 
             let t = match &self.w {

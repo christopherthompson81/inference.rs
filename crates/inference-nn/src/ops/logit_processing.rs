@@ -280,8 +280,8 @@ pub fn cuda_apply_causal_mask_f32(
             layout: &candle_core::Layout,
         ) -> Result<()> {
             use candle_core::backend::BackendStorage;
-            use candle_core::cuda_backend::cudarc::driver::DevicePtrMut;
             use candle_core::cuda_backend::CudaStorageSlice;
+            use candle_core::cuda_backend::cudarc::driver::DevicePtrMut;
             use std::ffi::c_void;
 
             let (batch_heads, q_len, kv_len) = layout.shape().dims3()?;
@@ -332,7 +332,7 @@ pub fn metal_apply_sparse_penalties(
     presence_penalty: f32,
     repetition_penalty: f32,
 ) -> Result<Tensor> {
-    use candle_core::{backend::BackendStorage, MetalStorage, Shape, Storage};
+    use candle_core::{MetalStorage, Shape, Storage, backend::BackendStorage};
 
     if !matches!(input.dtype(), DType::F32 | DType::F16 | DType::BF16) {
         candle_core::bail!("metal_apply_sparse_penalties requires F32/F16/BF16 logits");

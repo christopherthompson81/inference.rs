@@ -176,7 +176,7 @@ macro_rules! qmm_kernel {
 // Extern "C" declarations
 // ============================================================================
 
-extern "C" {
+unsafe extern "C" {
     // --- Dequantize: 2-bit ---
     dequant_kernel_power_of_2!(2, 32, f32, f32);
     dequant_kernel_power_of_2!(2, 64, f32, f32);

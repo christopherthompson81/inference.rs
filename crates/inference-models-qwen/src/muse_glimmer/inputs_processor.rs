@@ -2,7 +2,7 @@ use std::{any::Any, sync::Arc};
 
 use anyhow::{Context, Result};
 use candle_core::{Device, Tensor};
-use image::{imageops::FilterType, DynamicImage, GenericImageView};
+use image::{DynamicImage, GenericImageView, imageops::FilterType};
 use inference_vision::{ApplyTransforms, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
@@ -20,8 +20,8 @@ use crate::media_inputs::{
     video::VideoInput,
 };
 use crate::paged_attention::{
-    block_hash::{MultimodalAttentionPolicy, MultimodalKind},
     PagedAttentionMeta,
+    block_hash::{MultimodalAttentionPolicy, MultimodalKind},
 };
 use crate::qwen2vl::inputs_processor::{
     media_data_cached_offset, select_media_batch, select_media_view, shift_media_spans,
@@ -777,16 +777,19 @@ impl MuseGlimmerImageProcessor {
         let mut video_item_counts = vec![0; input_seqs.len()];
 
         for (index, seq) in input_seqs.iter_mut().enumerate() {
-            let cached = if let Some(pixels) = seq.multimodal().cached_pixel_values.clone() {
-                Some((
+            let cached = match seq.multimodal().cached_pixel_values.clone() {
+                Some(pixels) => Some((
                     pixels,
                     seq.multimodal().cached_img_thw.clone(),
                     seq.multimodal().cached_vid_thw.clone(),
-                ))
-            } else if seq.has_images() || seq.has_videos() {
-                Some(self.cached_media(&mut **seq, device)?)
-            } else {
-                None
+                )),
+                _ => {
+                    if seq.has_images() || seq.has_videos() {
+                        Some(self.cached_media(&mut **seq, device)?)
+                    } else {
+                        None
+                    }
+                }
             };
             let Some((cached_pixels, image_grid, video_grid)) = cached else {
                 image_grids.push(None);
@@ -1275,21 +1278,27 @@ mod tests {
             max_edge: None,
         };
         let error = MuseGlimmerImageProcessor::smart_resize(0, 640, 28, 4096).unwrap_err();
-        assert!(error
-            .downcast_ref::<InputsProcessorValidationError>()
-            .is_none());
+        assert!(
+            error
+                .downcast_ref::<InputsProcessorValidationError>()
+                .is_none()
+        );
         let error = processor
             .transform_image(DynamicImage::new_rgb8(0, 640), 4096)
             .unwrap_err();
-        assert!(error
-            .downcast_ref::<InputsProcessorValidationError>()
-            .is_some());
+        assert!(
+            error
+                .downcast_ref::<InputsProcessorValidationError>()
+                .is_some()
+        );
         let error = MuseGlimmerImageProcessor::new(&PreProcessorConfig::default(), Some(0), false)
             .err()
             .unwrap();
-        assert!(error
-            .downcast_ref::<InputsProcessorValidationError>()
-            .is_none());
+        assert!(
+            error
+                .downcast_ref::<InputsProcessorValidationError>()
+                .is_none()
+        );
     }
 
     #[test]
@@ -1368,9 +1377,11 @@ mod tests {
             .preprocess_videos(vec![video], &Device::Cpu)
             .err()
             .unwrap();
-        assert!(error
-            .downcast_ref::<InputsProcessorValidationError>()
-            .is_some());
+        assert!(
+            error
+                .downcast_ref::<InputsProcessorValidationError>()
+                .is_some()
+        );
         Ok(())
     }
 

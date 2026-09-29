@@ -15,9 +15,9 @@ use crate::{
     kv_cache::EitherCache,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     paged_attention::{
+        AttentionImplementation, ModelConfigMetadata,
         block_hash::MultimodalKind,
         encoder_cache::{CacheModality, EncoderCacheManager},
-        AttentionImplementation, ModelConfigMetadata,
     },
     qwen2,
     utils::unvarbuilder::UnVarBuilder,
@@ -112,10 +112,9 @@ impl MiniCpmOModel {
             .lock()
             .expect("encoder cache lock poisoned")
             .get(CacheModality::Image, input.key.hash)
+            && cached.len() == input.pixel_values.len()
         {
-            if cached.len() == input.pixel_values.len() {
-                return Ok(cached);
-            }
+            return Ok(cached);
         }
 
         let target_sizes = input.tgt_sizes.to_vec2::<u32>()?;

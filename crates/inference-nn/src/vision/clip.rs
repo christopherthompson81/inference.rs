@@ -4,7 +4,7 @@ use crate::attention::AttentionMask;
 use std::sync::Arc;
 
 // Sourced from https://github.com/huggingface/candle/blob/main/candle-transformers/src/models/clip/vision_model.rs
-use candle_core::{IndexOp, Result, Shape, Tensor, D};
+use candle_core::{D, IndexOp, Result, Shape, Tensor};
 use candle_nn::{Conv2dConfig, Module};
 use inference_quant::{Convolution, QuantMethod, ShardedVarBuilder};
 

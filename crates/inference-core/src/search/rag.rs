@@ -11,12 +11,12 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::pipeline::ForwardInputsResult;
 use crate::{
-    embedding_models::inputs_processor::{make_prompt_chunk, ModelInputs},
+    AutoDeviceMapParams, DeviceMapSetting, EmbeddingLoaderBuilder, EmbeddingSpecificConfig,
+    ModelDType, Pipeline, TokenSource,
+    embedding_models::inputs_processor::{ModelInputs, make_prompt_chunk},
     engine::SearchEmbeddingModel,
     get_mut_arcmutex,
     pipeline::EmbeddingLoadContext,
-    AutoDeviceMapParams, DeviceMapSetting, EmbeddingLoaderBuilder, EmbeddingSpecificConfig,
-    ModelDType, Pipeline, TokenSource,
 };
 
 use super::SearchResult;

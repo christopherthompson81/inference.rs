@@ -3,15 +3,15 @@ use std::{fs::File, path::PathBuf};
 use anyhow::Context;
 
 use crate::{
+    AutoDeviceMapParams, EmbeddingLoaderBuilder, EmbeddingSpecificConfig,
+    GGUF_MULTI_FILE_DELIMITER, LoadOverrides, Loader, ModelDType, ModelSelected, Ordering,
+    SpeechLoader, Topology, UQFF_MULTI_FILE_DELIMITER,
     pipeline::{
         AutoLoaderBuilder, DiffusionLoaderBuilder, GGMLLoaderBuilder, GGMLSpecificConfig,
         GGUFLoaderBuilder, GGUFSpecificConfig, HfConfigOverrides, IsqOrganization,
         MultimodalLoaderBuilder, MultimodalSpecificConfig, NormalLoaderBuilder,
         NormalSpecificConfig, UqffWriteConfig,
     },
-    AutoDeviceMapParams, EmbeddingLoaderBuilder, EmbeddingSpecificConfig, LoadOverrides, Loader,
-    ModelDType, ModelSelected, Ordering, SpeechLoader, Topology, GGUF_MULTI_FILE_DELIMITER,
-    UQFF_MULTI_FILE_DELIMITER,
 };
 
 /// A builder for a loader using the selected model.

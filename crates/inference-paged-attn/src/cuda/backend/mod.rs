@@ -15,14 +15,14 @@ use candle_core::cuda::cudarc::{
 use candle_core::{Layout, Result};
 pub use context_attention_mla::context_attention_fwd_mla;
 pub use fa3::{
-    fa3_fp8_decode, fa3_prepare_decode_metadata, fa3_prepare_paged_metadata, Fa3DecodeMetadata,
-    Fa3DecodeParams, Fa3DecodeSchedule, Fa3PagedMetadataLayout, FA3_DECODE_MAX_QUERY_LEN,
-    USE_FA3_FP8_PAGED,
+    FA3_DECODE_MAX_QUERY_LEN, Fa3DecodeMetadata, Fa3DecodeParams, Fa3DecodeSchedule,
+    Fa3PagedMetadataLayout, USE_FA3_FP8_PAGED, fa3_fp8_decode, fa3_prepare_decode_metadata,
+    fa3_prepare_paged_metadata,
 };
 pub use flash_attn_sinks::{flash_attn_sinks, flash_attn_sinks_varlen};
 pub use flashinfer::{
-    flashinfer_decode, gather_kv_cache_flashinfer, is_flashinfer_cache,
-    reshape_and_cache_flashinfer, FlashInferDecodeScratch,
+    FlashInferDecodeScratch, flashinfer_decode, gather_kv_cache_flashinfer, is_flashinfer_cache,
+    reshape_and_cache_flashinfer,
 };
 pub use gather_kv::gather_kv_cache;
 pub use mla::{concat_and_cache_mla, flashinfer_mla_decode, gather_mla_cache};

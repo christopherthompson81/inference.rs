@@ -10,8 +10,8 @@ use std::{
     sync::Arc,
 };
 
-use crate::model_builder_trait::{build_model_from_pipeline, build_text_pipeline};
 use crate::Model;
+use crate::model_builder_trait::{build_model_from_pipeline, build_text_pipeline};
 
 #[derive(Clone)]
 /// Configure a text model with the various parameters for loading, running, and other inference behaviors.

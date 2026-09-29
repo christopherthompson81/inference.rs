@@ -184,7 +184,7 @@ pub fn call_copy_blocks(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name.to_string())?;
@@ -372,7 +372,8 @@ pub fn call_paged_attention_v1(
     // v1 has no partition
     let name = format!(
         "paged_attention_{}_cache_{}_hs{head_size}_bs{block_size}_nt{NUM_THREADS}_nsl{NUM_SIMD_LANES}_ps0",
-        ty.to_repr(), cache_ty.to_repr()
+        ty.to_repr(),
+        cache_ty.to_repr()
     );
 
     let constants = Some(ConstantValues::new(vec![
@@ -509,7 +510,8 @@ pub fn call_paged_attention_v2(
         // v2 has partition.
         let name = format!(
             "paged_attention_{}_cache_{}_hs{head_size}_bs{block_size}_nt{NUM_THREADS}_nsl{NUM_SIMD_LANES}_ps{PARTITION_SIZE}",
-            ty.to_repr(), cache_ty.to_repr()
+            ty.to_repr(),
+            cache_ty.to_repr()
         );
 
         // v2 has partition.
@@ -615,7 +617,7 @@ pub fn call_paged_attention_v2(
                 return Err(MetalKernelError::DTypeMismatch {
                     expected: vec![DType::F32, DType::F16, DType::BF16],
                     got: DType::F8E4M3,
-                })
+                });
             }
         };
         let mut name = name.to_string();
@@ -794,7 +796,7 @@ pub fn call_kv_scale_update(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: DType::F8E4M3,
-            })
+            });
         }
     };
 

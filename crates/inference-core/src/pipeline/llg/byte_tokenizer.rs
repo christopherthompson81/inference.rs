@@ -5,8 +5,8 @@ use std::{
     sync::Arc,
 };
 
-use anyhow::{anyhow, bail, Result};
-use tokenizers::{normalizers::Sequence, NormalizerWrapper, Tokenizer};
+use anyhow::{Result, anyhow, bail};
+use tokenizers::{NormalizerWrapper, Tokenizer, normalizers::Sequence};
 use toktrie::{TokEnv, TokRxInfo, TokTrie, TokenId, TokenizerEnv};
 use tracing::warn;
 
@@ -65,20 +65,19 @@ impl ByteTokenizer {
             let v = serde_json::to_value(d)?;
             if v["type"].as_str() == Some("ByteLevel") {
                 is_byte_level = true;
-            } else if v["type"].as_str() == Some("Sequence") {
-                if let Some(decoders) = v["decoders"].as_array() {
-                    for decoder in decoders {
-                        if decoder["type"].as_str() == Some("ByteFallback") {
-                            is_byte_fallback = true;
-                        } else if decoder["type"].as_str() == Some("Replace")
-                            && decoder["content"].as_str() == Some(" ")
-                        {
-                            if let Some(s) = decoder["pattern"]["String"].as_str() {
-                                let s: Vec<char> = s.chars().collect();
-                                if s.len() == 1 {
-                                    space_ch = s[0];
-                                }
-                            }
+            } else if v["type"].as_str() == Some("Sequence")
+                && let Some(decoders) = v["decoders"].as_array()
+            {
+                for decoder in decoders {
+                    if decoder["type"].as_str() == Some("ByteFallback") {
+                        is_byte_fallback = true;
+                    } else if decoder["type"].as_str() == Some("Replace")
+                        && decoder["content"].as_str() == Some(" ")
+                        && let Some(s) = decoder["pattern"]["String"].as_str()
+                    {
+                        let s: Vec<char> = s.chars().collect();
+                        if s.len() == 1 {
+                            space_ch = s[0];
                         }
                     }
                 }

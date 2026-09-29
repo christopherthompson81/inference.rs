@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use super::CudaDecodeBatchLease;
 use super::Engine;
 #[cfg(feature = "cuda")]
-use super::{cuda_decode::CudaDecodeCompletionWorker, cuda_memory, CudaPromptRejection};
+use super::{CudaPromptRejection, cuda_decode::CudaDecodeCompletionWorker, cuda_memory};
 #[cfg(feature = "cuda")]
 use crate::paged_attention::block_hash::MultimodalAttentionPolicy;
 #[cfg(feature = "cuda")]
@@ -20,14 +20,14 @@ use crate::pipeline::execution::CudaStepSubmission;
 use crate::{
     get_mut_arcmutex,
     paged_attention::{
-        block_hash::{adapter_generation_key, compute_block_hashes},
         AttentionBackendKind, KVCacheManager, PagedAttentionMeta,
+        block_hash::{adapter_generation_key, compute_block_hashes},
     },
     pipeline::{
-        execution::StepSubmissionKind, prompt_chunks::PromptChunkPlan, start_decoding_prompt_rows,
         CacheBackendMetadata, Pipeline, StepLookahead, StepSubmission,
+        execution::StepSubmissionKind, prompt_chunks::PromptChunkPlan, start_decoding_prompt_rows,
     },
-    scheduler::{modality_signature, PagedAttentionSchedulerOutput},
+    scheduler::{PagedAttentionSchedulerOutput, modality_signature},
     sequence::Sequence,
 };
 
@@ -107,12 +107,11 @@ impl Engine {
             #[cfg(feature = "cuda")]
             cuda_prompt_preemption_workspace,
         } = ctx;
-        if !preempted_sequence_ids.is_empty() {
-            if let Err(err) = get_mut_arcmutex!(self.pipeline)
+        if !preempted_sequence_ids.is_empty()
+            && let Err(err) = get_mut_arcmutex!(self.pipeline)
                 .release_speculative_sequences(&preempted_sequence_ids)
-            {
-                tracing::error!("Failed to release preempted speculative state: {err}");
-            }
+        {
+            tracing::error!("Failed to release preempted speculative state: {err}");
         }
         #[cfg(feature = "cuda")]
         let mut prefix_gather_workspace_limit = None;
@@ -164,14 +163,13 @@ impl Engine {
                     .iter()
                     .enumerate()
                     .map(|(seq_idx, seq)| {
-                        if is_prompt {
-                            if let Some(chunk) = output
+                        if is_prompt
+                            && let Some(chunk) = output
                                 .scheduled_prompt_chunks
                                 .as_ref()
                                 .and_then(|chunks| chunks.get(seq_idx))
-                            {
-                                return chunk.end - chunk.start;
-                            }
+                        {
+                            return chunk.end - chunk.start;
                         }
                         let staged = staged_width
                             .map(|_| seq.active_staged_speculative_len())

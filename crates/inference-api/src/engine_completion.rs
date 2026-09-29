@@ -14,12 +14,12 @@ use inference_core::{
 use tokio::sync::mpsc::{Receiver, Sender};
 
 use crate::{
-    api_error::{boxed_anyhow, ApiError, ApiErrorKind, ModelErrorMessage},
+    api_error::{ApiError, ApiErrorKind, ModelErrorMessage, boxed_anyhow},
     dispatch::{
         apply_model_override, create_response_channel, response_model_id, send_request_with_model,
     },
     engine_chat::{DispatchError, ResponseTap},
-    lora_routing::{resolve_lora_adapter_model, DEFAULT_MODEL_ID},
+    lora_routing::{DEFAULT_MODEL_ID, resolve_lora_adapter_model},
     openai::{CompletionRequest, Grammar},
     sampling::{convert_stop_tokens, get_dry_sampling_params},
     types::SharedInferenceRsState,
@@ -81,7 +81,7 @@ pub async fn collect_completion(
             None => {
                 return Response::InternalError(
                     anyhow::Error::msg("No response received from the model.").into(),
-                )
+                );
             }
         }
     }

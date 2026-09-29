@@ -3,8 +3,8 @@
 
 use either::Either;
 use inference_core::{
-    parse_isq_value, CalibrationAction, CalibrationRequest, CalibrationStatus,
-    DetokenizationRequest, InferenceRsError, Request, SerializedSession, TokenizationRequest,
+    CalibrationAction, CalibrationRequest, CalibrationStatus, DetokenizationRequest,
+    InferenceRsError, Request, SerializedSession, TokenizationRequest, parse_isq_value,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;

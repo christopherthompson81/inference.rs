@@ -1,8 +1,8 @@
 use candle_core::{DType, Result};
 
 use super::{
-    attention_backend::AttentionBackendKind, config::PrefixPrefillAttentionFeatures,
-    ModelConfigLike,
+    ModelConfigLike, attention_backend::AttentionBackendKind,
+    config::PrefixPrefillAttentionFeatures,
 };
 #[cfg(all(feature = "cuda", feature = "flash-attn", target_family = "unix"))]
 use crate::attention::flash_backend_supports_sdpa;
@@ -945,11 +945,13 @@ mod tests {
             gather_prefill_workspace_bytes(mixed_fallback).unwrap(),
             66_494_857_216
         );
-        assert!(gather_prefill_workspace_bytes(GatherPrefillWorkspaceInput {
-            total_kv: usize::MAX,
-            ..packed
-        })
-        .is_err());
+        assert!(
+            gather_prefill_workspace_bytes(GatherPrefillWorkspaceInput {
+                total_kv: usize::MAX,
+                ..packed
+            })
+            .is_err()
+        );
     }
 
     #[test]

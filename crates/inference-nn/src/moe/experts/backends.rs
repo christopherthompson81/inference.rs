@@ -1,9 +1,9 @@
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 use candle_nn::Linear;
 use inference_quant::{
-    apply_immediate_isq_with_key, should_apply_immediate_isq, DummyLayer, LoraExpertInputMode,
-    LoraExpertProjection, PreQuantizedExperts, QuantMethod, QuantMethodConfig, QuantizedConfig,
-    QuantizedExpertKeys, Shard, ShardedVarBuilder, UnquantLinear,
+    DummyLayer, LoraExpertInputMode, LoraExpertProjection, PreQuantizedExperts, QuantMethod,
+    QuantMethodConfig, QuantizedConfig, QuantizedExpertKeys, Shard, ShardedVarBuilder,
+    UnquantLinear, apply_immediate_isq_with_key, should_apply_immediate_isq,
 };
 use std::sync::Arc;
 
@@ -136,7 +136,7 @@ impl CutileFp8ExpertsWeights {
         quantization_config: &Option<QuantizedConfig>,
         act: Activation,
     ) -> Result<Option<Self>> {
-        use inference_quant::cutile::{fp8_moe_supported, FP8_MOE_GROUP};
+        use inference_quant::cutile::{FP8_MOE_GROUP, fp8_moe_supported};
         let Some(QuantizedConfig::Fp8 {
             weight_block_size: Some(block),
             activation_scheme,
@@ -407,9 +407,9 @@ mod tests {
     use crate::moe::experts::forward::{MoEForwardPhase, MoEForwardShape};
     use candle_core::quantized::{GgmlDType, QTensor};
     use inference_quant::{
-        with_lora_execution, GgufMatMul, LoraExecution, LoraExpertExecution,
-        LoraExpertProjectionNames, LoraExpertProjectionWeights, LoraExpertSiteSpec,
-        LoraExpertWeights, LoraLayerRegistry, LoraSiteKey,
+        GgufMatMul, LoraExecution, LoraExpertExecution, LoraExpertProjectionNames,
+        LoraExpertProjectionWeights, LoraExpertSiteSpec, LoraExpertWeights, LoraLayerRegistry,
+        LoraSiteKey, with_lora_execution,
     };
 
     fn values(len: usize, phase: f32) -> Vec<f32> {
@@ -1098,10 +1098,10 @@ impl FastExpertsWeights {
         }
         // while collecting, force the gather path; fused kernels never materialize the routed inputs
         #[cfg(feature = "cuda")]
-        if self.fused_gate_proj.stats_snapshot().is_none() {
-            if let Some(result) = self.forward_cuda(forward, config)? {
-                return Ok(result);
-            }
+        if self.fused_gate_proj.stats_snapshot().is_none()
+            && let Some(result) = self.forward_cuda(forward, config)?
+        {
+            return Ok(result);
         }
 
         self.forward_gather(forward, config)
@@ -1810,10 +1810,12 @@ mod immediate_isq_tests {
         let tracker = experts_vb.tracker().clone();
         inference_quant::set_immediate_isq(
             Some(inference_quant::IsqType::Q8_0),
-            vec![Regex::new(
-                r"^model\.layers\.0\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
-            )
-            .expect("valid regex")],
+            vec![
+                Regex::new(
+                    r"^model\.layers\.0\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
+                )
+                .expect("valid regex"),
+            ],
             inference_quant::IsqCaptureMode::CaptureMatches,
         );
         let _clear = ClearImmediateIsq;

@@ -9,23 +9,23 @@ use std::{
 use candle_core::Result;
 pub(crate) use dynamic::maybe_wrap_dynamic_lora_with_key;
 pub use dynamic::{
-    add_expert_delta_reference, apply_dynamic_lora_delta, has_active_lora_execution,
-    is_dynamic_lora_site_active, load_dynamic_lora_weights, maybe_wrap_dynamic_lora,
-    plan_dynamic_lora_weights, register_dynamic_lora_site, with_lora_execution,
-    with_lora_execution_repeated_row, with_lora_execution_row_range, DynamicLoraLoadPlan,
-    DynamicLoraWeights, LoraAdapterWeights, LoraExecution, LoraExecutionArena,
+    DynamicLoraLoadPlan, DynamicLoraWeights, LoraAdapterWeights, LoraExecution, LoraExecutionArena,
     LoraExecutionArenaStats, LoraExpertDelta, LoraExpertExecution, LoraExpertInputMode,
     LoraExpertProjection, LoraExpertProjectionNames, LoraExpertProjectionWeights,
     LoraExpertSiteHandle, LoraExpertSiteSpec, LoraExpertWeights, LoraGateUpOrder,
     LoraLayerRegistry, LoraLinearSpec, LoraRuntimeId, LoraSiteHandle, LoraSiteKey, LoraSiteSlice,
-    LoraSlotId, LoraWeights, RoutedLoraAdapterWeight, RoutedLoraInputMode,
-    RoutedLoraMetadataLayout, RoutedLoraProjectionLayout, ROUTED_LORA_BASE_SLOT,
-    ROUTED_LORA_BLOCK_SIZE, ROUTED_LORA_MAX_RANK, ROUTED_LORA_WMMA_RANK_CAP,
+    LoraSlotId, LoraWeights, ROUTED_LORA_BASE_SLOT, ROUTED_LORA_BLOCK_SIZE, ROUTED_LORA_MAX_RANK,
+    ROUTED_LORA_WMMA_RANK_CAP, RoutedLoraAdapterWeight, RoutedLoraInputMode,
+    RoutedLoraMetadataLayout, RoutedLoraProjectionLayout, add_expert_delta_reference,
+    apply_dynamic_lora_delta, has_active_lora_execution, is_dynamic_lora_site_active,
+    load_dynamic_lora_weights, maybe_wrap_dynamic_lora, plan_dynamic_lora_weights,
+    register_dynamic_lora_site, with_lora_execution, with_lora_execution_repeated_row,
+    with_lora_execution_row_range,
 };
 #[cfg(feature = "cuda")]
 pub use dynamic::{
-    launch_routed_lora_direct, launch_routed_lora_grouped, RoutedLoraCudaMetadata,
-    RoutedLoraCudaWeightTable, RoutedLoraDirectLaunch, RoutedLoraGroupedLaunch,
+    RoutedLoraCudaMetadata, RoutedLoraCudaWeightTable, RoutedLoraDirectLaunch,
+    RoutedLoraGroupedLaunch, launch_routed_lora_direct, launch_routed_lora_grouped,
 };
 use indexmap::IndexMap;
 use regex::Regex;
@@ -146,10 +146,10 @@ fn cached_regex(pattern: String) -> std::result::Result<Arc<LoraRegex>, String> 
     }
     let regex = Arc::new(LoraRegex::new(pattern.clone())?);
     let mut cache = cache.lock().expect("LoRA regex cache poisoned");
-    if cache.len() >= LORA_REGEX_CACHE_CAPACITY {
-        if let Some(key) = cache.keys().next().cloned() {
-            cache.remove(&key);
-        }
+    if cache.len() >= LORA_REGEX_CACHE_CAPACITY
+        && let Some(key) = cache.keys().next().cloned()
+    {
+        cache.remove(&key);
     }
     cache.insert(pattern, regex.clone());
     Ok(regex)
@@ -621,11 +621,13 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!(target
-            .validate_dynamic()
-            .unwrap_err()
-            .to_string()
-            .contains("target_modules regex"));
+        assert!(
+            target
+                .validate_dynamic()
+                .unwrap_err()
+                .to_string()
+                .contains("target_modules regex")
+        );
 
         let rank: LoraConfig = serde_json::from_str(
             r#"{
@@ -636,11 +638,12 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!(rank
-            .validate_dynamic()
-            .unwrap_err()
-            .to_string()
-            .contains("rank_pattern regex"));
+        assert!(
+            rank.validate_dynamic()
+                .unwrap_err()
+                .to_string()
+                .contains("rank_pattern regex")
+        );
 
         let alpha: LoraConfig = serde_json::from_str(
             r#"{
@@ -651,11 +654,13 @@ mod tests {
             }"#,
         )
         .unwrap();
-        assert!(alpha
-            .validate_dynamic()
-            .unwrap_err()
-            .to_string()
-            .contains("alpha_pattern regex"));
+        assert!(
+            alpha
+                .validate_dynamic()
+                .unwrap_err()
+                .to_string()
+                .contains("alpha_pattern regex")
+        );
     }
 
     #[test]
@@ -744,11 +749,13 @@ mod tests {
                 .unwrap()
                 .insert(name.to_string(), value);
             let config: LoraConfig = serde_json::from_value(input).unwrap();
-            assert!(config
-                .validate_dynamic()
-                .unwrap_err()
-                .to_string()
-                .contains(name));
+            assert!(
+                config
+                    .validate_dynamic()
+                    .unwrap_err()
+                    .to_string()
+                    .contains(name)
+            );
         }
     }
 

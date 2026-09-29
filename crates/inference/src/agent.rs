@@ -209,156 +209,152 @@ impl<'a> AgentStream<'a> {
                     steps,
                 } => {
                     // Get next chunk from model stream
-                    if let Some(ref mut stream) = self.model_stream {
-                        if let Some(response) = stream.next().await {
-                            match response {
-                                Response::Chunk(ChatCompletionChunkResponse {
-                                    choices, ..
-                                }) => {
-                                    if let Some(ChunkChoice {
-                                        delta:
-                                            Delta {
-                                                content,
-                                                tool_calls,
-                                                ..
-                                            },
-                                        finish_reason,
-                                        ..
-                                    }) = choices.first()
-                                    {
-                                        // Accumulate content
-                                        if let Some(text) = content {
-                                            accumulated_content.push_str(text);
-                                            return Some(AgentEvent::TextDelta(text.clone()));
-                                        }
+                    if let Some(ref mut stream) = self.model_stream
+                        && let Some(response) = stream.next().await
+                    {
+                        match response {
+                            Response::Chunk(ChatCompletionChunkResponse { choices, .. }) => {
+                                if let Some(ChunkChoice {
+                                    delta:
+                                        Delta {
+                                            content,
+                                            tool_calls,
+                                            ..
+                                        },
+                                    finish_reason,
+                                    ..
+                                }) = choices.first()
+                                {
+                                    // Accumulate content
+                                    if let Some(text) = content {
+                                        accumulated_content.push_str(text);
+                                        return Some(AgentEvent::TextDelta(text.clone()));
+                                    }
 
-                                        // Accumulate tool calls
-                                        if let Some(calls) = tool_calls {
-                                            accumulated_tool_calls.extend(calls.clone());
-                                        }
+                                    // Accumulate tool calls
+                                    if let Some(calls) = tool_calls {
+                                        accumulated_tool_calls.extend(calls.clone());
+                                    }
 
-                                        // Check if done
-                                        if finish_reason.is_some() {
-                                            self.model_stream = None;
+                                    // Check if done
+                                    if finish_reason.is_some() {
+                                        self.model_stream = None;
 
-                                            if accumulated_tool_calls.is_empty() {
-                                                // No tool calls - we're done
-                                                let final_response =
-                                                    if accumulated_content.is_empty() {
-                                                        None
-                                                    } else {
-                                                        Some(accumulated_content.clone())
-                                                    };
-
-                                                let stop_reason = if final_response.is_some() {
-                                                    AgentStopReason::TextResponse
-                                                } else {
-                                                    AgentStopReason::NoAction
-                                                };
-
-                                                let response = AgentResponse {
-                                                    steps: steps.clone(),
-                                                    final_response,
-                                                    iterations: *iteration + 1,
-                                                    stop_reason,
-                                                };
-
-                                                self.state = AgentStreamState::Done;
-                                                return Some(AgentEvent::Complete(response));
+                                        if accumulated_tool_calls.is_empty() {
+                                            // No tool calls - we're done
+                                            let final_response = if accumulated_content.is_empty() {
+                                                None
                                             } else {
-                                                // Transition to executing tools
-                                                let tool_calls = accumulated_tool_calls.clone();
-                                                let event =
-                                                    AgentEvent::ToolCallsStart(tool_calls.clone());
+                                                Some(accumulated_content.clone())
+                                            };
 
-                                                // Create a placeholder response for the step
-                                                let placeholder_response = ChatCompletionResponse {
-                                                    id: String::new(),
-                                                    choices: vec![],
-                                                    created: 0,
-                                                    model: String::new(),
-                                                    system_fingerprint: String::new(),
-                                                    object: String::new(),
-                                                    usage: crate::Usage {
-                                                        completion_tokens: 0,
-                                                        prompt_tokens: 0,
-                                                        total_tokens: 0,
-                                                        prompt_tokens_details: None,
-                                                        avg_tok_per_sec: 0.0,
-                                                        avg_prompt_tok_per_sec: 0.0,
-                                                        avg_compl_tok_per_sec: 0.0,
-                                                        total_time_sec: 0.0,
-                                                        total_prompt_time_sec: 0.0,
-                                                        total_completion_time_sec: 0.0,
-                                                    },
-                                                    adapter_generation: None,
-                                                    agentic_tool_calls: None,
-                                                    files: None,
-                                                    session_id: None,
-                                                };
+                                            let stop_reason = if final_response.is_some() {
+                                                AgentStopReason::TextResponse
+                                            } else {
+                                                AgentStopReason::NoAction
+                                            };
 
-                                                self.state = AgentStreamState::ExecutingTools {
-                                                    messages: messages.clone(),
-                                                    iteration: *iteration,
-                                                    response: placeholder_response,
-                                                    tool_calls: tool_calls.clone(),
-                                                    tool_results: Vec::new(),
-                                                    pending_indices: (0..tool_calls.len())
-                                                        .collect(),
-                                                    steps: steps.clone(),
-                                                };
+                                            let response = AgentResponse {
+                                                steps: steps.clone(),
+                                                final_response,
+                                                iterations: *iteration + 1,
+                                                stop_reason,
+                                            };
 
-                                                return Some(event);
-                                            }
+                                            self.state = AgentStreamState::Done;
+                                            return Some(AgentEvent::Complete(response));
+                                        } else {
+                                            // Transition to executing tools
+                                            let tool_calls = accumulated_tool_calls.clone();
+                                            let event =
+                                                AgentEvent::ToolCallsStart(tool_calls.clone());
+
+                                            // Create a placeholder response for the step
+                                            let placeholder_response = ChatCompletionResponse {
+                                                id: String::new(),
+                                                choices: vec![],
+                                                created: 0,
+                                                model: String::new(),
+                                                system_fingerprint: String::new(),
+                                                object: String::new(),
+                                                usage: crate::Usage {
+                                                    completion_tokens: 0,
+                                                    prompt_tokens: 0,
+                                                    total_tokens: 0,
+                                                    prompt_tokens_details: None,
+                                                    avg_tok_per_sec: 0.0,
+                                                    avg_prompt_tok_per_sec: 0.0,
+                                                    avg_compl_tok_per_sec: 0.0,
+                                                    total_time_sec: 0.0,
+                                                    total_prompt_time_sec: 0.0,
+                                                    total_completion_time_sec: 0.0,
+                                                },
+                                                adapter_generation: None,
+                                                agentic_tool_calls: None,
+                                                files: None,
+                                                session_id: None,
+                                            };
+
+                                            self.state = AgentStreamState::ExecutingTools {
+                                                messages: messages.clone(),
+                                                iteration: *iteration,
+                                                response: placeholder_response,
+                                                tool_calls: tool_calls.clone(),
+                                                tool_results: Vec::new(),
+                                                pending_indices: (0..tool_calls.len()).collect(),
+                                                steps: steps.clone(),
+                                            };
+
+                                            return Some(event);
                                         }
                                     }
                                 }
-                                Response::Done(response) => {
-                                    self.model_stream = None;
-                                    let tool_calls = response
+                            }
+                            Response::Done(response) => {
+                                self.model_stream = None;
+                                let tool_calls = response
+                                    .choices
+                                    .first()
+                                    .and_then(|c| c.message.tool_calls.clone())
+                                    .unwrap_or_default();
+
+                                if tool_calls.is_empty() {
+                                    let final_response = response
                                         .choices
                                         .first()
-                                        .and_then(|c| c.message.tool_calls.clone())
-                                        .unwrap_or_default();
-
-                                    if tool_calls.is_empty() {
-                                        let final_response = response
-                                            .choices
-                                            .first()
-                                            .and_then(|c| c.message.content.clone());
-                                        let stop_reason = if final_response.is_some() {
-                                            AgentStopReason::TextResponse
-                                        } else {
-                                            AgentStopReason::NoAction
-                                        };
-
-                                        let agent_response = AgentResponse {
-                                            steps: steps.clone(),
-                                            final_response,
-                                            iterations: *iteration + 1,
-                                            stop_reason,
-                                        };
-
-                                        self.state = AgentStreamState::Done;
-                                        return Some(AgentEvent::Complete(agent_response));
+                                        .and_then(|c| c.message.content.clone());
+                                    let stop_reason = if final_response.is_some() {
+                                        AgentStopReason::TextResponse
                                     } else {
-                                        let event = AgentEvent::ToolCallsStart(tool_calls.clone());
+                                        AgentStopReason::NoAction
+                                    };
 
-                                        self.state = AgentStreamState::ExecutingTools {
-                                            messages: messages.clone(),
-                                            iteration: *iteration,
-                                            response: response.clone(),
-                                            tool_calls: tool_calls.clone(),
-                                            tool_results: Vec::new(),
-                                            pending_indices: (0..tool_calls.len()).collect(),
-                                            steps: steps.clone(),
-                                        };
+                                    let agent_response = AgentResponse {
+                                        steps: steps.clone(),
+                                        final_response,
+                                        iterations: *iteration + 1,
+                                        stop_reason,
+                                    };
 
-                                        return Some(event);
-                                    }
+                                    self.state = AgentStreamState::Done;
+                                    return Some(AgentEvent::Complete(agent_response));
+                                } else {
+                                    let event = AgentEvent::ToolCallsStart(tool_calls.clone());
+
+                                    self.state = AgentStreamState::ExecutingTools {
+                                        messages: messages.clone(),
+                                        iteration: *iteration,
+                                        response: response.clone(),
+                                        tool_calls: tool_calls.clone(),
+                                        tool_results: Vec::new(),
+                                        pending_indices: (0..tool_calls.len()).collect(),
+                                        steps: steps.clone(),
+                                    };
+
+                                    return Some(event);
                                 }
-                                _ => continue,
                             }
+                            _ => continue,
                         }
                     }
 

@@ -6,7 +6,7 @@
 use std::any::Any;
 use std::sync::{Arc, Mutex};
 
-use candle_core::{bail, DType, Device, IndexOp, Result, Tensor};
+use candle_core::{DType, Device, IndexOp, Result, Tensor, bail};
 use candle_nn::{Activation, Linear};
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
 
@@ -295,22 +295,25 @@ impl Model {
                     .lock()
                     .expect("encoder cache lock poisoned");
                 for (i, &hash) in image_hashes.iter().enumerate() {
-                    if let Some(cached) = guard.get(CacheModality::Image, hash) {
-                        let cached = cached.first().ok_or_else(|| {
-                            candle_core::Error::Msg(
-                                "cached LLaVA-Next image has no encoder output".into(),
-                            )
-                        })?;
-                        if cached.dim(0)? != num_image_samples[i] {
-                            candle_core::bail!(
-                                "cached LLaVA-Next image has {} samples but metadata describes {}",
-                                cached.dim(0)?,
-                                num_image_samples[i]
-                            );
+                    match guard.get(CacheModality::Image, hash) {
+                        Some(cached) => {
+                            let cached = cached.first().ok_or_else(|| {
+                                candle_core::Error::Msg(
+                                    "cached LLaVA-Next image has no encoder output".into(),
+                                )
+                            })?;
+                            if cached.dim(0)? != num_image_samples[i] {
+                                candle_core::bail!(
+                                    "cached LLaVA-Next image has {} samples but metadata describes {}",
+                                    cached.dim(0)?,
+                                    num_image_samples[i]
+                                );
+                            }
+                            per_image[i] = Some(cached.clone());
                         }
-                        per_image[i] = Some(cached.clone());
-                    } else {
-                        miss_indices.push(i);
+                        _ => {
+                            miss_indices.push(i);
+                        }
                     }
                 }
             }

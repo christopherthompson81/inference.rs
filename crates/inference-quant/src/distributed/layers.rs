@@ -1,22 +1,22 @@
 use std::sync::Arc;
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::Linear;
 
 use crate::{
+    ActivationQuantizationScheme, ActivationScaleLayout, AfqLayer, BlockwiseFP8Linear, BnbLinear,
+    DistributedKind, LoraLinearSpec, LoraSiteKey, MXFP4Layer, QuantMethod, QuantMethodConfig,
+    QuantizeOntoGuard, QuantizedActivation, QuantizedConfig, QuantizedSerde, Shard,
+    ShardedVarBuilder, UnquantLinear,
     blockwise_fp8::{
-        blockwise_fp8_module_kind, blockwise_fp8_moe, scale_shard_from_weight_shard,
-        BlockwiseFp8ModuleKind,
+        BlockwiseFp8ModuleKind, blockwise_fp8_module_kind, blockwise_fp8_moe,
+        scale_shard_from_weight_shard,
     },
     distributed,
     gptq::gptq_linear,
     lora::maybe_wrap_dynamic_lora_with_key,
     make_dummy_or_error, maybe_wrap_dynamic_lora, should_apply_immediate_isq,
     utils::isq::apply_immediate_isq_sharded,
-    ActivationQuantizationScheme, ActivationScaleLayout, AfqLayer, BlockwiseFP8Linear, BnbLinear,
-    DistributedKind, LoraLinearSpec, LoraSiteKey, MXFP4Layer, QuantMethod, QuantMethodConfig,
-    QuantizeOntoGuard, QuantizedActivation, QuantizedConfig, QuantizedSerde, Shard,
-    ShardedVarBuilder, UnquantLinear,
 };
 
 use super::Comm;
@@ -3000,23 +3000,23 @@ pub fn compute_n_kv_groups(
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::atomic::AtomicUsize;
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
 
     use candle_core::{DType, Device, Tensor};
     use regex::Regex;
 
     use super::{
-        distributed, validate_tp_head_layout, ColumnParallelLayer, PackedOutputLayout,
-        ReplicatedLayer, RowParallelLayer,
+        ColumnParallelLayer, PackedOutputLayout, ReplicatedLayer, RowParallelLayer, distributed,
+        validate_tp_head_layout,
     };
     use crate::{
-        create_isq_executor, set_immediate_isq_config, ActivationQuantizationScheme, Comm,
-        Fp8ActivationScheme, Id, ImmediateIsqConfig, ImmediateIsqOverride, IsqCaptureMode,
-        IsqConsumer, IsqExecutorConfig, IsqPlanParams, IsqRequest, IsqType, LoraLayerRegistry,
-        LoraLinearSpec, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, QuantizedActivation,
-        QuantizedConfig, QuantizedSerde, QuantizedWeightSource, Shard, ShardedSafeTensors,
-        UnquantLinear,
+        ActivationQuantizationScheme, Comm, Fp8ActivationScheme, Id, ImmediateIsqConfig,
+        ImmediateIsqOverride, IsqCaptureMode, IsqConsumer, IsqExecutorConfig, IsqPlanParams,
+        IsqRequest, IsqType, LoraLayerRegistry, LoraLinearSpec, QuantMethod, QuantMethodConfig,
+        QuantizeOntoGuard, QuantizedActivation, QuantizedConfig, QuantizedSerde,
+        QuantizedWeightSource, Shard, ShardedSafeTensors, UnquantLinear, create_isq_executor,
+        set_immediate_isq_config,
     };
 
     #[test]
@@ -3087,12 +3087,14 @@ mod tests {
         for (values, expected) in up.iter().zip([3f32, 5.]) {
             assert!(values.iter().flatten().all(|value| *value == expected));
         }
-        assert!(shared
-            .dequantize_w()?
-            .to_vec2::<f32>()?
-            .iter()
-            .flatten()
-            .all(|value| *value == 7.));
+        assert!(
+            shared
+                .dequantize_w()?
+                .to_vec2::<f32>()?
+                .iter()
+                .flatten()
+                .all(|value| *value == 7.)
+        );
         Ok(())
     }
 
@@ -3552,13 +3554,15 @@ mod tests {
                 layer.forward_quantized(&activation)?.to_vec2::<f32>()?,
                 layer.forward(&activation_input)?.to_vec2::<f32>()?
             );
-            assert!(layer
-                .try_quantize_glu(
-                    &activation_input,
-                    &activation_input,
-                    crate::GluActivationType::Gelu,
-                )?
-                .is_none());
+            assert!(
+                layer
+                    .try_quantize_glu(
+                        &activation_input,
+                        &activation_input,
+                        crate::GluActivationType::Gelu,
+                    )?
+                    .is_none()
+            );
         }
 
         let activation = row.quantize_activation(&activation_input)?;
@@ -3592,13 +3596,15 @@ mod tests {
                 tracking_stats,
             }) as Arc<dyn QuantMethod>;
             let column = ColumnParallelLayer { weight, bias: None };
-            assert!(crate::try_forward_fused_quantized_glu(
-                &input,
-                &input,
-                &column,
-                crate::GluActivationType::Relu,
-            )?
-            .is_none());
+            assert!(
+                crate::try_forward_fused_quantized_glu(
+                    &input,
+                    &input,
+                    &column,
+                    crate::GluActivationType::Relu,
+                )?
+                .is_none()
+            );
         }
         Ok(())
     }
@@ -3680,8 +3686,8 @@ mod tests {
     }
 
     #[test]
-    fn packed_output_layout_stays_within_tp_shards_and_preserves_canonical_weights(
-    ) -> candle_core::Result<()> {
+    fn packed_output_layout_stays_within_tp_shards_and_preserves_canonical_weights()
+    -> candle_core::Result<()> {
         let device = Device::Cpu;
         let layout = PackedOutputLayout::rank_local_interleaved_to_grouped(4, &[1, 1], 2)?;
         assert_eq!(layout.runtime_to_canonical(), &[0, 2, 1, 3, 4, 6, 5, 7]);
@@ -3823,17 +3829,19 @@ mod tests {
             modules_to_not_convert: Vec::new(),
         });
         let comm = Arc::new(Comm::from_device(Id::new(), &device, 0, 1)?);
-        assert!(ColumnParallelLayer::new_packed(
-            4,
-            &[4],
-            &["q"],
-            &config,
-            false,
-            &comm,
-            None,
-            vb.clone(),
-        )?
-        .is_none());
+        assert!(
+            ColumnParallelLayer::new_packed(
+                4,
+                &[4],
+                &["q"],
+                &config,
+                false,
+                &comm,
+                None,
+                vb.clone(),
+            )?
+            .is_none()
+        );
         ColumnParallelLayer::new(4, 4, &config, false, &comm, vb.pp("q"))?;
         Ok(())
     }
@@ -3860,18 +3868,20 @@ mod tests {
         });
         let comm = Arc::new(Comm::from_device(Id::new(), &device, 0, 1)?);
         let layout = PackedOutputLayout::rank_local_interleaved_to_grouped(2, &[1, 1], 1)?;
-        assert!(ColumnParallelLayer::new_packed_with_output_layouts(
-            4,
-            &[4],
-            &["q"],
-            &[layout],
-            &config,
-            false,
-            &comm,
-            None,
-            vb,
-        )?
-        .is_none());
+        assert!(
+            ColumnParallelLayer::new_packed_with_output_layouts(
+                4,
+                &[4],
+                &["q"],
+                &[layout],
+                &config,
+                false,
+                &comm,
+                None,
+                vb,
+            )?
+            .is_none()
+        );
         Ok(())
     }
 
@@ -3880,17 +3890,19 @@ mod tests {
         let device = Device::Cpu;
         let vb = ShardedSafeTensors::wrap(HashMap::new(), DType::F32, device.clone());
         let comm = Arc::new(Comm::from_device(Id::new(), &device, 0, 1)?);
-        assert!(ColumnParallelLayer::new_packed(
-            4,
-            &[4, 4],
-            &["gate", "up"],
-            &None,
-            false,
-            &comm,
-            None,
-            vb,
-        )?
-        .is_none());
+        assert!(
+            ColumnParallelLayer::new_packed(
+                4,
+                &[4, 4],
+                &["gate", "up"],
+                &None,
+                false,
+                &comm,
+                None,
+                vb,
+            )?
+            .is_none()
+        );
         Ok(())
     }
 
@@ -3989,17 +4001,19 @@ mod tests {
             modules_to_not_convert: Vec::new(),
         });
         let comm = Arc::new(Comm::from_device(Id::new(), &device, 0, 1)?);
-        assert!(ColumnParallelLayer::new_packed(
-            4,
-            &[3, 4],
-            &["first", "second"],
-            &config,
-            false,
-            &comm,
-            None,
-            vb,
-        )?
-        .is_none());
+        assert!(
+            ColumnParallelLayer::new_packed(
+                4,
+                &[3, 4],
+                &["first", "second"],
+                &config,
+                false,
+                &comm,
+                None,
+                vb,
+            )?
+            .is_none()
+        );
         Ok(())
     }
 
@@ -4224,14 +4238,16 @@ mod tests {
         assert!(ReplicatedLayer::new_with_lora_spec(row_spec, &None, false, vb.clone()).is_err());
 
         let comm = std::sync::Arc::new(Comm::from_device(Id::new(), &Device::Cpu, 0, 1)?);
-        assert!(RowParallelLayer::new_with_lora_spec(
-            LoraLinearSpec::replicated(4, 3),
-            &None,
-            false,
-            &comm,
-            vb,
-        )
-        .is_err());
+        assert!(
+            RowParallelLayer::new_with_lora_spec(
+                LoraLinearSpec::replicated(4, 3),
+                &None,
+                false,
+                &comm,
+                vb,
+            )
+            .is_err()
+        );
         Ok(())
     }
 

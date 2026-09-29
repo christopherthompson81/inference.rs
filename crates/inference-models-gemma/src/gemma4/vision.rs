@@ -2,7 +2,7 @@
 
 use crate::attention::AttentionMask;
 use crate::attention::FlashParams;
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{LayerNorm, LayerNormConfig, Module};
 use inference_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
 use std::sync::Arc;

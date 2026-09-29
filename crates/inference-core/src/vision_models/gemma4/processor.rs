@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use inference_models_gemma::gemma4::config::Gemma4BidirectionalAttention;
 use inference_models_gemma::gemma4::inputs_processor::{
-    Gemma4ImageProcessor, AUDIO_TOKEN, BOA_TOKEN, BOI_TOKEN, EOA_TOKEN, EOI_TOKEN, IMAGE_TOKEN,
+    AUDIO_TOKEN, BOA_TOKEN, BOI_TOKEN, EOA_TOKEN, EOI_TOKEN, Gemma4ImageProcessor, IMAGE_TOKEN,
     VIDEO_TOKEN,
 };
 

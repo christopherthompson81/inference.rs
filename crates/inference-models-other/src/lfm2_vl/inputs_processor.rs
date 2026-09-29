@@ -3,7 +3,7 @@
 use std::{any::Any, ops::Range, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
-use image::{imageops, DynamicImage, RgbImage};
+use image::{DynamicImage, RgbImage, imageops};
 use itertools::Itertools;
 use tokenizers::Tokenizer;
 
@@ -17,9 +17,9 @@ use crate::media_inputs::{
         ModelInputs, MultimodalInputsProcessor, TextInputs,
     },
 };
-use crate::paged_attention::{block_hash::MultimodalKind, PagedAttentionMeta};
+use crate::paged_attention::{PagedAttentionMeta, block_hash::MultimodalKind};
 
-use super::{config::Config, Lfm2VlSpecificArgs};
+use super::{Lfm2VlSpecificArgs, config::Config};
 
 pub const IMAGE_TOKEN: &str = "<image>";
 pub const IMAGE_START: &str = "<|image_start|>";

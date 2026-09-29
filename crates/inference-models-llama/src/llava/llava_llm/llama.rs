@@ -23,14 +23,14 @@ use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
     get_delta_from_lora_ab,
     layers::masker::PastKvLenCache,
-    layers::{embedding, Activation, CausalMasker, MatMul, RmsNorm, Sdpa},
+    layers::{Activation, CausalMasker, MatMul, RmsNorm, Sdpa, embedding},
     llama::Config,
     model::{IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 
-use super::{rope_positions, LLaVALLM, OrdinaryRoPE};
+use super::{LLaVALLM, OrdinaryRoPE, rope_positions};
 
 struct CausalSelfAttention {
     q_proj: Arc<dyn QuantMethod>,
@@ -403,7 +403,7 @@ impl Llama {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),

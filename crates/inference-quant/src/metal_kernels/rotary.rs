@@ -61,7 +61,7 @@ pub fn call_rotary_q(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -125,7 +125,7 @@ pub fn call_rotary_qk(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -189,7 +189,7 @@ pub fn call_rotary_q_positions(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -254,7 +254,7 @@ pub fn call_rotary_qk_positions(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;

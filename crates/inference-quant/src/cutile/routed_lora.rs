@@ -2,12 +2,12 @@
 #![allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
 
 use std::cell::RefCell;
-use std::collections::{hash_map::DefaultHasher, HashMap, VecDeque};
+use std::collections::{HashMap, VecDeque, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::sync::{Mutex, OnceLock};
 
 use candle_core::{
-    cuda::cudarc::driver::CudaSlice, CudaDevice, CudaStorage, DType, Result, Shape, Storage, Tensor,
+    CudaDevice, CudaStorage, DType, Result, Shape, Storage, Tensor, cuda::cudarc::driver::CudaSlice,
 };
 use cutile::cuda_async::device_buffer::DevicePointer;
 use cutile::cuda_async::device_operation::DeviceOp;
@@ -20,12 +20,12 @@ use half::bf16;
 #[cfg(test)]
 use crate::lora::RoutedLoraInputMode;
 use crate::lora::{
-    RoutedLoraCudaMetadata, RoutedLoraCudaWeightTable, RoutedLoraMetadataLayout,
-    RoutedLoraProjectionLayout, ROUTED_LORA_BLOCK_SIZE,
+    ROUTED_LORA_BLOCK_SIZE, RoutedLoraCudaMetadata, RoutedLoraCudaWeightTable,
+    RoutedLoraMetadataLayout, RoutedLoraProjectionLayout,
 };
 use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
-use super::tune::{config, cutile_error, tune, Bucket, Prepared, Space, TuneMode, TuneRequest};
+use super::tune::{Bucket, Prepared, Space, TuneMode, TuneRequest, config, cutile_error, tune};
 
 use super::{
     catch_cutile_panic, context, device_compute_capability, device_supported, jit_available,
@@ -49,20 +49,22 @@ mod routed_lora_kernel {
     const DESCRIPTOR_BYTES: i32 = 40;
 
     unsafe fn load_scalar_tile<T: ElementType>(ptr: *mut T, offset: i32) -> Tile<T, { [] }> {
-        let base_scalar: PointerTile<*mut T, { [] }> = pointer_to_tile(ptr);
-        let base: PointerTile<*mut T, { [1] }> = base_scalar.reshape(const_shape![1]);
-        let offset: Tile<i32, { [1] }> = broadcast_scalar(offset, const_shape![1]);
-        let pointers: PointerTile<*mut T, { [1] }> = base.offset_tile(offset);
-        let (value, _): (Tile<T, { [1] }>, Token) = load_ptr_tko(
-            pointers,
-            ordering::Weak,
-            None::<scope::TileBlock>,
-            None,
-            None,
-            None,
-            Latency::<0>,
-        );
-        value.reshape(const_shape![])
+        unsafe {
+            let base_scalar: PointerTile<*mut T, { [] }> = pointer_to_tile(ptr);
+            let base: PointerTile<*mut T, { [1] }> = base_scalar.reshape(const_shape![1]);
+            let offset: Tile<i32, { [1] }> = broadcast_scalar(offset, const_shape![1]);
+            let pointers: PointerTile<*mut T, { [1] }> = base.offset_tile(offset);
+            let (value, _): (Tile<T, { [1] }>, Token) = load_ptr_tko(
+                pointers,
+                ordering::Weak,
+                None::<scope::TileBlock>,
+                None,
+                None,
+                None,
+                Latency::<0>,
+            );
+            value.reshape(const_shape![])
+        }
     }
 
     #[cutile::entry(unchecked_accesses = true)]
@@ -97,376 +99,385 @@ mod routed_lora_kernel {
         output_row_stride: i32,
         output_slice_stride: i32,
     ) {
-        let pid: (i32, i32, i32) = get_tile_block_id();
-        let block = pid.0 / N_GROUPS;
-        let n_group = pid.0 - block * N_GROUPS;
-        let slice = pid.1;
-        let output_tiles = 1 + (output_features - 1) / BN;
-        if n_group >= output_tiles {
-            return;
-        }
-
-        if NAIVE_ASSIGNMENT != 0 && block >= num_routes {
-            return;
-        }
-        let pair: i32 = if NAIVE_ASSIGNMENT != 0 {
-            let token = block / top_k;
-            let adapter_slot: i32 = if HAS_TOKEN_ADAPTER_SLOTS != 0 {
-                tile_to_scalar(load_scalar_tile(token_adapter_slots_ptr, token))
-            } else {
-                0
-            };
-            let expert: i32 = tile_to_scalar(load_scalar_tile(topk_expert_ids_ptr, block));
-            let assignment_valid = adapter_slot >= 0
-                && adapter_slot < num_adapter_slots
-                && expert >= 0
-                && expert < num_experts;
-            if assignment_valid {
-                adapter_slot * num_experts + expert
-            } else {
-                -1
+        unsafe {
+            let pid: (i32, i32, i32) = get_tile_block_id();
+            let block = pid.0 / N_GROUPS;
+            let n_group = pid.0 - block * N_GROUPS;
+            let slice = pid.1;
+            let output_tiles = 1 + (output_features - 1) / BN;
+            if n_group >= output_tiles {
+                return;
             }
-        } else {
-            tile_to_scalar(load_scalar_tile(block_pair_ids_ptr, block))
-        };
-        let pair_valid = pair >= 0 && pair < num_adapter_slots * num_experts;
-        let safe_pair = if pair_valid { pair } else { 0 };
-        let adapter_slot: i32 = safe_pair / num_experts;
-        let expert: i32 = safe_pair - adapter_slot * num_experts;
 
-        let descriptor_index: i32 = slice * num_adapter_slots + adapter_slot;
-        let descriptor_byte_offset: Tile<i32, { [] }> =
-            scalar_to_tile(descriptor_index * DESCRIPTOR_BYTES);
-        let descriptors_base: PointerTile<*mut u8, { [] }> = pointer_to_tile(descriptors_ptr);
-        let descriptor_base: PointerTile<*mut u8, { [] }> =
-            descriptors_base.offset_tile(descriptor_byte_offset);
-        let descriptor_u64: *mut u64 = tile_to_pointer(ptr_to_ptr(descriptor_base));
-        let descriptor_i32: *mut i32 = tile_to_pointer(ptr_to_ptr(descriptor_base));
-        let descriptor_f32: *mut f32 = tile_to_pointer(ptr_to_ptr(descriptor_base));
-        let a_address: u64 = tile_to_scalar(load_scalar_tile(descriptor_u64, 0));
-        let b_address: u64 = tile_to_scalar(load_scalar_tile(descriptor_u64, 1));
-        let scales_address: u64 = tile_to_scalar(load_scalar_tile(descriptor_u64, 2));
-        let rank: i32 = tile_to_scalar(load_scalar_tile(descriptor_i32, 6));
-        let rank_stride: i32 = tile_to_scalar(load_scalar_tile(descriptor_i32, 7));
-        let mut adapter_scale: f32 = tile_to_scalar(load_scalar_tile(descriptor_f32, 8));
-        if rank <= 0 || rank > BR || rank_stride < rank || a_address == 0 || b_address == 0 {
-            return;
-        }
-        if scales_address != 0 {
-            let scales_tile: Tile<u64, { [] }> = scalar_to_tile(scales_address);
-            let scales_pointer_tile: PointerTile<*mut f32, { [] }> = int_to_ptr(scales_tile);
-            let scales_ptr: *mut f32 = tile_to_pointer(scales_pointer_tile);
-            adapter_scale = tile_to_scalar(load_scalar_tile(scales_ptr, expert));
-        }
-        if adapter_scale == 0.0 {
-            return;
-        }
+            if NAIVE_ASSIGNMENT != 0 && block >= num_routes {
+                return;
+            }
+            let pair: i32 = if NAIVE_ASSIGNMENT != 0 {
+                let token = block / top_k;
+                let adapter_slot: i32 = if HAS_TOKEN_ADAPTER_SLOTS != 0 {
+                    tile_to_scalar(load_scalar_tile(token_adapter_slots_ptr, token))
+                } else {
+                    0
+                };
+                let expert: i32 = tile_to_scalar(load_scalar_tile(topk_expert_ids_ptr, block));
+                let assignment_valid = adapter_slot >= 0
+                    && adapter_slot < num_adapter_slots
+                    && expert >= 0
+                    && expert < num_experts;
+                if assignment_valid {
+                    adapter_slot * num_experts + expert
+                } else {
+                    -1
+                }
+            } else {
+                tile_to_scalar(load_scalar_tile(block_pair_ids_ptr, block))
+            };
+            let pair_valid = pair >= 0 && pair < num_adapter_slots * num_experts;
+            let safe_pair = if pair_valid { pair } else { 0 };
+            let adapter_slot: i32 = safe_pair / num_experts;
+            let expert: i32 = safe_pair - adapter_slot * num_experts;
 
-        let route_lane: Tile<i32, { [16] }> = iota(const_shape![16]);
-        let route_index_base: Tile<i32, { [16] }> = broadcast_scalar(block * 16, const_shape![16]);
-        let routes: Tile<i32, { [16] }> = if NAIVE_ASSIGNMENT != 0 {
-            let route = broadcast_scalar(block, const_shape![16]);
-            let lane_zero = eq_tile(route_lane, broadcast_scalar(0i32, const_shape![16]));
-            select(lane_zero, route, broadcast_scalar(-1i32, const_shape![16]))
-        } else {
-            let route_indices = route_index_base + route_lane;
-            let sorted_base_0: PointerTile<*mut i32, { [] }> =
-                pointer_to_tile(sorted_route_ids_ptr);
-            let sorted_base_1: PointerTile<*mut i32, { [1] }> =
-                sorted_base_0.reshape(const_shape![1]);
-            let sorted_base: PointerTile<*mut i32, { [16] }> =
-                sorted_base_1.broadcast(const_shape![16]);
-            let sorted_ptrs = sorted_base.offset_tile(route_indices);
-            let (routes, _): (Tile<i32, { [16] }>, Token) = load_ptr_tko(
-                sorted_ptrs,
-                ordering::Weak,
-                None::<scope::TileBlock>,
-                None,
-                None,
-                None,
-                Latency::<0>,
-            );
-            routes
-        };
-        let zero_routes: Tile<i32, { [16] }> = broadcast_scalar(0i32, const_shape![16]);
-        let num_routes_tile: Tile<i32, { [16] }> = broadcast_scalar(num_routes, const_shape![16]);
-        let pair_mask: Tile<bool, { [16] }> = broadcast_scalar(pair_valid, const_shape![16]);
-        let route_mask =
-            pair_mask & ge_tile(routes, zero_routes) & lt_tile(routes, num_routes_tile);
-        let safe_routes = select(route_mask, routes, zero_routes);
+            let descriptor_index: i32 = slice * num_adapter_slots + adapter_slot;
+            let descriptor_byte_offset: Tile<i32, { [] }> =
+                scalar_to_tile(descriptor_index * DESCRIPTOR_BYTES);
+            let descriptors_base: PointerTile<*mut u8, { [] }> = pointer_to_tile(descriptors_ptr);
+            let descriptor_base: PointerTile<*mut u8, { [] }> =
+                descriptors_base.offset_tile(descriptor_byte_offset);
+            let descriptor_u64: *mut u64 = tile_to_pointer(ptr_to_ptr(descriptor_base));
+            let descriptor_i32: *mut i32 = tile_to_pointer(ptr_to_ptr(descriptor_base));
+            let descriptor_f32: *mut f32 = tile_to_pointer(ptr_to_ptr(descriptor_base));
+            let a_address: u64 = tile_to_scalar(load_scalar_tile(descriptor_u64, 0));
+            let b_address: u64 = tile_to_scalar(load_scalar_tile(descriptor_u64, 1));
+            let scales_address: u64 = tile_to_scalar(load_scalar_tile(descriptor_u64, 2));
+            let rank: i32 = tile_to_scalar(load_scalar_tile(descriptor_i32, 6));
+            let rank_stride: i32 = tile_to_scalar(load_scalar_tile(descriptor_i32, 7));
+            let mut adapter_scale: f32 = tile_to_scalar(load_scalar_tile(descriptor_f32, 8));
+            if rank <= 0 || rank > BR || rank_stride < rank || a_address == 0 || b_address == 0 {
+                return;
+            }
+            if scales_address != 0 {
+                let scales_tile: Tile<u64, { [] }> = scalar_to_tile(scales_address);
+                let scales_pointer_tile: PointerTile<*mut f32, { [] }> = int_to_ptr(scales_tile);
+                let scales_ptr: *mut f32 = tile_to_pointer(scales_pointer_tile);
+                adapter_scale = tile_to_scalar(load_scalar_tile(scales_ptr, expert));
+            }
+            if adapter_scale == 0.0 {
+                return;
+            }
 
-        let input_rows: Tile<i32, { [16] }> = if HAS_INPUT_ROWS != 0 {
-            let base_0: PointerTile<*mut i32, { [] }> = pointer_to_tile(route_input_rows_ptr);
-            let base_1: PointerTile<*mut i32, { [1] }> = base_0.reshape(const_shape![1]);
-            let base: PointerTile<*mut i32, { [16] }> = base_1.broadcast(const_shape![16]);
-            let pointers = base.offset_tile(safe_routes);
-            let (rows, _): (Tile<i32, { [16] }>, Token) = load_ptr_tko(
-                pointers,
-                ordering::Weak,
-                None::<scope::TileBlock>,
-                Some(route_mask),
-                Some(0i32),
-                None,
-                Latency::<0>,
-            );
-            rows
-        } else if INPUT_MODE == 1 {
-            safe_routes / broadcast_scalar(top_k, const_shape![16])
-        } else {
-            safe_routes
-        };
-        let output_rows: Tile<i32, { [16] }> = if HAS_OUTPUT_ROWS != 0 {
-            let base_0: PointerTile<*mut i32, { [] }> = pointer_to_tile(route_output_rows_ptr);
-            let base_1: PointerTile<*mut i32, { [1] }> = base_0.reshape(const_shape![1]);
-            let base: PointerTile<*mut i32, { [16] }> = base_1.broadcast(const_shape![16]);
-            let pointers = base.offset_tile(safe_routes);
-            let (rows, _): (Tile<i32, { [16] }>, Token) = load_ptr_tko(
-                pointers,
-                ordering::Weak,
-                None::<scope::TileBlock>,
-                Some(route_mask),
-                Some(0i32),
-                None,
-                Latency::<0>,
-            );
-            rows
-        } else {
-            safe_routes
-        };
+            let route_lane: Tile<i32, { [16] }> = iota(const_shape![16]);
+            let route_index_base: Tile<i32, { [16] }> =
+                broadcast_scalar(block * 16, const_shape![16]);
+            let routes: Tile<i32, { [16] }> = if NAIVE_ASSIGNMENT != 0 {
+                let route = broadcast_scalar(block, const_shape![16]);
+                let lane_zero = eq_tile(route_lane, broadcast_scalar(0i32, const_shape![16]));
+                select(lane_zero, route, broadcast_scalar(-1i32, const_shape![16]))
+            } else {
+                let route_indices = route_index_base + route_lane;
+                let sorted_base_0: PointerTile<*mut i32, { [] }> =
+                    pointer_to_tile(sorted_route_ids_ptr);
+                let sorted_base_1: PointerTile<*mut i32, { [1] }> =
+                    sorted_base_0.reshape(const_shape![1]);
+                let sorted_base: PointerTile<*mut i32, { [16] }> =
+                    sorted_base_1.broadcast(const_shape![16]);
+                let sorted_ptrs = sorted_base.offset_tile(route_indices);
+                let (routes, _): (Tile<i32, { [16] }>, Token) = load_ptr_tko(
+                    sorted_ptrs,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    None,
+                    None,
+                    None,
+                    Latency::<0>,
+                );
+                routes
+            };
+            let zero_routes: Tile<i32, { [16] }> = broadcast_scalar(0i32, const_shape![16]);
+            let num_routes_tile: Tile<i32, { [16] }> =
+                broadcast_scalar(num_routes, const_shape![16]);
+            let pair_mask: Tile<bool, { [16] }> = broadcast_scalar(pair_valid, const_shape![16]);
+            let route_mask =
+                pair_mask & ge_tile(routes, zero_routes) & lt_tile(routes, num_routes_tile);
+            let safe_routes = select(route_mask, routes, zero_routes);
 
-        let a_address_tile: Tile<u64, { [] }> = scalar_to_tile(a_address);
-        let a_pointer_tile: PointerTile<*mut bf16, { [] }> = int_to_ptr(a_address_tile);
-        let a_ptr: *mut bf16 = tile_to_pointer(a_pointer_tile);
-        let b_address_tile: Tile<u64, { [] }> = scalar_to_tile(b_address);
-        let b_pointer_tile: PointerTile<*mut bf16, { [] }> = int_to_ptr(b_address_tile);
-        let b_ptr: *mut bf16 = tile_to_pointer(b_pointer_tile);
-        let rank_offsets: Tile<i32, { [BR] }> = iota(const_shape![BR]);
-        let rank_limit: Tile<i32, { [BR] }> = broadcast_scalar(rank, const_shape![BR]);
-        let rank_mask = lt_tile(rank_offsets, rank_limit);
-        let safe_rank = select(
-            rank_mask,
-            rank_offsets,
-            broadcast_scalar(0i32, const_shape![BR]),
-        );
-        let route_mask_2d: Tile<bool, { [16, BK] }> = route_mask
-            .reshape(const_shape![16, 1])
-            .broadcast(const_shape![16, BK]);
-        let input_row_offsets = muli(
-            input_rows,
-            broadcast_scalar(input_features, const_shape![16]),
-            overflow::NoSignedWrap,
-        );
-        let input_row_offsets: Tile<i32, { [16, BK] }> = input_row_offsets
-            .reshape(const_shape![16, 1])
-            .broadcast(const_shape![16, BK]);
-        let input_base_0: PointerTile<*mut bf16, { [] }> = pointer_to_tile(input_ptr);
-        let input_base_1: PointerTile<*mut bf16, { [1, 1] }> =
-            input_base_0.reshape(const_shape![1, 1]);
-        let input_base: PointerTile<*mut bf16, { [16, BK] }> =
-            input_base_1.broadcast(const_shape![16, BK]);
-        let a_base_0: PointerTile<*mut bf16, { [] }> = pointer_to_tile(a_ptr);
-        let a_base_1: PointerTile<*mut bf16, { [1, 1] }> = a_base_0.reshape(const_shape![1, 1]);
-        let a_base: PointerTile<*mut bf16, { [BK, BR] }> = a_base_1.broadcast(const_shape![BK, BR]);
-        let expert_a_offset = expert * rank_stride * input_features;
-        let safe_rank_a: Tile<i32, { [1, BR] }> = muli(
-            safe_rank,
-            broadcast_scalar(input_features, const_shape![BR]),
-            overflow::NoSignedWrap,
-        )
-        .reshape(const_shape![1, BR]);
-        let safe_rank_a: Tile<i32, { [BK, BR] }> = safe_rank_a.broadcast(const_shape![BK, BR]);
-        let rank_mask_a: Tile<bool, { [BK, BR] }> = rank_mask
-            .reshape(const_shape![1, BR])
-            .broadcast(const_shape![BK, BR]);
-        let input_k_lane: Tile<i32, { [BK] }> = iota(const_shape![BK]);
-        let mut hidden: Tile<f32, { [16, BR] }> = constant(0.0f32, const_shape![16, BR]);
+            let input_rows: Tile<i32, { [16] }> = if HAS_INPUT_ROWS != 0 {
+                let base_0: PointerTile<*mut i32, { [] }> = pointer_to_tile(route_input_rows_ptr);
+                let base_1: PointerTile<*mut i32, { [1] }> = base_0.reshape(const_shape![1]);
+                let base: PointerTile<*mut i32, { [16] }> = base_1.broadcast(const_shape![16]);
+                let pointers = base.offset_tile(safe_routes);
+                let (rows, _): (Tile<i32, { [16] }>, Token) = load_ptr_tko(
+                    pointers,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    Some(route_mask),
+                    Some(0i32),
+                    None,
+                    Latency::<0>,
+                );
+                rows
+            } else if INPUT_MODE == 1 {
+                safe_routes / broadcast_scalar(top_k, const_shape![16])
+            } else {
+                safe_routes
+            };
+            let output_rows: Tile<i32, { [16] }> = if HAS_OUTPUT_ROWS != 0 {
+                let base_0: PointerTile<*mut i32, { [] }> = pointer_to_tile(route_output_rows_ptr);
+                let base_1: PointerTile<*mut i32, { [1] }> = base_0.reshape(const_shape![1]);
+                let base: PointerTile<*mut i32, { [16] }> = base_1.broadcast(const_shape![16]);
+                let pointers = base.offset_tile(safe_routes);
+                let (rows, _): (Tile<i32, { [16] }>, Token) = load_ptr_tko(
+                    pointers,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    Some(route_mask),
+                    Some(0i32),
+                    None,
+                    Latency::<0>,
+                );
+                rows
+            } else {
+                safe_routes
+            };
 
-        let input_tiles = 1 + (input_features - 1) / BK;
-        for input_tile in 0i32..input_tiles {
-            let input_columns = input_k_lane + broadcast_scalar(input_tile * BK, const_shape![BK]);
-            let input_column_mask = lt_tile(
-                input_columns,
-                broadcast_scalar(input_features, const_shape![BK]),
+            let a_address_tile: Tile<u64, { [] }> = scalar_to_tile(a_address);
+            let a_pointer_tile: PointerTile<*mut bf16, { [] }> = int_to_ptr(a_address_tile);
+            let a_ptr: *mut bf16 = tile_to_pointer(a_pointer_tile);
+            let b_address_tile: Tile<u64, { [] }> = scalar_to_tile(b_address);
+            let b_pointer_tile: PointerTile<*mut bf16, { [] }> = int_to_ptr(b_address_tile);
+            let b_ptr: *mut bf16 = tile_to_pointer(b_pointer_tile);
+            let rank_offsets: Tile<i32, { [BR] }> = iota(const_shape![BR]);
+            let rank_limit: Tile<i32, { [BR] }> = broadcast_scalar(rank, const_shape![BR]);
+            let rank_mask = lt_tile(rank_offsets, rank_limit);
+            let safe_rank = select(
+                rank_mask,
+                rank_offsets,
+                broadcast_scalar(0i32, const_shape![BR]),
             );
-            let safe_input_columns = select(
-                input_column_mask,
-                input_columns,
-                broadcast_scalar(0i32, const_shape![BK]),
-            );
-            let input_columns_x: Tile<i32, { [16, BK] }> = safe_input_columns
-                .reshape(const_shape![1, BK])
+            let route_mask_2d: Tile<bool, { [16, BK] }> = route_mask
+                .reshape(const_shape![16, 1])
                 .broadcast(const_shape![16, BK]);
-            let x_offsets = input_row_offsets + input_columns_x;
-            let x_ptrs = input_base.offset_tile(x_offsets);
-            let input_column_mask_x: Tile<bool, { [16, BK] }> = input_column_mask
-                .reshape(const_shape![1, BK])
+            let input_row_offsets = muli(
+                input_rows,
+                broadcast_scalar(input_features, const_shape![16]),
+                overflow::NoSignedWrap,
+            );
+            let input_row_offsets: Tile<i32, { [16, BK] }> = input_row_offsets
+                .reshape(const_shape![16, 1])
                 .broadcast(const_shape![16, BK]);
-            let x_mask = route_mask_2d & input_column_mask_x;
-            let (x_loaded, _): (Tile<bf16, { [16, BK] }>, Token) = load_ptr_tko(
-                x_ptrs,
-                ordering::Weak,
-                None::<scope::TileBlock>,
-                Some(x_mask),
-                None,
-                None,
-                Latency::<0>,
-            );
-            let x_zero: Tile<bf16, { [16, BK] }> = constant(bf16::ZERO, const_shape![16, BK]);
-            let x_loaded = select(x_mask, x_loaded, x_zero);
-
-            let input_columns_a: Tile<i32, { [BK, 1] }> =
-                safe_input_columns.reshape(const_shape![BK, 1]);
-            let input_columns_a: Tile<i32, { [BK, BR] }> =
-                input_columns_a.broadcast(const_shape![BK, BR]);
-            let a_offsets = input_columns_a
-                + safe_rank_a
-                + broadcast_scalar(expert_a_offset, const_shape![BK, BR]);
-            let a_ptrs = a_base.offset_tile(a_offsets);
-            let input_column_mask_a: Tile<bool, { [BK, BR] }> = input_column_mask
-                .reshape(const_shape![BK, 1])
-                .broadcast(const_shape![BK, BR]);
-            let a_mask = input_column_mask_a & rank_mask_a;
-            let (a_loaded, _): (Tile<bf16, { [BK, BR] }>, Token) = load_ptr_tko(
-                a_ptrs,
-                ordering::Weak,
-                None::<scope::TileBlock>,
-                Some(a_mask),
-                None,
-                None,
-                Latency::<0>,
-            );
-            let a_zero: Tile<bf16, { [BK, BR] }> = constant(bf16::ZERO, const_shape![BK, BR]);
-            let a_loaded = select(a_mask, a_loaded, a_zero);
-            hidden = mmaf(x_loaded, a_loaded, hidden);
-        }
-        let hidden: Tile<bf16, { [16, BR] }> = convert_tile(hidden);
-
-        let tile_begin = output_tiles * n_group / N_GROUPS;
-        let tile_end = output_tiles * (n_group + 1) / N_GROUPS;
-
-        let mut route_scale: Tile<f32, { [16] }> =
-            broadcast_scalar(adapter_scale, const_shape![16]);
-        if HAS_ROUTE_SCALES != 0 {
-            let base_0: PointerTile<*mut f32, { [] }> = pointer_to_tile(route_output_scales_ptr);
-            let base_1: PointerTile<*mut f32, { [1] }> = base_0.reshape(const_shape![1]);
-            let base: PointerTile<*mut f32, { [16] }> = base_1.broadcast(const_shape![16]);
-            let pointers = base.offset_tile(safe_routes);
-            let (scales, _): (Tile<f32, { [16] }>, Token) = load_ptr_tko(
-                pointers,
-                ordering::Weak,
-                None::<scope::TileBlock>,
-                Some(route_mask),
-                Some(0.0f32),
-                None,
-                Latency::<0>,
-            );
-            route_scale = route_scale * scales;
-        }
-        let route_scale: Tile<f32, { [16, BN] }> = route_scale
-            .reshape(const_shape![16, 1])
-            .broadcast(const_shape![16, BN]);
-        let output_row_offsets = muli(
-            output_rows,
-            broadcast_scalar(output_row_stride, const_shape![16]),
-            overflow::NoSignedWrap,
-        );
-        let output_row_offsets: Tile<i32, { [16, BN] }> = output_row_offsets
-            .reshape(const_shape![16, 1])
-            .broadcast(const_shape![16, BN]);
-        let output_base_0: PointerTile<*mut bf16, { [] }> = pointer_to_tile(output_ptr);
-        let output_base_1: PointerTile<*mut bf16, { [1, 1] }> =
-            output_base_0.reshape(const_shape![1, 1]);
-        let output_base: PointerTile<*mut bf16, { [16, BN] }> =
-            output_base_1.broadcast(const_shape![16, BN]);
-        let b_base_0: PointerTile<*mut bf16, { [] }> = pointer_to_tile(b_ptr);
-        let b_base_1: PointerTile<*mut bf16, { [1, 1] }> = b_base_0.reshape(const_shape![1, 1]);
-        let b_base: PointerTile<*mut bf16, { [BR, BN] }> = b_base_1.broadcast(const_shape![BR, BN]);
-        let expert_b_offset = expert * output_features * rank_stride;
-        let rank_mask_b: Tile<bool, { [BR, BN] }> = rank_mask
-            .reshape(const_shape![BR, 1])
-            .broadcast(const_shape![BR, BN]);
-        let safe_rank_b: Tile<i32, { [BR, BN] }> = safe_rank
-            .reshape(const_shape![BR, 1])
-            .broadcast(const_shape![BR, BN]);
-        let output_lane: Tile<i32, { [BN] }> = iota(const_shape![BN]);
-        let route_mask_output: Tile<bool, { [16, BN] }> = route_mask
-            .reshape(const_shape![16, 1])
-            .broadcast(const_shape![16, BN]);
-
-        for output_tile in tile_begin..tile_end {
-            let output_columns = output_lane + broadcast_scalar(output_tile * BN, const_shape![BN]);
-            let output_column_mask = lt_tile(
-                output_columns,
-                broadcast_scalar(output_features, const_shape![BN]),
-            );
-            let safe_output_columns = select(
-                output_column_mask,
-                output_columns,
-                broadcast_scalar(0i32, const_shape![BN]),
-            );
-            let output_columns_b: Tile<i32, { [BR, BN] }> = muli(
-                safe_output_columns,
-                broadcast_scalar(rank_stride, const_shape![BN]),
+            let input_base_0: PointerTile<*mut bf16, { [] }> = pointer_to_tile(input_ptr);
+            let input_base_1: PointerTile<*mut bf16, { [1, 1] }> =
+                input_base_0.reshape(const_shape![1, 1]);
+            let input_base: PointerTile<*mut bf16, { [16, BK] }> =
+                input_base_1.broadcast(const_shape![16, BK]);
+            let a_base_0: PointerTile<*mut bf16, { [] }> = pointer_to_tile(a_ptr);
+            let a_base_1: PointerTile<*mut bf16, { [1, 1] }> = a_base_0.reshape(const_shape![1, 1]);
+            let a_base: PointerTile<*mut bf16, { [BK, BR] }> =
+                a_base_1.broadcast(const_shape![BK, BR]);
+            let expert_a_offset = expert * rank_stride * input_features;
+            let safe_rank_a: Tile<i32, { [1, BR] }> = muli(
+                safe_rank,
+                broadcast_scalar(input_features, const_shape![BR]),
                 overflow::NoSignedWrap,
             )
-            .reshape(const_shape![1, BN])
-            .broadcast(const_shape![BR, BN]);
-            let b_offsets = output_columns_b
-                + safe_rank_b
-                + broadcast_scalar(expert_b_offset, const_shape![BR, BN]);
-            let b_ptrs = b_base.offset_tile(b_offsets);
-            let output_column_mask_b: Tile<bool, { [BR, BN] }> = output_column_mask
+            .reshape(const_shape![1, BR]);
+            let safe_rank_a: Tile<i32, { [BK, BR] }> = safe_rank_a.broadcast(const_shape![BK, BR]);
+            let rank_mask_a: Tile<bool, { [BK, BR] }> = rank_mask
+                .reshape(const_shape![1, BR])
+                .broadcast(const_shape![BK, BR]);
+            let input_k_lane: Tile<i32, { [BK] }> = iota(const_shape![BK]);
+            let mut hidden: Tile<f32, { [16, BR] }> = constant(0.0f32, const_shape![16, BR]);
+
+            let input_tiles = 1 + (input_features - 1) / BK;
+            for input_tile in 0i32..input_tiles {
+                let input_columns =
+                    input_k_lane + broadcast_scalar(input_tile * BK, const_shape![BK]);
+                let input_column_mask = lt_tile(
+                    input_columns,
+                    broadcast_scalar(input_features, const_shape![BK]),
+                );
+                let safe_input_columns = select(
+                    input_column_mask,
+                    input_columns,
+                    broadcast_scalar(0i32, const_shape![BK]),
+                );
+                let input_columns_x: Tile<i32, { [16, BK] }> = safe_input_columns
+                    .reshape(const_shape![1, BK])
+                    .broadcast(const_shape![16, BK]);
+                let x_offsets = input_row_offsets + input_columns_x;
+                let x_ptrs = input_base.offset_tile(x_offsets);
+                let input_column_mask_x: Tile<bool, { [16, BK] }> = input_column_mask
+                    .reshape(const_shape![1, BK])
+                    .broadcast(const_shape![16, BK]);
+                let x_mask = route_mask_2d & input_column_mask_x;
+                let (x_loaded, _): (Tile<bf16, { [16, BK] }>, Token) = load_ptr_tko(
+                    x_ptrs,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    Some(x_mask),
+                    None,
+                    None,
+                    Latency::<0>,
+                );
+                let x_zero: Tile<bf16, { [16, BK] }> = constant(bf16::ZERO, const_shape![16, BK]);
+                let x_loaded = select(x_mask, x_loaded, x_zero);
+
+                let input_columns_a: Tile<i32, { [BK, 1] }> =
+                    safe_input_columns.reshape(const_shape![BK, 1]);
+                let input_columns_a: Tile<i32, { [BK, BR] }> =
+                    input_columns_a.broadcast(const_shape![BK, BR]);
+                let a_offsets = input_columns_a
+                    + safe_rank_a
+                    + broadcast_scalar(expert_a_offset, const_shape![BK, BR]);
+                let a_ptrs = a_base.offset_tile(a_offsets);
+                let input_column_mask_a: Tile<bool, { [BK, BR] }> = input_column_mask
+                    .reshape(const_shape![BK, 1])
+                    .broadcast(const_shape![BK, BR]);
+                let a_mask = input_column_mask_a & rank_mask_a;
+                let (a_loaded, _): (Tile<bf16, { [BK, BR] }>, Token) = load_ptr_tko(
+                    a_ptrs,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    Some(a_mask),
+                    None,
+                    None,
+                    Latency::<0>,
+                );
+                let a_zero: Tile<bf16, { [BK, BR] }> = constant(bf16::ZERO, const_shape![BK, BR]);
+                let a_loaded = select(a_mask, a_loaded, a_zero);
+                hidden = mmaf(x_loaded, a_loaded, hidden);
+            }
+            let hidden: Tile<bf16, { [16, BR] }> = convert_tile(hidden);
+
+            let tile_begin = output_tiles * n_group / N_GROUPS;
+            let tile_end = output_tiles * (n_group + 1) / N_GROUPS;
+
+            let mut route_scale: Tile<f32, { [16] }> =
+                broadcast_scalar(adapter_scale, const_shape![16]);
+            if HAS_ROUTE_SCALES != 0 {
+                let base_0: PointerTile<*mut f32, { [] }> =
+                    pointer_to_tile(route_output_scales_ptr);
+                let base_1: PointerTile<*mut f32, { [1] }> = base_0.reshape(const_shape![1]);
+                let base: PointerTile<*mut f32, { [16] }> = base_1.broadcast(const_shape![16]);
+                let pointers = base.offset_tile(safe_routes);
+                let (scales, _): (Tile<f32, { [16] }>, Token) = load_ptr_tko(
+                    pointers,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    Some(route_mask),
+                    Some(0.0f32),
+                    None,
+                    Latency::<0>,
+                );
+                route_scale = route_scale * scales;
+            }
+            let route_scale: Tile<f32, { [16, BN] }> = route_scale
+                .reshape(const_shape![16, 1])
+                .broadcast(const_shape![16, BN]);
+            let output_row_offsets = muli(
+                output_rows,
+                broadcast_scalar(output_row_stride, const_shape![16]),
+                overflow::NoSignedWrap,
+            );
+            let output_row_offsets: Tile<i32, { [16, BN] }> = output_row_offsets
+                .reshape(const_shape![16, 1])
+                .broadcast(const_shape![16, BN]);
+            let output_base_0: PointerTile<*mut bf16, { [] }> = pointer_to_tile(output_ptr);
+            let output_base_1: PointerTile<*mut bf16, { [1, 1] }> =
+                output_base_0.reshape(const_shape![1, 1]);
+            let output_base: PointerTile<*mut bf16, { [16, BN] }> =
+                output_base_1.broadcast(const_shape![16, BN]);
+            let b_base_0: PointerTile<*mut bf16, { [] }> = pointer_to_tile(b_ptr);
+            let b_base_1: PointerTile<*mut bf16, { [1, 1] }> = b_base_0.reshape(const_shape![1, 1]);
+            let b_base: PointerTile<*mut bf16, { [BR, BN] }> =
+                b_base_1.broadcast(const_shape![BR, BN]);
+            let expert_b_offset = expert * output_features * rank_stride;
+            let rank_mask_b: Tile<bool, { [BR, BN] }> = rank_mask
+                .reshape(const_shape![BR, 1])
+                .broadcast(const_shape![BR, BN]);
+            let safe_rank_b: Tile<i32, { [BR, BN] }> = safe_rank
+                .reshape(const_shape![BR, 1])
+                .broadcast(const_shape![BR, BN]);
+            let output_lane: Tile<i32, { [BN] }> = iota(const_shape![BN]);
+            let route_mask_output: Tile<bool, { [16, BN] }> = route_mask
+                .reshape(const_shape![16, 1])
+                .broadcast(const_shape![16, BN]);
+
+            for output_tile in tile_begin..tile_end {
+                let output_columns =
+                    output_lane + broadcast_scalar(output_tile * BN, const_shape![BN]);
+                let output_column_mask = lt_tile(
+                    output_columns,
+                    broadcast_scalar(output_features, const_shape![BN]),
+                );
+                let safe_output_columns = select(
+                    output_column_mask,
+                    output_columns,
+                    broadcast_scalar(0i32, const_shape![BN]),
+                );
+                let output_columns_b: Tile<i32, { [BR, BN] }> = muli(
+                    safe_output_columns,
+                    broadcast_scalar(rank_stride, const_shape![BN]),
+                    overflow::NoSignedWrap,
+                )
                 .reshape(const_shape![1, BN])
                 .broadcast(const_shape![BR, BN]);
-            let b_mask = rank_mask_b & output_column_mask_b;
-            let (b_loaded, _): (Tile<bf16, { [BR, BN] }>, Token) = load_ptr_tko(
-                b_ptrs,
-                ordering::Weak,
-                None::<scope::TileBlock>,
-                Some(b_mask),
-                None,
-                None,
-                Latency::<0>,
-            );
-            let b_zero: Tile<bf16, { [BR, BN] }> = constant(bf16::ZERO, const_shape![BR, BN]);
-            let b_loaded = select(b_mask, b_loaded, b_zero);
-            let mut delta: Tile<f32, { [16, BN] }> = constant(0.0f32, const_shape![16, BN]);
-            delta = mmaf(hidden, b_loaded, delta) * route_scale;
+                let b_offsets = output_columns_b
+                    + safe_rank_b
+                    + broadcast_scalar(expert_b_offset, const_shape![BR, BN]);
+                let b_ptrs = b_base.offset_tile(b_offsets);
+                let output_column_mask_b: Tile<bool, { [BR, BN] }> = output_column_mask
+                    .reshape(const_shape![1, BN])
+                    .broadcast(const_shape![BR, BN]);
+                let b_mask = rank_mask_b & output_column_mask_b;
+                let (b_loaded, _): (Tile<bf16, { [BR, BN] }>, Token) = load_ptr_tko(
+                    b_ptrs,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    Some(b_mask),
+                    None,
+                    None,
+                    Latency::<0>,
+                );
+                let b_zero: Tile<bf16, { [BR, BN] }> = constant(bf16::ZERO, const_shape![BR, BN]);
+                let b_loaded = select(b_mask, b_loaded, b_zero);
+                let mut delta: Tile<f32, { [16, BN] }> = constant(0.0f32, const_shape![16, BN]);
+                delta = mmaf(hidden, b_loaded, delta) * route_scale;
 
-            let output_columns_2d: Tile<i32, { [16, BN] }> = safe_output_columns
-                .reshape(const_shape![1, BN])
-                .broadcast(const_shape![16, BN]);
-            let slice_offset: Tile<i32, { [16, BN] }> =
-                broadcast_scalar(slice * output_slice_stride, const_shape![16, BN]);
-            let output_offsets = output_row_offsets + slice_offset + output_columns_2d;
-            let output_ptrs = output_base.offset_tile(output_offsets);
-            let output_column_mask_2d: Tile<bool, { [16, BN] }> = output_column_mask
-                .reshape(const_shape![1, BN])
-                .broadcast(const_shape![16, BN]);
-            let output_mask = route_mask_output & output_column_mask_2d;
-            let (previous, _): (Tile<bf16, { [16, BN] }>, Token) = load_ptr_tko(
-                output_ptrs,
-                ordering::Weak,
-                None::<scope::TileBlock>,
-                Some(output_mask),
-                None,
-                None,
-                Latency::<0>,
-            );
-            let previous_zero: Tile<bf16, { [16, BN] }> =
-                constant(bf16::ZERO, const_shape![16, BN]);
-            let previous = select(output_mask, previous, previous_zero);
-            let previous: Tile<f32, { [16, BN] }> = convert_tile(previous);
-            let result: Tile<bf16, { [16, BN] }> = convert_tile(previous + delta);
-            store_ptr_tko(
-                output_ptrs,
-                result,
-                ordering::Weak,
-                None::<scope::TileBlock>,
-                Some(output_mask),
-                None,
-                Latency::<0>,
-            );
+                let output_columns_2d: Tile<i32, { [16, BN] }> = safe_output_columns
+                    .reshape(const_shape![1, BN])
+                    .broadcast(const_shape![16, BN]);
+                let slice_offset: Tile<i32, { [16, BN] }> =
+                    broadcast_scalar(slice * output_slice_stride, const_shape![16, BN]);
+                let output_offsets = output_row_offsets + slice_offset + output_columns_2d;
+                let output_ptrs = output_base.offset_tile(output_offsets);
+                let output_column_mask_2d: Tile<bool, { [16, BN] }> = output_column_mask
+                    .reshape(const_shape![1, BN])
+                    .broadcast(const_shape![16, BN]);
+                let output_mask = route_mask_output & output_column_mask_2d;
+                let (previous, _): (Tile<bf16, { [16, BN] }>, Token) = load_ptr_tko(
+                    output_ptrs,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    Some(output_mask),
+                    None,
+                    None,
+                    Latency::<0>,
+                );
+                let previous_zero: Tile<bf16, { [16, BN] }> =
+                    constant(bf16::ZERO, const_shape![16, BN]);
+                let previous = select(output_mask, previous, previous_zero);
+                let previous: Tile<f32, { [16, BN] }> = convert_tile(previous);
+                let result: Tile<bf16, { [16, BN] }> = convert_tile(previous + delta);
+                store_ptr_tko(
+                    output_ptrs,
+                    result,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    Some(output_mask),
+                    None,
+                    Latency::<0>,
+                );
+            }
         }
     }
 }
@@ -1125,56 +1136,58 @@ unsafe fn launch_config(
     launch: CutileRoutedLoraLaunch,
     config: CutileRoutedLoraConfig,
 ) -> Result<()> {
-    let grid_x = addresses
-        .program_blocks(layout)
-        .checked_mul(config.n_axis_groups as usize)
-        .filter(|value| *value <= i32::MAX as usize)
-        .and_then(|value| u32::try_from(value).ok())
-        .ok_or_else(|| candle_core::Error::msg("cuTile routed LoRA launch grid overflow"))?;
-    let grid_y = u32::try_from(launch.projection.num_slices())
-        .map_err(|_| candle_core::Error::msg("cuTile routed LoRA slice grid overflow"))?;
-    let generics = vec![
-        rank_block(launch.projection.max_rank()).to_string(),
-        config.block_k.to_string(),
-        config.block_n.to_string(),
-        config.n_axis_groups.to_string(),
-        i32::from(launch.route_input_rows != 0).to_string(),
-        i32::from(launch.route_output_rows != 0).to_string(),
-        i32::from(launch.route_output_scales != 0).to_string(),
-        (launch.projection.input_mode() as i32).to_string(),
-        i32::from(addresses.naive_assignment).to_string(),
-        i32::from(addresses.token_adapter_slots != 0).to_string(),
-    ];
-    let cutile_stream = context::stream(dev);
-    let launcher = routed_lora_kernel::routed_lora_one_shot(
-        DevicePointer::<bf16>::from_cu_deviceptr(launch.input as CUdeviceptr),
-        DevicePointer::<bf16>::from_cu_deviceptr(launch.output as CUdeviceptr),
-        DevicePointer::<u8>::from_cu_deviceptr(addresses.descriptors as CUdeviceptr),
-        DevicePointer::<i32>::from_cu_deviceptr(addresses.sorted_routes as CUdeviceptr),
-        DevicePointer::<i32>::from_cu_deviceptr(addresses.block_pairs as CUdeviceptr),
-        DevicePointer::<i32>::from_cu_deviceptr(addresses.token_adapter_slots as CUdeviceptr),
-        DevicePointer::<i32>::from_cu_deviceptr(addresses.topk_expert_ids as CUdeviceptr),
-        DevicePointer::<i32>::from_cu_deviceptr(launch.route_input_rows as CUdeviceptr),
-        DevicePointer::<i32>::from_cu_deviceptr(launch.route_output_rows as CUdeviceptr),
-        DevicePointer::<f32>::from_cu_deviceptr(launch.route_output_scales as CUdeviceptr),
-        layout.num_routes() as i32,
-        layout.top_k() as i32,
-        layout.num_experts() as i32,
-        layout.num_adapter_slots() as i32,
-        launch.projection.input_features() as i32,
-        launch.projection.output_features() as i32,
-        launch.projection.output_row_stride() as i32,
-        launch.projection.output_slice_stride() as i32,
-    )
-    .generics(generics)
-    .grid((grid_x, grid_y, 1))
-    .compile_options(compile_options(config.optimization_hint));
-    catch_cutile_panic("routed LoRA kernel execute", || unsafe {
-        launcher
-            .async_on(&cutile_stream)
-            .map_err(|error| driver_error("launch", error))
-    })?;
-    Ok(())
+    unsafe {
+        let grid_x = addresses
+            .program_blocks(layout)
+            .checked_mul(config.n_axis_groups as usize)
+            .filter(|value| *value <= i32::MAX as usize)
+            .and_then(|value| u32::try_from(value).ok())
+            .ok_or_else(|| candle_core::Error::msg("cuTile routed LoRA launch grid overflow"))?;
+        let grid_y = u32::try_from(launch.projection.num_slices())
+            .map_err(|_| candle_core::Error::msg("cuTile routed LoRA slice grid overflow"))?;
+        let generics = vec![
+            rank_block(launch.projection.max_rank()).to_string(),
+            config.block_k.to_string(),
+            config.block_n.to_string(),
+            config.n_axis_groups.to_string(),
+            i32::from(launch.route_input_rows != 0).to_string(),
+            i32::from(launch.route_output_rows != 0).to_string(),
+            i32::from(launch.route_output_scales != 0).to_string(),
+            (launch.projection.input_mode() as i32).to_string(),
+            i32::from(addresses.naive_assignment).to_string(),
+            i32::from(addresses.token_adapter_slots != 0).to_string(),
+        ];
+        let cutile_stream = context::stream(dev);
+        let launcher = routed_lora_kernel::routed_lora_one_shot(
+            DevicePointer::<bf16>::from_cu_deviceptr(launch.input as CUdeviceptr),
+            DevicePointer::<bf16>::from_cu_deviceptr(launch.output as CUdeviceptr),
+            DevicePointer::<u8>::from_cu_deviceptr(addresses.descriptors as CUdeviceptr),
+            DevicePointer::<i32>::from_cu_deviceptr(addresses.sorted_routes as CUdeviceptr),
+            DevicePointer::<i32>::from_cu_deviceptr(addresses.block_pairs as CUdeviceptr),
+            DevicePointer::<i32>::from_cu_deviceptr(addresses.token_adapter_slots as CUdeviceptr),
+            DevicePointer::<i32>::from_cu_deviceptr(addresses.topk_expert_ids as CUdeviceptr),
+            DevicePointer::<i32>::from_cu_deviceptr(launch.route_input_rows as CUdeviceptr),
+            DevicePointer::<i32>::from_cu_deviceptr(launch.route_output_rows as CUdeviceptr),
+            DevicePointer::<f32>::from_cu_deviceptr(launch.route_output_scales as CUdeviceptr),
+            layout.num_routes() as i32,
+            layout.top_k() as i32,
+            layout.num_experts() as i32,
+            layout.num_adapter_slots() as i32,
+            launch.projection.input_features() as i32,
+            launch.projection.output_features() as i32,
+            launch.projection.output_row_stride() as i32,
+            launch.projection.output_slice_stride() as i32,
+        )
+        .generics(generics)
+        .grid((grid_x, grid_y, 1))
+        .compile_options(compile_options(config.optimization_hint));
+        catch_cutile_panic("routed LoRA kernel execute", || {
+            launcher
+                .async_on(&cutile_stream)
+                .map_err(|error| driver_error("launch", error))
+        })?;
+        Ok(())
+    }
 }
 
 fn tuning_output_elements(
@@ -1214,36 +1227,38 @@ unsafe fn prepare_config_on_thread(
     launch: CutileRoutedLoraLaunch,
     config: CutileRoutedLoraConfig,
 ) -> CutileAutotuneResult<()> {
-    let prepared_key = prepared_key(key, addresses, launch);
-    if prepared_config(prepared_key, config) {
-        return Ok(());
+    unsafe {
+        let prepared_key = prepared_key(key, addresses, launch);
+        if prepared_config(prepared_key, config) {
+            return Ok(());
+        }
+        let mut state = CutileAutotuneState::FallbackSafe;
+        let stream = dev.cuda_stream();
+        let (mut scratch, scratch_offset) =
+            tuning_scratch(dev, layout, launch).map_err(|error| state.failure(error))?;
+        stream
+            .memset_zeros(&mut scratch)
+            .map_err(|error| state.failure(driver_error("scratch reset", error)))?;
+        let (scratch_address, scratch_guard) =
+            slice_ptr_mut_on_stream(&mut scratch, scratch_offset, &stream);
+        let scratch_launch = CutileRoutedLoraLaunch {
+            output: scratch_address,
+            ..launch
+        };
+        launch_config(dev, layout, addresses, scratch_launch, config)
+            .map_err(|error| state.failure(error))?;
+        state.mark_scratch_launch();
+        drop(scratch_guard);
+        let completion = stream
+            .record_event(None)
+            .map_err(|error| state.failure(driver_error("JIT preparation event", error)))?;
+        completion.synchronize().map_err(|error| {
+            state.failure(driver_error("JIT preparation synchronization", error))
+        })?;
+        state.mark_synchronized();
+        mark_config_prepared(prepared_key, config);
+        Ok(())
     }
-    let mut state = CutileAutotuneState::FallbackSafe;
-    let stream = dev.cuda_stream();
-    let (mut scratch, scratch_offset) =
-        unsafe { tuning_scratch(dev, layout, launch) }.map_err(|error| state.failure(error))?;
-    stream
-        .memset_zeros(&mut scratch)
-        .map_err(|error| state.failure(driver_error("scratch reset", error)))?;
-    let (scratch_address, scratch_guard) =
-        slice_ptr_mut_on_stream(&mut scratch, scratch_offset, &stream);
-    let scratch_launch = CutileRoutedLoraLaunch {
-        output: scratch_address,
-        ..launch
-    };
-    launch_config(dev, layout, addresses, scratch_launch, config)
-        .map_err(|error| state.failure(error))?;
-    state.mark_scratch_launch();
-    drop(scratch_guard);
-    let completion = stream
-        .record_event(None)
-        .map_err(|error| state.failure(driver_error("JIT preparation event", error)))?;
-    completion
-        .synchronize()
-        .map_err(|error| state.failure(driver_error("JIT preparation synchronization", error)))?;
-    state.mark_synchronized();
-    mark_config_prepared(prepared_key, config);
-    Ok(())
 }
 
 /// The candidate tiles as a grid with the heuristic first, then the optimization hint as an axis.
@@ -1340,73 +1355,75 @@ unsafe fn autotune_config(
     addresses: KernelAddresses,
     launch: CutileRoutedLoraLaunch,
 ) -> CutileAutotuneResult<CutileRoutedLoraConfig> {
-    let cached = config_cache().lock().unwrap().get(&key).copied();
-    if let Some(config) = cached {
-        prepare_config_on_thread(dev, layout, key, addresses, launch, config)?;
-        return Ok(config);
-    }
-    let bucket_key = bucketed_tuning_key(key);
-    let _tuning_guard = tuning_locks()[tuning_lock_index(bucket_key)]
-        .lock()
-        .unwrap();
-    let cached = config_cache().lock().unwrap().get(&key).copied();
-    if let Some(config) = cached {
-        prepare_config_on_thread(dev, layout, key, addresses, launch, config)?;
-        return Ok(config);
-    }
-    if let Some(config) = cached_bucket_config(key) {
-        prepare_config_on_thread(dev, layout, key, addresses, launch, config)?;
-        config_cache().lock().unwrap().insert(key, config);
-        return Ok(config);
-    }
+    unsafe {
+        let cached = config_cache().lock().unwrap().get(&key).copied();
+        if let Some(config) = cached {
+            prepare_config_on_thread(dev, layout, key, addresses, launch, config)?;
+            return Ok(config);
+        }
+        let bucket_key = bucketed_tuning_key(key);
+        let _tuning_guard = tuning_locks()[tuning_lock_index(bucket_key)]
+            .lock()
+            .unwrap();
+        let cached = config_cache().lock().unwrap().get(&key).copied();
+        if let Some(config) = cached {
+            prepare_config_on_thread(dev, layout, key, addresses, launch, config)?;
+            return Ok(config);
+        }
+        if let Some(config) = cached_bucket_config(key) {
+            prepare_config_on_thread(dev, layout, key, addresses, launch, config)?;
+            config_cache().lock().unwrap().insert(key, config);
+            return Ok(config);
+        }
 
-    let stream = dev.cuda_stream();
-    let mut state = CutileAutotuneState::FallbackSafe;
-    let buckets = [Bucket {
-        upper: usize::MAX,
-        probe: key.shape.num_routes,
-    }];
-    let request = TuneRequest {
-        kernel: TUNE_KERNEL,
-        source_hash: routed_lora_kernel::_SOURCE_HASH,
-        shape: record_shape(bucket_key),
-        buckets: &buckets,
-        space: &|_| lora_space(key),
-    };
-    // candidates launch into scratch until the stream drains, so a failure in between is not yet safe
-    state.mark_scratch_launch();
-    let tuned = tune(dev, TuneMode::from_env(), &request, |_, candidate| {
-        let config = CutileRoutedLoraConfig::from_config(candidate)
-            .ok_or_else(|| candle_core::Error::msg("config outside the space"))?;
-        unsafe { prepare_candidate(dev, layout, addresses, launch, config) }
-    });
-    stream
-        .synchronize()
-        .map_err(|error| state.failure(driver_error("tuning synchronization", error)))?;
-    state.mark_synchronized();
-    let config = tuned
-        .first()
-        .and_then(|t| CutileRoutedLoraConfig::from_config(&t.config))
-        .ok_or_else(|| {
-            state.failure(candle_core::Error::msg(
-                "all cuTile routed LoRA autotune candidates failed",
-            ))
-        })?;
-    prepare_config_on_thread(dev, layout, key, addresses, launch, config)?;
-    let mut cache = config_cache().lock().unwrap();
-    if let Some(existing) = cache.get(&key).copied() {
+        let stream = dev.cuda_stream();
+        let mut state = CutileAutotuneState::FallbackSafe;
+        let buckets = [Bucket {
+            upper: usize::MAX,
+            probe: key.shape.num_routes,
+        }];
+        let request = TuneRequest {
+            kernel: TUNE_KERNEL,
+            source_hash: routed_lora_kernel::_SOURCE_HASH,
+            shape: record_shape(bucket_key),
+            buckets: &buckets,
+            space: &|_| lora_space(key),
+        };
+        // candidates launch into scratch until the stream drains, so a failure in between is not yet safe
+        state.mark_scratch_launch();
+        let tuned = tune(dev, TuneMode::from_env(), &request, |_, candidate| {
+            let config = CutileRoutedLoraConfig::from_config(candidate)
+                .ok_or_else(|| candle_core::Error::msg("config outside the space"))?;
+            prepare_candidate(dev, layout, addresses, launch, config)
+        });
+        stream
+            .synchronize()
+            .map_err(|error| state.failure(driver_error("tuning synchronization", error)))?;
+        state.mark_synchronized();
+        let config = tuned
+            .first()
+            .and_then(|t| CutileRoutedLoraConfig::from_config(&t.config))
+            .ok_or_else(|| {
+                state.failure(candle_core::Error::msg(
+                    "all cuTile routed LoRA autotune candidates failed",
+                ))
+            })?;
+        prepare_config_on_thread(dev, layout, key, addresses, launch, config)?;
+        let mut cache = config_cache().lock().unwrap();
+        if let Some(existing) = cache.get(&key).copied() {
+            drop(cache);
+            prepare_config_on_thread(dev, layout, key, addresses, launch, existing)?;
+            return Ok(existing);
+        }
+        tracing::debug!(?config, "autotuned cuTile routed LoRA kernel");
+        cache.insert(key, config);
         drop(cache);
-        prepare_config_on_thread(dev, layout, key, addresses, launch, existing)?;
-        return Ok(existing);
+        bucket_config_cache()
+            .lock()
+            .unwrap()
+            .insert(bucket_key, config);
+        Ok(config)
     }
-    tracing::debug!(?config, "autotuned cuTile routed LoRA kernel");
-    cache.insert(key, config);
-    drop(cache);
-    bucket_config_cache()
-        .lock()
-        .unwrap()
-        .insert(bucket_key, config);
-    Ok(config)
 }
 
 fn mark_failed(
@@ -1539,37 +1556,39 @@ unsafe fn try_cutile_routed_lora_with_addresses(
     max_rank_stride: usize,
     addresses: KernelAddresses,
 ) -> Result<CutileRoutedLoraStatus> {
-    let key = tuning_key(dev, layout, launch, max_rank_stride, addresses);
-    if let Some(failure) = failed_keys().lock().unwrap().get(&key).copied() {
-        return cached_failure_result(failure);
-    }
-    let config = match autotune_config(dev, layout, key, addresses, launch) {
-        Ok(config) => config,
-        Err(failure) => {
+    unsafe {
+        let key = tuning_key(dev, layout, launch, max_rank_stride, addresses);
+        if let Some(failure) = failed_keys().lock().unwrap().get(&key).copied() {
+            return cached_failure_result(failure);
+        }
+        let config = match autotune_config(dev, layout, key, addresses, launch) {
+            Ok(config) => config,
+            Err(failure) => {
+                let cached = mark_failed(
+                    key,
+                    CutileRoutedLoraUnsupported::AutotuneFailed,
+                    "autotune",
+                    &failure.error,
+                    failure.boundary,
+                );
+                return failure_result(cached.boundary, cached.reason, failure.error);
+            }
+        };
+        if let Some(failure) = failed_keys().lock().unwrap().get(&key).copied() {
+            return cached_failure_result(failure);
+        }
+        if let Err(error) = launch_config(dev, layout, addresses, launch, config) {
             let cached = mark_failed(
                 key,
-                CutileRoutedLoraUnsupported::AutotuneFailed,
-                "autotune",
-                &failure.error,
-                failure.boundary,
+                CutileRoutedLoraUnsupported::LaunchFailed,
+                "launch",
+                &error,
+                CutileFailureBoundary::OutputLaunchAttempted,
             );
-            return failure_result(cached.boundary, cached.reason, failure.error);
+            return failure_result(cached.boundary, cached.reason, error);
         }
-    };
-    if let Some(failure) = failed_keys().lock().unwrap().get(&key).copied() {
-        return cached_failure_result(failure);
+        Ok(CutileRoutedLoraStatus::Launched)
     }
-    if let Err(error) = launch_config(dev, layout, addresses, launch, config) {
-        let cached = mark_failed(
-            key,
-            CutileRoutedLoraUnsupported::LaunchFailed,
-            "launch",
-            &error,
-            CutileFailureBoundary::OutputLaunchAttempted,
-        );
-        return failure_result(cached.boundary, cached.reason, error);
-    }
-    Ok(CutileRoutedLoraStatus::Launched)
 }
 
 /// Tries the one-shot cuTile path. Unsupported shapes leave CUDA dispatch to the caller.
@@ -1589,41 +1608,45 @@ pub unsafe fn try_cutile_routed_lora(
     weights: &RoutedLoraCudaWeightTable,
     launch: CutileRoutedLoraLaunch,
 ) -> Result<CutileRoutedLoraStatus> {
-    let layout = metadata.layout();
-    let max_rank_stride = validate_launch_shape(layout, weights, launch)?;
-    if let Some(reason) = unsupported(dev, layout, launch, max_rank_stride) {
-        return Ok(CutileRoutedLoraStatus::Unsupported(reason));
-    }
+    unsafe {
+        let layout = metadata.layout();
+        let max_rank_stride = validate_launch_shape(layout, weights, launch)?;
+        if let Some(reason) = unsupported(dev, layout, launch, max_rank_stride) {
+            return Ok(CutileRoutedLoraStatus::Unsupported(reason));
+        }
 
-    let ordinal = dev.cuda_stream().context().ordinal();
-    if weights.descriptors().ordinal() != ordinal
-        || metadata.sorted_route_ids().ordinal() != ordinal
-        || metadata.block_pair_ids().ordinal() != ordinal
-    {
-        candle_core::bail!("cuTile routed LoRA metadata is on a different CUDA device");
+        let ordinal = dev.cuda_stream().context().ordinal();
+        if weights.descriptors().ordinal() != ordinal
+            || metadata.sorted_route_ids().ordinal() != ordinal
+            || metadata.block_pair_ids().ordinal() != ordinal
+        {
+            candle_core::bail!("cuTile routed LoRA metadata is on a different CUDA device");
+        }
+        let stream = dev.cuda_stream();
+        let descriptor_offset = launch
+            .weight_slice_offset
+            .checked_mul(layout.num_adapter_slots())
+            .ok_or_else(|| {
+                candle_core::Error::msg("cuTile routed LoRA descriptor offset overflow")
+            })?;
+        let (descriptor_address, descriptor_guard) =
+            slice_ptr_on_stream(weights.descriptors(), descriptor_offset, &stream);
+        let (sorted_address, sorted_guard) =
+            slice_ptr_on_stream(metadata.sorted_route_ids(), 0, &stream);
+        let (pair_address, pair_guard) = slice_ptr_on_stream(metadata.block_pair_ids(), 0, &stream);
+        let addresses = KernelAddresses {
+            descriptors: descriptor_address,
+            sorted_routes: sorted_address,
+            block_pairs: pair_address,
+            token_adapter_slots: 0,
+            topk_expert_ids: 0,
+            naive_assignment: false,
+        };
+        let status =
+            try_cutile_routed_lora_with_addresses(dev, layout, launch, max_rank_stride, addresses)?;
+        drop((descriptor_guard, sorted_guard, pair_guard));
+        Ok(status)
     }
-    let stream = dev.cuda_stream();
-    let descriptor_offset = launch
-        .weight_slice_offset
-        .checked_mul(layout.num_adapter_slots())
-        .ok_or_else(|| candle_core::Error::msg("cuTile routed LoRA descriptor offset overflow"))?;
-    let (descriptor_address, descriptor_guard) =
-        slice_ptr_on_stream(weights.descriptors(), descriptor_offset, &stream);
-    let (sorted_address, sorted_guard) =
-        slice_ptr_on_stream(metadata.sorted_route_ids(), 0, &stream);
-    let (pair_address, pair_guard) = slice_ptr_on_stream(metadata.block_pair_ids(), 0, &stream);
-    let addresses = KernelAddresses {
-        descriptors: descriptor_address,
-        sorted_routes: sorted_address,
-        block_pairs: pair_address,
-        token_adapter_slots: 0,
-        topk_expert_ids: 0,
-        naive_assignment: false,
-    };
-    let status =
-        try_cutile_routed_lora_with_addresses(dev, layout, launch, max_rank_stride, addresses)?;
-    drop((descriptor_guard, sorted_guard, pair_guard));
-    Ok(status)
 }
 
 /// Tries the no-sort one-shot cuTile path using route-major token and expert mappings.
@@ -1643,60 +1666,64 @@ pub unsafe fn try_cutile_routed_lora_no_sort(
     weights: &RoutedLoraCudaWeightTable,
     launch: CutileRoutedLoraLaunch,
 ) -> Result<CutileRoutedLoraStatus> {
-    let max_rank_stride = validate_launch_shape(layout, weights, launch)?;
-    if let Some(reason) = unsupported(dev, layout, launch, max_rank_stride) {
-        return Ok(CutileRoutedLoraStatus::Unsupported(reason));
-    }
-    if token_adapter_slots.is_none() && layout.num_adapter_slots() != 1 {
-        candle_core::bail!(
-            "null cuTile routed LoRA token slots require one adapter descriptor slot"
-        );
-    }
-    if token_adapter_slots.is_some_and(|slots| slots.len() < layout.num_tokens()) {
-        candle_core::bail!("cuTile routed LoRA token slot buffer is too small");
-    }
-    if topk_expert_ids_offset
-        .checked_add(layout.num_routes())
-        .is_none_or(|end| end > topk_expert_ids.len())
-    {
-        candle_core::bail!("cuTile routed LoRA expert ID buffer is too small");
-    }
-
-    let ordinal = dev.cuda_stream().context().ordinal();
-    if weights.descriptors().ordinal() != ordinal
-        || token_adapter_slots.is_some_and(|slots| slots.ordinal() != ordinal)
-        || topk_expert_ids.ordinal() != ordinal
-    {
-        candle_core::bail!("cuTile routed LoRA no-sort inputs are on a different CUDA device");
-    }
-    let stream = dev.cuda_stream();
-    let descriptor_offset = launch
-        .weight_slice_offset
-        .checked_mul(layout.num_adapter_slots())
-        .ok_or_else(|| candle_core::Error::msg("cuTile routed LoRA descriptor offset overflow"))?;
-    let (descriptor_address, descriptor_guard) =
-        slice_ptr_on_stream(weights.descriptors(), descriptor_offset, &stream);
-    let (topk_address, topk_guard) =
-        slice_ptr_on_stream(topk_expert_ids, topk_expert_ids_offset, &stream);
-    let (token_slots_address, token_slots_guard) = match token_adapter_slots {
-        Some(slots) => {
-            let (address, guard) = slice_ptr_on_stream(slots, 0, &stream);
-            (address, Some(guard))
+    unsafe {
+        let max_rank_stride = validate_launch_shape(layout, weights, launch)?;
+        if let Some(reason) = unsupported(dev, layout, launch, max_rank_stride) {
+            return Ok(CutileRoutedLoraStatus::Unsupported(reason));
         }
-        None => (0, None),
-    };
-    let addresses = KernelAddresses {
-        descriptors: descriptor_address,
-        sorted_routes: 0,
-        block_pairs: 0,
-        token_adapter_slots: token_slots_address,
-        topk_expert_ids: topk_address,
-        naive_assignment: true,
-    };
-    let status =
-        try_cutile_routed_lora_with_addresses(dev, layout, launch, max_rank_stride, addresses)?;
-    drop((descriptor_guard, topk_guard, token_slots_guard));
-    Ok(status)
+        if token_adapter_slots.is_none() && layout.num_adapter_slots() != 1 {
+            candle_core::bail!(
+                "null cuTile routed LoRA token slots require one adapter descriptor slot"
+            );
+        }
+        if token_adapter_slots.is_some_and(|slots| slots.len() < layout.num_tokens()) {
+            candle_core::bail!("cuTile routed LoRA token slot buffer is too small");
+        }
+        if topk_expert_ids_offset
+            .checked_add(layout.num_routes())
+            .is_none_or(|end| end > topk_expert_ids.len())
+        {
+            candle_core::bail!("cuTile routed LoRA expert ID buffer is too small");
+        }
+
+        let ordinal = dev.cuda_stream().context().ordinal();
+        if weights.descriptors().ordinal() != ordinal
+            || token_adapter_slots.is_some_and(|slots| slots.ordinal() != ordinal)
+            || topk_expert_ids.ordinal() != ordinal
+        {
+            candle_core::bail!("cuTile routed LoRA no-sort inputs are on a different CUDA device");
+        }
+        let stream = dev.cuda_stream();
+        let descriptor_offset = launch
+            .weight_slice_offset
+            .checked_mul(layout.num_adapter_slots())
+            .ok_or_else(|| {
+                candle_core::Error::msg("cuTile routed LoRA descriptor offset overflow")
+            })?;
+        let (descriptor_address, descriptor_guard) =
+            slice_ptr_on_stream(weights.descriptors(), descriptor_offset, &stream);
+        let (topk_address, topk_guard) =
+            slice_ptr_on_stream(topk_expert_ids, topk_expert_ids_offset, &stream);
+        let (token_slots_address, token_slots_guard) = match token_adapter_slots {
+            Some(slots) => {
+                let (address, guard) = slice_ptr_on_stream(slots, 0, &stream);
+                (address, Some(guard))
+            }
+            None => (0, None),
+        };
+        let addresses = KernelAddresses {
+            descriptors: descriptor_address,
+            sorted_routes: 0,
+            block_pairs: 0,
+            token_adapter_slots: token_slots_address,
+            topk_expert_ids: topk_address,
+            naive_assignment: true,
+        };
+        let status =
+            try_cutile_routed_lora_with_addresses(dev, layout, launch, max_rank_stride, addresses)?;
+        drop((descriptor_guard, topk_guard, token_slots_guard));
+        Ok(status)
+    }
 }
 
 #[cfg(test)]
@@ -1905,9 +1932,11 @@ mod tests {
         assert!(candidates.iter().any(|config| {
             config.optimization_hint == CutileRoutedLoraOptimizationHint::HighOccupancy
         }));
-        assert!(candidates
-            .iter()
-            .all(|config| valid_config(tuning_key, *config)));
+        assert!(
+            candidates
+                .iter()
+                .all(|config| valid_config(tuning_key, *config))
+        );
     }
 
     #[test]
@@ -2172,16 +2201,18 @@ mod tests {
             RoutedLoraInputMode::RoutedRows,
         )?;
         assert!(addressing_supported(layout, boundary, 1));
-        assert!(RoutedLoraProjectionLayout::new(
-            i32::MAX as usize + 1,
-            1,
-            1,
-            0,
-            1,
-            1,
-            RoutedLoraInputMode::RoutedRows,
-        )
-        .is_err());
+        assert!(
+            RoutedLoraProjectionLayout::new(
+                i32::MAX as usize + 1,
+                1,
+                1,
+                0,
+                1,
+                1,
+                RoutedLoraInputMode::RoutedRows,
+            )
+            .is_err()
+        );
         Ok(())
     }
 

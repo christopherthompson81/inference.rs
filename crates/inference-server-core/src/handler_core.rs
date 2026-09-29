@@ -1,7 +1,7 @@
 //! Core functionality for handlers.
 
 use axum::{
-    extract::{rejection::JsonRejection, Json},
+    extract::{Json, rejection::JsonRejection},
     http::StatusCode,
     response::IntoResponse,
 };
@@ -10,7 +10,7 @@ pub(crate) use crate::api_error::{
     ApiError, ApiErrorKind, ModelErrorMessage, SERVICE_UNAVAILABLE_MESSAGE,
 };
 pub use crate::dispatch::{
-    create_response_channel, send_request, send_request_with_model, DEFAULT_CHANNEL_BUFFER_SIZE,
+    DEFAULT_CHANNEL_BUFFER_SIZE, create_response_channel, send_request, send_request_with_model,
 };
 
 // Rate-limited operations (a busy adapter load) clear within a request's time, so clients retry promptly.

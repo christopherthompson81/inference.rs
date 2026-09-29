@@ -1,7 +1,7 @@
 use crate::attention::FlashParams;
 use std::f64;
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{Embedding, LayerNorm, LayerNormConfig, Linear, Module};
 use inference_quant::{QuantizedConfig, ShardedVarBuilder};
 

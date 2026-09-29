@@ -7,12 +7,12 @@ use tokenizers::Tokenizer;
 
 use crate::paged_attention::PagedAttentionMeta;
 use crate::{
+    MessageContent, Pipeline,
     device_map::DeviceMapper,
     pipeline::{
         InputProcessorOutput, InputsProcessor, InputsProcessorType, MessagesAction, Processor,
     },
     sequence::Sequence,
-    MessageContent, Pipeline,
 };
 
 use super::DiffusionGenerationParams;

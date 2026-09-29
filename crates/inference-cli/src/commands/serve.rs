@@ -9,23 +9,23 @@ use std::path::Path;
 use tracing::{debug, info, warn};
 
 use inference_api::{
+    Engine, EngineSpec,
     engine::{
         AdapterSpec, AgenticSpec, MtpSpec, PagedCacheSpec, RuntimeSpec, SearchSpec, SkillsSpec,
     },
     lora_adapters::LoraAdapterApiConfig,
     skill_store::SkillStore,
-    Engine, EngineSpec,
 };
 use inference_core::{
-    initialize_logging, DiffusionLoaderType, McpClientConfig, ModelSelected, PagedCacheType,
-    SandboxMode, SpeechLoaderType,
+    DiffusionLoaderType, McpClientConfig, ModelSelected, PagedCacheType, SandboxMode,
+    SpeechLoaderType, initialize_logging,
 };
 use inference_server_core::{
-    inference_server_router_builder::{InferenceRsServerRouterBuilder, DEFAULT_MAX_BODY_LIMIT},
+    inference_server_router_builder::{DEFAULT_MAX_BODY_LIMIT, InferenceRsServerRouterBuilder},
     lora_adapters::runtime_lora_updates_enabled,
-    mcp_server::{create_mcp_router, MCP_PROTOCOL_VERSION, MCP_ROUTE},
-    metrics::{install_prometheus_recorder, observe_http, ObservabilityState},
-    route_registry::{RouteInfo, RouteKind, INFERENCE_RS_API_ROUTES, RUNTIME_LORA_API_ROUTES},
+    mcp_server::{MCP_PROTOCOL_VERSION, MCP_ROUTE, create_mcp_router},
+    metrics::{ObservabilityState, install_prometheus_recorder, observe_http},
+    route_registry::{INFERENCE_RS_API_ROUTES, RUNTIME_LORA_API_ROUTES, RouteInfo, RouteKind},
     types::SharedInferenceRsState,
 };
 
@@ -1173,17 +1173,15 @@ pub(crate) async fn apply_quant_resolution(
             .context("GGUF artifacts are not supported for this model type")?;
         if format.mmproj.is_none()
             && (is_confident_gguf_repo || is_explicit_multimodal || format.direct_file_only)
-        {
-            if let Some(projector) =
+            && let Some(projector) =
                 inference_core::selection::quant::resolve_gguf_projector(files, dtype)?
-            {
-                info!(
-                    "GGUF: selected {} projector `{}`",
-                    projector.label,
-                    projector.file_spec()
-                );
-                format.mmproj = Some(projector.file_spec());
-            }
+        {
+            info!(
+                "GGUF: selected {} projector `{}`",
+                projector.label,
+                projector.file_spec()
+            );
+            format.mmproj = Some(projector.file_spec());
         }
         return Ok(());
     }
@@ -1447,11 +1445,7 @@ fn code_execution_summary(runtime: &RuntimeOptions) -> &'static str {
 
 #[cfg(feature = "code-execution")]
 fn shell_summary(runtime: &RuntimeOptions) -> &'static str {
-    if runtime.enable_shell {
-        "on"
-    } else {
-        "off"
-    }
+    if runtime.enable_shell { "on" } else { "off" }
 }
 
 #[cfg(feature = "code-execution")]
@@ -2010,9 +2004,11 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("Could not inspect GGUF artifacts"));
+        assert!(
+            error
+                .to_string()
+                .contains("Could not inspect GGUF artifacts")
+        );
 
         fs::remove_dir_all(root).unwrap();
     }
@@ -2048,9 +2044,11 @@ mod tests {
         )
         .await
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("appears to be a GGUF artifact repo"));
+        assert!(
+            error
+                .to_string()
+                .contains("appears to be a GGUF artifact repo")
+        );
         let ModelType::Auto { format, .. } = model_type else {
             unreachable!()
         };

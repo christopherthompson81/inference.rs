@@ -1,7 +1,7 @@
 use anyhow::Result;
 use std::process::Command;
 
-use inference_core::{run_doctor as run_doctor_report, DoctorStatus};
+use inference_core::{DoctorStatus, run_doctor as run_doctor_report};
 
 pub fn run_doctor(json: bool) -> Result<()> {
     if json {

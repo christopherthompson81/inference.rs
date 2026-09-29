@@ -48,10 +48,10 @@ impl CublasLtController {
         }
         // Check if the device matches the initialized device
         let device_loc = self.device_location.lock().unwrap();
-        if let Some(init_loc) = *device_loc {
-            if device.location() != init_loc {
-                return None;
-            }
+        if let Some(init_loc) = *device_loc
+            && device.location() != init_loc
+        {
+            return None;
         }
         let handle_opt = self.handle.lock().unwrap();
         *handle_opt
@@ -74,7 +74,7 @@ mod matmul;
 mod tests;
 
 #[cfg(feature = "cuda")]
-pub use api::{fused_batch_matmul, fused_batch_matmul_f8, CublasLt};
+pub use api::{CublasLt, fused_batch_matmul, fused_batch_matmul_f8};
 
 pub fn maybe_init_cublas_lt_wrapper(device: Device) {
     #[cfg(feature = "cuda")]

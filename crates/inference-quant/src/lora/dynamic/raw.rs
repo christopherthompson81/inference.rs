@@ -4,7 +4,7 @@ use candle_core::{Result, Tensor};
 
 use crate::ShardedVarBuilder;
 
-use super::{add_delta, current_lora_execution, LoraLinearSpec, LoraSiteHandle, LoraSiteKey};
+use super::{LoraLinearSpec, LoraSiteHandle, LoraSiteKey, add_delta, current_lora_execution};
 
 pub fn register_dynamic_lora_site(
     vb: &ShardedVarBuilder,
@@ -46,7 +46,7 @@ pub fn is_dynamic_lora_site_active(site: &LoraSiteHandle) -> bool {
 mod tests {
     use super::*;
     use crate::{
-        with_lora_execution, LoraExecution, LoraLayerRegistry, LoraLinearSpec, LoraWeights,
+        LoraExecution, LoraLayerRegistry, LoraLinearSpec, LoraWeights, with_lora_execution,
     };
     use candle_core::{DType, Device};
 

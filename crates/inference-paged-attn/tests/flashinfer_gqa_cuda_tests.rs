@@ -2,7 +2,7 @@
 
 use candle_core::{DType, Device, Result, Storage, Tensor};
 use inference_paged_attn::{
-    flashinfer_decode, FlashInferDecodeScratch, KvCacheScales, DEFAULT_FP8_KV_CACHE_SCALES, USE_FP8,
+    DEFAULT_FP8_KV_CACHE_SCALES, FlashInferDecodeScratch, KvCacheScales, USE_FP8, flashinfer_decode,
 };
 use std::sync::Mutex;
 
@@ -55,7 +55,7 @@ fn values(tensor: &Tensor) -> Result<Vec<f32>> {
 }
 
 fn copy_i32_metadata(source: &Tensor, destination: &Tensor) -> Result<()> {
-    use candle_core::cuda::cudarc::driver::{result, DevicePtr};
+    use candle_core::cuda::cudarc::driver::{DevicePtr, result};
 
     let (source_storage, source_layout) = source.storage_and_layout();
     let (destination_storage, destination_layout) = destination.storage_and_layout();

@@ -2,7 +2,7 @@
 
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::LayerNorm;
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
@@ -23,8 +23,8 @@ use crate::{
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::masker::masked_fill,
     layers::{
-        self, embedding, layer_norm, Activation, CausalMasker, PhiRopeConfig, PhiRopeScalingConfig,
-        PhiRotaryEmbedding,
+        self, Activation, CausalMasker, PhiRopeConfig, PhiRopeScalingConfig, PhiRotaryEmbedding,
+        embedding, layer_norm,
     },
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
@@ -443,7 +443,7 @@ impl Model {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),

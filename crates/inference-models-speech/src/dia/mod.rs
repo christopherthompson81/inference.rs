@@ -4,13 +4,13 @@ use std::{sync::Arc, time::Instant};
 
 use audio::{apply_audio_delay, build_delay_indices, build_revert_indices, revert_audio_delay};
 use cache::DiaKvCache;
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::VarBuilder;
 use inference_quant::{BitWiseOp, ShardedVarBuilder};
 use model::DiaModel;
 use rand::{
-    distr::{weighted::WeightedIndex, Distribution},
     SeedableRng,
+    distr::{Distribution, weighted::WeightedIndex},
 };
 use rand_isaac::Isaac64Rng;
 
@@ -19,7 +19,7 @@ use tracing::info;
 
 use crate::ops::apply_triangular;
 
-use super::{utils::normalize_loudness, SpeechGenerationConfig, SpeechGenerationOutput};
+use super::{SpeechGenerationConfig, SpeechGenerationOutput, utils::normalize_loudness};
 
 /// Aggregated outputs for generation preparation.
 pub struct PrepareGenerationOutput {

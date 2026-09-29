@@ -1,7 +1,7 @@
 use crate::attention::FlashParams;
 use std::sync::Arc;
 
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::{Embedding, LayerNorm, LayerNormConfig, Linear};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
@@ -740,7 +740,7 @@ impl VisionModel {
 mod tests {
     use std::{io::Write, sync::Arc};
 
-    use candle_core::quantized::{gguf_file, GgmlDType, QTensor};
+    use candle_core::quantized::{GgmlDType, QTensor, gguf_file};
     use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding, GgufWeightSource};
     use tempfile::NamedTempFile;
 
@@ -834,9 +834,11 @@ mod tests {
         assert!((corner_weight - 25.0 / 36.0).abs() < 1e-6);
         let center = 4 * 4;
         assert_eq!(&indices[center..center + 4], &[0, 1, 2, 3]);
-        assert!(weights[center..center + 4]
-            .iter()
-            .all(|weight| (*weight - 0.25).abs() < 1e-6));
+        assert!(
+            weights[center..center + 4]
+                .iter()
+                .all(|weight| (*weight - 0.25).abs() < 1e-6)
+        );
     }
 
     #[test]

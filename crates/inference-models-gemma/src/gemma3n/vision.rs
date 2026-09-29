@@ -5,7 +5,7 @@ use tracing::warn;
 
 use crate::{
     attention::SdpaParams,
-    layers::{conv2d, conv2d_no_bias, Sdpa},
+    layers::{Sdpa, conv2d, conv2d_no_bias},
     utils::unvarbuilder::UnVarBuilder,
 };
 

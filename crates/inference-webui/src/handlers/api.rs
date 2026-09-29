@@ -1,8 +1,8 @@
 use axum::{
+    Json,
     extract::{Extension, Multipart},
     http::StatusCode,
     response::IntoResponse,
-    Json,
 };
 use chrono::Utc;
 use serde::Deserialize;
@@ -94,20 +94,19 @@ fn validate_text_upload(
     filename: Option<&str>,
     content_type: Option<&str>,
 ) -> Result<String, &'static str> {
-    if let Some(mime) = content_type {
-        if !mime.starts_with("text/")
-            && mime != "application/json"
-            && mime != "application/javascript"
-            && !matches!(
-                mime,
-                "application/octet-stream"
-                    | "application/x-python"
-                    | "application/x-rust"
-                    | "application/x-sh"
-            )
-        {
-            return Err("File must be a text file");
-        }
+    if let Some(mime) = content_type
+        && !mime.starts_with("text/")
+        && mime != "application/json"
+        && mime != "application/javascript"
+        && !matches!(
+            mime,
+            "application/octet-stream"
+                | "application/x-python"
+                | "application/x-rust"
+                | "application/x-sh"
+        )
+    {
+        return Err("File must be a text file");
     }
 
     let ext = if let Some(name) = filename {
@@ -159,51 +158,54 @@ pub async fn upload_audio(
     Extension(_app): Extension<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    if let Ok(Some(field)) = multipart.next_field().await {
-        let orig_filename = field.file_name().map(|s| s.to_string());
-        let content_type_opt = field.content_type().map(|s| s.to_string());
+    match multipart.next_field().await {
+        Ok(Some(field)) => {
+            let orig_filename = field.file_name().map(|s| s.to_string());
+            let content_type_opt = field.content_type().map(|s| s.to_string());
 
-        let ext = match validate_audio_upload(orig_filename.as_deref(), content_type_opt.as_deref())
-        {
-            Ok(ext) => ext,
-            Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
-        };
+            let ext = match validate_audio_upload(
+                orig_filename.as_deref(),
+                content_type_opt.as_deref(),
+            ) {
+                Ok(ext) => ext,
+                Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+            };
 
-        let data = match field.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                error!("multipart bytes error: {}", e);
-                let msg = if e.to_string().contains("exceeded") {
-                    "audio too large (limit 50 MB)"
-                } else {
-                    "failed to read upload"
-                };
-                return (StatusCode::BAD_REQUEST, msg).into_response();
+            let data = match field.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    error!("multipart bytes error: {}", e);
+                    let msg = if e.to_string().contains("exceeded") {
+                        "audio too large (limit 50 MB)"
+                    } else {
+                        "failed to read upload"
+                    };
+                    return (StatusCode::BAD_REQUEST, msg).into_response();
+                }
+            };
+
+            let uploads_dir = get_cache_dir().join("uploads");
+            if let Err(e) = tokio::fs::create_dir_all(&uploads_dir).await {
+                error!("create uploads dir error: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to create uploads directory",
+                )
+                    .into_response();
             }
-        };
 
-        let uploads_dir = get_cache_dir().join("uploads");
-        if let Err(e) = tokio::fs::create_dir_all(&uploads_dir).await {
-            error!("create uploads dir error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to create uploads directory",
-            )
-                .into_response();
+            let filename = format!("{}.{}", Uuid::new_v4(), ext);
+            let filepath = uploads_dir.join(&filename);
+            if let Err(e) = tokio::fs::write(&filepath, &data).await {
+                error!("write upload error: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "failed to save audio").into_response();
+            }
+
+            let path = filepath.to_string_lossy().to_string();
+            let url = format!("uploads/{filename}");
+            (StatusCode::OK, Json(json!({ "path": path, "url": url }))).into_response()
         }
-
-        let filename = format!("{}.{}", Uuid::new_v4(), ext);
-        let filepath = uploads_dir.join(&filename);
-        if let Err(e) = tokio::fs::write(&filepath, &data).await {
-            error!("write upload error: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "failed to save audio").into_response();
-        }
-
-        let path = filepath.to_string_lossy().to_string();
-        let url = format!("uploads/{filename}");
-        (StatusCode::OK, Json(json!({ "path": path, "url": url }))).into_response()
-    } else {
-        (StatusCode::BAD_REQUEST, "missing audio part").into_response()
+        _ => (StatusCode::BAD_REQUEST, "missing audio part").into_response(),
     }
 }
 
@@ -211,51 +213,54 @@ pub async fn upload_video(
     Extension(_app): Extension<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    if let Ok(Some(field)) = multipart.next_field().await {
-        let orig_filename = field.file_name().map(|s| s.to_string());
-        let content_type_opt = field.content_type().map(|s| s.to_string());
+    match multipart.next_field().await {
+        Ok(Some(field)) => {
+            let orig_filename = field.file_name().map(|s| s.to_string());
+            let content_type_opt = field.content_type().map(|s| s.to_string());
 
-        let ext = match validate_video_upload(orig_filename.as_deref(), content_type_opt.as_deref())
-        {
-            Ok(ext) => ext,
-            Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
-        };
+            let ext = match validate_video_upload(
+                orig_filename.as_deref(),
+                content_type_opt.as_deref(),
+            ) {
+                Ok(ext) => ext,
+                Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+            };
 
-        let data = match field.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                error!("multipart bytes error: {}", e);
-                let msg = if e.to_string().contains("exceeded") {
-                    "video too large (limit 50 MB)"
-                } else {
-                    "failed to read upload"
-                };
-                return (StatusCode::BAD_REQUEST, msg).into_response();
+            let data = match field.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    error!("multipart bytes error: {}", e);
+                    let msg = if e.to_string().contains("exceeded") {
+                        "video too large (limit 50 MB)"
+                    } else {
+                        "failed to read upload"
+                    };
+                    return (StatusCode::BAD_REQUEST, msg).into_response();
+                }
+            };
+
+            let uploads_dir = get_cache_dir().join("uploads");
+            if let Err(e) = tokio::fs::create_dir_all(&uploads_dir).await {
+                error!("create uploads dir error: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to create uploads directory",
+                )
+                    .into_response();
             }
-        };
 
-        let uploads_dir = get_cache_dir().join("uploads");
-        if let Err(e) = tokio::fs::create_dir_all(&uploads_dir).await {
-            error!("create uploads dir error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to create uploads directory",
-            )
-                .into_response();
+            let filename = format!("{}.{}", Uuid::new_v4(), ext);
+            let filepath = uploads_dir.join(&filename);
+            if let Err(e) = tokio::fs::write(&filepath, &data).await {
+                error!("write upload error: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "failed to save video").into_response();
+            }
+
+            let path = filepath.to_string_lossy().to_string();
+            let url = format!("uploads/{filename}");
+            (StatusCode::OK, Json(json!({ "path": path, "url": url }))).into_response()
         }
-
-        let filename = format!("{}.{}", Uuid::new_v4(), ext);
-        let filepath = uploads_dir.join(&filename);
-        if let Err(e) = tokio::fs::write(&filepath, &data).await {
-            error!("write upload error: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "failed to save video").into_response();
-        }
-
-        let path = filepath.to_string_lossy().to_string();
-        let url = format!("uploads/{filename}");
-        (StatusCode::OK, Json(json!({ "path": path, "url": url }))).into_response()
-    } else {
-        (StatusCode::BAD_REQUEST, "missing video part").into_response()
+        _ => (StatusCode::BAD_REQUEST, "missing video part").into_response(),
     }
 }
 
@@ -263,51 +268,54 @@ pub async fn upload_image(
     Extension(_app): Extension<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    if let Ok(Some(field)) = multipart.next_field().await {
-        let orig_filename = field.file_name().map(|s| s.to_string());
-        let content_type_opt = field.content_type().map(|s| s.to_string());
+    match multipart.next_field().await {
+        Ok(Some(field)) => {
+            let orig_filename = field.file_name().map(|s| s.to_string());
+            let content_type_opt = field.content_type().map(|s| s.to_string());
 
-        let ext = match validate_image_upload(orig_filename.as_deref(), content_type_opt.as_deref())
-        {
-            Ok(extension) => extension,
-            Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
-        };
+            let ext = match validate_image_upload(
+                orig_filename.as_deref(),
+                content_type_opt.as_deref(),
+            ) {
+                Ok(extension) => extension,
+                Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
+            };
 
-        let data = match field.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                error!("multipart bytes error: {}", e);
-                let msg = if e.to_string().contains("exceeded") {
-                    "image too large (limit 50 MB)"
-                } else {
-                    "failed to read upload"
-                };
-                return (StatusCode::BAD_REQUEST, msg).into_response();
+            let data = match field.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    error!("multipart bytes error: {}", e);
+                    let msg = if e.to_string().contains("exceeded") {
+                        "image too large (limit 50 MB)"
+                    } else {
+                        "failed to read upload"
+                    };
+                    return (StatusCode::BAD_REQUEST, msg).into_response();
+                }
+            };
+
+            let uploads_dir = get_cache_dir().join("uploads");
+            if let Err(e) = tokio::fs::create_dir_all(&uploads_dir).await {
+                error!("create uploads dir error: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to create uploads directory",
+                )
+                    .into_response();
             }
-        };
 
-        let uploads_dir = get_cache_dir().join("uploads");
-        if let Err(e) = tokio::fs::create_dir_all(&uploads_dir).await {
-            error!("create uploads dir error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to create uploads directory",
-            )
-                .into_response();
+            let filename = format!("{}.{}", Uuid::new_v4(), ext);
+            let filepath = uploads_dir.join(&filename);
+            if let Err(e) = tokio::fs::write(&filepath, &data).await {
+                error!("write upload error: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "failed to save image").into_response();
+            }
+
+            let path = filepath.to_string_lossy().to_string();
+            let url = format!("uploads/{filename}");
+            (StatusCode::OK, Json(json!({ "path": path, "url": url }))).into_response()
         }
-
-        let filename = format!("{}.{}", Uuid::new_v4(), ext);
-        let filepath = uploads_dir.join(&filename);
-        if let Err(e) = tokio::fs::write(&filepath, &data).await {
-            error!("write upload error: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "failed to save image").into_response();
-        }
-
-        let path = filepath.to_string_lossy().to_string();
-        let url = format!("uploads/{filename}");
-        (StatusCode::OK, Json(json!({ "path": path, "url": url }))).into_response()
-    } else {
-        (StatusCode::BAD_REQUEST, "missing image part").into_response()
+        _ => (StatusCode::BAD_REQUEST, "missing image part").into_response(),
     }
 }
 
@@ -315,55 +323,56 @@ pub async fn upload_text(
     Extension(_app): Extension<Arc<AppState>>,
     mut multipart: Multipart,
 ) -> impl IntoResponse {
-    if let Ok(Some(field)) = multipart.next_field().await {
-        let orig_filename = field.file_name().map(|s| s.to_string());
-        let content_type_opt = field.content_type().map(|s| s.to_string());
+    match multipart.next_field().await {
+        Ok(Some(field)) => {
+            let orig_filename = field.file_name().map(|s| s.to_string());
+            let content_type_opt = field.content_type().map(|s| s.to_string());
 
-        let ext = match validate_text_upload(orig_filename.as_deref(), content_type_opt.as_deref())
-        {
-            Ok(ext) => ext,
-            Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
-        };
-
-        let data = match field.bytes().await {
-            Ok(b) => b,
-            Err(e) => {
-                error!("multipart bytes error: {}", e);
-                let msg = if e.to_string().contains("exceeded") {
-                    "file too large (limit 50 MB)"
-                } else {
-                    "failed to read upload"
+            let ext =
+                match validate_text_upload(orig_filename.as_deref(), content_type_opt.as_deref()) {
+                    Ok(ext) => ext,
+                    Err(msg) => return (StatusCode::BAD_REQUEST, msg).into_response(),
                 };
-                return (StatusCode::BAD_REQUEST, msg).into_response();
+
+            let data = match field.bytes().await {
+                Ok(b) => b,
+                Err(e) => {
+                    error!("multipart bytes error: {}", e);
+                    let msg = if e.to_string().contains("exceeded") {
+                        "file too large (limit 50 MB)"
+                    } else {
+                        "failed to read upload"
+                    };
+                    return (StatusCode::BAD_REQUEST, msg).into_response();
+                }
+            };
+
+            let uploads_dir = get_cache_dir().join("uploads");
+            if let Err(e) = tokio::fs::create_dir_all(&uploads_dir).await {
+                error!("create uploads dir error: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to create uploads directory",
+                )
+                    .into_response();
             }
-        };
 
-        let uploads_dir = get_cache_dir().join("uploads");
-        if let Err(e) = tokio::fs::create_dir_all(&uploads_dir).await {
-            error!("create uploads dir error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to create uploads directory",
-            )
-                .into_response();
+            let filename = format!("{}.{}", Uuid::new_v4(), ext);
+            let filepath = uploads_dir.join(&filename);
+            if let Err(e) = tokio::fs::write(&filepath, &data).await {
+                error!("write upload error: {}", e);
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to save text file",
+                )
+                    .into_response();
+            }
+
+            let path = filepath.to_string_lossy().to_string();
+            let url = format!("uploads/{filename}");
+            (StatusCode::OK, Json(json!({ "path": path, "url": url }))).into_response()
         }
-
-        let filename = format!("{}.{}", Uuid::new_v4(), ext);
-        let filepath = uploads_dir.join(&filename);
-        if let Err(e) = tokio::fs::write(&filepath, &data).await {
-            error!("write upload error: {}", e);
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "failed to save text file",
-            )
-                .into_response();
-        }
-
-        let path = filepath.to_string_lossy().to_string();
-        let url = format!("uploads/{filename}");
-        (StatusCode::OK, Json(json!({ "path": path, "url": url }))).into_response()
-    } else {
-        (StatusCode::BAD_REQUEST, "missing text part").into_response()
+        _ => (StatusCode::BAD_REQUEST, "missing text part").into_response(),
     }
 }
 
@@ -399,12 +408,12 @@ pub async fn list_chats(Extension(app): Extension<Arc<AppState>>) -> impl IntoRe
                 .strip_suffix(".json")
                 .unwrap_or(&filename)
                 .to_string();
-            if let Ok(bytes) = fs::read(entry.path()).await {
-                if let Ok(chat) = serde_json::from_slice::<ChatFile>(&bytes) {
-                    let mut value = serde_json::to_value(&chat).unwrap();
-                    value["id"] = serde_json::Value::String(id);
-                    chats.push(value);
-                }
+            if let Ok(bytes) = fs::read(entry.path()).await
+                && let Ok(chat) = serde_json::from_slice::<ChatFile>(&bytes)
+            {
+                let mut value = serde_json::to_value(&chat).unwrap();
+                value["id"] = serde_json::Value::String(id);
+                chats.push(value);
             }
         }
     }
@@ -480,12 +489,12 @@ pub async fn load_chat(
     let Some(path) = app.chat_path(&req.id) else {
         return (StatusCode::BAD_REQUEST, INVALID_CHAT_ID).into_response();
     };
-    if let Ok(bytes) = fs::read(&path).await {
-        if let Ok(chat) = serde_json::from_slice::<ChatFile>(&bytes) {
-            let mut cur = app.current_chat.write().await;
-            *cur = Some(req.id.clone());
-            return Json(chat).into_response();
-        }
+    if let Ok(bytes) = fs::read(&path).await
+        && let Ok(chat) = serde_json::from_slice::<ChatFile>(&bytes)
+    {
+        let mut cur = app.current_chat.write().await;
+        *cur = Some(req.id.clone());
+        return Json(chat).into_response();
     }
     (StatusCode::NOT_FOUND, "Chat not found").into_response()
 }
@@ -497,15 +506,15 @@ pub async fn rename_chat(
     let Some(path) = app.chat_path(&req.id) else {
         return (StatusCode::BAD_REQUEST, INVALID_CHAT_ID).into_response();
     };
-    if let Ok(bytes) = fs::read(&path).await {
-        if let Ok(mut chat) = serde_json::from_slice::<ChatFile>(&bytes) {
-            chat.title = Some(req.title);
-            if fs::write(&path, serde_json::to_vec_pretty(&chat).unwrap())
-                .await
-                .is_ok()
-            {
-                return (StatusCode::OK, "Renamed").into_response();
-            }
+    if let Ok(bytes) = fs::read(&path).await
+        && let Ok(mut chat) = serde_json::from_slice::<ChatFile>(&bytes)
+    {
+        chat.title = Some(req.title);
+        if fs::write(&path, serde_json::to_vec_pretty(&chat).unwrap())
+            .await
+            .is_ok()
+        {
+            return (StatusCode::OK, "Renamed").into_response();
         }
     }
     (StatusCode::INTERNAL_SERVER_ERROR, "rename failed").into_response()
@@ -780,11 +789,11 @@ pub async fn save_chat_session(
     }
 
     // Stamp session_id into the chat JSON for fast lookup
-    if let Ok(bytes) = fs::read(&chat_path).await {
-        if let Ok(mut chat) = serde_json::from_slice::<ChatFile>(&bytes) {
-            chat.session_id = Some(req.session_id);
-            let _ = fs::write(&chat_path, serde_json::to_vec_pretty(&chat).unwrap()).await;
-        }
+    if let Ok(bytes) = fs::read(&chat_path).await
+        && let Ok(mut chat) = serde_json::from_slice::<ChatFile>(&bytes)
+    {
+        chat.session_id = Some(req.session_id);
+        let _ = fs::write(&chat_path, serde_json::to_vec_pretty(&chat).unwrap()).await;
     }
 
     (StatusCode::OK, "Saved").into_response()

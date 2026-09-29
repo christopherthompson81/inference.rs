@@ -8,12 +8,11 @@ use inference::{
 
 #[path = "../support/paddleocr_vl_tiny.rs"]
 mod support;
-use support::{tiny_checkpoint, FIXTURES};
+use support::{FIXTURES, tiny_checkpoint};
 
 const OCR_PROMPT: &str = "OCR:";
 // Long enough that a shared prefix runs past the image into whole paged blocks; paged hits never end inside an image.
-const LONG_PROMPT: &str =
-    "OCR: transcribe every line of this page exactly, keeping the original line breaks and punctuation in place.";
+const LONG_PROMPT: &str = "OCR: transcribe every line of this page exactly, keeping the original line breaks and punctuation in place.";
 const TEXT_PROMPT: &str = "Reply with the single word: ok";
 const MAX_LEN: usize = 8;
 // A scheduler spin never completes either request, so the mixed-batch test fails on this instead of hanging.

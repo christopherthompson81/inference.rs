@@ -1,11 +1,11 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 
-use crate::vision_models::gemma3n::vision::{gemma3n_mobilenet_def, BlockType};
+use crate::vision_models::gemma3n::vision::{BlockType, gemma3n_mobilenet_def};
 
 use super::multimodal_binding_utils::{
-    bind, bind_required, bind_required_linear, bind_required_with, metadata_string, metadata_usize,
-    validate_architecture, validate_projector, TensorInventory,
+    TensorInventory, bind, bind_required, bind_required_linear, bind_required_with,
+    metadata_string, metadata_usize, validate_architecture, validate_projector,
 };
 
 const FAMILY: &str = "Gemma 3n";

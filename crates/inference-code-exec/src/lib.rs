@@ -23,13 +23,14 @@ use session::PythonSession;
 use tokio::sync::Mutex;
 
 pub use inference_mcp::{CodeExecutionPermission, ShellOptions, ShellSkillMount};
-pub use mount::{mounted_input_files, MountedInputFile};
+pub use mount::{MountedInputFile, mounted_input_files};
 pub use protocol::{ExecuteFile as CodeExecFile, ExecuteOutputSpec as CodeExecOutputSpec};
 pub use shell::{ShellConfig, ShellManager};
 pub use tools::{
-    build_list_files_tool, build_read_file_tool, build_surface_outputs_tool, code_exec_tool_called,
-    shell_tool_called, surface_outputs_tool_called, EXECUTE_PYTHON_TOOL_NAME, LIST_FILES_TOOL_NAME,
-    READ_FILE_TOOL_NAME, RESET_SESSION_TOOL_NAME, SHELL_TOOL_NAME, SURFACE_OUTPUTS_TOOL_NAME,
+    EXECUTE_PYTHON_TOOL_NAME, LIST_FILES_TOOL_NAME, READ_FILE_TOOL_NAME, RESET_SESSION_TOOL_NAME,
+    SHELL_TOOL_NAME, SURFACE_OUTPUTS_TOOL_NAME, build_list_files_tool, build_read_file_tool,
+    build_surface_outputs_tool, code_exec_tool_called, shell_tool_called,
+    surface_outputs_tool_called,
 };
 
 /// Tailors the tool description to what the model can take as input.
@@ -166,11 +167,7 @@ async fn resolve_python_prefixes(python_path: &Path) -> Vec<PathBuf> {
             } else {
                 p
             };
-            if p.exists() {
-                Some(p)
-            } else {
-                None
-            }
+            if p.exists() { Some(p) } else { None }
         })
         .collect()
 }
@@ -286,10 +283,10 @@ fn spawn_reaper(sessions: Arc<Mutex<HashMap<String, Arc<Mutex<PythonSession>>>>>
             let before = map.len();
             let mut to_remove = Vec::new();
             for (id, session_arc) in map.iter() {
-                if let Ok(session) = session_arc.try_lock() {
-                    if session.seconds_since_last_active() >= SESSION_TTL.as_secs() {
-                        to_remove.push(id.clone());
-                    }
+                if let Ok(session) = session_arc.try_lock()
+                    && session.seconds_since_last_active() >= SESSION_TTL.as_secs()
+                {
+                    to_remove.push(id.clone());
                 }
             }
             for id in &to_remove {

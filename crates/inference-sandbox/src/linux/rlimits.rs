@@ -2,7 +2,7 @@
 
 use std::io;
 
-use nix::sys::resource::{getrlimit, setrlimit, Resource};
+use nix::sys::resource::{Resource, getrlimit, setrlimit};
 
 const PROC_DIR: &str = "/proc";
 const PROC_STATUS: &str = "status";

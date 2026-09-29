@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
-    softcap, ColumnParallelLayer, QuantMethod, RowParallelLayer, ShardedVarBuilder,
+    ColumnParallelLayer, QuantMethod, RowParallelLayer, ShardedVarBuilder, softcap,
 };
 
 use crate::{
@@ -13,7 +13,7 @@ use crate::{
     attention::{AttentionMask, SdpaParams},
     device_map::DeviceMapper,
     layers::masker::BidirectionalMasker,
-    layers::{embedding, Gemma3RotaryEmbedding, GemmaRmsNorm, Mlp, RotaryEmbedding, Sdpa},
+    layers::{Gemma3RotaryEmbedding, GemmaRmsNorm, Mlp, RotaryEmbedding, Sdpa, embedding},
     model::{EmbeddingModel, IsqModel, NormalLoadingMetadata},
     paged_attention::AttentionImplementation,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
@@ -378,7 +378,7 @@ impl EmbeddingGemma {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),

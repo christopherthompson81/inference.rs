@@ -7,7 +7,7 @@ use inference_quant::{QuantMethod, ShardedVarBuilder};
 
 use crate::{
     attention::{AttentionMask, SdpaParams},
-    layers::{dense_embedding, layer_norm, linear, Activation, CausalMasker, Sdpa},
+    layers::{Activation, CausalMasker, Sdpa, dense_embedding, layer_norm, linear},
     utils::unvarbuilder::UnVarBuilder,
 };
 

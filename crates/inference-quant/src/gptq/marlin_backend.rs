@@ -1,8 +1,8 @@
 use crate::utils::slice_ptr;
 
 use super::marlin_ffi::{
-    awq_marlin_repack, gptq_marlin_repack, marlin_awq_4bit_bf16, marlin_awq_4bit_f16,
-    marlin_gptq_4bit_bf16, marlin_gptq_4bit_f16, HAVE_MARLIN_KERNELS,
+    HAVE_MARLIN_KERNELS, awq_marlin_repack, gptq_marlin_repack, marlin_awq_4bit_bf16,
+    marlin_awq_4bit_f16, marlin_gptq_4bit_bf16, marlin_gptq_4bit_f16,
 };
 use candle::backend::BackendStorage;
 use candle::cuda_backend::cudarc::driver::DevicePtr;
@@ -291,7 +291,9 @@ impl MarlinRepack {
                 }
             }
         } else {
-            candle_core::bail!("Not compiled with marlin kernels, but attempted to use one. Please raise an issue.");
+            candle_core::bail!(
+                "Not compiled with marlin kernels, but attempted to use one. Please raise an issue."
+            );
         }
 
         drop(out_guard);

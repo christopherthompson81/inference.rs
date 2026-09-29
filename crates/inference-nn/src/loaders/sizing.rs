@@ -7,11 +7,7 @@ use crate::topology::Topology;
 #[macro_export]
 macro_rules! bias_if {
     ($cond:expr, $size:expr) => {
-        if $cond {
-            $size
-        } else {
-            0
-        }
+        if $cond { $size } else { 0 }
     };
 }
 

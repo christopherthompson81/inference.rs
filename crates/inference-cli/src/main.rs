@@ -16,13 +16,13 @@ use anyhow::Result;
 use clap::{CommandFactory, Parser};
 use clap_complete::generate;
 
-use args::{resolve_model_type, resolve_quantize_model_type, CacheCommand, Cli, Command};
+use args::{CacheCommand, Cli, Command, resolve_model_type, resolve_quantize_model_type};
 use commands::{
-    run_bench, run_cache_delete, run_cache_list, run_doctor, run_from_config, run_interactive,
-    run_login, run_quantize, run_server, run_tune, run_uninstall, run_update, run_uqff,
-    BenchRunConfig,
+    BenchRunConfig, run_bench, run_cache_delete, run_cache_list, run_doctor, run_from_config,
+    run_interactive, run_login, run_quantize, run_server, run_tune, run_uninstall, run_update,
+    run_uqff,
 };
-use inference_core::{initialize_inference_logging, LogVerbosity};
+use inference_core::{LogVerbosity, initialize_inference_logging};
 
 // Tensor ops allocate fresh output buffers constantly; mimalloc removes the page-fault
 // churn that dominates small-model CPU inference with the system allocator.

@@ -62,7 +62,7 @@ pub struct Fa3Fp8DecodeParams {
     pub scheduler_metadata_prepared: c_int,
 }
 
-extern "C" {
+unsafe extern "C" {
     #[cfg(has_fa3_fp8_paged)]
     pub fn fa3_fp8_paged_materialize_metadata(
         paged_kv_indptr: *const c_int,

@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use crate::layers::Activation;
 
-pub use config::{prelog_moe_backend, ExpertProj, ExpertProjNames, MoEExpertsConfig};
+pub use config::{ExpertProj, ExpertProjNames, MoEExpertsConfig, prelog_moe_backend};
 
 #[cfg(feature = "cutile")]
 use backends::CutileExpertsWeights;
@@ -28,7 +28,7 @@ use backends::CutileFp8ExpertsWeights;
 #[cfg(feature = "cuda")]
 use backends::CutlassExpertsWeights;
 use backends::{
-    experts_are_prequantized, FastExpertsWeights, FusedExpertsWeights, StackedExpertWeights,
+    FastExpertsWeights, FusedExpertsWeights, StackedExpertWeights, experts_are_prequantized,
 };
 use checkpoint::ExpertCheckpoint;
 use config::{BackendChoice, MoEExpertsBackend};
@@ -83,13 +83,13 @@ fn check_isq_gather_support() -> Result<()> {
     let Some(params) = inference_quant::get_immediate_isq() else {
         return Ok(());
     };
-    if let Some(ty) = params.ty {
-        if matches!(
+    if let Some(ty) = params.ty
+        && matches!(
             ty,
             IsqType::HQQ4 | IsqType::HQQ8 | IsqType::F8E4M3 | IsqType::F8Q8
-        ) {
-            candle_core::bail!("ISQ type {ty} is not supported for MoE experts.");
-        }
+        )
+    {
+        candle_core::bail!("ISQ type {ty} is not supported for MoE experts.");
     }
     Ok(())
 }

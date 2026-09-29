@@ -18,13 +18,13 @@ use vision::Qwen3VLVisionModel;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
     kv_cache::EitherCache,
-    layers::masker::PastKvLenCache,
     layers::CausalMasker,
+    layers::masker::PastKvLenCache,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata},
     paged_attention::{
+        AttentionImplementation, ModelConfigMetadata,
         block_hash::MultimodalKind,
         encoder_cache::{CacheModality, EncoderCacheBatchLookup, EncoderCacheManager},
-        AttentionImplementation, ModelConfigMetadata,
     },
     vision::multimodal_layout::{
         MultimodalEncoderKey, MultimodalEncoderOutputs, PackedMultimodalLayout,
@@ -887,12 +887,12 @@ impl Qwen3VLModel {
                     }
                     if img_offset != img_layer.dim(0)? || vid_offset != vid_layer.dim(0)? {
                         candle_core::bail!(
-                                "DeepStack feature alignment failed for images ({}/{}) or videos ({}/{})",
-                                img_offset,
-                                img_layer.dim(0)?,
-                                vid_offset,
-                                vid_layer.dim(0)?
-                            );
+                            "DeepStack feature alignment failed for images ({}/{}) or videos ({}/{})",
+                            img_offset,
+                            img_layer.dim(0)?,
+                            vid_offset,
+                            vid_layer.dim(0)?
+                        );
                     }
                     let row_refs: Vec<&Tensor> = rows.iter().collect();
                     combined_layers.push(Tensor::stack(&row_refs, 0)?);

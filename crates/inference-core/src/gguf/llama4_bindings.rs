@@ -1,9 +1,9 @@
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 
 use super::multimodal_binding_utils::{
-    bind, bind_required, bind_required_linear, validate_architecture, validate_projector,
-    TensorInventory,
+    TensorInventory, bind, bind_required, bind_required_linear, validate_architecture,
+    validate_projector,
 };
 
 const FAMILY: &str = "Llama 4";

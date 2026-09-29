@@ -197,8 +197,8 @@ pub fn concat_and_cache_mla(
         }
         _ => {
             candle_core::bail!(
-                    "concat_and_cache_mla expects matching dtype for ckv/k_pe/caches and i64 slot_mapping"
-                )
+                "concat_and_cache_mla expects matching dtype for ckv/k_pe/caches and i64 slot_mapping"
+            )
         }
     };
 

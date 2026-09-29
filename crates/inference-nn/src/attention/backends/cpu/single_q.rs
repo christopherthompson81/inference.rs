@@ -2,7 +2,7 @@ use candle_core::{Device, Result, Tensor, WithDType};
 use rayon::prelude::*;
 
 use super::{
-    elem::ElemOps, prefetch::prefetch, threading::FLASH_ATTN_POOL, CpuAttnCtx, SINGLE_Q_STACK_DV,
+    CpuAttnCtx, SINGLE_Q_STACK_DV, elem::ElemOps, prefetch::prefetch, threading::FLASH_ATTN_POOL,
 };
 
 // Aim for a couple of units per thread so no worker idles and the tail chunk stays short.

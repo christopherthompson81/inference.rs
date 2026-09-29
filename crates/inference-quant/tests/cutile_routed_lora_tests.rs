@@ -4,8 +4,8 @@ use candle_core::cuda::cudarc::driver::{CudaSlice, DevicePtr, DeviceRepr};
 use candle_core::{CudaDevice, DType, Device, Result};
 use half::bf16;
 use inference_quant::cutile::{
-    try_cutile_routed_lora, try_cutile_routed_lora_no_sort, CutileRoutedLoraLaunch,
-    CutileRoutedLoraStatus, CutileRoutedLoraUnsupported,
+    CutileRoutedLoraLaunch, CutileRoutedLoraStatus, CutileRoutedLoraUnsupported,
+    try_cutile_routed_lora, try_cutile_routed_lora_no_sort,
 };
 use inference_quant::{
     RoutedLoraAdapterWeight, RoutedLoraCudaMetadata, RoutedLoraCudaWeightTable,

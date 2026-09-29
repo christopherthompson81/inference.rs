@@ -2,23 +2,23 @@ use std::sync::Arc;
 
 use crate::anthropic::anthropic_error_response;
 use crate::handler_core::{
-    openai_error_response, ApiError, ApiErrorKind, SERVICE_UNAVAILABLE_MESSAGE,
+    ApiError, ApiErrorKind, SERVICE_UNAVAILABLE_MESSAGE, openai_error_response,
 };
 use anyhow::Result;
 use axum::{
+    Extension, Json,
     extract::{
+        Multipart, Path as AxumPath, Query, RawQuery,
         multipart::{MultipartError, MultipartRejection},
         rejection::QueryRejection,
-        Multipart, Path as AxumPath, Query, RawQuery,
     },
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
-    Extension, Json,
 };
 
 use crate::skill_store::{
-    invalid_skill_upload, skill_api_error, skill_upload_too_large, ANTHROPIC_SKILL_SOURCE,
-    CUSTOM_SKILL_SOURCE,
+    ANTHROPIC_SKILL_SOURCE, CUSTOM_SKILL_SOURCE, invalid_skill_upload, skill_api_error,
+    skill_upload_too_large,
 };
 pub use crate::skill_store::{
     AnthropicSkillListObject, AnthropicSkillObject, AnthropicSkillVersionListObject,
@@ -256,7 +256,7 @@ mod tests {
     use axum::{
         body::Body,
         extract::FromRequest,
-        http::{header, Request, Uri},
+        http::{Request, Uri, header},
     };
     use http_body_util::BodyExt;
     use serde_json::Value;
@@ -427,10 +427,12 @@ mod tests {
         let body = response_json(response).await;
         assert_eq!(body["type"], "error");
         assert_eq!(body["error"]["type"], "invalid_request_error");
-        assert!(body["error"]["message"]
-            .as_str()
-            .unwrap()
-            .contains("unknown"));
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("unknown")
+        );
     }
 
     #[tokio::test]

@@ -2,8 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 use utoipa::{
-    openapi::{schema::SchemaType, ArrayBuilder, ObjectBuilder, OneOfBuilder, RefOr, Schema, Type},
     PartialSchema, ToSchema,
+    openapi::{ArrayBuilder, ObjectBuilder, OneOfBuilder, RefOr, Schema, Type, schema::SchemaType},
 };
 
 use super::enums::ImageDetail;

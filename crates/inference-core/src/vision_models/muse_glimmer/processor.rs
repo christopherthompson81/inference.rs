@@ -1,11 +1,11 @@
 use std::sync::Arc;
 
 use inference_models_qwen::loaders::MuseGlimmerLoader;
+use inference_models_qwen::muse_glimmer::Config as MuseGlimmerConfig;
 use inference_models_qwen::muse_glimmer::inputs_processor::{
-    MuseGlimmerImageProcessor, IMAGE_END, IMAGE_START, IMAGE_TOKEN, VIDEO_END, VIDEO_SEPARATOR,
+    IMAGE_END, IMAGE_START, IMAGE_TOKEN, MuseGlimmerImageProcessor, VIDEO_END, VIDEO_SEPARATOR,
     VIDEO_START, VIDEO_TOKEN,
 };
-use inference_models_qwen::muse_glimmer::Config as MuseGlimmerConfig;
 
 use crate::pipeline::{InputsProcessor, MessagesAction, MultimodalProcessorFactory, Processor};
 use crate::vision_models::media_host::MediaInputsProcessor;

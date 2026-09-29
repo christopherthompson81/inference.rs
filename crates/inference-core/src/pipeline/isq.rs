@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 use candle_core::Tensor;
 use indicatif::{ProgressBar, ProgressStyle};
 use inference_quant::{
-    parse_isq_value, IsqBits, IsqType, TrackedModule, UqffOutputReport, UqffReport, UqffTensor,
+    IsqBits, IsqType, TrackedModule, UqffOutputReport, UqffReport, UqffTensor, parse_isq_value,
 };
 use regex::Regex;
 use serde::Deserialize;
@@ -469,10 +469,10 @@ pub(crate) fn resolve_uqff_input_files(
     available_files: &[String],
     report: Option<&UqffReport>,
 ) -> Result<Vec<String>> {
-    if let Some(report) = report {
-        if let Some(output) = resolve_uqff_report_output(input, available_files, report)? {
-            return Ok(output.shards.clone());
-        }
+    if let Some(report) = report
+        && let Some(output) = resolve_uqff_report_output(input, available_files, report)?
+    {
+        return Ok(output.shards.clone());
     }
 
     if available_files.iter().any(|file| file == input) {
@@ -1263,7 +1263,7 @@ fn uqff_safetensors_metadata() -> HashMap<String, String> {
     ])
 }
 
-pub(crate) use inference_nn::loaders::{isq_regexes, IsqModelLoader};
+pub(crate) use inference_nn::loaders::{IsqModelLoader, isq_regexes};
 
 /// Map a layer tracking key to candidate llama.cpp imatrix entries.
 fn gguf_imatrix_names(key: &str) -> Vec<String> {
@@ -1434,14 +1434,14 @@ pub(crate) fn load_imatrix_map(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::{get_chat_template, AdapterPaths, LocalModelPaths};
+    use crate::pipeline::{AdapterPaths, LocalModelPaths, get_chat_template};
     use candle_core::{DType, Device};
     use candle_nn::Linear;
     use inference_quant::{
-        pending_isq_channel, PendingIsqLayer, QuantMethod, QuantMethodConfig, QuantizeOntoGuard,
-        UnquantLinear,
+        PendingIsqLayer, QuantMethod, QuantMethodConfig, QuantizeOntoGuard, UnquantLinear,
+        pending_isq_channel,
     };
-    use std::sync::{atomic::AtomicUsize, Arc};
+    use std::sync::{Arc, atomic::AtomicUsize};
 
     #[test]
     fn uqff_config_removes_source_quantization_metadata_recursively() -> Result<()> {
@@ -1472,13 +1472,17 @@ mod tests {
         assert_eq!(sanitized["submodels"][0]["layers"], 2);
         assert!(sanitized.get("quantization_config").is_none());
         assert!(sanitized.get("compression_config").is_none());
-        assert!(sanitized["text_config"]
-            .get("quantization_config")
-            .is_none());
+        assert!(
+            sanitized["text_config"]
+                .get("quantization_config")
+                .is_none()
+        );
         assert!(sanitized["text_config"].get("compression_config").is_none());
-        assert!(sanitized["submodels"][0]
-            .get("quantization_config")
-            .is_none());
+        assert!(
+            sanitized["submodels"][0]
+                .get("quantization_config")
+                .is_none()
+        );
         Ok(())
     }
 
@@ -1726,9 +1730,11 @@ mod tests {
         assert!(!final_parent.join("model-4.uqff").exists());
         assert!(!final_parent.join("legacy-0.uqff").exists());
         assert!(!final_parent.join("generation_config.json").exists());
-        assert!(!final_parent
-            .join(inference_quant::UQFF_REPORT_JSON)
-            .exists());
+        assert!(
+            !final_parent
+                .join(inference_quant::UQFF_REPORT_JSON)
+                .exists()
+        );
         assert_eq!(std::fs::read(final_parent.join("notes.txt"))?, b"keep me");
         Ok(())
     }
@@ -1960,11 +1966,14 @@ mod tests {
         })
         .unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("does not support stacked expert gather"));
-        assert!(std::fs::read_dir(dir.path())?.all(|entry| entry
-            .is_ok_and(|entry| entry.path().extension().is_none_or(|ext| ext != "uqff"))));
+        assert!(
+            error
+                .to_string()
+                .contains("does not support stacked expert gather")
+        );
+        assert!(std::fs::read_dir(dir.path())?.all(|entry| {
+            entry.is_ok_and(|entry| entry.path().extension().is_none_or(|ext| ext != "uqff"))
+        }));
         Ok(())
     }
 

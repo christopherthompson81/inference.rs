@@ -2,7 +2,7 @@
 
 use candle_core::{DType, Device, Result, Tensor};
 use float8::F8E4M3;
-use inference_quant::cutile::{cutile_nvfp4, cutile_nvfp4_gather, Nvfp4GemmArgs};
+use inference_quant::cutile::{Nvfp4GemmArgs, cutile_nvfp4, cutile_nvfp4_gather};
 
 const BLOCK_SIZE: usize = 16;
 const FP4_VALUES: [f32; 8] = [0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 4.0, 6.0];
@@ -665,7 +665,10 @@ fn nvfp4_gather_matches_selected_experts() -> Result<()> {
                         for col in 0..GATHER_N {
                             let actual = actual[route * GATHER_N + col];
                             let expected = references[expert as usize][input_row * GATHER_N + col];
-                            assert!((actual - expected).abs() <= tolerance * expected.abs().max(1.0), "NVFP4 gather dtype={dtype:?} a4={a4} per_route={per_route_input} route={route} col={col}: {actual} != {expected}");
+                            assert!(
+                                (actual - expected).abs() <= tolerance * expected.abs().max(1.0),
+                                "NVFP4 gather dtype={dtype:?} a4={a4} per_route={per_route_input} route={route} col={col}: {actual} != {expected}"
+                            );
                         }
                     }
                 }
@@ -798,7 +801,10 @@ fn nvfp4_warmup_supports_cuda_graph_replay() -> Result<()> {
                 assert_eq!(actual.len(), rows * GRAPH_N);
                 for (index, &actual) in actual.iter().enumerate() {
                     let expected = reference[index] * sign;
-                    assert!((actual - expected).abs() <= BF16_TOLERANCE * expected.abs().max(1.0), "NVFP4 graph dense a4={a4} alternate={alternate_input} index={index}: {actual} != {expected}");
+                    assert!(
+                        (actual - expected).abs() <= BF16_TOLERANCE * expected.abs().max(1.0),
+                        "NVFP4 graph dense a4={a4} alternate={alternate_input} index={index}: {actual} != {expected}"
+                    );
                 }
             }
             let actual = gathered
@@ -812,7 +818,10 @@ fn nvfp4_warmup_supports_cuda_graph_replay() -> Result<()> {
                     let expected =
                         reference[route / GRAPH_TOPK * GRAPH_N + col] * sign * (expert + 1) as f32;
                     let actual = actual[route * GRAPH_N + col];
-                    assert!((actual - expected).abs() <= BF16_TOLERANCE * expected.abs().max(1.0), "NVFP4 graph gather a4={a4} alternate={alternate_input} route={route} col={col}: {actual} != {expected}");
+                    assert!(
+                        (actual - expected).abs() <= BF16_TOLERANCE * expected.abs().max(1.0),
+                        "NVFP4 graph gather a4={a4} alternate={alternate_input} route={route} col={col}: {actual} != {expected}"
+                    );
                 }
             }
         }
@@ -986,8 +995,10 @@ fn nvfp4_merged_views_and_shared_activation_support_graph_replay() -> Result<()>
                         for column in 0..columns {
                             let expected = reference[row * n + start + column] * sign;
                             let value = actual[row * columns + column];
-                            assert!((value - expected).abs() <= tolerance * expected.abs().max(1.0),
-                                "merged/shared NVFP4 dtype={dtype:?} a4={a4} row={row} col={column}: {value} != {expected}");
+                            assert!(
+                                (value - expected).abs() <= tolerance * expected.abs().max(1.0),
+                                "merged/shared NVFP4 dtype={dtype:?} a4={a4} row={row} col={column}: {value} != {expected}"
+                            );
                         }
                     }
                 }
@@ -1056,8 +1067,8 @@ fn nvfp4_prequantized_forward_materializes_strided_values_and_scales() -> Result
 #[test]
 fn nvfp4_shared_activation_rejects_diverging_live_calibration() -> Result<()> {
     use inference_quant::{
-        try_forward_with_shared_quantized_activation, Nvfp4ActivationMode, Nvfp4Layer,
-        Nvfp4LayerParts, QuantMethod,
+        Nvfp4ActivationMode, Nvfp4Layer, Nvfp4LayerParts, QuantMethod,
+        try_forward_with_shared_quantized_activation,
     };
     let _gpu_guard = CUDA_TEST_LOCK.lock().unwrap();
     let device = Device::new_cuda(0)?;
@@ -1126,12 +1137,14 @@ fn nvfp4_shared_activation_rejects_diverging_live_calibration() -> Result<()> {
             }
         }
         let separate = independent.forward(&input)?;
-        assert!(separate
-            .to_dtype(DType::F32)?
-            .flatten_all()?
-            .to_vec1::<f32>()?
-            .iter()
-            .all(|value| value.is_finite()));
+        assert!(
+            separate
+                .to_dtype(DType::F32)?
+                .flatten_all()?
+                .to_vec1::<f32>()?
+                .iter()
+                .all(|value| value.is_finite())
+        );
     }
     Ok(())
 }

@@ -21,7 +21,7 @@ fn has_kernels(dev: &candle_core::Device) -> bool {
 
 #[cfg(test)]
 mod test_util {
-    use candle_core::{Device, Result, Tensor, D};
+    use candle_core::{D, Device, Result, Tensor};
 
     pub fn max_abs(a: &Tensor, b: &Tensor) -> Result<f32> {
         (a.to_device(&Device::Cpu)? - b.to_device(&Device::Cpu)?)?

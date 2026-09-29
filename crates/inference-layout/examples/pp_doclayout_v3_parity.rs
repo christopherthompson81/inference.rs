@@ -4,7 +4,7 @@ use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use clap::Parser;
 use inference_layout::pp_doclayout_v3::{
-    postprocess, PPDocLayoutV3Detector, PostprocessArgs, DEFAULT_THRESHOLD,
+    DEFAULT_THRESHOLD, PPDocLayoutV3Detector, PostprocessArgs, postprocess,
 };
 
 #[derive(Parser)]

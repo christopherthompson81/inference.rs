@@ -1,15 +1,15 @@
 use std::sync::Arc;
 
-use candle_core::{DType, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, IndexOp, Result, Tensor};
 use candle_nn::{Embedding, Linear, Module};
 use inference_quant::{
-    apply_immediate_isq, QuantMethod, QuantMethodConfig, ShardedVarBuilder, UnquantLinear,
+    QuantMethod, QuantMethodConfig, ShardedVarBuilder, UnquantLinear, apply_immediate_isq,
 };
 
 use crate::{
-    attention::{naive_sdpa, SdpaParams},
-    layers::{self, repeat_kv, DiaRotaryEmbedding, RmsNorm},
-    nn_utils::progress::{new_multi_progress, NiceProgressBar},
+    attention::{SdpaParams, naive_sdpa},
+    layers::{self, DiaRotaryEmbedding, RmsNorm, repeat_kv},
+    nn_utils::progress::{NiceProgressBar, new_multi_progress},
 };
 
 use super::{cache::DiaKvCache, config::DiaConfig};

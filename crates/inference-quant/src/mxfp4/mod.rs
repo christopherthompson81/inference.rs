@@ -1,4 +1,4 @@
-use std::sync::{atomic::AtomicUsize, Arc};
+use std::sync::{Arc, atomic::AtomicUsize};
 
 use candle_core::{DType, Device, Result, Tensor};
 use safetensors::tensor::Dtype;
@@ -445,11 +445,7 @@ impl MXFP4Layer {
             7 // 6.0
         };
 
-        if sign {
-            nibble | 0x08
-        } else {
-            nibble
-        }
+        if sign { nibble | 0x08 } else { nibble }
     }
 
     pub fn linear_b(
@@ -1127,9 +1123,11 @@ mod tests {
             module_key: "experts".to_string(),
         };
         let plan_error = layer.plan_isq(&request).unwrap_err();
-        assert!(plan_error
-            .to_string()
-            .contains("does not support stacked expert gather"));
+        assert!(
+            plan_error
+                .to_string()
+                .contains("does not support stacked expert gather")
+        );
         let error = layer
             .apply_isq(
                 Some(IsqType::F8Q8),

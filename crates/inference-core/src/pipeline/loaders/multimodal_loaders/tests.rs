@@ -715,21 +715,23 @@ fn direct_gguf_adjacent_rope_overrides_multimodal_defaults() {
     ] {
         assert!(loader.is_gptx(""));
         assert!(!loader.is_gptx_for("{}", &metadata).unwrap());
-        assert!(!loader
-            .is_gptx_for(
-                r#"{"_inference_qk_rope_layout":"adjacent"}"#,
-                &NormalLoadingMetadata {
-                    mapper: Box::new(DummyDeviceMapper {
-                        nm_device: Device::Cpu,
-                    }),
-                    loading_isq: false,
-                    real_device: Device::Cpu,
-                    multi_progress: Arc::new(crate::utils::progress::new_multi_progress()),
-                    matformer_slicing_config: None,
-                    rope_pairing: None,
-                },
-            )
-            .unwrap());
+        assert!(
+            !loader
+                .is_gptx_for(
+                    r#"{"_inference_qk_rope_layout":"adjacent"}"#,
+                    &NormalLoadingMetadata {
+                        mapper: Box::new(DummyDeviceMapper {
+                            nm_device: Device::Cpu,
+                        }),
+                        loading_isq: false,
+                        real_device: Device::Cpu,
+                        multi_progress: Arc::new(crate::utils::progress::new_multi_progress()),
+                        matformer_slicing_config: None,
+                        rope_pairing: None,
+                    },
+                )
+                .unwrap()
+        );
     }
 }
 
@@ -1378,9 +1380,11 @@ fn gemma3_reports_text_only_modalities_without_vision_config() -> Result<()> {
             max_batch_size: 2
         }
     ));
-    assert!(AutoMultimodalLoader
-        .non_mapped_sub_models_for_config(&text)?
-        .is_none());
+    assert!(
+        AutoMultimodalLoader
+            .non_mapped_sub_models_for_config(&text)?
+            .is_none()
+    );
 
     let multimodal = serde_json::json!({
         "architectures": ["Gemma3ForConditionalGeneration"],

@@ -8,10 +8,10 @@ use std::{
 };
 
 use candle_core::{DType, Device, Result as CandleResult, Shape, Tensor};
-use candle_nn::{var_builder::SimpleBackend, Init};
+use candle_nn::{Init, var_builder::SimpleBackend};
 use inference_nn::{device_map::DeviceMapSetting, model::NormalLoadingMetadata};
 use inference_quant::{ShardedSafeTensors, ShardedVarBuilder, TensorShapes};
-use rand::{rngs::StdRng, SeedableRng};
+use rand::{SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, Normal};
 
 // Large enough that the input moves the logits, small enough to stay finite through a couple of layers.

@@ -10,7 +10,7 @@ pub(crate) const HAVE_CUTLASS_FP8_SM90_KERNELS: bool = cfg!(has_cutlass_fp8_sm90
 pub(crate) const HAVE_DEEPGEMM_FP8_SM90_PROVIDER: bool = cfg!(has_deepgemm_fp8_sm90_provider);
 
 #[cfg(has_blockwise_fp8_kernels)]
-extern "C" {
+unsafe extern "C" {
     pub(crate) fn inference_fused_rms_norm_fp8_error_string(
         status: i32,
     ) -> *const core::ffi::c_char;
@@ -33,7 +33,7 @@ extern "C" {
 }
 
 #[cfg(has_blockwise_fp8_kernels)]
-extern "C" {
+unsafe extern "C" {
     pub(crate) fn inference_fp8_mma_error_string(status: i32) -> *const core::ffi::c_char;
     pub(crate) fn inference_fp8_mma_gemv(
         weight: *const F8E4M3,
@@ -97,7 +97,7 @@ pub(crate) struct DeepGemmPrepared {
 }
 
 #[cfg(has_deepgemm_fp8_sm90_provider)]
-extern "C" {
+unsafe extern "C" {
     pub(crate) fn inference_deepgemm_sm90_error_string(status: i32) -> *const core::ffi::c_char;
 
     pub(crate) fn inference_deepgemm_sm90_last_error() -> *const core::ffi::c_char;
@@ -142,7 +142,7 @@ extern "C" {
 }
 
 #[cfg(has_cutlass_fp8_sm90_kernels)]
-extern "C" {
+unsafe extern "C" {
     pub(crate) fn inference_cutlass_fp8_error_string(status: i32) -> *const core::ffi::c_char;
 
     pub(crate) fn inference_cutlass_fp8_blockwise_prepare() -> i32;
@@ -191,7 +191,7 @@ extern "C" {
     ) -> i32;
 }
 
-extern "C" {
+unsafe extern "C" {
     pub(crate) fn launch_dequant_fp8_blockwise_kernel_f32(
         d_weight: *const F8E4M3,
         d_scale: *const f32,

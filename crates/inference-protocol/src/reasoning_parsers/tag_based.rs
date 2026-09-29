@@ -177,18 +177,18 @@ impl TagReasoningContext {
                 // Strip optional prefix (e.g., "thought\n") at the start of a
                 // reasoning block. Handles the case where the prefix arrives
                 // across multiple process_text() calls.
-                if self.pending_strip {
-                    if let Some(ref prefix) = self.reasoning_strip_prefix {
-                        if self.buffer.starts_with(prefix.as_str()) {
-                            self.buffer = self.buffer[prefix.len()..].to_string();
-                            self.pending_strip = false;
-                        } else if prefix.starts_with(&self.buffer) {
-                            // Buffer is a prefix of the strip-prefix — wait for more
-                            break;
-                        } else {
-                            // Buffer doesn't match — no prefix to strip
-                            self.pending_strip = false;
-                        }
+                if self.pending_strip
+                    && let Some(ref prefix) = self.reasoning_strip_prefix
+                {
+                    if self.buffer.starts_with(prefix.as_str()) {
+                        self.buffer = self.buffer[prefix.len()..].to_string();
+                        self.pending_strip = false;
+                    } else if prefix.starts_with(&self.buffer) {
+                        // Buffer is a prefix of the strip-prefix — wait for more
+                        break;
+                    } else {
+                        // Buffer doesn't match — no prefix to strip
+                        self.pending_strip = false;
                     }
                 }
 
@@ -223,21 +223,20 @@ impl TagReasoningContext {
             } else {
                 if self.allow_implicit_leading_reasoning_prefix
                     && self.accumulated_content.is_empty()
+                    && let Some(prefix) = &self.implicit_leading_reasoning_prefix
                 {
-                    if let Some(prefix) = &self.implicit_leading_reasoning_prefix {
-                        if self.buffer.starts_with(prefix) {
-                            self.in_think_block = true;
-                            self.allow_implicit_leading_reasoning_prefix = false;
-                            self.buffer = self.buffer[prefix.len()..].to_string();
-                            continue;
-                        }
-
-                        if prefix.starts_with(&self.buffer) {
-                            break;
-                        }
-
+                    if self.buffer.starts_with(prefix) {
+                        self.in_think_block = true;
                         self.allow_implicit_leading_reasoning_prefix = false;
+                        self.buffer = self.buffer[prefix.len()..].to_string();
+                        continue;
                     }
+
+                    if prefix.starts_with(&self.buffer) {
+                        break;
+                    }
+
+                    self.allow_implicit_leading_reasoning_prefix = false;
                 }
 
                 let open_pos = self.buffer.find(&*self.open_tag);
@@ -315,11 +314,7 @@ impl TagReasoningContext {
         if self.accumulated_content.len() > self.sent_content_len {
             let delta = self.accumulated_content[self.sent_content_len..].to_string();
             self.sent_content_len = self.accumulated_content.len();
-            if delta.is_empty() {
-                None
-            } else {
-                Some(delta)
-            }
+            if delta.is_empty() { None } else { Some(delta) }
         } else {
             None
         }
@@ -332,11 +327,7 @@ impl TagReasoningContext {
         if self.accumulated_reasoning.len() > self.sent_reasoning_len {
             let delta = self.accumulated_reasoning[self.sent_reasoning_len..].to_string();
             self.sent_reasoning_len = self.accumulated_reasoning.len();
-            if delta.is_empty() {
-                None
-            } else {
-                Some(delta)
-            }
+            if delta.is_empty() { None } else { Some(delta) }
         } else {
             None
         }

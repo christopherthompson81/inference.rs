@@ -22,8 +22,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::amoe::AnyMoeBaseModelMixin;
 use crate::kv_cache::{EitherCache, NormalCache};
-use crate::layers::masker::{CausalMaskConfig, PastKvLenCache};
 use crate::layers::CausalMasker;
+use crate::layers::masker::{CausalMaskConfig, PastKvLenCache};
 use crate::model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata};
 use crate::paged_attention::encoder_cache::{CacheModality, EncoderCacheManager};
 use crate::paged_attention::{AttentionImplementation, KvCacheLayout, ModelConfigMetadata};

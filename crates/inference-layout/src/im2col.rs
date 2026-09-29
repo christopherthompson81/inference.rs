@@ -81,8 +81,8 @@ impl CustomOp1 for Im2Col {
         l: &Layout,
     ) -> Result<(candle_core::CudaStorage, Shape)> {
         use candle_core::cuda_backend::{
-            cudarc::driver::{LaunchConfig, PushKernelArg},
             CudaStorageSlice, WrapErr,
+            cudarc::driver::{LaunchConfig, PushKernelArg},
         };
 
         let (b, c, h, w) = l.shape().dims4()?;

@@ -5,6 +5,7 @@ use std::{collections::HashSet, sync::Arc};
 use tracing::info;
 
 use crate::{
+    AdapterGenerationId,
     kv_cache::{PagedAuxiliaryPrefixState, RecurrentStateSnapshot},
     paged_attention::{
         block_hash::{BlockHash, MultiModalFeature, MultimodalKind},
@@ -12,7 +13,6 @@ use crate::{
     },
     pipeline::KvCache,
     sequence::Sequence,
-    AdapterGenerationId,
 };
 
 const PAGED_RECURRENT_PREFIX_OWNERS_CAPACITY_METRIC: &str =
@@ -216,7 +216,9 @@ pub enum MatchingCache {
 impl PrefixCacheManagerV2 {
     pub fn new(n_on_device: usize, no_prefix_cache: bool, has_paged_attention: bool) -> Self {
         if !no_prefix_cache && !has_paged_attention {
-            info!("Prefix caching enabled (sequence-level, non-paged attention). Expect higher multi-turn throughput for both text and multimodal.");
+            info!(
+                "Prefix caching enabled (sequence-level, non-paged attention). Expect higher multi-turn throughput for both text and multimodal."
+            );
         }
         let manager = PrefixCacheManagerV2 {
             caches: IndexMap::new(),
@@ -497,10 +499,10 @@ impl PrefixCacheManagerV2 {
         }
         self.prune_revoked_paged_recurrent_entries();
 
-        if let Some(stale_key) = self.paged_recurrent_sequence_keys.shift_remove(&owner) {
-            if stale_key != key {
-                self.remove_paged_recurrent_owner(owner, &stale_key);
-            }
+        if let Some(stale_key) = self.paged_recurrent_sequence_keys.shift_remove(&owner)
+            && stale_key != key
+        {
+            self.remove_paged_recurrent_owner(owner, &stale_key);
         }
 
         let previous = self.paged_recurrent_caches.shift_remove(&key);
@@ -622,14 +624,13 @@ impl PrefixCacheManagerV2 {
             .contains(&current_owner)
             .then_some(current_owner)
             .or_else(|| entry.owners.iter().copied().next());
-        if let Some(promote_owner) = promote_owner {
-            if let Some(key) = self
+        if let Some(promote_owner) = promote_owner
+            && let Some(key) = self
                 .paged_recurrent_sequence_keys
                 .shift_remove(&promote_owner)
-            {
-                self.paged_recurrent_sequence_keys
-                    .insert(promote_owner, key);
-            }
+        {
+            self.paged_recurrent_sequence_keys
+                .insert(promote_owner, key);
         }
     }
 
@@ -894,8 +895,8 @@ mod tests {
     use std::{
         collections::HashSet,
         sync::{
-            atomic::{AtomicUsize, Ordering},
             Arc,
+            atomic::{AtomicUsize, Ordering},
         },
     };
 
@@ -904,13 +905,13 @@ mod tests {
         PrefixCacheManagerV2,
     };
     use crate::{
+        AdapterGenerationId,
         kv_cache::{KvCache, RecurrentStateSnapshot, RotatingCache, SingleCache},
         paged_attention::block_hash::{
-            compute_block_hashes, BlockHash, MultiModalFeature, MultimodalAttentionPolicy,
-            MultimodalKind,
+            BlockHash, MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind,
+            compute_block_hashes,
         },
         paged_attention::block_pool::BlockPool,
-        AdapterGenerationId,
     };
 
     fn make_cache_tensor(len: usize) -> candle_core::Result<Tensor> {
@@ -996,9 +997,11 @@ mod tests {
         assert_eq!(prefix_cacher.paged_recurrent_sequence_keys.len(), 1);
         assert_eq!(prefix_cacher.paged_recurrent_sequence_keys[&owner], hashes);
         assert!(prefix_cacher.paged_recurrent_caches.contains_key(&hashes));
-        assert!(prefix_cacher
-            .get_paged_recurrent_prefix(&hashes[..6], owner)
-            .is_none());
+        assert!(
+            prefix_cacher
+                .get_paged_recurrent_prefix(&hashes[..6], owner)
+                .is_none()
+        );
 
         Ok(())
     }
@@ -1045,12 +1048,16 @@ mod tests {
             prefix_cacher.paged_recurrent_sequence_keys[&owner_b],
             hashes_b
         );
-        assert!(prefix_cacher
-            .get_paged_recurrent_prefix(&hashes_a, owner_a)
-            .is_some());
-        assert!(prefix_cacher
-            .get_paged_recurrent_prefix(&hashes_b, owner_b)
-            .is_some());
+        assert!(
+            prefix_cacher
+                .get_paged_recurrent_prefix(&hashes_a, owner_a)
+                .is_some()
+        );
+        assert!(
+            prefix_cacher
+                .get_paged_recurrent_prefix(&hashes_b, owner_b)
+                .is_some()
+        );
 
         Ok(())
     }
@@ -1264,9 +1271,11 @@ mod tests {
             prefix_cacher.paged_recurrent_caches[&hashes_a[..2]].owners,
             HashSet::from([owner_b])
         );
-        assert!(!prefix_cacher
-            .paged_recurrent_caches
-            .contains_key(&hashes_a[..4]));
+        assert!(
+            !prefix_cacher
+                .paged_recurrent_caches
+                .contains_key(&hashes_a[..4])
+        );
         assert_eq!(
             prefix_cacher.paged_recurrent_sequence_keys[&owner_a],
             hashes_a
@@ -1297,9 +1306,11 @@ mod tests {
             vec![make_recurrent_snapshot()?],
             None,
         );
-        assert!(prefix_cacher
-            .get_longest_paged_recurrent_prefix(&hashes_a, 2)
-            .is_some());
+        assert!(
+            prefix_cacher
+                .get_longest_paged_recurrent_prefix(&hashes_a, 2)
+                .is_some()
+        );
         prefix_cacher.add_paged_recurrent_prefix(
             owner_c,
             hashes_c.clone(),
@@ -1307,12 +1318,16 @@ mod tests {
             None,
         );
 
-        assert!(!prefix_cacher
-            .paged_recurrent_sequence_keys
-            .contains_key(&owner_b));
-        assert!(prefix_cacher
-            .paged_recurrent_sequence_keys
-            .contains_key(&owner_a));
+        assert!(
+            !prefix_cacher
+                .paged_recurrent_sequence_keys
+                .contains_key(&owner_b)
+        );
+        assert!(
+            prefix_cacher
+                .paged_recurrent_sequence_keys
+                .contains_key(&owner_a)
+        );
         assert_eq!(
             prefix_cacher.paged_recurrent_caches[&hashes_a[..2]].owners,
             HashSet::from([owner_a])
@@ -1385,12 +1400,14 @@ mod tests {
         let checkpoint = prefix_cacher
             .get_paged_recurrent_prefix(&hashes_a, owner_a)
             .expect("auxiliary checkpoint missing");
-        assert!(checkpoint
-            .auxiliary
-            .as_deref()
-            .expect("auxiliary state missing")
-            .as_any()
-            .is::<TestAuxiliaryPrefixState>());
+        assert!(
+            checkpoint
+                .auxiliary
+                .as_deref()
+                .expect("auxiliary state missing")
+                .as_any()
+                .is::<TestAuxiliaryPrefixState>()
+        );
 
         prefix_cacher.add_paged_recurrent_prefix(
             owner_b,
@@ -1454,15 +1471,21 @@ mod tests {
         );
 
         let query = [1, 2, 3, 4];
-        assert!(prefix_cacher
-            .search_for_matching_cache(&query, None, &[], None, None, None)?
-            .is_none());
-        assert!(prefix_cacher
-            .search_for_matching_cache(&query, Some(generation_b), &[], None, None, None)?
-            .is_none());
-        assert!(prefix_cacher
-            .search_for_matching_cache(&query, Some(generation_a), &[], None, None, None)?
-            .is_some());
+        assert!(
+            prefix_cacher
+                .search_for_matching_cache(&query, None, &[], None, None, None)?
+                .is_none()
+        );
+        assert!(
+            prefix_cacher
+                .search_for_matching_cache(&query, Some(generation_b), &[], None, None, None)?
+                .is_none()
+        );
+        assert!(
+            prefix_cacher
+                .search_for_matching_cache(&query, Some(generation_a), &[], None, None, None)?
+                .is_some()
+        );
 
         Ok(())
     }
@@ -1762,12 +1785,16 @@ mod tests {
             },
         );
 
-        assert!(prefix_cacher
-            .search_for_matching_cache(&[1, 2, 3, 4], None, &[], None, None, Some(&[44]))?
-            .is_none());
-        assert!(prefix_cacher
-            .search_for_matching_cache(&[1, 2, 3, 4], None, &[], None, None, None)?
-            .is_none());
+        assert!(
+            prefix_cacher
+                .search_for_matching_cache(&[1, 2, 3, 4], None, &[], None, None, Some(&[44]))?
+                .is_none()
+        );
+        assert!(
+            prefix_cacher
+                .search_for_matching_cache(&[1, 2, 3, 4], None, &[], None, None, None)?
+                .is_none()
+        );
 
         Ok(())
     }
@@ -1786,9 +1813,18 @@ mod tests {
             },
         );
 
-        assert!(prefix_cacher
-            .search_for_matching_cache(&[1, 2, 3, 4], None, &[], Some(&[11]), Some(&[22]), None,)?
-            .is_none());
+        assert!(
+            prefix_cacher
+                .search_for_matching_cache(
+                    &[1, 2, 3, 4],
+                    None,
+                    &[],
+                    Some(&[11]),
+                    Some(&[22]),
+                    None,
+                )?
+                .is_none()
+        );
 
         Ok(())
     }
@@ -1827,26 +1863,30 @@ mod tests {
             },
         ];
 
-        assert!(prefix_cacher
-            .search_for_matching_cache(
-                &[1, 2, 3, 4, 5],
-                None,
-                &image_features[..1],
-                Some(&[11, 22]),
-                Some(&[33]),
-                None,
-            )?
-            .is_none());
-        assert!(prefix_cacher
-            .search_for_matching_cache(
-                &[1, 2, 3, 4, 5],
-                None,
-                &image_features,
-                Some(&[11, 22]),
-                Some(&[33]),
-                None,
-            )?
-            .is_none());
+        assert!(
+            prefix_cacher
+                .search_for_matching_cache(
+                    &[1, 2, 3, 4, 5],
+                    None,
+                    &image_features[..1],
+                    Some(&[11, 22]),
+                    Some(&[33]),
+                    None,
+                )?
+                .is_none()
+        );
+        assert!(
+            prefix_cacher
+                .search_for_matching_cache(
+                    &[1, 2, 3, 4, 5],
+                    None,
+                    &image_features,
+                    Some(&[11, 22]),
+                    Some(&[33]),
+                    None,
+                )?
+                .is_none()
+        );
 
         Ok(())
     }
@@ -1900,16 +1940,18 @@ mod tests {
             offset: 0,
             ..features[0].clone()
         }];
-        assert!(prefix_cacher
-            .search_for_matching_cache(
-                &[1, 2, 3, 4],
-                None,
-                &leading_feature,
-                Some(&[11]),
-                None,
-                None,
-            )?
-            .is_none());
+        assert!(
+            prefix_cacher
+                .search_for_matching_cache(
+                    &[1, 2, 3, 4],
+                    None,
+                    &leading_feature,
+                    Some(&[11]),
+                    None,
+                    None,
+                )?
+                .is_none()
+        );
 
         Ok(())
     }

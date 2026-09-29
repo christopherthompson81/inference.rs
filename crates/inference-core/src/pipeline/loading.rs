@@ -11,11 +11,11 @@ use inference_quant::{QuantizedWeightSource, UqffReader};
 use tracing::{info, warn};
 
 use crate::{
+    PagedAttentionConfig, Topology, TryIntoDType,
     device_map::{self, DeviceMapSetting, DeviceMapper},
     distributed::{self, TensorParallelism, WorkerTransferData},
     matformer::{MatformerConfig, MatformerSliceConfig},
     paged_attention::ModelConfigLike,
-    PagedAttentionConfig, Topology, TryIntoDType,
 };
 
 pub(crate) struct DeviceMapperInputs<'a> {
@@ -68,7 +68,9 @@ pub(crate) fn materialize_device_mapper(
 
     // get_device_layers already keeps PagedAttention off the CPU; a manual map can still mix devices
     if paged_attn_config.is_some() && mapper.get_unique_devices().iter().any(Device::is_cpu) {
-        warn!("Device mapping contains a mix of GPU and CPU. There is no CPU support for PagedAttention, disabling PagedAttention.");
+        warn!(
+            "Device mapping contains a mix of GPU and CPU. There is no CPU support for PagedAttention, disabling PagedAttention."
+        );
         *paged_attn_config = None;
     }
     Ok(MaterializedDeviceMapper {
@@ -192,7 +194,9 @@ pub(crate) fn load_matformer_slice(
             )))
         }
         None => {
-            warn!("Matformer config loaded but no slice name specified. Models will use their default slice.");
+            warn!(
+                "Matformer config loaded but no slice name specified. Models will use their default slice."
+            );
             Ok(None)
         }
     }

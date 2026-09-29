@@ -3,7 +3,7 @@
 use std::{any::Any, cmp, collections::HashMap, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
-use image::{imageops::FilterType, DynamicImage, GenericImageView};
+use image::{DynamicImage, GenericImageView, imageops::FilterType};
 use inference_vision::{ApplyTransforms, Normalize, Rescale, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
@@ -18,8 +18,8 @@ use crate::media_inputs::{
     },
 };
 use crate::paged_attention::{
-    block_hash::{MultimodalAttentionPolicy, MultimodalKind},
     PagedAttentionMeta,
+    block_hash::{MultimodalAttentionPolicy, MultimodalKind},
 };
 use crate::vision::multimodal_layout::{
     MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
@@ -356,27 +356,27 @@ impl MultimodalInputsProcessor for Idefics3ImageProcessor {
                 .map_err(|error| anyhow::Error::msg(error.to_string()))?
                 .get_ids()
                 .to_vec();
-            if seq.mm_features().is_empty() {
-                if let Some(hashes) = seq.image_hashes().map(<[u64]>::to_vec) {
-                    let ranges = grouped_image_ranges(
-                        &ids,
-                        image_token_id,
-                        &subimage_counts,
-                        self.image_seq_len,
-                    )?;
-                    if hashes.len() != ranges.len() {
-                        anyhow::bail!(
-                            "Idefics3 has {} image hashes but {} image placeholders",
-                            hashes.len(),
-                            ranges.len()
-                        );
-                    }
-                    seq.set_mm_features(build_mm_features_from_ranges(
-                        &ranges,
-                        &hashes,
-                        MultimodalKind::Image,
-                    ));
+            if seq.mm_features().is_empty()
+                && let Some(hashes) = seq.image_hashes().map(<[u64]>::to_vec)
+            {
+                let ranges = grouped_image_ranges(
+                    &ids,
+                    image_token_id,
+                    &subimage_counts,
+                    self.image_seq_len,
+                )?;
+                if hashes.len() != ranges.len() {
+                    anyhow::bail!(
+                        "Idefics3 has {} image hashes but {} image placeholders",
+                        hashes.len(),
+                        ranges.len()
+                    );
                 }
+                seq.set_mm_features(build_mm_features_from_ranges(
+                    &ranges,
+                    &hashes,
+                    MultimodalKind::Image,
+                ));
             }
             seq.set_toks_and_reallocate(ids, paged_attn_metadata.as_deref_mut());
             seq.multimodal_mut().has_changed_prompt = true;
@@ -489,30 +489,30 @@ impl MultimodalInputsProcessor for Idefics3ImageProcessor {
                     let ids = toks.get_ids().to_vec();
 
                     // Build mm_features for position-aware prefix cache hashing
-                    if seq.mm_features().is_empty() {
-                        if let (Some(hashes), Some(image_token_id)) = (
+                    if seq.mm_features().is_empty()
+                        && let (Some(hashes), Some(image_token_id)) = (
                             seq.image_hashes().map(|h| h.to_vec()),
                             tokenizer.token_to_id(IMAGE_TOKEN),
-                        ) {
-                            let ranges = grouped_image_ranges(
-                                &ids,
-                                image_token_id,
-                                &subimage_counts,
-                                self.image_seq_len,
-                            )?;
-                            if hashes.len() != ranges.len() {
-                                anyhow::bail!(
-                                    "Idefics3 has {} image hashes but {} image placeholders",
-                                    hashes.len(),
-                                    ranges.len()
-                                );
-                            }
-                            seq.set_mm_features(build_mm_features_from_ranges(
-                                &ranges,
-                                &hashes,
-                                MultimodalKind::Image,
-                            ));
+                        )
+                    {
+                        let ranges = grouped_image_ranges(
+                            &ids,
+                            image_token_id,
+                            &subimage_counts,
+                            self.image_seq_len,
+                        )?;
+                        if hashes.len() != ranges.len() {
+                            anyhow::bail!(
+                                "Idefics3 has {} image hashes but {} image placeholders",
+                                hashes.len(),
+                                ranges.len()
+                            );
                         }
+                        seq.set_mm_features(build_mm_features_from_ranges(
+                            &ranges,
+                            &hashes,
+                            MultimodalKind::Image,
+                        ));
                     }
 
                     seq.set_toks_and_reallocate(ids, paged_attn_metadata.as_mut());

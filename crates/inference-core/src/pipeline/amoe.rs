@@ -6,7 +6,7 @@ use std::{
     sync::Arc,
 };
 
-use base64::{engine::general_purpose, Engine};
+use base64::{Engine, engine::general_purpose};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW};
 use either::Either;
@@ -20,6 +20,8 @@ use regex_automata::meta::Regex;
 use tracing::{info, warn};
 
 use crate::{
+    DeviceMapSetting, Loader, ModelCategory, ModelKind, ModelPaths, PagedAttentionConfig, Pipeline,
+    Response, TokenSource, TryIntoDType,
     amoe::{AnyMoeConfig, AnyMoeTrainingInputRow, AnyMoeTrainingInputs, AnyMoeTrainingResult},
     api_dir_list, api_get_file,
     device_map::DeviceMapper,
@@ -29,11 +31,9 @@ use crate::{
     sampler::Sampler,
     sequence::{SeqStepType, Sequence, SequenceGroup, SequenceRecognizer},
     utils::{
-        progress::{new_multi_progress, NiceProgressBar, ProgressScopeGuard},
-        varbuilder_utils::{from_mmaped_safetensors, DeviceForLoadTensor},
+        progress::{NiceProgressBar, ProgressScopeGuard, new_multi_progress},
+        varbuilder_utils::{DeviceForLoadTensor, from_mmaped_safetensors},
     },
-    DeviceMapSetting, Loader, ModelCategory, ModelKind, ModelPaths, PagedAttentionConfig, Pipeline,
-    Response, TokenSource, TryIntoDType,
 };
 
 use super::{
@@ -598,16 +598,21 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
                                         Ok(http_resp) => http_resp.bytes()?.to_vec(),
                                         Err(e) => anyhow::bail!(e),
                                     }
-                                } else if let Ok(mut f) = File::open(url) {
-                                    // Read from local file
-                                    let metadata = fs::metadata(url)?;
-                                    #[allow(clippy::cast_possible_truncation)]
-                                    let mut buffer = vec![0; metadata.len() as usize];
-                                    f.read_exact(&mut buffer)?;
-                                    buffer
                                 } else {
-                                    // Decode with base64
-                                    general_purpose::STANDARD.decode(url)?
+                                    match File::open(url) {
+                                        Ok(mut f) => {
+                                            // Read from local file
+                                            let metadata = fs::metadata(url)?;
+                                            #[allow(clippy::cast_possible_truncation)]
+                                            let mut buffer = vec![0; metadata.len() as usize];
+                                            f.read_exact(&mut buffer)?;
+                                            buffer
+                                        }
+                                        _ => {
+                                            // Decode with base64
+                                            general_purpose::STANDARD.decode(url)?
+                                        }
+                                    }
                                 };
                                 Ok(image::load_from_memory(&bytes)?)
                             })
@@ -616,7 +621,7 @@ impl AnyMoePipelineMixin for AnyMoePipeline {
                     let images = match images {
                         Some(Ok(x)) => Some(x),
                         Some(Err(e)) => {
-                            return anyhow::Result::Err(candle_core::Error::Msg(e.to_string()))
+                            return anyhow::Result::Err(candle_core::Error::Msg(e.to_string()));
                         }
                         None => None,
                     };

@@ -5,7 +5,7 @@ use std::{
 };
 
 use anyhow::Context;
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use inference_mcp::ToolInputFile;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

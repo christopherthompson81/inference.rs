@@ -532,10 +532,9 @@ impl Qwen3VLTextModel {
             // Integrate DeepStack visual features when provided.
             if let (Some(visual_pos_masks), Some(deepstack)) =
                 (visual_pos_masks, deepstack_visual_embeds)
+                && i < deepstack.len()
             {
-                if i < deepstack.len() {
-                    xs = self.deepstack_process(xs, visual_pos_masks, &deepstack[i])?;
-                }
+                xs = self.deepstack_process(xs, visual_pos_masks, &deepstack[i])?;
             }
         }
         let xs = xs.to_device(&self.device)?;
@@ -570,7 +569,7 @@ impl Qwen3VLTextModel {
         let indices: Vec<u32> = mask_flat
             .iter()
             .enumerate()
-            .filter(|(_, &v)| v > 0.0)
+            .filter(|&(_, &v)| v > 0.0)
             .map(|(i, _)| i as u32)
             .collect();
 

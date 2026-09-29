@@ -133,88 +133,94 @@ fn host_tool(tool: &inference_host_tool, index: usize) -> FfiResult<ToolCallback
 pub(crate) unsafe fn engine_callbacks(
     callbacks: *const inference_host_callbacks,
 ) -> FfiResult<EngineCallbacks> {
-    let Some(callbacks) = callbacks.as_ref() else {
-        return Ok(EngineCallbacks::default());
-    };
-    let tools = if callbacks.tool_count == 0 {
-        Vec::new()
-    } else if callbacks.tools.is_null() {
-        return Err(Failure::invalid("tools is NULL but tool_count is not 0"));
-    } else {
-        std::slice::from_raw_parts(callbacks.tools, callbacks.tool_count)
-            .iter()
-            .enumerate()
-            .map(|(index, tool)| host_tool(tool, index))
-            .collect::<FfiResult<Vec<_>>>()?
-    };
-    let mut names = std::collections::HashSet::new();
-    if let Some(tool) = tools
-        .iter()
-        .find(|tool| !names.insert(&tool.tool.function.name))
-    {
-        let name = &tool.tool.function.name;
-        return Err(Failure::invalid(format!(
-            "two host tools are named `{name}`"
-        )));
-    }
-    let search = callbacks.search.map(|search| {
-        let user_data = UserData(callbacks.search_user_data);
-        let run = move |params: &inference_core::SearchFunctionParameters| {
-            let query = c_string(&params.query);
-            let json = call_host(|result| unsafe {
-                search(
-                    user_data.get(),
-                    query.as_ptr(),
-                    query.as_bytes().len(),
-                    result,
-                )
-            })?;
-            Ok(serde_json::from_str::<Vec<SearchResult>>(&json)?)
+    unsafe {
+        let Some(callbacks) = callbacks.as_ref() else {
+            return Ok(EngineCallbacks::default());
         };
-        Arc::new(run) as Arc<inference_core::SearchCallback>
-    });
-    Ok(EngineCallbacks { tools, search })
+        let tools = if callbacks.tool_count == 0 {
+            Vec::new()
+        } else if callbacks.tools.is_null() {
+            return Err(Failure::invalid("tools is NULL but tool_count is not 0"));
+        } else {
+            std::slice::from_raw_parts(callbacks.tools, callbacks.tool_count)
+                .iter()
+                .enumerate()
+                .map(|(index, tool)| host_tool(tool, index))
+                .collect::<FfiResult<Vec<_>>>()?
+        };
+        let mut names = std::collections::HashSet::new();
+        if let Some(tool) = tools
+            .iter()
+            .find(|tool| !names.insert(&tool.tool.function.name))
+        {
+            let name = &tool.tool.function.name;
+            return Err(Failure::invalid(format!(
+                "two host tools are named `{name}`"
+            )));
+        }
+        let search = callbacks.search.map(|search| {
+            let user_data = UserData(callbacks.search_user_data);
+            let run = move |params: &inference_core::SearchFunctionParameters| {
+                let query = c_string(&params.query);
+                let json = call_host(|result| {
+                    search(
+                        user_data.get(),
+                        query.as_ptr(),
+                        query.as_bytes().len(),
+                        result,
+                    )
+                })?;
+                Ok(serde_json::from_str::<Vec<SearchResult>>(&json)?)
+            };
+            Arc::new(run) as Arc<inference_core::SearchCallback>
+        });
+        Ok(EngineCallbacks { tools, search })
+    }
 }
 
 /// Safety: `result` is the handle passed to the running callback and `data` valid for `len` bytes.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn inference_callback_result_set(
     result: *mut inference_callback_result,
     data: *const c_char,
     len: usize,
 ) {
-    crate::guard_value((), || {
-        let Some(result) = result.as_mut() else {
-            return;
-        };
-        let bytes = match (data.is_null(), len) {
-            (true, 0) => &[][..],
-            (true, _) => return,
-            (false, _) => std::slice::from_raw_parts(data.cast::<u8>(), len),
-        };
-        result.outcome = Some(Ok(String::from_utf8_lossy(bytes).into_owned()));
-    })
+    unsafe {
+        crate::guard_value((), || {
+            let Some(result) = result.as_mut() else {
+                return;
+            };
+            let bytes = match (data.is_null(), len) {
+                (true, 0) => &[][..],
+                (true, _) => return,
+                (false, _) => std::slice::from_raw_parts(data.cast::<u8>(), len),
+            };
+            result.outcome = Some(Ok(String::from_utf8_lossy(bytes).into_owned()));
+        })
+    }
 }
 
 /// Safety: `result` is the handle passed to the running callback and `message` NULL or a C string.
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn inference_callback_result_fail(
     result: *mut inference_callback_result,
     message: *const c_char,
 ) {
-    crate::guard_value((), || {
-        let Some(result) = result.as_mut() else {
-            return;
-        };
-        let message = if message.is_null() {
-            HOST_FAILED.to_string()
-        } else {
-            std::ffi::CStr::from_ptr(message)
-                .to_string_lossy()
-                .into_owned()
-        };
-        result.outcome = Some(Err(message));
-    })
+    unsafe {
+        crate::guard_value((), || {
+            let Some(result) = result.as_mut() else {
+                return;
+            };
+            let message = if message.is_null() {
+                HOST_FAILED.to_string()
+            } else {
+                std::ffi::CStr::from_ptr(message)
+                    .to_string_lossy()
+                    .into_owned()
+            };
+            result.outcome = Some(Err(message));
+        })
+    }
 }
 
 #[cfg(test)]
@@ -233,14 +239,16 @@ mod tests {
         _context_len: usize,
         result: *mut inference_callback_result,
     ) {
-        let prefix = &*(user_data as *const String);
-        let name = std::ffi::CStr::from_ptr(tool_name).to_str().unwrap();
-        let arguments =
-            std::str::from_utf8(std::slice::from_raw_parts(arguments.cast(), arguments_len))
-                .unwrap();
-        let context = std::ffi::CStr::from_ptr(context).to_str().unwrap();
-        let text = format!("{prefix} {name} {arguments} {context}");
-        inference_callback_result_set(result, text.as_ptr().cast(), text.len());
+        unsafe {
+            let prefix = &*(user_data as *const String);
+            let name = std::ffi::CStr::from_ptr(tool_name).to_str().unwrap();
+            let arguments =
+                std::str::from_utf8(std::slice::from_raw_parts(arguments.cast(), arguments_len))
+                    .unwrap();
+            let context = std::ffi::CStr::from_ptr(context).to_str().unwrap();
+            let text = format!("{prefix} {name} {arguments} {context}");
+            inference_callback_result_set(result, text.as_ptr().cast(), text.len());
+        }
     }
 
     unsafe extern "C" fn silent(
@@ -260,15 +268,17 @@ mod tests {
         query_len: usize,
         result: *mut inference_callback_result,
     ) {
-        let query =
-            std::str::from_utf8(std::slice::from_raw_parts(query.cast(), query_len)).unwrap();
-        if query == "fail" {
-            inference_callback_result_fail(result, c"search backend down".as_ptr());
-            return;
-        }
-        let json = serde_json::json!([{"title": query, "description": "", "url": "https://example.com", "content": ""}])
+        unsafe {
+            let query =
+                std::str::from_utf8(std::slice::from_raw_parts(query.cast(), query_len)).unwrap();
+            if query == "fail" {
+                inference_callback_result_fail(result, c"search backend down".as_ptr());
+                return;
+            }
+            let json = serde_json::json!([{"title": query, "description": "", "url": "https://example.com", "content": ""}])
             .to_string();
-        inference_callback_result_set(result, json.as_ptr().cast(), json.len());
+            inference_callback_result_set(result, json.as_ptr().cast(), json.len());
+        }
     }
 
     fn tool(callback: inference_tool_callback, user_data: *mut c_void) -> inference_host_tool {

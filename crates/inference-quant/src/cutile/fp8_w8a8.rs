@@ -15,8 +15,8 @@ use float8::F8E4M3;
 use half::{bf16, f16};
 
 use super::tune::{
-    buckets_from_breakpoints, config, cutile_error, tune, Bucket, Prepared, Space, TuneMode,
-    TuneRequest, TunedTable, TUNE_WEIGHT_SETS,
+    Bucket, Prepared, Space, TUNE_WEIGHT_SETS, TuneMode, TuneRequest, TunedTable,
+    buckets_from_breakpoints, config, cutile_error, tune,
 };
 use super::warmup::CutileKernel;
 use super::{
@@ -913,8 +913,8 @@ mod tests {
     use candle_core::{DType, Device, Result, Tensor};
 
     use super::{
-        cutile_fp8_w8a8, quantize_activation, validate_scale_shapes, CutileFp8W8A8Args,
-        Fp8W8A8Scheme, GemmOperands,
+        CutileFp8W8A8Args, Fp8W8A8Scheme, GemmOperands, cutile_fp8_w8a8, quantize_activation,
+        validate_scale_shapes,
     };
     use crate::{Fp8ActivationMode, Fp8WeightScaleLayout};
 
@@ -957,18 +957,20 @@ mod tests {
             7,
             256,
         )?;
-        assert!(validate_scale_shapes(
-            &GemmOperands {
-                activation: &activation,
-                activation_scales: &token,
-                weight: &weight,
-                weight_scales: &scalar,
-                scheme: static_tensor,
-            },
-            7,
-            256,
-        )
-        .is_err());
+        assert!(
+            validate_scale_shapes(
+                &GemmOperands {
+                    activation: &activation,
+                    activation_scales: &token,
+                    weight: &weight,
+                    weight_scales: &scalar,
+                    scheme: static_tensor,
+                },
+                7,
+                256,
+            )
+            .is_err()
+        );
         Ok(())
     }
 

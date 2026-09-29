@@ -34,141 +34,144 @@ mod kernels {
         value_stride: i64,
         ag: &Tensor<f32, { [-1] }>,
     ) {
-        let global: Tile<f32, { [1] }> = load_tile(ag, const_shape![1], [0]);
-        for idx in q.iter_indices() {
-            let (m, kg) = idx.components();
-            let row: Tile<i32, { [BM] }> =
-                iota(const_shape![BM]) + broadcast_scalar(m * BM, const_shape![BM]);
-            let column: Tile<i32, { [BK] }> =
-                iota(const_shape![BK]) + broadcast_scalar(kg * BK, const_shape![BK]);
-            let row64: Tile<i64, { [BM] }> = exti(row);
-            let column64: Tile<i64, { [BK] }> = exti(column);
-            let gate_row = row64 * broadcast_scalar(gate_stride, const_shape![BM]);
-            let value_row = row64 * broadcast_scalar(value_stride, const_shape![BM]);
-            let gate_offsets = gate_row
-                .reshape(const_shape![BM, 1])
-                .broadcast(const_shape![BM, BK])
-                + column64
-                    .reshape(const_shape![1, BK])
-                    .broadcast(const_shape![BM, BK]);
-            let value_offsets = value_row
-                .reshape(const_shape![BM, 1])
-                .broadcast(const_shape![BM, BK])
-                + column64
-                    .reshape(const_shape![1, BK])
-                    .broadcast(const_shape![BM, BK]);
-            let mask = lt_tile(row, broadcast_scalar(rows, const_shape![BM]))
-                .reshape(const_shape![BM, 1])
-                .broadcast(const_shape![BM, BK])
-                & lt_tile(column, broadcast_scalar(columns, const_shape![BK]))
-                    .reshape(const_shape![1, BK])
-                    .broadcast(const_shape![BM, BK]);
-            let gp: PointerTile<*mut bf16, { [] }> = pointer_to_tile(gate);
-            let gp: PointerTile<*mut bf16, { [1, 1] }> = gp.reshape(const_shape![1, 1]);
-            let gp: PointerTile<*mut bf16, { [BM, BK] }> = gp.broadcast(const_shape![BM, BK]);
-            let vp: PointerTile<*mut bf16, { [] }> = pointer_to_tile(value);
-            let vp: PointerTile<*mut bf16, { [1, 1] }> = vp.reshape(const_shape![1, 1]);
-            let vp: PointerTile<*mut bf16, { [BM, BK] }> = vp.broadcast(const_shape![BM, BK]);
-            let gp: PointerTile<*mut bf16, { [BM, BK] }> = gp.offset_tile(gate_offsets);
-            let vp: PointerTile<*mut bf16, { [BM, BK] }> = vp.offset_tile(value_offsets);
-            let (gt, _): (Tile<bf16, { [BM, BK] }>, Token) = load_ptr_tko(
-                gp,
-                ordering::Weak,
-                None::<scope::TileBlock>,
-                Some(mask),
-                None,
-                None,
-                Latency::<0>,
-            );
-            let (vt, _): (Tile<bf16, { [BM, BK] }>, Token) = load_ptr_tko(
-                vp,
-                ordering::Weak,
-                None::<scope::TileBlock>,
-                Some(mask),
-                None,
-                None,
-                Latency::<0>,
-            );
-            let zeros: Tile<f32, { [BM, BK] }> = constant(0.0f32, const_shape![BM, BK]);
-            let gt: Tile<f32, { [BM, BK] }> = convert_tile(gt);
-            let gt = select(mask, gt, zeros);
-            let vt: Tile<f32, { [BM, BK] }> = convert_tile(vt);
-            let vt = select(mask, vt, zeros);
-            let activated = if ACTIVATION == RELU {
-                max_tile(gt, zeros)
-            } else {
-                let log2e: Tile<f32, { [BM, BK] }> = constant(LOG2_E, const_shape![BM, BK]);
-                let exponent = mulf(negf(gt), log2e, rounding::NearestEven, ftz::Enabled);
-                let exponent = exp2(exponent, ftz::Enabled);
-                let ones: Tile<f32, { [BM, BK] }> = constant(1.0f32, const_shape![BM, BK]);
-                let denominator = addf(ones, exponent, rounding::NearestEven, ftz::Enabled);
-                if ACTIVATION == SILU {
-                    divf(gt, denominator, rounding::Approx, ftz::Enabled)
+        unsafe {
+            let global: Tile<f32, { [1] }> = load_tile(ag, const_shape![1], [0]);
+            for idx in q.iter_indices() {
+                let (m, kg) = idx.components();
+                let row: Tile<i32, { [BM] }> =
+                    iota(const_shape![BM]) + broadcast_scalar(m * BM, const_shape![BM]);
+                let column: Tile<i32, { [BK] }> =
+                    iota(const_shape![BK]) + broadcast_scalar(kg * BK, const_shape![BK]);
+                let row64: Tile<i64, { [BM] }> = exti(row);
+                let column64: Tile<i64, { [BK] }> = exti(column);
+                let gate_row = row64 * broadcast_scalar(gate_stride, const_shape![BM]);
+                let value_row = row64 * broadcast_scalar(value_stride, const_shape![BM]);
+                let gate_offsets = gate_row
+                    .reshape(const_shape![BM, 1])
+                    .broadcast(const_shape![BM, BK])
+                    + column64
+                        .reshape(const_shape![1, BK])
+                        .broadcast(const_shape![BM, BK]);
+                let value_offsets = value_row
+                    .reshape(const_shape![BM, 1])
+                    .broadcast(const_shape![BM, BK])
+                    + column64
+                        .reshape(const_shape![1, BK])
+                        .broadcast(const_shape![BM, BK]);
+                let mask = lt_tile(row, broadcast_scalar(rows, const_shape![BM]))
+                    .reshape(const_shape![BM, 1])
+                    .broadcast(const_shape![BM, BK])
+                    & lt_tile(column, broadcast_scalar(columns, const_shape![BK]))
+                        .reshape(const_shape![1, BK])
+                        .broadcast(const_shape![BM, BK]);
+                let gp: PointerTile<*mut bf16, { [] }> = pointer_to_tile(gate);
+                let gp: PointerTile<*mut bf16, { [1, 1] }> = gp.reshape(const_shape![1, 1]);
+                let gp: PointerTile<*mut bf16, { [BM, BK] }> = gp.broadcast(const_shape![BM, BK]);
+                let vp: PointerTile<*mut bf16, { [] }> = pointer_to_tile(value);
+                let vp: PointerTile<*mut bf16, { [1, 1] }> = vp.reshape(const_shape![1, 1]);
+                let vp: PointerTile<*mut bf16, { [BM, BK] }> = vp.broadcast(const_shape![BM, BK]);
+                let gp: PointerTile<*mut bf16, { [BM, BK] }> = gp.offset_tile(gate_offsets);
+                let vp: PointerTile<*mut bf16, { [BM, BK] }> = vp.offset_tile(value_offsets);
+                let (gt, _): (Tile<bf16, { [BM, BK] }>, Token) = load_ptr_tko(
+                    gp,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    Some(mask),
+                    None,
+                    None,
+                    Latency::<0>,
+                );
+                let (vt, _): (Tile<bf16, { [BM, BK] }>, Token) = load_ptr_tko(
+                    vp,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    Some(mask),
+                    None,
+                    None,
+                    Latency::<0>,
+                );
+                let zeros: Tile<f32, { [BM, BK] }> = constant(0.0f32, const_shape![BM, BK]);
+                let gt: Tile<f32, { [BM, BK] }> = convert_tile(gt);
+                let gt = select(mask, gt, zeros);
+                let vt: Tile<f32, { [BM, BK] }> = convert_tile(vt);
+                let vt = select(mask, vt, zeros);
+                let activated = if ACTIVATION == RELU {
+                    max_tile(gt, zeros)
                 } else {
-                    divf(ones, denominator, rounding::Approx, ftz::Enabled)
-                }
-            };
-            // Both casts preserve the existing activation-then-product rounding boundaries.
-            let activated: Tile<bf16, { [BM, BK] }> = convert_tile(activated);
-            let vt: Tile<bf16, { [BM, BK] }> = convert_tile(vt);
-            let product: Tile<bf16, { [BM, BK] }> = activated * vt;
-            let xf: Tile<f32, { [BM, BK] }> = convert_tile(product);
-            let xf = xf
-                / global
-                    .reshape(const_shape![1, 1])
-                    .broadcast(const_shape![BM, BK]);
-            let blocks: Tile<f32, { [BM, SK, BLOCK] }> = xf.reshape(const_shape![BM, SK, BLOCK]);
-            let maxima: Tile<f32, { [BM, SK] }> = reduce_max(absf(blocks), 2);
-            let maxima = maxima.reshape(const_shape![BM, SK]);
-            let fp4_max: Tile<f32, { [BM, SK] }> = constant(FP4_MAX, const_shape![BM, SK]);
-            let fp8_max: Tile<f32, { [BM, SK] }> = constant(FP8_MAX, const_shape![BM, SK]);
-            let zeros: Tile<f32, { [BM, SK] }> = constant(0.0f32, const_shape![BM, SK]);
-            let ones: Tile<f32, { [BM, SK] }> = constant(1.0f32, const_shape![BM, SK]);
-            let upper: Tile<f32, { [BM, BK] }> = constant(FP4_MAX, const_shape![BM, BK]);
-            let lower: Tile<f32, { [BM, BK] }> = constant(FP4_MIN, const_shape![BM, BK]);
-            let raw_scale = min_tile(maxima / fp4_max, fp8_max);
-            let sx: Tile<f8e4m3fn, { [BM, SK] }> = convert_tile(raw_scale);
-            let rounded: Tile<f32, { [BM, SK] }> = convert_tile(sx);
-            let denominator = select(eq_tile(rounded, zeros), ones, rounded);
-            let denominator = denominator
-                .reshape(const_shape![BM, SK, 1])
-                .broadcast(const_shape![BM, SK, BLOCK]);
-            let normalized = (blocks / denominator).reshape(const_shape![BM, BK]);
-            let normalized = max_tile(min_tile(normalized, upper), lower);
-            let xq: Tile<f4e2m1fn, { [BM, BK] }> = convert_tile(normalized);
-            let packed: Tile<f4e2m1fnx2, { [BM, PK] }> = xq.pack(const_shape![BM, PK]);
-            q.store(packed, idx);
-            let col: Tile<i32, { [SK] }> =
-                iota(const_shape![SK]) + broadcast_scalar(kg * SK, const_shape![SK]);
-            let stride: Tile<i64, { [BM] }> =
-                exti(broadcast_scalar(scale_stride, const_shape![BM]));
-            let col_offset: Tile<i64, { [SK] }> = exti(col);
-            let offset = (row64 * stride)
-                .reshape(const_shape![BM, 1])
-                .broadcast(const_shape![BM, SK])
-                + col_offset
-                    .reshape(const_shape![1, SK])
-                    .broadcast(const_shape![BM, SK]);
-            let mask = lt_tile(row, broadcast_scalar(rows, const_shape![BM]))
-                .reshape(const_shape![BM, 1])
-                .broadcast(const_shape![BM, SK])
-                & lt_tile(col, broadcast_scalar(scale_stride, const_shape![SK]))
-                    .reshape(const_shape![1, SK])
-                    .broadcast(const_shape![BM, SK]);
-            let base: PointerTile<*mut f8e4m3fn, { [] }> = pointer_to_tile(s);
-            let base: PointerTile<*mut f8e4m3fn, { [1, 1] }> = base.reshape(const_shape![1, 1]);
-            let base: PointerTile<*mut f8e4m3fn, { [BM, SK] }> =
-                base.broadcast(const_shape![BM, SK]);
-            let base: PointerTile<*mut f8e4m3fn, { [BM, SK] }> = base.offset_tile(offset);
-            store_ptr_tko(
-                base,
-                sx,
-                ordering::Weak,
-                None::<scope::TileBlock>,
-                Some(mask),
-                None,
-                Latency::<0>,
-            );
+                    let log2e: Tile<f32, { [BM, BK] }> = constant(LOG2_E, const_shape![BM, BK]);
+                    let exponent = mulf(negf(gt), log2e, rounding::NearestEven, ftz::Enabled);
+                    let exponent = exp2(exponent, ftz::Enabled);
+                    let ones: Tile<f32, { [BM, BK] }> = constant(1.0f32, const_shape![BM, BK]);
+                    let denominator = addf(ones, exponent, rounding::NearestEven, ftz::Enabled);
+                    if ACTIVATION == SILU {
+                        divf(gt, denominator, rounding::Approx, ftz::Enabled)
+                    } else {
+                        divf(ones, denominator, rounding::Approx, ftz::Enabled)
+                    }
+                };
+                // Both casts preserve the existing activation-then-product rounding boundaries.
+                let activated: Tile<bf16, { [BM, BK] }> = convert_tile(activated);
+                let vt: Tile<bf16, { [BM, BK] }> = convert_tile(vt);
+                let product: Tile<bf16, { [BM, BK] }> = activated * vt;
+                let xf: Tile<f32, { [BM, BK] }> = convert_tile(product);
+                let xf = xf
+                    / global
+                        .reshape(const_shape![1, 1])
+                        .broadcast(const_shape![BM, BK]);
+                let blocks: Tile<f32, { [BM, SK, BLOCK] }> =
+                    xf.reshape(const_shape![BM, SK, BLOCK]);
+                let maxima: Tile<f32, { [BM, SK] }> = reduce_max(absf(blocks), 2);
+                let maxima = maxima.reshape(const_shape![BM, SK]);
+                let fp4_max: Tile<f32, { [BM, SK] }> = constant(FP4_MAX, const_shape![BM, SK]);
+                let fp8_max: Tile<f32, { [BM, SK] }> = constant(FP8_MAX, const_shape![BM, SK]);
+                let zeros: Tile<f32, { [BM, SK] }> = constant(0.0f32, const_shape![BM, SK]);
+                let ones: Tile<f32, { [BM, SK] }> = constant(1.0f32, const_shape![BM, SK]);
+                let upper: Tile<f32, { [BM, BK] }> = constant(FP4_MAX, const_shape![BM, BK]);
+                let lower: Tile<f32, { [BM, BK] }> = constant(FP4_MIN, const_shape![BM, BK]);
+                let raw_scale = min_tile(maxima / fp4_max, fp8_max);
+                let sx: Tile<f8e4m3fn, { [BM, SK] }> = convert_tile(raw_scale);
+                let rounded: Tile<f32, { [BM, SK] }> = convert_tile(sx);
+                let denominator = select(eq_tile(rounded, zeros), ones, rounded);
+                let denominator = denominator
+                    .reshape(const_shape![BM, SK, 1])
+                    .broadcast(const_shape![BM, SK, BLOCK]);
+                let normalized = (blocks / denominator).reshape(const_shape![BM, BK]);
+                let normalized = max_tile(min_tile(normalized, upper), lower);
+                let xq: Tile<f4e2m1fn, { [BM, BK] }> = convert_tile(normalized);
+                let packed: Tile<f4e2m1fnx2, { [BM, PK] }> = xq.pack(const_shape![BM, PK]);
+                q.store(packed, idx);
+                let col: Tile<i32, { [SK] }> =
+                    iota(const_shape![SK]) + broadcast_scalar(kg * SK, const_shape![SK]);
+                let stride: Tile<i64, { [BM] }> =
+                    exti(broadcast_scalar(scale_stride, const_shape![BM]));
+                let col_offset: Tile<i64, { [SK] }> = exti(col);
+                let offset = (row64 * stride)
+                    .reshape(const_shape![BM, 1])
+                    .broadcast(const_shape![BM, SK])
+                    + col_offset
+                        .reshape(const_shape![1, SK])
+                        .broadcast(const_shape![BM, SK]);
+                let mask = lt_tile(row, broadcast_scalar(rows, const_shape![BM]))
+                    .reshape(const_shape![BM, 1])
+                    .broadcast(const_shape![BM, SK])
+                    & lt_tile(col, broadcast_scalar(scale_stride, const_shape![SK]))
+                        .reshape(const_shape![1, SK])
+                        .broadcast(const_shape![BM, SK]);
+                let base: PointerTile<*mut f8e4m3fn, { [] }> = pointer_to_tile(s);
+                let base: PointerTile<*mut f8e4m3fn, { [1, 1] }> = base.reshape(const_shape![1, 1]);
+                let base: PointerTile<*mut f8e4m3fn, { [BM, SK] }> =
+                    base.broadcast(const_shape![BM, SK]);
+                let base: PointerTile<*mut f8e4m3fn, { [BM, SK] }> = base.offset_tile(offset);
+                store_ptr_tko(
+                    base,
+                    sx,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    Some(mask),
+                    None,
+                    Latency::<0>,
+                );
+            }
         }
     }
 
@@ -191,141 +194,144 @@ mod kernels {
         value_stride: i64,
         ag: &Tensor<f32, { [-1] }>,
     ) {
-        let global: Tile<f32, { [1] }> = load_tile(ag, const_shape![1], [0]);
-        for idx in q.iter_indices() {
-            let (m, kg) = idx.components();
-            let row: Tile<i32, { [BM] }> =
-                iota(const_shape![BM]) + broadcast_scalar(m * BM, const_shape![BM]);
-            let column: Tile<i32, { [BK] }> =
-                iota(const_shape![BK]) + broadcast_scalar(kg * BK, const_shape![BK]);
-            let row64: Tile<i64, { [BM] }> = exti(row);
-            let column64: Tile<i64, { [BK] }> = exti(column);
-            let gate_row = row64 * broadcast_scalar(gate_stride, const_shape![BM]);
-            let value_row = row64 * broadcast_scalar(value_stride, const_shape![BM]);
-            let gate_offsets = gate_row
-                .reshape(const_shape![BM, 1])
-                .broadcast(const_shape![BM, BK])
-                + column64
-                    .reshape(const_shape![1, BK])
-                    .broadcast(const_shape![BM, BK]);
-            let value_offsets = value_row
-                .reshape(const_shape![BM, 1])
-                .broadcast(const_shape![BM, BK])
-                + column64
-                    .reshape(const_shape![1, BK])
-                    .broadcast(const_shape![BM, BK]);
-            let mask = lt_tile(row, broadcast_scalar(rows, const_shape![BM]))
-                .reshape(const_shape![BM, 1])
-                .broadcast(const_shape![BM, BK])
-                & lt_tile(column, broadcast_scalar(columns, const_shape![BK]))
-                    .reshape(const_shape![1, BK])
-                    .broadcast(const_shape![BM, BK]);
-            let gp: PointerTile<*mut f16, { [] }> = pointer_to_tile(gate);
-            let gp: PointerTile<*mut f16, { [1, 1] }> = gp.reshape(const_shape![1, 1]);
-            let gp: PointerTile<*mut f16, { [BM, BK] }> = gp.broadcast(const_shape![BM, BK]);
-            let vp: PointerTile<*mut f16, { [] }> = pointer_to_tile(value);
-            let vp: PointerTile<*mut f16, { [1, 1] }> = vp.reshape(const_shape![1, 1]);
-            let vp: PointerTile<*mut f16, { [BM, BK] }> = vp.broadcast(const_shape![BM, BK]);
-            let gp: PointerTile<*mut f16, { [BM, BK] }> = gp.offset_tile(gate_offsets);
-            let vp: PointerTile<*mut f16, { [BM, BK] }> = vp.offset_tile(value_offsets);
-            let (gt, _): (Tile<f16, { [BM, BK] }>, Token) = load_ptr_tko(
-                gp,
-                ordering::Weak,
-                None::<scope::TileBlock>,
-                Some(mask),
-                None,
-                None,
-                Latency::<0>,
-            );
-            let (vt, _): (Tile<f16, { [BM, BK] }>, Token) = load_ptr_tko(
-                vp,
-                ordering::Weak,
-                None::<scope::TileBlock>,
-                Some(mask),
-                None,
-                None,
-                Latency::<0>,
-            );
-            let zeros: Tile<f32, { [BM, BK] }> = constant(0.0f32, const_shape![BM, BK]);
-            let gt: Tile<f32, { [BM, BK] }> = convert_tile(gt);
-            let gt = select(mask, gt, zeros);
-            let vt: Tile<f32, { [BM, BK] }> = convert_tile(vt);
-            let vt = select(mask, vt, zeros);
-            let activated = if ACTIVATION == RELU {
-                max_tile(gt, zeros)
-            } else {
-                let log2e: Tile<f32, { [BM, BK] }> = constant(LOG2_E, const_shape![BM, BK]);
-                let exponent = mulf(negf(gt), log2e, rounding::NearestEven, ftz::Enabled);
-                let exponent = exp2(exponent, ftz::Enabled);
-                let ones: Tile<f32, { [BM, BK] }> = constant(1.0f32, const_shape![BM, BK]);
-                let denominator = addf(ones, exponent, rounding::NearestEven, ftz::Enabled);
-                if ACTIVATION == SILU {
-                    divf(gt, denominator, rounding::Approx, ftz::Enabled)
+        unsafe {
+            let global: Tile<f32, { [1] }> = load_tile(ag, const_shape![1], [0]);
+            for idx in q.iter_indices() {
+                let (m, kg) = idx.components();
+                let row: Tile<i32, { [BM] }> =
+                    iota(const_shape![BM]) + broadcast_scalar(m * BM, const_shape![BM]);
+                let column: Tile<i32, { [BK] }> =
+                    iota(const_shape![BK]) + broadcast_scalar(kg * BK, const_shape![BK]);
+                let row64: Tile<i64, { [BM] }> = exti(row);
+                let column64: Tile<i64, { [BK] }> = exti(column);
+                let gate_row = row64 * broadcast_scalar(gate_stride, const_shape![BM]);
+                let value_row = row64 * broadcast_scalar(value_stride, const_shape![BM]);
+                let gate_offsets = gate_row
+                    .reshape(const_shape![BM, 1])
+                    .broadcast(const_shape![BM, BK])
+                    + column64
+                        .reshape(const_shape![1, BK])
+                        .broadcast(const_shape![BM, BK]);
+                let value_offsets = value_row
+                    .reshape(const_shape![BM, 1])
+                    .broadcast(const_shape![BM, BK])
+                    + column64
+                        .reshape(const_shape![1, BK])
+                        .broadcast(const_shape![BM, BK]);
+                let mask = lt_tile(row, broadcast_scalar(rows, const_shape![BM]))
+                    .reshape(const_shape![BM, 1])
+                    .broadcast(const_shape![BM, BK])
+                    & lt_tile(column, broadcast_scalar(columns, const_shape![BK]))
+                        .reshape(const_shape![1, BK])
+                        .broadcast(const_shape![BM, BK]);
+                let gp: PointerTile<*mut f16, { [] }> = pointer_to_tile(gate);
+                let gp: PointerTile<*mut f16, { [1, 1] }> = gp.reshape(const_shape![1, 1]);
+                let gp: PointerTile<*mut f16, { [BM, BK] }> = gp.broadcast(const_shape![BM, BK]);
+                let vp: PointerTile<*mut f16, { [] }> = pointer_to_tile(value);
+                let vp: PointerTile<*mut f16, { [1, 1] }> = vp.reshape(const_shape![1, 1]);
+                let vp: PointerTile<*mut f16, { [BM, BK] }> = vp.broadcast(const_shape![BM, BK]);
+                let gp: PointerTile<*mut f16, { [BM, BK] }> = gp.offset_tile(gate_offsets);
+                let vp: PointerTile<*mut f16, { [BM, BK] }> = vp.offset_tile(value_offsets);
+                let (gt, _): (Tile<f16, { [BM, BK] }>, Token) = load_ptr_tko(
+                    gp,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    Some(mask),
+                    None,
+                    None,
+                    Latency::<0>,
+                );
+                let (vt, _): (Tile<f16, { [BM, BK] }>, Token) = load_ptr_tko(
+                    vp,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    Some(mask),
+                    None,
+                    None,
+                    Latency::<0>,
+                );
+                let zeros: Tile<f32, { [BM, BK] }> = constant(0.0f32, const_shape![BM, BK]);
+                let gt: Tile<f32, { [BM, BK] }> = convert_tile(gt);
+                let gt = select(mask, gt, zeros);
+                let vt: Tile<f32, { [BM, BK] }> = convert_tile(vt);
+                let vt = select(mask, vt, zeros);
+                let activated = if ACTIVATION == RELU {
+                    max_tile(gt, zeros)
                 } else {
-                    divf(ones, denominator, rounding::Approx, ftz::Enabled)
-                }
-            };
-            // Both casts preserve the existing activation-then-product rounding boundaries.
-            let activated: Tile<f16, { [BM, BK] }> = convert_tile(activated);
-            let vt: Tile<f16, { [BM, BK] }> = convert_tile(vt);
-            let product: Tile<f16, { [BM, BK] }> = activated * vt;
-            let xf: Tile<f32, { [BM, BK] }> = convert_tile(product);
-            let xf = xf
-                / global
-                    .reshape(const_shape![1, 1])
-                    .broadcast(const_shape![BM, BK]);
-            let blocks: Tile<f32, { [BM, SK, BLOCK] }> = xf.reshape(const_shape![BM, SK, BLOCK]);
-            let maxima: Tile<f32, { [BM, SK] }> = reduce_max(absf(blocks), 2);
-            let maxima = maxima.reshape(const_shape![BM, SK]);
-            let fp4_max: Tile<f32, { [BM, SK] }> = constant(FP4_MAX, const_shape![BM, SK]);
-            let fp8_max: Tile<f32, { [BM, SK] }> = constant(FP8_MAX, const_shape![BM, SK]);
-            let zeros: Tile<f32, { [BM, SK] }> = constant(0.0f32, const_shape![BM, SK]);
-            let ones: Tile<f32, { [BM, SK] }> = constant(1.0f32, const_shape![BM, SK]);
-            let upper: Tile<f32, { [BM, BK] }> = constant(FP4_MAX, const_shape![BM, BK]);
-            let lower: Tile<f32, { [BM, BK] }> = constant(FP4_MIN, const_shape![BM, BK]);
-            let raw_scale = min_tile(maxima / fp4_max, fp8_max);
-            let sx: Tile<f8e4m3fn, { [BM, SK] }> = convert_tile(raw_scale);
-            let rounded: Tile<f32, { [BM, SK] }> = convert_tile(sx);
-            let denominator = select(eq_tile(rounded, zeros), ones, rounded);
-            let denominator = denominator
-                .reshape(const_shape![BM, SK, 1])
-                .broadcast(const_shape![BM, SK, BLOCK]);
-            let normalized = (blocks / denominator).reshape(const_shape![BM, BK]);
-            let normalized = max_tile(min_tile(normalized, upper), lower);
-            let xq: Tile<f4e2m1fn, { [BM, BK] }> = convert_tile(normalized);
-            let packed: Tile<f4e2m1fnx2, { [BM, PK] }> = xq.pack(const_shape![BM, PK]);
-            q.store(packed, idx);
-            let col: Tile<i32, { [SK] }> =
-                iota(const_shape![SK]) + broadcast_scalar(kg * SK, const_shape![SK]);
-            let stride: Tile<i64, { [BM] }> =
-                exti(broadcast_scalar(scale_stride, const_shape![BM]));
-            let col_offset: Tile<i64, { [SK] }> = exti(col);
-            let offset = (row64 * stride)
-                .reshape(const_shape![BM, 1])
-                .broadcast(const_shape![BM, SK])
-                + col_offset
-                    .reshape(const_shape![1, SK])
-                    .broadcast(const_shape![BM, SK]);
-            let mask = lt_tile(row, broadcast_scalar(rows, const_shape![BM]))
-                .reshape(const_shape![BM, 1])
-                .broadcast(const_shape![BM, SK])
-                & lt_tile(col, broadcast_scalar(scale_stride, const_shape![SK]))
-                    .reshape(const_shape![1, SK])
-                    .broadcast(const_shape![BM, SK]);
-            let base: PointerTile<*mut f8e4m3fn, { [] }> = pointer_to_tile(s);
-            let base: PointerTile<*mut f8e4m3fn, { [1, 1] }> = base.reshape(const_shape![1, 1]);
-            let base: PointerTile<*mut f8e4m3fn, { [BM, SK] }> =
-                base.broadcast(const_shape![BM, SK]);
-            let base: PointerTile<*mut f8e4m3fn, { [BM, SK] }> = base.offset_tile(offset);
-            store_ptr_tko(
-                base,
-                sx,
-                ordering::Weak,
-                None::<scope::TileBlock>,
-                Some(mask),
-                None,
-                Latency::<0>,
-            );
+                    let log2e: Tile<f32, { [BM, BK] }> = constant(LOG2_E, const_shape![BM, BK]);
+                    let exponent = mulf(negf(gt), log2e, rounding::NearestEven, ftz::Enabled);
+                    let exponent = exp2(exponent, ftz::Enabled);
+                    let ones: Tile<f32, { [BM, BK] }> = constant(1.0f32, const_shape![BM, BK]);
+                    let denominator = addf(ones, exponent, rounding::NearestEven, ftz::Enabled);
+                    if ACTIVATION == SILU {
+                        divf(gt, denominator, rounding::Approx, ftz::Enabled)
+                    } else {
+                        divf(ones, denominator, rounding::Approx, ftz::Enabled)
+                    }
+                };
+                // Both casts preserve the existing activation-then-product rounding boundaries.
+                let activated: Tile<f16, { [BM, BK] }> = convert_tile(activated);
+                let vt: Tile<f16, { [BM, BK] }> = convert_tile(vt);
+                let product: Tile<f16, { [BM, BK] }> = activated * vt;
+                let xf: Tile<f32, { [BM, BK] }> = convert_tile(product);
+                let xf = xf
+                    / global
+                        .reshape(const_shape![1, 1])
+                        .broadcast(const_shape![BM, BK]);
+                let blocks: Tile<f32, { [BM, SK, BLOCK] }> =
+                    xf.reshape(const_shape![BM, SK, BLOCK]);
+                let maxima: Tile<f32, { [BM, SK] }> = reduce_max(absf(blocks), 2);
+                let maxima = maxima.reshape(const_shape![BM, SK]);
+                let fp4_max: Tile<f32, { [BM, SK] }> = constant(FP4_MAX, const_shape![BM, SK]);
+                let fp8_max: Tile<f32, { [BM, SK] }> = constant(FP8_MAX, const_shape![BM, SK]);
+                let zeros: Tile<f32, { [BM, SK] }> = constant(0.0f32, const_shape![BM, SK]);
+                let ones: Tile<f32, { [BM, SK] }> = constant(1.0f32, const_shape![BM, SK]);
+                let upper: Tile<f32, { [BM, BK] }> = constant(FP4_MAX, const_shape![BM, BK]);
+                let lower: Tile<f32, { [BM, BK] }> = constant(FP4_MIN, const_shape![BM, BK]);
+                let raw_scale = min_tile(maxima / fp4_max, fp8_max);
+                let sx: Tile<f8e4m3fn, { [BM, SK] }> = convert_tile(raw_scale);
+                let rounded: Tile<f32, { [BM, SK] }> = convert_tile(sx);
+                let denominator = select(eq_tile(rounded, zeros), ones, rounded);
+                let denominator = denominator
+                    .reshape(const_shape![BM, SK, 1])
+                    .broadcast(const_shape![BM, SK, BLOCK]);
+                let normalized = (blocks / denominator).reshape(const_shape![BM, BK]);
+                let normalized = max_tile(min_tile(normalized, upper), lower);
+                let xq: Tile<f4e2m1fn, { [BM, BK] }> = convert_tile(normalized);
+                let packed: Tile<f4e2m1fnx2, { [BM, PK] }> = xq.pack(const_shape![BM, PK]);
+                q.store(packed, idx);
+                let col: Tile<i32, { [SK] }> =
+                    iota(const_shape![SK]) + broadcast_scalar(kg * SK, const_shape![SK]);
+                let stride: Tile<i64, { [BM] }> =
+                    exti(broadcast_scalar(scale_stride, const_shape![BM]));
+                let col_offset: Tile<i64, { [SK] }> = exti(col);
+                let offset = (row64 * stride)
+                    .reshape(const_shape![BM, 1])
+                    .broadcast(const_shape![BM, SK])
+                    + col_offset
+                        .reshape(const_shape![1, SK])
+                        .broadcast(const_shape![BM, SK]);
+                let mask = lt_tile(row, broadcast_scalar(rows, const_shape![BM]))
+                    .reshape(const_shape![BM, 1])
+                    .broadcast(const_shape![BM, SK])
+                    & lt_tile(col, broadcast_scalar(scale_stride, const_shape![SK]))
+                        .reshape(const_shape![1, SK])
+                        .broadcast(const_shape![BM, SK]);
+                let base: PointerTile<*mut f8e4m3fn, { [] }> = pointer_to_tile(s);
+                let base: PointerTile<*mut f8e4m3fn, { [1, 1] }> = base.reshape(const_shape![1, 1]);
+                let base: PointerTile<*mut f8e4m3fn, { [BM, SK] }> =
+                    base.broadcast(const_shape![BM, SK]);
+                let base: PointerTile<*mut f8e4m3fn, { [BM, SK] }> = base.offset_tile(offset);
+                store_ptr_tko(
+                    base,
+                    sx,
+                    ordering::Weak,
+                    None::<scope::TileBlock>,
+                    Some(mask),
+                    None,
+                    Latency::<0>,
+                );
+            }
         }
     }
 }
@@ -340,14 +346,14 @@ use cutile::cuda_async::device_buffer::DevicePointer;
 use cutile::cuda_async::device_operation::DeviceOp;
 use cutile::cuda_core::sys::CUdeviceptr;
 use cutile::tensor::IntoPartition;
-use cutile::tile_kernel::{contains_cuda_function, CompileOptions, TileKernel};
+use cutile::tile_kernel::{CompileOptions, TileKernel, contains_cuda_function};
 use float8::F8E4M3;
 use half::{bf16, f16};
 
 use super::nvfp4::nvfp4_supported;
 use super::{catch_cutile_panic, context, device_compute_capability, device_multiprocessor_count};
-use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 use crate::GluActivationType;
+use crate::utils::{slice_ptr_mut_on_stream, slice_ptr_on_stream};
 
 const BLOCK_SIZE: usize = 16;
 const QUANT_ROWS: usize = 4;
@@ -772,11 +778,7 @@ mod tests {
                         DType::F16 => f16::from_bits(bits).to_f32(),
                         _ => unreachable!(),
                     };
-                    if value.is_finite() {
-                        value
-                    } else {
-                        0.0
-                    }
+                    if value.is_finite() { value } else { 0.0 }
                 })
                 .collect();
             let gate = Tensor::from_vec(values, (SIDE, SIDE), &Device::Cpu)?
@@ -993,29 +995,41 @@ mod tests {
                     .flatten_all()?
                     .to_vec1::<f32>()?,
             );
-            assert!(layer
-                .try_quantize_glu(&separate_gate, &separate_value, GluActivationType::Gelu)?
-                .is_none());
-            assert!(layer
-                .try_quantize_glu(
-                    &separate_gate,
-                    &separate_value.narrow(2, 0, COLUMNS - 1)?,
-                    activation
-                )?
-                .is_none());
+            assert!(
+                layer
+                    .try_quantize_glu(&separate_gate, &separate_value, GluActivationType::Gelu)?
+                    .is_none()
+            );
+            assert!(
+                layer
+                    .try_quantize_glu(
+                        &separate_gate,
+                        &separate_value.narrow(2, 0, COLUMNS - 1)?,
+                        activation
+                    )?
+                    .is_none()
+            );
             let one_row = input.reshape((ROWS, COLUMNS * 2))?.narrow(0, 0, 1)?;
-            assert!(layer
-                .try_forward_fused_split_glu(&one_row, COLUMNS, activation)?
-                .is_none());
-            assert!(layer
-                .try_forward_fused_split_glu(&input, COLUMNS - 1, activation)?
-                .is_none());
-            assert!(layer
-                .try_forward_fused_split_glu(&input, COLUMNS, GluActivationType::Gelu)?
-                .is_none());
-            assert!(layer
-                .try_forward_fused_split_glu(&input.to_dtype(DType::F32)?, COLUMNS, activation)?
-                .is_none());
+            assert!(
+                layer
+                    .try_forward_fused_split_glu(&one_row, COLUMNS, activation)?
+                    .is_none()
+            );
+            assert!(
+                layer
+                    .try_forward_fused_split_glu(&input, COLUMNS - 1, activation)?
+                    .is_none()
+            );
+            assert!(
+                layer
+                    .try_forward_fused_split_glu(&input, COLUMNS, GluActivationType::Gelu)?
+                    .is_none()
+            );
+            assert!(
+                layer
+                    .try_forward_fused_split_glu(&input.to_dtype(DType::F32)?, COLUMNS, activation)?
+                    .is_none()
+            );
             let separate = crate::cutile::cutile_nvfp4_quantize(
                 &intermediate.reshape((ROWS, COLUMNS))?,
                 &global,
@@ -1032,12 +1046,14 @@ mod tests {
                 bias: Some(bias),
                 dtype,
             })?;
-            assert!(a16
-                .try_forward_fused_split_glu(&input, COLUMNS, activation)?
-                .is_none());
-            assert!(a16
-                .try_quantize_glu(&separate_gate, &separate_value, activation)?
-                .is_none());
+            assert!(
+                a16.try_forward_fused_split_glu(&input, COLUMNS, activation)?
+                    .is_none()
+            );
+            assert!(
+                a16.try_quantize_glu(&separate_gate, &separate_value, activation)?
+                    .is_none()
+            );
         }
         Ok(())
     }

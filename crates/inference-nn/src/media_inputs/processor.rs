@@ -15,8 +15,8 @@ use crate::{
     gdn::RecurrentBatchKind,
     model::BlockDenoisingProgressEmitter,
     paged_attention::{
-        block_hash::{noncausal_mm_ranges, MultiModalFeature, MultimodalKind},
         PagedAttentionInputMetadata, PagedAttentionMeta,
+        block_hash::{MultiModalFeature, MultimodalKind, noncausal_mm_ranges},
     },
 };
 

@@ -6,39 +6,40 @@ use crate::paged_attention::PagedAttentionInputMetadata;
 use std::{
     collections::HashMap,
     sync::{
-        atomic::{AtomicBool, Ordering},
         Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
     },
 };
 
 use candle_core::{DType, Device, Module, Result, Tensor};
 use candle_nn::Linear;
 use inference_quant::{
-    softcap, ColumnParallelLayer, QuantMethod, QuantMethodConfig, ReplicatedLayer,
-    RowParallelLayer, ShardedVarBuilder, UnquantLinear,
+    ColumnParallelLayer, QuantMethod, QuantMethodConfig, ReplicatedLayer, RowParallelLayer,
+    ShardedVarBuilder, UnquantLinear, softcap,
 };
 
 use crate::kv_cache::EitherCache;
 use crate::kv_cache::KvCache;
 use crate::kv_cache::NormalCache;
 use crate::kv_cache::NormalCacheType;
-use crate::model::extract_logits;
 use crate::model::IsqModel;
 use crate::model::ModelForwardContext;
 use crate::model::MultimodalModel;
 use crate::model::NormalLoadingMetadata;
+use crate::model::extract_logits;
 use crate::{
     amoe::AnyMoeBaseModelMixin,
-    attention::{flash_backend_supports, AttentionMask, SdpaParams},
+    attention::{AttentionMask, SdpaParams, flash_backend_supports},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
-        contains_tensor_or_weight_source, embedding, embedding_with_legacy_tied_uqff, Activation,
-        CausalMasker, Mlp, RmsNorm, RotaryEmbedding, Sdpa,
+        Activation, CausalMasker, Mlp, RmsNorm, RotaryEmbedding, Sdpa,
+        contains_tensor_or_weight_source, embedding, embedding_with_legacy_tied_uqff,
     },
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{
-        block_hash::MultimodalAttentionPolicy, AttentionBackendKind, AttentionImplementation,
-        KvCacheLayout, KvCacheTopology, ModelConfigLike, ModelConfigMetadata, PagedAttention,
+        AttentionBackendKind, AttentionImplementation, KvCacheLayout, KvCacheTopology,
+        ModelConfigLike, ModelConfigMetadata, PagedAttention,
+        block_hash::MultimodalAttentionPolicy,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -576,70 +577,76 @@ impl Attention {
         };
 
         if self.is_sliding {
-            if let (Some(k_val), Some(v_val)) = (k.take(), v.take()) {
-                let k_norm = self
-                    .k_norm
-                    .as_ref()
-                    .expect("Gemma4 non-shared attention missing k_norm");
-                let v_norm_rms = self
-                    .v_norm_rms
-                    .as_ref()
-                    .expect("Gemma4 non-shared attention missing v_norm");
-                let (q_rot, k_rot, v_norm) = self.rotary_emb_local.forward_qkv_norm(
-                    &q,
-                    &k_val,
-                    &v_val,
-                    self.q_norm.weight(),
-                    k_norm.weight(),
-                    v_norm_rms.weight(),
-                    self.q_norm.eps(),
-                    k_norm.eps(),
-                    v_norm_rms.eps(),
-                    rope_positions,
-                )?;
-                q = q_rot;
-                k = Some(k_rot);
-                v = Some(v_norm);
-            } else {
-                q = self.rotary_emb_local.forward_q_norm(
-                    &q,
-                    self.q_norm.weight(),
-                    self.q_norm.eps(),
-                    rope_positions,
-                )?;
+            match (k.take(), v.take()) {
+                (Some(k_val), Some(v_val)) => {
+                    let k_norm = self
+                        .k_norm
+                        .as_ref()
+                        .expect("Gemma4 non-shared attention missing k_norm");
+                    let v_norm_rms = self
+                        .v_norm_rms
+                        .as_ref()
+                        .expect("Gemma4 non-shared attention missing v_norm");
+                    let (q_rot, k_rot, v_norm) = self.rotary_emb_local.forward_qkv_norm(
+                        &q,
+                        &k_val,
+                        &v_val,
+                        self.q_norm.weight(),
+                        k_norm.weight(),
+                        v_norm_rms.weight(),
+                        self.q_norm.eps(),
+                        k_norm.eps(),
+                        v_norm_rms.eps(),
+                        rope_positions,
+                    )?;
+                    q = q_rot;
+                    k = Some(k_rot);
+                    v = Some(v_norm);
+                }
+                _ => {
+                    q = self.rotary_emb_local.forward_q_norm(
+                        &q,
+                        self.q_norm.weight(),
+                        self.q_norm.eps(),
+                        rope_positions,
+                    )?;
+                }
             }
         } else {
-            if let (Some(k_val), Some(v_val)) = (k.take(), v.take()) {
-                let k_norm = self
-                    .k_norm
-                    .as_ref()
-                    .expect("Gemma4 non-shared attention missing k_norm");
-                let v_norm_rms = self
-                    .v_norm_rms
-                    .as_ref()
-                    .expect("Gemma4 non-shared attention missing v_norm");
-                let (q_rot, k_rot, v_norm) = self.rotary_emb_global.forward_qkv_norm(
-                    &q,
-                    &k_val,
-                    &v_val,
-                    self.q_norm.weight(),
-                    k_norm.weight(),
-                    v_norm_rms.weight(),
-                    self.q_norm.eps(),
-                    k_norm.eps(),
-                    v_norm_rms.eps(),
-                    rope_positions,
-                )?;
-                q = q_rot;
-                k = Some(k_rot);
-                v = Some(v_norm);
-            } else {
-                q = self.rotary_emb_global.forward_q_norm(
-                    &q,
-                    self.q_norm.weight(),
-                    self.q_norm.eps(),
-                    rope_positions,
-                )?;
+            match (k.take(), v.take()) {
+                (Some(k_val), Some(v_val)) => {
+                    let k_norm = self
+                        .k_norm
+                        .as_ref()
+                        .expect("Gemma4 non-shared attention missing k_norm");
+                    let v_norm_rms = self
+                        .v_norm_rms
+                        .as_ref()
+                        .expect("Gemma4 non-shared attention missing v_norm");
+                    let (q_rot, k_rot, v_norm) = self.rotary_emb_global.forward_qkv_norm(
+                        &q,
+                        &k_val,
+                        &v_val,
+                        self.q_norm.weight(),
+                        k_norm.weight(),
+                        v_norm_rms.weight(),
+                        self.q_norm.eps(),
+                        k_norm.eps(),
+                        v_norm_rms.eps(),
+                        rope_positions,
+                    )?;
+                    q = q_rot;
+                    k = Some(k_rot);
+                    v = Some(v_norm);
+                }
+                _ => {
+                    q = self.rotary_emb_global.forward_q_norm(
+                        &q,
+                        self.q_norm.weight(),
+                        self.q_norm.eps(),
+                        rope_positions,
+                    )?;
+                }
             }
         }
 
@@ -1240,7 +1247,7 @@ impl DecoderLayer {
         let mut next_normed = None;
         let mut layer_scalar_applied = false;
 
-        if let (Some(ref moe), Some(ref per_expert_scale), Some(ref router)) =
+        if let (Some(moe), Some(per_expert_scale), Some(router)) =
             (&self.moe_block, &self.per_expert_scale, &self.router)
         {
             // MoE path: parallel MLP + MoE with separate norms
@@ -1309,51 +1316,48 @@ impl DecoderLayer {
         };
 
         // PLE: per-layer embedding injection (after feedforward, before layer scalar)
-        if let (Some(ref gate), Some(ref proj), Some(ref norm)) = (
+        if let (Some(gate), Some(proj), Some(norm)) = (
             &self.per_layer_input_gate,
             &self.per_layer_projection,
             &self.post_per_layer_input_norm,
-        ) {
-            if let Some(pli) = per_layer_input {
-                let residual_ple = xs.clone();
-                // gate: Linear(hidden_size -> ple_dim)
-                let gate_in = xs;
-                let gated = gate.forward(&gate_in)?;
-                // activation + elementwise multiply with per_layer_input
-                let gated = crate::ops::mul_and_act(&gated, pli, self.act)?;
-                // projection: Linear(ple_dim -> hidden_size)
-                let projected = proj.forward(&gated)?;
-                // post-norm + residual
-                xs = if let Some(scalar) = layer_scalar {
-                    layer_scalar_applied = true;
-                    if let Some(next_norm) = next_input_layernorm {
-                        let (out, normed) = norm.forward_residual_scaled_then_rms_norm(
-                            &projected,
-                            &residual_ple,
-                            scalar,
-                            next_norm,
-                        )?;
-                        next_normed = Some(normed);
-                        out
-                    } else {
-                        norm.forward_residual_scaled(&projected, &residual_ple, scalar)?
-                    }
-                } else if let Some(next_norm) = next_input_layernorm {
-                    let (out, normed) =
-                        norm.forward_residual_then_rms_norm(&projected, &residual_ple, next_norm)?;
+        ) && let Some(pli) = per_layer_input
+        {
+            let residual_ple = xs.clone();
+            // gate: Linear(hidden_size -> ple_dim)
+            let gate_in = xs;
+            let gated = gate.forward(&gate_in)?;
+            // activation + elementwise multiply with per_layer_input
+            let gated = crate::ops::mul_and_act(&gated, pli, self.act)?;
+            // projection: Linear(ple_dim -> hidden_size)
+            let projected = proj.forward(&gated)?;
+            // post-norm + residual
+            xs = if let Some(scalar) = layer_scalar {
+                layer_scalar_applied = true;
+                if let Some(next_norm) = next_input_layernorm {
+                    let (out, normed) = norm.forward_residual_scaled_then_rms_norm(
+                        &projected,
+                        &residual_ple,
+                        scalar,
+                        next_norm,
+                    )?;
                     next_normed = Some(normed);
                     out
                 } else {
-                    norm.forward_residual(&projected, &residual_ple)?
-                };
-            }
+                    norm.forward_residual_scaled(&projected, &residual_ple, scalar)?
+                }
+            } else if let Some(next_norm) = next_input_layernorm {
+                let (out, normed) =
+                    norm.forward_residual_then_rms_norm(&projected, &residual_ple, next_norm)?;
+                next_normed = Some(normed);
+                out
+            } else {
+                norm.forward_residual(&projected, &residual_ple)?
+            };
         }
 
         // Apply layer scalar
-        if !layer_scalar_applied {
-            if let Some(scalar) = layer_scalar {
-                xs = xs.broadcast_mul(scalar)?;
-            }
+        if !layer_scalar_applied && let Some(scalar) = layer_scalar {
+            xs = xs.broadcast_mul(scalar)?;
         }
 
         Ok((xs, next_normed))
@@ -1579,7 +1583,7 @@ impl TextModel {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),
@@ -1922,10 +1926,8 @@ impl TextModel {
 
     pub fn set_store_spec_hidden(&self, store: bool) {
         self.store_spec_hidden.store(store, Ordering::Relaxed);
-        if !store {
-            if let Ok(mut hidden) = self.last_spec_hidden.lock() {
-                *hidden = None;
-            }
+        if !store && let Ok(mut hidden) = self.last_spec_hidden.lock() {
+            *hidden = None;
         }
     }
 
@@ -2404,10 +2406,10 @@ impl TextModel {
         } else {
             ctx.logits(&xs)?
         };
-        if self.store_spec_hidden.load(Ordering::Relaxed) {
-            if let Ok(mut hidden) = self.last_spec_hidden.lock() {
-                *hidden = Some(xs.clone());
-            }
+        if self.store_spec_hidden.load(Ordering::Relaxed)
+            && let Ok(mut hidden) = self.last_spec_hidden.lock()
+        {
+            *hidden = Some(xs.clone());
         }
         let mut xs = ctx.lm_head(&*self.lm_head, &xs)?;
         if let Some(final_logit_softcapping) = self.final_logit_softcapping {
@@ -2565,15 +2567,15 @@ impl IsqModel for TextModel {
         }
         uvb_m.pp("norm").add(&self.norm);
 
-        if self.embed_tokens_per_layer_in_residual {
-            if let Some(ref emb) = self.embed_tokens_per_layer {
-                let weight = emb
-                    .dequantize_w()
-                    .expect("dense Gemma4 PLE embedding missing");
-                uvb_m
-                    .pp("embed_tokens_per_layer")
-                    .add_tensor("weight", weight);
-            }
+        if self.embed_tokens_per_layer_in_residual
+            && let Some(ref emb) = self.embed_tokens_per_layer
+        {
+            let weight = emb
+                .dequantize_w()
+                .expect("dense Gemma4 PLE embedding missing");
+            uvb_m
+                .pp("embed_tokens_per_layer")
+                .add_tensor("weight", weight);
         }
         if let Some(ref norm) = self.per_layer_projection_norm {
             uvb_m.pp("per_layer_projection_norm").add(norm);
@@ -2685,8 +2687,8 @@ mod tests {
     };
 
     use super::{
-        gemma4_moe_weight_prefix, is_paged_decode_forward, select_paged_mm_prefix_path,
-        sliding_decode_kv_window, Gemma4Router, TextModel,
+        Gemma4Router, TextModel, gemma4_moe_weight_prefix, is_paged_decode_forward,
+        select_paged_mm_prefix_path, sliding_decode_kv_window,
     };
     use candle_core::{DType, Device, Tensor};
     use inference_quant::{

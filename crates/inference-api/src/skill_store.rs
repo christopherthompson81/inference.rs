@@ -323,7 +323,7 @@ impl SkillStore {
             Some(other) => {
                 return Err(invalid_skill_reference(format!(
                     "Unsupported skill version value `{other}`."
-                )))
+                )));
             }
         }
         .ok_or_else(|| {
@@ -584,7 +584,7 @@ fn safe_relative_path(path: &str) -> Result<PathBuf> {
                 return Err(invalid_skill_upload(format!(
                     "Skill file path `{}` is not allowed.",
                     path.display()
-                )))
+                )));
             }
         }
     }
@@ -702,11 +702,13 @@ mod tests {
     fn a_poisoned_store_is_an_internal_error() {
         let (_root, store) = test_store();
         let skills = store.skills.clone();
-        assert!(std::panic::catch_unwind(move || {
-            let _guard = skills.write().unwrap();
-            panic!("poison skill store");
-        })
-        .is_err());
+        assert!(
+            std::panic::catch_unwind(move || {
+                let _guard = skills.write().unwrap();
+                panic!("poison skill store");
+            })
+            .is_err()
+        );
         let error = store.list_versions("skill_missing").unwrap_err();
         let error = ApiError::from_error(error.as_ref(), ApiErrorKind::Internal);
         assert_eq!(error.kind, ApiErrorKind::Internal);

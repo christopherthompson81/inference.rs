@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use inference_models_llama::loaders::VLlamaLoader;
-use inference_models_llama::mllama::inputs_processor::{MLlamaImageProcessor, IMAGE_TOKEN};
+use inference_models_llama::mllama::inputs_processor::{IMAGE_TOKEN, MLlamaImageProcessor};
 
 use crate::pipeline::{InputsProcessor, MessagesAction, MultimodalProcessorFactory, Processor};
 use crate::vision_models::media_host::MediaInputsProcessor;

@@ -1,6 +1,6 @@
 use std::{
     cell::RefCell,
-    collections::{hash_map::Entry, BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, hash_map::Entry},
     ops::Range,
     sync::{Arc, Mutex},
 };
@@ -670,7 +670,7 @@ pub fn has_active_lora_execution() -> bool {
 mod tests {
     use std::{
         cell::Cell,
-        panic::{catch_unwind, AssertUnwindSafe},
+        panic::{AssertUnwindSafe, catch_unwind},
     };
 
     use super::*;
@@ -970,11 +970,13 @@ mod tests {
     fn adapter_tables_must_match_their_runtime() -> Result<()> {
         let (registry, _) = finalized_site()?;
         let (foreign_registry, foreign_site) = finalized_site()?;
-        assert!(LoraAdapterWeights::new(
-            registry.runtime_id(),
-            vec![(foreign_site.clone(), scalar_weights(2.0)?)],
-        )
-        .is_err());
+        assert!(
+            LoraAdapterWeights::new(
+                registry.runtime_id(),
+                vec![(foreign_site.clone(), scalar_weights(2.0)?)],
+            )
+            .is_err()
+        );
 
         let foreign_adapter = adapter_weights(&foreign_registry, foreign_site, 2.0)?;
         let mut execution = LoraExecution::new(registry.runtime_id(), vec![Some(3)]);
@@ -1078,14 +1080,16 @@ mod tests {
         )?;
         let weights = LoraExpertWeights::new(&first, Some(projection), None, None)?;
 
-        assert!(LoraAdapterWeights::new(
-            registry.runtime_id(),
-            DynamicLoraWeights {
-                linear: Vec::new(),
-                experts: vec![(second, weights)],
-            },
-        )
-        .is_err());
+        assert!(
+            LoraAdapterWeights::new(
+                registry.runtime_id(),
+                DynamicLoraWeights {
+                    linear: Vec::new(),
+                    experts: vec![(second, weights)],
+                },
+            )
+            .is_err()
+        );
         Ok(())
     }
 
@@ -1118,9 +1122,11 @@ mod tests {
         let (registry, _) = finalized_site()?;
         let (_, foreign_site) = finalized_site()?;
         let mut execution = LoraExecution::new(registry.runtime_id(), vec![Some(0)]);
-        assert!(execution
-            .insert(&foreign_site, 0, scalar_weights(2.0)?)
-            .is_err());
+        assert!(
+            execution
+                .insert(&foreign_site, 0, scalar_weights(2.0)?)
+                .is_err()
+        );
         assert!(execution.site_is_active(&foreign_site).is_err());
         Ok(())
     }

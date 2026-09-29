@@ -1,12 +1,12 @@
 //! ## General inference.rs server route handlers.
 
-use axum::extract::{rejection::JsonRejection, Json, Path, State};
+use axum::extract::{Json, Path, State, rejection::JsonRejection};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use inference_api::operations::{self, CalibrationApplyRequest, ReIsqRequest, ReIsqResponse};
 use inference_core::{
-    auto_tune, parse_isq_value, AutoDeviceMapParams, AutoTuneRequest, CalibrationAction,
-    InferenceRs, ModelDType, ModelSelected, SerializedSession, TokenSource, TuneProfile,
+    AutoDeviceMapParams, AutoTuneRequest, CalibrationAction, InferenceRs, ModelDType,
+    ModelSelected, SerializedSession, TokenSource, TuneProfile, auto_tune, parse_isq_value,
 };
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -14,7 +14,7 @@ use utoipa::ToSchema;
 use crate::handler_core::ApiErrorHttp;
 pub use crate::models_api::{ModelOperationRequest, ModelStatus, ModelStatusResponse};
 use crate::{
-    handler_core::{json_response, openai_error_response, ApiError, ApiErrorKind},
+    handler_core::{ApiError, ApiErrorKind, json_response, openai_error_response},
     models_api::{
         list_models, model_status as status, reload_model as reload, unload_model as unload,
     },

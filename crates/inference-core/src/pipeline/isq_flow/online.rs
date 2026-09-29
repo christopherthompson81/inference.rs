@@ -81,13 +81,13 @@ pub(crate) fn apply_calibration(
         anyhow::bail!("No calibration data collected; call start first.");
     }
     // harvest destroys the collected state; reject a bad save path before touching it
-    if let Some(path) = save_cimatrix {
-        if path.extension().is_none_or(|ext| ext != "cimatrix") {
-            anyhow::bail!(
-                "save_cimatrix path `{}` must end in .cimatrix",
-                path.display()
-            );
-        }
+    if let Some(path) = save_cimatrix
+        && path.extension().is_none_or(|ext| ext != "cimatrix")
+    {
+        anyhow::bail!(
+            "save_cimatrix path `{}` must end in .cimatrix",
+            path.display()
+        );
     }
 
     let map = harvest_imatrix(modules)?;
@@ -617,9 +617,9 @@ mod tests {
     #[test]
     fn from_source_preserves_dynamic_lora() -> Result<()> {
         use inference_quant::{
-            maybe_wrap_dynamic_lora, with_lora_execution, LoraExecution, LoraLayerRegistry,
-            LoraLinearSpec, LoraWeights, QuantMethod, Shard, ShardedSafeTensors, TrackedModule,
-            UnquantLinear,
+            LoraExecution, LoraLayerRegistry, LoraLinearSpec, LoraWeights, QuantMethod, Shard,
+            ShardedSafeTensors, TrackedModule, UnquantLinear, maybe_wrap_dynamic_lora,
+            with_lora_execution,
         };
 
         let dir = tempfile::tempdir()?;

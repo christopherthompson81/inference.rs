@@ -3,9 +3,9 @@
 use super::{parse_arch, parse_dtype};
 use clap::{Args, ValueEnum};
 use inference_core::{
-    AutoDeviceMapParams, HfConfigOverrides, IsqOrganization, LoraAdapterSpec, LoraRuntimeConfig,
-    ModelDType, NormalLoaderType, DEFAULT_LORA_MAX_ADAPTERS, DEFAULT_LORA_MAX_BYTES,
-    DEFAULT_LORA_MAX_RANK, MAX_LORA_ALIAS_BYTES,
+    AutoDeviceMapParams, DEFAULT_LORA_MAX_ADAPTERS, DEFAULT_LORA_MAX_BYTES, DEFAULT_LORA_MAX_RANK,
+    HfConfigOverrides, IsqOrganization, LoraAdapterSpec, LoraRuntimeConfig, MAX_LORA_ALIAS_BYTES,
+    ModelDType, NormalLoaderType,
 };
 use serde::Deserialize;
 use std::{
@@ -815,7 +815,7 @@ mod tests {
     fn vllm_base_model_name_is_lineage_metadata() {
         let options = AdapterOptions {
             lora: vec![
-                LoraAdapterSpec::new("code", "org/code-lora").with_base_model_name("org/expected")
+                LoraAdapterSpec::new("code", "org/code-lora").with_base_model_name("org/expected"),
             ],
             ..AdapterOptions::default()
         };

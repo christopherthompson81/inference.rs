@@ -3,17 +3,17 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{rejection::JsonRejection, State},
+    Router,
+    extract::{State, rejection::JsonRejection},
     response::Json,
     routing::post,
-    Router,
 };
 use inference_core::{Response, SupportedModality};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{
-    chat_completion::{parse_request, ChatCompletionParseContext},
-    handler_core::{create_response_channel, send_request, ApiError, ApiErrorKind},
+    chat_completion::{ChatCompletionParseContext, parse_request},
+    handler_core::{ApiError, ApiErrorKind, create_response_channel, send_request},
     openai::{ChatCompletionRequest, OpenAiToolSurface},
     types::SharedInferenceRsState,
 };

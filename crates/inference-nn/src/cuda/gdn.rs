@@ -6,9 +6,9 @@ use inference_quant::QuantizedActivation;
 #[cfg(any(feature = "cuda", test))]
 use inference_quant::{ActivationQuantizationScheme, ActivationScaleLayout};
 
-use crate::kv_cache::RecurrentStateLayout;
 #[cfg(feature = "cuda")]
 use crate::kv_cache::GDN_PENDING_KEY_BANK_COUNT;
+use crate::kv_cache::RecurrentStateLayout;
 
 #[cfg_attr(not(feature = "cuda"), allow(dead_code))]
 pub const GDN_PAD_SLOT: u32 = u32::MAX;
@@ -245,17 +245,19 @@ mod fp8_output_contract_tests {
         let row_major = ActivationScaleLayout::RowMajor;
         assert!(GdnFp8OutputSpec::new([1, 1, 6144], scheme(), row_major, 48, 64).is_none());
         assert!(GdnFp8OutputSpec::new([1, 1, 4096], scheme(), row_major, 48, 128).is_none());
-        assert!(GdnFp8OutputSpec::new(
-            [1, 1, 6144],
-            ActivationQuantizationScheme {
-                dtype: DType::F8E4M3,
-                block_shape: [1, 64],
-            },
-            row_major,
-            48,
-            128,
-        )
-        .is_none());
+        assert!(
+            GdnFp8OutputSpec::new(
+                [1, 1, 6144],
+                ActivationQuantizationScheme {
+                    dtype: DType::F8E4M3,
+                    block_shape: [1, 64],
+                },
+                row_major,
+                48,
+                128,
+            )
+            .is_none()
+        );
     }
 }
 
@@ -5802,10 +5804,10 @@ pub fn fused_gdn_gating_cuda(
 #[cfg(test)]
 mod dispatch_tests {
     use super::{
+        GdnDecodeKernel, GdnDecodePolicy, GdnPrefillKernel, GdnPrefillPolicy,
         automatic_decode_kernel, automatic_prefill_kernel, deferred_decode_batch_supported,
         parse_decode_kernel, parse_prefill_kernel, prefill_kernel_supported, select_decode_kernel,
-        select_prefill_kernel, GdnDecodeKernel, GdnDecodePolicy, GdnPrefillKernel,
-        GdnPrefillPolicy,
+        select_prefill_kernel,
     };
     use crate::kv_cache::RecurrentStateLayout;
 

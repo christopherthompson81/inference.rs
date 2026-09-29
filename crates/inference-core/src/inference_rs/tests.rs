@@ -1,5 +1,5 @@
 use super::*;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 fn empty_state() -> InferenceRs {
     InferenceRs {

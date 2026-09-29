@@ -3,7 +3,7 @@
 use std::{any::Any, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
-use image::{imageops, DynamicImage, GenericImageView, Rgba, RgbaImage};
+use image::{DynamicImage, GenericImageView, Rgba, RgbaImage, imageops};
 use inference_vision::{ApplyTransforms, Rescale, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
@@ -22,8 +22,8 @@ use crate::media_inputs::{
 };
 use crate::model::recurrent_batch_kind_for_input;
 use crate::paged_attention::{
-    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
     PagedAttentionMeta,
+    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
 };
 use crate::vision::multimodal_layout::{
     MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
@@ -31,7 +31,7 @@ use crate::vision::multimodal_layout::{
 };
 
 use super::audio_processing::AudioProcessor;
-use super::{config::Gemma4BidirectionalAttention, Gemma4SpecificArgs};
+use super::{Gemma4SpecificArgs, config::Gemma4BidirectionalAttention};
 
 pub const IMAGE_TOKEN: &str = "<|image|>";
 pub const BOI_TOKEN: &str = "<|image>";

@@ -2,9 +2,8 @@
 
 use candle_core::Device;
 use inference_core::{
-    plan_paged_kv, AddModelConfig, EngineConfig, IsqType, PagedAttentionConfig,
-    PagedKvModelRequest, Pipeline, SchedulerConfig, SearchCallback, SearchEmbeddingModel,
-    ToolCallbackWithTool,
+    AddModelConfig, EngineConfig, IsqType, PagedAttentionConfig, PagedKvModelRequest, Pipeline,
+    SchedulerConfig, SearchCallback, SearchEmbeddingModel, ToolCallbackWithTool, plan_paged_kv,
 };
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
@@ -245,12 +244,12 @@ impl MultiModelBuilder {
 
         let inference = runner_builder.build().await;
 
-        if let Some(alias) = first_entry.alias {
-            if alias != pipeline_name {
-                inference
-                    .register_model_alias(pipeline_name.clone(), &primary_id)
-                    .map_err(|e| anyhow::anyhow!(e))?;
-            }
+        if let Some(alias) = first_entry.alias
+            && alias != pipeline_name
+        {
+            inference
+                .register_model_alias(pipeline_name.clone(), &primary_id)
+                .map_err(|e| anyhow::anyhow!(e))?;
         }
 
         // Add remaining models using their pipeline names as IDs (or aliases when provided)
@@ -269,12 +268,12 @@ impl MultiModelBuilder {
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
 
-            if let Some(alias) = entry.alias {
-                if alias != pipeline_name {
-                    inference
-                        .register_model_alias(pipeline_name.clone(), &primary_id)
-                        .map_err(|e| anyhow::anyhow!(e))?;
-                }
+            if let Some(alias) = entry.alias
+                && alias != pipeline_name
+            {
+                inference
+                    .register_model_alias(pipeline_name.clone(), &primary_id)
+                    .map_err(|e| anyhow::anyhow!(e))?;
             }
         }
 

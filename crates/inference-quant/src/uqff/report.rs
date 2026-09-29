@@ -16,8 +16,8 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use crate::QuantizedSerdeType;
 
 use super::{
-    UqffHeaderMatch, UqffLayerHeaderView, UqffTensorHeader, UQFF_VERSION_MAJOR, UQFF_VERSION_MINOR,
-    UQFF_VERSION_PATCH, UQFF_WEIGHT_FORMAT_SUFFIX,
+    UQFF_VERSION_MAJOR, UQFF_VERSION_MINOR, UQFF_VERSION_PATCH, UQFF_WEIGHT_FORMAT_SUFFIX,
+    UqffHeaderMatch, UqffLayerHeaderView, UqffTensorHeader,
 };
 
 pub const UQFF_REPORT_JSON: &str = "uqff_report.json";
@@ -1107,13 +1107,13 @@ fn validate_layer(
     match layer_matches(prefix, headers).as_slice() {
         [] => errors.push(format!("{prefix}: unrecognized UQFF layer structure")),
         [matched] => {
-            if let Ok(declared) = declared {
-                if declared != matched.serde_type {
-                    errors.push(format!(
+            if let Ok(declared) = declared
+                && declared != matched.serde_type
+            {
+                errors.push(format!(
                         "{prefix}: `weight.format` declares {declared:?}, but tensor structure matches {:?}",
                         matched.serde_type
                     ));
-                }
             }
         }
         matches => {
@@ -1643,10 +1643,10 @@ fn group_key_for_path(path: &Path) -> String {
         .file_stem()
         .and_then(|stem| stem.to_str())
         .unwrap_or_default();
-    if let Some((prefix, suffix)) = stem.rsplit_once('-') {
-        if suffix.chars().all(|ch| ch.is_ascii_digit()) {
-            return prefix.to_string();
-        }
+    if let Some((prefix, suffix)) = stem.rsplit_once('-')
+        && suffix.chars().all(|ch| ch.is_ascii_digit())
+    {
+        return prefix.to_string();
     }
     stem.to_string()
 }
@@ -1665,8 +1665,8 @@ mod tests {
     use super::*;
     use crate::{UqffReader, UqffTensor};
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc,
+        atomic::{AtomicUsize, Ordering},
     };
 
     fn write_synthetic_afq3(path: &Path) {
@@ -1980,10 +1980,12 @@ mod tests {
         .unwrap();
 
         assert!(!result.ok);
-        assert!(result
-            .errors
-            .iter()
-            .any(|error| error.contains("invalid `weight.format` header")));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("invalid `weight.format` header"))
+        );
     }
 
     #[tokio::test]
@@ -2018,10 +2020,12 @@ mod tests {
         .unwrap();
 
         assert!(!result.ok);
-        assert!(result
-            .errors
-            .iter()
-            .any(|error| error.contains("invalid `weight.shape` payload")));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("invalid `weight.shape` payload"))
+        );
     }
 
     #[tokio::test]
@@ -2059,18 +2063,24 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(inspection.report.outputs[0].quant, "afq3");
-        assert!(inspection
-            .tensors
-            .iter()
-            .all(|tensor| tensor.group == "afq3"));
-        assert!(inspection
-            .tensors
-            .iter()
-            .any(|tensor| tensor.name.starts_with("model.layers.0.")));
-        assert!(inspection
-            .tensors
-            .iter()
-            .any(|tensor| tensor.name.starts_with("model.layers.1.")));
+        assert!(
+            inspection
+                .tensors
+                .iter()
+                .all(|tensor| tensor.group == "afq3")
+        );
+        assert!(
+            inspection
+                .tensors
+                .iter()
+                .any(|tensor| tensor.name.starts_with("model.layers.0."))
+        );
+        assert!(
+            inspection
+                .tensors
+                .iter()
+                .any(|tensor| tensor.name.starts_with("model.layers.1."))
+        );
 
         write_synthetic_afq_shard(&dir.path().join("surprise.uqff"), "model.layers.2");
         let extra = verify_uqff_path(
@@ -2098,10 +2108,12 @@ mod tests {
         .await
         .unwrap();
         assert!(!missing.ok);
-        assert!(missing
-            .errors
-            .iter()
-            .any(|error| error.contains("shard list does not match artifacts")));
+        assert!(
+            missing
+                .errors
+                .iter()
+                .any(|error| error.contains("shard list does not match artifacts"))
+        );
     }
 
     #[test]
@@ -2241,10 +2253,12 @@ mod tests {
         .unwrap();
 
         assert!(!result.ok);
-        assert!(result
-            .errors
-            .iter()
-            .any(|error| error.contains("strict mode rejects")));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("strict mode rejects"))
+        );
     }
 
     #[tokio::test]
@@ -2309,10 +2323,12 @@ mod tests {
         .unwrap();
 
         assert!(!result.ok);
-        assert!(result
-            .errors
-            .iter()
-            .any(|error| error.contains("invalid old-format tensor key")));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("invalid old-format tensor key"))
+        );
     }
 
     #[tokio::test]
@@ -2375,10 +2391,12 @@ mod tests {
         .await
         .unwrap();
         assert!(!result.ok);
-        assert!(result
-            .errors
-            .iter()
-            .any(|error| error.contains("conflicting `uqff.version.major`")));
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|error| error.contains("conflicting `uqff.version.major`"))
+        );
     }
 
     #[test]

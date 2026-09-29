@@ -10,7 +10,7 @@
 use half::{bf16, f16};
 use std::ffi::c_void;
 
-extern "C" {
+unsafe extern "C" {
     /// Launch BF16 GEMV kernel
     /// Y = X @ A^T + bias (optional)
     /// A: [M, K], X: [B, K], bias: [M] (optional), Y: [B, M]

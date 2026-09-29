@@ -13,9 +13,9 @@ use crate::{
     kv_cache::EitherCache,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata},
     paged_attention::{
+        AttentionImplementation, ModelConfigMetadata,
         block_hash::MultimodalKind,
         encoder_cache::{CacheModality, EncoderCacheManager},
-        AttentionImplementation, ModelConfigMetadata,
     },
     qwen2vl::insert_current_visual_outputs,
     utils::unvarbuilder::UnVarBuilder,
@@ -136,10 +136,13 @@ impl MuseGlimmerModel {
                 .lock()
                 .expect("Muse-Glimmer encoder cache poisoned");
             for (index, &hash) in hashes.iter().enumerate() {
-                if let Some(cached) = cache.get(modality, hash) {
-                    outputs[index] = Some(cached[0].clone());
-                } else {
-                    misses.push(index);
+                match cache.get(modality, hash) {
+                    Some(cached) => {
+                        outputs[index] = Some(cached[0].clone());
+                    }
+                    _ => {
+                        misses.push(index);
+                    }
                 }
             }
         }
@@ -455,9 +458,11 @@ mod tests {
         let (vision_vb, text_vb) = split_model_builders(vb, &Device::Cpu);
 
         assert!(vision_vb.lora_registry().is_none());
-        assert!(text_vb
-            .lora_registry()
-            .is_some_and(|text_registry| Arc::ptr_eq(text_registry, &registry)));
+        assert!(
+            text_vb
+                .lora_registry()
+                .is_some_and(|text_registry| Arc::ptr_eq(text_registry, &registry))
+        );
         assert_eq!(
             text_vb
                 .pp("model")
@@ -469,14 +474,16 @@ mod tests {
                 .prefix(),
             "model.language_model.layers.0.self_attn.q_proj"
         );
-        assert!(vision_vb
-            .pp("model")
-            .pp("vision_tower")
-            .pp("layers")
-            .pp(0)
-            .pp("attn")
-            .pp("q_proj")
-            .lora_registry()
-            .is_none());
+        assert!(
+            vision_vb
+                .pp("model")
+                .pp("vision_tower")
+                .pp("layers")
+                .pp(0)
+                .pp("attn")
+                .pp("q_proj")
+                .lora_registry()
+                .is_none()
+        );
     }
 }

@@ -6,8 +6,8 @@ pub mod utils;
 use std::{f32::consts::PI, ops::Mul, str::FromStr, sync::Arc};
 
 use candle_core::{
+    Context, D, DType, Device, IndexOp, Result, Tensor,
     quantized::{QMatMul, QTensor},
-    Context, DType, Device, IndexOp, Result, Tensor, D,
 };
 use candle_nn::{
     BatchNorm, BatchNormConfig, Conv1d, Conv1dConfig, Conv2d, Conv2dConfig, Embedding, GroupNorm,
@@ -16,9 +16,9 @@ use candle_nn::{
 use float8::F8E4M3;
 use half::{bf16, f16};
 use inference_quant::{
-    should_apply_immediate_isq, ActivationQuantizationScheme, ActivationScaleLayout,
-    ColumnParallelLayer, Convolution, QuantMethod, QuantMethodConfig, QuantizedActivation,
-    QuantizedConfig, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder, UnquantLinear,
+    ActivationQuantizationScheme, ActivationScaleLayout, ColumnParallelLayer, Convolution,
+    QuantMethod, QuantMethodConfig, QuantizedActivation, QuantizedConfig, ReplicatedLayer,
+    RowParallelLayer, ShardedVarBuilder, UnquantLinear, should_apply_immediate_isq,
 };
 use serde::{Deserialize, Serialize};
 
@@ -105,12 +105,12 @@ pub fn embedding_with_legacy_tied_uqff(
     legacy_lm_head_vb: Option<ShardedVarBuilder>,
     config: &Option<QuantizedConfig>,
 ) -> Result<Arc<dyn QuantMethod>> {
-    if let (Some(source), Some(lm_head_vb)) = (vb.weight_source(), legacy_lm_head_vb) {
-        if use_legacy_tied_uqff_head(&vb.prefix(), &lm_head_vb.prefix(), |name| {
+    if let (Some(source), Some(lm_head_vb)) = (vb.weight_source(), legacy_lm_head_vb)
+        && use_legacy_tied_uqff_head(&vb.prefix(), &lm_head_vb.prefix(), |name| {
             source.contains(name)
-        }) {
-            return ReplicatedLayer::new(out_size, in_size, &None, false, lm_head_vb);
-        }
+        })
+    {
+        return ReplicatedLayer::new(out_size, in_size, &None, false, lm_head_vb);
     }
     embedding(in_size, out_size, vb, config)
 }
@@ -846,7 +846,9 @@ impl PhiRotaryEmbedding {
         let dim = (cfg.head_dim as f64 * cfg.partial_rotary_factor.unwrap_or(1.)) as usize;
 
         if !matches!(scaling_type, ScaledRopeType::Su) {
-            candle_core::bail!("Scaled Phi3 RoPE (non-classic scaled, with mscales) must have type `su`/`longrope`.");
+            candle_core::bail!(
+                "Scaled Phi3 RoPE (non-classic scaled, with mscales) must have type `su`/`longrope`."
+            );
         }
 
         if short_factor.len() != dim / 2 {
@@ -929,7 +931,7 @@ impl PhiRotaryEmbedding {
                     &cfg,
                     dtype,
                     dev,
-                )
+                );
             }
             (None, None) => {}
             _ => candle_core::bail!("GGUF LongRoPE requires both short and long factor tensors"),
@@ -1073,7 +1075,7 @@ impl Llama3RotaryEmbedding {
                         dev,
                         is_gpt_neox,
                         dtype,
-                    )?))
+                    )?));
                 }
                 Some(Llama3RopeConfig {
                     rope_type: Llama3RopeType::Llama3,
@@ -3029,16 +3031,17 @@ impl Mlp {
 
     fn forward_packed_gate_up(&self, gate_up: Tensor) -> Result<Tensor> {
         let split_size = gate_up.dim(D::Minus1)? / 2;
-        if let Some(output) = crate::ops::try_fused_split_glu_quantized_forward(
+        match crate::ops::try_fused_split_glu_quantized_forward(
             &gate_up,
             split_size,
             self.act,
             &*self.down,
         )? {
-            Ok(output)
-        } else {
-            let inter = crate::ops::split_mul_and_act(&gate_up, split_size, self.act)?;
-            self.down.forward(&inter)
+            Some(output) => Ok(output),
+            _ => {
+                let inter = crate::ops::split_mul_and_act(&gate_up, split_size, self.act)?;
+                self.down.forward(&inter)
+            }
         }
     }
 
@@ -3105,13 +3108,14 @@ impl Mlp {
 
     pub fn forward(&self, xs: &Tensor) -> Result<Tensor> {
         let res = if let Some(merged_gate_up) = &self.merged_gate_up {
-            if let Some(gate_up) = merged_gate_up.forward_packed(xs)? {
-                self.forward_packed_gate_up(gate_up)?
-            } else {
-                let mut gate_up = merged_gate_up.forward(xs)?.into_iter();
-                let gate = gate_up.next().unwrap();
-                let up = gate_up.next().unwrap();
-                self.forward_gate_up(&gate, &up)?
+            match merged_gate_up.forward_packed(xs)? {
+                Some(gate_up) => self.forward_packed_gate_up(gate_up)?,
+                _ => {
+                    let mut gate_up = merged_gate_up.forward(xs)?.into_iter();
+                    let gate = gate_up.next().unwrap();
+                    let up = gate_up.next().unwrap();
+                    self.forward_gate_up(&gate, &up)?
+                }
             }
         } else {
             crate::ops::quantized_ffn(xs, &*self.gate, &*self.up, &*self.down, self.act)?
@@ -3296,8 +3300,8 @@ impl Module for ScaledEmbedding {
 #[cfg(test)]
 mod tests {
     use super::{
-        contains_tensor_or_weight_source_with, use_legacy_tied_uqff_head,
-        yarn_inv_freq_and_attention_factor, Qwen3VLRotaryEmbedding, YarnRopeConfig,
+        Qwen3VLRotaryEmbedding, YarnRopeConfig, contains_tensor_or_weight_source_with,
+        use_legacy_tied_uqff_head, yarn_inv_freq_and_attention_factor,
     };
     use candle_core::{DType, Device, Tensor};
     use std::collections::HashSet;

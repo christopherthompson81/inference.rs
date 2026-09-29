@@ -278,15 +278,14 @@ impl TextConfig {
                 self.num_hidden_layers
             );
         }
-        if let Some(layer_types) = &self.layer_types {
-            if layer_types.len() != self.num_hidden_layers
-                || !layer_types.contains(&LayerType::FullAttention)
-            {
-                candle_core::bail!(
-                    "Qwen3.5 layer_types must list {} layers with at least one full_attention entry",
-                    self.num_hidden_layers
-                );
-            }
+        if let Some(layer_types) = &self.layer_types
+            && (layer_types.len() != self.num_hidden_layers
+                || !layer_types.contains(&LayerType::FullAttention))
+        {
+            candle_core::bail!(
+                "Qwen3.5 layer_types must list {} layers with at least one full_attention entry",
+                self.num_hidden_layers
+            );
         }
         if self.num_attention_heads == 0
             || self.num_key_value_heads == 0
@@ -405,11 +404,7 @@ impl TextConfig {
     }
 
     pub fn mtp_layers(&self, mtp: bool) -> usize {
-        if mtp {
-            self.mtp_num_hidden_layers
-        } else {
-            0
-        }
+        if mtp { self.mtp_num_hidden_layers } else { 0 }
     }
 
     /// Paged-KV mask over the main stack plus any MTP blocks appended after it.
@@ -577,11 +572,12 @@ mod tests {
                 "truncate": false
             }),
         );
-        assert!(cfg
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("truncate=false"));
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("truncate=false")
+        );
     }
 
     #[test]
@@ -597,11 +593,12 @@ mod tests {
                 "beta_slow": 32.0
             }),
         );
-        assert!(cfg
-            .validate()
-            .unwrap_err()
-            .to_string()
-            .contains("beta_fast"));
+        assert!(
+            cfg.validate()
+                .unwrap_err()
+                .to_string()
+                .contains("beta_fast")
+        );
     }
 
     #[test]

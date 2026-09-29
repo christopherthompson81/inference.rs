@@ -148,12 +148,11 @@ async fn read_resource_via_transport(
     let params = serde_json::json!({ "uri": uri });
     let result = transport.send_request("resources/read", params).await?;
 
-    if let Some(contents) = result.get("contents").and_then(|c| c.as_array()) {
-        if let Some(first_content) = contents.first() {
-            if let Some(text) = first_content.get("text").and_then(|t| t.as_str()) {
-                return Ok(text.to_string());
-            }
-        }
+    if let Some(contents) = result.get("contents").and_then(|c| c.as_array())
+        && let Some(first_content) = contents.first()
+        && let Some(text) = first_content.get("text").and_then(|t| t.as_str())
+    {
+        return Ok(text.to_string());
     }
 
     Err(anyhow::anyhow!("No readable content found in resource"))

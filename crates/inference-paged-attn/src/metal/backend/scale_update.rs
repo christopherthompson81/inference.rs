@@ -1,4 +1,4 @@
-use candle_core::{backend::BackendStorage, DType, Result, Storage, Tensor};
+use candle_core::{DType, Result, Storage, Tensor, backend::BackendStorage};
 
 use crate::metal::kernels::{self, PagedAttentionDType};
 

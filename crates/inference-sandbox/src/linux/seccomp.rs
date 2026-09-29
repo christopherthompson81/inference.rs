@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::io;
 
 use seccompiler::{
-    apply_filter_all_threads, BackendError, BpfProgram, SeccompAction, SeccompCmpArgLen,
-    SeccompCmpOp, SeccompCondition, SeccompFilter, SeccompRule, TargetArch,
+    BackendError, BpfProgram, SeccompAction, SeccompCmpArgLen, SeccompCmpOp, SeccompCondition,
+    SeccompFilter, SeccompRule, TargetArch, apply_filter_all_threads,
 };
 
 use crate::NetworkMode;
@@ -91,8 +91,8 @@ pub(crate) fn install(program: &BpfProgram) -> io::Result<()> {
 }
 
 pub(crate) fn supported() -> bool {
-    use nix::sys::wait::{waitpid, WaitStatus};
-    use nix::unistd::{fork, ForkResult};
+    use nix::sys::wait::{WaitStatus, waitpid};
+    use nix::unistd::{ForkResult, fork};
 
     let Ok(program) = build(NetworkMode::None) else {
         return false;

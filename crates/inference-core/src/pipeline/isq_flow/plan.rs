@@ -8,15 +8,15 @@ use inference_quant::{IsqType, QuantizedWeightSource};
 use tracing::info;
 
 use crate::{
+    Topology, TryIntoDType,
     device_map::DeviceMapper,
     matformer::MatformerSliceConfig,
     pipeline::loaders::{
         AutoDeviceMapQuantization, DeviceMappedModelLoader, QuantizationConfigShim,
     },
-    Topology, TryIntoDType,
 };
 
-use super::super::isq::{format_isq_types, IsqModelLoader, IsqOrganization};
+use super::super::isq::{IsqModelLoader, IsqOrganization, format_isq_types};
 
 fn resolve_isq_predicates(
     loader: &dyn IsqModelLoader,
@@ -427,11 +427,15 @@ pub(crate) fn resolve_and_install_isq_plan(i: IsqPlanInputs<'_>) -> Result<IsqLo
             if sensitive_ty == ty || promoted_predicates.is_empty() {
                 info!("Quantizing model weights to {ty}.");
             } else {
-                info!("Quantizing model weights to {ty}, with sensitive tensors using {sensitive_ty}.");
+                info!(
+                    "Quantizing model weights to {ty}, with sensitive tensors using {sensitive_ty}."
+                );
             }
         }
         if immediate_predicates.is_empty() {
-            tracing::warn!("No predicates for this model and ISQ setting detected. ISQ will not be applied to any weights!");
+            tracing::warn!(
+                "No predicates for this model and ISQ setting detected. ISQ will not be applied to any weights!"
+            );
         }
 
         let capture = capture_mode(i.has_write_uqff, wants_imatrix);
@@ -658,9 +662,11 @@ mod tests {
         });
 
         let error = result.err().expect("duplicate UQFF types must fail");
-        assert!(error
-            .to_string()
-            .contains("Duplicate UQFF output type `q4k`"));
+        assert!(
+            error
+                .to_string()
+                .contains("Duplicate UQFF output type `q4k`")
+        );
     }
 
     #[test]
@@ -835,14 +841,18 @@ mod tests {
         assert!(params.predicates.is_empty());
         assert_eq!(params.overrides.len(), 1);
         assert_eq!(params.overrides[0].ty, None);
-        assert!(params.overrides[0]
-            .device
-            .as_ref()
-            .is_some_and(Device::is_cpu));
-        assert!(params.overrides[0]
-            .predicate
-            .as_ref()
-            .is_some_and(|predicate| predicate.is_match("model.vision_proj.weight")));
+        assert!(
+            params.overrides[0]
+                .device
+                .as_ref()
+                .is_some_and(Device::is_cpu)
+        );
+        assert!(
+            params.overrides[0]
+                .predicate
+                .as_ref()
+                .is_some_and(|predicate| predicate.is_match("model.vision_proj.weight"))
+        );
         inference_quant::clear_immediate_isq();
         Ok(())
     }

@@ -1,7 +1,7 @@
 use crate::attention::AttentionMask;
 use std::sync::Arc;
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{Linear, Module};
 use inference_quant::{ColumnParallelLayer, QuantMethod, RowParallelLayer, ShardedVarBuilder};
 

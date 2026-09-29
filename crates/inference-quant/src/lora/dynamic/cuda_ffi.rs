@@ -1,7 +1,7 @@
 use candle_core::cuda::cudarc::driver::sys::CUstream;
 use half::{bf16, f16};
 
-extern "C" {
+unsafe extern "C" {
     pub fn launch_dynamic_lora_f16(
         input: *const f16,
         a: *const f16,

@@ -5,8 +5,8 @@ use std::{
     sync::LazyLock,
 };
 
-use crate::{ModelDType, GGUF_MULTI_FILE_DELIMITER};
-use anyhow::{bail, Context, Result};
+use crate::{GGUF_MULTI_FILE_DELIMITER, ModelDType};
+use anyhow::{Context, Result, bail};
 use regex::Regex;
 use walkdir::WalkDir;
 
@@ -537,7 +537,7 @@ fn quant_preferences(requested: &str) -> Result<QuantPreferences> {
             return Ok(QuantPreferences {
                 labels: vec![normalize_label(other)],
                 bit_width: None,
-            })
+            });
         }
     };
     Ok(QuantPreferences {
@@ -792,9 +792,11 @@ mod tests {
             "model-UD-Q4_K_XL.gguf",
         ]);
         let error = resolve_gguf_quant(&listing, "iq4_xs").unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("IQ GGUF formats are not supported"));
+        assert!(
+            error
+                .to_string()
+                .contains("IQ GGUF formats are not supported")
+        );
         assert_eq!(
             resolve_gguf_quant(&listing, "ud-q4_k_xl").unwrap().label,
             "UD-Q4_K_XL"
@@ -805,9 +807,11 @@ mod tests {
     fn numeric_width_does_not_fall_back_to_iq() {
         let listing = files(&["model-IQ4_NL.gguf", "model-IQ4_XS.gguf"]);
         let error = resolve_gguf_quant(&listing, "4").unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("only matched unsupported IQ GGUF artifacts"));
+        assert!(
+            error
+                .to_string()
+                .contains("only matched unsupported IQ GGUF artifacts")
+        );
     }
 
     #[test]
@@ -1036,9 +1040,11 @@ mod tests {
         let listing = files(&["vision-mmproj-Q4_K_M.gguf", "audio-mmproj-IQ4_XS.gguf"]);
         let error = resolve_gguf_projector(&listing, ModelDType::Auto).unwrap_err();
 
-        assert!(error
-            .to_string()
-            .contains("unsupported IQ artifacts for the audio projector"));
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported IQ artifacts for the audio projector")
+        );
         assert!(error.to_string().contains("audio-mmproj-IQ4_XS.gguf"));
     }
 

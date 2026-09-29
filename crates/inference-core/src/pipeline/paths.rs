@@ -6,13 +6,13 @@ use std::{
 
 use anyhow::Result;
 use either::Either;
-use hf_hub::{api::sync::ApiRepo, Repo, RepoType};
+use hf_hub::{Repo, RepoType, api::sync::ApiRepo};
 use regex_automata::meta::Regex;
 use serde_json::Value;
 use tracing::{debug, info, trace, warn};
 
 use crate::{
-    api_dir_list, api_get_file,
+    LoraAdapterSpec, ModelPaths, Ordering, TokenSource, api_dir_list, api_get_file,
     lora::LoraConfig,
     pipeline::{
         chat_template::{BeginEndUnkPadTok, ChatTemplate, ChatTemplateValue},
@@ -20,7 +20,6 @@ use crate::{
         isq::UQFF_RESIDUAL_SAFETENSORS,
     },
     xlora_models::XLoraConfig,
-    LoraAdapterSpec, ModelPaths, Ordering, TokenSource,
 };
 
 // Match files against these
@@ -169,7 +168,9 @@ pub(crate) fn get_adapter_paths(
                 })
                 .collect::<Vec<_>>();
             if adapter_files.is_empty() && xlora_order.adapters.is_some() {
-                anyhow::bail!("Adapter files are empty. Perhaps the ordering file adapters does not match the actual adapters?")
+                anyhow::bail!(
+                    "Adapter files are empty. Perhaps the ordering file adapters does not match the actual adapters?"
+                )
             }
 
             // Get the local paths for each adapter
@@ -221,7 +222,9 @@ pub(crate) fn get_adapter_paths(
                 anyhow::bail!(
                     "Adapter ordering file, adapter model config, and base model ID do not match: {}, {}, and {} respectively.",
                     xlora_order.base_model_id,
-                    xlora_config.map(|cfg| cfg.base_model_id).unwrap_or(base_model_id.clone()),
+                    xlora_config
+                        .map(|cfg| cfg.base_model_id)
+                        .unwrap_or(base_model_id.clone()),
                     base_model_id
                 );
             }
@@ -242,7 +245,9 @@ pub(crate) fn get_adapter_paths(
                                 })
                                 .collect::<Vec<_>>();
                         if adapter_files.is_empty() {
-                            anyhow::bail!("Adapter files are empty. Perhaps the ordering file adapters does not match the actual adapters?")
+                            anyhow::bail!(
+                                "Adapter files are empty. Perhaps the ordering file adapters does not match the actual adapters?"
+                            )
                         }
                         // Get local paths for this adapter
                         let mut adapters_paths: HashMap<String, Vec<PathBuf>> = HashMap::new();
@@ -315,13 +320,13 @@ pub(crate) fn get_adapter_paths(
                         adapter.alias
                     );
                 }
-                if let Some(expected) = adapter.base_model_name.as_deref().map(str::trim) {
-                    if expected.is_empty() {
-                        anyhow::bail!(
-                            "LoRA adapter `{}` has an empty base_model_name",
-                            adapter.alias
-                        );
-                    }
+                if let Some(expected) = adapter.base_model_name.as_deref().map(str::trim)
+                    && expected.is_empty()
+                {
+                    anyhow::bail!(
+                        "LoRA adapter `{}` has an empty base_model_name",
+                        adapter.alias
+                    );
                 }
                 if !aliases.insert(alias) {
                     anyhow::bail!(
@@ -524,7 +529,9 @@ pub(crate) fn get_chat_template(
     } else if chat_template_ovrd.is_some() {
         None
     } else {
-        debug!("No chat template file found. Chat template may be set via `chat_template.json` or processor config.");
+        debug!(
+            "No chat template file found. Chat template may be set via `chat_template.json` or processor config."
+        );
         None
     };
     let mut template: ChatTemplate = match chat_template_ovrd {
@@ -566,38 +573,36 @@ pub(crate) fn get_chat_template(
                                             .map(|d| d.join("tokenizer.json"))
                                             .filter(|p| p.exists())
                                     })
-                                {
-                                    if let Some(tok_json) =
+                                    && let Some(tok_json) =
                                         fs::read_to_string(&tok_path).ok().and_then(|s| {
                                             serde_json::from_str::<serde_json::Value>(&s).ok()
                                         })
-                                    {
-                                        let added = tok_json
-                                            .get("added_tokens")
-                                            .and_then(serde_json::Value::as_array);
-                                        for token in added.into_iter().flatten() {
-                                            let content = token
-                                                .get("content")
-                                                .and_then(serde_json::Value::as_str)
-                                                .unwrap_or("");
-                                            let special = token
-                                                .get("special")
-                                                .and_then(serde_json::Value::as_bool)
-                                                .unwrap_or(false);
-                                            if special {
-                                                if content == "<bos>" {
-                                                    ct.bos_token = Some(BeginEndUnkPadTok(
-                                                        Either::Left(content.to_string()),
-                                                    ));
-                                                } else if content == "<eos>" {
-                                                    ct.eos_token = Some(BeginEndUnkPadTok(
-                                                        Either::Left(content.to_string()),
-                                                    ));
-                                                } else if content == "<unk>" {
-                                                    ct.unk_token = Some(BeginEndUnkPadTok(
-                                                        Either::Left(content.to_string()),
-                                                    ));
-                                                }
+                                {
+                                    let added = tok_json
+                                        .get("added_tokens")
+                                        .and_then(serde_json::Value::as_array);
+                                    for token in added.into_iter().flatten() {
+                                        let content = token
+                                            .get("content")
+                                            .and_then(serde_json::Value::as_str)
+                                            .unwrap_or("");
+                                        let special = token
+                                            .get("special")
+                                            .and_then(serde_json::Value::as_bool)
+                                            .unwrap_or(false);
+                                        if special {
+                                            if content == "<bos>" {
+                                                ct.bos_token = Some(BeginEndUnkPadTok(
+                                                    Either::Left(content.to_string()),
+                                                ));
+                                            } else if content == "<eos>" {
+                                                ct.eos_token = Some(BeginEndUnkPadTok(
+                                                    Either::Left(content.to_string()),
+                                                ));
+                                            } else if content == "<unk>" {
+                                                ct.unk_token = Some(BeginEndUnkPadTok(
+                                                    Either::Left(content.to_string()),
+                                                ));
                                             }
                                         }
                                     }
@@ -621,36 +626,35 @@ pub(crate) fn get_chat_template(
         }
     };
     // Overwrite to use any present `chat_template.json`, only if there is not one present already.
-    if template.chat_template.is_none() {
-        if let Some(chat_template_explicit) = chat_template_explicit {
-            let ct =
-                fs::read_to_string(chat_template_explicit).expect("Loading chat template failed.");
+    if template.chat_template.is_none()
+        && let Some(chat_template_explicit) = chat_template_explicit
+    {
+        let ct = fs::read_to_string(chat_template_explicit).expect("Loading chat template failed.");
 
-            let new_chat_template = if chat_template_explicit.ends_with(".jinja") {
-                ct
-            } else {
-                #[derive(Debug, serde::Deserialize)]
-                struct AutomaticTemplate {
-                    chat_template: String,
-                }
-                let deser: AutomaticTemplate = serde_json::from_str(&ct).unwrap();
-                deser.chat_template
-            };
+        let new_chat_template = if chat_template_explicit.ends_with(".jinja") {
+            ct
+        } else {
+            #[derive(Debug, serde::Deserialize)]
+            struct AutomaticTemplate {
+                chat_template: String,
+            }
+            let deser: AutomaticTemplate = serde_json::from_str(&ct).unwrap();
+            deser.chat_template
+        };
 
-            template.chat_template = Some(ChatTemplateValue(Either::Left(new_chat_template)));
-        }
+        template.chat_template = Some(ChatTemplateValue(Either::Left(new_chat_template)));
     }
 
     let processor_conf: Option<crate::vision_models::processor_config::ProcessorConfig> = paths
         .get_processor_config()
         .as_ref()
         .map(|f| serde_json::from_str(&fs::read_to_string(f).unwrap()).unwrap());
-    if let Some(processor_conf) = processor_conf {
-        if processor_conf.chat_template.is_some() {
-            template.chat_template = processor_conf
-                .chat_template
-                .map(|x| ChatTemplateValue(Either::Left(x)));
-        }
+    if let Some(processor_conf) = processor_conf
+        && processor_conf.chat_template.is_some()
+    {
+        template.chat_template = processor_conf
+            .chat_template
+            .map(|x| ChatTemplateValue(Either::Left(x)));
     }
 
     if let Some(jinja_explicit) = jinja_explicit {
@@ -678,7 +682,9 @@ pub(crate) fn get_chat_template(
         Some(_) => template,
         None => {
             if let Some(template_content) = template_content {
-                info!("`tokenizer_config.json` does not contain a chat template, attempting to use specified JINJA chat template.");
+                info!(
+                    "`tokenizer_config.json` does not contain a chat template, attempting to use specified JINJA chat template."
+                );
                 let mut deser: HashMap<String, Value> =
                     serde_json::from_str(&template_content).unwrap();
 
@@ -702,7 +708,9 @@ pub(crate) fn get_chat_template(
                         }
                     }
                     None => {
-                        warn!("No specified chat template. No chat template will be used. Only prompts will be accepted, not messages.");
+                        warn!(
+                            "No specified chat template. No chat template will be used. Only prompts will be accepted, not messages."
+                        );
                         deser.insert("chat_template".to_string(), Value::Null);
                     }
                 }
@@ -711,7 +719,9 @@ pub(crate) fn get_chat_template(
                     .expect("Serialization of modified chat template failed.");
                 serde_json::from_str(&ser).unwrap()
             } else {
-                warn!("No chat template source found. No chat template will be used. Only prompts will be accepted, not messages.");
+                warn!(
+                    "No chat template source found. No chat template will be used. Only prompts will be accepted, not messages."
+                );
                 template
             }
         }
@@ -722,7 +732,7 @@ pub(crate) fn get_chat_template(
 mod tests {
     use crate::pipeline::loaders::LocalModelPaths;
 
-    use super::{get_chat_template, parse_safetensor_index, AdapterPaths};
+    use super::{AdapterPaths, get_chat_template, parse_safetensor_index};
 
     #[test]
     fn explicit_jinja_overrides_processor_template() {

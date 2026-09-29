@@ -26,8 +26,8 @@ use crate::media_inputs::{
     },
 };
 use crate::paged_attention::{
-    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
     PagedAttentionMeta,
+    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
 };
 use crate::vision::multimodal_layout::{
     MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
@@ -313,13 +313,13 @@ impl MultimodalInputsProcessor for Gemma3ImageProcessor {
                 .encode_fast(prompt, false)
                 .expect("Detokenization failed!");
             let ids = toks.get_ids().to_vec();
-            if seq.mm_features().is_empty() {
-                if let (Some(hashes), Some(img_tok_id)) = (
+            if seq.mm_features().is_empty()
+                && let (Some(hashes), Some(img_tok_id)) = (
                     seq.image_hashes().map(|h| h.to_vec()),
                     tokenizer.token_to_id(IMAGE_TOKEN),
-                ) {
-                    seq.set_mm_features(gemma3_mm_features(&ids, img_tok_id, &hashes, &num_crops)?);
-                }
+                )
+            {
+                seq.set_mm_features(gemma3_mm_features(&ids, img_tok_id, &hashes, &num_crops)?);
             }
 
             seq.set_toks_and_reallocate(ids, paged_attn_metadata.as_deref_mut());
@@ -446,7 +446,8 @@ impl MultimodalInputsProcessor for Gemma3ImageProcessor {
                     for (num, idx) in num_crops.iter().copied().zip(image_indexes).rev() {
                         if num != 0 {
                             let formatted_image_text = format!(
-                                "Here is the original image {BOI_TOKEN} and here are some crops to help you see better {}", vec![BOI_TOKEN.to_string(); num].join(" ")
+                                "Here is the original image {BOI_TOKEN} and here are some crops to help you see better {}",
+                                vec![BOI_TOKEN.to_string(); num].join(" ")
                             );
                             prompt = format!(
                                 "{}{formatted_image_text}{}",
@@ -463,15 +464,15 @@ impl MultimodalInputsProcessor for Gemma3ImageProcessor {
 
                     let ids = toks.get_ids().to_vec();
 
-                    if seq.mm_features().is_empty() {
-                        if let (Some(hashes), Some(img_tok_id)) = (
+                    if seq.mm_features().is_empty()
+                        && let (Some(hashes), Some(img_tok_id)) = (
                             seq.image_hashes().map(|h| h.to_vec()),
                             tokenizer.token_to_id(IMAGE_TOKEN),
-                        ) {
-                            seq.set_mm_features(gemma3_mm_features(
-                                &ids, img_tok_id, &hashes, &num_crops,
-                            )?);
-                        }
+                        )
+                    {
+                        seq.set_mm_features(gemma3_mm_features(
+                            &ids, img_tok_id, &hashes, &num_crops,
+                        )?);
                     }
 
                     seq.set_toks_and_reallocate(ids, paged_attn_metadata.as_mut());
@@ -879,9 +880,11 @@ mod tests {
 
         assert_eq!(features.len(), 3);
         assert!(features.iter().all(|feature| feature.item_range == (0..1)));
-        assert!(features
-            .iter()
-            .all(|feature| { feature.attention_policy == MultimodalAttentionPolicy::NonCausal }));
+        assert!(
+            features.iter().all(|feature| {
+                feature.attention_policy == MultimodalAttentionPolicy::NonCausal
+            })
+        );
         assert_eq!(
             features
                 .iter()

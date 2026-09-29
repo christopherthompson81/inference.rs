@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, LazyLock, Mutex},
 };
 
-use candle_core::{shape::ShapeWithOneHole, DType, Device, IndexOp, Result, Shape, Tensor, D};
+use candle_core::{D, DType, Device, IndexOp, Result, Shape, Tensor, shape::ShapeWithOneHole};
 use candle_nn::Module;
 use inference_quant::{NonZeroOp, QuantMethod, ShardedVarBuilder};
 
@@ -16,7 +16,7 @@ use crate::{
     vision::siglip::{SiglipVisionConfig, SiglipVisionTransformer},
 };
 
-use super::{config::Phi4MMImageEmbedConfig, Phi4MMConfig};
+use super::{Phi4MMConfig, config::Phi4MMImageEmbedConfig};
 
 pub const IMAGE_SPECIAL_TOKEN_ID: f64 = 200010.;
 
@@ -492,18 +492,17 @@ impl ImageEmbedding {
                         let mut cached_results = Vec::with_capacity(bs);
                         let mut all_hit = true;
                         for &hash in image_hashes {
-                            if let Some(cached) = guard.get(CacheModality::Image, hash) {
-                                cached_results.push(cached[0].clone());
-                            } else {
-                                all_hit = false;
-                                break;
+                            match guard.get(CacheModality::Image, hash) {
+                                Some(cached) => {
+                                    cached_results.push(cached[0].clone());
+                                }
+                                _ => {
+                                    all_hit = false;
+                                    break;
+                                }
                             }
                         }
-                        if all_hit {
-                            Some(cached_results)
-                        } else {
-                            None
-                        }
+                        if all_hit { Some(cached_results) } else { None }
                     } else {
                         None
                     };

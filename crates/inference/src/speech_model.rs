@@ -1,7 +1,7 @@
 use inference_core::*;
 
-use crate::model_builder_trait::{build_model_from_pipeline, build_speech_pipeline};
 use crate::Model;
+use crate::model_builder_trait::{build_model_from_pipeline, build_speech_pipeline};
 
 /// Configure a speech model (text-to-speech) with the various parameters for loading, running, and other inference behaviors.
 pub struct SpeechModelBuilder {

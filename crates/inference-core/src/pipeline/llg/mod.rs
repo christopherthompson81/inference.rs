@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use llguidance::{api::TopLevelGrammar, ParserFactory};
-use tokenizers::{decoders::DecoderWrapper, Tokenizer};
+use llguidance::{ParserFactory, api::TopLevelGrammar};
+use tokenizers::{Tokenizer, decoders::DecoderWrapper};
 
 use crate::Constraint;
 
@@ -230,8 +230,8 @@ mod tests {
     #[test]
     fn honors_special_flag_inline_fixture() {
         use tokenizers::{
-            decoders::byte_level::ByteLevel as ByteLevelDecoder, models::bpe::BpeBuilder,
-            AddedToken,
+            AddedToken, decoders::byte_level::ByteLevel as ByteLevelDecoder,
+            models::bpe::BpeBuilder,
         };
         let vocab = ahash::AHashMap::from([("a".to_string(), 0u32)]);
         let bpe = BpeBuilder::new()

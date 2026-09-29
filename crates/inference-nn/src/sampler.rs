@@ -7,7 +7,7 @@ use std::{
 
 use candle_core::{Device, Error, Result, Tensor};
 
-use rand::distr::{weighted::WeightedIndex, Distribution};
+use rand::distr::{Distribution, weighted::WeightedIndex};
 use rand_isaac::Isaac64Rng;
 use rayon::iter::{IndexedParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use serde::{Deserialize, Serialize};
@@ -1391,35 +1391,34 @@ impl Sampler {
 
         let vocab_size = logits.elem_count();
         let mut logits = logits;
-        if frequency_penalty != 0.0 || presence_penalty != 0.0 {
-            if let Some((token_ids, token_counts)) = sparse_token_counts(
+        if (frequency_penalty != 0.0 || presence_penalty != 0.0)
+            && let Some((token_ids, token_counts)) = sparse_token_counts(
                 &context[prompt_len.min(context.len())..],
                 vocab_size,
                 logits.device(),
-            )? {
-                logits = crate::ops::cuda_apply_sparse_penalties_f32(
-                    &logits,
-                    &token_ids,
-                    &token_counts,
-                    frequency_penalty,
-                    presence_penalty,
-                    1.0,
-                )?;
-            }
+            )?
+        {
+            logits = crate::ops::cuda_apply_sparse_penalties_f32(
+                &logits,
+                &token_ids,
+                &token_counts,
+                frequency_penalty,
+                presence_penalty,
+                1.0,
+            )?;
         }
-        if repetition_penalty != 1.0 {
-            if let Some((token_ids, token_counts)) =
+        if repetition_penalty != 1.0
+            && let Some((token_ids, token_counts)) =
                 sparse_token_counts(context, vocab_size, logits.device())?
-            {
-                logits = crate::ops::cuda_apply_sparse_penalties_f32(
-                    &logits,
-                    &token_ids,
-                    &token_counts,
-                    0.0,
-                    0.0,
-                    repetition_penalty,
-                )?;
-            }
+        {
+            logits = crate::ops::cuda_apply_sparse_penalties_f32(
+                &logits,
+                &token_ids,
+                &token_counts,
+                0.0,
+                0.0,
+                repetition_penalty,
+            )?;
         }
         Ok(logits)
     }
@@ -2146,13 +2145,12 @@ impl Sampler {
                 multiple_sequences,
                 true,
             )
+            && let Some(temperature) = self.temperature
         {
-            if let Some(temperature) = self.temperature {
-                let logits =
-                    self.apply_device_sparse_penalties_if_needed(logits, context, prompt_len)?;
-                let logits = self.apply_device_logits_bias_if_needed(logits)?;
-                return self.sample_topk_on_device(logits, temperature, rng);
-            }
+            let logits =
+                self.apply_device_sparse_penalties_if_needed(logits, context, prompt_len)?;
+            let logits = self.apply_device_logits_bias_if_needed(logits)?;
+            return self.sample_topk_on_device(logits, temperature, rng);
         }
 
         #[cfg(feature = "metal")]
@@ -2223,7 +2221,7 @@ impl Sampler {
 
 #[cfg(test)]
 mod tests {
-    use super::{argmax_f32, partial_sort_top_k, ModelGenerationDefaults, SamplingParams};
+    use super::{ModelGenerationDefaults, SamplingParams, argmax_f32, partial_sort_top_k};
     use std::collections::HashMap;
 
     #[test]
@@ -2773,8 +2771,8 @@ mod tests {
     fn resident_unit_uniform_matches_weighted_index_for_fixed_seeds() {
         use super::weighted_index_from_unit_f32;
         use rand::{
-            distr::{weighted::WeightedIndex, Distribution, Uniform},
             RngCore, SeedableRng,
+            distr::{Distribution, Uniform, weighted::WeightedIndex},
         };
         use rand_isaac::Isaac64Rng;
 
@@ -2841,9 +2839,11 @@ mod tests {
 
         assert_eq!(sampled.token, 17);
         assert_eq!(sampled.logprob, -2.5);
-        assert!(sampler
-            .sample_cuda_categorical_row(&[f32::NAN, f32::NAN])
-            .is_err());
+        assert!(
+            sampler
+                .sample_cuda_categorical_row(&[f32::NAN, f32::NAN])
+                .is_err()
+        );
     }
 
     #[cfg(feature = "cuda")]

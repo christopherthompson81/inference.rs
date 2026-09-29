@@ -4,7 +4,7 @@
 use std::sync::Mutex;
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-use candle_core::{Device, Result, Tensor, D};
+use candle_core::{D, Device, Result, Tensor};
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use inference_quant::QuantMethod;

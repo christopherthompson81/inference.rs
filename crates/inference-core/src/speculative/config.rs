@@ -4,13 +4,13 @@ use std::{
 };
 
 use candle_core::{DType, Device};
-use hf_hub::{api::sync::ApiRepo, Repo, RepoType};
+use hf_hub::{Repo, RepoType, api::sync::ApiRepo};
 
 use crate::{
     paged_attention::PagedAttentionConfig,
     pipeline::{
-        hf::{build_api, get_file, list_repo_files, try_get_file},
         TokenSource,
+        hf::{build_api, get_file, list_repo_files, try_get_file},
     },
     utils::normal::TryIntoDType,
 };
@@ -208,7 +208,7 @@ mod tests {
     use std::collections::HashMap;
 
     use safetensors::{serialize_to_file, tensor::Dtype as SafeDtype, tensor::TensorView};
-    use tempfile::{tempdir, TempDir};
+    use tempfile::{TempDir, tempdir};
 
     use super::*;
 
@@ -255,9 +255,11 @@ mod tests {
             &Device::Cpu,
         )
         .expect_err("adding the checkpoint twice should overflow");
-        assert!(error
-            .to_string()
-            .contains("paged attention device memory reservation overflow"));
+        assert!(
+            error
+                .to_string()
+                .contains("paged attention device memory reservation overflow")
+        );
         Ok(())
     }
 

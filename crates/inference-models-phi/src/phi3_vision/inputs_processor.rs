@@ -3,7 +3,7 @@
 use std::{any::Any, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
-use image::{imageops::FilterType, DynamicImage, GenericImage, GenericImageView, Rgba};
+use image::{DynamicImage, GenericImage, GenericImageView, Rgba, imageops::FilterType};
 use inference_vision::{ApplyTransforms, Normalize, ToTensor, Transforms};
 use itertools::Itertools;
 use regex_automata::meta::Regex;
@@ -20,8 +20,8 @@ use crate::media_inputs::{
     },
 };
 use crate::paged_attention::{
-    block_hash::{MultiModalFeature, MultimodalKind},
     PagedAttentionMeta,
+    block_hash::{MultiModalFeature, MultimodalKind},
 };
 use crate::vision::multimodal_layout::{
     MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,

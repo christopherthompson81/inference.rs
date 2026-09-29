@@ -85,11 +85,10 @@ pub fn selective_scan_cuda(
         _ => candle::bail!("selective_scan_cuda: state must be on CUDA"),
     };
     let state_ptr = {
-        let ptr = state_s
+        state_s
             .slice(state_l.start_offset()..)
             .device_ptr(state_s.stream())
-            .0 as *mut f32;
-        ptr
+            .0 as *mut f32
     };
     let _ = state_s;
     let _ = state_l;
@@ -111,10 +110,7 @@ pub fn selective_scan_cuda(
             d_ptr,
             dt_bias_ptr,
             state_ptr,
-            {
-                let p = y_buf.device_ptr(y_buf.stream()).0 as *mut f32;
-                p
-            },
+            y_buf.device_ptr(y_buf.stream()).0 as *mut f32,
             batch_size as i32,
             n_heads as i32,
             head_dim as i32,

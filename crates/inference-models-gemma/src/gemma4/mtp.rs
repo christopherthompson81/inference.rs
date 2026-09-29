@@ -6,7 +6,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use candle_core::{DType, Device, Result, Tensor, D};
+use candle_core::{D, DType, Device, Result, Tensor};
 use candle_nn::Linear;
 use inference_quant::ShardedVarBuilder;
 use rand_isaac::Isaac64Rng;
@@ -22,12 +22,12 @@ use crate::{
         MtpConfig, SpeculativeKvCache, SpeculativeProposal, SpeculativeProposalBatch,
         SpeculativeProposeBatchCtx, SpeculativeProposer, TargetTokenEmbedder,
     },
-    utils::varbuilder_utils::{from_mmaped_safetensors, DeviceForLoadTensor},
+    utils::varbuilder_utils::{DeviceForLoadTensor, from_mmaped_safetensors},
 };
 
 use super::{
     config::Gemma4TextConfig,
-    text::{first_kv_shared_layer_idx, ProportionalRotaryEmbedding},
+    text::{ProportionalRotaryEmbedding, first_kv_shared_layer_idx},
 };
 
 #[derive(Debug, Clone, Deserialize)]

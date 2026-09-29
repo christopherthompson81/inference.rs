@@ -2,12 +2,12 @@
 
 use anyhow::Result;
 use axum::{
+    Extension, Router,
     extract::DefaultBodyLimit,
-    http::{self, header::HeaderName, HeaderMap, Method, StatusCode, Uri},
+    http::{self, HeaderMap, Method, StatusCode, Uri, header::HeaderName},
     middleware,
     response::IntoResponse,
     routing::{get, post},
-    Extension, Router,
 };
 use tower_http::cors::{AllowOrigin, CorsLayer};
 #[cfg(feature = "swagger-ui")]
@@ -17,7 +17,7 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::openapi_doc::get_openapi_doc;
 use crate::{
     anthropic::{anthropic_count_tokens, anthropic_error_response, anthropic_messages},
-    approvals::{resolve_agent_approval, ApprovalBroker},
+    approvals::{ApprovalBroker, resolve_agent_approval},
     chat_completion::chatcompletions,
     completions::completions,
     embeddings::embeddings,
@@ -25,7 +25,7 @@ use crate::{
         delete_file, get_container_file, get_container_file_content, get_file, get_file_content,
         list_container_files, list_files, upload_file,
     },
-    handler_core::{openai_error_response, ApiError, ApiErrorKind},
+    handler_core::{ApiError, ApiErrorKind, openai_error_response},
     handlers::{
         calibration_apply, calibration_start, calibration_status, delete_session, get_model_status,
         get_session, health, models, put_session, re_isq, reload_model, system_doctor, system_info,
@@ -33,23 +33,23 @@ use crate::{
     },
     image_generation::image_generation,
     lora_adapters::{
-        list_lora_adapters, load_lora_adapter, unload_lora_adapter, LoraAdapterApiConfig,
+        LoraAdapterApiConfig, list_lora_adapters, load_lora_adapter, unload_lora_adapter,
     },
-    metrics::{metrics, metrics_disabled, observe_http, ObservabilityConfig, ObservabilityState},
+    metrics::{ObservabilityConfig, ObservabilityState, metrics, metrics_disabled, observe_http},
     responses::{cancel_response, create_response, delete_response, get_response},
     route_registry::{
         AGENT_APPROVAL_ROUTE, ANTHROPIC_COUNT_TOKENS_ROUTE, ANTHROPIC_MESSAGES_ROUTE,
         CALIBRATION_APPLY_ROUTE, CALIBRATION_START_ROUTE, CALIBRATION_STATUS_ROUTE,
-        CANCEL_RESPONSE_ROUTE, CHAT_COMPLETIONS_ROUTE, COMPLETIONS_ROUTE, CONTAINER_FILES_ROUTE,
-        CONTAINER_FILE_CONTENT_ROUTE, CONTAINER_FILE_ROUTE, EMBEDDINGS_ROUTE, FILES_ROUTE,
-        FILE_CONTENT_ROUTE, FILE_ROUTE, HEALTH_ROUTE, IMAGE_GENERATION_ROUTE,
-        LIST_LORA_ADAPTERS_ROUTE, LOAD_LORA_ADAPTER_ROUTE, MODELS_ROUTE, MODEL_STATUS_ROUTE,
-        RELOAD_MODEL_ROUTE, RESPONSES_ROUTE, RESPONSE_ROUTE, RE_ISQ_ROUTE, ROOT_ROUTE,
-        SESSION_ROUTE, SKILLS_ROUTE, SKILL_VERSIONS_ROUTE, SPEECH_GENERATION_ROUTE,
-        SYSTEM_DOCTOR_ROUTE, SYSTEM_INFO_ROUTE, TUNE_MODEL_ROUTE, UNLOAD_LORA_ADAPTER_ROUTE,
-        UNLOAD_MODEL_ROUTE,
+        CANCEL_RESPONSE_ROUTE, CHAT_COMPLETIONS_ROUTE, COMPLETIONS_ROUTE,
+        CONTAINER_FILE_CONTENT_ROUTE, CONTAINER_FILE_ROUTE, CONTAINER_FILES_ROUTE,
+        EMBEDDINGS_ROUTE, FILE_CONTENT_ROUTE, FILE_ROUTE, FILES_ROUTE, HEALTH_ROUTE,
+        IMAGE_GENERATION_ROUTE, LIST_LORA_ADAPTERS_ROUTE, LOAD_LORA_ADAPTER_ROUTE,
+        MODEL_STATUS_ROUTE, MODELS_ROUTE, RE_ISQ_ROUTE, RELOAD_MODEL_ROUTE, RESPONSE_ROUTE,
+        RESPONSES_ROUTE, ROOT_ROUTE, SESSION_ROUTE, SKILL_VERSIONS_ROUTE, SKILLS_ROUTE,
+        SPEECH_GENERATION_ROUTE, SYSTEM_DOCTOR_ROUTE, SYSTEM_INFO_ROUTE, TUNE_MODEL_ROUTE,
+        UNLOAD_LORA_ADAPTER_ROUTE, UNLOAD_MODEL_ROUTE,
     },
-    skills::{list_skill_versions, list_skills, upload_skill, upload_skill_version, SkillStore},
+    skills::{SkillStore, list_skill_versions, list_skills, upload_skill, upload_skill_version},
     speech_generation::speech_generation,
     types::SharedInferenceRsState,
 };

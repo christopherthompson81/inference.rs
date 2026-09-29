@@ -1,7 +1,7 @@
 use super::normal_registry::CanonicalGgufArchitecture;
 use crate::NormalLoaderType;
-use anyhow::{bail, Context, Result};
-use candle_core::{quantized::gguf_file::Value, DType};
+use anyhow::{Context, Result, bail};
+use candle_core::{DType, quantized::gguf_file::Value};
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 
 pub(crate) fn build_normal_bindings(

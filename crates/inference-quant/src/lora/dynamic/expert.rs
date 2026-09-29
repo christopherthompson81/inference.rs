@@ -8,7 +8,7 @@ use candle_core::{DType, Device, Result, Tensor};
 use crate::Shard;
 
 use super::{
-    current_lora_execution, LoraExecution, LoraRuntimeId, LoraSiteHandle, LoraSiteKey, LoraWeights,
+    LoraExecution, LoraRuntimeId, LoraSiteHandle, LoraSiteKey, LoraWeights, current_lora_execution,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -925,18 +925,22 @@ mod tests {
             Tensor::zeros(2, DType::F32, &device)?,
         )?;
         assert!(LoraExpertWeights::new(&site, Some(bad), None, None).is_err());
-        assert!(LoraExpertProjectionWeights::new(
-            Tensor::zeros((2, 1, 2), DType::F32, &device)?,
-            Tensor::zeros((2, 2, 1), DType::F32, &device)?,
-            Tensor::zeros(1, DType::F32, &device)?,
-        )
-        .is_err());
-        assert!(LoraExpertProjectionWeights::new(
-            Tensor::zeros((2, 1, 2), DType::F32, &device)?,
-            Tensor::zeros((2, 2, 1), DType::F32, &device)?,
-            Tensor::new(&[1f32, f32::NAN], &device)?,
-        )
-        .is_err());
+        assert!(
+            LoraExpertProjectionWeights::new(
+                Tensor::zeros((2, 1, 2), DType::F32, &device)?,
+                Tensor::zeros((2, 2, 1), DType::F32, &device)?,
+                Tensor::zeros(1, DType::F32, &device)?,
+            )
+            .is_err()
+        );
+        assert!(
+            LoraExpertProjectionWeights::new(
+                Tensor::zeros((2, 1, 2), DType::F32, &device)?,
+                Tensor::zeros((2, 2, 1), DType::F32, &device)?,
+                Tensor::new(&[1f32, f32::NAN], &device)?,
+            )
+            .is_err()
+        );
         Ok(())
     }
 

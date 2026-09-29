@@ -24,7 +24,7 @@ use inference_models_diffusion::flux::{
 
 use crate::{
     api_dir_list, api_get_file,
-    pipeline::{hf, paths::AdapterPaths, EmbeddingModulePaths},
+    pipeline::{EmbeddingModulePaths, hf, paths::AdapterPaths},
 };
 
 const AE_FILE: &str = "ae.safetensors";
@@ -296,7 +296,9 @@ impl DiffusionModelLoader for FluxLoader {
         let vae_vb = vbs.remove(1);
         let flux_vb = vbs.remove(0);
         if self.offload && flux_vb.weight_source().is_some() {
-            anyhow::bail!("a GGUF FLUX transformer is quantized and cannot be offloaded; use `flux`, not `flux-offloaded`");
+            anyhow::bail!(
+                "a GGUF FLUX transformer is quantized and cannot be offloaded; use `flux`, not `flux-offloaded`"
+            );
         }
         let (flux_cfg, vae_cfg) = match configs.as_slice() {
             [] => (
@@ -340,7 +342,7 @@ impl DiffusionModelLoader for FluxLoader {
 
 #[cfg(test)]
 mod tests {
-    use super::{flux_local_files, DiffusionLoaderType};
+    use super::{DiffusionLoaderType, flux_local_files};
 
     fn dir_with(files: &[&str]) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
@@ -381,9 +383,11 @@ mod tests {
             "ae.safetensors",
         ]);
         assert!(flux_local_files(two.path()).is_err());
-        assert!(flux_local_files(dir_with(&["ae.safetensors"]).path())
-            .unwrap()
-            .is_none());
+        assert!(
+            flux_local_files(dir_with(&["ae.safetensors"]).path())
+                .unwrap()
+                .is_none()
+        );
         assert!(
             flux_local_files(std::path::Path::new("black-forest-labs/FLUX.1-dev"))
                 .unwrap()

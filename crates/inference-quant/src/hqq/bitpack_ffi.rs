@@ -1,4 +1,4 @@
-extern "C" {
+unsafe extern "C" {
     pub(crate) fn launch_pack_1bit_kernel(
         d_input: *const u8,
         d_output: *mut u8,

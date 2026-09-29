@@ -11,7 +11,7 @@ pub use inject::{
     compose_tool_response_with_files, file_to_tool_input_file, input_files_message,
     merge_required_outputs_into_args, required_files_tool_addendum, tool_file_to_file,
 };
-pub use store::{FileStore, DEFAULT_FILE_TTL};
+pub use store::{DEFAULT_FILE_TTL, FileStore};
 
 /// Max text bytes shown to the model inline. Above this it gets a preview + id and calls `read_file`.
 pub const MODEL_INLINE_BYTES: usize = 1024;

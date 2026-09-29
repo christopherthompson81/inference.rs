@@ -6,7 +6,7 @@ use std::{collections::HashMap, sync::Arc};
 
 use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_nn::utils::progress::IterWithProgress;
-use inference_quant::{softcap, QuantMethod, ShardedVarBuilder};
+use inference_quant::{QuantMethod, ShardedVarBuilder, softcap};
 use tracing::info;
 
 use crate::{
@@ -16,8 +16,8 @@ use crate::{
     gemma2::Config,
     kv_cache::{Cache, EitherCache},
     layers::{self, Activation, CausalMasker, GemmaRmsNorm, RotaryEmbedding, Sdpa},
-    lora::{linear_b, linear_no_bias, LinearLayerLike, LoraConfig, Ordering},
-    model::{extract_logits, IsqModel, NormalLoadingMetadata, NormalModel},
+    lora::{LinearLayerLike, LoraConfig, Ordering, linear_b, linear_no_bias},
+    model::{IsqModel, NormalLoadingMetadata, NormalModel, extract_logits},
     paged_attention::ModelConfigMetadata,
     utils::progress::NiceProgressBar,
 };
@@ -456,7 +456,7 @@ impl Model {
         normal_loading_metadata: NormalLoadingMetadata,
         preload_adapters: &Option<HashMap<String, (ShardedVarBuilder, LoraConfig)>>,
     ) -> Result<Self> {
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),

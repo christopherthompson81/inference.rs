@@ -1,7 +1,8 @@
 use crate::{
+    AudioInput, DiffusionGenerationParams, ModelCategory, RequestMessage, Response, VideoInput,
     pipeline::{
-        chat_template::is_chat_template_request_error, is_inputs_processor_validation_error,
-        KvCache, NormalCache,
+        KvCache, NormalCache, chat_template::is_chat_template_request_error,
+        is_inputs_processor_validation_error,
     },
     prefix_cacher::MatchingCache,
     request::{
@@ -9,27 +10,25 @@ use crate::{
     },
     sequence::{SeqPreallocatedCache, SeqStepType},
     tools::{ToolCallFormat, ToolCallState, ToolChoice},
-    AudioInput, DiffusionGenerationParams, ModelCategory, RequestMessage, Response, VideoInput,
 };
 use candle_core::Tensor;
 use either::Either;
 use std::{
     ops::Deref,
     path::PathBuf,
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
 use tracing::warn;
 
 use crate::{
-    get_mut_arcmutex,
+    StopTokens, get_mut_arcmutex,
     request::Request,
     sampler::Sampler,
     sequence::{Sequence, SequenceGroup},
-    StopTokens,
 };
 
-use super::{agentic_loop, Engine, TERMINATE_ALL_NEXT_STEP};
+use super::{Engine, TERMINATE_ALL_NEXT_STEP, agentic_loop};
 
 fn tools_for_chat_template(
     tools: Option<&[crate::Tool]>,
@@ -521,13 +520,12 @@ impl Engine {
             .and_then(|chat_template| chat_template.tool_call_format());
         if preferred == Some(ToolCallFormat::Harmony)
             && !crate::reasoning_parsers::harmony::is_harmony_encoding_ready()
-        {
-            if let Err(e) = tokio::task::block_in_place(|| {
+            && let Err(e) = tokio::task::block_in_place(|| {
                 crate::reasoning_parsers::harmony::prewarm_harmony_encoding();
                 Ok::<(), anyhow::Error>(())
-            }) {
-                warn!("Failed to initialize Harmony encoding: {e}");
-            }
+            })
+        {
+            warn!("Failed to initialize Harmony encoding: {e}");
         }
         preferred
     }
@@ -648,10 +646,14 @@ impl Engine {
                 requested_max_len.map_or(1, |sampling_max| sampling_max.min(max_len));
             let tokens_to_keep = max_len.saturating_sub(sampling_max);
             let slice_start = prompt_len.saturating_sub(tokens_to_keep);
-            warn!("Prompt for request {request_id} was {currently_over} tokens over the model maximum length. The first {slice_start} tokens were truncated to make space for generation.");
+            warn!(
+                "Prompt for request {request_id} was {currently_over} tokens over the model maximum length. The first {slice_start} tokens were truncated to make space for generation."
+            );
             Ok(prompt_tokens[slice_start..].to_vec())
         } else {
-            warn!("Prompt for request {request_id} was {currently_over} tokens over the model maximum length. The last {currently_over} tokens were truncated to make space for generation.");
+            warn!(
+                "Prompt for request {request_id} was {currently_over} tokens over the model maximum length. The last {currently_over} tokens were truncated to make space for generation."
+            );
             Ok(prompt_tokens[..max_len].to_vec())
         }
     }
@@ -793,7 +795,7 @@ impl Engine {
 
     fn enable_template_reasoning(&self, seq: &mut Sequence) {
         use crate::reasoning_parsers::{
-            tag_based::THINK_OPEN_TAG, ReasoningMode, TagReasoningContext,
+            ReasoningMode, TagReasoningContext, tag_based::THINK_OPEN_TAG,
         };
 
         let pipeline = get_mut_arcmutex!(self.pipeline);
@@ -1048,11 +1050,11 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::chat_template::{apply_chat_template_to, ChatTemplateValue};
+    use crate::pipeline::chat_template::{ChatTemplateValue, apply_chat_template_to};
     use crate::{Function, Tool, ToolType};
     use ahash::AHashMap;
     use indexmap::IndexMap;
-    use tokenizers::{models::wordlevel::WordLevel, Tokenizer};
+    use tokenizers::{Tokenizer, models::wordlevel::WordLevel};
 
     #[test]
     fn choice_seeds_are_stable_and_distinct() {

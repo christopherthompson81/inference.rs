@@ -18,8 +18,8 @@ use crate::media_inputs::{
     },
 };
 use crate::paged_attention::{
-    block_hash::{MultimodalAttentionPolicy, MultimodalKind},
     PagedAttentionMeta,
+    block_hash::{MultimodalAttentionPolicy, MultimodalKind},
 };
 use crate::vision::multimodal_layout::{
     MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
@@ -773,8 +773,8 @@ mod tests {
     use candle_core::{DType, Device, Tensor};
 
     use super::{
-        cat_padded_mistral3_images, find_mistral3_image_ranges, InputsProcessorValidationError,
-        Mistral3ImageProcessor,
+        InputsProcessorValidationError, Mistral3ImageProcessor, cat_padded_mistral3_images,
+        find_mistral3_image_ranges,
     };
 
     fn processor() -> Mistral3ImageProcessor {
@@ -811,12 +811,16 @@ mod tests {
         let error = processor()
             .expand_prompt("aI b I c", &[(2, 4)])
             .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("2 image placeholders but 1 image inputs"));
-        assert!(error
-            .downcast_ref::<InputsProcessorValidationError>()
-            .is_some());
+        assert!(
+            error
+                .to_string()
+                .contains("2 image placeholders but 1 image inputs")
+        );
+        assert!(
+            error
+                .downcast_ref::<InputsProcessorValidationError>()
+                .is_some()
+        );
     }
 
     #[test]

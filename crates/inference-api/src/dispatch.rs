@@ -1,7 +1,7 @@
 //! Sending requests to the engine and routing their responses.
 
 use inference_core::{InferenceRs, InferenceRsError, Request, Response};
-use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::mpsc::{Receiver, Sender, channel};
 
 use crate::{lora_routing::DEFAULT_MODEL_ID, types::SharedInferenceRsState};
 

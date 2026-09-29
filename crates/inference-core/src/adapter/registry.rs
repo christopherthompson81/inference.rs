@@ -465,12 +465,12 @@ fn register(
     resident: Arc<ResidentAdapterGeneration>,
 ) -> Result<(AdapterLease, Option<Arc<ResidentAdapterGeneration>>), AdapterRegistryError> {
     validate_registration(state, max_aliases, max_alias_bytes, &alias)?;
-    if let Some(existing) = state.generations.get(&resident.generation()) {
-        if !Arc::ptr_eq(existing, &resident) {
-            return Err(AdapterRegistryError::GenerationConflict(
-                resident.generation(),
-            ));
-        }
+    if let Some(existing) = state.generations.get(&resident.generation())
+        && !Arc::ptr_eq(existing, &resident)
+    {
+        return Err(AdapterRegistryError::GenerationConflict(
+            resident.generation(),
+        ));
     }
 
     state

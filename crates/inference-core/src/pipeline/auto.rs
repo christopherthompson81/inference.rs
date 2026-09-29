@@ -1,5 +1,5 @@
 use super::hf::{
-    build_api_with_cache, hf_access_error, remote_issue_from_api_error, RemoteAccessIssue,
+    RemoteAccessIssue, build_api_with_cache, hf_access_error, remote_issue_from_api_error,
 };
 use super::{
     DiffusionLoaderBuilder, DiffusionLoaderType, EmbeddingLoaderBuilder, EmbeddingLoaderType,
@@ -7,8 +7,8 @@ use super::{
     MultimodalLoaderType, MultimodalSpecificConfig, NormalLoaderBuilder, NormalLoaderType,
     NormalSpecificConfig, SpeechLoader, TokenSource,
 };
-use crate::utils::progress::ProgressScopeGuard;
 use crate::Ordering;
+use crate::utils::progress::ProgressScopeGuard;
 use crate::{
     AutoDeviceMapParams, DeviceMapSetting, IsqType, LoraAdapterSpec, LoraRuntimeConfig,
     PagedAttentionConfig, Pipeline, TryIntoDType,
@@ -16,8 +16,8 @@ use crate::{
 use anyhow::Result;
 use candle_core::Device;
 use hf_hub::{
-    api::sync::{ApiError, ApiRepo},
     Cache, Repo, RepoType,
+    api::sync::{ApiError, ApiRepo},
 };
 use serde::Deserialize;
 use std::io;
@@ -401,28 +401,28 @@ impl AutoLoader {
             return Ok(Detected::Diffusion(tp));
         }
 
-        if let Some(ref config) = artifacts.contents {
-            if let Some(tp) = crate::pipeline::SpeechLoaderType::auto_detect_from_config(config) {
-                return Ok(Detected::Speech(tp));
-            }
+        if let Some(ref config) = artifacts.contents
+            && let Some(tp) = crate::pipeline::SpeechLoaderType::auto_detect_from_config(config)
+        {
+            return Ok(Detected::Speech(tp));
         }
 
         if artifacts.sentence_transformers_present {
             if let Some(ref config) = artifacts.contents {
                 let cfg: AutoConfig = serde_json::from_str(config)?;
-                if let Some(name) = cfg.architectures.first() {
-                    if let Ok(tp) = EmbeddingLoaderType::from_causal_lm_name(name) {
-                        info!(
-                            "Detected `config_sentence_transformers.json`; using embedding loader `{tp}`."
-                        );
-                        return Ok(Detected::Embedding(Some(tp)));
-                    }
+                if let Some(name) = cfg.architectures.first()
+                    && let Ok(tp) = EmbeddingLoaderType::from_causal_lm_name(name)
+                {
+                    info!(
+                        "Detected `config_sentence_transformers.json`; using embedding loader `{tp}`."
+                    );
+                    return Ok(Detected::Embedding(Some(tp)));
                 }
             }
-            if artifacts.contents.is_none() {
-                if let Some(issue) = artifacts.remote_access_issue.as_ref() {
-                    return Err(hf_access_error(Path::new(&self.model_id), issue));
-                }
+            if artifacts.contents.is_none()
+                && let Some(issue) = artifacts.remote_access_issue.as_ref()
+            {
+                return Err(hf_access_error(Path::new(&self.model_id), issue));
             }
             info!(
                 "Detected `config_sentence_transformers.json`; routing via auto embedding loader."

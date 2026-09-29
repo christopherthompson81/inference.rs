@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use inference_models_other::lfm2_vl::inputs_processor::{
-    Lfm2VlImageProcessor, IMAGE_END, IMAGE_START, IMAGE_THUMBNAIL, IMAGE_TOKEN,
+    IMAGE_END, IMAGE_START, IMAGE_THUMBNAIL, IMAGE_TOKEN, Lfm2VlImageProcessor,
 };
 use inference_models_other::loaders::Lfm2VlLoader;
 

@@ -1,6 +1,6 @@
 use std::{
     borrow::Cow,
-    collections::{hash_map::Entry, HashMap, HashSet},
+    collections::{HashMap, HashSet, hash_map::Entry},
     fs::File,
     mem::{align_of, size_of},
     ops::Range,
@@ -9,15 +9,15 @@ use std::{
 
 use byteorder::{BigEndian, ByteOrder, LittleEndian};
 use candle_core::{
+    Device, Error, Result,
     quantized::{
+        GgmlDType, QStorage, QTensor,
         gguf_file::Value,
         k_quants::{
-            BlockQ2K, BlockQ3K, BlockQ4K, BlockQ4_0, BlockQ4_1, BlockQ5K, BlockQ5_0, BlockQ5_1,
-            BlockQ6K, BlockQ8K, BlockQ8_0, BlockQ8_1,
+            BlockQ2K, BlockQ3K, BlockQ4_0, BlockQ4_1, BlockQ4K, BlockQ5_0, BlockQ5_1, BlockQ5K,
+            BlockQ6K, BlockQ8_0, BlockQ8_1, BlockQ8K,
         },
-        GgmlDType, QStorage, QTensor,
     },
-    Device, Error, Result,
 };
 use half::{bf16, f16};
 use memmap2::{Mmap, MmapOptions};
@@ -431,13 +431,13 @@ impl GgufArchive {
             shards.push(shard_info);
         }
 
-        if let Some(expected) = declared_total {
-            if tensors.len() != expected {
-                candle_core::bail!(
-                    "GGUF split metadata declares {expected} tensors, but {} were cataloged",
-                    tensors.len()
-                );
-            }
+        if let Some(expected) = declared_total
+            && tensors.len() != expected
+        {
+            candle_core::bail!(
+                "GGUF split metadata declares {expected} tensors, but {} were cataloged",
+                tensors.len()
+            );
         }
 
         Ok(Self {
@@ -760,13 +760,13 @@ impl ParsedShard {
                 .get(index + 1)
                 .map(|next| usize::try_from(next.offset).map_err(Error::wrap))
                 .transpose()?;
-            if let Some(next_offset) = next_offset {
-                if next_offset <= offset {
-                    candle_core::bail!(
-                        "GGUF tensor `{}` offset {offset} is not before the next tensor offset {next_offset}",
-                        raw.name
-                    );
-                }
+            if let Some(next_offset) = next_offset
+                && next_offset <= offset
+            {
+                candle_core::bail!(
+                    "GGUF tensor `{}` offset {offset} is not before the next tensor offset {next_offset}",
+                    raw.name
+                );
             }
 
             let absolute_start = tensor_data_offset.checked_add(offset).ok_or_else(|| {
@@ -808,13 +808,13 @@ impl ParsedShard {
                             raw.name
                         ))
                     })?;
-                    if let Some(next_offset) = next_offset {
-                        if next_offset != expected_next {
-                            candle_core::bail!(
-                                "GGUF tensor `{}` is followed by offset {next_offset}, expected {expected_next}",
-                                raw.name
-                            );
-                        }
+                    if let Some(next_offset) = next_offset
+                        && next_offset != expected_next
+                    {
+                        candle_core::bail!(
+                            "GGUF tensor `{}` is followed by offset {next_offset}, expected {expected_next}",
+                            raw.name
+                        );
                     }
                     let storage_end = absolute_start.checked_add(padded_len).ok_or_else(|| {
                         Error::msg(format!(
@@ -1170,10 +1170,10 @@ fn archive_alignment(shards: &[ParsedShard]) -> Result<usize> {
         candle_core::bail!("GGUF alignment {primary} is not a nonzero power of two");
     }
     for shard in shards.iter().skip(1) {
-        if let Some(alignment) = metadata_usize(&shard.metadata, GENERAL_ALIGNMENT)? {
-            if alignment != primary {
-                candle_core::bail!("GGUF shards disagree on alignment: {primary} and {alignment}");
-            }
+        if let Some(alignment) = metadata_usize(&shard.metadata, GENERAL_ALIGNMENT)?
+            && alignment != primary
+        {
+            candle_core::bail!("GGUF shards disagree on alignment: {primary} and {alignment}");
         }
     }
     Ok(primary)
@@ -2030,9 +2030,11 @@ mod tests {
             DEFAULT_ALIGNMENT,
         );
         let error = GgufArchive::open_file(first.path()).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("were supplied, but split metadata declares 2"));
+        assert!(
+            error
+                .to_string()
+                .contains("were supplied, but split metadata declares 2")
+        );
 
         let first = write_test_gguf(
             &[

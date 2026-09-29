@@ -1,5 +1,5 @@
 use crate::utils::image_to_pixels;
-use candle_core::{Device, Result, Tensor, D};
+use candle_core::{D, Device, Result, Tensor};
 use image::DynamicImage;
 
 use crate::ImageTransform;

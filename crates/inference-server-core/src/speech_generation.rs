@@ -1,14 +1,14 @@
 //! The speech generation route: HTTP framing over the engine's speech generation.
 
 use axum::{
-    extract::{rejection::JsonRejection, Json, State},
-    http::{header, HeaderValue, StatusCode},
+    extract::{Json, State, rejection::JsonRejection},
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 
 use crate::{
     generation::generate_speech,
-    handler_core::{openai_error_response, ApiError, ApiErrorHttp},
+    handler_core::{ApiError, ApiErrorHttp, openai_error_response},
     openai::SpeechGenerationRequest,
     types::ExtractedInferenceRsState,
 };

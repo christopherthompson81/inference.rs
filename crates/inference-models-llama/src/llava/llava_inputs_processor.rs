@@ -14,7 +14,7 @@ use tokenizers::Tokenizer;
 
 use super::config::Config as LLaVAConfig;
 use super::llava15::LLaVAVisionSpecificArgs;
-use super::utils::{expand2square, LLaVAImageProcessor};
+use super::utils::{LLaVAImageProcessor, expand2square};
 use crate::device_map::DeviceMapper;
 use crate::media_inputs::{
     image_processor::{self, ImagePreProcessor, PreprocessedImages},
@@ -26,8 +26,8 @@ use crate::media_inputs::{
     },
 };
 use crate::paged_attention::{
-    block_hash::{MultiModalFeature, MultimodalKind},
     PagedAttentionMeta,
+    block_hash::{MultiModalFeature, MultimodalKind},
 };
 use crate::vision::multimodal_layout::{
     MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
@@ -228,14 +228,14 @@ impl MultimodalInputsProcessor for LLaVAInputProcessor {
             let new_prompt = tokenizer.decode(&new_ids, false).unwrap();
             seq.set_initial_prompt(new_prompt);
 
-            if seq.mm_features().is_empty() {
-                if let Some(hashes) = seq.image_hashes().map(|h| h.to_vec()) {
-                    seq.set_mm_features(build_mm_features_from_ranges(
-                        &img_ranges,
-                        &hashes,
-                        MultimodalKind::Image,
-                    ));
-                }
+            if seq.mm_features().is_empty()
+                && let Some(hashes) = seq.image_hashes().map(|h| h.to_vec())
+            {
+                seq.set_mm_features(build_mm_features_from_ranges(
+                    &img_ranges,
+                    &hashes,
+                    MultimodalKind::Image,
+                ));
             }
 
             seq.set_toks_and_reallocate(new_ids, paged_attn_metadata.as_deref_mut());
@@ -486,14 +486,14 @@ impl MultimodalInputsProcessor for LLaVAInputProcessor {
             let new_prompt = tokenizer.decode(&new_ids, false).unwrap();
             seq.set_initial_prompt(new_prompt);
 
-            if seq.mm_features().is_empty() {
-                if let Some(hashes) = seq.image_hashes().map(|h| h.to_vec()) {
-                    seq.set_mm_features(build_mm_features_from_ranges(
-                        &img_ranges,
-                        &hashes,
-                        MultimodalKind::Image,
-                    ));
-                }
+            if seq.mm_features().is_empty()
+                && let Some(hashes) = seq.image_hashes().map(|h| h.to_vec())
+            {
+                seq.set_mm_features(build_mm_features_from_ranges(
+                    &img_ranges,
+                    &hashes,
+                    MultimodalKind::Image,
+                ));
             }
 
             seq.set_toks_and_reallocate(new_ids, paged_attn_metadata.as_mut());

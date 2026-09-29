@@ -1,5 +1,5 @@
 use super::*;
-use candle_core::{DType, Device, Result as CandleResult, Tensor, D};
+use candle_core::{D, DType, Device, Result as CandleResult, Tensor};
 use candle_nn::ops::softmax;
 
 const EPS: f32 = 1e-4;

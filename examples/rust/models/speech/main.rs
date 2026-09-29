@@ -5,7 +5,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use inference::{speech_utils, SpeechLoaderType, SpeechModelBuilder};
+use inference::{SpeechLoaderType, SpeechModelBuilder, speech_utils};
 
 #[tokio::main]
 async fn main() -> Result<()> {

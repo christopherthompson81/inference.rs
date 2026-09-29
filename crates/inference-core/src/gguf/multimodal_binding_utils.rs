@@ -1,6 +1,6 @@
 use std::collections::{BTreeSet, HashMap};
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use candle_core::quantized::gguf_file::Value;
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 

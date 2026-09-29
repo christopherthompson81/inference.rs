@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     num::NonZeroUsize,
-    sync::{atomic::Ordering, Arc},
+    sync::{Arc, atomic::Ordering},
 };
 
 use crate::{
@@ -380,7 +380,7 @@ mod tests {
         sampler::Sampler,
         sequence::{SeqStepType, SequenceGroup, SequenceRecognizer},
     };
-    use tokio::sync::{mpsc::channel, Mutex as TokioMutex};
+    use tokio::sync::{Mutex as TokioMutex, mpsc::channel};
 
     fn test_sequence(id: usize, input_images: Option<Vec<image::DynamicImage>>) -> Sequence {
         let (tx, _rx) = channel(1);

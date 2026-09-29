@@ -2,12 +2,12 @@ use std::{collections::HashMap, iter::zip, mem::size_of, sync::Arc};
 
 use crate::cuda::backend::{slice_ptr, slice_ptr_on_stream};
 use crate::cuda::ffi::{copy_blocks_bf16, copy_blocks_f16, copy_blocks_f32, copy_blocks_u8};
-use candle_core::backend::BackendDevice;
-use candle_core::cuda_backend::cudarc::driver::sys::CUstreamCaptureStatus;
-use candle_core::cuda_backend::cudarc::driver::CudaStream;
-use candle_core::cuda_backend::CudaStorageSlice;
 use candle_core::Result;
-use candle_core::{cuda_backend::cudarc::driver::CudaSlice, Device, Storage, Tensor};
+use candle_core::backend::BackendDevice;
+use candle_core::cuda_backend::CudaStorageSlice;
+use candle_core::cuda_backend::cudarc::driver::CudaStream;
+use candle_core::cuda_backend::cudarc::driver::sys::CUstreamCaptureStatus;
+use candle_core::{Device, Storage, Tensor, cuda_backend::cudarc::driver::CudaSlice};
 
 fn ensure_allocation_stream<T>(
     slice: &CudaSlice<T>,
@@ -270,7 +270,11 @@ pub unsafe fn swap_blocks(
     match (src.device(), dst.device()) {
         (Device::Cuda(src_dev), Device::Cuda(dst_dev)) => {
             if src_dev.location() != dst_dev.location() {
-                candle_core::bail!("Tensors must be on the same device to copy, got locations {:?} (src) and {:?} (dst).", src_dev.location(), dst_dev.location());
+                candle_core::bail!(
+                    "Tensors must be on the same device to copy, got locations {:?} (src) and {:?} (dst).",
+                    src_dev.location(),
+                    dst_dev.location()
+                );
             }
             let (src_storage, src_layout) = src.storage_and_layout();
             let (dst_storage, dst_layout) = dst.storage_and_layout();
@@ -362,7 +366,9 @@ pub unsafe fn swap_blocks(
             }
         }
         (src, dst) => {
-            candle_core::bail!("Tensors must be on either the GPU or CPU to swap, got {src:?} (src) and {dst:?} (dst).");
+            candle_core::bail!(
+                "Tensors must be on either the GPU or CPU to swap, got {src:?} (src) and {dst:?} (dst)."
+            );
         }
     }
 

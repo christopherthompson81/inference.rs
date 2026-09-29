@@ -5,23 +5,23 @@ use super::{
     PreProcessingMixin, Processor, TokenSource,
 };
 use crate::device_map::{self, DeviceMapper};
-use crate::distributed::{use_ring, WorkerTransferData};
+use crate::distributed::{WorkerTransferData, use_ring};
 use crate::paged_attention::PagedAttentionMeta;
 use crate::pipeline::tokens::get_token;
 use crate::pipeline::{ChatTemplate, EmbeddingModulePaths, Modalities, SupportedModality};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
 use crate::utils::progress::ProgressScopeGuard;
-use crate::utils::varbuilder_utils::from_mmaped_safetensors;
 use crate::utils::varbuilder_utils::DeviceForLoadTensor;
+use crate::utils::varbuilder_utils::from_mmaped_safetensors;
 use crate::{
-    api_get_file, distributed, DeviceMapSetting, MessageContent, PagedAttentionConfig, Pipeline,
-    SpeechGenerationConfig, TryIntoDType,
+    DeviceMapSetting, MessageContent, PagedAttentionConfig, Pipeline, SpeechGenerationConfig,
+    TryIntoDType, api_get_file, distributed,
 };
 use anyhow::Result;
 use candle_core::{Device, Tensor};
 use candle_nn::VarBuilder;
-use hf_hub::{api::sync::ApiBuilder, Repo, RepoType};
+use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use indexmap::IndexMap;
 use inference_models_speech::{DiaConfig, DiaPipeline, SpeechGenerationOutput};
 use inference_quant::IsqType;

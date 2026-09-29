@@ -1,16 +1,16 @@
 use std::{
     collections::{HashSet, VecDeque},
     fmt::Debug,
-    panic::{catch_unwind, AssertUnwindSafe},
+    panic::{AssertUnwindSafe, catch_unwind},
     sync::{
+        Arc, Condvar, Mutex,
         atomic::{AtomicUsize, Ordering},
         mpsc::{self, Receiver},
-        Arc, Condvar, Mutex,
     },
     thread::JoinHandle,
 };
 
-use candle_core::{quantized::GgmlDType, DType, Device, DeviceLocation, Result};
+use candle_core::{DType, Device, DeviceLocation, Result, quantized::GgmlDType};
 use sysinfo::System;
 
 use crate::{IsqCaptureMode, IsqType};
@@ -383,12 +383,11 @@ fn can_start(state: &ExecutorState, config: &IsqExecutorConfig, job: &QueuedJob)
     if resources.large_job && state.active_large_jobs >= config.max_large_jobs {
         return false;
     }
-    if resources.exclusive_device {
-        if let Some(key) = device_key(&job.plan.target_device) {
-            if state.active_exclusive_devices.contains(&key) {
-                return false;
-            }
-        }
+    if resources.exclusive_device
+        && let Some(key) = device_key(&job.plan.target_device)
+        && state.active_exclusive_devices.contains(&key)
+    {
+        return false;
     }
     true
 }
@@ -402,10 +401,10 @@ fn reserve_job(state: &mut ExecutorState, job: &QueuedJob) {
     if resources.large_job {
         state.active_large_jobs += 1;
     }
-    if resources.exclusive_device {
-        if let Some(key) = device_key(&job.plan.target_device) {
-            state.active_exclusive_devices.insert(key);
-        }
+    if resources.exclusive_device
+        && let Some(key) = device_key(&job.plan.target_device)
+    {
+        state.active_exclusive_devices.insert(key);
     }
 }
 
@@ -424,10 +423,10 @@ fn finish_job(
     if resources.large_job {
         state.active_large_jobs = state.active_large_jobs.saturating_sub(1);
     }
-    if resources.exclusive_device {
-        if let Some(key) = device_key(&running.plan.target_device) {
-            state.active_exclusive_devices.remove(&key);
-        }
+    if resources.exclusive_device
+        && let Some(key) = device_key(&running.plan.target_device)
+    {
+        state.active_exclusive_devices.remove(&key);
     }
     if !retain_output {
         state.retained_output = state.retained_output.saturating_sub(resources.output_bytes);
@@ -639,8 +638,8 @@ fn device_key(device: &Device) -> Option<DeviceLocation> {
 #[cfg(test)]
 mod tests {
     use std::sync::{
-        atomic::{AtomicUsize, Ordering},
         Arc, Mutex as StdMutex,
+        atomic::{AtomicUsize, Ordering},
     };
     use std::time::Duration;
 
@@ -826,15 +825,18 @@ mod tests {
     fn singlethread_env_sets_one_worker() {
         let _guard = ENV_LOCK.lock().unwrap();
         let old = std::env::var_os("INFERENCE_RS_ISQ_SINGLETHREAD");
-        std::env::set_var("INFERENCE_RS_ISQ_SINGLETHREAD", "1");
+        // FIXME: Audit that the environment access only happens in single-threaded code.
+        unsafe { std::env::set_var("INFERENCE_RS_ISQ_SINGLETHREAD", "1") };
         assert_eq!(
             IsqExecutorConfig::new(Some(IsqType::Q8_0)).worker_threads,
             1
         );
         if let Some(old) = old {
-            std::env::set_var("INFERENCE_RS_ISQ_SINGLETHREAD", old);
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::set_var("INFERENCE_RS_ISQ_SINGLETHREAD", old) };
         } else {
-            std::env::remove_var("INFERENCE_RS_ISQ_SINGLETHREAD");
+            // FIXME: Audit that the environment access only happens in single-threaded code.
+            unsafe { std::env::remove_var("INFERENCE_RS_ISQ_SINGLETHREAD") };
         }
     }
 }

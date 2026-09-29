@@ -16,10 +16,10 @@
 //!
 //! See <https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/guides/models/video-setup.md> for full details.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use image::codecs::gif::GifDecoder;
 use image::{AnimationDecoder, DynamicImage, ImageDecoder, Limits};
-use inference_core::{sample_frame_indices, VideoFrameSampling, VideoInput};
+use inference_core::{VideoFrameSampling, VideoInput, sample_frame_indices};
 use std::io::Cursor;
 use std::path::Path;
 use tokio::fs;
@@ -393,11 +393,7 @@ fn parse_fps_fraction(s: &str) -> Option<f64> {
     if let Some((num, den)) = s.split_once('/') {
         let n: f64 = num.parse().ok()?;
         let d: f64 = den.parse().ok()?;
-        if d > 0.0 {
-            Some(n / d)
-        } else {
-            None
-        }
+        if d > 0.0 { Some(n / d) } else { None }
     } else {
         s.parse().ok()
     }
@@ -451,12 +447,14 @@ mod tests {
 
     #[tokio::test]
     async fn server_video_rejects_local_sources() {
-        assert!(parse_video_url_for_server(
-            "resources/rust-logo-32x32.png",
-            None,
-            &MediaAttachments::default()
-        )
-        .await
-        .is_err());
+        assert!(
+            parse_video_url_for_server(
+                "resources/rust-logo-32x32.png",
+                None,
+                &MediaAttachments::default()
+            )
+            .await
+            .is_err()
+        );
     }
 }

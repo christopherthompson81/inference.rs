@@ -14,7 +14,7 @@ use candle_nn::VarBuilder;
 use image::RgbImage;
 use rayon::prelude::*;
 
-pub use config::{PPDocLayoutV3Config, PPDocLayoutV3PreprocessorConfig, LABELS};
+pub use config::{LABELS, PPDocLayoutV3Config, PPDocLayoutV3PreprocessorConfig};
 pub use model::{Intermediates, PPDocLayoutV3, RawOutputs};
 pub use postprocess::{LayoutDetection, PostprocessArgs};
 pub use preprocess::Preprocessor;

@@ -1,7 +1,7 @@
 pub(crate) use crate::paged_attention::input_metadata::PromptChunkPlan;
 use crate::{
     paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy},
-    speculative::{target::clamp_speculative_prefix_cache_hit, SpeculativePrefixReplay},
+    speculative::{SpeculativePrefixReplay, target::clamp_speculative_prefix_cache_hit},
 };
 
 pub(crate) fn next_prompt_chunk_group(

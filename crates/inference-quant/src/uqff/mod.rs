@@ -14,12 +14,12 @@ mod tracker;
 
 pub use reader::UqffReader;
 pub use report::{
-    build_output_report_from_layers, build_uqff_report, build_uqff_report_from_artifacts,
-    inspect_uqff_artifacts, inspect_uqff_path, stored_type_from_tensors, verify_uqff_artifacts,
-    verify_uqff_path, write_uqff_report, QuantizationIssue, QuantizationReport, UqffArtifactFile,
-    UqffArtifactGroup, UqffArtifacts, UqffFallbackReport, UqffGeneratedBy, UqffInspection,
-    UqffLayerReport, UqffMetadataSummary, UqffOutputReport, UqffReport, UqffReportOptions,
-    UqffTensorSummary, UqffVerifyOptions, UqffVerifyResult, UQFF_REPORT_JSON,
+    QuantizationIssue, QuantizationReport, UQFF_REPORT_JSON, UqffArtifactFile, UqffArtifactGroup,
+    UqffArtifacts, UqffFallbackReport, UqffGeneratedBy, UqffInspection, UqffLayerReport,
+    UqffMetadataSummary, UqffOutputReport, UqffReport, UqffReportOptions, UqffTensorSummary,
+    UqffVerifyOptions, UqffVerifyResult, build_output_report_from_layers, build_uqff_report,
+    build_uqff_report_from_artifacts, inspect_uqff_artifacts, inspect_uqff_path,
+    stored_type_from_tensors, verify_uqff_artifacts, verify_uqff_path, write_uqff_report,
 };
 pub use tensor::UqffTensor;
 pub use tracker::{TrackedModule, Tracker};
@@ -559,9 +559,10 @@ mod tests {
             .with_weight_source(Arc::new(TestWeightSource));
         let vb = vb.pp("model").to_dtype(DType::F64);
 
-        assert!(vb
-            .weight_source()
-            .is_some_and(|source| source.contains("model.weight")));
+        assert!(
+            vb.weight_source()
+                .is_some_and(|source| source.contains("model.weight"))
+        );
     }
 
     #[test]
@@ -573,9 +574,11 @@ mod tests {
         let language = vb.pp("language_model");
         let vision = vb.pp("vision_model").without_lora_registry();
 
-        assert!(language
-            .lora_registry()
-            .is_some_and(|candidate| Arc::ptr_eq(candidate, &registry)));
+        assert!(
+            language
+                .lora_registry()
+                .is_some_and(|candidate| Arc::ptr_eq(candidate, &registry))
+        );
         assert!(vision.lora_registry().is_none());
         assert!(vb.lora_registry().is_some());
     }
@@ -606,24 +609,28 @@ mod tests {
             )?,
             Some((0, 2, 4))
         );
-        assert!(shard_range(
-            Shard::Offset {
-                dim: 0,
-                offset: 0,
-                len: 8
-            },
-            &dims
-        )?
-        .is_none());
-        assert!(shard_range(
-            Shard::Simple {
-                dim: 1,
-                rank: 0,
-                world_size: 3
-            },
-            &dims
-        )
-        .is_err());
+        assert!(
+            shard_range(
+                Shard::Offset {
+                    dim: 0,
+                    offset: 0,
+                    len: 8
+                },
+                &dims
+            )?
+            .is_none()
+        );
+        assert!(
+            shard_range(
+                Shard::Simple {
+                    dim: 1,
+                    rank: 0,
+                    world_size: 3
+                },
+                &dims
+            )
+            .is_err()
+        );
         Ok(())
     }
 

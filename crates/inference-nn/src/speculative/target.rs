@@ -5,10 +5,10 @@ use candle_core::{Result, Tensor};
 use crate::kv_cache::PagedAuxiliaryPrefixState;
 
 use super::{
-    logging::log_attach, SpeculativeAttachInfo, SpeculativeBatchObservation, SpeculativeBatchPlan,
-    SpeculativeCommitRow, SpeculativeConfig, SpeculativeGraphPlan, SpeculativePrefillCtx,
-    SpeculativeProposalBatch, SpeculativeProposeBatchCtx, SpeculativeProposePreparation,
-    SpeculativeProposePrepareCtx,
+    SpeculativeAttachInfo, SpeculativeBatchObservation, SpeculativeBatchPlan, SpeculativeCommitRow,
+    SpeculativeConfig, SpeculativeGraphPlan, SpeculativePrefillCtx, SpeculativeProposalBatch,
+    SpeculativeProposeBatchCtx, SpeculativeProposePreparation, SpeculativeProposePrepareCtx,
+    logging::log_attach,
 };
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -256,7 +256,7 @@ mod tests {
     use std::{cell::RefCell, rc::Rc};
 
     use super::{
-        clamp_speculative_prefix_cache_hit, SpeculativePrefixReplay, SpeculativeTargetMixin,
+        SpeculativePrefixReplay, SpeculativeTargetMixin, clamp_speculative_prefix_cache_hit,
     };
 
     struct NoSpeculativeProposer;

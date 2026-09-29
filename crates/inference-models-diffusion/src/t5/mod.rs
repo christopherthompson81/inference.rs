@@ -3,13 +3,13 @@
 // T5 Text Model
 // https://github.com/huggingface/transformers/blob/main/src/transformers/models/t5/modeling_t5.py
 
-use candle_core::{DType, Device, Module, Result, Tensor, D};
+use candle_core::{D, DType, Device, Module, Result, Tensor};
 use candle_nn::{Activation, Embedding};
 use inference_quant::ShardedVarBuilder;
 use serde::Deserialize;
 use std::sync::Arc;
 
-use crate::layers::{clamp_for_f16, dense_embedding, MatMul};
+use crate::layers::{MatMul, clamp_for_f16, dense_embedding};
 use crate::qlinear::MaybeQuantLinear;
 
 fn default_relative_attention_max_distance() -> usize {

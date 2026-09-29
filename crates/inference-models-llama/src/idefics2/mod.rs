@@ -2,7 +2,7 @@
 
 pub mod inputs_processor;
 
-use candle_core::{DType, Device, IndexOp, Result, Tensor, D};
+use candle_core::{D, DType, Device, IndexOp, Result, Tensor};
 use candle_nn::{Conv2d, Conv2dConfig, Embedding, LayerNorm, Module};
 use inference_quant::{Convolution, QuantizedConfig, ShardedVarBuilder};
 use serde::Deserialize;
@@ -18,15 +18,15 @@ use crate::{
     amoe::{AnyMoeConfig, AnyMoeExpertType},
     kv_cache::EitherCache,
     layers::{
-        conv2d, dense_embedding, layer_norm, linear, linear_no_bias, repeat_kv, Activation,
-        CausalMasker, MatMul, QLinear, RmsNorm,
+        Activation, CausalMasker, MatMul, QLinear, RmsNorm, conv2d, dense_embedding, layer_norm,
+        linear, linear_no_bias, repeat_kv,
     },
     mistral::Model as Mistral,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata, NormalModel},
     paged_attention::{
+        AttentionImplementation, ModelConfigMetadata,
         block_hash::MultimodalKind,
         encoder_cache::{CacheModality, EncoderCacheManager},
-        AttentionImplementation, ModelConfigMetadata,
     },
     utils::unvarbuilder::UnVarBuilder,
     vision::multimodal_layout::{
@@ -1156,21 +1156,25 @@ impl Idefics2 {
         let input_embeds = if let Some(pixel_values) = pixel_values {
             let (pixel_values, pixel_attention_mask) = if args.packed_prefill {
                 pixel_values.dims4()?;
-                if let Some(mask) = args.pixel_attention_mask.clone() {
-                    mask.dims3()?;
-                    (pixel_values, Some(mask))
-                } else {
-                    (pixel_values, None)
+                match args.pixel_attention_mask.clone() {
+                    Some(mask) => {
+                        mask.dims3()?;
+                        (pixel_values, Some(mask))
+                    }
+                    _ => (pixel_values, None),
                 }
             } else {
                 let (batch_size, num_images, _, _, _) = pixel_values.dims5()?;
                 let mut shape = vec![batch_size * num_images];
                 shape.extend(pixel_values.dims()[2..].to_vec());
                 let pixel_values = pixel_values.reshape(shape)?;
-                let pixel_attention_mask = if let Some(mask) = args.pixel_attention_mask.clone() {
-                    Some(mask.reshape((batch_size * num_images, mask.dims()[2], mask.dims()[3]))?)
-                } else {
-                    None
+                let pixel_attention_mask = match args.pixel_attention_mask.clone() {
+                    Some(mask) => Some(mask.reshape((
+                        batch_size * num_images,
+                        mask.dims()[2],
+                        mask.dims()[3],
+                    ))?),
+                    _ => None,
                 };
                 (pixel_values, pixel_attention_mask)
             };
@@ -1276,18 +1280,22 @@ impl Idefics2 {
                         .lock()
                         .expect("encoder cache lock poisoned");
                     for (i, &hash) in args.image_hashes.iter().enumerate() {
-                        if let Some(cached) = guard.get(CacheModality::Image, hash) {
-                            let valid = cached.len() == args.subimage_counts[i]
-                                && cached.iter().all(|output| {
-                                    output.rank() == 2 && output.dim(0).ok() == Some(expected_rows)
-                                });
-                            if valid {
-                                per_image[i] = Some(cached);
-                            } else {
+                        match guard.get(CacheModality::Image, hash) {
+                            Some(cached) => {
+                                let valid = cached.len() == args.subimage_counts[i]
+                                    && cached.iter().all(|output| {
+                                        output.rank() == 2
+                                            && output.dim(0).ok() == Some(expected_rows)
+                                    });
+                                if valid {
+                                    per_image[i] = Some(cached);
+                                } else {
+                                    miss_indices.push(i);
+                                }
+                            }
+                            _ => {
                                 miss_indices.push(i);
                             }
-                        } else {
-                            miss_indices.push(i);
                         }
                     }
                 }

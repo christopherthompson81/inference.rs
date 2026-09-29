@@ -159,8 +159,8 @@ fn cuda_topk_sampling_submit_inner(
     op: &'static str,
 ) -> Result<CudaTopKSamplingSubmission> {
     use candle_core::backend::{BackendDevice, BackendStorage};
-    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
     use candle_core::cuda_backend::CudaStorageSlice;
+    use candle_core::cuda_backend::cudarc::driver::DevicePtr;
 
     if !matches!(input.dtype(), DType::BF16 | DType::F16 | DType::F32) {
         candle_core::bail!("{op} requires BF16, F16, or F32 logits");

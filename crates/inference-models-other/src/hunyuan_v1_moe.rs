@@ -1,6 +1,6 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use super::hunyuan_rope::{effective_rope_theta, RopeScalingConfig};
+use super::hunyuan_rope::{RopeScalingConfig, effective_rope_theta};
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use candle_core::{DType, Device, Module, Result, Tensor};
@@ -22,7 +22,7 @@ use crate::{
     amoe::{AnyMoeBaseModelMixin, AnyMoeConfig, AnyMoeExpertType, MlpLayer},
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
-    layers::{embedding_with_legacy_tied_uqff, Activation, CausalMasker, RmsNorm, RotaryEmbedding},
+    layers::{Activation, CausalMasker, RmsNorm, RotaryEmbedding, embedding_with_legacy_tied_uqff},
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     serde_default_fn,
@@ -206,26 +206,26 @@ impl Config {
             ("moe_topk", &self.moe_topk),
             ("moe_intermediate_size", &self.moe_intermediate_size),
         ] {
-            if let PerLayerValue::Array(values) = value {
-                if values.len() != self.num_hidden_layers {
-                    candle_core::bail!(
-                        "HunYuanMoEV1 {name} has {} entries for {} layers",
-                        values.len(),
-                        self.num_hidden_layers
-                    )
-                }
+            if let PerLayerValue::Array(values) = value
+                && values.len() != self.num_hidden_layers
+            {
+                candle_core::bail!(
+                    "HunYuanMoEV1 {name} has {} entries for {} layers",
+                    values.len(),
+                    self.num_hidden_layers
+                )
             }
         }
         for (name, value) in [
             ("num_shared_expert", &self.num_shared_expert),
             ("moe_topk", &self.moe_topk),
         ] {
-            if let PerLayerValue::Array(values) = value {
-                if values.windows(2).any(|pair| pair[0] != pair[1]) {
-                    candle_core::bail!(
-                        "HunYuanMoEV1 official implementation requires uniform {name} across layers"
-                    )
-                }
+            if let PerLayerValue::Array(values) = value
+                && values.windows(2).any(|pair| pair[0] != pair[1])
+            {
+                candle_core::bail!(
+                    "HunYuanMoEV1 official implementation requires uniform {name} across layers"
+                )
             }
         }
         for layer in 0..self.num_hidden_layers {
@@ -868,7 +868,7 @@ impl Model {
             candle_core::bail!("HunYuanMoEV1 skipped MoE layers are not implemented")
         }
         let rope_theta = cfg.effective_rope_theta()? as f32;
-        if let Some(ref quant_cfg) = &cfg.quantization_config {
+        if let Some(quant_cfg) = &cfg.quantization_config {
             tracing::info!(
                 "Using {} quantization: {}.",
                 quant_cfg.name(),

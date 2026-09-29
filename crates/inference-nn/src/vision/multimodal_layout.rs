@@ -659,9 +659,11 @@ mod tests {
             )],
         }])
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("must be scheduled as a complete span"));
+        assert!(
+            error
+                .to_string()
+                .contains("must be scheduled as a complete span")
+        );
     }
 
     #[test]

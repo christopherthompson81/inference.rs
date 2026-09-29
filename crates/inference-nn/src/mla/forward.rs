@@ -670,12 +670,12 @@ pub fn mla_cache_forward(
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use candle_core::{DType, Device, Tensor, D};
+    use candle_core::{D, DType, Device, Tensor};
     use candle_nn::Linear;
     use inference_quant::{
-        maybe_wrap_dynamic_lora, with_lora_execution, LoraExecution, LoraLayerRegistry,
-        LoraLinearSpec, LoraWeights, QuantMethod, QuantMethodConfig, ShardedSafeTensors,
-        UnquantLinear,
+        LoraExecution, LoraLayerRegistry, LoraLinearSpec, LoraWeights, QuantMethod,
+        QuantMethodConfig, ShardedSafeTensors, UnquantLinear, maybe_wrap_dynamic_lora,
+        with_lora_execution,
     };
 
     use super::{pad_mla_value_for_flash, supports_cached_mla_weights};

@@ -3,8 +3,8 @@
 //! This dequantizes the weights and delegates to UnquantLinear's gather_forward.
 
 use candle_core::{
-    quantized::{QMatMul, QTensor},
     Result, Tensor,
+    quantized::{QMatMul, QTensor},
 };
 use candle_nn::Linear;
 use std::sync::Arc;
@@ -57,15 +57,15 @@ pub fn qtensor_indexed_moe_forward(
             [_, _, _] => (x.clone(), ids.clone(), Some(vec![])),
             _ => (x.clone(), ids.clone(), None),
         };
-        if let Some(shape) = out_shape.filter(|_| x3.rank() == 3 && ids2.rank() == 2) {
-            if let Some(out) = qtensor.indexed_gemv(&x3, &ids2)? {
-                return if shape.is_empty() {
-                    Ok(out)
-                } else {
-                    let n_out = out.dim(2)?;
-                    out.reshape((shape[0], shape[1], shape[2], n_out))
-                };
-            }
+        if let Some(shape) = out_shape.filter(|_| x3.rank() == 3 && ids2.rank() == 2)
+            && let Some(out) = qtensor.indexed_gemv(&x3, &ids2)?
+        {
+            return if shape.is_empty() {
+                Ok(out)
+            } else {
+                let n_out = out.dim(2)?;
+                out.reshape((shape[0], shape[1], shape[2], n_out))
+            };
         }
     }
 

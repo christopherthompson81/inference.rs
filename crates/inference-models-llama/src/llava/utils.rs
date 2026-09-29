@@ -6,8 +6,8 @@
 use crate::media_inputs::preprocessor_config::PreProcessorConfig;
 use candle_core::{DType, Device, Result, Tensor};
 use image::{
-    imageops::{overlay, FilterType},
     DynamicImage, GenericImageView, Rgb, RgbImage,
+    imageops::{FilterType, overlay},
 };
 use std::cmp::min;
 

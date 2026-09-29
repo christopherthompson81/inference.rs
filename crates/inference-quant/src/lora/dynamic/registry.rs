@@ -1,8 +1,8 @@
 use std::{
     collections::BTreeMap,
     sync::{
-        atomic::{AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
+        atomic::{AtomicU64, Ordering},
     },
 };
 
@@ -559,22 +559,26 @@ mod tests {
             Device::Cpu,
         )?;
         assert!(Arc::ptr_eq(&first, &second));
-        assert!(registry
-            .register(
-                key.clone(),
-                LoraLinearSpec::replicated(4, 8),
-                DType::BF16,
-                Device::Cpu,
-            )
-            .is_err());
-        assert!(registry
-            .register(
-                key,
-                LoraLinearSpec::replicated(8, 8),
-                DType::F32,
-                Device::Cpu,
-            )
-            .is_err());
+        assert!(
+            registry
+                .register(
+                    key.clone(),
+                    LoraLinearSpec::replicated(4, 8),
+                    DType::BF16,
+                    Device::Cpu,
+                )
+                .is_err()
+        );
+        assert!(
+            registry
+                .register(
+                    key,
+                    LoraLinearSpec::replicated(8, 8),
+                    DType::F32,
+                    Device::Cpu,
+                )
+                .is_err()
+        );
         Ok(())
     }
 
@@ -625,15 +629,21 @@ mod tests {
         assert_eq!(spec.input_runtime_to_canonical(), Some(&[0, 2, 1, 3][..]));
         assert_eq!(spec.output_runtime_to_canonical(), Some(&[2, 0, 1][..]));
 
-        assert!(LoraLinearSpec::replicated(4, 3)
-            .with_input_runtime_to_canonical(vec![0, 1, 2])
-            .is_err());
-        assert!(LoraLinearSpec::replicated(4, 3)
-            .with_input_runtime_to_canonical(vec![0, 1, 2, 4])
-            .is_err());
-        assert!(LoraLinearSpec::replicated(4, 3)
-            .with_input_runtime_to_canonical(vec![0, 1, 1, 3])
-            .is_err());
+        assert!(
+            LoraLinearSpec::replicated(4, 3)
+                .with_input_runtime_to_canonical(vec![0, 1, 2])
+                .is_err()
+        );
+        assert!(
+            LoraLinearSpec::replicated(4, 3)
+                .with_input_runtime_to_canonical(vec![0, 1, 2, 4])
+                .is_err()
+        );
+        assert!(
+            LoraLinearSpec::replicated(4, 3)
+                .with_input_runtime_to_canonical(vec![0, 1, 1, 3])
+                .is_err()
+        );
         Ok(())
     }
 
@@ -646,9 +656,11 @@ mod tests {
         registry.register(key.clone(), first, DType::F32, Device::Cpu)?;
         let second =
             LoraLinearSpec::replicated(4, 4).with_output_runtime_to_canonical(vec![0, 1, 2, 3])?;
-        assert!(registry
-            .register(key, second, DType::F32, Device::Cpu)
-            .is_err());
+        assert!(
+            registry
+                .register(key, second, DType::F32, Device::Cpu)
+                .is_err()
+        );
         Ok(())
     }
 
@@ -662,14 +674,16 @@ mod tests {
             Device::Cpu,
         )?;
         registry.finalize()?;
-        assert!(registry
-            .register(
-                LoraSiteKey::new("b"),
-                LoraLinearSpec::replicated(4, 8),
-                DType::F32,
-                Device::Cpu,
-            )
-            .is_err());
+        assert!(
+            registry
+                .register(
+                    LoraSiteKey::new("b"),
+                    LoraLinearSpec::replicated(4, 8),
+                    DType::F32,
+                    Device::Cpu,
+                )
+                .is_err()
+        );
         Ok(())
     }
 }

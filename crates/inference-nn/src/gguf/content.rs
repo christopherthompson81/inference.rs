@@ -2,11 +2,11 @@ use std::{collections::HashMap, fs};
 
 use anyhow::Context;
 use candle_core::{
-    quantized::{
-        gguf_file::{self, TensorInfo, Value},
-        GgmlDType, QTensor,
-    },
     Device, Result,
+    quantized::{
+        GgmlDType, QTensor,
+        gguf_file::{self, TensorInfo, Value},
+    },
 };
 use indexmap::IndexMap;
 use tracing::{debug, info};
@@ -125,7 +125,9 @@ impl<'a, R: std::io::Seek + std::io::Read> Content<'a, R> {
                 accum
             });
         if n_splits.len() > 1 {
-            candle_core::bail!("GGUF files have differing `split.count` values: {n_splits:?}. Perhaps the GGUF files do not match?");
+            candle_core::bail!(
+                "GGUF files have differing `split.count` values: {n_splits:?}. Perhaps the GGUF files do not match?"
+            );
         }
         #[allow(clippy::cast_possible_truncation)]
         if !n_splits.is_empty() && n_readers != n_splits[0] as usize {
@@ -244,7 +246,9 @@ impl<'a, R: std::io::Seek + std::io::Read> Content<'a, R> {
                 serde_json::to_string_pretty(&tensors).expect("Serialization failed."),
             )?;
 
-            info!("Debug is enabled, wrote the names and information about each tensor to `inference_gguf_tensors.txt`.");
+            info!(
+                "Debug is enabled, wrote the names and information about each tensor to `inference_gguf_tensors.txt`."
+            );
         }
 
         anyhow::Ok(())

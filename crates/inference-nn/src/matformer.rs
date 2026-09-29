@@ -196,10 +196,12 @@ mod tests {
         let small = config.get_slicing("Config for 1B").unwrap();
         assert_eq!(small.ffn_hidden_dimensions, vec![8192, 16384]);
         assert_eq!(small.layers_skipped, Some(vec![20, 21]));
-        assert!(config
-            .get_slicing("Config for 2B")
-            .unwrap()
-            .layers_skipped
-            .is_none());
+        assert!(
+            config
+                .get_slicing("Config for 2B")
+                .unwrap()
+                .layers_skipped
+                .is_none()
+        );
     }
 }

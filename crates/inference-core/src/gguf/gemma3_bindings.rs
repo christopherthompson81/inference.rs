@@ -2,8 +2,8 @@ use anyhow::Result;
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 
 use super::multimodal_binding_utils::{
-    bind_required, bind_required_linear, bind_required_with, validate_architecture,
-    validate_projector, TensorInventory,
+    TensorInventory, bind_required, bind_required_linear, bind_required_with,
+    validate_architecture, validate_projector,
 };
 
 const FAMILY: &str = "Gemma 3";
@@ -253,15 +253,19 @@ mod tests {
 
         assert_eq!(binding_sources(&bindings), expected);
         assert!(bindings.get("model.embed_tokens.weight").is_some());
-        assert!(bindings
-            .get("model.layers.0.self_attn.q_proj.weight")
-            .is_some());
+        assert!(
+            bindings
+                .get("model.layers.0.self_attn.q_proj.weight")
+                .is_some()
+        );
         assert!(bindings.get("lm_head.weight").is_some());
-        assert!(!bindings
-            .iter()
-            .any(|(name, _)| name.starts_with("language_model.")
-                || name.starts_with("multi_modal_projector.")
-                || name.starts_with("vision_tower.")));
+        assert!(
+            !bindings
+                .iter()
+                .any(|(name, _)| name.starts_with("language_model.")
+                    || name.starts_with("multi_modal_projector.")
+                    || name.starts_with("vision_tower."))
+        );
     }
 
     #[test]
@@ -277,9 +281,11 @@ mod tests {
         );
         let bindings = build_gemma3_text_bindings_from_inventory(&inventory, true).unwrap();
 
-        assert!(bindings
-            .get("language_model.model.layers.0.self_attn.q_proj.weight")
-            .is_some());
+        assert!(
+            bindings
+                .get("language_model.model.layers.0.self_attn.q_proj.weight")
+                .is_some()
+        );
         assert!(bindings.get("language_model.lm_head.weight").is_some());
         assert!(!bindings.iter().any(|(name, _)| name.starts_with("model.")));
     }

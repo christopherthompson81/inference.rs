@@ -401,10 +401,12 @@ lora = [
         )
         .unwrap();
 
-        assert!(validate_config(&config)
-            .unwrap_err()
-            .to_string()
-            .contains("more than once"));
+        assert!(
+            validate_config(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("more than once")
+        );
     }
 
     #[test]
@@ -424,10 +426,12 @@ legacy_lora_order = "order.json"
         )
         .unwrap();
 
-        assert!(validate_config(&config)
-            .unwrap_err()
-            .to_string()
-            .contains("not legacy LoRA or X-LoRA"));
+        assert!(
+            validate_config(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("not legacy LoRA or X-LoRA")
+        );
     }
 
     #[test]
@@ -446,9 +450,11 @@ lora = [{ alias = "code", source = "org/code-lora" }]
         )
         .unwrap();
 
-        assert!(validate_config(&config)
-            .unwrap_err()
-            .to_string()
-            .contains("not configured"));
+        assert!(
+            validate_config(&config)
+                .unwrap_err()
+                .to_string()
+                .contains("not configured")
+        );
     }
 }

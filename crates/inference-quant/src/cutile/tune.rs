@@ -13,8 +13,8 @@ use cutile::bench::BenchOptions;
 use cutile::cuda_core::Stream;
 use cutile::error::Error as CutileError;
 use cutile::tune::{
-    space_hash, Autotuner, Config, Objective, ParamValue, Record, RecordEntry, Searcher, Trial,
-    TrialState, Workspace,
+    Autotuner, Config, Objective, ParamValue, Record, RecordEntry, Searcher, Trial, TrialState,
+    Workspace, space_hash,
 };
 use std::collections::{BTreeMap, HashMap};
 use std::hash::Hash;
@@ -486,10 +486,8 @@ pub fn tune(
             policy_ms,
         });
     }
-    if measured_any {
-        if let Err(err) = save_record(&record, &path) {
-            tracing::warn!("cuTile autotune: could not write {}: {err}", path.display());
-        }
+    if measured_any && let Err(err) = save_record(&record, &path) {
+        tracing::warn!("cuTile autotune: could not write {}: {err}", path.display());
     }
     log_summary(request, &labels, &spaces, &results);
     results
@@ -518,10 +516,10 @@ impl Searcher for Descent<'_> {
                         break;
                     }
                     let trial = objective.measure(index);
-                    if let Some(ms) = trial.median_ms() {
-                        if best.as_ref().is_none_or(|(_, b)| ms < *b) {
-                            best = Some((configs[index].clone(), ms));
-                        }
+                    if let Some(ms) = trial.median_ms()
+                        && best.as_ref().is_none_or(|(_, b)| ms < *b)
+                    {
+                        best = Some((configs[index].clone(), ms));
                     }
                     trials.push(trial);
                 }
@@ -537,11 +535,11 @@ impl Searcher for Descent<'_> {
                 .into_iter()
                 .filter(|c| c.id != incumbent.id)
                 .collect();
-            if let Some((candidate, ms)) = visit(variants, &mut trials) {
-                if f64::from(ms) < f64::from(incumbent_ms) * (1.0 - MIN_GAIN) {
-                    incumbent = candidate;
-                    incumbent_ms = ms;
-                }
+            if let Some((candidate, ms)) = visit(variants, &mut trials)
+                && f64::from(ms) < f64::from(incumbent_ms) * (1.0 - MIN_GAIN)
+            {
+                incumbent = candidate;
+                incumbent_ms = ms;
             }
         }
         trials

@@ -2,8 +2,8 @@ use std::collections::HashMap;
 
 #[cfg(feature = "cuda")]
 use std::sync::{
-    atomic::{AtomicBool, Ordering},
     Arc,
+    atomic::{AtomicBool, Ordering},
 };
 
 #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -17,15 +17,15 @@ use crate::paged_attention::attention_backend::{
 mod metadata;
 #[cfg(feature = "cuda")]
 pub use metadata::make_fa3_decode_state;
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+pub use metadata::{
+    Fa3PrefillWorkspaceRegistration, fa3_device_num_sm, fa3_prefill_cache_num_sm,
+    register_fa3_prefill_caches, with_fa3_prefill_workspace,
+};
 pub use metadata::{
     decode_split_capacity_pages, decode_split_pages, flashinfer_metadata, flashinfer_paged_kv,
     flashinfer_tile_plan, flashinfer_view, make_paged_kv_decode_tensors,
     make_paged_kv_decode_tensors_from_lens, make_paged_kv_tensors,
-};
-#[cfg(all(feature = "cuda", target_family = "unix"))]
-pub use metadata::{
-    fa3_device_num_sm, fa3_prefill_cache_num_sm, register_fa3_prefill_caches,
-    with_fa3_prefill_workspace, Fa3PrefillWorkspaceRegistration,
 };
 
 // Metadata is copied per CUDA device; graph replay may substitute graph-owned tensors.
@@ -681,9 +681,9 @@ mod tests {
     use super::supports_flashinfer_group_size;
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     use super::{
+        FA3_DECODE_MAX_QUERY_LEN, FA3_DECODE_NUM_SPLITS, Fa3DecodeScheduleKey, Fa3DecodeView,
+        Fa3PagedScheduleShape, Fa3PrefillPoolBytes, Fa3PrefillWorkspaceBytes,
         fa3_prefill_num_splits, fa3_prefill_workspace_bytes, fa3_prefill_workspace_components,
-        Fa3DecodeScheduleKey, Fa3DecodeView, Fa3PagedScheduleShape, Fa3PrefillPoolBytes,
-        Fa3PrefillWorkspaceBytes, FA3_DECODE_MAX_QUERY_LEN, FA3_DECODE_NUM_SPLITS,
     };
     #[cfg(all(feature = "cuda", target_family = "unix"))]
     use candle_core::DeviceLocation;
@@ -718,23 +718,29 @@ mod tests {
         };
         assert!(key.supported());
         assert_eq!(key.total_q(), Some(16));
-        assert!(!Fa3DecodeScheduleKey {
-            head_dim: 128,
-            ..key
-        }
-        .supported());
+        assert!(
+            !Fa3DecodeScheduleKey {
+                head_dim: 128,
+                ..key
+            }
+            .supported()
+        );
         assert!(!Fa3DecodeScheduleKey { q_heads: 30, ..key }.supported());
-        assert!(Fa3DecodeScheduleKey {
-            query_len: 8,
-            causal: true,
-            ..key
-        }
-        .supported());
-        assert!(!Fa3DecodeScheduleKey {
-            query_len: FA3_DECODE_MAX_QUERY_LEN + 1,
-            ..key
-        }
-        .supported());
+        assert!(
+            Fa3DecodeScheduleKey {
+                query_len: 8,
+                causal: true,
+                ..key
+            }
+            .supported()
+        );
+        assert!(
+            !Fa3DecodeScheduleKey {
+                query_len: FA3_DECODE_MAX_QUERY_LEN + 1,
+                ..key
+            }
+            .supported()
+        );
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -829,15 +835,17 @@ mod tests {
             fa3_prefill_workspace_bytes(2, 8, 24, 4, 256, 17, 132).unwrap(),
             components.bytes().unwrap()
         );
-        assert!(Fa3PrefillWorkspaceBytes {
-            pool: Fa3PrefillPoolBytes {
-                quantized_query: usize::MAX,
-                ..Default::default()
-            },
-            transient: 1,
-        }
-        .bytes()
-        .is_err());
+        assert!(
+            Fa3PrefillWorkspaceBytes {
+                pool: Fa3PrefillPoolBytes {
+                    quantized_query: usize::MAX,
+                    ..Default::default()
+                },
+                transient: 1,
+            }
+            .bytes()
+            .is_err()
+        );
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]

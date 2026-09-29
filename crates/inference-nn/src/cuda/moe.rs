@@ -81,11 +81,11 @@ pub fn moe_gemm(
                 _ => candle::bail!("topk_weights must be a cuda tensor"),
             };
             let tw_offset = tw_l.start_offset();
-            let topk_w_ptr = topk_weights
+
+            topk_weights
                 .slice(tw_offset..)
                 .device_ptr(topk_weights.stream())
-                .0 as *const f32;
-            topk_w_ptr
+                .0 as *const f32
         } else {
             std::ptr::null()
         };

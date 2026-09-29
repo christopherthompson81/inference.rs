@@ -144,8 +144,8 @@ impl MemoryUsage {
 
     #[cfg(feature = "cuda")]
     pub fn query_cuda_memory_pool(&self, device: &Device) -> Result<Option<CudaMemoryPoolUsage>> {
-        use candle_core::cuda_backend::cudarc::driver::sys;
         use candle_core::cuda_backend::WrapErr;
+        use candle_core::cuda_backend::cudarc::driver::sys;
 
         let Device::Cuda(device) = device else {
             return Ok(None);
@@ -178,8 +178,8 @@ impl MemoryUsage {
     #[cfg(feature = "cuda")]
     pub fn query_cuda_allocator(&self, device: &Device) -> Result<Option<CudaAllocatorSnapshot>> {
         use candle_core::cuda::cudarc::driver::result;
-        use candle_core::cuda_backend::cudarc::driver::sys;
         use candle_core::cuda_backend::WrapErr;
+        use candle_core::cuda_backend::cudarc::driver::sys;
 
         let Device::Cuda(device) = device else {
             return Ok(None);
@@ -236,8 +236,8 @@ impl MemoryUsage {
 
     #[cfg(feature = "cuda")]
     pub fn trim_cuda_memory_pool(&self, device: &Device, min_bytes: usize) -> Result<bool> {
-        use candle_core::cuda_backend::cudarc::driver::sys;
         use candle_core::cuda_backend::WrapErr;
+        use candle_core::cuda_backend::cudarc::driver::sys;
 
         let Device::Cuda(device) = device else {
             return Ok(false);
@@ -407,7 +407,7 @@ fn metal_sysctl_floor_bytes() -> Result<usize> {
         x => {
             return Err(candle_core::Error::Msg(format!(
                 "Invalid system ram mb value {x}."
-            )))
+            )));
         }
     };
 

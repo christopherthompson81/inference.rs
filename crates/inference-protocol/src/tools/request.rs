@@ -94,8 +94,8 @@ pub enum BuiltinToolChoiceType {
 impl utoipa::PartialSchema for ToolChoice {
     fn schema() -> utoipa::openapi::RefOr<utoipa::openapi::schema::Schema> {
         use utoipa::openapi::{
-            schema::{SchemaType, Type},
             ObjectBuilder, OneOfBuilder, Ref, RefOr, Schema,
+            schema::{SchemaType, Type},
         };
 
         fn string_choice(value: &'static str, description: &'static str) -> Schema {

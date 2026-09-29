@@ -1,6 +1,6 @@
 use std::{collections::HashMap, iter::zip, ops::Mul, sync::Arc};
 
-use candle_core::{quantized::QMatMul, Module, Result, Tensor};
+use candle_core::{Module, Result, Tensor, quantized::QMatMul};
 use candle_nn::Linear;
 use either::Either;
 use inference_quant::{
@@ -10,8 +10,8 @@ use inference_quant::{
 use crate::layers::MatMul;
 
 use super::{
-    apply_scalings_to_x, get_maybe_topk_scalings, make_adapter, Adapter, LinearLayerLike,
-    LoraConfig, LoraLinearConfig, Merge, Ordering,
+    Adapter, LinearLayerLike, LoraConfig, LoraLinearConfig, Merge, Ordering, apply_scalings_to_x,
+    get_maybe_topk_scalings, make_adapter,
 };
 
 #[derive(Debug)]

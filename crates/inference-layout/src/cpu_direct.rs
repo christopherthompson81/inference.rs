@@ -442,61 +442,63 @@ unsafe impl Sync for RowGeom<'_> {}
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn conv_tile<const XV: usize>(g: &RowGeom, x0: usize, n: usize, dst: [*mut f32; OC_T]) {
-    use std::arch::x86_64::*;
-    let (act, blk) = (g.act, g.blk);
-    let mut acc = [[_mm256_setzero_ps(); XV]; OC_T];
-    for (j, row) in acc.iter_mut().enumerate() {
-        if blk.start == 0 {
-            *row = [_mm256_set1_ps(g.bias[j]); XV];
-            continue;
-        }
-        // later channel blocks resume from the partial sums already stored in the output row
-        for (v, a) in row.iter_mut().enumerate() {
-            let lanes = n.saturating_sub(v * LANES).min(LANES);
-            let mut tmp = [0f32; LANES];
-            std::ptr::copy_nonoverlapping(dst[j].add(v * LANES), tmp.as_mut_ptr(), lanes);
-            *a = _mm256_loadu_ps(tmp.as_ptr());
-        }
-    }
-    let base = g.x.add(g.row + x0);
-    let mut wp = g.w.add(blk.start * g.taps.len() * OC_T);
-    for ic in blk.start..blk.end {
-        let xc = base.add(ic * g.plane);
-        for &off in g.taps {
-            let src = xc.add(off);
-            let mut xin = [_mm256_setzero_ps(); XV];
-            for (v, xv) in xin.iter_mut().enumerate() {
-                *xv = _mm256_loadu_ps(src.add(v * LANES));
+    unsafe {
+        use std::arch::x86_64::*;
+        let (act, blk) = (g.act, g.blk);
+        let mut acc = [[_mm256_setzero_ps(); XV]; OC_T];
+        for (j, row) in acc.iter_mut().enumerate() {
+            if blk.start == 0 {
+                *row = [_mm256_set1_ps(g.bias[j]); XV];
+                continue;
             }
-            for row in acc.iter_mut() {
-                let wj = _mm256_broadcast_ss(&*wp);
-                wp = wp.add(1);
-                for (a, &xv) in row.iter_mut().zip(&xin) {
-                    *a = _mm256_fmadd_ps(xv, wj, *a);
+            // later channel blocks resume from the partial sums already stored in the output row
+            for (v, a) in row.iter_mut().enumerate() {
+                let lanes = n.saturating_sub(v * LANES).min(LANES);
+                let mut tmp = [0f32; LANES];
+                std::ptr::copy_nonoverlapping(dst[j].add(v * LANES), tmp.as_mut_ptr(), lanes);
+                *a = _mm256_loadu_ps(tmp.as_ptr());
+            }
+        }
+        let base = g.x.add(g.row + x0);
+        let mut wp = g.w.add(blk.start * g.taps.len() * OC_T);
+        for ic in blk.start..blk.end {
+            let xc = base.add(ic * g.plane);
+            for &off in g.taps {
+                let src = xc.add(off);
+                let mut xin = [_mm256_setzero_ps(); XV];
+                for (v, xv) in xin.iter_mut().enumerate() {
+                    *xv = _mm256_loadu_ps(src.add(v * LANES));
+                }
+                for row in acc.iter_mut() {
+                    let wj = _mm256_broadcast_ss(&*wp);
+                    wp = wp.add(1);
+                    for (a, &xv) in row.iter_mut().zip(&xin) {
+                        *a = _mm256_fmadd_ps(xv, wj, *a);
+                    }
                 }
             }
         }
-    }
-    // epilogue inline: passing `&acc` to a helper forces the accumulators onto the stack
-    let zero = _mm256_setzero_ps();
-    for (j, row) in acc.into_iter().enumerate() {
-        for (v, a) in row.into_iter().enumerate() {
-            let r = if act == Act::Relu {
-                _mm256_max_ps(a, zero)
-            } else {
-                a
-            };
-            let lanes = n.saturating_sub(v * LANES).min(LANES);
-            if lanes == LANES {
-                _mm256_storeu_ps(dst[j].add(v * LANES), r);
-            } else if lanes > 0 {
-                let mut tmp = [0f32; LANES];
-                _mm256_storeu_ps(tmp.as_mut_ptr(), r);
-                std::ptr::copy_nonoverlapping(tmp.as_ptr(), dst[j].add(v * LANES), lanes);
+        // epilogue inline: passing `&acc` to a helper forces the accumulators onto the stack
+        let zero = _mm256_setzero_ps();
+        for (j, row) in acc.into_iter().enumerate() {
+            for (v, a) in row.into_iter().enumerate() {
+                let r = if act == Act::Relu {
+                    _mm256_max_ps(a, zero)
+                } else {
+                    a
+                };
+                let lanes = n.saturating_sub(v * LANES).min(LANES);
+                if lanes == LANES {
+                    _mm256_storeu_ps(dst[j].add(v * LANES), r);
+                } else if lanes > 0 {
+                    let mut tmp = [0f32; LANES];
+                    _mm256_storeu_ps(tmp.as_mut_ptr(), r);
+                    std::ptr::copy_nonoverlapping(tmp.as_ptr(), dst[j].add(v * LANES), lanes);
+                }
             }
-        }
-        if act == Act::Silu {
-            silu_in_place(std::slice::from_raw_parts_mut(dst[j], n));
+            if act == Act::Silu {
+                silu_in_place(std::slice::from_raw_parts_mut(dst[j], n));
+            }
         }
     }
 }
@@ -576,26 +578,28 @@ impl CustomOp3 for DirectDepthwise {
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "avx2,fma")]
 unsafe fn depthwise_row(x: *const f32, dw: &DwChannel, row: &mut [f32]) {
-    use std::arch::x86_64::*;
-    let (taps, wk, bias, act) = (dw.taps, dw.w, dw.bias, dw.act);
-    let zero = _mm256_setzero_ps();
-    let mut x0 = 0;
-    while x0 < row.len() {
-        let mut acc = _mm256_set1_ps(bias);
-        for (&off, &wv) in taps.iter().zip(wk) {
-            acc = _mm256_fmadd_ps(_mm256_loadu_ps(x.add(off + x0)), _mm256_set1_ps(wv), acc);
+    unsafe {
+        use std::arch::x86_64::*;
+        let (taps, wk, bias, act) = (dw.taps, dw.w, dw.bias, dw.act);
+        let zero = _mm256_setzero_ps();
+        let mut x0 = 0;
+        while x0 < row.len() {
+            let mut acc = _mm256_set1_ps(bias);
+            for (&off, &wv) in taps.iter().zip(wk) {
+                acc = _mm256_fmadd_ps(_mm256_loadu_ps(x.add(off + x0)), _mm256_set1_ps(wv), acc);
+            }
+            if act == Act::Relu {
+                acc = _mm256_max_ps(acc, zero);
+            }
+            let lanes = (row.len() - x0).min(LANES);
+            let mut tmp = [0f32; LANES];
+            _mm256_storeu_ps(tmp.as_mut_ptr(), acc);
+            row[x0..x0 + lanes].copy_from_slice(&tmp[..lanes]);
+            x0 += LANES;
         }
-        if act == Act::Relu {
-            acc = _mm256_max_ps(acc, zero);
+        if act == Act::Silu {
+            silu_in_place(row);
         }
-        let lanes = (row.len() - x0).min(LANES);
-        let mut tmp = [0f32; LANES];
-        _mm256_storeu_ps(tmp.as_mut_ptr(), acc);
-        row[x0..x0 + lanes].copy_from_slice(&tmp[..lanes]);
-        x0 += LANES;
-    }
-    if act == Act::Silu {
-        silu_in_place(row);
     }
 }
 

@@ -1,14 +1,14 @@
 #![allow(unused)]
 
-use candle_core::{backend::BackendStorage, DType, Result, Shape, Storage, Tensor, D};
+use candle_core::{D, DType, Result, Shape, Storage, Tensor, backend::BackendStorage};
 
 #[cfg(feature = "metal")]
 use candle_core::MetalStorage;
 
 #[cfg(feature = "cuda")]
 use candle_core::{
-    cuda::{cudarc::driver::DevicePtr, CudaStorageSlice},
     CudaStorage,
+    cuda::{CudaStorageSlice, cudarc::driver::DevicePtr},
 };
 
 use super::{AfqBits, AfqGroupSize};
@@ -1019,11 +1019,11 @@ pub fn afq_gather_qmm_rhs_sorted_gate_up(
 
 #[cfg(test)]
 mod cpu_tests {
-    use candle_core::{DType, Device, Result, Tensor, D};
+    use candle_core::{D, DType, Device, Result, Tensor};
 
     use crate::{
-        afq::ops::{afq_dequantize_op, afq_embedding_op},
         AfqBits, AfqGroupSize,
+        afq::ops::{afq_dequantize_op, afq_embedding_op},
     };
 
     use super::afq_quantize_op;
@@ -1136,11 +1136,11 @@ mod cpu_tests {
 #[cfg(feature = "metal")]
 #[cfg(test)]
 mod metal_tests {
-    use candle_core::{DType, Device, Result, Tensor, D};
+    use candle_core::{D, DType, Device, Result, Tensor};
 
     use crate::{
-        afq::ops::{afq_dequantize_op, afq_embedding_op},
         AfqBits, AfqGroupSize,
+        afq::ops::{afq_dequantize_op, afq_embedding_op},
     };
 
     use super::afq_quantize_op;
@@ -1528,7 +1528,7 @@ mod metal_tests {
 // ============================================================
 mod cpu_backend {
     use super::*;
-    use candle_core::{DType, Device, Result, Tensor, D};
+    use candle_core::{D, DType, Device, Result, Tensor};
 
     /// Simple scalar (reference) quantiser: per‑`group_size` affine.
     pub(crate) fn afq_quantize_op(
@@ -1773,7 +1773,7 @@ mod cpu_backend {
 mod cuda_backend {
     use super::*;
     use crate::afq::ffi;
-    use candle_core::{cuda::cudarc::driver::DevicePtr, CudaStorage, DType, Result, Tensor, D};
+    use candle_core::{CudaStorage, D, DType, Result, Tensor, cuda::cudarc::driver::DevicePtr};
     use half::{bf16, f16};
 
     macro_rules! dispatch_afq_embedding {

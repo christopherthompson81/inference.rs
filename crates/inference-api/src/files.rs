@@ -2,10 +2,10 @@
 
 use std::sync::Arc;
 
-use base64::{engine::general_purpose::STANDARD, Engine};
+use base64::{Engine, engine::general_purpose::STANDARD};
 use inference_core::{
-    File as CoreFile, FileContent, FileSource, InferenceRs, InferenceRsError,
-    FILE_PURPOSE_USER_DATA,
+    FILE_PURPOSE_USER_DATA, File as CoreFile, FileContent, FileSource, InferenceRs,
+    InferenceRsError,
 };
 use serde::Serialize;
 use utoipa::ToSchema;

@@ -35,7 +35,7 @@ pub fn call_topk_logits_packed(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let stage1 = kernels.load_pipeline(device, stage1_name)?;
@@ -106,7 +106,7 @@ pub fn call_copy_logits(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
@@ -148,7 +148,7 @@ pub fn call_apply_sparse_penalties(
             return Err(MetalKernelError::DTypeMismatch {
                 expected: vec![DType::F32, DType::F16, DType::BF16],
                 got: other,
-            })
+            });
         }
     };
     let pipeline = kernels.load_pipeline(device, name)?;
