@@ -976,3 +976,28 @@ Review follow-ups:
 - Change: `local_ci.sh --docs` passes `--emit dep-info`. Rendered docs come from `cargo doc`.
   - The same changed-source `--docs` run now takes 17.6 s wall (was 40.5 s).
   - A branch that touches `Cargo.lock` documents `--workspace`, which is now a 17 s pass instead of 30-107 s.
+
+## Run 49 - 2026-09-30
+
+- Change: the loader series (#128-#137). Family configs deserialize in their own crates, each crate's integration
+  tests build as one binary, the loader traits moved to `inference_nn::loaders`, and every per-model loader moved into
+  its family crate. The workspace also moved to edition 2024 (#136). Core IR fell from 3,025,589 to 2,508,386 lines.
+- Command: the Run 39 cold build at 7a7f8172. The machine was loaded, with load 17 by the end, so the comparison is
+  with the similarly loaded rerun in loaders Run 2: 254 s, 2,442 unit-seconds.
+- Result:
+  - Wall 243.5 s and 2,262 unit-seconds (-7%), with 792 units.
+  - Upstream stages match that run (candle-kernels build script 65.8 s against 64.2 s, candle-core 37.7 s against
+    37.8 s), so the comparison holds.
+  - Core's lib takes 70.5 s (was 77.4 s) and its lib test 94.5 s (was 111.8 s).
+  - inference-api's lib test takes 42.1 s (was 49.6 s), and the CLI test 32.3 s (was 38.7 s).
+  - The tail is now shared: core's lib test ends at 242.5 s, the CLI test at 243.4 s, and server-core's integration
+    binary at 242.3 s.
+- Implication: core's lib test is no longer the sole tail. Further wall-time gains need both it and the downstream
+  test binaries to shrink. A quiet-machine rerun would pin the absolute wall time against Run 47's 237.6 s.
+- Quiet rerun (all other work stopped, load 0.9 at the start):
+  - Wall 227.2 s (Run 47: 237.6 s) and 2,086 unit-seconds (Run 47: 2,238).
+  - candle-kernels build script 61.2 s, candle-core 35.6 s, inference-nn 41.0 s.
+  - Core's lib takes 61.9 s (Run 47: 73.5 s) and its lib test 81.5 s (Run 47: 104.5 s, -22%). inference-api's lib
+    test takes 29.5 s.
+  - The last unit is now the CLI test binary (t=208-227 s). Core's lib test ends at 222.3 s, server-core's integration
+    binary at 222.7 s and the webui lib test at 219.3 s.

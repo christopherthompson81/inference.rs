@@ -351,3 +351,22 @@ What in them costs core's compile, and what can leave?
     - import groups merged in three processor files and two loader modules;
     - a Gemma 3 comment copied into Gemma 3n dropped.
 - Next: PR 7 moves the per-model loader tests into the family crates, then a cold-build measurement.
+
+## Run 13 - 2026-09-30
+
+- Question: is moving the per-model loader tests out of core (PR 7 of the plan) worth doing?
+- Command: the Run 2/3 `-Z time-passes` build of core's lib test with core's incremental directory cleared, once as is
+  and once with both loader test modules compiled out (`#[cfg(any())]` on `mod tests;`, reverted afterwards).
+- Result: 38.6 s with the tests, 37.8 s without. The two test files (2.5k lines) cost core's lib test 0.8 s.
+- Decision: PR 7 is dropped.
+  - Moving the tests could save at most 0.8 s.
+  - They are tangled with core-only machinery that would have to stay behind: the GGUF registry matrices, the Auto
+    loaders, the registry round-trips and the processor factory.
+  - For reference, the same core lib-test measurement was 47.0 s before this series (Run 3's master baseline).
+- Cold build after the whole series (build-time Run 49):
+  - Wall 243.5 s. The load reached 17 during the run, but the upstream stages matched the busy run in Run 2, so that
+    run is the comparison: unit-seconds fell from 2,442 to 2,262 (-7%).
+  - Core's lib fell from 77.4 s to 70.5 s, and its lib test from 111.8 s to 94.5 s (-15%).
+  - Core's lib test no longer ends the build alone: it finishes at t=242.5 s, beside the CLI test binary at t=243.4 s.
+  - Quiet rerun: wall 227.2 s (Run 47: 237.6 s), core lib test 81.5 s (Run 47: 104.5 s); the CLI test binary now ends
+    the build.
