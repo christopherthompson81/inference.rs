@@ -183,3 +183,29 @@ cold compile and lib test (the end of the cold build since Run 26 of the build-t
   The lint and CPU tests were rerun after them.
 - Next: the gemma family (gemma3, gemma3n, gemma4 with their audio processors). Then measure core's cold compile and
   IR against build-time Run 40.
+
+## Run 7 - 2026-09-29
+
+- Change: the gemma family, the last one. The Gemma 3, 3n and 4 input processors moved into inference-models-gemma,
+  with Gemma 3n's and 4's `audio_processing.rs` (now private modules).
+  - Core keeps the three `Processor` impls, still building the image processor per call. `Gemma4ImageProcessor` has 13
+    fields, so they became `pub` in place of a 13-argument constructor, as Llama 4's already were.
+  - Gemma 4's `defaults_audio_seq_length_to_reference_cap` covers the core `Processor`, so it moved to core.
+  - No input processor is left in core, so it sheds what only they used:
+    - the `rand_distr`, `inference-vision` and `rubato` dependencies;
+    - the `multimodal_layout` alias and the `InputsProcessorValidationError` re-export;
+    - the glob re-export of `media_inputs::media`, narrowed to the two items core uses.
+
+    The `--slim` run caught two items that only core's tests used. Those tests cover inference-nn's image hashing and
+    placeholder ranges, so they moved to `media.rs`.
+  - The banner comments in the moved files went too.
+- Command: `scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`, then build-time Run 47's cold
+  build and `cargo llvm-lines`.
+- Result:
+  - CI: green (2191 CPU and 2511 CUDA tests).
+  - Core IR: 3,486,102 to 3,025,589 lines, -460k (-13%). That is more than Run 1's 373k lines of `vision_models`
+    functions, since core also stops instantiating its own generics (text builders, iterator folds) for them.
+  - Cold build: core's lib test 112 s to 104.5 s, core's lib 73.5 s, wall 243 s to 237.6 s.
+  - The family crates each take 22-29 s, in parallel with each other and ahead of core's lib test.
+- Done: every multimodal input processor now lives beside its model. Core keeps the `Processor` impls (the chat
+  template actions) and the `media_host` adapter. Core's lib test still ends the cold build.

@@ -13,13 +13,23 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
+anyhow.workspace = true
 candle-core.workspace = true
 candle-nn.workspace = true
+image.workspace = true
+inference-audio.workspace = true
 inference-nn.workspace = true
 inference-quant.workspace = true
+inference-vision.workspace = true
+itertools.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
 rand_isaac.workspace = true
+regex.workspace = true
+rubato.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+tokenizers.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]

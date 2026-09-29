@@ -33,7 +33,6 @@ either.workspace = true
 indexmap.workspace = true
 tracing.workspace = true
 rand.workspace = true
-rand_distr.workspace = true
 regex-automata.workspace = true
 galil-seiferas.workspace = true
 tokio.workspace = true
@@ -48,7 +47,6 @@ image.workspace = true
 derive_more = { workspace = true}
 itertools.workspace = true
 sysinfo.workspace = true
-inference-vision.workspace = true
 csv.workspace = true
 reqwest.workspace = true
 base64.workspace = true
@@ -77,7 +75,6 @@ html2text.workspace = true
 ahash.workspace = true
 num-traits.workspace = true
 bm25.workspace = true
-rubato.workspace = true
 inference-audio.workspace = true
 inference-mcp = { workspace = true, features = ["utoipa"] }
 inference-code-exec.workspace = true

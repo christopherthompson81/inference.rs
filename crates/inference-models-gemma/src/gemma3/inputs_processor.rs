@@ -15,41 +15,35 @@ use itertools::Itertools;
 use regex::Regex;
 use tokenizers::Tokenizer;
 
-use crate::paged_attention::PagedAttentionMeta;
-use crate::{
-    device_map::DeviceMapper,
-    paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
-    pipeline::{
-        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
-        Processor,
-    },
-    sequence::find_image_placeholder_ranges,
-    vision_models::{
-        image_processor::{ImagePreProcessor, PreprocessedImages},
-        media_host::MediaInputsProcessor,
-        multimodal_layout::{
-            MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout,
-            PackedMultimodalLayout, RequestMultimodalLayout,
-        },
-        preprocessor_config::{PreProcessorConfig, ToFilter},
-        processor_config::ProcessorConfig,
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
+    image_processor::{ImagePreProcessor, PreprocessedImages},
+    media::find_image_placeholder_ranges,
+    preprocessor_config::{PreProcessorConfig, ToFilter},
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, TextInputs,
     },
 };
-
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
+use crate::paged_attention::{
+    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
+    PagedAttentionMeta,
+};
+use crate::vision::multimodal_layout::{
+    MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
+    RequestMultimodalLayout,
 };
 
 use super::Gemma3SpecificArgs;
 
-struct Gemma3ImageProcessor {
+pub const IMAGE_TOKEN: &str = "<image_soft_token>";
+pub const BOI_TOKEN: &str = "<start_of_image>";
+pub const EOI_TOKEN: &str = "<end_of_image>";
+
+pub struct Gemma3ImageProcessor {
     full_image_sequence: String,
     supports_images: bool,
 }
-
-const IMAGE_TOKEN: &str = "<image_soft_token>";
-const BOI_TOKEN: &str = "<start_of_image>";
-const EOI_TOKEN: &str = "<end_of_image>";
 
 fn expanded_image_hashes(raw_hashes: &[u64], num_crops: &[usize]) -> Result<Vec<u64>> {
     if raw_hashes.len() != num_crops.len() {
@@ -222,41 +216,6 @@ fn gemma3_packed_layout(
         })
         .collect::<Result<Vec<_>>>()?;
     PackedMultimodalLayout::new(&requests)
-}
-
-pub struct Gemma3Processor {
-    full_image_sequence: String,
-    supports_images: bool,
-}
-
-impl Gemma3Processor {
-    pub fn new(processor_config: ProcessorConfig, supports_images: bool) -> Self {
-        let image_tokens_expanded =
-            vec![IMAGE_TOKEN.to_string(); processor_config.image_seq_len.unwrap_or(256)].join("");
-        let full_image_sequence = format!("\n\n{BOI_TOKEN}{image_tokens_expanded}{EOI_TOKEN}\n\n");
-
-        Self {
-            full_image_sequence,
-            supports_images,
-        }
-    }
-}
-
-impl Processor for Gemma3Processor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(Arc::new(Gemma3ImageProcessor {
-            full_image_sequence: self.full_image_sequence.clone(),
-            supports_images: self.supports_images,
-        })))
-    }
-
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[BOI_TOKEN, EOI_TOKEN, IMAGE_TOKEN]
-    }
-
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::Keep
-    }
 }
 
 impl MultimodalInputsProcessor for Gemma3ImageProcessor {
@@ -699,6 +658,13 @@ impl MultimodalInputsProcessor for Gemma3ImageProcessor {
 }
 
 impl Gemma3ImageProcessor {
+    pub fn new(full_image_sequence: String, supports_images: bool) -> Self {
+        Self {
+            full_image_sequence,
+            supports_images,
+        }
+    }
+
     fn pan_and_scan(
         &self,
         image: &DynamicImage,

@@ -930,3 +930,20 @@ Review follow-ups:
   - IR: core 3,486,102 lines, inference-api 1,372,394.
 - Implication: the protocol split is done. The cold build's tail is now core's lib test alone; the next wall-time
   lever is still shrinking what core compiles (the loaders or the vision preprocessing, Run 40) or its tests.
+
+## Run 47 - 2026-09-29
+
+- Change: the multimodal input processors left core for their family crates (#122-#127; the log is in
+  `multimodal_preprocessing_investigation.md`). Core also dropped `ordered-float`, `rand_distr`, `inference-vision` and
+  `rubato`.
+- Command: the Run 39 cold build on an idle machine (load 0.9 at the start), then
+  `cargo llvm-lines -p <crate> --lib --features cuda`.
+- Result:
+  - Wall 237.6 s (Run 46: 243 s); 799 units (was 832), 2,238 unit-seconds (was 2,245).
+  - The family crates build together from t=104 s and take 22-29 s each. Their lib tests end by t=155 s.
+  - Core's lib takes t=113-187 s (73.5 s) and its lib test t=133-237 s (104.5 s; Run 46: 112 s). The lib test still
+    ends the build; inference-api's lib test ends at 229 s and the CLI test at 237.5 s.
+  - IR: core 3,025,589 lines (Run 46: 3,486,102, -13%); qwen 754,607, llama 716,135, gemma 695,276.
+- Implication: moving the processors was worth about 7 s of core's lib test, and about 5 s of cold wall time. Core's
+  lib test is still the tail, now tied with the CLI test binary. The next lever is still the size of core itself; the
+  loaders are the largest part left.

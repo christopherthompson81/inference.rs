@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use inference_nn::media_inputs::processor::NoncausalMmContext;
 use std::{any::Any, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
@@ -8,173 +7,59 @@ use image::{imageops, DynamicImage, GenericImageView, Rgba, RgbaImage};
 use inference_vision::{ApplyTransforms, Rescale, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
-use crate::paged_attention::PagedAttentionMeta;
-use crate::{
-    device_map::DeviceMapper,
-    paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
-    pipeline::{
-        recurrent_batch_kind_for_input, InputProcessorOutput, InputsProcessor,
-        InputsProcessorValidationError, MessagesAction, Processor,
-    },
-    sequence::{
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
+    image_processor::{ImagePreProcessor, PreprocessedImages},
+    media::{
         build_mm_features_from_ranges, build_mm_features_from_ranges_with_policy,
         find_image_placeholder_ranges,
     },
-    vision_models::gemma4::audio_processing::AudioProcessor,
-    vision_models::{
-        image_processor::{ImagePreProcessor, PreprocessedImages},
-        multimodal_layout::{
-            MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout,
-            PackedMultimodalLayout, RequestMultimodalLayout,
-        },
-        preprocessor_config::{PreProcessorConfig, ToFilter},
-        processor_config::ProcessorConfig,
+    preprocessor_config::{PreProcessorConfig, ToFilter},
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, NoncausalMmContext, TextInputs,
     },
 };
-
-use super::{config::Gemma4BidirectionalAttention, Gemma4SpecificArgs};
-use crate::vision_models::media_host::MediaInputsProcessor;
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
+use crate::model::recurrent_batch_kind_for_input;
+use crate::paged_attention::{
+    block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
+    PagedAttentionMeta,
+};
+use crate::vision::multimodal_layout::{
+    MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
+    RequestMultimodalLayout,
 };
 
-// ── Token constants ────────────────────────────────────────────────────────
+use super::audio_processing::AudioProcessor;
+use super::{config::Gemma4BidirectionalAttention, Gemma4SpecificArgs};
 
-const IMAGE_TOKEN: &str = "<|image|>";
-const BOI_TOKEN: &str = "<|image>";
-const EOI_TOKEN: &str = "<image|>";
+pub const IMAGE_TOKEN: &str = "<|image|>";
+pub const BOI_TOKEN: &str = "<|image>";
+pub const EOI_TOKEN: &str = "<image|>";
 pub const IMAGE_TOKEN_ID: u32 = 258880;
 
-const AUDIO_TOKEN: &str = "<|audio|>";
-const BOA_TOKEN: &str = "<|audio>";
-const EOA_TOKEN: &str = "<audio|>";
+pub const AUDIO_TOKEN: &str = "<|audio|>";
+pub const BOA_TOKEN: &str = "<|audio>";
+pub const EOA_TOKEN: &str = "<audio|>";
 pub const AUDIO_TOKEN_ID: u32 = 258881;
 
-const VIDEO_TOKEN: &str = "<|video|>";
+pub const VIDEO_TOKEN: &str = "<|video|>";
 pub const VIDEO_TOKEN_ID: u32 = 258884;
 
-// ── Processor (public, created by the pipeline loader) ─────────────────────
-
-pub struct Gemma4Processor {
-    patch_size: usize,
-    pooling_kernel_size: usize,
-    default_output_length: usize,
-    max_patches: usize,
-    audio_seq_length: usize,
-    raw_audio_frame_size: Option<usize>,
-    video_max_soft_tokens: usize,
-    is_unified: bool,
-    supports_images: bool,
-    supports_audio: bool,
-    decode_window: Option<usize>,
-    bidirectional_attention: Gemma4BidirectionalAttention,
-    vision_attention_on_full_layers: bool,
-}
-
-pub struct Gemma4ProcessorSettings {
-    pub processor_config: ProcessorConfig,
+pub struct Gemma4ImageProcessor {
     pub patch_size: usize,
     pub pooling_kernel_size: usize,
     pub default_output_length: usize,
+    pub max_patches: usize,
+    pub audio_seq_length: usize,
+    pub raw_audio_frame_size: Option<usize>,
+    pub video_max_patches: usize,
+    pub is_unified: bool,
     pub supports_images: bool,
     pub supports_audio: bool,
-    pub raw_audio_frame_size: Option<usize>,
-    pub is_unified: bool,
-    /// Tokens fed per decode step; block-diffusion models set this to the canvas length.
     pub decode_window: Option<usize>,
     pub bidirectional_attention: Gemma4BidirectionalAttention,
     pub vision_attention_on_full_layers: bool,
-}
-
-impl Gemma4Processor {
-    pub fn new(settings: Gemma4ProcessorSettings) -> Self {
-        let Gemma4ProcessorSettings {
-            processor_config,
-            patch_size,
-            pooling_kernel_size,
-            default_output_length,
-            supports_images,
-            supports_audio,
-            raw_audio_frame_size,
-            is_unified,
-            decode_window,
-            bidirectional_attention,
-            vision_attention_on_full_layers,
-        } = settings;
-        let max_patches = default_output_length * pooling_kernel_size * pooling_kernel_size;
-        let audio_seq_length = processor_config.audio_seq_length.unwrap_or(750);
-        let video_max_soft_tokens = processor_config.video_max_soft_tokens.unwrap_or(70);
-
-        Self {
-            patch_size,
-            pooling_kernel_size,
-            default_output_length,
-            max_patches,
-            audio_seq_length,
-            raw_audio_frame_size,
-            video_max_soft_tokens,
-            is_unified,
-            supports_images,
-            supports_audio,
-            decode_window,
-            bidirectional_attention,
-            vision_attention_on_full_layers,
-        }
-    }
-}
-
-impl Processor for Gemma4Processor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        let video_max_patches =
-            self.video_max_soft_tokens * self.pooling_kernel_size * self.pooling_kernel_size;
-        Arc::new(MediaInputsProcessor(Arc::new(Gemma4ImageProcessor {
-            patch_size: self.patch_size,
-            pooling_kernel_size: self.pooling_kernel_size,
-            default_output_length: self.default_output_length,
-            max_patches: self.max_patches,
-            audio_seq_length: self.audio_seq_length,
-            raw_audio_frame_size: self.raw_audio_frame_size,
-            video_max_patches,
-            is_unified: self.is_unified,
-            supports_images: self.supports_images,
-            supports_audio: self.supports_audio,
-            decode_window: self.decode_window,
-            bidirectional_attention: self.bidirectional_attention,
-            vision_attention_on_full_layers: self.vision_attention_on_full_layers,
-        })))
-    }
-
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[
-            IMAGE_TOKEN,
-            BOI_TOKEN,
-            EOI_TOKEN,
-            AUDIO_TOKEN,
-            BOA_TOKEN,
-            EOA_TOKEN,
-            VIDEO_TOKEN,
-        ]
-    }
-
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::KeepWithAudioAfterText
-    }
-}
-
-struct Gemma4ImageProcessor {
-    patch_size: usize,
-    pooling_kernel_size: usize,
-    default_output_length: usize,
-    max_patches: usize,
-    audio_seq_length: usize,
-    raw_audio_frame_size: Option<usize>,
-    video_max_patches: usize,
-    is_unified: bool,
-    supports_images: bool,
-    supports_audio: bool,
-    decode_window: Option<usize>,
-    bidirectional_attention: Gemma4BidirectionalAttention,
-    vision_attention_on_full_layers: bool,
 }
 
 type UnifiedMediaPreprocessOutput = (Tensor, Tensor, Vec<(u32, u32)>);
@@ -818,8 +703,6 @@ fn gemma4_packed_layout(
     PackedMultimodalLayout::new(&requests)
 }
 
-// ── InputsProcessor ────────────────────────────────────────────────────────
-
 impl MultimodalInputsProcessor for Gemma4ImageProcessor {
     fn prepare_for_paged_prompt_planning(
         &self,
@@ -1065,7 +948,6 @@ impl MultimodalInputsProcessor for Gemma4ImageProcessor {
         let mut video_cached_tokens_accum = Vec::new();
         let mut video_sizes_accum = Vec::new();
 
-        // ── Audio processing ───────────────────────────────────────────────
         if has_audios && !self.supports_audio {
             return Err(anyhow::Error::msg(
                 "This image processor does not support audio.",
@@ -1185,7 +1067,6 @@ impl MultimodalInputsProcessor for Gemma4ImageProcessor {
             (None, None)
         };
 
-        // ── Image processing ───────────────────────────────────────────────
         let pixel_values = if has_images {
             if !self.supports_images {
                 return Err(anyhow::Error::msg(
@@ -1523,7 +1404,6 @@ impl MultimodalInputsProcessor for Gemma4ImageProcessor {
                 .set_noncausal_mm_context_views(input_seqs, self.vision_attention_on_full_layers);
         }
 
-        // ── Build final model inputs ───────────────────────────────────────
         let inference_nn::media_inputs::processor::InnerInputProcessorOutput {
             inputs:
                 inference_nn::media_inputs::processor::InputMetadata {
@@ -1699,8 +1579,6 @@ impl MultimodalInputsProcessor for Gemma4ImageProcessor {
     }
 }
 
-// ── ImagePreProcessor ──────────────────────────────────────────────────────
-
 impl ImagePreProcessor for Gemma4ImageProcessor {
     // Gemma4 rescales to [0, 1] but does NOT apply ImageNet normalization.
     const DEFAULT_MEAN: [f64; 3] = [0.0, 0.0, 0.0];
@@ -1800,7 +1678,6 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::vision_models::processor_config::ProcessorConfig;
     use image::{DynamicImage, Rgba, RgbaImage};
 
     #[test]
@@ -1835,24 +1712,6 @@ mod tests {
             bidirectional_attention: Gemma4BidirectionalAttention::Vision,
             vision_attention_on_full_layers: false,
         }
-    }
-
-    #[test]
-    fn defaults_audio_seq_length_to_reference_cap() {
-        let processor = Gemma4Processor::new(Gemma4ProcessorSettings {
-            processor_config: ProcessorConfig::default(),
-            patch_size: 16,
-            pooling_kernel_size: 3,
-            default_output_length: 280,
-            supports_images: true,
-            supports_audio: true,
-            raw_audio_frame_size: None,
-            is_unified: false,
-            decode_window: None,
-            bidirectional_attention: Gemma4BidirectionalAttention::Vision,
-            vision_attention_on_full_layers: false,
-        });
-        assert_eq!(processor.audio_seq_length, 750);
     }
 
     #[test]

@@ -4,12 +4,9 @@ use inference_audio::fft::{plan_forward_f32, Complex32};
 use inference_audio::AudioInput;
 use rubato::Resampler;
 
-use crate::vision_models::preprocessor_config::PreProcessorConfig;
+use crate::media_inputs::preprocessor_config::PreProcessorConfig;
 
-// === Configuration constants ===
-// NOTE: All configuration values are now loaded from the preprocessor config.
 // Defaults match the HuggingFace Transformers implementation.
-
 pub struct AudioProcessor {
     target_sample_rate: u32,
     fft_overdrive: bool,
@@ -160,7 +157,7 @@ impl AudioProcessor {
 
         let fft = plan_forward_f32(n_fft);
 
-        // === Hann window (same formulation as the reference implementation) ===
+        // Hann window, same formulation as the reference implementation.
         let window: Vec<f64> = (0..frame_length)
             .map(|n| {
                 0.5 * (1.0 - (2.0 * std::f64::consts::PI * n as f64 / frame_length as f64).cos())
@@ -193,7 +190,7 @@ impl AudioProcessor {
             let start = frame_idx * hop_length;
             let raw_frame = &samples[start..start + frame_size_for_pe];
 
-            // === Pre-emphasis (HTK flavour) ===
+            // Pre-emphasis, HTK flavour.
             let mut frame: Vec<f32> = Vec::with_capacity(frame_length);
             // First sample – scaled, no look-back.
             frame.push(raw_frame[0] * (1.0 - self.preemphasis));
@@ -202,14 +199,12 @@ impl AudioProcessor {
                 frame.push(raw_frame[i] - self.preemphasis * raw_frame[i - 1]);
             }
 
-            // === Window ===
             let mut windowed: Vec<Complex32> = frame
                 .iter()
                 .zip(window.iter())
                 .map(|(s, w)| Complex32::new(s * *w as f32, 0.0))
                 .collect();
 
-            // === FFT ===
             windowed.resize(n_fft, Complex32::new(0.0, 0.0));
             fft.process(&mut windowed);
 
@@ -219,7 +214,6 @@ impl AudioProcessor {
                 .map(|c| c.norm())
                 .collect();
 
-            // === Mel filter-bank projection ===
             let mut mel_frame = vec![0.0f32; self.feature_size];
             for (mel_idx, filter) in mel_filters.iter().enumerate() {
                 let mut sum = 0.0f32;

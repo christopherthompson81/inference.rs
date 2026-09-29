@@ -4,7 +4,7 @@ use inference_audio::fft::{plan_forward_f32, Complex32};
 use inference_audio::AudioInput;
 use rubato::Resampler;
 
-use crate::vision_models::preprocessor_config::PreProcessorConfig;
+use crate::media_inputs::preprocessor_config::PreProcessorConfig;
 
 const DEFAULT_MAX_AUDIO_SAMPLES: usize = 480_000;
 const DEFAULT_PAD_TO_MULTIPLE_OF: usize = 128;
@@ -421,7 +421,7 @@ mod tests {
     use candle_core::Device;
     use inference_audio::AudioInput;
 
-    use crate::vision_models::preprocessor_config::PreProcessorConfig;
+    use crate::media_inputs::preprocessor_config::PreProcessorConfig;
 
     use super::AudioProcessor;
 
