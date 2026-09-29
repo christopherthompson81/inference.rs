@@ -7,31 +7,24 @@ use image::{imageops, DynamicImage, RgbImage};
 use itertools::Itertools;
 use tokenizers::Tokenizer;
 
-use crate::paged_attention::PagedAttentionMeta;
-use crate::{
-    device_map::DeviceMapper,
-    paged_attention::block_hash::MultimodalKind,
-    pipeline::{
-        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
-        Processor,
-    },
-    sequence::{build_mm_features_from_ranges, find_image_delimited_ranges},
-    vision_models::{
-        image_processor::{ImagePreProcessor, PreprocessedImages},
-        preprocessor_config::{PreProcessorConfig, ToFilter},
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
+    image_processor::{ImagePreProcessor, PreprocessedImages},
+    media::{build_mm_features_from_ranges, find_image_delimited_ranges},
+    preprocessor_config::{PreProcessorConfig, ToFilter},
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, TextInputs,
     },
 };
+use crate::paged_attention::{block_hash::MultimodalKind, PagedAttentionMeta};
 
 use super::{config::Config, Lfm2VlSpecificArgs};
-use crate::vision_models::media_host::MediaInputsProcessor;
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
-};
 
-pub(crate) const IMAGE_TOKEN: &str = "<image>";
-const IMAGE_START: &str = "<|image_start|>";
-const IMAGE_END: &str = "<|image_end|>";
-const IMAGE_THUMBNAIL: &str = "<|img_thumbnail|>";
+pub const IMAGE_TOKEN: &str = "<image>";
+pub const IMAGE_START: &str = "<|image_start|>";
+pub const IMAGE_END: &str = "<|image_end|>";
+pub const IMAGE_THUMBNAIL: &str = "<|img_thumbnail|>";
 
 fn prompt_image_sequence_indices(
     is_prompt: bool,
@@ -47,16 +40,10 @@ fn prompt_image_sequence_indices(
         .collect()
 }
 
-#[derive(Clone)]
 pub struct Lfm2VlImageProcessor {
     settings: Lfm2VlProcessorSettings,
 }
 
-pub struct Lfm2VlProcessor {
-    settings: Lfm2VlProcessorSettings,
-}
-
-#[derive(Clone)]
 struct Lfm2VlProcessorSettings {
     downsample_factor: usize,
     do_image_splitting: bool,
@@ -132,31 +119,13 @@ impl Lfm2VlProcessorSettings {
     }
 }
 
-impl Lfm2VlProcessor {
+impl Lfm2VlImageProcessor {
     pub fn new(config: &Config, preprocessor_config: &PreProcessorConfig) -> Self {
         Self {
             settings: Lfm2VlProcessorSettings::from_config(config, preprocessor_config),
         }
     }
-}
 
-impl Processor for Lfm2VlProcessor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(Arc::new(Lfm2VlImageProcessor {
-            settings: self.settings.clone(),
-        })))
-    }
-
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[IMAGE_TOKEN, IMAGE_START, IMAGE_END, IMAGE_THUMBNAIL]
-    }
-
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::Keep
-    }
-}
-
-impl Lfm2VlImageProcessor {
     fn round_by_factor(number: u32, factor: usize) -> usize {
         ((number as f64 / factor as f64).round() as usize) * factor
     }

@@ -4,107 +4,34 @@ use std::{any::Any, sync::Arc};
 
 use anyhow::Result;
 use candle_core::{Device, Tensor};
-use either::Either;
 use image::DynamicImage;
-use indexmap::IndexMap;
-use serde_json::Value;
 use tokenizers::Tokenizer;
 
-use crate::paged_attention::PagedAttentionMeta;
-use crate::{
-    device_map::DeviceMapper,
-    paged_attention::block_hash::MultimodalKind,
-    pipeline::{
-        processing::default_process, InputProcessorOutput, InputsProcessor, MessagesAction,
-        Processor,
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
+    image_processor::{ImagePreProcessor, PreprocessedImages},
+    media::{build_mm_features_from_ranges, find_placeholder_delimited_ranges},
+    preprocessor_config::PreProcessorConfig,
+    processor::{
+        InputProcessorOutput, InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor,
+        TextInputs,
     },
-    request::ReasoningEffort,
-    sequence::{build_mm_features_from_ranges, find_placeholder_delimited_ranges},
-    vision_models::{
-        image_processor::{ImagePreProcessor, PreprocessedImages},
-        preprocessor_config::PreProcessorConfig,
-    },
-    MessageContent, Tool,
 };
+use crate::paged_attention::{block_hash::MultimodalKind, PagedAttentionMeta};
 
 use super::preprocess::{preprocess_decoded, MERGE};
 use super::PaddleOcrVlVisionSpecificArgs;
-use crate::vision_models::media_host::MediaInputsProcessor;
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
-};
+
+pub const IMAGE_START: &str = "<|IMAGE_START|>";
+pub const IMAGE_PLACEHOLDER: &str = "<|IMAGE_PLACEHOLDER|>";
+pub const IMAGE_END: &str = "<|IMAGE_END|>";
+// Stops the expand loop from re-matching the copies it just inserted.
+const EXPAND_MARKER: &str = "<|IMAGE_EXPAND_TMP|>";
 
 // One image grid row as (t, h, w) in patches.
 type ImageGrid = (usize, usize, usize);
 
-pub struct PaddleOcrVlProcessor;
-
-impl PaddleOcrVlProcessor {
-    pub const IMAGE_START: &'static str = "<|IMAGE_START|>";
-    pub const IMAGE_PLACEHOLDER: &'static str = "<|IMAGE_PLACEHOLDER|>";
-    pub const IMAGE_END: &'static str = "<|IMAGE_END|>";
-    // Stops the expand loop from re-matching the copies it just inserted.
-    const EXPAND_MARKER: &'static str = "<|IMAGE_EXPAND_TMP|>";
-}
-
-impl Processor for PaddleOcrVlProcessor {
-    // The template iterates content as typed parts; a bare string would be iterated per char and dropped.
-    fn process(
-        &self,
-        pipeline: &dyn crate::pipeline::Pipeline,
-        messages: Vec<IndexMap<String, MessageContent>>,
-        add_generation_prompt: bool,
-        add_special_tokens: bool,
-        enable_thinking: Option<bool>,
-        reasoning_effort: Option<ReasoningEffort>,
-        tools: Vec<Tool>,
-    ) -> anyhow::Result<(Vec<u32>, String)> {
-        let messages = messages
-            .into_iter()
-            .map(|message| {
-                message
-                    .into_iter()
-                    .map(|(key, value)| match (key.as_str(), value) {
-                        ("content", Either::Left(text)) => (
-                            key,
-                            Either::Right(vec![IndexMap::from([
-                                ("type".to_string(), Value::String("text".to_string())),
-                                ("text".to_string(), Value::String(text)),
-                            ])]),
-                        ),
-                        (_, value) => (key, value),
-                    })
-                    .collect()
-            })
-            .collect();
-        default_process(
-            pipeline,
-            messages,
-            add_generation_prompt,
-            add_special_tokens,
-            enable_thinking,
-            reasoning_effort,
-            self.template_action(),
-            tools,
-        )
-    }
-    // The model takes every image's patches and skips the cached ones itself, so a prefix hit must not drop them.
-    fn retain_prefix_cached_images(&self) -> bool {
-        true
-    }
-
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(Arc::new(PaddleOcrVlImageProcessor)))
-    }
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[Self::IMAGE_START, Self::IMAGE_PLACEHOLDER, Self::IMAGE_END]
-    }
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::Keep
-    }
-}
-
-struct PaddleOcrVlImageProcessor;
+pub struct PaddleOcrVlImageProcessor;
 
 fn replace_first_occurrence(text: &str, to_replace: &str, replacement: &str) -> String {
     if let Some(pos) = text.find(to_replace) {
@@ -118,9 +45,7 @@ fn replace_first_occurrence(text: &str, to_replace: &str, replacement: &str) -> 
 
 // The i-th placeholder takes the i-th grid; a prompt can carry a literal placeholder, so counts must match.
 fn expand_placeholders(text: &str, grids: &[ImageGrid], merge: usize) -> anyhow::Result<String> {
-    let placeholders = text
-        .matches(PaddleOcrVlProcessor::IMAGE_PLACEHOLDER)
-        .count();
+    let placeholders = text.matches(IMAGE_PLACEHOLDER).count();
     if placeholders != grids.len() {
         anyhow::bail!(
             "prompt has {placeholders} image placeholders for {} images",
@@ -130,20 +55,13 @@ fn expand_placeholders(text: &str, grids: &[ImageGrid], merge: usize) -> anyhow:
     let merge_length = merge * merge;
     let mut out = text.to_string();
     let mut index = 0;
-    while out.contains(PaddleOcrVlProcessor::IMAGE_PLACEHOLDER) {
+    while out.contains(IMAGE_PLACEHOLDER) {
         let (t, h, w) = grids[index];
         let n = t * h * w / merge_length;
-        out = replace_first_occurrence(
-            &out,
-            PaddleOcrVlProcessor::IMAGE_PLACEHOLDER,
-            &PaddleOcrVlProcessor::EXPAND_MARKER.repeat(n),
-        );
+        out = replace_first_occurrence(&out, IMAGE_PLACEHOLDER, &EXPAND_MARKER.repeat(n));
         index += 1;
     }
-    Ok(out.replace(
-        PaddleOcrVlProcessor::EXPAND_MARKER,
-        PaddleOcrVlProcessor::IMAGE_PLACEHOLDER,
-    ))
+    Ok(out.replace(EXPAND_MARKER, IMAGE_PLACEHOLDER))
 }
 
 // Placeholders share one id; the span's image hash keeps same-shape images apart and prefix hits off mid-span.
@@ -153,9 +71,9 @@ fn register_image_span(seq: &mut dyn MediaSequence, ids: &[u32], tokenizer: &Tok
     }
     let (Some(hashes), Some(pad_id), Some(start_id), Some(end_id)) = (
         seq.image_hashes().map(<[u64]>::to_vec),
-        tokenizer.token_to_id(PaddleOcrVlProcessor::IMAGE_PLACEHOLDER),
-        tokenizer.token_to_id(PaddleOcrVlProcessor::IMAGE_START),
-        tokenizer.token_to_id(PaddleOcrVlProcessor::IMAGE_END),
+        tokenizer.token_to_id(IMAGE_PLACEHOLDER),
+        tokenizer.token_to_id(IMAGE_START),
+        tokenizer.token_to_id(IMAGE_END),
     ) else {
         return;
     };
@@ -293,7 +211,7 @@ impl MultimodalInputsProcessor for PaddleOcrVlImageProcessor {
         let config: &PreProcessorConfig = config.downcast_ref().expect("Downcast failed.");
 
         // Per row, as rows sit at different chunks; a grid attaches once its image tokens are in, else phantom rope.
-        let image_pad_id = tokenizer.token_to_id(PaddleOcrVlProcessor::IMAGE_PLACEHOLDER);
+        let image_pad_id = tokenizer.token_to_id(IMAGE_PLACEHOLDER);
         let mut grids: Vec<Vec<ImageGrid>> = Vec::with_capacity(input_seqs.len());
         let mut hashes: Vec<Vec<u64>> = Vec::with_capacity(input_seqs.len());
         let mut pixel_values_accum = Vec::new();
@@ -491,8 +409,8 @@ impl ImagePreProcessor for PaddleOcrVlImageProcessor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::media_inputs::media::clamp_prefix_cache_len_for_mm_features;
     use crate::paged_attention::block_hash::compute_block_hashes;
-    use crate::sequence::clamp_prefix_cache_len_for_mm_features;
 
     // Real tokenizer ids; only their distinctness matters.
     const IMAGE_START_ID: u32 = 101305;
@@ -589,26 +507,19 @@ mod tests {
         // 1*14*46 / 2^2 = 161
         let text = format!(
             "User: {}{}{}OCR:",
-            PaddleOcrVlProcessor::IMAGE_START,
-            PaddleOcrVlProcessor::IMAGE_PLACEHOLDER,
-            PaddleOcrVlProcessor::IMAGE_END,
+            IMAGE_START, IMAGE_PLACEHOLDER, IMAGE_END,
         );
         let expanded = expand_placeholders(&text, &[(1, 14, 46)], MERGE).unwrap();
-        let count = expanded
-            .matches(PaddleOcrVlProcessor::IMAGE_PLACEHOLDER)
-            .count();
+        let count = expanded.matches(IMAGE_PLACEHOLDER).count();
         assert_eq!(count, 161);
-        assert!(!expanded.contains(PaddleOcrVlProcessor::EXPAND_MARKER));
-        assert!(expanded.contains(PaddleOcrVlProcessor::IMAGE_START));
+        assert!(!expanded.contains(EXPAND_MARKER));
+        assert!(expanded.contains(IMAGE_START));
         assert!(expanded.contains("OCR:"));
     }
 
     #[test]
     fn literal_placeholder_in_user_text_is_an_error() {
-        let text = format!(
-            "User: {p}{p}OCR:",
-            p = PaddleOcrVlProcessor::IMAGE_PLACEHOLDER
-        );
+        let text = format!("User: {p}{p}OCR:", p = IMAGE_PLACEHOLDER);
         assert!(expand_placeholders(&text, &[(1, 14, 46)], MERGE).is_err());
     }
 }

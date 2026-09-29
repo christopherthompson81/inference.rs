@@ -90,9 +90,7 @@ use crate::vision_models::muse_glimmer::{
 #[cfg(feature = "models-other")]
 use crate::vision_models::paddleocr_vl::config::Config as PaddleOcrVlConfig;
 #[cfg(feature = "models-other")]
-use crate::vision_models::paddleocr_vl::{
-    inputs_processor::PaddleOcrVlProcessor, PaddleOcrVlModel,
-};
+use crate::vision_models::paddleocr_vl::{processor::PaddleOcrVlProcessor, PaddleOcrVlModel};
 #[cfg(feature = "models-phi")]
 use crate::vision_models::phi3::{Config as Phi3Config, Model as Phi3, PHI3V_CLIP_CONFIG};
 #[cfg(feature = "models-phi")]
