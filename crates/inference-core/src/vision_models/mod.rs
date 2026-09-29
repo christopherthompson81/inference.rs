@@ -61,7 +61,6 @@ pub(crate) mod media_host;
 pub(crate) use inference_nn::media_inputs::{
     image_processor, preprocessor_config, processor_config,
 };
-pub(crate) use inference_nn::vision::multimodal_layout;
 
 use crate::gdn::RecurrentBatchKind;
 

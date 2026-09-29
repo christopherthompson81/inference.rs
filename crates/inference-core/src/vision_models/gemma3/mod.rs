@@ -2,5 +2,5 @@
 
 pub(crate) use inference_models_gemma::gemma3::*;
 
-mod inputs_processor;
-pub(crate) use inputs_processor::Gemma3Processor;
+pub(crate) mod processor;
+pub(crate) use processor::Gemma3Processor;

@@ -2,6 +2,5 @@
 
 pub(crate) use inference_models_gemma::gemma3n::*;
 
-pub(crate) mod audio_processing;
-mod inputs_processor;
-pub(crate) use inputs_processor::Gemma3nProcessor;
+pub(crate) mod processor;
+pub(crate) use processor::Gemma3nProcessor;

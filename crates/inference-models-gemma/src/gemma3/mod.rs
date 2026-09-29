@@ -28,6 +28,7 @@ use crate::{
 };
 
 pub mod config;
+pub mod inputs_processor;
 mod mmproj;
 mod text;
 

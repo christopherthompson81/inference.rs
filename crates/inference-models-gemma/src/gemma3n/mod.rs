@@ -30,7 +30,9 @@ use crate::{
 use self::multimodal_embedding::Gemma3nMultimodalEmbedder;
 
 pub mod audio;
+mod audio_processing;
 pub mod config;
+pub mod inputs_processor;
 mod multimodal_embedding;
 pub mod text;
 pub mod vision;

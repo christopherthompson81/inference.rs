@@ -1,6 +1,5 @@
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 
-use crate::paged_attention::block_hash::{MultiModalFeature, MultimodalKind};
 use std::{any::Any, collections::HashSet, ops::Range, sync::Arc};
 
 use candle_core::{Device, Result, Tensor};
@@ -8,33 +7,37 @@ use image::DynamicImage;
 use inference_vision::{ApplyTransforms, Normalize, Rescale, ToTensorNoNorm, Transforms};
 use tokenizers::Tokenizer;
 
-use crate::paged_attention::PagedAttentionMeta;
-use crate::{
-    device_map::DeviceMapper,
-    pipeline::{
-        InputProcessorOutput, InputsProcessor, InputsProcessorValidationError, MessagesAction,
-        Processor,
-    },
-    sequence::{build_mm_features_from_ranges, find_image_placeholder_ranges},
-    vision_models::gemma3n::audio_processing::AudioProcessor,
-    vision_models::{
-        image_processor::{ImagePreProcessor, PreprocessedImages},
-        multimodal_layout::{
-            MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout,
-            PackedMultimodalLayout, RequestMultimodalLayout,
-        },
-        preprocessor_config::{PreProcessorConfig, ToFilter},
-        processor_config::ProcessorConfig,
+use crate::device_map::DeviceMapper;
+use crate::media_inputs::{
+    image_processor::{ImagePreProcessor, PreprocessedImages},
+    media::{build_mm_features_from_ranges, find_image_placeholder_ranges},
+    preprocessor_config::{PreProcessorConfig, ToFilter},
+    processor::{
+        InputProcessorOutput, InputsHost, InputsProcessorValidationError, MediaSequence,
+        ModelInputs, MultimodalInputsProcessor, TextInputs,
     },
 };
+use crate::paged_attention::{
+    block_hash::{MultiModalFeature, MultimodalKind},
+    PagedAttentionMeta,
+};
+use crate::vision::multimodal_layout::{
+    MultimodalEmbeddingMap, MultimodalEncoderKey, MultimodalItemLayout, PackedMultimodalLayout,
+    RequestMultimodalLayout,
+};
 
+use super::audio_processing::AudioProcessor;
 use super::{Gemma3nSpecificArgs, AUDIO_TOKEN_ID, IMAGE_TOKEN_ID};
-use crate::vision_models::media_host::MediaInputsProcessor;
-use inference_nn::media_inputs::processor::{
-    InputsHost, MediaSequence, ModelInputs, MultimodalInputsProcessor, TextInputs,
-};
 
-struct Gemma3nImageProcessor {
+pub const IMAGE_TOKEN: &str = "<image_soft_token>";
+pub const BOI_TOKEN: &str = "<start_of_image>";
+pub const EOI_TOKEN: &str = "<end_of_image>";
+
+pub const AUDIO_TOKEN: &str = "<audio_soft_token>";
+pub const BOA_TOKEN: &str = "<start_of_audio>";
+pub const EOA_TOKEN: &str = "<end_of_audio>";
+
+pub struct Gemma3nImageProcessor {
     supports_images: bool,
     supports_audio: bool,
     full_image_sequence: String,
@@ -62,19 +65,25 @@ struct Gemma3nAudioBatch {
 }
 
 impl Gemma3nImageProcessor {
+    pub fn new(
+        supports_images: bool,
+        supports_audio: bool,
+        full_image_sequence: String,
+        audio_seq_length: usize,
+    ) -> Self {
+        Self {
+            supports_images,
+            supports_audio,
+            full_image_sequence,
+            audio_seq_length,
+        }
+    }
+
     fn create_full_audio_sequence(&self) -> String {
         let audio_tokens_expanded = vec![AUDIO_TOKEN.to_string(); self.audio_seq_length].join("");
         format!("\n\n{BOA_TOKEN}{audio_tokens_expanded}{EOA_TOKEN}\n\n")
     }
 }
-
-const IMAGE_TOKEN: &str = "<image_soft_token>";
-const BOI_TOKEN: &str = "<start_of_image>";
-const EOI_TOKEN: &str = "<end_of_image>";
-
-const AUDIO_TOKEN: &str = "<audio_soft_token>";
-const BOA_TOKEN: &str = "<start_of_audio>";
-const EOA_TOKEN: &str = "<end_of_audio>";
 
 fn gemma3n_active_items(
     features: &[MultiModalFeature],
@@ -228,62 +237,6 @@ fn gemma3n_packed_layout(
         })
         .collect::<Result<Vec<_>>>()?;
     PackedMultimodalLayout::new(&requests)
-}
-
-pub struct Gemma3nProcessor {
-    vision_soft_tokens_per_image: usize,
-    audio_seq_length: usize,
-    supports_images: bool,
-    supports_audio: bool,
-}
-
-impl Gemma3nProcessor {
-    pub fn new(processor_config: ProcessorConfig, supports_images: bool) -> Self {
-        // Default to 256 soft tokens per image if not specified
-        let vision_soft_tokens_per_image = processor_config.image_seq_len.unwrap_or(256);
-        // Default to 188 audio tokens as per transformers implementation
-        let audio_seq_length = processor_config.audio_seq_length.unwrap_or(188);
-
-        Self {
-            vision_soft_tokens_per_image,
-            audio_seq_length,
-            supports_images,
-            supports_audio: true, // Enable audio support
-        }
-    }
-
-    fn create_full_image_sequence(&self) -> String {
-        // Create the full image token sequence: "\n\n<boi>{repeated image tokens}<eoi>\n\n"
-        let image_tokens_expanded =
-            vec![IMAGE_TOKEN.to_string(); self.vision_soft_tokens_per_image].join("");
-        format!("\n\n{BOI_TOKEN}{image_tokens_expanded}{EOI_TOKEN}\n\n")
-    }
-}
-
-impl Processor for Gemma3nProcessor {
-    fn inputs_processor(&self) -> Arc<dyn InputsProcessor> {
-        Arc::new(MediaInputsProcessor(Arc::new(Gemma3nImageProcessor {
-            supports_images: self.supports_images,
-            supports_audio: self.supports_audio,
-            full_image_sequence: self.create_full_image_sequence(),
-            audio_seq_length: self.audio_seq_length,
-        })))
-    }
-
-    fn get_special_tokens(&self) -> &[&'static str] {
-        &[
-            IMAGE_TOKEN,
-            BOI_TOKEN,
-            EOI_TOKEN,
-            AUDIO_TOKEN,
-            BOA_TOKEN,
-            EOA_TOKEN,
-        ]
-    }
-
-    fn template_action(&self) -> MessagesAction {
-        MessagesAction::Keep
-    }
 }
 
 impl MultimodalInputsProcessor for Gemma3nImageProcessor {
@@ -810,7 +763,7 @@ mod tests {
 
     use crate::{
         paged_attention::block_hash::MultimodalAttentionPolicy,
-        vision_models::multimodal_layout::MultimodalEncoderOutputs,
+        vision::multimodal_layout::MultimodalEncoderOutputs,
     };
 
     use super::*;

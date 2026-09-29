@@ -561,3 +561,52 @@ pub fn build_mm_features_from_ranges_with_policy(
     layout.extend_ranges(ranges, hashes, kind, attention_policy);
     layout.into_features()
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn image_hash_distinguishes_geometry() {
+        let bytes = vec![1, 2, 3, 4, 5, 6];
+        let wide =
+            image::DynamicImage::ImageRgb8(image::RgbImage::from_raw(2, 1, bytes.clone()).unwrap());
+        let tall = image::DynamicImage::ImageRgb8(image::RgbImage::from_raw(1, 2, bytes).unwrap());
+
+        assert_eq!(wide.as_bytes(), tall.as_bytes());
+        let images = SequenceImages::new(vec![wide, tall]);
+        assert_ne!(images.hashes()[0], images.hashes()[1]);
+    }
+
+    #[test]
+    fn image_hash_distinguishes_color_type() {
+        let rgba = image::DynamicImage::ImageRgba8(
+            image::RgbaImage::from_raw(1, 1, vec![1, 2, 3, 4]).unwrap(),
+        );
+        let luma_alpha = image::DynamicImage::ImageLumaA16(
+            image::ImageBuffer::<image::LumaA<u16>, Vec<u16>>::from_raw(
+                1,
+                1,
+                vec![u16::from_ne_bytes([1, 2]), u16::from_ne_bytes([3, 4])],
+            )
+            .unwrap(),
+        );
+
+        assert_eq!(rgba.as_bytes(), luma_alpha.as_bytes());
+        assert_ne!(rgba.color(), luma_alpha.color());
+        let images = SequenceImages::new(vec![rgba, luma_alpha]);
+        assert_ne!(images.hashes()[0], images.hashes()[1]);
+    }
+
+    #[test]
+    fn multimodal_prefix_placeholder_delimited_ranges_include_wrappers() {
+        let tokens = vec![1, 10, 20, 20, 11, 2, 10, 30, 30, 30, 11, 3];
+        let img = find_placeholder_delimited_ranges(&tokens, 20, 10, 11);
+        let video = find_placeholder_delimited_ranges(&tokens, 30, 10, 11);
+        let fallback = find_placeholder_delimited_ranges(&tokens, 2, 99, 100);
+
+        assert_eq!(img, vec![(1, 4)]);
+        assert_eq!(video, vec![(6, 5)]);
+        assert_eq!(fallback, vec![(5, 1)]);
+    }
+}

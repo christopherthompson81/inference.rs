@@ -193,9 +193,7 @@ use crate::sequence::Sequence;
 
 use prompt_chunks::{next_prompt_chunk_group, PromptChunkPlan};
 
-pub(crate) use self::inputs_processor::{
-    is_inputs_processor_validation_error, InputsProcessorValidationError,
-};
+pub(crate) use self::inputs_processor::is_inputs_processor_validation_error;
 pub use self::inputs_processor::{
     text_models_inputs_processor, InputsProcessor, InputsProcessorType,
 };
