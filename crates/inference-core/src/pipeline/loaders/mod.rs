@@ -42,6 +42,7 @@ pub use normal_loaders::{LlamaLoader, MistralLoader, MixtralLoader};
 #[cfg(feature = "models-phi")]
 pub use normal_loaders::{Phi2Loader, Phi3Loader};
 
+pub(crate) use multimodal_loaders::MultimodalProcessorFactory;
 #[cfg(feature = "models-phi")]
 pub use multimodal_loaders::Phi3VLoader;
 pub use multimodal_loaders::{

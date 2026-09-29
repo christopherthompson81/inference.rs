@@ -234,3 +234,29 @@ What in them costs core's compile, and what can leave?
     redundant `allow`s, a test module name, and `pub(crate)` on the factory trait. The lint, CPU tests and slim were
     rerun after them.
 - Next: the phi family's loaders (PR 2).
+
+## Run 8 - 2026-09-29
+
+- Change: the phi family, PR 2 of the plan.
+  - Phi 2, Phi 3, Phi 3.5 MoE, Phi-3V and Phi-4MM moved into `inference-models-phi/src/loaders/`. A private prelude
+    in `loaders/mod.rs` stands in for core's `use super::*` surface.
+  - The bodies are unchanged apart from paths: `crate::models::X` became `crate::X`, the `vision_models` and
+    `xlora_models` re-exports became the family modules, and doc links to core types became code spans.
+  - The two `MultimodalProcessorFactory` impls stayed in core, now in `vision_models/phi{3,4}/processor.rs`.
+- IR check, as Run 6 asked (`cargo llvm-lines -p inference-core --lib --features cuda`):
+  - After the move alone, 2,196 lines of `inference_models_phi::loaders` functions were still compiled in core. They
+    were trait defaults (`mapped_max_act_size_elems` 139 per text loader, `num_layers` 84, `is_gptx_for` 78-82, and
+    so on), instantiated where core's registry built the vtables with `Box::new($loader)`.
+  - Fix: nn `boxed_loaders!` gives each loader a `boxed()`. The registries call `$loader::boxed()`, and each family
+    crate invokes the macro for its own loaders; core invokes it for the loaders still in core. That left 12 lines in
+    core (the factory impls).
+  - Core went from 2,778,718 to 2,746,265 lines. About 440 lines per loader were defaults compiled in core, roughly
+    22k over the 50 loaders, and the remaining family moves will remove them.
+- Fallout, all caught by CI:
+  - `models::{phi2, phi3, phi3_5_moe}` is now used only by the GGUF config tests, so it is gated `cfg(test)`.
+  - A `cfg` landed on the wrong line and broke `--slim`, which the review also flagged.
+  - The phi entries in stale `cfg` lists were dropped.
+- CI: `scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep` green (2191 CPU and 2511 CUDA tests).
+  The review confirmed the moved bodies and factory impls are identical, and that every registry arm has exactly one
+  `boxed()`. CLAUDE.md's steps for adding a model now point at the family crate's `loaders/` and `boxed_loaders!`.
+- Next: the other family (PR 3).

@@ -4,7 +4,7 @@ use std::{any::Any, sync::Arc};
 
 use candle_core::Tensor;
 
-#[cfg(any(feature = "models-llama", feature = "models-phi"))]
+#[cfg(feature = "models-llama")]
 pub(crate) use inference_nn::vision::clip;
 #[cfg(feature = "models-llama")]
 pub(crate) mod idefics2;

@@ -10,6 +10,18 @@ pub use placement::*;
 pub use rope::*;
 pub use sizing::*;
 
+// A loader's vtable carries its trait defaults, so building the box where the loader is defined compiles them there.
+#[macro_export]
+macro_rules! boxed_loaders {
+    ($loader_trait:ident: $($loader:ident),+ $(,)?) => {$(
+        impl $loader {
+            pub fn boxed() -> Box<dyn $crate::loaders::$loader_trait> {
+                Box::new(Self)
+            }
+        }
+    )+};
+}
+
 use std::borrow::Cow;
 use std::collections::HashMap;
 use std::fmt::Debug;
