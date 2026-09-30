@@ -352,9 +352,9 @@ impl Pipeline for DiffusionPipeline {
         }
         Ok(ForwardInputsResult::Image { images })
     }
-    fn sample_causal_gen<'a, 'b: 'a>(
+    fn sample_causal_gen<'a>(
         &'a self,
-        _seqs: &'a mut [&'b mut Sequence],
+        _seqs: &'a mut [&mut Sequence],
         _logits: Vec<Tensor>,
         _prefix_cacher: &'a mut PrefixCacheManagerV2,
         _disable_eos_stop: bool,

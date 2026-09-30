@@ -708,9 +708,9 @@ pub(crate) async fn finish_or_add_toks_to_seq(
 /// sequence, running the standard per-token finalize path (EOS/length stop, tool parsing,
 /// streaming, prefix caching) for every token. Stops consuming a block once its sequence
 /// finishes.
-pub(crate) fn finalize_block_gen<'a, 'b: 'a>(
+pub(crate) fn finalize_block_gen<'a>(
     this: &'a dyn Pipeline,
-    seqs: &'a mut [&'b mut Sequence],
+    seqs: &'a mut [&mut Sequence],
     token_blocks: Vec<Vec<u32>>,
     denoise_times: Vec<std::time::Duration>,
     prefix_cacher: &'a mut PrefixCacheManagerV2,
@@ -761,9 +761,9 @@ async fn finalize_block_gen_impl(
 }
 
 // Boxed so each pipeline's `sample_*` wrapper awaits a small future instead of re-checking this state machine.
-pub fn sample_and_add_toks<'a, 'b: 'a>(
+pub fn sample_and_add_toks<'a>(
     this: &'a dyn Pipeline,
-    seqs: &'a mut [&'b mut Sequence],
+    seqs: &'a mut [&mut Sequence],
     logits_seq: Vec<Tensor>,
     prefix_cacher: &'a mut PrefixCacheManagerV2,
     disable_eos_stop: bool,
@@ -779,9 +779,9 @@ pub fn sample_and_add_toks<'a, 'b: 'a>(
     ))
 }
 
-pub fn sample_and_add_toks_batched<'a, 'b: 'a>(
+pub fn sample_and_add_toks_batched<'a>(
     this: &'a dyn Pipeline,
-    seqs: &'a mut [&'b mut Sequence],
+    seqs: &'a mut [&mut Sequence],
     logits: Tensor,
     prefix_cacher: &'a mut PrefixCacheManagerV2,
     disable_eos_stop: bool,

@@ -145,9 +145,9 @@ pub(crate) fn clear_staged_speculative_tokens(seqs: &mut [&mut Sequence]) {
 
 // Boxed so the pipeline wrappers that await it stay small; see `sample_and_add_toks`.
 #[allow(clippy::too_many_arguments)]
-pub fn try_sample_speculative_causal_gen<'a, 'b: 'a, C>(
+pub fn try_sample_speculative_causal_gen<'a, C>(
     target: &'a mut dyn SpeculativePipelineExt,
-    seqs: &'a mut [&'b mut Sequence],
+    seqs: &'a mut [&mut Sequence],
     logits: &'a [Tensor],
     batched_logits: Option<&'a Tensor>,
     prefix_cacher: &'a mut PrefixCacheManagerV2,

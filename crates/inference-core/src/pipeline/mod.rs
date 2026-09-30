@@ -1205,9 +1205,9 @@ pub trait Pipeline:
     /// Append pre-sampled token blocks (block-diffusion canvases) to the sequences via the
     /// standard per-token finalize path. Overridden by pipelines whose models emit
     /// `ForwardInputsResult::BlockGeneration`.
-    fn sample_block_gen<'a, 'b: 'a>(
+    fn sample_block_gen<'a>(
         &'a self,
-        _input_seqs: &'a mut [&'b mut Sequence],
+        _input_seqs: &'a mut [&mut Sequence],
         _token_blocks: Vec<Vec<u32>>,
         _denoise_times: Vec<std::time::Duration>,
         _prefix_cacher: &'a mut PrefixCacheManagerV2,
@@ -1220,9 +1220,9 @@ pub trait Pipeline:
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn try_sample_speculative_causal_gen<'a, 'b: 'a>(
+    fn try_sample_speculative_causal_gen<'a>(
         &'a mut self,
-        _input_seqs: &'a mut [&'b mut Sequence],
+        _input_seqs: &'a mut [&mut Sequence],
         _logits: &'a [Tensor],
         _batched_logits: Option<&'a Tensor>,
         _prefix_cacher: &'a mut PrefixCacheManagerV2,
@@ -1291,9 +1291,9 @@ pub trait Pipeline:
         Ok(())
     }
 
-    fn try_sample_causal_gen_batched<'a, 'b: 'a>(
+    fn try_sample_causal_gen_batched<'a>(
         &'a self,
-        _seqs: &'a mut [&'b mut Sequence],
+        _seqs: &'a mut [&mut Sequence],
         _logits: &'a Tensor,
         _prefix_cacher: &'a mut PrefixCacheManagerV2,
         _disable_eos_stop: bool,
@@ -1302,9 +1302,9 @@ pub trait Pipeline:
         Box::pin(std::future::ready(Ok(false)))
     }
 
-    fn sample_causal_gen<'a, 'b: 'a>(
+    fn sample_causal_gen<'a>(
         &'a self,
-        seqs: &'a mut [&'b mut Sequence],
+        seqs: &'a mut [&mut Sequence],
         logits: Vec<Tensor>,
         prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
