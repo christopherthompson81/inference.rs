@@ -8,6 +8,13 @@ use candle_core::Tensor;
 
 pub use inference_protocol::response::*;
 
+/// Images a diffusion pipeline produced; the caller encodes them, e.g. with `inference_protocol::images`.
+#[derive(Debug, Clone)]
+pub struct GeneratedImages {
+    pub created: u128,
+    pub images: Vec<image::DynamicImage>,
+}
+
 /// The response enum contains 3 types of variants:
 /// - Error (-Error suffix)
 /// - Chat (no prefix)
@@ -24,7 +31,7 @@ pub enum Response {
     CompletionDone(CompletionResponse),
     CompletionChunk(CompletionChunkResponse),
     // Image generation
-    ImageGeneration(ImageGenerationResponse),
+    ImageGeneration(GeneratedImages),
     // Speech generation
     Speech {
         pcm: Arc<Vec<f32>>,
@@ -68,7 +75,7 @@ pub enum ResponseOk {
     CompletionDone(CompletionResponse),
     CompletionChunk(CompletionChunkResponse),
     // Image generation
-    ImageGeneration(ImageGenerationResponse),
+    ImageGeneration(GeneratedImages),
     // Speech generation
     Speech {
         pcm: Arc<Vec<f32>>,

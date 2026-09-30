@@ -99,6 +99,7 @@ mod block_diffusion;
 pub mod distributed;
 use inference_gguf as gguf;
 pub use inference_protocol::files;
+pub use inference_protocol::images;
 mod models;
 mod pipeline;
 mod prefix_cacher;

@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use either::Either;
-use image::{DynamicImage, codecs::png::PngEncoder};
+use image::DynamicImage;
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 
@@ -398,9 +398,7 @@ impl SerializedVideo {
 }
 
 fn encode_png_base64(img: &DynamicImage) -> Result<String> {
-    let mut buf = Vec::new();
-    img.write_with_encoder(PngEncoder::new(&mut buf))
-        .context("encoding image as PNG")?;
+    let buf = crate::images::encode_png(img).context("encoding image as PNG")?;
     Ok(BASE64.encode(&buf))
 }
 

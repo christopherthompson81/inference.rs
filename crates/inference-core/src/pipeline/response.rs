@@ -1,14 +1,9 @@
 use std::sync::Arc;
 
-use base64::{Engine, engine::general_purpose::STANDARD};
 use candle_core::Tensor;
-use image::{DynamicImage, codecs::png::PngEncoder};
-use uuid::Uuid;
+use image::DynamicImage;
 
-use crate::{
-    ImageChoice, ImageGenerationResponse, ImageGenerationResponseFormat,
-    sequence::{Sequence, SequenceState, StopReason},
-};
+use crate::sequence::{Sequence, SequenceState, StopReason};
 
 pub async fn send_image_responses(
     input_seqs: &mut [&mut Sequence],
@@ -23,46 +18,11 @@ pub async fn send_image_responses(
     }
 
     for (seq, image) in input_seqs.iter_mut().zip(images) {
-        let choice = match seq
-            .image_gen_response_format()
-            .unwrap_or(ImageGenerationResponseFormat::Url)
-        {
-            ImageGenerationResponseFormat::Url => {
-                let saved_file = match seq.image_gen_save_file() {
-                    Some(path) => path.to_string_lossy().into_owned(),
-                    None => format!("image-generation-{}.png", Uuid::new_v4()),
-                };
-                let file = std::io::BufWriter::new(std::fs::File::create(&saved_file)?);
-                image
-                    .write_with_encoder(PngEncoder::new(file))
-                    .map_err(|e| candle_core::Error::Msg(e.to_string()))?;
-                ImageChoice {
-                    url: Some(saved_file),
-                    b64_json: None,
-                }
-            }
-            ImageGenerationResponseFormat::B64Json => {
-                let mut buffer = Vec::new();
-                image
-                    .write_with_encoder(PngEncoder::new(&mut buffer))
-                    .expect("Failed to encode image");
-                ImageChoice {
-                    url: None,
-                    b64_json: Some(STANDARD.encode(&buffer)),
-                }
-            }
-        };
-        seq.add_image_choice_to_group(choice);
-
-        let group = seq.get_mut_group();
-        group
-            .maybe_send_image_gen_response(
-                ImageGenerationResponse {
-                    created: seq.creation_time() as u128,
-                    data: group.get_image_choices().to_vec(),
-                },
-                seq.responder(),
-            )
+        seq.add_image_to_group(image);
+        let created = seq.creation_time() as u128;
+        let responder = seq.responder();
+        seq.get_mut_group()
+            .maybe_send_image_gen_response(created, responder)
             .await
             .map_err(candle_core::Error::msg)?;
 

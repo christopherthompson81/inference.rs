@@ -771,9 +771,7 @@ fn new_dummy_seq(
         None, // input_videos
         None, // TODO incorrect for PagedAttention
         None,
-        None,
         SeqStepType::PromptAndDecode,
-        None,
         None,
         None,
         false,

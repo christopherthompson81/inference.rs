@@ -12,7 +12,7 @@ use crate::{
     CustomLogitsProcessor, DiffusionGenerationParams, Tool, response::Response,
     sampler::SamplingParams, tools::ToolChoice,
 };
-use std::{fmt::Debug, path::PathBuf, sync::Arc, time::Instant};
+use std::{fmt::Debug, sync::Arc, time::Instant};
 use tokio::sync::mpsc::Sender;
 
 pub use inference_protocol::request::*;
@@ -46,9 +46,7 @@ pub enum RequestMessage {
     },
     ImageGeneration {
         prompt: String,
-        format: ImageGenerationResponseFormat,
         generation_params: DiffusionGenerationParams,
-        save_file: Option<PathBuf>,
     },
     SpeechGeneration {
         prompt: String,

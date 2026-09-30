@@ -7,6 +7,8 @@ use inference_core::{
     speech_utils::{self, Sample},
 };
 
+use inference_protocol::images::image_generation_response;
+
 use crate::{
     api_error::{ApiError, ApiErrorKind, ModelErrorMessage},
     dispatch::{base_process_non_streaming_response, create_response_channel, send_request},
@@ -112,15 +114,23 @@ async fn generate_image_inner(
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
     let messages = RequestMessage::ImageGeneration {
         prompt: request.prompt,
-        format: request.response_format,
         generation_params: DiffusionGenerationParams {
             height: request.height,
             width: request.width,
         },
-        save_file: None,
     };
     match run(state, &request.model, repr, messages).await? {
-        Response::ImageGeneration(response) => {
+        Response::ImageGeneration(generated) => {
+            let response = image_generation_response(
+                generated.created,
+                &generated.images,
+                request.response_format,
+                None,
+            )
+            .map_err(|e| {
+                InferenceRs::maybe_log_error(state.clone(), e.as_ref());
+                ApiError::from_error(e.as_ref(), ApiErrorKind::Internal)
+            })?;
             InferenceRs::maybe_log_response(state.clone(), &response);
             Ok(response)
         }
