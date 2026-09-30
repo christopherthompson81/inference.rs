@@ -65,7 +65,7 @@ async fn run_serve_config(cfg: crate::config::ServeConfig) -> Result<()> {
         adapters: adapter_spec_from_env(),
         throughput_logging: true,
     })?;
-    serve_engine(spec, &server, &runtime).await
+    serve_engine(spec, &server).await
 }
 
 async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {

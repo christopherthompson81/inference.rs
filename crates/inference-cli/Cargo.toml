@@ -40,7 +40,6 @@ base64.workspace = true
 toml = { workspace = true }
 ctrlc = { workspace = true }
 rustyline = { workspace = true }
-axum = { workspace = true }
 either = { workspace = true }
 indexmap = { workspace = true }
 regex = { workspace = true }
@@ -52,6 +51,7 @@ crossterm = "0.28"
 fuzzy-matcher = "0.3"
 
 [dev-dependencies]
+axum = { workspace = true }
 candle-nn.workspace = true
 image.workspace = true
 indicatif.workspace = true
@@ -60,6 +60,7 @@ inference-nn.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
 tempfile.workspace = true
+tower = { workspace = true, features = ["util"] }
 
 [features]
 default = ["code-execution", "swagger-ui", "all-models"]

@@ -1,9 +1,8 @@
 //! Server command implementation
 
 use anyhow::{Context, Result};
-use axum::middleware;
 use std::path::Path;
-use tracing::{debug, info};
+use tracing::info;
 
 use inference_api::{
     Engine, EngineSpec,
@@ -19,11 +18,9 @@ use inference_core::{
 };
 use inference_selection::{MmprojSelection, ModelSelected};
 use inference_server_core::{
-    inference_server_router_builder::{DEFAULT_MAX_BODY_LIMIT, InferenceRsServerRouterBuilder},
-    lora_adapters::runtime_lora_updates_enabled,
-    mcp_server::{MCP_PROTOCOL_VERSION, MCP_ROUTE, create_mcp_router},
-    metrics::{ObservabilityState, install_prometheus_recorder, observe_http},
-    route_registry::{INFERENCE_RS_API_ROUTES, RUNTIME_LORA_API_ROUTES, RouteInfo, RouteKind},
+    inference_server_router_builder::InferenceRsServerRouterBuilder,
+    metrics::install_prometheus_recorder,
+    serve::{ServeOptions, serve},
 };
 
 #[cfg(test)]
@@ -33,7 +30,7 @@ use crate::args::{
     GlobalOptions, MatformerSelection, ModelFormat, ModelSourceOptions, ModelType,
     MultimodalOptions, QuantizationOptions, RuntimeOptions, SandboxOptions, ServerOptions,
 };
-use inference_webui::build_ui_router;
+use inference_webui::{UI_ROUTE, UiOptions};
 
 const MEBIBYTE_BYTES: usize = 1024 * 1024;
 
@@ -73,7 +70,7 @@ pub async fn run_server(
         adapters: adapter_spec_from_env(),
         throughput_logging: true,
     })?;
-    serve_engine(spec, &server, &runtime).await
+    serve_engine(spec, &server).await
 }
 
 /// The model and the runtime settings that come with it, as `serve`, `run` and `bench` all resolve them.
@@ -249,149 +246,33 @@ pub(crate) fn skills_root(runtime: &RuntimeOptions) -> std::path::PathBuf {
 }
 
 /// Loads `spec` and serves it over HTTP, with the web UI and MCP server the options ask for.
-pub(crate) async fn serve_engine(
-    spec: EngineSpec,
-    server: &ServerOptions,
-    runtime: &RuntimeOptions,
-) -> Result<()> {
+pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Result<()> {
+    if server.mcp_port == Some(server.port) {
+        anyhow::bail!(
+            "--mcp-port must differ from the HTTP --port ({})",
+            server.port
+        );
+    }
+    let ui = (!server.no_ui).then(|| UiOptions::from_agentic(&spec.agentic));
     let engine = Engine::load(spec).await?;
-    let inference_for_ui = engine.state().clone();
-
     let mut app = InferenceRsServerRouterBuilder::new()
         .with_engine(&engine)
         .with_observability_config(server.observability_config())
         .build()
         .await?;
-
-    if !server.no_ui {
-        let enable_code_execution = {
-            #[cfg(feature = "code-execution")]
-            {
-                runtime.enable_code_execution
-            }
-            #[cfg(not(feature = "code-execution"))]
-            {
-                false
-            }
-        };
-        let enable_shell = {
-            #[cfg(feature = "code-execution")]
-            {
-                runtime.enable_shell
-            }
-            #[cfg(not(feature = "code-execution"))]
-            {
-                false
-            }
-        };
-        let ui_observability = ObservabilityState::with_max_body_bytes(
-            server.observability_config(),
-            inference_for_ui.clone(),
-            DEFAULT_MAX_BODY_LIMIT,
+    if let Some(ui) = ui {
+        app = inference_webui::mount(app, &engine, ui, server.observability_config()).await?;
+        info!(
+            "UI available at http://{}:{}{UI_ROUTE}",
+            server.host, server.port
         );
-        let ui_router = build_ui_router(
-            inference_for_ui,
-            runtime.enable_search,
-            runtime.search_embedding_model.map(|m| m.into()),
-            enable_code_execution,
-            enable_shell,
-            server.tool_dispatch_url.clone(),
-        )
-        .await?
-        .layer(middleware::from_fn_with_state(
-            ui_observability,
-            observe_http,
-        ));
-        app = app.nest("/ui", ui_router);
-        info!("UI available at http://{}:{}/ui", server.host, server.port);
     }
-
-    if let Some(mcp_port) = server.mcp_port {
-        spawn_mcp_server(&engine, &server.host, mcp_port, server.port).await?;
-    }
-
-    let listener =
-        tokio::net::TcpListener::bind(format!("{}:{}", server.host, server.port)).await?;
-    let listener = tcp_nodelay_listener(listener);
-
-    info!("Server listening on http://{}:{}", server.host, server.port);
-    log_api_surfaces(&server.host, server.port);
-
-    axum::serve(listener, app).await?;
-
-    Ok(())
-}
-
-/// Bind and spawn the MCP server on its own port, alongside the main HTTP server.
-pub(crate) async fn spawn_mcp_server(
-    engine: &Engine,
-    host: &str,
-    mcp_port: u16,
-    http_port: u16,
-) -> Result<()> {
-    if mcp_port == http_port {
-        anyhow::bail!("--mcp-port must differ from the HTTP --port ({http_port})");
-    }
-    let listener = tokio::net::TcpListener::bind(format!("{host}:{mcp_port}"))
-        .await
-        .with_context(|| format!("Failed to bind MCP server to {host}:{mcp_port}"))?;
-    let listener = tcp_nodelay_listener(listener);
-    let router = create_mcp_router(engine);
-
-    info!("MCP server listening on http://{host}:{mcp_port}{MCP_ROUTE}");
-    info!("MCP protocol version is {MCP_PROTOCOL_VERSION}");
-
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, router).await {
-            tracing::error!("MCP server error: {e}");
-        }
-    });
-    Ok(())
-}
-
-pub(crate) fn tcp_nodelay_listener(
-    listener: tokio::net::TcpListener,
-) -> impl axum::serve::Listener<Io = tokio::net::TcpStream, Addr = std::net::SocketAddr> {
-    use axum::serve::ListenerExt;
-
-    listener.tap_io(|stream| {
-        if let Err(error) = stream.set_nodelay(true) {
-            tracing::warn!("failed to set TCP_NODELAY on incoming connection: {error}");
-        }
-    })
-}
-
-pub(crate) fn log_api_surfaces(host: &str, port: u16) {
-    let client_host = match host {
-        "0.0.0.0" => "localhost",
-        "::" => "[::1]",
-        host => host,
+    let options = ServeOptions {
+        host: &server.host,
+        port: server.port,
+        mcp_port: server.mcp_port,
     };
-    let root = format!("http://{client_host}:{port}");
-
-    info!("OpenAI-compatible API: {root}/v1");
-    info!("Anthropic-compatible API: {root}");
-    info!("Swagger UI docs: {root}/docs");
-
-    debug!("Available OpenAI-compatible routes:");
-    log_routes(INFERENCE_RS_API_ROUTES, RouteKind::OpenAi);
-    debug!("Available Anthropic-compatible routes:");
-    log_routes(INFERENCE_RS_API_ROUTES, RouteKind::Anthropic);
-    debug!("Available additional inference.rs routes:");
-    log_routes(INFERENCE_RS_API_ROUTES, RouteKind::InferenceRs);
-    if runtime_lora_updates_enabled() {
-        log_routes(RUNTIME_LORA_API_ROUTES, RouteKind::InferenceRs);
-    }
-}
-
-fn log_routes(routes: &[RouteInfo], kind: RouteKind) {
-    for route in routes.iter().filter(|route| route.kind == kind) {
-        log_route(route);
-    }
-}
-
-fn log_route(route: &RouteInfo) {
-    debug!("  Route: {}, Methods: {}", route.path, route.methods);
+    serve(app, &engine, options).await
 }
 
 /// Convert our clean ModelType to the legacy ModelSelected enum
@@ -1365,7 +1246,6 @@ fn log_agent_runtime_details(runtime: &RuntimeOptions) {
 
 #[cfg(test)]
 mod tests {
-    use axum::serve::Listener;
     use inference_core::{
         AutoDeviceMapParams, IsqOrganization, LoraAdapterSpec, ModelDType, NormalLoaderType,
     };
@@ -1619,17 +1499,44 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn accepted_connections_enable_tcp_nodelay() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let mut listener = tcp_nodelay_listener(listener);
-        let connect = tokio::net::TcpStream::connect(address);
+    const XDG_CACHE_HOME: &str = "XDG_CACHE_HOME";
 
-        let ((stream, _), client) = tokio::join!(listener.accept(), connect);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_ui_mounts_beside_the_api_with_the_engines_tools() -> anyhow::Result<()> {
+        use axum::body::{Body, to_bytes};
+        use tower::ServiceExt;
 
-        client.unwrap();
-        assert!(stream.nodelay().unwrap());
+        let cache = tempfile::tempdir()?;
+        let previous = std::env::var_os(XDG_CACHE_HOME);
+        // nextest runs each test in its own process, so no other thread reads the environment meanwhile
+        unsafe { std::env::set_var(XDG_CACHE_HOME, cache.path()) };
+        let dir = crate::commands::tiny_support::tiny_checkpoint()?;
+        let spec: EngineSpec = serde_json::from_value(serde_json::json!({
+            "model": {"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}},
+            "runtime": {"device": "cpu"},
+            "agentic": {"tool_dispatch_url": "http://127.0.0.1:9/tools"},
+        }))?;
+        let ui = UiOptions::from_agentic(&spec.agentic);
+        let engine = Engine::load(spec).await?;
+        let app = InferenceRsServerRouterBuilder::new()
+            .with_engine(&engine)
+            .build()
+            .await?;
+        let app = inference_webui::mount(app, &engine, ui, Default::default()).await?;
+
+        let request = axum::http::Request::get(format!("{UI_ROUTE}/api/capabilities"));
+        let response = app.oneshot(request.body(Body::empty())?).await?;
+        assert_eq!(response.status(), axum::http::StatusCode::OK);
+        let body: serde_json::Value =
+            serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
+        assert_eq!(body["tool_dispatch_url"], "http://127.0.0.1:9/tools");
+        assert_eq!(body["search_enabled"], false);
+        assert!(cache.path().join("inference-rs").join("chats").is_dir());
+        match previous {
+            Some(value) => unsafe { std::env::set_var(XDG_CACHE_HOME, value) },
+            None => unsafe { std::env::remove_var(XDG_CACHE_HOME) },
+        }
+        Ok(())
     }
 
     #[test]

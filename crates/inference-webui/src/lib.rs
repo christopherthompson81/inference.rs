@@ -5,11 +5,17 @@ use axum::Router;
 use axum::body::Body;
 use axum::extract::DefaultBodyLimit;
 use axum::http::{Response, StatusCode};
+use axum::middleware;
 use axum::routing::{get, get_service, post};
 use include_dir::{Dir, include_dir};
 use indexmap::IndexMap;
+use inference_api::{Engine, engine::AgenticSpec};
 use inference_core::{InferenceRs, ModelCategory, SearchEmbeddingModel, SupportedModality};
-use inference_server_core::route_registry::{RouteInfo, RouteKind};
+use inference_server_core::{
+    inference_server_router_builder::DEFAULT_MAX_BODY_LIMIT,
+    metrics::{ObservabilityConfig, ObservabilityState, observe_http},
+    route_registry::{RouteInfo, RouteKind},
+};
 use tokio::fs;
 use tower_http::services::ServeDir;
 
@@ -155,14 +161,49 @@ fn build_model_list(inference: &Arc<InferenceRs>) -> IndexMap<String, UiModelInf
     models
 }
 
-pub async fn build_ui_router(
-    inference: Arc<InferenceRs>,
-    enable_search: bool,
-    search_embedding_model: Option<SearchEmbeddingModel>,
-    enable_code_execution: bool,
-    enable_shell: bool,
-    tool_dispatch_url: Option<String>,
+pub use inference_server_core::route_registry::UI_ROUTE;
+
+/// The tools the UI offers and reports; `from_agentic` reads them from the spec the engine was loaded with.
+#[derive(Debug, Clone, Default)]
+pub struct UiOptions {
+    /// Web search and the model reranking its results; `None` when search is off.
+    pub search: Option<SearchEmbeddingModel>,
+    pub code_execution: bool,
+    pub shell: bool,
+    pub tool_dispatch_url: Option<String>,
+}
+
+impl UiOptions {
+    pub fn from_agentic(agentic: &AgenticSpec) -> Self {
+        Self {
+            search: agentic.search.as_ref().map(|search| search.embedding_model),
+            code_execution: agentic.code_execution.is_some(),
+            shell: agentic.shell.is_some(),
+            tool_dispatch_url: agentic.tool_dispatch_url.clone(),
+        }
+    }
+}
+
+/// Nests the UI at `UI_ROUTE` in `app`, with the same request logging and metrics as the API routes.
+pub async fn mount(
+    app: Router,
+    engine: &Engine,
+    options: UiOptions,
+    observability: ObservabilityConfig,
 ) -> Result<Router> {
+    let inference = engine.state().clone();
+    let observability = ObservabilityState::with_max_body_bytes(
+        observability,
+        inference.clone(),
+        DEFAULT_MAX_BODY_LIMIT,
+    );
+    let ui = build_ui_router(inference, options)
+        .await?
+        .layer(middleware::from_fn_with_state(observability, observe_http));
+    Ok(app.nest(UI_ROUTE, ui))
+}
+
+async fn build_ui_router(inference: Arc<InferenceRs>, options: UiOptions) -> Result<Router> {
     let models = build_model_list(&inference);
 
     let base_cache = get_cache_dir();
@@ -203,11 +244,11 @@ pub async fn build_ui_router(
         current_chat: tokio::sync::RwLock::new(None),
         next_chat_id: tokio::sync::RwLock::new(next_id),
         default_params: GenerationParams::default(),
-        search_enabled: enable_search,
-        search_embedding_model,
-        code_execution_enabled: enable_code_execution,
-        shell_enabled: enable_shell,
-        tool_dispatch_url,
+        search_enabled: options.search.is_some(),
+        search_embedding_model: options.search,
+        code_execution_enabled: options.code_execution,
+        shell_enabled: options.shell,
+        tool_dispatch_url: options.tool_dispatch_url,
     });
 
     let router = Router::new()

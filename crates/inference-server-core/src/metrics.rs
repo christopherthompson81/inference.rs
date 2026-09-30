@@ -28,6 +28,7 @@ use crate::{
     handler_core::{ApiError, ApiErrorKind, ResponseErrorMessage, openai_error_response},
     inference_server_router_builder::DEFAULT_MAX_BODY_LIMIT,
     lora_routing::{is_resolvable_lora_adapter_model, list_lora_adapter_models},
+    route_registry::UI_ROUTE,
     streaming::{StreamOutcome, StreamOutcomeHandle},
     types::SharedInferenceRsState,
 };
@@ -817,8 +818,8 @@ fn is_housekeeping(method: &str, route: &str, uri_path: &str) -> bool {
             | "/docs/"
             | "/docs/{*rest}"
             | "/api-doc/openapi.json"
-    ) || route.starts_with("/ui")
-        || uri_path.starts_with("/ui")
+    ) || route.starts_with(UI_ROUTE)
+        || uri_path.starts_with(UI_ROUTE)
 }
 
 fn model_label_field(route: &str) -> Option<ModelLabelField> {
