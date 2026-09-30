@@ -193,3 +193,67 @@ from 31,081 to 25,363.
 
 **Implication:** step 1 of Run 4 is done. Next is step 2, one request-parse path shared by the HTTP server and the
 C ABI.
+
+## Run 6 — 2026-09-29 19:41
+
+**Question:** what is the disk cost of sharing generics across crates, with debug info off? Stable rustc shares them
+only at opt-level 0, 1, `"s"` or `"z"`, so the test puts the workspace crates at opt-level 1 and keeps dependencies
+at 3.
+
+**Commands:** in one scratch target, with `--config profile.dev.debug=false`:
+- `cargo build -p inference-cli --features cuda` as the profile stands (everything at opt-level 3).
+- The same with `--config profile.dev.opt-level=1 --config 'profile.dev.package."*".opt-level=3'`.
+
+**Raw finding:**
+
+| Measure | All crates at 3 | Workspace at 1, dependencies at 3 | Change |
+|---|---|---|---|
+| Workspace rlibs | 305.4 MB | 278.8 MB | -8.7% |
+| `inference` CLI binary | 177.2 MB | 154.7 MB | -12.7% |
+| Build wall time | 172.5 s | 192.2 s | +11% |
+
+- Rlibs by crate, opt-level 3 → 1 (MB): core 53.5 → 53.6, inference-nn 36.9 → 35.7, inference-quant 26.2 → 30.2,
+  inference-api 24.8 → 22.5, inference-server-core 24.8 → 18.7, models-llama 18.8 → 15.8, models-gemma 15.5 → 12.1,
+  models-speech 5.1 → 1.3.
+- The exported instantiations are outweighed by opt-level 1's smaller code: only quant, mcp, audio and paged-attn grow.
+- The second build recompiled 344 of the first build's 520 crates, dependencies included (all rlibs
+  1,046.6 → 1,910.2 MB, the old set kept beside the new), so both builds are close to cold.
+
+**Implication:** sharing doesn't cost disk. Rlibs and the binary both shrink. The unexplained number is the wall time:
++20 s despite less optimization. The second build ran at a higher load, so the next step is a timed pair on a quiet
+machine, plus the test-suite runtimes, before any profile change.
+
+## Run 7 — 2026-09-29 21:10
+
+**Question:** how much IR does one shared request-parse path save?
+
+**Change:**
+- `inference_api::request_body::parse_json` runs `serde_path_to_error` over serde_json's byte-slice deserializer and
+  produces axum's messages and codes (`malformed_json` for a syntax error, `invalid_request_body` for a data error).
+- `JsonRequest` has one concrete impl per request type, so each deserializer compiles in the api only. The engine's
+  `*_json` methods (the C ABI path) parse through it.
+- server-core's handlers extract `ApiJson<T>`, which checks the content type, reads the bytes and calls
+  `T::from_json`, instead of axum's `Json<T>`. Only the MCP endpoint keeps `Json`, since it maps syntax errors to
+  JSON-RPC codes.
+
+**Command:** `CARGO_TARGET_DIR=<scratch> cargo llvm-lines -p <crate> --lib --features cuda`.
+
+**Raw finding:**
+
+| Crate | Before | After | Change |
+|---|---|---|---|
+| `inference-server-core` | 1,148,114 | 923,139 | -224,975 (-19.6%) |
+| `inference-api` | 1,195,272 | 1,258,892 | +63,620 |
+| Both | 2,343,386 | 2,182,031 | -161,355 |
+
+- `serde_path_to_error` code is now 17,258 lines in server-core (was 176,599) and 171,872 in the api (was 0).
+- The api's plain `SliceRead` instantiations fell from 233,518 to 122,780. So the request types cost about 110k lines
+  under a bare `from_slice` and 172k under `serde_path_to_error`, about 1.55 times as much.
+- The remaining `SliceRead` code is mostly the engine spec: `ModelSelected`'s 14 deserializer instantiations, about
+  40k lines.
+
+**Implication:**
+- Parsing with a bare `from_slice` would save another ~60k, but errors would lose the failing field's path, which
+  the HTTP API reports today. The path stays.
+- The C ABI's errors improve: they now carry the path, and a syntax error reports `malformed_json`, as HTTP does.
+- Next is step 4, `ModelSelected`'s deserializer.

@@ -4,7 +4,7 @@ use std::{pin::Pin, sync::Arc, task::Poll, time::Duration};
 
 use axum::{
     Extension,
-    extract::{Json, Path, State, rejection::JsonRejection},
+    extract::{Json, Path, State},
     response::{
         IntoResponse, Sse,
         sse::{Event, KeepAlive, KeepAliveStream},
@@ -12,11 +12,12 @@ use axum::{
 };
 use futures::Stream;
 
+use crate::handler_core::{ApiJson, ApiJsonRejection};
 pub use crate::responses_api::{
     OpenResponsesCreateRequest, OpenResponsesStreamEvent, ResponseDeleted,
 };
 use crate::{
-    handler_core::{ApiError, ApiErrorHttp, openai_error_response},
+    handler_core::{ApiError, openai_error_response},
     responses_api::{
         OpenResponsesStreamer, ResponsesStreamItem, cancel_response as cancel, collect_response,
         delete_response as delete, get_response as get, prepare_response, spawn_background,
@@ -96,11 +97,11 @@ pub async fn create_response(
     State(state): ExtractedInferenceRsState,
     Extension(skill_store): Extension<Arc<SkillStore>>,
     stream_outcome: Option<Extension<StreamOutcomeHandle>>,
-    payload: Result<Json<OpenResponsesCreateRequest>, JsonRejection>,
+    payload: Result<ApiJson<OpenResponsesCreateRequest>, ApiJsonRejection>,
 ) -> OpenResponsesResponder {
     let request = match payload {
-        Ok(Json(request)) => request,
-        Err(error) => return OpenResponsesResponder::Error(ApiError::from_json_rejection(error)),
+        Ok(ApiJson(request)) => request,
+        Err(ApiJsonRejection(error)) => return OpenResponsesResponder::Error(error),
     };
     let prepared = match prepare_response(&state, Some(skill_store), request).await {
         Ok(prepared) => prepared,

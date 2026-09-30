@@ -1,13 +1,11 @@
 //! The image generation route: HTTP framing over the engine's image generation.
 
-use axum::{
-    extract::{Json, State, rejection::JsonRejection},
-    response::Response,
-};
+use axum::{extract::State, response::Response};
 
+use crate::handler_core::{ApiJson, ApiJsonRejection};
 use crate::{
     generation::generate_image,
-    handler_core::{ApiError, ApiErrorHttp, json_response, openai_error_response},
+    handler_core::{json_response, openai_error_response},
     openai::ImageGenerationRequest,
     types::ExtractedInferenceRsState,
 };
@@ -22,10 +20,10 @@ use crate::{
 )]
 pub async fn image_generation(
     State(state): ExtractedInferenceRsState,
-    payload: Result<Json<ImageGenerationRequest>, JsonRejection>,
+    payload: Result<ApiJson<ImageGenerationRequest>, ApiJsonRejection>,
 ) -> Response {
     match payload {
-        Ok(Json(request)) => json_response(generate_image(&state, request).await),
-        Err(error) => openai_error_response(ApiError::from_json_rejection(error)),
+        Ok(ApiJson(request)) => json_response(generate_image(&state, request).await),
+        Err(ApiJsonRejection(error)) => openai_error_response(error),
     }
 }

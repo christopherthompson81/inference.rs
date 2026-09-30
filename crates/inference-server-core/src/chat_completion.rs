@@ -4,7 +4,7 @@ use std::{pin::Pin, sync::Arc, task::Poll, time::Duration};
 
 use axum::{
     Extension,
-    extract::{Json, State, rejection::JsonRejection},
+    extract::{Json, State},
     response::{
         IntoResponse, Sse,
         sse::{Event, KeepAlive, KeepAliveStream},
@@ -16,7 +16,7 @@ use tokio::sync::mpsc::Receiver;
 pub use crate::engine_chat::{
     ChatCompletionParseContext, parse_request, serialize_agentic_progress,
 };
-use crate::handler_core::ApiErrorHttp;
+use crate::handler_core::{ApiJson, ApiJsonRejection};
 use crate::{
     agentic::AgenticDefaults,
     completion_core::{
@@ -198,14 +198,12 @@ pub async fn chatcompletions(
     Extension(agentic_defaults): Extension<AgenticDefaults>,
     Extension(skill_store): Extension<Arc<SkillStore>>,
     stream_outcome: Option<Extension<StreamOutcomeHandle>>,
-    payload: Result<Json<ChatCompletionRequest>, JsonRejection>,
+    payload: Result<ApiJson<ChatCompletionRequest>, ApiJsonRejection>,
 ) -> ChatCompletionResponder {
     let oairequest = match payload {
-        Ok(Json(request)) => request,
-        Err(error) => {
-            return ChatCompletionResponder::ValidationError(Box::new(
-                ApiError::from_json_rejection(error),
-            ));
+        Ok(ApiJson(request)) => request,
+        Err(ApiJsonRejection(error)) => {
+            return ChatCompletionResponder::ValidationError(Box::new(error));
         }
     };
     let engine = ChatEngine {
