@@ -8,13 +8,13 @@ use super::multimodal_binding_utils::{
 
 const FAMILY: &str = "Gemma 3";
 
-pub(crate) fn build_gemma3_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+pub fn build_gemma3_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     validate_architecture(archive, "gemma3")?;
     validate_projector(archive, "gemma3")?;
     build_gemma3_bindings_from_inventory(&TensorInventory::from_archive(archive))
 }
 
-pub(crate) fn build_gemma3_text_bindings(
+pub fn build_gemma3_text_bindings(
     archive: &GgufArchive,
     use_language_model_prefix: bool,
 ) -> Result<GgufBindingMap> {
@@ -207,7 +207,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::gguf::multimodal_binding_utils::binding_sources;
+    use crate::multimodal_binding_utils::binding_sources;
 
     #[test]
     fn maps_complete_gemma3_inventory() {

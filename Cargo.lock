@@ -2908,6 +2908,7 @@ dependencies = [
  "indicatif 0.18.3",
  "inference-audio",
  "inference-code-exec",
+ "inference-gguf",
  "inference-mcp",
  "inference-models-diffusion",
  "inference-models-gemma",
@@ -3004,6 +3005,29 @@ dependencies = [
  "candle-nn",
  "cudaforge",
  "half",
+]
+
+[[package]]
+name = "inference-gguf"
+version = "0.9.3"
+dependencies = [
+ "ahash",
+ "anyhow",
+ "candle-core",
+ "hf-hub",
+ "inference-models-gemma",
+ "inference-models-llama",
+ "inference-models-other",
+ "inference-models-phi",
+ "inference-models-qwen",
+ "inference-nn",
+ "inference-quant",
+ "rand 0.9.4",
+ "serde_json",
+ "strum 0.28.0",
+ "tempfile",
+ "tokenizers",
+ "tracing",
 ]
 
 [[package]]

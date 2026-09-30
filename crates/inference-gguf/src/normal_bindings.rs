@@ -1,10 +1,10 @@
 use super::normal_registry::CanonicalGgufArchitecture;
-use crate::NormalLoaderType;
 use anyhow::{Context, Result, bail};
 use candle_core::{DType, quantized::gguf_file::Value};
+use inference_nn::loaders::NormalLoaderType;
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 
-pub(crate) fn build_normal_bindings(
+pub fn build_normal_bindings(
     archive: &GgufArchive,
     loader: &NormalLoaderType,
     architecture: CanonicalGgufArchitecture,

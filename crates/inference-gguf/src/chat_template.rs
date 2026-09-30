@@ -4,7 +4,7 @@ use anyhow::Result;
 use candle_core::quantized::gguf_file::Value;
 use tracing::info;
 
-use crate::gguf::metadata::ContentMetadata;
+use crate::metadata::ContentMetadata;
 
 use super::Content;
 
@@ -33,7 +33,7 @@ pub fn get_gguf_chat_template<R: std::io::Seek + std::io::Read>(
     get_gguf_chat_template_from_metadata(content.get_metadata())
 }
 
-pub(crate) fn get_gguf_chat_template_from_metadata(
+pub fn get_gguf_chat_template_from_metadata(
     metadata: &HashMap<String, Value>,
 ) -> Result<Option<String>> {
     let metadata = ContentMetadata {

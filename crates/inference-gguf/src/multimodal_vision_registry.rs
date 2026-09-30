@@ -1,9 +1,9 @@
 use anyhow::{Result, bail};
 use inference_quant::{GgufArchive, GgufBindingMap};
 
-use crate::MultimodalLoaderType;
+use inference_nn::loaders::MultimodalLoaderType;
 
-#[cfg(feature = "models-gemma")]
+#[cfg(any(test, feature = "models-gemma"))]
 use super::{gemma3_bindings::build_gemma3_bindings, gemma3n_bindings::build_gemma3n_bindings};
 use super::{
     idefics3_bindings::build_idefics3_bindings,
@@ -16,7 +16,7 @@ use super::{
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum NativeMultimodalGgufFamily {
+pub enum NativeMultimodalGgufFamily {
     Gemma3,
     Gemma3n,
     Idefics3,
@@ -26,13 +26,13 @@ pub(crate) enum NativeMultimodalGgufFamily {
     MuseGlimmer,
 }
 
-pub(crate) struct NativeMultimodalGguf {
+pub struct NativeMultimodalGguf {
     pub loader_type: MultimodalLoaderType,
     pub bindings: GgufBindingMap,
     pub rope_pairing: RopePairing,
 }
 
-pub(crate) fn resolve_native_multimodal_gguf(
+pub fn resolve_native_multimodal_gguf(
     archive: &GgufArchive,
 ) -> Result<Option<NativeMultimodalGguf>> {
     let architecture = metadata_string(archive, "general.architecture")?
@@ -71,11 +71,11 @@ impl NativeMultimodalGgufFamily {
 
     fn build_bindings(self, archive: &GgufArchive) -> Result<GgufBindingMap> {
         match self {
-            #[cfg(feature = "models-gemma")]
+            #[cfg(any(test, feature = "models-gemma"))]
             Self::Gemma3 => build_gemma3_bindings(archive),
-            #[cfg(feature = "models-gemma")]
+            #[cfg(any(test, feature = "models-gemma"))]
             Self::Gemma3n => build_gemma3n_bindings(archive),
-            #[cfg(not(feature = "models-gemma"))]
+            #[cfg(not(any(test, feature = "models-gemma")))]
             Self::Gemma3 | Self::Gemma3n => {
                 bail!("GGUF Gemma 3 models are not built in; enable the `models-gemma` feature")
             }

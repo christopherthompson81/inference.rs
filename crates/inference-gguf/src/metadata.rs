@@ -3,14 +3,14 @@ use candle_core::DType;
 use candle_core::quantized::gguf_file;
 use std::fs;
 
+use crate::Content;
 use crate::GGUFArchitecture;
-use crate::attention::ATTENTION_CHUNK_SIZE;
-use crate::device_map::AutoDeviceMapParams;
-use crate::gguf::Content;
-use crate::matformer::MatformerSliceConfig;
-use crate::paged_attention::ModelConfigLike;
-use crate::pipeline::DeviceMappedModelLoader;
-pub(crate) use inference_nn::gguf::metadata::{ContentConfig, ContentMetadata};
+use inference_nn::attention::ATTENTION_CHUNK_SIZE;
+use inference_nn::device_map::AutoDeviceMapParams;
+pub use inference_nn::gguf::metadata::{ContentConfig, ContentMetadata};
+use inference_nn::loaders::DeviceMappedModelLoader;
+use inference_nn::matformer::MatformerSliceConfig;
+use inference_nn::paged_attention::ModelConfigLike;
 
 fn info_bytes(info: &gguf_file::TensorInfo) -> usize {
     info.shape.elem_count() / info.ggml_dtype.block_size() * info.ggml_dtype.type_size()
@@ -61,7 +61,7 @@ impl DeviceMappedModelLoader for GgufDeviceMapLoaderInner<'_, '_> {
         _config: &str,
         _dtype: DType,
         _weight_pack_factor: usize,
-        _quantization: Option<&crate::pipeline::AutoDeviceMapQuantization<'_>>,
+        _quantization: Option<&inference_nn::loaders::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
         let size_in_bytes = match self.arch {

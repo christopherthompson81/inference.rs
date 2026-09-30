@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 
-use crate::NormalLoaderType;
+use inference_nn::loaders::NormalLoaderType;
 
 use super::{
     multimodal_binding_utils::{
@@ -14,7 +14,7 @@ use super::{
 
 const FAMILY: &str = "LFM2-VL";
 
-pub(crate) fn build_lfm2_vl_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+pub fn build_lfm2_vl_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     validate_architecture(archive, "lfm2")?;
     validate_projector(archive, "lfm2")?;
     let text = build_normal_bindings(
@@ -136,7 +136,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::gguf::multimodal_binding_utils::binding_sources;
+    use crate::multimodal_binding_utils::binding_sources;
 
     #[test]
     fn maps_complete_lfm2_vl_inventory() {

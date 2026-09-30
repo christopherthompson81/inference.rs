@@ -8,7 +8,7 @@ const BASE_MODEL_PREFIX: &str = "general.base_model.";
 const BASE_MODEL_REPO_URL_SUFFIX: &str = ".repo_url";
 const HUGGING_FACE_PREFIX: &str = "https://huggingface.co/";
 
-pub(crate) fn infer_hf_base_model_id<'a>(
+pub fn infer_hf_base_model_id<'a>(
     sources: impl IntoIterator<Item = (&'a str, &'a HashMap<String, Value>)>,
 ) -> Result<Option<String>> {
     let mut selected: Option<(&str, String)> = None;

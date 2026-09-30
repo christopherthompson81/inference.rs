@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 
-use crate::MultimodalLoaderType;
+use inference_nn::loaders::MultimodalLoaderType;
 
 use super::multimodal_binding_utils::{
     TensorInventory, bind_required, bind_required_linear, bind_required_with,
@@ -9,16 +9,15 @@ use super::multimodal_binding_utils::{
 };
 
 const FAMILY: &str = "Muse-Glimmer";
-pub(crate) const COLLAPSED_TEMPORAL_CONFIG_KEY: &str =
-    "_inference_muse_glimmer_gguf_collapsed_temporal";
+pub const COLLAPSED_TEMPORAL_CONFIG_KEY: &str = "_inference_muse_glimmer_gguf_collapsed_temporal";
 
-pub(crate) fn build_muse_glimmer_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+pub fn build_muse_glimmer_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     validate_architecture(archive, "muse-glimmer")?;
     validate_projector(archive, "muse-glimmer")?;
     build_muse_glimmer_bindings_from_inventory(&TensorInventory::from_archive(archive))
 }
 
-pub(crate) fn normalize_muse_glimmer_config(
+pub fn normalize_muse_glimmer_config(
     loader_type: &MultimodalLoaderType,
     config: &str,
 ) -> Result<String> {
@@ -188,7 +187,7 @@ mod tests {
     use std::io::Write;
 
     use super::*;
-    use crate::gguf::{
+    use crate::{
         multimodal_binding_utils::binding_sources,
         multimodal_vision_registry::resolve_native_multimodal_gguf, normal_registry::RopePairing,
     };
