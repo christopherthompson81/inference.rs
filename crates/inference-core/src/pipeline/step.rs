@@ -166,9 +166,9 @@ struct ChunkedPrompt<'a> {
 impl dyn Pipeline {
     #[doc(hidden)]
     #[allow(clippy::too_many_arguments)]
-    pub fn submit_step<'a, 'b: 'a>(
+    pub fn submit_step<'a>(
         &'a mut self,
-        input_seqs: &'a mut [&'b mut Sequence],
+        input_seqs: &'a mut [&mut Sequence],
         is_prompt: bool,
         return_raw_logits: bool,
         prefix_cacher: &'a mut PrefixCacheManagerV2,

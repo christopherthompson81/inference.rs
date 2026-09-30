@@ -2250,9 +2250,9 @@ impl Pipeline for NormalPipeline {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn try_sample_speculative_causal_gen<'a, 'b: 'a>(
+    fn try_sample_speculative_causal_gen<'a>(
         &'a mut self,
-        seqs: &'a mut [&'b mut Sequence],
+        seqs: &'a mut [&mut Sequence],
         logits: &'a [Tensor],
         batched_logits: Option<&'a Tensor>,
         prefix_cacher: &'a mut PrefixCacheManagerV2,
@@ -2296,9 +2296,9 @@ impl Pipeline for NormalPipeline {
         })
     }
 
-    fn try_sample_causal_gen_batched<'a, 'b: 'a>(
+    fn try_sample_causal_gen_batched<'a>(
         &'a self,
-        seqs: &'a mut [&'b mut Sequence],
+        seqs: &'a mut [&mut Sequence],
         logits: &'a Tensor,
         prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
@@ -2321,9 +2321,9 @@ impl Pipeline for NormalPipeline {
         )
     }
 
-    fn sample_causal_gen<'a, 'b: 'a>(
+    fn sample_causal_gen<'a>(
         &'a self,
-        seqs: &'a mut [&'b mut Sequence],
+        seqs: &'a mut [&mut Sequence],
         logits: Vec<Tensor>,
         prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,

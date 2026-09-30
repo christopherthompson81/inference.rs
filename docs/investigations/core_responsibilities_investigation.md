@@ -664,3 +664,54 @@ model and quant fits this machine", which is an API question. Can they leave cor
 **Implication:** Code that uses core only through its public surface is cheap to lift out, and each move takes its
 monomorphized dependencies with it, which is where most of the IR was. The chat templates (minijinja) are the next
 candidate of this kind, moving down to inference-protocol.
+
+## Run 18 — 2026-09-30 09:30
+
+**Question:** Run 16 found `#[async_trait]` wrappers re-proving `Send` over `Sequence`'s type graph. Does the same
+pattern (a boxed `dyn Future + Send` whose proof can't be cached) survive anywhere, in core or the crates above it?
+
+**Commands:** a CPU-only scratch target (`CARGO_INCREMENTAL=0`), each crate touched and rebuilt with
+`RUSTC_BOOTSTRAP=1 cargo rustc -p <crate> --lib -- -Z self-profile=<dir> -Z self-profile-events=default,args`, read
+with `summarize` and with `crox --minimum-duration 20`. A script charges each top-level trait-solving event
+(`evaluate_obligation`, `type_op_prove_predicate`, `codegen_select_candidate`, normalization) to the innermost
+enclosing `typeck_root`, `mir_borrowck`, `optimized_mir` or mono-item collection event and groups it by trait and
+self type.
+
+**Raw finding, per crate (self time; CPU-only, so not comparable with Run 16's CUDA build):**
+- inference-core: `evaluate_obligation` 2.49 s, `type_op_prove_predicate` 0.54 s, `codegen_select_candidate` 0.53 s;
+  3.20 s of top-level solving in all.
+- inference-api 0.39 s, inference-server-core 0.22 s (+0.84 s `codegen_select_candidate`), inference-agent 0.11 s.
+- LLVM object emission dominates all four (core 33 s, api 18 s, agent 11 s, server-core 9 s summed over 16 CGUs).
+- Core by item: `speculative::driver::try_sample_speculative_causal_gen` 0.64 s (1054 queries, all
+  `<C as SpeculativeCacheAccess>::Guard: Send/Sync`), `sample_and_add_toks` 0.38 s, `finalize_block_gen` 0.32 s,
+  `submit_step` 0.18 s, the normal and multimodal speculative wrappers 0.19 s. All are `Send`/`Sync` proofs of an
+  async fn's coroutine witness and `Sequence`'s graph.
+- Every one of those queries' environments includes `OutlivesPredicate('^c_0, '^c_1)`: the explicit `'b: 'a` that
+  #149 kept on the `BoxFuture` signatures (`fn f<'a, 'b: 'a>(seqs: &'a mut [&'b mut Sequence]) -> BoxFuture<'a, _>`).
+- Server-core's cost sits under mono-item collection: projections through axum's `Handler`, tower's `MapResponse` and
+  the handler fn types. That is axum monomorphizing each route, not a `Send` proof.
+
+**Cause:** canonicalizing a query turns the free regions of an outlives where-clause into region variables, and
+rustc's selection context won't use the crate-wide evaluation cache for an environment that holds inference
+variables. So the region bound sent every nested proof to a per-query cache and each wrapper re-proved the whole graph.
+Region-free trait bounds don't do this: the driver keeps `C: SpeculativeCacheAccess + Sync` and still got fast. This
+finishes Run 16's diagnosis, which blamed the methods' lifetime bounds; moving off `async_trait` kept them. The bound is
+redundant: `&'a mut [&'b mut Sequence]` implies `'b: 'a`, and implied bounds are not where-clauses.
+
+**Change:** `<'a, 'b: 'a>` becomes `<'a>`, with `&'b mut Sequence` elided to `&mut Sequence` (clippy flags `'b` once it
+has no bound), on 25 signatures: the `Pipeline` sampling methods, their shared functions,
+`submit_step`, the speculative driver and `report_pipeline_forward_error`. Nothing else changes; the implied bound
+still types the futures.
+
+**Raw finding, after:**
+- Core self-profile: top-level solving 3.20 s → 0.76 s. `evaluate_obligation` 2.49 → 0.54 s, `typeck_root` 3.31 →
+  1.45 s self, `mir_borrowck` 2.28 → 0.90 s self. The speculative driver fell 0.64 → 0.013 s without touching its
+  generic, so making it concrete over `PagedSpeculativeCacheAccess` isn't needed.
+- `-Z time-passes`, two runs each: type checking 2.28/2.33 → 2.04/2.06 s, borrow checking 1.86/1.89 → 1.76/1.77 s,
+  total 19.24/19.62 → 18.84/18.97 s, about -0.5 s. The self-profile overstated the gain roughly fivefold: its
+  per-event recording inflates query-heavy passes most.
+
+**Implication:** Explicit outlives bounds on functions that prove auto traits over large graphs cost real time, and
+the self-profile makes that cost look bigger than it is; confirm with `-Z time-passes`. What remains of trait solving
+in these crates is small. The next lever is codegen volume: LLVM emission dominates every crate, and server-core's
+remaining solver time is axum's per-route monomorphization, which only erasing handlers (boxed services) would cut.

@@ -36,11 +36,11 @@ macro_rules! handle_seq_error_stateaware_ok {
 }
 
 // Boxed and out of line so every forward failure in the engine loop shares one copy of the error path.
-pub(crate) fn report_pipeline_forward_error<'a, 'b: 'a>(
+pub(crate) fn report_pipeline_forward_error<'a>(
     stage: &'static str,
     message: String,
     detail: String,
-    seqs: &'a mut [&'b mut Sequence],
+    seqs: &'a mut [&mut Sequence],
     pipeline: &'a Mutex<dyn Pipeline>,
     prefix_cacher: &'a Mutex<PrefixCacheManagerV2>,
 ) -> BoxFuture<'a, ()> {

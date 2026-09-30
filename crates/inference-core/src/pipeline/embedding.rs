@@ -651,9 +651,9 @@ impl Pipeline for EmbeddingPipeline {
 
         Ok(ForwardInputsResult::Embeddings { embeddings: xs })
     }
-    fn sample_causal_gen<'a, 'b: 'a>(
+    fn sample_causal_gen<'a>(
         &'a self,
-        seqs: &'a mut [&'b mut Sequence],
+        seqs: &'a mut [&mut Sequence],
         logits: Vec<Tensor>,
         prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
