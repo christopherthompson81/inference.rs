@@ -10,7 +10,7 @@ use candle_core::cuda_backend::cudarc::driver::{
 use candle_core::{DType, Device, DeviceLocation, Storage, Tensor, Var};
 
 const CUDA_GRAPH_INSTANTIATE_FLAGS: u64 =
-    sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH as u64;
+    sys::CUgraphInstantiate_flags_enum::CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH.0 as u64;
 
 const CUDA_GRAPH_BATCH_BUCKET_GRANULARITY: usize = 8;
 
