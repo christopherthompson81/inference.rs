@@ -10,9 +10,9 @@ use serde_json::Value;
 use inference_core::{
     AgentPermission, AgentToolApproval, AgentToolApprovalCallback, AgentToolApprovalDecision,
     AgentToolApprovalHandler, AgentToolKind, AgentToolMetadata, AgentToolSource,
-    AgenticToolCallData, AgenticToolCallPhase, Engine, MessageContent, NormalRequest, Request,
-    RequestMessage, Response, SupportedModality, ToolCallResponse, ToolChoice, Usage,
-    WebSearchOptions,
+    AgenticToolCallData, AgenticToolCallPhase, Engine, FINISH_REASON_CANCELED, MessageContent,
+    NormalRequest, Request, RequestMessage, Response, SupportedModality, ToolCallResponse,
+    ToolChoice, Usage, WebSearchOptions,
     agent::{
         AGENTIC_LOOP_REENTRY_SENTINEL, CODE_EXECUTION, DEFAULT_MAX_TOOL_ROUNDS, is_code_exec_tool,
         is_list_files_tool, is_read_file_tool, is_shell_tool, is_surface_outputs_tool,
@@ -1138,6 +1138,7 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
             agent_approval_handler,
         };
 
+        let cancellation = probe.cancellation.clone();
         let mut current = probe;
         let max_rounds = current.max_tool_rounds.unwrap_or(DEFAULT_MAX_TOOL_ROUNDS);
         let mut round = 0;
@@ -1196,9 +1197,16 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                     _ => None,
                 };
 
-                if tc_opt.is_none() || round >= max_rounds {
+                let canceled = cancellation.as_ref().is_some_and(|c| c.is_canceled());
+                if tc_opt.is_none() || round >= max_rounds || canceled {
                     save_session(&this_clone, &session_id, &visible_req);
                     let mut final_resp = done.clone();
+                    if canceled {
+                        for choice in &mut final_resp.choices {
+                            choice.finish_reason = FINISH_REASON_CANCELED.to_string();
+                            choice.message.tool_calls = None;
+                        }
+                    }
                     if let Some(usage) = usage_accumulator.aggregate() {
                         final_resp.usage = usage;
                     }
@@ -1265,6 +1273,7 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                 let mut last_choice = None;
                 let mut held_final_chunk: Option<inference_core::ChatCompletionChunkResponse> =
                     None;
+                let mut tool_call_final_chunk = None;
                 let mut round_reasoning_content = String::new();
 
                 loop {
@@ -1293,6 +1302,8 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                                 } else {
                                     let _ = user_sender.send(Response::Chunk(chunk.clone())).await;
                                 }
+                            } else if is_final {
+                                tool_call_final_chunk = Some(chunk.clone());
                             }
                             last_choice = Some(first_choice.clone());
 
@@ -1326,7 +1337,19 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                     _ => None,
                 };
 
-                if tc_opt.is_none() || round >= max_rounds {
+                let canceled = cancellation.as_ref().is_some_and(|c| c.is_canceled());
+                if canceled {
+                    // A tool call that finished on the canceled token is dropped, not run.
+                    held_final_chunk =
+                        held_final_chunk.or(tool_call_final_chunk).map(|mut chunk| {
+                            for choice in &mut chunk.choices {
+                                choice.finish_reason = Some(FINISH_REASON_CANCELED.to_string());
+                                choice.delta.tool_calls = None;
+                            }
+                            chunk
+                        });
+                }
+                if tc_opt.is_none() || round >= max_rounds || canceled {
                     save_session(&this_clone, &session_id, &visible_req);
                     if let Some(mut final_chunk) = held_final_chunk {
                         if let Some(usage) = usage_accumulator.aggregate() {

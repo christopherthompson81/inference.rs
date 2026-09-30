@@ -1440,7 +1440,8 @@ impl Scheduler for PagedAttentionScheduler {
             .iter()
             .chain(self.waiting.iter())
             .for_each(|seq| {
-                let seq = get_mut_arcmutex!(seq);
+                let mut seq = get_mut_arcmutex!(seq);
+                seq.latch_cancellation();
                 if seq.response_is_closed() && !seq.is_finished_paged_attn() {
                     seq.set_state(SequenceState::Done(StopReason::Canceled));
                 }

@@ -416,6 +416,7 @@ impl Engine {
                 seq.bind_adapter(adapter_lease.clone());
             }
 
+            seq.set_cancellation(request.cancellation.clone());
             self.enable_template_reasoning(&mut seq);
             self.prepare_multimodal_prompt(&mut seq)?;
             if request.response.is_closed() {

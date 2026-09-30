@@ -399,6 +399,7 @@ impl Model {
             session_id: request.session_id().map(|s| s.to_string()),
             files: request.take_files(),
             input_files: request.take_input_files(),
+            cancellation: None,
         }));
         self.runner.get_sender(model_id)?.send(request).await?;
         Ok(rx)

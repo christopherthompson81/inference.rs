@@ -267,6 +267,7 @@ async fn fetch_embedding(
         session_id: None,
         files: None,
         input_files: Vec::new(),
+        cancellation: None,
     }));
 
     send_request_with_model(&state, request, model_id)
@@ -316,6 +317,7 @@ async fn fetch_embedding_tokens(
         session_id: None,
         files: None,
         input_files: Vec::new(),
+        cancellation: None,
     }));
 
     send_request_with_model(&state, request, model_id)

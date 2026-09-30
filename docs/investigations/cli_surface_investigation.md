@@ -129,3 +129,31 @@ types they carry. The Responses stream's own items stay JSON; nothing in Rust co
 **Deferred:** `BlockDenoisingProgress` on chat streams (it would add an event to the C ABI stream) and per-request
 cancellation that keeps the final chunk and usage. Core has no per-request cancel, only the process-wide
 `TERMINATE_ALL_NEXT_STEP`, so that is a scheduler change of its own.
+
+## Run 6 — 2026-09-30 20:30
+
+**Question:** per-request cancellation that still delivers the final chunk and usage, replacing the process-wide
+`TERMINATE_ALL_NEXT_STEP` the CLI uses for Ctrl-C.
+
+**Dead end:** the first version marked a canceled request's sequences `Done(Canceled)` in the schedulers'
+per-step `cancel_closed_response_groups` hook. The new test got an internal error instead of a final chunk: that hook
+runs before scheduling, and the scheduler frees finished sequences without a step, which is right for a closed
+client but sends nothing. `TERMINATE_ALL` works because it marks sequences inside `schedule()`.
+
+**Change:** `NormalRequest.cancellation: Option<RequestCancellation>` (a shared atomic flag) is copied onto each
+sequence. The same per-step hook latches it into a plain bool on the engine thread, and the stop check returns
+`Canceled` after the EOS, stop-token and length checks. The sequence therefore ends on its next sampled token through
+the normal done path. `ChatEngine` attaches a token to every chat request; `ChatStream::cancel()` fires it.
+
+**Review findings fixed:** the latch exists because the CUDA decode path asks whether a step finishes a sequence
+twice (before syncing the lookahead tail and while finishing), and an atomic another thread flips could answer the
+two differently. The agent loop now checks the token after each round: a tool call that finished on the canceled
+token is dropped rather than approved and run, and the final response is marked `canceled`.
+
+**Known limits, for follow-up:** a sequence still waiting or mid-prefill runs its prefill and one token before it
+ends; ring/NCCL workers don't receive the cancel (the same as a closed client today); the Responses and Anthropic
+streams and the C ABI's stream handles can't fire it yet (an `inference_stream_cancel` would need C# and Python
+bindings). Diffusion and speech requests never reach the stop check.
+
+**Test:** `chat_route::a_cancelled_chat_stream_ends_with_its_usage`: cancelling after the first chunk ends the stream
+with `finish_reason: canceled`, usage, and fewer tokens than the cap (CPU and CUDA suites).

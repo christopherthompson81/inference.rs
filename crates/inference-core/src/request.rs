@@ -12,7 +12,14 @@ use crate::{
     CustomLogitsProcessor, DiffusionGenerationParams, Tool, response::Response,
     sampler::SamplingParams, tools::ToolChoice,
 };
-use std::{fmt::Debug, sync::Arc, time::Instant};
+use std::{
+    fmt::Debug,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering as AtomicOrdering},
+    },
+    time::Instant,
+};
 use tokio::sync::mpsc::Sender;
 
 pub use inference_protocol::request::*;
@@ -140,6 +147,27 @@ pub struct NormalRequest {
     /// User-provided input files attached to this request.
     #[serde(default)]
     pub input_files: Vec<crate::files::File>,
+    /// Ends the request's sequences as `canceled` on their next sampled token, with their final response and usage.
+    #[serde(skip)]
+    // Like a closed response channel, it isn't sent to ring or NCCL workers, whose copies keep stepping.
+    pub cancellation: Option<RequestCancellation>,
+}
+
+/// The `finish_reason` of a sequence its request canceled.
+pub const FINISH_REASON_CANCELED: &str = "canceled";
+
+/// A flag the requester sets to cancel its request; cloning shares it.
+#[derive(Clone, Debug, Default)]
+pub struct RequestCancellation(Arc<AtomicBool>);
+
+impl RequestCancellation {
+    pub fn cancel(&self) {
+        self.0.store(true, AtomicOrdering::Relaxed);
+    }
+
+    pub fn is_canceled(&self) -> bool {
+        self.0.load(AtomicOrdering::Relaxed)
+    }
 }
 
 impl NormalRequest {
@@ -271,6 +299,7 @@ impl NormalRequest {
             session_id: None,
             files: None,
             input_files: Vec::new(),
+            cancellation: None,
         }
     }
 }

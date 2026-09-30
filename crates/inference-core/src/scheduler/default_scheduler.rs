@@ -331,10 +331,14 @@ impl Scheduler for DefaultScheduler<VecDeque<Sequence>> {
     }
     fn cancel_closed_response_groups(&mut self) {
         self.running
-            .iter()
-            .chain(self.waiting.iter())
-            .filter(|seq| seq.response_is_closed() && !seq.is_finished_paged_attn())
-            .for_each(|seq| seq.set_state(SequenceState::Done(StopReason::Canceled)));
+            .iter_mut()
+            .chain(self.waiting.iter_mut())
+            .for_each(|seq| {
+                seq.latch_cancellation();
+                if seq.response_is_closed() && !seq.is_finished_paged_attn() {
+                    seq.set_state(SequenceState::Done(StopReason::Canceled));
+                }
+            });
     }
     fn block_size(&self) -> Option<usize> {
         None

@@ -312,6 +312,7 @@ async fn oneshot_text(inference: Arc<InferenceRs>, ctx: OneshotCtx, text: String
         truncate_sequence: false,
         files: None,
         input_files: Vec::new(),
+        cancellation: None,
     }));
     sender.send(req).await.unwrap();
     let start_ttft = Instant::now();
@@ -497,6 +498,7 @@ async fn oneshot_multimodal(inference: Arc<InferenceRs>, ctx: OneshotCtx, input:
         truncate_sequence: false,
         files: None,
         input_files: Vec::new(),
+        cancellation: None,
     }));
     sender.send(req).await.unwrap();
     let start_ttft = Instant::now();
@@ -1004,6 +1006,7 @@ async fn text_interactive_mode(
             truncate_sequence: false,
             files: None,
             input_files: Vec::new(),
+            cancellation: None,
         }));
         sender.send(req).await.unwrap();
         let start_ttft = Instant::now();
@@ -1790,6 +1793,7 @@ async fn multimodal_interactive_mode(
             truncate_sequence: false,
             files: None,
             input_files: Vec::new(),
+            cancellation: None,
         }));
         sender.send(req).await.unwrap();
         let start_ttft = Instant::now();
@@ -1956,6 +1960,7 @@ async fn diffusion_interactive_mode(
             truncate_sequence: false,
             files: None,
             input_files: Vec::new(),
+            cancellation: None,
         }));
 
         let start = Instant::now();
@@ -2090,6 +2095,7 @@ async fn speech_interactive_mode(
             truncate_sequence: false,
             files: None,
             input_files: Vec::new(),
+            cancellation: None,
         }));
 
         let start = Instant::now();
