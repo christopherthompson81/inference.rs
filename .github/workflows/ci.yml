@@ -69,6 +69,23 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
       - run: cargo clippy --workspace --tests --examples -- -D warnings
 
+  # The metal-only code paths are invisible to the Linux clippy job, and Check (metal) only runs cargo check
+  clippy-metal:
+    name: Clippy (metal)
+    runs-on: macOS-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      # Shaders are compiled by metal_shaders.yml, only when shader sources or their build config change
+      - run: cargo clippy --workspace --tests --examples --features metal -- -D warnings
+        env:
+          INFERENCE_RS_METAL_PRECOMPILE: "0"
+
   typos:
     name: Typos
     runs-on: ubuntu-latest

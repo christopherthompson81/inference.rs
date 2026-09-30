@@ -417,12 +417,10 @@ fn rms_norm_forward_residual(
         && x.dtype() == weight.dtype()
         && scale.is_none_or(|scale| scale.dtype() == x.dtype())
         && matches!(x.dtype(), DType::BF16 | DType::F16 | DType::F32)
-    {
-        if let Some(out) =
+        && let Some(out) =
             crate::ops::metal_rms_norm_residual(x, residual, weight, scale, eps as f32)?
-        {
-            return Ok(out);
-        }
+    {
+        return Ok(out);
     }
 
     let normed = candle_nn::ops::rms_norm(&x.contiguous()?, weight, eps as f32)?;
