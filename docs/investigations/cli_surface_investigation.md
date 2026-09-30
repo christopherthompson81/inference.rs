@@ -230,7 +230,7 @@ points at `ChatEngine::prepare`. Still public, below the parsing layer: `dispatc
 **Test:** `chat_route::anthropic_count_tokens_counts_the_rendered_prompt` (a count on the tiny checkpoint, and an empty
 message list rejected with an Anthropic error body).
 
-## Run 10 — 2026-10-01 (time approximate)
+## Run 10 — 2026-09-30 (time approximate)
 
 **Question:** quant resolution exists three times (Run 1). Can the one the engine runs at load,
 `inference_selection::quant`, cover everything the CLI's `apply_quant_resolution` (serve.rs) and `resolve_gguf_source`
@@ -269,3 +269,31 @@ does, since it means nothing for safetensors. `--quant` with `--format ggml` als
 **Next:** the CLI emits `quant` and `mmproj_selection` and deletes both resolvers. Known behavior changes there:
 `--format plain --quant` on a GGUF-only repo loads the GGUF instead of erroring; a TOML model with both `quant` and
 `isq`/`from_uqff` is an error instead of `isq` being dropped with a warning.
+
+## Run 11 — 2026-09-30 (time approximate)
+
+**Question:** with Run 10's resolver in selection, can the CLI drop `apply_quant_resolution` and `resolve_gguf_source`
+and just put `--quant` in the spec it hands `Engine::load`?
+
+**Change:** the CLI's conversion writes `quant` into every spec kind and `mmproj_selection` into the GGUF it emits
+(`any` for the direct `-f` shorthand, `required` for an explicit multimodal model, including LoRA-enabled ones,
+`artifact_repo` otherwise). `normalize_quant_flags` keeps only the flag rules: `--quant` with `-f`, `--quant` with
+`--format ggml`, and `--tok-model-id` with `--quant` meaning GGUF. `quantize` resolves its spec with
+`QuantPolicy::GgufInput` before loading. `serve` no longer computes an id override (the engine keeps the requested id
+after a UQFF swap), and the TOML path no longer resolves per model. serve.rs lost about 600 lines, quantize.rs about
+150; config's spec building is sync.
+
+**Behavior changes:** `--format plain --quant` on a GGUF-only repo loads the GGUF (the CLI can't tell an explicit
+`plain` from none once it is a `ModelSelected`); a TOML model with `quant` and `isq` fails with the engine's
+`drop isq` error instead of a warning; an explicit multimodal GGUF without a projector fails at load, not at argument
+conversion.
+
+**Review:** one regression, `--legacy-lora --quant` without `--format gguf`: no safetensors spec carries a legacy
+LoRA, so conversion refused it before the engine could resolve. `--legacy-lora` with `--quant` now means GGUF, like
+`--tok-model-id`. Also: `quantize` resolved after creating its output directory, leaving an empty one on failure (now
+resolves first); serve and quantize shared their GGUF file and projector rules as copies (now one helper each); the
+TOML spec builders were async with nothing to await. Accepted too: TOML `quant` with `from_uqff` is an error.
+
+**Tests:** the CLI's 12 resolution tests (now covered in selection) became 5 conversion tests: `quant` left for the
+engine, `--tok-model-id` meaning GGUF, projector selection per how the file was given, multimodal LoRA requiring a
+projector, the flag conflicts, legacy LoRA meaning GGUF, and a multimodal dynamic-LoRA GGUF keeping its runtime. The 5 quantize tests now run the selection resolver with the GGUF-input policy.

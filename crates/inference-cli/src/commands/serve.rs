@@ -2,11 +2,8 @@
 
 use anyhow::{Context, Result};
 use axum::middleware;
-use inference_selection::quant::{
-    is_confident_gguf_artifact_repo, model_name_looks_gguf, selected_model_files,
-};
 use std::path::Path;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use inference_api::{
     Engine, EngineSpec,
@@ -20,7 +17,7 @@ use inference_core::{
     DiffusionLoaderType, McpClientConfig, PagedCacheType, SandboxMode, SpeechLoaderType,
     initialize_logging,
 };
-use inference_selection::ModelSelected;
+use inference_selection::{MmprojSelection, ModelSelected};
 use inference_server_core::{
     inference_server_router_builder::{DEFAULT_MAX_BODY_LIMIT, InferenceRsServerRouterBuilder},
     lora_adapters::runtime_lora_updates_enabled,
@@ -62,14 +59,11 @@ pub async fn run_server(
 
     // Convert our clean args to ModelSelected for the existing loader infrastructure
     let matformer = runtime.matformer_selection();
-    let original_model_id = model_id_of(&model_type).to_string();
-    apply_quant_resolution(&mut model_type, &global.token_source, &matformer).await?;
-    let api_id_override =
-        (model_id_of(&model_type) != original_model_id).then_some(original_model_id);
+    normalize_quant_flags(&mut model_type)?;
     let spec = engine_spec(EngineSpecInputs {
         model_type: &model_type,
         matformer: &matformer,
-        model_id: api_id_override,
+        model_id: None,
         runtime: &runtime,
         sandbox,
         global: &global,
@@ -423,8 +417,9 @@ pub(crate) fn convert_to_model_selected(
             // For GGUF/GGML formats, delegate to text model conversion which has proper validation
             match format_type {
                 ModelFormat::Gguf | ModelFormat::Ggml => {
-                    // Validate that required options are present
-                    if format.quantized_file.is_none() {
+                    let picks_by_quant =
+                        matches!(format_type, ModelFormat::Gguf) && quantization.quant.is_some();
+                    if format.quantized_file.is_none() && !picks_by_quant {
                         match format_type {
                             ModelFormat::Gguf => anyhow::bail!(
                                 "GGUF format requires a model file. Pass `-f <model.gguf>`, or use \
@@ -467,7 +462,7 @@ pub(crate) fn convert_to_model_selected(
             // Use Run (auto-loader) for auto mode without explicit quantized format
             Ok(ModelSelected::Run {
                 model_id: model.model_id.clone(),
-                quant: None,
+                quant: quantization.quant.clone(),
                 tokenizer_json: model
                     .tokenizer
                     .as_ref()
@@ -525,23 +520,16 @@ pub(crate) fn convert_to_model_selected(
             let mut model = model.clone();
             model.arch = None;
             match format.format.unwrap_or(ModelFormat::Plain) {
-                ModelFormat::Gguf => {
-                    if format.mmproj.is_none() {
-                        anyhow::bail!(
-                            "No companion projector was found for this multimodal GGUF; pass \
-                             `--mmproj <filename>` to select one explicitly"
-                        );
-                    }
-                    convert_text_model(
-                        &model,
-                        format,
-                        &adapter,
-                        quantization,
-                        device,
-                        matformer,
-                        Some(multimodal),
-                    )
-                }
+                ModelFormat::Gguf => convert_text_model(
+                    &model,
+                    format,
+                    &adapter,
+                    quantization,
+                    device,
+                    matformer,
+                    Some(multimodal),
+                )
+                .map(require_projector),
                 ModelFormat::Ggml => {
                     anyhow::bail!(
                         "GGML is not supported for multimodal models; use a GGUF model with \
@@ -556,9 +544,10 @@ pub(crate) fn convert_to_model_selected(
                     device,
                     matformer,
                     Some(multimodal),
-                ),
+                )
+                .map(require_projector),
                 ModelFormat::Plain => Ok(ModelSelected::MultimodalPlain {
-                    quant: None,
+                    quant: quantization.quant.clone(),
                     model_id: model.model_id.clone(),
                     tokenizer_json: model
                         .tokenizer
@@ -612,7 +601,7 @@ pub(crate) fn convert_to_model_selected(
                 anyhow::bail!("Embedding models do not support GGUF or GGML format");
             }
             Ok(ModelSelected::Embedding {
-                quant: None,
+                quant: quantization.quant.clone(),
                 model_id: model.model_id.clone(),
                 tokenizer_json: model
                     .tokenizer
@@ -631,6 +620,41 @@ pub(crate) fn convert_to_model_selected(
                 hf_cache_path: device.hf_cache.clone(),
             })
         }
+    }
+}
+
+/// An explicit multimodal model needs its projector, whether named, found beside the file or found by `quant`.
+pub(crate) fn require_projector(mut model: ModelSelected) -> ModelSelected {
+    if let ModelSelected::GGUF {
+        mmproj_selection, ..
+    }
+    | ModelSelected::Lora {
+        mmproj_selection, ..
+    } = &mut model
+    {
+        *mmproj_selection = MmprojSelection::Required;
+    }
+    model
+}
+
+pub(crate) fn gguf_mmproj_selection(direct_file_only: bool) -> MmprojSelection {
+    // `-f` without `-m` points at a file: its directory is not a repository to judge
+    if direct_file_only {
+        MmprojSelection::Any
+    } else {
+        MmprojSelection::ArtifactRepo
+    }
+}
+
+/// The GGUF file `-f` names, or none for `--quant` to pick.
+pub(crate) fn gguf_filename(quantized_file: Option<&str>, quant: Option<&str>) -> Result<String> {
+    match (quantized_file, quant) {
+        (Some(file), _) => Ok(file.to_string()),
+        (None, Some(_)) => Ok(String::new()),
+        (None, None) => anyhow::bail!(
+            "GGUF format requires a model file. Pass `-f <model.gguf>`, or use `-m <GGUF-repo> --quant <level>` \
+             to select one automatically."
+        ),
     }
 }
 
@@ -664,7 +688,7 @@ fn convert_text_model(
     match (format_type, has_lora, has_legacy_lora, has_xlora) {
         // Plain format
         (ModelFormat::Plain, false, false, false) => Ok(ModelSelected::Plain {
-            quant: None,
+            quant: quantization.quant.clone(),
             model_id: model.model_id.clone(),
             tokenizer_json: model
                 .tokenizer
@@ -689,8 +713,8 @@ fn convert_text_model(
         }),
 
         (ModelFormat::Plain, true, false, false) => Ok(ModelSelected::Lora {
-            mmproj_selection: inference_selection::MmprojSelection::Given,
-            quant: None,
+            mmproj_selection: gguf_mmproj_selection(format_opts.direct_file_only),
+            quant: quantization.quant.clone(),
             model_id: model.model_id.clone(),
             tokenizer_json: model
                 .tokenizer
@@ -720,7 +744,7 @@ fn convert_text_model(
         }),
 
         (ModelFormat::Plain, false, false, true) => Ok(ModelSelected::XLora {
-            quant: None,
+            quant: quantization.quant.clone(),
             model_id: Some(model.model_id.clone()),
             tokenizer_json: model
                 .tokenizer
@@ -747,16 +771,15 @@ fn convert_text_model(
             organization: quantization.isq_organization,
         }),
 
-        // GGUF format - quantized_filename is required String
         (ModelFormat::Gguf, dynamic_lora, false, false) => Ok(ModelSelected::GGUF {
-            quant: None,
-            mmproj_selection: inference_selection::MmprojSelection::Given,
+            quant: quantization.quant.clone(),
+            mmproj_selection: gguf_mmproj_selection(format_opts.direct_file_only),
             tok_model_id: format_opts.tok_model_id.clone(),
             quantized_model_id: model.model_id.clone(),
-            quantized_filename: format_opts
-                .quantized_file
-                .clone()
-                .context("GGUF model type requires `--quantized-file`/`-f` to be specified")?,
+            quantized_filename: gguf_filename(
+                format_opts.quantized_file.as_deref(),
+                quantization.quant.as_deref(),
+            )?,
             tokenizer_json: model
                 .tokenizer
                 .as_ref()
@@ -784,13 +807,13 @@ fn convert_text_model(
         }),
 
         (ModelFormat::Gguf, false, true, false) => Ok(ModelSelected::LoraGGUF {
-            quant: None,
+            quant: quantization.quant.clone(),
             tok_model_id: format_opts.tok_model_id.clone(),
             quantized_model_id: model.model_id.clone(),
-            quantized_filename: format_opts
-                .quantized_file
-                .clone()
-                .context("GGUF model type requires `--quantized-file`/`-f` to be specified")?,
+            quantized_filename: gguf_filename(
+                format_opts.quantized_file.as_deref(),
+                quantization.quant.as_deref(),
+            )?,
             adapters_model_id: adapter.legacy_lora.clone().unwrap_or_default(),
             order: adapter
                 .legacy_lora_order
@@ -818,13 +841,13 @@ fn convert_text_model(
         }),
 
         (ModelFormat::Gguf, false, false, true) => Ok(ModelSelected::XLoraGGUF {
-            quant: None,
+            quant: quantization.quant.clone(),
             tok_model_id: format_opts.tok_model_id.clone(),
             quantized_model_id: model.model_id.clone(),
-            quantized_filename: format_opts
-                .quantized_file
-                .clone()
-                .context("GGUF model type requires `--quantized-file`/`-f` to be specified")?,
+            quantized_filename: gguf_filename(
+                format_opts.quantized_file.as_deref(),
+                quantization.quant.as_deref(),
+            )?,
             xlora_model_id: adapter.xlora.clone().unwrap_or_default(),
             order: adapter
                 .xlora_order
@@ -1039,60 +1062,6 @@ fn model_format_mut(model_type: &mut ModelType) -> Option<&mut FormatOptions> {
     }
 }
 
-fn model_format(model_type: &ModelType) -> Option<&FormatOptions> {
-    match model_type {
-        ModelType::Auto { format, .. }
-        | ModelType::Text { format, .. }
-        | ModelType::Multimodal { format, .. }
-        | ModelType::Embedding { format, .. } => Some(format),
-        ModelType::Diffusion { .. } | ModelType::Speech { .. } => None,
-    }
-}
-
-fn model_dtype(model_type: &ModelType) -> inference_core::ModelDType {
-    match model_type {
-        ModelType::Auto { model, .. }
-        | ModelType::Text { model, .. }
-        | ModelType::Multimodal { model, .. }
-        | ModelType::Diffusion { model, .. }
-        | ModelType::Speech { model, .. }
-        | ModelType::Embedding { model, .. } => model.dtype,
-    }
-}
-
-fn device_options(model_type: &ModelType) -> &DeviceOptions {
-    match model_type {
-        ModelType::Auto { device, .. }
-        | ModelType::Text { device, .. }
-        | ModelType::Multimodal { device, .. }
-        | ModelType::Diffusion { device, .. }
-        | ModelType::Speech { device, .. }
-        | ModelType::Embedding { device, .. } => device,
-    }
-}
-
-pub(crate) fn model_id_mut(model_type: &mut ModelType) -> &mut String {
-    match model_type {
-        ModelType::Auto { model, .. } => &mut model.model_id,
-        ModelType::Text { model, .. } => &mut model.model_id,
-        ModelType::Multimodal { model, .. } => &mut model.model_id,
-        ModelType::Diffusion { model, .. } => &mut model.model_id,
-        ModelType::Speech { model, .. } => &mut model.model_id,
-        ModelType::Embedding { model, .. } => &mut model.model_id,
-    }
-}
-
-pub(crate) fn model_id_of(model_type: &ModelType) -> &str {
-    match model_type {
-        ModelType::Auto { model, .. } => &model.model_id,
-        ModelType::Text { model, .. } => &model.model_id,
-        ModelType::Multimodal { model, .. } => &model.model_id,
-        ModelType::Diffusion { model, .. } => &model.model_id,
-        ModelType::Speech { model, .. } => &model.model_id,
-        ModelType::Embedding { model, .. } => &model.model_id,
-    }
-}
-
 pub(crate) fn extract_hf_config_settings(
     model_type: &ModelType,
 ) -> (Option<usize>, Option<inference_core::HfConfigOverrides>) {
@@ -1107,130 +1076,32 @@ pub(crate) fn extract_hf_config_settings(
     (model.max_model_len, model.hf_overrides.clone())
 }
 
-pub(crate) async fn apply_quant_resolution(
-    model_type: &mut ModelType,
-    token_source: &inference_core::TokenSource,
-    matformer: &MatformerSelection,
-) -> Result<()> {
-    if let Some(path) = device_options(model_type).hf_cache.clone() {
-        inference_core::set_hf_cache_path(path);
+/// The `--quant` rules that are about the flags; what `--quant` picks is resolved when the engine loads.
+pub(crate) fn normalize_quant_flags(model_type: &mut ModelType) -> Result<()> {
+    let quant = model_quantization_mut(model_type).and_then(|q| q.quant.clone());
+    let legacy_lora = matches!(
+        model_type,
+        ModelType::Auto { adapter, .. } | ModelType::Text { adapter, .. } if adapter.legacy_lora.is_some()
+    );
+    let Some(format) = model_format_mut(model_type) else {
+        return Ok(());
+    };
+    format.normalize()?;
+    if quant.is_none() {
+        return Ok(());
     }
-    if let Some(format) = model_format_mut(model_type) {
-        format.normalize()?;
-    }
-    let model_id = model_id_mut(model_type).clone();
-    let raw = model_quantization_mut(model_type).and_then(|q| q.quant.clone());
-    let (explicit_format, exact_file) = model_format(model_type).map_or((None, None), |format| {
-        (format.format, format.quantized_file.clone())
-    });
-    let is_explicit_gguf = matches!(explicit_format, Some(ModelFormat::Gguf));
-    let is_explicit_multimodal = matches!(model_type, ModelType::Multimodal { .. });
-    if raw.is_some() && exact_file.is_some() {
+    if format.quantized_file.is_some() {
         anyhow::bail!("`--quant` and `--quantized-file` are mutually exclusive");
     }
-    if raw.is_some() && matches!(explicit_format, Some(ModelFormat::Ggml)) {
-        anyhow::bail!("`--quant` cannot select a GGML file; pass one explicitly with `-f`");
-    }
-    let should_inspect_files = raw.is_some() || (is_explicit_gguf && exact_file.is_some());
-    let repo_files = if should_inspect_files {
-        selected_model_files(&model_id, exact_file.as_deref(), token_source)?
-    } else {
-        None
-    };
-    let is_confident_gguf_repo = repo_files
-        .as_ref()
-        .is_some_and(|files| is_confident_gguf_artifact_repo(&model_id, files));
-    let looks_like_gguf_repo = repo_files.as_ref().is_some_and(|files| {
-        inference_selection::quant::has_gguf_model_files(files)
-            && !matches!(
-                explicit_format,
-                Some(ModelFormat::Plain | ModelFormat::Ggml)
-            )
-            && (is_explicit_gguf || is_confident_gguf_repo)
-    });
-
-    if looks_like_gguf_repo {
-        let files = repo_files
-            .as_ref()
-            .expect("GGUF repository detection requires a file listing");
-        if let Some(raw) = raw.as_deref() {
-            let artifact = inference_selection::quant::resolve_gguf_quant(files, raw)?;
-            info!(
-                "quant: --quant {raw} -> GGUF {} from `{model_id}`",
-                artifact.label
-            );
-            let format = model_format_mut(model_type)
-                .context("GGUF artifacts are not supported for this model type")?;
-            format.format = Some(ModelFormat::Gguf);
-            format.quantized_file = Some(artifact.file_spec());
-            if let Some(quantization) = model_quantization_mut(model_type) {
-                // The CLI rejects these alongside `--quant`, but a TOML config can still set both.
-                if quantization.in_situ_quant.is_some() || quantization.from_uqff.is_some() {
-                    warn!(
-                        "quant: `--quant {raw}` selected a published GGUF artifact, ignoring the \
-                         configured `isq`/`from_uqff` target"
-                    );
-                }
-                quantization.quant = None;
-                quantization.in_situ_quant = None;
-                quantization.from_uqff = None;
-            }
+    match format.format {
+        Some(ModelFormat::Ggml) => {
+            anyhow::bail!("`--quant` cannot select a GGML file; pass one explicitly with `-f`")
         }
-
-        let dtype = model_dtype(model_type);
-        let format = model_format_mut(model_type)
-            .context("GGUF artifacts are not supported for this model type")?;
-        if format.mmproj.is_none()
-            && (is_confident_gguf_repo || is_explicit_multimodal || format.direct_file_only)
-            && let Some(projector) =
-                inference_selection::quant::resolve_gguf_projector(files, dtype)?
-        {
-            info!(
-                "GGUF: selected {} projector `{}`",
-                projector.label,
-                projector.file_spec()
-            );
-            format.mmproj = Some(projector.file_spec());
+        // these only mean something for a quantized file, as `--mmproj` does
+        None if format.tok_model_id.is_some() || legacy_lora => {
+            format.format = Some(ModelFormat::Gguf)
         }
-        return Ok(());
-    }
-
-    let Some(raw) = raw else {
-        return Ok(());
-    };
-    if is_explicit_gguf {
-        anyhow::bail!(
-            "Could not inspect GGUF artifacts for `{model_id}`. Pass `-f <filename.gguf>` \
-             explicitly or check repository access."
-        );
-    }
-    if model_name_looks_gguf(&model_id) {
-        anyhow::bail!(
-            "Model `{model_id}` appears to be a GGUF artifact repo, but its files could not be \
-             inspected or no model GGUF was found. Pass `-f <filename.gguf>` explicitly or check \
-             repository access."
-        );
-    }
-
-    let force_cpu = extract_device_settings(model_type).0;
-    let model_selected = convert_to_model_selected(model_type, matformer)?;
-
-    let resolved = inference_selection::quant::resolve_quant(
-        &raw,
-        &model_id,
-        token_source,
-        &model_selected,
-        force_cpu,
-    )
-    .await?;
-
-    if let Some(swap) = resolved.model_id_swap {
-        *model_id_mut(model_type) = swap;
-    }
-    if let Some(q) = model_quantization_mut(model_type) {
-        q.quant = None;
-        q.in_situ_quant = resolved.in_situ_quant;
-        q.from_uqff = resolved.from_uqff;
+        _ => {}
     }
     Ok(())
 }
@@ -1547,7 +1418,7 @@ mod tests {
         AutoDeviceMapParams, IsqOrganization, LoraAdapterSpec, ModelDType, NormalLoaderType,
     };
     use inference_sandbox::NetworkMode;
-    use std::{fs, num::NonZeroUsize, path::PathBuf};
+    use std::{num::NonZeroUsize, path::PathBuf};
 
     use super::*;
     use crate::args::SandboxMode;
@@ -1592,289 +1463,144 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn local_gguf_quant_selects_model_and_projector() {
-        let root = std::env::temp_dir().join(format!("inference-gguf-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        for file in [
-            "model-Q4_K_S.gguf",
-            "model-Q4_K_M.gguf",
-            "mmproj-BF16.gguf",
-            "mmproj-F16.gguf",
-        ] {
-            fs::write(root.join(file), []).unwrap();
-        }
-
-        let mut model = test_model();
-        model.model_id = root.to_string_lossy().into_owned();
-        model.dtype = ModelDType::F16;
-        let mut model_type = ModelType::Auto {
-            model,
-            format: FormatOptions::default(),
-            adapter: AdapterOptions::default(),
-            quantization: QuantizationOptions {
-                quant: Some("4".to_string()),
-                ..QuantizationOptions::default()
-            },
-            device: DeviceOptions::default(),
-            cache: crate::args::CacheOptions::default(),
-            multimodal: MultimodalOptions::default(),
-        };
-
-        apply_quant_resolution(
-            &mut model_type,
-            &inference_core::TokenSource::None,
-            &MatformerSelection::default(),
-        )
-        .await
-        .unwrap();
-
-        let ModelType::Auto {
+    fn auto_with_quant(format: FormatOptions, quant: &str) -> ModelType {
+        ModelType::Auto {
+            model: test_model(),
             format,
-            quantization,
+            adapter: AdapterOptions::default(),
+            quantization: QuantizationOptions {
+                quant: Some(quant.to_string()),
+                ..QuantizationOptions::default()
+            },
+            device: DeviceOptions::default(),
+            cache: crate::args::CacheOptions::default(),
+            multimodal: MultimodalOptions::default(),
+        }
+    }
+
+    fn converted(model_type: &mut ModelType) -> ModelSelected {
+        normalize_quant_flags(model_type).unwrap();
+        convert_to_model_selected(model_type, &MatformerSelection::default()).unwrap()
+    }
+
+    #[test]
+    fn quant_is_left_for_the_engine_to_resolve() {
+        let model = converted(&mut auto_with_quant(FormatOptions::default(), "4"));
+        assert!(matches!(model, ModelSelected::Run { quant: Some(ref q), .. } if q == "4"));
+
+        let gguf = FormatOptions {
+            format: Some(ModelFormat::Gguf),
+            ..FormatOptions::default()
+        };
+        let model = converted(&mut auto_with_quant(gguf, "4"));
+        let ModelSelected::GGUF {
+            quant,
+            quantized_filename,
+            mmproj_selection,
             ..
-        } = model_type
+        } = &model
         else {
-            unreachable!()
+            panic!("expected GGUF, got {model:?}");
         };
-        assert_eq!(format.format, Some(ModelFormat::Gguf));
-        assert_eq!(format.quantized_file.as_deref(), Some("model-Q4_K_M.gguf"));
-        assert_eq!(format.mmproj.as_deref(), Some("mmproj-F16.gguf"));
-        assert!(quantization.quant.is_none());
-        assert!(quantization.in_situ_quant.is_none());
-
-        fs::remove_dir_all(root).unwrap();
+        assert_eq!(quant.as_deref(), Some("4"));
+        assert!(quantized_filename.is_empty());
+        assert_eq!(*mmproj_selection, MmprojSelection::ArtifactRepo);
+        assert!(model.needs_source_resolution());
     }
 
-    #[tokio::test]
-    async fn local_gguf_quant_selects_vision_and_audio_projectors() {
-        let root = std::env::temp_dir().join(format!("inference-gguf-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        for file in [
-            "model-Q4_K_M.gguf",
-            "model-vision-mmproj-BF16.gguf",
-            "model-audio-mmproj-BF16.gguf",
-        ] {
-            fs::write(root.join(file), []).unwrap();
-        }
-
-        let mut model = test_model();
-        model.model_id = root.to_string_lossy().into_owned();
-        let mut model_type = ModelType::Auto {
+    #[test]
+    fn tok_model_id_with_quant_means_gguf() {
+        let format = FormatOptions {
+            tok_model_id: Some("org/base".to_string()),
+            ..FormatOptions::default()
+        };
+        let model = converted(&mut auto_with_quant(format, "4"));
+        assert!(matches!(
             model,
-            format: FormatOptions::default(),
-            adapter: AdapterOptions::default(),
-            quantization: QuantizationOptions {
-                quant: Some("4".to_string()),
-                ..QuantizationOptions::default()
-            },
-            device: DeviceOptions::default(),
-            cache: crate::args::CacheOptions::default(),
-            multimodal: MultimodalOptions::default(),
-        };
-
-        apply_quant_resolution(
-            &mut model_type,
-            &inference_core::TokenSource::None,
-            &MatformerSelection::default(),
-        )
-        .await
-        .unwrap();
-
-        let ModelType::Auto { format, .. } = model_type else {
-            unreachable!()
-        };
-        assert_eq!(
-            format.mmproj.as_deref(),
-            Some("model-vision-mmproj-BF16.gguf;model-audio-mmproj-BF16.gguf")
-        );
-
-        fs::remove_dir_all(root).unwrap();
+            ModelSelected::GGUF { tok_model_id: Some(ref id), quant: Some(_), .. } if id == "org/base"
+        ));
     }
 
-    #[tokio::test]
-    async fn dynamic_lora_keeps_automatic_projector_selection() {
-        let root = std::env::temp_dir().join(format!("inference-gguf-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        fs::write(root.join("mmproj-BF16.gguf"), []).unwrap();
-        fs::write(root.join("model-Q4_K_M.gguf"), []).unwrap();
-
-        let mut model = test_model();
-        model.model_id = root.to_string_lossy().into_owned();
-        let mut model_type = ModelType::Auto {
-            model,
-            format: FormatOptions::default(),
-            adapter: AdapterOptions {
-                enable_lora: true,
-                ..AdapterOptions::default()
-            },
-            quantization: QuantizationOptions {
-                quant: Some("4".to_string()),
-                ..QuantizationOptions::default()
-            },
-            device: DeviceOptions::default(),
-            cache: crate::args::CacheOptions::default(),
-            multimodal: MultimodalOptions::default(),
+    #[test]
+    fn gguf_projector_selection_follows_how_the_file_was_given() {
+        let selection = |format: FormatOptions, multimodal: bool| {
+            let mut model_type = if multimodal {
+                test_multimodal_model(format)
+            } else {
+                ModelType::Auto {
+                    model: test_model(),
+                    format,
+                    adapter: AdapterOptions::default(),
+                    quantization: QuantizationOptions::default(),
+                    device: DeviceOptions::default(),
+                    cache: crate::args::CacheOptions::default(),
+                    multimodal: MultimodalOptions::default(),
+                }
+            };
+            match converted(&mut model_type) {
+                ModelSelected::GGUF {
+                    mmproj_selection, ..
+                } => mmproj_selection,
+                other => panic!("expected GGUF, got {other:?}"),
+            }
         };
-
-        apply_quant_resolution(
-            &mut model_type,
-            &inference_core::TokenSource::None,
-            &MatformerSelection::default(),
-        )
-        .await
-        .unwrap();
-
-        let ModelType::Auto { format, .. } = model_type else {
-            unreachable!()
+        let file = |direct_file_only| FormatOptions {
+            quantized_file: Some("model.gguf".to_string()),
+            direct_file_only,
+            ..FormatOptions::default()
         };
-        assert_eq!(format.format, Some(ModelFormat::Gguf));
-        assert_eq!(format.quantized_file.as_deref(), Some("model-Q4_K_M.gguf"));
-        assert_eq!(format.mmproj.as_deref(), Some("mmproj-BF16.gguf"));
-
-        fs::remove_dir_all(root).unwrap();
+        assert_eq!(selection(file(false), false), MmprojSelection::ArtifactRepo);
+        assert_eq!(selection(file(true), false), MmprojSelection::Any);
+        assert_eq!(selection(file(false), true), MmprojSelection::Required);
     }
 
-    #[tokio::test]
-    async fn exact_local_gguf_only_discovers_nearby_projectors() {
-        let root = std::env::temp_dir().join(format!("inference-gguf-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(root.join("selected")).unwrap();
-        fs::create_dir_all(root.join("unrelated")).unwrap();
-        for file in [
-            "selected/model.gguf",
-            "selected/mmproj-BF16.gguf",
-            "unrelated/model-Q4_K_M.gguf",
-            "unrelated/mmproj-BF16.gguf",
-        ] {
-            fs::write(root.join(file), []).unwrap();
-        }
-
-        let mut model = test_model();
-        model.model_id = root.to_string_lossy().into_owned();
-        let mut model_type = ModelType::Auto {
-            model,
-            format: FormatOptions {
-                quantized_file: Some("selected/model.gguf".to_string()),
-                ..FormatOptions::default()
-            },
-            adapter: AdapterOptions::default(),
-            quantization: QuantizationOptions::default(),
-            device: DeviceOptions::default(),
-            cache: crate::args::CacheOptions::default(),
-            multimodal: MultimodalOptions::default(),
-        };
-
-        apply_quant_resolution(
-            &mut model_type,
-            &inference_core::TokenSource::None,
-            &MatformerSelection::default(),
-        )
-        .await
-        .unwrap();
-
-        let ModelType::Auto { format, .. } = model_type else {
-            unreachable!()
-        };
-        assert_eq!(format.format, Some(ModelFormat::Gguf));
-        assert_eq!(format.mmproj.as_deref(), Some("selected/mmproj-BF16.gguf"));
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
-    async fn direct_file_shorthand_discovers_only_a_sibling_projector() {
-        let root = std::env::temp_dir().join(format!("inference-gguf-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(root.join("unrelated")).unwrap();
-        for file in ["model.gguf", "mmproj-BF16.gguf", "model.safetensors"] {
-            fs::write(root.join(file), []).unwrap();
-        }
-        fs::write(root.join("unrelated/mmproj-BF16.gguf"), []).unwrap();
-
-        let mut model = test_model();
-        model.model_id = root.to_string_lossy().into_owned();
-        let mut model_type = ModelType::Auto {
-            model,
-            format: FormatOptions {
-                quantized_file: Some("model.gguf".to_string()),
-                direct_file_only: true,
-                ..FormatOptions::default()
-            },
-            adapter: AdapterOptions::default(),
-            quantization: QuantizationOptions::default(),
-            device: DeviceOptions::default(),
-            cache: crate::args::CacheOptions::default(),
-            multimodal: MultimodalOptions::default(),
-        };
-
-        apply_quant_resolution(
-            &mut model_type,
-            &inference_core::TokenSource::None,
-            &MatformerSelection::default(),
-        )
-        .await
-        .unwrap();
-
-        let ModelType::Auto { format, .. } = model_type else {
-            unreachable!()
-        };
-        assert_eq!(format.format, Some(ModelFormat::Gguf));
-        assert_eq!(format.mmproj.as_deref(), Some("mmproj-BF16.gguf"));
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
-    async fn exact_gguf_in_a_source_repository_does_not_guess_a_projector() {
-        let root = std::env::temp_dir().join(format!("inference-source-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        for file in ["model.gguf", "mmproj-BF16.gguf", "model.safetensors"] {
-            fs::write(root.join(file), []).unwrap();
-        }
-
-        let mut model = test_model();
-        model.model_id = root.to_string_lossy().into_owned();
-        let mut model_type = ModelType::Auto {
-            model,
-            format: FormatOptions {
-                quantized_file: Some("model.gguf".to_string()),
-                ..FormatOptions::default()
-            },
-            adapter: AdapterOptions::default(),
-            quantization: QuantizationOptions::default(),
-            device: DeviceOptions::default(),
-            cache: crate::args::CacheOptions::default(),
-            multimodal: MultimodalOptions::default(),
-        };
-
-        apply_quant_resolution(
-            &mut model_type,
-            &inference_core::TokenSource::None,
-            &MatformerSelection::default(),
-        )
-        .await
-        .unwrap();
-
-        let ModelType::Auto { format, .. } = model_type else {
-            unreachable!()
-        };
-        assert_eq!(format.format, Some(ModelFormat::Gguf));
-        assert!(format.mmproj.is_none());
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
-    async fn explicit_multimodal_discovers_a_projector_in_a_source_repository() {
-        let root = std::env::temp_dir().join(format!("inference-source-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        for file in ["model.gguf", "mmproj-BF16.gguf", "model.safetensors"] {
-            fs::write(root.join(file), []).unwrap();
-        }
-
-        let mut model = test_model();
-        model.model_id = root.to_string_lossy().into_owned();
+    #[test]
+    fn multimodal_lora_requires_a_projector_once_quant_picks_a_gguf() {
         let mut model_type = ModelType::Multimodal {
+            model: test_model(),
+            format: FormatOptions::default(),
+            adapter: MultimodalAdapterOptions {
+                enable_lora: true,
+                ..MultimodalAdapterOptions::default()
+            },
+            quantization: QuantizationOptions {
+                quant: Some("4".to_string()),
+                ..QuantizationOptions::default()
+            },
+            device: DeviceOptions::default(),
+            cache: crate::args::CacheOptions::default(),
+            multimodal: MultimodalOptions::default(),
+        };
+        let model = converted(&mut model_type);
+        assert!(matches!(
             model,
+            ModelSelected::Lora {
+                quant: Some(_),
+                mmproj_selection: MmprojSelection::Required,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn legacy_lora_with_quant_means_gguf() {
+        let mut model_type = auto_with_quant(FormatOptions::default(), "4");
+        let ModelType::Auto { adapter, .. } = &mut model_type else {
+            unreachable!()
+        };
+        adapter.legacy_lora = Some("org/adapters".to_string());
+        adapter.legacy_lora_order = Some(PathBuf::from("order.json"));
+        let model = converted(&mut model_type);
+        assert!(matches!(
+            model,
+            ModelSelected::LoraGGUF { ref quantized_filename, quant: Some(_), .. } if quantized_filename.is_empty()
+        ));
+    }
+
+    #[test]
+    fn multimodal_dynamic_lora_gguf_keeps_its_runtime_and_requires_a_projector() {
+        let mut model_type = ModelType::Multimodal {
+            model: test_model(),
             format: FormatOptions {
                 quantized_file: Some("model.gguf".to_string()),
                 ..FormatOptions::default()
@@ -1888,210 +1614,35 @@ mod tests {
             cache: crate::args::CacheOptions::default(),
             multimodal: MultimodalOptions::default(),
         };
-
-        apply_quant_resolution(
-            &mut model_type,
-            &inference_core::TokenSource::None,
-            &MatformerSelection::default(),
-        )
-        .await
-        .unwrap();
-
-        let ModelType::Multimodal {
-            format, adapter, ..
-        } = model_type
-        else {
-            unreachable!()
-        };
-        assert_eq!(format.format, Some(ModelFormat::Gguf));
-        assert_eq!(format.mmproj.as_deref(), Some("mmproj-BF16.gguf"));
-        assert!(adapter.dynamic_lora_enabled());
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
-    async fn explicit_multimodal_projector_override_wins_in_a_source_repository() {
-        let root = std::env::temp_dir().join(format!("inference-source-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        for file in [
-            "model.gguf",
-            "mmproj-BF16.gguf",
-            "chosen-mmproj-F16.gguf",
-            "model.safetensors",
-        ] {
-            fs::write(root.join(file), []).unwrap();
-        }
-
-        let mut model = test_model();
-        model.model_id = root.to_string_lossy().into_owned();
-        let mut model_type = ModelType::Multimodal {
+        let model = converted(&mut model_type);
+        assert!(matches!(
             model,
-            format: FormatOptions {
-                quantized_file: Some("model.gguf".to_string()),
-                mmproj: Some("chosen-mmproj-F16.gguf".to_string()),
-                ..FormatOptions::default()
-            },
-            adapter: MultimodalAdapterOptions::default(),
-            quantization: QuantizationOptions::default(),
-            device: DeviceOptions::default(),
-            cache: crate::args::CacheOptions::default(),
-            multimodal: MultimodalOptions::default(),
-        };
-
-        apply_quant_resolution(
-            &mut model_type,
-            &inference_core::TokenSource::None,
-            &MatformerSelection::default(),
-        )
-        .await
-        .unwrap();
-
-        let ModelType::Multimodal { format, .. } = model_type else {
-            unreachable!()
-        };
-        assert_eq!(format.mmproj.as_deref(), Some("chosen-mmproj-F16.gguf"));
-
-        fs::remove_dir_all(root).unwrap();
+            ModelSelected::GGUF {
+                lora_runtime_config: Some(_),
+                mmproj_selection: MmprojSelection::Required,
+                ..
+            }
+        ));
     }
 
-    #[tokio::test]
-    async fn exact_file_and_quant_conflict_before_repository_access() {
-        let mut model_type = ModelType::Auto {
-            model: test_model(),
-            format: FormatOptions {
-                quantized_file: Some("model.gguf".to_string()),
-                ..FormatOptions::default()
-            },
-            adapter: AdapterOptions::default(),
-            quantization: QuantizationOptions {
-                quant: Some("4".to_string()),
-                ..QuantizationOptions::default()
-            },
-            device: DeviceOptions::default(),
-            cache: crate::args::CacheOptions::default(),
-            multimodal: MultimodalOptions::default(),
+    #[test]
+    fn quant_flag_conflicts_are_refused_before_loading() {
+        let file = FormatOptions {
+            quantized_file: Some("model.gguf".to_string()),
+            ..FormatOptions::default()
         };
+        let error = normalize_quant_flags(&mut auto_with_quant(file, "4")).unwrap_err();
+        assert!(error.to_string().contains("mutually exclusive"), "{error}");
 
-        let error = apply_quant_resolution(
-            &mut model_type,
-            &inference_core::TokenSource::None,
-            &MatformerSelection::default(),
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("mutually exclusive"));
-    }
-
-    #[tokio::test]
-    async fn explicit_gguf_quant_does_not_fall_back_to_isq() {
-        let root = std::env::temp_dir().join(format!("inference-gguf-{}", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-
-        let mut model = test_model();
-        model.model_id = root.to_string_lossy().into_owned();
-        let mut model_type = ModelType::Auto {
-            model,
-            format: FormatOptions {
-                format: Some(ModelFormat::Gguf),
-                ..FormatOptions::default()
-            },
-            adapter: AdapterOptions::default(),
-            quantization: QuantizationOptions {
-                quant: Some("4".to_string()),
-                ..QuantizationOptions::default()
-            },
-            device: DeviceOptions::default(),
-            cache: crate::args::CacheOptions::default(),
-            multimodal: MultimodalOptions::default(),
+        let ggml = FormatOptions {
+            format: Some(ModelFormat::Ggml),
+            ..FormatOptions::default()
         };
-
-        let error = apply_quant_resolution(
-            &mut model_type,
-            &inference_core::TokenSource::None,
-            &MatformerSelection::default(),
-        )
-        .await
-        .unwrap_err();
+        let error = normalize_quant_flags(&mut auto_with_quant(ggml, "4")).unwrap_err();
         assert!(
-            error
-                .to_string()
-                .contains("Could not inspect GGUF artifacts")
+            error.to_string().contains("cannot select a GGML file"),
+            "{error}"
         );
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
-    async fn quant_does_not_override_an_explicit_non_gguf_format() {
-        let root = std::env::temp_dir().join(format!("inference-{}-GGUF", uuid::Uuid::new_v4()));
-        fs::create_dir_all(&root).unwrap();
-        fs::write(root.join("model-Q4_K_M.gguf"), []).unwrap();
-
-        let mut model = test_model();
-        model.model_id = root.to_string_lossy().into_owned();
-        let mut model_type = ModelType::Auto {
-            model,
-            format: FormatOptions {
-                format: Some(ModelFormat::Plain),
-                ..FormatOptions::default()
-            },
-            adapter: AdapterOptions::default(),
-            quantization: QuantizationOptions {
-                quant: Some("4".to_string()),
-                ..QuantizationOptions::default()
-            },
-            device: DeviceOptions::default(),
-            cache: crate::args::CacheOptions::default(),
-            multimodal: MultimodalOptions::default(),
-        };
-
-        let error = apply_quant_resolution(
-            &mut model_type,
-            &inference_core::TokenSource::None,
-            &MatformerSelection::default(),
-        )
-        .await
-        .unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("appears to be a GGUF artifact repo")
-        );
-        let ModelType::Auto { format, .. } = model_type else {
-            unreachable!()
-        };
-        assert_eq!(format.format, Some(ModelFormat::Plain));
-
-        fs::remove_dir_all(root).unwrap();
-    }
-
-    #[tokio::test]
-    async fn quant_rejects_explicit_ggml_without_repository_access() {
-        let mut model_type = ModelType::Auto {
-            model: test_model(),
-            format: FormatOptions {
-                format: Some(ModelFormat::Ggml),
-                ..FormatOptions::default()
-            },
-            adapter: AdapterOptions::default(),
-            quantization: QuantizationOptions {
-                quant: Some("4".to_string()),
-                ..QuantizationOptions::default()
-            },
-            device: DeviceOptions::default(),
-            cache: crate::args::CacheOptions::default(),
-            multimodal: MultimodalOptions::default(),
-        };
-
-        let error = apply_quant_resolution(
-            &mut model_type,
-            &inference_core::TokenSource::None,
-            &MatformerSelection::default(),
-        )
-        .await
-        .unwrap_err();
-        assert!(error.to_string().contains("cannot select a GGML file"));
     }
 
     fn test_multimodal_model(format: FormatOptions) -> ModelType {
@@ -2701,20 +2252,10 @@ mod tests {
         let error =
             convert_to_model_selected(&model_type, &MatformerSelection::default()).unwrap_err();
 
-        assert!(error.to_string().contains("--quantized-file"));
-    }
-
-    #[test]
-    fn explicit_multimodal_gguf_requires_mmproj() {
-        let model_type = test_multimodal_model(FormatOptions {
-            format: Some(ModelFormat::Gguf),
-            quantized_file: Some("model.gguf".to_string()),
-            ..FormatOptions::default()
-        });
-        let error =
-            convert_to_model_selected(&model_type, &MatformerSelection::default()).unwrap_err();
-
-        assert!(error.to_string().contains("--mmproj"));
+        assert!(
+            error.to_string().contains("requires a model file"),
+            "{error}"
+        );
     }
 
     #[test]

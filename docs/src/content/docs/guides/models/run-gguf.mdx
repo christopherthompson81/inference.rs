@@ -125,7 +125,7 @@ Use these options to select files explicitly:
 |---|---|
 | `-f <file.gguf>` | You want an exact model file instead of automatic quant selection. |
 | `--mmproj <file.gguf>` | You want an exact multimodal projector, or the projector is not stored beside the selected local model. |
-| `--tok-model-id <model-id-or-path>` | The original configuration, tokenizer, or processor assets cannot be identified automatically. |
+| `--tok-model-id <model-id-or-path>` | The original configuration, tokenizer, or processor assets cannot be identified automatically. With `--quant`, it also selects the GGUF format. |
 | `-t <tokenizer.json>` | You want to provide a tokenizer file directly. |
 | `-c <template>` | You want to override the chat template. |
 
