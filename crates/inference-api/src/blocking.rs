@@ -1,6 +1,6 @@
 //! A synchronous face of [`Engine`] for callers without an async runtime, such as the C ABI.
 
-use std::{sync::OnceLock, time::Duration};
+use std::{any::Any, future::Future, pin::Pin, sync::OnceLock, time::Duration};
 
 use futures::{Stream, StreamExt, stream::BoxStream};
 use tokio::runtime::Runtime;
@@ -26,9 +26,19 @@ fn runtime() -> &'static Runtime {
 }
 
 // Work runs on a runtime worker, never on the caller's thread, so `block_in_place` inside the engine is allowed.
-fn run<T: Send + 'static>(work: impl std::future::Future<Output = T> + Send + 'static) -> T {
+fn run<T: Send + 'static>(work: impl Future<Output = T> + Send + 'static) -> T {
+    let output = run_job(Box::pin(async move {
+        Box::new(work.await) as Box<dyn Any + Send>
+    }));
+    *output
+        .downcast::<T>()
+        .expect("a job returns its own output type")
+}
+
+// Every call spawns this one future type, so tokio's task harness is instantiated once, not once per method.
+fn run_job(job: Pin<Box<dyn Future<Output = Box<dyn Any + Send>> + Send>>) -> Box<dyn Any + Send> {
     let rt = runtime();
-    rt.block_on(rt.spawn(work))
+    rt.block_on(rt.spawn(job))
         .unwrap_or_else(|panic| std::panic::resume_unwind(panic.into_panic()))
 }
 
@@ -52,7 +62,7 @@ impl BlockingEngine {
     fn call<T, Fut>(&self, request: &[u8], op: impl FnOnce(Engine, Vec<u8>) -> Fut) -> T
     where
         T: Send + 'static,
-        Fut: std::future::Future<Output = T> + Send + 'static,
+        Fut: Future<Output = T> + Send + 'static,
     {
         run(op(self.engine.clone(), request.to_vec()))
     }
@@ -64,7 +74,7 @@ impl BlockingEngine {
     ) -> Result<BlockingStream, ApiError>
     where
         S: Stream<Item = String> + Send + 'static,
-        Fut: std::future::Future<Output = Result<S, ApiError>> + Send + 'static,
+        Fut: Future<Output = Result<S, ApiError>> + Send + 'static,
     {
         self.call(request, op).map(BlockingStream::new)
     }

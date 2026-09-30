@@ -127,3 +127,69 @@ Load was 3.35 at the start and 17.8 at the end, which matches that doc's loaded 
   survey that gave Run 1 its core figure, they are 1.37M and 1.15M IR lines.
 - Moving GGUF out of core (step 2) would shorten core's lib test and metadata, but on its own won't cut wall time
   while the api chain sets the end.
+
+## Run 4 — 2026-09-29 19:40
+
+**Question:** where do `inference-api` (1,371,600 IR lines from 15.1k source lines) and `inference-server-core`
+(1,148,114 from 6.6k) get their IR? They now end the cold build (Run 3). Core manages about 22 IR lines per source
+line; these two produce 90 and 175.
+
+**Command:** `CARGO_TARGET_DIR=<scratch> cargo llvm-lines -p <crate> --lib --features cuda`, grouped by module, by the
+kind of code, and by the deserializer or serializer type a serde function is instantiated for.
+
+**Raw finding:**
+- **`inference-api`:** 571,098 lines name an api module and 800,502 are generic code from other crates. Top modules:
+  `blocking` 168,270 (from a 254-line file), `anthropic` 76,286, `responses` 66,153, `engine` 62,812.
+- **`inference-server-core`:** 202,660 lines name a server-core module and 945,454 don't, of which 80,358 are
+  `inference_api` generics instantiated again here (for example `engine_chat::parse_request::{closure#0}`, 9,583).
+  Top modules: `openapi_doc` 41,089 (`ApiDoc::openapi` alone 19,248) and `handlers` 38,922.
+- **`blocking`:** each of its 24 methods spawns its own future type, so tokio's task harness, task core and
+  scheduler code are instantiated once per method: 7.3k lines for a plain call and 13k for a streaming one, 190,708 in
+  total. Tokio task and scheduler code is 258,002 lines in the api, 143,924 of it from `BlockingEngine`.
+- **serde is 607,639 lines in the api and 683,116 in server-core.** The same protocol request types are deserialized
+  through different deserializers in the two crates:
+
+  | Instantiated for | `inference-api` | `inference-server-core` |
+  |---|---|---|
+  | serde_json `SliceRead` (the api's `parse_json`, the C ABI path) | 233,518 | 17,349 |
+  | `serde_path_to_error` (inside axum's `Json<T>`, one per request extractor) | 0 | 176,599 |
+  | serde_json `Value` | 31,578 | 50,442 |
+  | Untagged-enum buffering (`Content`) | 30,686 | 28,517 |
+  | serde_json `StrRead` | 18,917 | 4,208 |
+  | Serializers | 16,513 | 44,941 |
+  | Other serde | 197,629 | 228,643 |
+
+  `ChatCompletionRequest::visit_map` appears three times in server-core, under three deserializers.
+  `ResponseResource::serialize` appears three times, under three serializers.
+- **`ModelSelected`'s `Deserialize`:** 14 instantiations in the api, about 40k lines for one enum.
+- **utoipa (OpenAPI schemas):** 78,798 lines in the api and 132,417 in server-core.
+
+**Implication, in order of confidence:**
+1. Spawn one type-erased job in `blocking` (a boxed `dyn Future<Output = ()>` that sends its result back), so the
+   tokio harness is instantiated once. Expect about 180k lines out of the api.
+2. Give the HTTP server and the C ABI one request-parse path: a non-generic parse function per request type in the
+   api, which server-core calls from a bytes extractor instead of axum's `Json<T>`. It needs to keep axum's status split
+   (415 wrong content type, 400 bad syntax, 422 bad data) and the field path in the error. Expect most of
+   server-core's 177k `path_to_error` lines out.
+3. Find why api generics such as `engine_chat::parse_request` are instantiated again in server-core (80k).
+4. Collapse the 14 `ModelSelected` deserializer instantiations.
+
+## Run 5 — 2026-09-29 20:30
+
+**Question:** how much IR does erasing `blocking`'s spawned futures save?
+
+**Change:**
+- Every `BlockingEngine` call now spawns the same `Pin<Box<dyn Future<Output = Box<dyn Any + Send>>>>`, and `run<T>`
+  downcasts its output.
+- A first cut passed the result back through `std::sync::mpsc::sync_channel`: 1,243,332 lines. That still
+  instantiated std's channel (the zero, list and array flavors, about 18k lines) for each result type.
+- A second cut used an `Arc<Mutex<Option<T>>>` slot: 1,201,091 lines.
+- The `dyn Any` output, suggested in review, is the simplest of the three and the smallest.
+
+**Command:** `CARGO_TARGET_DIR=<scratch> cargo llvm-lines -p inference-api --lib --features cuda`.
+
+**Raw finding:** `inference-api` went from 1,371,600 to 1,195,272 lines (-176,328, -12.9%). Function copies went
+from 31,081 to 25,363.
+
+**Implication:** step 1 of Run 4 is done. Next is step 2, one request-parse path shared by the HTTP server and the
+C ABI.
