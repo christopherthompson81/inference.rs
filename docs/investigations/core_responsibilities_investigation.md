@@ -423,3 +423,51 @@ change in IR and build time?
   by 6.6%.
 - For wall time, what's left is core's lib test and the api → CLI test chain.
 
+
+## Run 12 — 2026-09-29 23:00
+
+**Question:** can an internal parser over the model's own token bytes replace `openai-harmony` without changing what
+the engine sees?
+
+**Change:**
+- `reasoning_parsers::harmony` gets a small incremental parser that mirrors the crate's `StreamableParser`:
+  - It works from each token's decoded bytes. The Harmony strategy already receives them, special tokens included,
+    because the chat template's format makes them visible.
+  - A token whose bytes are exactly `<|start|>`, `<|message|>`, `<|end|>`, `<|call|>` or `<|return|>` counts as that
+    special token.
+  - Headers use the crate's own rules: channel extraction, `<|constrain|>` spacing, `to=` recipients and role
+    detection.
+- `HarmonyContext` no longer loads an encoding. That removes the o200k vocabulary download through
+  `reqwest::blocking` and core's `prewarm_harmony_encoding` workaround, which ran inside `block_in_place`.
+
+**Command:** a throwaway scratch crate, deleted afterwards (not committed). It holds the old `HarmonyContext` from
+git (on `openai-harmony` 0.0.8) and the new one. Each text is encoded with Harmony's o200k tokenizer and fed token by
+token, the old context by id and the new one by `decode_bytes([id])`. The comparison covers, after every token, the
+current recipient, the reasoning, final and grammar-activation deltas, and at the end the reasoning, final content
+and tool calls. Inputs: 9 hand-written conversations (channels, tool calls with the recipient before and after the
+channel, `<|constrain|>`, multibyte text, stray text, malformed headers, no end marker) and 3,000 random
+concatenations of Harmony fragments.
+
+**Raw finding, three rounds:**
+1. 2,707 same, 302 different. Two causes: the crate parses strictly by default, so a stop token inside a header is
+   header text; and after a failed header, the pending assistant role stays until a header parses.
+2. After matching the first: 2,957 same, 52 different.
+3. After matching the second: 3,002 same, 7 different.
+
+All 7 remaining differences are one bug in the old wrapper, not in the parser. Its per-channel lengths
+(`last_analysis_len` and the like) carried across messages, so a later message on the same channel was sliced at the
+earlier message's length and dropped or garbled. Examples:
+- `...analysis<|message|>abcdef<|end|><|start|>assistant<|channel|>analysis<|message|>de` gave `abcdef`
+  (new: `abcdefde`).
+- A second final message `user` came out as `er`.
+
+The new context resets the lengths when a message starts.
+
+The review found a second, older wrapper bug: back-to-back calls to the same function merged into one, because the
+"same call" check compared only recipients. Calls are now keyed by message too. Tests now cover this, the pending-role
+quirk, a stop token inside a header, a recipient-only header, the GPT-OSS `assistant to=functions.x<|channel|>`
+header form, and a Harmony stream through `ToolCallState`.
+
+**Implication:** the replacement matches the crate on every stream except the ones the old wrapper got wrong.
+`openai-harmony` leaves the dependency graph, and 49 packages leave the lockfile, among them `ravif`, `rav1e` and
+`av1-grain` (the AVIF encoder chain behind issue #120). `reqwest` 0.12 remains only through `hf-hub` 0.4.
