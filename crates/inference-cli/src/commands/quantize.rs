@@ -9,17 +9,19 @@ use tracing::{info, warn};
 
 use inference_api::{Engine, EngineSpec, engine::RuntimeSpec};
 use inference_core::{
-    AutoDeviceMapParams, IsqType, UqffWriteConfig, expand_isq_value, initialize_logging,
+    IsqType, NormalLoaderType, UqffWriteConfig, expand_isq_value, initialize_logging,
 };
 use inference_selection::{
     ModelSelected,
     quant::{QuantPolicy, resolve_model_source},
 };
 
-use super::serve::{gguf_filename, gguf_mmproj_selection, require_projector};
+use super::serve::{self, extract_device_settings};
 use crate::args::{
-    GlobalOptions, QuantizeDeviceOptions, QuantizeModelFormat, QuantizeModelSourceOptions,
-    QuantizeModelType, QuantizeMultimodalOptions, QuantizeQuantizationOptions,
+    AdapterOptions, CacheOptions, DeviceOptions, FormatOptions, GlobalOptions, MatformerSelection,
+    ModelSourceOptions, ModelType, MultimodalAdapterOptions, MultimodalOptions,
+    QuantizationOptions, QuantizeDeviceOptions, QuantizeModelSourceOptions, QuantizeModelType,
+    QuantizeMultimodalOptions, QuantizeQuantizationOptions,
 };
 
 /// Extract ISQ values from the QuantizeModelType
@@ -385,241 +387,126 @@ fn print_upload_hint(output_dir: &Path, repo_id: Option<&str>, model_id: &str) {
     );
 }
 
-/// Convert QuantizeModelType to ModelSelected with write_uqff set.
+/// The `ModelSelected` to load for UQFF output: quantize's arguments go through `serve`'s conversion.
 fn convert_to_model_selected(
     model_type: &QuantizeModelType,
     write_uqff: UqffWriteConfig,
 ) -> Result<(ModelSelected, bool, Option<Vec<String>>)> {
+    let mut model_type = as_model_type(model_type);
+    serve::normalize_quant_flags(&mut model_type)?;
+    let (cpu, device_layers) = extract_device_settings(&model_type);
+    let mut selected =
+        serve::convert_to_model_selected(&model_type, &MatformerSelection::default())?;
+    *selected
+        .write_uqff_mut()
+        .expect("every kind quantize accepts can write a UQFF") = Some(write_uqff);
+    Ok((selected, cpu, device_layers))
+}
+
+fn as_model_type(model_type: &QuantizeModelType) -> ModelType {
+    let source =
+        |model: &QuantizeModelSourceOptions, arch: Option<NormalLoaderType>| ModelSourceOptions {
+            model_id: model
+                .model_id
+                .clone()
+                .expect("quantize model source was normalized"),
+            tokenizer: model.tokenizer.clone(),
+            arch,
+            dtype: model.dtype,
+            hf_overrides: None,
+            max_model_len: None,
+        };
+    let quantization =
+        |options: &QuantizeQuantizationOptions, quant: Option<String>| QuantizationOptions {
+            quant,
+            in_situ_quant: None,
+            from_uqff: None,
+            isq_organization: options.isq_organization,
+            imatrix: options.imatrix.clone(),
+            calibration_file: options.calibration_file.clone(),
+        };
+    let multimodal = |options: &QuantizeMultimodalOptions| MultimodalOptions {
+        encoder_cache_memory_mb: None,
+        max_edge: options.max_edge,
+        max_num_images: options.max_num_images,
+        max_image_length: options.max_image_length,
+    };
     match model_type {
         QuantizeModelType::Auto {
             model,
-            quantization,
+            quantization: options,
             device,
-            multimodal,
+            multimodal: multimodal_options,
             ..
-        } => {
-            match model.format.format.unwrap_or(QuantizeModelFormat::Plain) {
-                QuantizeModelFormat::Gguf => {
-                    let selected = convert_gguf_source(
-                        model,
-                        quantization,
-                        device,
-                        Some(multimodal),
-                        write_uqff,
-                    )?;
-                    return Ok((selected, device.cpu, device.device_layers.clone()));
-                }
-                QuantizeModelFormat::Plain => {}
-            }
-            let model_selected = ModelSelected::Run {
-                model_id: model
-                    .model_id
-                    .clone()
-                    .expect("quantize model source was normalized"),
-                quant: model.quant.clone(),
-                tokenizer_json: model
-                    .tokenizer
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string()),
-                dtype: model.dtype,
-                topology: device
-                    .topology
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string()),
-                organization: quantization.isq_organization,
-                write_uqff: Some(write_uqff),
-                from_uqff: None,
-                imatrix: quantization.imatrix.clone(),
-                calibration_file: quantization.calibration_file.clone(),
-                max_edge: multimodal.max_edge,
-                max_seq_len: device.max_seq_len,
-                max_batch_size: device.max_batch_size,
-                max_num_images: multimodal.max_num_images,
-                max_image_length: multimodal.max_image_length,
-                hf_cache_path: device.hf_cache.clone(),
-                matformer_config_path: None,
-                matformer_slice_name: None,
-            };
-            Ok((model_selected, device.cpu, device.device_layers.clone()))
-        }
-
+        } => ModelType::Auto {
+            model: source(model, None),
+            format: model.format.to_format_options(),
+            adapter: AdapterOptions::default(),
+            quantization: quantization(options, model.quant.clone()),
+            device: device_options(device),
+            cache: CacheOptions::default(),
+            multimodal: multimodal(multimodal_options),
+        },
         QuantizeModelType::Text {
             model,
             arch,
-            quantization,
+            quantization: options,
             device,
             ..
-        } => {
-            match model.format.format.unwrap_or(QuantizeModelFormat::Plain) {
-                QuantizeModelFormat::Gguf => {
-                    let selected =
-                        convert_gguf_source(model, quantization, device, None, write_uqff)?;
-                    return Ok((selected, device.cpu, device.device_layers.clone()));
-                }
-                QuantizeModelFormat::Plain => {}
-            }
-            let model_selected = ModelSelected::Plain {
-                quant: model.quant.clone(),
-                model_id: model
-                    .model_id
-                    .clone()
-                    .expect("quantize model source was normalized"),
-                tokenizer_json: model
-                    .tokenizer
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string()),
-                arch: arch.clone(),
-                dtype: model.dtype,
-                topology: device
-                    .topology
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string()),
-                organization: quantization.isq_organization,
-                write_uqff: Some(write_uqff),
-                from_uqff: None,
-                imatrix: quantization.imatrix.clone(),
-                calibration_file: quantization.calibration_file.clone(),
-                max_seq_len: device.max_seq_len,
-                max_batch_size: device.max_batch_size,
-                hf_cache_path: device.hf_cache.clone(),
-                matformer_config_path: None,
-                matformer_slice_name: None,
-            };
-            Ok((model_selected, device.cpu, device.device_layers.clone()))
-        }
-
+        } => ModelType::Text {
+            model: source(model, arch.clone()),
+            format: model.format.to_format_options(),
+            adapter: AdapterOptions::default(),
+            quantization: quantization(options, model.quant.clone()),
+            device: device_options(device),
+            cache: CacheOptions::default(),
+        },
         QuantizeModelType::Multimodal {
             model,
-            quantization,
+            quantization: options,
             device,
-            multimodal,
+            multimodal: multimodal_options,
             ..
-        } => {
-            match model.format.format.unwrap_or(QuantizeModelFormat::Plain) {
-                QuantizeModelFormat::Gguf => {
-                    let selected = convert_gguf_source(
-                        model,
-                        quantization,
-                        device,
-                        Some(multimodal),
-                        write_uqff,
-                    )
-                    .map(require_projector)?;
-                    return Ok((selected, device.cpu, device.device_layers.clone()));
-                }
-                QuantizeModelFormat::Plain => {}
-            }
-            let model_selected = ModelSelected::MultimodalPlain {
-                quant: model.quant.clone(),
-                model_id: model
-                    .model_id
-                    .clone()
-                    .expect("quantize model source was normalized"),
-                tokenizer_json: model
-                    .tokenizer
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string()),
-                arch: None,
-                dtype: model.dtype,
-                topology: device
-                    .topology
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string()),
-                write_uqff: Some(write_uqff),
-                from_uqff: None,
-                max_edge: multimodal.max_edge,
-                calibration_file: quantization.calibration_file.clone(),
-                imatrix: quantization.imatrix.clone(),
-                max_seq_len: device.max_seq_len,
-                max_batch_size: device.max_batch_size,
-                max_num_images: multimodal
-                    .max_num_images
-                    .unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_NUM_IMAGES),
-                max_image_length: multimodal
-                    .max_image_length
-                    .unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_IMAGE_LENGTH),
-                hf_cache_path: device.hf_cache.clone(),
-                matformer_config_path: None,
-                matformer_slice_name: None,
-                organization: quantization.isq_organization,
-            };
-            Ok((model_selected, device.cpu, device.device_layers.clone()))
-        }
-
+        } => ModelType::Multimodal {
+            model: source(model, None),
+            format: model.format.to_format_options(),
+            adapter: MultimodalAdapterOptions::default(),
+            quantization: quantization(options, model.quant.clone()),
+            device: device_options(device),
+            cache: CacheOptions::default(),
+            multimodal: multimodal(multimodal_options),
+        },
         QuantizeModelType::Embedding {
             model,
+            quantization: options,
             device,
-            quantization,
             ..
-        } => {
-            let model_selected = ModelSelected::Embedding {
-                quant: None,
+        } => ModelType::Embedding {
+            model: ModelSourceOptions {
                 model_id: model.model_id.clone(),
-                tokenizer_json: model
-                    .tokenizer
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string()),
+                tokenizer: model.tokenizer.clone(),
                 arch: None,
                 dtype: model.dtype,
-                topology: device
-                    .topology
-                    .as_ref()
-                    .map(|p| p.to_string_lossy().to_string()),
-                write_uqff: Some(write_uqff),
-                from_uqff: None,
-                imatrix: quantization.imatrix.clone(),
-                calibration_file: quantization.calibration_file.clone(),
-                hf_cache_path: device.hf_cache.clone(),
-            };
-            Ok((model_selected, device.cpu, device.device_layers.clone()))
-        }
+                hf_overrides: None,
+                max_model_len: None,
+            },
+            format: FormatOptions::default(),
+            quantization: quantization(options, None),
+            device: device_options(device),
+            cache: CacheOptions::default(),
+        },
     }
 }
 
-fn convert_gguf_source(
-    model: &QuantizeModelSourceOptions,
-    quantization: &QuantizeQuantizationOptions,
-    device: &QuantizeDeviceOptions,
-    multimodal: Option<&QuantizeMultimodalOptions>,
-    write_uqff: UqffWriteConfig,
-) -> Result<ModelSelected> {
-    Ok(ModelSelected::GGUF {
-        quant: model.quant.clone(),
-        mmproj_selection: gguf_mmproj_selection(model.format.direct_file_only),
-        tok_model_id: model.format.tok_model_id.clone(),
-        quantized_model_id: model
-            .model_id
-            .clone()
-            .expect("quantize model source was normalized"),
-        quantized_filename: gguf_filename(
-            model.format.quantized_file.as_deref(),
-            model.quant.as_deref(),
-        )?,
-        tokenizer_json: model
-            .tokenizer
-            .as_ref()
-            .map(|path| path.to_string_lossy().to_string()),
-        mmproj_filename: model.format.mmproj.clone(),
-        lora_adapters: Vec::new(),
-        lora_runtime_config: None,
-        dtype: model.dtype,
-        topology: device
-            .topology
-            .as_ref()
-            .map(|path| path.to_string_lossy().to_string()),
-        organization: quantization.isq_organization,
-        write_uqff: Some(write_uqff),
-        imatrix: quantization.imatrix.clone(),
-        calibration_file: quantization.calibration_file.clone(),
-        max_edge: multimodal.and_then(|options| options.max_edge),
+fn device_options(device: &QuantizeDeviceOptions) -> DeviceOptions {
+    DeviceOptions {
+        cpu: device.cpu,
+        device_layers: device.device_layers.clone(),
+        topology: device.topology.clone(),
+        hf_cache: device.hf_cache.clone(),
         max_seq_len: device.max_seq_len,
         max_batch_size: device.max_batch_size,
-        max_num_images: multimodal.and_then(|options| options.max_num_images),
-        max_image_length: multimodal.and_then(|options| options.max_image_length),
-        hf_cache_path: device.hf_cache.clone(),
-        matformer_config_path: None,
-        matformer_slice_name: None,
-    })
+    }
 }
 
 #[cfg(test)]

@@ -84,7 +84,7 @@ inference bench auto [OPTIONS] --model-id <MODEL_ID>
 |---|---|---|
 | `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID or local path to model directory |
 | `-t, --tokenizer <TOKENIZER>` |  | Path to local tokenizer.json file |
-| `-a, --arch <ARCH>` |  | Model architecture (auto-detected if not specified) |
+| `-a, --arch <ARCH>` |  | Text model architecture; forces the text loader instead of auto-detection |
 | `--dtype <DTYPE>` | `auto` | Model data type |
 | `--hf-overrides <HF_OVERRIDES>` |  | Recursively merged JSON overrides for the Hugging Face model config |
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
@@ -138,7 +138,7 @@ inference bench text [OPTIONS] --model-id <MODEL_ID>
 |---|---|---|
 | `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID or local path to model directory |
 | `-t, --tokenizer <TOKENIZER>` |  | Path to local tokenizer.json file |
-| `-a, --arch <ARCH>` |  | Model architecture (auto-detected if not specified) |
+| `-a, --arch <ARCH>` |  | Text model architecture; forces the text loader instead of auto-detection |
 | `--dtype <DTYPE>` | `auto` | Model data type |
 | `--hf-overrides <HF_OVERRIDES>` |  | Recursively merged JSON overrides for the Hugging Face model config |
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
@@ -188,7 +188,7 @@ inference bench multimodal [OPTIONS] --model-id <MODEL_ID>
 |---|---|---|
 | `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID or local path to model directory |
 | `-t, --tokenizer <TOKENIZER>` |  | Path to local tokenizer.json file |
-| `-a, --arch <ARCH>` |  | Model architecture (auto-detected if not specified) |
+| `-a, --arch <ARCH>` |  | Text model architecture; forces the text loader instead of auto-detection |
 | `--dtype <DTYPE>` | `auto` | Model data type |
 | `--hf-overrides <HF_OVERRIDES>` |  | Recursively merged JSON overrides for the Hugging Face model config |
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
@@ -237,7 +237,7 @@ inference bench diffusion [OPTIONS] --model-id <MODEL_ID>
 |---|---|---|
 | `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID or local path to model directory |
 | `-t, --tokenizer <TOKENIZER>` |  | Path to local tokenizer.json file |
-| `-a, --arch <ARCH>` |  | Model architecture (auto-detected if not specified) |
+| `-a, --arch <ARCH>` |  | Text model architecture; forces the text loader instead of auto-detection |
 | `--dtype <DTYPE>` | `auto` | Model data type |
 | `--hf-overrides <HF_OVERRIDES>` |  | Recursively merged JSON overrides for the Hugging Face model config |
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
@@ -260,7 +260,7 @@ inference bench speech [OPTIONS] --model-id <MODEL_ID>
 |---|---|---|
 | `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID or local path to model directory |
 | `-t, --tokenizer <TOKENIZER>` |  | Path to local tokenizer.json file |
-| `-a, --arch <ARCH>` |  | Model architecture (auto-detected if not specified) |
+| `-a, --arch <ARCH>` |  | Text model architecture; forces the text loader instead of auto-detection |
 | `--dtype <DTYPE>` | `auto` | Model data type |
 | `--hf-overrides <HF_OVERRIDES>` |  | Recursively merged JSON overrides for the Hugging Face model config |
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
@@ -283,7 +283,7 @@ inference bench embedding [OPTIONS] --model-id <MODEL_ID>
 |---|---|---|
 | `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID or local path to model directory |
 | `-t, --tokenizer <TOKENIZER>` |  | Path to local tokenizer.json file |
-| `-a, --arch <ARCH>` |  | Model architecture (auto-detected if not specified) |
+| `-a, --arch <ARCH>` |  | Text model architecture; forces the text loader instead of auto-detection |
 | `--dtype <DTYPE>` | `auto` | Model data type |
 | `--hf-overrides <HF_OVERRIDES>` |  | Recursively merged JSON overrides for the Hugging Face model config |
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |

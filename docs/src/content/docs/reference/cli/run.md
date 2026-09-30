@@ -112,7 +112,7 @@ inference run auto [OPTIONS] --model-id <MODEL_ID>
 |---|---|---|
 | `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID or local path to model directory |
 | `-t, --tokenizer <TOKENIZER>` |  | Path to local tokenizer.json file |
-| `-a, --arch <ARCH>` |  | Model architecture (auto-detected if not specified) |
+| `-a, --arch <ARCH>` |  | Text model architecture; forces the text loader instead of auto-detection |
 | `--dtype <DTYPE>` | `auto` | Model data type |
 | `--hf-overrides <HF_OVERRIDES>` |  | Recursively merged JSON overrides for the Hugging Face model config |
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
@@ -166,7 +166,7 @@ inference run text [OPTIONS] --model-id <MODEL_ID>
 |---|---|---|
 | `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID or local path to model directory |
 | `-t, --tokenizer <TOKENIZER>` |  | Path to local tokenizer.json file |
-| `-a, --arch <ARCH>` |  | Model architecture (auto-detected if not specified) |
+| `-a, --arch <ARCH>` |  | Text model architecture; forces the text loader instead of auto-detection |
 | `--dtype <DTYPE>` | `auto` | Model data type |
 | `--hf-overrides <HF_OVERRIDES>` |  | Recursively merged JSON overrides for the Hugging Face model config |
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
@@ -216,7 +216,7 @@ inference run multimodal [OPTIONS] --model-id <MODEL_ID>
 |---|---|---|
 | `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID or local path to model directory |
 | `-t, --tokenizer <TOKENIZER>` |  | Path to local tokenizer.json file |
-| `-a, --arch <ARCH>` |  | Model architecture (auto-detected if not specified) |
+| `-a, --arch <ARCH>` |  | Text model architecture; forces the text loader instead of auto-detection |
 | `--dtype <DTYPE>` | `auto` | Model data type |
 | `--hf-overrides <HF_OVERRIDES>` |  | Recursively merged JSON overrides for the Hugging Face model config |
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
@@ -265,7 +265,7 @@ inference run diffusion [OPTIONS] --model-id <MODEL_ID>
 |---|---|---|
 | `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID or local path to model directory |
 | `-t, --tokenizer <TOKENIZER>` |  | Path to local tokenizer.json file |
-| `-a, --arch <ARCH>` |  | Model architecture (auto-detected if not specified) |
+| `-a, --arch <ARCH>` |  | Text model architecture; forces the text loader instead of auto-detection |
 | `--dtype <DTYPE>` | `auto` | Model data type |
 | `--hf-overrides <HF_OVERRIDES>` |  | Recursively merged JSON overrides for the Hugging Face model config |
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
@@ -288,7 +288,7 @@ inference run speech [OPTIONS] --model-id <MODEL_ID>
 |---|---|---|
 | `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID or local path to model directory |
 | `-t, --tokenizer <TOKENIZER>` |  | Path to local tokenizer.json file |
-| `-a, --arch <ARCH>` |  | Model architecture (auto-detected if not specified) |
+| `-a, --arch <ARCH>` |  | Text model architecture; forces the text loader instead of auto-detection |
 | `--dtype <DTYPE>` | `auto` | Model data type |
 | `--hf-overrides <HF_OVERRIDES>` |  | Recursively merged JSON overrides for the Hugging Face model config |
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |
@@ -311,7 +311,7 @@ inference run embedding [OPTIONS] --model-id <MODEL_ID>
 |---|---|---|
 | `-m, --model-id <MODEL_ID>` | required | Hugging Face model ID or local path to model directory |
 | `-t, --tokenizer <TOKENIZER>` |  | Path to local tokenizer.json file |
-| `-a, --arch <ARCH>` |  | Model architecture (auto-detected if not specified) |
+| `-a, --arch <ARCH>` |  | Text model architecture; forces the text loader instead of auto-detection |
 | `--dtype <DTYPE>` | `auto` | Model data type |
 | `--hf-overrides <HF_OVERRIDES>` |  | Recursively merged JSON overrides for the Hugging Face model config |
 | `--max-model-len <MAX_MODEL_LEN>` |  | Runtime model context length |

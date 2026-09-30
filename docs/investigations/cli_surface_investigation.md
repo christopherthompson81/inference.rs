@@ -410,3 +410,25 @@ every client); the selection loader's `resolve_ordering` refuses an empty orderi
 
 **Tests:** `config_rejects_an_xlora_index_without_xlora`, `a_matformer_slice_without_its_config_is_refused`, and
 `inline_ordering_is_used_over_the_order_path` now asserts the new ordering error rather than any error.
+
+## Run 17 — 2026-09-30 (time approximate)
+
+**Question:** Run 15's PR 3 was a public `ModelRequest` in inference-selection. That would be a fourth public way to
+describe a model (clap, TOML, `ModelSelected`, and it), while most of the duplication it removes is inside the CLI:
+quantize's own 230-line copy of serve's conversion. The user chose the smaller change: quantize maps its arguments onto
+the `ModelType` serve converts, and dropped `arch` stops being silent.
+
+**Change:** quantize's `convert_to_model_selected`/`convert_gguf_source` became `as_model_type` (a field mapping) plus
+serve's `convert_to_model_selected` and `ModelSelected::write_uqff_mut` for the UQFF output. An auto model with
+`--arch` now uses the text loader it names instead of auto-detection, which ignored it. `--arch` on a multimodal,
+embedding, diffusion, speech, GGUF or GGML model (where it can't apply) logs that it is ignored.
+
+**Review:** no field differs from master's quantize conversion for any variant or format. The arch reroute means
+a multimodal checkpoint given a (text) `-a` now gets the text loader rather than auto-detection; the docs already say
+`--arch` forces the text loader, so the flag's help now says so too. Also fixed from the review: `tune --emit-config`
+writes `arch`, so the config loads the loader that was tuned; quantize applies `normalize_quant_flags` like the other
+commands (`--tok-model-id --quant` means GGUF).
+
+**Tests:** quantize's 5 conversion tests pass unchanged through the shared path;
+`an_explicit_arch_picks_the_text_loader_for_an_auto_model`; `an_emitted_config_keeps_the_tuned_architecture`
+round-trips an emitted config through the TOML parser.
