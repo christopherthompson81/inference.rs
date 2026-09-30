@@ -1,16 +1,15 @@
 //! The speech generation route: HTTP framing over the engine's speech generation.
 
 use axum::{
-    extract::{Json, State, rejection::JsonRejection},
+    extract::State,
     http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
 };
 
+use crate::handler_core::{ApiJson, ApiJsonRejection};
 use crate::{
-    generation::generate_speech,
-    handler_core::{ApiError, ApiErrorHttp, openai_error_response},
-    openai::SpeechGenerationRequest,
-    types::ExtractedInferenceRsState,
+    generation::generate_speech, handler_core::openai_error_response,
+    openai::SpeechGenerationRequest, types::ExtractedInferenceRsState,
 };
 
 /// Speech generation endpoint handler.
@@ -23,11 +22,11 @@ use crate::{
 )]
 pub async fn speech_generation(
     State(state): ExtractedInferenceRsState,
-    payload: Result<Json<SpeechGenerationRequest>, JsonRejection>,
+    payload: Result<ApiJson<SpeechGenerationRequest>, ApiJsonRejection>,
 ) -> Response {
     let request = match payload {
-        Ok(Json(request)) => request,
-        Err(error) => return openai_error_response(ApiError::from_json_rejection(error)),
+        Ok(ApiJson(request)) => request,
+        Err(ApiJsonRejection(error)) => return openai_error_response(error),
     };
     match generate_speech(&state, request).await {
         Ok(audio) => {

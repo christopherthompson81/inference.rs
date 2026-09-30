@@ -1,21 +1,19 @@
 //! The LoRA adapter routes: HTTP framing over the engine's adapter management.
 
 use axum::{
-    Extension, Json,
-    extract::{
-        Query, State,
-        rejection::{JsonRejection, QueryRejection},
-    },
+    Extension,
+    extract::{Query, State, rejection::QueryRejection},
     response::Response,
 };
 
+use crate::handler_core::{ApiJson, ApiJsonRejection};
 pub use crate::lora_adapters_api::{
     ALLOW_RUNTIME_LORA_UPDATING_ENV, LORA_ADAPTER_ROOT_ENV, ListLoraAdaptersQuery,
     LoadLoraAdapterRequest, LoraAdapterApiConfig, LoraAdapterListResponse, LoraAdapterObject,
     LoraResidentGenerationObject, UnloadLoraAdapterRequest, runtime_lora_updates_enabled,
 };
 use crate::{
-    handler_core::{ApiError, ApiErrorHttp, ApiErrorKind, json_response, openai_error_response},
+    handler_core::{ApiError, ApiErrorKind, json_response, openai_error_response},
     lora_adapters_api::{list_adapters, load_adapter, unload_adapter},
     types::ExtractedInferenceRsState,
 };
@@ -47,11 +45,11 @@ const INVALID_QUERY: &str = "invalid_query";
 pub(crate) async fn load_lora_adapter(
     State(state): ExtractedInferenceRsState,
     Extension(config): Extension<LoraAdapterApiConfig>,
-    payload: Result<Json<LoadLoraAdapterRequest>, JsonRejection>,
+    payload: Result<ApiJson<LoadLoraAdapterRequest>, ApiJsonRejection>,
 ) -> Response {
     match payload {
-        Ok(Json(request)) => json_response(load_adapter(&state, &config, request).await),
-        Err(error) => openai_error_response(ApiError::from_json_rejection(error)),
+        Ok(ApiJson(request)) => json_response(load_adapter(&state, &config, request).await),
+        Err(ApiJsonRejection(error)) => openai_error_response(error),
     }
 }
 
@@ -77,11 +75,11 @@ pub(crate) async fn load_lora_adapter(
 pub(crate) async fn unload_lora_adapter(
     State(state): ExtractedInferenceRsState,
     Extension(config): Extension<LoraAdapterApiConfig>,
-    payload: Result<Json<UnloadLoraAdapterRequest>, JsonRejection>,
+    payload: Result<ApiJson<UnloadLoraAdapterRequest>, ApiJsonRejection>,
 ) -> Response {
     match payload {
-        Ok(Json(request)) => json_response(unload_adapter(&state, &config, request).await),
-        Err(error) => openai_error_response(ApiError::from_json_rejection(error)),
+        Ok(ApiJson(request)) => json_response(unload_adapter(&state, &config, request).await),
+        Err(ApiJsonRejection(error)) => openai_error_response(error),
     }
 }
 

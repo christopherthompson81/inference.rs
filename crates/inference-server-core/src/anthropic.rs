@@ -4,7 +4,7 @@ use std::{pin::Pin, sync::Arc, task::Poll, time::Duration};
 
 use axum::{
     Extension,
-    extract::{Json, State, rejection::JsonRejection},
+    extract::{Json, State},
     http,
     response::{
         IntoResponse, Sse,
@@ -30,12 +30,13 @@ use crate::anthropic_api::{
     AnthropicStream, AnthropicStreamEvent, MessagesFailure, anthropic_error_body, collect_messages,
     prepare_messages,
 };
+use crate::handler_core::{ApiJson, ApiJsonRejection};
 use crate::{
     agentic::AgenticDefaults,
     chat_completion::{ChatCompletionParseContext, parse_request},
     engine_chat::{ChatEngine, DispatchError},
     handler_core::{
-        ApiError, ApiErrorHttp, ApiErrorKind, ResponseErrorMessage, create_response_channel,
+        ApiError, ApiErrorKind, ResponseErrorMessage, create_response_channel,
         send_request_with_model,
     },
     lora_routing::{DEFAULT_MODEL_ID, resolve_lora_adapter_model},
@@ -158,8 +159,7 @@ fn anthropic_error_status(kind: ApiErrorKind) -> http::StatusCode {
     }
 }
 
-fn anthropic_json_rejection(error: JsonRejection) -> ApiError {
-    let mut error = ApiError::from_json_rejection(error);
+fn anthropic_json_rejection(mut error: ApiError) -> ApiError {
     if error.kind == ApiErrorKind::UnsupportedMediaType {
         error.kind = ApiErrorKind::InvalidRequest;
     }
@@ -187,11 +187,11 @@ pub async fn anthropic_messages(
     Extension(agentic_defaults): Extension<AgenticDefaults>,
     Extension(skill_store): Extension<Arc<SkillStore>>,
     stream_outcome: Option<Extension<StreamOutcomeHandle>>,
-    payload: Result<Json<AnthropicMessagesRequest>, JsonRejection>,
+    payload: Result<ApiJson<AnthropicMessagesRequest>, ApiJsonRejection>,
 ) -> AnthropicMessagesResponder {
     let request = match payload {
-        Ok(Json(request)) => request,
-        Err(error) => {
+        Ok(ApiJson(request)) => request,
+        Err(ApiJsonRejection(error)) => {
             return AnthropicMessagesResponder::ValidationError(Box::new(
                 anthropic_json_rejection(error),
             ));
@@ -234,11 +234,11 @@ pub async fn anthropic_messages(
 )]
 pub async fn anthropic_count_tokens(
     State(state): ExtractedInferenceRsState,
-    payload: Result<Json<AnthropicMessagesRequest>, JsonRejection>,
+    payload: Result<ApiJson<AnthropicMessagesRequest>, ApiJsonRejection>,
 ) -> AnthropicCountTokensResponder {
     let request = match payload {
-        Ok(Json(request)) => request,
-        Err(error) => {
+        Ok(ApiJson(request)) => request,
+        Err(ApiJsonRejection(error)) => {
             return AnthropicCountTokensResponder::ValidationError(Box::new(
                 anthropic_json_rejection(error),
             ));
@@ -479,10 +479,10 @@ mod tests {
             .header(http::header::CONTENT_TYPE, "application/json")
             .body(Body::from("{"))
             .unwrap();
-        let rejection = Json::<AnthropicMessagesRequest>::from_request(malformed, &())
+        let rejection = ApiJson::<AnthropicMessagesRequest>::from_request(malformed, &())
             .await
             .unwrap_err();
-        let response = anthropic_error_response(anthropic_json_rejection(rejection));
+        let response = anthropic_error_response(anthropic_json_rejection(rejection.0));
         assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
         let body = error_body(response).await;
         assert_eq!(body["error"]["type"], "invalid_request_error");
@@ -491,10 +491,10 @@ mod tests {
             .header(http::header::CONTENT_TYPE, "application/json")
             .body(Body::from(r#"{"messages":"not-an-array"}"#))
             .unwrap();
-        let rejection = Json::<AnthropicMessagesRequest>::from_request(wrong_type, &())
+        let rejection = ApiJson::<AnthropicMessagesRequest>::from_request(wrong_type, &())
             .await
             .unwrap_err();
-        let response = anthropic_error_response(anthropic_json_rejection(rejection));
+        let response = anthropic_error_response(anthropic_json_rejection(rejection.0));
         assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
         let body = error_body(response).await;
         assert_eq!(body["error"]["type"], "invalid_request_error");
@@ -502,10 +502,11 @@ mod tests {
         let missing_content_type = HttpRequest::builder()
             .body(Body::from(r#"{"messages":[]}"#))
             .unwrap();
-        let rejection = Json::<AnthropicMessagesRequest>::from_request(missing_content_type, &())
-            .await
-            .unwrap_err();
-        let response = anthropic_error_response(anthropic_json_rejection(rejection));
+        let rejection =
+            ApiJson::<AnthropicMessagesRequest>::from_request(missing_content_type, &())
+                .await
+                .unwrap_err();
+        let response = anthropic_error_response(anthropic_json_rejection(rejection.0));
         assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
         let body = error_body(response).await;
         assert_eq!(body["error"]["type"], "invalid_request_error");

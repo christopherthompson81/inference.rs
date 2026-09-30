@@ -49,6 +49,7 @@ use crate::{
         ReIsqResponse, SessionDeleted, SessionList, SessionStored, TokenizeRequest,
         TokenizeResponse,
     },
+    request_body::JsonRequest,
     responses::{
         OpenResponsesCreateRequest, OpenResponsesStreamer, PreparedResponse, ResponseDeleted,
         cancel_response, collect_response, delete_response, get_response, prepare_response,
@@ -62,7 +63,6 @@ use crate::{
     types::SharedInferenceRsState,
 };
 
-const INVALID_REQUEST_BODY: &str = "invalid_request_body";
 const ONE_MODEL_SOURCE: &str = "give either `model` or a non-empty `models`, not both";
 const DEFAULT_WITHOUT_MODELS: &str =
     "`default_model_id` picks one of `models`; with `model`, use `model_id`";
@@ -1298,15 +1298,8 @@ impl Engine {
     }
 }
 
-fn parse_json<T: serde::de::DeserializeOwned>(request: &[u8]) -> Result<T, ApiError> {
-    serde_json::from_slice(request).map_err(|error| {
-        ApiError::new(
-            ApiErrorKind::InvalidRequest,
-            error.to_string(),
-            Some(INVALID_REQUEST_BODY),
-            None,
-        )
-    })
+fn parse_json<T: JsonRequest>(request: &[u8]) -> Result<T, ApiError> {
+    T::from_json(request)
 }
 
 fn to_json(response: &impl serde::Serialize) -> Result<String, ApiError> {

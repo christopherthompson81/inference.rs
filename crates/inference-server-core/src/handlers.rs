@@ -1,9 +1,10 @@
 //! ## General inference.rs server route handlers.
 
-use axum::extract::{Json, Path, State, rejection::JsonRejection};
+use axum::extract::{Json, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use inference_api::operations::{self, CalibrationApplyRequest, ReIsqRequest, ReIsqResponse};
+use inference_api::request_body::{JsonRequest, parse_json};
 use inference_core::{
     AutoDeviceMapParams, AutoTuneRequest, CalibrationAction, InferenceRs, ModelDType,
     ModelSelected, SerializedSession, TokenSource, TuneProfile, auto_tune, parse_isq_value,
@@ -11,7 +12,7 @@ use inference_core::{
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
-use crate::handler_core::ApiErrorHttp;
+use crate::handler_core::{ApiJson, ApiJsonRejection};
 pub use crate::models_api::{ModelOperationRequest, ModelStatus, ModelStatusResponse};
 use crate::{
     handler_core::{ApiError, ApiErrorKind, json_response, openai_error_response},
@@ -97,11 +98,11 @@ pub async fn system_doctor() -> Json<inference_core::DoctorReport> {
 )]
 pub async fn re_isq(
     State(state): ExtractedInferenceRsState,
-    payload: Result<Json<ReIsqRequest>, JsonRejection>,
+    payload: Result<ApiJson<ReIsqRequest>, ApiJsonRejection>,
 ) -> Response {
     let request = match payload {
-        Ok(Json(request)) => request,
-        Err(error) => return openai_error_response(ApiError::from_json_rejection(error)),
+        Ok(ApiJson(request)) => request,
+        Err(ApiJsonRejection(error)) => return openai_error_response(error),
     };
     InferenceRs::maybe_log_request(state.clone(), format!("Re ISQ: {:?}", request.ggml_type));
     json_response(operations::re_isq(&state, request).await)
@@ -153,11 +154,11 @@ pub async fn calibration_status(State(state): ExtractedInferenceRsState) -> Resp
 )]
 pub async fn calibration_apply(
     State(state): ExtractedInferenceRsState,
-    payload: Result<Json<CalibrationApplyRequest>, JsonRejection>,
+    payload: Result<ApiJson<CalibrationApplyRequest>, ApiJsonRejection>,
 ) -> Response {
     let request = match payload {
-        Ok(Json(request)) => request,
-        Err(error) => return openai_error_response(ApiError::from_json_rejection(error)),
+        Ok(ApiJson(request)) => request,
+        Err(ApiJsonRejection(error)) => return openai_error_response(error),
     };
     let save_cimatrix = match request
         .save_cimatrix
@@ -173,11 +174,11 @@ pub async fn calibration_apply(
 }
 
 fn model_operation_request(
-    payload: Result<Json<ModelOperationRequest>, JsonRejection>,
+    payload: Result<ApiJson<ModelOperationRequest>, ApiJsonRejection>,
 ) -> Result<ModelOperationRequest, ApiError> {
     payload
-        .map(|Json(request)| request)
-        .map_err(ApiError::from_json_rejection)
+        .map(|ApiJson(request)| request)
+        .map_err(|ApiJsonRejection(error)| error)
 }
 
 #[utoipa::path(
@@ -197,7 +198,7 @@ fn model_operation_request(
 )]
 pub async fn unload_model(
     State(state): ExtractedInferenceRsState,
-    payload: Result<Json<ModelOperationRequest>, JsonRejection>,
+    payload: Result<ApiJson<ModelOperationRequest>, ApiJsonRejection>,
 ) -> Response {
     match model_operation_request(payload) {
         Ok(request) => json_response(unload(&state, request)),
@@ -222,7 +223,7 @@ pub async fn unload_model(
 )]
 pub async fn reload_model(
     State(state): ExtractedInferenceRsState,
-    payload: Result<Json<ModelOperationRequest>, JsonRejection>,
+    payload: Result<ApiJson<ModelOperationRequest>, ApiJsonRejection>,
 ) -> Response {
     match model_operation_request(payload) {
         Ok(request) => json_response(reload(&state, request).await),
@@ -246,7 +247,7 @@ pub async fn reload_model(
 )]
 pub async fn get_model_status(
     State(state): ExtractedInferenceRsState,
-    payload: Result<Json<ModelOperationRequest>, JsonRejection>,
+    payload: Result<ApiJson<ModelOperationRequest>, ApiJsonRejection>,
 ) -> Response {
     match model_operation_request(payload) {
         Ok(request) => json_response(status(&state, request)),
@@ -290,6 +291,12 @@ pub struct TuneModelRequest {
     pub cpu: Option<bool>,
 }
 
+impl JsonRequest for TuneModelRequest {
+    fn from_json(body: &[u8]) -> Result<Self, ApiError> {
+        parse_json(body)
+    }
+}
+
 #[utoipa::path(
   post,
   tag = "inference.rs",
@@ -303,10 +310,10 @@ pub struct TuneModelRequest {
     (status = 500, description = "Tuning failed")
   )
 )]
-pub async fn tune_model(payload: Result<Json<TuneModelRequest>, JsonRejection>) -> Response {
+pub async fn tune_model(payload: Result<ApiJson<TuneModelRequest>, ApiJsonRejection>) -> Response {
     let request = match payload {
-        Ok(Json(request)) => request,
-        Err(error) => return openai_error_response(ApiError::from_json_rejection(error)),
+        Ok(ApiJson(request)) => request,
+        Err(ApiJsonRejection(error)) => return openai_error_response(error),
     };
     let token_source = match request.token_source {
         Some(value) => match value.parse() {
@@ -437,11 +444,11 @@ pub async fn get_session(
 pub async fn put_session(
     State(state): ExtractedInferenceRsState,
     Path(session_id): Path<String>,
-    payload: Result<Json<SerializedSession>, JsonRejection>,
+    payload: Result<ApiJson<SerializedSession>, ApiJsonRejection>,
 ) -> Response {
     let session = match payload {
-        Ok(Json(session)) => session,
-        Err(error) => return openai_error_response(ApiError::from_json_rejection(error)),
+        Ok(ApiJson(session)) => session,
+        Err(ApiJsonRejection(error)) => return openai_error_response(error),
     };
     match operations::import_session(&state, session_id, session) {
         Ok(()) => StatusCode::OK.into_response(),
@@ -472,6 +479,7 @@ mod tests {
     use axum::{body::Body, extract::FromRequest, http::Request as HttpRequest};
 
     use super::*;
+    use crate::handler_core::ApiErrorHttp;
 
     #[test]
     fn http_save_cimatrix_accepts_only_bare_file_names() {
@@ -496,7 +504,7 @@ mod tests {
             .header(axum::http::header::CONTENT_TYPE, "application/json")
             .body(Body::from("{}"))
             .unwrap();
-        let rejection = Json::<ModelOperationRequest>::from_request(request, &())
+        let rejection = ApiJson::<ModelOperationRequest>::from_request(request, &())
             .await
             .unwrap_err();
         let error = model_operation_request(Err(rejection)).unwrap_err();

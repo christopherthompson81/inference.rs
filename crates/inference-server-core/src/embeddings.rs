@@ -1,13 +1,14 @@
 //! OpenAI-compatible embeddings endpoint.
 
 use axum::{
-    extract::{Json, State, rejection::JsonRejection},
+    extract::{Json, State},
     response::IntoResponse,
 };
 
+use crate::handler_core::{ApiJson, ApiJsonRejection};
 use crate::{
     engine_embeddings::{EmbeddingError, embed},
-    handler_core::{ApiError, ApiErrorHttp, ApiErrorKind, openai_error_from_error},
+    handler_core::{ApiErrorKind, openai_error_from_error},
     openai::{EmbeddingRequest, EmbeddingResponse},
     types::ExtractedInferenceRsState,
 };
@@ -41,14 +42,12 @@ impl IntoResponse for EmbeddingResponder {
 )]
 pub async fn embeddings(
     State(state): ExtractedInferenceRsState,
-    payload: Result<Json<EmbeddingRequest>, JsonRejection>,
+    payload: Result<ApiJson<EmbeddingRequest>, ApiJsonRejection>,
 ) -> EmbeddingResponder {
     let oairequest = match payload {
-        Ok(Json(request)) => request,
-        Err(error) => {
-            return EmbeddingResponder::ValidationError(
-                ApiError::from_json_rejection(error).into(),
-            );
+        Ok(ApiJson(request)) => request,
+        Err(ApiJsonRejection(error)) => {
+            return EmbeddingResponder::ValidationError(error.into());
         }
     };
     match embed(state, oairequest).await {

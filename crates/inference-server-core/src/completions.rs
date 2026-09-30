@@ -8,7 +8,7 @@ use std::{
 
 use axum::{
     Extension,
-    extract::{Json, State, rejection::JsonRejection},
+    extract::{Json, State},
     response::{
         IntoResponse, Sse,
         sse::{Event, KeepAlive, KeepAliveStream},
@@ -18,6 +18,7 @@ use inference_core::{CompletionChunkResponse, CompletionResponse, InferenceRs, R
 use tokio::sync::mpsc::Receiver;
 
 pub use crate::engine_completion::parse_request;
+use crate::handler_core::{ApiJson, ApiJsonRejection};
 use crate::{
     completion_core::{
         BaseCompletionResponder, handle_completion_error, handle_completion_validation_error,
@@ -27,8 +28,7 @@ use crate::{
         CompletionStream, CompletionStreamEvent, collect_completion, prepare_completion,
     },
     handler_core::{
-        ApiError, ApiErrorHttp, ApiErrorKind, ModelErrorMessage, openai_error_from_error,
-        openai_error_response,
+        ApiError, ApiErrorKind, ModelErrorMessage, openai_error_from_error, openai_error_response,
     },
     openai::{CompletionChunkResponseBody, CompletionRequest, CompletionResponseBody},
     streaming::{DoneState, StreamOutcomeHandle, get_keep_alive_interval, openai_error_event},
@@ -158,14 +158,12 @@ impl IntoResponse for CompletionResponder {
 pub async fn completions(
     State(state): ExtractedInferenceRsState,
     stream_outcome: Option<Extension<StreamOutcomeHandle>>,
-    payload: Result<Json<CompletionRequest>, JsonRejection>,
+    payload: Result<ApiJson<CompletionRequest>, ApiJsonRejection>,
 ) -> CompletionResponder {
     let oairequest = match payload {
-        Ok(Json(request)) => request,
-        Err(error) => {
-            return CompletionResponder::ValidationError(Box::new(ApiError::from_json_rejection(
-                error,
-            )));
+        Ok(ApiJson(request)) => request,
+        Err(ApiJsonRejection(error)) => {
+            return CompletionResponder::ValidationError(Box::new(error));
         }
     };
     let prepared = match prepare_completion(&state, oairequest).await {

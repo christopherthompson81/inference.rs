@@ -134,7 +134,7 @@ fn chat_and_stream_agree_and_errors_carry_openai_bodies() {
     assert!(response.is_none());
     let error: Value = serde_json::from_str(&last_error()).unwrap();
     assert_eq!(error["error"]["type"], "invalid_request_error");
-    assert_eq!(error["error"]["code"], "invalid_request_body");
+    assert_eq!(error["error"]["code"], "malformed_json");
 
     let unknown_model =
         json!({"model": "no-such-model", "messages": [{"role": "user", "content": "hi"}]});

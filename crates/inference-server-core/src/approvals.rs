@@ -1,14 +1,12 @@
-use axum::{
-    Extension,
-    extract::{Json, Path, rejection::JsonRejection},
-};
+use axum::{Extension, extract::Path};
 
 pub use crate::agentic::{
     ApprovalBroker, ApprovalDecision, ApprovalDecisionRequest, ApprovalDecisionResponse,
 };
+use crate::handler_core::{ApiJson, ApiJsonRejection};
 use crate::{
     agentic::resolve_approval,
-    handler_core::{ApiError, ApiErrorHttp, json_response, openai_error_response},
+    handler_core::{json_response, openai_error_response},
 };
 
 #[utoipa::path(
@@ -28,11 +26,11 @@ use crate::{
 pub async fn resolve_agent_approval(
     Extension(broker): Extension<ApprovalBroker>,
     Path(approval_id): Path<String>,
-    payload: Result<Json<ApprovalDecisionRequest>, JsonRejection>,
+    payload: Result<ApiJson<ApprovalDecisionRequest>, ApiJsonRejection>,
 ) -> axum::response::Response {
     match payload {
-        Ok(Json(request)) => json_response(resolve_approval(&broker, &approval_id, request)),
-        Err(error) => openai_error_response(ApiError::from_json_rejection(error)),
+        Ok(ApiJson(request)) => json_response(resolve_approval(&broker, &approval_id, request)),
+        Err(ApiJsonRejection(error)) => openai_error_response(error),
     }
 }
 
@@ -64,13 +62,13 @@ mod tests {
     async fn approval_json_rejection(
         body: &'static str,
         content_type: Option<&'static str>,
-    ) -> JsonRejection {
+    ) -> ApiJsonRejection {
         let mut builder = HttpRequest::builder();
         if let Some(content_type) = content_type {
             builder = builder.header(CONTENT_TYPE, content_type);
         }
         let request = builder.body(Body::from(body)).unwrap();
-        match Json::<ApprovalDecisionRequest>::from_request(request, &()).await {
+        match ApiJson::<ApprovalDecisionRequest>::from_request(request, &()).await {
             Ok(_) => panic!("expected JSON rejection"),
             Err(error) => error,
         }
@@ -138,7 +136,7 @@ mod tests {
         let response = resolve_agent_approval(
             Extension(ApprovalBroker::default()),
             Path("missing".to_string()),
-            Ok(Json(ApprovalDecisionRequest {
+            Ok(ApiJson(ApprovalDecisionRequest {
                 decision: ApprovalDecision::Approve,
                 remember_for_session: false,
                 message: None,
