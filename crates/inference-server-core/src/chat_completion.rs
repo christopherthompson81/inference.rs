@@ -133,9 +133,11 @@ impl futures::Stream for ChatCompletionStreamer {
                         }
                         Event::default().json_data(response)
                     }
-                    ChatStreamEvent::AgenticToolCallProgress(payload)
-                    | ChatStreamEvent::AgenticToolApprovalRequired(payload) => {
-                        Event::default().json_data(payload)
+                    ChatStreamEvent::AgenticToolCallProgress(progress) => {
+                        Event::default().json_data(progress.to_json())
+                    }
+                    ChatStreamEvent::AgenticToolApprovalRequired(approval) => {
+                        Event::default().json_data(approval.to_json())
                     }
                     ChatStreamEvent::FileProduced(file) => Event::default().json_data(file),
                     ChatStreamEvent::Error(error) => Ok(openai_error_event(error)),
