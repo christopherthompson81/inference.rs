@@ -1,7 +1,7 @@
 use inference_core::{
-    AutoDeviceMapParams, LoraAdapterSpec, LoraRuntimeConfig, ModelSelected,
-    UQFF_MULTI_FILE_DELIMITER,
+    AutoDeviceMapParams, LoraAdapterSpec, LoraRuntimeConfig, UQFF_MULTI_FILE_DELIMITER,
 };
+use inference_selection::ModelSelected;
 
 use crate::{
     Model, TextModelBuilder,

@@ -2,9 +2,10 @@
 
 use candle_core::Device;
 use inference_core::{
-    AddModelConfig, EngineConfig, IsqType, PagedAttentionConfig, PagedKvModelRequest, Pipeline,
-    SchedulerConfig, SearchCallback, SearchEmbeddingModel, ToolCallbackWithTool, plan_paged_kv,
+    AddModelConfig, EngineConfig, IsqType, PagedAttentionConfig, Pipeline, SchedulerConfig,
+    SearchCallback, SearchEmbeddingModel, ToolCallbackWithTool,
 };
+use inference_selection::{ModelSelected, PagedKvModelRequest, plan_paged_kv};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -395,9 +396,7 @@ pub async fn build_text_pipeline(
     build_text_pipeline_as(builder, model_selected, Default::default()).await
 }
 
-pub(crate) fn plain_text_selection(
-    builder: &crate::TextModelBuilder,
-) -> inference_core::ModelSelected {
+pub(crate) fn plain_text_selection(builder: &crate::TextModelBuilder) -> ModelSelected {
     use inference_core::*;
     ModelSelected::Plain {
         model_id: builder.model_id.clone(),
@@ -421,7 +420,7 @@ pub(crate) fn plain_text_selection(
 // Loads `model_selected` with the text builder's runtime options; adapter builders pick their own selection.
 pub(crate) async fn build_text_pipeline_as(
     mut builder: crate::TextModelBuilder,
-    model_selected: inference_core::ModelSelected,
+    model_selected: ModelSelected,
     overrides: inference_core::LoadOverrides,
 ) -> anyhow::Result<(Arc<Mutex<dyn Pipeline>>, SchedulerConfig, AddModelConfig)> {
     use inference_core::*;
@@ -449,7 +448,7 @@ pub(crate) async fn build_text_pipeline_as(
         .unwrap_or(DeviceMapSetting::Auto(AutoDeviceMapParams::default_text()));
 
     let loader_config = ModelLoaderConfig {
-        model_selected,
+        source: Arc::new(model_selected),
         token_source: builder.token_source.clone(),
         hf_revision: builder.hf_revision.clone(),
         dtype: builder.dtype,
@@ -529,7 +528,7 @@ pub async fn build_multimodal_pipeline(
         ));
 
     let loader_config = ModelLoaderConfig {
-        model_selected: ModelSelected::MultimodalPlain {
+        source: Arc::new(ModelSelected::MultimodalPlain {
             model_id: builder.model_id.clone(),
             tokenizer_json: builder.tokenizer_json.clone(),
             arch: builder.loader_type,
@@ -548,7 +547,7 @@ pub async fn build_multimodal_pipeline(
             matformer_config_path: builder.matformer_config_path.clone(),
             matformer_slice_name: builder.matformer_slice_name.clone(),
             organization: Some(builder.organization),
-        },
+        }),
         token_source: builder.token_source.clone(),
         hf_revision: builder.hf_revision.clone(),
         dtype: builder.dtype,
@@ -615,7 +614,7 @@ pub(crate) struct GgufAutoMapDims {
 pub(crate) fn gguf_selection(
     builder: &crate::GgufModelBuilder,
     dims: GgufAutoMapDims,
-) -> inference_core::ModelSelected {
+) -> ModelSelected {
     use inference_core::*;
     ModelSelected::GGUF {
         tok_model_id: builder.tok_model_id.clone(),
@@ -651,7 +650,7 @@ pub(crate) fn gguf_selection(
 // Loads the GGUF selection `select` builds with the GGUF builder's runtime options.
 pub(crate) async fn build_gguf_pipeline_as(
     mut builder: crate::GgufModelBuilder,
-    select: impl FnOnce(&crate::GgufModelBuilder, GgufAutoMapDims) -> inference_core::ModelSelected,
+    select: impl FnOnce(&crate::GgufModelBuilder, GgufAutoMapDims) -> ModelSelected,
     overrides: inference_core::LoadOverrides,
 ) -> anyhow::Result<(Arc<Mutex<dyn Pipeline>>, SchedulerConfig, AddModelConfig)> {
     use inference_core::*;
@@ -715,7 +714,7 @@ pub(crate) async fn build_gguf_pipeline_as(
     };
 
     let loader_config = ModelLoaderConfig {
-        model_selected: select(
+        source: Arc::new(select(
             &builder,
             GgufAutoMapDims {
                 max_seq_len,
@@ -723,7 +722,7 @@ pub(crate) async fn build_gguf_pipeline_as(
                 max_num_images,
                 max_image_length,
             },
-        ),
+        )),
         token_source: builder.token_source.clone(),
         hf_revision: builder.hf_revision.clone(),
         dtype: builder.dtype,
@@ -780,11 +779,11 @@ pub async fn build_diffusion_pipeline(
 
     maybe_initialize_logging(builder.with_logging);
     let loader_config = ModelLoaderConfig {
-        model_selected: ModelSelected::DiffusionPlain {
+        source: Arc::new(ModelSelected::DiffusionPlain {
             model_id: builder.model_id.clone(),
             arch: builder.loader_type,
             dtype: builder.dtype,
-        },
+        }),
         token_source: builder.token_source.clone(),
         hf_revision: builder.hf_revision.clone(),
         dtype: builder.dtype,
@@ -827,12 +826,12 @@ pub async fn build_speech_pipeline(
 
     maybe_initialize_logging(builder.with_logging);
     let loader_config = ModelLoaderConfig {
-        model_selected: ModelSelected::Speech {
+        source: Arc::new(ModelSelected::Speech {
             model_id: builder.model_id.clone(),
             dac_model_id: builder.dac_model_id.clone(),
             arch: builder.loader_type,
             dtype: builder.dtype,
-        },
+        }),
         token_source: builder.token_source.clone(),
         hf_revision: builder.hf_revision.clone(),
         dtype: builder.dtype,
@@ -880,7 +879,7 @@ pub async fn build_embedding_pipeline(
     let device = resolve_device(builder.force_cpu, builder.device.clone())?;
     let isq_type = resolve_isq_type(builder.isq.as_ref(), &device)?;
     let loader_config = ModelLoaderConfig {
-        model_selected: ModelSelected::Embedding {
+        source: Arc::new(ModelSelected::Embedding {
             model_id: builder.model_id.clone(),
             tokenizer_json: builder.tokenizer_json.clone(),
             arch: builder.loader_type,
@@ -891,7 +890,7 @@ pub async fn build_embedding_pipeline(
             imatrix: builder.imatrix.clone(),
             calibration_file: builder.calibration_file.clone(),
             hf_cache_path: builder.hf_cache_path.clone(),
-        },
+        }),
         token_source: builder.token_source.clone(),
         hf_revision: builder.hf_revision.clone(),
         dtype: builder.dtype,
@@ -967,7 +966,7 @@ pub async fn build_auto_pipeline(
         .unwrap_or(DeviceMapSetting::Auto(AutoDeviceMapParams::default_text()));
 
     let loader_config = ModelLoaderConfig {
-        model_selected: ModelSelected::Run {
+        source: Arc::new(ModelSelected::Run {
             model_id: builder.model_id.clone(),
             quant: None,
             tokenizer_json: builder.tokenizer_json.clone(),
@@ -986,7 +985,7 @@ pub async fn build_auto_pipeline(
             hf_cache_path: builder.hf_cache_path.clone(),
             matformer_config_path: builder.matformer_config_path.clone(),
             matformer_slice_name: builder.matformer_slice_name.clone(),
-        },
+        }),
         token_source: builder.token_source.clone(),
         hf_revision: builder.hf_revision.clone(),
         dtype: builder.dtype,

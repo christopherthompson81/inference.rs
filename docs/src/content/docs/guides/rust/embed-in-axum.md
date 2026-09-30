@@ -14,18 +14,20 @@ To add inference.rs to an existing Axum app, mount the inference router under a 
 [dependencies]
 anyhow = "1"
 inference-core = "0.8"
+inference-selection = "0.8"
 inference-server-core = "0.8"
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 ```
 
-The high-level `inference` crate is not needed here; the server builders take a `ModelSelected` from `inference-core` directly.
+The high-level `inference` crate is not needed here; the server builders take a `ModelSelected` from `inference-selection` directly.
 
 ## Mount under a sub-path
 
 ```rust
 use axum::{Router, routing::get};
-use inference_core::{AutoDeviceMapParams, ModelDType, ModelSelected};
+use inference_core::{AutoDeviceMapParams, ModelDType};
+use inference_selection::ModelSelected;
 use inference_server_core::{
     inference_for_server_builder::InferenceRsForServerBuilder,
     inference_server_router_builder::InferenceRsServerRouterBuilder,
@@ -76,7 +78,7 @@ async fn main() -> anyhow::Result<()> {
 
 `with_in_situ_quant("4")` applies [ISQ (in-situ quantization)](/reference/quantization-types/) to 4-bit; omit it to run the model unquantized.
 
-`ModelSelected` names every field, so this literal will not compile when new fields are added. For the current field list, see [`ModelSelected`](https://github.com/christopherthompson81/inference.rs/blob/master/crates/inference-core/src/selection/model_selected.rs), or the `EngineSpec` schema in `docs/openapi.json`.
+`ModelSelected` names every field, so this literal will not compile when new fields are added. For the current field list, see [`ModelSelected`](https://github.com/christopherthompson81/inference.rs/blob/master/crates/inference-selection/src/model_selected.rs), or the `EngineSpec` schema in `docs/openapi.json`.
 
 ## Builder options
 

@@ -89,19 +89,13 @@ mod agent_approval;
 mod chat_collector;
 mod engine;
 use inference_nn::media_inputs::video as video_input;
-pub use selection::model_loader::{
-    LoaderBuilder, get_auto_device_map_params, get_model_dtype, get_tgt_non_granular_index,
-};
 pub use video_input::{
     DEFAULT_VIDEO_FRAME_LIMIT, VideoFrameSampling, VideoInput, sample_frame_indices,
 };
 mod embedding_models;
 pub mod search;
 
-pub use selection::model_selected::ModelSelected;
-
 mod block_diffusion;
-mod diagnostics;
 pub mod distributed;
 use inference_gguf as gguf;
 pub use inference_protocol::files;
@@ -111,25 +105,14 @@ mod prefix_cacher;
 pub use inference_protocol::reasoning_parsers;
 pub mod remote_fetch;
 mod request;
-pub mod resource_plan;
 mod response;
 mod scheduler;
-pub mod selection;
 mod sequence;
 pub(crate) mod sequence_macros;
 pub mod speculative;
 use inference_protocol::tools;
 mod vision_models;
 mod xlora_models;
-
-pub use diagnostics::{
-    BuildInfo, CpuInfo, DeviceInfo, DoctorCheck, DoctorReport, DoctorStatus, HfConnectivityInfo,
-    MemoryInfo, SystemInfo, check_hf_gated_access, collect_system_info, run_doctor,
-};
-mod tuning;
-pub use tuning::{
-    AutoTuneRequest, AutoTuneResult, FitStatus, QualityTier, TuneCandidate, TuneProfile, auto_tune,
-};
 
 pub(crate) use adapter::AdapterLease;
 #[doc(hidden)]
@@ -182,13 +165,19 @@ pub use pipeline::GemmaLoader;
 pub use pipeline::Qwen2Loader;
 #[cfg(feature = "models-other")]
 pub use pipeline::Starcoder2Loader;
+pub use pipeline::get_device_layers_for_loader;
+pub use pipeline::hf::build_api_with_cache;
 pub use pipeline::hf::{
     HF_HUB_OFFLINE_ENV, get_model_file, hf_home_dir, hf_hub_cache_dir, hf_token_path,
     is_hf_hub_offline, list_model_files, probe_hf_repo_files, read_model_file_range,
     try_get_model_file,
 };
+// Named only by the ModelSelected schema attributes.
+#[cfg(feature = "utoipa")]
+pub use pipeline::UqffWriteSpec;
 pub use pipeline::{
-    AdapterPaths, AnyMoeLoader, AnyMoePipeline, AutoDeviceMapParams, AutoLoader, AutoLoaderBuilder,
+    AdapterPaths, AnyMoeLoader, AnyMoePipeline, AutoDeviceMapParams, AutoEmbeddingLoader,
+    AutoLoader, AutoLoaderBuilder, AutoMultimodalLoader, AutoNormalLoader,
     DiffusionGenerationParams, DiffusionLoader, DiffusionLoaderBuilder, DiffusionLoaderType,
     EmbeddingLoader, EmbeddingLoaderBuilder, EmbeddingLoaderType, EmbeddingModelPaths,
     EmbeddingSpecificConfig, GGMLLoader, GGMLLoaderBuilder, GGMLSpecificConfig, GGUFLoader,
@@ -216,9 +205,6 @@ pub use request::{
     SearchContextSize, TokenizationRequest, WebSearchContentType, WebSearchFilters,
     WebSearchImageSettings, WebSearchOptions, WebSearchReturnTokenBudget, WebSearchUserLocation,
     resolve_reasoning_controls,
-};
-pub use resource_plan::{
-    PagedKvModelRequest, PagedKvPlan, PagedKvPolicy, RuntimeResourcePlanOptions, plan_paged_kv,
 };
 pub use response::*;
 pub use sampler::{

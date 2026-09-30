@@ -906,12 +906,12 @@ impl RuntimeOptions {
     }
 }
 
-impl From<TuneProfileArg> for inference_core::TuneProfile {
+impl From<TuneProfileArg> for inference_selection::TuneProfile {
     fn from(value: TuneProfileArg) -> Self {
         match value {
-            TuneProfileArg::Quality => inference_core::TuneProfile::Quality,
-            TuneProfileArg::Balanced => inference_core::TuneProfile::Balanced,
-            TuneProfileArg::Fast => inference_core::TuneProfile::Fast,
+            TuneProfileArg::Quality => inference_selection::TuneProfile::Quality,
+            TuneProfileArg::Balanced => inference_selection::TuneProfile::Balanced,
+            TuneProfileArg::Fast => inference_selection::TuneProfile::Fast,
         }
     }
 }

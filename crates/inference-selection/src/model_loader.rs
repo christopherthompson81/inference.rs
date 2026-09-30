@@ -2,16 +2,15 @@ use std::{fs::File, path::PathBuf};
 
 use anyhow::Context;
 
-use crate::{
-    AutoDeviceMapParams, EmbeddingLoaderBuilder, EmbeddingSpecificConfig,
-    GGUF_MULTI_FILE_DELIMITER, LoadOverrides, Loader, ModelDType, ModelSelected, Ordering,
-    SpeechLoader, Topology, UQFF_MULTI_FILE_DELIMITER,
-    pipeline::{
-        AutoLoaderBuilder, DiffusionLoaderBuilder, GGMLLoaderBuilder, GGMLSpecificConfig,
-        GGUFLoaderBuilder, GGUFSpecificConfig, HfConfigOverrides, IsqOrganization,
-        MultimodalLoaderBuilder, MultimodalSpecificConfig, NormalLoaderBuilder,
-        NormalSpecificConfig, UqffWriteConfig,
-    },
+use crate::ModelSelected;
+
+use inference_core::{
+    AutoDeviceMapParams, AutoLoaderBuilder, DiffusionLoaderBuilder, EmbeddingLoaderBuilder,
+    EmbeddingSpecificConfig, GGMLLoaderBuilder, GGMLSpecificConfig, GGUF_MULTI_FILE_DELIMITER,
+    GGUFLoaderBuilder, GGUFSpecificConfig, HfConfigOverrides, IsqOrganization, LoadOverrides,
+    Loader, LoaderSource, ModelDType, ModelLoaderConfig, MtpConfig, MultimodalLoaderBuilder,
+    MultimodalSpecificConfig, NormalLoaderBuilder, NormalSpecificConfig, Ordering, SpeechLoader,
+    Topology, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig,
 };
 
 /// A builder for a loader using the selected model.
@@ -87,6 +86,30 @@ impl LoaderBuilder {
 
     pub fn build(self) -> anyhow::Result<Box<dyn Loader>> {
         loader_from_model_selected(self)
+    }
+}
+
+impl LoaderSource for ModelSelected {
+    fn build_loader(
+        &self,
+        config: &ModelLoaderConfig,
+        no_kv_cache: bool,
+    ) -> anyhow::Result<Box<dyn Loader>> {
+        LoaderBuilder::new(self.clone())
+            .with_no_kv_cache(no_kv_cache)
+            .with_chat_template(config.chat_template.clone())
+            .with_jinja_explicit(config.jinja_explicit.clone())
+            .with_max_model_len(config.max_model_len)
+            .with_hf_config_overrides(config.hf_config_overrides.clone())
+            .with_mtp(
+                config
+                    .mtp_config
+                    .as_ref()
+                    .is_some_and(MtpConfig::is_builtin),
+            )
+            .with_encoder_cache_memory_bytes(config.encoder_cache_memory_bytes)
+            .with_overrides(config.overrides.clone())
+            .build()
     }
 }
 
@@ -989,17 +1012,14 @@ mod tests {
         Ok(())
     }
 
-    fn loader_config(
-        model: ModelSelected,
-        max_model_len: Option<usize>,
-    ) -> crate::ModelLoaderConfig {
-        crate::ModelLoaderConfig {
-            model_selected: model,
-            token_source: crate::TokenSource::None,
+    fn loader_config(model: ModelSelected, max_model_len: Option<usize>) -> ModelLoaderConfig {
+        ModelLoaderConfig {
+            source: std::sync::Arc::new(model),
+            token_source: inference_core::TokenSource::None,
             hf_revision: None,
             dtype: ModelDType::Auto,
             device: candle_core::Device::Cpu,
-            device_map_setting: crate::DeviceMapSetting::dummy(),
+            device_map_setting: inference_core::DeviceMapSetting::dummy(),
             isq: None,
             paged_attn_config: None,
             silent: true,
@@ -1093,13 +1113,13 @@ mod tests {
             selected(serde_json::json!({"Plain": {"model_id": "org/model"}})),
             None,
         );
-        config.overrides.anymoe = Some(crate::AnyMoeSpec {
-            config: crate::AnyMoeConfig {
+        config.overrides.anymoe = Some(inference_core::AnyMoeSpec {
+            config: inference_core::AnyMoeConfig {
                 hidden_size: 8,
                 lr: 1e-3,
                 epochs: 1,
                 batch_size: 1,
-                expert_type: crate::AnyMoeExpertType::FineTuned,
+                expert_type: inference_core::AnyMoeExpertType::FineTuned,
                 gate_model_id: None,
                 training: false,
                 loss_csv_path: None,

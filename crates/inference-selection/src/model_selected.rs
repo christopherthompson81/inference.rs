@@ -1,11 +1,9 @@
 use std::path::PathBuf;
 
-use crate::{
-    DiffusionLoaderType, LoraAdapterSpec, LoraRuntimeConfig, ModelDType, SpeechLoaderType,
-    pipeline::{
-        AutoDeviceMapParams, EmbeddingLoaderType, IsqOrganization, MultimodalLoaderType,
-        NormalLoaderType, UqffWriteConfig,
-    },
+use inference_core::{
+    AutoDeviceMapParams, DiffusionLoaderType, EmbeddingLoaderType, IsqOrganization,
+    LoraAdapterSpec, LoraRuntimeConfig, ModelDType, MultimodalLoaderType, NormalLoaderType,
+    SpeechLoaderType, UqffWriteConfig,
 };
 
 // Default value functions for serde deserialization
@@ -57,7 +55,7 @@ pub enum ModelSelected {
         organization: Option<IsqOrganization>,
 
         /// UQFF path to write to.
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<inference_core::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;).
@@ -135,7 +133,7 @@ pub enum ModelSelected {
 
         /// UQFF path to write to.
         #[serde(default)]
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<inference_core::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;)
@@ -209,7 +207,7 @@ pub enum ModelSelected {
         topology: Option<String>,
 
         /// UQFF path to write to.
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<inference_core::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;).
@@ -266,7 +264,7 @@ pub enum ModelSelected {
         organization: Option<IsqOrganization>,
 
         /// UQFF path to write to.
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<inference_core::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;).
@@ -359,7 +357,7 @@ pub enum ModelSelected {
         organization: Option<IsqOrganization>,
 
         /// UQFF path and quantization types to write.
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<inference_core::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// Imatrix file to use while requantizing the GGUF weights.
@@ -460,7 +458,7 @@ pub enum ModelSelected {
 
         /// UQFF path and quantization types to write.
         #[serde(default)]
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<inference_core::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// Imatrix file to use while requantizing the GGUF weights.
@@ -537,7 +535,7 @@ pub enum ModelSelected {
 
         /// UQFF path and quantization types to write.
         #[serde(default)]
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<inference_core::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// Imatrix file to use while requantizing the GGUF weights.
@@ -712,7 +710,7 @@ pub enum ModelSelected {
         topology: Option<String>,
 
         /// UQFF path to write to.
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<inference_core::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;).
@@ -821,7 +819,7 @@ pub enum ModelSelected {
 
         /// UQFF path to write to.
         #[serde(default)]
-        #[cfg_attr(feature = "utoipa", schema(value_type = Option<crate::pipeline::UqffWriteSpec>))]
+        #[cfg_attr(feature = "utoipa", schema(value_type = Option<inference_core::UqffWriteSpec>))]
         write_uqff: Option<UqffWriteConfig>,
 
         /// UQFF path to load from. If provided, this takes precedence over applying ISQ. Specify multiple files using a semicolon delimiter (;)
@@ -850,9 +848,9 @@ mod tests {
     use serde::{Serialize, de::DeserializeOwned};
     use strum::IntoEnumIterator;
 
-    use crate::{
-        DiffusionLoaderType, ModelDType, SpeechLoaderType,
-        pipeline::{EmbeddingLoaderType, MultimodalLoaderType, NormalLoaderType},
+    use inference_core::{
+        DiffusionLoaderType, EmbeddingLoaderType, ModelDType, MultimodalLoaderType,
+        NormalLoaderType, SpeechLoaderType,
     };
 
     // The names a schema publishes must be the ones serde writes, and each must parse back.

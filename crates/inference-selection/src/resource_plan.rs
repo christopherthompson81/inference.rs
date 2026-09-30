@@ -1,7 +1,7 @@
 use anyhow::Context;
 use num_traits::ToPrimitive;
 
-use crate::{MemoryGpuConfig, PagedAttentionConfig};
+use inference_core::{MemoryGpuConfig, PagedAttentionConfig};
 
 #[derive(Clone, Copy, Debug)]
 pub enum PagedKvPolicy {
@@ -114,7 +114,7 @@ fn split_paged_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::PagedCacheType;
+    use inference_core::PagedCacheType;
 
     #[test]
     fn split_preserves_base_device_memory_reservation() -> anyhow::Result<()> {

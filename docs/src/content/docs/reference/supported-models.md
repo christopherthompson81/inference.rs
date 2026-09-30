@@ -3,7 +3,7 @@ title: Supported models
 description: Architectures supported by inference.rs, and how to tell if yours is one of them.
 ---
 
-<!-- Generated from the loader registry by inference-core model_metadata. Do not edit by hand. -->
+<!-- Generated from the loader registry by inference-selection model_metadata. Do not edit by hand. -->
 
 ## Is my model supported?
 

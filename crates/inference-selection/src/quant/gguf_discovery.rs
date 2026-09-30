@@ -5,8 +5,8 @@ use std::{
     sync::LazyLock,
 };
 
-use crate::{GGUF_MULTI_FILE_DELIMITER, ModelDType};
 use anyhow::{Context, Result, bail};
+use inference_core::{GGUF_MULTI_FILE_DELIMITER, ModelDType};
 use regex::Regex;
 use walkdir::WalkDir;
 

@@ -2,15 +2,17 @@
 //! One architecture often serves several brand names (Qwen 3.5/3.6, LFM2/LFM2.5);
 //! `families` carries those names while the loader enum stays the machine-matchable key.
 //! `supported_models_matches_committed` keeps docs/.../reference/supported-models.md in sync;
-//! refresh with `cargo test -p inference-core regenerate_supported_models -- --ignored`.
+//! refresh with `cargo test -p inference-selection regenerate_supported_models -- --ignored`.
 
 use std::fmt::Write as _;
 
 use strum::IntoEnumIterator;
 
-use crate::pipeline::SpeechLoaderType;
-use crate::pipeline::SupportedModality;
-use crate::{DiffusionLoaderType, EmbeddingLoaderType, MultimodalLoaderType, NormalLoaderType};
+use inference_core::SpeechLoaderType;
+use inference_core::SupportedModality;
+use inference_core::{
+    DiffusionLoaderType, EmbeddingLoaderType, MultimodalLoaderType, NormalLoaderType,
+};
 
 use SupportedModality::{Audio, Embedding, Text, Video, Vision};
 
@@ -389,22 +391,12 @@ impl SupportedArch for SpeechLoaderType {
     }
 }
 
-// the HF `config.json` `architectures` string, so the supported-models table's first column is what users search for
-impl EmbeddingLoaderType {
-    pub fn config_arch(&self) -> &'static str {
-        match self {
-            Self::EmbeddingGemma => "Gemma3TextModel",
-            Self::Qwen3Embedding => "Qwen3ForCausalLM",
-        }
-    }
-}
-
 const HEADER: &str = r#"---
 title: Supported models
 description: Architectures supported by inference.rs, and how to tell if yours is one of them.
 ---
 
-<!-- Generated from the loader registry by inference-core model_metadata. Do not edit by hand. -->
+<!-- Generated from the loader registry by inference-selection model_metadata. Do not edit by hand. -->
 
 ## Is my model supported?
 
@@ -540,7 +532,7 @@ mod tests {
         "/../../docs/src/content/docs/reference/supported-models.md"
     );
     const REGEN_HINT: &str =
-        "cargo test -p inference-core regenerate_supported_models -- --ignored";
+        "cargo test -p inference-selection regenerate_supported_models -- --ignored";
 
     #[test]
     fn supported_models_matches_committed() {

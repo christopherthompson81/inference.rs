@@ -5,17 +5,16 @@ use candle_core::{DType, Device};
 use hf_hub::{Cache, Repo, RepoType, api::sync::ApiRepo};
 use serde::{Deserialize, Serialize};
 
-use crate::device_map::{DeviceLayerMapMetadata, DeviceMapMetadata};
-use crate::pipeline::hf::build_api_with_cache;
-use crate::pipeline::{
-    AutoDeviceMapParams, AutoDeviceMapQuantization, AutoEmbeddingLoader, AutoMultimodalLoader,
-    AutoNormalLoader, DeviceMappedModelLoader, EmbeddingLoaderType, MultimodalLoaderType,
-    NormalLoaderType, TokenSource,
+use crate::ModelSelected;
+use crate::model_loader::{get_auto_device_map_params, get_model_dtype};
+use inference_core::build_api_with_cache;
+use inference_core::{
+    AutoDeviceMapParams, AutoEmbeddingLoader, AutoMultimodalLoader, AutoNormalLoader,
+    EmbeddingLoaderType, MultimodalLoaderType, NormalLoaderType, TokenSource,
 };
-use crate::selection::model_loader::{get_auto_device_map_params, get_model_dtype};
-use crate::{
-    GLOBAL_HF_CACHE, IsqType, ModelSelected, Topology, TryIntoDType, paged_attn_supported,
-};
+use inference_core::{DeviceLayerMapMetadata, DeviceMapMetadata};
+use inference_core::{GLOBAL_HF_CACHE, IsqType, Topology, TryIntoDType, paged_attn_supported};
+use inference_nn::loaders::{AutoDeviceMapQuantization, DeviceMappedModelLoader};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -150,14 +149,14 @@ fn select_devices(force_cpu: bool) -> Result<Vec<Device>> {
     #[cfg(feature = "cuda")]
     {
         if let Ok(dev) = Device::new_cuda(0) {
-            return Ok(crate::device_map::get_all_similar_devices(&dev)?);
+            return Ok(inference_nn::device_map::get_all_similar_devices(&dev)?);
         }
     }
 
     #[cfg(feature = "metal")]
     {
         if let Ok(dev) = Device::new_metal(0) {
-            return Ok(crate::device_map::get_all_similar_devices(&dev)?);
+            return Ok(inference_nn::device_map::get_all_similar_devices(&dev)?);
         }
     }
 
@@ -382,7 +381,7 @@ fn isq_display_name(isq: Option<IsqType>) -> String {
 /// Get total VRAM across all GPU devices
 #[allow(clippy::cast_possible_truncation)]
 fn total_vram(devices: &[Device]) -> u64 {
-    use crate::MemoryUsage;
+    use inference_core::MemoryUsage;
     devices
         .iter()
         .filter(|d| !matches!(d, Device::Cpu))
@@ -393,7 +392,7 @@ fn total_vram(devices: &[Device]) -> u64 {
 /// Get available VRAM across all GPU devices
 #[allow(clippy::cast_possible_truncation)]
 fn available_vram(devices: &[Device]) -> u64 {
-    use crate::MemoryUsage;
+    use inference_core::MemoryUsage;
     devices
         .iter()
         .filter(|d| !matches!(d, Device::Cpu))
@@ -457,7 +456,7 @@ fn map_for_candidate(
     let non_mapped =
         loader.non_mapped_size_in_bytes(config, dtype, pack_factor, Some(&quantization), None)?;
     let total = layer_sizes.iter().sum::<usize>() + non_mapped;
-    let map = crate::pipeline::get_device_layers_for_loader(
+    let map = inference_core::get_device_layers_for_loader(
         loader,
         config,
         loader.num_layers(config)?,

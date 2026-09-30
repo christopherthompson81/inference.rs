@@ -4,14 +4,15 @@ use std::sync::Arc;
 
 use candle_core::Device;
 use futures::StreamExt;
-use inference_core::selection::quant;
 use inference_core::{
     AgentPermission, AnyMoeSpec, CalibrationAction, CalibrationStatus, ChatCompletionResponse,
     CodeExecutionConfig, CompletionResponse, HfConfigOverrides, ImageGenerationResponse,
-    InferenceRs, McpClientConfig, ModelSelected, MtpConfig, MtpDraftSamplingMethod, PagedCacheType,
-    Response, SandboxMode, SandboxPolicy, SandboxProfile, SearchCallback, SearchEmbeddingModel,
+    InferenceRs, McpClientConfig, MtpConfig, MtpDraftSamplingMethod, PagedCacheType, Response,
+    SandboxMode, SandboxPolicy, SandboxProfile, SearchCallback, SearchEmbeddingModel,
     SerializedSession, ShellConfig, TokenSource, ToolCallbackWithTool,
 };
+use inference_selection::ModelSelected;
+use inference_selection::quant;
 use serde::Deserialize;
 
 use crate::{
