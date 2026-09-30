@@ -12,8 +12,9 @@ use either::Either;
 use futures::future::BoxFuture;
 use inference_core::{
     AgentPermission, ApproximateUserLocation, ChatCompletionChunkResponse, ChatCompletionResponse,
-    CodeExecutionPermission, Function, InferenceRs, ReasoningEffort, Response, Tool, ToolChoice,
-    ToolType, Usage, WebSearchOptions, WebSearchUserLocation,
+    CodeExecutionPermission, Function, InferenceRs, ReasoningEffort, Request, RequestMessage,
+    Response, TokenizationRequest, Tool, ToolChoice, ToolType, Usage, WebSearchOptions,
+    WebSearchUserLocation, is_chat_template_request_error,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -22,11 +23,12 @@ use utoipa::ToSchema;
 
 use crate::{
     api_error::{ApiError, ApiErrorKind, INTERNAL_ERROR_MESSAGE, ModelErrorMessage, boxed_anyhow},
-    dispatch::apply_model_override,
+    dispatch::{apply_model_override, create_response_channel, send_request_with_model},
     engine_chat::{
-        ChatEngine, DispatchError, PreparedChat, ResponseTap, serialize_agentic_progress,
-        serialize_approval_required,
+        ChatCompletionParseContext, ChatEngine, DispatchError, PreparedChat, ResponseTap,
+        parse_request, serialize_agentic_progress, serialize_approval_required,
     },
+    lora_routing::{DEFAULT_MODEL_ID, resolve_lora_adapter_model},
     openai::{
         ChatCompletionRequest, FunctionCalled, Grammar, Message, MessageContent,
         OpenAiCodeInterpreterAutoContainer, OpenAiCodeInterpreterContainer,
@@ -38,6 +40,9 @@ use crate::{
 };
 
 type BoxError = Box<dyn Error + Send + Sync + 'static>;
+
+const ONLY_CHAT_IS_COUNTED: &str =
+    "Only chat messages can be counted by the Anthropic count_tokens endpoint.";
 
 const ANTHROPIC_WEB_SEARCH_PREFIX: &str = "web_search_";
 const ANTHROPIC_DYNAMIC_WEB_SEARCH_TYPE: &str = "web_search_20260209";
@@ -384,6 +389,100 @@ pub struct AnthropicUsage {
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct AnthropicCountTokensResponse {
     pub input_tokens: usize,
+}
+
+/// Counts the prompt tokens an Anthropic Messages request renders to, with its tools and chat template.
+pub fn count_tokens<'a>(
+    state: &'a SharedInferenceRsState,
+    request: AnthropicMessagesRequest,
+) -> BoxFuture<'a, Result<AnthropicCountTokensResponse, ApiError>> {
+    Box::pin(count_tokens_inner(state, request))
+}
+
+async fn count_tokens_inner(
+    state: &SharedInferenceRsState,
+    request: AnthropicMessagesRequest,
+) -> Result<AnthropicCountTokensResponse, ApiError> {
+    let invalid =
+        |error: &(dyn Error + 'static)| ApiError::from_error(error, ApiErrorKind::InvalidRequest);
+    let internal = |error: &(dyn Error + 'static)| {
+        InferenceRs::maybe_log_error(state.clone(), error);
+        ApiError::from_error(error, ApiErrorKind::Internal)
+    };
+    request
+        .validate(false)
+        .map_err(|error| invalid(error.as_ref()))?;
+    let mut oairequest = request
+        .into_chat_completion_request()
+        .map_err(|error| invalid(error.as_ref()))?;
+    oairequest.stream = Some(false);
+    resolve_lora_adapter_model(state, &mut oairequest.model, &mut oairequest.adapter)
+        .map_err(|error| invalid(&error))?;
+    let model_id = (oairequest.model != DEFAULT_MODEL_ID).then(|| oairequest.model.clone());
+
+    // Parsed like a chat request, for its rendered messages and tools, but never sent as one.
+    let (tx, _) = create_response_channel(Some(1));
+    let (parsed, _) = parse_request(
+        oairequest,
+        ChatCompletionParseContext {
+            state: state.clone(),
+            tx,
+            tool_dispatch_url: None,
+            agent_approval_handler: None,
+            agent_approval_notifier: None,
+            tool_surface: OpenAiToolSurface::ChatCompletions,
+            skill_store: None,
+            media: Default::default(),
+        },
+    )
+    .await
+    .map_err(|error| invalid(error.as_ref()))?;
+    let Request::Normal(parsed) = parsed else {
+        return Err(ApiError::internal());
+    };
+    let (messages, enable_thinking, reasoning_effort) = match parsed.messages {
+        RequestMessage::Chat {
+            messages,
+            enable_thinking,
+            reasoning_effort,
+        }
+        | RequestMessage::MultimodalChat {
+            messages,
+            enable_thinking,
+            reasoning_effort,
+            ..
+        } => (messages, enable_thinking, reasoning_effort),
+        _ => {
+            return Err(ApiError::new(
+                ApiErrorKind::InvalidRequest,
+                ONLY_CHAT_IS_COUNTED,
+                None,
+                None,
+            ));
+        }
+    };
+
+    let (response, mut rx) = tokio::sync::mpsc::channel(1);
+    let tokenize = Request::Tokenize(TokenizationRequest {
+        text: Either::Left(messages),
+        tools: parsed.tools,
+        add_generation_prompt: true,
+        add_special_tokens: true,
+        enable_thinking,
+        reasoning_effort,
+        response,
+    });
+    send_request_with_model(state, tokenize, model_id.as_deref())
+        .await
+        .map_err(|error| internal(&error))?;
+    match rx.recv().await {
+        Some(Ok(tokens)) => Ok(AnthropicCountTokensResponse {
+            input_tokens: tokens.len(),
+        }),
+        Some(Err(error)) if is_chat_template_request_error(&error) => Err(invalid(error.as_ref())),
+        Some(Err(error)) => Err(internal(error.as_ref())),
+        None => Err(ApiError::internal()),
+    }
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]

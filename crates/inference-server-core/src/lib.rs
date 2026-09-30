@@ -27,13 +27,12 @@
 //! use inference_selection::ModelSelected;
 //! use inference_server_core::{
 //!     chat_completion::{
-//!         create_streamer, handle_error, parse_request, process_non_streaming_response,
-//!         ChatCompletionOnChunkCallback, ChatCompletionOnDoneCallback,
-//!         ChatCompletionParseContext, ChatCompletionResponder,
+//!         create_streamer, process_non_streaming_response,
+//!         ChatCompletionOnChunkCallback, ChatCompletionOnDoneCallback, ChatCompletionResponder,
+//!         ChatEngine,
 //!     },
-//!     handler_core::{create_response_channel, send_request},
 //!     inference_for_server_builder::InferenceRsForServerBuilder,
-//!     inference_server_router_builder::InferenceRsServerRouterBuilder,
+//!     inference_server_router_builder::{AgenticDefaults, InferenceRsServerRouterBuilder},
 //!     openai::{ChatCompletionRequest, OpenAiToolSurface},
 //!     openapi_doc::get_openapi_doc,
 //!     types::SharedInferenceRsState,
@@ -164,33 +163,25 @@
 //!     Json(oai_request): Json<ChatCompletionRequest>,
 //! ) -> ChatCompletionResponder {
 //!     let inference_state = state.inference_state.clone();
-//!     let (tx, mut rx) = create_response_channel(None);
 //!
-//!     let (request, is_streaming) =
-//!         match parse_request(
-//!             oai_request,
-//!             ChatCompletionParseContext {
-//!                 state: inference_state.clone(),
-//!                 tx,
-//!                 tool_dispatch_url: None,
-//!                 agent_approval_handler: None,
-//!                 agent_approval_notifier: None,
-//!                 tool_surface: OpenAiToolSurface::ChatCompletions,
-//!                 skill_store: None,
-//!                 media: Default::default(),
-//!             },
-//!         )
+//!     // Through the chat engine, so the agent policy applies; this route has its own defaults and approval broker.
+//!     let chat = ChatEngine {
+//!         state: inference_state.clone(),
+//!         agentic: AgenticDefaults::default(),
+//!         skill_store: None,
+//!     };
+//!     let prepared = match chat
+//!         .prepare(oai_request, OpenAiToolSurface::ChatCompletions, Default::default())
 //!         .await
-//!         {
-//!             Ok(x) => x,
-//!             Err(e) => return handle_error(inference_state, e.into()),
-//!         };
-//!
-//!     dbg!(request.clone());
-//!
-//!     if let Err(e) = send_request(&inference_state, request).await {
-//!         return handle_error(inference_state, e.into());
-//!     }
+//!     {
+//!         Ok(prepared) => prepared,
+//!         Err(e) => {
+//!             let error = e.into_api_error(inference_state.clone());
+//!             return ChatCompletionResponder::ValidationError(Box::new(error));
+//!         }
+//!     };
+//!     let is_streaming = prepared.is_streaming;
+//!     let mut rx = prepared.rx;
 //!
 //!     if is_streaming {
 //!         let db_fn = state.db_create;
