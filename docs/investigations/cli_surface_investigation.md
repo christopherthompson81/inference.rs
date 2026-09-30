@@ -464,3 +464,22 @@ finish before the cancel lands.
 
 **Found, not fixed:** a Responses run stopped by its token cap ends `completed`, never `incomplete` with
 `max_output_tokens`, in both the streaming and non-streaming paths, though the HTTP reference says otherwise.
+
+## Run 19 — 2026-09-30 (time approximate)
+
+**Question:** Run 18 found Responses runs stopped by their token cap reporting `completed`. Fix it on both paths.
+
+**Change:** `finished_status` maps a run's finish reasons to `cancelled` (any `canceled`), `incomplete` (any `length`,
+now core's `FINISH_REASON_LENGTH`) or `completed`, for the stream's terminal event (`response.incomplete`) and the
+non-streaming/background resource; an incomplete one gets `incomplete_details.reason = max_output_tokens` and its
+message item is `incomplete`. It stays continuable with `previous_response_id`, unlike a cancelled one.
+
+**Tests:** `a_capped_response_is_incomplete_and_can_be_continued`; the Responses stream tests (server-core, Python,
+C#) cap the tiny model's output, so they now expect `response.incomplete` and check its details.
+
+**Review:** tool-call rounds report `tool_calls` (core overrides the finish reason when it parses tool calls), so they
+never read as capped. Missed and fixed: the C ABI Responses test still expected `completed` (full CI caught it); the
+stream's `Response::Done` fallback always sent `response.completed` (now `terminal_event` names the event from the
+status for both paths); with several choices every message item took the run's status (now each takes its own
+choice's); the non-streaming path stored a cancelled run's history (now neither path does); a cancelled background
+partial kept `incomplete_details`. Left as it was: a cap that lands mid-reasoning reports a completed reasoning item.

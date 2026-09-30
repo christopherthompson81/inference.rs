@@ -256,11 +256,12 @@ class TypedEngine(unittest.TestCase):
         with self.engine.response_stream(request) as stream:
             events = list(stream)
         self.assertIsInstance(events[0].data, t.OpenResponsesStreamEventResponseCreated)
-        completed = events[-1].data
-        self.assertIsInstance(completed, t.OpenResponsesStreamEventResponseCompleted)
-        self.assertIsInstance(completed.response, t.ResponseResource)
-        stored = self.engine.get_response(completed.response.id)
-        self.assertEqual(stored.status, t.ResponseStatus.COMPLETED)
+        # The random weights never stop on their own, so the token cap ends the run.
+        capped = events[-1].data
+        self.assertIsInstance(capped, t.OpenResponsesStreamEventResponseIncomplete)
+        self.assertIsInstance(capped.response, t.ResponseResource)
+        stored = self.engine.get_response(capped.response.id)
+        self.assertEqual(stored.status, t.ResponseStatus.INCOMPLETE)
 
     def test_management_calls_return_their_classes(self):
         models = self.engine.list_models()

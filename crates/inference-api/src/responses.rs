@@ -13,8 +13,8 @@ use either::Either;
 use futures::future::BoxFuture;
 use inference_core::{
     AgentPermission, AgentToolApprovalHandler, AgenticToolCallData, AgenticToolCallPhase,
-    ChatCompletionResponse, FINISH_REASON_CANCELED, InferenceRs, Request, RequestCancellation,
-    Response,
+    ChatCompletionResponse, FINISH_REASON_CANCELED, FINISH_REASON_LENGTH, InferenceRs, Request,
+    RequestCancellation, Response,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -45,7 +45,9 @@ use crate::{
         enums::{ItemStatus, ResponseStatus},
         events::StreamingState,
         items::{InputItem, MessageContentParam, OutputItem, ShellCallOutputPart},
-        resource::{InputTokensDetails, ResponseError, ResponseResource, ResponseUsage},
+        resource::{
+            IncompleteDetails, InputTokensDetails, ResponseError, ResponseResource, ResponseUsage,
+        },
     },
     types::SharedInferenceRsState,
 };
@@ -1378,9 +1380,12 @@ impl futures::Stream for OpenResponsesStreamer {
 
                         // If all finished, emit completion events
                         if all_finished {
-                            let cancelled = chat_chunk.choices.iter().any(|choice| {
-                                choice.finish_reason.as_deref() == Some(FINISH_REASON_CANCELED)
-                            });
+                            let status = finished_status(
+                                chat_chunk
+                                    .choices
+                                    .iter()
+                                    .map(|choice| choice.finish_reason.as_deref()),
+                            );
                             self.finish_reasoning_item(&mut events_to_emit);
                             let message_output_index = self.message_output_index();
                             // Emit content_part.done
@@ -1406,11 +1411,7 @@ impl futures::Stream for OpenResponsesStreamer {
                                     self.accumulated_text.clone(),
                                     &self.streaming_state.response_id,
                                     &self.files,
-                                    if cancelled {
-                                        ItemStatus::Incomplete
-                                    } else {
-                                        ItemStatus::Completed
-                                    },
+                                    finished_item_status(status),
                                 );
                                 events_to_emit.push(OpenResponsesStreamEvent::OutputItemDone {
                                     sequence_number: seq,
@@ -1420,11 +1421,8 @@ impl futures::Stream for OpenResponsesStreamer {
                             }
 
                             let seq = self.streaming_state.next_sequence_number();
-                            let mut response = self.build_current_response(if cancelled {
-                                ResponseStatus::Cancelled
-                            } else {
-                                ResponseStatus::Completed
-                            });
+                            let mut response = self.build_current_response(status);
+                            apply_incomplete_details(&mut response);
                             response.adapter_generation = chat_chunk.adapter_generation.clone();
                             response.completed_at = Some(unix_now());
 
@@ -1444,17 +1442,7 @@ impl futures::Stream for OpenResponsesStreamer {
                             }
 
                             self.finish(Some(&response));
-                            events_to_emit.push(if cancelled {
-                                OpenResponsesStreamEvent::ResponseCancelled {
-                                    sequence_number: seq,
-                                    response,
-                                }
-                            } else {
-                                OpenResponsesStreamEvent::ResponseCompleted {
-                                    sequence_number: seq,
-                                    response,
-                                }
-                            });
+                            events_to_emit.push(terminal_event(seq, response));
                         }
 
                         InferenceRs::maybe_log_response(self.state.clone(), &chat_chunk);
@@ -1484,10 +1472,7 @@ impl futures::Stream for OpenResponsesStreamer {
                             &self.files,
                         );
                         self.finish(Some(&response));
-                        let event = OpenResponsesStreamEvent::ResponseCompleted {
-                            sequence_number: seq,
-                            response,
-                        };
+                        let event = terminal_event(seq, response);
                         Poll::Ready(Some(ResponsesStreamItem::Event(event)))
                     }
                     Response::AgenticToolCallProgress {
@@ -1657,6 +1642,12 @@ fn chat_response_to_response_resource(
     let mut resource = ResponseResource::new(request_id.clone(), model, created_at);
     resource.adapter_generation = chat_resp.adapter_generation.clone();
 
+    let status = finished_status(
+        chat_resp
+            .choices
+            .iter()
+            .map(|choice| Some(choice.finish_reason.as_str())),
+    );
     let mut output_items = shell_output_items.to_vec();
     let mut output_text_parts = Vec::new();
     let mut reasoning_parts = Vec::new();
@@ -1705,13 +1696,14 @@ fn chat_response_to_response_resource(
             let item = OutputItem::message(
                 format!("msg_{}", Uuid::new_v4()),
                 content_items,
-                ItemStatus::Completed,
+                finished_item_status(finished_status([Some(choice.finish_reason.as_str())])),
             );
             output_items.push(item);
         }
     }
 
-    resource.status = ResponseStatus::Completed;
+    resource.status = status;
+    apply_incomplete_details(&mut resource);
     resource.output = output_items;
     resource.output_text = if output_text_parts.is_empty() {
         None
@@ -2026,7 +2018,7 @@ async fn prepare_response_inner(
 struct StoredResponse {
     id: String,
     response: ResponseResource,
-    /// Only a completed response can be continued with `previous_response_id`.
+    /// `None` for a response that is not a conversation to continue with `previous_response_id` (failed, cancelled).
     history: Option<Vec<Message>>,
 }
 
@@ -2128,7 +2120,7 @@ async fn run_to_end(
                 StoredResponse {
                     id: id.clone(),
                     response: response.clone(),
-                    history: Some(history),
+                    history: (response.status != ResponseStatus::Cancelled).then_some(history),
                 }
             });
             (Ok(response), stored)
@@ -2262,6 +2254,56 @@ pub fn cancel_response(
 ) -> Result<ResponseResource, ApiError> {
     get_background_task_manager().cancel(response_id);
     get_response(state, response_id)
+}
+
+/// How a run that stopped ended: cancelled by its caller, cut off by its token cap, or finished.
+fn finished_status<'a>(
+    finish_reasons: impl IntoIterator<Item = Option<&'a str>>,
+) -> ResponseStatus {
+    let (mut cancelled, mut capped) = (false, false);
+    for reason in finish_reasons.into_iter().flatten() {
+        cancelled |= reason == FINISH_REASON_CANCELED;
+        capped |= reason == FINISH_REASON_LENGTH;
+    }
+    if cancelled {
+        ResponseStatus::Cancelled
+    } else if capped {
+        ResponseStatus::Incomplete
+    } else {
+        ResponseStatus::Completed
+    }
+}
+
+/// The event that ends a stream, named for how its response ended.
+fn terminal_event(sequence_number: u64, response: ResponseResource) -> OpenResponsesStreamEvent {
+    match response.status {
+        ResponseStatus::Cancelled => OpenResponsesStreamEvent::ResponseCancelled {
+            sequence_number,
+            response,
+        },
+        ResponseStatus::Incomplete => OpenResponsesStreamEvent::ResponseIncomplete {
+            sequence_number,
+            response,
+        },
+        _ => OpenResponsesStreamEvent::ResponseCompleted {
+            sequence_number,
+            response,
+        },
+    }
+}
+
+/// A message item in a run that ended: completed only if the run did, else cut short.
+fn finished_item_status(status: ResponseStatus) -> ItemStatus {
+    match status {
+        ResponseStatus::Completed => ItemStatus::Completed,
+        _ => ItemStatus::Incomplete,
+    }
+}
+
+fn apply_incomplete_details(resource: &mut ResponseResource) {
+    if resource.status == ResponseStatus::Incomplete {
+        resource.incomplete_details = Some(IncompleteDetails::max_output_tokens());
+    }
 }
 
 /// What an item that never finished reports in a response that has stopped: cut short once the response is over.

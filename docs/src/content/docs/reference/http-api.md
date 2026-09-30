@@ -64,7 +64,7 @@ Terminal events (exactly one ends the stream):
 
 - `response.completed`: the run finished successfully.
 - `response.failed`: the run errored.
-- `response.incomplete`: the run stopped early (e.g. token cap).
+- `response.incomplete`: the token cap (`max_output_tokens`, or the model's length) stopped the run; `incomplete_details.reason` is `max_output_tokens`. A non-streaming or background response reports the same status. It can be continued with `previous_response_id`.
 - `response.cancelled`: the caller cancelled the run (the engine API's `cancel`, or `inference_stream_cancel` in the C ABI); it carries what was generated, with usage, and its message item is `incomplete`. It is stored for fetching but cannot be continued with `previous_response_id`. An HTTP client that disconnects abandons the request instead.
 
 Errors also stream as a named `error` event. The inference.rs `agentic_tool_call_progress` and `file_produced` events are also emitted on this endpoint. Shell tool calls are represented as Responses `shell_call` and `shell_call_output` output items.

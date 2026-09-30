@@ -12,9 +12,9 @@ use either::Either;
 use futures::future::BoxFuture;
 use inference_core::{
     AgentPermission, ApproximateUserLocation, ChatCompletionChunkResponse, ChatCompletionResponse,
-    CodeExecutionPermission, Function, InferenceRs, ReasoningEffort, Request, RequestCancellation,
-    RequestMessage, Response, TokenizationRequest, Tool, ToolChoice, ToolType, Usage,
-    WebSearchOptions, WebSearchUserLocation, is_chat_template_request_error,
+    CodeExecutionPermission, FINISH_REASON_LENGTH, Function, InferenceRs, ReasoningEffort, Request,
+    RequestCancellation, RequestMessage, Response, TokenizationRequest, Tool, ToolChoice, ToolType,
+    Usage, WebSearchOptions, WebSearchUserLocation, is_chat_template_request_error,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -1217,7 +1217,7 @@ fn output_usage_json(usage: Option<&Usage>) -> Value {
 fn stop_reason(finish_reason: &str) -> String {
     match finish_reason {
         "tool_calls" => "tool_use",
-        "length" => "max_tokens",
+        FINISH_REASON_LENGTH => "max_tokens",
         "stop_sequence" => "stop_sequence",
         "stop" | "eos" => "end_turn",
         _ => "end_turn",

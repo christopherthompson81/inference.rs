@@ -305,7 +305,8 @@ INFERENCE_API inference_status inference_responses_create(const inference_engine
 /* Starts a streaming Responses request; poll it with inference_stream_next. Its events are the OpenResponses stream
  * events named by their "type" (response.created, response.in_progress, response.output_item.added/done,
  * response.content_part.added/done, response.output_text.delta, response.reasoning_text.delta/done,
- * response.function_call_arguments.delta/done, response.completed, response.failed, error), plus
+ * response.function_call_arguments.delta/done, and one terminal event: response.completed, response.incomplete (the
+ * token cap stopped it), response.cancelled (inference_stream_cancel stopped it) or response.failed; or error), plus
  * agentic_tool_call_progress and file_produced. "background" cannot be streamed. */
 INFERENCE_API inference_status inference_responses_stream_open(const inference_engine *engine, const char *request,
                                                               size_t request_len, inference_stream **out_stream);
