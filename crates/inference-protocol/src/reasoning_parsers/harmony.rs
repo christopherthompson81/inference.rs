@@ -12,11 +12,17 @@
 //!
 //! This module provides incremental parsing of Harmony-formatted token streams.
 
-use openai_harmony::{
-    HarmonyEncoding, HarmonyEncodingName, StreamableParser, chat::Role, load_harmony_encoding,
-};
-use std::sync::OnceLock;
 use uuid::Uuid;
+
+const START: &[u8] = b"<|start|>";
+const MESSAGE: &[u8] = b"<|message|>";
+const CHANNEL: &str = "<|channel|>";
+const CONSTRAIN: &str = "<|constrain|>";
+// `<|end|>` closes a message, `<|call|>` a tool call, `<|return|>` the turn.
+const MESSAGE_ENDS: &[&[u8]] = &[b"<|end|>", b"<|call|>", b"<|return|>"];
+const ASSISTANT_ROLE: &str = "assistant";
+const TOOL_ROLE: &str = "tool";
+const HARMONY_ROLES: &[&str] = &["system", "developer", "user", "assistant", "tool"];
 
 /// Extract the tool name from a recipient string.
 /// - "functions.my_tool" -> "my_tool"
@@ -120,12 +126,196 @@ impl HarmonyAccumulated {
     }
 }
 
+/// The routing header of the message being streamed.
+#[derive(Debug, Clone, Default, PartialEq)]
+struct MessageHeader {
+    channel: Option<String>,
+    recipient: Option<String>,
+}
+
+#[derive(Debug)]
+enum ParserState {
+    ExpectStart,
+    Header {
+        bytes: Vec<u8>,
+    },
+    Content {
+        header: MessageHeader,
+        text: String,
+        pending: Vec<u8>,
+    },
+}
+
+/// `openai-harmony`'s `StreamableParser` over decoded token bytes; a special token decodes to exactly its marker.
+#[derive(Debug)]
+struct HarmonyParser {
+    state: ParserState,
+    // The prompt ends in `<|start|>assistant`; the role stays pending until a header parses, as upstream's does.
+    assistant_role_pending: bool,
+    messages_started: usize,
+}
+
+impl HarmonyParser {
+    fn new() -> Self {
+        Self {
+            state: ParserState::Header { bytes: Vec::new() },
+            assistant_role_pending: true,
+            messages_started: 0,
+        }
+    }
+
+    fn process(&mut self, token: &[u8]) {
+        match &mut self.state {
+            ParserState::ExpectStart => {
+                if token == START {
+                    self.state = ParserState::Header { bytes: Vec::new() };
+                }
+            }
+            ParserState::Header { bytes } => {
+                if token == MESSAGE {
+                    let header =
+                        parse_header(&String::from_utf8_lossy(bytes), self.assistant_role_pending);
+                    self.state = match header {
+                        Some(header) => {
+                            self.assistant_role_pending = false;
+                            self.messages_started += 1;
+                            ParserState::Content {
+                                header,
+                                text: String::new(),
+                                pending: Vec::new(),
+                            }
+                        }
+                        None => ParserState::ExpectStart,
+                    };
+                } else {
+                    // Strict parsing, as `openai-harmony` defaults to: a stop token here is header text.
+                    bytes.extend_from_slice(token);
+                }
+            }
+            ParserState::Content { text, pending, .. } => {
+                if MESSAGE_ENDS.contains(&token) {
+                    self.state = ParserState::ExpectStart;
+                } else {
+                    pending.extend_from_slice(token);
+                    push_complete_utf8(text, pending);
+                }
+            }
+        }
+    }
+
+    fn process_eos(&mut self) {
+        self.state = ParserState::ExpectStart;
+    }
+
+    fn header(&self) -> Option<&MessageHeader> {
+        match &self.state {
+            ParserState::Content { header, .. } => Some(header),
+            _ => None,
+        }
+    }
+
+    fn content(&self) -> Option<&str> {
+        match &self.state {
+            ParserState::Content { text, .. } => Some(text),
+            _ => None,
+        }
+    }
+}
+
+// Moves the complete UTF-8 prefix of `pending` into `text`, replacing invalid bytes and keeping an incomplete tail.
+fn push_complete_utf8(text: &mut String, pending: &mut Vec<u8>) {
+    let mut consumed = 0;
+    loop {
+        match std::str::from_utf8(&pending[consumed..]) {
+            Ok(valid) => {
+                text.push_str(valid);
+                consumed = pending.len();
+                break;
+            }
+            Err(error) => {
+                let valid_up_to = consumed + error.valid_up_to();
+                text.push_str(
+                    std::str::from_utf8(&pending[consumed..valid_up_to]).expect("validated"),
+                );
+                match error.error_len() {
+                    Some(len) => {
+                        text.push(char::REPLACEMENT_CHARACTER);
+                        consumed = valid_up_to + len;
+                    }
+                    None => {
+                        consumed = valid_up_to;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    pending.drain(..consumed);
+}
+
+// The header rules of `openai-harmony`'s `parse_header_from_string`; `None` where it errors.
+fn parse_header(header: &str, role_known: bool) -> Option<MessageHeader> {
+    let mut header = header.to_string();
+    let mut channel = None;
+    if let Some(idx) = header.find(CHANNEL) {
+        let after = &header[idx + CHANNEL.len()..];
+        let end = after
+            .find(|c: char| c.is_whitespace() || c == '<')
+            .unwrap_or(after.len());
+        if end == 0 {
+            return None;
+        }
+        channel = Some(after[..end].to_string());
+        header = format!("{}{}", &header[..idx], &after[end..]);
+    }
+    let mut header = header.trim().to_string();
+    if header.contains(CONSTRAIN) {
+        header = header
+            .replace(CONSTRAIN, &format!(" {CONSTRAIN}"))
+            .trim()
+            .to_string();
+    }
+    let mut parts: Vec<&str> = header.split_ascii_whitespace().collect();
+    let role = if role_known {
+        ASSISTANT_ROLE
+    } else {
+        let first = *parts.first()?;
+        if HARMONY_ROLES.contains(&first) {
+            first
+        } else if parts.len() > 1 || first.starts_with("to=") {
+            // An unknown role with a recipient is a tool message.
+            parts.remove(0);
+            TOOL_ROLE
+        } else {
+            return None;
+        }
+    };
+    if parts.first() == Some(&role) {
+        parts.remove(0);
+    }
+    let mut recipient = None;
+    if let Some(last) = parts.pop() {
+        let num_parts = parts.len() + 1;
+        if let Some(stripped) = last.strip_prefix("to=") {
+            recipient = Some(stripped.to_string());
+        } else if num_parts == 1 {
+            recipient = Some(last.to_string());
+        } else if let Some(raw) = parts.pop() {
+            recipient = Some(raw.strip_prefix("to=").unwrap_or(raw).to_string());
+        }
+    }
+    parts
+        .is_empty()
+        .then_some(MessageHeader { channel, recipient })
+}
+
 /// Context for tracking Harmony parsing state within a sequence.
 ///
-/// This wraps the openai-harmony crate's StreamableParser and provides
-/// delta extraction for streaming responses.
+/// Wraps the streaming parser with delta extraction for streaming responses.
 pub struct HarmonyContext {
-    parser: StreamableParser,
+    parser: HarmonyParser,
+    // The message the per-channel lengths below belong to.
+    message: usize,
     // Track lengths for delta extraction (for parser content)
     last_analysis_len: usize,
     last_commentary_len: usize,
@@ -141,6 +331,8 @@ pub struct HarmonyContext {
     tool_calls: Vec<HarmonyToolCall>,
     // Track current tool call being built (recipient, accumulated_args)
     current_tool_call: Option<(String, String)>,
+    // The message the current tool call is in; a later message to the same recipient is a new call.
+    current_tool_message: usize,
     // Track how much of current tool call args have been sent
     sent_tool_args_len: usize,
     // Set when a new tool call starts, signaling that a JSON grammar
@@ -148,14 +340,18 @@ pub struct HarmonyContext {
     needs_grammar_activation: bool,
 }
 
+impl Default for HarmonyContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl HarmonyContext {
     /// Create a new Harmony parsing context
-    pub fn new() -> Result<Self, anyhow::Error> {
-        let encoding = get_harmony_encoding().clone();
-        let parser = StreamableParser::new(encoding, Some(Role::Assistant))
-            .map_err(|e| anyhow::anyhow!("Failed to create Harmony parser: {:?}", e))?;
-        Ok(Self {
-            parser,
+    pub fn new() -> Self {
+        Self {
+            parser: HarmonyParser::new(),
+            message: 0,
             last_analysis_len: 0,
             last_commentary_len: 0,
             last_final_len: 0,
@@ -165,15 +361,21 @@ impl HarmonyContext {
             sent_final_len: 0,
             tool_calls: Vec::new(),
             current_tool_call: None,
+            current_tool_message: 0,
             sent_tool_args_len: 0,
             needs_grammar_activation: false,
-        })
+        }
     }
 
-    /// Process a token and return any new delta content
-    pub fn process_token(&mut self, token_id: u32) -> HarmonyDelta {
-        // process() returns Result, ignore errors for robustness
-        let _ = self.parser.process(token_id);
+    /// Process one token's decoded bytes, special tokens included, and return any new delta content.
+    pub fn process_token(&mut self, token: &[u8]) -> HarmonyDelta {
+        self.parser.process(token);
+        if self.parser.messages_started != self.message {
+            self.message = self.parser.messages_started;
+            self.last_analysis_len = 0;
+            self.last_commentary_len = 0;
+            self.last_final_len = 0;
+        }
         self.extract_delta()
     }
 
@@ -182,8 +384,11 @@ impl HarmonyContext {
         let mut delta = HarmonyDelta::default();
 
         // Get current channel from parser
-        if let Some(channel_str) = self.parser.current_channel()
-            && let Some(channel) = HarmonyChannel::parse(&channel_str)
+        if let Some(channel) = self
+            .parser
+            .header()
+            .and_then(|header| header.channel.as_deref())
+            .and_then(HarmonyChannel::parse)
         {
             self.channel = Some(channel);
             delta.current_channel = Some(channel);
@@ -191,11 +396,9 @@ impl HarmonyContext {
 
         // Check for tool calls via recipient field
         // Recipient is set to "functions.tool_name" when making a tool call
-        let current_recipient = self.parser.current_recipient();
+        let current_recipient = self.current_recipient();
 
-        // Get current content and extract delta based on channel
-        // current_content() returns Result<String>
-        if let Ok(content) = self.parser.current_content() {
+        if let Some(content) = self.parser.content() {
             // Check if this is a tool call
             // Tool calls have recipients like:
             // - "functions.tool_name" for user-defined tools
@@ -209,15 +412,16 @@ impl HarmonyContext {
                 if is_tool_call {
                     // This is a tool call - track it
                     // Check if this is the same tool call or a different one
-                    let is_same_tool_call = self
-                        .current_tool_call
-                        .as_ref()
-                        .is_some_and(|(existing, _)| existing == recipient);
+                    let is_same_tool_call = self.current_tool_message == self.message
+                        && self
+                            .current_tool_call
+                            .as_ref()
+                            .is_some_and(|(existing, _)| existing == recipient);
 
                     if is_same_tool_call {
                         // Same tool call, update arguments
                         if let Some((_, ref mut args)) = self.current_tool_call {
-                            *args = content.clone();
+                            *args = content.to_string();
                         }
                     } else {
                         // Different tool call or no current tool call
@@ -231,7 +435,8 @@ impl HarmonyContext {
                             });
                         }
                         // Start new tool call
-                        self.current_tool_call = Some((recipient.clone(), content.clone()));
+                        self.current_tool_call = Some((recipient.clone(), content.to_string()));
+                        self.current_tool_message = self.message;
                         self.sent_tool_args_len = 0;
                         self.needs_grammar_activation = true;
                     }
@@ -335,7 +540,7 @@ impl HarmonyContext {
 
     /// Signal end of stream to the parser
     pub fn process_eos(&mut self) {
-        let _ = self.parser.process_eos();
+        self.parser.process_eos();
 
         // Finalize any pending tool call
         if let Some((recipient, args)) = self.current_tool_call.take() {
@@ -350,7 +555,7 @@ impl HarmonyContext {
 
     /// Get the recipient (for tool calls) if any
     pub fn current_recipient(&self) -> Option<String> {
-        self.parser.current_recipient()
+        self.parser.header()?.recipient.clone()
     }
 
     /// Check if there's a tool call in progress
@@ -390,31 +595,6 @@ impl HarmonyContext {
     }
 }
 
-/// Global harmony encoding (lazy loaded)
-static HARMONY_ENCODING: OnceLock<HarmonyEncoding> = OnceLock::new();
-
-/// Pre-initialize the Harmony encoding. This MUST be called from a non-async
-/// context (e.g., during pipeline loading) before any async code runs.
-/// The openai-harmony crate uses reqwest::blocking which creates its own
-/// tokio runtime, so it cannot be called from within an existing async context.
-pub fn prewarm_harmony_encoding() {
-    let _ = HARMONY_ENCODING.get_or_init(|| {
-        load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss)
-            .expect("Failed to load Harmony encoding")
-    });
-}
-
-/// Check if the Harmony encoding has been initialized.
-pub fn is_harmony_encoding_ready() -> bool {
-    HARMONY_ENCODING.get().is_some()
-}
-
-fn get_harmony_encoding() -> &'static HarmonyEncoding {
-    HARMONY_ENCODING
-        .get()
-        .expect("Harmony encoding not initialized. Call prewarm_harmony_encoding() first.")
-}
-
 /// Check if a chat template uses Harmony format by looking for Harmony markers.
 ///
 /// Returns true if the template contains Harmony-specific tokens like
@@ -434,6 +614,218 @@ pub fn is_harmony_template(template: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn feed(tokens: &[&[u8]]) -> HarmonyContext {
+        let mut context = HarmonyContext::new();
+        for token in tokens {
+            context.process_token(token);
+        }
+        context
+    }
+
+    #[test]
+    fn channels_split_reasoning_from_the_final_answer() {
+        let mut context = feed(&[
+            b"<|channel|>",
+            b"analysis",
+            b"<|message|>",
+            b"Thinking",
+            b" hard",
+            b"<|end|>",
+            b"<|start|>",
+            b"assistant",
+            b"<|channel|>",
+            b"final",
+            b"<|message|>",
+            b"Hi",
+            b"<|return|>",
+        ]);
+        context.process_eos();
+        assert_eq!(
+            context.reasoning_content().as_deref(),
+            Some("Thinking hard")
+        );
+        assert_eq!(context.final_content().as_deref(), Some("Hi"));
+        assert!(!context.has_tool_call());
+    }
+
+    #[test]
+    fn a_recipient_after_the_channel_is_a_tool_call() {
+        let mut context = feed(&[
+            b"<|channel|>",
+            b"commentary",
+            b" to=functions.get_weather",
+            b" ",
+            b"<|constrain|>",
+            b"json",
+            b"<|message|>",
+            br#"{"city":"#,
+            br#""Paris"}"#,
+        ]);
+        assert!(context.take_needs_grammar_activation());
+        assert_eq!(
+            context.get_current_tool_call(),
+            Some(("functions.get_weather", r#"{"city":"Paris"}"#))
+        );
+        context.process_token(b"<|call|>");
+        let calls = context.finalize_tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(calls[0].arguments, r#"{"city":"Paris"}"#);
+        assert_eq!(context.final_content(), None);
+    }
+
+    #[test]
+    fn a_recipient_before_the_channel_is_a_tool_call() {
+        let mut context = feed(&[
+            b"<|channel|>",
+            b"analysis",
+            b"<|message|>",
+            b"look it up",
+            b"<|end|>",
+            b"<|start|>",
+            b"assistant",
+            b" to=browser.search",
+            b"<|channel|>",
+            b"commentary json",
+            b"<|message|>",
+            b"{}",
+            b"<|call|>",
+        ]);
+        let calls = context.finalize_tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "browser.search");
+        assert_eq!(context.reasoning_content().as_deref(), Some("look it up"));
+    }
+
+    #[test]
+    fn a_character_split_across_tokens_streams_once_complete() {
+        let mut context = feed(&[b"<|channel|>", b"final", b"<|message|>", b"x", &[0xc3]]);
+        assert_eq!(context.get_final_delta().as_deref(), Some("x"));
+        context.process_token(&[0xa9]);
+        assert_eq!(context.get_final_delta().as_deref(), Some("\u{e9}"));
+    }
+
+    #[test]
+    fn a_second_message_on_a_channel_streams_from_its_start() {
+        let context = feed(&[
+            b"<|channel|>",
+            b"analysis",
+            b"<|message|>",
+            b"abc",
+            b"<|end|>",
+            b"<|start|>",
+            b"assistant",
+            b"<|channel|>",
+            b"analysis",
+            b"<|message|>",
+            b"de",
+        ]);
+        assert_eq!(context.reasoning_content().as_deref(), Some("abcde"));
+    }
+
+    #[test]
+    fn the_gpt_oss_tool_call_header_names_the_function() {
+        let calls = feed(&[
+            b"<|channel|>",
+            b"analysis",
+            b"<|message|>",
+            b"need weather",
+            b"<|end|>",
+            b"<|start|>",
+            b"assistant",
+            b" to=functions.get_weather",
+            b"<|channel|>",
+            b"commentary",
+            b" ",
+            b"<|constrain|>",
+            b"json",
+            b"<|message|>",
+            br#"{"city":"Oslo"}"#,
+            b"<|call|>",
+        ])
+        .finalize_tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "get_weather");
+        assert_eq!(calls[0].arguments, r#"{"city":"Oslo"}"#);
+    }
+
+    #[test]
+    fn a_recipient_alone_is_a_tool_call() {
+        let calls = feed(&[
+            b"<|channel|>",
+            b"commentary",
+            b" to=functions.lookup",
+            b"<|message|>",
+            b"{}",
+            b"<|call|>",
+        ])
+        .finalize_tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "lookup");
+    }
+
+    #[test]
+    fn back_to_back_calls_to_one_function_stay_separate() {
+        let calls = feed(&[
+            b"<|channel|>",
+            b"commentary to=functions.f",
+            b"<|message|>",
+            br#"{"n":1}"#,
+            b"<|call|>",
+            b"<|start|>",
+            b"assistant",
+            b"<|channel|>",
+            b"commentary to=functions.f",
+            b"<|message|>",
+            br#"{"n":2}"#,
+            b"<|call|>",
+        ])
+        .finalize_tool_calls();
+        let arguments: Vec<_> = calls.iter().map(|call| call.arguments.as_str()).collect();
+        assert_eq!(arguments, [r#"{"n":1}"#, r#"{"n":2}"#]);
+    }
+
+    #[test]
+    fn a_stop_token_inside_a_header_is_header_text() {
+        let context = feed(&[b"<|end|>", b"<|channel|>", b"final", b"<|message|>", b"hi"]);
+        assert_eq!(context.final_content().as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn a_failed_header_leaves_the_assistant_role_pending() {
+        // With the role pending, the next header's first word is a recipient, not a role.
+        let calls = feed(&[
+            b"<|channel|>",
+            b"<|constrain|>",
+            b"<|message|>",
+            b"dropped",
+            b"<|start|>",
+            b" to=functions.x json",
+            b"<|message|>",
+            b"{}",
+            b"<|call|>",
+        ])
+        .finalize_tool_calls();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].name, "x");
+    }
+
+    #[test]
+    fn text_between_messages_and_malformed_headers_are_dropped() {
+        let context = feed(&[
+            b"<|message|>",
+            b"plain",
+            b"<|end|>",
+            b"stray",
+            b"<|start|>",
+            b"narrator",
+            b"<|message|>",
+            b"ignored",
+            b"<|end|>",
+        ]);
+        assert_eq!(context.final_content().as_deref(), Some("plain"));
+    }
 
     #[test]
     fn test_is_harmony_template() {

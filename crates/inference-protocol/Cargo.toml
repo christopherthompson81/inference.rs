@@ -19,7 +19,6 @@ inference-code-exec = { workspace = true, optional = true }
 inference-mcp.workspace = true
 llguidance.workspace = true
 mime_guess.workspace = true
-openai-harmony = "0.0.8"
 regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true

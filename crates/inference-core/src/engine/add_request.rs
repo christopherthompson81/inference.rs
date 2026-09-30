@@ -529,19 +529,9 @@ impl Engine {
     }
 
     fn preferred_tool_call_format(&self) -> Option<ToolCallFormat> {
-        let preferred = get_mut_arcmutex!(self.pipeline)
+        get_mut_arcmutex!(self.pipeline)
             .get_chat_template()
-            .and_then(|chat_template| chat_template.tool_call_format());
-        if preferred == Some(ToolCallFormat::Harmony)
-            && !crate::reasoning_parsers::harmony::is_harmony_encoding_ready()
-            && let Err(e) = tokio::task::block_in_place(|| {
-                crate::reasoning_parsers::harmony::prewarm_harmony_encoding();
-                Ok::<(), anyhow::Error>(())
-            })
-        {
-            warn!("Failed to initialize Harmony encoding: {e}");
-        }
-        preferred
+            .and_then(|chat_template| chat_template.tool_call_format())
     }
 
     fn render_prompt(

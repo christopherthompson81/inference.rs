@@ -253,38 +253,14 @@ fn decode_streaming_utf8(bytes: &[u8]) -> Cow<'_, str> {
     Cow::Owned(decoded)
 }
 
+#[derive(Default)]
 pub(crate) struct HarmonyToolCallStrategy {
-    context: Option<HarmonyContext>,
-}
-
-impl HarmonyToolCallStrategy {
-    pub(crate) fn new() -> anyhow::Result<Self> {
-        Ok(Self { context: None })
-    }
-
-    fn context(&self) -> Option<&HarmonyContext> {
-        self.context.as_ref()
-    }
-
-    fn context_mut(&mut self) -> Option<&mut HarmonyContext> {
-        if self.context.is_none() {
-            match HarmonyContext::new() {
-                Ok(context) => self.context = Some(context),
-                Err(e) => {
-                    tracing::warn!("Failed to initialize Harmony parser: {e}");
-                    return None;
-                }
-            }
-        }
-        self.context.as_mut()
-    }
+    context: HarmonyContext,
 }
 
 impl ToolCallStrategy for HarmonyToolCallStrategy {
-    fn observe_token(&mut self, token: u32, _bytes: &[u8]) {
-        if let Some(context) = self.context_mut() {
-            context.process_token(token);
-        }
+    fn observe_token(&mut self, _token: u32, bytes: &[u8]) {
+        self.context.process_token(bytes);
     }
 
     fn continuation_grammar(
@@ -292,7 +268,7 @@ impl ToolCallStrategy for HarmonyToolCallStrategy {
         _text: Option<&str>,
         tools: &[Tool],
     ) -> Option<TopLevelGrammar> {
-        let context = self.context_mut()?;
+        let context = &mut self.context;
         if !context.take_needs_grammar_activation() {
             return None;
         }
@@ -313,10 +289,7 @@ impl ToolCallStrategy for HarmonyToolCallStrategy {
     }
 
     fn required_boundary(&self) -> ToolCallBoundary {
-        if self
-            .context()
-            .is_some_and(|context| context.current_channel().is_some())
-        {
+        if self.context.current_channel().is_some() {
             ToolCallBoundary::StartNewMessage
         } else {
             ToolCallBoundary::ContinueCurrentMessage
@@ -328,37 +301,31 @@ impl ToolCallStrategy for HarmonyToolCallStrategy {
     }
 
     fn finalize(&mut self) {
-        if let Some(context) = self.context.as_mut() {
-            context.process_eos();
-        }
+        self.context.process_eos();
     }
 
     fn content_delta(&mut self) -> Option<String> {
-        self.context.as_mut()?.get_final_delta()
+        self.context.get_final_delta()
     }
 
     fn reasoning_delta(&mut self) -> Option<String> {
-        self.context.as_mut()?.get_reasoning_delta()
+        self.context.get_reasoning_delta()
     }
 
     fn content(&self) -> Option<String> {
-        self.context()?.final_content()
+        self.context.final_content()
     }
 
     fn reasoning_content(&self) -> Option<String> {
-        self.context()?.reasoning_content()
+        self.context.reasoning_content()
     }
 
     fn has_tool_calls(&self) -> bool {
-        self.context()
-            .is_some_and(|context| context.has_tool_call())
+        self.context.has_tool_call()
     }
 
     fn finalize_tool_calls(&mut self) -> Vec<ToolCallResponse> {
-        self.context
-            .as_mut()
-            .map(|context| harmony_tool_calls_to_responses(context.finalize_tool_calls()))
-            .unwrap_or_default()
+        harmony_tool_calls_to_responses(self.context.finalize_tool_calls())
     }
 }
 

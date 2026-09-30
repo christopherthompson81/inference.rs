@@ -94,7 +94,7 @@ impl ToolCallState {
     ) -> anyhow::Result<Self> {
         let matcher = ToolCallingMatcher::new_with_format(tool_choice, tools, preferred_format)?;
         let strategy: Box<dyn ToolCallStrategy> = match preferred_format {
-            Some(ToolCallFormat::Harmony) => Box::new(HarmonyToolCallStrategy::new()?),
+            Some(ToolCallFormat::Harmony) => Box::<HarmonyToolCallStrategy>::default(),
             Some(ToolCallFormat::Atem) => {
                 Box::new(AtemToolCallStrategy::new(if matcher.allows_tool_call() {
                     matcher.tools()
@@ -435,6 +435,47 @@ mod tests {
 
         assert!(lark(&grammar).contains("<|channel|>"));
         assert!(lark(&grammar).contains("commentary to=functions.get_weather "));
+    }
+
+    #[test]
+    fn harmony_strategy_separates_reasoning_content_and_tools() {
+        let tools = vec![tool("get_weather")];
+        let mut state = ToolCallState::new(
+            ToolChoice::Auto,
+            Some(&tools),
+            Some(ToolCallFormat::Harmony),
+        )
+        .unwrap();
+        let tokens: &[&[u8]] = &[
+            b"<|channel|>",
+            b"analysis",
+            b"<|message|>",
+            b"checking",
+            b"<|end|>",
+            b"<|start|>",
+            b"assistant",
+            b" to=functions.get_weather",
+            b"<|channel|>",
+            b"commentary",
+            b" ",
+            b"<|constrain|>",
+            b"json",
+            b"<|message|>",
+            br#"{"city":"Paris"}"#,
+            b"<|call|>",
+        ];
+        for token in tokens {
+            state.observe_token(0, token);
+        }
+
+        assert_eq!(state.reasoning_delta().as_deref(), Some("checking"));
+        let parsed = state.parse_streaming(None, "", None, false, true).unwrap();
+        assert_eq!(parsed.tool_calls.len(), 1);
+        assert_eq!(parsed.tool_calls[0].function.name, "get_weather");
+        assert_eq!(
+            parsed.tool_calls[0].function.arguments,
+            r#"{"city":"Paris"}"#
+        );
     }
 
     #[test]
