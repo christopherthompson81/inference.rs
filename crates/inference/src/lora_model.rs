@@ -59,6 +59,8 @@ impl LoraModelBuilder {
     pub async fn build(self) -> anyhow::Result<Model> {
         let builder = &self.text_model;
         let model_selected = ModelSelected::Lora {
+            mmproj_selection: inference_selection::MmprojSelection::Given,
+            quant: None,
             model_id: builder.model_id.clone(),
             tokenizer_json: builder.tokenizer_json.clone(),
             adapters: self.adapters,

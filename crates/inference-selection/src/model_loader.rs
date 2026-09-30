@@ -13,6 +13,9 @@ use inference_core::{
     Topology, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig,
 };
 
+const UNRESOLVED_SOURCE: &str = "the spec's `quant`, empty GGUF filename or projector choice has to be resolved before loading; \
+                                 `Engine::load` and `selection::quant::resolve_model_source` do it";
+
 /// A builder for a loader using the selected model.
 pub struct LoaderBuilder {
     model: ModelSelected,
@@ -433,12 +436,16 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
         anyhow::bail!("max_model_len is not supported by this model format");
     }
 
+    if args.model.needs_source_resolution() {
+        anyhow::bail!(UNRESOLVED_SOURCE);
+    }
     let base = SafetensorsOptions::from_args(&args);
     let inline_topology = args.overrides.topology.clone();
     let inline_ordering = args.overrides.ordering.clone();
     let loader: Box<dyn Loader> = match args.model {
         ModelSelected::Plain {
             model_id,
+            quant: _,
             tokenizer_json,
             arch,
             dtype: _,
@@ -479,7 +486,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
         }
         ModelSelected::Run {
             model_id,
-            quant,
+            quant: _,
             tokenizer_json,
             dtype: _,
             topology,
@@ -497,12 +504,6 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             matformer_config_path,
             matformer_slice_name,
         } => {
-            if let Some(quant) = quant {
-                anyhow::bail!(
-                    "`quant = {quant}` has to be resolved before loading; `Engine::load` and \
-                     `selection::quant::resolve_model_quant` do it"
-                );
-            }
             let options = SafetensorsOptions {
                 topology: resolve_topology(&inline_topology, topology)?,
                 organization: organization.unwrap_or_default(),
@@ -537,6 +538,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
         }
         ModelSelected::MultimodalPlain {
             model_id,
+            quant: _,
             tokenizer_json,
             arch,
             dtype: _,
@@ -596,6 +598,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
         }),
         ModelSelected::XLora {
             model_id,
+            quant: _,
             xlora_model_id,
             order,
             tokenizer_json,
@@ -636,6 +639,8 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
         }
         ModelSelected::Lora {
             model_id,
+            quant: _,
+            mmproj_selection: _,
             tokenizer_json,
             adapters,
             runtime_config,
@@ -924,6 +929,7 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
         .build(),
         ModelSelected::Embedding {
             model_id,
+            quant: _,
             tokenizer_json,
             arch,
             dtype: _,

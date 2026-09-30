@@ -1020,6 +1020,15 @@ class Message:
     tool_calls: list[ToolCall] | None = None
 
 
+class MmprojSelection(str, Enum):
+    """How a GGUF spec without `mmproj_filename` gets its multimodal projector."""
+
+    GIVEN = "given"
+    ARTIFACT_REPO = "artifact_repo"
+    ANY = "any"
+    REQUIRED = "required"
+
+
 class Modality(str, Enum):
     TEXT = "text"
     AUDIO = "audio"
@@ -1129,6 +1138,7 @@ class ModelSelectedPlain:
     max_seq_len: int | None = 4096
     model_id: str
     organization: IsqOrganization | None = None
+    quant: str | None = None
     tokenizer_json: str | None = None
     topology: str | None = None
     write_uqff: UqffWriteSpec | None = None
@@ -1148,6 +1158,7 @@ class ModelSelectedXLora:
     model_id: str | None = None
     order: str
     organization: IsqOrganization | None = None
+    quant: str | None = None
     tgt_non_granular_index: int | None = None
     tokenizer_json: str | None = None
     topology: str | None = None
@@ -1174,8 +1185,10 @@ class ModelSelectedLora:
     max_image_length: int | None = None
     max_num_images: int | None = None
     max_seq_len: int | None = 4096
+    mmproj_selection: MmprojSelection | None = None
     model_id: str
     organization: IsqOrganization | None = None
+    quant: str | None = None
     runtime_config: LoraRuntimeConfig | None = None
     tokenizer_json: str | None = None
     topology: str | None = None
@@ -1201,8 +1214,10 @@ class ModelSelectedGGUF:
     max_num_images: int | None = None
     max_seq_len: int | None = 4096
     mmproj_filename: str | None = None
+    mmproj_selection: MmprojSelection | None = None
     organization: IsqOrganization | None = None
-    quantized_filename: str
+    quant: str | None = None
+    quantized_filename: str | None = None
     quantized_model_id: str
     tok_model_id: str | None = None
     tokenizer_json: str | None = None
@@ -1225,7 +1240,8 @@ class ModelSelectedXLoraGGUF:
     max_seq_len: int | None = 4096
     order: str
     organization: IsqOrganization | None = None
-    quantized_filename: str
+    quant: str | None = None
+    quantized_filename: str | None = None
     quantized_model_id: str
     tgt_non_granular_index: int | None = None
     tok_model_id: str | None = None
@@ -1251,7 +1267,8 @@ class ModelSelectedLoraGGUF:
     max_seq_len: int | None = 4096
     order: str
     organization: IsqOrganization | None = None
-    quantized_filename: str
+    quant: str | None = None
+    quantized_filename: str | None = None
     quantized_model_id: str
     tok_model_id: str | None = None
     tokenizer_json: str | None = None
@@ -1332,6 +1349,7 @@ class ModelSelectedMultimodalPlain:
     max_seq_len: int | None = 4096
     model_id: str
     organization: IsqOrganization | None = None
+    quant: str | None = None
     tokenizer_json: str | None = None
     topology: str | None = None
     write_uqff: UqffWriteSpec | None = None
@@ -1368,6 +1386,7 @@ class ModelSelectedEmbedding:
     hf_cache_path: str | None = None
     imatrix: str | None = None
     model_id: str
+    quant: str | None = None
     tokenizer_json: str | None = None
     topology: str | None = None
     write_uqff: UqffWriteSpec | None = None

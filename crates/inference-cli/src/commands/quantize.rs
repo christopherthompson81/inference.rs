@@ -558,6 +558,7 @@ fn convert_to_model_selected(
                 QuantizeModelFormat::Plain => {}
             }
             let model_selected = ModelSelected::Plain {
+                quant: None,
                 model_id: model
                     .model_id
                     .clone()
@@ -613,6 +614,7 @@ fn convert_to_model_selected(
                 QuantizeModelFormat::Plain => {}
             }
             let model_selected = ModelSelected::MultimodalPlain {
+                quant: None,
                 model_id: model
                     .model_id
                     .clone()
@@ -651,6 +653,7 @@ fn convert_to_model_selected(
             ..
         } => {
             let model_selected = ModelSelected::Embedding {
+                quant: None,
                 model_id: model.model_id.clone(),
                 tokenizer_json: model
                     .tokenizer
@@ -681,6 +684,8 @@ fn convert_gguf_source(
     write_uqff: UqffWriteConfig,
 ) -> Result<ModelSelected> {
     Ok(ModelSelected::GGUF {
+        quant: None,
+        mmproj_selection: inference_selection::MmprojSelection::Given,
         tok_model_id: model.format.tok_model_id.clone(),
         quantized_model_id: model
             .model_id

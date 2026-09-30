@@ -39,6 +39,7 @@ impl XLoraModelBuilder {
     pub async fn build(self) -> anyhow::Result<Model> {
         let builder = &self.text_model;
         let model_selected = ModelSelected::XLora {
+            quant: None,
             model_id: Some(builder.model_id.clone()),
             tokenizer_json: builder.tokenizer_json.clone(),
             xlora_model_id: self.xlora_model_id,
