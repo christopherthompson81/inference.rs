@@ -26,6 +26,7 @@ use tokio::sync::Mutex;
 
 #[cfg(feature = "models-gemma")]
 pub use normal_loaders::GemmaLoader;
+pub(crate) use normal_loaders::NormalLoaderTypeExt;
 #[cfg(feature = "models-qwen")]
 pub use normal_loaders::Qwen2Loader;
 #[cfg(feature = "models-other")]
@@ -38,7 +39,6 @@ pub use normal_loaders::{LlamaLoader, MistralLoader, MixtralLoader};
 #[cfg(feature = "models-phi")]
 pub use normal_loaders::{Phi2Loader, Phi3Loader};
 
-pub(crate) use multimodal_loaders::MultimodalProcessorFactory;
 #[cfg(feature = "models-phi")]
 pub use multimodal_loaders::Phi3VLoader;
 pub use multimodal_loaders::{
@@ -46,6 +46,7 @@ pub use multimodal_loaders::{
 };
 #[cfg(feature = "models-llama")]
 pub use multimodal_loaders::{Idefics2Loader, LLaVALoader, LLaVANextLoader};
+pub(crate) use multimodal_loaders::{MultimodalLoaderTypeExt, MultimodalProcessorFactory};
 
 pub use embedding_loaders::{
     AutoEmbeddingLoader, EmbeddingLoaderType, EmbeddingModel, EmbeddingModelLoader,

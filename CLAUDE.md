@@ -117,9 +117,10 @@ You should also look for a model.safetensors.index.json file for the model at ha
 When adding new model architectures:
 1. Implement the model in its family crate, `crates/inference-models-<family>/`, with its input processor (`<model>/inputs_processor.rs`); its `Processor` goes in core's `crates/inference-core/src/vision_models/<model>/processor.rs`, beside a module that re-exports the model
 2. Add its loader beside the model in `crates/inference-models-<family>/src/loaders/` and list it in that crate's `inference_nn::boxed_loaders!`, so its vtable and trait defaults compile there. A multimodal loader's `MultimodalProcessorFactory` impl stays in core's `vision_models/<model>/processor.rs`.
-3. Add one row to `normal_loader_types!` (or `multimodal_loader_types!`) in core's `pipeline/loaders/{normal,multimodal}_loaders/mod.rs`. The row gives
-   the CLI name, the HF class, the `model_type` (text only) and the loader, and the enum variant, parsing, display, HF detection and loader
-   dispatch are all generated from it. Embedding loaders are listed by hand in `EmbeddingLoaderType` (`embedding_loaders/mod.rs`).
+3. Add one row to `normal_loader_table!` (or `multimodal_loader_table!`) in `crates/inference-nn/src/loaders/types.rs`. The row gives
+   the CLI name, the HF class, the `model_type` (text only) and the loader. inference-nn expands the enum variant, parsing, display and
+   HF detection from it, and core expands its feature-gated loader dispatch from the same row. Embedding loaders are listed by hand in
+   `EmbeddingLoaderType` (`embedding_loaders/mod.rs`).
 4. Add the GGUF bindings in `crates/inference-core/src/gguf/` if the model loads from GGUF
 
 When adding new quantization methods:

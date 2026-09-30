@@ -1,4 +1,5 @@
 use super::llg::build_llg_factory;
+use super::loaders::NormalLoaderTypeExt;
 use super::{
     AdapterKind, CacheManager, DecodeGraphPrecaptureCtx, GeneralMetadata, Loader, ModelKind,
     ModelPaths, NormalModel, NormalModelLoader, TokenSource, get_model_paths,
