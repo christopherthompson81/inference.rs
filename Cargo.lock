@@ -2673,7 +2673,6 @@ dependencies = [
  "ahash",
  "anyhow",
  "as-any",
- "async-trait",
  "base64 0.22.1",
  "candle-core",
  "candle-metal-kernels",

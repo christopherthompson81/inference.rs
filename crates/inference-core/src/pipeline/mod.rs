@@ -62,6 +62,7 @@ pub(crate) use embedding::EmbeddingLoadContext;
 pub use embedding::{EmbeddingLoader, EmbeddingLoaderBuilder, EmbeddingSpecificConfig};
 #[doc(hidden)]
 pub use execution::{StepLookahead, StepSubmission};
+use futures::future::BoxFuture;
 pub use ggml::{GGMLLoader, GGMLLoaderBuilder, GGMLSpecificConfig};
 pub use gguf::{GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig};
 pub use hf_config::HfConfigOverrides;
@@ -1069,7 +1070,6 @@ fn next_pipeline_prompt_chunk_group(
     next_prompt_chunk_group(plan_indices, chunk_plans, require_uniform_query_len)
 }
 
-#[async_trait::async_trait]
 pub trait Pipeline:
     Send
     + Sync
@@ -1207,30 +1207,33 @@ pub trait Pipeline:
     /// Append pre-sampled token blocks (block-diffusion canvases) to the sequences via the
     /// standard per-token finalize path. Overridden by pipelines whose models emit
     /// `ForwardInputsResult::BlockGeneration`.
-    async fn sample_block_gen(
-        &self,
-        _input_seqs: &mut [&mut Sequence],
+    fn sample_block_gen<'a, 'b: 'a>(
+        &'a self,
+        _input_seqs: &'a mut [&'b mut Sequence],
         _token_blocks: Vec<Vec<u32>>,
         _denoise_times: Vec<std::time::Duration>,
-        _prefix_cacher: &mut PrefixCacheManagerV2,
+        _prefix_cacher: &'a mut PrefixCacheManagerV2,
         _disable_eos_stop: bool,
-    ) -> Result<(), candle_core::Error> {
-        candle_core::bail!("This pipeline does not support block generation.")
+    ) -> BoxFuture<'a, Result<(), candle_core::Error>> {
+        Box::pin(std::future::ready(Err(candle_core::Error::Msg(
+            "This pipeline does not support block generation.".to_string(),
+        )
+        .bt())))
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn try_sample_speculative_causal_gen(
-        &mut self,
-        _input_seqs: &mut [&mut Sequence],
-        _logits: &[Tensor],
-        _batched_logits: Option<&Tensor>,
-        _prefix_cacher: &mut PrefixCacheManagerV2,
+    fn try_sample_speculative_causal_gen<'a, 'b: 'a>(
+        &'a mut self,
+        _input_seqs: &'a mut [&'b mut Sequence],
+        _logits: &'a [Tensor],
+        _batched_logits: Option<&'a Tensor>,
+        _prefix_cacher: &'a mut PrefixCacheManagerV2,
         _disable_eos_stop: bool,
         _rng: Arc<std::sync::Mutex<Isaac64Rng>>,
         _metadata: Option<PagedAttentionMeta>,
-        _logger: &IntervalLogger,
-    ) -> Result<bool, candle_core::Error> {
-        Ok(false)
+        _logger: &'a IntervalLogger,
+    ) -> BoxFuture<'a, Result<bool, candle_core::Error>> {
+        Box::pin(std::future::ready(Ok(false)))
     }
 
     fn snapshot_paged_recurrent_prefix(
@@ -1290,25 +1293,25 @@ pub trait Pipeline:
         Ok(())
     }
 
-    async fn try_sample_causal_gen_batched(
-        &self,
-        _seqs: &mut [&mut Sequence],
-        _logits: &Tensor,
-        _prefix_cacher: &mut PrefixCacheManagerV2,
+    fn try_sample_causal_gen_batched<'a, 'b: 'a>(
+        &'a self,
+        _seqs: &'a mut [&'b mut Sequence],
+        _logits: &'a Tensor,
+        _prefix_cacher: &'a mut PrefixCacheManagerV2,
         _disable_eos_stop: bool,
         _rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> Result<bool, candle_core::Error> {
-        Ok(false)
+    ) -> BoxFuture<'a, Result<bool, candle_core::Error>> {
+        Box::pin(std::future::ready(Ok(false)))
     }
 
-    async fn sample_causal_gen(
-        &self,
-        seqs: &mut [&mut Sequence],
+    fn sample_causal_gen<'a, 'b: 'a>(
+        &'a self,
+        seqs: &'a mut [&'b mut Sequence],
         logits: Vec<Tensor>,
-        prefix_cacher: &mut PrefixCacheManagerV2,
+        prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> Result<(), candle_core::Error>;
+    ) -> BoxFuture<'a, Result<(), candle_core::Error>>;
 
     fn category(&self) -> ModelCategory;
 

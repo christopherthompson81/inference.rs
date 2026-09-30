@@ -21,6 +21,7 @@ use crate::{
 use anyhow::Result;
 use candle_core::{Device, Tensor};
 use candle_nn::VarBuilder;
+use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use indexmap::IndexMap;
 use inference_models_speech::{DiaConfig, DiaPipeline, SpeechGenerationOutput};
@@ -432,7 +433,6 @@ impl MetadataMixin for SpeechPipeline {
     }
 }
 
-#[async_trait::async_trait]
 impl Pipeline for SpeechPipeline {
     fn forward_inputs(
         &mut self,
@@ -463,15 +463,18 @@ impl Pipeline for SpeechPipeline {
         })
     }
 
-    async fn sample_causal_gen(
-        &self,
-        _seqs: &mut [&mut Sequence],
+    fn sample_causal_gen<'a, 'b: 'a>(
+        &'a self,
+        _seqs: &'a mut [&'b mut Sequence],
         _logits: Vec<Tensor>,
-        _prefix_cacher: &mut PrefixCacheManagerV2,
+        _prefix_cacher: &'a mut PrefixCacheManagerV2,
         _disable_eos_stop: bool,
         _srng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> Result<(), candle_core::Error> {
-        candle_core::bail!("`sample_causal_gen` is incompatible with `SpeechPipeline`");
+    ) -> BoxFuture<'a, Result<(), candle_core::Error>> {
+        Box::pin(std::future::ready(Err(candle_core::Error::Msg(
+            "`sample_causal_gen` is incompatible with `SpeechPipeline`".to_string(),
+        )
+        .bt())))
     }
 
     fn category(&self) -> ModelCategory {

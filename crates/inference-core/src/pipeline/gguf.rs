@@ -69,6 +69,7 @@ use crate::{
 use anyhow::{Context, Result, bail};
 use candle_core::{Device, Tensor};
 use either::Either;
+use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType};
 use inference_nn::gguf::{QuantizedForwardInputs, QuantizedModel};
 use inference_quant::IsqType;
@@ -1496,7 +1497,6 @@ impl MetadataMixin for GGUFPipeline {
     }
 }
 
-#[async_trait::async_trait]
 impl Pipeline for GGUFPipeline {
     fn requires_uniform_completion_batch(&self) -> bool {
         false
@@ -1541,15 +1541,15 @@ impl Pipeline for GGUFPipeline {
             Ok(ForwardInputsResult::CausalGeneration { logits })
         }
     }
-    async fn sample_causal_gen(
-        &self,
-        seqs: &mut [&mut Sequence],
+    fn sample_causal_gen<'a, 'b: 'a>(
+        &'a self,
+        seqs: &'a mut [&'b mut Sequence],
         logits: Vec<Tensor>,
-        prefix_cacher: &mut PrefixCacheManagerV2,
+        prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> Result<(), candle_core::Error> {
-        sample_and_add_toks(self, seqs, logits, prefix_cacher, disable_eos_stop, rng).await
+    ) -> BoxFuture<'a, Result<(), candle_core::Error>> {
+        sample_and_add_toks(self, seqs, logits, prefix_cacher, disable_eos_stop, rng)
     }
     fn category(&self) -> ModelCategory {
         ModelCategory::Text

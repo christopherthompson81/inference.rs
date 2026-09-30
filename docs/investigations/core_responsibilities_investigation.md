@@ -573,3 +573,51 @@ Load was 9 falling to 7, so the machine was mostly idle.
   all 576 unit tests out of core would take that, plus widening core's private modules to make the tests reachable.
   The cost is out of proportion to the gain.
 - In a saturated build, wall time follows total CPU work more than any one chain.
+
+## Run 16 — 2026-09-29 23:50
+
+**Question:** where does core's single-threaded compile time go, pass by pass and item by item?
+
+**Commands:** in a scratch target with dependencies built, `CARGO_INCREMENTAL=0`, core touched each time:
+- `RUSTC_BOOTSTRAP=1 cargo rustc --features cuda -p inference-core --lib -- -Z time-passes` for the phases.
+- `... -- -Z self-profile=<dir> -Z self-profile-events=default,args`, read with `summarize`.
+- `crox --minimum-duration 100` to a Chrome trace. Each `evaluate_obligation` event was attributed to the enclosing
+  `typeck_root`, `mir_borrowck` or `optimized_mir` event on the same thread, and its predicate recorded.
+
+**Raw finding, before the change (at eb07616c plus #146 to #148):**
+- Phases (32.8 s total): type checking 6.6 s, borrow checking 6.1 s, metadata generation 5.6 s, coherence 1.8 s,
+  lowering to LLVM IR 7.0 s, LLVM passes 11.9 s (parallel), waiting on LLVM 5.0 s.
+- Self time: `evaluate_obligation` 5.43 s over 158,587 queries, more than `typeck_root` itself (1.64 s self, 2.25 s
+  total). `mir_borrowck` is 4.27 s total but 1.10 s self.
+- Attributed trait-solving time: about 0.19 s each under the `mir_borrowck` and `optimized_mir` of every `#[async_trait]`
+  sampling wrapper on `Pipeline` (`sample_causal_gen`, `try_sample_causal_gen_batched`,
+  `try_sample_speculative_causal_gen`, `sample_block_gen`). There are 20 of them across 8 pipelines, even though their
+  bodies only await a shared function that already returns a `BoxFuture`.
+- The predicates are the auto traits of `Sequence`'s type graph: `Sequence: Send`, `Sampler: Send + Sync`,
+  `Tokenizer: Send + Sync`, the FlashInfer workspace maps, and so on.
+
+**Cause:** `async_trait` wraps each body in an async block boxed as `dyn Future + Send`, so the compiler proves the
+block's captured state `Send`, including `&mut [&mut Sequence]`. The trait's lifetime bounds sit in each method's
+environment, so every canonical query is distinct and nothing is cached across wrappers. Each wrapper re-proves the
+whole graph.
+
+**Change:**
+- `Pipeline` drops `#[async_trait]`. Its four async methods become plain `fn`s returning `BoxFuture<'a, _>`.
+- Forwarding impls return the shared function's future (`sample_and_add_toks`, `finalize_block_gen`) directly.
+- `try_sample_causal_gen_batched` maps that future to `true`.
+- Defaults and unsupported pipelines return `std::future::ready`.
+- Five async blocks remain: the speculative method in the normal and multimodal pipelines, because the future borrows
+  a local cache view, and AnyMoE's three methods, which hold the target's lock across the await.
+
+**Raw finding, after:**
+- Self time: `evaluate_obligation` 5.43 s → 1.49 s. Phases: borrow checking 6.1 s → 4.4 s, metadata 5.6 s → 4.0 s,
+  total 32.8 s → 29.6 s.
+- Rebuilds of core's lib test (`cargo test --no-run --features cuda -p inference-core --lib`, two each): master 29.5
+  and 29.8 s (load 7.6 and 6.7), branch 26.3 and 26.0 s (load 10.0 and 8.6), about -12%.
+
+**Implication:**
+- About 3.5 s of single-threaded work comes off each of core's two compiles, so every cold build and every edit to
+  core gains.
+- What's left in the front end is spread thin: `typeck_root` 1.6 s self, `mir_borrowck` 1.1 s self, and the MIR
+  passes. The larger serial items now scale with the amount of code: LLVM IR generation (`codegen_module` 5.4 s) and
+  metadata (4.8 s).

@@ -20,6 +20,7 @@ use crate::utils::{
 use crate::{DeviceMapSetting, PagedAttentionConfig, Pipeline, TryIntoDType};
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
+use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
 use image::{DynamicImage, RgbImage};
 use inference_models_diffusion::gguf;
@@ -325,7 +326,6 @@ impl MetadataMixin for DiffusionPipeline {
     }
 }
 
-#[async_trait::async_trait]
 impl Pipeline for DiffusionPipeline {
     fn forward_inputs(
         &mut self,
@@ -352,15 +352,18 @@ impl Pipeline for DiffusionPipeline {
         }
         Ok(ForwardInputsResult::Image { images })
     }
-    async fn sample_causal_gen(
-        &self,
-        _seqs: &mut [&mut Sequence],
+    fn sample_causal_gen<'a, 'b: 'a>(
+        &'a self,
+        _seqs: &'a mut [&'b mut Sequence],
         _logits: Vec<Tensor>,
-        _prefix_cacher: &mut PrefixCacheManagerV2,
+        _prefix_cacher: &'a mut PrefixCacheManagerV2,
         _disable_eos_stop: bool,
         _srng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> Result<(), candle_core::Error> {
-        candle_core::bail!("`sample_causal_gen` is incompatible with `DiffusionPipeline`");
+    ) -> BoxFuture<'a, Result<(), candle_core::Error>> {
+        Box::pin(std::future::ready(Err(candle_core::Error::Msg(
+            "`sample_causal_gen` is incompatible with `DiffusionPipeline`".to_string(),
+        )
+        .bt())))
     }
     fn category(&self) -> ModelCategory {
         ModelCategory::Diffusion
