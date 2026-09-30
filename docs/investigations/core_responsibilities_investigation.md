@@ -621,3 +621,46 @@ whole graph.
 - What's left in the front end is spread thin: `typeck_root` 1.6 s self, `mir_borrowck` 1.1 s self, and the MIR
   passes. The larger serial items now scale with the amount of code: LLVM IR generation (`codegen_module` 5.4 s) and
   metadata (4.8 s).
+
+## Run 17 — 2026-09-30 01:00
+
+**Question:** Model selection and hardware fit (`selection/`, `tuning`, `diagnostics`, `resource_plan`) answer "which
+model and quant fits this machine", which is an API question. Can they leave core, and what does core save?
+
+**Coupling found:**
+- `tuning`, `diagnostics` and `resource_plan` had no users inside core; they were only re-exported.
+- `selection` used only core's public loader builders, plus `UqffWriteSpec` (schema only), `build_api_with_cache`
+  and `get_device_layers_for_loader`, which were `pub(crate)`.
+- The one real tie: `ModelLoaderConfig` held a `ModelSelected`, and core's unload/reload path rebuilt the loader from
+  it through `LoaderBuilder`.
+- The SDK depends on core but not on inference-api, so selection can't live in inference-api.
+
+**Change:**
+- New crate `inference-selection` above core holds `ModelSelected`, `LoaderBuilder`, model metadata, quant/GGUF/UQFF
+  discovery, auto-tuning, paged KV planning and the doctor.
+- Core's seam is `trait LoaderSource { fn build_loader(&self, &ModelLoaderConfig, no_kv_cache) }`.
+  `ModelLoaderConfig.source: Arc<dyn LoaderSource>` replaces `model_selected`, and `ModelSelected` implements it.
+  AnyMoE wrapping stays in core.
+- `EmbeddingLoaderType::config_arch` moved into core beside its inverse, `from_causal_lm_name` (orphan rule).
+- The doctor reports compiled-in backends, so the crate forwards cuda/metal/cutile/... to core. Consumers forward to
+  it; inference-api gained a `cutile` feature so FFI's reaches it.
+- Core dropped `sysinfo`, `walkdir`, `num-traits` and `candle-metal-kernels`.
+
+**Raw finding:**
+- `cargo llvm-lines --lib -p inference-core`: 2,163,788 → 1,840,443 (-323k). The survey estimated ~75k for this
+  group, so most of the drop is generic instantiations (serde, hf-hub, sysinfo) the moved code pulled into core.
+- `cargo llvm-lines --lib -p inference-selection`: 245,499. Net over both crates: about -78k.
+- `-Z time-passes` on core's lib (touched lib.rs): total 29.6 s (Run 16) → 24.6 s. borrow checking 4.4 → 4.2 s,
+  metadata 4.0 → 3.5 s, `codegen_crate` 8.0 s, LLVM passes 8.9 s.
+- First CI run: every test passed, but a server-core doctest still imported `inference_core::ModelSelected`.
+- Review: FFI's `cutile` did not reach the new crate (inference-api had no `cutile`), so an FFI cutile build would
+  report `cutile: false` and compile out the doctor's cuTile check. The Makefile's supported-models regen targets
+  still named `-p inference-core` and matched nothing. Both fixed.
+- Second CI run: 287 s, all passing (2208 CPU, 2528 CUDA).
+- cuTile check with CUDA 13.4 in a scratch target (`cargo clippy -p inference-selection -p inference-ffi -p
+  inference-api --tests --features inference-selection/cutile,inference-ffi/cutile -- -D warnings`): clean, 18.5 min,
+  2.3 GB, deleted afterwards.
+
+**Implication:** Code that uses core only through its public surface is cheap to lift out, and each move takes its
+monomorphized dependencies with it, which is where most of the IR was. The chat templates (minijinja) are the next
+candidate of this kind, moving down to inference-protocol.

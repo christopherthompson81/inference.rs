@@ -1,6 +1,6 @@
 //! Engine-independent reports about the host: devices and build, and environment diagnostics.
 
-use inference_core::{DoctorReport, SystemInfo, collect_system_info, run_doctor};
+use inference_selection::{DoctorReport, SystemInfo, collect_system_info, run_doctor};
 
 use crate::api_error::ApiError;
 

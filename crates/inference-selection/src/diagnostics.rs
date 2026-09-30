@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use sysinfo::{Disks, System};
 
 #[cfg(any(feature = "cuda", feature = "metal"))]
-use crate::MemoryUsage;
-#[cfg(any(feature = "cuda", feature = "metal"))]
 use candle_core::Device;
+#[cfg(any(feature = "cuda", feature = "metal"))]
+use inference_core::MemoryUsage;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuInfo {
@@ -117,7 +117,7 @@ pub struct DoctorReport {
 
 fn build_info() -> BuildInfo {
     BuildInfo {
-        version: crate::INFERENCE_RS_VERSION.to_string(),
+        version: inference_core::INFERENCE_RS_VERSION.to_string(),
         cuda: cfg!(feature = "cuda"),
         metal: cfg!(feature = "metal"),
         cudnn: cfg!(feature = "cudnn"),
@@ -126,7 +126,7 @@ fn build_info() -> BuildInfo {
         cutile: cfg!(feature = "cutile"),
         accelerate: cfg!(feature = "accelerate"),
         mkl: cfg!(feature = "mkl"),
-        git_revision: crate::INFERENCE_RS_GIT_REVISION.to_string(),
+        git_revision: inference_core::INFERENCE_RS_GIT_REVISION.to_string(),
         cuda_toolkit_version: inference_nn::BUILD_CUDA_VERSION.map(str::to_string),
         cuda_toolkit_version_code: inference_nn::BUILD_CUDA_VERSION_CODE
             .and_then(|s| s.parse().ok()),
@@ -178,7 +178,7 @@ fn collect_devices(sys: &System) -> Vec<DeviceInfo> {
                 compute_capability: compute_cap,
                 flash_attn_compatible: flash_attn_v2_ok,
                 flash_attn_v3_compatible: flash_attn_v3_ok,
-                unified_memory: Some(crate::utils::normal::is_integrated_gpu(&dev)),
+                unified_memory: Some(inference_nn::utils::normal::is_integrated_gpu(&dev)),
             });
             ord += 1;
         }
@@ -297,14 +297,14 @@ pub fn collect_system_info() -> SystemInfo {
 pub fn check_hf_gated_access() -> HfConnectivityInfo {
     let start = Instant::now();
 
-    if crate::pipeline::hf::is_hf_hub_offline() {
+    if inference_core::is_hf_hub_offline() {
         return HfConnectivityInfo {
             reachable: false,
             latency_ms: None,
             token_valid_for_gated: None,
             error: Some(format!(
                 "Skipped: `{}` is set; no network calls were made.",
-                crate::pipeline::hf::HF_HUB_OFFLINE_ENV
+                inference_core::HF_HUB_OFFLINE_ENV
             )),
         };
     }

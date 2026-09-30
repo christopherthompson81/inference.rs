@@ -2537,6 +2537,7 @@ dependencies = [
  "inference-models-qwen",
  "inference-nn",
  "inference-quant",
+ "inference-selection",
  "rand 0.9.4",
  "rand_distr",
  "schemars",
@@ -2590,6 +2591,7 @@ dependencies = [
  "inference-agent",
  "inference-core",
  "inference-protocol",
+ "inference-selection",
  "itertools 0.14.0",
  "serde",
  "serde_json",
@@ -2633,6 +2635,7 @@ dependencies = [
  "inference-core",
  "inference-quant",
  "inference-sandbox",
+ "inference-selection",
  "inference-server-core",
  "inference-webui",
  "mimalloc",
@@ -2675,7 +2678,6 @@ dependencies = [
  "as-any",
  "base64 0.22.1",
  "candle-core",
- "candle-metal-kernels",
  "candle-nn",
  "chrono",
  "csv",
@@ -2710,7 +2712,6 @@ dependencies = [
  "metrics",
  "minijinja",
  "minijinja-contrib",
- "num-traits",
  "objc",
  "rand 0.9.4",
  "rand_isaac",
@@ -2723,7 +2724,6 @@ dependencies = [
  "serde_json",
  "sha2",
  "strum 0.28.0",
- "sysinfo",
  "tempfile",
  "thiserror 2.0.18",
  "tokenizers",
@@ -2733,7 +2733,6 @@ dependencies = [
  "tracing",
  "utoipa",
  "uuid",
- "walkdir",
 ]
 
 [[package]]
@@ -3157,6 +3156,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-selection"
+version = "0.9.3"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "candle-metal-kernels",
+ "futures",
+ "hf-hub",
+ "inference-core",
+ "inference-nn",
+ "inference-quant",
+ "num-traits",
+ "regex",
+ "serde",
+ "serde_json",
+ "strum 0.28.0",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "utoipa",
+ "walkdir",
+]
+
+[[package]]
 name = "inference-server-core"
 version = "0.9.3"
 dependencies = [
@@ -3176,6 +3200,7 @@ dependencies = [
  "inference-models-other",
  "inference-nn",
  "inference-quant",
+ "inference-selection",
  "metrics",
  "metrics-exporter-prometheus",
  "mime",

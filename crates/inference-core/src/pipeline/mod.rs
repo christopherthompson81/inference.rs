@@ -70,14 +70,12 @@ use image::DynamicImage;
 pub use inference_nn::loaders::{Modalities, MultimodalPromptPrefixer, SupportedModality};
 pub use inputs_processor::InputProcessorOutput;
 pub(crate) use isq::IsqModelLoader;
+#[cfg(feature = "utoipa")]
+pub use isq::UqffWriteSpec;
 pub use isq::{
     IsqOrganization, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig, expand_isq_value,
     expand_uqff_shards, parse_uqff_shard, resolve_uqff_report_output, resolve_uqff_shorthand,
 };
-pub(crate) use step::start_decoding_prompt_rows;
-// Named only by the ModelSelected schema attributes.
-#[cfg(feature = "utoipa")]
-pub(crate) use isq::UqffWriteSpec;
 use llguidance::toktrie::TokEnv;
 #[cfg(feature = "models-gemma")]
 pub use loaders::GemmaLoader;
@@ -88,14 +86,13 @@ pub use loaders::Qwen2Loader;
 pub use loaders::Starcoder2Loader;
 pub(crate) use loaders::checkpoint_runtime_size;
 pub use loaders::{
-    AdapterKind, AutoDeviceMapParams, AutoDeviceMapQuantization, AutoEmbeddingLoader,
-    AutoMultimodalLoader, AutoNormalLoader, DeviceMappedModelLoader, DiffusionLoaderType,
-    DiffusionModel, DiffusionModelLoader, EmbeddingLoaderType, EmbeddingModel,
-    EmbeddingModelLoader, EmbeddingModelPaths, EmbeddingModule, EmbeddingModulePaths,
-    EmbeddingModuleType, FluxLoader, Loader, LocalModelPaths, ModelKind, ModelPaths,
-    MultimodalLoaderType, MultimodalModel, MultimodalModelLoader, NormalLoaderType,
-    NormalLoadingMetadata, NormalModel, NormalModelLoader, PrettyName, QuantizationKind,
-    TokenSource,
+    AdapterKind, AutoDeviceMapParams, AutoEmbeddingLoader, AutoMultimodalLoader, AutoNormalLoader,
+    DeviceMappedModelLoader, DiffusionLoaderType, DiffusionModel, DiffusionModelLoader,
+    EmbeddingLoaderType, EmbeddingModel, EmbeddingModelLoader, EmbeddingModelPaths,
+    EmbeddingModule, EmbeddingModulePaths, EmbeddingModuleType, FluxLoader, Loader,
+    LocalModelPaths, ModelKind, ModelPaths, MultimodalLoaderType, MultimodalModel,
+    MultimodalModelLoader, NormalLoaderType, NormalLoadingMetadata, NormalModel, NormalModelLoader,
+    PrettyName, QuantizationKind, TokenSource,
 };
 #[cfg(feature = "models-llama")]
 pub use loaders::{
@@ -103,8 +100,9 @@ pub use loaders::{
 };
 #[cfg(feature = "models-phi")]
 pub use loaders::{Phi2Loader, Phi3Loader, Phi3VLoader};
+pub(crate) use step::start_decoding_prompt_rows;
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn get_device_layers_for_loader(
+pub fn get_device_layers_for_loader(
     loader: &dyn loaders::DeviceMappedModelLoader,
     config: &str,
     num_layers: usize,

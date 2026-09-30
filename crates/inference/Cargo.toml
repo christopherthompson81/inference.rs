@@ -14,6 +14,7 @@ homepage.workspace = true
 
 [dependencies]
 inference-core.workspace = true
+inference-selection.workspace = true
 inference-agent.workspace = true
 inference-macros.workspace = true
 anyhow.workspace = true
@@ -52,18 +53,18 @@ models-other = ["inference-core/models-other"]
 models-phi = ["inference-core/models-phi"]
 models-qwen = ["inference-core/models-qwen"]
 # NVIDIA CUDA GPU support
-cuda = ["inference-core/cuda"]
-cutile = ["cuda", "inference-core/cutile"]
+cuda = ["inference-core/cuda", "inference-selection/cuda"]
+cutile = ["cuda", "inference-core/cutile", "inference-selection/cutile"]
 # cuDNN acceleration (requires cuda)
-cudnn = ["inference-core/cudnn"]
+cudnn = ["inference-core/cudnn", "inference-selection/cudnn"]
 # Apple Metal GPU support (macOS/iOS)
-metal = ["inference-core/metal"]
+metal = ["inference-core/metal", "inference-selection/metal"]
 # Flash Attention 2 kernels (requires cuda)
-flash-attn = ["cuda", "inference-core/flash-attn"]
+flash-attn = ["cuda", "inference-core/flash-attn", "inference-selection/flash-attn"]
 # Apple Accelerate framework for BLAS operations
-accelerate = ["inference-core/accelerate"]
+accelerate = ["inference-core/accelerate", "inference-selection/accelerate"]
 # Intel MKL acceleration for BLAS operations
-mkl = ["inference-core/mkl"]
+mkl = ["inference-core/mkl", "inference-selection/mkl"]
 # Multi-GPU support via NCCL (requires cuda)
 nccl = ["inference-core/nccl"]
 # Use ring instead of aws-lc-rs for TLS

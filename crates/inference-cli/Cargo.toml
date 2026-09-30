@@ -22,6 +22,7 @@ doc = false
 mimalloc = { workspace = true }
 inference-api = { workspace = true }
 inference-core = { workspace = true }
+inference-selection.workspace = true
 inference-server-core = { workspace = true }
 inference-webui = { workspace = true }
 inference-sandbox = { workspace = true }
@@ -59,7 +60,7 @@ models-other = ["inference-core/models-other", "inference-server-core/models-oth
 models-phi = ["inference-core/models-phi", "inference-server-core/models-phi"]
 models-qwen = ["inference-core/models-qwen", "inference-server-core/models-qwen"]
 cuda = ["inference-core/cuda", "inference-server-core/cuda"]
-cutile = ["cuda", "inference-core/cutile"]
+cutile = ["cuda", "inference-core/cutile", "inference-selection/cutile"]
 nccl = ["inference-core/nccl", "inference-server-core/nccl"]
 cudnn = ["inference-core/cudnn", "inference-server-core/cudnn"]
 flash-attn = ["cuda", "inference-core/flash-attn", "inference-server-core/flash-attn"]

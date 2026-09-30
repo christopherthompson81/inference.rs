@@ -7,11 +7,14 @@ use candle_core::Device;
 use inference_core::{
     AutoDeviceMapParams, DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting,
     HfConfigOverrides, InferenceRsBuilder, Loader, McpClientConfig, MemoryGpuConfig,
-    ModelLoaderConfig, ModelSelected, MtpConfig, MtpRuntimeConfig, PagedAttentionConfig,
-    PagedCacheType, PagedKvModelRequest, SchedulerConfig, SchedulerLimits, SearchCallback,
-    SearchEmbeddingModel, TokenSource, ToolCallbackWithTool, get_auto_device_map_params,
-    get_model_dtype, get_tgt_non_granular_index, paged_attn_supported, parse_isq_value,
-    plan_paged_kv, reserve_external_mtp_memory_with_runtime,
+    ModelLoaderConfig, MtpConfig, MtpRuntimeConfig, PagedAttentionConfig, PagedCacheType,
+    SchedulerConfig, SchedulerLimits, SearchCallback, SearchEmbeddingModel, TokenSource,
+    ToolCallbackWithTool, paged_attn_supported, parse_isq_value,
+    reserve_external_mtp_memory_with_runtime,
+};
+use inference_selection::{
+    ModelSelected, PagedKvModelRequest, get_auto_device_map_params, get_model_dtype,
+    get_tgt_non_granular_index, plan_paged_kv,
 };
 use tracing::{debug, info, warn};
 
@@ -118,7 +121,7 @@ pub mod defaults {
     pub const DEVICE: Option<candle_core::Device> = None;
     pub const SEED: Option<u64> = None;
     pub const LOG: Option<String> = None;
-    pub const MODEL: Option<inference_core::ModelSelected> = None;
+    pub const MODEL: Option<inference_selection::ModelSelected> = None;
     pub const MAX_SEQS: usize = 16;
     pub const MAX_NUM_BATCHED_TOKENS: usize = DEFAULT_MAX_NUM_BATCHED_TOKENS;
     pub const MAX_PREFILL_CHUNK_TOKENS: usize = DEFAULT_MAX_PREFILL_CHUNK_TOKENS;
@@ -917,7 +920,7 @@ impl InferenceRsForServerBuilder {
             .transpose()?;
 
         let loader_config = ModelLoaderConfig {
-            model_selected: model,
+            source: Arc::new(model),
             token_source: self.token_source,
             hf_revision: None,
             dtype,
@@ -1043,7 +1046,7 @@ impl InferenceRsForServerBuilder {
                 .transpose()?;
             let paged_attn_config = paged_kv_plan.paged_attn[model_index];
             let loader_config = ModelLoaderConfig {
-                model_selected: model,
+                source: Arc::new(model),
                 token_source: self.token_source.clone(),
                 hf_revision: None,
                 dtype,

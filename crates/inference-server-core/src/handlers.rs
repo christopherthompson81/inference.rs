@@ -10,9 +10,10 @@ use inference_api::operations::ReIsqResponse;
 use inference_api::operations::{self, CalibrationApplyRequest, ReIsqRequest};
 use inference_api::request_body::{JsonRequest, parse_json};
 use inference_core::{
-    AutoDeviceMapParams, AutoTuneRequest, CalibrationAction, InferenceRs, ModelDType,
-    ModelSelected, SerializedSession, TokenSource, TuneProfile, auto_tune, parse_isq_value,
+    AutoDeviceMapParams, CalibrationAction, InferenceRs, ModelDType, SerializedSession,
+    TokenSource, parse_isq_value,
 };
+use inference_selection::{AutoTuneRequest, ModelSelected, TuneProfile, auto_tune};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
@@ -76,7 +77,7 @@ pub async fn health() -> &'static str {
   path = "/v1/system/info",
   responses((status = 200, description = "Host, device, and build information"))
 ))]
-pub async fn system_info() -> Json<inference_core::SystemInfo> {
+pub async fn system_info() -> Json<inference_selection::SystemInfo> {
     Json(system::system_info())
 }
 
@@ -86,7 +87,7 @@ pub async fn system_info() -> Json<inference_core::SystemInfo> {
   path = "/v1/system/doctor",
   responses((status = 200, description = "Environment diagnostics report"))
 ))]
-pub async fn system_doctor() -> Json<inference_core::DoctorReport> {
+pub async fn system_doctor() -> Json<inference_selection::DoctorReport> {
     Json(system::system_doctor())
 }
 

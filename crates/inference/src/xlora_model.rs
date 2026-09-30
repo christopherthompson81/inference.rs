@@ -1,6 +1,5 @@
-use inference_core::{
-    AutoDeviceMapParams, LoadOverrides, ModelSelected, Ordering, UQFF_MULTI_FILE_DELIMITER,
-};
+use inference_core::{AutoDeviceMapParams, LoadOverrides, Ordering, UQFF_MULTI_FILE_DELIMITER};
+use inference_selection::ModelSelected;
 
 use crate::{
     Model, TextModelBuilder,

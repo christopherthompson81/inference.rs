@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::Result;
 use comfy_table::{Cell, Color, ContentArrangement, Table, presets::UTF8_FULL};
 
-use inference_core::{AutoTuneRequest, FitStatus, ModelSelected, QualityTier, auto_tune};
+use inference_selection::{AutoTuneRequest, FitStatus, ModelSelected, QualityTier, auto_tune};
 
 use crate::args::{AdapterOptions, GlobalOptions, MatformerSelection, ModelType, TuneProfileArg};
 
@@ -204,7 +204,7 @@ fn reject_configured_adapters(adapter: &AdapterOptions) -> Result<()> {
 fn emit_toml_config(
     model_type: &ModelType,
     model_selected: &ModelSelected,
-    result: &inference_core::AutoTuneResult,
+    result: &inference_selection::AutoTuneResult,
 ) -> Result<String> {
     let mut out = String::new();
     out.push_str("command = \"serve\"\n\n");

@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use axum::middleware;
-use inference_core::selection::quant::{
+use inference_selection::quant::{
     is_confident_gguf_artifact_repo, model_name_looks_gguf, selected_model_files,
 };
 use std::path::Path;
@@ -17,9 +17,10 @@ use inference_api::{
     skill_store::SkillStore,
 };
 use inference_core::{
-    DiffusionLoaderType, McpClientConfig, ModelSelected, PagedCacheType, SandboxMode,
-    SpeechLoaderType, initialize_logging,
+    DiffusionLoaderType, McpClientConfig, PagedCacheType, SandboxMode, SpeechLoaderType,
+    initialize_logging,
 };
+use inference_selection::ModelSelected;
 use inference_server_core::{
     inference_server_router_builder::{DEFAULT_MAX_BODY_LIMIT, InferenceRsServerRouterBuilder},
     lora_adapters::runtime_lora_updates_enabled,
@@ -1132,7 +1133,7 @@ pub(crate) async fn apply_quant_resolution(
         .as_ref()
         .is_some_and(|files| is_confident_gguf_artifact_repo(&model_id, files));
     let looks_like_gguf_repo = repo_files.as_ref().is_some_and(|files| {
-        inference_core::selection::quant::has_gguf_model_files(files)
+        inference_selection::quant::has_gguf_model_files(files)
             && !matches!(
                 explicit_format,
                 Some(ModelFormat::Plain | ModelFormat::Ggml)
@@ -1145,7 +1146,7 @@ pub(crate) async fn apply_quant_resolution(
             .as_ref()
             .expect("GGUF repository detection requires a file listing");
         if let Some(raw) = raw.as_deref() {
-            let artifact = inference_core::selection::quant::resolve_gguf_quant(files, raw)?;
+            let artifact = inference_selection::quant::resolve_gguf_quant(files, raw)?;
             info!(
                 "quant: --quant {raw} -> GGUF {} from `{model_id}`",
                 artifact.label
@@ -1174,7 +1175,7 @@ pub(crate) async fn apply_quant_resolution(
         if format.mmproj.is_none()
             && (is_confident_gguf_repo || is_explicit_multimodal || format.direct_file_only)
             && let Some(projector) =
-                inference_core::selection::quant::resolve_gguf_projector(files, dtype)?
+                inference_selection::quant::resolve_gguf_projector(files, dtype)?
         {
             info!(
                 "GGUF: selected {} projector `{}`",
@@ -1206,7 +1207,7 @@ pub(crate) async fn apply_quant_resolution(
     let force_cpu = extract_device_settings(model_type).0;
     let model_selected = convert_to_model_selected(model_type, matformer)?;
 
-    let resolved = inference_core::selection::quant::resolve_quant(
+    let resolved = inference_selection::quant::resolve_quant(
         &raw,
         &model_id,
         token_source,
@@ -2142,7 +2143,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            inference_core::get_auto_device_map_params(&selected).unwrap(),
+            inference_selection::get_auto_device_map_params(&selected).unwrap(),
             AutoDeviceMapParams::Text { .. }
         ));
         match selected {
@@ -2212,7 +2213,7 @@ mod tests {
         };
         let selected = convert_to_model_selected(&model_type, &matformer).unwrap();
 
-        match inference_core::get_auto_device_map_params(&selected).unwrap() {
+        match inference_selection::get_auto_device_map_params(&selected).unwrap() {
             AutoDeviceMapParams::Multimodal {
                 max_seq_len,
                 max_batch_size,
@@ -2286,7 +2287,7 @@ mod tests {
             panic!("expected dynamic LoRA model")
         };
         assert!(arch.is_none());
-        match inference_core::get_auto_device_map_params(&selected).unwrap() {
+        match inference_selection::get_auto_device_map_params(&selected).unwrap() {
             AutoDeviceMapParams::Multimodal {
                 max_seq_len,
                 max_batch_size,
@@ -2527,7 +2528,7 @@ mod tests {
         )
         .unwrap();
 
-        match inference_core::get_auto_device_map_params(&selected).unwrap() {
+        match inference_selection::get_auto_device_map_params(&selected).unwrap() {
             AutoDeviceMapParams::Multimodal {
                 max_seq_len,
                 max_batch_size,
@@ -2651,7 +2652,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            inference_core::get_auto_device_map_params(&selected).unwrap(),
+            inference_selection::get_auto_device_map_params(&selected).unwrap(),
             AutoDeviceMapParams::Text { .. }
         ));
     }

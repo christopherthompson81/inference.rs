@@ -13,12 +13,13 @@ pub use gguf_discovery::{
     resolve_gguf_projector, resolve_gguf_quant,
 };
 
-use crate::{
-    AutoTuneRequest, ModelSelected, TokenSource, TuneProfile, auto_tune, parse_isq_value,
-    parse_uqff_shard, probe_hf_repo_files, resolve_uqff_report_output, resolve_uqff_shorthand,
-    try_get_model_file,
+use inference_core::{
+    TokenSource, parse_isq_value, parse_uqff_shard, probe_hf_repo_files,
+    resolve_uqff_report_output, resolve_uqff_shorthand, try_get_model_file,
 };
 use inference_quant::UqffReport;
+
+use crate::{AutoTuneRequest, ModelSelected, TuneProfile, auto_tune};
 
 const DEFAULT_REVISION: &str = "main";
 const UQFF_REPO_ORG: &str = "inference-community";
@@ -80,7 +81,7 @@ async fn resolve_model_quant_inner(
         ..
     } = &model
     {
-        crate::set_hf_cache_path(path.clone());
+        inference_core::set_hf_cache_path(path.clone());
     }
     let files = selected_model_files(&model_id, None, token_source)?;
     if let Some(files) = files.as_ref().filter(|files| {
@@ -476,7 +477,7 @@ pub fn selected_model_files(
         }
         return list_local_files_recursive(path).map(Some);
     }
-    Ok(crate::probe_hf_repo_files(
+    Ok(inference_core::probe_hf_repo_files(
         model_id,
         DEFAULT_REVISION,
         token_source,

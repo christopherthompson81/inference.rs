@@ -1,4 +1,5 @@
-use inference_core::{GGUF_MULTI_FILE_DELIMITER, LoadOverrides, ModelSelected, Ordering};
+use inference_core::{GGUF_MULTI_FILE_DELIMITER, LoadOverrides, Ordering};
+use inference_selection::ModelSelected;
 
 use crate::{
     GgufModelBuilder, Model,

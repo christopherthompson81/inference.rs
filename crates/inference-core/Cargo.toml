@@ -36,7 +36,6 @@ rand.workspace = true
 regex-automata.workspace = true
 galil-seiferas.workspace = true
 tokio.workspace = true
-walkdir.workspace = true
 tokio-rayon.workspace = true
 rand_isaac.workspace = true
 futures.workspace = true
@@ -45,7 +44,6 @@ strum.workspace = true
 image.workspace = true
 derive_more = { workspace = true}
 itertools.workspace = true
-sysinfo.workspace = true
 csv.workspace = true
 reqwest.workspace = true
 base64.workspace = true
@@ -70,7 +68,6 @@ safetensors.workspace = true
 serde-big-array.workspace = true
 interprocess.workspace = true
 ahash.workspace = true
-num-traits.workspace = true
 inference-audio.workspace = true
 inference-mcp = { workspace = true, features = ["utoipa"] }
 inference-code-exec.workspace = true
@@ -78,7 +75,6 @@ inference-sandbox.workspace = true
 
 [target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))'.dependencies]
 objc = { workspace = true, optional = true }
-candle-metal-kernels = { workspace = true, optional = true }
 
 [features]
 default = ["all-models"]
@@ -109,7 +105,6 @@ metal = [
     "candle-core/metal",
     "candle-nn/metal",
     "inference-quant/metal",
-    "dep:candle-metal-kernels",
     "dep:objc",
     "dep:inference-paged-attn",
     "inference-paged-attn/metal",

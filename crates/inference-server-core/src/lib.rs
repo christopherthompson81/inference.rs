@@ -22,8 +22,9 @@
 //! use utoipa_swagger_ui::SwaggerUi;
 //!
 //! use inference_core::{
-//!     initialize_logging, AutoDeviceMapParams, ChatCompletionChunkResponse, ModelDType, ModelSelected,
+//!     initialize_logging, AutoDeviceMapParams, ChatCompletionChunkResponse, ModelDType,
 //! };
+//! use inference_selection::ModelSelected;
 //! use inference_server_core::{
 //!     chat_completion::{
 //!         create_streamer, handle_error, parse_request, process_non_streaming_response,

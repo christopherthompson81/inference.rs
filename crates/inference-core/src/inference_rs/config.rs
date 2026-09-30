@@ -89,12 +89,21 @@ pub struct InferenceRsConfig {
     pub generation_defaults: Option<ModelGenerationDefaults>,
 }
 
+/// What a model was loaded from, able to build its loader again; `inference_selection::ModelSelected` is the usual one.
+pub trait LoaderSource: Send + Sync {
+    fn build_loader(
+        &self,
+        config: &ModelLoaderConfig,
+        no_kv_cache: bool,
+    ) -> anyhow::Result<Box<dyn Loader>>;
+}
+
 /// Configuration for recreating a model loader when reloading an unloaded model.
 /// This captures the essential parameters needed to reconstruct a loader.
 #[derive(Clone)]
 pub struct ModelLoaderConfig {
-    /// The model selection configuration (Plain, GGUF, Multimodal, etc.)
-    pub model_selected: ModelSelected,
+    /// Builds the loader, from these options and its own model selection.
+    pub source: Arc<dyn LoaderSource>,
     /// Source of the HF token
     pub token_source: TokenSource,
     /// Optional HF revision
@@ -123,18 +132,18 @@ pub struct ModelLoaderConfig {
     pub mtp_config: Option<MtpConfig>,
     /// Optional logical tensor byte budget for multimodal encoder outputs.
     pub encoder_cache_memory_bytes: Option<usize>,
-    /// Values given inline (not by path), which `model_selected` cannot carry.
+    /// Values given inline (not by path), which a selection's paths cannot carry.
     pub overrides: LoadOverrides,
 }
 
 /// Inline load options that take precedence over their path-based `ModelSelected` counterparts.
 #[derive(Clone, Default)]
 pub struct LoadOverrides {
-    /// Used instead of loading `model_selected`'s topology path.
+    /// Used instead of loading the selection's topology path.
     pub topology: Option<Topology>,
     /// Generation config for speech models.
     pub speech_cfg: Option<SpeechGenerationConfig>,
-    /// Used instead of reading `model_selected`'s adapter ordering file.
+    /// Used instead of reading the selection's adapter ordering file.
     pub ordering: Option<Ordering>,
     /// Wraps the loaded model in an AnyMoE pipeline.
     pub anymoe: Option<AnyMoeSpec>,
@@ -161,16 +170,7 @@ pub struct AnyMoeSpec {
 impl ModelLoaderConfig {
     /// The loader this config describes. `no_kv_cache` is an engine setting, so it is passed in.
     pub fn build_loader(&self, no_kv_cache: bool) -> anyhow::Result<Box<dyn Loader>> {
-        let loader = selection::model_loader::LoaderBuilder::new(self.model_selected.clone())
-            .with_no_kv_cache(no_kv_cache)
-            .with_chat_template(self.chat_template.clone())
-            .with_jinja_explicit(self.jinja_explicit.clone())
-            .with_max_model_len(self.max_model_len)
-            .with_hf_config_overrides(self.hf_config_overrides.clone())
-            .with_mtp(self.mtp_config.as_ref().is_some_and(MtpConfig::is_builtin))
-            .with_encoder_cache_memory_bytes(self.encoder_cache_memory_bytes)
-            .with_overrides(self.overrides.clone())
-            .build()?;
+        let loader = self.source.build_loader(self, no_kv_cache)?;
         Ok(match self.overrides.anymoe.clone() {
             Some(spec) => Box::new(AnyMoeLoader {
                 target: loader,

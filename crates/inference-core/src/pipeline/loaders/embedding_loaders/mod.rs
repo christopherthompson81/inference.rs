@@ -45,6 +45,14 @@ impl EmbeddingLoaderType {
             ),
         }
     }
+
+    /// The HF `config.json` `architectures` string, the inverse of `from_causal_lm_name`.
+    pub fn config_arch(&self) -> &'static str {
+        match self {
+            Self::EmbeddingGemma => "Gemma3TextModel",
+            Self::Qwen3Embedding => "Qwen3ForCausalLM",
+        }
+    }
 }
 
 impl EmbeddingLoaderType {

@@ -1,0 +1,50 @@
+[package]
+name = "inference-selection"
+readme = "../../README.md"
+authors = ["Eric Buehler"]
+version.workspace = true
+edition.workspace = true
+description = "Model selection for inference.rs: the loader a selection builds, quant discovery, auto-tuning and the doctor"
+homepage.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+inference-core.workspace = true
+inference-nn.workspace = true
+inference-quant.workspace = true
+
+anyhow.workspace = true
+candle-core.workspace = true
+futures.workspace = true
+hf-hub.workspace = true
+num-traits.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+strum.workspace = true
+sysinfo.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+utoipa = { workspace = true, optional = true }
+walkdir.workspace = true
+
+[target.'cfg(any(target_os = "macos", target_os = "ios", target_os = "tvos"))'.dependencies]
+candle-metal-kernels = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[features]
+cuda = ["inference-core/cuda"]
+cudnn = ["inference-core/cudnn"]
+cutile = ["cuda", "inference-core/cutile"]
+metal = ["inference-core/metal", "dep:candle-metal-kernels"]
+flash-attn = ["cuda", "inference-core/flash-attn"]
+flash-attn-v3 = ["cuda", "inference-core/flash-attn-v3"]
+accelerate = ["inference-core/accelerate"]
+mkl = ["inference-core/mkl"]
+utoipa = ["dep:utoipa", "inference-core/utoipa"]

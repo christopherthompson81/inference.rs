@@ -236,7 +236,7 @@ pub(crate) fn build_api(
     build_api_with_cache(token_source, progress, None)
 }
 
-pub(crate) fn build_api_with_cache(
+pub fn build_api_with_cache(
     token_source: &crate::pipeline::TokenSource,
     progress: bool,
     cache: Option<Cache>,

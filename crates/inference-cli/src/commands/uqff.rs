@@ -26,7 +26,7 @@ use inference_quant::{
 };
 
 use crate::args::{GlobalOptions, UqffCommand};
-use inference_core::selection::quant::read_existing_uqff_report;
+use inference_selection::quant::read_existing_uqff_report;
 
 const DEFAULT_REVISION: &str = "main";
 
