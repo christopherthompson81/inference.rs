@@ -1,6 +1,8 @@
 //! The wire protocol shared by the engine, the HTTP server and the C ABI: request options, response bodies, tool
-//! calls and their parsers, reasoning parsers and files. It builds without candle, so it compiles early.
+//! calls and their parsers, reasoning parsers, chat templates, image encoding and files. It builds without candle,
+//! so it compiles early.
 
+pub mod chat_template;
 pub mod files;
 pub mod images;
 #[cfg(feature = "openai")]

@@ -46,8 +46,8 @@ async fn main() -> Result<()> {
 
     let mut stream = model.stream_chat_request(messages).await?;
     while let Some(chunk) = stream.next().await {
-        if let Response::Chunk(ChatCompletionChunkResponse { choices, .. }) = chunk {
-            if let Some(ChunkChoice {
+        if let Response::Chunk(ChatCompletionChunkResponse { choices, .. }) = chunk
+            && let Some(ChunkChoice {
                 delta:
                     Delta {
                         content: Some(content),
@@ -55,10 +55,9 @@ async fn main() -> Result<()> {
                     },
                 ..
             }) = choices.first()
-            {
-                print!("{content}");
-                std::io::stdout().flush()?;
-            }
+        {
+            print!("{content}");
+            std::io::stdout().flush()?;
         }
     }
     println!();

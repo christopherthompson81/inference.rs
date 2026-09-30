@@ -66,8 +66,8 @@ async fn main() -> Result<()> {
         let mut assistant_text = String::new();
 
         while let Some(chunk) = stream.next().await {
-            if let Response::Chunk(ChatCompletionChunkResponse { choices, .. }) = chunk {
-                if let Some(ChunkChoice {
+            if let Response::Chunk(ChatCompletionChunkResponse { choices, .. }) = chunk
+                && let Some(ChunkChoice {
                     delta:
                         Delta {
                             content: Some(content),
@@ -75,11 +75,10 @@ async fn main() -> Result<()> {
                         },
                     ..
                 }) = choices.first()
-                {
-                    print!("{content}");
-                    io::stdout().flush()?;
-                    assistant_text.push_str(content);
-                }
+            {
+                print!("{content}");
+                io::stdout().flush()?;
+                assistant_text.push_str(content);
             }
         }
         println!("\n");

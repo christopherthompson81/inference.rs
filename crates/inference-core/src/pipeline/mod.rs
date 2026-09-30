@@ -56,7 +56,6 @@ use crate::paged_attention::{
 use crate::prefix_cacher::PrefixCacheManagerV2;
 pub use amoe::{AnyMoeLoader, AnyMoePipeline};
 pub use auto::{AutoLoader, AutoLoaderBuilder};
-use chat_template::ChatTemplate;
 pub use diffusion::{DiffusionLoader, DiffusionLoaderBuilder};
 pub(crate) use embedding::EmbeddingLoadContext;
 pub use embedding::{EmbeddingLoader, EmbeddingLoaderBuilder, EmbeddingSpecificConfig};
@@ -68,6 +67,7 @@ pub use gguf::{GGUFLoader, GGUFLoaderBuilder, GGUFSpecificConfig};
 pub use hf_config::HfConfigOverrides;
 use image::DynamicImage;
 pub use inference_nn::loaders::{Modalities, MultimodalPromptPrefixer, SupportedModality};
+use inference_protocol::chat_template::ChatTemplate;
 pub use inputs_processor::InputProcessorOutput;
 pub(crate) use isq::IsqModelLoader;
 #[cfg(feature = "utoipa")]
@@ -1941,9 +1941,9 @@ mod tests {
         expected_outputs: &[&str],
         inputs: Vec<IndexMap<String, MessageContent>>,
     ) {
-        use crate::pipeline::chat_template::ChatTemplateValue;
+        use inference_protocol::chat_template::ChatTemplateValue;
 
-        use super::chat_template::apply_chat_template_to;
+        use inference_protocol::chat_template::apply_chat_template_to;
         let mut failed = Vec::new();
         let n_templates = templates.len();
         for ((has_system, bos, eos, unk, template), expected) in

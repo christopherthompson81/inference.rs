@@ -98,6 +98,7 @@ pub mod search;
 mod block_diffusion;
 pub mod distributed;
 use inference_gguf as gguf;
+pub use inference_protocol::chat_template::{ChatTemplate, is_chat_template_request_error};
 pub use inference_protocol::files;
 pub use inference_protocol::images;
 mod models;
@@ -187,10 +188,8 @@ pub use pipeline::{
     MultimodalLoaderType, MultimodalPromptPrefixer, MultimodalSpecificConfig, NormalLoader,
     NormalLoaderBuilder, NormalLoaderType, NormalSpecificConfig, ResolvedLoraAdapter, SpeechLoader,
     SpeechLoaderType, SpeechPipeline, SupportedModality, TokenSource, UQFF_MULTI_FILE_DELIMITER,
-    UqffWriteConfig,
-    chat_template::{ChatTemplate, is_chat_template_request_error},
-    expand_isq_value, expand_uqff_shards, parse_uqff_shard, resolve_uqff_report_output,
-    resolve_uqff_shorthand,
+    UqffWriteConfig, expand_isq_value, expand_uqff_shards, parse_uqff_shard,
+    resolve_uqff_report_output, resolve_uqff_shorthand,
 };
 #[cfg(feature = "models-llama")]
 pub use pipeline::{

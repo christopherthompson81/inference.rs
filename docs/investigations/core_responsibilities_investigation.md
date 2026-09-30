@@ -791,3 +791,20 @@ the PNG encoder now compiles there, off the critical path beside the kernel buil
 
 **Implication:** the remaining build-time items are each 1 to 4% of core. The next architecture items are the
 chat-template move and choosing where url images should be stored (the files store, a configured directory).
+
+## Run 21 — 2026-09-30 15:00
+
+**Question:** Run 19 put templating at about 2.5% of core's IR. What does moving it to inference-protocol actually
+remove?
+
+**Change:** `ChatTemplate`, `apply_chat_template_to`, the minijinja environment and filters, and their 16 tests move
+to `inference_protocol::chat_template`. Core keeps `GenerationConfig` (it builds inference-nn's
+`ModelGenerationDefaults`) and `calculate_eos_tokens` (it needs the tokenizer), with their 4 tests. minijinja and
+minijinja-contrib leave core's dependencies.
+
+**Raw finding:** `cargo llvm-lines --lib`: inference-core 1,661,023 → 1,594,535 (-66.5k, -4%); inference-protocol
+173,978 → 231,017 (+57k). The drop is larger than Run 19's name-matching estimate (47k): minijinja's generics and the
+serde instantiations for template values moved too, and they don't carry `chat_template` in their names.
+
+**Implication:** protocol now holds the prompt-rendering step, so the API and C ABI could render or inspect a
+template without an engine. Since Run 17, core has gone from 2.16M to 1.59M IR lines.
