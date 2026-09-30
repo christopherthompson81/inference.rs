@@ -7,8 +7,8 @@ use futures::StreamExt;
 use inference_core::{
     AgentPermission, AnyMoeSpec, CalibrationAction, CalibrationStatus, ChatCompletionResponse,
     CodeExecutionConfig, CompletionResponse, HfConfigOverrides, ImageGenerationResponse,
-    InferenceRs, McpClientConfig, MtpConfig, MtpDraftSamplingMethod, PagedCacheType, Response,
-    SandboxMode, SandboxPolicy, SandboxProfile, SearchCallback, SearchEmbeddingModel,
+    InferenceRs, McpClientConfig, MtpConfig, MtpDraftSamplingMethod, NetworkMode, PagedCacheType,
+    Response, SandboxMode, SandboxPolicy, SandboxProfile, SearchCallback, SearchEmbeddingModel,
     SerializedSession, ShellConfig, TokenSource, ToolCallbackWithTool,
 };
 use inference_selection::ModelSelected;
@@ -386,15 +386,59 @@ pub struct AgenticSpec {
     /// The shell tool, which also runs uploaded skills; needs a build with the `code-execution` feature.
     #[serde(default)]
     pub shell: Option<ShellConfig>,
-    /// Sandboxes code execution and the shell unless their config gives its own policy: `auto` and `on` use the
-    /// developer profile, `off` runs them unsandboxed.
+    /// Sandboxes code execution and the shell unless their config gives its own policy: `auto` and `on` apply
+    /// `sandbox_profile` with `sandbox_limits`, `off` runs them unsandboxed.
     #[serde(default)]
     pub sandbox: SandboxMode,
+    /// The profile the sandbox starts from; defaults to `developer`.
+    #[serde(default)]
+    pub sandbox_profile: Option<SandboxProfile>,
+    /// Overrides for the profile's limits.
+    #[serde(default)]
+    pub sandbox_limits: SandboxLimits,
 }
 
-fn default_policy(mode: SandboxMode) -> Option<SandboxPolicy> {
-    let mut policy =
-        (mode != SandboxMode::Off).then(|| SandboxProfile::Developer.default_policy())?;
+/// Limits that replace a sandbox profile's; unset ones keep the profile's.
+#[derive(Debug, Default, Clone, Deserialize, utoipa::ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxLimits {
+    /// Per-session memory cap in MiB.
+    #[serde(default)]
+    pub max_memory_mb: Option<u64>,
+    /// Per-session CPU time cap in seconds; raised to the tool's timeout where rlimits apply.
+    #[serde(default)]
+    pub max_cpu_secs: Option<u64>,
+    /// Per-session process and thread cap.
+    #[serde(default)]
+    pub max_procs: Option<u32>,
+    #[serde(default)]
+    pub network: Option<NetworkMode>,
+}
+
+fn default_policy(
+    mode: SandboxMode,
+    profile: Option<SandboxProfile>,
+    limits: &SandboxLimits,
+) -> Option<SandboxPolicy> {
+    if mode == SandboxMode::Off {
+        return None;
+    }
+    // not `unwrap_or_default`: the profile type defaults to `restricted`, the spec to `developer`
+    let mut policy = profile
+        .unwrap_or(SandboxProfile::Developer)
+        .default_policy();
+    if let Some(max_memory_mb) = limits.max_memory_mb {
+        policy.max_memory_mb = max_memory_mb;
+    }
+    if let Some(max_cpu_secs) = limits.max_cpu_secs {
+        policy.max_cpu_secs = max_cpu_secs;
+    }
+    if let Some(max_procs) = limits.max_procs {
+        policy.max_procs = max_procs;
+    }
+    if let Some(network) = limits.network {
+        policy.network = network;
+    }
     policy.strict = mode == SandboxMode::On;
     Some(policy)
 }
@@ -592,13 +636,17 @@ impl EngineSpec {
                 CODE_EXECUTION_UNAVAILABLE.to_string(),
             ));
         }
-        let sandbox = agentic.sandbox.resolve();
+        let sandbox = default_policy(
+            agentic.sandbox.resolve(),
+            agentic.sandbox_profile,
+            &agentic.sandbox_limits,
+        );
         let code_execution = agentic.code_execution.map(|mut config| {
-            config.sandbox_policy = config.sandbox_policy.or_else(|| default_policy(sandbox));
+            config.sandbox_policy = config.sandbox_policy.or_else(|| sandbox.clone());
             config
         });
         let shell = agentic.shell.map(|mut config| {
-            config.sandbox_policy = config.sandbox_policy.or_else(|| default_policy(sandbox));
+            config.sandbox_policy = config.sandbox_policy.or(sandbox);
             config
         });
         builder = builder
@@ -1405,12 +1453,35 @@ mod tests {
 
     #[test]
     fn tools_without_a_policy_are_sandboxed_unless_the_mode_is_off() {
+        let none = SandboxLimits::default();
         let developer = SandboxProfile::Developer.default_policy();
-        let auto = default_policy(SandboxMode::Auto).unwrap();
+        let auto = default_policy(SandboxMode::Auto, None, &none).unwrap();
         assert_eq!(auto.max_procs, developer.max_procs);
         assert!(!auto.strict);
-        assert!(default_policy(SandboxMode::On).unwrap().strict);
-        assert!(default_policy(SandboxMode::Off).is_none());
+        assert!(default_policy(SandboxMode::On, None, &none).unwrap().strict);
+        assert!(default_policy(SandboxMode::Off, None, &none).is_none());
+    }
+
+    #[test]
+    fn a_sandbox_profile_and_limits_shape_the_default_policy() {
+        let spec: AgenticSpec = serde_json::from_value(serde_json::json!({
+            "sandbox": "on",
+            "sandbox_profile": "restricted",
+            "sandbox_limits": {"max_memory_mb": 512, "max_procs": 7},
+        }))
+        .unwrap();
+        let restricted = SandboxProfile::Restricted.default_policy();
+        let policy =
+            default_policy(spec.sandbox, spec.sandbox_profile, &spec.sandbox_limits).unwrap();
+        assert_eq!((policy.max_memory_mb, policy.max_procs), (512, 7));
+        assert_eq!(policy.max_cpu_secs, restricted.max_cpu_secs);
+        assert_eq!(policy.network, NetworkMode::Loopback);
+        let limits = SandboxLimits {
+            network: Some(NetworkMode::Full),
+            ..SandboxLimits::default()
+        };
+        let policy = default_policy(SandboxMode::Auto, Some(SandboxProfile::Restricted), &limits);
+        assert_eq!(policy.unwrap().network, NetworkMode::Full);
     }
 
     #[test]

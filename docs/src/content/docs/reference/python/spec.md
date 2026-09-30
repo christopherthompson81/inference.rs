@@ -34,6 +34,8 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `max_tool_rounds` | `int \| None` | optional |
 | `mcp` | `McpClientConfig \| None` | optional |
 | `sandbox` | `SandboxMode \| None` | optional |
+| `sandbox_limits` | `SandboxLimits \| None` | optional |
+| `sandbox_profile` | `SandboxProfile \| None` | optional |
 | `search` | `SearchSpec \| None` | optional |
 | `shell` | `ShellConfig \| None` | optional |
 | `tool_dispatch_url` | `str \| None` | optional |
@@ -764,6 +766,18 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `token_source` | `str \| None` | optional |
 
 
+## `SandboxLimits`
+
+Limits that replace a sandbox profile's; unset ones keep the profile's.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `max_cpu_secs` | `int \| None` | optional |
+| `max_memory_mb` | `int \| None` | optional |
+| `max_procs` | `int \| None` | optional |
+| `network` | `NetworkMode \| None` | optional |
+
+
 ## `SandboxMode`
 
 Whether tools that run model-written code are sandboxed.
@@ -793,6 +807,18 @@ Policy applied to a sandboxed process.
 | `max_procs` | `int \| None` | `64` |
 | `network` | `NetworkMode \| None` | `NetworkMode.LOOPBACK` |
 | `strict` | `bool \| None` | `False` |
+
+
+## `SandboxProfile`
+
+The starting policy for sandboxed tools: `restricted` or `developer` (toolchain paths, full network by default).
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `SandboxProfile.RESTRICTED` | `'restricted'` |
+| `SandboxProfile.DEVELOPER` | `'developer'` |
 
 
 ## `SearchEmbeddingModel`

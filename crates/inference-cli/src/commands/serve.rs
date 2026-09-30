@@ -8,14 +8,14 @@ use tracing::{debug, info};
 use inference_api::{
     Engine, EngineSpec,
     engine::{
-        AdapterSpec, AgenticSpec, MtpSpec, PagedCacheSpec, RuntimeSpec, SearchSpec, SkillsSpec,
+        AdapterSpec, AgenticSpec, MtpSpec, PagedCacheSpec, RuntimeSpec, SandboxLimits, SearchSpec,
+        SkillsSpec,
     },
     lora_adapters::LoraAdapterApiConfig,
     skill_store::SkillStore,
 };
 use inference_core::{
-    DiffusionLoaderType, McpClientConfig, PagedCacheType, SandboxMode, SpeechLoaderType,
-    initialize_logging,
+    DiffusionLoaderType, McpClientConfig, PagedCacheType, SpeechLoaderType, initialize_logging,
 };
 use inference_selection::{MmprojSelection, ModelSelected};
 use inference_server_core::{
@@ -183,9 +183,6 @@ pub(crate) struct AgenticInputs<'a> {
 /// The tool loop, search, MCP and code-running tools `RuntimeOptions` asks for.
 pub(crate) fn agentic_spec(inputs: AgenticInputs) -> Result<AgenticSpec> {
     let runtime = inputs.runtime;
-    let sandbox_policy = extract_sandbox_settings(inputs.sandbox, runtime);
-    #[cfg(not(feature = "code-execution"))]
-    let _ = sandbox_policy;
     Ok(AgenticSpec {
         max_tool_rounds: inputs.max_tool_rounds,
         tool_dispatch_url: inputs.tool_dispatch_url,
@@ -198,15 +195,21 @@ pub(crate) fn agentic_spec(inputs: AgenticInputs) -> Result<AgenticSpec> {
         }),
         mcp: load_mcp_config(runtime.mcp_config.as_deref())?,
         #[cfg(feature = "code-execution")]
-        code_execution: build_code_exec_config(runtime, sandbox_policy.clone()),
+        code_execution: build_code_exec_config(runtime),
         #[cfg(not(feature = "code-execution"))]
         code_execution: None,
         #[cfg(feature = "code-execution")]
-        shell: build_shell_config(runtime, sandbox_policy),
+        shell: build_shell_config(runtime),
         #[cfg(not(feature = "code-execution"))]
         shell: None,
-        // The CLI resolves its sandbox into each config's policy, so the spec must not add one.
-        sandbox: SandboxMode::Off,
+        sandbox: inputs.sandbox.mode.into(),
+        sandbox_profile: inputs.sandbox.profile.map(Into::into),
+        sandbox_limits: SandboxLimits {
+            max_memory_mb: inputs.sandbox.max_memory_mb,
+            max_cpu_secs: inputs.sandbox.max_cpu_secs,
+            max_procs: inputs.sandbox.max_procs,
+            network: inputs.sandbox.network.map(Into::into),
+        },
     })
 }
 
@@ -1131,7 +1134,6 @@ pub(crate) fn load_mcp_config(path: Option<&Path>) -> Result<Option<McpClientCon
 #[cfg(feature = "code-execution")]
 pub(crate) fn build_code_exec_config(
     runtime: &RuntimeOptions,
-    sandbox_policy: Option<inference_sandbox::SandboxPolicy>,
 ) -> Option<inference_core::CodeExecutionConfig> {
     if !runtime.enable_code_execution {
         return None;
@@ -1144,16 +1146,12 @@ pub(crate) fn build_code_exec_config(
         config.timeout_secs = timeout;
     }
     config.working_directory = runtime.code_exec_workdir.clone();
-    config.sandbox_policy = sandbox_policy;
     Some(config)
 }
 
 /// Build a `ShellConfig` from runtime options. Returns `None` when shell execution is off.
 #[cfg(feature = "code-execution")]
-pub(crate) fn build_shell_config(
-    runtime: &RuntimeOptions,
-    sandbox_policy: Option<inference_sandbox::SandboxPolicy>,
-) -> Option<inference_core::ShellConfig> {
+pub(crate) fn build_shell_config(runtime: &RuntimeOptions) -> Option<inference_core::ShellConfig> {
     if !runtime.enable_shell {
         return None;
     }
@@ -1165,54 +1163,8 @@ pub(crate) fn build_shell_config(
         config.timeout_secs = timeout;
     }
     config.working_directory = runtime.shell_workdir.clone();
-    config.sandbox_policy = sandbox_policy;
     config.permission = runtime.code_exec_permission.into();
     Some(config)
-}
-
-pub(crate) fn extract_sandbox_settings(
-    sandbox: SandboxOptions,
-    runtime: &RuntimeOptions,
-) -> Option<inference_sandbox::SandboxPolicy> {
-    let mode = inference_sandbox::SandboxMode::from(sandbox.mode).resolve();
-    match mode {
-        inference_sandbox::SandboxMode::Off => None,
-        inference_sandbox::SandboxMode::Auto | inference_sandbox::SandboxMode::On => {
-            let profile = sandbox
-                .profile
-                .map(Into::into)
-                .unwrap_or_else(|| default_sandbox_profile(runtime));
-            let mut policy = profile.default_policy();
-            if let Some(v) = sandbox.max_memory_mb {
-                policy.max_memory_mb = v;
-            }
-            if let Some(v) = sandbox.max_cpu_secs {
-                policy.max_cpu_secs = v;
-            }
-            if let Some(v) = sandbox.max_procs {
-                policy.max_procs = v;
-            }
-            if let Some(network) = sandbox.network {
-                policy.network = network.into();
-            }
-            policy.strict = mode == inference_sandbox::SandboxMode::On;
-            Some(policy)
-        }
-    }
-}
-
-fn default_sandbox_profile(runtime: &RuntimeOptions) -> inference_sandbox::SandboxProfile {
-    #[cfg(feature = "code-execution")]
-    {
-        if runtime.agent || runtime.enable_code_execution || runtime.enable_shell {
-            return inference_sandbox::SandboxProfile::Developer;
-        }
-    }
-    #[cfg(not(feature = "code-execution"))]
-    {
-        let _ = runtime;
-    }
-    inference_sandbox::SandboxProfile::Restricted
 }
 
 pub(crate) fn apply_agent_mode(runtime: &mut RuntimeOptions) {
@@ -1417,13 +1369,9 @@ mod tests {
     use inference_core::{
         AutoDeviceMapParams, IsqOrganization, LoraAdapterSpec, ModelDType, NormalLoaderType,
     };
-    use inference_sandbox::NetworkMode;
     use std::{num::NonZeroUsize, path::PathBuf};
 
     use super::*;
-    use crate::args::SandboxMode;
-
-    use crate::args::{SandboxNetworkMode, SandboxProfileArg};
 
     fn test_model() -> ModelSourceOptions {
         ModelSourceOptions {
@@ -2271,76 +2219,6 @@ mod tests {
         assert!(error.to_string().contains("GGML is not supported"));
     }
 
-    #[test]
-    fn sandbox_off_returns_none() {
-        let runtime = RuntimeOptions::default();
-        let sandbox = SandboxOptions {
-            mode: SandboxMode::Off,
-            ..SandboxOptions::default()
-        };
-
-        assert!(extract_sandbox_settings(sandbox, &runtime).is_none());
-    }
-
-    #[test]
-    fn sandbox_on_sets_strict() {
-        let runtime = RuntimeOptions::default();
-        let sandbox = SandboxOptions {
-            mode: SandboxMode::On,
-            ..SandboxOptions::default()
-        };
-
-        let policy = extract_sandbox_settings(sandbox, &runtime).unwrap();
-        assert!(policy.strict);
-    }
-
-    #[test]
-    fn restricted_profile_uses_loopback_by_default() {
-        let runtime = RuntimeOptions::default();
-        let sandbox = SandboxOptions {
-            mode: SandboxMode::On,
-            profile: Some(SandboxProfileArg::Restricted),
-            ..SandboxOptions::default()
-        };
-
-        let policy = extract_sandbox_settings(sandbox, &runtime).unwrap();
-        assert_eq!(policy.network, NetworkMode::Loopback);
-        assert!(policy.extra_env.is_empty());
-    }
-
-    #[test]
-    #[cfg(feature = "code-execution")]
-    fn agent_defaults_to_developer_profile() {
-        let runtime = RuntimeOptions {
-            agent: true,
-            ..RuntimeOptions::default()
-        };
-        let sandbox = SandboxOptions {
-            mode: SandboxMode::On,
-            ..SandboxOptions::default()
-        };
-
-        let policy = extract_sandbox_settings(sandbox, &runtime).unwrap();
-        assert_eq!(policy.network, NetworkMode::Full);
-        assert!(policy.extra_env.iter().any(|v| v == "RUSTUP_HOME"));
-    }
-
-    #[test]
-    fn explicit_network_overrides_profile_default() {
-        let runtime = RuntimeOptions {
-            agent: true,
-            ..RuntimeOptions::default()
-        };
-        let sandbox = SandboxOptions {
-            mode: SandboxMode::On,
-            network: Some(SandboxNetworkMode::Loopback),
-            ..SandboxOptions::default()
-        };
-
-        let policy = extract_sandbox_settings(sandbox, &runtime).unwrap();
-        assert_eq!(policy.network, NetworkMode::Loopback);
-    }
-
     fn serve_spec(args: &[&str]) -> EngineSpec {
         use clap::Parser;
         let cli = crate::args::Cli::try_parse_from(args).unwrap();
@@ -2423,7 +2301,7 @@ mod tests {
     }
 
     #[test]
-    fn an_mtp_assistant_model_and_the_resolved_sandbox_carry_over() {
+    fn an_mtp_assistant_model_and_the_sandbox_options_carry_over() {
         let spec = serve_spec(&[
             "inference",
             "serve",
@@ -2439,24 +2317,39 @@ mod tests {
             (mtp.model.as_deref(), mtp.n_predict),
             (Some("org/draft"), Some(3))
         );
-        assert_eq!(spec.agentic.sandbox, inference_core::SandboxMode::Off);
+        assert_eq!(spec.agentic.sandbox, inference_core::SandboxMode::Auto);
+        assert!(spec.agentic.sandbox_profile.is_none());
+
+        let spec = serve_spec(&[
+            "inference",
+            "serve",
+            "-m",
+            "org/model",
+            "--sandbox",
+            "on",
+            "--sandbox-profile",
+            "restricted",
+            "--sb-max-procs",
+            "7",
+            "--sandbox-network",
+            "loopback",
+        ]);
+        let agentic = spec.agentic;
+        assert_eq!(agentic.sandbox, inference_core::SandboxMode::On);
+        assert_eq!(
+            agentic.sandbox_profile,
+            Some(inference_core::SandboxProfile::Restricted)
+        );
+        assert_eq!(agentic.sandbox_limits.max_procs, Some(7));
+        assert_eq!(
+            agentic.sandbox_limits.network,
+            Some(inference_core::NetworkMode::Loopback)
+        );
+        // the engine applies the sandbox, so a tool config carries no policy of its own
         #[cfg(feature = "code-execution")]
         {
-            let spec = serve_spec(&[
-                "inference",
-                "serve",
-                "-m",
-                "org/model",
-                "--enable-shell",
-                "--sandbox",
-                "on",
-            ]);
-            let policy = spec
-                .agentic
-                .shell
-                .and_then(|shell| shell.sandbox_policy)
-                .unwrap();
-            assert!(policy.strict);
+            let spec = serve_spec(&["inference", "serve", "-m", "org/model", "--enable-shell"]);
+            assert!(spec.agentic.shell.unwrap().sandbox_policy.is_none());
         }
     }
 }

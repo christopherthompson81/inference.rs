@@ -111,7 +111,7 @@ OS-level isolation for the code-execution subprocess. Mechanics and threat model
 | Field | CLI flag | Default | Purpose |
 |---|---|---|---|
 | `mode` | `--sandbox` | `auto` | `auto` (on for Linux/macOS, no-op elsewhere), `on` (missing isolation is a hard error), or `off`. |
-| `profile` | `--sandbox-profile` | profile-dependent | `developer` for agent/code/shell tools, otherwise `restricted`. |
+| `profile` | `--sandbox-profile` | `developer` | `developer` or `restricted`; see the [sandbox reference](/reference/sandbox/). |
 | `max_memory_mb` | `--sb-max-memory-mb` | 2048 | Per-session memory cap in MiB. |
 | `max_cpu_secs` | `--sb-max-cpu-secs` | 600 | Per-session CPU time cap in seconds. When rlimits apply, this is raised before execution to at least the enabled code or shell timeout. |
 | `max_procs` | `--sb-max-procs` | 64 | Per-session process/thread cap. |

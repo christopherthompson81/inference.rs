@@ -34,6 +34,8 @@ class AgenticSpec:
     max_tool_rounds: int | None = None
     mcp: McpClientConfig | None = None
     sandbox: SandboxMode | None = None
+    sandbox_limits: SandboxLimits | None = None
+    sandbox_profile: SandboxProfile | None = None
     search: SearchSpec | None = None
     shell: ShellConfig | None = None
     tool_dispatch_url: str | None = None
@@ -2406,6 +2408,16 @@ class RuntimeSpec:
     token_source: str | None = None
 
 
+@dataclass(kw_only=True)
+class SandboxLimits:
+    """Limits that replace a sandbox profile's; unset ones keep the profile's."""
+
+    max_cpu_secs: int | None = None
+    max_memory_mb: int | None = None
+    max_procs: int | None = None
+    network: NetworkMode | None = None
+
+
 class SandboxMode(str, Enum):
     """Whether tools that run model-written code are sandboxed."""
 
@@ -2428,6 +2440,13 @@ class SandboxPolicy:
     max_procs: int | None = 64
     network: NetworkMode | None = NetworkMode.LOOPBACK
     strict: bool | None = False
+
+
+class SandboxProfile(str, Enum):
+    """The starting policy for sandboxed tools: `restricted` or `developer` (toolchain paths, full network by default)."""
+
+    RESTRICTED = "restricted"
+    DEVELOPER = "developer"
 
 
 class SearchContextSize(str, Enum):

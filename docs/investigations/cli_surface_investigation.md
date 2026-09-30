@@ -315,3 +315,25 @@ since the probe's value already starts with the product name; it now prints it o
 
 **Tests:** `toolchain_probe_outputs_parse` (nvcc release line and its fallback, deduplicated driver versions, Xcode
 version and build).
+
+## Run 13 — 2026-09-30 (time approximate)
+
+**Question:** Run 1 found the CLI building its own `SandboxPolicy` (profile, memory/CPU/process caps, network) and
+writing it into each tool config, because `AgenticSpec` only took a mode. Can the spec carry the profile and limits?
+
+**Change:** `AgenticSpec.sandbox_profile: Option<SandboxProfile>` (default `developer`) and
+`AgenticSpec.sandbox_limits: SandboxLimits { max_memory_mb, max_cpu_secs, max_procs, network }`, beside the existing
+`sandbox` mode, so specs that only give a mode are unchanged. The engine builds the default policy from all three for a
+code-execution or shell config that has no `sandbox_policy`. The CLI passes its `--sandbox`, `--sandbox-profile`,
+`--sb-*` and `--sandbox-network` values through and lost `extract_sandbox_settings` and `default_sandbox_profile`.
+The CLI's default profile was `restricted` unless the agent, code execution or shell was on; since the policy only
+reaches those tools' configs, the effective default was always `developer`, which is what the engine now applies.
+
+**Tests:** `a_sandbox_profile_and_limits_shape_the_default_policy` (engine: restricted profile, limit overrides,
+network override); the CLI's spec test checks the flags land in `AgenticSpec` and tool configs carry no policy. The
+CLI's five `extract_sandbox_settings` tests went with it.
+
+**Review:** no regressions; confirmed every path builds its spec through `agentic_spec`, nothing else attached a
+policy, and the effective-default claim. Fixed docs that still described the conditional default (TOML reference,
+sandbox reference) and the sandbox reference's caution box, which said the Python SDK is unsandboxed by default when
+the engine spec (and so Python) is sandboxed; only the Rust SDK is.
