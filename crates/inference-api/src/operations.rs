@@ -2,6 +2,7 @@
 //! tokenization.
 
 use either::Either;
+use futures::future::BoxFuture;
 use inference_core::{
     CalibrationAction, CalibrationRequest, CalibrationStatus, DetokenizationRequest,
     InferenceRsError, Request, SerializedSession, TokenizationRequest, parse_isq_value,
@@ -141,7 +142,14 @@ pub async fn re_isq(
     })
 }
 
-pub async fn calibration(
+pub fn calibration<'a>(
+    state: &'a SharedInferenceRsState,
+    action: CalibrationAction,
+) -> BoxFuture<'a, Result<CalibrationStatus, ApiError>> {
+    Box::pin(calibration_inner(state, action))
+}
+
+async fn calibration_inner(
     state: &SharedInferenceRsState,
     action: CalibrationAction,
 ) -> Result<CalibrationStatus, ApiError> {
