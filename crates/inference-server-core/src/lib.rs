@@ -247,6 +247,7 @@ pub mod metrics;
 pub mod openapi_doc;
 pub mod responses;
 pub mod route_registry;
+pub mod serve;
 pub mod skills;
 pub mod speech_generation;
 pub mod streaming;

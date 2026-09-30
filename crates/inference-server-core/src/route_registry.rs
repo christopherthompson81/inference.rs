@@ -24,6 +24,9 @@ impl RouteInfo {
     }
 }
 
+/// Where the web UI is nested; request metrics treat it as housekeeping.
+pub const UI_ROUTE: &str = "/ui";
+
 pub const CHAT_COMPLETIONS_ROUTE: RouteInfo =
     RouteInfo::new("/v1/chat/completions", "POST", RouteKind::OpenAi);
 pub const ANTHROPIC_MESSAGES_ROUTE: RouteInfo =

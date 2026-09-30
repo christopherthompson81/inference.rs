@@ -337,3 +337,27 @@ CLI's five `extract_sandbox_settings` tests went with it.
 policy, and the effective-default claim. Fixed docs that still described the conditional default (TOML reference,
 sandbox reference) and the sandbox reference's caution box, which said the Python SDK is unsandboxed by default when
 the engine spec (and so Python) is sandboxed; only the Rust SDK is.
+
+## Run 14 — 2026-09-30 (time approximate)
+
+**Question:** Run 1 found `serve` assembling the web UI (its router, observability layer and tool flags), binding the
+listeners with TCP_NODELAY, spawning the MCP listener and logging the API surfaces itself. Can that live below the
+CLI?
+
+**Finding:** `inference-webui` depends on `inference-server-core`, so a `with_ui` option on server-core's router
+builder would be a cycle. The split follows the dependency: server-core runs a router, the UI crate mounts itself.
+
+**Change:** `inference_server_core::serve::serve(app, &engine, ServeOptions { host, port, mcp_port })` binds with
+TCP_NODELAY, spawns the MCP listener and logs the API surfaces and routes. `inference_webui::mount(app, &engine,
+UiOptions, ObservabilityConfig)` nests the UI at `UI_ROUTE` with the API's request logging and metrics;
+`UiOptions::from_agentic` reads the tools from the `AgenticSpec` rather than the CLI re-deriving them from its flags
+(so the UI now reports the search embedding model the engine uses, default included). `serve_engine` is 20 lines and
+axum is only a dev-dependency of the CLI now. `UI_ROUTE` lives in server-core's route registry (its metrics treat
+the UI as housekeeping) and the UI crate re-exports it.
+
+**Review:** no regressions; the UI's tool flags equal master's in every build and mode. `--mcp-port` equal to `--port`
+was reported only after the model loaded; the CLI now refuses it first, with the flag names.
+
+**Tests:** `serve::tests::accepted_connections_enable_tcp_nodelay` moved to server-core;
+`the_ui_mounts_beside_the_api_with_the_engines_tools` mounts the UI on the tiny checkpoint's engine with its chat
+cache in a tempdir and reads the tools back from `/ui/api/capabilities`.
