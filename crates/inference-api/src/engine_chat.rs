@@ -9,8 +9,8 @@ use indexmap::IndexMap;
 use inference_core::{
     AgentPermission, AgentToolApprovalHandler, AgentToolApprovalNotifier,
     ChatCompletionChunkResponse, ChatResponseCollector, Constraint, InferenceRs, MessageContent,
-    ModelCategory, NormalRequest, ReasoningEffort, Request, RequestCancellation, RequestMessage,
-    Response, SamplingParams, encode_agentic_tool_images, resolve_reasoning_controls,
+    ModelCategory, NormalRequest, ReasoningEffort, Request, RequestMessage, Response,
+    SamplingParams, encode_agentic_tool_images, resolve_reasoning_controls,
 };
 use itertools::Itertools;
 use serde_json::{Value, json};
@@ -959,6 +959,8 @@ pub enum ChatStreamEvent {
     AgenticToolCallProgress(AgenticToolProgress),
     AgenticToolApprovalRequired(AgenticToolApproval),
     FileProduced(inference_core::File),
+    /// A block-diffusion model's denoising step; only streams that asked with `with_denoising_progress` get these.
+    BlockDenoisingProgress(inference_core::BlockDenoisingProgress),
     /// Terminal: nothing follows an error.
     Error(ApiError),
 }
@@ -966,6 +968,7 @@ pub enum ChatStreamEvent {
 // The types the agentic events carry, so API consumers can match on them without naming inference_core.
 pub use inference_core::{
     AgentToolKind, AgentToolMetadata, AgentToolSource, AgenticToolCallData, AgenticToolCallPhase,
+    BlockDenoisingProgress, RequestCancellation, Usage,
 };
 
 /// A tool call's progress in an agentic run.
@@ -1016,6 +1019,7 @@ pub struct ChatStream {
     model_override: Option<String>,
     tap: Option<ResponseTap>,
     cancellation: Option<RequestCancellation>,
+    denoising_progress: bool,
     finished: bool,
 }
 
@@ -1032,8 +1036,19 @@ impl ChatStream {
             model_override,
             tap,
             cancellation: None,
+            denoising_progress: false,
             finished: false,
         }
+    }
+
+    pub fn with_denoising_progress(mut self) -> Self {
+        self.denoising_progress = true;
+        self
+    }
+
+    /// The request's cancellation, for a caller that cancels from elsewhere, e.g. a signal handler.
+    pub fn cancellation(&self) -> Option<RequestCancellation> {
+        self.cancellation.clone()
     }
 
     pub fn with_cancellation(mut self, cancellation: RequestCancellation) -> Self {
@@ -1100,7 +1115,12 @@ impl ChatStream {
                 tool,
                 arguments,
             }),
-            Response::BlockDenoisingProgress(_) => return None,
+            Response::BlockDenoisingProgress(progress) => {
+                if !self.denoising_progress {
+                    return None;
+                }
+                ChatStreamEvent::BlockDenoisingProgress(progress)
+            }
             Response::File(file) => ChatStreamEvent::FileProduced(file),
             Response::Done(_)
             | Response::CompletionDone(_)

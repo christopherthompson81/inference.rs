@@ -12,6 +12,11 @@ pub(crate) mod serve;
 mod tune;
 mod uqff;
 
+// The tiny random-weight checkpoint the CLI's engine tests load.
+#[cfg(test)]
+#[path = "../../../inference/tests/support/paddleocr_vl_tiny.rs"]
+pub(crate) mod tiny_support;
+
 pub use bench::{BenchRunConfig, run_bench};
 pub use cache::{run_cache_delete, run_cache_list};
 pub use config::run_from_config;

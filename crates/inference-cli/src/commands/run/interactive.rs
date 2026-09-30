@@ -1,638 +1,20 @@
-//! Interactive mode implementation
+//! Interactive and one-shot modes: the terminal loop over the engine API for each kind of model.
 
-use either::Either;
-use indexmap::IndexMap;
-use inference_core::{
-    AdapterSelection, AgentPermission, AgentToolKind, Constraint, DiffusionGenerationParams,
-    DrySamplingParams, ImageGenerationResponseFormat, InferenceRs, MessageContent, ModelCategory,
-    NormalRequest, ReasoningEffort, Request, RequestMessage, Response, ResponseOk, SamplingParams,
-    TERMINATE_ALL_NEXT_STEP, Usage, WebSearchOptions, speech_utils,
+use std::{fs, path::PathBuf, time::Instant};
+
+use base64::{Engine as _, engine::general_purpose::STANDARD};
+use inference_api::{
+    Engine,
+    lora_adapters::ListLoraAdaptersQuery,
+    openai::{ImageGenerationRequest, ModelCategory, SpeechGenerationRequest},
 };
+use inference_core::{AgentPermission, ReasoningEffort};
 use regex::Regex;
 use rustyline::{DefaultEditor, Editor, Helper, error::ReadlineError, history::History};
-use serde_json::Value;
-#[cfg(feature = "code-execution")]
-use std::collections::VecDeque;
-use std::{
-    fs,
-    io::{self, Write},
-    path::PathBuf,
-    sync::{Arc, LazyLock, Mutex, atomic::Ordering},
-    time::Instant,
-};
-use tokio::sync::mpsc::{Receiver, channel};
+use serde_json::{Value, json};
 use tracing::{error, info};
 
-use inference_server_core::util;
-use inference_server_core::video::parse_video_url;
-
-const AGENTIC_PANEL_WIDTH: usize = 50;
-const DENOISING_BAR_WIDTH: usize = 28;
-const INTERACTIVE_FALLBACK_TEMPERATURE: f64 = 0.8;
-const INTERACTIVE_FALLBACK_TOP_K: usize = 40;
-const INTERACTIVE_FALLBACK_TOP_P: f64 = 0.95;
-const INTERACTIVE_FALLBACK_MIN_P: f64 = 0.05;
-
-#[cfg(feature = "code-execution")]
-static RENDERED_CODE_CALLS: LazyLock<Mutex<VecDeque<String>>> =
-    LazyLock::new(|| Mutex::new(VecDeque::new()));
-#[cfg(feature = "code-execution")]
-static APPROVAL_RENDERED_CODE_CALLS: LazyLock<Mutex<VecDeque<String>>> =
-    LazyLock::new(|| Mutex::new(VecDeque::new()));
-static AGENTIC_RENDER_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-fn exit_handler() {
-    std::process::exit(0);
-}
-
-fn terminate_handler() {
-    TERMINATE_ALL_NEXT_STEP.store(true, Ordering::SeqCst);
-}
-
-fn history_file_path() -> PathBuf {
-    let config_dir = dirs::config_dir()
-        .expect("Could not determine the config directory")
-        .join("inference.rs");
-    fs::create_dir_all(&config_dir).expect("Failed to create config directory");
-
-    // e.g. ~/.config/inference.rs/history.txt
-    config_dir.join("history.txt")
-}
-
-fn format_sampling_params(params: &SamplingParams) -> String {
-    fn fmt_opt<T: std::fmt::Display>(v: &Option<T>) -> String {
-        match v {
-            Some(v) => v.to_string(),
-            None => "off".to_string(),
-        }
-    }
-    let mut parts = vec![
-        format!("temp={}", fmt_opt(&params.temperature)),
-        format!("top_k={}", fmt_opt(&params.top_k)),
-        format!("top_p={}", fmt_opt(&params.top_p)),
-        format!("min_p={}", fmt_opt(&params.min_p)),
-    ];
-    if params.frequency_penalty.is_some() {
-        parts.push(format!("freq_pen={}", fmt_opt(&params.frequency_penalty)));
-    }
-    if params.presence_penalty.is_some() {
-        parts.push(format!("pres_pen={}", fmt_opt(&params.presence_penalty)));
-    }
-    if params.repetition_penalty.is_some() {
-        parts.push(format!("rep_pen={}", fmt_opt(&params.repetition_penalty)));
-    }
-    parts.join(", ")
-}
-
-fn build_prompt(
-    do_search: bool,
-    do_code_exec: bool,
-    do_shell: bool,
-    adapter: Option<&str>,
-) -> String {
-    let mut tags = Vec::new();
-    if do_code_exec {
-        tags.push("code".to_string());
-    }
-    if do_shell {
-        tags.push("shell".to_string());
-    }
-    if do_search {
-        tags.push("search".to_string());
-    }
-    if let Some(adapter) = adapter {
-        tags.push(format!("lora:{adapter}"));
-    }
-    if tags.is_empty() {
-        "> ".to_string()
-    } else {
-        format!("[{}] > ", tags.join(","))
-    }
-}
-
-struct DenoisingProgress {
-    active: bool,
-}
-
-impl DenoisingProgress {
-    fn new() -> Self {
-        Self { active: false }
-    }
-
-    fn clear(&mut self) {
-        if self.active {
-            eprint!("\r\x1b[K");
-            io::stderr().flush().unwrap();
-            self.active = false;
-        }
-    }
-
-    fn render(&mut self, progress: &inference_core::BlockDenoisingProgress) {
-        if progress.final_block {
-            self.clear();
-            return;
-        }
-
-        let total_steps = progress.total_steps.max(1) as u64;
-        let step = progress.step.min(progress.total_steps.max(1)) as u64;
-        let status = if progress.finished {
-            "stable"
-        } else {
-            "denoising"
-        };
-        let filled = (step as usize)
-            .saturating_mul(DENOISING_BAR_WIDTH)
-            .checked_div(total_steps as usize)
-            .unwrap_or(0)
-            .min(DENOISING_BAR_WIDTH);
-        let empty = DENOISING_BAR_WIDTH - filled;
-        eprint!(
-            "\rblock diffusion [{}{}] {}/{} {}\x1b[K",
-            "=".repeat(filled),
-            " ".repeat(empty),
-            step,
-            total_steps,
-            status,
-        );
-        io::stderr().flush().unwrap();
-        self.active = true;
-    }
-}
-
-fn read_line<H: Helper, I: History>(editor: &mut Editor<H, I>, prompt: &str) -> String {
-    let r = editor.readline(prompt);
-    match r {
-        Err(ReadlineError::Interrupted) => {
-            editor.save_history(&history_file_path()).unwrap();
-            // Ctrl+C
-            std::process::exit(0);
-        }
-
-        Err(ReadlineError::Eof) => {
-            editor.save_history(&history_file_path()).unwrap();
-            // CTRL-D
-            std::process::exit(0);
-        }
-
-        Err(e) => {
-            editor.save_history(&history_file_path()).unwrap();
-            eprintln!("Error reading input: {e:?}");
-            std::process::exit(1);
-        }
-        Ok(prompt) => {
-            editor.add_history_entry(prompt.clone()).unwrap();
-            prompt
-        }
-    }
-}
-
-static CTRLC_HANDLER: LazyLock<Mutex<&'static (dyn Fn() + Sync)>> =
-    LazyLock::new(|| Mutex::new(&exit_handler));
-
-pub struct OneshotInput {
-    pub text: String,
-    pub images: Vec<String>,
-    pub videos: Vec<String>,
-    pub audios: Vec<String>,
-}
-
-pub struct InteractiveConfig {
-    pub do_search: bool,
-    pub do_code_exec: bool,
-    pub do_shell: bool,
-    pub agent_permission: AgentPermission,
-    pub enable_thinking: Option<bool>,
-    pub reasoning_effort: Option<ReasoningEffort>,
-    pub adapter: Option<String>,
-}
-
-struct OneshotCtx {
-    do_search: bool,
-    do_code_exec: bool,
-    do_shell: bool,
-    agent_permission: AgentPermission,
-    agent_approval_callback: Option<inference_core::AgentToolApprovalCallback>,
-    enable_thinking: Option<bool>,
-    reasoning_effort: Option<ReasoningEffort>,
-    adapter: Option<String>,
-}
-
-pub async fn oneshot_mode(
-    inference: Arc<InferenceRs>,
-    input: OneshotInput,
-    config: InteractiveConfig,
-) {
-    let InteractiveConfig {
-        do_search,
-        do_code_exec,
-        do_shell,
-        agent_permission,
-        enable_thinking,
-        reasoning_effort,
-        adapter,
-    } = config;
-    let agent_approval_callback = cli_agent_approval_callback(agent_permission);
-    let has_media =
-        !input.images.is_empty() || !input.videos.is_empty() || !input.audios.is_empty();
-    let ctx = OneshotCtx {
-        do_search,
-        do_code_exec,
-        do_shell,
-        agent_permission,
-        agent_approval_callback,
-        enable_thinking,
-        reasoning_effort,
-        adapter,
-    };
-
-    if has_media {
-        oneshot_multimodal(inference, ctx, input).await;
-    } else {
-        oneshot_text(inference, ctx, input.text).await;
-    }
-}
-
-async fn oneshot_text(inference: Arc<InferenceRs>, ctx: OneshotCtx, text: String) {
-    let OneshotCtx {
-        do_search,
-        do_code_exec,
-        do_shell,
-        agent_permission,
-        agent_approval_callback,
-        enable_thinking,
-        reasoning_effort,
-        adapter,
-    } = ctx;
-    let sender = inference.get_sender(None).unwrap();
-    let sampling_params = interactive_sample_parameters(&inference);
-
-    let mut user_message: IndexMap<String, MessageContent> = IndexMap::new();
-    user_message.insert("role".to_string(), Either::Left("user".to_string()));
-    user_message.insert("content".to_string(), Either::Left(text));
-    let messages = vec![user_message];
-
-    let request_messages = RequestMessage::Chat {
-        messages,
-        enable_thinking,
-        reasoning_effort,
-    };
-
-    let (tx, mut rx) = channel(10_000);
-    let session_id = (do_code_exec || do_shell).then(|| uuid::Uuid::new_v4().to_string());
-    let req = Request::Normal(Box::new(NormalRequest {
-        id: inference.next_request_id(),
-        queued_at: None,
-        messages: request_messages,
-        sampling_params: sampling_params.clone(),
-        seed: None,
-        response: tx,
-        return_logprobs: false,
-        is_streaming: true,
-        constraint: Constraint::None,
-        suffix: None,
-        tool_choice: None,
-        tools: None,
-        logits_processors: None,
-        return_raw_logits: false,
-        web_search_options: do_search.then(WebSearchOptions::default),
-        enable_code_execution: do_code_exec,
-        enable_shell: do_shell,
-        shell_options: None,
-        code_execution_permission: None,
-        code_execution_approval_notifier: None,
-        agent_permission: Some(agent_permission),
-        agent_approval_handler: agent_approval_callback
-            .map(inference_core::AgentToolApprovalHandler::from_sync),
-        agent_approval_notifier: None,
-        session_id,
-        max_tool_rounds: None,
-        tool_dispatch_url: None,
-        model_id: None,
-        adapter: adapter.map(AdapterSelection::alias),
-        truncate_sequence: false,
-        files: None,
-        input_files: Vec::new(),
-        cancellation: None,
-    }));
-    sender.send(req).await.unwrap();
-    let start_ttft = Instant::now();
-    match stream_assistant_response(&mut rx, start_ttft).await {
-        Ok((_, first_token_duration, last_usage)) => {
-            print_stats(
-                &inference,
-                &sampling_params,
-                first_token_duration,
-                last_usage,
-            );
-        }
-        Err(e) => {
-            error!("{e}");
-        }
-    }
-    println!();
-}
-
-async fn oneshot_multimodal(inference: Arc<InferenceRs>, ctx: OneshotCtx, input: OneshotInput) {
-    let OneshotCtx {
-        do_search,
-        do_code_exec,
-        do_shell,
-        agent_permission,
-        agent_approval_callback,
-        enable_thinking,
-        reasoning_effort,
-        adapter: _,
-    } = ctx;
-    let config = inference.config(None).unwrap();
-    let (prefixer, video_sampling) = match &config.category {
-        ModelCategory::Multimodal {
-            prefixer,
-            video_sampling,
-        } => (prefixer, *video_sampling),
-        _ => {
-            error!(
-                "--image/--video/--audio require a multimodal model, but the loaded model is not multimodal."
-            );
-            return;
-        }
-    };
-
-    let sender = inference.get_sender(None).unwrap();
-    let sampling_params = interactive_sample_parameters(&inference);
-
-    let mut images = Vec::new();
-    let mut audios = Vec::new();
-    let mut videos = Vec::new();
-
-    // Load images
-    let mut image_indexes = Vec::new();
-    for url in &input.images {
-        match util::parse_image_url(url).await {
-            Ok(image) => {
-                info!("Loaded image: {url}");
-                image_indexes.push(images.len());
-                images.push(image);
-            }
-            Err(e) => {
-                error!("Failed to load image {url}: {e}");
-                return;
-            }
-        }
-    }
-
-    // Load audios
-    let mut audio_indexes = Vec::new();
-    for url in &input.audios {
-        match util::parse_audio_url(url).await {
-            Ok(audio) => {
-                info!("Loaded audio: {url}");
-                audio_indexes.push(audios.len());
-                audios.push(audio);
-            }
-            Err(e) => {
-                error!("Failed to load audio {url}: {e}");
-                return;
-            }
-        }
-    }
-
-    // Load videos
-    let mut video_indexes = Vec::new();
-    for url in &input.videos {
-        match parse_video_url(url, Some(video_sampling)).await {
-            Ok(video) => {
-                info!("Loaded video: {url}");
-                video_indexes.push(videos.len());
-                videos.push(video);
-            }
-            Err(e) => {
-                error!("Failed to load video {url}: {e}");
-                return;
-            }
-        }
-    }
-
-    // Build content parts
-    let mut content_vec: Vec<IndexMap<String, Value>> = Vec::new();
-    for _ in &input.images {
-        content_vec.push(IndexMap::from([(
-            "type".to_string(),
-            Value::String("image".to_string()),
-        )]));
-    }
-    for _ in &input.audios {
-        content_vec.push(IndexMap::from([(
-            "type".to_string(),
-            Value::String("audio".to_string()),
-        )]));
-    }
-    for _ in &input.videos {
-        content_vec.push(IndexMap::from([(
-            "type".to_string(),
-            Value::String("video".to_string()),
-        )]));
-    }
-
-    // Prefix the text with media context
-    let mut prefixed_text = input.text.clone();
-    if !image_indexes.is_empty() {
-        prefixed_text = prefixer.prefix_image(image_indexes, &prefixed_text);
-    }
-    if !audio_indexes.is_empty() {
-        prefixed_text = prefixer.prefix_audio(audio_indexes, &prefixed_text);
-    }
-    if !video_indexes.is_empty() {
-        prefixed_text = prefixer.prefix_video(video_indexes, &prefixed_text);
-    }
-    content_vec.push(IndexMap::from([
-        ("type".to_string(), Value::String("text".to_string())),
-        ("text".to_string(), Value::String(prefixed_text)),
-    ]));
-
-    let mut user_message: IndexMap<String, MessageContent> = IndexMap::new();
-    user_message.insert("role".to_string(), Either::Left("user".to_string()));
-    user_message.insert("content".to_string(), Either::Right(content_vec));
-    let messages = vec![user_message];
-
-    let request_messages = RequestMessage::MultimodalChat {
-        images,
-        audios,
-        videos,
-        messages,
-        enable_thinking,
-        reasoning_effort,
-    };
-
-    let (tx, mut rx) = channel(10_000);
-    let session_id = (do_code_exec || do_shell).then(|| uuid::Uuid::new_v4().to_string());
-    let req = Request::Normal(Box::new(NormalRequest {
-        id: inference.next_request_id(),
-        queued_at: None,
-        messages: request_messages,
-        sampling_params: sampling_params.clone(),
-        seed: None,
-        response: tx,
-        return_logprobs: false,
-        is_streaming: true,
-        constraint: Constraint::None,
-        suffix: None,
-        tool_choice: None,
-        tools: None,
-        logits_processors: None,
-        return_raw_logits: false,
-        web_search_options: do_search.then(WebSearchOptions::default),
-        enable_code_execution: do_code_exec,
-        enable_shell: do_shell,
-        shell_options: None,
-        code_execution_permission: None,
-        code_execution_approval_notifier: None,
-        agent_permission: Some(agent_permission),
-        agent_approval_handler: agent_approval_callback
-            .map(inference_core::AgentToolApprovalHandler::from_sync),
-        agent_approval_notifier: None,
-        session_id,
-        max_tool_rounds: None,
-        tool_dispatch_url: None,
-        model_id: None,
-        adapter: None,
-        truncate_sequence: false,
-        files: None,
-        input_files: Vec::new(),
-        cancellation: None,
-    }));
-    sender.send(req).await.unwrap();
-    let start_ttft = Instant::now();
-    match stream_assistant_response(&mut rx, start_ttft).await {
-        Ok((_, first_token_duration, last_usage)) => {
-            print_stats(
-                &inference,
-                &sampling_params,
-                first_token_duration,
-                last_usage,
-            );
-        }
-        Err(e) => {
-            error!("{e}");
-        }
-    }
-    println!();
-}
-
-fn print_stats(
-    inference: &Arc<InferenceRs>,
-    sampling_params: &SamplingParams,
-    first_token_duration: Option<std::time::Duration>,
-    last_usage: Option<Usage>,
-) {
-    if let Some(last_usage) = last_usage {
-        println!();
-        println!();
-        println!("Stats:");
-        if let Some(ttft) = first_token_duration {
-            println!("CLI time to first token: {:.2?}s", ttft.as_secs_f32());
-        }
-        println!(
-            "Prompt: {} tokens, {:.2} T/s",
-            last_usage.prompt_tokens, last_usage.avg_prompt_tok_per_sec
-        );
-        println!(
-            "Decode: {} tokens, {:.2} T/s",
-            last_usage.completion_tokens, last_usage.avg_compl_tok_per_sec
-        );
-        if let Ok(logger) = inference.get_logger(None) {
-            let (prefix_hits, prefix_total) = logger.prefix_cache_stats();
-            if prefix_total > 0 {
-                println!(
-                    "Prefix cache: {} hits / {} turns",
-                    prefix_hits, prefix_total
-                );
-            }
-            if let Some((hits, misses)) = logger.encoder_cache_stats()
-                && hits + misses > 0
-            {
-                println!("Encoder cache: {}/{} hits", hits, hits + misses);
-            }
-        }
-        println!("Sampling: {}", format_sampling_params(sampling_params));
-    }
-}
-
-pub async fn interactive_mode(inference: Arc<InferenceRs>, config: InteractiveConfig) {
-    let agent_approval_callback = cli_agent_approval_callback(config.agent_permission);
-    match inference.get_model_category(None) {
-        Ok(ModelCategory::Text) => {
-            text_interactive_mode(inference, config, agent_approval_callback.clone()).await
-        }
-        Ok(ModelCategory::Multimodal { .. }) => {
-            multimodal_interactive_mode(inference, config, agent_approval_callback.clone()).await
-        }
-        Ok(ModelCategory::Diffusion) => {
-            let InteractiveConfig {
-                do_search,
-                do_code_exec,
-                do_shell,
-                agent_permission,
-                enable_thinking: _,
-                reasoning_effort: _,
-                adapter: _,
-            } = config;
-            diffusion_interactive_mode(
-                inference,
-                do_search,
-                do_code_exec,
-                do_shell,
-                agent_permission,
-                agent_approval_callback.clone(),
-            )
-            .await
-        }
-        Ok(ModelCategory::Audio) => {
-            let InteractiveConfig {
-                do_search,
-                do_code_exec,
-                do_shell,
-                agent_permission,
-                enable_thinking,
-                reasoning_effort: _,
-                adapter: _,
-            } = config;
-            audio_interactive_mode(
-                inference,
-                do_search,
-                do_code_exec,
-                do_shell,
-                agent_permission,
-                agent_approval_callback.clone(),
-                enable_thinking,
-            )
-            .await
-        }
-        Ok(ModelCategory::Speech) => {
-            let InteractiveConfig {
-                do_search,
-                do_code_exec,
-                do_shell,
-                agent_permission,
-                enable_thinking: _,
-                reasoning_effort: _,
-                adapter: _,
-            } = config;
-            speech_interactive_mode(
-                inference,
-                do_search,
-                do_code_exec,
-                do_shell,
-                agent_permission,
-                agent_approval_callback.clone(),
-            )
-            .await
-        }
-        Ok(ModelCategory::Embedding) => error!(
-            "Embedding models do not support interactive mode. Use the server or Python/Rust APIs."
-        ),
-        Err(e) => eprintln!("Error getting model category: {e}"),
-    }
-}
+use super::chat::{self, AUDIO_PART, ChatOptions, IMAGE_PART, Sampling, SessionMedia, VIDEO_PART};
 
 const COMMAND_COMMANDS: &str = r#"
 Commands:
@@ -686,9 +68,9 @@ const EXIT_CMD: &str = "/exit";
 const SYSTEM_CMD: &str = "/system";
 const CLEAR_CMD: &str = "/clear";
 const ADAPTER_CMD: &str = "/adapter";
-const TEMPERATURE_CMD: &str = "/temperature";
-const TOPK_CMD: &str = "/topk";
-const TOPP_CMD: &str = "/topp";
+const BANNER: &str = "====================";
+const IMAGE_FILE_PREFIX: &str = "image-generation-";
+const SPEECH_FILE_PREFIX: &str = "speech-";
 
 /// Regex string used to extract image URLs from prompts.
 const IMAGE_REGEX: &str = r#"((?:https?://|file://)?\S+?\.(?:png|jpe?g|bmp|gif|webp)(?:\?\S+?)?)"#;
@@ -696,135 +78,358 @@ const AUDIO_REGEX: &str = r#"((?:https?://|file://)?\S+?\.(?:wav|mp3|flac|ogg)(?
 const VIDEO_REGEX: &str =
     r#"((?:https?://|file://)?\S+?\.(?:mp4|avi|mov|mkv|webm|gif|m4v)(?:\?\S+?)?)"#;
 
-fn interactive_fallback_sample_parameters() -> SamplingParams {
-    SamplingParams {
-        temperature: Some(INTERACTIVE_FALLBACK_TEMPERATURE),
-        top_k: Some(INTERACTIVE_FALLBACK_TOP_K),
-        top_p: Some(INTERACTIVE_FALLBACK_TOP_P),
-        min_p: Some(INTERACTIVE_FALLBACK_MIN_P),
-        top_n_logprobs: 0,
-        frequency_penalty: None,
-        presence_penalty: None,
-        repetition_penalty: None,
-        max_len: None,
-        stop_toks: None,
-        ignore_eos: false,
-        logits_bias: None,
-        n_choices: 1,
-        dry_params: Some(DrySamplingParams::default()),
+pub struct OneshotInput {
+    pub text: String,
+    pub images: Vec<String>,
+    pub videos: Vec<String>,
+    pub audios: Vec<String>,
+}
+
+pub struct InteractiveConfig {
+    pub do_search: bool,
+    pub do_code_exec: bool,
+    pub do_shell: bool,
+    pub agent_permission: AgentPermission,
+    pub enable_thinking: Option<bool>,
+    pub reasoning_effort: Option<ReasoningEffort>,
+    pub adapter: Option<String>,
+}
+
+impl InteractiveConfig {
+    fn chat_options(self) -> ChatOptions {
+        let session_id =
+            (self.do_code_exec || self.do_shell).then(|| uuid::Uuid::new_v4().to_string());
+        ChatOptions {
+            do_search: self.do_search,
+            do_code_exec: self.do_code_exec,
+            do_shell: self.do_shell,
+            agent_permission: self.agent_permission,
+            enable_thinking: self.enable_thinking,
+            reasoning_effort: self.reasoning_effort,
+            adapter: self.adapter,
+            session_id,
+        }
     }
 }
 
-fn interactive_sample_parameters(inference: &Arc<InferenceRs>) -> SamplingParams {
-    match inference
-        .config(None)
-        .ok()
-        .and_then(|cfg| cfg.generation_defaults)
-    {
-        Some(defaults) => {
-            let mut params = SamplingParams {
-                dry_params: Some(DrySamplingParams::default()),
-                ..SamplingParams::neutral()
-            };
-            params.apply_model_defaults(&defaults);
-            params
-        }
-        None => interactive_fallback_sample_parameters(),
+fn history_file_path() -> PathBuf {
+    let config_dir = dirs::config_dir()
+        .expect("Could not determine the config directory")
+        .join("inference.rs");
+    fs::create_dir_all(&config_dir).expect("Failed to create config directory");
+
+    // e.g. ~/.config/inference.rs/history.txt
+    config_dir.join("history.txt")
+}
+
+fn build_prompt(options: &ChatOptions) -> String {
+    let mut tags = Vec::new();
+    if options.do_code_exec {
+        tags.push("code".to_string());
+    }
+    if options.do_shell {
+        tags.push("shell".to_string());
+    }
+    if options.do_search {
+        tags.push("search".to_string());
+    }
+    if let Some(adapter) = &options.adapter {
+        tags.push(format!("lora:{adapter}"));
+    }
+    if tags.is_empty() {
+        "> ".to_string()
+    } else {
+        format!("[{}] > ", tags.join(","))
     }
 }
 
-/// Handles sampling commands (\temperature, \topk, \topp) and updates the sampling_params accordingly.
-/// Returns true if the prompt was a handled sampling command, otherwise false.
-fn handle_sampling_command(prompt: &str, sampling_params: &mut SamplingParams) -> bool {
-    let trimmed = prompt.trim();
-    if trimmed.starts_with(TEMPERATURE_CMD) {
-        let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
-        if let [_, value] = parts.as_slice() {
-            match value.trim().parse::<f64>() {
-                Ok(v) if (0.0..=2.0).contains(&v) => {
-                    sampling_params.temperature = Some(v);
-                    info!("Set temperature to {v}");
+fn read_line<H: Helper, I: History>(editor: &mut Editor<H, I>, prompt: &str) -> String {
+    match editor.readline(prompt) {
+        Err(ReadlineError::Interrupted | ReadlineError::Eof) => {
+            editor.save_history(&history_file_path()).unwrap();
+            std::process::exit(0);
+        }
+        Err(e) => {
+            editor.save_history(&history_file_path()).unwrap();
+            eprintln!("Error reading input: {e:?}");
+            std::process::exit(1);
+        }
+        Ok(prompt) => {
+            editor.add_history_entry(prompt.clone()).unwrap();
+            prompt
+        }
+    }
+}
+
+// Ctrl-C ends the turn in flight (it still prints its stats) and quits between turns.
+fn install_ctrlc_handler() {
+    ctrlc::set_handler(|| {
+        if !chat::cancel_in_flight() {
+            std::process::exit(0);
+        }
+    })
+    .expect("Failed to set CTRL-C handler for interactive mode");
+}
+
+fn open_editor() -> DefaultEditor {
+    let mut editor = DefaultEditor::new().expect("Failed to open input");
+    let _ = editor.load_history(&history_file_path());
+    editor
+}
+
+pub async fn oneshot_mode(engine: &Engine, input: OneshotInput, config: InteractiveConfig) {
+    if let Err(e) = oneshot(engine, input, config).await {
+        error!("{e}");
+    }
+    println!();
+}
+
+async fn oneshot(
+    engine: &Engine,
+    input: OneshotInput,
+    config: InteractiveConfig,
+) -> anyhow::Result<()> {
+    let model = chat::default_model(engine)?;
+    let options = config.chat_options();
+    let sampling = Sampling::for_model(model.generation_defaults.as_ref());
+    let mut media = SessionMedia::default();
+    let has_media =
+        !input.images.is_empty() || !input.videos.is_empty() || !input.audios.is_empty();
+    let message = if has_media {
+        anyhow::ensure!(
+            model.category == Some(ModelCategory::Multimodal),
+            "--image/--video/--audio require a multimodal model, but the loaded model is not multimodal."
+        );
+        let mut parts = Vec::new();
+        for (kind, references) in [
+            (IMAGE_PART, &input.images),
+            (AUDIO_PART, &input.audios),
+            (VIDEO_PART, &input.videos),
+        ] {
+            for reference in references {
+                parts.push((kind, media.source_for(reference, kind).await?));
+            }
+        }
+        chat::media_message(parts, &input.text)
+    } else {
+        chat::text_message("user", &input.text)
+    };
+    install_ctrlc_handler();
+    let turn = chat::stream_turn(engine, &[message], &media, &options, &sampling).await?;
+    chat::print_stats(&turn, &sampling);
+    Ok(())
+}
+
+pub async fn interactive_mode(engine: &Engine, config: InteractiveConfig) {
+    let model = match chat::default_model(engine) {
+        Ok(model) => model,
+        Err(e) => return error!("{e}"),
+    };
+    install_ctrlc_handler();
+    match model.category {
+        Some(ModelCategory::Text | ModelCategory::Multimodal) => {
+            chat_interactive_mode(engine, config, &model).await
+        }
+        Some(ModelCategory::Diffusion) => diffusion_interactive_mode(engine).await,
+        Some(ModelCategory::Speech) => speech_interactive_mode(engine).await,
+        Some(ModelCategory::Audio) => error!(
+            "Audio models are not supported in `inference run`. Use `inference serve` and the OpenAI-compatible /v1/chat/completions endpoint instead."
+        ),
+        Some(ModelCategory::Embedding) => error!(
+            "Embedding models do not support interactive mode. Use the server or Python/Rust APIs."
+        ),
+        None => error!("The engine did not report the loaded model's category."),
+    }
+}
+
+async fn chat_interactive_mode(
+    engine: &Engine,
+    config: InteractiveConfig,
+    model: &inference_api::openai::ModelObject,
+) {
+    let multimodal = model.category == Some(ModelCategory::Multimodal);
+    let help = if multimodal {
+        VISION_INTERACTIVE_HELP
+    } else {
+        TEXT_INTERACTIVE_HELP
+    };
+    let media_regexes = media_regexes();
+    let mut options = config.chat_options();
+    let mut sampling = Sampling::for_model(model.generation_defaults.as_ref());
+    let mut messages: Vec<Value> = Vec::new();
+    let mut media = SessionMedia::default();
+
+    info!(
+        "Starting interactive loop with sampling: {}",
+        sampling.describe()
+    );
+    println!(
+        "{BANNER}{help}{COMMAND_COMMANDS}\nSampling: {}\n{BANNER}",
+        sampling.describe()
+    );
+
+    let mut editor = open_editor();
+    loop {
+        let prompt = read_line(&mut editor, &build_prompt(&options));
+        let prompt = prompt.trim();
+        if prompt.is_empty() || sampling.apply_command(prompt) {
+            continue;
+        }
+        if handle_adapter_command(engine, prompt, &mut options.adapter).await {
+            continue;
+        }
+        match prompt {
+            HELP_CMD => {
+                println!("{BANNER}{help}{COMMAND_COMMANDS}{BANNER}");
+                continue;
+            }
+            EXIT_CMD => break,
+            CLEAR_CMD => {
+                messages.clear();
+                media.clear();
+                info!("Cleared chat history.");
+                continue;
+            }
+            _ if prompt.starts_with(SYSTEM_CMD) => {
+                let parsed = match &prompt.split(SYSTEM_CMD).collect::<Vec<_>>()[..] {
+                    &["", system] => system.trim(),
+                    _ => {
+                        println!(
+                            "Error: Setting the system command should be done with this format: `{SYSTEM_CMD} This is a system message.`"
+                        );
+                        continue;
+                    }
+                };
+                info!("Set system message to `{parsed}`.");
+                messages.push(chat::text_message("system", parsed));
+                continue;
+            }
+            _ => {}
+        }
+
+        // A turn that fails leaves the conversation as it was, so the next prompt can go on.
+        let media_before = media.len();
+        let message = if multimodal {
+            match media_user_message(prompt, &media_regexes, &mut media).await {
+                Ok(message) => message,
+                Err(e) => {
+                    media.truncate(media_before);
+                    error!("{e}");
+                    continue;
                 }
-                Ok(_) => {
-                    println!("Error: temperature must be in [0.0, 2.0]");
-                }
-                Err(_) => println!("Error: format is `{TEMPERATURE_CMD} <float>`"),
             }
         } else {
-            println!("Error: format is `{TEMPERATURE_CMD} <float>`");
-        }
-        return true;
-    }
-    if trimmed.starts_with(TOPK_CMD) {
-        let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
-        if let [_, value] = parts.as_slice() {
-            match value.trim().parse::<usize>() {
-                Ok(v) if v > 0 => {
-                    sampling_params.top_k = Some(v);
-                    info!("Set top-k to {v}");
-                }
-                Ok(_) => {
-                    println!("Error: top-k must be a positive integer");
-                }
-                Err(_) => println!("Error: format is `{TOPK_CMD} <int>`"),
+            chat::text_message("user", prompt)
+        };
+        messages.push(message);
+
+        match chat::stream_turn(engine, &messages, &media, &options, &sampling).await {
+            Ok(turn) => {
+                chat::print_stats(&turn, &sampling);
+                messages.push(turn.message);
             }
-        } else {
-            println!("Error: format is `{TOPK_CMD} <int>`");
-        }
-        return true;
-    }
-    if trimmed.starts_with(TOPP_CMD) {
-        let parts: Vec<&str> = trimmed.splitn(2, ' ').collect();
-        if let [_, value] = parts.as_slice() {
-            match value.trim().parse::<f64>() {
-                Ok(v) if v > 0.0 && v <= 1.0 => {
-                    sampling_params.top_p = Some(v);
-                    info!("Set top-p to {v}");
-                }
-                Ok(_) => {
-                    println!("Error: top-p must be in (0.0, 1.0]");
-                }
-                Err(_) => println!("Error: format is `{TOPP_CMD} <float>`"),
+            Err(e) => {
+                messages.pop();
+                media.truncate(media_before);
+                error!("{e}");
             }
-        } else {
-            println!("Error: format is `{TOPP_CMD} <float>`");
         }
-        return true;
+        println!();
     }
-    false
+
+    editor.save_history(&history_file_path()).unwrap();
+}
+
+fn media_regexes() -> [(&'static str, Regex); 3] {
+    [
+        (IMAGE_PART, Regex::new(IMAGE_REGEX).unwrap()),
+        (AUDIO_PART, Regex::new(AUDIO_REGEX).unwrap()),
+        (VIDEO_PART, Regex::new(VIDEO_REGEX).unwrap()),
+    ]
+}
+
+// Media named in the prompt become content parts, and the text keeps what's left.
+async fn media_user_message(
+    prompt: &str,
+    regexes: &[(&'static str, Regex)],
+    media: &mut SessionMedia,
+) -> anyhow::Result<Value> {
+    let mut text = prompt.to_string();
+    let mut parts = Vec::new();
+    for (kind, regex) in regexes {
+        let (references, rest) = parse_files_and_message(&text, regex);
+        for reference in references {
+            let source = media.source_for(&reference, kind).await?;
+            info!("Added `{reference}`");
+            parts.push((*kind, source));
+        }
+        text = rest;
+    }
+    Ok(if parts.is_empty() {
+        chat::text_message("user", prompt)
+    } else {
+        chat::media_message(parts, &text)
+    })
+}
+
+fn parse_files_and_message(input: &str, regex: &Regex) -> (Vec<String>, String) {
+    // Trailing punctuation after a URL is sentence punctuation, not part of it.
+    let urls = regex
+        .captures_iter(input)
+        .filter_map(|cap| {
+            cap.get(1).map(|m| {
+                m.as_str()
+                    .trim_end_matches(|c: char| {
+                        matches!(
+                            c,
+                            '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '"' | '\''
+                        )
+                    })
+                    .to_string()
+            })
+        })
+        .collect::<Vec<_>>();
+    let text = regex.replace_all(input, "").trim().to_string();
+    (urls, text)
 }
 
 async fn handle_adapter_command(
-    inference: &InferenceRs,
+    engine: &Engine,
     prompt: &str,
     adapter: &mut Option<String>,
 ) -> bool {
     let Some(command) = parse_adapter_command(prompt) else {
         return false;
     };
-
+    let loaded = || async {
+        engine
+            .lora_adapters(ListLoraAdaptersQuery::default())
+            .await
+            .map(|adapters| adapters.data.into_iter().map(|a| a.id).collect::<Vec<_>>())
+    };
     match command {
-        AdapterCommand::Invalid => {
-            println!("Error: format is `{ADAPTER_CMD} <alias|none|list>`")
-        }
+        AdapterCommand::Invalid => println!("Error: format is `{ADAPTER_CMD} <alias|none|list>`"),
         AdapterCommand::Base => {
             *adapter = None;
             info!("Using the base model.");
         }
-        AdapterCommand::List => match inference.list_lora_adapters(None).await {
-            Ok(adapters) if adapters.is_empty() => println!("No LoRA adapters are loaded."),
-            Ok(adapters) => {
+        AdapterCommand::List => match loaded().await {
+            Ok(aliases) if aliases.is_empty() => println!("No LoRA adapters are loaded."),
+            Ok(aliases) => {
                 println!("Loaded LoRA adapters:");
-                for loaded in adapters {
-                    let selected = adapter.as_deref() == Some(loaded.alias.as_str());
-                    let marker = if selected { " (selected)" } else { "" };
-                    println!("- {}{marker}", loaded.alias);
+                for alias in aliases {
+                    let marker = if adapter.as_deref() == Some(alias.as_str()) {
+                        " (selected)"
+                    } else {
+                        ""
+                    };
+                    println!("- {alias}{marker}");
                 }
             }
             Err(error) => println!("Error: {error}"),
         },
-        AdapterCommand::Select(alias) => match inference.list_lora_adapters(None).await {
-            Ok(adapters) if adapters.iter().any(|loaded| loaded.alias == alias) => {
+        AdapterCommand::Select(alias) => match loaded().await {
+            Ok(aliases) if aliases.iter().any(|loaded| loaded == alias) => {
                 *adapter = Some(alias.to_string());
                 info!("Using LoRA adapter `{alias}`.");
             }
@@ -861,1283 +466,95 @@ fn parse_adapter_command(prompt: &str) -> Option<AdapterCommand<'_>> {
     })
 }
 
-async fn text_interactive_mode(
-    inference: Arc<InferenceRs>,
-    config: InteractiveConfig,
-    agent_approval_callback: Option<inference_core::AgentToolApprovalCallback>,
-) {
-    let InteractiveConfig {
-        do_search,
-        do_code_exec,
-        do_shell,
-        agent_permission,
-        enable_thinking,
-        reasoning_effort,
-        mut adapter,
-    } = config;
-    let sender = inference.get_sender(None).unwrap();
-    let mut messages: Vec<IndexMap<String, MessageContent>> = Vec::new();
-    let tool_session_id = uuid::Uuid::new_v4().to_string();
-
-    let mut sampling_params = interactive_sample_parameters(&inference);
-
-    info!("Starting interactive loop with sampling params: {sampling_params:?}");
-    println!(
-        "{}{TEXT_INTERACTIVE_HELP}{COMMAND_COMMANDS}\nSampling: {}\n{}",
-        "=".repeat(20),
-        format_sampling_params(&sampling_params),
-        "=".repeat(20)
-    );
-
-    // Set the handler to process exit
-    *CTRLC_HANDLER.lock().unwrap() = &exit_handler;
-
-    ctrlc::set_handler(move || CTRLC_HANDLER.lock().unwrap()())
-        .expect("Failed to set CTRL-C handler for interactive mode");
-
-    let mut rl = DefaultEditor::new().expect("Failed to open input");
-    let _ = rl.load_history(&history_file_path());
-    'outer: loop {
-        // Set the handler to process exit
-        *CTRLC_HANDLER.lock().unwrap() = &exit_handler;
-
-        let prompt = read_line(
-            &mut rl,
-            &build_prompt(do_search, do_code_exec, do_shell, adapter.as_deref()),
-        );
-
-        let prompt_trimmed = prompt.as_str().trim();
-        if prompt_trimmed.is_empty() {
-            continue;
-        }
-        if handle_sampling_command(prompt_trimmed, &mut sampling_params) {
-            continue;
-        }
-        if handle_adapter_command(&inference, prompt_trimmed, &mut adapter).await {
-            continue;
-        }
-        match prompt_trimmed {
+async fn diffusion_interactive_mode(engine: &Engine) {
+    println!("{BANNER}{DIFFUSION_INTERACTIVE_HELP}{BANNER}");
+    let mut editor = open_editor();
+    loop {
+        let prompt = match read_line(&mut editor, "> ").trim() {
+            "" => continue,
             HELP_CMD => {
-                println!(
-                    "{}{TEXT_INTERACTIVE_HELP}{COMMAND_COMMANDS}{}",
-                    "=".repeat(20),
-                    "=".repeat(20)
-                );
+                println!("{BANNER}{DIFFUSION_INTERACTIVE_HELP}{BANNER}");
                 continue;
             }
-            EXIT_CMD => {
-                break;
-            }
-            CLEAR_CMD => {
-                messages.clear();
-                info!("Cleared chat history.");
-                continue;
-            }
-            _ if prompt_trimmed.starts_with(SYSTEM_CMD) => {
-                let parsed = match &prompt_trimmed.split(SYSTEM_CMD).collect::<Vec<_>>()[..] {
-                    &["", a] => a.trim(),
-                    _ => {
-                        println!(
-                            "Error: Setting the system command should be done with this format: `{SYSTEM_CMD} This is a system message.`"
-                        );
-                        continue;
-                    }
-                };
-                info!("Set system message to `{parsed}`.");
-                let mut user_message: IndexMap<String, MessageContent> = IndexMap::new();
-                user_message.insert("role".to_string(), Either::Left("system".to_string()));
-                user_message.insert("content".to_string(), Either::Left(parsed.to_string()));
-                messages.push(user_message);
-                continue;
-            }
-            message => {
-                let mut user_message: IndexMap<String, MessageContent> = IndexMap::new();
-                user_message.insert("role".to_string(), Either::Left("user".to_string()));
-                user_message.insert("content".to_string(), Either::Left(message.to_string()));
-                messages.push(user_message);
-            }
-        }
-
-        // Set the handler to terminate all seqs, so allowing cancelling running
-        *CTRLC_HANDLER.lock().unwrap() = &terminate_handler;
-
-        let request_messages = RequestMessage::Chat {
-            messages: messages.clone(),
-            enable_thinking,
-            reasoning_effort,
+            EXIT_CMD => break,
+            prompt => prompt.to_string(),
         };
-
-        let (tx, mut rx) = channel(10_000);
-        let req = Request::Normal(Box::new(NormalRequest {
-            id: inference.next_request_id(),
-            queued_at: None,
-            messages: request_messages,
-            sampling_params: sampling_params.clone(),
-            seed: None,
-            response: tx,
-            return_logprobs: false,
-            is_streaming: true,
-            constraint: Constraint::None,
-            suffix: None,
-            tool_choice: None,
-            tools: None,
-            logits_processors: None,
-            return_raw_logits: false,
-            web_search_options: do_search.then(WebSearchOptions::default),
-            enable_code_execution: do_code_exec,
-            enable_shell: do_shell,
-            shell_options: None,
-            code_execution_permission: None,
-            code_execution_approval_notifier: None,
-            agent_permission: Some(agent_permission),
-            agent_approval_handler: agent_approval_callback
-                .clone()
-                .map(inference_core::AgentToolApprovalHandler::from_sync),
-            agent_approval_notifier: None,
-            session_id: if do_code_exec || do_shell {
-                Some(tool_session_id.clone())
-            } else {
-                None
-            },
-            max_tool_rounds: None,
-            tool_dispatch_url: None,
-            model_id: None,
-            adapter: adapter.clone().map(AdapterSelection::alias),
-            truncate_sequence: false,
-            files: None,
-            input_files: Vec::new(),
-            cancellation: None,
-        }));
-        sender.send(req).await.unwrap();
-        let start_ttft = Instant::now();
-        let (assistant_output, first_token_duration, last_usage) =
-            match stream_assistant_response(&mut rx, start_ttft).await {
-                Ok(response) => response,
-                Err(e) => {
-                    error!("{e}");
-                    break 'outer;
-                }
-            };
-
-        if let Some(last_usage) = last_usage {
-            println!();
-            println!();
-            println!("Stats:");
-            if let Some(ttft) = first_token_duration {
-                println!("CLI time to first token: {:.2?}s", ttft.as_secs_f32());
-            }
-            println!(
-                "Prompt: {} tokens, {:.2} T/s",
-                last_usage.prompt_tokens, last_usage.avg_prompt_tok_per_sec
-            );
-            println!(
-                "Decode: {} tokens, {:.2} T/s",
-                last_usage.completion_tokens, last_usage.avg_compl_tok_per_sec
-            );
-            if let Ok(logger) = inference.get_logger(None) {
-                let (prefix_hits, prefix_total) = logger.prefix_cache_stats();
-                if prefix_total > 0 {
-                    println!(
-                        "Prefix cache: {} hits / {} turns",
-                        prefix_hits, prefix_total
-                    );
-                }
-            }
-            println!("Sampling: {}", format_sampling_params(&sampling_params));
+        match generate_image(engine, &prompt).await {
+            Ok(message) => println!("{message}"),
+            Err(e) => error!("{e}"),
         }
-        messages.push(assistant_output.into_message());
         println!();
     }
-
-    rl.save_history(&history_file_path()).unwrap();
+    editor.save_history(&history_file_path()).unwrap();
 }
 
-fn parse_files_and_message(input: &str, regex: &Regex) -> (Vec<String>, String) {
-    // Collect all URLs
-    let urls: Vec<String> = regex
-        .captures_iter(input)
-        .filter_map(|cap| {
-            cap.get(1).map(|m| {
-                m.as_str()
-                    .trim_end_matches(|c: char| {
-                        matches!(
-                            c,
-                            '.' | ',' | ';' | ':' | '!' | '?' | ')' | ']' | '}' | '"' | '\''
-                        )
-                    })
-                    .to_string()
-            })
-        })
-        .collect();
-    // Remove the URLs from the input to get the message text
-    let text = regex.replace_all(input, "").trim().to_string();
-    (urls, text)
-}
-
-#[cfg(feature = "code-execution")]
-fn remember_code_call(queue: &LazyLock<Mutex<VecDeque<String>>>, code: &str) {
-    const MAX_REMEMBERED_CALLS: usize = 16;
-
-    let mut calls = queue.lock().unwrap();
-    if calls.len() >= MAX_REMEMBERED_CALLS {
-        calls.pop_front();
-    }
-    calls.push_back(code.to_string());
-}
-
-#[cfg(feature = "code-execution")]
-fn take_code_call(queue: &LazyLock<Mutex<VecDeque<String>>>, code: &str) -> bool {
-    let mut calls = queue.lock().unwrap();
-    let Some(index) = calls.iter().position(|c| c == code) else {
-        return false;
-    };
-    calls.remove(index);
-    true
-}
-
-#[cfg(feature = "code-execution")]
-fn print_code_call_panel(tool_name: &str, code: &str) {
-    let header = format!("╭─ tool call: {tool_name} ");
-    let pad = AGENTIC_PANEL_WIDTH.saturating_sub(header.len());
-    println!("\n{header}{}", "─".repeat(pad));
-    for line in code.lines() {
-        println!("│ {line}");
-    }
-}
-
-fn print_agentic_progress(
-    tool_name: &str,
-    phase: &inference_core::AgenticToolCallPhase,
-    files: &[inference_core::files::File],
-) {
-    use inference_core::{AgenticToolCallData, AgenticToolCallPhase};
-
-    const GRAY: &str = "\x1b[90m";
-    const RESET: &str = "\x1b[0m";
-
-    let _render_guard = AGENTIC_RENDER_LOCK.lock().unwrap();
-
-    match phase {
-        AgenticToolCallPhase::Calling(data) => {
-            #[cfg(feature = "code-execution")]
-            if let AgenticToolCallData::CodeExecution {
-                code: Some(code), ..
-            } = data
-            {
-                if take_code_call(&APPROVAL_RENDERED_CODE_CALLS, code) {
-                    return;
-                }
-                remember_code_call(&RENDERED_CODE_CALLS, code);
-            }
-
-            let header = format!("╭─ tool call: {} ", tool_name);
-            let pad = AGENTIC_PANEL_WIDTH.saturating_sub(header.len());
-            println!("\n{header}{}", "─".repeat(pad));
-            match data {
-                AgenticToolCallData::CodeExecution {
-                    code: Some(code), ..
-                } => {
-                    for line in code.lines() {
-                        println!("│ {line}");
-                    }
-                }
-                AgenticToolCallData::WebSearch {
-                    query: Some(query), ..
-                } => {
-                    println!("│ query: {query}");
-                }
-                AgenticToolCallData::Shell { commands, .. } => {
-                    for command in commands {
-                        for line in command.lines() {
-                            println!("│ {line}");
-                        }
-                    }
-                }
-                AgenticToolCallData::Custom { arguments, .. } if !arguments.is_empty() => {
-                    println!("│ {arguments}");
-                }
-                _ => {}
-            }
-        }
-        AgenticToolCallPhase::Complete(data) => {
-            match data {
-                AgenticToolCallData::CodeExecution {
-                    stdout,
-                    stderr,
-                    exception,
-                    images,
-                    video_frame_count,
-                    working_directory,
-                    execution_time_ms,
-                    ..
-                } => {
-                    let timing = execution_time_ms
-                        .map(|ms| format!(" ({ms}ms)"))
-                        .unwrap_or_default();
-                    let status = if exception.is_some() {
-                        "error"
-                    } else {
-                        "result"
-                    };
-                    let divider = format!("├─ {status}{timing} ");
-                    let pad = AGENTIC_PANEL_WIDTH.saturating_sub(divider.len());
-                    println!("{divider}{}", "─".repeat(pad));
-                    if let Some(dir) = working_directory {
-                        println!("│ workdir: {dir}");
-                    }
-                    println!("│ stdout:");
-                    match stdout {
-                        Some(s) if !s.trim().is_empty() => {
-                            for line in s.trim().lines() {
-                                println!("│   {line}");
-                            }
-                        }
-                        _ => {
-                            println!("│   {GRAY}<none>{RESET}");
-                        }
-                    }
-                    println!("│ stderr:");
-                    match stderr {
-                        Some(s) if !s.trim().is_empty() => {
-                            for line in s.trim().lines() {
-                                println!("│   {line}");
-                            }
-                        }
-                        _ => {
-                            println!("│   {GRAY}<none>{RESET}");
-                        }
-                    }
-                    if let Some(exc) = exception {
-                        for line in exc.lines() {
-                            println!("│ {line}");
-                        }
-                    }
-                    if !images.is_empty() {
-                        println!("│ {} image(s) captured", images.len());
-                    }
-                    if let Some(n) = video_frame_count {
-                        println!("│ {} video frame(s) captured", n);
-                    }
-                    if !files.is_empty() {
-                        println!("│ files:");
-                        for file in files {
-                            println!(
-                                "│   {} ({}, {} bytes)",
-                                file.name,
-                                file.format.as_deref().unwrap_or(""),
-                                file.bytes
-                            );
-                        }
-                    }
-                }
-                AgenticToolCallData::WebSearch {
-                    results_count,
-                    sources,
-                    ..
-                } => {
-                    let divider = "├─ result ".to_string();
-                    let pad = AGENTIC_PANEL_WIDTH.saturating_sub(divider.len());
-                    println!("{divider}{}", "─".repeat(pad));
-                    if let Some(n) = results_count {
-                        println!("│ {n} results found");
-                    }
-                    if !sources.is_empty() {
-                        println!("│ sources:");
-                        for source in sources {
-                            println!("│   {source}");
-                        }
-                    }
-                }
-                AgenticToolCallData::Shell {
-                    stdout,
-                    stderr,
-                    exit_code,
-                    status,
-                    working_directory,
-                    timed_out,
-                    ..
-                } => {
-                    let status = status.as_deref().unwrap_or("result");
-                    let divider = format!("├─ {status} ");
-                    let pad = AGENTIC_PANEL_WIDTH.saturating_sub(divider.len());
-                    println!("{divider}{}", "─".repeat(pad));
-                    if let Some(dir) = working_directory {
-                        println!("│ workdir: {dir}");
-                    }
-                    if let Some(code) = exit_code {
-                        println!("│ exit: {code}");
-                    }
-                    if matches!(timed_out, Some(true)) {
-                        println!("│ timed out");
-                    }
-                    println!("│ stdout:");
-                    match stdout {
-                        Some(s) if !s.trim().is_empty() => {
-                            for line in s.trim().lines() {
-                                println!("│   {line}");
-                            }
-                        }
-                        _ => {
-                            println!("│   {GRAY}<none>{RESET}");
-                        }
-                    }
-                    println!("│ stderr:");
-                    match stderr {
-                        Some(s) if !s.trim().is_empty() => {
-                            for line in s.trim().lines() {
-                                println!("│   {line}");
-                            }
-                        }
-                        _ => {
-                            println!("│   {GRAY}<none>{RESET}");
-                        }
-                    }
-                }
-                AgenticToolCallData::Custom { content, .. } if !content.is_empty() => {
-                    let divider = "├─ result ".to_string();
-                    let pad = AGENTIC_PANEL_WIDTH.saturating_sub(divider.len());
-                    println!("{divider}{}", "─".repeat(pad));
-                    for line in content.lines().take(5) {
-                        println!("│ {line}");
-                    }
-                }
-                _ => {}
-            }
-            println!("{}", "╰".to_string() + &"─".repeat(AGENTIC_PANEL_WIDTH));
-        }
-    }
-    io::stdout().flush().unwrap();
-}
-
-pub(super) fn cli_agent_approval_callback(
-    permission: AgentPermission,
-) -> Option<inference_core::AgentToolApprovalCallback> {
-    matches!(permission, AgentPermission::Ask).then(agent_approval_callback)
-}
-
-pub(super) fn agent_approval_callback() -> inference_core::AgentToolApprovalCallback {
-    std::sync::Arc::new(move |approval: &inference_core::AgentToolApproval| {
-        let _render_guard = AGENTIC_RENDER_LOCK.lock().unwrap();
-
-        #[cfg(feature = "code-execution")]
-        {
-            if matches!(approval.tool.kind, AgentToolKind::CodeExecution)
-                && let Some(code) = approval.arguments.get("code").and_then(|v| v.as_str())
-                && !take_code_call(&RENDERED_CODE_CALLS, code)
-            {
-                remember_code_call(&APPROVAL_RENDERED_CODE_CALLS, code);
-                print_code_call_panel(&approval.tool.label, code);
-            }
-        }
-
-        let divider = "├─ approval ".to_string();
-        let pad = AGENTIC_PANEL_WIDTH.saturating_sub(divider.len());
-        println!("{divider}{}", "─".repeat(pad));
-        println!("│ session: {}", approval.session_id);
-        println!("│ tool: {}", approval.tool.label);
-        if matches!(approval.tool.kind, AgentToolKind::Shell)
-            && let Some(commands) = approval
-                .arguments
-                .get("commands")
-                .and_then(|v| v.as_array())
-        {
-            let commands = commands
-                .iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>();
-            if !commands.is_empty() {
-                println!("│ commands:");
-                for command in commands {
-                    for line in command.lines() {
-                        println!("│   {line}");
-                    }
-                }
-            }
-        }
-        if let Some(outputs) = approval.arguments.get("outputs").and_then(|v| v.as_array()) {
-            let outputs = outputs
-                .iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>();
-            if !outputs.is_empty() {
-                println!("│ outputs: {}", outputs.join(", "));
-            }
-        }
-
-        loop {
-            print!("│ Approve action? [y]es / [n]o / [a]lways: ");
-            let _ = io::Write::flush(&mut io::stdout());
-
-            let mut input = String::new();
-            if io::stdin().read_line(&mut input).is_err() {
-                return inference_core::AgentToolApprovalDecision::deny(None);
-            }
-            match input.trim().to_ascii_lowercase().as_str() {
-                "y" | "yes" => return inference_core::AgentToolApprovalDecision::approve(),
-                "a" | "always" => {
-                    return inference_core::AgentToolApprovalDecision::approve_for_session();
-                }
-                "" | "n" | "no" => {
-                    return inference_core::AgentToolApprovalDecision::deny(None);
-                }
-                _ => println!("│ Please enter y, n, or a."),
-            }
-        }
-    })
-}
-
-struct AssistantTurn {
-    content: String,
-    reasoning: String,
-}
-
-impl AssistantTurn {
-    fn into_message(self) -> IndexMap<String, Either<String, Vec<IndexMap<String, Value>>>> {
-        let mut message = IndexMap::new();
-        message.insert("role".to_string(), Either::Left("assistant".to_string()));
-        message.insert("content".to_string(), Either::Left(self.content));
-        // Thinking models expect their own reasoning back in history (Qwen3.5 preserve_thinking)
-        if !self.reasoning.is_empty() {
-            message.insert(
-                "reasoning_content".to_string(),
-                Either::Left(self.reasoning),
-            );
-        }
-        message
-    }
-}
-
-async fn stream_assistant_response(
-    rx: &mut Receiver<Response>,
-    start_ttft: Instant,
-) -> Result<(AssistantTurn, Option<std::time::Duration>, Option<Usage>), String> {
-    let mut assistant_output = String::new();
-    let mut assistant_reasoning = String::new();
-    let mut first_token_duration = None;
-    let mut last_usage = None;
-    let mut pending_agentic_files = Vec::new();
-    let mut denoising_progress = DenoisingProgress::new();
-
-    const GRAY: &str = "\x1b[90m";
-    const RESET: &str = "\x1b[0m";
-    let mut was_reasoning = false;
-
-    while let Some(resp) = rx.recv().await {
-        match resp {
-            Response::Chunk(chunk) => {
-                denoising_progress.clear();
-                last_usage = chunk.usage.clone();
-                let choice = &chunk.choices[0];
-
-                let has_any_content =
-                    choice.delta.content.is_some() || choice.delta.reasoning_content.is_some();
-                if has_any_content && first_token_duration.is_none() {
-                    first_token_duration = Some(Instant::now().duration_since(start_ttft));
-                }
-
-                if let Some(ref reasoning) = choice.delta.reasoning_content {
-                    assistant_reasoning.push_str(reasoning);
-                    print!("{GRAY}{reasoning}{RESET}");
-                    io::stdout().flush().unwrap();
-                    was_reasoning = true;
-                }
-
-                if let Some(ref content) = choice.delta.content {
-                    if was_reasoning {
-                        println!();
-                        was_reasoning = false;
-                    }
-                    assistant_output.push_str(content);
-                    print!("{content}");
-                    io::stdout().flush().unwrap();
-                }
-
-                if let Some(ref finish_reason) = choice.finish_reason {
-                    if was_reasoning {
-                        println!();
-                    }
-                    if matches!(finish_reason.as_str(), "length") {
-                        print!("...");
-                    }
-                    break;
-                }
-            }
-            Response::AgenticToolCallProgress {
-                round: _,
-                tool_name,
-                phase,
-            } => {
-                denoising_progress.clear();
-                let complete = matches!(phase, inference_core::AgenticToolCallPhase::Complete(_));
-                print_agentic_progress(&tool_name, &phase, &pending_agentic_files);
-                if complete {
-                    pending_agentic_files.clear();
-                }
-            }
-            Response::BlockDenoisingProgress(progress) => {
-                if progress.index != 0 {
-                    denoising_progress.clear();
-                    continue;
-                }
-
-                denoising_progress.render(&progress);
-            }
-            Response::File(file) => {
-                pending_agentic_files.push(file);
-            }
-            Response::AgenticToolApprovalRequired { .. } => continue,
-            Response::InternalError(e) => {
-                denoising_progress.clear();
-                return Err(format!("Got an internal error: {e:?}"));
-            }
-            Response::ModelError(e, resp) => {
-                denoising_progress.clear();
-                return Err(format!("Got a model error: {e:?}, response: {resp:?}"));
-            }
-            Response::ValidationError(e) => {
-                denoising_progress.clear();
-                return Err(format!("Got a validation error: {e:?}"));
-            }
-            Response::Done(_) => unreachable!(),
-            Response::CompletionDone(_) => unreachable!(),
-            Response::CompletionModelError(_, _) => unreachable!(),
-            Response::CompletionChunk(_) => unreachable!(),
-            Response::ImageGeneration(_) => unreachable!(),
-            Response::Speech { .. } => unreachable!(),
-            Response::Raw { .. } => unreachable!(),
-            Response::Embeddings { .. } => unreachable!(),
-        }
-    }
-    denoising_progress.clear();
-
-    Ok((
-        AssistantTurn {
-            content: assistant_output,
-            reasoning: assistant_reasoning,
-        },
-        first_token_duration,
-        last_usage,
+// The image comes back inline and is written to the working directory.
+async fn generate_image(engine: &Engine, prompt: &str) -> anyhow::Result<String> {
+    let request: ImageGenerationRequest =
+        serde_json::from_value(json!({"prompt": prompt, "response_format": "b64_json"}))?;
+    let pixels = (request.height * request.width) as f32;
+    let start = Instant::now();
+    let response = engine
+        .image_generation(request)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let duration = start.elapsed().as_secs_f32();
+    let png = response
+        .data
+        .first()
+        .and_then(|choice| choice.b64_json.as_deref())
+        .ok_or_else(|| anyhow::anyhow!("the engine returned no image"))?;
+    let path = format!("{IMAGE_FILE_PREFIX}{}.png", uuid::Uuid::new_v4());
+    fs::write(&path, STANDARD.decode(png)?)?;
+    Ok(format!(
+        "Image generated can be found at: image is at `{path}`. Took {duration:.2}s ({:.2} pixels/s).",
+        pixels / duration
     ))
 }
 
-async fn multimodal_interactive_mode(
-    inference: Arc<InferenceRs>,
-    config: InteractiveConfig,
-    agent_approval_callback: Option<inference_core::AgentToolApprovalCallback>,
-) {
-    let InteractiveConfig {
-        do_search,
-        do_code_exec,
-        do_shell,
-        agent_permission,
-        enable_thinking,
-        reasoning_effort,
-        adapter: _,
-    } = config;
-    let tool_session_id = uuid::Uuid::new_v4().to_string();
-
-    // Capture HTTP/HTTPS URLs and local file paths ending with common image extensions
-    let image_regex = Regex::new(IMAGE_REGEX).unwrap();
-    let audio_regex = Regex::new(AUDIO_REGEX).unwrap();
-    let video_regex = Regex::new(VIDEO_REGEX).unwrap();
-
-    let sender = inference.get_sender(None).unwrap();
-    let mut messages: Vec<IndexMap<String, MessageContent>> = Vec::new();
-    let mut images = Vec::new();
-    let mut audios = Vec::new();
-    let mut videos = Vec::new();
-
-    let config = inference.config(None).unwrap();
-    let (prefixer, video_sampling) = match &config.category {
-        ModelCategory::Multimodal {
-            prefixer,
-            video_sampling,
-        } => (prefixer, *video_sampling),
-        _ => {
-            panic!("`add_image_message` expects a multimodal model.")
-        }
-    };
-
-    let mut sampling_params = interactive_sample_parameters(&inference);
-    let mut prev_encoder_hits: usize = 0;
-    let mut prev_encoder_misses: usize = 0;
-
-    info!("Starting interactive loop with sampling params: {sampling_params:?}");
-    println!(
-        "{}{VISION_INTERACTIVE_HELP}{COMMAND_COMMANDS}\nSampling: {}\n{}",
-        "=".repeat(20),
-        format_sampling_params(&sampling_params),
-        "=".repeat(20)
-    );
-
-    // Set the handler to process exit
-    *CTRLC_HANDLER.lock().unwrap() = &exit_handler;
-
-    ctrlc::set_handler(move || CTRLC_HANDLER.lock().unwrap()())
-        .expect("Failed to set CTRL-C handler for interactive mode");
-
-    let mut rl = DefaultEditor::new().expect("Failed to open input");
-    let _ = rl.load_history(&history_file_path());
-    'outer: loop {
-        // Set the handler to process exit
-        *CTRLC_HANDLER.lock().unwrap() = &exit_handler;
-
-        let prompt = read_line(
-            &mut rl,
-            &build_prompt(do_search, do_code_exec, do_shell, None),
-        );
-
-        let prompt_trimmed = prompt.as_str().trim();
-        if prompt_trimmed.is_empty() {
-            continue;
-        }
-        if handle_sampling_command(prompt_trimmed, &mut sampling_params) {
-            continue;
-        }
-        match prompt_trimmed {
-            HELP_CMD => {
-                println!(
-                    "{}{VISION_INTERACTIVE_HELP}{COMMAND_COMMANDS}{}",
-                    "=".repeat(20),
-                    "=".repeat(20)
-                );
-                continue;
-            }
-            EXIT_CMD => {
-                break;
-            }
-            CLEAR_CMD => {
-                messages.clear();
-                images.clear();
-                audios.clear();
-                videos.clear();
-                info!("Cleared chat history.");
-                continue;
-            }
-            _ if prompt_trimmed.starts_with(SYSTEM_CMD) => {
-                let parsed = match &prompt_trimmed.split(SYSTEM_CMD).collect::<Vec<_>>()[..] {
-                    &["", a] => a.trim(),
-                    _ => {
-                        println!(
-                            "Error: Setting the system command should be done with this format: `{SYSTEM_CMD} This is a system message.`"
-                        );
-                        continue;
-                    }
-                };
-                info!("Set system message to `{parsed}`.");
-                let mut user_message: IndexMap<String, MessageContent> = IndexMap::new();
-                user_message.insert("role".to_string(), Either::Left("system".to_string()));
-                user_message.insert("content".to_string(), Either::Left(parsed.to_string()));
-                messages.push(user_message);
-                continue;
-            }
-            _ => {
-                let (urls_image, text_without_images) =
-                    parse_files_and_message(prompt_trimmed, &image_regex);
-                let (urls_audio, text_without_audios) =
-                    parse_files_and_message(&text_without_images, &audio_regex);
-                let (urls_video, text) =
-                    parse_files_and_message(&text_without_audios, &video_regex);
-                if !urls_image.is_empty() || !urls_audio.is_empty() || !urls_video.is_empty() {
-                    // Load images
-                    let mut image_indexes = Vec::new();
-                    for url in &urls_image {
-                        match util::parse_image_url(url).await {
-                            Ok(image) => {
-                                info!("Added image at `{url}`");
-                                image_indexes.push(images.len());
-                                images.push(image);
-                            }
-                            Err(e) => {
-                                error!("Failed to read image from URL/path {}: {}", url, e);
-                                continue 'outer;
-                            }
-                        }
-                    }
-                    // Load audios and retain earlier turns so multimodal history can be
-                    // replayed with stable audio indices and matching payloads.
-                    let mut audio_indexes = Vec::new();
-                    for url in &urls_audio {
-                        match util::parse_audio_url(url).await {
-                            Ok(audio) => {
-                                info!("Added audio at `{url}`");
-                                audio_indexes.push(audios.len());
-                                audios.push(audio);
-                            }
-                            Err(e) => {
-                                error!("Failed to read audio from URL/path {}: {}", url, e);
-                                continue 'outer;
-                            }
-                        }
-                    }
-                    // Load videos
-                    let mut video_indexes = Vec::new();
-                    for url in &urls_video {
-                        match parse_video_url(url, Some(video_sampling)).await {
-                            Ok(video) => {
-                                info!("Added video at `{url}`");
-                                video_indexes.push(videos.len());
-                                videos.push(video);
-                            }
-                            Err(e) => {
-                                error!("Failed to read video from URL/path {}: {}", url, e);
-                                continue 'outer;
-                            }
-                        }
-                    }
-                    // Build mixed content parts
-                    let mut content_vec: Vec<IndexMap<String, Value>> = Vec::new();
-                    for _ in &urls_image {
-                        content_vec.push(IndexMap::from([(
-                            "type".to_string(),
-                            Value::String("image".to_string()),
-                        )]));
-                    }
-                    for _ in &urls_audio {
-                        content_vec.push(IndexMap::from([(
-                            "type".to_string(),
-                            Value::String("audio".to_string()),
-                        )]));
-                    }
-                    for _ in &urls_video {
-                        content_vec.push(IndexMap::from([(
-                            "type".to_string(),
-                            Value::String("video".to_string()),
-                        )]));
-                    }
-                    // Prefix the text with any media context
-                    let mut prefixed_text = text.clone();
-                    if !image_indexes.is_empty() {
-                        prefixed_text =
-                            prefixer.prefix_image(image_indexes.clone(), &prefixed_text);
-                    }
-                    if !audio_indexes.is_empty() {
-                        prefixed_text =
-                            prefixer.prefix_audio(audio_indexes.clone(), &prefixed_text);
-                    }
-                    if !video_indexes.is_empty() {
-                        prefixed_text =
-                            prefixer.prefix_video(video_indexes.clone(), &prefixed_text);
-                    }
-                    // Add the final text part
-                    content_vec.push(IndexMap::from([
-                        ("type".to_string(), Value::String("text".to_string())),
-                        ("text".to_string(), Value::String(prefixed_text)),
-                    ]));
-                    // Push the combined user message
-                    let mut user_message: IndexMap<String, MessageContent> = IndexMap::new();
-                    user_message.insert("role".to_string(), Either::Left("user".to_string()));
-                    user_message.insert("content".to_string(), Either::Right(content_vec));
-                    messages.push(user_message);
-                } else {
-                    // Default: handle as text-only prompt
-                    let mut user_message: IndexMap<String, MessageContent> = IndexMap::new();
-                    user_message.insert("role".to_string(), Either::Left("user".to_string()));
-                    user_message.insert(
-                        "content".to_string(),
-                        Either::Left(prompt_trimmed.to_string()),
-                    );
-                    messages.push(user_message);
-                }
-            }
-        }
-
-        // Set the handler to terminate all seqs, so allowing cancelling running
-        *CTRLC_HANDLER.lock().unwrap() = &terminate_handler;
-
-        let request_messages = RequestMessage::MultimodalChat {
-            images: images.clone(),
-            audios: audios.clone(),
-            videos: videos.clone(),
-            messages: messages.clone(),
-            enable_thinking,
-            reasoning_effort,
-        };
-
-        let (tx, mut rx) = channel(10_000);
-        let req = Request::Normal(Box::new(NormalRequest {
-            id: inference.next_request_id(),
-            queued_at: None,
-            messages: request_messages,
-            sampling_params: sampling_params.clone(),
-            seed: None,
-            response: tx,
-            return_logprobs: false,
-            is_streaming: true,
-            constraint: Constraint::None,
-            suffix: None,
-            tool_choice: None,
-            tools: None,
-            logits_processors: None,
-            return_raw_logits: false,
-            web_search_options: do_search.then(WebSearchOptions::default),
-            enable_code_execution: do_code_exec,
-            enable_shell: do_shell,
-            shell_options: None,
-            code_execution_permission: None,
-            code_execution_approval_notifier: None,
-            agent_permission: Some(agent_permission),
-            agent_approval_handler: agent_approval_callback
-                .clone()
-                .map(inference_core::AgentToolApprovalHandler::from_sync),
-            agent_approval_notifier: None,
-            session_id: if do_code_exec || do_shell {
-                Some(tool_session_id.clone())
-            } else {
-                None
-            },
-            max_tool_rounds: None,
-            tool_dispatch_url: None,
-            model_id: None,
-            adapter: None,
-            truncate_sequence: false,
-            files: None,
-            input_files: Vec::new(),
-            cancellation: None,
-        }));
-        sender.send(req).await.unwrap();
-        let start_ttft = Instant::now();
-        let (assistant_output, first_token_duration, last_usage) =
-            match stream_assistant_response(&mut rx, start_ttft).await {
-                Ok(response) => response,
-                Err(e) => {
-                    error!("{e}");
-                    break 'outer;
-                }
-            };
-
-        if let Some(last_usage) = last_usage {
-            println!();
-            println!();
-            println!("Stats:");
-            if let Some(ttft) = first_token_duration {
-                println!("CLI time to first token: {:.2?}s", ttft.as_secs_f32());
-            }
-            println!(
-                "Prompt: {} tokens, {:.2} T/s",
-                last_usage.prompt_tokens, last_usage.avg_prompt_tok_per_sec
-            );
-            println!(
-                "Decode: {} tokens, {:.2} T/s",
-                last_usage.completion_tokens, last_usage.avg_compl_tok_per_sec
-            );
-            if let Ok(logger) = inference.get_logger(None) {
-                let (prefix_hits, prefix_total) = logger.prefix_cache_stats();
-                if prefix_total > 0 {
-                    println!(
-                        "Prefix cache: {} hits / {} turns",
-                        prefix_hits, prefix_total
-                    );
-                }
-                if let Some((hits, misses)) = logger.encoder_cache_stats() {
-                    let turn_hits = hits - prev_encoder_hits;
-                    let turn_lookups = (hits + misses) - (prev_encoder_hits + prev_encoder_misses);
-                    if turn_lookups > 0 {
-                        println!("Encoder cache: {}/{} hits", turn_hits, turn_lookups);
-                    }
-                    prev_encoder_hits = hits;
-                    prev_encoder_misses = misses;
-                }
-            }
-            println!("Sampling: {}", format_sampling_params(&sampling_params));
-        }
-        messages.push(assistant_output.into_message());
-        println!();
-    }
-
-    rl.save_history(&history_file_path()).unwrap();
-}
-
-async fn audio_interactive_mode(
-    _inference: Arc<InferenceRs>,
-    _do_search: bool,
-    _do_code_exec: bool,
-    _do_shell: bool,
-    _agent_permission: AgentPermission,
-    _agent_approval_callback: Option<inference_core::AgentToolApprovalCallback>,
-    _enable_thinking: Option<bool>,
-) {
-    error!(
-        "Audio models are not supported in `inference run`. Use `inference serve` and the OpenAI-compatible /v1/chat/completions endpoint instead."
-    );
-}
-
-async fn diffusion_interactive_mode(
-    inference: Arc<InferenceRs>,
-    do_search: bool,
-    do_code_exec: bool,
-    do_shell: bool,
-    agent_permission: AgentPermission,
-    agent_approval_callback: Option<inference_core::AgentToolApprovalCallback>,
-) {
-    let sender = inference.get_sender(None).unwrap();
-    let tool_session_id = uuid::Uuid::new_v4().to_string();
-
-    let diffusion_params = DiffusionGenerationParams::default();
-
-    info!("Starting interactive loop with generation params: {diffusion_params:?}");
-    println!(
-        "{}{DIFFUSION_INTERACTIVE_HELP}{}",
-        "=".repeat(20),
-        "=".repeat(20)
-    );
-
-    // Set the handler to process exit
-    *CTRLC_HANDLER.lock().unwrap() = &exit_handler;
-
-    ctrlc::set_handler(move || CTRLC_HANDLER.lock().unwrap()())
-        .expect("Failed to set CTRL-C handler for interactive mode");
-
-    let mut rl = DefaultEditor::new().expect("Failed to open input");
-    let _ = rl.load_history(&history_file_path());
-    loop {
-        // Set the handler to process exit
-        *CTRLC_HANDLER.lock().unwrap() = &exit_handler;
-
-        let prompt = read_line(
-            &mut rl,
-            &build_prompt(do_search, do_code_exec, do_shell, None),
-        );
-
-        let prompt = match prompt.as_str().trim() {
-            "" => continue,
-            HELP_CMD => {
-                println!(
-                    "{}{DIFFUSION_INTERACTIVE_HELP}{}",
-                    "=".repeat(20),
-                    "=".repeat(20)
-                );
-                continue;
-            }
-            EXIT_CMD => {
-                break;
-            }
-            prompt => prompt.to_string(),
-        };
-
-        // Set the handler to terminate all seqs, so allowing cancelling running
-        *CTRLC_HANDLER.lock().unwrap() = &terminate_handler;
-
-        let (tx, mut rx) = channel(10_000);
-        let req = Request::Normal(Box::new(NormalRequest {
-            id: 0,
-            queued_at: None,
-            messages: RequestMessage::ImageGeneration {
-                prompt: prompt.to_string(),
-                generation_params: diffusion_params.clone(),
-            },
-            sampling_params: SamplingParams::deterministic(),
-            seed: None,
-            response: tx,
-            return_logprobs: false,
-            is_streaming: false,
-            suffix: None,
-            constraint: Constraint::None,
-            tool_choice: None,
-            tools: None,
-            logits_processors: None,
-            return_raw_logits: false,
-            web_search_options: do_search.then(WebSearchOptions::default),
-            enable_code_execution: do_code_exec,
-            enable_shell: do_shell,
-            shell_options: None,
-            code_execution_permission: None,
-            code_execution_approval_notifier: None,
-            agent_permission: Some(agent_permission),
-            agent_approval_handler: agent_approval_callback
-                .clone()
-                .map(inference_core::AgentToolApprovalHandler::from_sync),
-            agent_approval_notifier: None,
-            session_id: if do_code_exec || do_shell {
-                Some(tool_session_id.clone())
-            } else {
-                None
-            },
-            max_tool_rounds: None,
-            tool_dispatch_url: None,
-            model_id: None,
-            adapter: None,
-            truncate_sequence: false,
-            files: None,
-            input_files: Vec::new(),
-            cancellation: None,
-        }));
-
-        let start = Instant::now();
-        sender.send(req).await.unwrap();
-
-        let ResponseOk::ImageGeneration(generated) = rx.recv().await.unwrap().as_result().unwrap()
-        else {
-            panic!("Got unexpected response type.")
-        };
-        let response = match inference_core::images::image_generation_response(
-            generated.created,
-            &generated.images,
-            ImageGenerationResponseFormat::Url,
-            None,
-        ) {
-            Ok(response) => response,
-            Err(e) => {
-                error!("Failed to save the generated image: {e}");
-                continue;
-            }
-        };
-        let end = Instant::now();
-
-        let duration = end.duration_since(start).as_secs_f32();
-        let pixels_per_s = (diffusion_params.height * diffusion_params.width) as f32 / duration;
-
-        println!(
-            "Image generated can be found at: image is at `{}`. Took {duration:.2}s ({pixels_per_s:.2} pixels/s).",
-            response.data[0].url.as_ref().unwrap(),
-        );
-
-        println!();
-    }
-
-    rl.save_history(&history_file_path()).unwrap();
-}
-
-async fn speech_interactive_mode(
-    inference: Arc<InferenceRs>,
-    do_search: bool,
-    do_code_exec: bool,
-    do_shell: bool,
-    agent_permission: AgentPermission,
-    agent_approval_callback: Option<inference_core::AgentToolApprovalCallback>,
-) {
-    let sender = inference.get_sender(None).unwrap();
-    let tool_session_id = uuid::Uuid::new_v4().to_string();
-
-    info!("Starting interactive loop for speech");
-    println!(
-        "{}{SPEECH_INTERACTIVE_HELP}{}",
-        "=".repeat(20),
-        "=".repeat(20)
-    );
-
-    // Set the handler to process exit
-    *CTRLC_HANDLER.lock().unwrap() = &exit_handler;
-
-    ctrlc::set_handler(move || CTRLC_HANDLER.lock().unwrap()())
-        .expect("Failed to set CTRL-C handler for interactive mode");
-
-    let mut rl = DefaultEditor::new().expect("Failed to open input");
-    let _ = rl.load_history(&history_file_path());
-
+async fn speech_interactive_mode(engine: &Engine) {
+    println!("{BANNER}{SPEECH_INTERACTIVE_HELP}{BANNER}");
+    let mut editor = open_editor();
     let mut n = 0;
     loop {
-        // Set the handler to process exit
-        *CTRLC_HANDLER.lock().unwrap() = &exit_handler;
-
-        let prompt = read_line(
-            &mut rl,
-            &build_prompt(do_search, do_code_exec, do_shell, None),
-        );
-
-        let prompt = match prompt.as_str().trim() {
+        let prompt = match read_line(&mut editor, "> ").trim() {
             "" => continue,
             HELP_CMD => {
-                println!(
-                    "{}{SPEECH_INTERACTIVE_HELP}{}",
-                    "=".repeat(20),
-                    "=".repeat(20)
-                );
+                println!("{BANNER}{SPEECH_INTERACTIVE_HELP}{BANNER}");
                 continue;
             }
-            EXIT_CMD => {
-                break;
-            }
+            EXIT_CMD => break,
             prompt => prompt.to_string(),
         };
-
-        // Set the handler to terminate all seqs, so allowing cancelling running
-        *CTRLC_HANDLER.lock().unwrap() = &terminate_handler;
-
-        let (tx, mut rx) = channel(10_000);
-        let req = Request::Normal(Box::new(NormalRequest {
-            id: 0,
-            queued_at: None,
-            messages: RequestMessage::SpeechGeneration {
-                prompt: prompt.to_string(),
-            },
-            sampling_params: SamplingParams::deterministic(),
-            seed: None,
-            response: tx,
-            return_logprobs: false,
-            is_streaming: false,
-            suffix: None,
-            constraint: Constraint::None,
-            tool_choice: None,
-            tools: None,
-            logits_processors: None,
-            return_raw_logits: false,
-            web_search_options: do_search.then(WebSearchOptions::default),
-            enable_code_execution: do_code_exec,
-            enable_shell: do_shell,
-            shell_options: None,
-            code_execution_permission: None,
-            code_execution_approval_notifier: None,
-            agent_permission: Some(agent_permission),
-            agent_approval_handler: agent_approval_callback
-                .clone()
-                .map(inference_core::AgentToolApprovalHandler::from_sync),
-            agent_approval_notifier: None,
-            session_id: if do_code_exec || do_shell {
-                Some(tool_session_id.clone())
-            } else {
-                None
-            },
-            max_tool_rounds: None,
-            tool_dispatch_url: None,
-            model_id: None,
-            adapter: None,
-            truncate_sequence: false,
-            files: None,
-            input_files: Vec::new(),
-            cancellation: None,
-        }));
-
-        let start = Instant::now();
-        sender.send(req).await.unwrap();
-
-        let ResponseOk::Speech {
-            pcm,
-            rate,
-            channels,
-        } = rx.recv().await.unwrap().as_result().unwrap()
-        else {
-            panic!("Got unexpected response type.")
-        };
-        let end = Instant::now();
-
-        let out_file = format!("speech-{n}.wav");
-        let mut output = std::fs::File::create(&out_file).unwrap();
-        speech_utils::write_pcm_as_wav(&mut output, &pcm, rate as u32, channels as u16).unwrap();
-
-        let duration = end.duration_since(start).as_secs_f32();
-        println!("Speech generated can be found at `{out_file}`. Took {duration:.2}s.");
-
-        n += 1;
-
+        let out_file = format!("{SPEECH_FILE_PREFIX}{n}.wav");
+        match generate_speech(engine, &prompt, &out_file).await {
+            Ok(duration) => {
+                println!("Speech generated can be found at `{out_file}`. Took {duration:.2}s.");
+                n += 1;
+            }
+            Err(e) => error!("{e}"),
+        }
         println!();
     }
+    editor.save_history(&history_file_path()).unwrap();
+}
 
-    rl.save_history(&history_file_path()).unwrap();
+async fn generate_speech(engine: &Engine, prompt: &str, out_file: &str) -> anyhow::Result<f32> {
+    let request: SpeechGenerationRequest =
+        serde_json::from_value(json!({"input": prompt, "response_format": "wav"}))?;
+    let start = Instant::now();
+    let audio = engine
+        .speech_generation(request)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let duration = start.elapsed().as_secs_f32();
+    fs::write(out_file, audio.bytes)?;
+    Ok(duration)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn interactive_fallback_uses_broad_sampling_defaults() {
-        let params = interactive_fallback_sample_parameters();
-        assert_eq!(params.temperature, Some(INTERACTIVE_FALLBACK_TEMPERATURE));
-        assert_eq!(params.top_k, Some(INTERACTIVE_FALLBACK_TOP_K));
-        assert_eq!(params.top_p, Some(INTERACTIVE_FALLBACK_TOP_P));
-        assert_eq!(params.min_p, Some(INTERACTIVE_FALLBACK_MIN_P));
-    }
 
     #[test]
     fn parse_files_and_message_trims_trailing_punctuation() {
@@ -2162,5 +579,25 @@ mod tests {
             parse_adapter_command("/adapter none"),
             Some(AdapterCommand::Base)
         );
+    }
+
+    #[tokio::test]
+    async fn a_prompt_naming_media_becomes_media_parts_and_text() {
+        let dir = tempfile::tempdir().unwrap();
+        let image = dir.path().join("cat.png");
+        fs::write(&image, b"png").unwrap();
+        let regexes = media_regexes();
+        let mut media = SessionMedia::default();
+        let prompt = format!("Describe {}", image.display());
+        let message = media_user_message(&prompt, &regexes, &mut media)
+            .await
+            .unwrap();
+        assert_eq!(message["content"][0]["type"], "image_url");
+        assert_eq!(message["content"][0]["image_url"]["url"], "media://0");
+        assert_eq!(message["content"][1]["text"], "Describe");
+        let plain = media_user_message("hello", &regexes, &mut media)
+            .await
+            .unwrap();
+        assert_eq!(plain["content"], "hello");
     }
 }
