@@ -1,17 +1,20 @@
 //! Quantize command implementation for UQFF generation
 
-use inference_selection::quant::{is_confident_gguf_artifact_repo, selected_model_files};
 use std::collections::{BTreeMap, HashSet};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tracing::{info, warn};
 
 use inference_api::{Engine, EngineSpec, engine::RuntimeSpec};
-use inference_core::{IsqType, TokenSource, UqffWriteConfig, expand_isq_value, initialize_logging};
-use inference_selection::ModelSelected;
+use inference_core::{IsqType, UqffWriteConfig, expand_isq_value, initialize_logging};
+use inference_selection::{
+    ModelSelected,
+    quant::{QuantPolicy, resolve_model_source},
+};
 
+use super::serve::{gguf_filename, gguf_mmproj_selection, require_projector};
 use crate::args::{
     GlobalOptions, QuantizeDeviceOptions, QuantizeModelFormat, QuantizeModelSourceOptions,
     QuantizeModelType, QuantizeMultimodalOptions, QuantizeQuantizationOptions,
@@ -50,35 +53,6 @@ fn get_model_id(model_type: &QuantizeModelType) -> &str {
     }
 }
 
-fn get_model_source(model_type: &QuantizeModelType) -> Option<&QuantizeModelSourceOptions> {
-    match model_type {
-        QuantizeModelType::Auto { model, .. }
-        | QuantizeModelType::Text { model, .. }
-        | QuantizeModelType::Multimodal { model, .. } => Some(model),
-        QuantizeModelType::Embedding { .. } => None,
-    }
-}
-
-fn get_model_source_mut(
-    model_type: &mut QuantizeModelType,
-) -> Option<&mut QuantizeModelSourceOptions> {
-    match model_type {
-        QuantizeModelType::Auto { model, .. }
-        | QuantizeModelType::Text { model, .. }
-        | QuantizeModelType::Multimodal { model, .. } => Some(model),
-        QuantizeModelType::Embedding { .. } => None,
-    }
-}
-
-fn get_device_options(model_type: &QuantizeModelType) -> &QuantizeDeviceOptions {
-    match model_type {
-        QuantizeModelType::Auto { device, .. }
-        | QuantizeModelType::Text { device, .. }
-        | QuantizeModelType::Multimodal { device, .. }
-        | QuantizeModelType::Embedding { device, .. } => device,
-    }
-}
-
 /// Extract the no_readme flag from the QuantizeModelType
 fn get_no_readme(model_type: &QuantizeModelType) -> bool {
     match model_type {
@@ -101,105 +75,14 @@ fn get_readme_overrides(model_type: &QuantizeModelType) -> (Option<String>, Opti
     }
 }
 
-fn resolve_gguf_source(
-    model_type: &mut QuantizeModelType,
-    token_source: &TokenSource,
-) -> Result<()> {
-    if let Some(path) = get_device_options(model_type).hf_cache.clone() {
-        inference_core::set_hf_cache_path(path);
-    }
-    let explicit_multimodal = matches!(model_type, QuantizeModelType::Multimodal { .. });
-    let Some(model) = get_model_source_mut(model_type) else {
-        return Ok(());
-    };
-    let model_id = model
-        .model_id
-        .as_deref()
-        .expect("quantize model source was normalized")
-        .to_string();
-    let requested = model.quant.clone();
-    let exact_file = model.format.quantized_file.clone();
-    let explicit_gguf = matches!(model.format.format, Some(QuantizeModelFormat::Gguf));
-
-    let should_inspect = requested.is_some() || (explicit_gguf && exact_file.is_some());
-    let files = should_inspect
-        .then(|| selected_model_files(&model_id, exact_file.as_deref(), token_source))
-        .transpose()?
-        .flatten();
-    let confident_gguf = files
-        .as_ref()
-        .is_some_and(|files| is_confident_gguf_artifact_repo(&model_id, files));
-
-    if let Some(requested) = requested.as_deref() {
-        let files = files.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "Could not inspect GGUF artifacts for `{model_id}`. Pass `-f <filename.gguf>` \
-                 explicitly or check repository access."
-            )
-        })?;
-        if !inference_selection::quant::has_gguf_model_files(files) {
-            anyhow::bail!(
-                "`--quant {requested}` selects an input GGUF artifact, but `{model_id}` has no \
-                 model GGUF files"
-            );
-        }
-        if !explicit_gguf && !confident_gguf {
-            anyhow::bail!(
-                "`{model_id}` contains GGUF files alongside another model format. Pass \
-                 `--format gguf` to use `--quant {requested}` as the input artifact selector."
-            );
-        }
-
-        let artifact = inference_selection::quant::resolve_gguf_quant(files, requested)?;
-        info!(
-            "quantize: --quant {requested} -> input GGUF {} from `{model_id}`",
-            artifact.label
-        );
-        model.format.format = Some(QuantizeModelFormat::Gguf);
-        model.format.quantized_file = Some(artifact.file_spec());
-    }
-
-    if matches!(model.format.format, Some(QuantizeModelFormat::Gguf)) {
-        let quantized_file = model.format.quantized_file.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "GGUF input requires a model file. Pass `-f <model.gguf>`, or use \
-                 `-m <GGUF-repo> --quant <level>` to select one automatically."
-            )
-        })?;
-
-        if model.format.mmproj.is_none()
-            && (confident_gguf || explicit_multimodal || model.format.direct_file_only)
-            && let Some(files) = files.as_ref()
-            && let Some(projector) =
-                inference_selection::quant::resolve_gguf_projector(files, model.dtype)?
-        {
-            info!(
-                "GGUF: selected {} projector `{}`",
-                projector.label,
-                projector.file_spec()
-            );
-            model.format.mmproj = Some(projector.file_spec());
-        }
-
-        if quantized_file.is_empty() {
-            anyhow::bail!("`--quantized-file` must contain nonempty filenames");
-        }
-    }
-
-    Ok(())
-}
-
 /// Run UQFF quantization and generation, supporting multiple ISQ types.
-pub async fn run_quantize(mut model_type: QuantizeModelType, global: GlobalOptions) -> Result<()> {
+pub async fn run_quantize(model_type: QuantizeModelType, global: GlobalOptions) -> Result<()> {
     initialize_logging();
-    resolve_gguf_source(&mut model_type, &global.token_source)?;
 
     let isq_values = get_isq_values(&model_type);
     let base_output = get_output_path(&model_type).clone();
     let file_mode = base_output.extension().is_some_and(|ext| ext == "uqff");
     let model_id = get_model_id(&model_type).to_string();
-    let is_multimodal = matches!(&model_type, QuantizeModelType::Multimodal { .. })
-        || get_model_source(&model_type).is_some_and(|model| model.format.mmproj.is_some());
     let no_readme = get_no_readme(&model_type);
     let (flag_base_model, flag_repo_id) = get_readme_overrides(&model_type);
 
@@ -232,10 +115,8 @@ pub async fn run_quantize(mut model_type: QuantizeModelType, global: GlobalOptio
     let effective_output = if file_mode {
         base_output.clone()
     } else if expanded_isq.len() == 1 {
-        std::fs::create_dir_all(&base_output)?;
         base_output.join(format!("{}.uqff", expanded_isq[0]))
     } else {
-        std::fs::create_dir_all(&base_output)?;
         base_output.clone()
     };
     let write_uqff = UqffWriteConfig::with_types(effective_output.clone(), expanded_isq.clone())
@@ -249,13 +130,31 @@ pub async fn run_quantize(mut model_type: QuantizeModelType, global: GlobalOptio
         .collect::<Vec<_>>()
         .join(", ");
 
+    let (model_selected, cpu, device_layers) = convert_to_model_selected(&model_type, write_uqff)?;
+    let model_selected = resolve_model_source(
+        model_selected,
+        &global.token_source,
+        cpu,
+        QuantPolicy::GgufInput,
+    )
+    .await?
+    .model;
+    if !file_mode {
+        std::fs::create_dir_all(&base_output)?;
+    }
     info!(
         "Starting UQFF generation for ISQ=[{}] -> `{}`",
         requested,
         effective_output.display()
     );
-
-    let (model_selected, cpu, device_layers) = convert_to_model_selected(&model_type, write_uqff)?;
+    let is_multimodal = matches!(&model_type, QuantizeModelType::Multimodal { .. })
+        || matches!(
+            &model_selected,
+            ModelSelected::GGUF {
+                mmproj_filename: Some(_),
+                ..
+            }
+        );
 
     // Loading with write_uqff set writes the files; the engine is shut down once it has.
     let spec = EngineSpec {
@@ -515,7 +414,7 @@ fn convert_to_model_selected(
                     .model_id
                     .clone()
                     .expect("quantize model source was normalized"),
-                quant: None,
+                quant: model.quant.clone(),
                 tokenizer_json: model
                     .tokenizer
                     .as_ref()
@@ -558,7 +457,7 @@ fn convert_to_model_selected(
                 QuantizeModelFormat::Plain => {}
             }
             let model_selected = ModelSelected::Plain {
-                quant: None,
+                quant: model.quant.clone(),
                 model_id: model
                     .model_id
                     .clone()
@@ -596,25 +495,20 @@ fn convert_to_model_selected(
         } => {
             match model.format.format.unwrap_or(QuantizeModelFormat::Plain) {
                 QuantizeModelFormat::Gguf => {
-                    if model.format.mmproj.is_none() {
-                        anyhow::bail!(
-                            "No companion projector was found for this multimodal GGUF; pass \
-                             `--mmproj <filename>` to select one explicitly"
-                        );
-                    }
                     let selected = convert_gguf_source(
                         model,
                         quantization,
                         device,
                         Some(multimodal),
                         write_uqff,
-                    )?;
+                    )
+                    .map(require_projector)?;
                     return Ok((selected, device.cpu, device.device_layers.clone()));
                 }
                 QuantizeModelFormat::Plain => {}
             }
             let model_selected = ModelSelected::MultimodalPlain {
-                quant: None,
+                quant: model.quant.clone(),
                 model_id: model
                     .model_id
                     .clone()
@@ -684,18 +578,17 @@ fn convert_gguf_source(
     write_uqff: UqffWriteConfig,
 ) -> Result<ModelSelected> {
     Ok(ModelSelected::GGUF {
-        quant: None,
-        mmproj_selection: inference_selection::MmprojSelection::Given,
+        quant: model.quant.clone(),
+        mmproj_selection: gguf_mmproj_selection(model.format.direct_file_only),
         tok_model_id: model.format.tok_model_id.clone(),
         quantized_model_id: model
             .model_id
             .clone()
             .expect("quantize model source was normalized"),
-        quantized_filename: model
-            .format
-            .quantized_file
-            .clone()
-            .context("GGUF input requires `--quantized-file`/`-f`")?,
+        quantized_filename: gguf_filename(
+            model.format.quantized_file.as_deref(),
+            model.quant.as_deref(),
+        )?,
         tokenizer_json: model
             .tokenizer
             .as_ref()
@@ -786,8 +679,25 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn gguf_artifact_and_projector_are_selected_for_uqff_output() {
+    async fn resolved(
+        model_type: &QuantizeModelType,
+        output: &Path,
+        isq: IsqType,
+    ) -> Result<ModelSelected> {
+        let write_uqff = UqffWriteConfig::with_types(output.to_path_buf(), vec![isq]);
+        let (selected, _, _) = convert_to_model_selected(model_type, write_uqff)?;
+        let resolved = resolve_model_source(
+            selected,
+            &inference_core::TokenSource::None,
+            true,
+            QuantPolicy::GgufInput,
+        )
+        .await?;
+        Ok(resolved.model)
+    }
+
+    #[tokio::test]
+    async fn gguf_artifact_and_projector_are_selected_for_uqff_output() {
         let root = std::env::temp_dir().join(format!("inference-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         for file in [
@@ -799,7 +709,7 @@ mod tests {
             fs::write(root.join(file), []).unwrap();
         }
         let output = root.join("output.uqff");
-        let mut model_type = parse(&[
+        let model_type = parse(&[
             "-m",
             &root.to_string_lossy(),
             "--quant",
@@ -811,19 +721,9 @@ mod tests {
             "-o",
             &output.to_string_lossy(),
         ]);
-
-        resolve_gguf_source(&mut model_type, &TokenSource::None).unwrap();
-        let source = get_model_source(&model_type).expect("GGUF model source");
-        assert_eq!(source.format.format, Some(QuantizeModelFormat::Gguf));
-        assert_eq!(
-            source.format.quantized_file.as_deref(),
-            Some("model-Q4_K_M.gguf")
-        );
-        assert_eq!(source.format.mmproj.as_deref(), Some("mmproj-BF16.gguf"));
         assert_eq!(get_isq_values(&model_type), ["q8_0"]);
 
-        let write_uqff = UqffWriteConfig::with_types(output.clone(), vec![IsqType::Q8_0]);
-        let (selected, _, _) = convert_to_model_selected(&model_type, write_uqff).unwrap();
+        let selected = resolved(&model_type, &output, IsqType::Q8_0).await.unwrap();
         let ModelSelected::GGUF {
             quantized_filename,
             mmproj_filename,
@@ -842,14 +742,14 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn exact_gguf_preserves_asset_and_projector_overrides() {
+    #[tokio::test]
+    async fn exact_gguf_preserves_asset_and_projector_overrides() {
         let root = std::env::temp_dir().join(format!("inference-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("model-Q4_K_M.gguf"), []).unwrap();
         fs::write(root.join("custom-mmproj.gguf"), []).unwrap();
         let output = root.join("output.uqff");
-        let mut model_type = parse(&[
+        let model_type = parse(&[
             "-m",
             &root.to_string_lossy(),
             "-f",
@@ -864,13 +764,7 @@ mod tests {
             &output.to_string_lossy(),
         ]);
 
-        resolve_gguf_source(&mut model_type, &TokenSource::None).unwrap();
-        let selected = convert_to_model_selected(
-            &model_type,
-            UqffWriteConfig::with_types(output, vec![IsqType::Q5K]),
-        )
-        .unwrap()
-        .0;
+        let selected = resolved(&model_type, &output, IsqType::Q5K).await.unwrap();
         let ModelSelected::GGUF {
             tok_model_id,
             quantized_filename,
@@ -887,8 +781,8 @@ mod tests {
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn direct_local_gguf_discovers_only_a_sibling_projector() {
+    #[tokio::test]
+    async fn direct_local_gguf_discovers_only_a_sibling_projector() {
         let root = std::env::temp_dir().join(format!("inference-{}", uuid::Uuid::new_v4()));
         let unrelated = root.join("unrelated");
         fs::create_dir_all(&unrelated).unwrap();
@@ -898,7 +792,7 @@ mod tests {
         fs::write(root.join("model.safetensors"), []).unwrap();
         fs::write(unrelated.join("mmproj-BF16.gguf"), []).unwrap();
         let output = root.join("output.uqff");
-        let mut model_type = parse(&[
+        let model_type = parse(&[
             "-f",
             &model_path.to_string_lossy(),
             "--isq",
@@ -907,24 +801,28 @@ mod tests {
             &output.to_string_lossy(),
         ]);
 
-        let resolved = resolve_gguf_source(&mut model_type, &TokenSource::None);
-
-        resolved.unwrap();
-        let source = get_model_source(&model_type).expect("GGUF model source");
-        assert_eq!(source.format.quantized_file.as_deref(), Some("model.gguf"));
-        assert_eq!(source.format.mmproj.as_deref(), Some("mmproj-BF16.gguf"));
-        assert!(source.format.direct_file_only);
+        let selected = resolved(&model_type, &output, IsqType::Q4K).await.unwrap();
+        let ModelSelected::GGUF {
+            quantized_filename,
+            mmproj_filename,
+            ..
+        } = selected
+        else {
+            panic!("expected GGUF source")
+        };
+        assert_eq!(quantized_filename, "model.gguf");
+        assert_eq!(mmproj_filename.as_deref(), Some("mmproj-BF16.gguf"));
 
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn multimodal_gguf_requires_a_projector() {
+    #[tokio::test]
+    async fn multimodal_gguf_requires_a_projector() {
         let root = std::env::temp_dir().join(format!("inference-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("model-Q4_K_M.gguf"), []).unwrap();
         let output = root.join("output.uqff");
-        let mut model_type = parse(&[
+        let model_type = parse(&[
             "multimodal",
             "-m",
             &root.to_string_lossy(),
@@ -936,19 +834,16 @@ mod tests {
             &output.to_string_lossy(),
         ]);
 
-        resolve_gguf_source(&mut model_type, &TokenSource::None).unwrap();
-        let error = convert_to_model_selected(
-            &model_type,
-            UqffWriteConfig::with_types(output, vec![IsqType::Q4K]),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("projector"));
+        let error = resolved(&model_type, &output, IsqType::Q4K)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("projector"), "{error}");
 
         fs::remove_dir_all(root).unwrap();
     }
 
-    #[test]
-    fn mixed_source_directory_requires_explicit_gguf_format() {
+    #[tokio::test]
+    async fn mixed_source_directory_requires_explicit_gguf_format() {
         let root = std::env::temp_dir().join(format!("inference-{}", uuid::Uuid::new_v4()));
         fs::create_dir_all(&root).unwrap();
         fs::write(root.join("model-Q4_K_M.gguf"), []).unwrap();
@@ -967,22 +862,20 @@ mod tests {
             output_arg.as_str(),
         ];
 
-        let mut ambiguous = parse(&args);
-        let error = resolve_gguf_source(&mut ambiguous, &TokenSource::None).unwrap_err();
-        assert!(error.to_string().contains("--format gguf"));
+        let ambiguous = parse(&args);
+        let error = resolved(&ambiguous, &output, IsqType::Q8_0)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("--format gguf"), "{error}");
 
         let mut explicit_args = args.to_vec();
         explicit_args.extend(["--format", "gguf"]);
-        let mut explicit = parse(&explicit_args);
-        resolve_gguf_source(&mut explicit, &TokenSource::None).unwrap();
-        assert_eq!(
-            get_model_source(&explicit)
-                .expect("GGUF model source")
-                .format
-                .quantized_file
-                .as_deref(),
-            Some("model-Q4_K_M.gguf")
-        );
+        let explicit = parse(&explicit_args);
+        let selected = resolved(&explicit, &output, IsqType::Q8_0).await.unwrap();
+        assert!(matches!(
+            selected,
+            ModelSelected::GGUF { ref quantized_filename, .. } if quantized_filename == "model-Q4_K_M.gguf"
+        ));
 
         fs::remove_dir_all(root).unwrap();
     }

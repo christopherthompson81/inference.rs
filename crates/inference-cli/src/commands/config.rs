@@ -64,8 +64,7 @@ async fn run_serve_config(cfg: crate::config::ServeConfig) -> Result<()> {
         skills_root: Some(skills_root(&runtime)),
         adapters: adapter_spec_from_env(),
         throughput_logging: true,
-    })
-    .await?;
+    })?;
     serve_engine(spec, &server, &runtime).await
 }
 
@@ -99,8 +98,7 @@ async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {
         skills_root: None,
         adapters: Default::default(),
         throughput_logging: false,
-    })
-    .await?;
+    })?;
     let engine = Engine::load(spec).await?;
     if let Some(alias) = adapter.as_deref() {
         require_adapter(&engine, alias).await?;
@@ -134,10 +132,9 @@ async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {
     Ok(())
 }
 
-async fn build_model_specs(
+fn build_model_specs(
     models: &[crate::config::ModelEntry],
     runtime: &RuntimeOptions,
-    token_source: &inference_core::TokenSource,
 ) -> Result<(Vec<ModelSpec>, bool)> {
     let mut cpu_setting: Option<bool> = None;
     for entry in models {
@@ -168,14 +165,11 @@ async fn build_model_specs(
                 .clone()
                 .or_else(|| runtime.matformer_slice_name.clone()),
         };
-        crate::commands::serve::apply_quant_resolution(&mut model_type, token_source, &matformer)
-            .await?;
+        crate::commands::serve::normalize_quant_flags(&mut model_type)?;
         let model = convert_to_model_selected(&model_type, &matformer)?;
-        let resolved_loader_id = crate::commands::serve::model_id_of(&model_type);
         specs.push(ModelSpec {
             model,
-            // An entry whose id resolved to another loader id keeps its own as the id requests use.
-            model_id: (resolved_loader_id != entry.model_id).then(|| entry.model_id.clone()),
+            model_id: None,
             chat_template: entry
                 .chat_template
                 .as_ref()
@@ -212,9 +206,8 @@ struct ConfigSpecInputs<'a> {
 }
 
 /// The engine a TOML config loads: every model it lists, sharing its runtime settings.
-async fn config_spec(inputs: ConfigSpecInputs<'_>) -> Result<EngineSpec> {
-    let (models, cpu) =
-        build_model_specs(inputs.models, inputs.runtime, &inputs.global.token_source).await?;
+fn config_spec(inputs: ConfigSpecInputs<'_>) -> Result<EngineSpec> {
+    let (models, cpu) = build_model_specs(inputs.models, inputs.runtime)?;
     let (paged_attn, memory_mb, memory_fraction, context_len, block_size, cache_type) =
         inputs.paged_attn.into_builder_flags();
     let base = RuntimeSpec {
@@ -280,13 +273,7 @@ mmproj = "mmproj-BF16.gguf"
             unreachable!()
         };
 
-        let (models, cpu) = build_model_specs(
-            &config.models,
-            &config.runtime,
-            &inference_core::TokenSource::None,
-        )
-        .await
-        .unwrap();
+        let (models, cpu) = build_model_specs(&config.models, &config.runtime).unwrap();
         assert_eq!(models.len(), 1);
         assert!(!cpu);
 
@@ -321,13 +308,7 @@ lora = [
         };
         assert!(config.models[0].adapter.dynamic_lora_enabled());
 
-        let (models, cpu) = build_model_specs(
-            &config.models,
-            &config.runtime,
-            &inference_core::TokenSource::None,
-        )
-        .await
-        .unwrap();
+        let (models, cpu) = build_model_specs(&config.models, &config.runtime).unwrap();
         assert_eq!(models.len(), 1);
         assert!(!cpu);
 
@@ -378,7 +359,6 @@ model_id = "{}"
             adapters: Default::default(),
             throughput_logging: true,
         })
-        .await
         .unwrap();
         assert!(spec.model.is_none());
         assert_eq!(spec.models.len(), 2);

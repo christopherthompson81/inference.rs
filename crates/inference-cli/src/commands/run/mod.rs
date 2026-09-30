@@ -15,7 +15,7 @@ use inference_core::initialize_logging;
 
 use super::normalize_requested_adapter;
 use super::serve::{
-    EngineSpecInputs, apply_agent_mode, apply_quant_resolution, engine_spec, log_agent_runtime,
+    EngineSpecInputs, apply_agent_mode, engine_spec, log_agent_runtime, normalize_quant_flags,
     validate_agent_options,
 };
 use crate::args::{AgentCliOptions, GlobalOptions, ModelType, RuntimeOptions, SandboxOptions};
@@ -45,10 +45,7 @@ pub async fn run_interactive(
     apply_agent_mode(&mut runtime);
     validate_agent_options(&runtime)?;
     log_agent_runtime(&runtime, None);
-
-    // Convert our clean args to ModelSelected
-    let matformer = runtime.matformer_selection();
-    apply_quant_resolution(&mut model_type, &global.token_source, &matformer).await?;
+    normalize_quant_flags(&mut model_type)?;
     let spec = run_spec(&model_type, &runtime, sandbox, &global)?;
     let engine = Engine::load(spec).await?;
     if let Some(alias) = request_adapter.as_deref() {

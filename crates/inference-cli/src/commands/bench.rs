@@ -16,7 +16,7 @@ use tracing::info;
 use crate::args::{BenchRuntimeOptions, GlobalOptions, ModelType};
 
 use super::normalize_requested_adapter;
-use super::serve::{apply_quant_resolution, model_spec, mtp_spec};
+use super::serve::{model_spec, mtp_spec, normalize_quant_flags};
 
 /// The engine a benchmark measures: the model as `serve` would load it, run one sequence at a time.
 fn bench_spec(
@@ -141,8 +141,7 @@ pub async fn run_bench(
     // Get model ID for display
     let model_id = get_model_id(&model_type);
     // Convert args and load model
-    let matformer = runtime.matformer_selection();
-    apply_quant_resolution(&mut model_type, &global.token_source, &matformer).await?;
+    normalize_quant_flags(&mut model_type)?;
     info!("Loading model for benchmarking...");
     let spec = bench_spec(&model_type, &runtime, &global)?;
     let engine = Engine::load(spec).await?;
