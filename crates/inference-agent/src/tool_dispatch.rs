@@ -7,14 +7,12 @@ use tokenizers::InputSequence;
 
 use image::DynamicImage;
 
-use crate::{
-    ToolCallResponse, ToolCallbackKind, WebSearchOptions, WebSearchReturnTokenBudget,
-    get_mut_arcmutex,
-    request::SearchContextSize,
-    search::{self, ExtractFunctionParameters, SearchFunctionParameters, SearchResult},
+use inference_core::{
+    Engine, SearchContextSize, SearchFunctionParameters, SearchResult, ToolCallResponse,
+    ToolCallbackKind, WebSearchOptions, WebSearchReturnTokenBudget,
 };
 
-use super::Engine;
+use crate::search::{self, ExtractFunctionParameters, ExtractResult};
 
 const LOW_SEARCH_TOKEN_BUDGET: usize = 4096;
 const MEDIUM_SEARCH_TOKEN_BUDGET: usize = 8192;
@@ -22,7 +20,7 @@ const HIGH_SEARCH_TOKEN_BUDGET: usize = 16384;
 const UNLIMITED_SEARCH_TOKEN_BUDGET: usize = HIGH_SEARCH_TOKEN_BUDGET;
 
 /// Tool call result, possibly multimodal.
-pub(super) struct ToolResult {
+pub(crate) struct ToolResult {
     pub content: String,
     pub images: Vec<DynamicImage>,
     pub video_frames: Vec<DynamicImage>,
@@ -103,7 +101,7 @@ fn apply_search_filters(results: Vec<SearchResult>, opts: &WebSearchOptions) -> 
         .collect()
 }
 
-pub(super) async fn execute_search(
+pub(crate) async fn execute_search(
     engine: &Arc<Engine>,
     tc: &ToolCallResponse,
     opts: &WebSearchOptions,
@@ -124,12 +122,12 @@ pub(super) async fn execute_search(
     tracing::debug!("Called search tool with query `{}`.", params.query);
 
     let start = Instant::now();
-    let tokenizer = get_mut_arcmutex!(engine.pipeline)
+    let tokenizer = engine
         .tokenizer()
         .expect("A tokenizer is expected for non-diffusion models.");
     let max_toks = token_budget(opts);
 
-    let base: Vec<SearchResult> = if let Some(cb) = &engine.search_callback {
+    let base: Vec<SearchResult> = if let Some(cb) = engine.search_callback() {
         match tokio::task::block_in_place(|| cb(&params)) {
             Ok(r) => r,
             Err(e) => {
@@ -153,7 +151,8 @@ pub(super) async fn execute_search(
         tokio::task::block_in_place(|| {
             base.into_iter()
                 .map(|mut r| {
-                    r = r.cap_content_len(&tokenizer, max_toks).unwrap();
+                    r.content =
+                        search::truncate_to_tokens(r.content, &tokenizer, max_toks).unwrap();
                     let len = {
                         let inp = InputSequence::Raw(Cow::from(&r.content));
                         tokenizer
@@ -180,12 +179,13 @@ pub(super) async fn execute_search(
     let mut used_results = Vec::new();
     let mut used_len = 0;
 
-    match &mut *get_mut_arcmutex!(engine.search_pipeline) {
-        Some(search_pipeline) => {
-            let ranked_chunks =
-                search::rag::rank_document_chunks(&params.query, &results, search_pipeline)
-                    .unwrap();
-
+    let ranked = engine.with_search_embedder(|embedder| {
+        embedder.map(|embedder| {
+            crate::rag::rank_document_chunks(&params.query, &results, embedder).unwrap()
+        })
+    });
+    match ranked {
+        Some(ranked_chunks) => {
             if ranked_chunks.is_empty() {
                 for (result, len) in results.iter().zip(result_token_lens.iter()) {
                     if used_len + len > max_toks {
@@ -209,7 +209,7 @@ pub(super) async fn execute_search(
                 }
             }
         }
-        _ => {
+        None => {
             tracing::warn!(
                 "No embedding model loaded; falling back to BM25 ranking for web search results."
             );
@@ -275,7 +275,7 @@ pub(super) async fn execute_search(
     }
 }
 
-pub(super) async fn execute_extraction(
+pub(crate) async fn execute_extraction(
     engine: &Arc<Engine>,
     tc: &ToolCallResponse,
     opts: &WebSearchOptions,
@@ -296,7 +296,7 @@ pub(super) async fn execute_extraction(
     tracing::debug!("Called extraction tool with url `{}`.", params.url);
 
     let start = Instant::now();
-    let tokenizer = get_mut_arcmutex!(engine.pipeline)
+    let tokenizer = engine
         .tokenizer()
         .expect("A tokenizer is expected for non-diffusion models.");
     let max_toks = token_budget(opts);
@@ -317,8 +317,11 @@ pub(super) async fn execute_extraction(
                 files: vec![],
             };
         };
-        match raw.cap_content_len(&tokenizer, max_toks) {
-            Ok(r) => r,
+        match search::truncate_to_tokens(raw.content, &tokenizer, max_toks) {
+            Ok(content) => ExtractResult {
+                url: raw.url,
+                content,
+            },
             Err(e) => {
                 tracing::error!("Failed to cap extraction content: {e}");
                 return ToolResult {
@@ -359,14 +362,14 @@ pub(super) async fn execute_extraction(
     }
 }
 
-pub(super) fn execute_custom_tool(
+pub(crate) fn execute_custom_tool(
     engine: &Engine,
     tc: &ToolCallResponse,
     ctx: &inference_mcp::ToolCallContext,
 ) -> ToolResult {
     let name = &tc.function.name;
 
-    let Some(cb_with_tool) = engine.tool_callbacks.get(name) else {
+    let Some(cb_with_tool) = engine.tool_callbacks().get(name) else {
         tracing::error!("Tool `{name}` not found in registered callbacks.");
         return ToolResult {
             content: serde_json::json!({
@@ -424,7 +427,7 @@ pub(super) fn execute_custom_tool(
 }
 
 /// POST `{"name": ..., "arguments": ...}` to `url`. Expects `{"content": "..."}` back.
-pub(super) fn execute_http_tool(tc: &ToolCallResponse, url: &str) -> ToolResult {
+pub(crate) fn execute_http_tool(tc: &ToolCallResponse, url: &str) -> ToolResult {
     let name = &tc.function.name;
     let args: serde_json::Value = serde_json::from_str(&tc.function.arguments)
         .unwrap_or(serde_json::Value::String(tc.function.arguments.clone()));
@@ -467,7 +470,7 @@ fn _http_post(url: &str, payload: &serde_json::Value) -> anyhow::Result<String> 
     let version = env!("CARGO_PKG_VERSION");
     let user_agent = format!("inference/{version} ({OS}; {ARCH}; {FAMILY})");
 
-    let client = crate::remote_fetch::blocking_http_client_builder().build()?;
+    let client = inference_core::remote_fetch::blocking_http_client_builder().build()?;
     let response = client
         .post(url)
         .header("User-Agent", &user_agent)

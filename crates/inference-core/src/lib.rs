@@ -11,10 +11,9 @@
     allow(dead_code, unused_imports, unused_macros)
 )]
 use candle_core::Device;
-use engine::Engine;
 pub use engine::{
-    DEFAULT_MAX_TOOL_ROUNDS, ENGINE_INSTRUCTIONS, EngineInstruction, IntervalLogger,
-    SearchEmbeddingModel, TERMINATE_ALL_NEXT_STEP,
+    AgentRunner, DEFAULT_MAX_TOOL_ROUNDS, ENGINE_INSTRUCTIONS, Engine, EngineInstruction,
+    IntervalLogger, SearchEmbeddingModel, TERMINATE_ALL_NEXT_STEP, agent, agentic_session,
     agentic_session::{AgenticSessionStore, SerializedSession, SerializedVideo},
     get_engine_terminate_flag, reset_engine_terminate_flag, should_terminate_engine_sequences,
 };
@@ -97,7 +96,7 @@ pub use video_input::{
     DEFAULT_VIDEO_FRAME_LIMIT, VideoFrameSampling, VideoInput, sample_frame_indices,
 };
 mod embedding_models;
-mod search;
+pub mod search;
 
 pub use selection::model_selected::ModelSelected;
 
@@ -229,7 +228,7 @@ pub use scheduler::{
     DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_NUM_BATCHED_TOKENS,
     DEFAULT_MAX_PREFILL_CHUNK_TOKENS, DefaultSchedulerMethod, SchedulerConfig, SchedulerLimits,
 };
-pub use search::{SearchCallback, SearchFunctionParameters, SearchResult};
+pub use search::{SearchCallback, SearchEmbedder, SearchFunctionParameters, SearchResult};
 use serde::Serialize;
 pub use speculative::{
     MtpConfig, MtpDraftSamplingMethod, MtpRuntimeConfig, SpeculativeConfig,

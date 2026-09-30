@@ -1001,3 +1001,17 @@ Review follow-ups:
     test takes 29.5 s.
   - The last unit is now the CLI test binary (t=208-227 s). Core's lib test ends at 222.3 s, server-core's integration
     binary at 222.7 s and the webui lib test at 219.3 s.
+
+## Run 50 - 2026-09-29
+
+- Change: the agent layer (the tool-calling loop, tool dispatch, web search and ranking) moved from core to
+  `inference-agent` behind core's `AgentRunner` seam. Core IR fell from 2,508,386 to 2,230,180 lines. See
+  `core_responsibilities_investigation.md` Runs 2-3.
+- Command: the Run 39 cold build. Load was 3.35 at the start, so the comparison is with Run 49's loaded run.
+- Result:
+  - Wall 245.2 s (243.4 s) and 2,292 unit-seconds (2,262).
+  - Core's lib takes 66.8 s (70.5 s) and its lib test 85.3 s (94.5 s).
+  - The agent crate takes 16.7 s; inference-api waits 1.6 s for its metadata.
+  - The last unit is still the CLI test binary, which follows the inference-api lib test.
+- Implication: wall time is now set by the inference-api to CLI chain, not by core.
+

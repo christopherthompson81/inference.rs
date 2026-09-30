@@ -30,7 +30,7 @@ cargo install --path crates/inference-cli --features <features>
 ### Testing & Quality
 ```bash
 # Run core tests
-cargo test -p inference-core -p inference-protocol -p inference-nn -p inference-models-llama -p inference-models-qwen -p inference-models-gemma -p inference-models-phi -p inference-models-other -p inference-models-speech -p inference-models-diffusion -p inference-quant -p inference-vision --features inference-protocol/openai
+cargo test -p inference-core -p inference-agent -p inference-protocol -p inference-nn -p inference-models-llama -p inference-models-qwen -p inference-models-gemma -p inference-models-phi -p inference-models-other -p inference-models-speech -p inference-models-diffusion -p inference-quant -p inference-vision --features inference-protocol/openai
 
 # Format code (uses rustfmt, ruff, clang-format)
 make fmt
@@ -92,6 +92,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-quant/` - Quantization implementations (ISQ, GGUF, GPTQ, etc.)
 - `crates/inference-paged-attn/` - PagedAttention implementation
 - `crates/inference-audio/` - Audio processing
+- `crates/inference-agent/` - The agent layer: the tool-calling loop over the engine (registered tools, MCP, code execution, files, web search and its ranking). Core's `AgentRunner` is the seam; engine builders install `inference_agent::runner()`, and without one the engine rejects agentic requests
 - `crates/inference-mcp/` - Model Context Protocol client
 - `crates/inference-protocol/` - The wire protocol with no candle dependency (so it compiles alongside the kernel builds): request options, response bodies, tool types with their call parsers and grammars, reasoning parsers, files. Core re-exports it; the engine-internal `Request`/`Response` channel types stay in core
 - `crates/inference-layout/` - Document layout detection (PP-DocLayoutV3) with custom CPU/CUDA kernels

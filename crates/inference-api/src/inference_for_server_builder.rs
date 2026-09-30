@@ -825,6 +825,7 @@ impl InferenceRsForServerBuilder {
             ),
             search_callback: self.search_callback.clone(),
             tool_callbacks: self.tool_callbacks.clone(),
+            agent_runner: Some(inference_agent::runner()),
         };
         inference_core::AddModelConfig {
             engine_config,
