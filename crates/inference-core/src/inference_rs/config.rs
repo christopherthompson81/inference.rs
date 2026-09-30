@@ -1,3 +1,5 @@
+use futures::future::BoxFuture;
+
 use crate::*;
 
 /// Configuration for creating an engine instance
@@ -184,7 +186,15 @@ impl ModelLoaderConfig {
     }
 
     /// Load `loader` with this config, attaching MTP speculative decoding when configured.
-    pub async fn load(
+    pub fn load<'a>(
+        &'a self,
+        loader: &'a dyn Loader,
+        mtp_runtime: MtpRuntimeConfig,
+    ) -> BoxFuture<'a, anyhow::Result<Arc<tokio::sync::Mutex<dyn Pipeline + Send + Sync>>>> {
+        Box::pin(self.load_inner(loader, mtp_runtime))
+    }
+
+    async fn load_inner(
         &self,
         loader: &dyn Loader,
         mtp_runtime: MtpRuntimeConfig,

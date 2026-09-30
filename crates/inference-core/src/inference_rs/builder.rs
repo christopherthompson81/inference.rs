@@ -1,3 +1,5 @@
+use futures::future::BoxFuture;
+
 use super::*;
 
 /// The InferenceRsBuilder takes the pipeline and a scheduler method and constructs
@@ -216,7 +218,11 @@ impl InferenceRsBuilder {
         self
     }
 
-    pub async fn build(self) -> Arc<InferenceRs> {
+    pub fn build(self) -> BoxFuture<'static, Arc<InferenceRs>> {
+        Box::pin(self.build_inner())
+    }
+
+    async fn build_inner(self) -> Arc<InferenceRs> {
         InferenceRs::new(self).await
     }
 }

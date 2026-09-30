@@ -1,3 +1,5 @@
+use futures::future::BoxFuture;
+
 use super::*;
 
 impl InferenceRs {
@@ -108,11 +110,26 @@ impl InferenceRs {
     }
 
     /// Load a local LoRA adapter directory using an atomic publication policy.
-    pub async fn load_lora_adapter_with_policy(
-        &self,
-        model_id: Option<&str>,
+    pub fn load_lora_adapter_with_policy<'a>(
+        &'a self,
+        model_id: Option<&'a str>,
         alias: impl Into<String>,
         adapter_dir: impl Into<PathBuf>,
+        policy: LoraAdapterLoadPolicy,
+    ) -> BoxFuture<'a, Result<LoraAdapterInfo, InferenceRsError>> {
+        Box::pin(self.load_lora_adapter_with_policy_inner(
+            model_id,
+            alias.into(),
+            adapter_dir.into(),
+            policy,
+        ))
+    }
+
+    async fn load_lora_adapter_with_policy_inner(
+        &self,
+        model_id: Option<&str>,
+        alias: String,
+        adapter_dir: PathBuf,
         policy: LoraAdapterLoadPolicy,
     ) -> Result<LoraAdapterInfo, InferenceRsError> {
         let (resolved_model_id, runtime) = self.lora_runtime(model_id).await?;
@@ -122,8 +139,6 @@ impl InferenceRs {
             }
             .into());
         }
-        let alias = alias.into();
-        let adapter_dir = adapter_dir.into();
         let expected = runtime.clone();
         let permit = DynamicLoraRuntime::try_acquire_load_permit()?;
         let info = tokio::task::spawn_blocking(move || {
@@ -157,10 +172,25 @@ impl InferenceRs {
     }
 
     /// Load already-open LoRA files using an atomic publication policy.
-    pub async fn load_lora_adapter_files_with_policy(
+    pub fn load_lora_adapter_files_with_policy<'a>(
+        &'a self,
+        model_id: Option<&'a str>,
+        alias: impl Into<String>,
+        files: LoraAdapterFiles,
+        policy: LoraAdapterLoadPolicy,
+    ) -> BoxFuture<'a, Result<LoraAdapterInfo, InferenceRsError>> {
+        Box::pin(self.load_lora_adapter_files_with_policy_inner(
+            model_id,
+            alias.into(),
+            files,
+            policy,
+        ))
+    }
+
+    async fn load_lora_adapter_files_with_policy_inner(
         &self,
         model_id: Option<&str>,
-        alias: impl Into<String>,
+        alias: String,
         files: LoraAdapterFiles,
         policy: LoraAdapterLoadPolicy,
     ) -> Result<LoraAdapterInfo, InferenceRsError> {
@@ -171,7 +201,6 @@ impl InferenceRs {
             }
             .into());
         }
-        let alias = alias.into();
         let expected = runtime.clone();
         let permit = DynamicLoraRuntime::try_acquire_load_permit()?;
         let info = tokio::task::spawn_blocking(move || {
@@ -266,7 +295,15 @@ impl InferenceRs {
     }
 
     /// Unregister an adapter alias while allowing admitted requests to finish.
-    pub async fn unload_lora_adapter(
+    pub fn unload_lora_adapter<'a>(
+        &'a self,
+        model_id: Option<&'a str>,
+        alias: &'a str,
+    ) -> BoxFuture<'a, Result<LoraAdapterInfo, InferenceRsError>> {
+        Box::pin(self.unload_lora_adapter_inner(model_id, alias))
+    }
+
+    async fn unload_lora_adapter_inner(
         &self,
         model_id: Option<&str>,
         alias: &str,
@@ -276,7 +313,16 @@ impl InferenceRs {
     }
 
     /// Unregister an alias only if it still points at the expected generation.
-    pub async fn unload_lora_adapter_if_generation(
+    pub fn unload_lora_adapter_if_generation<'a>(
+        &'a self,
+        model_id: Option<&'a str>,
+        alias: &'a str,
+        expected_generation: Option<AdapterGenerationId>,
+    ) -> BoxFuture<'a, Result<LoraAdapterInfo, InferenceRsError>> {
+        Box::pin(self.unload_lora_adapter_if_generation_inner(model_id, alias, expected_generation))
+    }
+
+    async fn unload_lora_adapter_if_generation_inner(
         &self,
         model_id: Option<&str>,
         alias: &str,
@@ -335,7 +381,14 @@ impl InferenceRs {
     }
 
     /// List loaded adapter aliases for a model.
-    pub async fn list_lora_adapters(
+    pub fn list_lora_adapters<'a>(
+        &'a self,
+        model_id: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<Vec<LoraAdapterInfo>, InferenceRsError>> {
+        Box::pin(self.list_lora_adapters_inner(model_id))
+    }
+
+    async fn list_lora_adapters_inner(
         &self,
         model_id: Option<&str>,
     ) -> Result<Vec<LoraAdapterInfo>, InferenceRsError> {
@@ -353,7 +406,14 @@ impl InferenceRs {
     }
 
     /// Return loaded aliases and complete resident-generation capacity usage.
-    pub async fn lora_adapter_status(
+    pub fn lora_adapter_status<'a>(
+        &'a self,
+        model_id: Option<&'a str>,
+    ) -> BoxFuture<'a, Result<LoraRuntimeStatus, InferenceRsError>> {
+        Box::pin(self.lora_adapter_status_inner(model_id))
+    }
+
+    async fn lora_adapter_status_inner(
         &self,
         model_id: Option<&str>,
     ) -> Result<LoraRuntimeStatus, InferenceRsError> {

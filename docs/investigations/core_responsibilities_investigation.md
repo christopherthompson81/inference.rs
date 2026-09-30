@@ -310,3 +310,46 @@ the same scratch target.
 **Implication:** box an async fn at the crate boundary whenever another workspace crate awaits it. Core's own public
 async API, which the api awaits, is the next place to look.
 
+## Run 9 — 2026-09-29 21:20
+
+**Question:** does the Run 8 pattern pay one level down, for core's public async fns that the api, the SDK and the
+CLI await?
+
+**Change:** the same wrapper pattern for core's externally awaited entry points:
+- `InferenceRsBuilder::build` and `ModelLoaderConfig::load`.
+- `InferenceRs::{add_model, reload_model, send_request_async, shutdown}`.
+- The LoRA list, status, load and unload calls. For the two `*_with_policy` loaders, the wrapper converts the
+  `impl Into` arguments before boxing, so the inner fn is non-generic.
+- `selection::quant::{resolve_model_quant, resolve_quant, read_existing_uqff_report}`.
+- `pipeline::hf::{list_model_files, read_model_file_range}` and `remote_fetch::{fetch_limited, fetch_url}`.
+
+**Commands:**
+- IR: `cargo llvm-lines` per crate, master and the branch, in one scratch target.
+- Build time: in one scratch target with `CARGO_INCREMENTAL=0`, a warm-up build of the branch, then
+  `cargo test --no-run --features cuda --workspace --lib --bins --tests --timings` on master and then on the branch.
+  Only core and its dependents rebuild. Load was about 14 during both builds.
+
+**Raw finding, IR lines:**
+
+| Crate | Master | Branch | Change |
+|---|---|---|---|
+| `inference-core` | 2,230,180 | 2,316,051 | +85,871 (+3.9%) |
+| `inference-api` | 1,260,648 | 1,093,479 | -167,169 (-13.3%) |
+| `inference` (SDK) | 142,393 | 77,368 | -65,025 (-45.7%) |
+| `inference` CLI binary | 1,320,324 | 1,151,826 | -168,498 (-12.8%) |
+| `inference-server-core` | 677,037 | 676,823 | -214 |
+
+Net: -315k lines. Core grows because a `pub async fn` that nothing in core awaits was never compiled in core. Its body
+was compiled only in each crate that awaited it. Boxed, it compiles once, in core.
+
+**Raw finding, rebuilding core and everything downstream:**
+- Wall time: master 80.8 s, branch 75.3 s (-6.8%). Unit-seconds: 393 and 338 (-14%).
+- Core's lib: 38.9 s → 40.2 s. Core's lib test: 68.3 s → 61.4 s.
+- `inference-api`: 29.4 s → 27.6 s. Its lib test: 30.1 s → 28.3 s.
+- The SDK: 8.8 s → 5.0 s.
+- The CLI test binary, the last unit in both: 29.5 s → 19.8 s.
+
+**Implication:** moving an awaited body into its defining crate pays even when that crate is on the critical path,
+because the api, the CLI and the SDK each compiled their own copy. The rule from Run 8 holds for every workspace
+crate boundary.
+

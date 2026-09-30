@@ -1,5 +1,7 @@
 //! The engine handle: models, their engine threads, and the requests routed to them.
 
+use futures::future::BoxFuture;
+
 use crate::*;
 
 mod builder;
@@ -261,7 +263,11 @@ impl InferenceRs {
         Ok(engine.sender.clone())
     }
 
-    pub async fn shutdown(self: Arc<Self>) -> Result<(), String> {
+    pub fn shutdown(self: Arc<Self>) -> BoxFuture<'static, Result<(), String>> {
+        Box::pin(self.shutdown_inner())
+    }
+
+    async fn shutdown_inner(self: Arc<Self>) -> Result<(), String> {
         let mut this =
             Arc::try_unwrap(self).map_err(|_| "Cannot shutdown while InferenceRs is shared")?;
         let engines = this
@@ -984,7 +990,14 @@ impl InferenceRs {
             .map_err(|_| InferenceRsError::SenderPoisoned)
     }
 
-    pub async fn send_request_async(&self, mut request: Request) -> Result<(), InferenceRsError> {
+    pub fn send_request_async<'a>(
+        &'a self,
+        request: Request,
+    ) -> BoxFuture<'a, Result<(), InferenceRsError>> {
+        Box::pin(self.send_request_async_inner(request))
+    }
+
+    async fn send_request_async_inner(&self, mut request: Request) -> Result<(), InferenceRsError> {
         let sender = self.prepare_request_dispatch(&mut request)?;
         sender
             .send(request)
