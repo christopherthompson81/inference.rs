@@ -10,6 +10,7 @@ use inference_api::{
     anthropic::anthropic_error_body,
     api_error::{ApiError, ApiErrorKind},
     blocking::{BlockingEngine, BlockingStream, StreamPoll},
+    engine_chat::RequestCancellation,
     files::{FileUpload, MAX_FILE_UPLOAD_BYTES, file_too_large},
     media_source::{MediaAttachment, MediaAttachments},
     skill_store::{SkillFiles, skill_api_error},
@@ -55,6 +56,8 @@ pub struct inference_engine {
 pub struct inference_stream {
     stream: BlockingStream,
     done: bool,
+    // Apart from `stream` so a cancel on another thread never borrows what a blocked poll holds.
+    cancellation: RequestCancellation,
 }
 
 /// Opaque; mirrors `inference_string`.
@@ -317,6 +320,7 @@ unsafe fn stream_call(
             |engine, request| {
                 let stream = open(engine, request)?;
                 Ok(Box::into_raw(Box::new(inference_stream {
+                    cancellation: stream.cancellation(),
                     stream,
                     done: false,
                 })))
@@ -1161,22 +1165,40 @@ pub unsafe extern "C" fn inference_stream_next(
             }
             out_done.write(0);
             out_arg(out_event, "out_event")?;
-            let stream = stream
-                .as_mut()
-                .ok_or_else(|| Failure::invalid("stream is NULL"))?;
-            if stream.done {
+            if stream.is_null() {
+                return Err(Failure::invalid("stream is NULL"));
+            }
+            // Borrows only the fields a poll uses, so `inference_stream_cancel` may read `cancellation` meanwhile.
+            let (poller, done) = (&mut (*stream).stream, &mut (*stream).done);
+            if *done {
                 out_done.write(1);
                 return Ok(());
             }
             let timeout = u64::try_from(timeout_ms).ok().map(Duration::from_millis);
-            match stream.stream.next(timeout) {
+            match poller.next(timeout) {
                 StreamPoll::Event(event) => out_event.write(string_handle(event)),
                 StreamPoll::Timeout => {}
                 StreamPoll::Done => {
-                    stream.done = true;
+                    *done = true;
                     out_done.write(1);
                 }
             }
+            Ok(())
+        })
+    }
+}
+
+/// Safety: `stream` is a live handle; it may be called while another thread is in `inference_stream_next` on it.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_stream_cancel(
+    stream: *const inference_stream,
+) -> inference_status {
+    unsafe {
+        guard(|| {
+            if stream.is_null() {
+                return Err(Failure::invalid("stream is NULL"));
+            }
+            (*stream).cancellation.cancel();
             Ok(())
         })
     }

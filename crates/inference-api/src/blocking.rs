@@ -3,6 +3,7 @@
 use std::{any::Any, future::Future, pin::Pin, sync::OnceLock, time::Duration};
 
 use futures::{Stream, StreamExt, stream::BoxStream};
+use inference_core::RequestCancellation;
 use tokio::runtime::Runtime;
 
 use crate::{
@@ -74,9 +75,10 @@ impl BlockingEngine {
     ) -> Result<BlockingStream, ApiError>
     where
         S: Stream<Item = String> + Send + 'static,
-        Fut: Future<Output = Result<S, ApiError>> + Send + 'static,
+        Fut: Future<Output = Result<(S, RequestCancellation), ApiError>> + Send + 'static,
     {
-        self.call(request, op).map(BlockingStream::new)
+        self.call(request, op)
+            .map(|(stream, cancellation)| BlockingStream::new(stream, cancellation))
     }
 
     pub fn chat_json(&self, request: &[u8], media: MediaAttachments) -> Result<String, ApiError> {
@@ -94,7 +96,12 @@ impl BlockingEngine {
             engine
                 .chat_stream_json(&request, media)
                 .await
-                .map(|stream| stream.map(|item| item.to_json()))
+                .map(|stream| {
+                    let cancellation = stream
+                        .cancellation()
+                        .expect("engine streams carry their cancellation");
+                    (stream.map(|item| item.to_json()), cancellation)
+                })
         })
     }
 
@@ -106,10 +113,12 @@ impl BlockingEngine {
 
     pub fn completion_stream_json(&self, request: &[u8]) -> Result<BlockingStream, ApiError> {
         self.stream(request, |engine, request| async move {
-            engine
-                .completion_stream_json(&request)
-                .await
-                .map(|stream| stream.map(|item| item.to_json()))
+            engine.completion_stream_json(&request).await.map(|stream| {
+                let cancellation = stream
+                    .cancellation()
+                    .expect("engine streams carry their cancellation");
+                (stream.map(|item| item.to_json()), cancellation)
+            })
         })
     }
 
@@ -127,7 +136,10 @@ impl BlockingEngine {
             engine
                 .anthropic_messages_stream_json(&request)
                 .await
-                .map(|stream| stream.map(|item| item.to_json()))
+                .map(|stream| {
+                    let cancellation = stream.cancellation();
+                    (stream.map(|item| item.to_json()), cancellation)
+                })
         })
     }
 
@@ -139,10 +151,10 @@ impl BlockingEngine {
 
     pub fn responses_stream_json(&self, request: &[u8]) -> Result<BlockingStream, ApiError> {
         self.stream(request, |engine, request| async move {
-            engine
-                .responses_stream_json(&request)
-                .await
-                .map(|stream| stream.map(|item| item.to_json()))
+            engine.responses_stream_json(&request).await.map(|stream| {
+                let cancellation = stream.cancellation();
+                (stream.map(|item| item.to_json()), cancellation)
+            })
         })
     }
 
@@ -238,13 +250,28 @@ pub enum StreamPoll {
 /// A streaming request behind blocking polls; each event is its JSON envelope. Dropping it abandons the request.
 pub struct BlockingStream {
     stream: BoxStream<'static, String>,
+    cancellation: RequestCancellation,
 }
 
 impl BlockingStream {
-    fn new(stream: impl Stream<Item = String> + Send + 'static) -> Self {
+    fn new(
+        stream: impl Stream<Item = String> + Send + 'static,
+        cancellation: RequestCancellation,
+    ) -> Self {
         Self {
             stream: stream.boxed(),
+            cancellation,
         }
+    }
+
+    /// Ends the request on its next sampled token; polling still yields its final event, with usage.
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
+    }
+
+    /// The request's cancellation, for a caller that cancels while another thread polls.
+    pub fn cancellation(&self) -> RequestCancellation {
+        self.cancellation.clone()
     }
 
     /// Waits up to `timeout` (forever when `None`) for the next event.

@@ -9,8 +9,8 @@ use std::{
 use anyhow::Result;
 use futures::future::BoxFuture;
 use inference_core::{
-    CompletionChunkResponse, Constraint, InferenceRs, NormalRequest, Request, RequestMessage,
-    Response, SamplingParams,
+    CompletionChunkResponse, Constraint, InferenceRs, NormalRequest, Request, RequestCancellation,
+    RequestMessage, Response, SamplingParams,
 };
 use tokio::sync::mpsc::{Receiver, Sender};
 
@@ -33,6 +33,7 @@ pub struct PreparedCompletion {
     pub is_streaming: bool,
     /// The model name the caller asked for, when routing resolved it to another id.
     pub model_override: Option<String>,
+    pub cancellation: RequestCancellation,
 }
 
 /// Resolves the request's model (LoRA aliases included), parses it and sends it to its model.
@@ -53,8 +54,12 @@ async fn prepare_completion_inner(
         .map_err(|error| DispatchError::Validation(Box::new(error)))?;
     let model_override = response_model_id(state, requested_model, &oairequest.model);
     let model_id = (oairequest.model != DEFAULT_MODEL_ID).then(|| oairequest.model.clone());
-    let (request, is_streaming) = parse_request(oairequest, state.clone(), tx)
+    let (mut request, is_streaming) = parse_request(oairequest, state.clone(), tx)
         .map_err(|error| DispatchError::Validation(boxed_anyhow(error)))?;
+    let cancellation = RequestCancellation::default();
+    if let Request::Normal(normal) = &mut request {
+        normal.cancellation = Some(cancellation.clone());
+    }
     send_request_with_model(state, request, model_id.as_deref())
         .await
         .map_err(|error| DispatchError::Internal(error.into()))?;
@@ -62,6 +67,7 @@ async fn prepare_completion_inner(
         rx,
         is_streaming,
         model_override,
+        cancellation,
     })
 }
 
@@ -242,6 +248,7 @@ pub struct CompletionStream {
     model_override: Option<String>,
     tap: Option<ResponseTap>,
     finished: bool,
+    cancellation: Option<RequestCancellation>,
 }
 
 impl CompletionStream {
@@ -257,6 +264,24 @@ impl CompletionStream {
             model_override,
             tap,
             finished: false,
+            cancellation: None,
+        }
+    }
+
+    /// The request's cancellation, for a caller that cancels from elsewhere, e.g. a signal handler.
+    pub fn cancellation(&self) -> Option<RequestCancellation> {
+        self.cancellation.clone()
+    }
+
+    pub fn with_cancellation(mut self, cancellation: RequestCancellation) -> Self {
+        self.cancellation = Some(cancellation);
+        self
+    }
+
+    /// Ends the request on its next sampled token; the stream still yields its final event, with usage.
+    pub fn cancel(&self) {
+        if let Some(cancellation) = &self.cancellation {
+            cancellation.cancel();
         }
     }
 

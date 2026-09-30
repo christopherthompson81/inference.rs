@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 11
+#define INFERENCE_ABI_VERSION_PATCH 12
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -155,7 +155,8 @@ INFERENCE_API inference_status inference_layout_result_detection(const inference
 
 /* Engine: a loaded model serving OpenAI-style requests. Requests and responses are the JSON the HTTP server accepts and
  * returns (e.g. POST /v1/chat/completions bodies). Engine calls block; they must not be made from inside a tokio
- * runtime thread. An engine handle may be used from several threads at once; a stream handle from one at a time.
+ * runtime thread. An engine handle may be used from several threads at once; a stream handle from one at a time, except that
+ * inference_stream_cancel may be called from any thread.
  * Failing engine calls, including INFERENCE_ERR_RUNTIME ones, leave the error JSON in inference_last_error(): the
  * OpenAI envelope, or the Anthropic one for the inference_anthropic_* calls.
  * Freeing the last handle of an engine (the engine or one of its streams) waits up to 10 s for the engine to stop.
@@ -263,6 +264,11 @@ INFERENCE_API inference_status inference_chat_stream_open_with_media(const infer
  * out_done 0. Once the stream has ended, out_event is NULL and out_done 1. out_event and out_done are required. */
 INFERENCE_API inference_status inference_stream_next(inference_stream *stream, int64_t timeout_ms,
                                                     inference_string **out_event, int32_t *out_done);
+/* Asks a stream's request to stop on its next sampled token. Keep polling: the stream still ends with its final
+ * event (a chunk with finish_reason "canceled", message_stop, or response.cancelled) carrying usage. Unlike the other
+ * stream calls it may run on any thread, including while another thread waits in inference_stream_next; it must not
+ * race inference_stream_free. Cancelling a finished stream does nothing. */
+INFERENCE_API inference_status inference_stream_cancel(const inference_stream *stream);
 INFERENCE_API void inference_stream_free(inference_stream *stream);
 
 /* Runs a text completion (the POST /v1/completions body) to its end; out_response receives the text_completion JSON.

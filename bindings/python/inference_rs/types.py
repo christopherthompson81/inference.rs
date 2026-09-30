@@ -1942,6 +1942,15 @@ class OpenResponsesStreamEventResponseIncomplete:
 
 
 @dataclass(kw_only=True)
+class OpenResponsesStreamEventResponseCancelled:
+    """The response stopped because its caller cancelled it; carries what was generated, with usage"""
+
+    response: ResponseResource
+    sequence_number: int
+    type: Literal["response.cancelled"] = "response.cancelled"
+
+
+@dataclass(kw_only=True)
 class OpenResponsesStreamEventError:
     """Error event"""
 
@@ -2760,7 +2769,7 @@ OpenAiShellSkill = Union[OpenAiShellSkillSkillReference, OpenAiShellSkillLocal]
 OpenAiTool = Union[Tool, OpenAiResponsesFunctionTool, OpenAiWebSearchTool, OpenAiCodeInterpreterTool, OpenAiShellTool, OpenAiNamespaceTool]
 OpenAiWebSearchUserLocation = OpenAiWebSearchUserLocationApproximate
 OpenResponsesInput = Union[str, list[Union[OpenResponsesInputMessage, OpenResponsesInputItemReference, OpenResponsesInputFunctionCall, OpenResponsesInputFunctionCallOutput, OpenResponsesInputReasoning]]]
-OpenResponsesStreamEvent = Union[OpenResponsesStreamEventResponseCreated, OpenResponsesStreamEventResponseInProgress, OpenResponsesStreamEventResponseOutputItemAdded, OpenResponsesStreamEventResponseContentPartAdded, OpenResponsesStreamEventResponseOutputTextDelta, OpenResponsesStreamEventResponseContentPartDone, OpenResponsesStreamEventResponseOutputItemDone, OpenResponsesStreamEventResponseFunctionCallArgumentsDelta, OpenResponsesStreamEventResponseFunctionCallArgumentsDone, OpenResponsesStreamEventResponseReasoningTextDelta, OpenResponsesStreamEventResponseReasoningTextDone, OpenResponsesStreamEventResponseCompleted, OpenResponsesStreamEventResponseFailed, OpenResponsesStreamEventResponseIncomplete, OpenResponsesStreamEventError]
+OpenResponsesStreamEvent = Union[OpenResponsesStreamEventResponseCreated, OpenResponsesStreamEventResponseInProgress, OpenResponsesStreamEventResponseOutputItemAdded, OpenResponsesStreamEventResponseContentPartAdded, OpenResponsesStreamEventResponseOutputTextDelta, OpenResponsesStreamEventResponseContentPartDone, OpenResponsesStreamEventResponseOutputItemDone, OpenResponsesStreamEventResponseFunctionCallArgumentsDelta, OpenResponsesStreamEventResponseFunctionCallArgumentsDone, OpenResponsesStreamEventResponseReasoningTextDelta, OpenResponsesStreamEventResponseReasoningTextDone, OpenResponsesStreamEventResponseCompleted, OpenResponsesStreamEventResponseFailed, OpenResponsesStreamEventResponseIncomplete, OpenResponsesStreamEventResponseCancelled, OpenResponsesStreamEventError]
 OutputContent = Union[OutputContentOutputText, OutputContentRefusal]
 OutputItem = Union[OutputItemMessage, OutputItemFunctionCall, OutputItemShellCall, OutputItemShellCallOutput, OutputItemReasoning]
 ResponseFormat = Union[ResponseFormatText, ResponseFormatJsonObject, ResponseFormatJsonSchema]

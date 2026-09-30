@@ -13,6 +13,8 @@ internal static class Program
 {
     private const string ModelVariable = "INFERENCE_TEST_TINY_CHECKPOINT";
     private const int MaxTokens = 6;
+    // Enough to outlast the few steps a cancel takes to land; the random weights never stop on their own.
+    private const int LongCompletion = 512;
     private const string Prompt = "Reply with the single word: ok";
     private static readonly TimeSpan PollTimeout = TimeSpan.FromSeconds(60);
     private const string ImageFixture = "crates/inference/tests/fixtures/paddleocr_vl/page_00.png";
@@ -39,6 +41,7 @@ internal static class Program
             FilesRoundTrip(engine);
             SkillsAreStored(engine);
             RuntimeOperations(engine);
+            ACancelledStreamEndsWithItsUsage(engine);
         }
         StreamsOutliveTheirEngine(model);
         HostToolsLoadAndBadOnesAreRefused(model);
@@ -184,6 +187,24 @@ internal static class Program
         Check("calibration reports its status", JsonNode.Parse(engine.CalibrationStatus())!["collecting"] is not null);
         var badIsq = Throws(() => engine.ReIsq("""{"ggml_type": "no-such-type"}"""));
         Check("an unknown ISQ type is InvalidRequest", badIsq?.Status == InferenceStatus.InvalidRequest);
+    }
+
+    private static void ACancelledStreamEndsWithItsUsage(InferenceEngine engine)
+    {
+        var request = JsonNode.Parse(ChatRequest(true))!;
+        request["max_tokens"] = LongCompletion;
+        request["ignore_eos"] = true;
+        using var stream = engine.ChatStream(request.ToJsonString());
+        var events = new List<StreamEvent>();
+        if (stream.TryNext(TimeSpan.FromMinutes(1), out var first)) events.Add(first);
+        var canceller = Task.Run(stream.Cancel);
+        events.AddRange(stream);
+        canceller.Wait();
+        var last = events.Last(streamEvent => streamEvent.Name == "chunk").Data;
+        Check("a cancelled stream finishes as canceled",
+            last.GetProperty("choices")[0].GetProperty("finish_reason").GetString() == "canceled");
+        Check("a cancelled stream reports its usage",
+            last.GetProperty("usage").GetProperty("completion_tokens").GetInt32() < LongCompletion);
     }
 
     private static void StreamsOutliveTheirEngine(string model)

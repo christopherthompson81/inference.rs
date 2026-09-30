@@ -69,6 +69,11 @@ class Stream:
         envelope = json.loads(take_string(event))
         return StreamEvent(envelope["event"], self.parse(envelope["event"], envelope["data"]))
 
+    def cancel(self):
+        """Asks the request to stop; keep reading for its final event, which carries usage. Safe from any thread."""
+        with Lease(self._stream) as stream:
+            check(lib.inference_stream_cancel(stream), "inference_stream_cancel")
+
     def __iter__(self) -> Iterator[StreamEvent]:
         while (event := self.next()) is not None:
             yield event

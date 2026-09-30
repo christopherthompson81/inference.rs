@@ -4,6 +4,7 @@
 #[path = "../../../inference/tests/support/paddleocr_vl_tiny.rs"]
 mod support;
 
+mod cancel;
 mod chat_route;
 mod flux;
 mod mcp;

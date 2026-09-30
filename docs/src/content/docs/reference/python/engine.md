@@ -792,6 +792,14 @@ next(timeout: float | None = None) -> StreamEvent | None
 
 The next event within `timeout` seconds; None on a timeout, or at the end (then `done` is True).
 
+### `Stream.cancel`
+
+```text
+cancel()
+```
+
+Asks the request to stop; keep reading for its final event, which carries usage. Safe from any thread.
+
 ### `Stream.__iter__`
 
 ```text

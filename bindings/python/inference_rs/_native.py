@@ -19,7 +19,7 @@ from ctypes import (
 from pathlib import Path
 
 # The ABI these declarations mirror; while it is 0.0.x any other version may differ anywhere.
-ABI_VERSION = (0 << 16) | (0 << 8) | 11
+ABI_VERSION = (0 << 16) | (0 << 8) | 12
 
 NATIVE_DIR_VARIABLE = "INFERENCE_NATIVE_DIR"
 BUNDLED_DIR = "_lib"
@@ -166,6 +166,7 @@ SIGNATURES = {
     "inference_system_info": (status, (out,)),
     "inference_system_doctor": (status, (out,)),
     "inference_stream_next": (status, (c_void_p, c_int64, out, POINTER(c_int32))),
+    "inference_stream_cancel": (status, (c_void_p,)),
     "inference_stream_free": (None, (c_void_p,)),
     "inference_blob_data": (c_void_p, (c_void_p,)),
     "inference_blob_len": (c_size_t, (c_void_p,)),
