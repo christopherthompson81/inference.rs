@@ -10,6 +10,7 @@ use base64::{Engine, engine::general_purpose};
 use candle_core::{DType, Device, Tensor};
 use candle_nn::{AdamW, Optimizer, ParamsAdamW};
 use either::Either;
+use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType};
 use image::DynamicImage;
 use indexmap::IndexMap;
@@ -280,7 +281,6 @@ impl MetadataMixin for AnyMoePipeline {
     }
 }
 
-#[async_trait::async_trait]
 impl Pipeline for AnyMoePipeline {
     fn requires_uniform_prompt_batch(&self) -> bool {
         get_mut_arcmutex!(self.target).requires_uniform_prompt_batch()
@@ -386,55 +386,61 @@ impl Pipeline for AnyMoePipeline {
         get_mut_arcmutex!(self.target).speculative_prompt_chunk(seqs, chunk, metadata)
     }
 
-    async fn try_sample_speculative_causal_gen(
-        &mut self,
-        input_seqs: &mut [&mut Sequence],
-        logits: &[Tensor],
-        batched_logits: Option<&Tensor>,
-        prefix_cacher: &mut PrefixCacheManagerV2,
+    fn try_sample_speculative_causal_gen<'a, 'b: 'a>(
+        &'a mut self,
+        input_seqs: &'a mut [&'b mut Sequence],
+        logits: &'a [Tensor],
+        batched_logits: Option<&'a Tensor>,
+        prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
         metadata: Option<crate::paged_attention::PagedAttentionMeta>,
-        logger: &crate::IntervalLogger,
-    ) -> Result<bool, candle_core::Error> {
-        get_mut_arcmutex!(self.target)
-            .try_sample_speculative_causal_gen(
-                input_seqs,
-                logits,
-                batched_logits,
-                prefix_cacher,
-                disable_eos_stop,
-                rng,
-                metadata,
-                logger,
-            )
-            .await
+        logger: &'a crate::IntervalLogger,
+    ) -> BoxFuture<'a, Result<bool, candle_core::Error>> {
+        Box::pin(async move {
+            get_mut_arcmutex!(self.target)
+                .try_sample_speculative_causal_gen(
+                    input_seqs,
+                    logits,
+                    batched_logits,
+                    prefix_cacher,
+                    disable_eos_stop,
+                    rng,
+                    metadata,
+                    logger,
+                )
+                .await
+        })
     }
 
-    async fn try_sample_causal_gen_batched(
-        &self,
-        seqs: &mut [&mut Sequence],
-        logits: &Tensor,
-        prefix_cacher: &mut PrefixCacheManagerV2,
+    fn try_sample_causal_gen_batched<'a, 'b: 'a>(
+        &'a self,
+        seqs: &'a mut [&'b mut Sequence],
+        logits: &'a Tensor,
+        prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> Result<bool, candle_core::Error> {
-        get_mut_arcmutex!(self.target)
-            .try_sample_causal_gen_batched(seqs, logits, prefix_cacher, disable_eos_stop, rng)
-            .await
+    ) -> BoxFuture<'a, Result<bool, candle_core::Error>> {
+        Box::pin(async move {
+            get_mut_arcmutex!(self.target)
+                .try_sample_causal_gen_batched(seqs, logits, prefix_cacher, disable_eos_stop, rng)
+                .await
+        })
     }
 
-    async fn sample_causal_gen(
-        &self,
-        seqs: &mut [&mut Sequence],
+    fn sample_causal_gen<'a, 'b: 'a>(
+        &'a self,
+        seqs: &'a mut [&'b mut Sequence],
         logits: Vec<Tensor>,
-        prefix_cacher: &mut PrefixCacheManagerV2,
+        prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> Result<(), candle_core::Error> {
-        get_mut_arcmutex!(self.target)
-            .sample_causal_gen(seqs, logits, prefix_cacher, disable_eos_stop, rng)
-            .await
+    ) -> BoxFuture<'a, Result<(), candle_core::Error>> {
+        Box::pin(async move {
+            get_mut_arcmutex!(self.target)
+                .sample_causal_gen(seqs, logits, prefix_cacher, disable_eos_stop, rng)
+                .await
+        })
     }
 
     fn category(&self) -> ModelCategory {

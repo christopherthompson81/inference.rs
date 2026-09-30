@@ -194,6 +194,7 @@ use crate::{
 use anyhow::Result;
 use candle_core::{DType, Device, Tensor, Var};
 use either::Either;
+use futures::{FutureExt, future::BoxFuture};
 use hf_hub::Cache;
 use hf_hub::{Repo, RepoType};
 use inference_quant::IsqType;
@@ -2234,7 +2235,6 @@ impl MultimodalPipeline {
     }
 }
 
-#[async_trait::async_trait]
 impl Pipeline for MultimodalPipeline {
     fn requires_uniform_prompt_batch(&self) -> bool {
         !self.supports_packed_prefill()
@@ -2586,93 +2586,96 @@ impl Pipeline for MultimodalPipeline {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn try_sample_speculative_causal_gen(
-        &mut self,
-        seqs: &mut [&mut Sequence],
-        logits: &[Tensor],
-        batched_logits: Option<&Tensor>,
-        prefix_cacher: &mut PrefixCacheManagerV2,
+    fn try_sample_speculative_causal_gen<'a, 'b: 'a>(
+        &'a mut self,
+        seqs: &'a mut [&'b mut Sequence],
+        logits: &'a [Tensor],
+        batched_logits: Option<&'a Tensor>,
+        prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
         metadata: Option<crate::paged_attention::PagedAttentionMeta>,
-        logger: &crate::IntervalLogger,
-    ) -> candle_core::Result<bool> {
-        if !self.model.has_speculative_proposer() {
-            crate::speculative::driver::clear_staged_speculative_tokens(seqs);
-            return Ok(false);
-        }
-
-        let general_metadata = self.get_metadata();
-        if let Some(cache_engine) = general_metadata.cache_engine.as_ref() {
-            let Some(metadata) = metadata else {
+        logger: &'a crate::IntervalLogger,
+    ) -> BoxFuture<'a, candle_core::Result<bool>> {
+        Box::pin(async move {
+            if !self.model.has_speculative_proposer() {
                 crate::speculative::driver::clear_staged_speculative_tokens(seqs);
                 return Ok(false);
-            };
-            let cache = crate::speculative::cache::PagedSpeculativeCacheAccess::new(
-                &metadata,
-                cache_engine,
-            );
-            return crate::speculative::driver::try_sample_speculative_causal_gen(
+            }
+
+            let general_metadata = self.get_metadata();
+            if let Some(cache_engine) = general_metadata.cache_engine.as_ref() {
+                let Some(metadata) = metadata else {
+                    crate::speculative::driver::clear_staged_speculative_tokens(seqs);
+                    return Ok(false);
+                };
+                let cache = crate::speculative::cache::PagedSpeculativeCacheAccess::new(
+                    &metadata,
+                    cache_engine,
+                );
+                return crate::speculative::driver::try_sample_speculative_causal_gen(
+                    self,
+                    seqs,
+                    logits,
+                    batched_logits,
+                    prefix_cacher,
+                    disable_eos_stop,
+                    rng,
+                    &cache,
+                    logger,
+                )
+                .await;
+            }
+
+            crate::speculative::driver::clear_staged_speculative_tokens(seqs);
+            Ok(false)
+        })
+    }
+
+    fn try_sample_causal_gen_batched<'a, 'b: 'a>(
+        &'a self,
+        seqs: &'a mut [&'b mut Sequence],
+        logits: &'a Tensor,
+        prefix_cacher: &'a mut PrefixCacheManagerV2,
+        disable_eos_stop: bool,
+        rng: Arc<std::sync::Mutex<Isaac64Rng>>,
+    ) -> BoxFuture<'a, Result<bool, candle_core::Error>> {
+        if self.model.has_speculative_proposer() {
+            return Box::pin(std::future::ready(Ok(false)));
+        }
+        crate::speculative::driver::clear_staged_speculative_tokens(seqs);
+        Box::pin(
+            sample_and_add_toks_batched(
                 self,
                 seqs,
-                logits,
-                batched_logits,
+                logits.clone(),
                 prefix_cacher,
                 disable_eos_stop,
                 rng,
-                &cache,
-                logger,
             )
-            .await;
-        }
-
-        crate::speculative::driver::clear_staged_speculative_tokens(seqs);
-        Ok(false)
-    }
-
-    async fn try_sample_causal_gen_batched(
-        &self,
-        seqs: &mut [&mut Sequence],
-        logits: &Tensor,
-        prefix_cacher: &mut PrefixCacheManagerV2,
-        disable_eos_stop: bool,
-        rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> Result<bool, candle_core::Error> {
-        if self.model.has_speculative_proposer() {
-            return Ok(false);
-        }
-        crate::speculative::driver::clear_staged_speculative_tokens(seqs);
-        sample_and_add_toks_batched(
-            self,
-            seqs,
-            logits.clone(),
-            prefix_cacher,
-            disable_eos_stop,
-            rng,
+            .map(|result| result.map(|()| true)),
         )
-        .await?;
-        Ok(true)
     }
 
-    async fn sample_causal_gen(
-        &self,
-        seqs: &mut [&mut Sequence],
+    fn sample_causal_gen<'a, 'b: 'a>(
+        &'a self,
+        seqs: &'a mut [&'b mut Sequence],
         logits: Vec<Tensor>,
-        prefix_cacher: &mut PrefixCacheManagerV2,
+        prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
         rng: Arc<std::sync::Mutex<Isaac64Rng>>,
-    ) -> Result<(), candle_core::Error> {
-        sample_and_add_toks(self, seqs, logits, prefix_cacher, disable_eos_stop, rng).await
+    ) -> BoxFuture<'a, Result<(), candle_core::Error>> {
+        sample_and_add_toks(self, seqs, logits, prefix_cacher, disable_eos_stop, rng)
     }
 
-    async fn sample_block_gen(
-        &self,
-        input_seqs: &mut [&mut Sequence],
+    fn sample_block_gen<'a, 'b: 'a>(
+        &'a self,
+        input_seqs: &'a mut [&'b mut Sequence],
         token_blocks: Vec<Vec<u32>>,
         denoise_times: Vec<std::time::Duration>,
-        prefix_cacher: &mut PrefixCacheManagerV2,
+        prefix_cacher: &'a mut PrefixCacheManagerV2,
         disable_eos_stop: bool,
-    ) -> Result<(), candle_core::Error> {
+    ) -> BoxFuture<'a, Result<(), candle_core::Error>> {
         crate::pipeline::sampling::finalize_block_gen(
             self,
             input_seqs,
@@ -2681,7 +2684,6 @@ impl Pipeline for MultimodalPipeline {
             prefix_cacher,
             disable_eos_stop,
         )
-        .await
     }
     fn category(&self) -> ModelCategory {
         if matches!(
