@@ -181,6 +181,12 @@ pub(crate) fn load_matformer_slice(
     slice_name: Option<&str>,
 ) -> Result<Option<MatformerSliceConfig>> {
     let Some(config_path) = config_path else {
+        if let Some(slice_name) = slice_name {
+            anyhow::bail!(
+                "MatFormer slice `{slice_name}` needs its config file (`matformer_config_path`, \
+                 `--matformer-config-path`)"
+            );
+        }
         return Ok(None);
     };
     info!("Loading Matformer config from {:?}", config_path);
@@ -311,5 +317,20 @@ impl LoadMetadataParts {
             matformer_slicing_config: self.matformer.clone(),
             rope_pairing,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_matformer_slice_without_its_config_is_refused() {
+        let error = load_matformer_slice(None, Some("small")).unwrap_err();
+        assert!(
+            error.to_string().contains("matformer_config_path"),
+            "{error}"
+        );
+        assert!(load_matformer_slice(None, None).unwrap().is_none());
     }
 }

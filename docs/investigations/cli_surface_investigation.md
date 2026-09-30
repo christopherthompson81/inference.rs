@@ -394,3 +394,19 @@ schema stay unchanged throughout.
 quantization accessors are `ModelType::{format_mut, quantization}`; the cpu-consistency check is one
 `config::models_cpu`; `tune` runs `normalize_quant_flags`; the image-size defaults use the `AutoDeviceMapParams`
 constants.
+
+## Run 16 — 2026-09-30 (time approximate)
+
+**Question:** PR 2 of the Run 15 plan was to have TOML reuse the clap groups and gain clap's checks. Reading
+`ModelEntry` again: flattening `ModelSourceOptions` saves about 15 lines, needs back the `Deserialize` derives PR 1
+removed, and PR 3 rewrites that conversion anyway; `DeviceOptionsToml` must keep `cpu: Option<bool>` for the
+consistency check. So PR 2 is only the checks. Of Run 15's list, quant with isq/from_uqff is already refused by the
+engine for every client; three were refused nowhere outside clap.
+
+**Change:** `AdapterOptions::validate` refuses `tgt_non_granular_index` without X-LoRA (CLI and TOML both run it);
+core's `load_matformer_slice` refuses a slice name without its config file (it used to load the model unsliced, for
+every client); the selection loader's `resolve_ordering` refuses an empty ordering path with no inline ordering
+(it used to fail with "Could not load ordering file at "), so the TOML/API user sees which field is missing.
+
+**Tests:** `config_rejects_an_xlora_index_without_xlora`, `a_matformer_slice_without_its_config_is_refused`, and
+`inline_ordering_is_used_over_the_order_path` now asserts the new ordering error rather than any error.
