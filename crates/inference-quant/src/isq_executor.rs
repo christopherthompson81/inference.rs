@@ -283,6 +283,7 @@ struct ExecutorState {
     held_input_bytes: usize,
     active_host_scratch: usize,
     retained_output: usize,
+    active_jobs: usize,
     active_large_jobs: usize,
     active_exclusive_devices: HashSet<DeviceLocation>,
     shutdown: bool,
@@ -356,16 +357,16 @@ fn next_job(inner: &Arc<ExecutorInner>) -> Option<QueuedJob> {
     }
 }
 
+// retained_output is the caller's to drop, and a UQFF write keeps every output until the file is written, so
+// counting it here would block the submitting thread on memory only that same thread can release.
 fn can_enqueue(state: &ExecutorState, config: &IsqExecutorConfig, job: &QueuedJob) -> bool {
     let resources = &job.plan.resources;
     let host_next = state
         .held_input_bytes
         .saturating_add(state.active_host_scratch)
-        .saturating_add(state.retained_output)
         .saturating_add(resources.input_bytes);
-    let no_host_work =
-        state.held_input_bytes == 0 && state.active_host_scratch == 0 && state.retained_output == 0;
-    host_next <= config.host_budget_bytes || no_host_work
+    let queue_idle = state.held_input_bytes == 0 && state.active_host_scratch == 0;
+    host_next <= config.host_budget_bytes || queue_idle
 }
 
 fn can_start(state: &ExecutorState, config: &IsqExecutorConfig, job: &QueuedJob) -> bool {
@@ -376,8 +377,9 @@ fn can_start(state: &ExecutorState, config: &IsqExecutorConfig, job: &QueuedJob)
         .saturating_add(state.retained_output)
         .saturating_add(resources.host_scratch_bytes)
         .saturating_add(resources.output_bytes);
-    let no_active_host_work = state.active_host_scratch == 0 && state.retained_output == 0;
-    if host_next > config.host_budget_bytes && !no_active_host_work {
+    // Nothing running means only the caller can free memory, and it may be blocked waiting for this job's result,
+    // so one job always starts even over budget; peak stays at the retained total plus a single job.
+    if host_next > config.host_budget_bytes && state.active_jobs > 0 {
         return false;
     }
     if resources.large_job && state.active_large_jobs >= config.max_large_jobs {
@@ -394,6 +396,7 @@ fn can_start(state: &ExecutorState, config: &IsqExecutorConfig, job: &QueuedJob)
 
 fn reserve_job(state: &mut ExecutorState, job: &QueuedJob) {
     let resources = &job.plan.resources;
+    state.active_jobs += 1;
     state.active_host_scratch = state
         .active_host_scratch
         .saturating_add(resources.host_scratch_bytes);
@@ -416,6 +419,7 @@ fn finish_job(
     let resources = &running.plan.resources;
     let retain_output = success && running.consumer.retains_output();
     let mut state = inner.state.lock().expect("ISQ executor lock poisoned");
+    state.active_jobs = state.active_jobs.saturating_sub(1);
     state.held_input_bytes = state.held_input_bytes.saturating_sub(resources.input_bytes);
     state.active_host_scratch = state
         .active_host_scratch
@@ -718,9 +722,24 @@ mod tests {
         std::thread::sleep(Duration::from_millis(30));
         assert_eq!(started.load(Ordering::SeqCst), 1);
         let first = rx1.recv().unwrap().unwrap();
-        assert_eq!(started.load(Ordering::SeqCst), 1);
         drop(first);
         assert_eq!(rx2.recv().unwrap().unwrap().value, 2);
+    }
+
+    #[test]
+    fn retained_outputs_do_not_wedge_later_submits() {
+        // A UQFF write holds every output until the file is written, so the retained total passes the budget while the
+        // caller is still submitting. Both gates have to ignore it or the caller waits on its own memory forever.
+        let executor = IsqExecutor::new(IsqExecutorConfig::for_tests(2, 100));
+        let mut plan = plan(40);
+        plan.resources.host_scratch_bytes = 0;
+        plan.resources.input_bytes = 40;
+        let mut held = Vec::new();
+        for i in 0..8usize {
+            let rx = executor.submit(plan.clone(), IsqConsumer::UqffWrite, move || Ok(i));
+            held.push(rx.recv_timeout(TEST_RECV_TIMEOUT).unwrap().unwrap());
+        }
+        assert_eq!(held.len(), 8);
     }
 
     #[test]
