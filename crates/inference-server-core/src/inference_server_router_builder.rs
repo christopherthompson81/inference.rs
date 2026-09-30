@@ -322,7 +322,7 @@ impl InferenceRsServerRouterBuilder {
             let doc = get_openapi_doc(None);
             router = router.merge(
                 SwaggerUi::new(format!("{prefix}/docs"))
-                    .url(format!("{prefix}/api-doc/openapi.json"), doc),
+                    .external_url_unchecked(format!("{prefix}/api-doc/openapi.json"), doc),
             );
         }
 

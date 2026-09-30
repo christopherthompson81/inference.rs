@@ -471,3 +471,75 @@ header form, and a Harmony stream through `ToolCallState`.
 **Implication:** the replacement matches the crate on every stream except the ones the old wrapper got wrong.
 `openai-harmony` leaves the dependency graph, and 49 packages leave the lockfile, among them `ravif`, `rav1e` and
 `av1-grain` (the AVIF encoder chain behind issue #120). `reqwest` 0.12 remains only through `hf-hub` 0.4.
+
+## Run 13 — 2026-09-29 23:30
+
+**Question:** how much of core's lib test (the last unit in Run 11, 71.2 s starting at 43.0 s) is test code that
+could move out?
+
+**Commands:**
+- `CARGO_TARGET_DIR=<scratch> cargo llvm-lines -p inference-core --lib --profile test --features cuda`, and the same
+  without `--profile test`.
+- Functions present only in the test build, grouped by their `...::tests` module.
+- Source lines inside `#[cfg(test)]` modules and `tests.rs` files.
+
+**Raw finding:**
+- Source: 22,243 test lines in 59 files, 576 tests. The largest are `scheduler/paged_scheduler/tests.rs` 3,131,
+  `pipeline/multimodal.rs` tests about 2.6k, `pipeline/inputs_processor.rs` 1.9k,
+  `loaders/multimodal_loaders/tests.rs` 1,523, `sequence.rs` 1.1k, `prefix_cacher.rs` 1.1k, and
+  `loaders/normal_loaders/tests.rs` 1,000.
+- IR: the lib test is 2,428,564 lines and the lib 2,159,228. Functions only in the test build total 436,669 (18% of
+  the lib test). The other 1,988,592 are core compiled again under `cfg(test)`.
+- Largest test-only blocks: `scheduler::paged_scheduler::tests` 52,799, `selection::model_selected` 30,822 (tests
+  deserialize `ModelSelected` through a second deserializer), `pipeline::cuda_graph::tests` 22,259,
+  `loaders::multimodal_loaders::tests` 20,863, `sequence::tests` 14,675, `pipeline::isq::tests` 14,582,
+  `prefix_cacher::tests` 13,665, `isq_flow::online::tests` 13,129, `loaders::normal_loaders::tests` 11,531.
+- The big test modules are written against internals: `use super::*` inside private modules (`scheduler`,
+  `sequence`, `prefix_cacher`, `pipeline` are all private in core). Moving them to integration tests would mean making
+  those modules public.
+- Scheduling: a test binary links, so cargo starts it only after every dependency's codegen, not just its metadata.
+  That is why core's lib test starts at 43.0 s in Run 11, when the slowest family crate (`inference-models-qwen`,
+  35.7 s) finishes, while core's lib starts at 24.2 s.
+
+**Implication:**
+- Moving every movable test would take at most about 18% (about 13 s) off core's lib test. The rest is core compiled
+  again, which stays as long as core has any unit test.
+- In Run 11 the CLI test binary ended 2.5 s before core's lib test, so the wall-time gain from shrinking core's lib
+  test alone is capped near 2.5 s until the api to CLI chain also shrinks.
+- The lib test's start is set by the slowest family crate's codegen, which is a separate lever.
+
+## Run 14 — 2026-09-29 23:20
+
+**Question:** does serving the committed OpenAPI document, instead of building it with utoipa, move the api to CLI
+chain?
+
+**Change:**
+- The 43 `#[utoipa::path]` annotations became `#[cfg_attr(test, utoipa::path(...))]`, and the `#[derive(OpenApi)]`
+  generator moved into a `#[cfg(test)] mod generated` in `openapi_doc.rs`. The staleness and regenerate tests still
+  use it.
+- At runtime, `get_openapi_doc(base_path) -> serde_json::Value` parses `include_str!` of `docs/openapi.json` and
+  prefixes its path keys, and Swagger UI serves it with `external_url_unchecked`. serde_json's `preserve_order` is now
+  declared in server-core, so the committed key order is kept explicitly rather than through minijinja.
+- utoipa can't deserialize our document (an untagged `RefOr`). So embedders now serve it beside their own document
+  instead of merging it into theirs; the `lib.rs` example shows how.
+
+**Commands:**
+- IR: `cargo llvm-lines -p inference-server-core --lib --features cuda`.
+- Build time: two trees in one scratch target (the branch and a `git worktree` of master), both warmed. Each tree's
+  `inference-api/src/lib.rs` was touched and it was rebuilt with the cold-build test command, `--timings` and
+  `CARGO_INCREMENTAL=0`. Load was about 14.
+
+**Raw finding:**
+- IR: `inference-server-core` went from 676,823 to 544,498 (-132,325, -19.6%). utoipa code in it fell from 132,417
+  to 9,639 (its own types' `ToSchema` derives).
+- Rebuild from inference-api down: master 30.9 s, branch 30.6 s. Unit-seconds: 99 and 97.
+  - server-core's lib: 11.9 s → 10.7 s.
+  - The CLI test binary, last in both: from 15.6 s + 15.2 s on master to 14.6 s + 15.9 s on the branch.
+
+**Implication:**
+- IR falls, and the server no longer builds its document at startup, but the wall-time gain is within noise.
+- After Runs 5, 7, 8 and 9, the crates below the CLI test binary are small enough that trimming them barely moves the
+  chain.
+- The cold build's end is now set by core: its lib (about 53 s), and its lib test (about 71 s), which starts only when
+  the slowest family crate finishes codegen (Run 13).
+

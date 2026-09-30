@@ -13,13 +13,13 @@ use crate::{
 };
 
 /// Speech generation endpoint handler.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     tag = "inference.rs",
     path = "/v1/audio/speech",
     request_body = SpeechGenerationRequest,
     responses((status = 200, description = "Speech generation"))
-)]
+))]
 pub async fn speech_generation(
     State(state): ExtractedInferenceRsState,
     payload: Result<ApiJson<SpeechGenerationRequest>, ApiJsonRejection>,

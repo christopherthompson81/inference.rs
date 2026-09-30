@@ -9,7 +9,7 @@ use crate::{
     handler_core::{json_response, openai_error_response},
 };
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     tag = "inference.rs",
     path = "/v1/agent/approvals/{approval_id}",
@@ -22,7 +22,7 @@ use crate::{
         (status = 413, description = "Decision payload is too large"),
         (status = 415, description = "Unsupported content type"),
     )
-)]
+))]
 pub async fn resolve_agent_approval(
     Extension(broker): Extension<ApprovalBroker>,
     Path(approval_id): Path<String>,

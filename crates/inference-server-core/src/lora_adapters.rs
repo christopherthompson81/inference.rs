@@ -20,7 +20,7 @@ use crate::{
 
 const INVALID_QUERY: &str = "invalid_query";
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     tag = "LoRA adapters",
     path = "/v1/load_lora_adapter",
@@ -41,7 +41,7 @@ const INVALID_QUERY: &str = "invalid_query";
         (status = 503, description = "Adapter storage or model device is unavailable"),
         (status = 500, description = "Adapter loading task failed")
     )
-)]
+))]
 pub(crate) async fn load_lora_adapter(
     State(state): ExtractedInferenceRsState,
     Extension(config): Extension<LoraAdapterApiConfig>,
@@ -53,7 +53,7 @@ pub(crate) async fn load_lora_adapter(
     }
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     tag = "LoRA adapters",
     path = "/v1/unload_lora_adapter",
@@ -71,7 +71,7 @@ pub(crate) async fn load_lora_adapter(
         (status = 415, description = "Request content type is not JSON"),
         (status = 500, description = "Internal server error")
     )
-)]
+))]
 pub(crate) async fn unload_lora_adapter(
     State(state): ExtractedInferenceRsState,
     Extension(config): Extension<LoraAdapterApiConfig>,
@@ -83,7 +83,7 @@ pub(crate) async fn unload_lora_adapter(
     }
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     tag = "LoRA adapters",
     path = "/v1/lora_adapters",
@@ -96,7 +96,7 @@ pub(crate) async fn unload_lora_adapter(
         (status = 409, description = "LoRA runtime is unavailable"),
         (status = 500, description = "Internal server error")
     )
-)]
+))]
 pub(crate) async fn list_lora_adapters(
     State(state): ExtractedInferenceRsState,
     Extension(config): Extension<LoraAdapterApiConfig>,

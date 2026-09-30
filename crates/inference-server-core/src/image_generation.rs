@@ -11,13 +11,13 @@ use crate::{
 };
 
 /// Image generation endpoint handler.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     tag = "inference.rs",
     path = "/v1/images/generations",
     request_body = ImageGenerationRequest,
     responses((status = 200, description = "Image generation", body = inference_core::ImageGenerationResponse))
-)]
+))]
 pub async fn image_generation(
     State(state): ExtractedInferenceRsState,
     payload: Result<ApiJson<ImageGenerationRequest>, ApiJsonRejection>,

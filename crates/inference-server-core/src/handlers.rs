@@ -1,9 +1,13 @@
 //! ## General inference.rs server route handlers.
 
+#[cfg(test)]
+use crate::openai::ModelObjects;
 use axum::extract::{Json, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use inference_api::operations::{self, CalibrationApplyRequest, ReIsqRequest, ReIsqResponse};
+#[cfg(test)]
+use inference_api::operations::ReIsqResponse;
+use inference_api::operations::{self, CalibrationApplyRequest, ReIsqRequest};
 use inference_api::request_body::{JsonRequest, parse_json};
 use inference_core::{
     AutoDeviceMapParams, AutoTuneRequest, CalibrationAction, InferenceRs, ModelDType,
@@ -13,13 +17,14 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::handler_core::{ApiJson, ApiJsonRejection};
-pub use crate::models_api::{ModelOperationRequest, ModelStatus, ModelStatusResponse};
+pub use crate::models_api::ModelOperationRequest;
+#[cfg(test)]
+pub use crate::models_api::{ModelStatus, ModelStatusResponse};
 use crate::{
     handler_core::{ApiError, ApiErrorKind, json_response, openai_error_response},
     models_api::{
         list_models, model_status as status, reload_model as reload, unload_model as unload,
     },
-    openai::ModelObjects,
     system,
     types::ExtractedInferenceRsState,
 };
@@ -42,7 +47,7 @@ impl From<TuneProfileRequest> for TuneProfile {
     }
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
   get,
   tag = "inference.rs",
   path = "/v1/models",
@@ -50,42 +55,42 @@ impl From<TuneProfileRequest> for TuneProfile {
     (status = 200, description = "Served model info", body = ModelObjects),
     (status = 500, description = "Failed to inspect the model registry")
   )
-)]
+))]
 pub async fn models(State(state): ExtractedInferenceRsState) -> Response {
     json_response(list_models(&state))
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
   get,
   tag = "inference.rs",
   path = "/health",
   responses((status = 200, description = "Server is healthy"))
-)]
+))]
 pub async fn health() -> &'static str {
     "OK"
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
   get,
   tag = "inference.rs",
   path = "/v1/system/info",
   responses((status = 200, description = "Host, device, and build information"))
-)]
+))]
 pub async fn system_info() -> Json<inference_core::SystemInfo> {
     Json(system::system_info())
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
   post,
   tag = "inference.rs",
   path = "/v1/system/doctor",
   responses((status = 200, description = "Environment diagnostics report"))
-)]
+))]
 pub async fn system_doctor() -> Json<inference_core::DoctorReport> {
     Json(system::system_doctor())
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
   post,
   tag = "inference.rs",
   path = "/re_isq",
@@ -95,7 +100,7 @@ pub async fn system_doctor() -> Json<inference_core::DoctorReport> {
     (status = 400, description = "Invalid ISQ type"),
     (status = 500, description = "Failed to dispatch the ISQ request")
   )
-)]
+))]
 pub async fn re_isq(
     State(state): ExtractedInferenceRsState,
     payload: Result<ApiJson<ReIsqRequest>, ApiJsonRejection>,
@@ -124,34 +129,34 @@ fn http_save_cimatrix_path(name: &str) -> Result<std::path::PathBuf, ApiError> {
     Ok(path.to_path_buf())
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
   post,
   tag = "inference.rs",
   path = "/calibration/start",
   responses((status = 200, description = "Begin collecting activation statistics from live traffic.", body = inference_core::CalibrationStatus))
-)]
+))]
 pub async fn calibration_start(State(state): ExtractedInferenceRsState) -> Response {
     InferenceRs::maybe_log_request(state.clone(), "Calibration start".to_string());
     json_response(operations::calibration(&state, CalibrationAction::Start).await)
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
   get,
   tag = "inference.rs",
   path = "/calibration/status",
   responses((status = 200, description = "Per-layer calibration collection progress.", body = inference_core::CalibrationStatus))
-)]
+))]
 pub async fn calibration_status(State(state): ExtractedInferenceRsState) -> Response {
     json_response(operations::calibration(&state, CalibrationAction::Status).await)
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
   post,
   tag = "inference.rs",
   path = "/calibration/apply",
   request_body = CalibrationApplyRequest,
   responses((status = 200, description = "Requantize with collected statistics and hot-swap the layers.", body = inference_core::CalibrationStatus))
-)]
+))]
 pub async fn calibration_apply(
     State(state): ExtractedInferenceRsState,
     payload: Result<ApiJson<CalibrationApplyRequest>, ApiJsonRejection>,
@@ -181,7 +186,7 @@ fn model_operation_request(
         .map_err(|ApiJsonRejection(error)| error)
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
   post,
   tag = "inference.rs",
   path = "/v1/models/unload",
@@ -195,7 +200,7 @@ fn model_operation_request(
     (status = 415, description = "Request content type is not JSON"),
     (status = 500, description = "Model registry failure")
   )
-)]
+))]
 pub async fn unload_model(
     State(state): ExtractedInferenceRsState,
     payload: Result<ApiJson<ModelOperationRequest>, ApiJsonRejection>,
@@ -206,7 +211,7 @@ pub async fn unload_model(
     }
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
   post,
   tag = "inference.rs",
   path = "/v1/models/reload",
@@ -220,7 +225,7 @@ pub async fn unload_model(
     (status = 415, description = "Request content type is not JSON"),
     (status = 500, description = "Model reload failure")
   )
-)]
+))]
 pub async fn reload_model(
     State(state): ExtractedInferenceRsState,
     payload: Result<ApiJson<ModelOperationRequest>, ApiJsonRejection>,
@@ -231,7 +236,7 @@ pub async fn reload_model(
     }
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
   post,
   tag = "inference.rs",
   path = "/v1/models/status",
@@ -244,7 +249,7 @@ pub async fn reload_model(
     (status = 415, description = "Request content type is not JSON"),
     (status = 500, description = "Model registry failure")
   )
-)]
+))]
 pub async fn get_model_status(
     State(state): ExtractedInferenceRsState,
     payload: Result<ApiJson<ModelOperationRequest>, ApiJsonRejection>,
@@ -297,7 +302,7 @@ impl JsonRequest for TuneModelRequest {
     }
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
   post,
   tag = "inference.rs",
   path = "/v1/models/tune",
@@ -309,7 +314,7 @@ impl JsonRequest for TuneModelRequest {
     (status = 415, description = "Request content type is not JSON"),
     (status = 500, description = "Tuning failed")
   )
-)]
+))]
 pub async fn tune_model(payload: Result<ApiJson<TuneModelRequest>, ApiJsonRejection>) -> Response {
     let request = match payload {
         Ok(ApiJson(request)) => request,
@@ -412,7 +417,7 @@ pub async fn tune_model(payload: Result<ApiJson<TuneModelRequest>, ApiJsonReject
 }
 
 /// GET `/v1/sessions/{session_id}`. 404 if the session doesn't exist.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     tag = "inference.rs",
     path = "/v1/sessions/{session_id}",
@@ -421,7 +426,7 @@ pub async fn tune_model(payload: Result<ApiJson<TuneModelRequest>, ApiJsonReject
         (status = 200, description = "Serialized agentic session", body = SerializedSession),
         (status = 404, description = "Session not found"),
     )
-)]
+))]
 pub async fn get_session(
     State(state): ExtractedInferenceRsState,
     Path(session_id): Path<String>,
@@ -430,7 +435,7 @@ pub async fn get_session(
 }
 
 /// PUT `/v1/sessions/{session_id}`. Replaces any existing session.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     put,
     tag = "inference.rs",
     path = "/v1/sessions/{session_id}",
@@ -440,7 +445,7 @@ pub async fn get_session(
         (status = 200, description = "Session imported"),
         (status = 400, description = "Invalid session payload"),
     )
-)]
+))]
 pub async fn put_session(
     State(state): ExtractedInferenceRsState,
     Path(session_id): Path<String>,
@@ -457,13 +462,13 @@ pub async fn put_session(
 }
 
 /// DELETE `/v1/sessions/{session_id}`. Idempotent: returns 200 either way.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     delete,
     tag = "inference.rs",
     path = "/v1/sessions/{session_id}",
     params(("session_id" = String, Path, description = "Session ID to delete")),
     responses((status = 200, description = "Session deleted (or did not exist)"))
-)]
+))]
 pub async fn delete_session(
     State(state): ExtractedInferenceRsState,
     Path(session_id): Path<String>,

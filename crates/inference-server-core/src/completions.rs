@@ -19,6 +19,8 @@ use tokio::sync::mpsc::Receiver;
 
 pub use crate::engine_completion::parse_request;
 use crate::handler_core::{ApiJson, ApiJsonRejection};
+#[cfg(test)]
+use crate::openai::{CompletionChunkResponseBody, CompletionResponseBody};
 use crate::{
     completion_core::{
         BaseCompletionResponder, handle_completion_error, handle_completion_validation_error,
@@ -30,7 +32,7 @@ use crate::{
     handler_core::{
         ApiError, ApiErrorKind, ModelErrorMessage, openai_error_from_error, openai_error_response,
     },
-    openai::{CompletionChunkResponseBody, CompletionRequest, CompletionResponseBody},
+    openai::CompletionRequest,
     streaming::{DoneState, StreamOutcomeHandle, get_keep_alive_interval, openai_error_event},
     types::{ExtractedInferenceRsState, OnChunkCallback, OnDoneCallback, SharedInferenceRsState},
 };
@@ -141,7 +143,7 @@ impl IntoResponse for CompletionResponder {
 }
 
 /// OpenAI-compatible completions endpoint handler.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     tag = "inference.rs",
     path = "/v1/completions",
@@ -154,7 +156,7 @@ impl IntoResponse for CompletionResponder {
             (CompletionChunkResponseBody = "text/event-stream")
         )
     ))
-)]
+))]
 pub async fn completions(
     State(state): ExtractedInferenceRsState,
     stream_outcome: Option<Extension<StreamOutcomeHandle>>,

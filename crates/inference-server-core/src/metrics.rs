@@ -174,7 +174,7 @@ pub fn install_prometheus_recorder() {
 }
 
 /// Axum handler for `GET /metrics`. Renders the Prometheus exposition format.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     tag = "inference.rs",
     path = "/metrics",
@@ -182,7 +182,7 @@ pub fn install_prometheus_recorder() {
         (status = 200, description = "Prometheus text exposition format", content_type = "text/plain"),
         (status = 503, description = "Metrics recorder not initialized or metrics disabled"),
     )
-)]
+))]
 pub async fn metrics() -> impl IntoResponse {
     match PROMETHEUS_HANDLE.get() {
         Some(handle) => (StatusCode::OK, handle.render()).into_response(),

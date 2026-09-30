@@ -116,8 +116,6 @@
 //!         .unwrap();
 //!
 //!     let inference_doc = get_openapi_doc(Some(inference_base_path));
-//!     let mut api_docs = ApiDoc::openapi();
-//!     api_docs.merge(inference_doc);
 //!
 //!     let app_state = Arc::new(AppState {
 //!         inference_state: shared_inference,
@@ -129,7 +127,11 @@
 //!         .route("/chat", post(custom_chat))
 //!         .with_state(app_state.clone())
 //!         .nest(inference_base_path, inference_routes)
-//!         .merge(SwaggerUi::new("/api-docs").url("/api-docs/openapi.json", api_docs));
+//!         .merge(
+//!             SwaggerUi::new("/api-docs")
+//!                 .url("/api-docs/openapi.json", ApiDoc::openapi())
+//!                 .external_url_unchecked("/api-docs/inference.json", inference_doc),
+//!         );
 //!
 //!     let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
 //!     axum::serve(listener, app).await.unwrap();
