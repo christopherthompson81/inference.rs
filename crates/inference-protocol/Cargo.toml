@@ -29,6 +29,9 @@ tracing.workspace = true
 utoipa = { workspace = true, optional = true }
 uuid = { workspace = true, features = ["v4"] }
 
+[dev-dependencies]
+tempfile.workspace = true
+
 [features]
 code-execution = ["dep:inference-code-exec"]
 utoipa = ["dep:utoipa", "inference-mcp/utoipa"]

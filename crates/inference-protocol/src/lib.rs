@@ -2,6 +2,7 @@
 //! calls and their parsers, reasoning parsers and files. It builds without candle, so it compiles early.
 
 pub mod files;
+pub mod images;
 #[cfg(feature = "openai")]
 pub mod openai;
 pub mod reasoning_parsers;

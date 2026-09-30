@@ -1920,9 +1920,7 @@ async fn diffusion_interactive_mode(
             queued_at: None,
             messages: RequestMessage::ImageGeneration {
                 prompt: prompt.to_string(),
-                format: ImageGenerationResponseFormat::Url,
                 generation_params: diffusion_params.clone(),
-                save_file: None,
             },
             sampling_params: SamplingParams::deterministic(),
             seed: None,
@@ -1963,9 +1961,21 @@ async fn diffusion_interactive_mode(
         let start = Instant::now();
         sender.send(req).await.unwrap();
 
-        let ResponseOk::ImageGeneration(response) = rx.recv().await.unwrap().as_result().unwrap()
+        let ResponseOk::ImageGeneration(generated) = rx.recv().await.unwrap().as_result().unwrap()
         else {
             panic!("Got unexpected response type.")
+        };
+        let response = match inference_core::images::image_generation_response(
+            generated.created,
+            &generated.images,
+            ImageGenerationResponseFormat::Url,
+            None,
+        ) {
+            Ok(response) => response,
+            Err(e) => {
+                error!("Failed to save the generated image: {e}");
+                continue;
+            }
         };
         let end = Instant::now();
 

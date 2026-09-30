@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-use image::{DynamicImage, codecs::png::PngEncoder};
+use image::DynamicImage;
 use serde_json::json;
+
+use crate::images::encode_png;
 
 use crate::{
     AgenticToolCallData, AgenticToolCallPhase, AgenticToolCallRecord, ChatCompletionResponse, File,
@@ -70,14 +72,11 @@ impl ChatResponseCollector {
 pub fn encode_agentic_tool_images(images: &[DynamicImage]) -> Vec<String> {
     images
         .iter()
-        .filter_map(|image| {
-            let mut buffer = Vec::new();
-            match image.write_with_encoder(PngEncoder::new(&mut buffer)) {
-                Ok(()) => Some(STANDARD.encode(buffer)),
-                Err(e) => {
-                    tracing::warn!("failed to encode agentic tool image: {e}");
-                    None
-                }
+        .filter_map(|image| match encode_png(image) {
+            Ok(buffer) => Some(STANDARD.encode(buffer)),
+            Err(e) => {
+                tracing::warn!("failed to encode agentic tool image: {e}");
+                None
             }
         })
         .collect()

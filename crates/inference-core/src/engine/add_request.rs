@@ -5,9 +5,7 @@ use crate::{
         is_inputs_processor_validation_error,
     },
     prefix_cacher::MatchingCache,
-    request::{
-        DetokenizationRequest, ImageGenerationResponseFormat, NormalRequest, TokenizationRequest,
-    },
+    request::{DetokenizationRequest, NormalRequest, TokenizationRequest},
     sequence::{SeqPreallocatedCache, SeqStepType},
     tools::{ToolCallFormat, ToolCallState, ToolChoice},
 };
@@ -15,7 +13,6 @@ use candle_core::Tensor;
 use either::Either;
 use std::{
     ops::Deref,
-    path::PathBuf,
     sync::{Arc, atomic::Ordering},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -60,10 +57,8 @@ struct MessageExtras {
     images: Option<Vec<image::DynamicImage>>,
     audios: Option<Vec<AudioInput>>,
     videos: Option<Vec<VideoInput>>,
-    image_generation_format: Option<ImageGenerationResponseFormat>,
     seq_step_type: SeqStepType,
     diffusion_params: Option<DiffusionGenerationParams>,
-    image_gen_save_file: Option<PathBuf>,
 }
 
 impl MessageExtras {
@@ -75,10 +70,8 @@ impl MessageExtras {
             images: None,
             audios: None,
             videos: None,
-            image_generation_format: None,
             seq_step_type: SeqStepType::PromptAndDecode,
             diffusion_params: None,
-            image_gen_save_file: None,
         };
         match messages {
             RequestMessage::Chat { .. } => extras.is_chat = true,
@@ -103,15 +96,10 @@ impl MessageExtras {
             }
             RequestMessage::CompletionTokens(_) => {}
             RequestMessage::ImageGeneration {
-                format,
-                generation_params,
-                save_file,
-                ..
+                generation_params, ..
             } => {
-                extras.image_generation_format = Some(*format);
                 extras.seq_step_type = SeqStepType::OneShot;
                 extras.diffusion_params = Some(generation_params.clone());
-                extras.image_gen_save_file = save_file.clone();
             }
             RequestMessage::SpeechGeneration { .. }
             | RequestMessage::Embedding { .. }
@@ -417,10 +405,8 @@ impl Engine {
                 extras.videos.clone(),
                 block_size,
                 tool_call_state,
-                extras.image_generation_format,
                 extras.seq_step_type,
                 extras.diffusion_params.clone(),
-                extras.image_gen_save_file.clone(),
                 seq_preallocated_cache,
                 request.return_raw_logits,
                 request.sampling_params.ignore_eos,

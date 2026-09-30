@@ -756,3 +756,38 @@ the caller adds. Grouping llvm-lines by the instantiated type's crate finds thes
 was the largest. Candidates the review found: tokenizers' generic `encode`/`encode_batch` (called in most model
 crates), PNG encoding generic over the writer in core, and inference-nn's config deserializers. The chat-template
 move is still worth doing for layering, but it is a small build-time item.
+
+## Run 20 — 2026-09-30 13:00
+
+**Question:** Run 19's review listed more generic-instantiation candidates. How large are they, and which are worth
+moving for separation of concerns rather than build time?
+
+**Command:** `cargo llvm-lines --lib -p <crate>`, grouped by the defining crate of each function and, for tokio, by
+runtime module and spawned future.
+
+**Raw finding:**
+- tokenizers-defined IR per crate: qwen 4,097, llama 4,097, gemma 4,071, gguf 4,289, agent 4,258, phi 4,192, core
+  19,329. The review's estimate for non-generic `encode`/`encode_batch` helpers (10 to 30k per crate) was far off:
+  tokenizers' wrapper types keep the work inside tokenizers. Not worth doing.
+- Core by defining crate (1.67M): its own code 29.2%, `core`/`alloc`/`std` 32.7%, serde_json 8.3%, tokio 5.5% (92k),
+  hashbrown 4.6%, inference_nn 2.5%, png 0.6% (10.6k), minijinja 0.5%.
+- tokio's runtime machinery per future is about 70k: the four distributed daemon replicators about 3.8k each,
+  `tokio::fs` operations each spawning their own blocking task (about 15k), the rest spread thin.
+
+**Separation-of-concerns reading of the candidates:** `encode` helpers and tokio spawn erasure are call-pattern
+changes with no responsibility to move. inference-nn's configs already live in the right crate; only their parsing
+happens in core. Chat templates are a protocol concern (messages to prompt text). Image encoding was the clearest
+boundary problem: for `response_format: url` the pipeline wrote `image-generation-<uuid>.png` into the process's
+working directory and returned that path, so the engine chose format, location and name.
+
+**Change (image encoding):** the engine returns pixels, `Response::ImageGeneration(GeneratedImages { created,
+images })`, as `Response::Speech` returns PCM. `RequestMessage::ImageGeneration` loses `format` and `save_file`.
+`inference_protocol::images::{encode_png, image_generation_response}` encodes them for inference-api, the Rust SDK
+(same public signature) and the CLI, and agent tool images use `encode_png`. Where url images are stored is
+unchanged, now decided above the engine.
+
+**Raw finding, after:** inference-core 1,671,740 → 1,661,023 IR lines; inference-protocol 149,483 → 173,978, since
+the PNG encoder now compiles there, off the critical path beside the kernel builds. Core drops its `uuid` dependency.
+
+**Implication:** the remaining build-time items are each 1 to 4% of core. The next architecture items are the
+chat-template move and choosing where url images should be stored (the files store, a configured directory).

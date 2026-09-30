@@ -10,20 +10,19 @@ use crate::{
     speculative::{SpeculativeProposalDistribution, SpeculativeTokens},
 };
 use crate::{
-    CompletionChunkChoice, CompletionChunkResponse, CompletionResponse, ImageChoice,
-    ImageGenerationResponse, ImageGenerationResponseFormat,
+    CompletionChunkChoice, CompletionChunkResponse, CompletionResponse, GeneratedImages,
     pipeline::{DiffusionGenerationParams, KvCache},
     response::CompletionChoice,
     tools::ToolCallState,
 };
 use candle_core::Tensor;
+use image::DynamicImage;
 use rand::SeedableRng;
 use rand_isaac::Isaac64Rng;
 use std::{
     collections::{HashSet, VecDeque},
     fmt::Display,
     ops::Range,
-    path::PathBuf,
     sync::{Arc, RwLock},
     time::{Duration, Instant},
 };
@@ -38,9 +37,7 @@ pub(crate) use inference_nn::media_inputs::media::{
 
 /// What an image-generation request asked for; the media and input-processor state live in `MultimodalData`.
 pub struct ImageGenerationSettings {
-    pub response_format: Option<ImageGenerationResponseFormat>,
     pub diffusion_params: Option<DiffusionGenerationParams>,
-    pub save_file: Option<PathBuf>,
 }
 
 pub type SeqPreallocatedCache = Vec<Option<(Tensor, Tensor)>>;
@@ -316,10 +313,8 @@ impl Sequence {
         block_size: Option<usize>,
         //
         tool_call_state: Option<ToolCallState>,
-        image_gen_response_format: Option<ImageGenerationResponseFormat>,
         sequence_stepping_type: SeqStepType,
         diffusion_params: Option<DiffusionGenerationParams>,
-        image_gen_save_file: Option<PathBuf>,
         // Preallocated KV cache templates, keyed by layer.
         seq_preallocated_cache: Option<SeqPreallocatedCache>,
         //
@@ -393,11 +388,7 @@ impl Sequence {
             scheduling_urgency: 0,
             // Multimodal data
             multimodal: MultimodalData::new(input_images, input_audios, input_videos),
-            image_generation: ImageGenerationSettings {
-                response_format: image_gen_response_format,
-                diffusion_params,
-                save_file: image_gen_save_file,
-            },
+            image_generation: ImageGenerationSettings { diffusion_params },
             tool_call_state,
             sequence_stepping_type,
             return_raw_logits,
@@ -1327,8 +1318,8 @@ impl Sequence {
         group.total_toks = self.len();
     }
 
-    pub fn add_image_choice_to_group(&self, choice: ImageChoice) {
-        get_mut_group!(self).image_choices.push(choice);
+    pub fn add_image_to_group(&self, image: DynamicImage) {
+        get_mut_group!(self).images.push(image);
     }
 
     pub fn add_speech_pcm_to_group(&self, pcm: Arc<Vec<f32>>, rate: usize, channels: usize) {
@@ -1525,14 +1516,6 @@ impl Sequence {
         self.multimodal.keep_num_images(images_to_keep)
     }
 
-    pub fn image_gen_response_format(&self) -> Option<ImageGenerationResponseFormat> {
-        self.image_generation.response_format
-    }
-
-    pub fn image_gen_save_file(&self) -> Option<&PathBuf> {
-        self.image_generation.save_file.as_ref()
-    }
-
     /// Per-item multimodal feature positions for prefix caching block hashing.
     pub fn mm_features(&self) -> &[MultiModalFeature] {
         self.multimodal.mm_features()
@@ -1682,7 +1665,7 @@ pub struct SequenceGroup {
     pub total_time: u128,
     pub total_completion_time: u128,
     choices: Vec<Choice>,
-    image_choices: Vec<ImageChoice>,
+    images: Vec<DynamicImage>,
     speech_pcms: Vec<(Arc<Vec<f32>>, usize, usize)>, // (pcm, rate, channels)
     raw_choices: Vec<(Vec<Tensor>, Vec<u32>)>,
     embedding_choices: Vec<Vec<f32>>,
@@ -1704,7 +1687,7 @@ impl SequenceGroup {
     ) -> Self {
         Self {
             choices: Vec::new(),
-            image_choices: Vec::new(),
+            images: Vec::new(),
             speech_pcms: Vec::new(),
             raw_choices: Vec::new(),
             embedding_choices: Vec::new(),
@@ -1753,10 +1736,6 @@ impl SequenceGroup {
                 .map(|(_, x)| x)
                 .collect::<Vec<_>>()
         }
-    }
-
-    pub fn get_image_choices(&self) -> &[ImageChoice] {
-        &self.image_choices
     }
 
     pub fn get_usage(&self) -> Usage {
@@ -1851,12 +1830,18 @@ impl SequenceGroup {
 
     #[allow(clippy::result_large_err)]
     pub async fn maybe_send_image_gen_response(
-        &self,
-        response: ImageGenerationResponse,
+        &mut self,
+        created: u128,
         sender: Sender<Response>,
     ) -> Result<(), SendError<Response>> {
-        if self.image_choices.len() == self.n_choices {
-            sender.send(Response::ImageGeneration(response)).await?;
+        if self.images.len() == self.n_choices {
+            let images = std::mem::take(&mut self.images);
+            sender
+                .send(Response::ImageGeneration(GeneratedImages {
+                    created,
+                    images,
+                }))
+                .await?;
         }
 
         Ok(())
@@ -2095,9 +2080,7 @@ mod tests {
             None, // input_videos
             None,
             None,
-            None,
             SeqStepType::PromptAndDecode,
-            None,
             None,
             None,
             false,

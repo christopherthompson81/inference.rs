@@ -520,11 +520,9 @@ impl Model {
     ) -> crate::error::Result<ImageGenerationResponse> {
         let messages = RequestMessage::ImageGeneration {
             prompt: prompt.to_string(),
-            format: response_format,
             generation_params,
-            save_file,
         };
-        let ResponseOk::ImageGeneration(response) =
+        let ResponseOk::ImageGeneration(generated) =
             self.send_simple(messages, model_id, false).await?
         else {
             return Err(SdkError::UnexpectedResponse {
@@ -532,7 +530,12 @@ impl Model {
             });
         };
 
-        Ok(response)
+        Ok(inference_core::images::image_generation_response(
+            generated.created,
+            &generated.images,
+            response_format,
+            save_file.as_deref(),
+        )?)
     }
 
     // ========================================================================

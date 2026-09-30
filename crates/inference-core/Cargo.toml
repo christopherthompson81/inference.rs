@@ -58,7 +58,6 @@ inference-models-other = { workspace = true, optional = true }
 inference-models-phi = { workspace = true, optional = true }
 inference-models-qwen = { workspace = true, optional = true }
 inference-models-speech.workspace = true
-uuid = { workspace = true, features = ["v4"] }
 utoipa = { workspace = true, optional = true }
 regex.workspace = true
 as-any.workspace = true
