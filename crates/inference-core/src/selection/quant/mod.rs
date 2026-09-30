@@ -5,6 +5,7 @@ mod gguf_discovery;
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
+use futures::future::BoxFuture;
 use tracing::{debug, info, warn};
 
 pub use gguf_discovery::{
@@ -41,7 +42,15 @@ pub struct ResolvedModelQuant {
 }
 
 /// Resolves `Run.quant` to a published GGUF variant, else a published UQFF (own or `-UQFF` sibling), else ISQ.
-pub async fn resolve_model_quant(
+pub fn resolve_model_quant<'a>(
+    model: ModelSelected,
+    token_source: &'a TokenSource,
+    force_cpu: bool,
+) -> BoxFuture<'a, Result<ResolvedModelQuant>> {
+    Box::pin(resolve_model_quant_inner(model, token_source, force_cpu))
+}
+
+async fn resolve_model_quant_inner(
     model: ModelSelected,
     token_source: &TokenSource,
     force_cpu: bool,
@@ -177,7 +186,23 @@ fn run_as_gguf(
     })
 }
 
-pub async fn resolve_quant(
+pub fn resolve_quant<'a>(
+    raw: &'a str,
+    model_id: &'a str,
+    token_source: &'a TokenSource,
+    model_selected: &'a ModelSelected,
+    force_cpu: bool,
+) -> BoxFuture<'a, Result<ResolvedQuant>> {
+    Box::pin(resolve_quant_inner(
+        raw,
+        model_id,
+        token_source,
+        model_selected,
+        force_cpu,
+    ))
+}
+
+async fn resolve_quant_inner(
     raw: &str,
     model_id: &str,
     token_source: &TokenSource,
@@ -281,7 +306,21 @@ async fn resolve_explicit(
 }
 
 /// The UQFF report a repo publishes, when its file listing has one.
-pub async fn read_existing_uqff_report(
+pub fn read_existing_uqff_report<'a>(
+    model_id: &'a str,
+    revision: &'a str,
+    files: &'a [String],
+    token_source: &'a TokenSource,
+) -> BoxFuture<'a, Result<Option<UqffReport>>> {
+    Box::pin(read_existing_uqff_report_inner(
+        model_id,
+        revision,
+        files,
+        token_source,
+    ))
+}
+
+async fn read_existing_uqff_report_inner(
     model_id: &str,
     revision: &str,
     files: &[String],

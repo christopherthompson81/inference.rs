@@ -1,3 +1,5 @@
+use futures::future::BoxFuture;
+
 use super::*;
 
 impl InferenceRs {
@@ -168,7 +170,17 @@ impl InferenceRs {
     }
 
     /// Add a new model engine to the InferenceRs instance
-    pub async fn add_model(
+    pub fn add_model<'a>(
+        &'a self,
+        model_id: String,
+        pipeline: Arc<tokio::sync::Mutex<dyn Pipeline>>,
+        method: SchedulerConfig,
+        config: AddModelConfig,
+    ) -> BoxFuture<'a, Result<(), String>> {
+        Box::pin(self.add_model_inner(model_id, pipeline, method, config))
+    }
+
+    async fn add_model_inner(
         &self,
         model_id: String,
         pipeline: Arc<tokio::sync::Mutex<dyn Pipeline>>,
@@ -428,7 +440,14 @@ impl InferenceRs {
 
     /// Manually reload a previously unloaded model.
     /// This is also called automatically by `get_sender()` when a request targets an unloaded model.
-    pub async fn reload_model(&self, model_id: &str) -> Result<(), InferenceRsError> {
+    pub fn reload_model<'a>(
+        &'a self,
+        model_id: &'a str,
+    ) -> BoxFuture<'a, Result<(), InferenceRsError>> {
+        Box::pin(self.reload_model_inner(model_id))
+    }
+
+    async fn reload_model_inner(&self, model_id: &str) -> Result<(), InferenceRsError> {
         let resolved_model_id = self.resolve_alias(model_id)?;
         // Marked before the checks so two reloads cannot both pass them; the guard clears it even if this is dropped.
         if !self

@@ -4,6 +4,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use futures::future::BoxFuture;
 use reqwest::{Url, header, redirect::Policy};
 
 const URL_FETCH_CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -15,7 +16,11 @@ pub enum NetworkPolicy {
 }
 
 /// Fetches a URL the caller chose, honouring proxy settings; request-driven fetches go through `fetch_limited`.
-pub async fn fetch_url(url: &str) -> Result<Vec<u8>> {
+pub fn fetch_url<'a>(url: &'a str) -> BoxFuture<'a, Result<Vec<u8>>> {
+    Box::pin(fetch_url_inner(url))
+}
+
+async fn fetch_url_inner(url: &str) -> Result<Vec<u8>> {
     let response = http_client_builder()
         .connect_timeout(URL_FETCH_CONNECT_TIMEOUT)
         .build()?
@@ -53,7 +58,16 @@ pub struct FetchedResponse {
 }
 
 /// Fetch an http(s) URL with a streamed byte cap, re-validating every redirect hop under `network`.
-pub async fn fetch_limited(
+pub fn fetch_limited<'a>(
+    url: Url,
+    options: FetchOptions<'a>,
+    network: NetworkPolicy,
+    kind: &'a str,
+) -> BoxFuture<'a, Result<FetchedResponse>> {
+    Box::pin(fetch_limited_inner(url, options, network, kind))
+}
+
+async fn fetch_limited_inner(
     mut url: Url,
     options: FetchOptions<'_>,
     network: NetworkPolicy,

@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
+use futures::future::BoxFuture;
 use hf_hub::{
     Cache, Repo, RepoType,
     api::{
@@ -268,7 +269,21 @@ pub(crate) fn build_async_api_with_cache(
         .map_err(Into::into)
 }
 
-pub async fn list_model_files(
+pub fn list_model_files<'a>(
+    model_id: &'a str,
+    revision: &'a str,
+    token_source: &'a crate::pipeline::TokenSource,
+    should_error: bool,
+) -> BoxFuture<'a, Result<Vec<String>>> {
+    Box::pin(list_model_files_inner(
+        model_id,
+        revision,
+        token_source,
+        should_error,
+    ))
+}
+
+async fn list_model_files_inner(
     model_id: &str,
     revision: &str,
     token_source: &crate::pipeline::TokenSource,
@@ -315,7 +330,23 @@ pub async fn try_get_model_file(
         .map_err(|err| hf_async_api_error(Path::new(model_id), Some(file), revision, &err))
 }
 
-pub async fn read_model_file_range(
+pub fn read_model_file_range<'a>(
+    model_id: &'a str,
+    revision: &'a str,
+    file: &'a str,
+    range: Range<u64>,
+    token_source: &'a crate::pipeline::TokenSource,
+) -> BoxFuture<'a, Result<Vec<u8>>> {
+    Box::pin(read_model_file_range_inner(
+        model_id,
+        revision,
+        file,
+        range,
+        token_source,
+    ))
+}
+
+async fn read_model_file_range_inner(
     model_id: &str,
     revision: &str,
     file: &str,
