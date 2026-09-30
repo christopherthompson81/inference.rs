@@ -403,6 +403,9 @@ impl AdapterOptions {
         if xlora != self.xlora_order.is_some() {
             return Err("xlora and xlora_order must be specified together".to_string());
         }
+        if !xlora && self.tgt_non_granular_index.is_some() {
+            return Err("tgt_non_granular_index only applies to X-LoRA (xlora)".to_string());
+        }
         if self
             .legacy_lora
             .as_ref()

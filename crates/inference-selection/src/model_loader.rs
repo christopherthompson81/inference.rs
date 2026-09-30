@@ -13,6 +13,8 @@ use inference_core::{
     Topology, UQFF_MULTI_FILE_DELIMITER, UqffWriteConfig,
 };
 
+const ORDERING_REQUIRED: &str = "X-LoRA and legacy LoRA need an ordering file: give `order` (`--xlora-order`, \
+                                 `--legacy-lora-order`)";
 const UNRESOLVED_SOURCE: &str = "the spec's `quant`, empty GGUF filename or projector choice has to be resolved before loading; \
                                  `Engine::load` and `selection::quant::resolve_model_source` do it";
 
@@ -139,6 +141,7 @@ fn with_gguf_tokenizer(
 fn resolve_ordering(inline: &Option<Ordering>, path: &str) -> anyhow::Result<Ordering> {
     match inline {
         Some(ordering) => Ok(ordering.clone()),
+        None if path.trim().is_empty() => anyhow::bail!(ORDERING_REQUIRED),
         None => load_ordering(path),
     }
 }
@@ -1103,7 +1106,8 @@ mod tests {
                 "max_batch_size": 1,
             }}))
         };
-        assert!(LoaderBuilder::new(xlora_gguf()).build().is_err());
+        let error = LoaderBuilder::new(xlora_gguf()).build().err().unwrap();
+        assert_eq!(error.to_string(), ORDERING_REQUIRED);
         LoaderBuilder::new(xlora_gguf())
             .with_overrides(LoadOverrides {
                 ordering: Some(load_ordering(XLORA_ORDERING)?),

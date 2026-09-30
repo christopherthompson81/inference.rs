@@ -409,6 +409,25 @@ lora = [
     }
 
     #[test]
+    fn config_rejects_an_xlora_index_without_xlora() {
+        let config: CliConfig = toml::from_str(
+            r#"
+command = "serve"
+
+[[models]]
+model_id = "org/model"
+
+[models.adapter]
+tgt_non_granular_index = 1
+"#,
+        )
+        .unwrap();
+
+        let error = validate_config(&config).unwrap_err().to_string();
+        assert!(error.contains("tgt_non_granular_index"), "{error}");
+    }
+
+    #[test]
     fn multimodal_toml_rejects_legacy_adapter_modes() {
         let config: CliConfig = toml::from_str(
             r#"
