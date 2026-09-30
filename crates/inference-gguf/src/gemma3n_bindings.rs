@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 
-use crate::vision_models::gemma3n::vision::{BlockType, gemma3n_mobilenet_def};
+use inference_models_gemma::gemma3n::vision::{BlockType, gemma3n_mobilenet_def};
 
 use super::multimodal_binding_utils::{
     TensorInventory, bind, bind_required, bind_required_linear, bind_required_with,
@@ -13,7 +13,7 @@ const AUDIO_PROJECTOR_TYPE: &str = "clip.audio.projector_type";
 const ALTUP_NUM_INPUTS: &str = "gemma3n.altup.num_inputs";
 const MIN_ALTUP_INPUTS: usize = 2;
 
-pub(crate) fn build_gemma3n_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+pub fn build_gemma3n_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     validate_architecture(archive, "gemma3n")?;
     validate_projector(archive, "gemma3nv")?;
     let audio_projector = metadata_string(archive, AUDIO_PROJECTOR_TYPE)?
@@ -506,7 +506,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::gguf::multimodal_binding_utils::binding_sources;
+    use crate::multimodal_binding_utils::binding_sources;
 
     #[test]
     fn maps_complete_gemma3n_inventory() {

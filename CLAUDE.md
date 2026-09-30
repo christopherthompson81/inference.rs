@@ -30,7 +30,7 @@ cargo install --path crates/inference-cli --features <features>
 ### Testing & Quality
 ```bash
 # Run core tests
-cargo test -p inference-core -p inference-agent -p inference-protocol -p inference-nn -p inference-models-llama -p inference-models-qwen -p inference-models-gemma -p inference-models-phi -p inference-models-other -p inference-models-speech -p inference-models-diffusion -p inference-quant -p inference-vision --features inference-protocol/openai
+cargo test -p inference-core -p inference-agent -p inference-gguf -p inference-protocol -p inference-nn -p inference-models-llama -p inference-models-qwen -p inference-models-gemma -p inference-models-phi -p inference-models-other -p inference-models-speech -p inference-models-diffusion -p inference-quant -p inference-vision --features inference-protocol/openai
 
 # Format code (uses rustfmt, ruff, clang-format)
 make fmt
@@ -94,6 +94,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-paged-attn/` - PagedAttention implementation
 - `crates/inference-audio/` - Audio processing
 - `crates/inference-agent/` - The agent layer: the tool-calling loop over the engine (registered tools, MCP, code execution, files, web search and its ranking). Core's `AgentRunner` is the seam; engine builders install `inference_agent::runner()`, and without one the engine rejects agentic requests
+- `crates/inference-gguf/` - GGUF to Hugging Face translation below core: config synthesis from GGUF metadata, tensor-name bindings per architecture, and the GGUF tokenizer. The pipelines that run GGUF models stay in core
 - `crates/inference-mcp/` - Model Context Protocol client
 - `crates/inference-protocol/` - The wire protocol with no candle dependency (so it compiles alongside the kernel builds): request options, response bodies, tool types with their call parsers and grammars, reasoning parsers, files. Core re-exports it; the engine-internal `Request`/`Response` channel types stay in core
 - `crates/inference-layout/` - Document layout detection (PP-DocLayoutV3) with custom CPU/CUDA kernels
@@ -117,10 +118,11 @@ You should also look for a model.safetensors.index.json file for the model at ha
 When adding new model architectures:
 1. Implement the model in its family crate, `crates/inference-models-<family>/`, with its input processor (`<model>/inputs_processor.rs`); its `Processor` goes in core's `crates/inference-core/src/vision_models/<model>/processor.rs`, beside a module that re-exports the model
 2. Add its loader beside the model in `crates/inference-models-<family>/src/loaders/` and list it in that crate's `inference_nn::boxed_loaders!`, so its vtable and trait defaults compile there. A multimodal loader's `MultimodalProcessorFactory` impl stays in core's `vision_models/<model>/processor.rs`.
-3. Add one row to `normal_loader_types!` (or `multimodal_loader_types!`) in core's `pipeline/loaders/{normal,multimodal}_loaders/mod.rs`. The row gives
-   the CLI name, the HF class, the `model_type` (text only) and the loader, and the enum variant, parsing, display, HF detection and loader
-   dispatch are all generated from it. Embedding loaders are listed by hand in `EmbeddingLoaderType` (`embedding_loaders/mod.rs`).
-4. Add the GGUF bindings in `crates/inference-core/src/gguf/` if the model loads from GGUF
+3. Add one row to `normal_loader_table!` (or `multimodal_loader_table!`) in `crates/inference-nn/src/loaders/types.rs`. The row gives
+   the CLI name, the HF class, the `model_type` (text only) and the loader. inference-nn expands the enum variant, parsing, display and
+   HF detection from it, and core expands its feature-gated loader dispatch from the same row. Embedding loaders are listed by hand in
+   `EmbeddingLoaderType` (`embedding_loaders/mod.rs`).
+4. Add the GGUF bindings in `crates/inference-gguf/src/` if the model loads from GGUF
 
 When adding new quantization methods:
 1. Implement in `crates/inference-quant/src/`

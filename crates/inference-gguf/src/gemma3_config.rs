@@ -4,8 +4,8 @@ use anyhow::{Context, Result, bail};
 use candle_core::quantized::gguf_file::Value as GgufValue;
 use serde_json::{Value as JsonValue, json};
 
-use crate::layers::Activation;
-use crate::vision_models::gemma3::config::{Gemma3Config, Gemma3TextConfig};
+use inference_models_gemma::gemma3::config::{Gemma3Config, Gemma3TextConfig};
+use inference_nn::layers::Activation;
 
 const ARCHITECTURE: &str = "gemma3";
 const TEXT_CAUSAL_LM_ARCHITECTURE: &str = "Gemma3ForCausalLM";
@@ -17,7 +17,7 @@ const GEMMA3_27B_LAYER_COUNT: usize = 62;
 const GEMMA3_MULTIMODAL_LAYER_COUNTS: &[usize] = &[34, 48, GEMMA3_27B_LAYER_COUNT];
 const CONFIG_FLOAT_RELATIVE_TOLERANCE: f64 = 1e-9;
 
-pub(crate) fn prepare_gemma3_text_config(
+pub fn prepare_gemma3_text_config(
     external: Option<&str>,
     metadata: &HashMap<String, GgufValue>,
     tensor_names: &[String],
@@ -48,7 +48,7 @@ pub(crate) fn prepare_gemma3_text_config(
     Ok(config)
 }
 
-pub(crate) fn ensure_gemma3_vision_config(config: &str) -> Result<()> {
+pub fn ensure_gemma3_vision_config(config: &str) -> Result<()> {
     let parsed = Gemma3Config::from_json(config)
         .context("Gemma 3 multimodal configuration is incompatible with the native loader")?;
     anyhow::ensure!(
@@ -58,7 +58,7 @@ pub(crate) fn ensure_gemma3_vision_config(config: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn gemma3_text_uses_language_model_prefix(config: &str) -> Result<bool> {
+pub fn gemma3_text_uses_language_model_prefix(config: &str) -> Result<bool> {
     let parsed = Gemma3Config::from_json(config)
         .context("Gemma 3 text configuration is incompatible with the native loader")?;
     let Gemma3Config::Text(parsed) = parsed else {
@@ -564,10 +564,10 @@ mod tests {
         assert_eq!(value["architectures"], json!(["Gemma3ForCausalLM"]));
         assert_eq!(value["model_type"], "gemma3_text");
         assert!(matches!(
-            crate::MultimodalLoaderType::from_causal_lm_name(
+            inference_nn::loaders::MultimodalLoaderType::from_causal_lm_name(
                 value["architectures"][0].as_str().unwrap()
             ),
-            Ok(crate::MultimodalLoaderType::Gemma3)
+            Ok(inference_nn::loaders::MultimodalLoaderType::Gemma3)
         ));
     }
 

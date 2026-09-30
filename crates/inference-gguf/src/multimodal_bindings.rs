@@ -43,7 +43,7 @@ impl<'a> TensorInventory<'a> {
     }
 }
 
-pub(crate) fn build_gemma4_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+pub fn build_gemma4_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     if let Some(architecture) = metadata_string(archive, "general.architecture")?
         && architecture != "gemma4"
     {

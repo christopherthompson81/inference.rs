@@ -353,3 +353,73 @@ was compiled only in each crate that awaited it. Boxed, it compiles once, in cor
 because the api, the CLI and the SDK each compiled their own copy. The rule from Run 8 holds for every workspace
 crate boundary.
 
+
+## Run 10 — 2026-09-29 21:40
+
+**Question:** what would moving GGUF out of core take, and what would it save?
+
+**Command:** the Run 9 IR of `inference-core` at eb07616c (2,316,051 lines), grouped by `gguf::*` and
+`pipeline::{gguf, ggml}`. The dependencies were mapped by reading each `gguf/` file's `use crate::` lines.
+
+**Raw finding:**
+- The GGUF-to-HF translation in `gguf/` (16.8k source lines) is 131,591 IR lines, 5.7% of core:
+  `normal_config` 44,100, `normal_bindings` 12,031, `qwen_multimodal_bindings` 11,807, `gguf_tokenizer` 11,399,
+  `multimodal_bindings` 7,715, `gemma3_config` 6,861, `multimodal_binding_utils` 5,691, `gemma3n_bindings` 5,262,
+  `normal_registry` 4,850, `metadata` 4,802, `base_model` 3,855, the remaining bindings under 3k each.
+- The pipelines that run GGUF and GGML models, `pipeline::gguf` 26,754 and `pipeline::ggml` 11,251, implement core's
+  `Pipeline` and stay in core.
+- What the translation needs from core:
+  - `NormalLoaderType`, used throughout: the registry maps each canonical GGUF architecture to its compatible
+    loaders, and `normal_bindings` branches on loader type for tensor names.
+  - `MultimodalLoaderType` (the vision registry and the Qwen bindings).
+  - The Gemma 3 and Gemma 3n vision config types, which live in `inference-models-gemma`.
+  - `inference-nn` items (`Content`, `GGUFArchitecture`, the device-map loader trait, attention constants), and
+    `RopePairing` in the other direction, which core's loaders read.
+- The loader enums' variants are not feature-gated; only `loader()` dispatch is (`#[cfg(feature = ...)]` per row
+  of `normal_loader_types!`). The enum, its names, parsing and HF-class detection are pure data.
+
+**Implication:** the translation can move to a crate below core if the loader enums move with it or below it. Their
+data half would come from one table macro exported from the lower crate, and core would generate its `loader()`
+dispatch from the same table, so there is still one source of truth. The Gemma 3 and 3n pieces need the gemma family
+crate, so the new crate would take it as an optional dependency behind `models-gemma`, or those two bindings would
+move into the gemma crate. The expected saving is up to about 130k lines of core's serial codegen, compiled in
+parallel with the family crates instead.
+
+## Run 11 — 2026-09-29 22:15
+
+**Question:** what do moving the loader enums to `inference_nn::loaders` and the GGUF translation to `inference-gguf`
+change in IR and build time?
+
+**Change:**
+- `NormalLoaderType`/`MultimodalLoaderType` are expanded in inference-nn from the exported `normal_loader_table!`
+  and `multimodal_loader_table!`. Core expands its feature-gated `loader()`/`get_processor()` dispatch from the same
+  rows into `NormalLoaderTypeExt`/`MultimodalLoaderTypeExt`.
+- `gguf/` became `crates/inference-gguf`, which core reaches as `crate::gguf`. The Gemma 3 and 3n bindings sit behind
+  its `models-gemma` feature, which core forwards; tests build them regardless, through the dev-dependency.
+- Tests gated on all five core family features became `#[cfg(test)]` over dev-dependencies. The crate keeps all 106
+  of its tests (103 run, 3 ignored).
+
+**Commands:**
+- IR: `cargo llvm-lines` per crate.
+- Build time: two trees in one scratch target, the branch and a `git worktree` of master, both warmed. Then each
+  tree's `inference-nn/src/lib.rs` was touched and it was rebuilt with
+  `cargo test --no-run --features cuda --workspace --lib --bins --tests --timings` and `CARGO_INCREMENTAL=0`, so
+  everything from inference-nn down rebuilds. Load was about 15 for both.
+
+**Raw finding:**
+- IR: `inference-core` went from 2,316,051 to 2,163,788 (-152,263, -6.6%). `inference-gguf` is 206,760.
+  `inference-nn` is 1,214,204.
+- Rebuild wall time: master 113.1 s, branch 114.3 s. Unit-seconds: 664 and 698.
+  - Core's lib: 55.9 s → 52.8 s (starts at 24.2 s instead of 20.4 s, after the slower inference-nn: 23.9 s against
+    22.1 s).
+  - `inference-gguf`: 15.9 s, from 18.0 s to 33.9 s, alongside the family crates.
+  - Core's lib test, the last unit in both: from 46.1 s + 66.9 s on master to 43.0 s + 71.2 s on the branch.
+  - The CLI test binary: 28.7 s → 28.8 s.
+
+**Implication:**
+- No measurable wall-time gain. Core's lib gets 3 s faster, but the tail (core's lib test and the api → CLI chain)
+  is unchanged within the noise at this load. Unit-seconds rise with the new crate and its test binary.
+- The value is structural: the GGUF format lives beside the model code rather than in the engine, and core's IR falls
+  by 6.6%.
+- For wall time, what's left is core's lib test and the api → CLI test chain.
+

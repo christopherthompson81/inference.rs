@@ -51,7 +51,7 @@ SLIM_FAMILIES=("" models-gemma models-llama models-other models-phi models-qwen)
 BINDINGS=(build --workspace --lib --example tiny_checkpoint)
 CSHARP=bindings/csharp
 PYTHON=bindings/python
-slim_clippy() { cargo clippy -p inference-core --lib --tests --no-default-features ${1:+--features $1} "${@:2}"; }
+slim_clippy() { cargo clippy -p inference-core -p inference-gguf --lib --tests --no-default-features ${1:+--features inference-core/$1} "${@:2}"; }
 
 if [[ $lint -eq 1 ]]; then
     cargo fmt --all -- --check

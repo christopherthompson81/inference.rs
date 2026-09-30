@@ -1,4 +1,5 @@
 use super::isq::{UqffFullSer, UqffWriteConfig, WeightLoadingMode, WeightLoadingState};
+use super::loaders::MultimodalLoaderTypeExt;
 use super::{
     AdapterKind, AnyMoePipelineMixin, AutoMultimodalLoader, CacheManager, CacheManagerMixin,
     DecodeGraphPrecaptureCtx, EitherCache, ForwardInputsResult, ForwardStepResult, GeneralMetadata,

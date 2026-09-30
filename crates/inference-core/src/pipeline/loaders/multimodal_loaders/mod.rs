@@ -1,7 +1,7 @@
 pub use crate::model::MultimodalModel;
 use std::borrow::Cow;
+use std::fmt::Debug;
 use std::sync::Arc;
-use std::{fmt::Debug, str::FromStr};
 
 use anyhow::Result;
 use candle_core::DType;
@@ -38,41 +38,30 @@ pub(crate) trait MultimodalProcessorFactory {
     ) -> Arc<dyn Processor + Send + Sync>;
 }
 
-// One row per multimodal architecture; the first `cli` name is canonical, the rest are accepted aliases.
-macro_rules! multimodal_loader_types {
+pub use inference_nn::loaders::MultimodalLoaderType;
+
+// Expands `loader()` and `get_processor()` from the architecture table in `inference_nn::loaders`.
+macro_rules! multimodal_loader_dispatch {
     ($($variant:ident {
         cli: $cli:tt $(| $cli_alias:tt)*,
         hf: $hf:literal $(| $hf_alias:literal)*,
         loader: $loader:ident
         $(, feature: $feature:literal)? $(,)?
     }),* $(,)?) => {
-        #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
-        #[derive(Clone, Debug, Deserialize, serde::Serialize, PartialEq, strum::EnumIter)]
-        /// The architecture to load the multimodal model as.
-        pub enum MultimodalLoaderType {
-            $(#[serde(rename = $cli)] $variant,)*
+        pub(crate) trait MultimodalLoaderTypeExt {
+            fn loader(&self) -> Result<Box<dyn MultimodalModelLoader>>;
+
+            fn get_processor(
+                &self,
+                model_config: &str,
+                processor_config: Option<ProcessorConfig>,
+                preprocessor_config: PreProcessorConfig,
+                max_edge: Option<u32>,
+            ) -> Result<Arc<dyn Processor + Send + Sync>>;
         }
 
-        // https://github.com/huggingface/transformers/blob/cff06aac6fad28019930be03f5d467055bf62177/src/transformers/models/auto/modeling_auto.py#L448
-        impl MultimodalLoaderType {
-            const CLI_NAMES: &'static [&'static str] = &[$($cli),*];
-
-            pub(crate) fn causal_lm_name(&self) -> &'static str {
-                match self {
-                    $(Self::$variant => $hf,)*
-                }
-            }
-
-            pub fn from_causal_lm_name(name: &str) -> Result<Self> {
-                match name {
-                    $($hf $(| $hf_alias)* => Ok(Self::$variant),)*
-                    other => anyhow::bail!(
-                        "Unsupported Hugging Face Transformers -CausalLM model class `{other}`. Please raise an issue."
-                    ),
-                }
-            }
-
-            pub(crate) fn loader(&self) -> Result<Box<dyn MultimodalModelLoader>> {
+        impl MultimodalLoaderTypeExt for MultimodalLoaderType {
+            fn loader(&self) -> Result<Box<dyn MultimodalModelLoader>> {
                 match self {
                     $(
                         $(#[cfg(feature = $feature)])?
@@ -99,7 +88,7 @@ macro_rules! multimodal_loader_types {
                 )),
                 allow(unused_variables)
             )]
-            pub(crate) fn get_processor(
+            fn get_processor(
                 &self,
                 model_config: &str,
                 processor_config: Option<ProcessorConfig>,
@@ -127,68 +116,10 @@ macro_rules! multimodal_loader_types {
                 }
             }
         }
-
-        impl FromStr for MultimodalLoaderType {
-            type Err = String;
-            fn from_str(s: &str) -> Result<Self, Self::Err> {
-                match s {
-                    $($cli $(| $cli_alias)* => Ok(Self::$variant),)*
-                    a => Err(format!(
-                        "Unknown architecture `{a}`. Possible architectures: {}.",
-                        Self::CLI_NAMES.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")
-                    )),
-                }
-            }
-        }
-
-        impl std::fmt::Display for MultimodalLoaderType {
-            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                match self {
-                    $(Self::$variant => f.write_str($cli),)*
-                }
-            }
-        }
     };
 }
 
-multimodal_loader_types! {
-    Phi3V { cli: "phi3v", hf: "Phi3VForCausalLM", loader: Phi3VLoader, feature: "models-phi" },
-    Idefics2 { cli: "idefics2", hf: "Idefics2ForConditionalGeneration", loader: Idefics2Loader, feature: "models-llama" },
-    LLaVANext { cli: "llava_next", hf: "LlavaNextForConditionalGeneration", loader: LLaVANextLoader, feature: "models-llama" },
-    LLaVA { cli: "llava", hf: "LlavaForConditionalGeneration", loader: LLaVALoader, feature: "models-llama" },
-    Lfm2Vl { cli: "lfm2vl" | "lfm2_vl", hf: "Lfm2VlForConditionalGeneration", loader: Lfm2VlLoader, feature: "models-other" },
-    VLlama { cli: "vllama", hf: "MllamaForConditionalGeneration", loader: VLlamaLoader, feature: "models-llama" },
-    Qwen2VL { cli: "qwen2vl", hf: "Qwen2VLForConditionalGeneration", loader: Qwen2VLLoader, feature: "models-qwen" },
-    Idefics3 { cli: "idefics3", hf: "Idefics3ForConditionalGeneration", loader: Idefics3Loader, feature: "models-llama" },
-    MiniCpmO { cli: "minicpmo", hf: "MiniCPMO", loader: MiniCpmOLoader, feature: "models-qwen" },
-    Phi4MM { cli: "phi4mm", hf: "Phi4MMForCausalLM", loader: Phi4MMLoader, feature: "models-phi" },
-    Qwen2_5VL { cli: "qwen2_5vl", hf: "Qwen2_5_VLForConditionalGeneration", loader: Qwen2_5VLLoader, feature: "models-qwen" },
-    Gemma3 { cli: "gemma3", hf: "Gemma3ForConditionalGeneration" | "Gemma3ForCausalLM", loader: Gemma3Loader, feature: "models-gemma" },
-    Mistral3 { cli: "mistral3", hf: "Mistral3ForConditionalGeneration", loader: Mistral3Loader, feature: "models-llama" },
-    Llama4 { cli: "llama4", hf: "Llama4ForConditionalGeneration", loader: VLlama4Loader, feature: "models-llama" },
-    Gemma3n { cli: "gemma3n", hf: "Gemma3nForConditionalGeneration", loader: Gemma3nLoader, feature: "models-gemma" },
-    Qwen3VL { cli: "qwen3vl", hf: "Qwen3VLForConditionalGeneration", loader: Qwen3VLLoader, feature: "models-qwen" },
-    Qwen3VLMoE { cli: "qwen3vlmoe", hf: "Qwen3VLMoeForConditionalGeneration", loader: Qwen3VLMoELoader, feature: "models-qwen" },
-    Qwen3_5 { cli: "qwen3_5", hf: "Qwen3_5ForConditionalGeneration", loader: Qwen3_5Loader, feature: "models-qwen" },
-    Qwen3_5Moe { cli: "qwen3_5moe", hf: "Qwen3_5MoeForConditionalGeneration", loader: Qwen3_5MoeLoader, feature: "models-qwen" },
-    Voxtral { cli: "voxtral", hf: "VoxtralRealtimeForConditionalGeneration", loader: VoxtralLoader, feature: "models-llama" },
-    Gemma4 {
-        cli: "gemma4",
-        hf: "Gemma4ForConditionalGeneration"
-            | "Gemma4ForCausalLM"
-            | "Gemma4UnifiedForConditionalGeneration"
-            | "Gemma4UnifiedForCausalLM",
-        loader: Gemma4Loader, feature: "models-gemma",
-    },
-    MuseGlimmer {
-        cli: "muse_glimmer" | "museglimmer",
-        hf: "MuseGlimmerForConditionalGeneration",
-        loader: MuseGlimmerLoader,
-        feature: "models-qwen",
-    },
-    DiffusionGemma { cli: "diffusiongemma", hf: "DiffusionGemmaForBlockDiffusion", loader: DiffusionGemmaLoader, feature: "models-gemma" },
-    PaddleOcrVl { cli: "paddleocr_vl", hf: "PaddleOCRVLForConditionalGeneration", loader: PaddleOcrVlLoader, feature: "models-other" },
-}
+inference_nn::multimodal_loader_table!(multimodal_loader_dispatch);
 
 mod auto;
 pub use auto::*;

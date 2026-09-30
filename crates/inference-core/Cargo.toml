@@ -53,6 +53,7 @@ base64.workspace = true
 inference-paged-attn = { workspace = true, optional = true }
 inference-quant.workspace = true
 inference-nn.workspace = true
+inference-gguf.workspace = true
 inference-models-diffusion.workspace = true
 inference-models-gemma = { workspace = true, optional = true }
 inference-models-llama = { workspace = true, optional = true }
@@ -83,7 +84,7 @@ candle-metal-kernels = { workspace = true, optional = true }
 [features]
 default = ["all-models"]
 all-models = ["models-gemma", "models-llama", "models-other", "models-phi", "models-qwen"]
-models-gemma = ["dep:inference-models-gemma"]
+models-gemma = ["dep:inference-models-gemma", "inference-gguf/models-gemma"]
 models-llama = ["dep:inference-models-llama"]
 models-other = ["dep:inference-models-other"]
 models-phi = ["dep:inference-models-phi"]

@@ -4,7 +4,7 @@ use anyhow::{Context, Result, bail};
 use candle_core::quantized::gguf_file::Value;
 use inference_quant::{GgufArchive, GgufBindingMap, GgufTensorBinding};
 
-use crate::{gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY, pipeline::MultimodalLoaderType};
+use inference_nn::{gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY, loaders::MultimodalLoaderType};
 
 const GENERAL_ARCHITECTURE: &str = "general.architecture";
 const PROJECTOR_TYPE: &str = "clip.projector_type";
@@ -130,11 +130,11 @@ impl GdnMetadata {
     }
 }
 
-pub(crate) fn qwen_multimodal_loader_type(archive: &GgufArchive) -> Result<MultimodalLoaderType> {
+pub fn qwen_multimodal_loader_type(archive: &GgufArchive) -> Result<MultimodalLoaderType> {
     qwen_family(archive).map(QwenMultimodalFamily::loader_type)
 }
 
-pub(crate) fn build_qwen_multimodal_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+pub fn build_qwen_multimodal_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     let family = qwen_family(archive)?;
     let inventory = TensorInventory::from_archive(archive);
     let deepstack_layers = metadata_bool_indices(archive, DEEPSTACK_LAYERS)?;
@@ -151,7 +151,7 @@ pub(crate) fn build_qwen_multimodal_bindings(archive: &GgufArchive) -> Result<Gg
     )
 }
 
-pub(crate) fn normalize_qwen_multimodal_config(
+pub fn normalize_qwen_multimodal_config(
     loader_type: &MultimodalLoaderType,
     config: &str,
 ) -> Result<String> {
@@ -179,7 +179,7 @@ pub(crate) fn normalize_qwen_multimodal_config(
     serde_json::to_string(&config).context("Failed to serialize Qwen3.5 multimodal config")
 }
 
-pub(crate) fn build_qwen35_text_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+pub fn build_qwen35_text_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     let architecture = metadata_string(archive, GENERAL_ARCHITECTURE)?
         .context("GGUF metadata is missing `general.architecture`")?;
     if architecture != "qwen35" {

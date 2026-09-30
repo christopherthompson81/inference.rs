@@ -37,14 +37,18 @@ macro_rules! ex {
     };
 }
 
+trait SupportedArch {
+    fn arch_metadata(&self) -> ArchMetadata;
+}
+
 pub struct ArchMetadata {
     pub families: &'static [&'static str],
     pub modalities: &'static [SupportedModality],
     pub examples: &'static [ModelExample],
 }
 
-impl NormalLoaderType {
-    pub fn arch_metadata(&self) -> ArchMetadata {
+impl SupportedArch for NormalLoaderType {
+    fn arch_metadata(&self) -> ArchMetadata {
         let m = &[Text][..];
         match self {
             Self::Mistral => ArchMetadata {
@@ -196,8 +200,8 @@ impl NormalLoaderType {
     }
 }
 
-impl MultimodalLoaderType {
-    pub fn arch_metadata(&self) -> ArchMetadata {
+impl SupportedArch for MultimodalLoaderType {
+    fn arch_metadata(&self) -> ArchMetadata {
         match self {
             Self::Phi3V => ArchMetadata {
                 families: &["Phi-3.5-Vision"],
@@ -339,8 +343,8 @@ impl MultimodalLoaderType {
     }
 }
 
-impl EmbeddingLoaderType {
-    pub fn arch_metadata(&self) -> ArchMetadata {
+impl SupportedArch for EmbeddingLoaderType {
+    fn arch_metadata(&self) -> ArchMetadata {
         match self {
             Self::EmbeddingGemma => ArchMetadata {
                 families: &["EmbeddingGemma"],
@@ -356,8 +360,8 @@ impl EmbeddingLoaderType {
     }
 }
 
-impl DiffusionLoaderType {
-    pub fn arch_metadata(&self) -> ArchMetadata {
+impl SupportedArch for DiffusionLoaderType {
+    fn arch_metadata(&self) -> ArchMetadata {
         match self {
             Self::Flux => ArchMetadata {
                 families: &["FLUX.1"],
@@ -373,8 +377,8 @@ impl DiffusionLoaderType {
     }
 }
 
-impl SpeechLoaderType {
-    pub fn arch_metadata(&self) -> ArchMetadata {
+impl SupportedArch for SpeechLoaderType {
+    fn arch_metadata(&self) -> ArchMetadata {
         match self {
             Self::Dia => ArchMetadata {
                 families: &["Dia"],
@@ -386,18 +390,6 @@ impl SpeechLoaderType {
 }
 
 // the HF `config.json` `architectures` string, so the supported-models table's first column is what users search for
-impl NormalLoaderType {
-    pub fn config_arch(&self) -> &'static str {
-        self.causal_lm_name()
-    }
-}
-
-impl MultimodalLoaderType {
-    pub fn config_arch(&self) -> &'static str {
-        self.causal_lm_name()
-    }
-}
-
 impl EmbeddingLoaderType {
     pub fn config_arch(&self) -> &'static str {
         match self {
@@ -507,13 +499,13 @@ pub fn render_supported_models_markdown() -> String {
     md.push_str("## Text models\n\n");
     simple_table(
         &mut md,
-        NormalLoaderType::iter().map(|t| (t.config_arch().to_string(), t.arch_metadata())),
+        NormalLoaderType::iter().map(|t| (t.causal_lm_name().to_string(), t.arch_metadata())),
     );
 
     md.push_str("## Multimodal models\n\n");
     simple_table(
         &mut md,
-        MultimodalLoaderType::iter().map(|t| (t.config_arch().to_string(), t.arch_metadata())),
+        MultimodalLoaderType::iter().map(|t| (t.causal_lm_name().to_string(), t.arch_metadata())),
     );
 
     md.push_str("## Image generation\n\n");
@@ -573,16 +565,16 @@ mod tests {
     fn config_archs_round_trip() {
         for t in NormalLoaderType::iter() {
             assert_eq!(
-                NormalLoaderType::from_causal_lm_name(t.config_arch()).unwrap(),
+                NormalLoaderType::from_causal_lm_name(t.causal_lm_name()).unwrap(),
                 t,
-                "{t:?} config_arch does not map back through from_causal_lm_name",
+                "{t:?} causal_lm_name does not map back through from_causal_lm_name",
             );
         }
         for t in MultimodalLoaderType::iter() {
             assert_eq!(
-                MultimodalLoaderType::from_causal_lm_name(t.config_arch()).unwrap(),
+                MultimodalLoaderType::from_causal_lm_name(t.causal_lm_name()).unwrap(),
                 t,
-                "{t:?} config_arch does not map back through from_causal_lm_name",
+                "{t:?} causal_lm_name does not map back through from_causal_lm_name",
             );
         }
         for t in EmbeddingLoaderType::iter() {

@@ -9,7 +9,7 @@ use super::multimodal_binding_utils::{
 const FAMILY: &str = "Mistral 3/Pixtral";
 const VISION_HEAD_COUNT: &str = "clip.vision.attention.head_count";
 
-pub(crate) fn build_mistral3_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+pub fn build_mistral3_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     validate_architecture(archive, "mistral3")?;
     validate_projector(archive, "pixtral")?;
     build_mistral3_bindings_from_inventory(
@@ -150,7 +150,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::gguf::multimodal_binding_utils::binding_sources;
+    use crate::multimodal_binding_utils::binding_sources;
 
     #[test]
     fn maps_complete_mistral3_inventory() {

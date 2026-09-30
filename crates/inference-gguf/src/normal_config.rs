@@ -1,15 +1,8 @@
 use super::normal_registry::{CanonicalGgufArchitecture, GgufDescriptor, schema_for};
-#[cfg(all(
-    test,
-    feature = "models-gemma",
-    feature = "models-llama",
-    feature = "models-other",
-    feature = "models-phi",
-    feature = "models-qwen"
-))]
+#[cfg(test)]
 use super::normal_registry::{NORMAL_MODEL_ADAPTERS, NativeModelAdapter};
-use crate::{NormalLoaderType, gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY};
 use candle_core::quantized::gguf_file::Value as GgufValue;
+use inference_nn::{gdn::GDN_V_HEAD_LAYOUT_CONFIG_KEY, loaders::NormalLoaderType};
 use serde_json::{Map as JsonMap, Value as JsonValue, json};
 use std::{collections::HashMap, error::Error, fmt, num::TryFromIntError};
 
@@ -24,7 +17,7 @@ type BuilderFn = fn(&MetadataView<'_>) -> SynthesisResult<JsonValue>;
 type SynthesisResult<T> = Result<T, NormalConfigSynthesisError>;
 
 #[derive(Debug)]
-pub(crate) struct NormalConfigSynthesisError {
+pub struct NormalConfigSynthesisError {
     message: String,
 }
 
@@ -45,12 +38,12 @@ impl fmt::Display for NormalConfigSynthesisError {
 impl Error for NormalConfigSynthesisError {}
 
 #[derive(Debug)]
-pub(crate) struct NormalConfigBuilder {
-    pub(crate) loader: NormalLoaderType,
+pub struct NormalConfigBuilder {
+    pub loader: NormalLoaderType,
     build: BuilderFn,
 }
 
-pub(crate) const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; 26] = &[
+pub const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; 26] = &[
     NormalConfigBuilder {
         loader: NormalLoaderType::Mistral,
         build: build_mistral,
@@ -157,7 +150,7 @@ pub(crate) const NORMAL_CONFIG_BUILDERS: &[NormalConfigBuilder; 26] = &[
     },
 ];
 
-pub(crate) fn synthesize_normal_config(
+pub fn synthesize_normal_config(
     loader: &NormalLoaderType,
     metadata: &HashMap<String, GgufValue>,
     tensor_names: &[String],
@@ -170,7 +163,7 @@ pub(crate) fn synthesize_normal_config(
     })
 }
 
-pub(crate) fn synthesize_normal_config_value(
+pub fn synthesize_normal_config_value(
     loader: &NormalLoaderType,
     metadata: &HashMap<String, GgufValue>,
     tensor_names: &[String],
@@ -205,7 +198,7 @@ fn with_reload_identity(
     Ok(value)
 }
 
-pub(crate) fn normal_loader_hint_from_external_config(
+pub fn normal_loader_hint_from_external_config(
     config: &str,
 ) -> anyhow::Result<Option<NormalLoaderType>> {
     let value: JsonValue = serde_json::from_str(config)
@@ -216,7 +209,7 @@ pub(crate) fn normal_loader_hint_from_external_config(
     loader_hint_from_config_object(object)
 }
 
-pub(crate) fn normalize_external_normal_config(
+pub fn normalize_external_normal_config(
     loader: &NormalLoaderType,
     architecture: CanonicalGgufArchitecture,
     config: &str,
@@ -317,7 +310,7 @@ pub(crate) fn normalize_external_normal_config(
     })
 }
 
-pub(crate) fn validate_normal_config_tensor_inventory(
+pub fn validate_normal_config_tensor_inventory(
     config: &str,
     tensor_names: &[String],
 ) -> anyhow::Result<()> {
@@ -972,28 +965,14 @@ fn transformer_block_count(metadata: &MetadataView<'_>) -> SynthesisResult<usize
     })
 }
 
-#[cfg(all(
-    test,
-    feature = "models-gemma",
-    feature = "models-llama",
-    feature = "models-other",
-    feature = "models-phi",
-    feature = "models-qwen"
-))]
+#[cfg(test)]
 fn builder_for(loader: &NormalLoaderType) -> Option<&'static NormalConfigBuilder> {
     NORMAL_CONFIG_BUILDERS
         .iter()
         .find(|builder| &builder.loader == loader)
 }
 
-#[cfg(all(
-    test,
-    feature = "models-gemma",
-    feature = "models-llama",
-    feature = "models-other",
-    feature = "models-phi",
-    feature = "models-qwen"
-))]
+#[cfg(test)]
 fn registry_adapter(loader: &NormalLoaderType) -> Option<&'static NativeModelAdapter> {
     NORMAL_MODEL_ADAPTERS
         .iter()
@@ -2543,17 +2522,19 @@ fn ratio_f64(
     Ok(f64::from(numerator) / f64::from(denominator))
 }
 
-#[cfg(all(
-    test,
-    feature = "models-gemma",
-    feature = "models-llama",
-    feature = "models-other",
-    feature = "models-phi",
-    feature = "models-qwen"
-))]
+#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::models;
+    mod models {
+        pub use inference_models_gemma::{gemma, gemma2};
+        pub use inference_models_llama::{llama, mistral, mixtral, smollm3};
+        pub use inference_models_other::{
+            deepseek2, deepseek3, glm4, glm4_moe, glm4_moe_lite, gpt_oss, granite,
+            hunyuan_v1_dense, hunyuan_v1_moe, lfm2, starcoder2,
+        };
+        pub use inference_models_phi::{phi2, phi3, phi3_5_moe};
+        pub use inference_models_qwen::{qwen2, qwen3, qwen3_moe, qwen3_next};
+    }
     use std::collections::HashSet;
     use strum::IntoEnumIterator;
 
@@ -2990,8 +2971,8 @@ mod tests {
         assert_eq!(config["architectures"][0], "Qwen3NextForCausalLM");
         let native = models::qwen3_next::Config::from_json(&config.to_string()).unwrap();
         assert_eq!(
-            crate::gdn::GdnConfig::v_head_layout(&native),
-            crate::gdn::GdnVHeadLayout::Tiled
+            inference_nn::gdn::GdnConfig::v_head_layout(&native),
+            inference_nn::gdn::GdnVHeadLayout::Tiled
         );
         assert_native_config_deserializes(&loader, config);
     }
@@ -3038,8 +3019,8 @@ mod tests {
         let native =
             inference_models_qwen::qwen3_5::TextConfig::from_json(&config.to_string()).unwrap();
         assert_eq!(
-            crate::gdn::GdnConfig::v_head_layout(&native),
-            crate::gdn::GdnVHeadLayout::Tiled
+            inference_nn::gdn::GdnConfig::v_head_layout(&native),
+            inference_nn::gdn::GdnVHeadLayout::Tiled
         );
         assert_native_config_deserializes(&loader, config);
     }

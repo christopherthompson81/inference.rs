@@ -2,11 +2,11 @@
 
 use std::{collections::HashMap, sync::atomic::Ordering};
 
-use crate::gguf::metadata::ContentMetadata;
-use crate::utils::debug::DEBUG;
+use crate::metadata::ContentMetadata;
 use ahash::AHashMap;
 use anyhow::Result;
 use candle_core::quantized::gguf_file::Value;
+use inference_nn::utils::debug::DEBUG;
 use tokenizers::pre_tokenizers::{
     PreTokenizerWrapper,
     sequence::Sequence,
@@ -58,7 +58,7 @@ const GGML_TOKEN_TYPE_NORMAL: i32 = 1;
 const GGML_TOKEN_TYPE_BYTE: i32 = 6;
 const SENTENCEPIECE_UNDERLINE: &str = "\u{2581}";
 
-pub(crate) struct GgufTokenizerConversion {
+pub struct GgufTokenizerConversion {
     pub tokenizer: Tokenizer,
     pub bos: Option<String>,
     pub eos: Option<String>,
@@ -111,7 +111,7 @@ impl GgufTokenizerMetadata {
     }
 }
 
-pub(crate) fn validate_external_gguf_tokenizer(
+pub fn validate_external_gguf_tokenizer(
     tokenizer: Tokenizer,
     values: &HashMap<String, Value>,
 ) -> Result<GgufTokenizerConversion> {
@@ -195,7 +195,7 @@ impl TryFrom<ContentMetadata<'_>> for PropsGGUF {
     }
 }
 
-pub(crate) fn convert_gguf_metadata_to_hf_tokenizer(
+pub fn convert_gguf_metadata_to_hf_tokenizer(
     values: &HashMap<String, Value>,
 ) -> Result<GgufTokenizerConversion> {
     let metadata = ContentMetadata {

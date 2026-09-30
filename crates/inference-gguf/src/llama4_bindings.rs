@@ -8,7 +8,7 @@ use super::multimodal_binding_utils::{
 
 const FAMILY: &str = "Llama 4";
 
-pub(crate) fn build_llama4_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+pub fn build_llama4_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     validate_architecture(archive, "llama4")?;
     validate_projector(archive, "llama4")?;
     build_llama4_bindings_from_inventory(&TensorInventory::from_archive(archive))
@@ -246,7 +246,7 @@ mod tests {
     use std::collections::BTreeSet;
 
     use super::*;
-    use crate::gguf::multimodal_binding_utils::binding_sources;
+    use crate::multimodal_binding_utils::binding_sources;
 
     #[test]
     fn maps_complete_llama4_moe_inventory_to_fast_expert_keys() {

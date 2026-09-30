@@ -1,12 +1,12 @@
-use crate::NormalLoaderType;
-pub(crate) use crate::model::RopePairing;
+use inference_nn::loaders::NormalLoaderType;
+pub use inference_nn::model::RopePairing;
 use std::{error::Error, fmt, str::FromStr};
 
-pub(crate) const NORMAL_LOADER_TYPE_COUNT: usize = 26;
-pub(crate) const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 26;
+pub const NORMAL_LOADER_TYPE_COUNT: usize = 26;
+pub const CANONICAL_GGUF_ARCHITECTURE_COUNT: usize = 26;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) enum CanonicalGgufArchitecture {
+pub enum CanonicalGgufArchitecture {
     Llama,
     Mistral3,
     Gemma,
@@ -36,7 +36,7 @@ pub(crate) enum CanonicalGgufArchitecture {
 }
 
 impl CanonicalGgufArchitecture {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Llama => "llama",
             Self::Mistral3 => "mistral3",
@@ -113,7 +113,7 @@ impl FromStr for CanonicalGgufArchitecture {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum GgufLayout {
+pub enum GgufLayout {
     Direct,
     ConverterPermutedQk,
     ShiftedRmsNorm,
@@ -131,33 +131,33 @@ pub(crate) enum GgufLayout {
 }
 
 #[derive(Debug)]
-pub(crate) struct GgufSchema {
-    pub(crate) architecture: CanonicalGgufArchitecture,
-    pub(crate) compatible_loaders: &'static [NormalLoaderType],
-    pub(crate) rope_pairing: RopePairing,
-    pub(crate) required_metadata: &'static [&'static str],
-    pub(crate) required_tensors: &'static [&'static str],
-    pub(crate) unsupported_metadata: &'static [&'static str],
+pub struct GgufSchema {
+    pub architecture: CanonicalGgufArchitecture,
+    pub compatible_loaders: &'static [NormalLoaderType],
+    pub rope_pairing: RopePairing,
+    pub required_metadata: &'static [&'static str],
+    pub required_tensors: &'static [&'static str],
+    pub unsupported_metadata: &'static [&'static str],
 }
 
 #[derive(Debug)]
-pub(crate) struct NativeModelAdapter {
-    pub(crate) loader: NormalLoaderType,
-    pub(crate) architectures: &'static [CanonicalGgufArchitecture],
-    pub(crate) layouts: &'static [GgufLayout],
+pub struct NativeModelAdapter {
+    pub loader: NormalLoaderType,
+    pub architectures: &'static [CanonicalGgufArchitecture],
+    pub layouts: &'static [GgufLayout],
 }
 
 #[derive(Debug)]
-pub(crate) struct GgufDescriptor<'a> {
-    pub(crate) architecture: CanonicalGgufArchitecture,
-    pub(crate) metadata_keys: &'a [&'a str],
-    pub(crate) tensor_names: &'a [&'a str],
+pub struct GgufDescriptor<'a> {
+    pub architecture: CanonicalGgufArchitecture,
+    pub metadata_keys: &'a [&'a str],
+    pub tensor_names: &'a [&'a str],
     general_name: Option<&'a str>,
     general_basename: Option<&'a str>,
 }
 
 impl<'a> GgufDescriptor<'a> {
-    pub(crate) fn new(
+    pub fn new(
         architecture: &str,
         metadata_keys: &'a [&'a str],
         tensor_names: &'a [&'a str],
@@ -171,7 +171,7 @@ impl<'a> GgufDescriptor<'a> {
         })
     }
 
-    pub(crate) fn with_model_identity(
+    pub fn with_model_identity(
         mut self,
         general_name: Option<&'a str>,
         general_basename: Option<&'a str>,
@@ -181,19 +181,19 @@ impl<'a> GgufDescriptor<'a> {
         self
     }
 
-    pub(crate) fn has_metadata(&self, pattern: &str) -> bool {
+    pub fn has_metadata(&self, pattern: &str) -> bool {
         self.metadata_keys
             .iter()
             .any(|key| metadata_key_matches(self.architecture, pattern, key))
     }
 
-    pub(crate) fn has_tensor(&self, marker: &str) -> bool {
+    pub fn has_tensor(&self, marker: &str) -> bool {
         self.tensor_names.iter().any(|name| name.contains(marker))
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum ResolutionReason {
+pub enum ResolutionReason {
     SingleCandidate,
     ExplicitOverride,
     ExpertInventory,
@@ -204,13 +204,13 @@ pub(crate) enum ResolutionReason {
 }
 
 #[derive(Debug)]
-pub(crate) struct ResolvedNativeModelAdapter {
-    pub(crate) adapter: &'static NativeModelAdapter,
-    pub(crate) reason: ResolutionReason,
+pub struct ResolvedNativeModelAdapter {
+    pub adapter: &'static NativeModelAdapter,
+    pub reason: ResolutionReason,
 }
 
 #[derive(Debug)]
-pub(crate) enum NormalGgufRegistryError {
+pub enum NormalGgufRegistryError {
     UnknownArchitecture(String),
     MissingMetadata {
         architecture: CanonicalGgufArchitecture,
@@ -325,7 +325,7 @@ impl fmt::Display for NormalGgufRegistryError {
 
 impl Error for NormalGgufRegistryError {}
 
-pub(crate) const COMMON_METADATA_REQUIREMENTS: &[&str] = &[
+pub const COMMON_METADATA_REQUIREMENTS: &[&str] = &[
     "general.architecture",
     "{arch}.context_length",
     "{arch}.embedding_length",
@@ -333,7 +333,7 @@ pub(crate) const COMMON_METADATA_REQUIREMENTS: &[&str] = &[
     "{arch}.attention.head_count",
 ];
 
-pub(crate) const COMMON_METADATA_ALTERNATIVES: &[&[&str]] = &[
+pub const COMMON_METADATA_ALTERNATIVES: &[&[&str]] = &[
     &["{arch}.vocab_size", "tokenizer.ggml.tokens"],
     &[
         "{arch}.attention.layer_norm_rms_epsilon",
@@ -341,7 +341,7 @@ pub(crate) const COMMON_METADATA_ALTERNATIVES: &[&[&str]] = &[
     ],
 ];
 
-pub(crate) const COMMON_TENSOR_REQUIREMENTS: &[&str] = &["token_embd.weight"];
+pub const COMMON_TENSOR_REQUIREMENTS: &[&str] = &["token_embd.weight"];
 
 const NO_REQUIREMENTS: &[&str] = &[];
 const MOE_METADATA: &[&str] = &["{arch}.expert_count", "{arch}.expert_used_count"];
@@ -438,7 +438,7 @@ const HUNYUAN_MOE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::HunYuanMoEV
 const LFM2_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Lfm2];
 const LFM2_MOE_LOADERS: &[NormalLoaderType] = &[NormalLoaderType::Lfm2Moe];
 
-pub(crate) const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
+pub const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] = &[
     GgufSchema {
         architecture: CanonicalGgufArchitecture::Llama,
         compatible_loaders: LLAMA_LOADERS,
@@ -649,7 +649,7 @@ pub(crate) const GGUF_SCHEMAS: &[GgufSchema; CANONICAL_GGUF_ARCHITECTURE_COUNT] 
     },
 ];
 
-pub(crate) const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT] = &[
+pub const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE_COUNT] = &[
     NativeModelAdapter {
         loader: NormalLoaderType::Mistral,
         architectures: &[
@@ -854,10 +854,7 @@ pub(crate) const NORMAL_MODEL_ADAPTERS: &[NativeModelAdapter; NORMAL_LOADER_TYPE
 ];
 
 impl GgufSchema {
-    pub(crate) fn validate(
-        &self,
-        descriptor: &GgufDescriptor<'_>,
-    ) -> Result<(), NormalGgufRegistryError> {
+    pub fn validate(&self, descriptor: &GgufDescriptor<'_>) -> Result<(), NormalGgufRegistryError> {
         if self.architecture != descriptor.architecture {
             return Err(NormalGgufRegistryError::SchemaArchitectureMismatch {
                 expected: self.architecture,
@@ -914,20 +911,20 @@ impl GgufSchema {
     }
 }
 
-pub(crate) fn schema_for(architecture: CanonicalGgufArchitecture) -> &'static GgufSchema {
+pub fn schema_for(architecture: CanonicalGgufArchitecture) -> &'static GgufSchema {
     GGUF_SCHEMAS
         .iter()
         .find(|schema| schema.architecture == architecture)
         .expect("canonical GGUF architecture is missing its schema")
 }
 
-pub(crate) fn adapter_for(loader: &NormalLoaderType) -> Option<&'static NativeModelAdapter> {
+pub fn adapter_for(loader: &NormalLoaderType) -> Option<&'static NativeModelAdapter> {
     NORMAL_MODEL_ADAPTERS
         .iter()
         .find(|adapter| &adapter.loader == loader)
 }
 
-pub(crate) fn resolve_native_adapter(
+pub fn resolve_native_adapter(
     descriptor: &GgufDescriptor<'_>,
     explicit_override: Option<NormalLoaderType>,
 ) -> Result<ResolvedNativeModelAdapter, NormalGgufRegistryError> {

@@ -4,11 +4,13 @@ mod isq;
 mod placement;
 mod rope;
 mod sizing;
+mod types;
 
 pub use isq::*;
 pub use placement::*;
 pub use rope::*;
 pub use sizing::*;
+pub use types::*;
 
 // A loader's vtable carries its trait defaults, so building the box where the loader is defined compiles them there.
 #[macro_export]

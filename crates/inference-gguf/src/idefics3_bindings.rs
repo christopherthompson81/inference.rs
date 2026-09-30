@@ -8,7 +8,7 @@ use super::multimodal_binding_utils::{
 
 const FAMILY: &str = "Idefics3/SmolVLM";
 
-pub(crate) fn build_idefics3_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
+pub fn build_idefics3_bindings(archive: &GgufArchive) -> Result<GgufBindingMap> {
     validate_architecture(archive, "llama")?;
     validate_projector(archive, "idefics3")?;
     build_idefics3_bindings_from_inventory(&TensorInventory::from_archive(archive))
@@ -90,7 +90,7 @@ mod tests {
     use inference_quant::GgufTensorBinding;
 
     use super::*;
-    use crate::gguf::multimodal_binding_utils::binding_sources;
+    use crate::multimodal_binding_utils::binding_sources;
 
     #[test]
     fn maps_complete_idefics3_inventory() {
