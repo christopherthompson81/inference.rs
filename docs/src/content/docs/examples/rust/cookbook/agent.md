@@ -21,7 +21,7 @@ Runnable Rust SDK example `agent`.
 ///
 /// Run with: `cargo run --release --example cookbook_agent -p inference-examples`
 use anyhow::Result;
-use inference::{tool, AgentBuilder, IsqBits, ModelBuilder, PagedAttentionMetaBuilder};
+use inference::{AgentBuilder, IsqBits, ModelBuilder, PagedAttentionMetaBuilder, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 

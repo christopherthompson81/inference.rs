@@ -1,9 +1,8 @@
+use inference_protocol::chat_template::is_chat_template_request_error;
+
 use crate::{
     AudioInput, DiffusionGenerationParams, ModelCategory, RequestMessage, Response, VideoInput,
-    pipeline::{
-        KvCache, NormalCache, chat_template::is_chat_template_request_error,
-        is_inputs_processor_validation_error,
-    },
+    pipeline::{KvCache, NormalCache, is_inputs_processor_validation_error},
     prefix_cacher::MatchingCache,
     request::{DetokenizationRequest, NormalRequest, TokenizationRequest},
     sequence::{SeqPreallocatedCache, SeqStepType},
@@ -1040,10 +1039,10 @@ impl Engine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pipeline::chat_template::{ChatTemplateValue, apply_chat_template_to};
     use crate::{Function, Tool, ToolType};
     use ahash::AHashMap;
     use indexmap::IndexMap;
+    use inference_protocol::chat_template::{ChatTemplateValue, apply_chat_template_to};
     use tokenizers::{Tokenizer, models::wordlevel::WordLevel};
 
     #[test]

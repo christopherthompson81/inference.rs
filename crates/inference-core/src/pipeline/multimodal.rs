@@ -153,9 +153,7 @@ use crate::attention::FlashParams;
 use crate::gdn::RecurrentBatchKind;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use crate::paged_attention::{AttentionImplementation, CacheEngine, calculate_cache_config};
-use crate::pipeline::chat_template::{
-    BeginEndUnkPadTok, ChatTemplateValue, GenerationConfig, calculate_eos_tokens,
-};
+use crate::pipeline::chat_template::{GenerationConfig, calculate_eos_tokens};
 #[cfg(feature = "cuda")]
 use crate::pipeline::cuda_graph::{
     CudaDecodeGraphCaptureCtx, CudaDecodeGraphKey, CudaDecodeGraphLaunch, CudaDecodeGraphReplay,
@@ -197,6 +195,7 @@ use either::Either;
 use futures::{FutureExt, future::BoxFuture};
 use hf_hub::Cache;
 use hf_hub::{Repo, RepoType};
+use inference_protocol::chat_template::{BeginEndUnkPadTok, ChatTemplateValue};
 use inference_quant::IsqType;
 use inference_quant::log::once_log_info;
 use rand_isaac::Isaac64Rng;

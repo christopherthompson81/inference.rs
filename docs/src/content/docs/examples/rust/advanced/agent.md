@@ -34,7 +34,7 @@ Run with: `cargo run --release --example agent -p inference-examples`
 
 use anyhow::Result;
 use inference::{
-    tool, AgentBuilder, AgentStopReason, IsqBits, ModelBuilder, PagedAttentionMetaBuilder,
+    AgentBuilder, AgentStopReason, IsqBits, ModelBuilder, PagedAttentionMetaBuilder, tool,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};

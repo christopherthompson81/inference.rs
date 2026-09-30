@@ -11,14 +11,12 @@ use regex_automata::meta::Regex;
 use serde_json::Value;
 use tracing::{debug, info, trace, warn};
 
+use inference_protocol::chat_template::{BeginEndUnkPadTok, ChatTemplate, ChatTemplateValue};
+
 use crate::{
     LoraAdapterSpec, ModelPaths, Ordering, TokenSource, api_dir_list, api_get_file,
     lora::LoraConfig,
-    pipeline::{
-        chat_template::{BeginEndUnkPadTok, ChatTemplate, ChatTemplateValue},
-        hf::build_api,
-        isq::UQFF_RESIDUAL_SAFETENSORS,
-    },
+    pipeline::{hf::build_api, isq::UQFF_RESIDUAL_SAFETENSORS},
     xlora_models::XLoraConfig,
 };
 

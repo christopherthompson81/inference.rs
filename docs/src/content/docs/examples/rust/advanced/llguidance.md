@@ -18,8 +18,8 @@ Run with: `cargo run --release --example llguidance -p inference-examples`
 
 use anyhow::Result;
 use inference::{
-    llguidance::api::GrammarWithLexer, IsqBits, LlguidanceGrammar, ModelBuilder,
-    PagedAttentionMetaBuilder, RequestBuilder, TextMessageRole,
+    IsqBits, LlguidanceGrammar, ModelBuilder, PagedAttentionMetaBuilder, RequestBuilder,
+    TextMessageRole, llguidance::api::GrammarWithLexer,
 };
 use serde_json::json;
 

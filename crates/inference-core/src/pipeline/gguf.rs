@@ -42,7 +42,7 @@ use crate::gguf::{
 use crate::lora::Ordering;
 use crate::pipeline::ChatTemplate;
 use crate::pipeline::cache_manager::FullCacheManager;
-use crate::pipeline::chat_template::{BeginEndUnkPadTok, GenerationConfig, calculate_eos_tokens};
+use crate::pipeline::chat_template::{GenerationConfig, calculate_eos_tokens};
 use crate::pipeline::hf::{build_api, get_file, list_repo_files};
 use crate::pipeline::loaders::{DeviceMappedModelLoader, stamp_qk_rope_layout};
 use crate::pipeline::model_config as ModelConfig;
@@ -72,6 +72,7 @@ use either::Either;
 use futures::future::BoxFuture;
 use hf_hub::{Repo, RepoType};
 use inference_nn::gguf::{QuantizedForwardInputs, QuantizedModel};
+use inference_protocol::chat_template::BeginEndUnkPadTok;
 use inference_quant::IsqType;
 use rand_isaac::Isaac64Rng;
 use std::any::Any;

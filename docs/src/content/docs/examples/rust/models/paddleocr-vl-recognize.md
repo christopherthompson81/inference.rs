@@ -22,7 +22,7 @@ Run with:
 //! Run with:
 //! `cargo run --release --example paddleocr_vl_recognize -p inference-examples -- <image> ["Table Recognition:"]`
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use inference::{MultimodalMessages, MultimodalModelBuilder, RequestBuilder, TextMessageRole};
 
 // Real crops stop on EOS well under this; the cap only stops a pathological region running away.

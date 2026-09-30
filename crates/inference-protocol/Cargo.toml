@@ -12,12 +12,15 @@ readme = "../../README.md"
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
+chrono.workspace = true
 either.workspace = true
 image.workspace = true
 indexmap.workspace = true
 inference-code-exec = { workspace = true, optional = true }
 inference-mcp.workspace = true
 llguidance.workspace = true
+minijinja.workspace = true
+minijinja-contrib.workspace = true
 mime_guess.workspace = true
 regex.workspace = true
 serde.workspace = true

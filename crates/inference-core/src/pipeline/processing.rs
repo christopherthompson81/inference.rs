@@ -6,7 +6,9 @@ use indexmap::IndexMap;
 
 use crate::{MessageContent, Pipeline, Tool, request::ReasoningEffort};
 
-use super::{InputsProcessor, chat_template::apply_chat_template_to, text_models_inputs_processor};
+use inference_protocol::chat_template::{BeginEndUnkPadTok, apply_chat_template_to};
+
+use super::{InputsProcessor, text_models_inputs_processor};
 
 pub enum MessagesAction {
     // For idefics2, others which use the "new" openai format
@@ -63,7 +65,7 @@ pub trait Processor {
 }
 
 /// Helper function to extract token string from BeginEndUnkPadTok
-fn extract_token_string(token: &super::chat_template::BeginEndUnkPadTok) -> String {
+fn extract_token_string(token: &BeginEndUnkPadTok) -> String {
     match &token.0 {
         Either::Left(lit) => lit.clone(),
         Either::Right(added) => added.content.clone(),
