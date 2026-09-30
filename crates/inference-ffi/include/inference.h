@@ -340,7 +340,8 @@ INFERENCE_API inference_status inference_lora_adapter_unload(const inference_eng
                                                             size_t request_len, inference_string **out_response);
 
 /* Generates images with a diffusion model (the POST /v1/images/generations body); out_response receives the image
- * list JSON. */
+ * list JSON. A "url" image is a PNG in the file store: its url is /v1/files/<id>/content, read with
+ * inference_file_content. */
 INFERENCE_API inference_status inference_image_generation(const inference_engine *engine, const char *request,
                                                          size_t request_len, inference_string **out_response);
 /* Speaks text with a speech model (the POST /v1/audio/speech body; "response_format" is "wav" or "pcm"). out_blob
@@ -357,10 +358,11 @@ INFERENCE_API inference_status inference_approval_resolve(const inference_engine
                                                          size_t approval_id_len, const char *request,
                                                          size_t request_len, inference_string **out_response);
 
-/* The engine's file store, shared by its models: uploads that requests name by id, and files agentic tools
- * produce. Uploading copies len bytes (at most 64 MiB; data must not be NULL) under filename and purpose (e.g.
- * "user_data"); mime_type may be NULL. Metadata calls return the /v1/files JSON; content returns the bytes, and a body
- * the store elided is INFERENCE_ERR_NOT_FOUND with code "file_content_unavailable". */
+/* The engine's file store, shared by its models: uploads that requests name by id, files agentic tools produce, and
+ * "url" images. Uploading copies len bytes (at most 64 MiB; data must not be NULL) under filename and purpose (e.g.
+ * "user_data"); mime_type may be NULL. Metadata calls return the /v1/files JSON; content returns the bytes, and a
+ * body the store elided is INFERENCE_ERR_NOT_FOUND with code "file_content_unavailable".
+ */
 INFERENCE_API inference_status inference_file_upload(const inference_engine *engine, const uint8_t *data, size_t len,
                                                     const char *filename, const char *mime_type, const char *purpose,
                                                     inference_string **out_response);

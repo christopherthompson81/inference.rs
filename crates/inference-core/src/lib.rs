@@ -135,9 +135,9 @@ pub use device_map::{
     DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting, LayerDeviceMapper,
 };
 pub use files::{
-    FILE_PURPOSE_AGENT_OUTPUT, FILE_PURPOSE_USER_DATA, File, FileContent, FileSource, FileStore,
-    MODEL_INLINE_BYTES, RequestedFile, WIRE_EMBED_LIMIT_BYTES, format_from_name, is_text_mime,
-    mime_for_format,
+    FILE_PURPOSE_AGENT_OUTPUT, FILE_PURPOSE_GENERATED_IMAGE, FILE_PURPOSE_USER_DATA, File,
+    FileContent, FileSource, FileStore, MODEL_INLINE_BYTES, RequestedFile, WIRE_EMBED_LIMIT_BYTES,
+    format_from_name, is_text_mime, mime_for_format,
 };
 pub use gguf::{GGUF_MULTI_FILE_DELIMITER, GGUFArchitecture};
 pub use inference_audio::AudioInput;

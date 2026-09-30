@@ -30,6 +30,7 @@ pub const INPUT_FILES_TOTAL_PREVIEW_CHARS: usize = 32 * 1024;
 
 pub const FILE_PURPOSE_AGENT_OUTPUT: &str = "agent_output";
 pub const FILE_PURPOSE_USER_DATA: &str = "user_data";
+pub const FILE_PURPOSE_GENERATED_IMAGE: &str = "generated_image";
 
 pub fn default_file_purpose() -> String {
     FILE_PURPOSE_AGENT_OUTPUT.to_string()

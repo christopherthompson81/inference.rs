@@ -158,7 +158,7 @@ Extensions:
 
 - `prompt`
 - `n`
-- `response_format`: `"url"` (default; response carries a server-side filename in `url`) or `"b64_json"` (response carries the base64-encoded PNG in `b64_json`).
+- `response_format`: `"url"` (default; `url` is the path that serves the PNG from the file store, `/v1/files/{id}/content`) or `"b64_json"` (response carries the base64-encoded PNG in `b64_json`).
 
 OpenAI's `size` string (e.g. `"1024x1024"`) is not supported. Use the `height` and `width` fields instead:
 
@@ -185,7 +185,7 @@ Not supported. inference.rs has no built-in moderation model; run one as a separ
 
 ## Files and Assistants APIs
 
-`POST /v1/files` multipart uploads are supported for user-provided input files. Use `purpose="user_data"` for OpenAI-compatible request attachments. Uploaded files, inline request files, URL-fetched request files, and agent-produced files are available through `GET /v1/files`, `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, and `DELETE /v1/files/{id}`.
+`POST /v1/files` multipart uploads are supported for user-provided input files. Use `purpose="user_data"` for OpenAI-compatible request attachments. Uploaded files, inline request files, URL-fetched request files, agent-produced files, and generated images (`response_format: "url"`) are available through `GET /v1/files`, `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, and `DELETE /v1/files/{id}`.
 
 Text-like UTF-8 files are exposed to the model as bounded decoded previews, with additional text available during agentic runs when file access is active. Binary files are stored, downloadable, and mounted into shell/code workdirs when those tools are active, but inference.rs does not perform OpenAI's private PDF/image/spreadsheet extraction pipeline. The Assistants API is not supported; the inference.rs equivalent is the session-based agentic loop on the chat completions endpoint.
 

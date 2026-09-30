@@ -117,13 +117,13 @@ Requesting files (`files` on chat, Responses, and Anthropic Messages requests):
 
 | Field | Type | Notes |
 |---|---|---|
-| `id` | string | Stable id. Agent outputs use `file_<run>_r<round>_<idx>`; uploaded/request files use `file-...`. |
+| `id` | string | Stable id. Agent outputs use `file_<run>_r<round>_<idx>`; uploaded/request files and generated images use `file-...`. |
 | `name` | string | Filename as written. |
 | `format` | string | Open-ended format string. |
 | `mime_type` | string | Content-Type. |
 | `bytes` | integer | Body size. |
 | `created_at` | integer | Unix epoch seconds. |
-| `purpose` | string | `agent_output` for generated files, `user_data` for uploaded/request files. |
+| `purpose` | string | `agent_output` for agent-produced files, `user_data` for uploaded/request files, `generated_image` for images from `/v1/images/generations` with `response_format: "url"`. |
 | `source` | object | `{"tool", "round", "turn"}` attribution. |
 | `text` | string | Full text body for text files. Absent if elided. |
 | `preview` | string | Short UTF-8 preview for text files. |

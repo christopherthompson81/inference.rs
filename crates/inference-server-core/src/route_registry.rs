@@ -66,8 +66,11 @@ pub const IMAGE_GENERATION_ROUTE: RouteInfo =
 pub const FILES_ROUTE: RouteInfo = RouteInfo::new("/v1/files", "GET, POST", RouteKind::OpenAi);
 pub const FILE_ROUTE: RouteInfo =
     RouteInfo::new("/v1/files/{id}", "GET, DELETE", RouteKind::OpenAi);
-pub const FILE_CONTENT_ROUTE: RouteInfo =
-    RouteInfo::new("/v1/files/{id}/content", "GET", RouteKind::OpenAi);
+pub const FILE_CONTENT_ROUTE: RouteInfo = RouteInfo::new(
+    inference_api::files::FILE_CONTENT_PATH,
+    "GET",
+    RouteKind::OpenAi,
+);
 pub const CONTAINER_FILES_ROUTE: RouteInfo = RouteInfo::new(
     "/v1/containers/{container_id}/files",
     "GET",

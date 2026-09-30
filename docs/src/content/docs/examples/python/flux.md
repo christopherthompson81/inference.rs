@@ -29,7 +29,10 @@ with ir.Engine(
             response_format=t.ImageGenerationResponseFormat.URL,
         )
     )
-    print(res.data[0].url)
+    # url is the file store path /v1/files/<id>/content; in process, read the PNG by id.
+    file_id = res.data[0].url.split("/")[-2]
+    with open("flux.png", "wb") as f:
+        f.write(engine.file_content(file_id).data)
 ```
 
 Source: [`examples/python/flux.py`](https://github.com/christopherthompson81/inference.rs/blob/master/examples/python/flux.py)
