@@ -2,16 +2,16 @@
 
 use anyhow::Result;
 use comfy_table::{Cell, Color, ContentArrangement, Table, presets::UTF8_FULL};
-use inference_api::{Engine, EngineSpec, engine::RuntimeSpec};
-use inference_core::{
-    AdapterSelection, Constraint, NormalRequest, Request, RequestMessage, Response, SamplingParams,
-    initialize_logging,
+use inference_api::{
+    Engine, EngineSpec,
+    engine::RuntimeSpec,
+    engine_completion::{CompletionStream, CompletionStreamEvent},
+    lora_adapters::ListLoraAdaptersQuery,
+    openai::CompletionRequest,
 };
-use std::{
-    sync::Arc,
-    time::{Duration, Instant},
-};
-use tokio::sync::mpsc::channel;
+use inference_core::initialize_logging;
+use serde_json::json;
+use std::time::{Duration, Instant};
 use tracing::info;
 
 use crate::args::{BenchRuntimeOptions, GlobalOptions, ModelType};
@@ -80,6 +80,8 @@ const BENCH_TOKEN_BASE: u32 = 1000;
 const BENCH_TOKEN_SPAN: u32 = 2048;
 const BENCH_ITER_STRIDE: u32 = 131;
 const BENCH_CASE_STRIDE: u32 = 719;
+// Greedy decoding, so every iteration of a case generates the same tokens.
+const GREEDY_TOP_K: usize = 1;
 
 pub struct BenchRunConfig {
     pub prompt_lens: Vec<usize>,
@@ -145,18 +147,23 @@ pub async fn run_bench(
     info!("Loading model for benchmarking...");
     let spec = bench_spec(&model_type, &runtime, &global)?;
     let engine = Engine::load(spec).await?;
-    let inference = engine.state().clone();
     if let Some(alias) = request_adapter.as_deref() {
-        let adapters = inference.list_lora_adapters(None).await?;
-        if !adapters.iter().any(|adapter| adapter.alias == alias) {
+        let adapters = engine
+            .lora_adapters(ListLoraAdaptersQuery::default())
+            .await
+            .map_err(anyhow::Error::msg)?;
+        if !adapters.data.iter().any(|adapter| adapter.id == alias) {
             anyhow::bail!("LoRA adapter alias `{alias}` is not loaded");
         }
     }
-    if let Some(max_seq_len) = inference
-        .config(None)
+    let max_model_len = engine
+        .models()
         .map_err(anyhow::Error::msg)?
-        .max_seq_len
-    {
+        .data
+        .into_iter()
+        .next()
+        .and_then(|model| model.max_model_len);
+    if let Some(max_seq_len) = max_model_len {
         let longest_ttft = prompt_lens
             .iter()
             .copied()
@@ -190,14 +197,8 @@ pub async fn run_bench(
             }
             for i in 0..warmup {
                 let token_start = bench_token_start(i, prompt_idx, 0);
-                run_single_bench(
-                    &inference,
-                    prompt_len,
-                    1,
-                    token_start,
-                    request_adapter.clone(),
-                )
-                .await?;
+                run_single_bench(&engine, prompt_len, 1, token_start, request_adapter.clone())
+                    .await?;
             }
         }
         if gen_len > 1 {
@@ -205,7 +206,7 @@ pub async fn run_bench(
                 for i in 0..warmup {
                     let token_start = bench_token_start(i, depth_idx, prompt_lens.len());
                     run_single_bench(
-                        &inference,
+                        &engine,
                         depth,
                         gen_len,
                         token_start,
@@ -216,11 +217,6 @@ pub async fn run_bench(
             }
         }
         info!("Warmup complete.");
-
-        // Reset logger counters so benchmark stats are clean
-        if let Ok(logger) = inference.get_logger(None) {
-            logger.reset();
-        }
     }
 
     // Run benchmarks
@@ -252,7 +248,7 @@ pub async fn run_bench(
             }
             let token_start = bench_token_start(i + warmup, prompt_idx, 0);
             let measurement = run_single_bench(
-                &inference,
+                &engine,
                 *prompt_len,
                 1,
                 token_start,
@@ -275,7 +271,7 @@ pub async fn run_bench(
             for (depth_idx, (depth, results)) in decode_results.iter_mut().enumerate() {
                 let token_start = bench_token_start(i + warmup, depth_idx, prompt_lens.len());
                 let measurement = run_single_bench(
-                    &inference,
+                    &engine,
                     *depth,
                     gen_len,
                     token_start,
@@ -364,59 +360,47 @@ fn bench_token_start(iteration: usize, case_idx: usize, group_offset: usize) -> 
 }
 
 async fn run_single_bench(
-    inference: &Arc<inference_core::InferenceRs>,
+    engine: &Engine,
     prompt_tokens: usize,
     gen_tokens: usize,
     token_start: u32,
     adapter: Option<String>,
 ) -> Result<BenchMeasurement> {
-    let mut sampling_params = SamplingParams::deterministic();
-    sampling_params.max_len = Some(gen_tokens);
+    measure(
+        engine,
+        bench_tokens(prompt_tokens, token_start),
+        gen_tokens,
+        adapter,
+    )
+    .await
+}
 
-    let sender = inference.get_sender(None).unwrap();
-    let (tx, mut rx) = channel(100);
-
-    let tokens = bench_tokens(prompt_tokens, token_start);
-
-    let req = Request::Normal(Box::new(NormalRequest {
-        id: inference.next_request_id(),
-        queued_at: None,
-        messages: RequestMessage::CompletionTokens(tokens),
-        sampling_params,
-        seed: None,
-        response: tx,
-        return_logprobs: false,
-        is_streaming: true,
-        constraint: Constraint::None,
-        suffix: None,
-        tools: None,
-        tool_choice: None,
-        logits_processors: None,
-        return_raw_logits: false,
-        web_search_options: None,
-        enable_code_execution: false,
-        enable_shell: false,
-        shell_options: None,
-        code_execution_permission: None,
-        code_execution_approval_notifier: None,
-        agent_permission: None,
-        agent_approval_handler: None,
-        agent_approval_notifier: None,
-        session_id: None,
-        max_tool_rounds: None,
-        tool_dispatch_url: None,
-        model_id: None,
-        adapter: adapter.map(AdapterSelection::alias),
-        truncate_sequence: false,
-        files: None,
-        input_files: Vec::new(),
-        cancellation: None,
-    }));
-
+async fn measure(
+    engine: &Engine,
+    prompt: Vec<u32>,
+    gen_tokens: usize,
+    adapter: Option<String>,
+) -> Result<BenchMeasurement> {
+    let request = bench_request(prompt, gen_tokens, adapter)?;
     let request_start = Instant::now();
-    sender.send(req).await?;
+    let stream = engine
+        .completion_stream(request)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    recv_measurement(stream, request_start, gen_tokens).await
+}
 
-    recv_measurement(&mut rx, request_start, gen_tokens).await
+fn bench_request(
+    prompt: Vec<u32>,
+    gen_tokens: usize,
+    adapter: Option<String>,
+) -> Result<CompletionRequest> {
+    Ok(serde_json::from_value(json!({
+        "prompt": prompt,
+        "max_tokens": gen_tokens,
+        "top_k": GREEDY_TOP_K,
+        "adapter": adapter,
+    }))?)
 }
 
 fn bench_tokens(prompt_tokens: usize, token_start: u32) -> Vec<u32> {
@@ -426,18 +410,15 @@ fn bench_tokens(prompt_tokens: usize, token_start: u32) -> Vec<u32> {
 }
 
 async fn recv_measurement(
-    rx: &mut tokio::sync::mpsc::Receiver<Response>,
+    mut stream: CompletionStream,
     request_start: Instant,
     expected_tokens: usize,
 ) -> Result<BenchMeasurement> {
     let mut first_token = None;
 
     let last_token = loop {
-        match rx.recv().await {
-            Some(Response::AgenticToolCallProgress { .. }) => continue,
-            Some(Response::BlockDenoisingProgress(_)) => continue,
-            Some(Response::File(_)) => continue,
-            Some(Response::CompletionChunk(response)) => {
+        match stream.next_event().await {
+            Some(CompletionStreamEvent::Chunk(response)) => {
                 let received = Instant::now();
                 let finished = response
                     .choices
@@ -450,12 +431,8 @@ async fn recv_measurement(
                     break received;
                 }
             }
-            Some(Response::InternalError(e)) => anyhow::bail!("Internal error: {e:?}"),
-            Some(Response::ModelError(e, _)) => anyhow::bail!("Model error: {e}"),
-            Some(Response::CompletionModelError(e, _)) => anyhow::bail!("Model error: {e}"),
-            Some(Response::ValidationError(e)) => anyhow::bail!("Validation error: {e:?}"),
-            Some(_) => anyhow::bail!("Unexpected response type"),
-            None => anyhow::bail!("No response received"),
+            Some(CompletionStreamEvent::Error(error)) => anyhow::bail!("{error}"),
+            None => anyhow::bail!("the completion stream ended without a final chunk"),
         }
     };
 
@@ -513,8 +490,39 @@ fn print_results(
 }
 
 #[cfg(test)]
+#[path = "../../../inference/tests/support/paddleocr_vl_tiny.rs"]
+mod tiny_support;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    const PROMPT_TOKENS: usize = 8;
+    const GEN_TOKENS: usize = 4;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_measurement_times_a_token_prompt_through_the_engine_api() -> anyhow::Result<()> {
+        let dir = super::tiny_support::tiny_checkpoint()?;
+        let spec = serde_json::from_value(json!({
+            "model": {"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}},
+            "runtime": {"device": "cpu", "disable_eos_stop": true},
+        }))?;
+        let engine = Engine::load(spec).await?;
+        // The tiny vocabulary is smaller than bench's synthetic token range.
+        let prompt: Vec<u32> = (1..=PROMPT_TOKENS as u32).collect();
+
+        // Bench divides decode time by max_tokens, so the request must run to it; disable_eos_stop sees to that.
+        let full = engine
+            .completion(bench_request(prompt.clone(), GEN_TOKENS, None)?)
+            .await
+            .map_err(anyhow::Error::msg)?;
+        assert_eq!(full.usage.completion_tokens, GEN_TOKENS);
+        assert_eq!(full.choices[0].finish_reason, "length");
+
+        let measurement = measure(&engine, prompt, GEN_TOKENS, None).await?;
+        assert!(measurement.time_to_first_token > Duration::ZERO);
+        Ok(())
+    }
 
     #[test]
     fn a_benchmark_runs_one_sequence_to_its_full_length() {

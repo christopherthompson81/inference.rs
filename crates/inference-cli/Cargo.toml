@@ -50,6 +50,15 @@ walkdir = { workspace = true }
 crossterm = "0.28"
 fuzzy-matcher = "0.3"
 
+[dev-dependencies]
+candle-nn.workspace = true
+indicatif.workspace = true
+inference-models-other.workspace = true
+inference-nn.workspace = true
+rand.workspace = true
+rand_distr.workspace = true
+tempfile.workspace = true
+
 [features]
 default = ["code-execution", "swagger-ui", "all-models"]
 swagger-ui = ["inference-server-core/swagger-ui"]

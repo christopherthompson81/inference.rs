@@ -157,3 +157,24 @@ bindings). Diffusion and speech requests never reach the stop check.
 
 **Test:** `chat_route::a_cancelled_chat_stream_ends_with_its_usage`: cancelling after the first chunk ends the stream
 with `finish_reason: canceled`, usage, and fewer tokens than the cap (CPU and CUDA suites).
+
+## Run 7 — 2026-09-30 21:30
+
+**Question:** can `inference bench` run entirely on `inference_api::Engine` now that completions take token ids and
+models report `max_model_len`?
+
+**Change:** bench's requests are `CompletionRequest`s (token-id `prompt`, `max_tokens`, `top_k: 1`, `adapter`)
+through `Engine::completion_stream`; the adapter check uses `Engine::lora_adapters` and the context check
+`Engine::models`. The post-warmup `IntervalLogger::reset` is dropped: it only affected the periodic log line
+spanning warmup, not the results table. bench now imports only `initialize_logging` from core.
+
+**Raw finding (a limit, not a regression):** a new test on the tiny checkpoint first asserted one streamed chunk per
+generated token and got 2 chunks for 4 tokens. The streaming path holds back tokens whose text is empty or an
+incomplete UTF-8 sequence, which random weights produce often. Bench divides decode time by `max_tokens - 1`, so its
+TPOT stays right, but TTFT runs to the first chunk that carries text; the old core-channel path read the same
+stream. The test instead checks that the request runs to `max_tokens` (`usage.completion_tokens`, finish reason
+`length`) and that a measurement completes.
+
+**Review notes left for later:** internal errors now reach bench as the API's generic message, since the API hides
+internals from callers (a local consumer could be given the source); the completion path serializes the whole
+request for its log even when logging is off, which grows with prompt length but stays well under 0.1% of prefill.
