@@ -1,7 +1,8 @@
 use crate::paged_attention::PagedAttentionMeta;
 use crate::{
     AdapterGenerationId, AdapterLease, AudioInput, ChatCompletionResponse, FINISH_REASON_CANCELED,
-    PromptTokensDetails, RequestCancellation, Usage, VideoInput, get_mut_arcmutex, get_mut_group,
+    FINISH_REASON_LENGTH, PromptTokensDetails, RequestCancellation, Usage, VideoInput,
+    get_mut_arcmutex, get_mut_group,
     paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
     pipeline::LayerCaches,
     reasoning_parsers::{ReasoningMode, ReasoningParser},
@@ -89,7 +90,9 @@ impl Display for StopReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             StopReason::Eos => write!(f, "stop"),
-            StopReason::Length(_) | StopReason::ModelLength(_) => write!(f, "length"),
+            StopReason::Length(_) | StopReason::ModelLength(_) => {
+                write!(f, "{FINISH_REASON_LENGTH}")
+            }
             StopReason::StopTok(_) | StopReason::StopString { .. } => write!(f, "stop"),
             StopReason::Canceled => write!(f, "{FINISH_REASON_CANCELED}"),
             StopReason::GeneratedImage => write!(f, "generated_image"),
@@ -103,7 +106,7 @@ impl StopReason {
     fn metric_label(self) -> &'static str {
         match self {
             StopReason::Eos => "stop",
-            StopReason::Length(_) | StopReason::ModelLength(_) => "length",
+            StopReason::Length(_) | StopReason::ModelLength(_) => FINISH_REASON_LENGTH,
             StopReason::StopTok(_) | StopReason::StopString { .. } => "stop",
             StopReason::Canceled => FINISH_REASON_CANCELED,
             StopReason::GeneratedImage => "generated_image",

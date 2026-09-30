@@ -84,6 +84,7 @@ impl BackgroundTask {
             BackgroundTaskState::Cancelled(Some(partial)) => {
                 let mut partial = partial.clone();
                 partial.status = ResponseStatus::Cancelled;
+                partial.incomplete_details = None;
                 // the reply was cut short; tool calls it finished stay completed
                 for item in &mut partial.output {
                     if matches!(item, OutputItem::Message { .. }) {

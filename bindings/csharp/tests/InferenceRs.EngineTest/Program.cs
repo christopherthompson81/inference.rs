@@ -158,7 +158,8 @@ internal static class Program
         Check("a deleted response is NotFound", Throws(() => engine.GetResponse(id))?.Status == InferenceStatus.NotFound);
         request["stream"] = true;
         using var stream = engine.ResponseStream(request.ToJsonString());
-        Check("a Responses stream ends with response.completed", stream.LastOrDefault()?.Name == "response.completed");
+        // The token cap ends the run: the random weights never stop on their own.
+        Check("a capped Responses stream ends with response.incomplete", stream.LastOrDefault()?.Name == "response.incomplete");
 
         var models = JsonNode.Parse(engine.ListModels())!["data"]!.AsArray();
         Check("the model list starts with the default alias", (string?)models[0]!["id"] == "default");

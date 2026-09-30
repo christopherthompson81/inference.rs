@@ -199,7 +199,7 @@ pub use pipeline::{
 pub use pipeline::{Phi2Loader, Phi3Loader, Phi3VLoader};
 pub use request::{
     ApproximateUserLocation, CalibrationAction, CalibrationRequest, Constraint,
-    DEFAULT_ENABLE_THINKING, DetokenizationRequest, FINISH_REASON_CANCELED,
+    DEFAULT_ENABLE_THINKING, DetokenizationRequest, FINISH_REASON_CANCELED, FINISH_REASON_LENGTH,
     ImageGenerationResponseFormat, LlguidanceGrammar, MessageContent, NormalRequest,
     ReasoningControlError, ReasoningEffort, ReasoningEffortParseError, Request,
     RequestCancellation, RequestMessage, ResolvedReasoningControls, SearchContextSize,

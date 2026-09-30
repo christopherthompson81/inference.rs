@@ -140,7 +140,8 @@ class EngineTest(unittest.TestCase):
             self.engine.get_response(response_id)
         self.assertEqual(missing.exception.status, ir.Status.NOT_FOUND)
         with self.engine.response_stream(json.dumps({**request, "stream": True})) as stream:
-            self.assertEqual(list(stream)[-1].name, "response.completed")
+            # the token cap ends the run
+            self.assertEqual(list(stream)[-1].name, "response.incomplete")
 
     def test_errors_carry_the_envelope(self):
         with self.assertRaises(ir.InferenceError) as unknown:

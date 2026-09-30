@@ -152,6 +152,37 @@ async fn missing_models_and_responses_are_typed_not_found() -> anyhow::Result<()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_capped_response_is_incomplete_and_can_be_continued() -> anyhow::Result<()> {
+    let dir = support::tiny_checkpoint()?;
+    let spec = serde_json::from_value(json!({
+        "model": {"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}},
+        "runtime": {"device": "cpu"},
+    }))?;
+    let engine = inference_api::Engine::load(spec).await?;
+    let request = json!({"model": "default", "input": PROMPT, "max_output_tokens": MAX_TOKENS});
+    let response = engine
+        .responses(serde_json::from_value(request)?)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let body = serde_json::to_value(&response)?;
+    assert_eq!(body["status"], "incomplete", "{body}");
+    assert_eq!(
+        body["incomplete_details"]["reason"], "max_output_tokens",
+        "{body}"
+    );
+    assert_eq!(body["output"][0]["status"], "incomplete", "{body}");
+
+    // Unlike a cancelled reply, one cut off by its cap is a conversation to continue.
+    let follow_up = json!({"model": "default", "input": PROMPT, "previous_response_id": response.id,
+        "max_output_tokens": MAX_TOKENS});
+    engine
+        .responses(serde_json::from_value(follow_up)?)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn responses_stream_names_its_events_and_ends_with_done() -> anyhow::Result<()> {
     let dir = support::tiny_checkpoint()?;
     let app = router(dir.path()).await?;
@@ -176,7 +207,23 @@ async fn responses_stream_names_its_events_and_ends_with_done() -> anyhow::Resul
         .filter_map(|line| line.strip_prefix("event: "))
         .collect();
     assert_eq!(names.first(), Some(&"response.created"), "{sse}");
-    assert_eq!(names.last(), Some(&"response.completed"), "{sse}");
+    // The random weights never stop on their own, so the token cap ends the run.
+    assert_eq!(names.last(), Some(&"response.incomplete"), "{sse}");
+    let terminal: Value = serde_json::from_str(
+        sse.lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .rev()
+            .nth(1)
+            .expect("the terminal event has data"),
+    )?;
+    assert_eq!(
+        terminal["response"]["incomplete_details"]["reason"], "max_output_tokens",
+        "{terminal}"
+    );
+    assert_eq!(
+        terminal["response"]["output"][0]["status"], "incomplete",
+        "{terminal}"
+    );
     let data: Vec<&str> = sse
         .lines()
         .filter_map(|line| line.strip_prefix("data: "))
@@ -340,7 +387,7 @@ async fn responses_apply_the_servers_ask_permission() -> anyhow::Result<()> {
     while let Some(item) = stream.next().await {
         names.push(item.name());
     }
-    assert_eq!(names.last(), Some(&"response.completed"), "{names:?}");
+    assert_eq!(names.last(), Some(&"response.incomplete"), "{names:?}");
 
     let app = InferenceRsServerRouterBuilder::new()
         .with_engine(&engine)

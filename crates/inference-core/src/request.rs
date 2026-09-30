@@ -155,6 +155,8 @@ pub struct NormalRequest {
 
 /// The `finish_reason` of a sequence its request canceled.
 pub const FINISH_REASON_CANCELED: &str = "canceled";
+/// The finish reason of a sequence stopped by its token cap (the request's or the model's).
+pub const FINISH_REASON_LENGTH: &str = "length";
 
 /// A flag the requester sets to cancel its request; cloning shares it.
 #[derive(Clone, Debug, Default)]

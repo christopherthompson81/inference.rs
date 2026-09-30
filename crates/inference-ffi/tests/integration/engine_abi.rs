@@ -660,7 +660,12 @@ fn responses_stream_store_continue_and_run_in_the_background() {
     let (status, response) = create_response(engine, &responses_request(json!({})));
     assert_eq!(status, INFERENCE_OK, "{response}");
     assert_eq!(response["object"], "response", "{response}");
-    assert_eq!(response["status"], "completed", "{response}");
+    // The random weights never stop on their own, so the token cap ends each run.
+    assert_eq!(response["status"], "incomplete", "{response}");
+    assert_eq!(
+        response["incomplete_details"]["reason"], "max_output_tokens",
+        "{response}"
+    );
     let id = response["id"].as_str().unwrap().to_string();
     let text = response["output_text"]
         .as_str()
@@ -684,7 +689,7 @@ fn responses_stream_store_continue_and_run_in_the_background() {
         .map(|e| e["event"].as_str().unwrap())
         .collect();
     assert_eq!(names.first(), Some(&"response.created"), "{names:?}");
-    assert_eq!(names.last(), Some(&"response.completed"), "{names:?}");
+    assert_eq!(names.last(), Some(&"response.incomplete"), "{names:?}");
     let streamed: String = events
         .iter()
         .filter(|e| e["event"] == "response.output_text.delta")
@@ -698,7 +703,7 @@ fn responses_stream_store_continue_and_run_in_the_background() {
         .to_string();
     let (status, stored) = by_id(inference_responses_get, engine, &streamed_id);
     assert_eq!(status, INFERENCE_OK, "{stored}");
-    assert_eq!(stored["status"], "completed", "{stored}");
+    assert_eq!(stored["status"], "incomplete", "{stored}");
     let follow_up = responses_request(json!({"previous_response_id": streamed_id}));
     let (status, continued) = create_response(engine, &follow_up);
     assert_eq!(status, INFERENCE_OK, "{continued}");
@@ -712,12 +717,12 @@ fn responses_stream_store_continue_and_run_in_the_background() {
     assert_eq!(status, INFERENCE_OK, "{stored}");
     assert_eq!(
         (stored["id"].as_str(), stored["status"].as_str()),
-        (Some(id.as_str()), Some("completed"))
+        (Some(id.as_str()), Some("incomplete"))
     );
     let (status, cancelled) = by_id(inference_responses_cancel, engine, &id);
     assert_eq!(status, INFERENCE_OK, "{cancelled}");
     assert_eq!(
-        cancelled["status"], "completed",
+        cancelled["status"], "incomplete",
         "a finished response stays finished"
     );
     let (status, deleted) = by_id(inference_responses_delete, engine, &id);
@@ -755,7 +760,11 @@ fn responses_stream_store_continue_and_run_in_the_background() {
         );
         std::thread::sleep(BACKGROUND_POLL);
     };
-    assert_eq!(finished["status"], "completed", "{finished}");
+    assert_eq!(finished["status"], "incomplete", "{finished}");
+    assert_eq!(
+        finished["incomplete_details"]["reason"], "max_output_tokens",
+        "{finished}"
+    );
     assert_eq!(finished["output_text"].as_str().unwrap_or_default(), text);
 
     let request = responses_request(json!({"stream": true, "background": true}));
