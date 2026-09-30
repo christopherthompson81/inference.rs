@@ -32,14 +32,14 @@ Clients connect to `http://<host>:<mcp_port>/mcp`. Each call is a `POST /mcp` wi
 
 - `initialize`: returns `{"capabilities":{"tools":{}},"instructions":...,"protocolVersion":"2025-11-25","serverInfo":{"name":"inference","version":...}}`.
 - `ping`: returns `{}`.
-- `tools/list`: returns the `chat` tool. The list is empty if the loaded model does not have text input and output modalities.
+- `tools/list`: returns the `chat` tool. The list is empty if the loaded model does not have text input and output modalities, or if the server runs with `--agent-permission ask`: approvals need a stream, and a tool call is one blocking chat.
 - `tools/call`: runs the `chat` tool.
 
-Anything else returns JSON-RPC error -32601 (method not found). A body with `jsonrpc` other than `"2.0"` returns -32600; tool execution failures return -32603.
+Anything else returns JSON-RPC error -32601 (method not found). A body with `jsonrpc` other than `"2.0"` returns -32600. A chat request the engine rejects (an unknown model, an invalid field) returns -32602, and a failure while generating returns -32603.
 
 ## The chat tool
 
-You can pass any OpenAI [`ChatCompletionRequest`](/reference/http-api/) field in `arguments`; the advertised schema only documents the common ones. The schema:
+You can pass any OpenAI [`ChatCompletionRequest`](/reference/http-api/) field in `arguments`; the advertised schema only documents the common ones. The call runs as a non-streaming `/v1/chat/completions` request under the server's agent policy (`--agent-permission`, `--max-tool-rounds`), and `stream` is ignored. The schema:
 
 - Requires `messages`: an array of `{role, content}` objects with roles `user`, `assistant`, or `system`.
 - Documents `max_tokens` and `temperature`.

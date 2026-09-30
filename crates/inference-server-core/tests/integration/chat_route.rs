@@ -8,8 +8,7 @@ use inference_server_core::inference_server_router_builder::InferenceRsServerRou
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
-#[path = "../../../inference/tests/support/paddleocr_vl_tiny.rs"]
-mod support;
+use crate::support;
 
 const MAX_TOKENS: usize = 6;
 // Streamed and non-streamed decodes share the model and greedy sampling, so they must agree exactly.

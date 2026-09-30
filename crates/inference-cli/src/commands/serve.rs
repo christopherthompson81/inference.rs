@@ -27,7 +27,6 @@ use inference_server_core::{
     mcp_server::{MCP_PROTOCOL_VERSION, MCP_ROUTE, create_mcp_router},
     metrics::{ObservabilityState, install_prometheus_recorder, observe_http},
     route_registry::{INFERENCE_RS_API_ROUTES, RUNTIME_LORA_API_ROUTES, RouteInfo, RouteKind},
-    types::SharedInferenceRsState,
 };
 
 #[cfg(test)]
@@ -260,7 +259,6 @@ pub(crate) async fn serve_engine(
 ) -> Result<()> {
     let engine = Engine::load(spec).await?;
     let inference_for_ui = engine.state().clone();
-    let inference_for_mcp = engine.state().clone();
 
     let mut app = InferenceRsServerRouterBuilder::new()
         .with_engine(&engine)
@@ -312,7 +310,7 @@ pub(crate) async fn serve_engine(
     }
 
     if let Some(mcp_port) = server.mcp_port {
-        spawn_mcp_server(inference_for_mcp, &server.host, mcp_port, server.port).await?;
+        spawn_mcp_server(&engine, &server.host, mcp_port, server.port).await?;
     }
 
     let listener =
@@ -329,7 +327,7 @@ pub(crate) async fn serve_engine(
 
 /// Bind and spawn the MCP server on its own port, alongside the main HTTP server.
 pub(crate) async fn spawn_mcp_server(
-    inference: SharedInferenceRsState,
+    engine: &Engine,
     host: &str,
     mcp_port: u16,
     http_port: u16,
@@ -341,7 +339,7 @@ pub(crate) async fn spawn_mcp_server(
         .await
         .with_context(|| format!("Failed to bind MCP server to {host}:{mcp_port}"))?;
     let listener = tcp_nodelay_listener(listener);
-    let router = create_mcp_router(inference);
+    let router = create_mcp_router(engine);
 
     info!("MCP server listening on http://{host}:{mcp_port}{MCP_ROUTE}");
     info!("MCP protocol version is {MCP_PROTOCOL_VERSION}");

@@ -8,14 +8,13 @@ use axum::{
     response::Json,
     routing::post,
 };
-use inference_core::{Response, SupportedModality};
+use inference_api::Engine;
+use inference_core::{AgentPermission, SupportedModality};
 use serde_json::{Value, json};
 
 use crate::{
-    chat_completion::{ChatCompletionParseContext, parse_request},
-    handler_core::{ApiError, ApiErrorKind, create_response_channel, send_request},
-    openai::{ChatCompletionRequest, OpenAiToolSurface},
-    types::SharedInferenceRsState,
+    handler_core::{ApiError, ApiErrorKind},
+    openai::ChatCompletionRequest,
 };
 
 pub const MCP_ROUTE: &str = "/mcp";
@@ -151,21 +150,25 @@ fn dispatch_stateless(
 }
 
 struct McpState {
-    inference: SharedInferenceRsState,
+    engine: Engine,
     chat_enabled: bool,
 }
 
 /// Build the MCP router (`POST /mcp`, JSON-RPC 2.0). Mount on its own port or into an existing app.
-pub fn create_mcp_router(inference: SharedInferenceRsState) -> Router {
-    let chat_enabled = inference
+pub fn create_mcp_router(engine: &Engine) -> Router {
+    let text_model = engine
+        .state()
         .config(None)
         .map(|c| {
             c.modalities.input.contains(&SupportedModality::Text)
                 && c.modalities.output.contains(&SupportedModality::Text)
         })
         .unwrap_or(false);
+    // `ask` needs a stream to carry approvals and a tool call is one blocking chat, so the tool could never succeed.
+    let asks = engine.chat_engine().agentic.agent_permission == Some(AgentPermission::Ask);
+    let chat_enabled = text_model && !asks;
     let state = Arc::new(McpState {
-        inference,
+        engine: engine.clone(),
         chat_enabled,
     });
     Router::new()
@@ -218,7 +221,7 @@ async fn handle_request(state: &McpState, request: JsonRpcRequest) -> JsonRpcRes
     }
 
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
-    match call_chat_tool(&state.inference, args).await {
+    match call_chat_tool(&state.engine, args).await {
         Ok(result) => ok_response(request.id, result),
         Err(McpCallError::InvalidParams(message)) => {
             error_response(request.id, INVALID_PARAMS, message)
@@ -237,8 +240,7 @@ enum McpCallError {
 }
 
 impl McpCallError {
-    fn from_error(error: &(dyn std::error::Error + 'static), fallback: ApiErrorKind) -> Self {
-        let error = ApiError::from_error(error, fallback);
+    fn from_api_error(error: ApiError) -> Self {
         match error.kind {
             ApiErrorKind::InvalidRequest
             | ApiErrorKind::NotFound
@@ -255,56 +257,21 @@ impl McpCallError {
     }
 }
 
-async fn call_chat_tool(
-    state: &SharedInferenceRsState,
-    args: Value,
-) -> Result<Value, McpCallError> {
+// Through the engine's chat operation, so the spec's agent defaults and approval policy apply as they do over HTTP.
+async fn call_chat_tool(engine: &Engine, args: Value) -> Result<Value, McpCallError> {
     let chat_req: ChatCompletionRequest = serde_json::from_value(args)
         .map_err(|error| McpCallError::InvalidParams(error.to_string()))?;
-
-    let (tx, mut rx) = create_response_channel(None);
-    let (request, _is_streaming) = parse_request(
-        chat_req,
-        ChatCompletionParseContext {
-            state: state.clone(),
-            tx,
-            tool_dispatch_url: None,
-            agent_approval_handler: None,
-            agent_approval_notifier: None,
-            tool_surface: OpenAiToolSurface::ChatCompletions,
-            skill_store: None,
-            media: Default::default(),
-        },
-    )
-    .await
-    .map_err(|error| McpCallError::from_error(error.as_ref(), ApiErrorKind::InvalidRequest))?;
-    send_request(state, request)
+    let response = engine
+        .chat(chat_req, Default::default())
         .await
-        .map_err(|error| McpCallError::from_error(&error, ApiErrorKind::Internal))?;
-
-    loop {
-        match rx.recv().await {
-            Some(Response::AgenticToolCallProgress { .. })
-            | Some(Response::BlockDenoisingProgress(_))
-            | Some(Response::File(_)) => continue,
-            Some(Response::Done(resp)) => {
-                let content = resp
-                    .choices
-                    .iter()
-                    .filter_map(|c| c.message.content.clone())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                return Ok(json!({ "content": [{ "type": "text", "text": content }] }));
-            }
-            Some(Response::ValidationError(error)) => {
-                return Err(McpCallError::from_error(
-                    error.as_ref(),
-                    ApiErrorKind::InvalidRequest,
-                ));
-            }
-            Some(_) | None => return Err(McpCallError::Internal),
-        }
-    }
+        .map_err(McpCallError::from_api_error)?;
+    let content = response
+        .choices
+        .iter()
+        .filter_map(|c| c.message.content.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    Ok(json!({ "content": [{ "type": "text", "text": content }] }))
 }
 
 #[cfg(test)]
@@ -372,13 +339,16 @@ mod tests {
     fn call_errors_distinguish_invalid_params_from_internal_failures() {
         let missing_model = inference_core::InferenceRsError::ModelNotFound("missing".to_string());
         assert!(matches!(
-            McpCallError::from_error(&missing_model, ApiErrorKind::Internal),
+            McpCallError::from_api_error(ApiError::from_error(
+                &missing_model,
+                ApiErrorKind::Internal
+            )),
             McpCallError::InvalidParams(_)
         ));
 
         let internal = std::io::Error::other("private detail");
         assert!(matches!(
-            McpCallError::from_error(&internal, ApiErrorKind::Internal),
+            McpCallError::from_api_error(ApiError::from_error(&internal, ApiErrorKind::Internal)),
             McpCallError::Internal
         ));
     }
