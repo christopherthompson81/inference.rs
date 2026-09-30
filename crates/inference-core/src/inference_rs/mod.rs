@@ -136,14 +136,7 @@ pub struct InferenceRs {
 struct RebootState {
     pipeline: Arc<tokio::sync::Mutex<dyn Pipeline>>,
     method: SchedulerConfig,
-    no_kv_cache: bool,
-    no_prefix_cache: bool,
-    prefix_cache_n: usize,
-    disable_eos_stop: bool,
-    throughput_logging_enabled: bool,
-    search_embedding_model: Option<SearchEmbeddingModel>,
-    search_callback: Option<Arc<search::SearchCallback>>,
-    tool_callbacks: tools::ToolCallbacksWithTools,
+    engine_config: EngineConfig,
     mcp_client_config: Option<McpClientConfig>,
     /// Optional loader config for reloading after unload
     loader_config: Option<ModelLoaderConfig>,
@@ -293,12 +286,10 @@ impl InferenceRs {
     }
 
     /// Create an engine instance with the given configuration
-    fn create_engine_instance(
-        pipeline: Arc<tokio::sync::Mutex<dyn Pipeline>>,
-        method: SchedulerConfig,
-        config: EngineConfig,
-        reboot_state: RebootState,
-    ) -> Result<EngineInstance, String> {
+    fn create_engine_instance(reboot_state: RebootState) -> Result<EngineInstance, String> {
+        let pipeline = reboot_state.pipeline.clone();
+        let method = reboot_state.method.clone();
+        let config = reboot_state.engine_config.clone();
         let (tx, rx) = channel(DEFAULT_ENGINE_REQUEST_QUEUE_CAPACITY);
 
         let pipeline_guard = pipeline.try_lock().unwrap();
@@ -364,23 +355,16 @@ impl InferenceRs {
                     if let Err(err) = inference_quant::cutile::warmup_moe_kernels(&warmup_device) {
                         warn!("Failed to warm up cuTile MoE kernels: {err}");
                     }
-                    let engine = match Engine::new(
-                        tx_for_engine,
+                    let engine = match Engine::new(engine::EngineParts {
+                        tx: tx_for_engine,
                         rx,
                         pipeline,
-                        method,
-                        config.no_kv_cache,
-                        config.no_prefix_cache,
-                        config.prefix_cache_n,
-                        config.disable_eos_stop,
-                        config.throughput_logging_enabled,
-                        config.search_embedding_model,
-                        config.search_callback.clone(),
-                        config.tool_callbacks.clone(),
-                        logger_for_engine,
-                        session_store_for_engine,
-                        file_store_for_engine,
-                    ) {
+                        scheduler: method,
+                        engine: config,
+                        logger: logger_for_engine,
+                        session_store: session_store_for_engine,
+                        file_store: file_store_for_engine,
+                    }) {
                         Ok(engine) => {
                             let _ = ready_tx.send(Ok(()));
                             engine.with_instruction_id(instruction_id)
@@ -404,23 +388,16 @@ impl InferenceRs {
                     if let Err(err) = inference_quant::cutile::warmup_moe_kernels(&warmup_device) {
                         warn!("Failed to warm up cuTile MoE kernels: {err}");
                     }
-                    let engine = match Engine::new(
-                        tx_for_engine,
+                    let engine = match Engine::new(engine::EngineParts {
+                        tx: tx_for_engine,
                         rx,
                         pipeline,
-                        method,
-                        config.no_kv_cache,
-                        config.no_prefix_cache,
-                        config.prefix_cache_n,
-                        config.disable_eos_stop,
-                        config.throughput_logging_enabled,
-                        config.search_embedding_model,
-                        config.search_callback.clone(),
-                        config.tool_callbacks.clone(),
-                        logger_for_engine,
-                        session_store_for_engine,
-                        file_store_for_engine,
-                    ) {
+                        scheduler: method,
+                        engine: config,
+                        logger: logger_for_engine,
+                        session_store: session_store_for_engine,
+                        file_store: file_store_for_engine,
+                    }) {
                         Ok(engine) => {
                             let _ = ready_tx.send(Ok(()));
                             engine.with_instruction_id(instruction_id)
@@ -665,6 +642,7 @@ impl InferenceRs {
             search_embedding_model,
             search_callback,
             mut tool_callbacks,
+            agent_runner,
             mcp_client_config,
             loader_config,
             #[cfg_attr(not(feature = "code-execution"), allow(unused_variables))]
@@ -697,21 +675,6 @@ impl InferenceRs {
         )
         .await;
 
-        let reboot_state = RebootState {
-            pipeline: pipeline.clone(),
-            method: method.clone(),
-            no_kv_cache,
-            no_prefix_cache,
-            prefix_cache_n,
-            disable_eos_stop,
-            throughput_logging_enabled,
-            search_embedding_model,
-            search_callback: search_callback.clone(),
-            tool_callbacks: tool_callbacks.clone(),
-            mcp_client_config: mcp_client_config.clone(),
-            loader_config,
-        };
-
         let engine_config = EngineConfig {
             no_kv_cache,
             no_prefix_cache,
@@ -721,12 +684,19 @@ impl InferenceRs {
             search_embedding_model,
             search_callback,
             tool_callbacks,
+            agent_runner,
+        };
+        let reboot_state = RebootState {
+            pipeline: pipeline.clone(),
+            method,
+            engine_config,
+            mcp_client_config: mcp_client_config.clone(),
+            loader_config,
         };
 
         let pipeline_name = pipeline.lock().await.name();
         let engine_instance =
-            Self::create_engine_instance(pipeline.clone(), method, engine_config, reboot_state)
-                .expect("Failed to create engine instance");
+            Self::create_engine_instance(reboot_state).expect("Failed to create engine instance");
 
         let (id, alias_map) = match model_id_override {
             Some(override_id) => {
@@ -871,22 +841,8 @@ impl InferenceRs {
                 return Ok(());
             }
 
-            let reboot_state = engine_instance.reboot_state.clone();
-            let engine_config = EngineConfig {
-                no_kv_cache: reboot_state.no_kv_cache,
-                no_prefix_cache: reboot_state.no_prefix_cache,
-                prefix_cache_n: reboot_state.prefix_cache_n,
-                disable_eos_stop: reboot_state.disable_eos_stop,
-                throughput_logging_enabled: reboot_state.throughput_logging_enabled,
-                search_embedding_model: reboot_state.search_embedding_model,
-                search_callback: reboot_state.search_callback.clone(),
-                tool_callbacks: reboot_state.tool_callbacks.clone(),
-            };
             let new_engine_instance = Self::create_engine_instance(
-                reboot_state.pipeline.clone(),
-                reboot_state.method.clone(),
-                engine_config,
-                reboot_state,
+                engine_instance.reboot_state.clone(),
             )
             .map_err(|e| {
                 tracing::error!("Failed to create new engine instance: {}", e);
@@ -1098,7 +1054,11 @@ impl InferenceRs {
             .read()
             .map_err(|_| "Failed to acquire read lock on engines")?;
         if let Some(engine_instance) = engines.get(&resolved_model_id) {
-            Ok(engine_instance.reboot_state.tool_callbacks.len())
+            Ok(engine_instance
+                .reboot_state
+                .engine_config
+                .tool_callbacks
+                .len())
         } else {
             Err(format!("Model {resolved_model_id} not found"))
         }
@@ -1123,6 +1083,7 @@ impl InferenceRs {
 
         let mut tools: Vec<(String, Option<String>)> = engine_instance
             .reboot_state
+            .engine_config
             .tool_callbacks
             .values()
             .filter(|cb| {

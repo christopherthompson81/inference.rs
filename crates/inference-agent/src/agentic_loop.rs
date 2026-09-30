@@ -7,35 +7,31 @@ use num_traits::ToPrimitive;
 
 use serde_json::Value;
 
-use crate::{
+use inference_core::{
     AgentPermission, AgentToolApproval, AgentToolApprovalCallback, AgentToolApprovalDecision,
-    AgentToolApprovalHandler, AgentToolKind, AgentToolMetadata, AgentToolSource, MessageContent,
-    NormalRequest, RequestMessage, Response, ToolCallResponse, ToolChoice, Usage, WebSearchOptions,
+    AgentToolApprovalHandler, AgentToolKind, AgentToolMetadata, AgentToolSource,
+    AgenticToolCallData, AgenticToolCallPhase, Engine, MessageContent, NormalRequest, Request,
+    RequestMessage, Response, SupportedModality, ToolCallResponse, ToolChoice, Usage,
+    WebSearchOptions,
+    agent::{
+        AGENTIC_LOOP_REENTRY_SENTINEL, CODE_EXECUTION, DEFAULT_MAX_TOOL_ROUNDS, is_code_exec_tool,
+        is_list_files_tool, is_read_file_tool, is_shell_tool, is_surface_outputs_tool,
+    },
     files::{
         File, RequestedFile, compose_tool_response_with_files, file_to_tool_input_file,
-        input_files_message, merge_required_outputs_into_args, required_files_tool_addendum,
-        tool_file_to_file,
+        merge_required_outputs_into_args, required_files_tool_addendum, tool_file_to_file,
     },
-    get_mut_arcmutex,
-    pipeline::SupportedModality,
-    response::{AgenticToolCallData, AgenticToolCallPhase},
-    search,
 };
 
-use super::Engine;
-use super::file_tools::{do_list_files, do_read_file};
+use crate::file_tools::{do_list_files, do_read_file};
 
-/// Default cap on tool-use rounds when the request doesn't set one.
-pub const DEFAULT_MAX_TOOL_ROUNDS: usize = 256;
-
-/// Set on inner probe requests so `handle_request` doesn't re-enter the loop. Distinct from `None` (unset).
-pub const AGENTIC_LOOP_REENTRY_SENTINEL: Option<usize> = Some(0);
 const MAX_SKILL_TREE_ENTRIES: usize = 80;
 const MAX_SKILL_TREE_DEPTH: usize = 4;
 
 /// Turn = number of completed user messages.
 fn count_user_messages(request: &NormalRequest) -> usize {
-    get_messages(request)
+    request
+        .chat_messages()
         .iter()
         .filter(|m| {
             matches!(
@@ -45,26 +41,6 @@ fn count_user_messages(request: &NormalRequest) -> usize {
         })
         .count()
         .saturating_sub(1)
-}
-
-fn get_messages(request: &NormalRequest) -> &Vec<IndexMap<String, MessageContent>> {
-    match &request.messages {
-        RequestMessage::Chat { messages, .. } | RequestMessage::MultimodalChat { messages, .. } => {
-            messages
-        }
-        _ => unreachable!(),
-    }
-}
-
-pub(super) fn get_messages_mut(
-    request: &mut NormalRequest,
-) -> &mut Vec<IndexMap<String, MessageContent>> {
-    match &mut request.messages {
-        RequestMessage::Chat { messages, .. } | RequestMessage::MultimodalChat { messages, .. } => {
-            messages
-        }
-        _ => unreachable!(),
-    }
 }
 
 fn shell_skill_dir_name(name: &str) -> String {
@@ -160,18 +136,7 @@ fn inject_shell_skills_message(request: &mut NormalRequest) {
         append_skill_tree(&mut content, &skill.source_path, &mounted_dir);
     }
 
-    let messages = get_messages_mut(request);
-    let mut message: IndexMap<String, MessageContent> = IndexMap::new();
-    message.insert("role".to_string(), Either::Left("system".to_string()));
-    message.insert("content".to_string(), Either::Left(content));
-    messages.insert(0, message);
-}
-
-pub(super) fn inject_input_files_message(request: &mut NormalRequest) {
-    let Some(content) = input_files_message(&request.input_files) else {
-        return;
-    };
-    let messages = get_messages_mut(request);
+    let messages = request.chat_messages_mut();
     let mut message: IndexMap<String, MessageContent> = IndexMap::new();
     message.insert("role".to_string(), Either::Left("system".to_string()));
     message.insert("content".to_string(), Either::Left(content));
@@ -192,7 +157,7 @@ fn build_tool_calls_field(tc: &ToolCallResponse) -> MessageContent {
     Either::Right(vec![tc_map])
 }
 
-pub(super) fn append_assistant_tool_call(
+pub(crate) fn append_assistant_tool_call(
     messages: &mut Vec<IndexMap<String, MessageContent>>,
     tc: &ToolCallResponse,
 ) {
@@ -222,7 +187,7 @@ fn attach_reasoning_to_latest_assistant_tool_call(
     );
 }
 
-pub(super) fn append_tool_response(
+pub(crate) fn append_tool_response(
     messages: &mut Vec<IndexMap<String, MessageContent>>,
     tool_name: &str,
     content: String,
@@ -232,46 +197,6 @@ pub(super) fn append_tool_response(
     message.insert("name".to_string(), Either::Left(tool_name.to_string()));
     message.insert("content".to_string(), Either::Left(content));
     messages.push(message);
-}
-
-/// Upgrade `Chat` to `MultimodalChat` in place. No-op if already multimodal.
-pub(super) fn upgrade_to_multimodal(request: &mut NormalRequest) {
-    let dummy = RequestMessage::Chat {
-        messages: vec![],
-        enable_thinking: None,
-        reasoning_effort: None,
-    };
-    let old = std::mem::replace(&mut request.messages, dummy);
-    request.messages = match old {
-        RequestMessage::Chat {
-            messages,
-            enable_thinking,
-            reasoning_effort,
-        } => RequestMessage::MultimodalChat {
-            images: Vec::new(),
-            audios: Vec::new(),
-            videos: Vec::new(),
-            messages,
-            enable_thinking,
-            reasoning_effort,
-        },
-        other @ RequestMessage::MultimodalChat { .. } => other,
-        _ => unreachable!(),
-    };
-}
-
-pub(super) fn get_images_mut(request: &mut NormalRequest) -> &mut Vec<DynamicImage> {
-    match &mut request.messages {
-        RequestMessage::MultimodalChat { images, .. } => images,
-        _ => unreachable!("must call upgrade_to_multimodal first"),
-    }
-}
-
-pub(super) fn get_videos_mut(request: &mut NormalRequest) -> &mut Vec<crate::VideoInput> {
-    match &mut request.messages {
-        RequestMessage::MultimodalChat { videos, .. } => videos,
-        _ => unreachable!("must call upgrade_to_multimodal first"),
-    }
 }
 
 /// Append a tool response, routing images/video to the request's multimodal vecs when supported. Otherwise text-only with an error note.
@@ -301,17 +226,17 @@ fn append_multimodal_tool_response(
     }
 
     if !inject_images && !inject_video {
-        let messages = get_messages_mut(request);
+        let messages = request.chat_messages_mut();
         append_tool_response(messages, tool_name, content);
         return;
     }
 
-    upgrade_to_multimodal(request);
+    request.upgrade_to_multimodal();
 
     let mut parts: Vec<IndexMap<String, Value>> = Vec::new();
 
     if inject_images {
-        let req_images = get_images_mut(request);
+        let req_images = request.images_mut();
         for img in &images {
             req_images.push(img.clone());
             let mut part = IndexMap::new();
@@ -321,8 +246,8 @@ fn append_multimodal_tool_response(
     }
 
     if inject_video {
-        let video = crate::VideoInput::from_frames(video_frames, 1.0, None);
-        get_videos_mut(request).push(video);
+        let video = inference_core::VideoInput::from_frames(video_frames, 1.0, None);
+        request.videos_mut().push(video);
         let mut part = IndexMap::new();
         part.insert("type".to_string(), Value::String("video".to_string()));
         parts.push(part);
@@ -333,7 +258,7 @@ fn append_multimodal_tool_response(
     text_part.insert("text".to_string(), Value::String(content));
     parts.push(text_part);
 
-    let messages = get_messages_mut(request);
+    let messages = request.chat_messages_mut();
     let mut message: IndexMap<String, MessageContent> = IndexMap::new();
     message.insert("role".to_string(), Either::Left("tool".to_string()));
     message.insert("name".to_string(), Either::Left(tool_name.to_string()));
@@ -419,66 +344,21 @@ fn tps(tokens: usize, seconds: f32) -> f32 {
 
 /// Persist the conversation as-is. Refreshes file TTLs.
 fn save_session(engine: &Arc<Engine>, session_id: &str, visible_req: &NormalRequest) {
-    let messages = get_messages(visible_req).clone();
+    let messages = visible_req.chat_messages().clone();
     let (images, videos) = match &visible_req.messages {
         RequestMessage::MultimodalChat { images, videos, .. } => (images.clone(), videos.clone()),
         _ => (Vec::new(), Vec::new()),
     };
-    let entry = super::agentic_session::AgenticSessionEntry::new(messages, images, videos);
+    let entry = inference_core::agentic_session::AgenticSessionEntry::new(messages, images, videos);
     engine
-        .session_store
+        .session_store()
         .lock()
         .unwrap()
         .save(session_id.to_string(), entry);
-    engine.file_store.touch_session(session_id);
+    engine.file_store().touch_session(session_id);
 }
 
-use super::tool_dispatch;
-
-#[cfg(feature = "code-execution")]
-fn is_code_exec_tool(name: &str) -> bool {
-    inference_code_exec::code_exec_tool_called(name)
-}
-#[cfg(not(feature = "code-execution"))]
-fn is_code_exec_tool(_name: &str) -> bool {
-    false
-}
-
-#[cfg(feature = "code-execution")]
-fn is_read_file_tool(name: &str) -> bool {
-    name == inference_code_exec::READ_FILE_TOOL_NAME
-}
-#[cfg(not(feature = "code-execution"))]
-fn is_read_file_tool(_name: &str) -> bool {
-    false
-}
-
-#[cfg(feature = "code-execution")]
-fn is_list_files_tool(name: &str) -> bool {
-    name == inference_code_exec::LIST_FILES_TOOL_NAME
-}
-#[cfg(not(feature = "code-execution"))]
-fn is_list_files_tool(_name: &str) -> bool {
-    false
-}
-
-#[cfg(feature = "code-execution")]
-fn is_surface_outputs_tool(name: &str) -> bool {
-    inference_code_exec::surface_outputs_tool_called(name)
-}
-#[cfg(not(feature = "code-execution"))]
-fn is_surface_outputs_tool(_name: &str) -> bool {
-    false
-}
-
-#[cfg(feature = "code-execution")]
-fn is_shell_tool(name: &str) -> bool {
-    inference_code_exec::shell_tool_called(name)
-}
-#[cfg(not(feature = "code-execution"))]
-fn is_shell_tool(_name: &str) -> bool {
-    false
-}
+use crate::{search, tool_dispatch};
 
 fn shell_commands_from_args(arguments: &str) -> Vec<String> {
     serde_json::from_str::<serde_json::Value>(arguments)
@@ -596,7 +476,7 @@ fn tool_metadata_for(ctx: &DispatchCtx<'_>, tc: &ToolCallResponse) -> AgentToolM
             kind: AgentToolKind::Shell,
             label: "Shell command".to_string(),
         }
-    } else if ctx.engine.tool_callbacks.contains_key(name) {
+    } else if ctx.engine.tool_callbacks().contains_key(name) {
         AgentToolMetadata {
             source: AgentToolSource::User,
             kind: AgentToolKind::Custom,
@@ -660,7 +540,7 @@ async fn approve_agent_tool(
         AgentPermission::Ask => {
             if ctx
                 .engine
-                .session_store
+                .session_store()
                 .lock()
                 .unwrap()
                 .agent_actions_approved(ctx.session_id)
@@ -691,7 +571,7 @@ async fn approve_agent_tool(
             let decision = call_agent_approval_handler(handler.clone(), approval).await;
             if decision.approve && decision.remember_for_session {
                 ctx.engine
-                    .session_store
+                    .session_store()
                     .lock()
                     .unwrap()
                     .approve_agent_actions(ctx.session_id.to_string());
@@ -707,7 +587,7 @@ fn denied_tool_result(
     tc: &ToolCallResponse,
     message: String,
 ) -> (NormalRequest, AgenticToolCallData, Vec<File>) {
-    let messages = get_messages_mut(&mut request);
+    let messages = request.chat_messages_mut();
     append_assistant_tool_call(messages, tc);
     let content = serde_json::json!({
         "status": "denied",
@@ -755,20 +635,6 @@ fn denied_tool_result(
     };
 
     (request, data, Vec::new())
-}
-
-pub(super) fn registered_tool_active_for_request(
-    name: &str,
-    enable_code_execution: bool,
-    enable_shell: bool,
-) -> bool {
-    if is_shell_tool(name) {
-        enable_shell
-    } else if is_code_exec_tool(name) {
-        enable_code_execution
-    } else {
-        true
-    }
 }
 
 fn shell_completion_data(arguments: &str, content: &str) -> AgenticToolCallData {
@@ -895,7 +761,7 @@ async fn do_search(
     tc: &ToolCallResponse,
     opts: &WebSearchOptions,
 ) -> (NormalRequest, AgenticToolCallData, Vec<File>) {
-    let messages = get_messages_mut(&mut request);
+    let messages = request.chat_messages_mut();
     append_assistant_tool_call(messages, tc);
 
     let result = tool_dispatch::execute_search(&engine, tc, opts).await;
@@ -919,7 +785,7 @@ async fn do_extraction(
     tc: &ToolCallResponse,
     opts: &WebSearchOptions,
 ) -> (NormalRequest, AgenticToolCallData, Vec<File>) {
-    let messages = get_messages_mut(&mut request);
+    let messages = request.chat_messages_mut();
     append_assistant_tool_call(messages, tc);
 
     let result = tool_dispatch::execute_extraction(&engine, tc, opts).await;
@@ -940,7 +806,7 @@ async fn do_custom_tool(
     tc: &ToolCallResponse,
     round: usize,
 ) -> (NormalRequest, AgenticToolCallData, Vec<File>) {
-    let messages = get_messages_mut(&mut request);
+    let messages = request.chat_messages_mut();
     append_assistant_tool_call(messages, tc);
 
     // Merge required files into `outputs` so the tool surfaces them even if the model omitted them.
@@ -1025,7 +891,7 @@ async fn do_custom_tool(
 
     let has_multimodal = !result.images.is_empty() || !result.video_frames.is_empty();
     if !has_multimodal {
-        let messages = get_messages_mut(&mut request);
+        let messages = request.chat_messages_mut();
         append_tool_response(messages, &tc.function.name, composed_content);
     } else {
         append_multimodal_tool_response(
@@ -1048,7 +914,7 @@ fn do_http_tool(
     tc: &ToolCallResponse,
     url: &str,
 ) -> (NormalRequest, AgenticToolCallData, Vec<File>) {
-    let messages = get_messages_mut(&mut request);
+    let messages = request.chat_messages_mut();
     append_assistant_tool_call(messages, tc);
 
     let result = tool_dispatch::execute_http_tool(tc, url);
@@ -1071,13 +937,13 @@ async fn dispatch_tool(
 ) -> Option<(NormalRequest, AgenticToolCallData, Vec<File>)> {
     let name = &tc.function.name;
     if is_read_file_tool(name) {
-        return Some(do_read_file(visible_req, tc, &ctx.engine.file_store));
+        return Some(do_read_file(visible_req, tc, ctx.engine.file_store()));
     }
     if is_list_files_tool(name) {
         return Some(do_list_files(
             visible_req,
             tc,
-            &ctx.engine.file_store,
+            ctx.engine.file_store(),
             ctx.session_id,
         ));
     }
@@ -1089,7 +955,7 @@ async fn dispatch_tool(
             do_extraction(ctx.engine.clone(), visible_req, tc, opts).await
         });
     }
-    if ctx.engine.tool_callbacks.contains_key(name) {
+    if ctx.engine.tool_callbacks().contains_key(name) {
         return Some(do_custom_tool(ctx, visible_req, tc, round).await);
     }
     if let Some(url) = ctx.dispatch_url {
@@ -1107,13 +973,13 @@ async fn emit_files(
 ) {
     for f in files {
         let wire = f.elide_for_wire();
-        engine.file_store.insert(f, Some(session_id.to_string()));
+        engine.file_store().insert(f, Some(session_id.to_string()));
         let _ = sender.send(Response::File(wire)).await;
     }
 }
 
 /// Drive tool-use rounds (search, code exec, custom tools) without recursion. Forwards every reply except the first probe.
-pub(super) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) {
+pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) {
     let web_search_options = request.web_search_options.clone();
     let shell_options = request.shell_options.clone();
     let dispatch_url = request.tool_dispatch_url.clone();
@@ -1133,33 +999,30 @@ pub(super) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
     {
-        let mut store = this.session_store.lock().unwrap();
+        let mut store = this.session_store().lock().unwrap();
         let existing = if request.session_id.is_some() {
             store.get(&session_id).map(|e| (session_id.clone(), e))
         } else {
-            let msgs = get_messages(&request);
+            let msgs = request.chat_messages();
             store.find_by_messages(msgs)
         };
         if let Some((matched_id, entry)) = existing {
             session_id = matched_id;
-            super::agentic_session::splice_session_into_request(&mut request, &entry);
+            inference_core::agentic_session::splice_session_into_request(&mut request, &entry);
         }
     }
 
     for file in &input_files {
-        this.file_store
+        this.file_store()
             .insert(file.clone(), Some(session_id.clone()));
     }
-    this.file_store.touch_session(&session_id);
+    this.file_store().touch_session(&session_id);
 
     let turn = count_user_messages(&request);
     inject_shell_skills_message(&mut request);
-    inject_input_files_message(&mut request);
+    request.inject_input_files_message();
 
-    let modalities = {
-        let pipeline = get_mut_arcmutex!(this.pipeline);
-        pipeline.get_metadata().modalities.clone()
-    };
+    let modalities = this.modalities();
     let supports_vision = modalities.input.contains(&SupportedModality::Vision);
     let supports_video = modalities.input.contains(&SupportedModality::Video);
 
@@ -1176,7 +1039,7 @@ pub(super) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
 
     if let Some(user_tools) = &probe.tools {
         for t in user_tools {
-            if this.tool_callbacks.contains_key(&t.function.name) {
+            if this.tool_callbacks().contains_key(&t.function.name) {
                 let _ = user_sender
                     .send(Response::ValidationError(
                         format!(
@@ -1192,10 +1055,10 @@ pub(super) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
         }
     }
 
-    if !this.tool_callbacks.is_empty() {
+    if !this.tool_callbacks().is_empty() {
         let tools = probe.tools.get_or_insert_with(Vec::new);
 
-        for (name, callback_with_tool) in &this.tool_callbacks {
+        for (name, callback_with_tool) in this.tool_callbacks() {
             if is_shell_tool(name) && !probe.enable_shell {
                 continue;
             }
@@ -1212,8 +1075,7 @@ pub(super) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
         }
     }
 
-    #[cfg(feature = "code-execution")]
-    if !input_files.is_empty() {
+    if CODE_EXECUTION && !input_files.is_empty() {
         let tools = probe.tools.get_or_insert_with(Vec::new);
         if !tools
             .iter()
@@ -1296,8 +1158,8 @@ pub(super) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
             current.files = None;
             current.input_files = Vec::new();
             let _ = this_clone
-                .tx
-                .send(crate::request::Request::Normal(Box::new(current)))
+                .request_sender()
+                .send(Request::Normal(Box::new(current)))
                 .await;
 
             if !is_streaming {
@@ -1379,7 +1241,7 @@ pub(super) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                     return;
                 };
                 attach_reasoning_to_latest_assistant_tool_call(
-                    get_messages_mut(&mut next_visible),
+                    next_visible.chat_messages_mut(),
                     done.choices[0].message.reasoning_content.as_deref(),
                 );
 
@@ -1401,7 +1263,8 @@ pub(super) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
             } else {
                 // Hold the finish-reason chunk so we can stamp the session ID on it if this is the final round.
                 let mut last_choice = None;
-                let mut held_final_chunk: Option<crate::ChatCompletionChunkResponse> = None;
+                let mut held_final_chunk: Option<inference_core::ChatCompletionChunkResponse> =
+                    None;
                 let mut round_reasoning_content = String::new();
 
                 loop {
@@ -1503,7 +1366,7 @@ pub(super) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                     break;
                 };
                 attach_reasoning_to_latest_assistant_tool_call(
-                    get_messages_mut(&mut next_visible),
+                    next_visible.chat_messages_mut(),
                     Some(&round_reasoning_content),
                 );
 
@@ -1526,13 +1389,13 @@ pub(super) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
         }
     });
 
-    get_mut_arcmutex!(this.handles).push(handle);
+    this.track_task(handle);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{CalledFunction, tools::ToolCallType};
+    use inference_core::{CalledFunction, ToolCallType};
 
     #[tokio::test]
     async fn client_disconnect_drops_the_internal_response_bridge() {

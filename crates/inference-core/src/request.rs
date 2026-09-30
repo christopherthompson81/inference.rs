@@ -1,4 +1,5 @@
 use either::Either;
+use image::DynamicImage;
 use indexmap::IndexMap;
 use inference_audio::AudioInput;
 use inference_quant::IsqType;
@@ -162,6 +163,74 @@ impl NormalRequest {
 
     fn take_queue_duration_at(&mut self, now: Instant) -> Option<std::time::Duration> {
         self.queued_at.take().map(|queued_at| now - queued_at)
+    }
+
+    /// The chat messages. Panics on a non-chat request, which the agentic path never sees.
+    pub fn chat_messages(&self) -> &Vec<IndexMap<String, MessageContent>> {
+        match &self.messages {
+            RequestMessage::Chat { messages, .. }
+            | RequestMessage::MultimodalChat { messages, .. } => messages,
+            _ => unreachable!(),
+        }
+    }
+
+    pub fn chat_messages_mut(&mut self) -> &mut Vec<IndexMap<String, MessageContent>> {
+        match &mut self.messages {
+            RequestMessage::Chat { messages, .. }
+            | RequestMessage::MultimodalChat { messages, .. } => messages,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Upgrade `Chat` to `MultimodalChat` in place. No-op if already multimodal.
+    pub fn upgrade_to_multimodal(&mut self) {
+        let dummy = RequestMessage::Chat {
+            messages: vec![],
+            enable_thinking: None,
+            reasoning_effort: None,
+        };
+        let old = std::mem::replace(&mut self.messages, dummy);
+        self.messages = match old {
+            RequestMessage::Chat {
+                messages,
+                enable_thinking,
+                reasoning_effort,
+            } => RequestMessage::MultimodalChat {
+                images: Vec::new(),
+                audios: Vec::new(),
+                videos: Vec::new(),
+                messages,
+                enable_thinking,
+                reasoning_effort,
+            },
+            other @ RequestMessage::MultimodalChat { .. } => other,
+            _ => unreachable!(),
+        };
+    }
+
+    pub fn images_mut(&mut self) -> &mut Vec<DynamicImage> {
+        match &mut self.messages {
+            RequestMessage::MultimodalChat { images, .. } => images,
+            _ => unreachable!("must call upgrade_to_multimodal first"),
+        }
+    }
+
+    pub fn videos_mut(&mut self) -> &mut Vec<VideoInput> {
+        match &mut self.messages {
+            RequestMessage::MultimodalChat { videos, .. } => videos,
+            _ => unreachable!("must call upgrade_to_multimodal first"),
+        }
+    }
+
+    /// Prepends the system message that lists the request's input files, if it has any.
+    pub fn inject_input_files_message(&mut self) {
+        let Some(content) = crate::files::input_files_message(&self.input_files) else {
+            return;
+        };
+        let mut message: IndexMap<String, MessageContent> = IndexMap::new();
+        message.insert("role".to_string(), Either::Left("system".to_string()));
+        message.insert("content".to_string(), Either::Left(content));
+        self.chat_messages_mut().insert(0, message);
     }
 
     pub fn new_simple(

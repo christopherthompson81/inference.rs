@@ -24,6 +24,7 @@ futures.workspace = true
 image.workspace = true
 indexmap.workspace = true
 inference-core = { workspace = true, features = ["utoipa"] }
+inference-agent.workspace = true
 itertools.workspace = true
 serde.workspace = true
 serde_json.workspace = true

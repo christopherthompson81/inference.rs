@@ -11,6 +11,8 @@ pub struct EngineConfig {
     pub search_embedding_model: Option<SearchEmbeddingModel>,
     pub search_callback: Option<Arc<SearchCallback>>,
     pub tool_callbacks: tools::ToolCallbacksWithTools,
+    /// Runs agentic requests (tools, web search); without one they are rejected.
+    pub agent_runner: Option<Arc<dyn AgentRunner>>,
 }
 
 impl Default for EngineConfig {
@@ -24,6 +26,7 @@ impl Default for EngineConfig {
             search_embedding_model: None,
             search_callback: None,
             tool_callbacks: HashMap::new(),
+            agent_runner: None,
         }
     }
 }

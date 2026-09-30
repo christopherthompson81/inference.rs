@@ -2746,6 +2746,7 @@ dependencies = [
  "image",
  "indexmap 2.13.0",
  "indicatif 0.18.3",
+ "inference-agent",
  "inference-core",
  "inference-macros",
  "inference-models-llama",
@@ -2764,6 +2765,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-agent"
+version = "0.9.3"
+dependencies = [
+ "anyhow",
+ "bm25",
+ "candle-core",
+ "either",
+ "futures",
+ "html2text",
+ "image",
+ "indexmap 2.13.0",
+ "inference-code-exec",
+ "inference-core",
+ "inference-mcp",
+ "num-traits",
+ "reqwest 0.13.1",
+ "scraper",
+ "serde",
+ "serde_json",
+ "tokenizers",
+ "tokio",
+ "tracing",
+ "urlencoding",
+ "uuid",
+]
+
+[[package]]
 name = "inference-api"
 version = "0.9.3"
 dependencies = [
@@ -2776,6 +2804,7 @@ dependencies = [
  "futures",
  "image",
  "indexmap 2.13.0",
+ "inference-agent",
  "inference-core",
  "inference-protocol",
  "itertools 0.14.0",
@@ -2862,7 +2891,6 @@ dependencies = [
  "as-any",
  "async-trait",
  "base64 0.22.1",
- "bm25",
  "candle-core",
  "candle-metal-kernels",
  "candle-nn",
@@ -2874,7 +2902,6 @@ dependencies = [
  "futures",
  "galil-seiferas",
  "hf-hub",
- "html2text",
  "image",
  "indexmap 2.13.0",
  "indicatif 0.18.3",
@@ -2907,7 +2934,6 @@ dependencies = [
  "regex-automata",
  "reqwest 0.13.1",
  "safetensors",
- "scraper",
  "serde",
  "serde-big-array",
  "serde_json",
@@ -2921,7 +2947,6 @@ dependencies = [
  "tokio-rayon",
  "toktrie",
  "tracing",
- "urlencoding",
  "utoipa",
  "uuid",
  "walkdir",

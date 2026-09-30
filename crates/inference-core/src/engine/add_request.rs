@@ -28,7 +28,10 @@ use crate::{
     sequence::{Sequence, SequenceGroup},
 };
 
-use super::{Engine, TERMINATE_ALL_NEXT_STEP, agentic_loop};
+use super::{
+    AGENTIC_LOOP_REENTRY_SENTINEL, Engine, TERMINATE_ALL_NEXT_STEP,
+    registered_tool_active_for_request,
+};
 
 fn tools_for_chat_template(
     tools: Option<&[crate::Tool]>,
@@ -149,10 +152,9 @@ impl Engine {
                     &request.messages,
                     RequestMessage::Chat { .. } | RequestMessage::MultimodalChat { .. }
                 );
-                let in_agentic_loop =
-                    request.max_tool_rounds == agentic_loop::AGENTIC_LOOP_REENTRY_SENTINEL;
+                let in_agentic_loop = request.max_tool_rounds == AGENTIC_LOOP_REENTRY_SENTINEL;
                 let has_tooling = self.tool_callbacks.keys().any(|name| {
-                    agentic_loop::registered_tool_active_for_request(
+                    registered_tool_active_for_request(
                         name,
                         request.enable_code_execution,
                         request.enable_shell,
@@ -168,7 +170,19 @@ impl Engine {
                     && !in_agentic_loop
                     && (has_search || has_tooling || has_agentic || has_input_files)
                 {
-                    Box::pin(agentic_loop::agentic_loop(self.clone(), *request)).await;
+                    match self.agent_runner() {
+                        Some(runner) => runner.run(self.clone(), *request).await,
+                        None => {
+                            let _ = request
+                                .response
+                                .send(crate::Response::ValidationError(
+                                    "tools, web search and file inputs need an agent runner, which \
+                                     this engine was built without"
+                                        .into(),
+                                ))
+                                .await;
+                        }
+                    }
                 } else if request.files.as_ref().is_some_and(|f| !f.is_empty()) {
                     // `request.files` is set but nothing would produce them. Reject rather than silently degrading to a plain chat.
                     let _ = request
@@ -183,7 +197,7 @@ impl Engine {
                         .await;
                 } else {
                     if is_chat && !request.input_files.is_empty() {
-                        agentic_loop::inject_input_files_message(&mut request);
+                        request.inject_input_files_message();
                     }
                     self.add_request(*request).await;
                 }

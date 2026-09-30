@@ -16,6 +16,7 @@ pub struct InferenceRsBuilder {
     pub(super) search_embedding_model: Option<SearchEmbeddingModel>,
     pub(super) search_callback: Option<Arc<SearchCallback>>,
     pub(super) tool_callbacks: tools::ToolCallbacksWithTools,
+    pub(super) agent_runner: Option<Arc<dyn AgentRunner>>,
     pub(super) mcp_client_config: Option<McpClientConfig>,
     pub(super) loader_config: Option<ModelLoaderConfig>,
     pub(super) code_exec_config: Option<CodeExecutionConfig>,
@@ -46,6 +47,7 @@ impl InferenceRsBuilder {
             search_embedding_model,
             search_callback: None,
             tool_callbacks: HashMap::new(),
+            agent_runner: None,
             mcp_client_config: None,
             loader_config: None,
             code_exec_config: None,
@@ -74,6 +76,7 @@ impl InferenceRsBuilder {
             disable_eos_stop: Some(engine_config.disable_eos_stop),
             search_callback: engine_config.search_callback,
             tool_callbacks: engine_config.tool_callbacks,
+            agent_runner: engine_config.agent_runner,
             mcp_client_config,
             loader_config,
             code_exec_config,
@@ -121,6 +124,12 @@ impl InferenceRsBuilder {
     }
     pub fn with_disable_eos_stop(mut self, disable_eos_stop: bool) -> Self {
         self.disable_eos_stop = Some(disable_eos_stop);
+        self
+    }
+
+    /// Install the runner for agentic requests (tools, web search), e.g. `inference_agent::runner()`.
+    pub fn with_agent_runner(mut self, runner: Arc<dyn AgentRunner>) -> Self {
+        self.agent_runner = Some(runner);
         self
     }
 

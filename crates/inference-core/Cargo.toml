@@ -69,12 +69,8 @@ toktrie.workspace = true
 safetensors.workspace = true
 serde-big-array.workspace = true
 interprocess.workspace = true
-urlencoding.workspace = true
-scraper.workspace = true
-html2text.workspace = true
 ahash.workspace = true
 num-traits.workspace = true
-bm25.workspace = true
 inference-audio.workspace = true
 inference-mcp = { workspace = true, features = ["utoipa"] }
 inference-code-exec.workspace = true

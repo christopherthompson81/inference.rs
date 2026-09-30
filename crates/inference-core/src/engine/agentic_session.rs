@@ -287,13 +287,13 @@ pub fn splice_session_into_request(request: &mut NormalRequest, entry: &AgenticS
     *incoming = result;
 
     if !entry.images.is_empty() || !entry.videos.is_empty() {
-        super::agentic_loop::upgrade_to_multimodal(request);
+        request.upgrade_to_multimodal();
         if !entry.images.is_empty() {
-            let req_images = super::agentic_loop::get_images_mut(request);
+            let req_images = request.images_mut();
             *req_images = entry.images.clone();
         }
         if !entry.videos.is_empty() {
-            let req_videos = super::agentic_loop::get_videos_mut(request);
+            let req_videos = request.videos_mut();
             *req_videos = entry.videos.clone();
         }
     }

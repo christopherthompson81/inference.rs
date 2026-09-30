@@ -1,5 +1,5 @@
 use crate::{
-    SchedulerConfig, distributed,
+    EngineConfig, SchedulerConfig, distributed,
     paged_attention::{block_hash::BlockHash, block_pool::PrefixBlockRetentionRevocationMonitor},
     pipeline::{
         CacheBackendMetadata, CacheInstruction, DecodeGraphPrecaptureCtx,
@@ -12,7 +12,7 @@ use crate::{
         DefaultSchedulerMethod, DefaultSchedulerOutput, PagedPrefixCacheValidation,
         PagedPrefixCacheValidator, Scheduler, SchedulerOutput, modality_signature,
     },
-    search::{self, rag::SearchPipeline},
+    search::{self, SearchEmbedder},
     sequence::{SeqStepType, Sequence, StopReason},
     tools,
     utils::debug::DEBUG,
@@ -55,17 +55,19 @@ use crate::{
 
 mod add_request;
 mod admission;
-pub(crate) mod agentic_loop;
+pub mod agent;
 #[cfg(any(feature = "cuda", test))]
 mod cuda_decode;
 #[cfg(feature = "cuda")]
 mod cuda_memory;
-pub use agentic_loop::DEFAULT_MAX_TOOL_ROUNDS;
-pub(crate) mod agentic_session;
-mod file_tools;
+pub(crate) use agent::EngineParts;
+pub use agent::{
+    AGENTIC_LOOP_REENTRY_SENTINEL, AgentRunner, DEFAULT_MAX_TOOL_ROUNDS,
+    registered_tool_active_for_request,
+};
+pub mod agentic_session;
 mod logger;
 mod paged_step;
-mod tool_dispatch;
 
 const PAGED_RECURRENT_PREFIX_VALIDATION_METRIC: &str =
     "inference_paged_recurrent_prefix_validation_total";
@@ -202,9 +204,10 @@ pub struct Engine {
     tx: Sender<Request>,
     rx: Arc<Mutex<Receiver<Request>>>,
     pipeline: Arc<Mutex<dyn Pipeline>>,
-    search_pipeline: Arc<Mutex<Option<SearchPipeline>>>,
+    search_embedder: Arc<Mutex<Option<SearchEmbedder>>>,
     search_callback: Option<Arc<search::SearchCallback>>,
     tool_callbacks: tools::ToolCallbacksWithTools,
+    agent_runner: Option<Arc<dyn AgentRunner>>,
     scheduler: Arc<Mutex<dyn Scheduler>>,
     max_active_sequences: usize,
     next_seq_id: Arc<Mutex<usize>>,
@@ -219,8 +222,8 @@ pub struct Engine {
     logger: Arc<IntervalLogger>,
     handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
     pending_notify: Arc<Notify>,
-    pub(crate) session_store: Arc<std::sync::Mutex<agentic_session::AgenticSessionStore>>,
-    pub(crate) file_store: crate::files::FileStore,
+    session_store: Arc<std::sync::Mutex<agentic_session::AgenticSessionStore>>,
+    file_store: crate::files::FileStore,
     // Re-runs the decode graph precapture after the recurrent pool grows and drops every graph
     pub(crate) graph_precapture_ctx: Option<DecodeGraphPrecaptureCtx>,
     #[cfg(feature = "cuda")]
@@ -539,24 +542,28 @@ impl Engine {
         self
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        tx: Sender<Request>,
-        rx: Receiver<Request>,
-        pipeline: Arc<Mutex<dyn Pipeline>>,
-        config: SchedulerConfig,
-        mut no_kv_cache: bool,
-        mut no_prefix_cache: bool,
-        prefix_cache_n: usize,
-        disable_eos_stop: bool,
-        throughput_logging_enabled: bool,
-        search_embedding_model: Option<SearchEmbeddingModel>,
-        search_callback: Option<Arc<search::SearchCallback>>,
-        tool_callbacks: tools::ToolCallbacksWithTools,
-        logger: Arc<IntervalLogger>,
-        session_store: Arc<std::sync::Mutex<agentic_session::AgenticSessionStore>>,
-        file_store: crate::files::FileStore,
-    ) -> anyhow::Result<Self> {
+    pub(crate) fn new(parts: EngineParts) -> anyhow::Result<Self> {
+        let EngineParts {
+            tx,
+            rx,
+            pipeline,
+            scheduler: config,
+            engine:
+                EngineConfig {
+                    mut no_kv_cache,
+                    mut no_prefix_cache,
+                    prefix_cache_n,
+                    disable_eos_stop,
+                    throughput_logging_enabled,
+                    search_embedding_model,
+                    search_callback,
+                    tool_callbacks,
+                    agent_runner,
+                },
+            logger,
+            session_store,
+            file_store,
+        } = parts;
         no_kv_cache |= get_mut_arcmutex!(pipeline).get_metadata().no_kv_cache;
 
         no_prefix_cache = no_prefix_cache
@@ -564,8 +571,8 @@ impl Engine {
             || get_mut_arcmutex!(pipeline).get_metadata().no_prefix_cache
             || prefix_cache_n == 0;
 
-        let search_pipeline = match search_embedding_model {
-            Some(search_embedding_model) => Some(SearchPipeline::new(
+        let search_embedder = match search_embedding_model {
+            Some(search_embedding_model) => Some(SearchEmbedder::new(
                 search_embedding_model,
                 &get_mut_arcmutex!(pipeline).device(),
             )?),
@@ -721,9 +728,10 @@ impl Engine {
             tx,
             rx: Arc::new(Mutex::new(rx)),
             pipeline,
-            search_pipeline: Arc::new(Mutex::new(search_pipeline)),
+            search_embedder: Arc::new(Mutex::new(search_embedder)),
             search_callback,
             tool_callbacks,
+            agent_runner,
             scheduler: scheduler.clone(),
             max_active_sequences,
             next_seq_id: Arc::new(Mutex::new(0)),

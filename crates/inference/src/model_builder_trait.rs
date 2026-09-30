@@ -344,6 +344,7 @@ pub(crate) fn build_engine_config(
         no_prefix_cache: prefix_cache_n.is_none(),
         prefix_cache_n: prefix_cache_n.unwrap_or(16),
         disable_eos_stop: false,
+        agent_runner: Some(inference_agent::runner()),
     }
 }
 
@@ -917,6 +918,7 @@ pub async fn build_embedding_pipeline(
 
     let engine_config = EngineConfig {
         throughput_logging_enabled: builder.throughput_logging,
+        agent_runner: Some(inference_agent::runner()),
         ..Default::default()
     };
     let add_model_config = AddModelConfig {

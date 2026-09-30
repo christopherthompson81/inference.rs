@@ -226,22 +226,14 @@ impl InferenceRs {
         .await;
 
         let reboot_state = RebootState {
-            pipeline: pipeline.clone(),
-            method: method.clone(),
-            no_kv_cache: engine_config.no_kv_cache,
-            no_prefix_cache: engine_config.no_prefix_cache,
-            prefix_cache_n: engine_config.prefix_cache_n,
-            disable_eos_stop: engine_config.disable_eos_stop,
-            throughput_logging_enabled: engine_config.throughput_logging_enabled,
-            search_embedding_model: engine_config.search_embedding_model,
-            search_callback: engine_config.search_callback.clone(),
-            tool_callbacks: engine_config.tool_callbacks.clone(),
+            pipeline,
+            method,
+            engine_config,
             mcp_client_config: config.mcp_client_config.clone(),
             loader_config: config.loader_config.clone(),
         };
 
-        let engine_instance =
-            Self::create_engine_instance(pipeline, method, engine_config, reboot_state)?;
+        let engine_instance = Self::create_engine_instance(reboot_state)?;
 
         let mut engines = self
             .engines
@@ -396,16 +388,7 @@ impl InferenceRs {
         let unloaded_state = UnloadedModelState {
             loader_config,
             scheduler_config: engine_instance.reboot_state.method.clone(),
-            engine_config: EngineConfig {
-                no_kv_cache: engine_instance.reboot_state.no_kv_cache,
-                no_prefix_cache: engine_instance.reboot_state.no_prefix_cache,
-                prefix_cache_n: engine_instance.reboot_state.prefix_cache_n,
-                disable_eos_stop: engine_instance.reboot_state.disable_eos_stop,
-                throughput_logging_enabled: engine_instance.reboot_state.throughput_logging_enabled,
-                search_embedding_model: engine_instance.reboot_state.search_embedding_model,
-                search_callback: engine_instance.reboot_state.search_callback.clone(),
-                tool_callbacks: engine_instance.reboot_state.tool_callbacks.clone(),
-            },
+            engine_config: engine_instance.reboot_state.engine_config.clone(),
             mcp_client_config: engine_instance.reboot_state.mcp_client_config.clone(),
             category: engine_instance.category.clone(),
             inference_config: engine_instance.config.clone(),
@@ -516,26 +499,14 @@ impl InferenceRs {
         // Create the reboot state
         let reboot_state = RebootState {
             pipeline: pipeline.clone(),
-            method: scheduler_config.clone(),
-            no_kv_cache: unloaded_state.engine_config.no_kv_cache,
-            no_prefix_cache: unloaded_state.engine_config.no_prefix_cache,
-            prefix_cache_n: unloaded_state.engine_config.prefix_cache_n,
-            disable_eos_stop: unloaded_state.engine_config.disable_eos_stop,
-            throughput_logging_enabled: unloaded_state.engine_config.throughput_logging_enabled,
-            search_embedding_model: unloaded_state.engine_config.search_embedding_model,
-            search_callback: unloaded_state.engine_config.search_callback.clone(),
-            tool_callbacks: unloaded_state.engine_config.tool_callbacks.clone(),
+            method: scheduler_config,
+            engine_config: unloaded_state.engine_config,
             mcp_client_config: unloaded_state.mcp_client_config.clone(),
             loader_config: Some(unloaded_state.loader_config.clone()),
         };
 
-        let engine_instance = Self::create_engine_instance(
-            pipeline,
-            scheduler_config,
-            unloaded_state.engine_config,
-            reboot_state,
-        )
-        .map_err(|e| InferenceRsError::ReloadFailed(format!("Failed to create engine: {e}")))?;
+        let engine_instance = Self::create_engine_instance(reboot_state)
+            .map_err(|e| InferenceRsError::ReloadFailed(format!("Failed to create engine: {e}")))?;
 
         // Add to engines map
         {
