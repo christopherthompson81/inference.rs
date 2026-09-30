@@ -715,3 +715,44 @@ still types the futures.
 the self-profile makes that cost look bigger than it is; confirm with `-Z time-passes`. What remains of trait solving
 in these crates is small. The next lever is codegen volume: LLVM emission dominates every crate, and server-core's
 remaining solver time is axum's per-route monomorphization, which only erasing handlers (boxed services) would cut.
+
+## Run 19 — 2026-09-30 11:00
+
+**Question:** before moving the chat templates to inference-protocol, how much of core's IR is templating, and what
+else is large?
+
+**Command:** `cargo llvm-lines --lib -p inference-core`, with function names grouped by substring, then the
+`Deserialize`/`Visitor` instantiations grouped by the type deserialized and its crate.
+
+**Raw finding:**
+- Of core's 1,840,443 lines, names containing `chat_template` total 47k and `minijinja` 30k (overlapping): about 2.5%.
+  The template move would pay less than the selection move did.
+- Names mentioning `serde_json` total 482k, over-counted by any signature that names it. Grouping the deserialize
+  instantiations properly: 284k lines, of which 101k deserialize tokenizers' own types (`NormalizerWrapper`,
+  `PreTokenizerWrapper`, `DecoderWrapper`, BPE, `Metaspace`, `Split`, ...), through both `serde_json` and serde's
+  untagged `ContentRefDeserializer`.
+- Source: `pipeline/tokenizer.rs` calls `Tokenizer::from_bytes`. In tokenizers 0.23 `from_bytes<P: AsRef<[u8]>>` and
+  `from_file<P: AsRef<Path>>` are generic, so the whole tokenizer deserializer is compiled in the calling crate. Its
+  `FromStr` impl is not generic and compiles once in tokenizers. inference-models-diffusion's FLUX stepper calls
+  `from_file` twice; the other calls were in tests (core's `pipeline/tokenizer.rs` and llg, inference-gguf). The
+  duplication happens because the dev profile's opt-level 3 turns share-generics off.
+
+**Change:** `inference_nn::utils::tokenizer::{tokenizer_from_bytes, tokenizer_from_file}`, non-generic helpers over
+`Tokenizer::from_str`, replace every `from_bytes`/`from_file` call in the workspace.
+
+**Raw finding, after:**
+- `cargo llvm-lines --lib`: inference-core 1,840,443 → 1,671,740 (-169k, -9%); inference-models-diffusion 396,710 →
+  204,967 (-48%); inference-nn 793,881 → 794,882 (+1k for the helpers).
+- Core's remaining deserialize IR: 147k, mostly its own request and template types and the protocol/MCP types inside
+  them, which must instantiate wherever `NormalRequest` is deserialized. inference-nn's configs (`PreProcessorConfig`
+  12k, `XLoraConfig`, `SamplingParams`) are about 20k more that non-generic `from_json`s in inference-nn would remove.
+- `-Z time-passes` on core's lib (CPU, scratch target, `CARGO_INCREMENTAL=0`): total 19.87 → 18.93 s, `codegen_crate`
+  5.86 → 5.26 s, LLVM passes 11.24 → 10.51 s. One steady run each; the first run of each pair was inflated
+  (23.3 and 25.3 s) for both versions alike.
+- A first attempt timed in the main target was meaningless: it is incremental, so the repeat reused everything.
+
+**Implication:** A generic constructor in a dependency is compiled into every crate that calls it, however little
+the caller adds. Grouping llvm-lines by the instantiated type's crate finds these; tokenizers' `from_file`/`from_bytes`
+was the largest. Candidates the review found: tokenizers' generic `encode`/`encode_batch` (called in most model
+crates), PNG encoding generic over the writer in core, and inference-nn's config deserializers. The chat-template
+move is still worth doing for layering, but it is a small build-time item.
