@@ -127,12 +127,12 @@ fn anthropic_list_response(
     }
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     tag = "inference.rs",
     path = "/v1/skills",
     responses((status = 200, description = "Skill uploaded", body = SkillObject))
-)]
+))]
 pub async fn upload_skill(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
@@ -151,12 +151,12 @@ pub async fn upload_skill(
     }
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     tag = "inference.rs",
     path = "/v1/skills",
     responses((status = 200, description = "Uploaded skills", body = SkillListObject))
-)]
+))]
 pub async fn list_skills(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
@@ -196,12 +196,12 @@ pub async fn list_skills(
     }
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     tag = "inference.rs",
     path = "/v1/skills/{skill_id}/versions",
     responses((status = 200, description = "Skill version uploaded", body = SkillVersionObject))
-)]
+))]
 pub async fn upload_skill_version(
     AxumPath(skill_id): AxumPath<String>,
     headers: HeaderMap,
@@ -223,12 +223,12 @@ pub async fn upload_skill_version(
     }
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     tag = "inference.rs",
     path = "/v1/skills/{skill_id}/versions",
     responses((status = 200, description = "Skill versions", body = AnthropicSkillVersionListObject))
-)]
+))]
 pub async fn list_skill_versions(
     AxumPath(skill_id): AxumPath<String>,
     headers: HeaderMap,

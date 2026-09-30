@@ -33,13 +33,13 @@ impl IntoResponse for EmbeddingResponder {
     }
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     tag = "inference.rs",
     path = "/v1/embeddings",
     request_body = EmbeddingRequest,
     responses((status = 200, description = "Embeddings", body = EmbeddingResponse))
-)]
+))]
 pub async fn embeddings(
     State(state): ExtractedInferenceRsState,
     payload: Result<ApiJson<EmbeddingRequest>, ApiJsonRejection>,

@@ -79,7 +79,7 @@ impl IntoResponse for OpenResponsesResponder {
 }
 
 /// Create response endpoint - OpenResponses API
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     tag = "inference.rs",
     path = "/v1/responses",
@@ -92,7 +92,7 @@ impl IntoResponse for OpenResponsesResponder {
             (OpenResponsesStreamEvent = "text/event-stream")
         )
     ))
-)]
+))]
 pub async fn create_response(
     State(state): ExtractedInferenceRsState,
     Extension(skill_store): Extension<Arc<SkillStore>>,
@@ -134,13 +134,13 @@ fn resource_response(result: Result<ResponseResource, ApiError>) -> axum::respon
 }
 
 /// Get response by ID endpoint
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     tag = "inference.rs",
     path = "/v1/responses/{response_id}",
     params(("response_id" = String, Path, description = "The ID of the response to retrieve")),
     responses((status = 200, description = "Response object", body = ResponseResource))
-)]
+))]
 pub async fn get_response(
     State(state): ExtractedInferenceRsState,
     Path(response_id): Path<String>,
@@ -149,13 +149,13 @@ pub async fn get_response(
 }
 
 /// Delete response by ID endpoint
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     delete,
     tag = "inference.rs",
     path = "/v1/responses/{response_id}",
     params(("response_id" = String, Path, description = "The ID of the response to delete")),
     responses((status = 200, description = "Response deleted", body = ResponseDeleted))
-)]
+))]
 pub async fn delete_response(
     State(state): ExtractedInferenceRsState,
     Path(response_id): Path<String>,
@@ -167,13 +167,13 @@ pub async fn delete_response(
 }
 
 /// Cancel response endpoint
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     tag = "inference.rs",
     path = "/v1/responses/{response_id}/cancel",
     params(("response_id" = String, Path, description = "The ID of the response to cancel")),
     responses((status = 200, description = "Response cancelled", body = ResponseResource))
-)]
+))]
 pub async fn cancel_response(
     State(state): ExtractedInferenceRsState,
     Path(response_id): Path<String>,

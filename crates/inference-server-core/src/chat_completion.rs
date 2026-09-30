@@ -17,6 +17,8 @@ pub use crate::engine_chat::{
     ChatCompletionParseContext, parse_request, serialize_agentic_progress,
 };
 use crate::handler_core::{ApiJson, ApiJsonRejection};
+#[cfg(test)]
+use crate::openai::{ChatCompletionChunkResponseBody, ChatCompletionResponseBody};
 use crate::{
     agentic::AgenticDefaults,
     completion_core::{
@@ -26,10 +28,7 @@ use crate::{
     handler_core::{
         ApiError, ApiErrorKind, ModelErrorMessage, openai_error_from_error, openai_error_response,
     },
-    openai::{
-        ChatCompletionChunkResponseBody, ChatCompletionRequest, ChatCompletionResponseBody,
-        OpenAiToolSurface,
-    },
+    openai::{ChatCompletionRequest, OpenAiToolSurface},
     skills::SkillStore,
     streaming::{DoneState, StreamOutcomeHandle, get_keep_alive_interval, openai_error_event},
     types::{ExtractedInferenceRsState, OnChunkCallback, OnDoneCallback, SharedInferenceRsState},
@@ -179,7 +178,7 @@ impl IntoResponse for ChatCompletionResponder {
 }
 
 /// OpenAI-compatible chat completions endpoint handler.
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     tag = "inference.rs",
     path = "/v1/chat/completions",
@@ -192,7 +191,7 @@ impl IntoResponse for ChatCompletionResponder {
             (ChatCompletionChunkResponseBody = "text/event-stream")
         )
     ))
-)]
+))]
 pub async fn chatcompletions(
     State(state): ExtractedInferenceRsState,
     Extension(agentic_defaults): Extension<AgenticDefaults>,

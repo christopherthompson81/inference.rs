@@ -175,13 +175,13 @@ pub(crate) fn anthropic_error_response(error: ApiError) -> axum::response::Respo
     response
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     tag = "inference.rs",
     path = "/v1/messages",
     request_body = AnthropicMessagesRequest,
     responses((status = 200, description = "Anthropic messages", body = AnthropicMessageResponse))
-)]
+))]
 pub async fn anthropic_messages(
     State(state): ExtractedInferenceRsState,
     Extension(agentic_defaults): Extension<AgenticDefaults>,
@@ -225,13 +225,13 @@ pub async fn anthropic_messages(
     }
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     tag = "inference.rs",
     path = "/v1/messages/count_tokens",
     request_body = AnthropicMessagesRequest,
     responses((status = 200, description = "Anthropic message token count", body = AnthropicCountTokensResponse))
-)]
+))]
 pub async fn anthropic_count_tokens(
     State(state): ExtractedInferenceRsState,
     payload: Result<ApiJson<AnthropicMessagesRequest>, ApiJsonRejection>,

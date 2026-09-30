@@ -17,7 +17,7 @@ use crate::{
     types::ExtractedInferenceRsState,
 };
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     post,
     tag = "inference.rs",
     path = "/v1/files",
@@ -26,7 +26,7 @@ use crate::{
         (status = 200, description = "Uploaded file metadata", body = FileMetadata),
         (status = 400, description = "Invalid upload"),
     )
-)]
+))]
 pub async fn upload_file(
     State(state): ExtractedInferenceRsState,
     payload: Result<Multipart, MultipartRejection>,
@@ -108,7 +108,7 @@ fn multipart_error(error: axum::extract::multipart::MultipartError) -> ApiError 
     ApiError::from_status(error.status(), error.body_text())
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     tag = "inference.rs",
     path = "/v1/files/{id}",
@@ -118,12 +118,12 @@ fn multipart_error(error: axum::extract::multipart::MultipartError) -> ApiError 
         (status = 404, description = "File not found or expired"),
         (status = 500, description = "Internal server error"),
     )
-)]
+))]
 pub async fn get_file(State(state): ExtractedInferenceRsState, Path(id): Path<String>) -> Response {
     json_response(files_api::get_file(&state, &id))
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     tag = "inference.rs",
     path = "/v1/files/{id}/content",
@@ -134,7 +134,7 @@ pub async fn get_file(State(state): ExtractedInferenceRsState, Path(id): Path<St
         (status = 410, description = "File body was elided and is no longer fetchable"),
         (status = 500, description = "Internal server error"),
     )
-)]
+))]
 pub async fn get_file_content(
     State(state): ExtractedInferenceRsState,
     Path(id): Path<String>,
@@ -142,7 +142,7 @@ pub async fn get_file_content(
     serve_bytes(files_api::file_content(&state, &id))
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     tag = "inference.rs",
     path = "/v1/files",
@@ -150,12 +150,12 @@ pub async fn get_file_content(
         (status = 200, description = "List of file metadata", body = FileListObject),
         (status = 500, description = "Internal server error"),
     )
-)]
+))]
 pub async fn list_files(State(state): ExtractedInferenceRsState) -> Response {
     json_response(files_api::list_files(&state))
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     delete,
     tag = "inference.rs",
     path = "/v1/files/{id}",
@@ -165,7 +165,7 @@ pub async fn list_files(State(state): ExtractedInferenceRsState) -> Response {
         (status = 404, description = "File not found or expired"),
         (status = 500, description = "Internal server error"),
     )
-)]
+))]
 pub async fn delete_file(
     State(state): ExtractedInferenceRsState,
     Path(id): Path<String>,
@@ -173,7 +173,7 @@ pub async fn delete_file(
     json_response(files_api::delete_file(&state, &id))
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     tag = "inference.rs",
     path = "/v1/containers/{container_id}/files",
@@ -182,7 +182,7 @@ pub async fn delete_file(
         (status = 200, description = "List of container file metadata", body = ContainerFileListObject),
         (status = 500, description = "Internal server error"),
     )
-)]
+))]
 pub async fn list_container_files(
     State(state): ExtractedInferenceRsState,
     Path(container_id): Path<String>,
@@ -190,7 +190,7 @@ pub async fn list_container_files(
     json_response(files_api::list_container_files(&state, &container_id))
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     tag = "inference.rs",
     path = "/v1/containers/{container_id}/files/{file_id}",
@@ -203,7 +203,7 @@ pub async fn list_container_files(
         (status = 404, description = "File not found or expired"),
         (status = 500, description = "Internal server error"),
     )
-)]
+))]
 pub async fn get_container_file(
     State(state): ExtractedInferenceRsState,
     Path((container_id, file_id)): Path<(String, String)>,
@@ -215,7 +215,7 @@ pub async fn get_container_file(
     ))
 }
 
-#[utoipa::path(
+#[cfg_attr(test, utoipa::path(
     get,
     tag = "inference.rs",
     path = "/v1/containers/{container_id}/files/{file_id}/content",
@@ -229,7 +229,7 @@ pub async fn get_container_file(
         (status = 410, description = "File body was elided and is no longer fetchable"),
         (status = 500, description = "Internal server error"),
     )
-)]
+))]
 pub async fn get_container_file_content(
     State(state): ExtractedInferenceRsState,
     Path((_container_id, file_id)): Path<(String, String)>,
