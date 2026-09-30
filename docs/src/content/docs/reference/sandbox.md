@@ -8,7 +8,7 @@ inference.rs can run model-generated Python code and shell commands in persisten
 This is only supported on macOS and Linux environments.
 
 :::caution
-The CLI and TOML default to sandboxing on Linux and macOS. The Python and Rust SDKs default to **no sandbox** - an embedding application must construct and attach a `SandboxPolicy` itself.
+The CLI, TOML, Python SDK and engine spec default to sandboxing on Linux and macOS. The Rust SDK defaults to **no sandbox**: an embedding application must construct and attach a `SandboxPolicy` itself.
 :::
 
 On by default for the CLI on Linux and macOS. To tune it, use `--sandbox` / the `[sandbox]` TOML table (see [Configuration](#configuration)). To turn it off, see [Disabling](#disabling). For full setup examples, see [enable code execution](/guides/agents/enable-code-execution/) and [enable shell execution](/guides/agents/enable-shell/).
@@ -38,10 +38,10 @@ The CLI and TOML configuration default to `auto`: enabled on Linux and macOS, an
 
 The sandbox profile controls the filesystem and environment allowlist inside that mode:
 
-- `developer` - default when agent, code execution, or shell execution is enabled. It keeps writes limited to the session workdir, but allows reads from common local toolchain roots such as Conda/venv, pyenv, rustup, nvm, Homebrew, Nix, Java, Bun, Deno, and selected compiler/library search paths. Its default network mode is `full`.
+- `developer` - the default. It keeps writes limited to the session workdir, but allows reads from common local toolchain roots such as Conda/venv, pyenv, rustup, nvm, Homebrew, Nix, Java, Bun, Deno, and selected compiler/library search paths. Its default network mode is `full`.
 - `restricted` - for tighter deployments. It allows system/runtime reads plus the session workdir and explicitly configured paths. Its default network mode is `loopback`.
 
-The engine spec (the Python SDK, the C ABI and its bindings) follows the CLI: `agentic.sandbox` takes the same `auto`/`on`/`off` modes, defaults to `auto`, honors `INFERENCE_RS_SANDBOX`, and gives a `CodeExecutionConfig` or `ShellConfig` without a `sandbox_policy` the developer profile. The Rust SDK behaves differently: its `CodeExecutionConfig` and `ShellConfig` default to **no sandbox**. Omitting `sandbox_policy` (or passing `None`) is equivalent to `--sandbox off`; the sandbox engages only when a `SandboxPolicy` is constructed and attached. A Rust application embedding inference.rs as a library does not inherit the safer default and is responsible for choosing a policy.
+The engine spec (the Python SDK, the C ABI and its bindings) follows the CLI: `agentic.sandbox` takes the same `auto`/`on`/`off` modes, defaults to `auto`, honors `INFERENCE_RS_SANDBOX`, and gives a `CodeExecutionConfig` or `ShellConfig` without a `sandbox_policy` the profile in `agentic.sandbox_profile` (default `developer`), with `agentic.sandbox_limits` (`max_memory_mb`, `max_cpu_secs`, `max_procs`, `network`) replacing its limits, as the CLI's `--sandbox-profile` and `--sb-*` flags do. The Rust SDK behaves differently: its `CodeExecutionConfig` and `ShellConfig` default to **no sandbox**. Omitting `sandbox_policy` (or passing `None`) is equivalent to `--sandbox off`; the sandbox engages only when a `SandboxPolicy` is constructed and attached. A Rust application embedding inference.rs as a library does not inherit the safer default and is responsible for choosing a policy.
 
 The restricted profile default policy:
 

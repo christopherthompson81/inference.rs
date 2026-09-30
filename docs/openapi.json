@@ -1479,7 +1479,22 @@
           },
           "sandbox": {
             "$ref": "#/components/schemas/SandboxMode",
-            "description": "Sandboxes code execution and the shell unless their config gives its own policy: `auto` and `on` use the\ndeveloper profile, `off` runs them unsandboxed."
+            "description": "Sandboxes code execution and the shell unless their config gives its own policy: `auto` and `on` apply\n`sandbox_profile` with `sandbox_limits`, `off` runs them unsandboxed."
+          },
+          "sandbox_limits": {
+            "$ref": "#/components/schemas/SandboxLimits",
+            "description": "Overrides for the profile's limits."
+          },
+          "sandbox_profile": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/SandboxProfile",
+                "description": "The profile the sandbox starts from; defaults to `developer`."
+              }
+            ]
           },
           "search": {
             "oneOf": [
@@ -10979,6 +10994,50 @@
         },
         "additionalProperties": false
       },
+      "SandboxLimits": {
+        "type": "object",
+        "description": "Limits that replace a sandbox profile's; unset ones keep the profile's.",
+        "properties": {
+          "max_cpu_secs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Per-session CPU time cap in seconds; raised to the tool's timeout where rlimits apply.",
+            "minimum": 0
+          },
+          "max_memory_mb": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Per-session memory cap in MiB.",
+            "minimum": 0
+          },
+          "max_procs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Per-session process and thread cap.",
+            "minimum": 0
+          },
+          "network": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/NetworkMode"
+              }
+            ]
+          }
+        },
+        "additionalProperties": false
+      },
       "SandboxMode": {
         "type": "string",
         "description": "Whether tools that run model-written code are sandboxed.",
@@ -11067,6 +11126,14 @@
           }
         },
         "additionalProperties": false
+      },
+      "SandboxProfile": {
+        "type": "string",
+        "description": "The starting policy for sandboxed tools: `restricted` or `developer` (toolchain paths, full network by default).",
+        "enum": [
+          "restricted",
+          "developer"
+        ]
       },
       "SearchContextSize": {
         "type": "string",
