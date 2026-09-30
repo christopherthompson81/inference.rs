@@ -273,15 +273,7 @@ fn nvidia_driver_version() -> Option<String> {
 
 fn nvidia_driver_cuda_version() -> Option<String> {
     let output = command_stdout_any(&["nvidia-smi", "nvidia-smi.exe"], &[])?;
-    let version = output.split("CUDA Version:").nth(1)?.trim_start();
-    let version = version
-        .split(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .next()?;
-    if version.is_empty() {
-        None
-    } else {
-        Some(version.to_string())
-    }
+    inference_selection::parse_nvidia_smi_cuda_version(&output).map(str::to_string)
 }
 
 fn xcode_version() -> Option<String> {
