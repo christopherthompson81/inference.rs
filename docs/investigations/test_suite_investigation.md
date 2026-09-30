@@ -100,3 +100,46 @@ Finding:
   VRAM group. New `local_ci.sh --models` runs the model tier on CPU.
 - Result (warm): `--lint --tests` = 23 s end to end (2122 tests plus doctests and smoke; was ~80 s). `--models` = 57 s
   for 8 tests (the CPU f32 pole, now opt-in). `--cuda` = 58 s, 2449 tests, green.
+
+## Local CI phase overlap — 2026-09-30 00:30
+
+**Question:** where does `scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep` leave the cores
+idle?
+
+**Command:** the full mode set under `PS4='+ $(date +%s.%N) ' bash -x` for each command's start time, with
+`vmstat -n 1` sampling CPU use, after `cargo clean -p inference-core` so every clippy configuration re-checks core
+cold.
+
+**Raw finding, cold core, 228 s in total:**
+
+| Phase | Time | CPU in use |
+|---|---|---|
+| Six `--slim` clippy checks, one after another | 52 s | ~12% (core's lib and lib test on two cores) |
+| CUDA-feature workspace clippy | 13.4 s | 21% |
+| CPU workspace clippy | 12.7 s | 26% |
+| Python binding tests | 10.2 s | 8.5% |
+| C# build and tests | ~4 s | 7-16% |
+
+With core warm (139 s in total), there is also a 27 s wait on the GPU-bound CUDA suite at 47%. One `--slim` check
+after a one-line edit to core takes 2.6 s, because incremental compilation reuses the rest.
+
+**Constraint:** every cargo command takes the target directory's lock, so cargo phases can't overlap within one target
+directory, and a second target directory costs gigabytes of duplicated artifacts. Only work that isn't cargo can run
+beside them: the CUDA suite's execution, and the Python and C# binding tests.
+
+**Change:**
+- The binding tests run in the background after the bindings library is built. The slim lint and the docs check run
+  in the foreground meanwhile, overlapping them and whatever remains of the CUDA suite.
+- The rlimit test still runs last and alone. One shared EXIT trap kills background jobs and removes temp files.
+- `--slim` is skipped when `scripts/slim_needed.py` finds no changed file (against the merge-base with origin/master,
+  plus untracked files) in inference-core or any workspace crate it depends on, a workspace-wide file, or these
+  scripts. It uses `cargo metadata`, so new crates are covered. A crash or a missing origin/master runs the lint.
+- `--sweep` saves the slim replay's artifact list in `target/debug/.slim-artifacts.json` and feeds it back on skipped
+  runs, so the slim configurations' artifacts aren't deleted and later rebuilt cold.
+
+**Raw finding, after:** cold core 215 s (-13 s, the binding tests now overlap the slim lint). With core warm the full
+set takes 87 s. A change that stays above core (the api, server, webui, FFI, CLI, SDK, agent, bindings or docs) skips
+the slim lint's six checks, 16 s warm or 52 s cold.
+
+**Implication:** the slim checks' remaining serial time is core's front end run six times. With one target directory,
+only fewer configurations or a faster core front end shorten it.

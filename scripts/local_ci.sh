@@ -3,8 +3,10 @@
 # [--models] [--slim] [--docs|--docs-all] [--bindings]; --models runs the real-checkpoint parity tests on CPU (--cuda
 # keeps one GPU parity check).
 # --metal is the macOS counterpart of --cuda: the metal-only code paths are invisible to a CPU or CUDA lint.
-# --slim lints inference-core with no model families and with each family alone, so feature gates stay intact.
-# With --cuda, the GPU-bound CUDA suite runs in the background while the CPU lint and tests run.
+# --slim lints inference-core with no model families and with each family alone, so feature gates stay intact; it is
+# skipped when nothing inference-core builds on differs from origin/master.
+# With --cuda, the GPU-bound CUDA suite runs in the background while the CPU lint and tests run; the binding tests run
+# in the background too, and the slim lint and docs check overlap both, since only cargo needs the build lock.
 # --bindings builds libinference_ffi and runs the C# (needs the .NET SDK) and Python binding tests on the tiny checkpoint.
 # --docs checks the docs of the crates whose files differ from origin/master (rustdoc is never incremental), not their
 # dependents; --docs-all checks every crate. Neither renders HTML; `cargo doc` does.
@@ -51,6 +53,8 @@ SLIM_FAMILIES=("" models-gemma models-llama models-other models-phi models-qwen)
 BINDINGS=(build --workspace --lib --example tiny_checkpoint)
 CSHARP=bindings/csharp
 PYTHON=bindings/python
+# The last slim replay's artifacts, so a sweep keeps them on the runs that skip the slim lint.
+SLIM_KEEP=target/debug/.slim-artifacts.json
 slim_clippy() { cargo clippy -p inference-core -p inference-gguf --lib --tests --no-default-features ${1:+--features inference-core/$1} "${@:2}"; }
 
 if [[ $lint -eq 1 ]]; then
@@ -67,7 +71,13 @@ if [[ $tests -eq 1 || $cuda -eq 1 || $metal -eq 1 || $models -eq 1 ]] && ! cargo
 fi
 # RLIMIT_NPROC counts every process the user runs, so this test never shares the machine with another suite.
 ALONE='package(inference-sandbox) & test(rlimit_nproc_caps_processes)'
-cuda_pid=
+cuda_pid= bindings_pid= cuda_log= bindings_log= tiny= live=
+cleanup() {
+    if [[ -n $cuda_pid ]]; then kill "$cuda_pid" 2> /dev/null || true; fi
+    if [[ -n $bindings_pid ]]; then kill "$bindings_pid" 2> /dev/null || true; fi
+    rm -rf "$cuda_log" "$bindings_log" "$tiny" "$live"
+}
+trap cleanup EXIT
 if [[ $cuda -eq 1 ]]; then
     cargo "${CLIPPY[@]}" --features cuda -- -D warnings
     # GPU tests skip themselves without a device; model-backed tests run when their INFERENCE_TEST_* path is set
@@ -78,7 +88,6 @@ if [[ $cuda -eq 1 ]]; then
         cargo nextest run --no-fail-fast --profile cuda --features cuda "${TEST_TARGETS[@]}" -E "not ($ALONE)" \
             > "$cuda_log" 2>&1 &
         cuda_pid=$!
-        trap 'kill "$cuda_pid" 2> /dev/null; rm -f "$cuda_log"' EXIT
     else
         cargo nextest run --no-fail-fast --profile cuda --features cuda "${TEST_TARGETS[@]}"
     fi
@@ -102,54 +111,61 @@ if [[ $tests -eq 1 ]]; then
     cargo test --workspace --no-fail-fast --doc || failed=1
     cargo "${SMOKE[@]}" || failed=1
 fi
-if [[ -n $cuda_pid ]]; then
-    wait "$cuda_pid" || failed=1
-    trap - EXIT
-    echo "---- CUDA suite ----"
-    cat "$cuda_log"
-    rm -f "$cuda_log"
-    cargo nextest run --no-fail-fast --profile cuda --features cuda "${TEST_TARGETS[@]}" -E "$ALONE" || failed=1
-fi
-[[ $failed -eq 0 ]] || exit 1
-if [[ $models -eq 1 ]]; then
-    cargo nextest run --no-fail-fast --profile models "${TEST_TARGETS[@]}"
-fi
-if [[ $slim -eq 1 ]]; then
-    for family in "${SLIM_FAMILIES[@]}"; do slim_clippy "$family" -- -D warnings; done
-fi
+# The binding tests and the CUDA suite need no cargo lock, so the slim lint and the docs check run while they do.
 if [[ $bindings -eq 1 ]]; then
     cargo "${BINDINGS[@]}"
     tiny=$(mktemp -d)
     target/debug/examples/tiny_checkpoint "$tiny" > /dev/null
-    # The library just built, not a release build a resolver would prefer
-    native=$PWD/target/debug
-    bindings_failed=0
-    INFERENCE_NATIVE_DIR=$native INFERENCE_TEST_TINY_CHECKPOINT=$tiny \
-        python3 -m unittest discover -s "$PYTHON/tests" -t "$PYTHON" || bindings_failed=1
-    # A missing or broken .NET SDK fails the C# tests without skipping the Python ones above
-    if dotnet build "$CSHARP/InferenceRs.slnx" -v quiet; then
-        INFERENCE_NATIVE_DIR=$native dotnet run --project "$CSHARP/tests/InferenceRs.BindingCoverage" --no-build \
-            || bindings_failed=1
+    bindings_log=$(mktemp)
+    run_binding_tests() {
+        # The library just built, not a release build a resolver would prefer
+        local native=$PWD/target/debug status=0
         INFERENCE_NATIVE_DIR=$native INFERENCE_TEST_TINY_CHECKPOINT=$tiny \
-            dotnet run --project "$CSHARP/tests/InferenceRs.EngineTest" --no-build || bindings_failed=1
-    else
-        bindings_failed=1
+            python3 -m unittest discover -s "$PYTHON/tests" -t "$PYTHON" || status=1
+        # A missing or broken .NET SDK fails the C# tests without skipping the Python ones above
+        if dotnet build "$CSHARP/InferenceRs.slnx" -v quiet --disable-build-servers; then
+            INFERENCE_NATIVE_DIR=$native dotnet run --project "$CSHARP/tests/InferenceRs.BindingCoverage" --no-build \
+                || status=1
+            INFERENCE_NATIVE_DIR=$native INFERENCE_TEST_TINY_CHECKPOINT=$tiny \
+                dotnet run --project "$CSHARP/tests/InferenceRs.EngineTest" --no-build || status=1
+        else
+            status=1
+        fi
+        return $status
+    }
+    run_binding_tests > "$bindings_log" 2>&1 &
+    bindings_pid=$!
+fi
+# Files that differ from origin/master, committed or not; fails when origin/master is unknown.
+changed_since_master() {
+    local base
+    base=$(git merge-base HEAD origin/master 2> /dev/null) || return 1
+    { git diff --name-only --no-renames "$base"; git ls-files --others --exclude-standard; }
+}
+# Exit 3 means nothing slim lints changed; any other failure, or no origin/master, runs it.
+slim_skip=0
+if [[ $slim -eq 1 ]] && changed=$(changed_since_master); then
+    slim_status=0
+    scripts/slim_needed.py <<< "$changed" || slim_status=$?
+    if [[ $slim_status -eq 3 ]]; then
+        slim_skip=1
+        echo "--slim: nothing inference-core builds on differs from master, skipping"
     fi
-    rm -rf "$tiny"
-    [[ $bindings_failed -eq 0 ]] || exit 1
+fi
+if [[ $slim -eq 1 && $slim_skip -eq 0 ]]; then
+    for family in "${SLIM_FAMILIES[@]}"; do slim_clippy "$family" -- -D warnings || failed=1; done
 fi
 DOC_TARGETS=()
 if [[ $docs -eq 1 ]]; then
     if [[ $docs_all -eq 1 ]]; then
         DOC_TARGETS=(--workspace)
     else
-        if ! base=$(git merge-base HEAD origin/master 2> /dev/null); then
+        if ! changed=$(changed_since_master); then
             echo "--docs needs origin/master to diff against; fetch it or pass --docs-all" >&2
             exit 2
         fi
         # An assignment, not `read <<< "$(...)"`, so a failed lookup stops the run instead of documenting nothing
-        targets=$({ git diff --name-only --no-renames "$base"; git ls-files --others --exclude-standard; } |
-            scripts/doc_targets.py)
+        targets=$(scripts/doc_targets.py <<< "$changed")
         read -ra DOC_TARGETS <<< "$targets"
     fi
 fi
@@ -159,14 +175,30 @@ if [[ $docs -eq 1 ]]; then
     if [[ ${#DOC_TARGETS[@]} -eq 0 ]]; then
         echo "--docs: no crate differs from master, nothing to document"
     else
-        doc_build
+        doc_build || failed=1
     fi
+fi
+if [[ -n $bindings_pid ]]; then
+    wait "$bindings_pid" || failed=1
+    echo "---- binding tests ----"
+    cat "$bindings_log"
+fi
+if [[ -n $cuda_pid ]]; then
+    wait "$cuda_pid" || failed=1
+    echo "---- CUDA suite ----"
+    cat "$cuda_log"
+    # Last and alone: it counts every process the user runs, the lint and binding tests above included.
+    cargo nextest run --no-fail-fast --profile cuda --features cuda "${TEST_TARGETS[@]}" -E "$ALONE" || failed=1
+fi
+cuda_pid= bindings_pid=
+[[ $failed -eq 0 ]] || exit 1
+if [[ $models -eq 1 ]]; then
+    cargo nextest run --no-fail-fast --profile models "${TEST_TARGETS[@]}"
 fi
 if [[ $sweep -eq 1 ]]; then
     # No-op rebuilds of exactly what the modes above built; their JSON names every live artifact. A failed replay
     # would under-report, so nothing is deleted unless all of them succeed.
     live=$(mktemp)
-    trap 'rm -f "$live"' EXIT
     # clippy's `-- -D warnings` is part of its fingerprint, so the replay passes it too or it rebuilds every lint unit
     replay() { cargo "$@" --message-format=json >> "$live"; }
     lint_replay() { cargo "${CLIPPY[@]}" "$@" --message-format=json -- -D warnings >> "$live"; }
@@ -181,11 +213,14 @@ if [[ $sweep -eq 1 ]]; then
         lint_replay --features metal
         replay test --no-run --features metal "${TEST_TARGETS[@]}"
     fi
-    if [[ $slim -eq 1 ]]; then
+    if [[ $slim -eq 1 && $slim_skip -eq 0 ]]; then
+        : > "$SLIM_KEEP.new"
         for family in "${SLIM_FAMILIES[@]}"; do
-            slim_clippy "$family" --message-format=json -- -D warnings >> "$live"
+            slim_clippy "$family" --message-format=json -- -D warnings >> "$SLIM_KEEP.new"
         done
+        mv "$SLIM_KEEP.new" "$SLIM_KEEP"
     fi
+    if [[ $slim -eq 1 && -f $SLIM_KEEP ]]; then cat "$SLIM_KEEP" >> "$live"; fi
     if [[ ${#DOC_TARGETS[@]} -gt 0 ]]; then doc_build --message-format=json >> "$live"; fi
     if [[ $bindings -eq 1 ]]; then replay "${BINDINGS[@]}"; fi
     scripts/sweep_target.py target/debug < "$live"
