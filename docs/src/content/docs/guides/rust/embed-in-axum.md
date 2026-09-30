@@ -96,6 +96,6 @@ async fn main() -> anyhow::Result<()> {
 
 ## Calling the model directly from a handler
 
-For custom request shapes, share the `SharedInferenceRsState` directly with Axum handlers and use the lower-level helpers exposed by `inference-server-core` (`chat_completion::parse_request`, `handler_core::send_request`, ...).
+For custom request shapes, share the `SharedInferenceRsState` with Axum handlers and prepare chat requests through `chat_completion::ChatEngine::prepare`, which applies the agent policy (permissions, tool-round limits, approvals) that `/v1/chat/completions` applies; build its `AgenticDefaults` the way the router is configured. The `PreparedChat` it returns carries the response channel for `create_streamer` or `process_non_streaming_response`.
 
 A complete example with custom OpenAPI integration is in the `inference-server-core` crate-level documentation (`cargo doc -p inference-server-core --open`).

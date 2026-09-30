@@ -209,3 +209,23 @@ would be; an approval unanswered for 5 minutes is denied.
 
 **Tests:** CLI unit tests for sampling, request building, media parts and rollback; a text turn and a two-turn image
 conversation (the second turn resends the first image by its index) on the tiny checkpoint.
+
+## Run 9 — 2026-10-01 00:30
+
+**Question:** the MCP and Responses policy bugs (Runs 2 and 3) had one cause: `inference_api::engine_chat::parse_request`
+was public, so any surface could assemble a chat request without `ChatEngine`'s agent policy. Can it be made
+private, leaving `ChatEngine::prepare` (and `Engine::chat`/`chat_stream`) as the only way in?
+
+**Finding:** outside inference-api only two things used it: server-core re-exported it (and its crate docs example
+taught the raw path), and the Anthropic `count_tokens` handler parsed a request to tokenize it. That handler is engine
+logic in the HTTP layer.
+
+**Change:** `inference_api::anthropic::count_tokens` holds the counting; the server handler maps its `Result`.
+`parse_request` and `ChatCompletionParseContext` are `pub(crate)`; server-core re-exports `ChatEngine` and
+`PreparedChat` instead, and its docs example prepares its custom route through `ChatEngine::prepare`. The compiler
+now enforces what the two reviews had to catch. The `embed-in-axum` guide, which also taught `parse_request`,
+points at `ChatEngine::prepare`. Still public, below the parsing layer: `dispatch::send_request` with a hand-built core
+`NormalRequest`; closing that would mean hiding core's request types.
+
+**Test:** `chat_route::anthropic_count_tokens_counts_the_rendered_prompt` (a count on the tiny checkpoint, and an empty
+message list rejected with an Anthropic error body).

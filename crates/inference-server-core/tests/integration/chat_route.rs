@@ -453,3 +453,32 @@ async fn a_cancelled_chat_stream_ends_with_its_usage() -> anyhow::Result<()> {
     assert!(usage.completion_tokens < LONG_COMPLETION, "{usage:?}");
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn anthropic_count_tokens_counts_the_rendered_prompt() -> anyhow::Result<()> {
+    let dir = support::tiny_checkpoint()?;
+    let app = router(dir.path()).await?;
+    let count = |body: Value| {
+        Request::post("/v1/messages/count_tokens")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+    };
+    let response = app
+        .clone()
+        .oneshot(count(json!({
+            "model": "default",
+            "messages": [{"role": "user", "content": PROMPT}],
+        }))?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_str(&body_text(response).await?)?;
+    assert!(body["input_tokens"].as_u64().unwrap() > 0, "{body}");
+
+    let response = app
+        .oneshot(count(json!({"model": "default", "messages": []}))?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_str(&body_text(response).await?)?;
+    assert_eq!(body["type"], "error", "{body}");
+    Ok(())
+}

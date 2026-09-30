@@ -11,11 +11,7 @@ use axum::{
         sse::{Event, KeepAlive, KeepAliveStream},
     },
 };
-use either::Either;
 use futures::Stream;
-use inference_core::{
-    Request, RequestMessage, TokenizationRequest, is_chat_template_request_error,
-};
 use tokio::time::{Instant, Interval, MissedTickBehavior, interval_at};
 
 pub use crate::anthropic_api::{
@@ -28,19 +24,13 @@ pub use crate::anthropic_api::{
 };
 use crate::anthropic_api::{
     AnthropicStream, AnthropicStreamEvent, MessagesFailure, anthropic_error_body, collect_messages,
-    prepare_messages,
+    count_tokens, prepare_messages,
 };
 use crate::handler_core::{ApiJson, ApiJsonRejection};
 use crate::{
     agentic::AgenticDefaults,
-    chat_completion::{ChatCompletionParseContext, parse_request},
     engine_chat::{ChatEngine, DispatchError},
-    handler_core::{
-        ApiError, ApiErrorKind, ResponseErrorMessage, create_response_channel,
-        send_request_with_model,
-    },
-    lora_routing::{DEFAULT_MODEL_ID, resolve_lora_adapter_model},
-    openai::OpenAiToolSurface,
+    handler_core::{ApiError, ApiErrorKind, ResponseErrorMessage},
     skills::SkillStore,
     streaming::{StreamOutcomeHandle, get_keep_alive_interval},
     types::ExtractedInferenceRsState,
@@ -104,8 +94,7 @@ pub enum AnthropicMessagesResponder {
 
 pub enum AnthropicCountTokensResponder {
     Json(AnthropicCountTokensResponse),
-    InternalError(BoxError),
-    ValidationError(BoxError),
+    Error(ApiError),
 }
 
 impl IntoResponse for AnthropicMessagesResponder {
@@ -130,12 +119,7 @@ impl IntoResponse for AnthropicCountTokensResponder {
     fn into_response(self) -> axum::response::Response {
         match self {
             AnthropicCountTokensResponder::Json(s) => Json(s).into_response(),
-            AnthropicCountTokensResponder::InternalError(e) => {
-                anthropic_error_response(ApiError::from_error(e.as_ref(), ApiErrorKind::Internal))
-            }
-            AnthropicCountTokensResponder::ValidationError(e) => anthropic_error_response(
-                ApiError::from_error(e.as_ref(), ApiErrorKind::InvalidRequest),
-            ),
+            AnthropicCountTokensResponder::Error(error) => anthropic_error_response(error),
         }
     }
 }
@@ -239,102 +223,12 @@ pub async fn anthropic_count_tokens(
     let request = match payload {
         Ok(ApiJson(request)) => request,
         Err(ApiJsonRejection(error)) => {
-            return AnthropicCountTokensResponder::ValidationError(Box::new(
-                anthropic_json_rejection(error),
-            ));
+            return AnthropicCountTokensResponder::Error(anthropic_json_rejection(error));
         }
     };
-    if let Err(error) = request.validate(false) {
-        return AnthropicCountTokensResponder::ValidationError(error.into());
-    }
-
-    let (tx, _) = create_response_channel(Some(1));
-    let mut oairequest = match request.into_chat_completion_request() {
-        Ok(request) => request,
-        Err(e) => return AnthropicCountTokensResponder::ValidationError(e.into()),
-    };
-
-    oairequest.stream = Some(false);
-    if let Err(error) =
-        resolve_lora_adapter_model(&state, &mut oairequest.model, &mut oairequest.adapter)
-    {
-        return AnthropicCountTokensResponder::ValidationError(Box::new(error));
-    }
-    let model_id = (oairequest.model != DEFAULT_MODEL_ID).then(|| oairequest.model.clone());
-
-    let (request, _) = match parse_request(
-        oairequest,
-        ChatCompletionParseContext {
-            state: state.clone(),
-            tx,
-            tool_dispatch_url: None,
-            agent_approval_handler: None,
-            agent_approval_notifier: None,
-            tool_surface: OpenAiToolSurface::ChatCompletions,
-            skill_store: None,
-            media: Default::default(),
-        },
-    )
-    .await
-    {
-        Ok(x) => x,
-        Err(e) => return AnthropicCountTokensResponder::ValidationError(e.into()),
-    };
-
-    let Request::Normal(request) = request else {
-        return AnthropicCountTokensResponder::InternalError(Box::new(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "Expected a chat request for token counting.",
-        )));
-    };
-
-    let (messages, enable_thinking, reasoning_effort) = match request.messages {
-        RequestMessage::Chat {
-            messages,
-            enable_thinking,
-            reasoning_effort,
-        }
-        | RequestMessage::MultimodalChat {
-            messages,
-            enable_thinking,
-            reasoning_effort,
-            ..
-        } => (messages, enable_thinking, reasoning_effort),
-        _ => {
-            return AnthropicCountTokensResponder::ValidationError(Box::new(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "Only chat messages can be counted by the Anthropic count_tokens endpoint.",
-            )));
-        }
-    };
-
-    let (response, mut rx) = tokio::sync::mpsc::channel(1);
-    let tokenize_request = Request::Tokenize(TokenizationRequest {
-        text: Either::Left(messages),
-        tools: request.tools,
-        add_generation_prompt: true,
-        add_special_tokens: true,
-        enable_thinking,
-        reasoning_effort,
-        response,
-    });
-
-    if let Err(e) = send_request_with_model(&state, tokenize_request, model_id.as_deref()).await {
-        return AnthropicCountTokensResponder::InternalError(Box::new(e));
-    }
-
-    match rx.recv().await {
-        Some(Ok(tokens)) => AnthropicCountTokensResponder::Json(AnthropicCountTokensResponse {
-            input_tokens: tokens.len(),
-        }),
-        Some(Err(e)) if is_chat_template_request_error(&e) => {
-            AnthropicCountTokensResponder::ValidationError(e.into())
-        }
-        Some(Err(e)) => AnthropicCountTokensResponder::InternalError(e.into()),
-        None => AnthropicCountTokensResponder::InternalError(Box::new(std::io::Error::new(
-            std::io::ErrorKind::UnexpectedEof,
-            "No token count received from the model.",
-        ))),
+    match count_tokens(&state, request).await {
+        Ok(count) => AnthropicCountTokensResponder::Json(count),
+        Err(error) => AnthropicCountTokensResponder::Error(error),
     }
 }
 

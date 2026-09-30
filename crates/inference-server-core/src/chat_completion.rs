@@ -13,9 +13,7 @@ use axum::{
 use inference_core::{ChatCompletionChunkResponse, ChatCompletionResponse, InferenceRs, Response};
 use tokio::sync::mpsc::Receiver;
 
-pub use crate::engine_chat::{
-    ChatCompletionParseContext, parse_request, serialize_agentic_progress,
-};
+pub use crate::engine_chat::{ChatEngine, PreparedChat, serialize_agentic_progress};
 use crate::handler_core::{ApiJson, ApiJsonRejection};
 #[cfg(test)]
 use crate::openai::{ChatCompletionChunkResponseBody, ChatCompletionResponseBody};
@@ -24,7 +22,7 @@ use crate::{
     completion_core::{
         BaseCompletionResponder, handle_completion_error, handle_completion_validation_error,
     },
-    engine_chat::{ChatEngine, ChatStream, ChatStreamEvent, DispatchError, collect_chat},
+    engine_chat::{ChatStream, ChatStreamEvent, DispatchError, collect_chat},
     handler_core::{
         ApiError, ApiErrorKind, ModelErrorMessage, openai_error_from_error, openai_error_response,
     },

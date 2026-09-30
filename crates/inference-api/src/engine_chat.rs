@@ -196,7 +196,7 @@ fn insert_reasoning_content(output: &mut IndexMap<String, MessageContent>, messa
     }
 }
 
-pub struct ChatCompletionParseContext {
+pub(crate) struct ChatCompletionParseContext {
     pub state: SharedInferenceRsState,
     pub tx: Sender<Response>,
     pub tool_dispatch_url: Option<String>,
@@ -212,7 +212,7 @@ pub struct ChatCompletionParseContext {
 ///
 /// This function transforms an OpenAI-compatible chat completion request into the
 /// request format used by inference.rs.
-pub fn parse_request(
+pub(crate) fn parse_request(
     oairequest: ChatCompletionRequest,
     ctx: ChatCompletionParseContext,
 ) -> BoxFuture<'static, Result<(Request, bool)>> {
