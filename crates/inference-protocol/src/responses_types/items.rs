@@ -782,6 +782,16 @@ impl OutputItem {
         }
     }
 
+    pub fn set_status(&mut self, new_status: ItemStatus) {
+        match self {
+            OutputItem::Message { status, .. }
+            | OutputItem::FunctionCall { status, .. }
+            | OutputItem::ShellCall { status, .. }
+            | OutputItem::ShellCallOutput { status, .. }
+            | OutputItem::Reasoning { status, .. } => *status = new_status,
+        }
+    }
+
     /// Get the status of the output item
     pub fn status(&self) -> ItemStatus {
         match self {

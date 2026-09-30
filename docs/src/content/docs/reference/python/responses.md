@@ -281,7 +281,7 @@ URL citation annotation
 
 ## `OpenResponsesStreamEvent`
 
-One of: `Union[OpenResponsesStreamEventResponseCreated, OpenResponsesStreamEventResponseInProgress, OpenResponsesStreamEventResponseOutputItemAdded, OpenResponsesStreamEventResponseContentPartAdded, OpenResponsesStreamEventResponseOutputTextDelta, OpenResponsesStreamEventResponseContentPartDone, OpenResponsesStreamEventResponseOutputItemDone, OpenResponsesStreamEventResponseFunctionCallArgumentsDelta, OpenResponsesStreamEventResponseFunctionCallArgumentsDone, OpenResponsesStreamEventResponseReasoningTextDelta, OpenResponsesStreamEventResponseReasoningTextDone, OpenResponsesStreamEventResponseCompleted, OpenResponsesStreamEventResponseFailed, OpenResponsesStreamEventResponseIncomplete, OpenResponsesStreamEventError]`.
+One of: `Union[OpenResponsesStreamEventResponseCreated, OpenResponsesStreamEventResponseInProgress, OpenResponsesStreamEventResponseOutputItemAdded, OpenResponsesStreamEventResponseContentPartAdded, OpenResponsesStreamEventResponseOutputTextDelta, OpenResponsesStreamEventResponseContentPartDone, OpenResponsesStreamEventResponseOutputItemDone, OpenResponsesStreamEventResponseFunctionCallArgumentsDelta, OpenResponsesStreamEventResponseFunctionCallArgumentsDone, OpenResponsesStreamEventResponseReasoningTextDelta, OpenResponsesStreamEventResponseReasoningTextDone, OpenResponsesStreamEventResponseCompleted, OpenResponsesStreamEventResponseFailed, OpenResponsesStreamEventResponseIncomplete, OpenResponsesStreamEventResponseCancelled, OpenResponsesStreamEventError]`.
 
 
 ## `OpenResponsesStreamEventError`
@@ -295,6 +295,17 @@ Error event
 | `param` | `str \| None` | optional |
 | `sequence_number` | `int` | required |
 | `type` | `Literal['error']` | `'error'` |
+
+
+## `OpenResponsesStreamEventResponseCancelled`
+
+The response stopped because its caller cancelled it; carries what was generated, with usage
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `response` | `ResponseResource` | required |
+| `sequence_number` | `int` | required |
+| `type` | `Literal['response.cancelled']` | `'response.cancelled'` |
 
 
 ## `OpenResponsesStreamEventResponseCompleted`

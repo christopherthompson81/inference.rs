@@ -71,7 +71,7 @@ inference.rs implements the OpenAI Responses API alongside Chat Completions:
 - `POST /v1/responses`: create a response. Returns a response object with a unique id.
 - `GET /v1/responses/{id}`: fetch the current state of a stored response.
 - `DELETE /v1/responses/{id}`: delete a stored response.
-- `POST /v1/responses/{id}/cancel`: cancel a background response that has not finished.
+- `POST /v1/responses/{id}/cancel`: cancel a background response that has not finished. Generation stops, and the response then holds what was generated, with usage.
 
 Use Responses when the client:
 

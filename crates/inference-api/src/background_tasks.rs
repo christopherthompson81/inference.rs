@@ -8,7 +8,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use crate::responses_types::{ResponseError, ResponseResource, ResponseStatus};
+use inference_core::RequestCancellation;
+
+use crate::responses_types::{
+    ItemStatus, OutputItem, ResponseError, ResponseResource, ResponseStatus,
+};
 
 /// State of a background task
 #[derive(Debug, Clone)]
@@ -22,8 +26,8 @@ pub enum BackgroundTaskState {
     Completed(ResponseResource),
     /// Task failed
     Failed(ResponseError),
-    /// Task was cancelled
-    Cancelled,
+    /// Task was cancelled; holds what it had generated once the stopped request comes back.
+    Cancelled(Option<ResponseResource>),
 }
 
 /// A background task for processing responses
@@ -37,11 +41,13 @@ pub struct BackgroundTask {
     pub created_at: u64,
     /// Model name
     pub model: String,
+    /// Stops the task's request.
+    pub cancellation: RequestCancellation,
 }
 
 impl BackgroundTask {
     /// Create a new background task
-    pub fn new(id: String, model: String) -> Self {
+    pub fn new(id: String, model: String, cancellation: RequestCancellation) -> Self {
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -52,6 +58,7 @@ impl BackgroundTask {
             state: BackgroundTaskState::Queued,
             created_at,
             model,
+            cancellation,
         }
     }
 
@@ -74,7 +81,18 @@ impl BackgroundTask {
                 resource.status = ResponseStatus::Failed;
                 resource.error = Some(error.clone());
             }
-            BackgroundTaskState::Cancelled => {
+            BackgroundTaskState::Cancelled(Some(partial)) => {
+                let mut partial = partial.clone();
+                partial.status = ResponseStatus::Cancelled;
+                // the reply was cut short; tool calls it finished stay completed
+                for item in &mut partial.output {
+                    if matches!(item, OutputItem::Message { .. }) {
+                        item.set_status(ItemStatus::Incomplete);
+                    }
+                }
+                return partial;
+            }
+            BackgroundTaskState::Cancelled(None) => {
                 resource.status = ResponseStatus::Cancelled;
             }
         }
@@ -99,8 +117,8 @@ impl BackgroundTaskManager {
     }
 
     /// Queue a task under the id of the response it produces
-    pub fn create_task(&self, id: String, model: String) {
-        let task = BackgroundTask::new(id.clone(), model);
+    pub fn create_task(&self, id: String, model: String, cancellation: RequestCancellation) {
+        let task = BackgroundTask::new(id.clone(), model, cancellation);
         self.tasks.write().unwrap().insert(id, task);
     }
 
@@ -116,15 +134,26 @@ impl BackgroundTaskManager {
         tasks.get(id).map(|t| t.to_response_resource())
     }
 
-    // A cancelled task stays cancelled when the request it abandoned finishes anyway.
+    // A cancelled task stays cancelled when its stopped request comes back; it keeps what was generated.
     fn transition(&self, id: &str, state: BackgroundTaskState) -> bool {
         let mut tasks = self.tasks.write().unwrap();
         match tasks.get_mut(id) {
-            Some(task) if !matches!(task.state, BackgroundTaskState::Cancelled) => {
+            Some(BackgroundTask {
+                state: BackgroundTaskState::Cancelled(partial),
+                ..
+            }) => {
+                if partial.is_none()
+                    && let BackgroundTaskState::Completed(response) = state
+                {
+                    *partial = Some(response);
+                }
+                false
+            }
+            Some(task) => {
                 task.state = state;
                 true
             }
-            _ => false,
+            None => false,
         }
     }
 
@@ -153,17 +182,21 @@ impl BackgroundTaskManager {
                     BackgroundTaskState::Queued | BackgroundTaskState::InProgress
                 ) =>
             {
-                task.state = BackgroundTaskState::Cancelled;
+                task.state = BackgroundTaskState::Cancelled(None);
+                task.cancellation.cancel();
                 true
             }
             _ => false,
         }
     }
 
-    /// Delete a task
+    /// Delete a task, stopping its request if it is still running
     pub fn delete_task(&self, id: &str) -> bool {
         let mut tasks = self.tasks.write().unwrap();
-        tasks.remove(id).is_some()
+        tasks
+            .remove(id)
+            .inspect(|task| task.cancellation.cancel())
+            .is_some()
     }
 }
 
@@ -184,7 +217,11 @@ mod tests {
     fn test_create_and_get_task() {
         let manager = BackgroundTaskManager::new();
         let id = "resp_test".to_string();
-        manager.create_task(id.clone(), "test-model".to_string());
+        manager.create_task(
+            id.clone(),
+            "test-model".to_string(),
+            RequestCancellation::default(),
+        );
 
         let task = manager.get_task(&id).unwrap();
         assert_eq!(task.id, id);
@@ -195,7 +232,11 @@ mod tests {
     fn test_task_state_transitions() {
         let manager = BackgroundTaskManager::new();
         let id = "resp_test".to_string();
-        manager.create_task(id.clone(), "test-model".to_string());
+        manager.create_task(
+            id.clone(),
+            "test-model".to_string(),
+            RequestCancellation::default(),
+        );
 
         // Move to in_progress
         assert!(manager.mark_in_progress(&id));
@@ -214,16 +255,29 @@ mod tests {
     fn test_cancel_task() {
         let manager = BackgroundTaskManager::new();
         let id = "resp_test".to_string();
-        manager.create_task(id.clone(), "test-model".to_string());
+        manager.create_task(
+            id.clone(),
+            "test-model".to_string(),
+            RequestCancellation::default(),
+        );
 
         assert!(manager.cancel(&id));
         let task = manager.get_task(&id).unwrap();
-        assert!(matches!(task.state, BackgroundTaskState::Cancelled));
+        assert!(matches!(task.state, BackgroundTaskState::Cancelled(None)));
+        assert!(
+            task.cancellation.is_canceled(),
+            "cancelling stops the request"
+        );
 
-        // The abandoned request finishing does not undo the cancellation
+        // The stopped request coming back keeps the cancellation, with what it generated
         let response = ResponseResource::new(id.clone(), "test-model".to_string(), 0);
         assert!(!manager.mark_completed(&id, response));
         let task = manager.get_task(&id).unwrap();
-        assert!(matches!(task.state, BackgroundTaskState::Cancelled));
+        assert!(matches!(
+            task.state,
+            BackgroundTaskState::Cancelled(Some(_))
+        ));
+        let resource = manager.get_response(&id).unwrap();
+        assert_eq!(resource.status, ResponseStatus::Cancelled);
     }
 }

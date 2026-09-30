@@ -12,9 +12,9 @@ use either::Either;
 use futures::future::BoxFuture;
 use inference_core::{
     AgentPermission, ApproximateUserLocation, ChatCompletionChunkResponse, ChatCompletionResponse,
-    CodeExecutionPermission, Function, InferenceRs, ReasoningEffort, Request, RequestMessage,
-    Response, TokenizationRequest, Tool, ToolChoice, ToolType, Usage, WebSearchOptions,
-    WebSearchUserLocation, is_chat_template_request_error,
+    CodeExecutionPermission, Function, InferenceRs, ReasoningEffort, Request, RequestCancellation,
+    RequestMessage, Response, TokenizationRequest, Tool, ToolChoice, ToolType, Usage,
+    WebSearchOptions, WebSearchUserLocation, is_chat_template_request_error,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -1699,6 +1699,7 @@ pub struct AnthropicStream {
     model_override: Option<String>,
     stream: AnthropicStreamState,
     tap: Option<ResponseTap>,
+    cancellation: RequestCancellation,
 }
 
 impl AnthropicStream {
@@ -1713,7 +1714,18 @@ impl AnthropicStream {
             model_override: prepared.chat.model_override,
             stream: AnthropicStreamState::new(prepared.omit_thinking),
             tap,
+            cancellation: prepared.chat.cancellation,
         }
+    }
+
+    /// The request's cancellation, for a caller that cancels from elsewhere, e.g. a signal handler.
+    pub fn cancellation(&self) -> RequestCancellation {
+        self.cancellation.clone()
+    }
+
+    /// Ends the request on its next sampled token; the stream still ends with `message_delta` and `message_stop`.
+    pub fn cancel(&self) {
+        self.cancellation.cancel();
     }
 
     fn handle(&mut self, response: Response) {

@@ -409,7 +409,7 @@ async fn completions_take_token_id_prompts() -> anyhow::Result<()> {
 }
 
 // Enough to outlast the few steps a cancel takes to land, on a model whose random weights never stop on their own.
-const LONG_COMPLETION: usize = 48;
+const LONG_COMPLETION: usize = 512;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn a_cancelled_chat_stream_ends_with_its_usage() -> anyhow::Result<()> {

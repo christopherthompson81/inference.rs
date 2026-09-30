@@ -897,12 +897,10 @@ impl Engine {
         let prepared = prepare_completion(&state, request)
             .await
             .map_err(|error| error.into_api_error(state.clone()))?;
-        Ok(CompletionStream::new(
-            prepared.rx,
-            state,
-            prepared.model_override,
-            None,
-        ))
+        Ok(
+            CompletionStream::new(prepared.rx, state, prepared.model_override, None)
+                .with_cancellation(prepared.cancellation),
+        )
     }
 
     pub async fn completion_json(&self, request: &[u8]) -> Result<String, ApiError> {

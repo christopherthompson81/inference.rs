@@ -432,3 +432,35 @@ commands (`--tok-model-id --quant` means GGUF).
 **Tests:** quantize's 5 conversion tests pass unchanged through the shared path;
 `an_explicit_arch_picks_the_text_loader_for_an_auto_model`; `an_emitted_config_keeps_the_tuned_architecture`
 round-trips an emitted config through the TOML parser.
+
+## Run 18 — 2026-09-30 (time approximate)
+
+**Question:** chat streams could be cancelled with their final chunk and usage (Run 8); what about completion,
+Anthropic and Responses streams, background responses, and C ABI streams?
+
+**Finding:** completion, Anthropic and Responses requests carried no `RequestCancellation`, so their streams could only
+be dropped (no final event, no usage). `cancel_response` on a background response only relabelled the task: its
+request ran to the end ("the abandoned request finishing does not undo the cancellation"). The C ABI had no stream
+cancel; `inference_stream_free` abandons.
+
+**Change:** every prepared request (completion, Responses; Anthropic already went through `PreparedChat`) carries a
+cancellation, and `CompletionStream`, `AnthropicStream` and `OpenResponsesStreamer` have `cancel()` like `ChatStream`.
+A cancelled Responses stream ends with `response.cancelled` (status `cancelled`, usage); Anthropic ends with
+`message_delta` (usage) and `message_stop`. A background task holds its request's cancellation: cancelling or
+deleting it stops generation, and the task keeps the partial response the stopped request returns. `BlockingStream`
+carries its cancellation, and `inference_stream_cancel` in the C ABI (C# `EngineStream.Cancel`, Python
+`Stream.cancel`) may run on another thread while one waits in `inference_stream_next`: the handle keeps the
+cancellation in its own field and each call borrows only the fields it uses.
+
+**Tests:** `cancel::` in server-core's integration tests (completion, Anthropic, Responses stream, background
+response); Python and C# tests cancel a chat stream from another thread and read its final chunk.
+
+**Review:** the FFI field-disjoint borrows are sound, and the leases keep cancel from racing free. Fixed: the ABI
+patch version (0.0.12) was not bumped for the new entry point; a cancelled stream stored its truncated reply as history,
+so `previous_response_id` could continue it while a cancelled background run could not (now neither can; both are
+fetchable); a cancelled response's message item said `in_progress` after `output_item.done` said `completed` (both are
+now `incomplete`, and so is a cancelled background partial's). Tests use a 512-token cap so a loaded runner cannot
+finish before the cancel lands.
+
+**Found, not fixed:** a Responses run stopped by its token cap ends `completed`, never `incomplete` with
+`max_output_tokens`, in both the streaming and non-streaming paths, though the HTTP reference says otherwise.

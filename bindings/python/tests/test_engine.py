@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import sys
+import threading
 import unittest
 from pathlib import Path
 
@@ -14,6 +15,8 @@ import inference_rs as ir
 
 MODEL_VARIABLE = "INFERENCE_TEST_TINY_CHECKPOINT"
 MAX_TOKENS = 6
+# Enough to outlast the few steps a cancel takes to land; the random weights never stop on their own.
+LONG_COMPLETION = 512
 PROMPT = "Reply with the single word: ok"
 POLL_TIMEOUT = 60.0
 IMAGE_FIXTURE = "crates/inference/tests/fixtures/paddleocr_vl/page_00.png"
@@ -178,6 +181,19 @@ class EngineTest(unittest.TestCase):
         with self.assertRaises(ir.InferenceError) as bad:
             self.engine.upload_skill([ir.SkillFile("SKILL.md", b"no frontmatter")])
         self.assertEqual(bad.exception.status, ir.Status.INVALID_REQUEST)
+
+    def test_a_stream_cancelled_from_another_thread_ends_with_its_usage(self):
+        request = json.loads(chat_request(stream=True))
+        request.update(max_tokens=LONG_COMPLETION, ignore_eos=True)
+        with self.engine.chat_stream(json.dumps(request)) as stream:
+            events = [stream.next(POLL_TIMEOUT)]
+            canceller = threading.Thread(target=stream.cancel)
+            canceller.start()
+            events.extend(stream)
+            canceller.join()
+        chunks = [event.data for event in events if event.name == "chunk"]
+        self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "canceled")
+        self.assertLess(chunks[-1]["usage"]["completion_tokens"], LONG_COMPLETION)
 
     def test_a_stream_outlives_its_engine(self):
         engine = ir.JsonEngine(spec(self.model))

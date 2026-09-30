@@ -44,6 +44,16 @@ public sealed class EngineStream : IEnumerable<StreamEvent>, IDisposable
         return true;
     }
 
+    /// <summary>Asks the request to stop; keep enumerating for its final event, which carries usage.</summary>
+    /// <remarks>Unlike the other members this may be called from any thread, including while another waits in
+    /// <see cref="TryNext"/>.</remarks>
+    public void Cancel()
+    {
+        using var stream = new Lease(_stream);
+        InferenceException.ThrowIfFailed(
+            NativeMethods.inference_stream_cancel(stream.Handle), nameof(NativeMethods.inference_stream_cancel));
+    }
+
     /// <summary>Whether the stream has ended.</summary>
     public bool IsDone { get; private set; }
 

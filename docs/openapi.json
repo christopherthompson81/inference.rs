@@ -9147,6 +9147,31 @@
           },
           {
             "type": "object",
+            "description": "The response stopped because its caller cancelled it; carries what was generated, with usage",
+            "required": [
+              "sequence_number",
+              "response",
+              "type"
+            ],
+            "properties": {
+              "response": {
+                "$ref": "#/components/schemas/ResponseResource"
+              },
+              "sequence_number": {
+                "type": "integer",
+                "format": "int64",
+                "minimum": 0
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "response.cancelled"
+                ]
+              }
+            }
+          },
+          {
+            "type": "object",
             "description": "Error event",
             "required": [
               "sequence_number",

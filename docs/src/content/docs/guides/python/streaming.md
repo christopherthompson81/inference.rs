@@ -41,7 +41,7 @@ async def main():
         print(delta, end="", flush=True)
 ```
 
-`stream.next(timeout)` takes a timeout in seconds and returns `None` when it expires; `stream.done` tells a timeout apart from the end of the stream. Closing the stream (or leaving the `with` block) abandons the request.
+`stream.next(timeout)` takes a timeout in seconds and returns `None` when it expires; `stream.done` tells a timeout apart from the end of the stream. Closing the stream (or leaving the `with` block) abandons the request. To stop it early and still get its final event, call `stream.cancel()` (from any thread, including while another waits in `next`) and keep reading: chat ends with a chunk whose `finish_reason` is `canceled`, Anthropic with `message_stop` (its `stop_reason` is `end_turn`, since Anthropic has no cancelled reason), Responses with `response.cancelled`, each with usage.
 
 ## Streaming into a web framework
 
