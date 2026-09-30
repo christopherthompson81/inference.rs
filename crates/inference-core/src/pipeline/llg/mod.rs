@@ -99,6 +99,7 @@ pub fn constraint_from_llg_grammar(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use inference_nn::utils::tokenizer::tokenizer_from_file;
 
     // Mirrors build_llg_factory; `apply_fix=false` leaves every added token special-marked, as toktrie does.
     fn build_trie(mut tokenizer: Tokenizer, apply_fix: bool) -> toktrie::TokTrie {
@@ -161,7 +162,7 @@ mod tests {
     #[test]
     fn honors_tokenizer_special_flag() {
         if let Ok(p) = std::env::var("REGRESSION_PADDLE_TOK") {
-            let tok = Tokenizer::from_file(&p).unwrap();
+            let tok = tokenizer_from_file(p.as_ref()).unwrap();
             let fcel = tok.token_to_id("<fcel>").unwrap();
             let eos = tok.token_to_id("</s>").unwrap();
             let imend = tok.token_to_id("<|IMAGE_END|>").unwrap();
@@ -200,7 +201,7 @@ mod tests {
             );
         }
         if let Ok(p) = std::env::var("REGRESSION_QWEN_TOK") {
-            let tok = Tokenizer::from_file(&p).unwrap();
+            let tok = tokenizer_from_file(p.as_ref()).unwrap();
             let im_start = tok.token_to_id("<|im_start|>").unwrap();
             let im_end = tok.token_to_id("<|im_end|>").unwrap();
             let tool = tok.token_to_id("<tool_call>").unwrap();

@@ -3,6 +3,7 @@ use std::{collections::HashMap, path::Path};
 use ahash::AHashMap;
 use anyhow::{Result, anyhow};
 use base64::Engine;
+use inference_nn::utils::tokenizer::tokenizer_from_bytes;
 use serde::Deserialize;
 use serde_json::Value;
 use tokenizers::{
@@ -216,7 +217,7 @@ pub(crate) fn get_tokenizer<P: AsRef<Path> + Clone>(
     let mut tokenizer = {
         let raw = std::fs::read(p.clone()).map_err(anyhow::Error::msg)?;
         let raw_fixed = repair_tokenizer_json(raw)?;
-        Tokenizer::from_bytes(&raw_fixed).map_err(anyhow::Error::msg)?
+        tokenizer_from_bytes(&raw_fixed)?
     };
     if let Some(added_tokens) = processor_added_tokens {
         tokenizer
@@ -232,7 +233,7 @@ pub(crate) fn get_tokenizer<P: AsRef<Path> + Clone>(
 
 #[cfg(test)]
 mod tests {
-    use super::repair_tokenizer_json;
+    use super::{repair_tokenizer_json, tokenizer_from_bytes};
     use serde_json::{Value, json};
 
     #[test]
@@ -294,6 +295,6 @@ mod tests {
 
         let repaired = repair_tokenizer_json(raw.clone()).unwrap();
         assert_eq!(repaired, raw);
-        assert!(tokenizers::Tokenizer::from_bytes(&repaired).is_ok());
+        assert!(tokenizer_from_bytes(&repaired).is_ok());
     }
 }

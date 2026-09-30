@@ -742,6 +742,7 @@ mod tests {
     use anyhow::Result;
     use candle_core::quantized::gguf_file::Value;
     use hf_hub::{Repo, RepoType, api::sync::ApiBuilder};
+    use inference_nn::utils::tokenizer::tokenizer_from_file;
     use std::collections::HashMap;
     use tokenizers::Tokenizer;
 
@@ -763,7 +764,7 @@ mod tests {
                 ));
 
                 let filename = api.get("llama_gguf_tokenizer.json").unwrap();
-                let tokenizer = Tokenizer::from_file(filename).expect("Valid tokenizer");
+                let tokenizer = tokenizer_from_file(filename.as_ref()).expect("Valid tokenizer");
                 Ok(tokenizer)
             }
             TokenizerType::Gpt2 => {
@@ -775,7 +776,7 @@ mod tests {
                 ));
 
                 let filename = api.get("gpt2_gguf_tokenizer.json").unwrap();
-                let tokenizer = Tokenizer::from_file(filename).expect("Valid tokenizer");
+                let tokenizer = tokenizer_from_file(filename.as_ref()).expect("Valid tokenizer");
                 Ok(tokenizer)
             }
         }
@@ -792,7 +793,7 @@ mod tests {
                 ));
 
                 let tokenizer_filename = api.get("tokenizer.json").unwrap();
-                Ok(Tokenizer::from_file(tokenizer_filename).unwrap())
+                Ok(tokenizer_from_file(tokenizer_filename.as_ref()).unwrap())
             }
             TokenizerType::Gpt2 => {
                 let api = ApiBuilder::new().with_progress(true).build().unwrap();
@@ -803,7 +804,7 @@ mod tests {
                 ));
 
                 let tokenizer_filename = api.get("tokenizer_gpt2.json").unwrap();
-                Ok(Tokenizer::from_file(tokenizer_filename).unwrap())
+                Ok(tokenizer_from_file(tokenizer_filename.as_ref()).unwrap())
             }
         }
     }
@@ -1078,7 +1079,7 @@ mod tests {
             .map_err(|_| anyhow::anyhow!("INFERENCE_RS_GEMMA4_TOKENIZER_JSON is not set"))?;
         let gguf_path = std::env::var("INFERENCE_RS_GEMMA4_GGUF")
             .map_err(|_| anyhow::anyhow!("INFERENCE_RS_GEMMA4_GGUF is not set"))?;
-        let hf = Tokenizer::from_file(hf_path).map_err(anyhow::Error::msg)?;
+        let hf = tokenizer_from_file(hf_path.as_ref())?;
         let archive = inference_quant::GgufArchive::open_file(gguf_path)?;
         let gguf = convert_gguf_metadata_to_hf_tokenizer(archive.metadata())?.tokenizer;
         assert_eq!(

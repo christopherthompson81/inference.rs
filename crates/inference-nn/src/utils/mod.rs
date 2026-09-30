@@ -2,6 +2,7 @@ pub mod debug;
 pub mod memory_usage;
 pub mod normal;
 pub mod progress;
+pub mod tokenizer;
 pub mod unvarbuilder;
 pub mod varbuilder_utils;
 

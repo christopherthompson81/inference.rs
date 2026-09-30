@@ -12,6 +12,7 @@ use tokenizers::Tokenizer;
 use tracing::info;
 
 use inference_nn::model::DiffusionModel;
+use inference_nn::utils::tokenizer::tokenizer_from_file;
 
 use crate::{
     DiffusionGenerationParams,
@@ -110,7 +111,7 @@ fn get_t5_tokenizer(fetch: &RepoFileFetcher) -> anyhow::Result<Tokenizer> {
         HUB_REVISION,
         "t5-v1_1-xxl.tokenizer.json",
     )?;
-    Tokenizer::from_file(tokenizer_filename).map_err(anyhow::Error::msg)
+    tokenizer_from_file(tokenizer_filename.as_ref())
 }
 
 fn get_t5_model(
@@ -176,7 +177,7 @@ fn get_clip_model_and_tokenizer(
     let model = ClipTextTransformer::new(vb.pp("text_model"), &config)?;
 
     let tokenizer_filename = fetch(repo_id, HUB_REVISION, "tokenizer.json")?;
-    let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(anyhow::Error::msg)?;
+    let tokenizer = tokenizer_from_file(tokenizer_filename.as_ref())?;
 
     Ok((model, tokenizer))
 }
