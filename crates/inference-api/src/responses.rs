@@ -4,7 +4,6 @@ pub use inference_protocol::responses_types::text::{TextConfig, TextFormat};
 use std::{
     collections::HashMap,
     pin::Pin,
-    sync::Arc,
     task::Poll,
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -13,8 +12,8 @@ use anyhow::Result;
 use either::Either;
 use futures::future::BoxFuture;
 use inference_core::{
-    AgenticToolCallData, AgenticToolCallPhase, ChatCompletionResponse, InferenceRs, Request,
-    Response,
+    AgentPermission, AgentToolApprovalHandler, AgenticToolCallData, AgenticToolCallPhase,
+    ChatCompletionResponse, InferenceRs, Request, Response,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -31,8 +30,9 @@ use crate::{
     cached_responses::get_response_cache,
     dispatch::{create_response_channel, response_model_id, send_request_with_model},
     engine_chat::{
-        ChatCompletionParseContext, DispatchError, ResponseTap,
+        ASK_REQUIRES_STREAMING, ChatCompletionParseContext, ChatEngine, DispatchError, ResponseTap,
         parse_request as parse_chat_request, serialize_agentic_progress,
+        serialize_approval_required,
     },
     lora_routing::{DEFAULT_MODEL_ID, resolve_lora_adapter_model},
     openai::{
@@ -46,7 +46,6 @@ use crate::{
         items::{InputItem, MessageContentParam, OutputItem, ShellCallOutputPart},
         resource::{InputTokensDetails, ResponseError, ResponseResource, ResponseUsage},
     },
-    skill_store::SkillStore,
     types::SharedInferenceRsState,
 };
 
@@ -917,6 +916,7 @@ fn record_shell_progress_items(
 pub enum ResponsesStreamItem {
     Event(OpenResponsesStreamEvent),
     AgenticToolCallProgress(Value),
+    AgenticToolApprovalRequired(Value),
     FileProduced(inference_core::File),
 }
 
@@ -926,6 +926,7 @@ impl ResponsesStreamItem {
         match self {
             Self::Event(event) => event.event_type(),
             Self::AgenticToolCallProgress(_) => "agentic_tool_call_progress",
+            Self::AgenticToolApprovalRequired(_) => "agentic_tool_approval_required",
             Self::FileProduced(_) => "file_produced",
         }
     }
@@ -934,7 +935,9 @@ impl ResponsesStreamItem {
     pub fn to_json(&self) -> String {
         let data = match self {
             Self::Event(event) => serde_json::to_value(event),
-            Self::AgenticToolCallProgress(value) => Ok(value.clone()),
+            Self::AgenticToolCallProgress(value) | Self::AgenticToolApprovalRequired(value) => {
+                Ok(value.clone())
+            }
             Self::FileProduced(file) => serde_json::to_value(file),
         }
         .unwrap_or_else(|_| ApiError::internal().to_openai_body());
@@ -1491,6 +1494,21 @@ impl futures::Stream for OpenResponsesStreamer {
                             )))
                         }
                     }
+                    Response::AgenticToolApprovalRequired {
+                        approval_id,
+                        session_id,
+                        round,
+                        tool,
+                        arguments,
+                    } => Poll::Ready(Some(ResponsesStreamItem::AgenticToolApprovalRequired(
+                        serialize_approval_required(
+                            &approval_id,
+                            &session_id,
+                            round,
+                            &tool,
+                            &arguments,
+                        ),
+                    ))),
                     Response::File(file) => {
                         self.files.push(file.clone());
                         Poll::Ready(Some(ResponsesStreamItem::FileProduced(file)))
@@ -1686,10 +1704,10 @@ fn chat_response_to_response_resource(
 /// Parse OpenResponses request into internal format
 async fn parse_openresponses_request(
     oairequest: OpenResponsesCreateRequest,
-    state: SharedInferenceRsState,
+    chat: &ChatEngine,
     tx: Sender<Response>,
-    skill_store: Option<Arc<SkillStore>>,
 ) -> Result<(Request, Vec<Message>, RequestContext)> {
+    let state = chat.state.clone();
     // parallel_tool_calls=false is accepted best-effort; max_tool_calls has no engine support
     if oairequest.max_tool_calls.is_some() {
         anyhow::bail!(
@@ -1812,7 +1830,7 @@ async fn parse_openresponses_request(
     };
 
     // Convert to ChatCompletionRequest
-    let chat_request = ChatCompletionRequest {
+    let mut chat_request = ChatCompletionRequest {
         messages: Either::Left(final_messages.clone()),
         model: oairequest.model,
         adapter: oairequest.adapter,
@@ -1854,16 +1872,30 @@ async fn parse_openresponses_request(
         files: oairequest.files,
     };
 
+    chat.apply_agent_policy(&mut chat_request);
+    let asks = chat_request.agent_permission == Some(AgentPermission::Ask);
+    if asks && chat_request.stream != Some(true) {
+        return Err(ApiError::new(
+            ApiErrorKind::InvalidRequest,
+            ASK_REQUIRES_STREAMING,
+            Some("unsupported_parameter"),
+            Some("agent_permission"),
+        )
+        .into());
+    }
+    let agent_approval_handler =
+        asks.then(|| AgentToolApprovalHandler::from_async(chat.agentic.approval_broker.callback()));
+    let agent_approval_notifier = asks.then(|| chat.agentic.approval_broker.notifier(tx.clone()));
     let (request, _) = parse_chat_request(
         chat_request,
         ChatCompletionParseContext {
             state,
             tx,
-            tool_dispatch_url: None,
-            agent_approval_handler: None,
-            agent_approval_notifier: None,
+            tool_dispatch_url: chat.agentic.tool_dispatch_url.clone(),
+            agent_approval_handler,
+            agent_approval_notifier,
             tool_surface: OpenAiToolSurface::Responses,
-            skill_store,
+            skill_store: chat.skill_store.clone(),
             media: Default::default(),
         },
     )
@@ -1897,18 +1929,17 @@ pub struct PreparedResponse {
 
 /// Validates a Responses request, resolves the conversation it continues and sends it to its model.
 pub fn prepare_response<'a>(
-    state: &'a SharedInferenceRsState,
-    skill_store: Option<Arc<SkillStore>>,
+    chat: &'a ChatEngine,
     request: OpenResponsesCreateRequest,
 ) -> BoxFuture<'a, Result<PreparedResponse, DispatchError>> {
-    Box::pin(prepare_response_inner(state, skill_store, request))
+    Box::pin(prepare_response_inner(chat, request))
 }
 
 async fn prepare_response_inner(
-    state: &SharedInferenceRsState,
-    skill_store: Option<Arc<SkillStore>>,
+    chat: &ChatEngine,
     mut request: OpenResponsesCreateRequest,
 ) -> Result<PreparedResponse, DispatchError> {
+    let state = &chat.state;
     let stream = request.stream == Some(true);
     let background = request.background == Some(true);
     if background && stream {
@@ -1925,10 +1956,9 @@ async fn prepare_response_inner(
     let model_id = (request.model != DEFAULT_MODEL_ID).then(|| request.model.clone());
     let metadata = request.metadata.clone();
     let store = request.store.unwrap_or(true);
-    let (core_request, history, context) =
-        parse_openresponses_request(request, state.clone(), tx, skill_store)
-            .await
-            .map_err(|error| DispatchError::Validation(boxed_anyhow(error)))?;
+    let (core_request, history, context) = parse_openresponses_request(request, chat, tx)
+        .await
+        .map_err(|error| DispatchError::Validation(boxed_anyhow(error)))?;
     send_request_with_model(state, core_request, model_id.as_deref())
         .await
         .map_err(|error| DispatchError::Internal(error.into()))?;

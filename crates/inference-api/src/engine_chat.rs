@@ -38,7 +38,7 @@ use crate::{
     video::parse_video_url_for_server,
 };
 
-const ASK_REQUIRES_STREAMING: &str = "agent_permission \"ask\" requires stream=true, so approval requests can be delivered and answered.";
+pub(crate) const ASK_REQUIRES_STREAMING: &str = "agent_permission \"ask\" requires stream=true, so approval requests can be delivered and answered.";
 
 pub fn serialize_agentic_progress(
     round: usize,
@@ -828,6 +828,22 @@ impl DispatchError {
 }
 
 impl ChatEngine {
+    /// Fills the server's `max_tool_rounds` default and merges its agent permission with the request's, strictest.
+    pub fn apply_agent_policy(&self, request: &mut ChatCompletionRequest) {
+        request.max_tool_rounds = request.max_tool_rounds.or(self.agentic.max_tool_rounds);
+        let request_permission = request
+            .agent_permission
+            .or_else(|| request.code_execution_permission.map(Into::into));
+        request.agent_permission = match (self.agentic.agent_permission, request_permission) {
+            (Some(server_permission), Some(request_permission)) => {
+                Some(server_permission.strictest(request_permission))
+            }
+            (Some(server_permission), None) => Some(server_permission),
+            (None, permission) => permission,
+        };
+        request.code_execution_permission = None;
+    }
+
     /// Applies the server's agentic policy to `oairequest`, parses it and sends it to its model.
     pub fn prepare<'a>(
         &'a self,
@@ -850,19 +866,7 @@ impl ChatEngine {
             .map_err(|error| DispatchError::Validation(Box::new(error)))?;
         let model_override = response_model_id(&self.state, requested_model, &oairequest.model);
 
-        oairequest.max_tool_rounds = oairequest.max_tool_rounds.or(self.agentic.max_tool_rounds);
-        let request_permission = oairequest
-            .agent_permission
-            .or_else(|| oairequest.code_execution_permission.map(Into::into));
-        oairequest.agent_permission = match (self.agentic.agent_permission, request_permission) {
-            (Some(server_permission), Some(request_permission)) => {
-                Some(server_permission.strictest(request_permission))
-            }
-            (Some(server_permission), None) => Some(server_permission),
-            (None, permission) => permission,
-        };
-        oairequest.code_execution_permission = None;
-
+        self.apply_agent_policy(&mut oairequest);
         let asks = matches!(oairequest.agent_permission, Some(AgentPermission::Ask));
         let is_streaming = oairequest.stream.unwrap_or(false);
         if asks && !is_streaming {

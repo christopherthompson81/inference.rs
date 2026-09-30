@@ -58,7 +58,7 @@ Approval cards show the tool metadata and decision controls, with collapsible ar
 </TabItem>
 <TabItem label="HTTP">
 
-`ask` is only supported with `stream: true`. The stream emits `agentic_tool_approval_required`, then waits while the app resolves that approval. **If an approval is not resolved within five minutes, the action is denied.**
+`ask` is only supported with `stream: true`, on `/v1/chat/completions` and `/v1/responses`. The stream emits `agentic_tool_approval_required`, then waits while the app resolves that approval. **If an approval is not resolved within five minutes, the action is denied.**
 
 ```json
 {

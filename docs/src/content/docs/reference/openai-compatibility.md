@@ -114,6 +114,7 @@ Uploaded skill versions remain available from the server's skills directory (`--
 
 - `parallel_tool_calls` must be `true` (default) or omitted; `false` returns an error.
 - `max_tool_calls` returns an error for any value. To cap tool rounds, use the server-level `--max-tool-rounds` flag (applies to both Chat Completions and Responses).
+- The server's `--agent-permission` applies to Responses as to chat: `deny` blocks agent tools, and under `ask` a request must stream, with approvals arriving as `agentic_tool_approval_required` events; a blocking or background request is rejected on `agent_permission`.
 - `tools[*].type="web_search"` rejects image search (`search_content_types: ["image"]` or `image_settings`) and `external_web_access: false`. Domain filters are supported for up to 100 allowed or blocked domains and include subdomains.
 - `tools[*].type="web_search_preview"` rejects `filters` and `return_token_budget`; `external_web_access` is ignored.
 - `tools[*].type="code_interpreter"` rejects container ids, `container.file_ids`, and `container.memory_limit`.
@@ -121,7 +122,7 @@ Uploaded skill versions remain available from the server's skills directory (`--
 
 ### inference extensions on Responses
 
-`top_k`, `min_p`, `repetition_penalty`, `dry_multiplier`, `dry_base`, `dry_allowed_length`, `dry_sequence_breakers`, `grammar`, `adapter`. The `adapter` field selects a loaded dynamic LoRA alias string or exact generation object; omit it or use `null` for the base model. A loaded alias can instead be sent as `model`. The chat-only agentic fields (`session_id`, `agent_permission`, `files`, `max_tool_rounds`, `web_search_options`) are not part of this endpoint's schema. Use the Responses `tools` array for web search, code interpreter, shell, and OpenAI-compatible Skills.
+`top_k`, `min_p`, `repetition_penalty`, `dry_multiplier`, `dry_base`, `dry_allowed_length`, `dry_sequence_breakers`, `grammar`, `adapter`. The `adapter` field selects a loaded dynamic LoRA alias string or exact generation object; omit it or use `null` for the base model. A loaded alias can instead be sent as `model`. `max_tool_rounds` and `files` are accepted as on chat; the other chat agentic fields (`session_id`, `agent_permission`, `web_search_options`) are not part of this endpoint's schema. Use the Responses `tools` array for web search, code interpreter, shell, and OpenAI-compatible Skills.
 
 Thinking, reasoning effort, and truncation are not top-level extension fields here; they are controlled through the standard Responses objects. Use `reasoning.effort` with `off`, `low`, `medium`, `high`, or `xhigh`; `none` is accepted as an alias for `off`. Omission enables thinking without choosing an effort. `reasoning.summary` is accepted for compatibility but currently does not change the response. Use `truncation` for sequence truncation. Top-level `enable_thinking`, `reasoning_effort`, and `truncate_sequence` keys are silently ignored on this endpoint.
 

@@ -307,3 +307,54 @@ async fn generated_images_are_served_from_the_file_store() -> anyhow::Result<()>
     assert_eq!(to_bytes(response.into_body(), usize::MAX).await?, png);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn responses_apply_the_servers_ask_permission() -> anyhow::Result<()> {
+    use futures::StreamExt;
+
+    let dir = support::tiny_checkpoint()?;
+    let spec = serde_json::from_value(json!({
+        "model": {"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}},
+        "runtime": {"device": "cpu"},
+        "agentic": {"agent_permission": "ask"},
+    }))?;
+    let engine = inference_api::Engine::load(spec).await?;
+    let request = json!({"model": "default", "input": PROMPT, "max_output_tokens": MAX_TOKENS});
+
+    // Approvals travel as stream events, so an `ask` server refuses a blocking request, as chat does.
+    let refused = engine
+        .responses(serde_json::from_value(request.clone())?)
+        .await
+        .expect_err("an ask server refuses a blocking Responses request");
+    assert_eq!(
+        refused.param.as_deref(),
+        Some("agent_permission"),
+        "{refused:?}"
+    );
+
+    let mut stream = engine
+        .responses_stream(serde_json::from_value(request.clone())?)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let mut names = Vec::new();
+    while let Some(item) = stream.next().await {
+        names.push(item.name());
+    }
+    assert_eq!(names.last(), Some(&"response.completed"), "{names:?}");
+
+    let app = InferenceRsServerRouterBuilder::new()
+        .with_engine(&engine)
+        .build()
+        .await?;
+    let response = app
+        .oneshot(
+            Request::post("/v1/responses")
+                .header("content-type", "application/json")
+                .body(Body::from(request.to_string()))?,
+        )
+        .await?;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let body: Value = serde_json::from_str(&body_text(response).await?)?;
+    assert_eq!(body["error"]["param"], "agent_permission", "{body}");
+    Ok(())
+}

@@ -948,7 +948,7 @@ impl Engine {
         request: OpenResponsesCreateRequest,
     ) -> Result<PreparedResponse, ApiError> {
         let state = self.state().clone();
-        prepare_response(&state, self.chat.skill_store.clone(), request)
+        prepare_response(&self.chat, request)
             .await
             .map_err(|error| error.into_api_error(state))
     }

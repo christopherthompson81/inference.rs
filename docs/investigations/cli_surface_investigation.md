@@ -64,3 +64,27 @@ MCP call can't give), so an `ask` server now lists no `chat` tool; the MCP guide
 applies and `stream` is ignored. The review also found `/v1/responses` (server handler and `Engine::response`) outside
 `ChatEngine`: `prepare_response_inner` hardcodes `agent_permission: None`, which the agentic loop treats as `auto`,
 so a server run with `deny` or `ask` still auto-runs tools through the Responses API. That is the next fix.
+
+## Run 3 — 2026-09-30 17:30
+
+**Question:** Run 2's review found `/v1/responses` outside `ChatEngine`. What did it skip, and what should `ask`
+mean on an API with no approval events?
+
+**Finding:** `parse_openresponses_request` built its internal `ChatCompletionRequest` with `agent_permission: None`
+(the agentic loop treats that as `auto`), no tool-dispatch URL and no server `max_tool_rounds` default. Both the HTTP
+handler and `Engine::responses` (so the C ABI and bindings) took this path.
+
+**Change:** `ChatEngine::apply_agent_policy`, factored out of `prepare_inner`, fills the `max_tool_rounds` default and
+merges the server's permission with the request's by the strictest. `prepare_response` takes `&ChatEngine`, applies
+it, and passes the server's tool-dispatch URL and skill store.
+
+**Dead end, then the design:** the first version refused `ask` on Responses outright, on the premise that the API has
+no event to carry an approval. The review pointed out that this dropped `/v1/responses` entirely for an `ask`
+server, plain text included, and that the Responses stream already carries engine extensions
+(`agentic_tool_call_progress`, `file_produced`). Now Responses matches chat: under `ask` a streaming request installs
+the approval broker's handler and notifier and streams `agentic_tool_approval_required` events (answered with
+`resolve_approval`); a blocking or background request is refused with chat's `ASK_REQUIRES_STREAMING`.
+
+**Test:** `chat_route::responses_apply_the_servers_ask_permission`: under an `ask` spec, a blocking `Engine::responses`
+and `POST /v1/responses` refuse on `agent_permission`, and `Engine::responses_stream` completes. Not covered: that a
+`deny` server's permission reaches the core request for Responses (it flows through the same `parse_request` as chat).
