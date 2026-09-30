@@ -81,6 +81,7 @@
 //!
 //!     let model = ModelSelected::Plain {
 //!         model_id: plain_model_id,
+//!         quant: None,
 //!         tokenizer_json,
 //!         arch,
 //!         dtype,

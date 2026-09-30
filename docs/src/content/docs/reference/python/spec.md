@@ -248,6 +248,20 @@ WebSocket-based MCP server for real-time bidirectional communication
 | `url` | `str` | required |
 
 
+## `MmprojSelection`
+
+How a GGUF spec without `mmproj_filename` gets its multimodal projector.
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `MmprojSelection.GIVEN` | `'given'` |
+| `MmprojSelection.ARTIFACT_REPO` | `'artifact_repo'` |
+| `MmprojSelection.ANY` | `'any'` |
+| `MmprojSelection.REQUIRED` | `'required'` |
+
+
 ## `ModelDType`
 
 DType for the model.
@@ -291,6 +305,7 @@ Select an embedding model, without quantization or adapters
 | `hf_cache_path` | `str \| None` | optional |
 | `imatrix` | `str \| None` | optional |
 | `model_id` | `str` | required |
+| `quant` | `str \| None` | optional |
 | `tokenizer_json` | `str \| None` | optional |
 | `topology` | `str \| None` | optional |
 | `write_uqff` | `UqffWriteSpec \| None` | optional |
@@ -333,8 +348,10 @@ Select a GGUF model.
 | `max_num_images` | `int \| None` | optional |
 | `max_seq_len` | `int \| None` | `4096` |
 | `mmproj_filename` | `str \| None` | optional |
+| `mmproj_selection` | `MmprojSelection \| None` | optional |
 | `organization` | `IsqOrganization \| None` | optional |
-| `quantized_filename` | `str` | required |
+| `quant` | `str \| None` | optional |
+| `quantized_filename` | `str \| None` | optional |
 | `quantized_model_id` | `str` | required |
 | `tok_model_id` | `str \| None` | optional |
 | `tokenizer_json` | `str \| None` | optional |
@@ -362,8 +379,10 @@ Select a LoRA architecture
 | `max_image_length` | `int \| None` | optional |
 | `max_num_images` | `int \| None` | optional |
 | `max_seq_len` | `int \| None` | `4096` |
+| `mmproj_selection` | `MmprojSelection \| None` | optional |
 | `model_id` | `str` | required |
 | `organization` | `IsqOrganization \| None` | optional |
+| `quant` | `str \| None` | optional |
 | `runtime_config` | `LoraRuntimeConfig \| None` | optional |
 | `tokenizer_json` | `str \| None` | optional |
 | `topology` | `str \| None` | optional |
@@ -406,7 +425,8 @@ Select a GGUF model with LoRA.
 | `max_seq_len` | `int \| None` | `4096` |
 | `order` | `str` | required |
 | `organization` | `IsqOrganization \| None` | optional |
-| `quantized_filename` | `str` | required |
+| `quant` | `str \| None` | optional |
+| `quantized_filename` | `str \| None` | optional |
 | `quantized_model_id` | `str` | required |
 | `tok_model_id` | `str \| None` | optional |
 | `tokenizer_json` | `str \| None` | optional |
@@ -435,6 +455,7 @@ Select a multimodal plain model, without quantization or adapters
 | `max_seq_len` | `int \| None` | `4096` |
 | `model_id` | `str` | required |
 | `organization` | `IsqOrganization \| None` | optional |
+| `quant` | `str \| None` | optional |
 | `tokenizer_json` | `str \| None` | optional |
 | `topology` | `str \| None` | optional |
 | `write_uqff` | `UqffWriteSpec \| None` | optional |
@@ -458,6 +479,7 @@ Select a plain model, without quantization or adapters
 | `max_seq_len` | `int \| None` | `4096` |
 | `model_id` | `str` | required |
 | `organization` | `IsqOrganization \| None` | optional |
+| `quant` | `str \| None` | optional |
 | `tokenizer_json` | `str \| None` | optional |
 | `topology` | `str \| None` | optional |
 | `write_uqff` | `UqffWriteSpec \| None` | optional |
@@ -514,6 +536,7 @@ Select an X-LoRA architecture
 | `model_id` | `str \| None` | optional |
 | `order` | `str` | required |
 | `organization` | `IsqOrganization \| None` | optional |
+| `quant` | `str \| None` | optional |
 | `tgt_non_granular_index` | `int \| None` | optional |
 | `tokenizer_json` | `str \| None` | optional |
 | `topology` | `str \| None` | optional |
@@ -557,7 +580,8 @@ Select a GGUF model with X-LoRA.
 | `max_seq_len` | `int \| None` | `4096` |
 | `order` | `str` | required |
 | `organization` | `IsqOrganization \| None` | optional |
-| `quantized_filename` | `str` | required |
+| `quant` | `str \| None` | optional |
+| `quantized_filename` | `str \| None` | optional |
 | `quantized_model_id` | `str` | required |
 | `tgt_non_granular_index` | `int \| None` | optional |
 | `tok_model_id` | `str \| None` | optional |

@@ -17,7 +17,7 @@ pub use diagnostics::{
 pub use model_loader::{
     LoaderBuilder, get_auto_device_map_params, get_model_dtype, get_tgt_non_granular_index,
 };
-pub use model_selected::ModelSelected;
+pub use model_selected::{MmprojSelection, ModelSelected};
 pub use resource_plan::{
     PagedKvModelRequest, PagedKvPlan, PagedKvPolicy, RuntimeResourcePlanOptions, plan_paged_kv,
 };

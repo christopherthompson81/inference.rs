@@ -81,6 +81,7 @@ GROUPS = [
             or n
             in {
                 "ModelDType",
+                "MmprojSelection",
                 "IsqOrganization",
                 "UqffWriteSpec",
                 "UqffWriteSpecConfig",

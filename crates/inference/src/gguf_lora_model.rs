@@ -43,6 +43,7 @@ impl GgufLoraModelBuilder {
         }
         let lora_model_id = self.lora_model_id;
         let select = |builder: &GgufModelBuilder, dims: GgufAutoMapDims| ModelSelected::LoraGGUF {
+            quant: None,
             tok_model_id: builder.tok_model_id.clone(),
             quantized_model_id: builder.model_id.clone(),
             quantized_filename: builder.files.join(GGUF_MULTI_FILE_DELIMITER),

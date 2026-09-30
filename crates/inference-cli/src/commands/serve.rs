@@ -558,6 +558,7 @@ pub(crate) fn convert_to_model_selected(
                     Some(multimodal),
                 ),
                 ModelFormat::Plain => Ok(ModelSelected::MultimodalPlain {
+                    quant: None,
                     model_id: model.model_id.clone(),
                     tokenizer_json: model
                         .tokenizer
@@ -611,6 +612,7 @@ pub(crate) fn convert_to_model_selected(
                 anyhow::bail!("Embedding models do not support GGUF or GGML format");
             }
             Ok(ModelSelected::Embedding {
+                quant: None,
                 model_id: model.model_id.clone(),
                 tokenizer_json: model
                     .tokenizer
@@ -662,6 +664,7 @@ fn convert_text_model(
     match (format_type, has_lora, has_legacy_lora, has_xlora) {
         // Plain format
         (ModelFormat::Plain, false, false, false) => Ok(ModelSelected::Plain {
+            quant: None,
             model_id: model.model_id.clone(),
             tokenizer_json: model
                 .tokenizer
@@ -686,6 +689,8 @@ fn convert_text_model(
         }),
 
         (ModelFormat::Plain, true, false, false) => Ok(ModelSelected::Lora {
+            mmproj_selection: inference_selection::MmprojSelection::Given,
+            quant: None,
             model_id: model.model_id.clone(),
             tokenizer_json: model
                 .tokenizer
@@ -715,6 +720,7 @@ fn convert_text_model(
         }),
 
         (ModelFormat::Plain, false, false, true) => Ok(ModelSelected::XLora {
+            quant: None,
             model_id: Some(model.model_id.clone()),
             tokenizer_json: model
                 .tokenizer
@@ -743,6 +749,8 @@ fn convert_text_model(
 
         // GGUF format - quantized_filename is required String
         (ModelFormat::Gguf, dynamic_lora, false, false) => Ok(ModelSelected::GGUF {
+            quant: None,
+            mmproj_selection: inference_selection::MmprojSelection::Given,
             tok_model_id: format_opts.tok_model_id.clone(),
             quantized_model_id: model.model_id.clone(),
             quantized_filename: format_opts
@@ -776,6 +784,7 @@ fn convert_text_model(
         }),
 
         (ModelFormat::Gguf, false, true, false) => Ok(ModelSelected::LoraGGUF {
+            quant: None,
             tok_model_id: format_opts.tok_model_id.clone(),
             quantized_model_id: model.model_id.clone(),
             quantized_filename: format_opts
@@ -809,6 +818,7 @@ fn convert_text_model(
         }),
 
         (ModelFormat::Gguf, false, false, true) => Ok(ModelSelected::XLoraGGUF {
+            quant: None,
             tok_model_id: format_opts.tok_model_id.clone(),
             quantized_model_id: model.model_id.clone(),
             quantized_filename: format_opts

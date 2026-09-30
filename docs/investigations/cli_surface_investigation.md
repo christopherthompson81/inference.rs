@@ -229,3 +229,43 @@ points at `ChatEngine::prepare`. Still public, below the parsing layer: `dispatc
 
 **Test:** `chat_route::anthropic_count_tokens_counts_the_rendered_prompt` (a count on the tiny checkpoint, and an empty
 message list rejected with an Anthropic error body).
+
+## Run 10 — 2026-10-01 (time approximate)
+
+**Question:** quant resolution exists three times (Run 1). Can the one the engine runs at load,
+`inference_selection::quant`, cover everything the CLI's `apply_quant_resolution` (serve.rs) and `resolve_gguf_source`
+(quantize.rs) do, so the CLI just passes `quant` through?
+
+**Finding (design pass, read-only):** the selection resolver only took `Run.quant`. The CLI additionally handled
+`--quant` on explicit text, multimodal and embedding models; `--format gguf --quant` (mixed repos allowed, no ISQ
+fallback); projector auto-selection for an exact `-f`; a required projector for multimodal GGUF; carrying dynamic LoRA
+and multimodal limits into the GGUF it picks (`run_as_gguf` dropped them); and a GGUF-input-only rule for `quantize`.
+None of these could be said in a `ModelSelected`, so non-CLI clients got less. The CLI's projector rule has three
+behaviors, which two bools can't hold: pick when the repo is a GGUF artifact repo (an exact file in a mixed repo gets
+none), pick any sibling for the direct local file shorthand (even in a mixed directory), and require one for an
+explicit multimodal model.
+
+**Change (first of two PRs):** `quant` on `Plain`, `Lora`, `MultimodalPlain`, `Embedding` and `GGUF`;
+`GGUF.quantized_filename` may be empty when `quant` picks it; `GGUF.mmproj_selection: MmprojSelection`
+(`given` default, `artifact_repo`, `any`, `required`). `quant::resolve_model_source(model, token, force_cpu,
+QuantPolicy::{Weights, GgufInput})` resolves all of them; a resolved spec has `quant: None` and `mmproj_selection:
+given`, and `ModelSelected::needs_source_resolution` tells whether one is still pending. The loader refuses unresolved
+specs. `Engine::load` resolves every spec that needs it; `isq` with `quant` is refused as before, now for any kind.
+OpenAPI, Python types and the Python spec reference regenerated.
+
+**Tests:** 13 resolver tests in selection ported from the CLI's cases (vision+audio projectors, LoRA runtime kept,
+mixed-dir ISQ fallback, multimodal needs a projector, embedding refuses GGUF, GGUF quant in a mixed repo, no ISQ
+fallback for GGUF, quant+filename conflict, each `mmproj_selection` mode, the GGUF-input policy, loader refusal);
+the engine test covers a GGUF `quant` and its `isq` conflict; a Python test that a GGUF `quant` spec omits the filename.
+
+**Review:** no correctness bugs; resolved specs never stay pending. It found cases the follow-up PR could not say:
+`--xlora`/`--legacy-lora` with `--quant` (now `quant` on `XLora`, `LoraGGUF`, `XLoraGGUF`, with X-LoRA switching to
+`XLoraGGUF` in a GGUF repo and needing its base `model_id`); a LoRA-enabled multimodal model needing its projector
+(now `mmproj_selection` on `Lora`, applied when `quant` resolves to GGUF); and `--tok-model-id`, which the GGUF a
+`quant` resolves to can't carry. The last stays in the CLI: `--tok-model-id` implies GGUF format, as `--mmproj` already
+does, since it means nothing for safetensors. `--quant` with `--format ggml` also stays a CLI check. JSON `null` for
+`quantized_filename`/`mmproj_selection` is refused (Python omits `None`, so only hand-written JSON sees it).
+
+**Next:** the CLI emits `quant` and `mmproj_selection` and deletes both resolvers. Known behavior changes there:
+`--format plain --quant` on a GGUF-only repo loads the GGUF instead of erroring; a TOML model with both `quant` and
+`isq`/`from_uqff` is an error instead of `isq` being dropped with a warning.

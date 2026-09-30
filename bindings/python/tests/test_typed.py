@@ -126,6 +126,14 @@ class Generated(unittest.TestCase):
         spec = t.EngineSpec(model=t.ModelSelectedPlain(model_id="m", arch=t.NormalLoaderType.QWEN3))
         self.assertEqual(ir.to_data(spec)["model"]["Plain"]["arch"], "qwen3")
 
+    def test_a_gguf_quant_leaves_the_filename_to_the_engine(self):
+        model = t.ModelSelectedGGUF(
+            quantized_model_id="org/model-GGUF", quant="4", mmproj_selection=t.MmprojSelection.ARTIFACT_REPO
+        )
+        data = ir.to_data(model)["GGUF"]
+        self.assertNotIn("quantized_filename", data)
+        self.assertEqual((data["quant"], data["mmproj_selection"]), ("4", "artifact_repo"))
+
     def test_a_dict_spec_loads_like_its_class(self):
         data = json.loads(spec("m"))
         written = ir.to_data(ir.from_data(t.EngineSpec, data))

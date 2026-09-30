@@ -27,6 +27,22 @@ fn default_max_image_length() -> usize {
     AutoDeviceMapParams::DEFAULT_MAX_IMAGE_LENGTH
 }
 
+/// How a GGUF spec without `mmproj_filename` gets its multimodal projector.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MmprojSelection {
+    /// Only `mmproj_filename`, except that a `quant` resolved in a GGUF artifact repo also picks its projector.
+    #[default]
+    Given,
+    /// The projector a GGUF artifact repo publishes; a repo that also holds other weights gets none.
+    ArtifactRepo,
+    /// Any projector published beside the model file.
+    Any,
+    /// Any projector beside the model file, failing when there is none: the model is multimodal.
+    Required,
+}
+
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub enum ModelSelected {
@@ -109,6 +125,10 @@ pub enum ModelSelected {
         /// Model ID to load from. This may be a HF hub repo or a local path.
         model_id: String,
 
+        /// A quantization level (`4`, `q4k`, `auto`) resolved against what the repository publishes, as for `Run`.
+        #[serde(default)]
+        quant: Option<String>,
+
         /// Path to local tokenizer.json file. If this is specified it is used over any remote file.
         #[serde(default)]
         tokenizer_json: Option<String>,
@@ -182,6 +202,10 @@ pub enum ModelSelected {
         /// Force a base model ID to load from instead of using the ordering file. This may be a HF hub repo or a local path.
         model_id: Option<String>,
 
+        /// A quantization level (`4`, `q4k`, `auto`) resolved against what the repository publishes, as for `Run`.
+        #[serde(default)]
+        quant: Option<String>,
+
         /// Path to local tokenizer.json file. If this is specified it is used over any remote file.
         tokenizer_json: Option<String>,
 
@@ -237,6 +261,10 @@ pub enum ModelSelected {
         /// Base model ID. This may be a Hugging Face repository or a local path.
         model_id: String,
 
+        /// A quantization level (`4`, `q4k`, `auto`) resolved against what the repository publishes, as for `Run`.
+        #[serde(default)]
+        quant: Option<String>,
+
         /// Path to local tokenizer.json file. If this is specified it is used over any remote file.
         tokenizer_json: Option<String>,
 
@@ -247,6 +275,10 @@ pub enum ModelSelected {
         /// Dynamic LoRA runtime capacity and rank limits.
         #[serde(default)]
         runtime_config: LoraRuntimeConfig,
+
+        /// How a GGUF that `quant` resolves to gets its projector.
+        #[serde(default)]
+        mmproj_selection: MmprojSelection,
 
         /// The architecture of the model.
         arch: Option<NormalLoaderType>,
@@ -328,14 +360,23 @@ pub enum ModelSelected {
         quantized_model_id: String,
 
         /// Quantized filename(s).
-        /// May be a single filename, or use semicolons to separate multiple files.
+        /// May be a single filename, or use semicolons to separate multiple files. Leave empty for `quant` to pick one.
+        #[serde(default)]
         quantized_filename: String,
+
+        /// A GGUF quantization level (`4`, `q4k`) to pick `quantized_filename` from the repository's GGUF files.
+        #[serde(default)]
+        quant: Option<String>,
 
         /// Path to a tokenizer JSON file.
         tokenizer_json: Option<String>,
 
         /// Multimodal projector filename(s), separated by semicolons.
         mmproj_filename: Option<String>,
+
+        /// How to pick a projector when `mmproj_filename` is unset.
+        #[serde(default)]
+        mmproj_selection: MmprojSelection,
 
         /// Dynamic LoRA adapters to preload.
         #[serde(default)]
@@ -418,7 +459,12 @@ pub enum ModelSelected {
 
         /// Quantized filename(s).
         /// May be a single filename, or use semicolons to separate multiple files.
+        #[serde(default)]
         quantized_filename: String,
+
+        /// A GGUF quantization level (`4`, `q4k`) to pick `quantized_filename` from the repository's GGUF files.
+        #[serde(default)]
+        quant: Option<String>,
 
         /// Model ID to load X-LoRA from. This may be a HF hub repo or a local path.
         xlora_model_id: String,
@@ -499,7 +545,12 @@ pub enum ModelSelected {
 
         /// Quantized filename(s).
         /// May be a single filename, or use semicolons to separate multiple files.
+        #[serde(default)]
         quantized_filename: String,
+
+        /// A GGUF quantization level (`4`, `q4k`) to pick `quantized_filename` from the repository's GGUF files.
+        #[serde(default)]
+        quant: Option<String>,
 
         /// Model ID to load LoRA from. This may be a HF hub repo or a local path.
         adapters_model_id: String,
@@ -695,6 +746,10 @@ pub enum ModelSelected {
         /// Model ID to load from. This may be a HF hub repo or a local path.
         model_id: String,
 
+        /// A quantization level (`4`, `q4k`, `auto`) resolved against what the repository publishes, as for `Run`.
+        #[serde(default)]
+        quant: Option<String>,
+
         /// Path to local tokenizer.json file. If this is specified it is used over any remote file.
         tokenizer_json: Option<String>,
 
@@ -800,6 +855,10 @@ pub enum ModelSelected {
         /// Model ID to load from. This may be a HF hub repo or a local path.
         model_id: String,
 
+        /// A quantization level (`4`, `q4k`, `auto`) resolved against what the repository publishes, as for `Run`.
+        #[serde(default)]
+        quant: Option<String>,
+
         /// Path to local tokenizer.json file. If this is specified it is used over any remote file.
         #[serde(default)]
         tokenizer_json: Option<String>,
@@ -841,6 +900,40 @@ pub enum ModelSelected {
         #[cfg_attr(feature = "utoipa", schema(value_type = Option<String>))]
         hf_cache_path: Option<PathBuf>,
     },
+}
+
+impl ModelSelected {
+    /// The quantization level the spec asks resolution to pick weights for.
+    pub fn quant(&self) -> Option<&str> {
+        match self {
+            Self::Run { quant, .. }
+            | Self::Plain { quant, .. }
+            | Self::Lora { quant, .. }
+            | Self::MultimodalPlain { quant, .. }
+            | Self::Embedding { quant, .. }
+            | Self::XLora { quant, .. }
+            | Self::GGUF { quant, .. }
+            | Self::LoraGGUF { quant, .. }
+            | Self::XLoraGGUF { quant, .. } => quant.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Whether `selection::quant::resolve_model_source` still has files or a projector to pick before loading.
+    pub fn needs_source_resolution(&self) -> bool {
+        self.quant().is_some()
+            || matches!(
+                self,
+                Self::GGUF { quantized_filename, mmproj_filename, mmproj_selection, .. }
+                    if quantized_filename.is_empty()
+                        || (mmproj_filename.is_none() && *mmproj_selection != MmprojSelection::Given)
+            )
+            || matches!(
+                self,
+                Self::LoraGGUF { quantized_filename, .. } | Self::XLoraGGUF { quantized_filename, .. }
+                    if quantized_filename.is_empty()
+            )
+    }
 }
 
 #[cfg(all(test, feature = "utoipa"))]

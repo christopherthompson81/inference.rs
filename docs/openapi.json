@@ -5394,6 +5394,16 @@
           }
         ]
       },
+      "MmprojSelection": {
+        "type": "string",
+        "description": "How a GGUF spec without `mmproj_filename` gets its multimodal projector.",
+        "enum": [
+          "given",
+          "artifact_repo",
+          "any",
+          "required"
+        ]
+      },
       "Modality": {
         "type": "string",
         "enum": [
@@ -5853,6 +5863,13 @@
                       }
                     ]
                   },
+                  "quant": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "A quantization level (`4`, `q4k`, `auto`) resolved against what the repository publishes, as for `Run`."
+                  },
                   "tokenizer_json": {
                     "type": [
                       "string",
@@ -5964,6 +5981,13 @@
                         "description": "ISQ organization: `default` or `moqe`."
                       }
                     ]
+                  },
+                  "quant": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "A quantization level (`4`, `q4k`, `auto`) resolved against what the repository publishes, as for `Run`."
                   },
                   "tgt_non_granular_index": {
                     "type": [
@@ -6126,6 +6150,10 @@
                     "default": 4096,
                     "minimum": 0
                   },
+                  "mmproj_selection": {
+                    "$ref": "#/components/schemas/MmprojSelection",
+                    "description": "How a GGUF that `quant` resolves to gets its projector."
+                  },
                   "model_id": {
                     "type": "string",
                     "description": "Base model ID. This may be a Hugging Face repository or a local path."
@@ -6140,6 +6168,13 @@
                         "description": "ISQ organization: `default` or `moqe`."
                       }
                     ]
+                  },
+                  "quant": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "A quantization level (`4`, `q4k`, `auto`) resolved against what the repository publishes, as for `Run`."
                   },
                   "runtime_config": {
                     "$ref": "#/components/schemas/LoraRuntimeConfig",
@@ -6185,8 +6220,7 @@
                 "type": "object",
                 "description": "Select a GGUF model.",
                 "required": [
-                  "quantized_model_id",
-                  "quantized_filename"
+                  "quantized_model_id"
                 ],
                 "properties": {
                   "calibration_file": {
@@ -6295,6 +6329,10 @@
                     ],
                     "description": "Multimodal projector filename(s), separated by semicolons."
                   },
+                  "mmproj_selection": {
+                    "$ref": "#/components/schemas/MmprojSelection",
+                    "description": "How to pick a projector when `mmproj_filename` is unset."
+                  },
                   "organization": {
                     "oneOf": [
                       {
@@ -6306,9 +6344,16 @@
                       }
                     ]
                   },
+                  "quant": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "A GGUF quantization level (`4`, `q4k`) to pick `quantized_filename` from the repository's GGUF files."
+                  },
                   "quantized_filename": {
                     "type": "string",
-                    "description": "Quantized filename(s).\nMay be a single filename, or use semicolons to separate multiple files."
+                    "description": "Quantized filename(s).\nMay be a single filename, or use semicolons to separate multiple files. Leave empty for `quant` to pick one."
                   },
                   "quantized_model_id": {
                     "type": "string",
@@ -6362,7 +6407,6 @@
                 "description": "Select a GGUF model with X-LoRA.",
                 "required": [
                   "quantized_model_id",
-                  "quantized_filename",
                   "xlora_model_id",
                   "order"
                 ],
@@ -6438,6 +6482,13 @@
                       }
                     ]
                   },
+                  "quant": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "A GGUF quantization level (`4`, `q4k`) to pick `quantized_filename` from the repository's GGUF files."
+                  },
                   "quantized_filename": {
                     "type": "string",
                     "description": "Quantized filename(s).\nMay be a single filename, or use semicolons to separate multiple files."
@@ -6506,7 +6557,6 @@
                 "description": "Select a GGUF model with LoRA.",
                 "required": [
                   "quantized_model_id",
-                  "quantized_filename",
                   "adapters_model_id",
                   "order"
                 ],
@@ -6585,6 +6635,13 @@
                         "description": "ISQ organization: `default` or `moqe`."
                       }
                     ]
+                  },
+                  "quant": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "A GGUF quantization level (`4`, `q4k`) to pick `quantized_filename` from the repository's GGUF files."
                   },
                   "quantized_filename": {
                     "type": "string",
@@ -7005,6 +7062,13 @@
                       }
                     ]
                   },
+                  "quant": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "A quantization level (`4`, `q4k`, `auto`) resolved against what the repository publishes, as for `Run`."
+                  },
                   "tokenizer_json": {
                     "type": [
                       "string",
@@ -7176,6 +7240,13 @@
                   "model_id": {
                     "type": "string",
                     "description": "Model ID to load from. This may be a HF hub repo or a local path."
+                  },
+                  "quant": {
+                    "type": [
+                      "string",
+                      "null"
+                    ],
+                    "description": "A quantization level (`4`, `q4k`, `auto`) resolved against what the repository publishes, as for `Run`."
                   },
                   "tokenizer_json": {
                     "type": [

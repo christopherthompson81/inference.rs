@@ -78,6 +78,10 @@ spec = t.EngineSpec(
 engine = ir.Engine(spec)
 ```
 
+Leave out `quantized_filename` and give `quant="4"` to pick a published variant the way `--quant` does; the
+projector a GGUF repository publishes comes with it. `mmproj_selection` (`"artifact_repo"`, `"any"`,
+`"required"`) picks a projector for an exact file.
+
 [Full Python example](/examples/python/gguf/).
 
 </TabItem>

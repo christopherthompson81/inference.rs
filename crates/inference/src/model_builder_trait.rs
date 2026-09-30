@@ -5,7 +5,7 @@ use inference_core::{
     AddModelConfig, EngineConfig, IsqType, PagedAttentionConfig, Pipeline, SchedulerConfig,
     SearchCallback, SearchEmbeddingModel, ToolCallbackWithTool,
 };
-use inference_selection::{ModelSelected, PagedKvModelRequest, plan_paged_kv};
+use inference_selection::{MmprojSelection, ModelSelected, PagedKvModelRequest, plan_paged_kv};
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 use tokio::sync::Mutex;
 
@@ -399,6 +399,7 @@ pub async fn build_text_pipeline(
 pub(crate) fn plain_text_selection(builder: &crate::TextModelBuilder) -> ModelSelected {
     use inference_core::*;
     ModelSelected::Plain {
+        quant: None,
         model_id: builder.model_id.clone(),
         tokenizer_json: builder.tokenizer_json.clone(),
         arch: builder.loader_type.clone(),
@@ -529,6 +530,7 @@ pub async fn build_multimodal_pipeline(
 
     let loader_config = ModelLoaderConfig {
         source: Arc::new(ModelSelected::MultimodalPlain {
+            quant: None,
             model_id: builder.model_id.clone(),
             tokenizer_json: builder.tokenizer_json.clone(),
             arch: builder.loader_type,
@@ -617,6 +619,8 @@ pub(crate) fn gguf_selection(
 ) -> ModelSelected {
     use inference_core::*;
     ModelSelected::GGUF {
+        quant: None,
+        mmproj_selection: MmprojSelection::Given,
         tok_model_id: builder.tok_model_id.clone(),
         quantized_model_id: builder.model_id.clone(),
         quantized_filename: builder.files.join(GGUF_MULTI_FILE_DELIMITER),
@@ -880,6 +884,7 @@ pub async fn build_embedding_pipeline(
     let isq_type = resolve_isq_type(builder.isq.as_ref(), &device)?;
     let loader_config = ModelLoaderConfig {
         source: Arc::new(ModelSelected::Embedding {
+            quant: None,
             model_id: builder.model_id.clone(),
             tokenizer_json: builder.tokenizer_json.clone(),
             arch: builder.loader_type,
