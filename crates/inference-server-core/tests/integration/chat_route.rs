@@ -358,3 +358,52 @@ async fn responses_apply_the_servers_ask_permission() -> anyhow::Result<()> {
     assert_eq!(body["error"]["param"], "agent_permission", "{body}");
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn models_describe_what_a_loaded_model_serves() -> anyhow::Result<()> {
+    let dir = support::tiny_checkpoint()?;
+    let spec = serde_json::from_value(json!({
+        "model": {"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}},
+        "runtime": {"device": "cpu"},
+    }))?;
+    let engine = inference_api::Engine::load(spec).await?;
+    let models = serde_json::to_value(engine.models().map_err(anyhow::Error::msg)?)?;
+    // The `default` alias describes the model it stands for, so a client can pick its mode without a lookup.
+    for model in models["data"].as_array().unwrap() {
+        assert_eq!(model["category"], "multimodal", "{model}");
+        assert!(
+            model["modalities"]["input"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("vision")),
+            "{model}"
+        );
+        assert!(model["max_model_len"].as_u64().is_some(), "{model}");
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn completions_take_token_id_prompts() -> anyhow::Result<()> {
+    let dir = support::tiny_checkpoint()?;
+    let spec = serde_json::from_value(json!({
+        "model": {"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}},
+        "runtime": {"device": "cpu"},
+    }))?;
+    let engine = inference_api::Engine::load(spec).await?;
+    let request = json!({"model": "default", "prompt": [1, 2, 3, 4], "max_tokens": MAX_TOKENS});
+    let response = engine
+        .completion(serde_json::from_value(request.clone())?)
+        .await
+        .map_err(anyhow::Error::msg)?;
+    assert_eq!(response.usage.prompt_tokens, 4);
+
+    let mut echoed = request;
+    echoed["echo"] = json!(true);
+    let refused = engine
+        .completion(serde_json::from_value(echoed)?)
+        .await
+        .expect_err("echo needs a text prompt");
+    assert!(refused.message.contains("text prompt"), "{refused:?}");
+    Ok(())
+}

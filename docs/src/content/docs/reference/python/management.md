@@ -143,6 +143,21 @@ OpenAI file metadata + inference.rs extensions (`format`, `mime_type`, `source`,
 | `truncated` | `bool \| None` | optional |
 
 
+## `GenerationDefaults`
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `do_sample` | `bool \| None` | optional |
+| `max_length` | `int \| None` | optional |
+| `max_new_tokens` | `int \| None` | optional |
+| `min_p` | `float \| None` | optional |
+| `repetition_penalty` | `float \| None` | optional |
+| `suppress_tokens` | `list[int] \| None` | optional |
+| `temperature` | `float \| None` | optional |
+| `top_k` | `int \| None` | optional |
+| `top_p` | `float \| None` | optional |
+
+
 ## `ImageChoice`
 
 | Field | Type | Default |
@@ -236,6 +251,41 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `retired` | `bool` |
 
 
+## `Modality`
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `Modality.TEXT` | `'text'` |
+| `Modality.AUDIO` | `'audio'` |
+| `Modality.VISION` | `'vision'` |
+| `Modality.VIDEO` | `'video'` |
+| `Modality.EMBEDDING` | `'embedding'` |
+
+
+## `ModelCategory`
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `ModelCategory.TEXT` | `'text'` |
+| `ModelCategory.MULTIMODAL` | `'multimodal'` |
+| `ModelCategory.DIFFUSION` | `'diffusion'` |
+| `ModelCategory.AUDIO` | `'audio'` |
+| `ModelCategory.SPEECH` | `'speech'` |
+| `ModelCategory.EMBEDDING` | `'embedding'` |
+
+
+## `ModelModalities`
+
+| Field | Type |
+| --- | --- |
+| `input` | `list[Modality]` |
+| `output` | `list[Modality]` |
+
+
 ## `ModelObject`
 
 Model information metadata about an available mode
@@ -243,11 +293,14 @@ Model information metadata about an available mode
 | Field | Type | Default |
 | --- | --- | --- |
 | `adapter_generation` | `str \| None` | optional |
+| `category` | `ModelCategory \| None` | optional |
 | `created` | `int` | required |
+| `generation_defaults` | `GenerationDefaults \| None` | optional |
 | `id` | `str` | required |
 | `max_model_len` | `int \| None` | optional |
 | `mcp_servers_connected` | `int \| None` | optional |
 | `mcp_tools_count` | `int \| None` | optional |
+| `modalities` | `ModelModalities \| None` | optional |
 | `object` | `str` | required |
 | `owned_by` | `str` | required |
 | `parent` | `str \| None` | optional |

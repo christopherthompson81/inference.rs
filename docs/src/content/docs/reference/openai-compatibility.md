@@ -142,7 +142,7 @@ Poll with `curl http://localhost:1234/v1/responses/<id>`, cancel with `curl -X P
 
 ## Completions (legacy)
 
-`/v1/completions` (non-chat) is supported with a subset of Chat Completions extensions: `top_k`, `min_p`, `repetition_penalty`, `dry_multiplier`, `dry_base`, `dry_allowed_length`, `dry_sequence_breakers`, `grammar`, `truncate_sequence`, `adapter`. LoRA accepts the same alias-as-`model`, adapter alias, and exact-generation forms as Chat Completions. The agentic, session, file, web-search, thinking, and reasoning-effort fields are not part of this endpoint's schema and have no effect.
+`/v1/completions` (non-chat) is supported with a subset of Chat Completions extensions: `top_k`, `min_p`, `repetition_penalty`, `dry_multiplier`, `dry_base`, `dry_allowed_length`, `dry_sequence_breakers`, `grammar`, `truncate_sequence`, `adapter`. LoRA accepts the same alias-as-`model`, adapter alias, and exact-generation forms as Chat Completions. The agentic, session, file, web-search, thinking, and reasoning-effort fields are not part of this endpoint's schema and have no effect. `prompt` is a string or an array of token ids, which the model reads as they are; `echo` and a `best_of` above 1 need a string prompt. Arrays of strings and batches of token arrays are not supported.
 
 ## Embeddings
 

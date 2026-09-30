@@ -1309,6 +1309,66 @@ pub struct ModelObject {
     /// Longest sequence, prompt plus completion, a loaded model accepts
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_model_len: Option<usize>,
+    /// What a loaded model does, which decides the requests it serves
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<ModelCategory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub modalities: Option<ModelModalities>,
+    /// From the model's `generation_config.json`; its temperature, top-k/p, min-p and repetition penalty fill unset fields
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation_defaults: Option<GenerationDefaults>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelCategory {
+    Text,
+    /// Text generation over images, audio or video as well as text
+    Multimodal,
+    /// Image generation
+    Diffusion,
+    Audio,
+    /// Speech synthesis
+    Speech,
+    Embedding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum Modality {
+    Text,
+    Audio,
+    Vision,
+    Video,
+    Embedding,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
+pub struct ModelModalities {
+    pub input: Vec<Modality>,
+    pub output: Vec<Modality>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, ToSchema)]
+pub struct GenerationDefaults {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub do_sample: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub min_p: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repetition_penalty: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_new_tokens: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_length: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suppress_tokens: Option<Vec<u32>>,
 }
 
 /// Collection of available models
@@ -1441,6 +1501,15 @@ pub struct CompletionChunkResponseBody {
     pub adapter_generation: Option<String>,
 }
 
+/// A completion prompt: text, or token ids the model reads as they are.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize, ToSchema)]
+#[serde(untagged, expecting = "a string or an array of token ids")]
+#[schema(example = "Say this is a test.")]
+pub enum CompletionPrompt {
+    Text(String),
+    Tokens(Vec<u32>),
+}
+
 /// Legacy OpenAI compatible text completion request
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct CompletionRequest {
@@ -1451,8 +1520,7 @@ pub struct CompletionRequest {
     /// Adapter alias or exact generation to activate for this request.
     #[schema(example = json!("production"))]
     pub adapter: Option<AdapterSelection>,
-    #[schema(example = "Say this is a test.")]
-    pub prompt: String,
+    pub prompt: CompletionPrompt,
     #[schema(example = 1)]
     pub best_of: Option<usize>,
     /// Echo the prompt back alongside the completion.
@@ -2107,6 +2175,31 @@ pub struct ResponsesDeltaContent {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_completion_prompt_is_text_or_token_ids() {
+        let parse =
+            |prompt: serde_json::Value| serde_json::from_value::<super::CompletionPrompt>(prompt);
+        assert_eq!(
+            parse(serde_json::json!("hi")).unwrap(),
+            super::CompletionPrompt::Text("hi".to_string())
+        );
+        assert_eq!(
+            parse(serde_json::json!([1, 2])).unwrap(),
+            super::CompletionPrompt::Tokens(vec![1, 2])
+        );
+        for unsupported in [
+            serde_json::json!(["a", "b"]),
+            serde_json::json!([[1]]),
+            serde_json::json!([-1]),
+        ] {
+            let error = parse(unsupported).unwrap_err().to_string();
+            assert!(
+                error.contains("a string or an array of token ids"),
+                "{error}"
+            );
+        }
+    }
+
     use super::*;
     use serde_json::json;
 

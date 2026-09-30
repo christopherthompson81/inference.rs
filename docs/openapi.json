@@ -3537,6 +3537,23 @@
           }
         }
       },
+      "CompletionPrompt": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "description": "A completion prompt: text, or token ids the model reads as they are.",
+        "example": "Say this is a test."
+      },
       "CompletionRequest": {
         "type": "object",
         "description": "Legacy OpenAI compatible text completion request",
@@ -3696,8 +3713,7 @@
             "example": null
           },
           "prompt": {
-            "type": "string",
-            "example": "Say this is a test."
+            "$ref": "#/components/schemas/CompletionPrompt"
           },
           "repetition_penalty": {
             "type": [
@@ -4466,6 +4482,77 @@
           "name": {
             "type": "string",
             "description": "The name of the function to call"
+          }
+        }
+      },
+      "GenerationDefaults": {
+        "type": "object",
+        "properties": {
+          "do_sample": {
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "max_length": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "max_new_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "min_p": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "repetition_penalty": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float"
+          },
+          "suppress_tokens": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          "temperature": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "top_k": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "top_p": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
           }
         }
       },
@@ -5307,6 +5394,27 @@
           }
         ]
       },
+      "Modality": {
+        "type": "string",
+        "enum": [
+          "text",
+          "audio",
+          "vision",
+          "video",
+          "embedding"
+        ]
+      },
+      "ModelCategory": {
+        "type": "string",
+        "enum": [
+          "text",
+          "multimodal",
+          "diffusion",
+          "audio",
+          "speech",
+          "embedding"
+        ]
+      },
       "ModelDType": {
         "type": "string",
         "description": "DType for the model.\n\nIf the model is quantized, this is ignored so it is reasonable to use the [`Default`] impl.\n\nNote: When using `Auto`, fallback pattern is: BF16 -> F16 -> 32",
@@ -5316,6 +5424,27 @@
           "f16",
           "f32"
         ]
+      },
+      "ModelModalities": {
+        "type": "object",
+        "required": [
+          "input",
+          "output"
+        ],
+        "properties": {
+          "input": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Modality"
+            }
+          },
+          "output": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Modality"
+            }
+          }
+        }
       },
       "ModelObject": {
         "type": "object",
@@ -5334,10 +5463,32 @@
             ],
             "description": "Current immutable LoRA generation for adapter model cards."
           },
+          "category": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ModelCategory",
+                "description": "What a loaded model does, which decides the requests it serves"
+              }
+            ]
+          },
           "created": {
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "generation_defaults": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/GenerationDefaults",
+                "description": "From the model's `generation_config.json`; its temperature, top-k/p, min-p and repetition penalty fill unset fields"
+              }
+            ]
           },
           "id": {
             "type": "string"
@@ -5365,6 +5516,16 @@
             ],
             "description": "Number of tools available from MCP servers",
             "minimum": 0
+          },
+          "modalities": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/ModelModalities"
+              }
+            ]
           },
           "object": {
             "type": "string"

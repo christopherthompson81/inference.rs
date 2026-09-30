@@ -551,7 +551,7 @@ class CompletionRequest:
     model: str | None = None
     n: int | None = None
     presence_penalty: float | None = None
-    prompt: str
+    prompt: CompletionPrompt
     repetition_penalty: float | None = None
     seed: int | None = None
     stop: StopTokens | None = None
@@ -758,6 +758,19 @@ class FunctionCalled:
 
     arguments: str
     name: str
+
+
+@dataclass(kw_only=True)
+class GenerationDefaults:
+    do_sample: bool | None = None
+    max_length: int | None = None
+    max_new_tokens: int | None = None
+    min_p: float | None = None
+    repetition_penalty: float | None = None
+    suppress_tokens: list[int] | None = None
+    temperature: float | None = None
+    top_k: int | None = None
+    top_p: float | None = None
 
 
 @dataclass(kw_only=True)
@@ -1007,6 +1020,23 @@ class Message:
     tool_calls: list[ToolCall] | None = None
 
 
+class Modality(str, Enum):
+    TEXT = "text"
+    AUDIO = "audio"
+    VISION = "vision"
+    VIDEO = "video"
+    EMBEDDING = "embedding"
+
+
+class ModelCategory(str, Enum):
+    TEXT = "text"
+    MULTIMODAL = "multimodal"
+    DIFFUSION = "diffusion"
+    AUDIO = "audio"
+    SPEECH = "speech"
+    EMBEDDING = "embedding"
+
+
 class ModelDType(str, Enum):
     """DType for the model."""
 
@@ -1017,15 +1047,24 @@ class ModelDType(str, Enum):
 
 
 @dataclass(kw_only=True)
+class ModelModalities:
+    input: list[Modality]
+    output: list[Modality]
+
+
+@dataclass(kw_only=True)
 class ModelObject:
     """Model information metadata about an available mode"""
 
     adapter_generation: str | None = None
+    category: ModelCategory | None = None
     created: int
+    generation_defaults: GenerationDefaults | None = None
     id: str
     max_model_len: int | None = None
     mcp_servers_connected: int | None = None
     mcp_tools_count: int | None = None
+    modalities: ModelModalities | None = None
     object: str
     owned_by: str
     parent: str | None = None
@@ -2668,6 +2707,7 @@ AllowedToolChoice = Union[AllowedToolChoiceFunction, AllowedToolChoiceWebSearchP
 AnthropicMessageContent = Union[str, list[AnthropicContentBlock]]
 AnthropicSystem = Union[str, list[AnthropicContentBlock]]
 AnyMoeExpertType = Union[Literal["fine_tuned"], AnyMoeExpertTypeLoraAdapter]
+CompletionPrompt = Union[str, list[int]]
 EmbeddingInput = Union[str, list[str], list[int], list[list[int]]]
 EmbeddingVector = Union[list[float], str]
 Grammar = Union[GrammarRegex, GrammarJsonSchema, GrammarLlguidance, GrammarLark]
