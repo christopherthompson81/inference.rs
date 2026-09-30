@@ -543,3 +543,33 @@ chain?
 - The cold build's end is now set by core: its lib (about 53 s), and its lib test (about 71 s), which starts only when
   the slowest family crate finishes codegen (Run 13).
 
+
+## Run 15 — 2026-09-29 23:35
+
+**Question:** what does core's second compile (its lib test) cost on its own, and how much of that is LLVM
+optimization at the dev profile's opt-level 3?
+
+**Commands:** in a scratch target with dependencies built and `CARGO_INCREMENTAL=0`, touch
+`inference-core/src/lib.rs` and time:
+- `cargo test --no-run --features cuda -p inference-core --lib --timings`, with
+  `--config profile.dev.package.inference-core.opt-level=3`, then with `=1`.
+- `cargo build --features cuda -p inference-core --lib`, the same two ways.
+
+Load was 9 falling to 7, so the machine was mostly idle.
+
+**Raw finding:**
+
+| Unit | opt-level 3 | opt-level 1 |
+|---|---|---|
+| Core lib test | 28.7 s (unit 28.2 s) | 27.6 s (unit 27.1 s) |
+| Core lib | 25.8 s | 23.0 s |
+
+**Implication:**
+- In the cold workspace build, core's lib test takes 71 s (Run 11) against 28 s alone. The difference is CPU
+  contention: the build is saturated from start to end, so the lib test gets a share of the cores, not all of them.
+- Optimization is a small part of either compile (1 to 3 s). The time is front-end work: type checking, borrow
+  checking and monomorphization. A lower opt-level for core buys almost nothing.
+- Removing the second compile would save about 28 CPU-seconds per cold build, out of about 2,100 unit-seconds. Moving
+  all 576 unit tests out of core would take that, plus widening core's private modules to make the tests reachable.
+  The cost is out of proportion to the gain.
+- In a saturated build, wall time follows total CPU work more than any one chain.
