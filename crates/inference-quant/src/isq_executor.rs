@@ -377,8 +377,9 @@ fn can_start(state: &ExecutorState, config: &IsqExecutorConfig, job: &QueuedJob)
         .saturating_add(state.retained_output)
         .saturating_add(resources.host_scratch_bytes)
         .saturating_add(resources.output_bytes);
-    // Nothing running means only the caller can free memory, and it may be blocked waiting for this job's result,
-    // so one job always starts even over budget; peak stays at the retained total plus a single job.
+    // Nothing running means only the caller can free memory, and an ordered consumer cannot drop an output it has
+    // not reached yet, so waiting here can wedge for good. One job runs instead: the budget gives way to progress,
+    // and a consumer slower than the pool holds more than it asked for rather than stopping dead.
     if host_next > config.host_budget_bytes && state.active_jobs > 0 {
         return false;
     }
@@ -728,18 +729,24 @@ mod tests {
 
     #[test]
     fn retained_outputs_do_not_wedge_later_submits() {
-        // A UQFF write holds every output until the file is written, so the retained total passes the budget while the
-        // caller is still submitting. Both gates have to ignore it or the caller waits on its own memory forever.
-        let executor = IsqExecutor::new(IsqExecutorConfig::for_tests(2, 100));
-        let mut plan = plan(40);
-        plan.resources.host_scratch_bytes = 0;
-        plan.resources.input_bytes = 40;
-        let mut held = Vec::new();
-        for i in 0..8usize {
-            let rx = executor.submit(plan.clone(), IsqConsumer::UqffWrite, move || Ok(i));
-            held.push(rx.recv_timeout(TEST_RECV_TIMEOUT).unwrap().unwrap());
-        }
-        assert_eq!(held.len(), 8);
+        // A UQFF write holds each output until it has been consumed, so the retained total passes the budget while the
+        // caller is still submitting. Neither gate may wait on it: the caller is the only thread that can release it.
+        // The loop runs off-thread because a regression parks inside submit, where no recv timeout would catch it.
+        let (done_tx, done_rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let executor = IsqExecutor::new(IsqExecutorConfig::for_tests(2, 100));
+            let mut plan = plan(40);
+            plan.resources.host_scratch_bytes = 0;
+            plan.resources.input_bytes = 40;
+            let mut held = Vec::new();
+            for i in 0..8usize {
+                let rx = executor.submit(plan.clone(), IsqConsumer::UqffWrite, move || Ok(i));
+                held.push(rx.recv_timeout(TEST_RECV_TIMEOUT).unwrap().unwrap());
+            }
+            done_tx.send(held.len()).unwrap();
+        });
+
+        assert_eq!(done_rx.recv_timeout(TEST_RECV_TIMEOUT * 8).unwrap(), 8);
     }
 
     #[test]

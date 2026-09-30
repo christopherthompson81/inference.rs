@@ -54,7 +54,11 @@ priority = 100
 [profile.metal]
 
 [[profile.metal.overrides]]
-filter = '(package(inference) & test(/_tiny::/)) | (package(inference-ffi) & test(/^engine_abi::/))'
+filter = """
+(package(inference) & test(/_tiny::/))
+| (package(inference-ffi) & test(/^engine_abi::/))
+| (package(inference-server-core) & test(/^chat_route::/))
+"""
 test-group = 'metal-model'
 
 # Restated per profile: overrides do not carry over from the default profile.

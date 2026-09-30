@@ -83,12 +83,12 @@ if [[ $cuda -eq 1 ]]; then
         cargo nextest run --no-fail-fast --profile cuda --features cuda "${TEST_TARGETS[@]}"
     fi
 fi
-if [[ $metal -eq 1 ]]; then
-    cargo "${CLIPPY[@]}" --features metal -- -D warnings
-    # Metal and the CPU suite share one chip, so this runs in series rather than beside them like the CUDA suite
-    cargo nextest run --no-fail-fast --profile metal --features metal "${TEST_TARGETS[@]}"
-fi
 failed=0
+if [[ $metal -eq 1 ]]; then
+    # Metal and the CPU suite share one chip, so this runs in series rather than beside them like the CUDA suite
+    cargo "${CLIPPY[@]}" --features metal -- -D warnings || failed=1
+    cargo nextest run --no-fail-fast --profile metal --features metal "${TEST_TARGETS[@]}" || failed=1
+fi
 if [[ $lint -eq 1 ]]; then
     cargo "${CLIPPY[@]}" -- -D warnings || failed=1
 fi
