@@ -768,7 +768,8 @@ impl Engine {
             self.state().clone(),
             prepared.model_override,
             None,
-        ))
+        )
+        .with_cancellation(prepared.cancellation))
     }
 
     /// [`Engine::chat`] over JSON: an OpenAI chat completion request in, the response out.

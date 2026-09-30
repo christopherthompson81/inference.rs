@@ -89,6 +89,7 @@ async fn process_chunk(
         session_id: None,
         files: None,
         input_files: Vec::new(),
+        cancellation: None,
     }));
 
     runner.get_sender(None)?.send(request).await?;

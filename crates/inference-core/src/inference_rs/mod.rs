@@ -788,6 +788,7 @@ impl InferenceRs {
                     session_id: None,
                     files: None,
                     input_files: Vec::new(),
+                    cancellation: None,
                 }));
                 debug!("Beginning dummy run.");
                 let start = Instant::now();

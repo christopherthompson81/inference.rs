@@ -1,7 +1,7 @@
 use crate::paged_attention::PagedAttentionMeta;
 use crate::{
-    AdapterGenerationId, AdapterLease, AudioInput, ChatCompletionResponse, PromptTokensDetails,
-    Usage, VideoInput, get_mut_arcmutex, get_mut_group,
+    AdapterGenerationId, AdapterLease, AudioInput, ChatCompletionResponse, FINISH_REASON_CANCELED,
+    PromptTokensDetails, RequestCancellation, Usage, VideoInput, get_mut_arcmutex, get_mut_group,
     paged_attention::block_hash::{MultiModalFeature, MultimodalAttentionPolicy, MultimodalKind},
     pipeline::LayerCaches,
     reasoning_parsers::{ReasoningMode, ReasoningParser},
@@ -91,7 +91,7 @@ impl Display for StopReason {
             StopReason::Eos => write!(f, "stop"),
             StopReason::Length(_) | StopReason::ModelLength(_) => write!(f, "length"),
             StopReason::StopTok(_) | StopReason::StopString { .. } => write!(f, "stop"),
-            StopReason::Canceled => write!(f, "canceled"),
+            StopReason::Canceled => write!(f, "{FINISH_REASON_CANCELED}"),
             StopReason::GeneratedImage => write!(f, "generated_image"),
             StopReason::GeneratedSpeech => write!(f, "generated_speech"),
             StopReason::ToolCalls => write!(f, "tool_calls"),
@@ -105,7 +105,7 @@ impl StopReason {
             StopReason::Eos => "stop",
             StopReason::Length(_) | StopReason::ModelLength(_) => "length",
             StopReason::StopTok(_) | StopReason::StopString { .. } => "stop",
-            StopReason::Canceled => "canceled",
+            StopReason::Canceled => FINISH_REASON_CANCELED,
             StopReason::GeneratedImage => "generated_image",
             StopReason::GeneratedSpeech => "generated_speech",
             StopReason::ToolCalls => "tool_calls",
@@ -199,6 +199,8 @@ pub struct Sequence {
     return_logprobs: bool,
     stream_logprobs: bool,
     responder: Sender<Response>,
+    cancellation: Option<RequestCancellation>,
+    cancel_latched: bool,
     response_index: usize,
     creation_time: u64,
     prompt: String,
@@ -350,6 +352,8 @@ impl Sequence {
             recurrent_state_idx: None,
             seq_preallocated_cache,
             responder,
+            cancellation: None,
+            cancel_latched: false,
             sampler: sampler.into(),
             sampling_rng: sampling_seed
                 .map(|seed| Arc::new(std::sync::Mutex::new(Isaac64Rng::seed_from_u64(seed)))),
@@ -1083,6 +1087,19 @@ impl Sequence {
         self.responder.clone()
     }
 
+    pub(crate) fn set_cancellation(&mut self, cancellation: Option<RequestCancellation>) {
+        self.cancellation = cancellation;
+    }
+
+    // Read on the engine thread once per step: the CUDA decode path asks whether a step finishes a sequence
+    // before and while finishing it, and a flag another thread flips could answer the two differently.
+    pub(crate) fn latch_cancellation(&mut self) {
+        self.cancel_latched |= self
+            .cancellation
+            .as_ref()
+            .is_some_and(RequestCancellation::is_canceled);
+    }
+
     pub(crate) fn response_is_closed(&self) -> bool {
         self.responder.is_closed()
     }
@@ -1146,6 +1163,9 @@ impl Sequence {
             Some(StopReason::Length(self.max_len.unwrap()))
         } else if self.tokens.len() >= max_model_len {
             Some(StopReason::ModelLength(max_model_len))
+        } else if self.cancel_latched {
+            // Ends on a sampled token rather than being freed, so the final response and usage still go out.
+            Some(StopReason::Canceled)
         } else {
             None
         }

@@ -407,3 +407,49 @@ async fn completions_take_token_id_prompts() -> anyhow::Result<()> {
     assert!(refused.message.contains("text prompt"), "{refused:?}");
     Ok(())
 }
+
+// Enough to outlast the few steps a cancel takes to land, on a model whose random weights never stop on their own.
+const LONG_COMPLETION: usize = 48;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_chat_stream_ends_with_its_usage() -> anyhow::Result<()> {
+    use futures::StreamExt;
+    use inference_api::engine_chat::ChatStreamEvent;
+
+    let dir = support::tiny_checkpoint()?;
+    let spec = serde_json::from_value(json!({
+        "model": {"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}},
+        "runtime": {"device": "cpu"},
+    }))?;
+    let engine = inference_api::Engine::load(spec).await?;
+    let request = json!({
+        "model": "default",
+        "messages": [{"role": "user", "content": PROMPT}],
+        "max_tokens": LONG_COMPLETION,
+        "ignore_eos": true,
+    });
+    let mut stream = engine
+        .chat_stream(serde_json::from_value(request)?, Default::default())
+        .await
+        .map_err(anyhow::Error::msg)?;
+    let mut last = None;
+    while let Some(event) = stream.next().await {
+        match event {
+            ChatStreamEvent::Chunk(chunk) => {
+                stream.cancel();
+                last = Some(chunk);
+            }
+            ChatStreamEvent::Error(error) => anyhow::bail!("{error:?}"),
+            _ => {}
+        }
+    }
+    let last = last.expect("the stream sent chunks");
+    assert_eq!(
+        last.choices[0].finish_reason.as_deref(),
+        Some("canceled"),
+        "{last:?}"
+    );
+    let usage = last.usage.expect("the final chunk carries usage");
+    assert!(usage.completion_tokens < LONG_COMPLETION, "{usage:?}");
+    Ok(())
+}

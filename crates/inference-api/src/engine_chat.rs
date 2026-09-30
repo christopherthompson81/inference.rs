@@ -9,8 +9,8 @@ use indexmap::IndexMap;
 use inference_core::{
     AgentPermission, AgentToolApprovalHandler, AgentToolApprovalNotifier,
     ChatCompletionChunkResponse, ChatResponseCollector, Constraint, InferenceRs, MessageContent,
-    ModelCategory, NormalRequest, ReasoningEffort, Request, RequestMessage, Response,
-    SamplingParams, encode_agentic_tool_images, resolve_reasoning_controls,
+    ModelCategory, NormalRequest, ReasoningEffort, Request, RequestCancellation, RequestMessage,
+    Response, SamplingParams, encode_agentic_tool_images, resolve_reasoning_controls,
 };
 use itertools::Itertools;
 use serde_json::{Value, json};
@@ -768,6 +768,7 @@ async fn parse_request_inner(
             session_id: oairequest.session_id,
             files: oairequest.files,
             input_files,
+            cancellation: None,
             max_tool_rounds: oairequest.max_tool_rounds,
             tool_dispatch_url,
             model_id: if oairequest.model == DEFAULT_MODEL_ID {
@@ -796,6 +797,8 @@ pub struct PreparedChat {
     pub is_streaming: bool,
     /// The model name the caller asked for, when routing resolved it to another id.
     pub model_override: Option<String>,
+    /// Cancels the dispatched request; its final response still arrives, marked `canceled`.
+    pub cancellation: RequestCancellation,
 }
 
 /// Why a chat request was not dispatched. Validation errors are the caller's; internal ones are the engine's.
@@ -882,7 +885,7 @@ impl ChatEngine {
             asks.then(|| self.agentic.approval_broker.notifier(tx.clone()));
 
         let model_id = (oairequest.model != DEFAULT_MODEL_ID).then(|| oairequest.model.clone());
-        let (request, is_streaming) = parse_request(
+        let (mut request, is_streaming) = parse_request(
             oairequest,
             ChatCompletionParseContext {
                 state: self.state.clone(),
@@ -897,6 +900,10 @@ impl ChatEngine {
         )
         .await
         .map_err(|error| DispatchError::Validation(boxed_anyhow(error)))?;
+        let cancellation = RequestCancellation::default();
+        if let Request::Normal(normal) = &mut request {
+            normal.cancellation = Some(cancellation.clone());
+        }
         send_request_with_model(&self.state, request, model_id.as_deref())
             .await
             .map_err(|error| DispatchError::Internal(error.into()))?;
@@ -904,6 +911,7 @@ impl ChatEngine {
             rx,
             is_streaming,
             model_override,
+            cancellation,
         })
     }
 }
@@ -1007,6 +1015,7 @@ pub struct ChatStream {
     state: SharedInferenceRsState,
     model_override: Option<String>,
     tap: Option<ResponseTap>,
+    cancellation: Option<RequestCancellation>,
     finished: bool,
 }
 
@@ -1022,7 +1031,20 @@ impl ChatStream {
             state,
             model_override,
             tap,
+            cancellation: None,
             finished: false,
+        }
+    }
+
+    pub fn with_cancellation(mut self, cancellation: RequestCancellation) -> Self {
+        self.cancellation = Some(cancellation);
+        self
+    }
+
+    /// Ends the request on its next sampled token; the stream still yields its final chunk, with usage.
+    pub fn cancel(&self) {
+        if let Some(cancellation) = &self.cancellation {
+            cancellation.cancel();
         }
     }
 

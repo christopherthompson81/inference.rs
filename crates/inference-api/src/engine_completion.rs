@@ -207,6 +207,7 @@ pub fn parse_request(
             session_id: None,
             files: None,
             input_files: Vec::new(),
+            cancellation: None,
         })),
         is_streaming,
     ))

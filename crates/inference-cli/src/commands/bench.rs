@@ -410,6 +410,7 @@ async fn run_single_bench(
         truncate_sequence: false,
         files: None,
         input_files: Vec::new(),
+        cancellation: None,
     }));
 
     let request_start = Instant::now();
