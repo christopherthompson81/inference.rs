@@ -10,6 +10,9 @@ use candle_core::Device;
 #[cfg(any(feature = "cuda", feature = "metal"))]
 use inference_core::MemoryUsage;
 
+// nvidia-smi's header gives the CUDA version the driver supports; R615+ labels it `CUDA UMD Version:`.
+const NVIDIA_SMI_CUDA_LABELS: [&str; 2] = ["CUDA UMD Version:", "CUDA Version:"];
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuInfo {
     pub brand: Option<String>,
@@ -382,13 +385,22 @@ fn cuda_driver_version_code() -> Option<u32> {
     parse_cuda_driver_version_code(&stdout)
 }
 
-#[cfg(feature = "cuda")]
-fn parse_cuda_driver_version_code(output: &str) -> Option<u32> {
-    let version = output.split("CUDA Version:").nth(1)?.trim_start();
-    let version = version
+/// The CUDA version (e.g. `"13.4"`) the driver supports, from `nvidia-smi`'s plain output.
+pub fn parse_nvidia_smi_cuda_version(output: &str) -> Option<&str> {
+    let rest = NVIDIA_SMI_CUDA_LABELS
+        .iter()
+        .find_map(|label| output.split_once(label))?
+        .1
+        .trim_start();
+    let version = rest
         .split(|c: char| !(c.is_ascii_digit() || c == '.'))
         .next()?;
-    let mut parts = version.split('.');
+    (!version.is_empty()).then_some(version)
+}
+
+#[cfg(feature = "cuda")]
+fn parse_cuda_driver_version_code(output: &str) -> Option<u32> {
+    let mut parts = parse_nvidia_smi_cuda_version(output)?.split('.');
     let major: u32 = parts.next()?.parse().ok()?;
     let minor: u32 = parts.next().unwrap_or("0").parse().ok()?;
     Some(major * 100 + minor)
@@ -782,4 +794,28 @@ pub fn run_doctor() -> DoctorReport {
     }
 
     DoctorReport { system, checks }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const HEADER_R580: &str =
+        "| NVIDIA-SMI 580.178.04   Driver Version: 580.178.04   CUDA Version: 13.0 |";
+    const HEADER_R615: &str =
+        "| NVIDIA-SMI 615.71.09   KMD Version: 615.71.09   CUDA UMD Version: 13.4 |";
+
+    #[test]
+    fn both_nvidia_smi_headers_give_the_cuda_version() {
+        assert_eq!(parse_nvidia_smi_cuda_version(HEADER_R580), Some("13.0"));
+        assert_eq!(parse_nvidia_smi_cuda_version(HEADER_R615), Some("13.4"));
+        assert_eq!(parse_nvidia_smi_cuda_version("No devices were found"), None);
+        assert_eq!(parse_nvidia_smi_cuda_version("CUDA Version: N/A"), None);
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn the_driver_version_code_reads_the_renamed_label() {
+        assert_eq!(parse_cuda_driver_version_code(HEADER_R615), Some(1304));
+    }
 }

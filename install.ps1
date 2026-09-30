@@ -188,7 +188,7 @@ function Get-CudaDriverVersionCode {
     try {
         $null = Get-Command nvidia-smi -ErrorAction Stop
         $output = & nvidia-smi 2>$null | Out-String
-        if ($output -match "CUDA Version:\s*(\d+)\.(\d+)") {
+        if ($output -match "CUDA (?:UMD )?Version:\s*(\d+)\.(\d+)") {
             return [int]$Matches[1] * 100 + [int]$Matches[2]
         }
     } catch {}

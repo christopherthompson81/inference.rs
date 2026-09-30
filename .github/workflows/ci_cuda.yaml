@@ -60,7 +60,7 @@ jobs:
           echo "CUDA_TOOLKIT_PATH=$CUDA_DIR" >> $GITHUB_ENV
           # The driver JITs PTX only up to its native CUDA level; newer toolkits need the forward-compat libcuda.
           LIB_DIRS="$CUDA_DIR/lib64"
-          NATIVE=$(nvidia-smi --query | grep -m1 "CUDA Version" | grep -oE "[0-9]+\.[0-9]+")
+          NATIVE=$(nvidia-smi | grep -oE "CUDA (UMD )?Version: *[0-9]+\.[0-9]+" | head -1 | grep -oE "[0-9]+\.[0-9]+")
           if [ "$(printf '%s\n' "$NATIVE" "${{ matrix.cuda }}" | sort -V | tail -1)" != "$NATIVE" ]; then
             [ -d "$CUDA_DIR/compat" ] || sudo apt-get install -y cuda-compat-$(echo "${{ matrix.cuda }}" | tr . -)
             LIB_DIRS="$CUDA_DIR/compat:$LIB_DIRS"
