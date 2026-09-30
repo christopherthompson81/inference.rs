@@ -24,7 +24,8 @@ pub use crate::models_api::{ModelStatus, ModelStatusResponse};
 use crate::{
     handler_core::{ApiError, ApiErrorKind, json_response, openai_error_response},
     models_api::{
-        list_models, model_status as status, reload_model as reload, unload_model as unload,
+        cache_stats, list_models, model_status as status, reload_model as reload,
+        unload_model as unload,
     },
     system,
     types::ExtractedInferenceRsState,
@@ -59,6 +60,20 @@ impl From<TuneProfileRequest> for TuneProfile {
 ))]
 pub async fn models(State(state): ExtractedInferenceRsState) -> Response {
     json_response(list_models(&state))
+}
+
+#[cfg_attr(test, utoipa::path(
+  get,
+  tag = "inference.rs",
+  path = "/v1/models/cache_stats",
+  responses(
+    (status = 200, description = "Each loaded model's cumulative prefix- and encoder-cache counters",
+     body = inference_api::models::CacheStats),
+    (status = 500, description = "Failed to inspect the model registry")
+  )
+))]
+pub async fn model_cache_stats(State(state): ExtractedInferenceRsState) -> Response {
+    json_response(cache_stats(&state))
 }
 
 #[cfg_attr(test, utoipa::path(

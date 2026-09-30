@@ -9,7 +9,7 @@ internal static unsafe partial class NativeMethods
     internal const string Library = "inference_ffi";
 
     /// <summary>The ABI these declarations mirror; while it is 0.0.x any other version may differ anywhere.</summary>
-    internal const uint AbiVersion = (0 << 16) | (0 << 8) | 12;
+    internal const uint AbiVersion = (0 << 16) | (0 << 8) | 13;
 
     /// <summary>Refuses a library built for another ABI, before any call into it could misread its memory.</summary>
     internal static void EnsureAbi()
@@ -193,6 +193,9 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(Library)]
     internal static partial InferenceStatus inference_calibration_status(IntPtr engine, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_models_cache_stats(IntPtr engine, out IntPtr outResponse);
 
     [LibraryImport(Library)]
     internal static partial InferenceStatus inference_calibration_apply(

@@ -212,6 +212,10 @@ impl BlockingEngine {
         })
     }
 
+    pub fn cache_stats_json(&self) -> Result<String, ApiError> {
+        self.call(&[], |engine, _| async move { engine.cache_stats_json() })
+    }
+
     pub fn calibration_status_json(&self) -> Result<String, ApiError> {
         self.call(&[], |engine, _| async move {
             engine.calibration_status_json().await

@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 12
+#define INFERENCE_ABI_VERSION_PATCH 13
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -323,6 +323,12 @@ INFERENCE_API inference_status inference_responses_cancel(const inference_engine
 /* The served models (the GET /v1/models body): the "default" alias, each model with its status, and each loaded LoRA
  * adapter as a model of its own. */
 INFERENCE_API inference_status inference_models_list(const inference_engine *engine, inference_string **out_response);
+/* Each loaded model's cache counters (the GET /v1/models/cache_stats body): {"object": "list", "data": [{"model_id",
+ * "prefix_cache_hits", "prefix_cache_sequences", "encoder_cache": {"hits", "misses"}}]}, sorted by model_id. They
+ * count since the model loaded (the prefix ones since its engine last started); encoder_cache is absent for a model
+ * without one. Diff two readings to see what the requests between them used. */
+INFERENCE_API inference_status inference_models_cache_stats(const inference_engine *engine,
+                                                          inference_string **out_response);
 /* Unloads, reloads or reports a model; the request is {"model_id"} and out_response receives {"model_id", "status":
  * "loaded" | "unloaded" | "reloading"}. Unloading an unloaded model or reloading a loaded one succeeds. An unknown
  * model is INFERENCE_ERR_NOT_FOUND. */

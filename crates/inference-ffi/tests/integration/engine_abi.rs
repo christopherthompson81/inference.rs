@@ -1386,6 +1386,9 @@ fn tokens_sessions_and_quantization_operations() {
         (INFERENCE_OK, json!(0)),
         "{report}"
     );
+    let (status, stats) = query(inference_models_cache_stats, engine);
+    assert_eq!(status, INFERENCE_OK, "{stats}");
+    assert!(stats["data"][0]["encoder_cache"].is_object(), "{stats}");
     let (status, error) = query(inference_calibration_start, engine);
     assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
     assert!(

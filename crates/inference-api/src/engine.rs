@@ -38,8 +38,8 @@ use crate::{
     },
     media_source::MediaAttachments,
     models::{
-        ModelOperationRequest, ModelStatusResponse, list_models, model_status, reload_model,
-        unload_model,
+        CacheStats, ModelOperationRequest, ModelStatusResponse, cache_stats, list_models,
+        model_status, reload_model, unload_model,
     },
     openai::{
         ChatCompletionRequest, CompletionRequest, EmbeddingRequest, EmbeddingResponse,
@@ -1044,6 +1044,11 @@ impl Engine {
         list_models(self.state())
     }
 
+    /// Cumulative prefix- and encoder-cache counters of each loaded model.
+    pub fn cache_stats(&self) -> Result<CacheStats, ApiError> {
+        cache_stats(self.state())
+    }
+
     pub fn unload_model(
         &self,
         request: ModelOperationRequest,
@@ -1180,6 +1185,10 @@ impl Engine {
 
     pub fn models_json(&self) -> Result<String, ApiError> {
         to_json(&self.models()?)
+    }
+
+    pub fn cache_stats_json(&self) -> Result<String, ApiError> {
+        to_json(&self.cache_stats()?)
     }
 
     pub fn unload_model_json(&self, request: &[u8]) -> Result<String, ApiError> {

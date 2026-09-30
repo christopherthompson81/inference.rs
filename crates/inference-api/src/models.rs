@@ -21,6 +21,63 @@ const MODEL_OBJECT: &str = "model";
 const MODEL_LIST_OBJECT: &str = "list";
 const MODEL_OWNER: &str = "local";
 
+/// Cache counters for each loaded model, counted since it loaded (the prefix ones since its engine last started);
+/// a caller diffs two readings to see what the requests between them used.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct CacheStats {
+    #[schema(example = "list")]
+    pub object: String,
+    pub data: Vec<ModelCacheStats>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct ModelCacheStats {
+    pub model_id: String,
+    /// Prompt sequences that reused a cached prefix.
+    pub prefix_cache_hits: usize,
+    /// Prompt sequences started, whether or not prefix caching was on for them.
+    pub prefix_cache_sequences: usize,
+    /// Media encodings the model reused and computed; media already covered by a reused prefix is neither. Absent
+    /// for a model without an encoder cache.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoder_cache: Option<EncoderCacheStats>,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema)]
+pub struct EncoderCacheStats {
+    pub hits: usize,
+    pub misses: usize,
+}
+
+/// The cache counters of every loaded model.
+pub fn cache_stats(state: &SharedInferenceRsState) -> Result<CacheStats, ApiError> {
+    let mut data = Vec::new();
+    let mut models = state.list_models_with_status().map_err(core_error)?;
+    models.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (model_id, status) in models {
+        if status != CoreModelStatus::Loaded {
+            continue;
+        }
+        // A model unloading between the listing and this lookup is left out rather than failing the call.
+        let Ok(logger) = state.get_logger(Some(&model_id)) else {
+            continue;
+        };
+        let (prefix_cache_hits, prefix_cache_sequences) = logger.prefix_cache_stats();
+        data.push(ModelCacheStats {
+            model_id,
+            prefix_cache_hits,
+            prefix_cache_sequences,
+            encoder_cache: logger
+                .encoder_cache_stats()
+                .map(|(hits, misses)| EncoderCacheStats { hits, misses }),
+        });
+    }
+    Ok(CacheStats {
+        object: MODEL_LIST_OBJECT.to_string(),
+        data,
+    })
+}
+
 /// The body of an unload, reload or status request.
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct ModelOperationRequest {

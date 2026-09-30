@@ -1278,6 +1278,15 @@ pub unsafe extern "C" fn inference_calibration_start(
 
 /// Safety: as for `inference_models_list`.
 #[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_models_cache_stats(
+    engine: *const inference_engine,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe { query_call(engine, out_response, BlockingEngine::cache_stats_json) }
+}
+
+/// Safety: as for `inference_models_list`.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn inference_calibration_status(
     engine: *const inference_engine,
     out_response: *mut *mut inference_string,
