@@ -1,4 +1,4 @@
-//! Chat completions as an engine operation, free of HTTP: the server routes (and later the C ABI) drive these.
+//! Chat completions as an engine operation, free of HTTP: the server routes and the C ABI drive these.
 
 use std::{ops::Deref, pin::Pin, sync::Arc, task::Poll};
 
@@ -7,11 +7,10 @@ use either::Either;
 use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use inference_core::{
-    AgentPermission, AgentToolApprovalHandler, AgentToolApprovalNotifier, AgenticToolCallData,
-    AgenticToolCallPhase, ChatCompletionChunkResponse, ChatResponseCollector, Constraint,
-    InferenceRs, MessageContent, ModelCategory, NormalRequest, ReasoningEffort, Request,
-    RequestMessage, Response, SamplingParams, encode_agentic_tool_images,
-    resolve_reasoning_controls,
+    AgentPermission, AgentToolApprovalHandler, AgentToolApprovalNotifier,
+    ChatCompletionChunkResponse, ChatResponseCollector, Constraint, InferenceRs, MessageContent,
+    ModelCategory, NormalRequest, ReasoningEffort, Request, RequestMessage, Response,
+    SamplingParams, encode_agentic_tool_images, resolve_reasoning_controls,
 };
 use itertools::Itertools;
 use serde_json::{Value, json};
@@ -949,11 +948,54 @@ async fn collect_chat_inner(rx: &mut Receiver<Response>, model_override: Option<
 /// One event of a streaming chat request, in the order the engine produced it.
 pub enum ChatStreamEvent {
     Chunk(ChatCompletionChunkResponse),
-    AgenticToolCallProgress(Value),
-    AgenticToolApprovalRequired(Value),
+    AgenticToolCallProgress(AgenticToolProgress),
+    AgenticToolApprovalRequired(AgenticToolApproval),
     FileProduced(inference_core::File),
     /// Terminal: nothing follows an error.
     Error(ApiError),
+}
+
+// The types the agentic events carry, so API consumers can match on them without naming inference_core.
+pub use inference_core::{
+    AgentToolKind, AgentToolMetadata, AgentToolSource, AgenticToolCallData, AgenticToolCallPhase,
+};
+
+/// A tool call's progress in an agentic run.
+#[derive(Debug, Clone)]
+pub struct AgenticToolProgress {
+    pub round: usize,
+    pub tool_name: String,
+    pub phase: AgenticToolCallPhase,
+}
+
+impl AgenticToolProgress {
+    /// The `agentic_tool_call_progress` payload the HTTP and C ABI streams carry.
+    pub fn to_json(&self) -> Value {
+        serialize_agentic_progress(self.round, &self.tool_name, &self.phase)
+    }
+}
+
+/// An agent action waiting for approval; answer it with the engine's approval resolution.
+#[derive(Debug, Clone)]
+pub struct AgenticToolApproval {
+    pub approval_id: String,
+    pub session_id: String,
+    pub round: usize,
+    pub tool: inference_core::AgentToolMetadata,
+    pub arguments: Value,
+}
+
+impl AgenticToolApproval {
+    /// The `agentic_tool_approval_required` payload the HTTP and C ABI streams carry.
+    pub fn to_json(&self) -> Value {
+        serialize_approval_required(
+            &self.approval_id,
+            &self.session_id,
+            self.round,
+            &self.tool,
+            &self.arguments,
+        )
+    }
 }
 
 /// Observes every engine response before it is mapped, e.g. for usage and latency accounting.
@@ -1018,22 +1060,24 @@ impl ChatStream {
                 round,
                 tool_name,
                 phase,
-            } => ChatStreamEvent::AgenticToolCallProgress(serialize_agentic_progress(
-                round, &tool_name, &phase,
-            )),
+            } => ChatStreamEvent::AgenticToolCallProgress(AgenticToolProgress {
+                round,
+                tool_name,
+                phase,
+            }),
             Response::AgenticToolApprovalRequired {
                 approval_id,
                 session_id,
                 round,
                 tool,
                 arguments,
-            } => ChatStreamEvent::AgenticToolApprovalRequired(serialize_approval_required(
-                &approval_id,
-                &session_id,
+            } => ChatStreamEvent::AgenticToolApprovalRequired(AgenticToolApproval {
+                approval_id,
+                session_id,
                 round,
-                &tool,
-                &arguments,
-            )),
+                tool,
+                arguments,
+            }),
             Response::BlockDenoisingProgress(_) => return None,
             Response::File(file) => ChatStreamEvent::FileProduced(file),
             Response::Done(_)
@@ -1081,6 +1125,42 @@ impl futures::Stream for ChatStream {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // The typed events' JSON is the payload the HTTP and C ABI streams carry.
+    #[test]
+    fn typed_agentic_events_serialize_to_the_wire_payloads() {
+        let progress = AgenticToolProgress {
+            round: 2,
+            tool_name: "lookup".to_string(),
+            phase: AgenticToolCallPhase::Complete(AgenticToolCallData::Custom {
+                arguments: "{}".to_string(),
+                content: "found".to_string(),
+            }),
+        };
+        let progress = progress.to_json();
+        assert_eq!(progress["type"], "agentic_tool_call_progress");
+        assert_eq!(progress["round"], 2);
+        assert_eq!(progress["phase"], "complete");
+        assert_eq!(progress["data"]["tool_type"], "custom");
+        assert_eq!(progress["data"]["content"], "found");
+
+        let approval = AgenticToolApproval {
+            approval_id: "appr_1".to_string(),
+            session_id: "session".to_string(),
+            round: 1,
+            tool: inference_core::AgentToolMetadata {
+                source: inference_core::AgentToolSource::BuiltIn,
+                kind: inference_core::AgentToolKind::Shell,
+                label: "Shell".to_string(),
+            },
+            arguments: json!({"command": "ls"}),
+        }
+        .to_json();
+        assert_eq!(approval["type"], "agentic_tool_approval_required");
+        assert_eq!(approval["approval_id"], "appr_1");
+        assert_eq!(approval["arguments"]["command"], "ls");
+        assert_eq!(approval["tool"]["label"], "Shell");
+    }
 
     #[test]
     fn reasoning_controls_normalize_http_values() {

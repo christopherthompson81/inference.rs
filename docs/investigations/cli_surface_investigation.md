@@ -114,3 +114,18 @@ TOML `ModelEntry`, `ModelSelected`, `EngineSpec`) with about 800 lines convertin
 
 **Follow-up:** echo with token prompts (what log-likelihood evaluation uses) needs `CompletionTokens` to carry
 `echo_prompt` and `best_of`; core already decodes token prompts for the echo text.
+
+## Run 5 — 2026-09-30 19:15
+
+**Question:** Run 1 listed agentic progress and approval events as untyped JSON on `ChatStreamEvent`, so a Rust
+consumer (the CLI) would have to parse JSON the engine had just built from typed data.
+
+**Change:** `ChatStreamEvent::AgenticToolCallProgress(AgenticToolProgress)` and
+`::AgenticToolApprovalRequired(AgenticToolApproval)` carry the typed round, tool, phase data (images as images),
+approval id and arguments; each has `to_json()` built on the existing serializers, which the SSE route and
+`ChatStreamEvent::to_json` (the C ABI) call, so the wire payloads are unchanged. `engine_chat` re-exports the core
+types they carry. The Responses stream's own items stay JSON; nothing in Rust consumes them.
+
+**Deferred:** `BlockDenoisingProgress` on chat streams (it would add an event to the C ABI stream) and per-request
+cancellation that keeps the final chunk and usage. Core has no per-request cancel, only the process-wide
+`TERMINATE_ALL_NEXT_STEP`, so that is a scheduler change of its own.

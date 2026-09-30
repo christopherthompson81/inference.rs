@@ -1323,9 +1323,8 @@ impl ChatStreamEvent {
     pub fn to_json(&self) -> String {
         let data = match self {
             Self::Chunk(chunk) => serde_json::to_value(chunk),
-            Self::AgenticToolCallProgress(value) | Self::AgenticToolApprovalRequired(value) => {
-                Ok(value.clone())
-            }
+            Self::AgenticToolCallProgress(progress) => Ok(progress.to_json()),
+            Self::AgenticToolApprovalRequired(approval) => Ok(approval.to_json()),
             Self::FileProduced(file) => serde_json::to_value(file),
             Self::Error(error) => Ok(error.to_openai_body()),
         }
