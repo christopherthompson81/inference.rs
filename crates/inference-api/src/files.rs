@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
 use inference_core::{
-    FILE_PURPOSE_USER_DATA, File as CoreFile, FileContent, FileSource, InferenceRs,
-    InferenceRsError,
+    FILE_PURPOSE_GENERATED_IMAGE, FILE_PURPOSE_USER_DATA, File as CoreFile, FileContent,
+    FileSource, InferenceRs, InferenceRsError,
 };
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -16,6 +16,11 @@ use crate::{
 };
 
 pub const MAX_FILE_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+/// Where a file's body is served; generated images' `url`s point here, relative to the inference router.
+pub const FILE_CONTENT_PATH: &str = "/v1/files/{id}/content";
+const FILE_ID_PARAM: &str = "{id}";
+const GENERATED_IMAGE_SOURCE_TOOL: &str = "image_generation";
+const PNG_MIME_TYPE: &str = "image/png";
 const DEFAULT_MIME_TYPE: &str = "application/octet-stream";
 const UPLOAD_SOURCE_TOOL: &str = "user_upload";
 const FILE_OBJECT: &str = "file";
@@ -210,6 +215,31 @@ pub fn upload_file(
         .insert_file(None, file.clone(), None)
         .map_err(|error| store_error(state, error))?;
     Ok(metadata(&file))
+}
+
+/// Stores a generated PNG in `model`'s file store and returns the url that serves it.
+pub fn store_generated_image(
+    state: &SharedInferenceRsState,
+    model: Option<&str>,
+    png: Vec<u8>,
+) -> Result<String, ApiError> {
+    let id = CoreFile::make_upload_id();
+    let file = CoreFile::from_bytes(
+        id.clone(),
+        format!("{id}.png"),
+        Some(PNG_MIME_TYPE.to_string()),
+        FILE_PURPOSE_GENERATED_IMAGE.to_string(),
+        FileSource {
+            tool: GENERATED_IMAGE_SOURCE_TOOL.to_string(),
+            round: 0,
+            turn: 0,
+        },
+        png,
+    );
+    state
+        .insert_file(model, file, None)
+        .map_err(|error| store_error(state, error))?;
+    Ok(FILE_CONTENT_PATH.replace(FILE_ID_PARAM, &id))
 }
 
 pub fn get_file(state: &SharedInferenceRsState, id: &str) -> Result<FileMetadata, ApiError> {

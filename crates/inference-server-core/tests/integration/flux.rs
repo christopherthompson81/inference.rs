@@ -66,9 +66,6 @@ async fn flux_gguf_generates_images_through_the_engine_and_http() -> anyhow::Res
         return Ok(());
     }
     let dir = std::fs::canonicalize(dir)?;
-    // `url` images land in the working directory; nextest runs each test in its own process, so this is contained.
-    let out = tempfile::tempdir()?;
-    std::env::set_current_dir(out.path())?;
 
     let spec = serde_json::from_value(json!({
         "model": {"DiffusionPlain": {"model_id": dir.to_string_lossy(), "arch": "flux", "dtype": "bf16"}},
@@ -93,12 +90,16 @@ async fn flux_gguf_generates_images_through_the_engine_and_http() -> anyhow::Res
     let http = Request::post("/v1/images/generations")
         .header("content-type", "application/json")
         .body(Body::from(request("url").to_string()))?;
-    let response = app.oneshot(http).await?;
+    let response = app.clone().oneshot(http).await?;
     assert_eq!(response.status(), StatusCode::OK);
     let response: Value =
         serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await?)?;
     assert!(response["data"][0]["b64_json"].is_null());
-    let file = response["data"][0]["url"].as_str().expect("url requested");
-    assert_side(&image::open(out.path().join(file))?);
+    let url = response["data"][0]["url"].as_str().expect("url requested");
+    let content = app.oneshot(Request::get(url).body(Body::empty())?).await?;
+    assert_eq!(content.status(), StatusCode::OK);
+    assert_eq!(content.headers()["content-type"], "image/png");
+    let png = to_bytes(content.into_body(), usize::MAX).await?;
+    assert_side(&image::load_from_memory(&png)?);
     Ok(())
 }

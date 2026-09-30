@@ -2,16 +2,17 @@
 
 use futures::future::BoxFuture;
 use inference_core::{
-    DiffusionGenerationParams, ImageGenerationResponse, InferenceRs, NormalRequest, Request,
-    RequestMessage, Response, SamplingParams,
+    DiffusionGenerationParams, ImageChoice, ImageGenerationResponse, ImageGenerationResponseFormat,
+    InferenceRs, NormalRequest, Request, RequestMessage, Response, SamplingParams,
     speech_utils::{self, Sample},
 };
 
-use inference_protocol::images::image_generation_response;
+use inference_protocol::images::{encode_png, image_generation_response};
 
 use crate::{
     api_error::{ApiError, ApiErrorKind, ModelErrorMessage},
     dispatch::{base_process_non_streaming_response, create_response_channel, send_request},
+    files::store_generated_image,
     lora_routing::DEFAULT_MODEL_ID,
     openai::{AudioResponseFormat, ImageGenerationRequest, SpeechGenerationRequest},
     types::SharedInferenceRsState,
@@ -119,23 +120,42 @@ async fn generate_image_inner(
             width: request.width,
         },
     };
-    match run(state, &request.model, repr, messages).await? {
-        Response::ImageGeneration(generated) => {
-            let response = image_generation_response(
-                generated.created,
-                &generated.images,
-                request.response_format,
-                None,
-            )
-            .map_err(|e| {
-                InferenceRs::maybe_log_error(state.clone(), e.as_ref());
-                ApiError::from_error(e.as_ref(), ApiErrorKind::Internal)
-            })?;
-            InferenceRs::maybe_log_response(state.clone(), &response);
-            Ok(response)
+    let Response::ImageGeneration(generated) = run(state, &request.model, repr, messages).await?
+    else {
+        return Err(unexpected(state));
+    };
+    let encode_error = |e: anyhow::Error| {
+        InferenceRs::maybe_log_error(state.clone(), e.as_ref());
+        ApiError::from_error(e.as_ref(), ApiErrorKind::Internal)
+    };
+    let response = match request.response_format {
+        ImageGenerationResponseFormat::Url => {
+            let model = (request.model != DEFAULT_MODEL_ID).then_some(request.model.as_str());
+            let data = generated
+                .images
+                .iter()
+                .map(|image| {
+                    let url = store_generated_image(
+                        state,
+                        model,
+                        encode_png(image).map_err(encode_error)?,
+                    )?;
+                    Ok(ImageChoice {
+                        url: Some(url),
+                        b64_json: None,
+                    })
+                })
+                .collect::<Result<_, ApiError>>()?;
+            ImageGenerationResponse {
+                created: generated.created,
+                data,
+            }
         }
-        _ => Err(unexpected(state)),
-    }
+        format => image_generation_response(generated.created, &generated.images, format, None)
+            .map_err(encode_error)?,
+    };
+    InferenceRs::maybe_log_response(state.clone(), &response);
+    Ok(response)
 }
 
 /// Speaks `input` with a speech model, encoded as WAV or 16-bit PCM.

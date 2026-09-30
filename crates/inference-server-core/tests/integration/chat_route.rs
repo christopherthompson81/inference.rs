@@ -286,3 +286,25 @@ async fn an_engine_shuts_down_from_its_last_clone() -> anyhow::Result<()> {
     other.shutdown().await.map_err(anyhow::Error::msg)?;
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn generated_images_are_served_from_the_file_store() -> anyhow::Result<()> {
+    let dir = support::tiny_checkpoint()?;
+    let spec = serde_json::from_value(json!({
+        "model": {"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}},
+        "runtime": {"device": "cpu"},
+    }))?;
+    let engine = inference_api::Engine::load(spec).await?;
+    let png = inference_core::images::encode_png(&image::DynamicImage::new_rgb8(5, 3))?;
+    let url = inference_api::files::store_generated_image(engine.state(), None, png.clone())
+        .map_err(anyhow::Error::msg)?;
+    let app = InferenceRsServerRouterBuilder::new()
+        .with_engine(&engine)
+        .build()
+        .await?;
+    let response = app.oneshot(Request::get(&url).body(Body::empty())?).await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(to_bytes(response.into_body(), usize::MAX).await?, png);
+    Ok(())
+}
