@@ -102,6 +102,8 @@ Timing is measured at the engine's token steps, not at SSE frames, so keep-alive
 | `inference_paged_recurrent_prefix_validation_total` | counter | `outcome`, `reason` | Prefix validation outcomes, including attention-only hits and recurrent restore misses. |
 | `inference_paged_recurrent_prefix_owner_evictions_total` | counter | `reason` | Logical recurrent owners evicted by `capacity` or after `block_pressure` revokes their paired blocks. |
 
+Prefix- and encoder-cache counters are also available per model, without Prometheus (whose encoder counters are one series for the whole process): `GET /v1/models/cache_stats` (`Engine::cache_stats`, `inference_models_cache_stats` in the C ABI, `cache_stats()` in Python, `CacheStats()` in C#). They count since the model loaded, the prefix ones since its engine last restarted; diff two readings to see what the requests between them used. `inference run` prints each turn's encoder-cache hits that way.
+
 ### Speculative decoding (MTP)
 
 These metrics are only populated when a model with a speculative proposer (MTP) is attached. `position` is the 0-based draft position within a proposal.

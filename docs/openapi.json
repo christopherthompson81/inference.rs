@@ -825,6 +825,29 @@
         }
       }
     },
+    "/v1/models/cache_stats": {
+      "get": {
+        "tags": [
+          "inference.rs"
+        ],
+        "operationId": "model_cache_stats",
+        "responses": {
+          "200": {
+            "description": "Each loaded model's cumulative prefix- and encoder-cache counters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CacheStats"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Failed to inspect the model registry"
+          }
+        }
+      }
+    },
     "/v1/models/reload": {
       "post": {
         "tags": [
@@ -2809,6 +2832,26 @@
           "shell"
         ]
       },
+      "CacheStats": {
+        "type": "object",
+        "description": "Cache counters for each loaded model, counted since it loaded (the prefix ones since its engine last started);\na caller diffs two readings to see what the requests between them used.",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelCacheStats"
+            }
+          },
+          "object": {
+            "type": "string",
+            "example": "list"
+          }
+        }
+      },
       "CalibrationApplyRequest": {
         "type": "object",
         "properties": {
@@ -4262,6 +4305,23 @@
           }
         ]
       },
+      "EncoderCacheStats": {
+        "type": "object",
+        "required": [
+          "hits",
+          "misses"
+        ],
+        "properties": {
+          "hits": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "misses": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
       "EngineSpec": {
         "type": "object",
         "description": "What to load and how to run it: the JSON form of the options `inference serve` takes.",
@@ -5428,6 +5488,40 @@
           "video",
           "embedding"
         ]
+      },
+      "ModelCacheStats": {
+        "type": "object",
+        "required": [
+          "model_id",
+          "prefix_cache_hits",
+          "prefix_cache_sequences"
+        ],
+        "properties": {
+          "encoder_cache": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/EncoderCacheStats",
+                "description": "Media encodings the model reused and computed; media already covered by a reused prefix is neither. Absent\nfor a model without an encoder cache."
+              }
+            ]
+          },
+          "model_id": {
+            "type": "string"
+          },
+          "prefix_cache_hits": {
+            "type": "integer",
+            "description": "Prompt sequences that reused a cached prefix.",
+            "minimum": 0
+          },
+          "prefix_cache_sequences": {
+            "type": "integer",
+            "description": "Prompt sequences started, whether or not prefix caching was on for them.",
+            "minimum": 0
+          }
+        }
       },
       "ModelCategory": {
         "type": "string",

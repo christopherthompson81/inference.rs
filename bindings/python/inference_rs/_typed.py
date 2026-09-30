@@ -114,6 +114,9 @@ class Engine:
     def calibration_status(self) -> types.CalibrationStatus:
         return from_json(types.CalibrationStatus, self.json.calibration_status())
 
+    def cache_stats(self) -> types.CacheStats:
+        return from_json(types.CacheStats, self.json.cache_stats())
+
     def calibration_apply(self, save_cimatrix: str | None = None) -> types.CalibrationStatus:
         """Requantizes from the collected statistics; returns the status as it stood before."""
         request = {} if save_cimatrix is None else {"save_cimatrix": str(save_cimatrix)}

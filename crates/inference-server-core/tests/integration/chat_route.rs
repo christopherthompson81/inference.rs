@@ -152,6 +152,27 @@ async fn missing_models_and_responses_are_typed_not_found() -> anyhow::Result<()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn cache_stats_list_each_loaded_models_counters() -> anyhow::Result<()> {
+    let dir = support::tiny_checkpoint()?;
+    let response = router(dir.path())
+        .await?
+        .oneshot(Request::get("/v1/models/cache_stats").body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let body: Value = serde_json::from_str(&body_text(response).await?)?;
+    assert_eq!(body["object"], "list", "{body}");
+    let model = &body["data"][0];
+    assert_eq!(model["prefix_cache_sequences"], 0, "{body}");
+    // The tiny PaddleOCR-VL keeps an encoder cache; nothing has been encoded yet.
+    assert_eq!(
+        model["encoder_cache"],
+        json!({"hits": 0, "misses": 0}),
+        "{body}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn a_capped_response_is_incomplete_and_can_be_continued() -> anyhow::Result<()> {
     let dir = support::tiny_checkpoint()?;
     let spec = serde_json::from_value(json!({

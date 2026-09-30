@@ -14,6 +14,7 @@ use inference_api::{
         BlockDenoisingProgress, ChatStreamEvent, RequestCancellation, Usage,
     },
     media_source::{MediaAttachment, MediaAttachments, MediaSourcePolicy, load_media_source},
+    models::EncoderCacheStats,
     openai::{ChatCompletionRequest, GenerationDefaults, ModelObject},
 };
 use inference_core::{AgentPermission, ReasoningEffort, files::File};
@@ -327,6 +328,8 @@ pub(super) struct Turn {
     pub message: Value,
     pub time_to_first_token: Option<Duration>,
     pub usage: Option<Usage>,
+    /// The turn's encoder-cache lookups; `None` when no loaded model has an encoder cache.
+    pub encoder_cache: Option<EncoderCacheStats>,
 }
 
 /// Streams one chat turn, printing its text, reasoning, tool panels and approvals as they arrive.
@@ -338,6 +341,7 @@ pub(super) async fn stream_turn(
     sampling: &Sampling,
 ) -> anyhow::Result<Turn> {
     let request = chat_request(messages, options, sampling)?;
+    let encoder_before = encoder_cache_totals(engine);
     let guard = TurnGuard::preparing();
     let mut stream = engine
         .chat_stream(request, media.shared.clone())
@@ -345,7 +349,27 @@ pub(super) async fn stream_turn(
         .map_err(|e| anyhow::anyhow!(media.describe(&e.to_string())))?
         .with_denoising_progress();
     guard.streaming(stream.cancellation());
-    read_turn(engine, &mut stream, Instant::now()).await
+    let mut turn = read_turn(engine, &mut stream, Instant::now()).await?;
+    turn.encoder_cache = encoder_before
+        .zip(encoder_cache_totals(engine))
+        .map(|(before, after)| EncoderCacheStats {
+            hits: after.hits.saturating_sub(before.hits),
+            misses: after.misses.saturating_sub(before.misses),
+        });
+    Ok(turn)
+}
+
+/// The encoder-cache counters summed over the loaded models; they are cumulative, so a turn's share is a difference.
+fn encoder_cache_totals(engine: &Engine) -> Option<EncoderCacheStats> {
+    let stats = engine.cache_stats().ok()?;
+    stats
+        .data
+        .iter()
+        .filter_map(|model| model.encoder_cache)
+        .reduce(|total, model| EncoderCacheStats {
+            hits: total.hits + model.hits,
+            misses: total.misses + model.misses,
+        })
 }
 
 async fn read_turn(
@@ -432,6 +456,7 @@ async fn read_turn(
         message,
         time_to_first_token,
         usage,
+        encoder_cache: None,
     })
 }
 
@@ -459,6 +484,16 @@ pub(super) fn print_stats(turn: &Turn, sampling: &Sampling) {
         println!(
             "Prefix cache: {} prompt tokens reused",
             details.cached_tokens
+        );
+    }
+    if let Some(encoder) = turn
+        .encoder_cache
+        .filter(|encoder| encoder.hits + encoder.misses > 0)
+    {
+        println!(
+            "Encoder cache: {}/{} hits",
+            encoder.hits,
+            encoder.hits + encoder.misses
         );
     }
     println!("Sampling: {}", sampling.describe());
@@ -801,6 +836,7 @@ mod tests {
         let images = tempfile::tempdir()?;
         let mut media = SessionMedia::default();
         let mut messages = Vec::new();
+        let mut encoder = Vec::new();
         let mut sampling = Sampling::for_model(None);
         sampling.max_tokens = Some(MAX_TOKENS);
         let options = ChatOptions {
@@ -822,9 +858,13 @@ mod tests {
             messages.push(media_message(vec![(IMAGE_PART, source)], "OCR:"));
             let turn = stream_turn(&engine, &messages, &media, &options, &sampling).await?;
             messages.push(turn.message);
+            encoder.push(turn.encoder_cache.expect("the model has an encoder cache"));
         }
         assert_eq!(media.len(), 2);
         assert_eq!(messages[2]["content"][0]["image_url"]["url"], "media://1");
+        // The first turn encodes its image; the second reuses it (the second image is identical too).
+        assert!(encoder[0].misses > 0, "{:?}", encoder[0]);
+        assert!(encoder[1].hits > 0, "{:?}", encoder[1]);
         Ok(())
     }
 

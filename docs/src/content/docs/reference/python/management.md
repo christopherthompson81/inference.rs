@@ -1,6 +1,6 @@
 ---
 title: Models, adapters, files and skills
-description: "Model status, LoRA adapters, files, skills, approvals, sessions, calibration, tokenization and the media generation calls."
+description: "Model status and cache counters, LoRA adapters, files, skills, approvals, sessions, calibration, tokenization and the media generation calls."
 sidebar:
   order: 7
 ---
@@ -46,6 +46,16 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `AudioResponseFormat.FLAC` | `'flac'` |
 | `AudioResponseFormat.WAV` | `'wav'` |
 | `AudioResponseFormat.PCM` | `'pcm'` |
+
+
+## `CacheStats`
+
+Cache counters for each loaded model, counted since it loaded (the prefix ones since its engine last started); a caller diffs two readings to see what the requests between them used.
+
+| Field | Type |
+| --- | --- |
+| `data` | `list[ModelCacheStats]` |
+| `object` | `str` |
 
 
 ## `CalibrationApplyRequest`
@@ -106,6 +116,14 @@ OpenAI-compatible container file metadata backed by the same in-process file sto
 | Field | Type |
 | --- | --- |
 | `text` | `str` |
+
+
+## `EncoderCacheStats`
+
+| Field | Type |
+| --- | --- |
+| `hits` | `int` |
+| `misses` | `int` |
 
 
 ## `FileDeleted`
@@ -262,6 +280,16 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `Modality.VISION` | `'vision'` |
 | `Modality.VIDEO` | `'video'` |
 | `Modality.EMBEDDING` | `'embedding'` |
+
+
+## `ModelCacheStats`
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `encoder_cache` | `EncoderCacheStats \| None` | optional |
+| `model_id` | `str` | required |
+| `prefix_cache_hits` | `int` | required |
+| `prefix_cache_sequences` | `int` | required |
 
 
 ## `ModelCategory`

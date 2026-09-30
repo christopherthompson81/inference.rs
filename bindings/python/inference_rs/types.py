@@ -378,6 +378,14 @@ class BuiltinToolChoiceType(str, Enum):
 
 
 @dataclass(kw_only=True)
+class CacheStats:
+    """Cache counters for each loaded model, counted since it loaded (the prefix ones since its engine last started); a caller diffs two readings to see what the requests between them used."""
+
+    data: list[ModelCacheStats]
+    object: str
+
+
+@dataclass(kw_only=True)
 class CalibrationApplyRequest:
     save_cimatrix: str | None = None
 
@@ -683,6 +691,12 @@ class EmbeddingResponse:
 class EmbeddingUsage:
     prompt_tokens: int
     total_tokens: int
+
+
+@dataclass(kw_only=True)
+class EncoderCacheStats:
+    hits: int
+    misses: int
 
 
 @dataclass(kw_only=True)
@@ -1037,6 +1051,14 @@ class Modality(str, Enum):
     VISION = "vision"
     VIDEO = "video"
     EMBEDDING = "embedding"
+
+
+@dataclass(kw_only=True)
+class ModelCacheStats:
+    encoder_cache: EncoderCacheStats | None = None
+    model_id: str
+    prefix_cache_hits: int
+    prefix_cache_sequences: int
 
 
 class ModelCategory(str, Enum):

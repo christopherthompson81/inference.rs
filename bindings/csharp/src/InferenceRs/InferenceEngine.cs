@@ -197,6 +197,14 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Text(status, response, nameof(NativeMethods.inference_calibration_start));
     }
 
+    /// <summary>Each loaded model's cumulative prefix- and encoder-cache counters; diff two readings for a span.</summary>
+    public string CacheStats()
+    {
+        using var engine = Borrow();
+        var status = NativeMethods.inference_models_cache_stats(engine.Handle, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_models_cache_stats));
+    }
+
     public string CalibrationStatus()
     {
         using var engine = Borrow();

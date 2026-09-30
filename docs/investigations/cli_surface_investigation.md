@@ -483,3 +483,28 @@ stream's `Response::Done` fallback always sent `response.completed` (now `termin
 status for both paths); with several choices every message item took the run's status (now each takes its own
 choice's); the non-streaming path stored a cancelled run's history (now neither path does); a cancelled background
 partial kept `incomplete_details`. Left as it was: a cap that lands mid-reasoning reports a completed reasoning item.
+
+## Run 20 — 2026-09-30 (time approximate)
+
+**Question:** `inference run` stopped printing encoder-cache hits when it moved to the engine API (Run 8): the counts
+lived on the core `IntervalLogger`, which the API did not expose. Per request or per model?
+
+**Finding:** the counters are per model and cumulative: about 20 multimodal models bump shared `AtomicUsize`s inside
+their forward passes, with no notion of which sequence an image belongs to. Per-request `Usage` would touch every one
+of them; the user chose exposing the model counters instead.
+
+**Change:** `Engine::cache_stats()` (`CacheStats { data: [ModelCacheStats { model, prefix_cache_hits,
+prefix_cache_sequences, encoder_cache: Option<EncoderCacheStats { hits, misses }> }] }`), served at
+`GET /v1/models/cache_stats`, in the C ABI as `inference_models_cache_stats` (ABI 0.0.13), in C# as `CacheStats()`
+and in Python as `cache_stats()`. The CLI reads the encoder totals before and after each turn and prints the
+difference as before; concurrent requests on the same engine would blur it, which a single-user CLI does not have.
+
+**Tests:** `a_second_image_turn_resends_the_first_image_by_its_index` now checks the first turn misses and the
+second hits; `cache_stats_list_each_loaded_models_counters` (HTTP); Python and C# read the stats.
+
+**Review:** counters, route and ABI are right. Fixed: the docs said "cumulative" without since when (the prefix counters
+live on the engine's logger and restart with it; the encoder ones are the model's and restart on reload);
+`prefix_cache_sequences` counts every prompt sequence started, not only those that consulted the cache; media already
+covered by a reused prefix is neither an encoder hit nor a miss; the observability page implied the Prometheus
+counters were these (they are one process-wide series); the field is `model_id` like `/v1/models/status`; entries are
+sorted by model id; the C ABI integration test calls the new entry point.

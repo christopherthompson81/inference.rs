@@ -51,10 +51,10 @@ mod generated {
         handlers::{
             __path_calibration_apply, __path_calibration_start, __path_calibration_status,
             __path_delete_session, __path_get_model_status, __path_get_session, __path_health,
-            __path_models, __path_put_session, __path_re_isq, __path_reload_model,
-            __path_system_doctor, __path_system_info, __path_tune_model, __path_unload_model,
-            ModelOperationRequest, ModelStatus, ModelStatusResponse, TuneModelRequest,
-            TuneProfileRequest,
+            __path_model_cache_stats, __path_models, __path_put_session, __path_re_isq,
+            __path_reload_model, __path_system_doctor, __path_system_info, __path_tune_model,
+            __path_unload_model, ModelOperationRequest, ModelStatus, ModelStatusResponse,
+            TuneModelRequest, TuneProfileRequest,
         },
         image_generation::__path_image_generation,
         lora_adapters::{
@@ -104,7 +104,7 @@ mod generated {
     pub(super) fn doc() -> utoipa::openapi::OpenApi {
         #[derive(OpenApi)]
         #[openapi(
-            paths(models, health, chatcompletions, anthropic_messages, anthropic_count_tokens, completions, embeddings, re_isq, calibration_start, calibration_status, calibration_apply, image_generation, speech_generation, create_response, get_response, delete_response, cancel_response, upload_skill, list_skills, upload_skill_version, list_skill_versions, load_lora_adapter, unload_lora_adapter, list_lora_adapters, unload_model, reload_model, get_model_status, tune_model, system_info, system_doctor, get_session, put_session, delete_session, list_files, upload_file, get_file, get_file_content, delete_file, list_container_files, get_container_file, get_container_file_content, resolve_agent_approval, metrics),
+            paths(models, model_cache_stats, health, chatcompletions, anthropic_messages, anthropic_count_tokens, completions, embeddings, re_isq, calibration_start, calibration_status, calibration_apply, image_generation, speech_generation, create_response, get_response, delete_response, cancel_response, upload_skill, list_skills, upload_skill_version, list_skill_versions, load_lora_adapter, unload_lora_adapter, list_lora_adapters, unload_model, reload_model, get_model_status, tune_model, system_info, system_doctor, get_session, put_session, delete_session, list_files, upload_file, get_file, get_file_content, delete_file, list_container_files, get_container_file, get_container_file_content, resolve_agent_approval, metrics),
             components(schemas(
                 // Not a route's body: the engine spec the C ABI and bindings load from, typed from this document.
                 inference_api::EngineSpec,
@@ -175,6 +175,9 @@ mod generated {
                 MessageInnerContent,
                 ModelObject,
                 ModelObjects,
+                inference_api::models::CacheStats,
+                inference_api::models::ModelCacheStats,
+                inference_api::models::EncoderCacheStats,
                 NamedFunctionToolChoice,
                 OpenAiCodeInterpreterAutoContainer,
                 OpenAiCodeInterpreterContainer,

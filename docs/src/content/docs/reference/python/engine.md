@@ -171,6 +171,12 @@ Starts collecting activation statistics from the requests the engine serves.
 calibration_status() -> types.CalibrationStatus
 ```
 
+### `Engine.cache_stats`
+
+```text
+cache_stats() -> types.CacheStats
+```
+
 ### `Engine.calibration_apply`
 
 ```text
@@ -664,6 +670,14 @@ calibration_start() -> str
 ```text
 calibration_status() -> str
 ```
+
+### `JsonEngine.cache_stats`
+
+```text
+cache_stats() -> str
+```
+
+Each loaded model's cumulative prefix- and encoder-cache counters; diff two readings for a span.
 
 ### `JsonEngine.calibration_apply`
 

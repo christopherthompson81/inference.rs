@@ -155,7 +155,7 @@ GROUPS = [
     (
         "Models, adapters, files and skills",
         "management",
-        "Model status, LoRA adapters, files, skills, approvals, sessions, calibration, tokenization and the media generation calls.",
+        "Model status and cache counters, LoRA adapters, files, skills, approvals, sessions, calibration, tokenization and the media generation calls.",
         lambda n: n.startswith(
             (
                 "Model",
@@ -174,6 +174,8 @@ GROUPS = [
                 "SpeechGeneration",
                 "AudioResponseFormat",
                 "Calibration",
+                "CacheStats",
+                "EncoderCacheStats",
                 "ReIsq",
                 "Tune",
                 "Serialized",
