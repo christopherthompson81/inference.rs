@@ -14,7 +14,8 @@ use inference_api::{
     skill_store::SkillStore,
 };
 use inference_core::{
-    DiffusionLoaderType, McpClientConfig, PagedCacheType, SpeechLoaderType, initialize_logging,
+    AutoDeviceMapParams, DiffusionLoaderType, McpClientConfig, PagedCacheType, SpeechLoaderType,
+    initialize_logging,
 };
 use inference_selection::{MmprojSelection, ModelSelected};
 use inference_server_core::{
@@ -450,8 +451,12 @@ pub(crate) fn convert_to_model_selected(
                     imatrix: quantization.imatrix.clone(),
                     max_seq_len: device.max_seq_len,
                     max_batch_size: device.max_batch_size,
-                    max_num_images: multimodal.max_num_images.unwrap_or(1),
-                    max_image_length: multimodal.max_image_length.unwrap_or(1024),
+                    max_num_images: multimodal
+                        .max_num_images
+                        .unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_NUM_IMAGES),
+                    max_image_length: multimodal
+                        .max_image_length
+                        .unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_IMAGE_LENGTH),
                     hf_cache_path: device.hf_cache.clone(),
                     matformer_config_path: matformer.config_path.clone(),
                     matformer_slice_name: matformer.slice_name.clone(),
@@ -890,7 +895,9 @@ pub(crate) fn extract_device_settings(model_type: &ModelType) -> (bool, Option<V
 }
 
 pub(crate) fn extract_isq_setting(model_type: &ModelType) -> Option<String> {
-    extract_quantization(model_type).and_then(|q| q.in_situ_quant.clone())
+    model_type
+        .quantization()
+        .and_then(|q| q.in_situ_quant.clone())
 }
 
 pub(crate) fn extract_encoder_cache_memory_bytes(model_type: &ModelType) -> Result<Option<usize>> {
@@ -911,39 +918,7 @@ pub(crate) fn extract_encoder_cache_memory_bytes(model_type: &ModelType) -> Resu
 }
 
 pub(crate) fn extract_quant_flag(model_type: &ModelType) -> Option<String> {
-    extract_quantization(model_type).and_then(|q| q.quant.clone())
-}
-
-fn extract_quantization(model_type: &ModelType) -> Option<&crate::args::QuantizationOptions> {
-    match model_type {
-        ModelType::Auto { quantization, .. } => Some(quantization),
-        ModelType::Text { quantization, .. } => Some(quantization),
-        ModelType::Multimodal { quantization, .. } => Some(quantization),
-        ModelType::Embedding { quantization, .. } => Some(quantization),
-        ModelType::Diffusion { .. } | ModelType::Speech { .. } => None,
-    }
-}
-
-pub(crate) fn model_quantization_mut(
-    model_type: &mut ModelType,
-) -> Option<&mut crate::args::QuantizationOptions> {
-    match model_type {
-        ModelType::Auto { quantization, .. } => Some(quantization),
-        ModelType::Text { quantization, .. } => Some(quantization),
-        ModelType::Multimodal { quantization, .. } => Some(quantization),
-        ModelType::Embedding { quantization, .. } => Some(quantization),
-        ModelType::Diffusion { .. } | ModelType::Speech { .. } => None,
-    }
-}
-
-fn model_format_mut(model_type: &mut ModelType) -> Option<&mut FormatOptions> {
-    match model_type {
-        ModelType::Auto { format, .. }
-        | ModelType::Text { format, .. }
-        | ModelType::Multimodal { format, .. }
-        | ModelType::Embedding { format, .. } => Some(format),
-        ModelType::Diffusion { .. } | ModelType::Speech { .. } => None,
-    }
+    model_type.quantization().and_then(|q| q.quant.clone())
 }
 
 pub(crate) fn extract_hf_config_settings(
@@ -962,12 +937,12 @@ pub(crate) fn extract_hf_config_settings(
 
 /// The `--quant` rules that are about the flags; what `--quant` picks is resolved when the engine loads.
 pub(crate) fn normalize_quant_flags(model_type: &mut ModelType) -> Result<()> {
-    let quant = model_quantization_mut(model_type).and_then(|q| q.quant.clone());
+    let quant = model_type.quantization().and_then(|q| q.quant.clone());
     let legacy_lora = matches!(
         model_type,
         ModelType::Auto { adapter, .. } | ModelType::Text { adapter, .. } if adapter.legacy_lora.is_some()
     );
-    let Some(format) = model_format_mut(model_type) else {
+    let Some(format) = model_type.format_mut() else {
         return Ok(());
     };
     format.normalize()?;
@@ -1602,7 +1577,7 @@ mod tests {
             ..QuantizationOptions::default()
         };
         let device = DeviceOptions {
-            max_seq_len: 4096,
+            max_seq_len: 8192,
             max_batch_size: 7,
             ..DeviceOptions::default()
         };
@@ -1634,7 +1609,7 @@ mod tests {
                 max_image_shape,
                 max_num_images,
             } => {
-                assert_eq!(max_seq_len, 4096);
+                assert_eq!(max_seq_len, 8192);
                 assert_eq!(max_batch_size, 7);
                 assert_eq!(max_image_shape, (1536, 1536));
                 assert_eq!(max_num_images, 5);

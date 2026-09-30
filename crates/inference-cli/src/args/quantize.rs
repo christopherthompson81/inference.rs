@@ -162,8 +162,8 @@ impl QuantizeFormatOptions {
             quantized_file: self.quantized_file.clone(),
             mmproj: self.mmproj.clone(),
             tok_model_id: self.tok_model_id.clone(),
-            gqa: 1,
             direct_file_only: self.direct_file_only,
+            ..FormatOptions::default()
         }
     }
 

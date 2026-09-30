@@ -20,9 +20,10 @@ const GIGABYTE: u64 = 1_000_000_000;
 const KIBIBYTE: u64 = 1 << 10;
 const MEBIBYTE: u64 = 1 << 20;
 const GIBIBYTE: u64 = 1 << 30;
+const DEFAULT_GQA: usize = 1;
 
 /// Model source options
-#[derive(Args, Clone, Deserialize)]
+#[derive(Args, Clone)]
 pub struct ModelSourceOptions {
     /// Hugging Face model ID or local path to model directory
     #[arg(short = 'm', long)]
@@ -38,7 +39,6 @@ pub struct ModelSourceOptions {
 
     /// Model data type
     #[arg(long, default_value = "auto", value_parser = parse_dtype)]
-    #[serde(default)]
     pub dtype: ModelDType,
 
     /// Recursively merged JSON overrides for the Hugging Face model config
@@ -61,7 +61,7 @@ pub(super) fn parse_positive_usize(value: &str) -> Result<usize, String> {
 }
 
 /// Format options for model loading
-#[derive(Args, Clone, Default, Deserialize)]
+#[derive(Args, Clone, Deserialize)]
 pub struct FormatOptions {
     /// Model format: plain (safetensors), GGUF, or GGML.
     /// Auto-detected from `-f` when not specified.
@@ -81,7 +81,7 @@ pub struct FormatOptions {
     pub tok_model_id: Option<String>,
 
     /// GQA value for GGML models
-    #[arg(long, default_value_t = 1)]
+    #[arg(long, default_value_t = DEFAULT_GQA)]
     #[serde(default = "default_gqa")]
     pub gqa: usize,
 
@@ -89,6 +89,19 @@ pub struct FormatOptions {
     #[arg(skip)]
     #[serde(skip)]
     pub direct_file_only: bool,
+}
+
+impl Default for FormatOptions {
+    fn default() -> Self {
+        Self {
+            format: None,
+            quantized_file: None,
+            mmproj: None,
+            tok_model_id: None,
+            gqa: DEFAULT_GQA,
+            direct_file_only: false,
+        }
+    }
 }
 
 impl FormatOptions {
@@ -667,11 +680,10 @@ pub struct QuantizationOptions {
 }
 
 /// Device and compute options
-#[derive(Args, Clone, Default, Deserialize)]
+#[derive(Args, Clone)]
 pub struct DeviceOptions {
     /// Force CPU-only execution
     #[arg(long)]
-    #[serde(default)]
     pub cpu: bool,
 
     /// Device layer mapping (format: ORD:NUM;... e.g., "0:10;1:20")
@@ -689,13 +701,25 @@ pub struct DeviceOptions {
 
     /// Max sequence length for automatic device mapping
     #[arg(long, default_value_t = AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN)]
-    #[serde(default = "default_max_seq_len")]
     pub max_seq_len: usize,
 
     /// Max batch size for automatic device mapping
     #[arg(long, default_value_t = AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE)]
-    #[serde(default = "default_max_batch_size")]
     pub max_batch_size: usize,
+}
+
+// Not derived: clap's defaults for the device-map sizes are nonzero, and TOML falls back to this.
+impl Default for DeviceOptions {
+    fn default() -> Self {
+        Self {
+            cpu: false,
+            device_layers: None,
+            topology: None,
+            hf_cache: None,
+            max_seq_len: AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
+            max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
+        }
+    }
 }
 
 /// Multimodal model specific options
@@ -719,15 +743,7 @@ pub struct MultimodalOptions {
 }
 
 fn default_gqa() -> usize {
-    1
-}
-
-fn default_max_seq_len() -> usize {
-    AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN
-}
-
-fn default_max_batch_size() -> usize {
-    AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE
+    DEFAULT_GQA
 }
 
 #[cfg(test)]

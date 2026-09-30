@@ -8,7 +8,9 @@ use anyhow::Result;
 use tracing::{info, warn};
 
 use inference_api::{Engine, EngineSpec, engine::RuntimeSpec};
-use inference_core::{IsqType, UqffWriteConfig, expand_isq_value, initialize_logging};
+use inference_core::{
+    AutoDeviceMapParams, IsqType, UqffWriteConfig, expand_isq_value, initialize_logging,
+};
 use inference_selection::{
     ModelSelected,
     quant::{QuantPolicy, resolve_model_source},
@@ -530,8 +532,12 @@ fn convert_to_model_selected(
                 imatrix: quantization.imatrix.clone(),
                 max_seq_len: device.max_seq_len,
                 max_batch_size: device.max_batch_size,
-                max_num_images: multimodal.max_num_images.unwrap_or(1),
-                max_image_length: multimodal.max_image_length.unwrap_or(1024),
+                max_num_images: multimodal
+                    .max_num_images
+                    .unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_NUM_IMAGES),
+                max_image_length: multimodal
+                    .max_image_length
+                    .unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_IMAGE_LENGTH),
                 hf_cache_path: device.hf_cache.clone(),
                 matformer_config_path: None,
                 matformer_slice_name: None,

@@ -361,3 +361,36 @@ was reported only after the model loaded; the CLI now refuses it first, with the
 **Tests:** `serve::tests::accepted_connections_enable_tcp_nodelay` moved to server-core;
 `the_ui_mounts_beside_the_api_with_the_engines_tools` mounts the UI on the tiny checkpoint's engine with its chat
 cache in a tempdir and reads the tools back from `/ui/api/capabilities`.
+
+## Run 15 — 2026-09-30 (time approximate)
+
+**Question:** "which model to load" is written three ways: the clap `ModelType` groups, the TOML `ModelEntry`, and
+`inference_selection::ModelSelected` (plus the per-model fields of `ModelSpec`/`RuntimeSpec`). Is the conversion
+between them worth re-aggregating? (Read-only design pass.)
+
+**Finding:** about 1,300 CLI lines turn model flags into `ModelSelected` + runtime settings: `convert_to_model_selected`
+(230) and `convert_text_model` (312) in serve.rs, quantize's own pair (230), `model_spec` and `build_model_specs`
+(two copies of the per-model runtime split), and TOML's `to_model_type`. Verbatim duplicates: two `model_format_mut`,
+`extract_quantization` vs `model_quantization_mut`, two cpu-consistency loops. Unused `Deserialize` derives on
+`ModelSourceOptions`, `DeviceOptions`, `CacheOptions`. Divergences: `arch` silently dropped for Auto (becomes `Run`),
+GGUF, multimodal and embedding; TOML skips clap's declarative checks (quant vs isq/from_uqff,
+`tgt_non_granular_index` without X-LoRA, matformer slice without its config); `tune` skips `normalize_quant_flags`.
+
+**Bug:** `DeviceOptions` derives `Default`, so its `max_seq_len`/`max_batch_size` default to 0, and the TOML path fills
+unset device fields from that default. A `[[models]]` entry without a `[models.device]` table (every documented
+example) hands automatic device mapping `max_seq_len = 0, max_batch_size = 0`; clap gives 4096 and 1.
+`FormatOptions` has the same shape (`gqa` 0 vs clap's 1).
+
+**Plan:** PR 1 fixes the defaults (with a from-config test), drops the dead derives and merges the duplicates; PR 2 has
+TOML reuse the clap groups and adds the missing TOML checks; PR 3 moves the conversion into inference-selection as a
+flat `ModelRequest -> ModelSelected` (serve/run/bench/tune/from-config), making dropped `arch` explicit; PR 4 does the
+same for quantize; PR 5 (optional) moves the SDK's hand-built `ModelSelected`s. `ModelSelected` and the OpenAPI/Python
+schema stay unchanged throughout.
+
+**PR 1 (defaults and duplicates):** confirmed the bug with
+`a_model_without_device_or_format_tables_gets_the_cli_defaults` (it saw `(0, 0)` before the fix). `DeviceOptions` and
+`FormatOptions` now implement `Default` with clap's values. The unused `Deserialize` derives on `ModelSourceOptions`,
+`DeviceOptions` and `CacheOptions` and their serde default functions are gone; the two `model_format_mut`s and the
+quantization accessors are `ModelType::{format_mut, quantization}`; the cpu-consistency check is one
+`config::models_cpu`; `tune` runs `normalize_quant_flags`; the image-size defaults use the `AutoDeviceMapParams`
+constants.

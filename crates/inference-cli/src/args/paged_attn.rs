@@ -7,7 +7,7 @@ use inference_core::PagedCacheType;
 use serde::Deserialize;
 
 /// Cache and attention configuration
-#[derive(Args, Clone, Deserialize, Default)]
+#[derive(Args, Clone, Default)]
 pub struct CacheOptions {
     #[command(flatten)]
     pub paged_attn: PagedAttentionOptions,

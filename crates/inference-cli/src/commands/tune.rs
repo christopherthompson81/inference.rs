@@ -9,16 +9,18 @@ use crate::args::{AdapterOptions, GlobalOptions, MatformerSelection, ModelType, 
 
 use super::serve::{
     convert_to_model_selected, extract_device_settings, extract_isq_setting, extract_quant_flag,
+    normalize_quant_flags,
 };
 
 pub async fn run_tune(
-    model_type: ModelType,
+    mut model_type: ModelType,
     global: GlobalOptions,
     profile: TuneProfileArg,
     json: bool,
     emit_config: Option<PathBuf>,
 ) -> Result<()> {
     validate_adapter_options(&model_type)?;
+    normalize_quant_flags(&mut model_type)?;
     let model_selected = convert_to_model_selected(&model_type, &MatformerSelection::default())?;
     let (cpu, _device_layers) = extract_device_settings(&model_type);
     let requested = match extract_quant_flag(&model_type) {

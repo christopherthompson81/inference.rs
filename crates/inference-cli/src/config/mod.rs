@@ -180,7 +180,7 @@ fn validate_config(config: &CliConfig) -> Result<()> {
         }
     }
 
-    let mut cpu_setting: Option<bool> = None;
+    models_cpu(models)?;
     for model in models {
         if model.max_model_len == Some(0) {
             anyhow::bail!("max_model_len must be greater than zero");
@@ -196,20 +196,19 @@ fn validate_config(config: &CliConfig) -> Result<()> {
                 "multimodal models support dynamic language-model LoRA, but not legacy LoRA or X-LoRA"
             );
         }
-        if let Some(cpu) = model.device.cpu {
-            match cpu_setting {
-                None => cpu_setting = Some(cpu),
-                Some(existing) if existing != cpu => {
-                    anyhow::bail!(
-                        "cpu must be consistent across all models (found both true and false)"
-                    );
-                }
-                _ => {}
-            }
-        }
     }
 
     Ok(())
+}
+
+/// Whether the models run on the CPU; they share one device, so every `device.cpu` that is set must agree.
+pub(crate) fn models_cpu(models: &[ModelEntry]) -> anyhow::Result<bool> {
+    let mut settings = models.iter().filter_map(|model| model.device.cpu);
+    let first = settings.next();
+    if first.is_some_and(|cpu| settings.any(|other| other != cpu)) {
+        anyhow::bail!("cpu must be consistent across all models (found both true and false)");
+    }
+    Ok(first.unwrap_or(false))
 }
 
 impl GlobalOptionsToml {

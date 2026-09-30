@@ -419,19 +419,31 @@ pub fn resolve_model_type(
         Some(model_type) => model_type,
         None => default_model.into_model_type()?,
     };
-    if let Some(format) = model_format_mut(&mut model_type) {
+    if let Some(format) = model_type.format_mut() {
         format.normalize()?;
     }
     Ok(model_type)
 }
 
-fn model_format_mut(model_type: &mut ModelType) -> Option<&mut FormatOptions> {
-    match model_type {
-        ModelType::Auto { format, .. }
-        | ModelType::Text { format, .. }
-        | ModelType::Multimodal { format, .. }
-        | ModelType::Embedding { format, .. } => Some(format),
-        ModelType::Diffusion { .. } | ModelType::Speech { .. } => None,
+impl ModelType {
+    pub(crate) fn format_mut(&mut self) -> Option<&mut FormatOptions> {
+        match self {
+            Self::Auto { format, .. }
+            | Self::Text { format, .. }
+            | Self::Multimodal { format, .. }
+            | Self::Embedding { format, .. } => Some(format),
+            Self::Diffusion { .. } | Self::Speech { .. } => None,
+        }
+    }
+
+    pub(crate) fn quantization(&self) -> Option<&QuantizationOptions> {
+        match self {
+            Self::Auto { quantization, .. }
+            | Self::Text { quantization, .. }
+            | Self::Multimodal { quantization, .. }
+            | Self::Embedding { quantization, .. } => Some(quantization),
+            Self::Diffusion { .. } | Self::Speech { .. } => None,
+        }
     }
 }
 
