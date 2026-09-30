@@ -1,5 +1,6 @@
 //! The models an engine serves: listing them, and unloading, reloading and inspecting one.
 
+use futures::future::BoxFuture;
 use inference_core::{InferenceRsError, ModelStatus as CoreModelStatus};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -116,7 +117,14 @@ pub fn unload_model(
 }
 
 /// Reloads an unloaded model; one that is already loaded is not an error.
-pub async fn reload_model(
+pub fn reload_model<'a>(
+    state: &'a SharedInferenceRsState,
+    request: ModelOperationRequest,
+) -> BoxFuture<'a, Result<ModelStatusResponse, ApiError>> {
+    Box::pin(reload_model_inner(state, request))
+}
+
+async fn reload_model_inner(
     state: &SharedInferenceRsState,
     request: ModelOperationRequest,
 ) -> Result<ModelStatusResponse, ApiError> {

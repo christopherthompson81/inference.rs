@@ -9,6 +9,7 @@ use std::{
 
 use anyhow::{Context, Result};
 use either::Either;
+use futures::future::BoxFuture;
 use inference_core::{
     AgentPermission, ApproximateUserLocation, ChatCompletionChunkResponse, ChatCompletionResponse,
     CodeExecutionPermission, Function, InferenceRs, ReasoningEffort, Response, Tool, ToolChoice,
@@ -1495,7 +1496,14 @@ pub struct PreparedMessages {
 }
 
 /// Validates a Messages request, converts it to chat, and dispatches it with the server's chat policy.
-pub async fn prepare_messages(
+pub fn prepare_messages<'a>(
+    engine: &'a ChatEngine,
+    request: AnthropicMessagesRequest,
+) -> BoxFuture<'a, Result<PreparedMessages, DispatchError>> {
+    Box::pin(prepare_messages_inner(engine, request))
+}
+
+async fn prepare_messages_inner(
     engine: &ChatEngine,
     request: AnthropicMessagesRequest,
 ) -> Result<PreparedMessages, DispatchError> {
@@ -1526,7 +1534,21 @@ pub enum MessagesFailure {
 }
 
 /// Waits for a non-streaming Messages request's final response.
-pub async fn collect_messages(
+pub fn collect_messages<'a>(
+    rx: &'a mut Receiver<Response>,
+    state: SharedInferenceRsState,
+    model_override: Option<&'a str>,
+    omit_thinking: bool,
+) -> BoxFuture<'a, Result<AnthropicMessageResponse, MessagesFailure>> {
+    Box::pin(collect_messages_inner(
+        rx,
+        state,
+        model_override,
+        omit_thinking,
+    ))
+}
+
+async fn collect_messages_inner(
     rx: &mut Receiver<Response>,
     state: SharedInferenceRsState,
     model_override: Option<&str>,

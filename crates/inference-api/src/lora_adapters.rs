@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, bail};
+use futures::future::BoxFuture;
 use inference_core::{
     LoraAdapterFiles, LoraAdapterInfo, LoraAdapterLoadPolicy, MAX_LORA_ALIAS_BYTES,
 };
@@ -450,7 +451,15 @@ fn core_error(error: inference_core::InferenceRsError) -> ApiError {
 }
 
 /// Loads a PEFT adapter directory under `lora_name`; one load runs at a time and a second is rejected, not queued.
-pub async fn load_adapter(
+pub fn load_adapter<'a>(
+    state: &'a SharedInferenceRsState,
+    config: &'a LoraAdapterApiConfig,
+    request: LoadLoraAdapterRequest,
+) -> BoxFuture<'a, Result<LoraAdapterObject, ApiError>> {
+    Box::pin(load_adapter_inner(state, config, request))
+}
+
+async fn load_adapter_inner(
     state: &SharedInferenceRsState,
     config: &LoraAdapterApiConfig,
     request: LoadLoraAdapterRequest,
@@ -490,7 +499,15 @@ pub async fn load_adapter(
     Ok(LoraAdapterObject::from_info(info, true))
 }
 
-pub async fn unload_adapter(
+pub fn unload_adapter<'a>(
+    state: &'a SharedInferenceRsState,
+    config: &'a LoraAdapterApiConfig,
+    request: UnloadLoraAdapterRequest,
+) -> BoxFuture<'a, Result<LoraAdapterObject, ApiError>> {
+    Box::pin(unload_adapter_inner(state, config, request))
+}
+
+async fn unload_adapter_inner(
     state: &SharedInferenceRsState,
     config: &LoraAdapterApiConfig,
     request: UnloadLoraAdapterRequest,
@@ -512,7 +529,15 @@ pub async fn unload_adapter(
 }
 
 /// The loaded adapters and the runtime's capacity; adapter sources are shown only when updates are enabled.
-pub async fn list_adapters(
+pub fn list_adapters<'a>(
+    state: &'a SharedInferenceRsState,
+    config: &'a LoraAdapterApiConfig,
+    query: ListLoraAdaptersQuery,
+) -> BoxFuture<'a, Result<LoraAdapterListResponse, ApiError>> {
+    Box::pin(list_adapters_inner(state, config, query))
+}
+
+async fn list_adapters_inner(
     state: &SharedInferenceRsState,
     config: &LoraAdapterApiConfig,
     query: ListLoraAdaptersQuery,

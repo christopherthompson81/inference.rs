@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Error as AnyhowError, Result, anyhow};
 use base64::{Engine, prelude::BASE64_STANDARD};
-use futures::future::join_all;
+use futures::future::{BoxFuture, join_all};
 use inference_core::{
     Constraint, InferenceRs, NormalRequest, Request, RequestMessage, Response, SamplingParams,
 };
@@ -35,7 +35,14 @@ pub enum EmbeddingError {
 }
 
 /// Embeds every input of an OpenAI embeddings request.
-pub async fn embed(
+pub fn embed(
+    state: SharedInferenceRsState,
+    oairequest: EmbeddingRequest,
+) -> BoxFuture<'static, Result<EmbeddingResponse, EmbeddingError>> {
+    Box::pin(embed_inner(state, oairequest))
+}
+
+async fn embed_inner(
     state: SharedInferenceRsState,
     oairequest: EmbeddingRequest,
 ) -> Result<EmbeddingResponse, EmbeddingError> {

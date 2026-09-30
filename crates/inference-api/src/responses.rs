@@ -11,6 +11,7 @@ use std::{
 
 use anyhow::Result;
 use either::Either;
+use futures::future::BoxFuture;
 use inference_core::{
     AgenticToolCallData, AgenticToolCallPhase, ChatCompletionResponse, InferenceRs, Request,
     Response,
@@ -1895,7 +1896,15 @@ pub struct PreparedResponse {
 }
 
 /// Validates a Responses request, resolves the conversation it continues and sends it to its model.
-pub async fn prepare_response(
+pub fn prepare_response<'a>(
+    state: &'a SharedInferenceRsState,
+    skill_store: Option<Arc<SkillStore>>,
+    request: OpenResponsesCreateRequest,
+) -> BoxFuture<'a, Result<PreparedResponse, DispatchError>> {
+    Box::pin(prepare_response_inner(state, skill_store, request))
+}
+
+async fn prepare_response_inner(
     state: &SharedInferenceRsState,
     skill_store: Option<Arc<SkillStore>>,
     mut request: OpenResponsesCreateRequest,
@@ -1955,7 +1964,14 @@ impl StoredResponse {
 }
 
 /// Waits for a non-streaming request's reply, storing it and its conversation when the request asked to.
-pub async fn collect_response(
+pub fn collect_response<'a>(
+    prepared: PreparedResponse,
+    state: &'a SharedInferenceRsState,
+) -> BoxFuture<'a, Result<ResponseResource, ApiError>> {
+    Box::pin(collect_response_inner(prepared, state))
+}
+
+async fn collect_response_inner(
     prepared: PreparedResponse,
     state: &SharedInferenceRsState,
 ) -> Result<ResponseResource, ApiError> {

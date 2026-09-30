@@ -4,6 +4,7 @@ use std::{ops::Deref, pin::Pin, sync::Arc, task::Poll};
 
 use anyhow::{Context, Result};
 use either::Either;
+use futures::future::BoxFuture;
 use indexmap::IndexMap;
 use inference_core::{
     AgentPermission, AgentToolApprovalHandler, AgentToolApprovalNotifier, AgenticToolCallData,
@@ -212,7 +213,14 @@ pub struct ChatCompletionParseContext {
 ///
 /// This function transforms an OpenAI-compatible chat completion request into the
 /// request format used by inference.rs.
-pub async fn parse_request(
+pub fn parse_request(
+    oairequest: ChatCompletionRequest,
+    ctx: ChatCompletionParseContext,
+) -> BoxFuture<'static, Result<(Request, bool)>> {
+    Box::pin(parse_request_inner(oairequest, ctx))
+}
+
+async fn parse_request_inner(
     oairequest: ChatCompletionRequest,
     ctx: ChatCompletionParseContext,
 ) -> Result<(Request, bool)> {
@@ -821,7 +829,16 @@ impl DispatchError {
 
 impl ChatEngine {
     /// Applies the server's agentic policy to `oairequest`, parses it and sends it to its model.
-    pub async fn prepare(
+    pub fn prepare<'a>(
+        &'a self,
+        oairequest: ChatCompletionRequest,
+        tool_surface: OpenAiToolSurface,
+        media: MediaAttachments,
+    ) -> BoxFuture<'a, Result<PreparedChat, DispatchError>> {
+        Box::pin(self.prepare_inner(oairequest, tool_surface, media))
+    }
+
+    async fn prepare_inner(
         &self,
         mut oairequest: ChatCompletionRequest,
         tool_surface: OpenAiToolSurface,
@@ -889,7 +906,14 @@ impl ChatEngine {
 }
 
 /// Waits for a non-streaming chat request's final response, with its agentic tool calls and files attached.
-pub async fn collect_chat(rx: &mut Receiver<Response>, model_override: Option<&str>) -> Response {
+pub fn collect_chat<'a>(
+    rx: &'a mut Receiver<Response>,
+    model_override: Option<&'a str>,
+) -> BoxFuture<'a, Response> {
+    Box::pin(collect_chat_inner(rx, model_override))
+}
+
+async fn collect_chat_inner(rx: &mut Receiver<Response>, model_override: Option<&str>) -> Response {
     let mut collector = ChatResponseCollector::default();
     let finish = |collector: ChatResponseCollector, response| {
         let mut response = collector.finish(response);

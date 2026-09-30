@@ -257,3 +257,56 @@ machine, plus the test-suite runtimes, before any profile change.
   the HTTP API reports today. The path stays.
 - The C ABI's errors improve: they now carry the path, and a syntax error reports `malformed_json`, as HTTP does.
 - Next is step 4, `ModelSelected`'s deserializer.
+
+## Run 8 — 2026-09-29 22:00
+
+**Question:** why are the api's async fns compiled again in server-core, and what does boxing them at the crate
+boundary save?
+
+**Finding first:** Run 4's step 4 was wrong. `ModelSelected`'s "14 copies" are its 14 variants' generated visitors,
+not 14 deserializer types. It has one deserializer, and its size (about 50k lines) comes from serde deriving a map and a
+sequence visitor for each variant. There is nothing to deduplicate.
+
+**Cause:**
+- A non-generic `async fn` body is a coroutine polled through the generic `Future` impl. Without shared generics
+  (the dev profile's opt-level 3; see Run 6), every crate that awaits it compiles its own copy, along with everything
+  it awaits in turn.
+- `engine_chat::parse_request::{closure#0}` is 9,330 lines in the api and 9,583 in server-core.
+- In total, server-core held 98,529 lines of api and core async bodies, headed by `parse_request` 13,378,
+  `load_adapter` 13,078, `embed` 11,191 and `decode_video_ffmpeg` 4,748 (awaited by `parse_request`).
+
+**Change:**
+- Each entry point other crates await is now a plain `pub fn` returning `BoxFuture<'a, T>`, whose body is
+  `Box::pin(<name>_inner(..))`. The unchanged body becomes a private `async fn <name>_inner`. The unsizing to
+  `dyn Future` happens in a non-generic api function, so the coroutine compiles there only.
+- A first cut wrapped each body in `Box::pin(async move { ... })` directly. It gave the same IR, but re-indenting the
+  bodies rewrapped about 1,200 lines in `engine_chat.rs` alone.
+- Converted: `engine_chat::{parse_request, ChatEngine::prepare, collect_chat}`,
+  `lora_adapters::{load_adapter, unload_adapter, list_adapters}`, `engine_embeddings::embed`,
+  `responses::{prepare_response, collect_response}`, `engine_completion::{prepare_completion, collect_completion}`,
+  `anthropic::{prepare_messages, collect_messages}`, `generation::{generate_image, generate_speech}`,
+  `models::reload_model` and `operations::calibration`.
+- The cost is one allocation per request-level call.
+
+**Command:** `CARGO_TARGET_DIR=<scratch> cargo llvm-lines -p <crate> --lib --features cuda`. The webui was measured
+without features (it has no `cuda` feature) and the CLI with `--bin inference`. Master and the change were measured in
+the same scratch target.
+
+**Raw finding:**
+
+| Crate | Master | Boxed entry points | Change |
+|---|---|---|---|
+| `inference-server-core` | 923,269 | 677,037 | -246,232 (-26.7%) |
+| `inference-webui` | 319,629 | 305,646 | -13,983 |
+| `inference-api` | 1,258,892 | 1,260,648 | +1,756 |
+| `inference` CLI binary | 1,323,945 | 1,320,324 | -3,621 |
+| `inference-ffi` | 104,003 | 104,003 | 0 |
+
+- Server-core's saving is well beyond the 98k of async bodies. Those bodies also pulled in the serde, channel and
+  futures code they instantiate.
+- 19,419 lines of api and core async bodies remain in server-core. The largest is core's
+  `InferenceRs::do_reload_model` (2,861), now reached through the boxed api `reload_model`; the rest are under 1k each.
+
+**Implication:** box an async fn at the crate boundary whenever another workspace crate awaits it. Core's own public
+async API, which the api awaits, is the next place to look.
+

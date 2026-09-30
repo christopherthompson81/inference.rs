@@ -1,5 +1,6 @@
 //! Image and speech generation as engine operations, free of HTTP.
 
+use futures::future::BoxFuture;
 use inference_core::{
     DiffusionGenerationParams, ImageGenerationResponse, InferenceRs, NormalRequest, Request,
     RequestMessage, Response, SamplingParams,
@@ -97,7 +98,14 @@ fn unexpected(state: &SharedInferenceRsState) -> ApiError {
 }
 
 /// Generates images from a prompt with a diffusion model.
-pub async fn generate_image(
+pub fn generate_image<'a>(
+    state: &'a SharedInferenceRsState,
+    request: ImageGenerationRequest,
+) -> BoxFuture<'a, Result<ImageGenerationResponse, ApiError>> {
+    Box::pin(generate_image_inner(state, request))
+}
+
+async fn generate_image_inner(
     state: &SharedInferenceRsState,
     request: ImageGenerationRequest,
 ) -> Result<ImageGenerationResponse, ApiError> {
@@ -121,7 +129,14 @@ pub async fn generate_image(
 }
 
 /// Speaks `input` with a speech model, encoded as WAV or 16-bit PCM.
-pub async fn generate_speech(
+pub fn generate_speech<'a>(
+    state: &'a SharedInferenceRsState,
+    request: SpeechGenerationRequest,
+) -> BoxFuture<'a, Result<SpeechAudio, ApiError>> {
+    Box::pin(generate_speech_inner(state, request))
+}
+
+async fn generate_speech_inner(
     state: &SharedInferenceRsState,
     request: SpeechGenerationRequest,
 ) -> Result<SpeechAudio, ApiError> {

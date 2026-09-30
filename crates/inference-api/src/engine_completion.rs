@@ -7,6 +7,7 @@ use std::{
 };
 
 use anyhow::Result;
+use futures::future::BoxFuture;
 use inference_core::{
     CompletionChunkResponse, Constraint, InferenceRs, NormalRequest, Request, RequestMessage,
     Response, SamplingParams,
@@ -35,7 +36,14 @@ pub struct PreparedCompletion {
 }
 
 /// Resolves the request's model (LoRA aliases included), parses it and sends it to its model.
-pub async fn prepare_completion(
+pub fn prepare_completion<'a>(
+    state: &'a SharedInferenceRsState,
+    oairequest: CompletionRequest,
+) -> BoxFuture<'a, Result<PreparedCompletion, DispatchError>> {
+    Box::pin(prepare_completion_inner(state, oairequest))
+}
+
+async fn prepare_completion_inner(
     state: &SharedInferenceRsState,
     mut oairequest: CompletionRequest,
 ) -> Result<PreparedCompletion, DispatchError> {
@@ -58,7 +66,14 @@ pub async fn prepare_completion(
 }
 
 /// Waits for a non-streaming completion's final response; errors come back as the core's error responses.
-pub async fn collect_completion(
+pub fn collect_completion<'a>(
+    rx: &'a mut Receiver<Response>,
+    model_override: Option<&'a str>,
+) -> BoxFuture<'a, Response> {
+    Box::pin(collect_completion_inner(rx, model_override))
+}
+
+async fn collect_completion_inner(
     rx: &mut Receiver<Response>,
     model_override: Option<&str>,
 ) -> Response {
