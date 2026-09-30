@@ -1145,6 +1145,24 @@ mod metal_tests {
 
     use super::afq_quantize_op;
 
+    // One contiguous row range per expert, since sorted_ids is sorted. Selecting the weights per row instead would
+    // materialize m * n * k floats: 16 GB at the largest case here, past what a unified-memory device can map.
+    fn matmul_by_expert_runs(x: &Tensor, w: &Tensor, sorted: &[u32]) -> Result<Tensor> {
+        let mut rows = Vec::new();
+        let mut start = 0;
+        while start < sorted.len() {
+            let expert = sorted[start];
+            let mut end = start + 1;
+            while end < sorted.len() && sorted[end] == expert {
+                end += 1;
+            }
+            let w_e = w.get(expert as usize)?;
+            rows.push(x.narrow(0, start, end - start)?.matmul(&w_e.t()?)?);
+            start = end;
+        }
+        Tensor::cat(&rows, 0)
+    }
+
     fn run_afq_roundtrip(bits: AfqBits) -> Result<f32> {
         let device = Device::new_metal(0)?;
         let group_size = AfqGroupSize::Low;
@@ -1394,11 +1412,7 @@ mod metal_tests {
                 bits,
             )?;
 
-            let w_sel = w_dequant.index_select(&sorted_ids, 0)?;
-            let y_ref = x
-                .unsqueeze(1)?
-                .matmul(&w_sel.transpose(1, 2)?)?
-                .squeeze(1)?;
+            let y_ref = matmul_by_expert_runs(&x, &w_dequant, &sorted)?;
             let diff = (y_new - y_ref.clone())?
                 .abs()?
                 .max_all()?
@@ -1482,7 +1496,7 @@ mod metal_tests {
                 .collect();
             let mut sorted: Vec<u32> = ids_vec.clone();
             sorted.sort();
-            let sorted_ids = Tensor::from_vec(sorted, (m,), &device)?;
+            let sorted_ids = Tensor::from_vec(sorted.clone(), (m,), &device)?;
 
             let y_new = afq_gather_qmm_rhs_sorted_gate_up(
                 &x,
@@ -1498,16 +1512,8 @@ mod metal_tests {
                 /* act=Silu */ 0,
             )?;
 
-            let wg_sel = wg_d.index_select(&sorted_ids, 0)?;
-            let wu_sel = wu_d.index_select(&sorted_ids, 0)?;
-            let gate = x
-                .unsqueeze(1)?
-                .matmul(&wg_sel.transpose(1, 2)?)?
-                .squeeze(1)?;
-            let up = x
-                .unsqueeze(1)?
-                .matmul(&wu_sel.transpose(1, 2)?)?
-                .squeeze(1)?;
+            let gate = matmul_by_expert_runs(&x, &wg_d, &sorted)?;
+            let up = matmul_by_expert_runs(&x, &wu_d, &sorted)?;
             let y_ref = (gate.silu()? * up)?;
             let diff = (y_new - y_ref.clone())?
                 .abs()?

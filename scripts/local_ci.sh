@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-# Canonical local checks with fixed package/feature sets: scripts/local_ci.sh [--lint] [--tests] [--cuda] [--models]
-# [--slim] [--docs|--docs-all] [--bindings]; --models runs the real-checkpoint parity tests on CPU (--cuda keeps one
-# GPU parity check).
+# Canonical local checks with fixed package/feature sets: scripts/local_ci.sh [--lint] [--tests] [--cuda] [--metal]
+# [--models] [--slim] [--docs|--docs-all] [--bindings]; --models runs the real-checkpoint parity tests on CPU (--cuda
+# keeps one GPU parity check).
+# --metal is the macOS counterpart of --cuda: the metal-only code paths are invisible to a CPU or CUDA lint.
 # --slim lints inference-core with no model families and with each family alone, so feature gates stay intact.
 # With --cuda, the GPU-bound CUDA suite runs in the background while the CPU lint and tests run.
 # --bindings builds libinference_ffi and runs the C# (needs the .NET SDK) and Python binding tests on the tiny checkpoint.
@@ -15,6 +16,7 @@ cd "$(dirname "$0")/.."
 lint=0
 tests=0
 cuda=0
+metal=0
 models=0
 slim=0
 docs=0
@@ -26,6 +28,7 @@ for arg in "$@"; do
         --lint) lint=1 ;;
         --tests) tests=1 ;;
         --cuda) cuda=1 ;;
+        --metal) metal=1 ;;
         --models) models=1 ;;
         --slim) slim=1 ;;
         --docs) docs=1 ;;
@@ -35,7 +38,7 @@ for arg in "$@"; do
         *) echo "unknown option $arg" >&2; exit 2 ;;
     esac
 done
-[[ $((lint + tests + cuda + models + slim + docs + bindings)) -eq 0 ]] && lint=1 && tests=1
+[[ $((lint + tests + cuda + metal + models + slim + docs + bindings)) -eq 0 ]] && lint=1 && tests=1
 
 # --examples compile-checks the examples (tests only link the smoke set below); --bins checks bins without dev-deps, like CI.
 CLIPPY=(clippy --workspace --bins --tests --examples)
@@ -56,9 +59,10 @@ if [[ $lint -eq 1 ]]; then
     # CI's typos job; skipped with a note where the binary is missing so lint still runs everywhere.
     if command -v typos > /dev/null; then typos --config .typos.toml; else echo "typos not installed: cargo install typos-cli" >&2; fi
 fi
-if [[ $tests -eq 1 || $cuda -eq 1 || $models -eq 1 ]] && ! cargo nextest --version > /dev/null 2>&1; then
+if [[ $tests -eq 1 || $cuda -eq 1 || $metal -eq 1 || $models -eq 1 ]] && ! cargo nextest --version > /dev/null 2>&1; then
     # nextest runs each test in its own process (CUDA tests stop sharing a context) and schedules nextest.toml groups
-    echo "cargo-nextest is required: curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin" >&2
+    platform=linux; [[ $OSTYPE == darwin* ]] && platform=mac
+    echo "cargo-nextest is required: curl -LsSf https://get.nexte.st/latest/$platform | tar zxf - -C ~/.cargo/bin" >&2
     exit 2
 fi
 # RLIMIT_NPROC counts every process the user runs, so this test never shares the machine with another suite.
@@ -80,6 +84,11 @@ if [[ $cuda -eq 1 ]]; then
     fi
 fi
 failed=0
+if [[ $metal -eq 1 ]]; then
+    # Metal and the CPU suite share one chip, so this runs in series rather than beside them like the CUDA suite
+    cargo "${CLIPPY[@]}" --features metal -- -D warnings || failed=1
+    cargo nextest run --no-fail-fast --profile metal --features metal "${TEST_TARGETS[@]}" || failed=1
+fi
 if [[ $lint -eq 1 ]]; then
     cargo "${CLIPPY[@]}" -- -D warnings || failed=1
 fi
@@ -167,6 +176,10 @@ if [[ $sweep -eq 1 ]]; then
     if [[ $cuda -eq 1 ]]; then
         lint_replay --features cuda
         replay test --no-run --features cuda "${TEST_TARGETS[@]}"
+    fi
+    if [[ $metal -eq 1 ]]; then
+        lint_replay --features metal
+        replay test --no-run --features metal "${TEST_TARGETS[@]}"
     fi
     if [[ $slim -eq 1 ]]; then
         for family in "${SLIM_FAMILIES[@]}"; do

@@ -479,10 +479,10 @@ pub fn metal_rms_norm_residual(
     if n_rows == 0 {
         return Ok(None);
     }
-    if let Some(scale) = scale {
-        if scale.elem_count() != 1 {
-            return Ok(None);
-        }
+    if let Some(scale) = scale
+        && scale.elem_count() != 1
+    {
+        return Ok(None);
     }
     let input = input.contiguous()?;
     let residual = residual.contiguous()?;

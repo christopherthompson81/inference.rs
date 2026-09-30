@@ -46,7 +46,8 @@ cargo clippy --workspace --tests --examples -- -D warnings
 # --docs checks the docs of the crates that differ from master (rustdoc is never incremental); --docs-all checks all.
 # Neither renders HTML (`cargo doc` does): rendering merges into target/doc under a lock that serialized the runs.
 # --bindings builds libinference_ffi and runs the C# (needs the .NET SDK) and Python binding tests.
-scripts/local_ci.sh [--lint] [--tests] [--cuda] [--models] [--slim] [--docs|--docs-all] [--bindings]
+# --metal is the macOS counterpart of --cuda; the metal-only paths are invisible to a CPU or CUDA lint.
+scripts/local_ci.sh [--lint] [--tests] [--cuda] [--metal] [--models] [--slim] [--docs|--docs-all] [--bindings]
 
 # Same, then delete target/debug artifacts the selected modes don't use (including on-request example builds).
 scripts/local_ci.sh --lint --tests --cuda --sweep
@@ -163,10 +164,10 @@ Avoid returning TODOs.
 
 - Unit tests are colocated with source files
 - Integration tests in `tests/` directories
-- `scripts/local_ci.sh --tests` (CPU) and `--cuda` (GPU) run the whole workspace suite. Narrow with a test-name filter only for quick iteration, and keep the same features.
+- `scripts/local_ci.sh --tests` (CPU), `--cuda` (GPU) and `--metal` (macOS) run the whole workspace suite. Narrow with a test-name filter only for quick iteration, and keep the same features.
 - In dev builds on Linux the always-built CUDA kernel sets are shared libraries under `target/debug/cuda-kernels` (one copy for every variant and test binary, loaded by absolute SONAME), so a dev binary only runs from this checkout. Release builds link static archives.
 - Put build env (CC/CXX/NVCC) and model paths (INFERENCE_TEST_*) in `~/.cargo/config.toml` `[env]`, not on the command line: build scripts track them, and changing one rebuilds the dependency tree.
-- Tests run under cargo-nextest (one process per test; see `.config/nextest.toml` for the GPU group sized by VRAM). It is required for `--features cuda`: plain `cargo test` shares one CUDA context across a binary's tests, so the memory-pool tests interfere. Install: `curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin`.
+- Tests run under cargo-nextest (one process per test; see `.config/nextest.toml` for the GPU group sized by VRAM). It is required for `--features cuda`: plain `cargo test` shares one CUDA context across a binary's tests, so the memory-pool tests interfere. Install: `curl -LsSf https://get.nexte.st/latest/linux | tar zxf - -C ~/.cargo/bin`, `/mac` on macOS.
 - Real-checkpoint parity tests are integration tests: `--models` runs them (CPU) and `--cuda` keeps one GPU parity check. Engine behavior is tested on tiny random-weight checkpoints built at test time (see `crates/inference/tests/integration/paddleocr_vl_tiny.rs`).
 - Each crate's integration tests are modules of one binary, `tests/integration/main.rs`, since a binary per file re-monomorphizes and links the whole stack. Add a test file there as a `mod`; nextest selects it by `package(<crate>) & test(/^<module>::/)`.
 - GPU tests use `skip_without_cuda!()` instead of `#[ignore]`, so `--features cuda` runs them wherever a device exists. Keep `#[ignore]` for hardware this suite can't assume (SM90, SM121, cuTile), benchmarks, and tests that write files.

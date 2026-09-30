@@ -6,6 +6,10 @@
 # left for the kernel tests and the desktop. Size this to the card: (VRAM - idle - headroom) / 2.5 GB.
 gpu-model = { max-threads = 6 }
 
+# Metal has no VRAM of its own: the model-backed tests compete with the rest of the suite for the same RAM, and the
+# engine sizes its KV budget from whatever is free when it loads. Admit a few at a time so that reading stays sane.
+metal-model = { max-threads = 4 }
+
 # Real-checkpoint parity tests are integration tests: they run on request (`local_ci.sh --models`), not on every cycle.
 [profile.default]
 default-filter = 'not ((package(inference) & test(/^paddleocr_vl::/)) | (package(inference-ffi) & test(detections)))'
@@ -45,3 +49,19 @@ test-group = 'gpu-model'
 filter = 'package(inference-server-core) & test(/^flux::/)'
 threads-required = 'num-test-threads'
 priority = 100
+
+# Metal keeps the default profile's filter; only the memory-hungry tests are held back.
+[profile.metal]
+
+[[profile.metal.overrides]]
+filter = """
+(package(inference) & test(/_tiny::/))
+| (package(inference-ffi) & test(/^engine_abi::/))
+| (package(inference-server-core) & test(/^chat_route::/))
+"""
+test-group = 'metal-model'
+
+# Restated per profile: overrides do not carry over from the default profile.
+[[profile.metal.overrides]]
+filter = 'package(inference-sandbox) & test(rlimit_nproc_caps_processes)'
+threads-required = 'num-test-threads'

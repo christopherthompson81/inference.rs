@@ -268,12 +268,11 @@ pub fn quantized_ffn(
     }
 
     #[cfg(feature = "metal")]
-    if let Some(activation_type) = glu_activation_type(act) {
-        if let Some(inter) =
+    if let Some(activation_type) = glu_activation_type(act)
+        && let Some(inter) =
             inference_quant::try_fused_gate_up_metal(xs, gate, up, activation_type)?
-        {
-            return down.forward(&inter);
-        }
+    {
+        return down.forward(&inter);
     }
 
     if xs.device().is_cpu()

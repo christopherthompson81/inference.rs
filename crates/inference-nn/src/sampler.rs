@@ -1596,35 +1596,34 @@ impl Sampler {
         }
         let vocab_size = logits.elem_count();
         let mut logits = logits;
-        if frequency_penalty.abs() > f32::EPSILON || presence_penalty.abs() > f32::EPSILON {
-            if let Some((token_ids, token_counts)) = sparse_token_counts(
+        if (frequency_penalty.abs() > f32::EPSILON || presence_penalty.abs() > f32::EPSILON)
+            && let Some((token_ids, token_counts)) = sparse_token_counts(
                 &context[prompt_len.min(context.len())..],
                 vocab_size,
                 logits.device(),
-            )? {
-                logits = crate::ops::metal_apply_sparse_penalties(
-                    &logits,
-                    &token_ids,
-                    &token_counts,
-                    frequency_penalty,
-                    presence_penalty,
-                    1.0,
-                )?;
-            }
+            )?
+        {
+            logits = crate::ops::metal_apply_sparse_penalties(
+                &logits,
+                &token_ids,
+                &token_counts,
+                frequency_penalty,
+                presence_penalty,
+                1.0,
+            )?;
         }
-        if (repetition_penalty - 1.0).abs() > f32::EPSILON {
-            if let Some((token_ids, token_counts)) =
+        if (repetition_penalty - 1.0).abs() > f32::EPSILON
+            && let Some((token_ids, token_counts)) =
                 sparse_token_counts(context, vocab_size, logits.device())?
-            {
-                logits = crate::ops::metal_apply_sparse_penalties(
-                    &logits,
-                    &token_ids,
-                    &token_counts,
-                    0.0,
-                    0.0,
-                    repetition_penalty,
-                )?;
-            }
+        {
+            logits = crate::ops::metal_apply_sparse_penalties(
+                &logits,
+                &token_ids,
+                &token_counts,
+                0.0,
+                0.0,
+                repetition_penalty,
+            )?;
         }
         Ok(logits)
     }
@@ -2161,12 +2160,11 @@ impl Sampler {
                 multiple_sequences,
                 false,
             )
+            && let Some(temperature) = self.temperature
         {
-            if let Some(temperature) = self.temperature {
-                let logits = self
-                    .apply_device_sparse_penalties_if_needed_metal(logits, context, prompt_len)?;
-                return self.sample_topk_on_device_metal(logits, temperature, rng);
-            }
+            let logits =
+                self.apply_device_sparse_penalties_if_needed_metal(logits, context, prompt_len)?;
+            return self.sample_topk_on_device_metal(logits, temperature, rng);
         }
 
         let logits = logits.to_vec1()?;

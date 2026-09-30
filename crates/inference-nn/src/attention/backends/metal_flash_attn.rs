@@ -153,10 +153,11 @@ pub fn try_flash_attn_ext_vec_bf16_dk512(
     if q.dtype() != DType::BF16 || k.dtype() != DType::BF16 || v.dtype() != DType::BF16 {
         return Ok(None);
     }
-    if let Some(m) = mask {
-        if m.dtype() != DType::F16 && m.dtype() != DType::BF16 {
-            return Ok(None);
-        }
+    if let Some(m) = mask
+        && m.dtype() != DType::F16
+        && m.dtype() != DType::BF16
+    {
+        return Ok(None);
     }
     let q_dims = q.dims4()?;
     let k_dims = k.dims4()?;
