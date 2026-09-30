@@ -297,3 +297,21 @@ TOML spec builders were async with nothing to await. Accepted too: TOML `quant` 
 **Tests:** the CLI's 12 resolution tests (now covered in selection) became 5 conversion tests: `quant` left for the
 engine, `--tok-model-id` meaning GGUF, projector selection per how the file was given, multimodal LoRA requiring a
 projector, the flag conflicts, legacy LoRA meaning GGUF, and a multimodal dynamic-LoRA GGUF keeping its runtime. The 5 quantize tests now run the selection resolver with the GGUF-input policy.
+
+## Run 12 — 2026-09-30 (time approximate)
+
+**Question:** Run 1 found the doctor's toolchain probes (nvcc, NVIDIA driver, the driver's CUDA version, Xcode) in the
+CLI's `doctor.rs`, so `/system/doctor` on the server returned a report without them. Can they live in
+`inference_selection::run_doctor`?
+
+**Change:** `DoctorReport.toolchain: ToolchainInfo { nvcc, nvidia_driver, driver_cuda, xcode }`, probed in
+`run_doctor` for the backends the build has (CUDA tools only with `cuda`, Xcode only with `metal`). The review moved
+it off `SystemInfo`: `system_info` is also `/v1/system/info` and the C ABI's `inference_system_info`, which should
+not spawn processes on each call. The CUDA build/driver check now reads the probed version rather than running
+`nvidia-smi` again, and the `.exe` fallbacks are gone (`Command` resolves `.exe` on Windows, and under WSL they could
+pick up the Windows toolkit's `nvcc.exe`). The
+CLI prints it and lost its process-spawning helpers (~90 lines). The CLI's Metal line printed `Xcode Xcode 16.2`,
+since the probe's value already starts with the product name; it now prints it once.
+
+**Tests:** `toolchain_probe_outputs_parse` (nvcc release line and its fallback, deduplicated driver versions, Xcode
+version and build).

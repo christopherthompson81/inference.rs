@@ -11,7 +11,7 @@ mod tuning;
 
 pub use diagnostics::{
     BuildInfo, CpuInfo, DeviceInfo, DoctorCheck, DoctorReport, DoctorStatus, HfConnectivityInfo,
-    MemoryInfo, SystemInfo, check_hf_gated_access, collect_system_info,
+    MemoryInfo, SystemInfo, ToolchainInfo, check_hf_gated_access, collect_system_info,
     parse_nvidia_smi_cuda_version, run_doctor,
 };
 pub use model_loader::{

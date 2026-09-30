@@ -12,6 +12,10 @@ use inference_core::MemoryUsage;
 
 // nvidia-smi's header gives the CUDA version the driver supports; R615+ labels it `CUDA UMD Version:`.
 const NVIDIA_SMI_CUDA_LABELS: [&str; 2] = ["CUDA UMD Version:", "CUDA Version:"];
+const NVCC: &str = "nvcc";
+const NVIDIA_SMI: &str = "nvidia-smi";
+const XCODEBUILD: &str = "xcodebuild";
+const NVCC_RELEASE_MARKER: &str = "release ";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CpuInfo {
@@ -69,6 +73,20 @@ pub struct BuildInfo {
     pub cuda_toolkit_version_code: Option<u32>,
 }
 
+/// Versions of the local tools the build's backends run against; each is `None` when not installed or not probed.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ToolchainInfo {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvcc: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub nvidia_driver: Option<String>,
+    /// The newest CUDA version the installed driver supports.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub driver_cuda: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub xcode: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HfConnectivityInfo {
     /// Whether HuggingFace is reachable
@@ -115,6 +133,9 @@ pub struct DoctorCheck {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DoctorReport {
     pub system: SystemInfo,
+    // Probing spawns nvcc/nvidia-smi/xcodebuild, so only the doctor pays for it, not `system_info`.
+    #[serde(default)]
+    pub toolchain: ToolchainInfo,
     pub checks: Vec<DoctorCheck>,
 }
 
@@ -375,14 +396,69 @@ fn disk_usage_for(path: &Path) -> Option<(u64, u64)> {
     best.map(|(_, avail, total)| (avail, total))
 }
 
-#[cfg(feature = "cuda")]
-fn cuda_driver_version_code() -> Option<u32> {
-    let output = std::process::Command::new("nvidia-smi").output().ok()?;
-    if !output.status.success() {
-        return None;
+fn probe_toolchain() -> ToolchainInfo {
+    let mut toolchain = ToolchainInfo::default();
+    if cfg!(feature = "cuda") {
+        toolchain.nvcc = command_stdout(NVCC, &["--version"]).map(|out| parse_nvcc_version(&out));
+        toolchain.nvidia_driver = command_stdout(
+            NVIDIA_SMI,
+            &["--query-gpu=driver_version", "--format=csv,noheader"],
+        )
+        .and_then(|out| join_distinct_lines(&out));
+        toolchain.driver_cuda = command_stdout(NVIDIA_SMI, &[])
+            .and_then(|out| parse_nvidia_smi_cuda_version(&out).map(str::to_string));
     }
+    if cfg!(feature = "metal") {
+        toolchain.xcode =
+            command_stdout(XCODEBUILD, &["-version"]).and_then(|out| parse_xcode_version(&out));
+    }
+    toolchain
+}
+
+fn command_stdout(cmd: &str, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new(cmd).args(args).output().ok()?;
     let stdout = String::from_utf8(output.stdout).ok()?;
-    parse_cuda_driver_version_code(&stdout)
+    let trimmed = stdout.trim();
+    (output.status.success() && !trimmed.is_empty()).then(|| trimmed.to_string())
+}
+
+/// `12.8` from `nvcc --version`'s `Cuda compilation tools, release 12.8, V12.8.93` line.
+fn parse_nvcc_version(output: &str) -> String {
+    let line = output
+        .lines()
+        .map(str::trim)
+        .find(|line| line.contains(NVCC_RELEASE_MARKER))
+        .or_else(|| output.lines().next().map(str::trim))
+        .unwrap_or_default();
+    line.split_once(NVCC_RELEASE_MARKER)
+        .and_then(|(_, after)| after.split(',').next())
+        .map_or(line, str::trim)
+        .to_string()
+}
+
+// One driver version per GPU; they are normally all the same.
+fn join_distinct_lines(output: &str) -> Option<String> {
+    let mut lines: Vec<&str> = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect();
+    lines.sort_unstable();
+    lines.dedup();
+    (!lines.is_empty()).then(|| lines.join(", "))
+}
+
+/// `Xcode 16.2 (Build version 16C5032a)` from `xcodebuild -version`.
+fn parse_xcode_version(output: &str) -> Option<String> {
+    let mut lines = output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty());
+    let xcode = lines.next()?;
+    Some(match lines.next() {
+        Some(build) => format!("{xcode} ({build})"),
+        None => xcode.to_string(),
+    })
 }
 
 /// The CUDA version (e.g. `"13.4"`) the driver supports, from `nvidia-smi`'s plain output.
@@ -399,8 +475,8 @@ pub fn parse_nvidia_smi_cuda_version(output: &str) -> Option<&str> {
 }
 
 #[cfg(feature = "cuda")]
-fn parse_cuda_driver_version_code(output: &str) -> Option<u32> {
-    let mut parts = parse_nvidia_smi_cuda_version(output)?.split('.');
+fn cuda_version_code(version: &str) -> Option<u32> {
+    let mut parts = version.split('.');
     let major: u32 = parts.next()?.parse().ok()?;
     let minor: u32 = parts.next().unwrap_or("0").parse().ok()?;
     Some(major * 100 + minor)
@@ -413,6 +489,7 @@ fn cuda_version_code_to_string(code: u32) -> String {
 
 pub fn run_doctor() -> DoctorReport {
     let system = collect_system_info();
+    let toolchain = probe_toolchain();
     let mut checks = Vec::new();
 
     // CPU extensions check (ARM-aware)
@@ -506,7 +583,7 @@ pub fn run_doctor() -> DoctorReport {
         if system.build.cuda && has_cuda_device {
             match (
                 system.build.cuda_toolkit_version_code,
-                cuda_driver_version_code(),
+                toolchain.driver_cuda.as_deref().and_then(cuda_version_code),
             ) {
                 (Some(build_code), Some(driver_code)) if build_code > driver_code => {
                     checks.push(DoctorCheck {
@@ -793,7 +870,11 @@ pub fn run_doctor() -> DoctorReport {
         });
     }
 
-    DoctorReport { system, checks }
+    DoctorReport {
+        system,
+        toolchain,
+        checks,
+    }
 }
 
 #[cfg(test)]
@@ -806,6 +887,25 @@ mod tests {
         "| NVIDIA-SMI 615.71.09   KMD Version: 615.71.09   CUDA UMD Version: 13.4 |";
 
     #[test]
+    fn toolchain_probe_outputs_parse() {
+        let nvcc = "nvcc: NVIDIA (R) Cuda compiler driver\nCuda compilation tools, release 12.8, V12.8.93\n";
+        assert_eq!(parse_nvcc_version(nvcc), "12.8");
+        assert_eq!(
+            parse_nvcc_version("some other tool 1.0"),
+            "some other tool 1.0"
+        );
+        assert_eq!(
+            join_distinct_lines("615.71.09\n615.71.09\n").as_deref(),
+            Some("615.71.09")
+        );
+        assert_eq!(join_distinct_lines("\n"), None);
+        assert_eq!(
+            parse_xcode_version("Xcode 16.2\nBuild version 16C5032a\n").as_deref(),
+            Some("Xcode 16.2 (Build version 16C5032a)")
+        );
+    }
+
+    #[test]
     fn both_nvidia_smi_headers_give_the_cuda_version() {
         assert_eq!(parse_nvidia_smi_cuda_version(HEADER_R580), Some("13.0"));
         assert_eq!(parse_nvidia_smi_cuda_version(HEADER_R615), Some("13.4"));
@@ -816,6 +916,7 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn the_driver_version_code_reads_the_renamed_label() {
-        assert_eq!(parse_cuda_driver_version_code(HEADER_R615), Some(1304));
+        let version = parse_nvidia_smi_cuda_version(HEADER_R615).unwrap();
+        assert_eq!(cuda_version_code(version), Some(1304));
     }
 }
