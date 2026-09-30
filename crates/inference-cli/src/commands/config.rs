@@ -136,21 +136,7 @@ fn build_model_specs(
     models: &[crate::config::ModelEntry],
     runtime: &RuntimeOptions,
 ) -> Result<(Vec<ModelSpec>, bool)> {
-    let mut cpu_setting: Option<bool> = None;
-    for entry in models {
-        if let Some(cpu) = entry.device.cpu {
-            match cpu_setting {
-                None => cpu_setting = Some(cpu),
-                Some(existing) if existing != cpu => {
-                    anyhow::bail!(
-                        "cpu must be consistent across all models (found both true and false)"
-                    );
-                }
-                _ => {}
-            }
-        }
-    }
-    let cpu = cpu_setting.unwrap_or(false);
+    let cpu = crate::config::models_cpu(models)?;
 
     let mut specs = Vec::new();
     for entry in models {
@@ -247,7 +233,40 @@ fn config_spec(inputs: ConfigSpecInputs<'_>) -> Result<EngineSpec> {
 mod tests {
     use std::fs;
 
+    use inference_core::AutoDeviceMapParams;
+    use inference_selection::ModelSelected;
+
     use super::*;
+
+    #[test]
+    fn a_model_without_device_or_format_tables_gets_the_cli_defaults() {
+        let input = r#"
+command = "serve"
+
+[[models]]
+model_id = "org/model"
+"#;
+        let CliConfig::Serve(config) = toml::from_str(input).unwrap() else {
+            unreachable!()
+        };
+        let (models, _) = build_model_specs(&config.models, &config.runtime).unwrap();
+        let ModelSelected::Run {
+            max_seq_len,
+            max_batch_size,
+            ..
+        } = models[0].model
+        else {
+            panic!("expected an auto-detected model")
+        };
+        assert_eq!(
+            (max_seq_len, max_batch_size),
+            (
+                AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
+                AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE
+            )
+        );
+        assert_eq!(config.models[0].format.gqa, 1);
+    }
 
     #[tokio::test]
     async fn from_config_infers_gguf_for_an_exact_file() {
