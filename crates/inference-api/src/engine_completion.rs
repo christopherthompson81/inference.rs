@@ -21,7 +21,7 @@ use crate::{
     },
     engine_chat::{DispatchError, ResponseTap},
     lora_routing::{DEFAULT_MODEL_ID, resolve_lora_adapter_model},
-    openai::{CompletionRequest, Grammar},
+    openai::{CompletionPrompt, CompletionRequest, Grammar},
     sampling::{convert_stop_tokens, get_dry_sampling_params},
     types::SharedInferenceRsState,
     util::validate_model_name,
@@ -125,6 +125,11 @@ pub fn parse_request(
     if oairequest.max_tokens == Some(0) {
         anyhow::bail!("max_tokens must be at least 1.");
     }
+    if matches!(oairequest.prompt, CompletionPrompt::Tokens(_))
+        && (oairequest.echo_prompt || oairequest.best_of.is_some_and(|n| n > 1))
+    {
+        anyhow::bail!("echo and best_of need a text prompt, not token ids.");
+    }
 
     let stop_toks = convert_stop_tokens(oairequest.stop_seqs);
 
@@ -141,10 +146,13 @@ pub fn parse_request(
         Request::Normal(Box::new(NormalRequest {
             id: state.next_request_id(),
             queued_at: None,
-            messages: RequestMessage::Completion {
-                text: oairequest.prompt,
-                echo_prompt: oairequest.echo_prompt,
-                best_of: oairequest.best_of,
+            messages: match oairequest.prompt {
+                CompletionPrompt::Text(text) => RequestMessage::Completion {
+                    text,
+                    echo_prompt: oairequest.echo_prompt,
+                    best_of: oairequest.best_of,
+                },
+                CompletionPrompt::Tokens(tokens) => RequestMessage::CompletionTokens(tokens),
             },
             sampling_params: SamplingParams {
                 temperature: oairequest.temperature,

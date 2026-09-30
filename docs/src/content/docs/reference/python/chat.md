@@ -249,6 +249,11 @@ Chat completion request following OpenAI's specification
 | `system_fingerprint` | `str` | required |
 
 
+## `CompletionPrompt`
+
+One of: `Union[str, list[int]]`.
+
+
 ## `CompletionRequest`
 
 Legacy OpenAI compatible text completion request
@@ -272,7 +277,7 @@ Legacy OpenAI compatible text completion request
 | `model` | `str \| None` | optional |
 | `n` | `int \| None` | optional |
 | `presence_penalty` | `float \| None` | optional |
-| `prompt` | `str` | required |
+| `prompt` | `CompletionPrompt` | required |
 | `repetition_penalty` | `float \| None` | optional |
 | `seed` | `int \| None` | optional |
 | `stop` | `StopTokens \| None` | optional |

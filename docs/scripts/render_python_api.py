@@ -159,6 +159,8 @@ GROUPS = [
         lambda n: n.startswith(
             (
                 "Model",
+                "Modality",
+                "GenerationDefaults",
                 "Lora",
                 "LoadLora",
                 "UnloadLora",

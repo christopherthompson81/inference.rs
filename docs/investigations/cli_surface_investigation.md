@@ -88,3 +88,29 @@ the approval broker's handler and notifier and streams `agentic_tool_approval_re
 **Test:** `chat_route::responses_apply_the_servers_ask_permission`: under an `ask` spec, a blocking `Engine::responses`
 and `POST /v1/responses` refuse on `agent_permission`, and `Engine::responses_stream` completes. Not covered: that a
 `deny` server's permission reaches the core request for Responses (it flows through the same `parse_request` as chat).
+
+## Run 4 — 2026-09-30 18:30
+
+**Question:** the first API additions `run` and `bench` need: model category, modalities and generation defaults
+(the CLI picks its mode from core's `get_model_category`), and token-id completion prompts (bench sends exact counts).
+
+**Change:** `ModelObject` gains `category`, `modalities` and `generation_defaults`, filled for loaded models and for
+the `default` entry, which carried nothing before. They are protocol types mapped from core's: core's
+`ModelCategory::Multimodal` holds an `Arc<dyn MultimodalPromptPrefixer>`, which has no place on the wire.
+`CompletionRequest.prompt` is a string or an array of token ids, routed to core's `RequestMessage::CompletionTokens`;
+`echo` and a `best_of` above 1 are refused with token ids, since that message doesn't carry them.
+
+**Raw finding:** the token path shares everything after prompt rendering with the text path (suffix, logprobs,
+n, stop, grammar, truncation, adapter, streaming), except echo, best_of and BOS insertion. `generation_defaults`
+fill only temperature, top-k, top-p, min-p and repetition penalty at request time (`fill_model_defaults`);
+`max_new_tokens` and `max_length` don't reach the engine, so the docs say exactly that.
+
+**Re-aggregation check (the user asked whether slimming core over-divided anything):** the mirrored model-info types
+are a wire/engine boundary, not over-division; the one true duplicate is `GenerationDefaults`, whose removal would
+make inference-nn depend on protocol and lengthen the critical path. Two real re-aggregation candidates: chat
+request assembly (every surface could call the public `parse_request` and skip `ChatEngine`, which caused both
+policy bugs; `ChatEngine::prepare` should be the only entry), and model selection held four ways (clap `ModelType`,
+TOML `ModelEntry`, `ModelSelected`, `EngineSpec`) with about 800 lines converting between them.
+
+**Follow-up:** echo with token prompts (what log-likelihood evaluation uses) needs `CompletionTokens` to carry
+`echo_prompt` and `best_of`; core already decodes token prompts for the echo text.

@@ -17,7 +17,7 @@ There is none. The server accepts and ignores `Authorization: Bearer ...` (OpenA
 
 ## Model routing
 
-The request `model` field selects among loaded models. `"default"` (or omitting the field) targets the configured default model; with a single `-m` model that is the only model. `GET /v1/models` lists real ids plus per-model `status` (`loaded`, `unloaded`, `reloading`), `tools_available`, `mcp_tools_count`, `mcp_servers_connected`, and a loaded model's `max_model_len`. See [multiple models](/guides/serve/multiple-models/).
+The request `model` field selects among loaded models. `"default"` (or omitting the field) targets the configured default model; with a single `-m` model that is the only model. `GET /v1/models` lists real ids plus per-model `status` (`loaded`, `unloaded`, `reloading`), `tools_available`, `mcp_tools_count`, `mcp_servers_connected`, and, for a loaded model (and the `default` entry), `max_model_len`, `category` (`text`, `multimodal`, `diffusion`, `audio`, `speech`, `embedding`), `modalities` (`{"input": [...], "output": [...]}`) and `generation_defaults` (from its `generation_config.json`; its temperature, top-k, top-p, min-p and repetition penalty fill a request's unset sampling fields). See [multiple models](/guides/serve/multiple-models/).
 
 ## LoRA adapter routing and management
 

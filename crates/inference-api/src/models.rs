@@ -1,14 +1,19 @@
 //! The models an engine serves: listing them, and unloading, reloading and inspecting one.
 
 use futures::future::BoxFuture;
-use inference_core::{InferenceRsError, ModelStatus as CoreModelStatus};
+use inference_core::{
+    InferenceRsError, ModelCategory as CoreModelCategory, ModelGenerationDefaults,
+    ModelStatus as CoreModelStatus, SupportedModality,
+};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::{
     api_error::{ApiError, ApiErrorKind},
     lora_routing::{DEFAULT_MODEL_ID, list_lora_adapter_models},
-    openai::{ModelObject, ModelObjects},
+    openai::{
+        GenerationDefaults, Modality, ModelCategory, ModelModalities, ModelObject, ModelObjects,
+    },
     types::SharedInferenceRsState,
 };
 
@@ -66,6 +71,62 @@ fn model_object(state: &SharedInferenceRsState, id: String) -> ModelObject {
         mcp_tools_count: None,
         mcp_servers_connected: None,
         max_model_len: None,
+        category: None,
+        modalities: None,
+        generation_defaults: None,
+    }
+}
+
+// A loaded model's limits and capabilities; `None` is the default model.
+fn describe_loaded(
+    state: &SharedInferenceRsState,
+    model_id: Option<&str>,
+    object: &mut ModelObject,
+) {
+    let Ok(config) = state.config(model_id) else {
+        return;
+    };
+    object.max_model_len = config.max_seq_len;
+    object.category = Some(category(&config.category));
+    object.modalities = Some(ModelModalities {
+        input: config.modalities.input.iter().map(modality).collect(),
+        output: config.modalities.output.iter().map(modality).collect(),
+    });
+    object.generation_defaults = config.generation_defaults.map(generation_defaults);
+}
+
+fn category(category: &CoreModelCategory) -> ModelCategory {
+    match category {
+        CoreModelCategory::Text => ModelCategory::Text,
+        CoreModelCategory::Multimodal { .. } => ModelCategory::Multimodal,
+        CoreModelCategory::Diffusion => ModelCategory::Diffusion,
+        CoreModelCategory::Audio => ModelCategory::Audio,
+        CoreModelCategory::Speech => ModelCategory::Speech,
+        CoreModelCategory::Embedding => ModelCategory::Embedding,
+    }
+}
+
+fn modality(modality: &SupportedModality) -> Modality {
+    match modality {
+        SupportedModality::Text => Modality::Text,
+        SupportedModality::Audio => Modality::Audio,
+        SupportedModality::Vision => Modality::Vision,
+        SupportedModality::Video => Modality::Video,
+        SupportedModality::Embedding => Modality::Embedding,
+    }
+}
+
+fn generation_defaults(defaults: ModelGenerationDefaults) -> GenerationDefaults {
+    GenerationDefaults {
+        do_sample: defaults.do_sample,
+        temperature: defaults.temperature,
+        top_k: defaults.top_k,
+        top_p: defaults.top_p,
+        min_p: defaults.min_p,
+        repetition_penalty: defaults.repetition_penalty,
+        max_new_tokens: defaults.max_new_tokens,
+        max_length: defaults.max_length,
+        suppress_tokens: defaults.suppress_tokens,
     }
 }
 
@@ -74,7 +135,9 @@ pub fn list_models(state: &SharedInferenceRsState) -> Result<ModelObjects, ApiEr
     let models_with_status = state.list_models_with_status().map_err(core_error)?;
     let mut data = Vec::new();
     if !models_with_status.is_empty() {
-        data.push(model_object(state, DEFAULT_MODEL_ID.to_string()));
+        let mut object = model_object(state, DEFAULT_MODEL_ID.to_string());
+        describe_loaded(state, None, &mut object);
+        data.push(object);
     }
     for (model_id, status) in models_with_status {
         let mut object = model_object(state, model_id.clone());
@@ -88,7 +151,7 @@ pub fn list_models(state: &SharedInferenceRsState) -> Result<ModelObjects, ApiEr
                 object.mcp_tools_count = Some(tools_count);
                 object.mcp_servers_connected = Some(1);
             }
-            object.max_model_len = state.max_sequence_length(Some(&model_id)).ok().flatten();
+            describe_loaded(state, Some(&model_id), &mut object);
         }
         object.status = Some(status.to_string());
         data.push(object);
