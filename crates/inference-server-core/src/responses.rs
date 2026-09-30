@@ -17,6 +17,8 @@ pub use crate::responses_api::{
     OpenResponsesCreateRequest, OpenResponsesStreamEvent, ResponseDeleted,
 };
 use crate::{
+    agentic::AgenticDefaults,
+    engine_chat::ChatEngine,
     handler_core::{ApiError, openai_error_response},
     responses_api::{
         OpenResponsesStreamer, ResponsesStreamItem, cancel_response as cancel, collect_response,
@@ -49,7 +51,10 @@ impl Stream for ResponsesSse {
                 let event = Event::default().event(item.name());
                 Poll::Ready(Some(match item {
                     ResponsesStreamItem::Event(event_data) => event.json_data(event_data),
-                    ResponsesStreamItem::AgenticToolCallProgress(value) => event.json_data(value),
+                    ResponsesStreamItem::AgenticToolCallProgress(value)
+                    | ResponsesStreamItem::AgenticToolApprovalRequired(value) => {
+                        event.json_data(value)
+                    }
                     ResponsesStreamItem::FileProduced(file) => event.json_data(file),
                 }))
             }
@@ -95,6 +100,7 @@ impl IntoResponse for OpenResponsesResponder {
 ))]
 pub async fn create_response(
     State(state): ExtractedInferenceRsState,
+    Extension(agentic_defaults): Extension<AgenticDefaults>,
     Extension(skill_store): Extension<Arc<SkillStore>>,
     stream_outcome: Option<Extension<StreamOutcomeHandle>>,
     payload: Result<ApiJson<OpenResponsesCreateRequest>, ApiJsonRejection>,
@@ -103,7 +109,12 @@ pub async fn create_response(
         Ok(ApiJson(request)) => request,
         Err(ApiJsonRejection(error)) => return OpenResponsesResponder::Error(error),
     };
-    let prepared = match prepare_response(&state, Some(skill_store), request).await {
+    let chat = ChatEngine {
+        state: state.clone(),
+        agentic: agentic_defaults,
+        skill_store: Some(skill_store),
+    };
+    let prepared = match prepare_response(&chat, request).await {
         Ok(prepared) => prepared,
         Err(error) => return OpenResponsesResponder::Error(error.into_api_error(state)),
     };

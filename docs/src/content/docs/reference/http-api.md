@@ -85,7 +85,7 @@ The `usage` object is a superset of OpenAI's, adding timing fields such as `avg_
 
 ## Agent approval flow
 
-`agent_permission: "ask"` requires `stream: true` on HTTP chat requests; non-streaming requests with `"ask"` return a validation error. When an agent action needs approval, the stream emits:
+`agent_permission: "ask"` requires `stream: true` on HTTP chat and Responses requests; non-streaming requests under `"ask"` (the request's, or the server's `--agent-permission`) return a validation error. When an agent action needs approval, the stream emits:
 
 ```text
 event: agentic_tool_approval_required
