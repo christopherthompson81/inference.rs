@@ -1316,6 +1316,7 @@ impl ChatStreamEvent {
             Self::AgenticToolCallProgress(_) => "agentic_tool_call_progress",
             Self::AgenticToolApprovalRequired(_) => "agentic_tool_approval_required",
             Self::FileProduced(_) => "file_produced",
+            Self::BlockDenoisingProgress(_) => "block_denoising_progress",
             Self::Error(_) => "error",
         }
     }
@@ -1327,6 +1328,14 @@ impl ChatStreamEvent {
             Self::AgenticToolCallProgress(progress) => Ok(progress.to_json()),
             Self::AgenticToolApprovalRequired(approval) => Ok(approval.to_json()),
             Self::FileProduced(file) => serde_json::to_value(file),
+            Self::BlockDenoisingProgress(progress) => Ok(serde_json::json!({
+                "index": progress.index,
+                "step": progress.step,
+                "total_steps": progress.total_steps,
+                "text": progress.text,
+                "finished": progress.finished,
+                "final_block": progress.final_block,
+            })),
             Self::Error(error) => Ok(error.to_openai_body()),
         }
         .unwrap_or_else(|_| ApiError::internal().to_openai_body());

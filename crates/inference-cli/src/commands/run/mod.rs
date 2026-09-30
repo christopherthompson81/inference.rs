@@ -1,5 +1,6 @@
 //! Interactive mode command implementation
 
+mod chat;
 mod interactive;
 
 use interactive::OneshotInput;
@@ -50,13 +51,8 @@ pub async fn run_interactive(
     apply_quant_resolution(&mut model_type, &global.token_source, &matformer).await?;
     let spec = run_spec(&model_type, &runtime, sandbox, &global)?;
     let engine = Engine::load(spec).await?;
-    let inference = engine.state().clone();
-
     if let Some(alias) = request_adapter.as_deref() {
-        let adapters = inference.list_lora_adapters(None).await?;
-        if !adapters.iter().any(|adapter| adapter.alias == alias) {
-            anyhow::bail!("LoRA adapter alias `{alias}` is not loaded");
-        }
+        require_adapter(&engine, alias).await?;
     }
 
     if let Some(text) = input {
@@ -71,7 +67,7 @@ pub async fn run_interactive(
         let do_shell = false;
 
         interactive::oneshot_mode(
-            inference.clone(),
+            &engine,
             OneshotInput {
                 text,
                 images,
@@ -101,7 +97,7 @@ pub async fn run_interactive(
 
         info!("Model loaded, starting interactive mode...");
         interactive::interactive_mode(
-            inference.clone(),
+            &engine,
             InteractiveConfig {
                 do_search: runtime.enable_search,
                 do_code_exec,
@@ -118,8 +114,21 @@ pub async fn run_interactive(
     Ok(())
 }
 
-/// The engine `run` chats with: the terminal loop talks to its state directly, so no tool loop limits, adapter
-/// management or shared skill store, and no throughput lines between turns.
+/// Fails unless the engine has a LoRA adapter loaded under `alias`.
+pub(crate) async fn require_adapter(engine: &Engine, alias: &str) -> Result<()> {
+    let adapters = engine
+        .lora_adapters(inference_api::lora_adapters::ListLoraAdaptersQuery::default())
+        .await
+        .map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(
+        adapters.data.iter().any(|adapter| adapter.id == alias),
+        "LoRA adapter alias `{alias}` is not loaded"
+    );
+    Ok(())
+}
+
+/// The engine `run` chats with: no tool loop limits, adapter management or shared skill store, and no throughput
+/// lines between turns.
 fn run_spec(
     model_type: &ModelType,
     runtime: &RuntimeOptions,

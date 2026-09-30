@@ -178,3 +178,34 @@ stream. The test instead checks that the request runs to `max_tokens` (`usage.co
 **Review notes left for later:** internal errors now reach bench as the API's generic message, since the API hides
 internals from callers (a local consumer could be given the source); the completion path serializes the whole
 request for its log even when logging is off, which grows with prompt length but stays well under 0.1% of prefill.
+
+## Run 8 — 2026-09-30 23:30
+
+**Question:** can `inference run` (interactive and one-shot; text, vision, image and speech) drive only
+`inference_api::Engine`?
+
+**Change:** a new `run/chat.rs` does chat turns through `Engine::chat_stream`: requests built as
+`ChatCompletionRequest`s, typed agentic events (tool panels, approvals answered with `Engine::resolve_approval`),
+Ctrl-C through the stream's `RequestCancellation`, stats from `usage`. The model's category and generation defaults
+come from `Engine::models`, `/adapter` from `Engine::lora_adapters`, and image and speech modes call
+`image_generation` (b64_json, written locally) and `speech_generation`. The text and vision REPLs are one loop.
+Two opt-ins on `ChatStream`: `with_denoising_progress()` (block-diffusion progress; HTTP skips it) and
+`cancellation()`. `run::require_adapter` replaces three copies. interactive.rs went from 2,166 lines to about 1,300
+across two files; the run path imports only protocol value types and logging from core.
+
+**Review regressions found and fixed:** media decoding moved into the API's request preparation, so a bad or
+unreachable file failed the turn, which ended the session and left its message and attachment in the history;
+a late approval answer (after the broker's 300 s auto-deny) returned an error that did the same; http(s) media
+passed through got the server's public-only policy, losing the private-network URLs the old CLI fetched; and
+Ctrl-C during request preparation exited. Now every reference is loaded once in the CLI with the API's
+`load_media_source` under `MediaSourcePolicy::Local`; a failed turn rolls back its message and attachments and
+names the user's path rather than `media://N`; approval errors are reported and the stream continues; and a
+Ctrl-C while preparing cancels the turn as soon as it streams. TTFT starts once the request is dispatched.
+
+**Known differences:** the prefix-cache line reports the turn's reused prompt tokens (not cumulative hits), and
+agentic turns don't report it because the agent loop's usage aggregate drops `prompt_tokens_details`; the encoder
+cache line is gone (no API for it); session media is re-decoded by the engine on every turn, as any API client's
+would be; an approval unanswered for 5 minutes is denied.
+
+**Tests:** CLI unit tests for sampling, request building, media parts and rollback; a text turn and a two-turn image
+conversation (the second turn resends the first image by its index) on the tiny checkpoint.

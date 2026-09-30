@@ -121,6 +121,11 @@ impl futures::Stream for ChatCompletionStreamer {
         }
 
         match Pin::new(&mut self.inner).poll_next(cx) {
+            // Only streams that opt in carry these, and HTTP has no event for them.
+            Poll::Ready(Some(ChatStreamEvent::BlockDenoisingProgress(_))) => {
+                cx.waker().wake_by_ref();
+                Poll::Pending
+            }
             Poll::Ready(Some(event)) => {
                 let name = sse_event_name(&event);
                 let sse = match event {
@@ -140,6 +145,11 @@ impl futures::Stream for ChatCompletionStreamer {
                         Event::default().json_data(approval.to_json())
                     }
                     ChatStreamEvent::FileProduced(file) => Event::default().json_data(file),
+                    ChatStreamEvent::BlockDenoisingProgress(_) => {
+                        unreachable!(
+                            "the HTTP route doesn't ask its ChatStream for denoising progress"
+                        )
+                    }
                     ChatStreamEvent::Error(error) => Ok(openai_error_event(error)),
                 };
                 Poll::Ready(Some(match name {
@@ -273,6 +283,7 @@ fn sse_event_name(event: &ChatStreamEvent) -> Option<&'static str> {
         ChatStreamEvent::AgenticToolCallProgress(_) => Some("agentic_tool_call_progress"),
         ChatStreamEvent::AgenticToolApprovalRequired(_) => Some("agentic_tool_approval_required"),
         ChatStreamEvent::FileProduced(_) => Some("file_produced"),
+        ChatStreamEvent::BlockDenoisingProgress(_) => None,
         ChatStreamEvent::Chunk(_) | ChatStreamEvent::Error(_) => None,
     }
 }

@@ -6,7 +6,6 @@ use inference_api::{
     Engine, EngineSpec,
     engine::RuntimeSpec,
     engine_completion::{CompletionStream, CompletionStreamEvent},
-    lora_adapters::ListLoraAdaptersQuery,
     openai::CompletionRequest,
 };
 use inference_core::initialize_logging;
@@ -148,13 +147,7 @@ pub async fn run_bench(
     let spec = bench_spec(&model_type, &runtime, &global)?;
     let engine = Engine::load(spec).await?;
     if let Some(alias) = request_adapter.as_deref() {
-        let adapters = engine
-            .lora_adapters(ListLoraAdaptersQuery::default())
-            .await
-            .map_err(anyhow::Error::msg)?;
-        if !adapters.data.iter().any(|adapter| adapter.id == alias) {
-            anyhow::bail!("LoRA adapter alias `{alias}` is not loaded");
-        }
+        super::run::require_adapter(&engine, alias).await?;
     }
     let max_model_len = engine
         .models()
@@ -490,10 +483,6 @@ fn print_results(
 }
 
 #[cfg(test)]
-#[path = "../../../inference/tests/support/paddleocr_vl_tiny.rs"]
-mod tiny_support;
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -502,7 +491,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn a_measurement_times_a_token_prompt_through_the_engine_api() -> anyhow::Result<()> {
-        let dir = super::tiny_support::tiny_checkpoint()?;
+        let dir = crate::commands::tiny_support::tiny_checkpoint()?;
         let spec = serde_json::from_value(json!({
             "model": {"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}},
             "runtime": {"device": "cpu", "disable_eos_stop": true},

@@ -13,7 +13,7 @@ use inference_server_core::metrics::install_prometheus_recorder;
 use crate::args::{
     GlobalOptions, MatformerSelection, PagedAttentionOptions, RuntimeOptions, SandboxOptions,
 };
-use crate::commands::run::{InteractiveConfig, interactive_mode};
+use crate::commands::run::{InteractiveConfig, interactive_mode, require_adapter};
 use crate::commands::serve::{
     AgenticInputs, adapter_spec_from_env, agentic_spec, apply_agent_mode,
     convert_to_model_selected, log_agent_runtime, runtime_options_spec, serve_engine, skills_root,
@@ -102,12 +102,8 @@ async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {
     })
     .await?;
     let engine = Engine::load(spec).await?;
-    let inference = engine.state().clone();
     if let Some(alias) = adapter.as_deref() {
-        let adapters = inference.list_lora_adapters(None).await?;
-        if !adapters.iter().any(|loaded| loaded.alias == alias) {
-            anyhow::bail!("LoRA adapter alias `{alias}` is not loaded");
-        }
+        require_adapter(&engine, alias).await?;
     }
 
     #[cfg(feature = "code-execution")]
@@ -122,7 +118,7 @@ async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {
     info!("Model(s) loaded, starting interactive mode...");
 
     interactive_mode(
-        inference.clone(),
+        &engine,
         InteractiveConfig {
             do_search: runtime.enable_search,
             do_code_exec,

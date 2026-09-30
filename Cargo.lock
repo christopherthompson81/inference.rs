@@ -2621,6 +2621,7 @@ version = "0.9.3"
 dependencies = [
  "anyhow",
  "axum",
+ "base64 0.22.1",
  "candle-core",
  "candle-nn",
  "clap",
@@ -2631,6 +2632,7 @@ dependencies = [
  "dirs",
  "either",
  "fuzzy-matcher",
+ "image",
  "indexmap",
  "indicatif 0.18.3",
  "inference-api",
