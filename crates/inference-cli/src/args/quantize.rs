@@ -156,7 +156,7 @@ impl QuantizeFormatOptions {
         Ok(root)
     }
 
-    fn to_format_options(&self) -> FormatOptions {
+    pub(crate) fn to_format_options(&self) -> FormatOptions {
         FormatOptions {
             format: self.format.map(Into::into),
             quantized_file: self.quantized_file.clone(),

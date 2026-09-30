@@ -33,7 +33,7 @@ pub struct ModelSourceOptions {
     #[arg(short = 't', long)]
     pub tokenizer: Option<PathBuf>,
 
-    /// Model architecture (auto-detected if not specified)
+    /// Text model architecture; forces the text loader instead of auto-detection
     #[arg(short = 'a', long, value_parser = parse_arch)]
     pub arch: Option<NormalLoaderType>,
 

@@ -903,6 +903,26 @@ pub enum ModelSelected {
 }
 
 impl ModelSelected {
+    /// Where the spec writes a UQFF of the weights it loads; `None` for kinds that cannot write one.
+    pub fn write_uqff_mut(&mut self) -> Option<&mut Option<UqffWriteConfig>> {
+        match self {
+            Self::Run { write_uqff, .. }
+            | Self::Plain { write_uqff, .. }
+            | Self::XLora { write_uqff, .. }
+            | Self::Lora { write_uqff, .. }
+            | Self::GGUF { write_uqff, .. }
+            | Self::XLoraGGUF { write_uqff, .. }
+            | Self::LoraGGUF { write_uqff, .. }
+            | Self::MultimodalPlain { write_uqff, .. }
+            | Self::Embedding { write_uqff, .. } => Some(write_uqff),
+            Self::GGML { .. }
+            | Self::XLoraGGML { .. }
+            | Self::LoraGGML { .. }
+            | Self::DiffusionPlain { .. }
+            | Self::Speech { .. } => None,
+        }
+    }
+
     /// The quantization level the spec asks resolution to pick weights for.
     pub fn quant(&self) -> Option<&str> {
         match self {

@@ -225,6 +225,16 @@ fn emit_toml_config(
     if let Some(dtype) = model_dtype(model_selected) {
         out.push_str(&format!("dtype = \"{}\"\n", dtype));
     }
+    if let ModelSelected::Plain {
+        arch: Some(arch), ..
+    }
+    | ModelSelected::Lora {
+        arch: Some(arch), ..
+    } = model_selected
+    {
+        // the loader that was tuned; without it the config would auto-detect another
+        out.push_str(&format!("arch = {}\n", serde_json::to_string(arch)?));
+    }
 
     if let Some(isq) = result.recommended_isq {
         out.push_str("\n[models.quantization]\n");
@@ -286,6 +296,45 @@ mod tests {
     use inference_core::LoraAdapterSpec;
 
     use super::*;
+
+    #[test]
+    fn an_emitted_config_keeps_the_tuned_architecture() {
+        let model: ModelSelected = serde_json::from_value(serde_json::json!({
+            "Plain": {"model_id": "org/model", "arch": "qwen3"}
+        }))
+        .unwrap();
+        let result = inference_selection::AutoTuneResult {
+            model_id: "org/model".to_string(),
+            profile: inference_selection::TuneProfile::Balanced,
+            backend: "cpu".to_string(),
+            candidates: Vec::new(),
+            recommended_isq: None,
+            device_layers: None,
+            device_layers_cli: None,
+            paged_attn_mode: None,
+            recommended_command: String::new(),
+            total_vram_bytes: 0,
+            warnings: Vec::new(),
+            notes: Vec::new(),
+        };
+        let model_type = crate::args::resolve_model_type(
+            None,
+            crate::args::DefaultModelOptions {
+                model_id: Some("org/model".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let toml = emit_toml_config(&model_type, &model, &result).unwrap();
+        let config: crate::config::CliConfig = toml::from_str(&toml).unwrap();
+        let crate::config::CliConfig::Serve(config) = config else {
+            unreachable!()
+        };
+        assert_eq!(
+            config.models[0].arch,
+            Some(inference_core::NormalLoaderType::Qwen3)
+        );
+    }
 
     #[test]
     fn tune_rejects_adapter_configuration() {

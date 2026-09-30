@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result};
 use std::path::Path;
-use tracing::info;
+use tracing::{info, warn};
 
 use inference_api::{
     Engine, EngineSpec,
@@ -329,8 +329,8 @@ pub(crate) fn convert_to_model_selected(
                     );
                 }
                 ModelFormat::Plain => {
-                    // For plain format with adapters, also use text model conversion
-                    if has_lora || has_legacy_lora || has_xlora {
+                    // An adapter or an explicit text architecture needs the text loader, not auto-detection
+                    if has_lora || has_legacy_lora || has_xlora || model.arch.is_some() {
                         return convert_text_model(
                             model,
                             format,
@@ -402,6 +402,7 @@ pub(crate) fn convert_to_model_selected(
             validate_mmproj_format(format)?;
             adapter.validate().map_err(anyhow::Error::msg)?;
             let adapter = adapter.as_adapter_options();
+            warn_unused_arch(model, "multimodal models detect their architecture");
             let mut model = model.clone();
             model.arch = None;
             match format.format.unwrap_or(ModelFormat::Plain) {
@@ -465,18 +466,24 @@ pub(crate) fn convert_to_model_selected(
             }
         }
 
-        ModelType::Diffusion { model, device: _ } => Ok(ModelSelected::DiffusionPlain {
-            model_id: model.model_id.clone(),
-            arch: DiffusionLoaderType::Flux,
-            dtype: model.dtype,
-        }),
+        ModelType::Diffusion { model, device: _ } => {
+            warn_unused_arch(model, "diffusion models load as FLUX");
+            Ok(ModelSelected::DiffusionPlain {
+                model_id: model.model_id.clone(),
+                arch: DiffusionLoaderType::Flux,
+                dtype: model.dtype,
+            })
+        }
 
-        ModelType::Speech { model, device: _ } => Ok(ModelSelected::Speech {
-            model_id: model.model_id.clone(),
-            dac_model_id: None,
-            arch: SpeechLoaderType::Dia,
-            dtype: model.dtype,
-        }),
+        ModelType::Speech { model, device: _ } => {
+            warn_unused_arch(model, "speech models load as Dia");
+            Ok(ModelSelected::Speech {
+                model_id: model.model_id.clone(),
+                dac_model_id: None,
+                arch: SpeechLoaderType::Dia,
+                dtype: model.dtype,
+            })
+        }
 
         ModelType::Embedding {
             model,
@@ -489,6 +496,7 @@ pub(crate) fn convert_to_model_selected(
             if !matches!(format.format, None | Some(ModelFormat::Plain)) {
                 anyhow::bail!("Embedding models do not support GGUF or GGML format");
             }
+            warn_unused_arch(model, "embedding models detect their architecture");
             Ok(ModelSelected::Embedding {
                 quant: quantization.quant.clone(),
                 model_id: model.model_id.clone(),
@@ -513,7 +521,7 @@ pub(crate) fn convert_to_model_selected(
 }
 
 /// An explicit multimodal model needs its projector, whether named, found beside the file or found by `quant`.
-pub(crate) fn require_projector(mut model: ModelSelected) -> ModelSelected {
+fn require_projector(mut model: ModelSelected) -> ModelSelected {
     if let ModelSelected::GGUF {
         mmproj_selection, ..
     }
@@ -526,7 +534,7 @@ pub(crate) fn require_projector(mut model: ModelSelected) -> ModelSelected {
     model
 }
 
-pub(crate) fn gguf_mmproj_selection(direct_file_only: bool) -> MmprojSelection {
+fn gguf_mmproj_selection(direct_file_only: bool) -> MmprojSelection {
     // `-f` without `-m` points at a file: its directory is not a repository to judge
     if direct_file_only {
         MmprojSelection::Any
@@ -536,7 +544,7 @@ pub(crate) fn gguf_mmproj_selection(direct_file_only: bool) -> MmprojSelection {
 }
 
 /// The GGUF file `-f` names, or none for `--quant` to pick.
-pub(crate) fn gguf_filename(quantized_file: Option<&str>, quant: Option<&str>) -> Result<String> {
+fn gguf_filename(quantized_file: Option<&str>, quant: Option<&str>) -> Result<String> {
     match (quantized_file, quant) {
         (Some(file), _) => Ok(file.to_string()),
         (None, Some(_)) => Ok(String::new()),
@@ -552,6 +560,12 @@ fn validate_mmproj_format(format_opts: &FormatOptions) -> Result<()> {
         anyhow::bail!("`--mmproj` requires GGUF format");
     }
     Ok(())
+}
+
+fn warn_unused_arch(model: &ModelSourceOptions, reason: &str) {
+    if let Some(arch) = &model.arch {
+        warn!("`--arch {arch}` is ignored: {reason}");
+    }
 }
 
 /// Convert text model with orthogonal format/adapter flags
@@ -572,6 +586,9 @@ fn convert_text_model(
     let has_xlora = adapter.xlora.is_some();
     if format_opts.mmproj.is_some() && (has_legacy_lora || has_xlora) {
         anyhow::bail!("Multimodal GGUF does not support legacy LoRA or X-LoRA adapters");
+    }
+    if format_type != ModelFormat::Plain {
+        warn_unused_arch(model, "GGUF and GGML files carry their architecture");
     }
 
     match (format_type, has_lora, has_legacy_lora, has_xlora) {
@@ -1423,6 +1440,30 @@ mod tests {
             ModelSelected::GGUF {
                 lora_runtime_config: Some(_),
                 mmproj_selection: MmprojSelection::Required,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn an_explicit_arch_picks_the_text_loader_for_an_auto_model() {
+        let mut model_type = ModelType::Auto {
+            model: ModelSourceOptions {
+                arch: Some(NormalLoaderType::Qwen3),
+                ..test_model()
+            },
+            format: FormatOptions::default(),
+            adapter: AdapterOptions::default(),
+            quantization: QuantizationOptions::default(),
+            device: DeviceOptions::default(),
+            cache: crate::args::CacheOptions::default(),
+            multimodal: MultimodalOptions::default(),
+        };
+        let model = converted(&mut model_type);
+        assert!(matches!(
+            model,
+            ModelSelected::Plain {
+                arch: Some(NormalLoaderType::Qwen3),
                 ..
             }
         ));
