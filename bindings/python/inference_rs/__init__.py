@@ -11,6 +11,7 @@ from ._engine import (
     StreamEvent,
     system_doctor,
     system_info,
+    tune_model,
 )
 from ._errors import InferenceError, Status
 from ._layout import (
@@ -47,5 +48,6 @@ __all__ = [
     "system_info",
     "to_data",
     "to_json",
+    "tune_model",
     "types",
 ]

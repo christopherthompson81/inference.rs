@@ -9,7 +9,7 @@ internal static unsafe partial class NativeMethods
     internal const string Library = "inference_ffi";
 
     /// <summary>The ABI these declarations mirror; while it is 0.0.x any other version may differ anywhere.</summary>
-    internal const uint AbiVersion = (0 << 16) | (0 << 8) | 14;
+    internal const uint AbiVersion = (0 << 16) | (0 << 8) | 15;
 
     /// <summary>Refuses a library built for another ABI, before any call into it could misread its memory.</summary>
     internal static void EnsureAbi()
@@ -151,6 +151,17 @@ internal static unsafe partial class NativeMethods
     internal static partial InferenceStatus inference_models_list(IntPtr engine, out IntPtr outResponse);
 
     [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_model_served(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_mcp_tools_list(IntPtr engine, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_anthropic_count_tokens(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
     internal static partial InferenceStatus inference_model_unload(
         IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
 
@@ -216,6 +227,10 @@ internal static unsafe partial class NativeMethods
         IntPtr engine, byte* id, nuint idLen, byte* session, nuint sessionLen, out IntPtr outResponse);
 
     [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_session_fork(
+        IntPtr engine, byte* id, nuint idLen, byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
     internal static partial InferenceStatus inference_session_delete(
         IntPtr engine, byte* id, nuint idLen, out IntPtr outResponse);
 
@@ -246,6 +261,18 @@ internal static unsafe partial class NativeMethods
     internal static partial InferenceStatus inference_file_content(IntPtr engine, byte* id, nuint idLen, out IntPtr outBlob);
 
     [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_container_files_list(
+        IntPtr engine, byte* containerId, nuint containerIdLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_container_file_get(
+        IntPtr engine, byte* containerId, nuint containerIdLen, byte* fileId, nuint fileIdLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_container_file_content(
+        IntPtr engine, byte* containerId, nuint containerIdLen, byte* fileId, nuint fileIdLen, out IntPtr outBlob);
+
+    [LibraryImport(Library)]
     internal static partial InferenceStatus inference_skill_upload(
         IntPtr engine, NativeSkillFile* files, nuint fileCount, out IntPtr outResponse);
 
@@ -265,6 +292,9 @@ internal static unsafe partial class NativeMethods
 
     [LibraryImport(Library)]
     internal static partial InferenceStatus inference_system_doctor(out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_model_tune(byte* request, nuint requestLen, out IntPtr outResponse);
 
     // Streams and owned results.
 

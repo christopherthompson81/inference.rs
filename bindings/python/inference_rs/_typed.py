@@ -89,6 +89,14 @@ class Engine:
             self.json.anthropic_messages(to_json(request)),
         )
 
+    def anthropic_count_tokens(
+        self, request: types.AnthropicMessagesRequest | str
+    ) -> types.AnthropicCountTokensResponse:
+        return from_json(
+            types.AnthropicCountTokensResponse,
+            self.json.anthropic_count_tokens(to_json(request)),
+        )
+
     def anthropic_messages_stream(self, request: types.AnthropicMessagesRequest | str) -> Stream:
         """Anthropic stream events, as parsed JSON."""
         return self.json.anthropic_messages_stream(to_json(request))
@@ -138,6 +146,11 @@ class Engine:
         """Imports a session under `session_id`, replacing any session there."""
         return from_json(types.SessionStored, self.json.put_session(session_id, to_json(session)))
 
+    def fork_session(self, session_id: str, num_turns: int) -> types.SessionStored:
+        """Branches a session into a new one, named by the engine, holding its first `num_turns` turns."""
+        request = types.SessionForkRequest(num_turns=num_turns)
+        return from_json(types.SessionStored, self.json.fork_session(session_id, to_json(request)))
+
     def delete_session(self, session_id: str) -> types.SessionDeleted:
         return from_json(types.SessionDeleted, self.json.delete_session(session_id))
 
@@ -151,6 +164,13 @@ class Engine:
 
     def list_models(self) -> types.ModelObjects:
         return from_json(types.ModelObjects, self.json.list_models())
+
+    def model_served(self, model_id: str) -> bool:
+        """Whether a request naming `model_id` would be routed, adapter aliases included."""
+        return from_json(types.ModelServed, self.json.model_served(_model(model_id))).served
+
+    def list_mcp_tools(self) -> types.McpToolList:
+        return from_json(types.McpToolList, self.json.list_mcp_tools())
 
     def unload_model(self, model_id: str) -> types.ModelStatusResponse:
         return from_json(types.ModelStatusResponse, self.json.unload_model(_model(model_id)))
@@ -203,6 +223,15 @@ class Engine:
 
     def file_content(self, file_id: str) -> Blob:
         return self.json.file_content(file_id)
+
+    def list_container_files(self, container_id: str) -> types.ContainerFileListObject:
+        return from_json(types.ContainerFileListObject, self.json.list_container_files(container_id))
+
+    def get_container_file(self, container_id: str, file_id: str) -> types.ContainerFileMetadata:
+        return from_json(types.ContainerFileMetadata, self.json.get_container_file(container_id, file_id))
+
+    def container_file_content(self, container_id: str, file_id: str) -> Blob:
+        return self.json.container_file_content(container_id, file_id)
 
     def upload_skill(self, files: Sequence[SkillFile]) -> types.SkillObject:
         return from_json(types.SkillObject, self.json.upload_skill(files))

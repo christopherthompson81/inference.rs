@@ -170,3 +170,8 @@ pub fn tune_model(request: TuneModelRequest) -> Result<AutoTuneResult, ApiError>
         ApiError::internal()
     })
 }
+
+pub fn tune_model_json(request: &[u8]) -> Result<String, ApiError> {
+    serde_json::to_string(&tune_model(TuneModelRequest::from_json(request)?)?)
+        .map_err(|_| ApiError::internal())
+}

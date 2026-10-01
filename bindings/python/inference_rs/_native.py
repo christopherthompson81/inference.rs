@@ -19,7 +19,7 @@ from ctypes import (
 from pathlib import Path
 
 # The ABI these declarations mirror; while it is 0.0.x any other version may differ anywhere.
-ABI_VERSION = (0 << 16) | (0 << 8) | 14
+ABI_VERSION = (0 << 16) | (0 << 8) | 15
 
 NATIVE_DIR_VARIABLE = "INFERENCE_NATIVE_DIR"
 BUNDLED_DIR = "_lib"
@@ -147,6 +147,12 @@ SIGNATURES = {
     "inference_file_get": (status, (c_void_p, *buffer, out)),
     "inference_file_delete": (status, (c_void_p, *buffer, out)),
     "inference_file_content": (status, (c_void_p, *buffer, out)),
+    "inference_container_files_list": (status, (c_void_p, *buffer, out)),
+    "inference_container_file_get": (status, (c_void_p, *buffer, *buffer, out)),
+    "inference_container_file_content": (status, (c_void_p, *buffer, *buffer, out)),
+    "inference_anthropic_count_tokens": (status, (c_void_p, *buffer, out)),
+    "inference_model_served": (status, (c_void_p, *buffer, out)),
+    "inference_mcp_tools_list": (status, (c_void_p, out)),
     "inference_skill_upload": (status, (c_void_p, POINTER(SkillFile), c_size_t, out)),
     "inference_skill_version_upload": (
         status,
@@ -162,11 +168,13 @@ SIGNATURES = {
     "inference_sessions_list": (status, (c_void_p, out)),
     "inference_session_get": (status, (c_void_p, *buffer, out)),
     "inference_session_put": (status, (c_void_p, *buffer, *buffer, out)),
+    "inference_session_fork": (status, (c_void_p, *buffer, *buffer, out)),
     "inference_session_delete": (status, (c_void_p, *buffer, out)),
     "inference_tokenize": (status, (c_void_p, *buffer, out)),
     "inference_detokenize": (status, (c_void_p, *buffer, out)),
     "inference_system_info": (status, (out,)),
     "inference_system_doctor": (status, (out,)),
+    "inference_model_tune": (status, (*buffer, out)),
     "inference_stream_next": (status, (c_void_p, c_int64, out, POINTER(c_int32))),
     "inference_stream_cancel": (status, (c_void_p,)),
     "inference_stream_free": (None, (c_void_p,)),

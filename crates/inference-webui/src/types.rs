@@ -4,7 +4,8 @@ use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
 use inference_api::Engine;
-use inference_core::{ModelGenerationDefaults, SearchEmbeddingModel};
+use inference_api::openai::GenerationDefaults;
+use inference_core::SearchEmbeddingModel;
 
 #[derive(Clone, Serialize)]
 pub struct UiModelInfo {
@@ -100,7 +101,7 @@ impl GenerationParams {
         }
     }
 
-    pub fn from_model_defaults(defaults: Option<&ModelGenerationDefaults>) -> Self {
+    pub fn from_model_defaults(defaults: Option<&GenerationDefaults>) -> Self {
         let Some(defaults) = defaults else {
             return Self::default();
         };
@@ -235,7 +236,7 @@ pub struct RenameChatRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::{GenerationParams, ModelGenerationDefaults, chat_file_path};
+    use super::{GenerationDefaults, GenerationParams, chat_file_path};
 
     #[test]
     fn chat_paths_stay_inside_chats_dir() {
@@ -260,7 +261,7 @@ mod tests {
 
     #[test]
     fn do_sample_false_overrides_sampling_defaults() {
-        let params = GenerationParams::from_model_defaults(Some(&ModelGenerationDefaults {
+        let params = GenerationParams::from_model_defaults(Some(&GenerationDefaults {
             do_sample: Some(false),
             temperature: Some(0.6),
             top_k: Some(20),

@@ -2,7 +2,7 @@
 
 use futures::future::BoxFuture;
 use inference_core::{
-    InferenceRsError, Modalities, ModelCategory as CoreModelCategory, ModelGenerationDefaults,
+    InferenceRsError, ModelCategory as CoreModelCategory, ModelGenerationDefaults,
     ModelStatus as CoreModelStatus, SupportedModality,
 };
 use serde::{Deserialize, Serialize};
@@ -78,6 +78,13 @@ pub fn cache_stats(state: &SharedInferenceRsState) -> Result<CacheStats, ApiErro
     })
 }
 
+/// Whether a request naming `model_id` would be routed: a served model, the `default` alias, or a LoRA adapter.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct ModelServed {
+    pub model_id: String,
+    pub served: bool,
+}
+
 /// The body of an unload, reload or status request.
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
 pub struct ModelOperationRequest {
@@ -131,6 +138,7 @@ fn model_object(state: &SharedInferenceRsState, id: String) -> ModelObject {
         category: None,
         modalities: None,
         generation_defaults: None,
+        default: None,
     }
 }
 
@@ -190,6 +198,7 @@ fn generation_defaults(defaults: ModelGenerationDefaults) -> GenerationDefaults 
 /// Every served model, preceded by the `default` alias and followed by each loaded LoRA adapter as its own model.
 pub fn list_models(state: &SharedInferenceRsState) -> Result<ModelObjects, ApiError> {
     let models_with_status = state.list_models_with_status().map_err(core_error)?;
+    let mut default_id = state.get_default_model_id().ok().flatten();
     let mut data = Vec::new();
     if !models_with_status.is_empty() {
         let mut object = model_object(state, DEFAULT_MODEL_ID.to_string());
@@ -211,6 +220,10 @@ pub fn list_models(state: &SharedInferenceRsState) -> Result<ModelObjects, ApiEr
             describe_loaded(state, Some(&model_id), &mut object);
         }
         object.status = Some(status.to_string());
+        // A reloading model can be listed twice; only its first card is marked.
+        if default_id.as_deref() == Some(model_id.as_str()) {
+            object.default = default_id.take().map(|_| true);
+        }
         data.push(object);
     }
     for adapter_model in list_lora_adapter_models(state).map_err(core_error)? {
@@ -297,34 +310,6 @@ fn status_result(
         }),
         None => Err(core_error(InferenceRsError::ModelNotFound(model_id))),
     }
-}
-
-/// A served model as a client choosing one sees it; `modalities` is `None` when its settings couldn't be read.
-#[derive(Debug, Clone)]
-pub struct ModelDescription {
-    pub id: String,
-    pub category: CoreModelCategory,
-    pub modalities: Option<Modalities>,
-    pub generation_defaults: Option<ModelGenerationDefaults>,
-}
-
-/// Every served model whose category resolves, in listing order.
-pub fn describe_models(state: &SharedInferenceRsState) -> Vec<ModelDescription> {
-    let Ok(ids) = state.list_models() else {
-        return Vec::new();
-    };
-    ids.into_iter()
-        .filter_map(|id| {
-            let category = state.get_model_category(Some(&id)).ok()?;
-            let config = state.config(Some(&id)).ok();
-            Some(ModelDescription {
-                category,
-                modalities: config.as_ref().map(|config| config.modalities.clone()),
-                generation_defaults: config.and_then(|config| config.generation_defaults),
-                id,
-            })
-        })
-        .collect()
 }
 
 #[cfg(test)]

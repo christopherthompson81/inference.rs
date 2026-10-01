@@ -109,6 +109,16 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Text(status, response, nameof(NativeMethods.inference_anthropic_messages));
     }
 
+    /// <summary>The prompt tokens an Anthropic Messages request would use: {"input_tokens"}.</summary>
+    public string AnthropicCountTokens(string requestJson)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_anthropic_count_tokens(
+            engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_anthropic_count_tokens));
+    }
+
     public EngineStream AnthropicMessagesStream(string requestJson)
     {
         using var engine = Borrow();
@@ -165,6 +175,23 @@ public sealed unsafe class InferenceEngine : IDisposable
         using var engine = Borrow();
         var status = NativeMethods.inference_models_list(engine.Handle, out var response);
         return Text(status, response, nameof(NativeMethods.inference_models_list));
+    }
+
+    /// <summary>Whether a request naming the model in {"model_id"} would be routed: {"model_id", "served"}.</summary>
+    public string ModelServed(string requestJson)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_model_served(engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_model_served));
+    }
+
+    /// <summary>The tools the engine's MCP servers give the default model.</summary>
+    public string ListMcpTools()
+    {
+        using var engine = Borrow();
+        var status = NativeMethods.inference_mcp_tools_list(engine.Handle, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_mcp_tools_list));
     }
 
     public string UnloadModel(string requestJson)
@@ -245,6 +272,17 @@ public sealed unsafe class InferenceEngine : IDisposable
         using var id = new PinnedBytes(sessionId);
         var status = NativeMethods.inference_session_get(engine.Handle, id.Pointer, id.Length, out var response);
         return Text(status, response, nameof(NativeMethods.inference_session_get));
+    }
+
+    /// <summary>Branches a session into a new one the engine names; the request is {"num_turns"}, the answer {"id"}.</summary>
+    public string ForkSession(string sessionId, string requestJson)
+    {
+        using var engine = Borrow();
+        using var id = new PinnedBytes(sessionId);
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_session_fork(
+            engine.Handle, id.Pointer, id.Length, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_session_fork));
     }
 
     /// <summary>Imports a session under <paramref name="sessionId"/>, replacing any session there.</summary>
@@ -380,6 +418,36 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Owned.TakeBlob(blob);
     }
 
+    /// <summary>The files a Responses container (a code-running session) produced.</summary>
+    public string ListContainerFiles(string containerId)
+    {
+        using var engine = Borrow();
+        using var id = new PinnedBytes(containerId);
+        var status = NativeMethods.inference_container_files_list(engine.Handle, id.Pointer, id.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_container_files_list));
+    }
+
+    public string GetContainerFile(string containerId, string fileId)
+    {
+        using var engine = Borrow();
+        using var container = new PinnedBytes(containerId);
+        using var file = new PinnedBytes(fileId);
+        var status = NativeMethods.inference_container_file_get(
+            engine.Handle, container.Pointer, container.Length, file.Pointer, file.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_container_file_get));
+    }
+
+    public Blob ContainerFileContent(string containerId, string fileId)
+    {
+        using var engine = Borrow();
+        using var container = new PinnedBytes(containerId);
+        using var file = new PinnedBytes(fileId);
+        var status = NativeMethods.inference_container_file_content(
+            engine.Handle, container.Pointer, container.Length, file.Pointer, file.Length, out var blob);
+        InferenceException.ThrowIfFailed(status, nameof(NativeMethods.inference_container_file_content));
+        return Owned.TakeBlob(blob);
+    }
+
     public string UploadSkill(IReadOnlyList<SkillFile> files)
     {
         using var engine = Borrow();
@@ -427,6 +495,15 @@ public sealed unsafe class InferenceEngine : IDisposable
         NativeMethods.EnsureAbi();
         var status = NativeMethods.inference_system_doctor(out var response);
         return Text(status, response, nameof(NativeMethods.inference_system_doctor));
+    }
+
+    /// <summary>The quantization and settings that fit a model on this machine, found without loading it.</summary>
+    public static string TuneModel(string requestJson)
+    {
+        NativeMethods.EnsureAbi();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_model_tune(request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_model_tune));
     }
 
     // Dispose ends the engine for its callers even while open streams keep the native engine alive.

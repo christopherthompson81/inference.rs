@@ -275,6 +275,10 @@ class JsonEngine:
         """An Anthropic Messages request; failures carry the Anthropic error envelope."""
         return self._call("inference_anthropic_messages", request_json)
 
+    def anthropic_count_tokens(self, request_json: str) -> str:
+        """The prompt tokens an Anthropic Messages request would use: {"input_tokens"}."""
+        return self._call("inference_anthropic_count_tokens", request_json)
+
     def anthropic_messages_stream(self, request_json: str) -> Stream:
         return self._stream("inference_anthropic_messages_stream_open", request_json)
 
@@ -295,6 +299,14 @@ class JsonEngine:
 
     def list_models(self) -> str:
         return self._get("inference_models_list")
+
+    def model_served(self, request_json: str) -> str:
+        """Whether a request naming the model in {"model_id"} would be routed: {"model_id", "served"}."""
+        return self._call("inference_model_served", request_json)
+
+    def list_mcp_tools(self) -> str:
+        """The tools the engine's MCP servers give the default model."""
+        return self._get("inference_mcp_tools_list")
 
     def unload_model(self, request_json: str) -> str:
         return self._call("inference_model_unload", request_json)
@@ -322,6 +334,12 @@ class JsonEngine:
         return self._blob("inference_speech_generation", request_json)
 
     def _call2(self, name: str, first: str, second: str) -> str:
+        return take_string(self._pair(name, first, second))
+
+    def _blob2(self, name: str, first: str, second: str) -> Blob:
+        return take_blob(self._pair(name, first, second))
+
+    def _pair(self, name: str, first: str, second: str) -> ctypes.c_void_p:
         first_data, second_data = text_arg(first), text_arg(second)
         response = ctypes.c_void_p()
         with Lease(self._handle) as engine:
@@ -336,7 +354,7 @@ class JsonEngine:
                 ),
                 name,
             )
-        return take_string(response)
+        return response
 
     def resolve_approval(self, approval_id: str, decision_json: str) -> str:
         """Answers the approval an agentic_tool_approval_required stream event named."""
@@ -385,6 +403,10 @@ class JsonEngine:
     def put_session(self, session_id: str, session_json: str) -> str:
         return self._call2("inference_session_put", session_id, session_json)
 
+    def fork_session(self, session_id: str, request_json: str) -> str:
+        """Branches a session into a new one the engine names; the request is {"num_turns"}, the answer {"id"}."""
+        return self._call2("inference_session_fork", session_id, request_json)
+
     def delete_session(self, session_id: str) -> str:
         return self._call("inference_session_delete", session_id)
 
@@ -405,6 +427,16 @@ class JsonEngine:
 
     def file_content(self, file_id: str) -> Blob:
         return self._blob("inference_file_content", file_id)
+
+    def list_container_files(self, container_id: str) -> str:
+        """The files a Responses container (a code-running session) produced."""
+        return self._call("inference_container_files_list", container_id)
+
+    def get_container_file(self, container_id: str, file_id: str) -> str:
+        return self._call2("inference_container_file_get", container_id, file_id)
+
+    def container_file_content(self, container_id: str, file_id: str) -> Blob:
+        return self._blob2("inference_container_file_content", container_id, file_id)
 
     def upload_skill(self, files: Sequence[SkillFile]) -> str:
         buffers = _Buffers()
@@ -450,3 +482,11 @@ def system_info() -> str:
 def system_doctor() -> str:
     """Environment diagnostics; needs no engine."""
     return _report("inference_system_doctor")
+
+
+def tune_model(request_json: str) -> str:
+    """The quantization and settings that fit a model on this machine, found without loading it; needs no engine."""
+    data = text_arg(request_json)
+    response = ctypes.c_void_p()
+    check(lib.inference_model_tune(data, len(data), ctypes.byref(response)), "inference_model_tune")
+    return take_string(response)

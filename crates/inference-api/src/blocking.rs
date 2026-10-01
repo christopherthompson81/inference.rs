@@ -135,6 +135,12 @@ impl BlockingEngine {
         })
     }
 
+    pub fn count_tokens_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.count_tokens_json(&request).await
+        })
+    }
+
     pub fn anthropic_messages_stream_json(
         &self,
         request: &[u8],

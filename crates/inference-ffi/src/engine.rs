@@ -14,7 +14,7 @@ use inference_api::{
     files::{FileUpload, MAX_FILE_UPLOAD_BYTES, file_too_large},
     media_source::{MediaAttachment, MediaAttachments},
     skill_store::{SkillFiles, skill_api_error},
-    system::{system_doctor_json, system_info_json},
+    system::{system_doctor_json, system_info_json, tune_model_json},
 };
 
 use crate::{
@@ -541,11 +541,7 @@ unsafe fn id_call<H>(
 ) -> inference_status {
     unsafe {
         let name = id.2;
-        engine_call(engine, id, out, |engine, id| {
-            let id = std::str::from_utf8(id)
-                .map_err(|_| Failure::invalid(format!("{name} is not UTF-8")))?;
-            call(engine, id)
-        })
+        engine_call(engine, id, out, |engine, id| call(engine, utf8(id, name)?))
     }
 }
 
@@ -1480,5 +1476,194 @@ pub unsafe extern "C" fn inference_detokenize(
             out_response,
             |engine, request| engine.detokenize_json(request).map_err(api_failure),
         )
+    }
+}
+
+fn utf8<'a>(bytes: &'a [u8], name: &str) -> FfiResult<&'a str> {
+    std::str::from_utf8(bytes).map_err(|_| Failure::invalid(format!("{name} is not UTF-8")))
+}
+
+// Safety: `data` is valid for `len` bytes.
+unsafe fn arg_utf8<'a>(data: *const c_char, len: usize, name: &str) -> FfiResult<&'a str> {
+    unsafe { utf8(arg_bytes(data, len, name)?, name) }
+}
+
+/// Safety: as for `inference_chat`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_anthropic_count_tokens(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe {
+        json_call(
+            engine,
+            request,
+            request_len,
+            out_response,
+            |engine, request| engine.count_tokens_json(request).map_err(anthropic_failure),
+        )
+    }
+}
+
+/// Safety: as for `inference_file_get`, with `container_id` in place of `file_id`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_container_files_list(
+    engine: *const inference_engine,
+    container_id: *const c_char,
+    container_id_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe {
+        id_call(
+            engine,
+            (container_id, container_id_len, "container_id"),
+            (out_response, "out_response"),
+            |engine, id| {
+                engine
+                    .engine()
+                    .container_files_json(id)
+                    .map(string_handle)
+                    .map_err(api_failure)
+            },
+        )
+    }
+}
+
+/// Safety: as for `inference_container_files_list`, and `file_id` valid for `file_id_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_container_file_get(
+    engine: *const inference_engine,
+    container_id: *const c_char,
+    container_id_len: usize,
+    file_id: *const c_char,
+    file_id_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe {
+        id_call(
+            engine,
+            (container_id, container_id_len, "container_id"),
+            (out_response, "out_response"),
+            |engine, container_id| {
+                let file_id = arg_utf8(file_id, file_id_len, "file_id")?;
+                engine
+                    .engine()
+                    .container_file_json(container_id, file_id)
+                    .map(string_handle)
+                    .map_err(api_failure)
+            },
+        )
+    }
+}
+
+/// Safety: as for `inference_container_file_get`, with `out_blob` valid for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_container_file_content(
+    engine: *const inference_engine,
+    container_id: *const c_char,
+    container_id_len: usize,
+    file_id: *const c_char,
+    file_id_len: usize,
+    out_blob: *mut *mut inference_blob,
+) -> inference_status {
+    unsafe {
+        id_call(
+            engine,
+            (container_id, container_id_len, "container_id"),
+            (out_blob, "out_blob"),
+            |engine, container_id| {
+                let file_id = arg_utf8(file_id, file_id_len, "file_id")?;
+                let body = engine
+                    .engine()
+                    .container_file_content(container_id, file_id)
+                    .map_err(api_failure)?;
+                Ok(blob_handle(body.bytes, body.mime_type))
+            },
+        )
+    }
+}
+
+/// Safety: as for `inference_session_put`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_session_fork(
+    engine: *const inference_engine,
+    session_id: *const c_char,
+    session_id_len: usize,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe {
+        json_call(
+            engine,
+            request,
+            request_len,
+            out_response,
+            |engine, request| {
+                let id = arg_utf8(session_id, session_id_len, "session_id")?;
+                engine
+                    .engine()
+                    .fork_session_json(id, request)
+                    .map_err(api_failure)
+            },
+        )
+    }
+}
+
+/// Safety: as for `inference_models_list`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_mcp_tools_list(
+    engine: *const inference_engine,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe {
+        query_call(engine, out_response, |engine| {
+            engine.engine().mcp_tools_json()
+        })
+    }
+}
+
+/// Safety: as for `inference_chat`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_model_served(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe {
+        json_call(
+            engine,
+            request,
+            request_len,
+            out_response,
+            |engine, request| {
+                engine
+                    .engine()
+                    .model_served_json(request)
+                    .map_err(api_failure)
+            },
+        )
+    }
+}
+
+/// Safety: `request` is valid for `request_len` bytes and `out_response` for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_model_tune(
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe {
+        guard(|| {
+            out_arg(out_response, "out_response")?;
+            let request = arg_bytes(request, request_len, "request")?;
+            out_response.write(string_handle(
+                tune_model_json(request).map_err(api_failure)?,
+            ));
+            Ok(())
+        })
     }
 }

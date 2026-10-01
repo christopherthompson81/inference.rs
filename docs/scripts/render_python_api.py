@@ -55,7 +55,8 @@ GROUPS = [
         "spec",
         "What to load and how to run it: EngineSpec, the ModelSelected variants and their options.",
         lambda n: (
-            n.startswith(
+            not n.startswith("McpTool")
+            and n.startswith(
                 (
                     "EngineSpec",
                     "ModelSpec",
@@ -155,7 +156,7 @@ GROUPS = [
     (
         "Models, adapters, files and skills",
         "management",
-        "Model status and cache counters, LoRA adapters, files, skills, approvals, sessions, calibration, tokenization and the media generation calls.",
+        "Model status and cache counters, LoRA adapters, files, skills, approvals, sessions, MCP tools, calibration, tokenization and the media generation calls.",
         lambda n: n.startswith(
             (
                 "Model",
@@ -183,6 +184,7 @@ GROUPS = [
                 "SignIn",
                 "Tokenize",
                 "Detokenize",
+                "McpTool",
             )
         ),
     ),

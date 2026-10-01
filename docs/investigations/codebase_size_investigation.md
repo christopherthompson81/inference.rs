@@ -768,3 +768,48 @@ Dead end: `Engine::state()` can't go crate-private yet. Its callers are server-c
 streamer storing tool calls, session import keeping a stored file's body, container-file tagging), which seed and read
 core state that no client operation exposes. They belong beside the code in inference-api, which needs the tiny
 checkpoint support shared outside `#[path]`: the test-support crate item.
+
+## Run 26 - 2026-10-01 (time approximate)
+
+Question: the target is an integration package, where a second project in another language builds an equally capable
+server on the bindings. Does our server use anything the C ABI doesn't export?
+
+Finding (every `Engine` method server-core and the web UI call, against `include/inference.h`): owner scoping, chat,
+completions, Anthropic messages, Responses, files, sessions, models, LoRA, re-ISQ, calibration, images, speech,
+embeddings, approvals, skills, tokenize and the system reports are exported. Missing: Anthropic `count_tokens`,
+container files (list, metadata, content), `fork_session`, the MCP tool list, the default model's id (metrics labels
+and the UI's first model; nothing in the models list says which is the default), and model auto-tuning
+(`/v1/models/tune`). Run 24's `describe_models` duplicated the models list, which already carries category,
+modalities and generation defaults. What `state()` still serves (tagging a file into a container, storing a generated
+image) happens inside code-execution and image-generation runs, so an integrator never calls it; it's a test shortcut,
+not an integration gap. Left to the integrator by design: HTTP framing, keys and browser sign-in, the file-listing
+policy, metrics.
+
+Each gap was then held to whether an inference engine needs it; a server concern stays out of the engine. Engine
+concerns: token counting (the chat template renders the request), container files (the store code-execution runs
+fill), session fork (the agent session store), the MCP tool list (what the engine loaded), the default model (its
+routing default) and model-name resolution (whether a `model`, adapter aliases included, routes; metrics label by it
+and an integrator would otherwise re-derive the routing rules). Support tooling, needing no engine: auto-tuning, as the
+doctor already is. Server concerns that Run 24 had put in `Engine`: `chats_in_text`, the MCP server's own policy, which
+the server can read off the default model's card; `describe_models`, a duplicate. Rust-only by nature: the accessors
+that echo the caller's own spec (`agent_permission`, `adapter_config`), stream taps (an ABI stream already hands the
+caller every event) and the internals (`chat_engine`, `skill_store`, `state`).
+
+Implication: export the engine concerns and tuning, mark the default on its model card, take `chats_in_text` and
+`describe_models` out of `Engine`, and add a test that fails when an `Engine` method has neither an ABI entry nor a
+listed reason, so the server can't get ahead of the ABI again.
+
+Change (ABI 0.0.15): `inference_anthropic_count_tokens`, `inference_container_files_list`, `_file_get` and
+`_file_content`, `inference_session_fork` (the engine names the new session, as the web UI did), `inference_mcp_tools_list`,
+`inference_model_served` and `inference_model_tune`, each in C# and Python with tests; model cards carry `"default":
+true` on the default model. The web UI builds its model list from the models list and forks and lists MCP tools through
+the same calls; the MCP server reads text-in, text-out off the default model's card. `engine_coverage` (in the FFI's
+integration binary) parses `impl Engine` and fails on a public method that no FFI entry calls, directly or as its
+`_json` form, unless it is listed with a reason; its first run flagged nothing beyond the gaps above once it matched
+methods handed on as paths (`Engine::delete_session_json`) as well as calls.
+
+Review and the first CI run: `model_served("default")` was false (core's status lookup doesn't resolve the alias), which
+the new tests in all three languages caught; the alias now counts when a default exists. Token counting returned
+OpenAI-shaped errors where the HTTP route and the Messages entries use the Anthropic envelope; fixed. A reloading model
+can be listed twice, so only its first card is marked default. Clean: every new signature agrees across the header, the
+Rust externs, C# and ctypes; the web UI lists the same models in the same order; MCP's text check is equivalent.

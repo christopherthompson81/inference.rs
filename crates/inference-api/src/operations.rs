@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::api_error::{ApiError, ApiErrorKind};
+use crate::request_body::{JsonRequest, parse_json};
 use crate::types::SharedInferenceRsState;
 
 const SESSION_NOT_FOUND: &str = "session_not_found";
@@ -43,6 +44,33 @@ pub struct CalibrationApplyRequest {
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct SessionList {
     pub data: Vec<String>,
+}
+
+/// Branches a session into a new one, named by the engine, with the source's first `num_turns` turns (0 copies all).
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SessionForkRequest {
+    pub num_turns: usize,
+}
+
+impl JsonRequest for SessionForkRequest {
+    fn from_json(body: &[u8]) -> Result<Self, ApiError> {
+        parse_json(body)
+    }
+}
+
+/// The tools the engine's MCP servers provide to the default model; built-in tools aren't listed.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct McpToolList {
+    #[schema(example = "list")]
+    pub object: &'static str,
+    pub data: Vec<McpToolObject>,
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct McpToolObject {
+    pub name: String,
+    pub description: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]

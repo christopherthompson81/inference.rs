@@ -1,6 +1,6 @@
 ---
 title: Models, adapters, files and skills
-description: "Model status and cache counters, LoRA adapters, files, skills, approvals, sessions, calibration, tokenization and the media generation calls."
+description: "Model status and cache counters, LoRA adapters, files, skills, approvals, sessions, MCP tools, calibration, tokenization and the media generation calls."
 sidebar:
   order: 7
 ---
@@ -269,6 +269,24 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `retired` | `bool` |
 
 
+## `McpToolList`
+
+The tools the engine's MCP servers provide to the default model; built-in tools aren't listed.
+
+| Field | Type |
+| --- | --- |
+| `data` | `list[McpToolObject]` |
+| `object` | `str` |
+
+
+## `McpToolObject`
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `description` | `str \| None` | optional |
+| `name` | `str` | required |
+
+
 ## `Modality`
 
 Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
@@ -323,6 +341,7 @@ Model information metadata about an available mode
 | `adapter_generation` | `str \| None` | optional |
 | `category` | `ModelCategory \| None` | optional |
 | `created` | `int` | required |
+| `default` | `bool \| None` | optional |
 | `generation_defaults` | `GenerationDefaults \| None` | optional |
 | `id` | `str` | required |
 | `max_model_len` | `int \| None` | optional |
@@ -354,6 +373,16 @@ The body of an unload, reload or status request.
 | Field | Type |
 | --- | --- |
 | `model_id` | `str` |
+
+
+## `ModelServed`
+
+Whether a request naming `model_id` would be routed: a served model, the `default` alias, or a LoRA adapter.
+
+| Field | Type |
+| --- | --- |
+| `model_id` | `str` |
+| `served` | `bool` |
 
 
 ## `ModelStatus`
@@ -409,6 +438,15 @@ Wire format. Images and video frames are base64 PNGs.
 | --- | --- |
 | `deleted` | `bool` |
 | `id` | `str` |
+
+
+## `SessionForkRequest`
+
+Branches a session into a new one, named by the engine, with the source's first `num_turns` turns (0 copies all).
+
+| Field | Type |
+| --- | --- |
+| `num_turns` | `int` |
 
 
 ## `SessionList`

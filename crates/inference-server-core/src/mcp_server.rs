@@ -9,6 +9,7 @@ use axum::{
     routing::post,
 };
 use inference_api::Engine;
+use inference_api::openai::Modality;
 use inference_core::AgentPermission;
 use serde_json::{Value, json};
 
@@ -159,7 +160,7 @@ struct McpState {
 pub fn create_mcp_router(engine: &Engine, auth: Option<Arc<crate::auth::Auth>>) -> Router {
     // `ask` needs a stream to carry approvals and a tool call is one blocking chat, so the tool could never succeed.
     let asks = engine.agent_permission() == Some(AgentPermission::Ask);
-    let chat_enabled = engine.chats_in_text() && !asks;
+    let chat_enabled = default_model_chats_in_text(engine) && !asks;
     let state = Arc::new(McpState {
         engine: engine.clone(),
         chat_enabled,
@@ -168,6 +169,21 @@ pub fn create_mcp_router(engine: &Engine, auth: Option<Arc<crate::auth::Auth>>) 
         .route(MCP_ROUTE, post(handle_jsonrpc))
         .with_state(state);
     crate::auth::require(router, auth, crate::auth::KEY_ONLY_GUARD)
+}
+
+fn default_model_chats_in_text(engine: &Engine) -> bool {
+    let Ok(models) = engine.models() else {
+        return false;
+    };
+    models
+        .data
+        .into_iter()
+        .find(|card| card.default == Some(true))
+        .and_then(|card| card.modalities)
+        .is_some_and(|modalities| {
+            modalities.input.contains(&Modality::Text)
+                && modalities.output.contains(&Modality::Text)
+        })
 }
 
 async fn handle_jsonrpc(
