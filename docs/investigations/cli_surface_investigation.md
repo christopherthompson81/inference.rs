@@ -615,3 +615,30 @@ items (before, only reply text between them split them). The test streams both s
 index matching its position in the resource. Left: stored Responses history has no assistant tool-call message, so a
 streamed run ending on a client tool call can't be continued with its `function_call_output`; a run stopped at its
 round limit hands back a call to a server-side tool the client cannot run (as the non-streaming reply always has).
+
+## Run 25 — 2026-09-30 (time approximate)
+
+**Question:** Run 24 left stored Responses history without the assistant's tool call: a run that hands a client tool
+call back stores no assistant message (streaming, with no text) or one without `tool_calls` (non-streaming), so a
+follow-up with `previous_response_id` and a `function_call_output` answers a call the history never made.
+
+**Change:** the streamer records each tool call it returns (`returned_tool_calls`) and `finish` stores an assistant
+message carrying them, with or without text; the non-streaming/background path stores the choice's `tool_calls` the
+same way. Calls keep the name the model emitted, as `convert_input_items_to_messages` rebuilds an input
+`function_call`.
+
+**Tests:** `a_reply_that_returns_a_tool_call_is_stored_with_it` (a streamed and a collected run, each ending on a
+client tool call, then the stored history's last message is the assistant's call with its id and arguments).
+
+**Review:** no bug in the diff, but two follow-ups went wrong once calls were stored. (1) Clients that resend the
+`function_call` item alongside its `function_call_output` (the usual pattern when not relying on the store) got the
+call twice in the merged prompt; the merge now drops input calls whose `call_id` the stored history already holds.
+Disabling that drop makes the new follow-up test fail with `[user, assistant(1), assistant(1), tool]` instead of
+`[user, assistant(1), tool]`. (2) A round-limit stop hands back calls to server-side tools; storing those would leave
+a call no client will answer, so only calls to tools the request defined (`function`, Responses `function`, or a
+namespace entry by its qualified name) are stored. Also from review: a streamed run that fails or errors now stores
+no history (non-streaming already didn't), and the streamer's fallback `Done` branch records its text, reasoning and
+calls before `finish`. Tests split into `a_streamed_reply_is_stored_with_the_client_calls_it_returns` and
+`a_collected_reply_is_stored_with_the_client_calls_it_returns` (each returns a client call and a server-tool call;
+only the client's is stored), plus `a_follow_up_answers_the_stored_call_without_repeating_it` (an end-to-end
+`prepare_response` with `previous_response_id`, the resent call and its output, checking the merged turn order).
