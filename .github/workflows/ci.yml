@@ -16,7 +16,7 @@ env:
   RUSTFLAGS: "-D warnings"
 
 # Caches are saved from master only, so PRs restore master's and do not churn the repo cache limit
-# Tests and Docs run locally via scripts/local_ci.sh; both are too slow per PR
+# Tests are too slow per PR: they run on master, on the schedule and on dispatch; scripts/local_ci.sh runs them and Docs locally
 jobs:
   check:
     name: Check
@@ -85,6 +85,27 @@ jobs:
       - run: cargo clippy --workspace --tests --examples --features metal -- -D warnings
         env:
           INFERENCE_RS_METAL_PRECOMPILE: "0"
+
+  # The CPU suite as `scripts/local_ci.sh --tests` runs it, guarding master after each merge
+  test:
+    name: Test
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 240
+    steps:
+      # A full test build outgrows the runner's free disk otherwise
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@nextest
+      - uses: Swatinem/rust-cache@v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/master' }}
+      - run: cargo nextest run --no-fail-fast --workspace --lib --bins --tests
+      # nextest does not run doctests
+      - run: cargo test --workspace --no-fail-fast --doc
+      - run: cargo build --workspace --example text_generation --example streaming --example multimodal_basic
 
   typos:
     name: Typos
