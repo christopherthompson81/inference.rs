@@ -382,6 +382,18 @@ impl RequestContext {
         resource.background = self.background;
     }
 
+    /// Whether `called` names a tool the client defined, so the call is the client's to answer.
+    fn defines_tool(&self, called: &str) -> bool {
+        self.tools.iter().flatten().any(|tool| match tool {
+            OpenAiTool::Function(f) => f.function.name == called,
+            OpenAiTool::ResponsesFunction(f) => f.name == called,
+            OpenAiTool::Namespace(namespace) => namespace.tools.iter().any(|entry| {
+                matches!(entry, OpenAiNamespaceEntry::Function(f) if namespace.qualified_name(&f.name) == called)
+            }),
+            _ => false,
+        })
+    }
+
     /// Split a flattened `<namespace>.<name>` back into the fields Codex-style clients route on.
     fn split_tool_name(&self, called: &str) -> (String, Option<String>) {
         for tool in self.tools.iter().flatten() {
@@ -989,6 +1001,8 @@ pub struct OpenResponsesStreamer {
     shell_output_items: Vec<OutputItem>,
     function_call_items: Vec<(usize, OutputItem)>,
     pending_shell_calls: PendingShellCalls,
+    /// The calls handed back to the client, stored with the reply so a `function_call_output` can answer them.
+    returned_tool_calls: Vec<ToolCall>,
     files: Vec<inference_core::File>,
     tap: Option<ResponseTap>,
     cancellation: RequestCancellation,
@@ -1039,6 +1053,7 @@ impl OpenResponsesStreamer {
             shell_output_items: Vec::new(),
             function_call_items: Vec::new(),
             pending_shell_calls: HashMap::new(),
+            returned_tool_calls: Vec::new(),
             files: Vec::new(),
             tap,
             cancellation,
@@ -1063,20 +1078,25 @@ impl OpenResponsesStreamer {
             return;
         };
         let cache = get_response_cache();
-        if let Some(response) = response {
-            let _ =
-                cache.store_response(self.streaming_state.response_id.clone(), response.clone());
-            // Its reply was cut short; only a finished one is a conversation to continue.
-            if response.status == ResponseStatus::Cancelled {
-                return;
-            }
+        let Some(response) = response else {
+            return;
+        };
+        let _ = cache.store_response(self.streaming_state.response_id.clone(), response.clone());
+        // Its reply was cut short or failed; only a finished one is a conversation to continue.
+        if matches!(
+            response.status,
+            ResponseStatus::Cancelled | ResponseStatus::Failed
+        ) {
+            return;
         }
-        if !self.accumulated_text.is_empty() {
+        let tool_calls = std::mem::take(&mut self.returned_tool_calls);
+        if !self.accumulated_text.is_empty() || !tool_calls.is_empty() {
             history.push(Message {
-                content: Some(MessageContent::from_text(self.accumulated_text.clone())),
+                content: (!self.accumulated_text.is_empty())
+                    .then(|| MessageContent::from_text(self.accumulated_text.clone())),
                 role: "assistant".to_string(),
                 name: None,
-                tool_calls: None,
+                tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
                 tool_call_id: None,
                 reasoning_content: (!self.accumulated_reasoning.is_empty())
                     .then(|| self.accumulated_reasoning.clone()),
@@ -1449,6 +1469,9 @@ impl futures::Stream for OpenResponsesStreamer {
                                         item: item.clone(),
                                     });
                                     self.function_call_items.push((output_index, item));
+                                    if self.request_context.defines_tool(&tool_call.function.name) {
+                                        self.returned_tool_calls.push(history_tool_call(tool_call));
+                                    }
                                 }
                             }
                         }
@@ -1550,6 +1573,16 @@ impl futures::Stream for OpenResponsesStreamer {
                             &self.shell_output_items,
                             &self.files,
                         );
+                        for choice in &chat_resp.choices {
+                            if let Some(content) = &choice.message.content {
+                                self.accumulated_text.push_str(content);
+                            }
+                            if let Some(reasoning) = &choice.message.reasoning_content {
+                                self.accumulated_reasoning.push_str(reasoning);
+                            }
+                            let calls = client_tool_calls(&self.request_context, &choice.message);
+                            self.returned_tool_calls.extend(calls);
+                        }
                         self.finish(Some(&response));
                         let event = terminal_event(seq, response);
                         Poll::Ready(Some(ResponsesStreamItem::Event(event)))
@@ -1900,12 +1933,12 @@ async fn parse_openresponses_request(
     // Get messages from input field
     let messages = oairequest.input.into_either();
 
-    let mut final_messages = Vec::new();
-    if let Some(prev_msgs) = previous_messages {
-        final_messages.extend(prev_msgs);
-    }
+    let mut final_messages = previous_messages.unwrap_or_default();
     match messages {
-        Either::Left(msgs) => final_messages.extend(msgs),
+        Either::Left(msgs) => {
+            let msgs = without_stored_calls(&final_messages, msgs);
+            final_messages.extend(msgs);
+        }
         Either::Right(prompt) => {
             final_messages.push(Message {
                 content: Some(MessageContent::from_text(prompt)),
@@ -2212,12 +2245,17 @@ async fn run_to_end(
             let response = resource(&chat_resp, metadata);
             let stored = store.then(|| {
                 for choice in &chat_resp.choices {
-                    if let Some(content) = &choice.message.content {
+                    let tool_calls = client_tool_calls(&context, &choice.message);
+                    if choice.message.content.is_some() || !tool_calls.is_empty() {
                         history.push(Message {
-                            content: Some(MessageContent::from_text(content.clone())),
+                            content: choice
+                                .message
+                                .content
+                                .clone()
+                                .map(MessageContent::from_text),
                             role: choice.message.role.clone(),
                             name: None,
-                            tool_calls: None,
+                            tool_calls: (!tool_calls.is_empty()).then_some(tool_calls),
                             tool_call_id: None,
                             reasoning_content: choice.message.reasoning_content.clone(),
                         });
@@ -2360,6 +2398,55 @@ pub fn cancel_response(
 ) -> Result<ResponseResource, ApiError> {
     get_background_task_manager().cancel(response_id);
     get_response(state, response_id)
+}
+
+/// The input minus `function_call` items the stored history holds, which a client resends with their outputs.
+fn without_stored_calls(stored: &[Message], input: Vec<Message>) -> Vec<Message> {
+    let stored_ids: std::collections::HashSet<&str> = stored
+        .iter()
+        .flat_map(|message| message.tool_calls.iter().flatten())
+        .filter_map(|call| call.id.as_deref())
+        .collect();
+    input
+        .into_iter()
+        .filter_map(|mut message| {
+            let Some(calls) = message.tool_calls.take() else {
+                return Some(message);
+            };
+            let calls: Vec<ToolCall> = calls
+                .into_iter()
+                .filter(|call| call.id.as_deref().is_none_or(|id| !stored_ids.contains(id)))
+                .collect();
+            message.tool_calls = (!calls.is_empty()).then_some(calls);
+            (message.tool_calls.is_some() || message.content.is_some()).then_some(message)
+        })
+        .collect()
+}
+
+/// The calls in a reply that the client answers; a server tool's call stopped by the round limit has no answer coming.
+fn client_tool_calls(
+    context: &RequestContext,
+    message: &inference_core::ResponseMessage,
+) -> Vec<ToolCall> {
+    message
+        .tool_calls
+        .iter()
+        .flatten()
+        .filter(|call| context.defines_tool(&call.function.name))
+        .map(history_tool_call)
+        .collect()
+}
+
+/// A tool call the run returned, as history keeps it: the name the model emitted, so a follow-up matches it.
+fn history_tool_call(call: &inference_core::ToolCallResponse) -> ToolCall {
+    ToolCall {
+        id: Some(call.id.clone()),
+        tp: inference_core::ToolType::Function,
+        function: crate::openai::FunctionCalled {
+            name: call.function.name.clone(),
+            arguments: call.function.arguments.clone(),
+        },
+    }
 }
 
 /// How a run that stopped ended: cancelled by its caller, cut off by its token cap, or finished.
