@@ -18,7 +18,6 @@ axum = { workspace = true, features = ["tokio", "multipart"] }
 mime.workspace = true
 http-body = { workspace = true }
 http-body-util.workspace = true
-either.workspace = true
 futures.workspace = true
 inference-api.workspace = true
 inference-selection.workspace = true

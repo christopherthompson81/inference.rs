@@ -561,3 +561,66 @@ Behavior changes a review traced (none regress a working setup):
 
 Tests: `inline_ordering_is_used_over_the_order_path` (an empty order path fails, the override builds) and
 `anymoe_override_wraps_the_stored_loader`.
+
+## Run 18 - 2026-09-30 (time approximate)
+
+Question: after the CLI-surface and multi-client work, where do build time, IR and organization stand, and what is the
+next housekeeping order?
+
+Commands: `cargo llvm-lines --lib -p <crate>` (CLI: `--bin inference`); `touch <file>` then `cargo build -p inference-cli
+--bin inference`, timed; `cargo machete`; two read-only sweeps (duplication; layering, cruft, docs, tests, CI).
+
+Raw findings:
+- IR lines: inference-core 1,599,227; inference-cli (bin) 1,233,511; inference-api 1,137,108; inference-server-core
+  707,573; inference-agent 358,655; inference-webui 326,731; inference-selection 249,896; inference-protocol 232,082;
+  inference-ffi 105,304.
+- Incremental rebuild of the `inference` binary: touching `inference-core/src/engine/mod.rs` 57.4 s; touching
+  `inference-api/src/responses.rs` 3.8 s; touching `inference-server-core/src/auth.rs` 3.0 s. A core edit is the
+  expensive iteration; above core the cycle is already short.
+- machete: `either` unused in inference-server-core and inference-cli, `indexmap` in inference-cli, `anyhow` in
+  third_party/cudaforge.
+- Duplication (largest): X-LoRA model copies (~8k lines in 10 files; the top-level `forward` byte-identical in five);
+  Normal vs Multimodal pipeline (~1.2k duplicated lines incl. the CUDA-graph driver and two `load_model_from_path`s of
+  559 and 731 lines); `pipeline/macros.rs` (13 loader-macro expansions, `api_get_file!` ~40 times inside them);
+  Qwen2-VL vs Qwen2.5-VL text (32 of 597 lines differ, a type rename of two identical rotary types); Qwen-VL input
+  processors (~900); DeepSeek2/3/GLM4-MoE-lite MLA (~1.5k); per-loader sizing math (36 copies); local gated `Mlp`
+  copies (~15) beside `inference_nn::layers::Mlp`; SigLIP copies (3); API stream collectors (4).
+- Layering: the web UI holds `Arc<InferenceRs>` via `Engine::state()`; server-core's `tune_model` builds selections
+  itself; ~80 raw `InferenceRs` uses in server-core handlers; the CLI names `inference_core::` 55 times, and the shared
+  model conversion lives in `commands/serve.rs`, which `args/` imports.
+- Tests: inference-quant has 8 integration binaries (paged-attn 2, sandbox 2) against the one-binary rule; tiny
+  checkpoints are shared by cross-crate `#[path]`, and server-core now dev-depends on inference-webui.
+- Cruft: `.github/workflows/tests.yml` is a stale manual `cargo test` list; `ci_cuda.yaml` runs plain `cargo test
+  --features cuda` (CLAUDE.md: needs nextest); docs pin `"0.8"`, the embed-in-axum example lacks `ModelSelected`'s
+  `quant`, cargo-features.md omits `all-models`/`models-*`; unreferenced `scripts/convert` and `testgen`; 45
+  TODO/FIXME (several empty); stale blanket allows; style debt (246 banners, 184 non-ASCII comment lines, 480
+  `too_many_arguments` allows).
+
+Implication: core is where iteration time goes, so its duplication (pipelines, macros) is the first build-time item;
+the model-family merges cut cold builds and IR; the Engine-only boundary is the next architecture item.
+
+## Run 19 - 2026-09-30 (time approximate)
+
+Change: Run 18's cruft list as one PR.
+- Dependencies: drop unused `either` (server-core, CLI) and `indexmap` (CLI); the CLI's crossterm 0.28 -> 0.29 and the
+  workspace's fancy-regex 0.14 -> 0.17 match what comfy-table and tokenizers pull, so `cargo tree -d` lists neither
+  crate twice.
+- CI: delete `tests.yml` (a manual `cargo test` over a stale crate list that `local_ci.sh --tests` replaces);
+  `ci_cuda.yaml` runs nextest, as plain `cargo test` shares one CUDA context per binary; checkout v5.
+- Docs: version pins 0.8 -> 0.9; the embed-in-axum guide rewritten on `Engine::load` + `with_engine` (its
+  `ModelSelected::Plain` literal lacked `quant` and no longer compiled); cargo-features documents `all-models` and
+  `models-*` and every crate's real defaults; the TOML reference gains the batching keys, `mtp` and the
+  `[models.multimodal]` keys; environment variables gain `HF_ENDPOINT`, `INFERENCE_RS_CPU_KV_F32`,
+  `INFERENCE_RS_FORCE_AVX2`, `INFERENCE_RS_CUDA_PHASE_TIMINGS` and `INFERENCE_RS_MAX_OUTPUT_BYTES`; README's "request a
+  model" link points at this repo; `examples/cli-config.toml` uses `isq`; CLAUDE.md's stale test command points at
+  `local_ci.sh --tests`.
+- Code: drop the commented-out Dia forward and Llama4 unfold blocks (the Dia mask's Python reference becomes one line),
+  `#![allow(dead_code, unused)]` on inference-nn's `utils/normal.rs` (now an allow under `accelerate` only, where the
+  device probe compiles away; the import it hid is gated on `cuda`), empty `// TODO`
+  markers, and the unused `configure_paged_attn_from_flags` (its `--no-paged-attn` flag is gone); the two bare
+  `#[ignore]`s get reasons.
+
+Sweep corrections: `scripts/convert` and `testgen` were reported unreferenced, but they are tooling for supported
+features (AWQ to Marlin, GPTQ conversion, X-LoRA ordering, the NVFP4 fixture fetch a quant test names), so they stay;
+`[models.format] direct_file_only` is `#[serde(skip)]`, not a TOML key. Left: `inference-sandbox/tests/linux.rs`
+creates a per-process temp dir it never removes.

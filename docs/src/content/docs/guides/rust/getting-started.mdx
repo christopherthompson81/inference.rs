@@ -47,7 +47,7 @@ Add the dependencies to `Cargo.toml`:
 ```toml
 [dependencies]
 anyhow = "1"
-inference = "0.8"
+inference = { git = "https://github.com/christopherthompson81/inference.rs" }
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -55,13 +55,13 @@ The default features build for CPU. For GPU acceleration, enable the matching fe
 
 ```toml
 # NVIDIA GPU (CUDA)
-inference = { version = "0.8", features = ["cuda", "flash-attn", "cudnn"] }
+inference = { git = "https://github.com/christopherthompson81/inference.rs", features = ["cuda", "flash-attn", "cudnn"] }
 
 # Apple Silicon (Metal)
-inference = { version = "0.8", features = ["metal"] }
+inference = { git = "https://github.com/christopherthompson81/inference.rs", features = ["metal"] }
 
 # Intel CPU with MKL
-inference = { version = "0.8", features = ["mkl"] }
+inference = { git = "https://github.com/christopherthompson81/inference.rs", features = ["mkl"] }
 ```
 
 Feature names match the CLI build features. The [cargo features reference](/reference/cargo-features/) lists every option.

@@ -154,7 +154,7 @@ inference doctor
 
 Text, multimodal, speech, image generation, and embedding models across 45+ architectures. The **[supported models reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/supported-models.md)** is the single source of truth: it explains how to check whether your model's `config.json` is supported, lists every architecture with copy-paste run commands, and is generated directly from the engine's loader registry so it never drifts.
 
-[Supported models reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/supported-models.md) | [Request a new model](https://github.com/EricLBuehler/mistral.rs/issues/156)
+[Supported models reference](https://github.com/christopherthompson81/inference.rs/blob/master/docs/src/content/docs/reference/supported-models.md) | [Request a new model](https://github.com/christopherthompson81/inference.rs/issues/new)
 
 ## Python SDK
 
@@ -170,7 +170,7 @@ In-process inference from Python: a pure-Python package over the engine's C ABI.
 ## Rust SDK
 
 ```bash
-cargo add inference
+cargo add inference --git https://github.com/christopherthompson81/inference.rs
 ```
 
 Embed the engine in a Rust application with the high-level `inference` crate.

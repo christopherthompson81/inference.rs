@@ -1,4 +1,5 @@
-#![allow(dead_code, unused)]
+// accelerate picks its dtype up front, leaving the device probe below unused
+#![cfg_attr(feature = "accelerate", allow(dead_code, unused))]
 
 use std::{fmt::Display, str::FromStr};
 
@@ -6,6 +7,7 @@ use anyhow::Result;
 use candle_core::{DType, Device, Tensor};
 use inference_quant::log::once_log_info;
 use serde::{Deserialize, Serialize};
+#[cfg(feature = "cuda")]
 use tracing::debug;
 
 #[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]

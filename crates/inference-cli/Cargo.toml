@@ -40,14 +40,12 @@ base64.workspace = true
 toml = { workspace = true }
 ctrlc = { workspace = true }
 rustyline = { workspace = true }
-either = { workspace = true }
-indexmap = { workspace = true }
 regex = { workspace = true }
 comfy-table = "7"
 uuid = { workspace = true, features = ["v4"] }
 dirs = { workspace = true }
 walkdir = { workspace = true }
-crossterm = "0.28"
+crossterm = "0.29"
 fuzzy-matcher = "0.3"
 
 [dev-dependencies]
