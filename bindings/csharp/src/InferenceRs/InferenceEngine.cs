@@ -66,7 +66,31 @@ public sealed unsafe class InferenceEngine : IDisposable
         if (status != InferenceStatus.Ok) HostCallbackRegistry.Remove([id]);
         InferenceException.ThrowIfFailed(status, nameof(NativeMethods.inference_engine_register_logits_processor));
         // The borrow still holds the engine, so the registration's own reference cannot fail.
-        return new LogitsProcessorRegistration(_handle, name, id);
+        return new HostRegistration(_handle, name, id, &NativeMethods.inference_engine_unregister_logits_processor);
+    }
+
+    /// <summary>Registers <paramref name="tool"/> after load; a chat request offers it by naming it in <c>host_tools</c>.</summary>
+    /// <remarks>The result keeps the engine open until disposed, which unregisters the tool; requests still running that named it then fail it.</remarks>
+    public IDisposable RegisterTool(HostTool tool)
+    {
+        var named = System.Text.Json.Nodes.JsonNode.Parse(tool.DefinitionJson)?["function"]?["name"];
+        var name = named is System.Text.Json.Nodes.JsonValue value && value.TryGetValue<string>(out var text)
+            ? text
+            : throw new ArgumentException("the definition has no function.name", nameof(tool));
+        using var engine = Borrow();
+        using var definition = new PinnedBytes(tool.DefinitionJson);
+        var id = HostCallbackRegistry.Add(tool.Handler);
+        var native = new NativeHostTool
+        {
+            Definition = definition.Pointer,
+            DefinitionLen = definition.Length,
+            Callback = &HostCallbackBridge.Tool,
+            UserData = id,
+        };
+        var status = NativeMethods.inference_engine_register_tool(engine.Handle, &native);
+        if (status != InferenceStatus.Ok) HostCallbackRegistry.Remove([id]);
+        InferenceException.ThrowIfFailed(status, nameof(NativeMethods.inference_engine_register_tool));
+        return new HostRegistration(_handle, name, id, &NativeMethods.inference_engine_unregister_tool);
     }
 
     public string Chat(string requestJson, IReadOnlyList<MediaAttachment>? media = null)

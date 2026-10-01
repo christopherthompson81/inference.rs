@@ -136,8 +136,8 @@ def _logits(user_data, logits, vocab_size, context, context_len):
         return 1
 
 
-def register_logits_processor(handle, name: str, processor) -> "LogitsProcessor":
-    data = name.encode("utf-8")
+def _register_native(handle, processor, register, unregister_name: str, name: bytes) -> "HostRegistration":
+    """Registers `processor` by id through `register(engine, id)`, holding the engine until the result closes."""
     processor_id = _register(processor)
     try:
         # Held until the registration closes, so unregistering never needs a handle its caller may have closed.
@@ -146,28 +146,52 @@ def register_logits_processor(handle, name: str, processor) -> "LogitsProcessor"
         unregister([processor_id])
         raise
     try:
-        check(
-            lib.inference_engine_register_logits_processor(engine, data, len(data), _logits, processor_id),
-            "inference_engine_register_logits_processor",
-        )
+        register(engine, processor_id)
     except BaseException:
         handle.release()
         unregister([processor_id])
         raise
-    return LogitsProcessor(handle, engine, data, processor_id)
+    return HostRegistration(handle, engine, getattr(lib, unregister_name), name, processor_id)
 
 
-class LogitsProcessor:
-    """A registered logits processor, holding its engine open until it is closed (or leaves its `with`).
+def register_logits_processor(handle, name: str, processor) -> "HostRegistration":
+    data = name.encode("utf-8")
 
-    Requests still running that named it fail once it is closed.
+    def register(engine, processor_id):
+        check(
+            lib.inference_engine_register_logits_processor(engine, data, len(data), _logits, processor_id),
+            "inference_engine_register_logits_processor",
+        )
+
+    return _register_native(handle, processor, register, "inference_engine_unregister_logits_processor", data)
+
+
+def register_tool(handle, tool: HostTool) -> "HostRegistration":
+    function = json.loads(tool.definition_json).get("function")
+    name = function.get("name") if isinstance(function, dict) else None
+    if not isinstance(name, str):
+        raise ValueError("the definition has no function.name")
+    definition = ctypes.create_string_buffer(tool.definition_json.encode("utf-8"))
+
+    def register(engine, tool_id):
+        native = _native.HostTool(ctypes.cast(definition, ctypes.c_void_p), len(definition) - 1, _tool, tool_id)
+        check(lib.inference_engine_register_tool(engine, ctypes.byref(native)), "inference_engine_register_tool")
+
+    return _register_native(handle, tool.handler, register, "inference_engine_unregister_tool", name.encode("utf-8"))
+
+
+class HostRegistration:
+    """A logits processor or tool registered on a running engine, holding it open until closed (or its `with` ends).
+
+    Closing it unregisters the entry; requests still running that named it fail once it is closed.
     """
 
-    def __init__(self, handle, engine, name: bytes, processor_id: int):
+    def __init__(self, handle, engine, unregister_native, name: bytes, entry_id: int):
         self._handle = handle
         self._engine = engine
+        self._unregister = unregister_native
         self._name = name
-        self._id = processor_id
+        self._id = entry_id
         self._closed = False
         self._lock = threading.Lock()
 
@@ -177,7 +201,7 @@ class LogitsProcessor:
                 return
             self._closed = True
         try:
-            lib.inference_engine_unregister_logits_processor(self._engine, self._name, len(self._name))
+            self._unregister(self._engine, self._name, len(self._name))
         finally:
             unregister([self._id])
             self._handle.release()

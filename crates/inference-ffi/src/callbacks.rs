@@ -128,20 +128,24 @@ fn c_string(text: &str) -> std::ffi::CString {
     std::ffi::CString::new(text.replace('\0', "")).expect("NULs were removed")
 }
 
-fn host_tool(tool: &inference_host_tool, index: usize) -> FfiResult<ToolCallbackWithTool> {
+/// `label` names the tool in errors, e.g. `tools[2]`.
+pub(crate) fn host_tool(
+    tool: &inference_host_tool,
+    label: &str,
+) -> FfiResult<ToolCallbackWithTool> {
     let callback = tool
         .callback
-        .ok_or_else(|| Failure::invalid(format!("tools[{index}].callback is NULL")))?;
+        .ok_or_else(|| Failure::invalid(format!("{label}.callback is NULL")))?;
     // Safety: the caller passes definition valid for definition_len bytes.
     let definition = unsafe {
         crate::engine::arg_bytes(
             tool.definition,
             tool.definition_len,
-            &format!("tools[{index}].definition"),
+            &format!("{label}.definition"),
         )?
     };
     let definition: Tool = serde_json::from_slice(definition)
-        .map_err(|error| Failure::invalid(format!("tools[{index}].definition: {error}")))?;
+        .map_err(|error| Failure::invalid(format!("{label}.definition: {error}")))?;
     let user_data = UserData(tool.user_data);
     let tool_name = c_string(&definition.function.name);
     let run = move |called: &inference_api::engine::CalledFunction,
@@ -185,7 +189,7 @@ pub(crate) unsafe fn engine_callbacks(
             std::slice::from_raw_parts(callbacks.tools, callbacks.tool_count)
                 .iter()
                 .enumerate()
-                .map(|(index, tool)| host_tool(tool, index))
+                .map(|(index, tool)| host_tool(tool, &format!("tools[{index}]")))
                 .collect::<FfiResult<Vec<_>>>()?
         };
         let mut names = std::collections::HashSet::new();

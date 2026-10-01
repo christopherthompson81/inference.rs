@@ -353,6 +353,20 @@ class TypedEngine(unittest.TestCase):
             self.engine.chat(request)
         self.assertEqual(unknown.exception.status, ir.Status.INVALID_REQUEST)
 
+        late = ir.HostTool(
+            json.dumps({"type": "function", "function": {"name": "py_late", "parameters": {"type": "object"}}}),
+            lambda call: "found",
+        )
+        with self.engine.register_tool(late):
+            with self.assertRaises(ir.InferenceError) as twice:
+                self.engine.register_tool(late)
+            self.assertEqual(twice.exception.status, ir.Status.INVALID_REQUEST)
+        named = chat_request()
+        named.host_tools = ["py_late"]
+        with self.assertRaises(ir.InferenceError) as gone:
+            self.engine.chat(named)
+        self.assertEqual(gone.exception.status, ir.Status.INVALID_REQUEST)
+
         # A registration outlives the handle it came through, and closing it afterwards still unregisters the name.
         scoped = self.engine.json.for_owner("py-processor-owner")
         registration = scoped.register_logits_processor("py-scoped", force_last_token)

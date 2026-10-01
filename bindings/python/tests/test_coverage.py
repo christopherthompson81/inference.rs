@@ -32,6 +32,7 @@ STRUCTS = {
     "inference_media": _native.Media,
     "inference_skill_file": _native.SkillFile,
     "inference_host_callbacks": _native.HostCallbacks,
+    "inference_host_tool": _native.HostTool,
 }
 CALLBACKS = {
     "inference_logits_processor_callback": _native.LOGITS_PROCESSOR_CALLBACK,

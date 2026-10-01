@@ -770,6 +770,7 @@ impl InferenceRs {
                     tool_choice: None,
                     tools: None,
                     logits_processors: None,
+                    host_tools: Vec::new(),
                     return_raw_logits: false,
                     web_search_options: None,
                     enable_code_execution: false,

@@ -9,8 +9,8 @@ use crate::VideoInput;
 
 use crate::{
     AdapterSelection, AgentPermission, AgentToolApprovalHandler, CodeExecutionPermission,
-    CustomLogitsProcessor, DiffusionGenerationParams, Tool, response::Response,
-    sampler::SamplingParams, tools::ToolChoice,
+    CustomLogitsProcessor, DiffusionGenerationParams, Tool, ToolCallbackWithTool,
+    response::Response, sampler::SamplingParams, tools::ToolChoice,
 };
 use std::{
     fmt::Debug,
@@ -110,6 +110,9 @@ pub struct NormalRequest {
     pub tool_choice: Option<ToolChoice>,
     #[serde(skip)]
     pub logits_processors: Option<Vec<Arc<dyn CustomLogitsProcessor>>>,
+    /// Host tools this request offers on top of the engine's, answered by their callbacks.
+    #[serde(skip)]
+    pub host_tools: Vec<ToolCallbackWithTool>,
     pub return_raw_logits: bool,
     pub web_search_options: Option<WebSearchOptions>,
     /// When true, registered code-execution tools are injected and the agentic loop runs.
@@ -286,6 +289,7 @@ impl NormalRequest {
             constraint: Constraint::None,
             suffix: None,
             logits_processors: None,
+            host_tools: Vec::new(),
             return_raw_logits: false,
             web_search_options: None,
             enable_code_execution: false,

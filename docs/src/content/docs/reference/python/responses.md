@@ -86,6 +86,7 @@ OpenResponses API create request
 | `files` | `list[Any] \| None` | optional |
 | `frequency_penalty` | `float \| None` | optional |
 | `grammar` | `Grammar \| None` | optional |
+| `host_tools` | `list[str] \| None` | optional |
 | `ignore_eos` | `bool \| None` | optional |
 | `include` | `list[IncludeOption] \| None` | optional |
 | `input` | `OpenResponsesInput` | required |

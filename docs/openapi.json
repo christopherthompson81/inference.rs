@@ -2196,6 +2196,16 @@
               }
             ]
           },
+          "host_tools": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Tools the engine's host registered after load, offered to the model by name and answered by the host."
+          },
           "logit_bias": {
             "type": [
               "object",
@@ -3331,6 +3341,17 @@
                 "description": "Constrain output with a regex, JSON schema, Lark, or LLGuidance grammar."
               }
             ]
+          },
+          "host_tools": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Tools the engine's host registered after load, offered to the model by name and answered by the host.",
+            "example": null
           },
           "ignore_eos": {
             "type": "boolean",
@@ -8427,6 +8448,16 @@
                 "description": "Grammar for constrained generation (inference.rs extension)"
               }
             ]
+          },
+          "host_tools": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Tools the engine's host registered after load, offered to the model by name and answered by the host."
           },
           "ignore_eos": {
             "type": "boolean",

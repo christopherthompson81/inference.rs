@@ -47,7 +47,7 @@ GROUPS = [
                 "HostCallbacks",
                 "HostTool",
                 "HostToolCall",
-                "LogitsProcessor",
+                "HostRegistration",
             }
         ),
     ),

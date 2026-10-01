@@ -148,6 +148,7 @@ impl Engine {
                     )
                 });
                 let has_search = request.web_search_options.is_some();
+                let has_host_tools = !request.host_tools.is_empty();
                 let has_agentic =
                     request.max_tool_rounds.is_some() || request.tool_dispatch_url.is_some();
                 let has_input_files =
@@ -155,7 +156,11 @@ impl Engine {
 
                 if is_chat
                     && !in_agentic_loop
-                    && (has_search || has_tooling || has_agentic || has_input_files)
+                    && (has_search
+                        || has_tooling
+                        || has_host_tools
+                        || has_agentic
+                        || has_input_files)
                 {
                     match self.agent_runner() {
                         Some(runner) => runner.run(self.clone(), *request).await,
