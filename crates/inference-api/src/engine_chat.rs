@@ -9,9 +9,10 @@ use indexmap::IndexMap;
 use inference_core::{
     AgentPermission, AgentToolApprovalHandler, AgentToolApprovalNotifier,
     ChatCompletionChunkResponse, ChatResponseCollector, Constraint, InferenceRs, MessageContent,
-    ModelCategory, NormalRequest, ReasoningEffort, Request, RequestMessage, Response,
-    SamplingParams, encode_agentic_tool_images, resolve_reasoning_controls,
+    ModelCategory, NormalRequest, Request, RequestMessage, Response, SamplingParams,
+    encode_agentic_tool_images,
 };
+pub use inference_core::{ReasoningEffort, resolve_reasoning_controls};
 use itertools::Itertools;
 use serde_json::{Value, json};
 use tokio::sync::mpsc::{Receiver, Sender};

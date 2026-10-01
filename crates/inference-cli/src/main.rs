@@ -22,7 +22,7 @@ use commands::{
     run_interactive, run_login, run_quantize, run_server, run_tune, run_uninstall, run_update,
     run_uqff,
 };
-use inference_core::{LogVerbosity, initialize_inference_logging};
+use inference_api::{LogVerbosity, initialize_inference_logging};
 
 // Tensor ops allocate fresh output buffers constantly; mimalloc removes the page-fault
 // churn that dominates small-model CPU inference with the system allocator.

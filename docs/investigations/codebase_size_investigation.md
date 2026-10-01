@@ -746,3 +746,25 @@ it was a 500.
 
 Next: the CLI on inference-api re-exports, `quantize` through `Engine::shutdown`, then `Engine::state()` made
 crate-private (server-core's integration tests still use it to seed files and drive `OpenResponsesStreamer`).
+
+## Run 25 - 2026-10-01 (time approximate)
+
+Question: what does the `inference` CLI still take from below inference-api, and can it go through inference-api alone?
+
+Finding (every `inference_core::`, `inference_selection::`, `inference_quant::` and `inference_sandbox::` path in the
+CLI's source): 71 names in five groups. The spec vocabulary (model selection, dtypes, loader types, ISQ, LoRA and agent
+config, runtime defaults) is what `EngineSpec` already carries; tuning and the doctor; UQFF inspection and reports;
+logging and the version; the reasoning controls and `File` a chat uses. The CLI called core with raw state in one
+place, `quantize` shutting the engine down through `state()`.
+
+Change: inference-api re-exports each group where it belongs (`engine`, `system`, a new `uqff`, the crate root,
+`engine_chat`, `files`); the CLI imports from there, drops its inference-core, inference-selection, inference-sandbox and
+inference-quant dependencies (quant stays a dev-dependency for the shared tiny-checkpoint support) and forwards its
+features to inference-api. `quantize` uses `Engine::shutdown`, which fixes it: shutting down a clone of `state()` while
+the engine still held the state always failed ("Cannot shutdown while InferenceRs is shared"), after the UQFF files were
+written but before the README and upload hint.
+
+Dead end: `Engine::state()` can't go crate-private yet. Its callers are server-core's engine-level tests (the Responses
+streamer storing tool calls, session import keeping a stored file's body, container-file tagging), which seed and read
+core state that no client operation exposes. They belong beside the code in inference-api, which needs the tiny
+checkpoint support shared outside `#[path]`: the test-support crate item.

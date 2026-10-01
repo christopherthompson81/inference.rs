@@ -32,7 +32,12 @@ pub mod sampling;
 pub mod skill_store;
 pub mod system;
 pub mod types;
+pub mod uqff;
 pub mod util;
 pub mod video;
 
 pub use engine::{Engine, EngineLoadError, EngineSpec};
+pub use inference_core::{
+    INFERENCE_RS_GIT_REVISION, INFERENCE_RS_VERSION, LogVerbosity, initialize_inference_logging,
+    initialize_logging,
+};

@@ -7,13 +7,13 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use tracing::{info, warn};
 
-use inference_api::{Engine, EngineSpec, engine::RuntimeSpec};
-use inference_core::{
-    IsqType, NormalLoaderType, UqffWriteConfig, expand_isq_value, initialize_logging,
-};
-use inference_selection::{
-    ModelSelected,
-    quant::{QuantPolicy, resolve_model_source},
+use inference_api::{
+    Engine, EngineSpec,
+    engine::{
+        IsqType, ModelSelected, NormalLoaderType, RuntimeSpec, UqffWriteConfig, expand_isq_value,
+    },
+    initialize_logging,
+    uqff::{QuantPolicy, resolve_model_source},
 };
 
 use super::serve::{self, extract_device_settings};
@@ -176,12 +176,7 @@ pub async fn run_quantize(model_type: QuantizeModelType, global: GlobalOptions) 
         ..Default::default()
     };
     let engine = Engine::load(spec).await?;
-    engine
-        .state()
-        .clone()
-        .shutdown()
-        .await
-        .map_err(anyhow::Error::msg)?;
+    engine.shutdown().await.map_err(anyhow::Error::msg)?;
 
     info!("UQFF generation for ISQ=[{}] complete!", requested);
 
@@ -327,7 +322,7 @@ irm https://raw.githubusercontent.com/christopherthompson81/inference.rs/master/
 |Quantization|Command|
 |--|--|
 "#,
-        inference_version = inference_core::INFERENCE_RS_VERSION,
+        inference_version = inference_api::INFERENCE_RS_VERSION,
     );
 
     let model_type = if is_multimodal { "multimodal " } else { "" };
@@ -581,7 +576,7 @@ mod tests {
         let (selected, _, _) = convert_to_model_selected(model_type, write_uqff)?;
         let resolved = resolve_model_source(
             selected,
-            &inference_core::TokenSource::None,
+            &inference_api::engine::TokenSource::None,
             true,
             QuantPolicy::GgufInput,
         )

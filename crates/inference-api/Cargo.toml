@@ -26,6 +26,7 @@ indexmap.workspace = true
 inference-core = { workspace = true, features = ["utoipa"] }
 inference-agent.workspace = true
 inference-selection = { workspace = true, features = ["utoipa"] }
+inference-quant.workspace = true
 itertools.workspace = true
 serde.workspace = true
 serde_json.workspace = true

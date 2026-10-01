@@ -5,13 +5,10 @@ use std::sync::Arc;
 use candle_core::Device;
 use futures::StreamExt;
 use inference_core::{
-    AgentPermission, AnyMoeSpec, CalibrationAction, CalibrationStatus, ChatCompletionResponse,
-    CodeExecutionConfig, CompletionResponse, HfConfigOverrides, ImageGenerationResponse,
-    InferenceRs, McpClientConfig, MtpConfig, MtpDraftSamplingMethod, NetworkMode, PagedCacheType,
-    Response, SandboxMode, SandboxPolicy, SandboxProfile, SearchCallback, SearchEmbeddingModel,
-    SerializedSession, ShellConfig, SupportedModality, TokenSource, ToolCallbackWithTool,
+    AnyMoeSpec, CalibrationAction, CalibrationStatus, ChatCompletionResponse, CompletionResponse,
+    ImageGenerationResponse, InferenceRs, MtpConfig, MtpDraftSamplingMethod, Response,
+    SandboxPolicy, SearchCallback, SerializedSession, SupportedModality, ToolCallbackWithTool,
 };
-use inference_selection::ModelSelected;
 use inference_selection::quant;
 use serde::Deserialize;
 
@@ -67,6 +64,19 @@ use crate::{
     },
     types::SharedInferenceRsState,
 };
+
+// The vocabulary of a spec and of the selection that builds one, so a client names it without depending on core.
+pub use inference_core::{
+    AgentPermission, AutoDeviceMapParams, CodeExecutionConfig, CodeExecutionPermission,
+    DEFAULT_CODE_EXEC_TIMEOUT_SECS, DEFAULT_LORA_MAX_ADAPTERS, DEFAULT_LORA_MAX_BYTES,
+    DEFAULT_LORA_MAX_RANK, DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_NUM_BATCHED_TOKENS,
+    DEFAULT_MAX_PREFILL_CHUNK_TOKENS, DEFAULT_MAX_TOOL_ROUNDS, DEFAULT_SHELL_TIMEOUT_SECS,
+    DiffusionLoaderType, HfConfigOverrides, IsqOrganization, IsqType, LoraAdapterSpec,
+    LoraRuntimeConfig, MAX_LORA_ALIAS_BYTES, McpClientConfig, ModelDType, NetworkMode,
+    NormalLoaderType, PagedCacheType, SandboxMode, SandboxProfile, SearchEmbeddingModel,
+    ShellConfig, SpeechLoaderType, TokenSource, UqffWriteConfig, expand_isq_value, parse_isq_value,
+};
+pub use inference_selection::{MmprojSelection, ModelSelected, get_auto_device_map_params};
 
 const ONE_MODEL_SOURCE: &str = "give either `model` or a non-empty `models`, not both";
 const DEFAULT_WITHOUT_MODELS: &str =
@@ -758,6 +768,8 @@ impl Engine {
         Self::load_with_callbacks(spec, callbacks).await
     }
 
+    /// The core state behind this engine, for tests that seed or read the store; clients call the engine's methods.
+    #[doc(hidden)]
     pub fn state(&self) -> &SharedInferenceRsState {
         &self.chat.state
     }

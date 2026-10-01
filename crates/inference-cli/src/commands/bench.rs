@@ -6,9 +6,9 @@ use inference_api::{
     Engine, EngineSpec,
     engine::RuntimeSpec,
     engine_completion::{CompletionStream, CompletionStreamEvent},
+    initialize_logging,
     openai::CompletionRequest,
 };
-use inference_core::initialize_logging;
 use serde_json::json;
 use std::time::{Duration, Instant};
 use tracing::info;

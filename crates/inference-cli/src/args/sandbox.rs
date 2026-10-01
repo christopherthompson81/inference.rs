@@ -1,7 +1,7 @@
 //! Sandbox configuration options.
 
 use clap::{Args, ValueEnum};
-use inference_sandbox::{NetworkMode, SandboxProfile};
+use inference_api::engine::{NetworkMode, SandboxProfile};
 use serde::Deserialize;
 
 #[derive(Args, Clone, Deserialize)]
@@ -83,7 +83,7 @@ pub enum SandboxMode {
     Off,
 }
 
-impl From<SandboxMode> for inference_sandbox::SandboxMode {
+impl From<SandboxMode> for inference_api::engine::SandboxMode {
     fn from(mode: SandboxMode) -> Self {
         match mode {
             SandboxMode::Auto => Self::Auto,

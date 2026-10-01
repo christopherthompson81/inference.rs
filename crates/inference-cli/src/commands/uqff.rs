@@ -15,18 +15,18 @@ use crossterm::{
     terminal::{self, ClearType},
 };
 use fuzzy_matcher::{FuzzyMatcher, skim::SkimMatcherV2};
-use inference_core::{
-    TokenSource, list_model_files, read_model_file_range, resolve_uqff_shorthand,
-};
-use inference_quant::{
-    QuantizedSerdeType, UQFF_REPORT_JSON, UqffArtifactFile, UqffArtifactGroup, UqffArtifacts,
-    UqffGeneratedBy, UqffInspection, UqffMetadataSummary, UqffReport, UqffReportOptions,
-    UqffTensorSummary, UqffVerifyOptions, build_uqff_report_from_artifacts, inspect_uqff_artifacts,
-    verify_uqff_artifacts, write_uqff_report,
+use inference_api::{
+    engine::TokenSource,
+    uqff::{
+        QuantizedSerdeType, UQFF_REPORT_JSON, UqffArtifactFile, UqffArtifactGroup, UqffArtifacts,
+        UqffGeneratedBy, UqffInspection, UqffMetadataSummary, UqffReport, UqffReportOptions,
+        UqffTensorSummary, UqffVerifyOptions, build_uqff_report_from_artifacts,
+        inspect_uqff_artifacts, list_model_files, read_existing_uqff_report, read_model_file_range,
+        resolve_uqff_shorthand, verify_uqff_artifacts, write_uqff_report,
+    },
 };
 
 use crate::args::{GlobalOptions, UqffCommand};
-use inference_selection::quant::read_existing_uqff_report;
 
 const DEFAULT_REVISION: &str = "main";
 
@@ -474,8 +474,8 @@ fn uqff_shard_index(file: &str) -> Option<u64> {
 fn generated_by(tool: &str) -> UqffGeneratedBy {
     UqffGeneratedBy {
         tool: tool.to_string(),
-        inference_version: Some(inference_core::INFERENCE_RS_VERSION.to_string()),
-        git_revision: Some(inference_core::INFERENCE_RS_GIT_REVISION.to_string()),
+        inference_version: Some(inference_api::INFERENCE_RS_VERSION.to_string()),
+        git_revision: Some(inference_api::INFERENCE_RS_GIT_REVISION.to_string()),
     }
 }
 
@@ -1285,7 +1285,7 @@ mod tests {
             uqff_version: "0.3".to_string(),
             outputs: outputs
                 .iter()
-                .map(|(quant, shards)| inference_quant::UqffOutputReport {
+                .map(|(quant, shards)| inference_api::uqff::UqffOutputReport {
                     quant: (*quant).to_string(),
                     shards: shards.iter().map(|shard| (*shard).to_string()).collect(),
                     layers: 0,

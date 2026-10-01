@@ -21,12 +21,8 @@ doc = false
 [dependencies]
 mimalloc = { workspace = true }
 inference-api = { workspace = true }
-inference-core = { workspace = true }
-inference-selection.workspace = true
 inference-server-core = { workspace = true }
 inference-webui = { workspace = true }
-inference-sandbox = { workspace = true }
-inference-quant = { workspace = true }
 candle-core = { workspace = true }
 
 clap = { workspace = true }
@@ -55,6 +51,7 @@ image.workspace = true
 indicatif.workspace = true
 inference-models-other.workspace = true
 inference-nn.workspace = true
+inference-quant.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
 tempfile.workspace = true
@@ -63,20 +60,20 @@ tower = { workspace = true, features = ["util"] }
 [features]
 default = ["code-execution", "swagger-ui", "all-models"]
 swagger-ui = ["inference-server-core/swagger-ui"]
-all-models = ["inference-core/all-models", "inference-server-core/all-models"]
-models-gemma = ["inference-core/models-gemma", "inference-server-core/models-gemma"]
-models-llama = ["inference-core/models-llama", "inference-server-core/models-llama"]
-models-other = ["inference-core/models-other", "inference-server-core/models-other"]
-models-phi = ["inference-core/models-phi", "inference-server-core/models-phi"]
-models-qwen = ["inference-core/models-qwen", "inference-server-core/models-qwen"]
-cuda = ["inference-core/cuda", "inference-server-core/cuda"]
-cutile = ["cuda", "inference-core/cutile", "inference-selection/cutile"]
-nccl = ["inference-core/nccl", "inference-server-core/nccl"]
-cudnn = ["inference-core/cudnn", "inference-server-core/cudnn"]
-flash-attn = ["cuda", "inference-core/flash-attn", "inference-server-core/flash-attn"]
-flash-attn-v3 = ["cuda", "inference-core/flash-attn-v3", "inference-server-core/flash-attn-v3"]
-accelerate = ["inference-core/accelerate", "inference-server-core/accelerate"]
-metal = ["inference-core/metal", "inference-server-core/metal"]
-mkl = ["inference-core/mkl", "inference-server-core/mkl"]
-ring = ["inference-core/ring", "inference-server-core/ring"]
-code-execution = ["inference-core/code-execution", "inference-server-core/code-execution"]
+all-models = ["inference-api/all-models", "inference-server-core/all-models"]
+models-gemma = ["inference-api/models-gemma", "inference-server-core/models-gemma"]
+models-llama = ["inference-api/models-llama", "inference-server-core/models-llama"]
+models-other = ["inference-api/models-other", "inference-server-core/models-other"]
+models-phi = ["inference-api/models-phi", "inference-server-core/models-phi"]
+models-qwen = ["inference-api/models-qwen", "inference-server-core/models-qwen"]
+cuda = ["inference-api/cuda", "inference-server-core/cuda"]
+cutile = ["cuda", "inference-api/cutile"]
+nccl = ["inference-api/nccl", "inference-server-core/nccl"]
+cudnn = ["inference-api/cudnn", "inference-server-core/cudnn"]
+flash-attn = ["cuda", "inference-api/flash-attn", "inference-server-core/flash-attn"]
+flash-attn-v3 = ["cuda", "inference-api/flash-attn-v3", "inference-server-core/flash-attn-v3"]
+accelerate = ["inference-api/accelerate", "inference-server-core/accelerate"]
+metal = ["inference-api/metal", "inference-server-core/metal"]
+mkl = ["inference-api/mkl", "inference-server-core/mkl"]
+ring = ["inference-api/ring", "inference-server-core/ring"]
+code-execution = ["inference-api/code-execution", "inference-server-core/code-execution"]

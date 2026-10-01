@@ -7,11 +7,12 @@ use interactive::OneshotInput;
 pub(crate) use interactive::{InteractiveConfig, interactive_mode};
 
 use anyhow::Result;
-use inference_core::{ReasoningEffort, resolve_reasoning_controls};
+use inference_api::{
+    Engine,
+    engine_chat::{ReasoningEffort, resolve_reasoning_controls},
+    initialize_logging,
+};
 use tracing::info;
-
-use inference_api::Engine;
-use inference_core::initialize_logging;
 
 use super::normalize_requested_adapter;
 use super::serve::{
