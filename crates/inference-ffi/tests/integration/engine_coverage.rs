@@ -8,15 +8,10 @@ const FFI_SOURCES: [&str; 3] = [
 ];
 
 // Methods the ABI covers some other way, or that a binding has no use for.
-const NOT_EXPORTED: [(&str, &str); 10] = [
+const NOT_EXPORTED: [(&str, &str); 8] = [
     (
         "load_with_callbacks",
         "the ABI loads through load_json, which takes the callbacks",
-    ),
-    ("state", "core state, for tests that seed the store"),
-    (
-        "chat_engine",
-        "the chat policy a Rust server shares, from the caller's own spec",
     ),
     (
         "adapter_config",

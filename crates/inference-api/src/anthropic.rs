@@ -392,7 +392,7 @@ pub struct AnthropicCountTokensResponse {
 }
 
 /// Counts the prompt tokens an Anthropic Messages request renders to, with its tools and chat template.
-pub fn count_tokens<'a>(
+pub(crate) fn count_tokens<'a>(
     state: &'a SharedInferenceRsState,
     request: AnthropicMessagesRequest,
     owner: Option<&'a str>,
@@ -1599,7 +1599,7 @@ pub struct PreparedMessages {
 }
 
 /// Validates a Messages request, converts it to chat, and dispatches it with the server's chat policy.
-pub fn prepare_messages<'a>(
+pub(crate) fn prepare_messages<'a>(
     engine: &'a ChatEngine,
     request: AnthropicMessagesRequest,
 ) -> BoxFuture<'a, Result<PreparedMessages, DispatchError>> {
@@ -1637,7 +1637,7 @@ pub enum MessagesFailure {
 }
 
 /// Waits for a non-streaming Messages request's final response.
-pub fn collect_messages<'a>(
+pub(crate) fn collect_messages<'a>(
     rx: &'a mut Receiver<Response>,
     state: SharedInferenceRsState,
     model_override: Option<&'a str>,
@@ -1707,7 +1707,7 @@ pub struct AnthropicStream {
 }
 
 impl AnthropicStream {
-    pub fn new(
+    pub(crate) fn new(
         prepared: PreparedMessages,
         state: SharedInferenceRsState,
         tap: Option<ResponseTap>,

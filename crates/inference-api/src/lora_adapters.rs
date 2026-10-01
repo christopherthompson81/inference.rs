@@ -451,7 +451,7 @@ fn core_error(error: inference_core::InferenceRsError) -> ApiError {
 }
 
 /// Loads a PEFT adapter directory under `lora_name`; one load runs at a time and a second is rejected, not queued.
-pub fn load_adapter<'a>(
+pub(crate) fn load_adapter<'a>(
     state: &'a SharedInferenceRsState,
     config: &'a LoraAdapterApiConfig,
     request: LoadLoraAdapterRequest,
@@ -499,7 +499,7 @@ async fn load_adapter_inner(
     Ok(LoraAdapterObject::from_info(info, true))
 }
 
-pub fn unload_adapter<'a>(
+pub(crate) fn unload_adapter<'a>(
     state: &'a SharedInferenceRsState,
     config: &'a LoraAdapterApiConfig,
     request: UnloadLoraAdapterRequest,
@@ -529,7 +529,7 @@ async fn unload_adapter_inner(
 }
 
 /// The loaded adapters and the runtime's capacity; adapter sources are shown only when updates are enabled.
-pub fn list_adapters<'a>(
+pub(crate) fn list_adapters<'a>(
     state: &'a SharedInferenceRsState,
     config: &'a LoraAdapterApiConfig,
     query: ListLoraAdaptersQuery,

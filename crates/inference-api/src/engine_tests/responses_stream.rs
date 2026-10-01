@@ -1,13 +1,13 @@
 //! The Responses streamer over agentic rounds, and the tool calls a stored reply keeps for its follow-up.
 
-use futures::StreamExt;
-use inference_api::{
+use crate::{
     Engine,
     responses::{OpenResponsesStreamEvent, ResponsesStreamItem},
 };
+use futures::StreamExt;
 use serde_json::json;
 
-use crate::cancel::tiny_engine;
+use super::tiny_engine;
 
 fn reasoning_chunk(
     reasoning: Option<&str>,
@@ -56,8 +56,8 @@ async fn stream_rounds(
     engine: &Engine,
     responses: Vec<inference_core::Response>,
 ) -> anyhow::Result<Vec<String>> {
-    use inference_api::responses::{OpenResponsesStreamer, PreparedResponse, RequestContext};
-    use inference_api::responses_types::OutputItem;
+    use crate::responses::{OpenResponsesStreamer, PreparedResponse, RequestContext};
+    use crate::responses_types::OutputItem;
 
     let (tx, rx) = tokio::sync::mpsc::channel(16);
     for response in responses {
@@ -182,8 +182,8 @@ fn prepared(
     id: &str,
     stream: bool,
     rx: tokio::sync::mpsc::Receiver<inference_core::Response>,
-) -> anyhow::Result<inference_api::responses::PreparedResponse> {
-    Ok(inference_api::responses::PreparedResponse {
+) -> anyhow::Result<crate::responses::PreparedResponse> {
+    Ok(crate::responses::PreparedResponse {
         rx,
         id: id.to_string(),
         model: "default".to_string(),
@@ -191,8 +191,8 @@ fn prepared(
         store: true,
         stream,
         background: false,
-        history: vec![inference_api::openai::Message {
-            content: Some(inference_api::openai::MessageContent::from_text(
+        history: vec![crate::openai::Message {
+            content: Some(crate::openai::MessageContent::from_text(
                 "Look up ok.".to_string(),
             )),
             role: "user".to_string(),
@@ -201,7 +201,7 @@ fn prepared(
             tool_call_id: None,
             reasoning_content: None,
         }],
-        context: inference_api::responses::RequestContext {
+        context: crate::responses::RequestContext {
             tools: Some(serde_json::from_value(client_tools())?),
             ..Default::default()
         },
@@ -250,8 +250,8 @@ fn done_with_calls(calls: Vec<inference_core::ToolCallResponse>) -> inference_co
 }
 
 /// The stored reply's tool calls, as `previous_response_id` will replay them in the run's session.
-fn stored_tool_calls(id: &str) -> anyhow::Result<Vec<inference_api::openai::ToolCall>> {
-    let history = inference_api::cached_responses::get_response_cache()
+fn stored_tool_calls(id: &str) -> anyhow::Result<Vec<crate::openai::ToolCall>> {
+    let history = crate::cached_responses::get_response_cache()
         .get_conversation(id, None)?
         .expect("the reply was stored");
     assert_eq!(history.session_id.as_deref(), Some(RUN_SESSION));
@@ -266,7 +266,7 @@ fn stored_tool_calls(id: &str) -> anyhow::Result<Vec<inference_api::openai::Tool
         .expect("the reply keeps its tool call"))
 }
 
-fn assert_only_client_call(calls: &[inference_api::openai::ToolCall]) {
+fn assert_only_client_call(calls: &[crate::openai::ToolCall]) {
     let calls: Vec<_> = calls
         .iter()
         .map(|call| (call.id.as_deref(), call.function.name.as_str()))
@@ -283,7 +283,7 @@ async fn stream_returned_calls(engine: &Engine, id: &str) -> anyhow::Result<()> 
     }
     tx.send(chunk).await?;
     drop(tx);
-    let mut stream = inference_api::responses::OpenResponsesStreamer::new(
+    let mut stream = crate::responses::OpenResponsesStreamer::new(
         prepared(id, true, rx)?,
         engine.state().clone(),
         None,
@@ -306,12 +306,9 @@ async fn a_collected_reply_is_stored_with_the_client_calls_it_returns() -> anyho
     let (tx, rx) = tokio::sync::mpsc::channel(4);
     tx.send(done_with_calls(returned_calls())).await?;
     drop(tx);
-    inference_api::responses::collect_response(
-        prepared("resp_collected_call", false, rx)?,
-        engine.state(),
-    )
-    .await
-    .map_err(anyhow::Error::msg)?;
+    crate::responses::collect_response(prepared("resp_collected_call", false, rx)?, engine.state())
+        .await
+        .map_err(anyhow::Error::msg)?;
     assert_only_client_call(&stored_tool_calls("resp_collected_call")?);
     Ok(())
 }
@@ -320,12 +317,10 @@ async fn a_collected_reply_is_stored_with_the_client_calls_it_returns() -> anyho
 async fn follow_up_session(engine: &Engine, previous: &str) -> anyhow::Result<Option<String>> {
     let request =
         json!({"model": "default", "previous_response_id": previous, "input": "And then?"});
-    let prepared = inference_api::responses::prepare_response(
-        engine.chat_engine(),
-        serde_json::from_value(request)?,
-    )
-    .await
-    .map_err(|error| anyhow::Error::msg(error.into_api_error(engine.state().clone())))?;
+    let prepared =
+        crate::responses::prepare_response(engine.chat_engine(), serde_json::from_value(request)?)
+            .await
+            .map_err(|error| anyhow::Error::msg(error.into_api_error(engine.state().clone())))?;
     prepared.cancellation.cancel();
     Ok(prepared.session_id)
 }
@@ -360,7 +355,7 @@ async fn a_reply_without_an_agent_run_keeps_the_session_it_continued() -> anyhow
     drop(tx);
     let mut prepared = prepared("resp_plain_turn", false, rx)?;
     prepared.session_id = Some(RUN_SESSION.to_string());
-    inference_api::responses::collect_response(prepared, engine.state())
+    crate::responses::collect_response(prepared, engine.state())
         .await
         .map_err(anyhow::Error::msg)?;
     assert_only_client_call(&stored_tool_calls("resp_plain_turn")?);
@@ -380,12 +375,10 @@ async fn a_follow_up_answers_the_stored_call_without_repeating_it() -> anyhow::R
             {"type": "function_call_output", "call_id": "call_lookup", "output": "found"},
         ],
     });
-    let prepared = inference_api::responses::prepare_response(
-        engine.chat_engine(),
-        serde_json::from_value(request)?,
-    )
-    .await
-    .map_err(|error| anyhow::Error::msg(error.into_api_error(engine.state().clone())))?;
+    let prepared =
+        crate::responses::prepare_response(engine.chat_engine(), serde_json::from_value(request)?)
+            .await
+            .map_err(|error| anyhow::Error::msg(error.into_api_error(engine.state().clone())))?;
     prepared.cancellation.cancel();
     let turns: Vec<_> = prepared
         .history

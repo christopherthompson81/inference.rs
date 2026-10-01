@@ -19,7 +19,7 @@ pub struct LoraAdapterModel {
     pub adapter: LoraAdapterInfo,
 }
 
-pub fn list_lora_adapter_models(
+pub(crate) fn list_lora_adapter_models(
     state: &InferenceRs,
 ) -> Result<Vec<LoraAdapterModel>, InferenceRsError> {
     let routes = state.list_lora_adapter_routes()?;
@@ -123,7 +123,7 @@ pub fn is_resolvable_lora_adapter_model(models: &[LoraAdapterModel], model: &str
             == 1
 }
 
-pub fn resolve_lora_adapter_model(
+pub(crate) fn resolve_lora_adapter_model(
     state: &InferenceRs,
     model: &mut String,
     adapter: &mut Option<crate::openai::AdapterSelection>,

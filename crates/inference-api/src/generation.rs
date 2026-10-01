@@ -101,7 +101,7 @@ fn unexpected(state: &SharedInferenceRsState) -> ApiError {
 }
 
 /// Generates images from a prompt with a diffusion model.
-pub fn generate_image<'a>(
+pub(crate) fn generate_image<'a>(
     state: &'a SharedInferenceRsState,
     request: ImageGenerationRequest,
     owner: Option<&'a str>,
@@ -162,7 +162,7 @@ async fn generate_image_inner(
 }
 
 /// Speaks `input` with a speech model, encoded as WAV or 16-bit PCM.
-pub fn generate_speech<'a>(
+pub(crate) fn generate_speech<'a>(
     state: &'a SharedInferenceRsState,
     request: SpeechGenerationRequest,
 ) -> BoxFuture<'a, Result<SpeechAudio, ApiError>> {

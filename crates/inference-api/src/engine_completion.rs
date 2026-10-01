@@ -37,7 +37,7 @@ pub struct PreparedCompletion {
 }
 
 /// Resolves the request's model (LoRA aliases included), parses it and sends it to its model.
-pub fn prepare_completion<'a>(
+pub(crate) fn prepare_completion<'a>(
     state: &'a SharedInferenceRsState,
     oairequest: CompletionRequest,
 ) -> BoxFuture<'a, Result<PreparedCompletion, DispatchError>> {
@@ -112,7 +112,7 @@ async fn collect_completion_inner(
 ///
 /// This function transforms an OpenAI-compatible completion request into the
 /// request format used by inference.rs.
-pub fn parse_request(
+pub(crate) fn parse_request(
     oairequest: CompletionRequest,
     state: Arc<InferenceRs>,
     tx: Sender<Response>,
@@ -253,7 +253,7 @@ pub struct CompletionStream {
 }
 
 impl CompletionStream {
-    pub fn new(
+    pub(crate) fn new(
         rx: Receiver<Response>,
         state: SharedInferenceRsState,
         model_override: Option<String>,

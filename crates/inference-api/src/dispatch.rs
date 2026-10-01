@@ -21,14 +21,14 @@ pub fn create_response_channel(
 }
 
 /// Sends a request to the model processing pipeline.
-pub async fn send_request(
+pub(crate) async fn send_request(
     state: &SharedInferenceRsState,
     request: Request,
 ) -> Result<(), InferenceRsError> {
     send_request_with_model(state, request, None).await
 }
 
-pub async fn send_request_with_model(
+pub(crate) async fn send_request_with_model(
     state: &SharedInferenceRsState,
     mut request: Request,
     model_id: Option<&str>,
@@ -49,7 +49,7 @@ pub async fn send_request_with_model(
 
 /// The model id a response names: the adapter id a request was routed to by alias, else the registered id of the
 /// model it resolved to (the one `/v1/models` lists, never a checkpoint path or `default`).
-pub fn response_model_id(
+pub(crate) fn response_model_id(
     state: &InferenceRs,
     requested_model: String,
     routed_model: &str,
@@ -68,7 +68,7 @@ pub fn apply_model_override(model: &mut String, model_override: Option<&str>) {
 }
 
 /// Generic function to process non-streaming responses.
-pub async fn base_process_non_streaming_response<R, M, E>(
+pub(crate) async fn base_process_non_streaming_response<R, M, E>(
     rx: &mut Receiver<Response>,
     state: SharedInferenceRsState,
     match_fn: M,

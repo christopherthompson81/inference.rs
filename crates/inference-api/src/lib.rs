@@ -11,9 +11,11 @@ pub mod engine;
 pub mod engine_chat;
 pub mod engine_completion;
 pub mod engine_embeddings;
+#[cfg(test)]
+mod engine_tests;
 pub mod files;
 pub mod generation;
-pub mod inference_for_server_builder;
+pub(crate) mod inference_for_server_builder;
 #[doc(hidden)]
 pub mod input_files;
 pub mod lora_adapters;

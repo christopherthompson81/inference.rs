@@ -51,7 +51,7 @@ pub struct EncoderCacheStats {
 }
 
 /// The cache counters of every loaded model.
-pub fn cache_stats(state: &SharedInferenceRsState) -> Result<CacheStats, ApiError> {
+pub(crate) fn cache_stats(state: &SharedInferenceRsState) -> Result<CacheStats, ApiError> {
     let mut data = Vec::new();
     let mut models = state.list_models_with_status().map_err(core_error)?;
     models.sort_by(|(a, _), (b, _)| a.cmp(b));
@@ -125,7 +125,7 @@ fn model_conflict(message: String) -> ApiError {
 }
 
 /// Stops serving a model and frees it; when it was the default, another served model becomes the default.
-pub async fn remove_model(
+pub(crate) async fn remove_model(
     state: &SharedInferenceRsState,
     request: ModelOperationRequest,
 ) -> Result<ModelRemoved, ApiError> {
@@ -141,7 +141,7 @@ pub async fn remove_model(
     })
 }
 
-pub fn set_default_model(
+pub(crate) fn set_default_model(
     state: &SharedInferenceRsState,
     request: ModelOperationRequest,
 ) -> Result<DefaultModel, ApiError> {
@@ -154,7 +154,7 @@ pub fn set_default_model(
     })
 }
 
-pub fn add_model_alias(
+pub(crate) fn add_model_alias(
     state: &SharedInferenceRsState,
     alias: ModelAlias,
 ) -> Result<ModelAlias, ApiError> {
@@ -283,7 +283,7 @@ fn generation_defaults(defaults: ModelGenerationDefaults) -> GenerationDefaults 
 }
 
 /// Every served model, preceded by the `default` alias and followed by each loaded LoRA adapter as its own model.
-pub fn list_models(state: &SharedInferenceRsState) -> Result<ModelObjects, ApiError> {
+pub(crate) fn list_models(state: &SharedInferenceRsState) -> Result<ModelObjects, ApiError> {
     let models_with_status = state.list_models_with_status().map_err(core_error)?;
     let mut default_id = state.get_default_model_id().ok().flatten();
     let mut data = Vec::new();
@@ -328,7 +328,7 @@ pub fn list_models(state: &SharedInferenceRsState) -> Result<ModelObjects, ApiEr
 }
 
 /// Unloads a model; one that is already unloaded is not an error.
-pub fn unload_model(
+pub(crate) fn unload_model(
     state: &SharedInferenceRsState,
     request: ModelOperationRequest,
 ) -> Result<ModelStatusResponse, ApiError> {
@@ -337,7 +337,7 @@ pub fn unload_model(
 }
 
 /// Reloads an unloaded model; one that is already loaded is not an error.
-pub fn reload_model<'a>(
+pub(crate) fn reload_model<'a>(
     state: &'a SharedInferenceRsState,
     request: ModelOperationRequest,
 ) -> BoxFuture<'a, Result<ModelStatusResponse, ApiError>> {
@@ -352,7 +352,7 @@ async fn reload_model_inner(
     reload_result(request.model_id, result)
 }
 
-pub fn model_status(
+pub(crate) fn model_status(
     state: &SharedInferenceRsState,
     request: ModelOperationRequest,
 ) -> Result<ModelStatusResponse, ApiError> {

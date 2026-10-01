@@ -903,3 +903,21 @@ its worker processes only load the models they started with.
 
 Tests: `models_are_added_made_default_aliased_and_removed_at_runtime` (FFI), the C# and Python equivalents, and
 `model_management_routes_are_served_only_when_enabled`.
+
+## Run 31 - 2026-10-01 (time approximate)
+
+Change: `Engine::state()` is crate-private, and `chat_engine()` exists only under `cfg(test)`. The engine-level tests
+that read or seeded core state move beside it, into inference-api (`engine_tests`, sharing the tiny-checkpoint support
+by `#[path]` as the other crates do): the Responses streamer storing tool calls, session import keeping a stored file's
+body, a container listing and serving only the files its run cited, and a generated image's url resolving to its
+bytes. server-core keeps the HTTP side: the container routes list nothing and answer 404 for a container that cited
+nothing, and file content is already served in `files_upload_and_serve_their_content`. With `state` and `chat_engine`
+gone from `engine_coverage`'s exceptions, everything a Rust client of inference-api can do is an `Engine` method the
+ABI exports or one listed there with its reason. `inference_for_server_builder`, whose `build` returns the raw core
+state too, goes crate-private (server-core stops re-exporting it; nothing outside used it), which surfaced 14 setters
+nothing called, removed. The review then listed the operation layer under `Engine`: 57 public functions across
+the modules (files, models, operations, responses, LoRA, dispatch, generation) took the raw state, so a Rust client
+holding core's `InferenceRs` could still bypass `Engine` through inference-api. They are crate-private now, and
+server-core's re-export of the raw-channel dispatch helpers (unused) goes. It also caught two coverage gaps from the
+move, now covered again: a cited container file's metadata lookup succeeding, and a stored PNG served over HTTP with its
+media type (`a_stored_image_is_served_as_its_media_type`, seeded by an upload so it runs on CPU).

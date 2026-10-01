@@ -35,7 +35,7 @@ pub enum EmbeddingError {
 }
 
 /// Embeds every input of an OpenAI embeddings request.
-pub fn embed(
+pub(crate) fn embed(
     state: SharedInferenceRsState,
     oairequest: EmbeddingRequest,
 ) -> BoxFuture<'static, Result<EmbeddingResponse, EmbeddingError>> {

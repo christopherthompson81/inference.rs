@@ -62,42 +62,6 @@ impl ModelConfig {
         }
     }
 
-    pub fn with_chat_template(mut self, chat_template: String) -> Self {
-        self.chat_template = Some(chat_template);
-        self
-    }
-
-    pub fn with_alias(mut self, alias: String) -> Self {
-        self.alias = Some(alias);
-        self
-    }
-
-    pub fn with_jinja_explicit(mut self, jinja_explicit: String) -> Self {
-        self.jinja_explicit = Some(jinja_explicit);
-        self
-    }
-
-    pub fn with_max_model_len(mut self, max_model_len: usize) -> Self {
-        assert!(max_model_len > 0, "maximum model length must be nonzero");
-        self.max_model_len = Some(max_model_len);
-        self
-    }
-
-    pub fn with_hf_config_overrides(mut self, overrides: HfConfigOverrides) -> Self {
-        self.hf_config_overrides = Some(overrides);
-        self
-    }
-
-    pub fn with_num_device_layers(mut self, num_device_layers: Vec<String>) -> Self {
-        self.num_device_layers = Some(num_device_layers);
-        self
-    }
-
-    pub fn with_in_situ_quant(mut self, in_situ_quant: String) -> Self {
-        self.in_situ_quant = Some(in_situ_quant);
-        self
-    }
-
     pub fn with_encoder_cache_memory_bytes(mut self, max_bytes: usize) -> Self {
         self.encoder_cache_memory_bytes = Some(
             NonZeroUsize::new(max_bytes).expect("encoder cache memory capacity must be nonzero"),
@@ -420,29 +384,11 @@ impl InferenceRsForServerBuilder {
         self
     }
 
-    /// Set the API id presented to clients in single-model mode.
-    pub fn with_model_id_override(mut self, id: impl Into<String>) -> Self {
-        self.model_id_override = Some(id.into());
-        self
-    }
-
-    /// Optional variant of [`Self::with_model_id_override`].
+    /// The id requests use for the single model, when the spec gives one.
     pub fn with_model_id_override_optional(mut self, id: Option<String>) -> Self {
         if let Some(id) = id {
             self.model_id_override = Some(id);
         }
-        self
-    }
-
-    /// Add a model to the multi-model configuration.
-    pub fn with_model_config(mut self, model_config: ModelConfig) -> Self {
-        self.models.push(model_config);
-        self
-    }
-
-    /// Add multiple models to the multi-model configuration.
-    pub fn with_model_configs(mut self, model_configs: Vec<ModelConfig>) -> Self {
-        self.models.extend(model_configs);
         self
     }
 
@@ -455,24 +401,6 @@ impl InferenceRsForServerBuilder {
     /// Add a model configuration.
     pub fn add_model_config(mut self, config: ModelConfig) -> Self {
         self.models.push(config);
-        self
-    }
-
-    /// Add a model with just an ID and ModelSelected (convenience method).
-    pub fn add_model(mut self, model_id: String, model: ModelSelected) -> Self {
-        self.models.push(ModelConfig::new(model_id, model));
-        self
-    }
-
-    /// Add a model with a custom alias used for API requests.
-    pub fn add_model_with_alias(
-        mut self,
-        model_id: String,
-        alias: String,
-        model: ModelSelected,
-    ) -> Self {
-        self.models
-            .push(ModelConfig::new(model_id, model).with_alias(alias));
         self
     }
 
@@ -780,23 +708,12 @@ impl InferenceRsForServerBuilder {
         self
     }
 
-    /// Sets the Python code execution configuration.
-    pub fn with_code_exec_config(mut self, config: inference_core::CodeExecutionConfig) -> Self {
-        self.code_exec_config = Some(config);
-        self
-    }
-
     /// Sets the Python code execution configuration if present.
     pub fn with_code_exec_config_optional(
         mut self,
         config: Option<inference_core::CodeExecutionConfig>,
     ) -> Self {
         self.code_exec_config = config;
-        self
-    }
-
-    pub fn with_shell_config(mut self, config: inference_core::ShellConfig) -> Self {
-        self.shell_config = Some(config);
         self
     }
 
@@ -1451,7 +1368,7 @@ impl ModelLoadSettings {
 
 impl LoadedModel {
     /// Serves this model from `inference` beside the models it has; returns the id requests use.
-    pub async fn add_to(self, inference: &InferenceRs, config_key: &str) -> Result<String> {
+    pub(crate) async fn add_to(self, inference: &InferenceRs, config_key: &str) -> Result<String> {
         let Self {
             model_id,
             pipeline_name,
