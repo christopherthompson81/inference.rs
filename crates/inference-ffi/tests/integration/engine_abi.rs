@@ -1699,3 +1699,107 @@ fn what_a_server_needs_beyond_requests_is_exported() {
     );
     unsafe { inference_engine_free(engine) };
 }
+
+#[test]
+fn models_are_added_made_default_aliased_and_removed_at_runtime() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let (status, engine) = load(&spec(dir.path()));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let model =
+        json!({"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}});
+
+    let (status, added) = request_call(
+        inference_model_add,
+        engine,
+        &json!({"model": model, "model_id": "second"}),
+    );
+    assert_eq!(status, INFERENCE_OK, "{added}");
+    assert_eq!(added, json!({"model_id": "second", "status": "loaded"}));
+    let (status, again) = request_call(
+        inference_model_add,
+        engine,
+        &json!({"model": model, "model_id": "second"}),
+    );
+    assert_eq!(
+        (status, again["error"]["code"].clone()),
+        (INFERENCE_ERR_INVALID_REQUEST, json!("model_conflict"))
+    );
+
+    let (status, default) = request_call(
+        inference_model_set_default,
+        engine,
+        &json!({"model_id": "second"}),
+    );
+    assert_eq!(
+        (status, default),
+        (INFERENCE_OK, json!({"model_id": "second"}))
+    );
+    let (_, models) = query(inference_models_list, engine);
+    let default_card = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["default"] == json!(true))
+        .cloned();
+    assert_eq!(
+        default_card.map(|card| card["id"].clone()),
+        Some(json!("second")),
+        "{models}"
+    );
+
+    let alias = json!({"alias": "spare", "model_id": "second"});
+    let (status, aliased) = request_call(inference_model_alias, engine, &alias);
+    assert_eq!((status, aliased), (INFERENCE_OK, alias));
+    let (_, served) = request_call(
+        inference_model_served,
+        engine,
+        &json!({"model_id": "spare"}),
+    );
+    assert_eq!(served["served"], json!(true), "{served}");
+    let (status, reserved) = request_call(
+        inference_model_alias,
+        engine,
+        &json!({"alias": "default", "model_id": "second"}),
+    );
+    assert_eq!(
+        (status, reserved["error"]["code"].clone()),
+        (INFERENCE_ERR_INVALID_REQUEST, json!("model_conflict"))
+    );
+    let (status, unknown) = request_call(
+        inference_model_alias,
+        engine,
+        &json!({"alias": "a", "model_id": "no-such-model"}),
+    );
+    assert_eq!(status, INFERENCE_ERR_NOT_FOUND, "{unknown}");
+
+    let (status, removed) = request_call(
+        inference_model_remove,
+        engine,
+        &json!({"model_id": "second"}),
+    );
+    assert_eq!(
+        (status, removed),
+        (INFERENCE_OK, json!({"model_id": "second"}))
+    );
+    let (_, served) = request_call(
+        inference_model_served,
+        engine,
+        &json!({"model_id": "second"}),
+    );
+    assert_eq!(served["served"], json!(false), "{served}");
+    let (_, models) = query(inference_models_list, engine);
+    let last = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|card| card["default"] == json!(true))
+        .unwrap()["id"]
+        .clone();
+    let (status, error) = request_call(inference_model_remove, engine, &json!({"model_id": last}));
+    assert_eq!(
+        (status, error["error"]["code"].clone()),
+        (INFERENCE_ERR_INVALID_REQUEST, json!("model_conflict")),
+        "{error}"
+    );
+    unsafe { inference_engine_free(engine) };
+}

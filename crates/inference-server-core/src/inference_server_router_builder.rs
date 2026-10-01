@@ -27,25 +27,28 @@ use crate::{
     },
     handler_core::{ApiError, ApiErrorKind, openai_error_response},
     handlers::{
-        calibration_apply, calibration_start, calibration_status, delete_session, get_model_status,
-        get_session, health, model_cache_stats, models, put_session, re_isq, reload_model,
-        system_doctor, system_info, tune_model, unload_model,
+        add_model, add_model_alias, calibration_apply, calibration_start, calibration_status,
+        delete_session, get_model_status, get_session, health, model_cache_stats, models,
+        put_session, re_isq, reload_model, remove_model, set_default_model, system_doctor,
+        system_info, tune_model, unload_model,
     },
     image_generation::image_generation,
     lora_adapters::{list_lora_adapters, load_lora_adapter, unload_lora_adapter},
     metrics::{ObservabilityConfig, ObservabilityState, metrics, metrics_disabled, observe_http},
     responses::{cancel_response, create_response, delete_response, get_response},
     route_registry::{
-        AGENT_APPROVAL_ROUTE, ANTHROPIC_COUNT_TOKENS_ROUTE, ANTHROPIC_MESSAGES_ROUTE,
-        AUTH_SESSION_ROUTE, CALIBRATION_APPLY_ROUTE, CALIBRATION_START_ROUTE,
-        CALIBRATION_STATUS_ROUTE, CANCEL_RESPONSE_ROUTE, CHAT_COMPLETIONS_ROUTE, COMPLETIONS_ROUTE,
-        CONTAINER_FILE_CONTENT_ROUTE, CONTAINER_FILE_ROUTE, CONTAINER_FILES_ROUTE,
-        EMBEDDINGS_ROUTE, FILE_CONTENT_ROUTE, FILE_ROUTE, FILES_ROUTE, HEALTH_ROUTE,
-        IMAGE_GENERATION_ROUTE, LIST_LORA_ADAPTERS_ROUTE, LOAD_LORA_ADAPTER_ROUTE,
+        ADD_MODEL_ROUTE, AGENT_APPROVAL_ROUTE, ANTHROPIC_COUNT_TOKENS_ROUTE,
+        ANTHROPIC_MESSAGES_ROUTE, AUTH_SESSION_ROUTE, CALIBRATION_APPLY_ROUTE,
+        CALIBRATION_START_ROUTE, CALIBRATION_STATUS_ROUTE, CANCEL_RESPONSE_ROUTE,
+        CHAT_COMPLETIONS_ROUTE, COMPLETIONS_ROUTE, CONTAINER_FILE_CONTENT_ROUTE,
+        CONTAINER_FILE_ROUTE, CONTAINER_FILES_ROUTE, DEFAULT_MODEL_ROUTE, EMBEDDINGS_ROUTE,
+        FILE_CONTENT_ROUTE, FILE_ROUTE, FILES_ROUTE, HEALTH_ROUTE, IMAGE_GENERATION_ROUTE,
+        LIST_LORA_ADAPTERS_ROUTE, LOAD_LORA_ADAPTER_ROUTE, MODEL_ALIAS_ROUTE,
         MODEL_CACHE_STATS_ROUTE, MODEL_STATUS_ROUTE, MODELS_ROUTE, RE_ISQ_ROUTE,
-        RELOAD_MODEL_ROUTE, RESPONSE_ROUTE, RESPONSES_ROUTE, ROOT_ROUTE, SESSION_ROUTE,
-        SKILL_VERSIONS_ROUTE, SKILLS_ROUTE, SPEECH_GENERATION_ROUTE, SYSTEM_DOCTOR_ROUTE,
-        SYSTEM_INFO_ROUTE, TUNE_MODEL_ROUTE, UNLOAD_LORA_ADAPTER_ROUTE, UNLOAD_MODEL_ROUTE,
+        RELOAD_MODEL_ROUTE, REMOVE_MODEL_ROUTE, RESPONSE_ROUTE, RESPONSES_ROUTE, ROOT_ROUTE,
+        SESSION_ROUTE, SKILL_VERSIONS_ROUTE, SKILLS_ROUTE, SPEECH_GENERATION_ROUTE,
+        SYSTEM_DOCTOR_ROUTE, SYSTEM_INFO_ROUTE, TUNE_MODEL_ROUTE, UNLOAD_LORA_ADAPTER_ROUTE,
+        UNLOAD_MODEL_ROUTE,
     },
     skills::{list_skill_versions, list_skills, upload_skill, upload_skill_version},
     speech_generation::speech_generation,
@@ -103,6 +106,7 @@ pub struct InferenceRsServerRouterBuilder {
     max_body_limit: Option<usize>,
     observability: ObservabilityConfig,
     file_listing: bool,
+    model_management: bool,
     auth: Option<std::sync::Arc<crate::auth::Auth>>,
 }
 
@@ -119,6 +123,7 @@ impl Default for InferenceRsServerRouterBuilder {
             max_body_limit: None,
             observability: ObservabilityConfig::default(),
             file_listing: false,
+            model_management: false,
             auth: None,
         }
     }
@@ -182,6 +187,12 @@ impl InferenceRsServerRouterBuilder {
         self
     }
 
+    /// Serves the routes that change the served models; off by default, as adding one reads any path or hub repo.
+    pub fn with_model_management(mut self, model_management: bool) -> Self {
+        self.model_management = model_management;
+        self
+    }
+
     /// Requires a key on all but health probes and sign in, scoping each request to its owner; later routes aren't.
     pub fn with_api_keys(self, keys: crate::auth::ApiKeys) -> Self {
         self.with_auth(crate::auth::Auth::new(keys))
@@ -219,6 +230,7 @@ impl InferenceRsServerRouterBuilder {
             self.allowed_origins,
             router_max_body_limit,
             &self.observability,
+            self.model_management,
         )?;
 
         #[cfg(feature = "swagger-ui")]
@@ -254,6 +266,7 @@ fn init_router(
     allowed_origins: Option<Vec<String>>,
     router_max_body_limit: usize,
     observability: &ObservabilityConfig,
+    model_management: bool,
 ) -> Result<Router> {
     let allow_origin = if let Some(origins) = allowed_origins {
         let parsed_origins: Result<Vec<_>, _> = origins.into_iter().map(|o| o.parse()).collect();
@@ -348,6 +361,17 @@ fn init_router(
             SESSION_ROUTE.path,
             get(get_session).put(put_session).delete(delete_session),
         );
+
+    if model_management {
+        tracing::warn!(
+            "model management is enabled; authorized clients can load models from any path or hub repo the server can reach"
+        );
+        router = router
+            .route(ADD_MODEL_ROUTE.path, post(add_model))
+            .route(REMOVE_MODEL_ROUTE.path, post(remove_model))
+            .route(DEFAULT_MODEL_ROUTE.path, post(set_default_model))
+            .route(MODEL_ALIAS_ROUTE.path, post(add_model_alias));
+    }
 
     let lora_adapter_api = engine.adapter_config();
     if lora_adapter_api.enabled() {

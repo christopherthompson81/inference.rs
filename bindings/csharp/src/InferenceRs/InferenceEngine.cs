@@ -194,6 +194,42 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Text(status, response, nameof(NativeMethods.inference_mcp_tools_list));
     }
 
+    /// <summary>Loads another model into the running engine; the request is one entry of the spec's &quot;models&quot;.</summary>
+    public string AddModel(string requestJson)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_model_add(engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_model_add));
+    }
+
+    /// <summary>Stops serving a model and frees it; the request is {&quot;model_id&quot;}.</summary>
+    public string RemoveModel(string requestJson)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_model_remove(engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_model_remove));
+    }
+
+    /// <summary>Makes a served model the default; the request is {&quot;model_id&quot;}.</summary>
+    public string SetDefaultModel(string requestJson)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_model_set_default(engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_model_set_default));
+    }
+
+    /// <summary>Lets requests name a served model by another id; the request is {&quot;alias&quot;, &quot;model_id&quot;}.</summary>
+    public string AddModelAlias(string requestJson)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_model_alias(engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_model_alias));
+    }
+
     public string UnloadModel(string requestJson)
     {
         using var engine = Borrow();

@@ -622,3 +622,26 @@ async fn anthropic_count_tokens_counts_the_rendered_prompt() -> anyhow::Result<(
     assert_eq!(body["type"], "error", "{body}");
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn model_management_routes_are_served_only_when_enabled() -> anyhow::Result<()> {
+    let (_dir, engine) = crate::cancel::tiny_engine().await?;
+    let model_id = engine
+        .default_model_id()
+        .expect("a loaded engine has a default");
+    let set_default = || {
+        Request::post("/v1/models/default")
+            .header("content-type", "application/json")
+            .body(Body::from(json!({ "model_id": model_id }).to_string()))
+    };
+    for (enabled, status) in [(false, StatusCode::NOT_FOUND), (true, StatusCode::OK)] {
+        let app = InferenceRsServerRouterBuilder::new()
+            .with_engine(&engine)
+            .with_model_management(enabled)
+            .build()
+            .await?;
+        let response = app.oneshot(set_default()?).await?;
+        assert_eq!(response.status(), status, "model management {enabled}");
+    }
+    Ok(())
+}

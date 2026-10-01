@@ -32,6 +32,11 @@ pub struct ServerOptions {
     #[serde(default)]
     pub allow_file_listing: bool,
 
+    /// Serve the routes that add and remove models at runtime; adding one loads any path or hub repo the server reaches.
+    #[arg(long)]
+    #[serde(default)]
+    pub allow_model_management: bool,
+
     /// File of `name = key` lines; each request must carry a key and sees only its owner's data (and INFERENCE_RS_API_KEY).
     #[arg(long)]
     #[serde(default)]
@@ -107,6 +112,7 @@ impl Default for ServerOptions {
             host: "0.0.0.0".to_string(),
             no_ui: false,
             allow_file_listing: false,
+            allow_model_management: false,
             api_keys_file: None,
             mcp_port: None,
             max_tool_rounds: None,

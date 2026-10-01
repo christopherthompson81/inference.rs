@@ -867,6 +867,80 @@
         }
       }
     },
+    "/v1/models/add": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "description": "Registered only when model management is on (`--allow-model-management`).",
+        "operationId": "add_model",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelSpec"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Model loaded and served",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelStatusResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Invalid spec or the model failed to load"
+          },
+          "409": {
+            "description": "A model with this id is already served"
+          }
+        }
+      }
+    },
+    "/v1/models/alias": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "description": "Registered only when model management is on (`--allow-model-management`).",
+        "operationId": "add_model_alias",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelAlias"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Alias registered",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelAlias"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "409": {
+            "description": "The alias is already a model's id"
+          }
+        }
+      }
+    },
     "/v1/models/cache_stats": {
       "get": {
         "tags": [
@@ -886,6 +960,40 @@
           },
           "500": {
             "description": "Failed to inspect the model registry"
+          }
+        }
+      }
+    },
+    "/v1/models/default": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "description": "Registered only when model management is on (`--allow-model-management`).",
+        "operationId": "set_default_model",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelOperationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "The default model",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DefaultModel"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Model not found"
           }
         }
       }
@@ -934,6 +1042,43 @@
           },
           "500": {
             "description": "Model reload failure"
+          }
+        }
+      }
+    },
+    "/v1/models/remove": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "description": "Registered only when model management is on (`--allow-model-management`).",
+        "operationId": "remove_model",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ModelOperationRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Model removed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ModelRemoved"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Model not found"
+          },
+          "409": {
+            "description": "The last model can't be removed"
           }
         }
       }
@@ -4122,6 +4267,18 @@
           }
         }
       },
+      "DefaultModel": {
+        "type": "object",
+        "description": "The model a request without `model`, or naming `default`, goes to.",
+        "required": [
+          "model_id"
+        ],
+        "properties": {
+          "model_id": {
+            "type": "string"
+          }
+        }
+      },
       "DetokenizeRequest": {
         "type": "object",
         "required": [
@@ -5568,6 +5725,23 @@
           "embedding"
         ]
       },
+      "ModelAlias": {
+        "type": "object",
+        "description": "Another id requests can name a served model by.",
+        "required": [
+          "alias",
+          "model_id"
+        ],
+        "properties": {
+          "alias": {
+            "type": "string"
+          },
+          "model_id": {
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "ModelCacheStats": {
         "type": "object",
         "required": [
@@ -5797,6 +5971,17 @@
           "model_id": {
             "type": "string",
             "example": "my-model"
+          }
+        }
+      },
+      "ModelRemoved": {
+        "type": "object",
+        "required": [
+          "model_id"
+        ],
+        "properties": {
+          "model_id": {
+            "type": "string"
           }
         }
       },

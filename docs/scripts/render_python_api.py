@@ -185,6 +185,7 @@ GROUPS = [
                 "Tokenize",
                 "Detokenize",
                 "McpTool",
+                "DefaultModel",
             )
         ),
     ),

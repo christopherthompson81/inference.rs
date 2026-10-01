@@ -19,7 +19,7 @@ from ctypes import (
 from pathlib import Path
 
 # The ABI these declarations mirror; while it is 0.0.x any other version may differ anywhere.
-ABI_VERSION = (0 << 16) | (0 << 8) | 15
+ABI_VERSION = (0 << 16) | (0 << 8) | 16
 
 NATIVE_DIR_VARIABLE = "INFERENCE_NATIVE_DIR"
 BUNDLED_DIR = "_lib"
@@ -152,6 +152,10 @@ SIGNATURES = {
     "inference_container_file_content": (status, (c_void_p, *buffer, *buffer, out)),
     "inference_anthropic_count_tokens": (status, (c_void_p, *buffer, out)),
     "inference_model_served": (status, (c_void_p, *buffer, out)),
+    "inference_model_add": (status, (c_void_p, *buffer, out)),
+    "inference_model_remove": (status, (c_void_p, *buffer, out)),
+    "inference_model_set_default": (status, (c_void_p, *buffer, out)),
+    "inference_model_alias": (status, (c_void_p, *buffer, out)),
     "inference_mcp_tools_list": (status, (c_void_p, out)),
     "inference_skill_upload": (status, (c_void_p, POINTER(SkillFile), c_size_t, out)),
     "inference_skill_version_upload": (

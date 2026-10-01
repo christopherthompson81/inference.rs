@@ -300,6 +300,19 @@ class JsonEngine:
     def list_models(self) -> str:
         return self._get("inference_models_list")
 
+    def add_model(self, request_json: str) -> str:
+        """Loads another model into the running engine; the request is one entry of the spec's "models"."""
+        return self._call("inference_model_add", request_json)
+
+    def remove_model(self, request_json: str) -> str:
+        return self._call("inference_model_remove", request_json)
+
+    def set_default_model(self, request_json: str) -> str:
+        return self._call("inference_model_set_default", request_json)
+
+    def add_model_alias(self, request_json: str) -> str:
+        return self._call("inference_model_alias", request_json)
+
     def model_served(self, request_json: str) -> str:
         """Whether a request naming the model in {"model_id"} would be routed: {"model_id", "served"}."""
         return self._call("inference_model_served", request_json)

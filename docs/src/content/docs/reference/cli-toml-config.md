@@ -83,6 +83,7 @@ quant = "4"
 | `port` | `-p`, `--port` | 1234 | TCP port. |
 | `no_ui` | `--no-ui` | false | Disable the built-in web UI (mounted at `/ui` by default). |
 | `allow_file_listing` | `--allow-file-listing` | false | Let an open server's `GET /v1/files` list every stored file. Its store is shared by every client, so enable it only for trusted ones. A keyed server always lists each owner's own files. |
+| `allow_model_management` | `--allow-model-management` | false | Serve `POST /v1/models/add`, `/remove`, `/default` and `/alias`, which change the served models at runtime. Adding a model loads any local path or hub repo the server can reach, so enable it only for trusted clients. |
 | `api_keys_file` | `--api-keys-file` | not set | File of `name = key` lines (blank lines and `#` comments skipped). Every request but `/health` must then carry a key, and each name is an owner that reaches only what it stored. `INFERENCE_RS_API_KEY` adds one more key, owned by `default`. See [authentication](/reference/http-api/#authentication). |
 | `mcp_port` | `--mcp-port` | not set | Also expose the loaded model as an MCP server on this port (JSON-RPC 2.0 at `POST /mcp`). See [serve over MCP](/guides/agents/expose-as-mcp/). |
 | `max_tool_rounds` | `--max-tool-rounds` | not set | Default cap on agentic tool loop rounds. Per-request values from the HTTP API override it; the safety cap is 256 when unset. |

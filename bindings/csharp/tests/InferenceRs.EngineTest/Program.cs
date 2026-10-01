@@ -46,6 +46,7 @@ internal static class Program
             RuntimeOperations(engine);
             ACancelledStreamEndsWithItsUsage(engine);
         }
+        ModelsAreManagedAtRuntime(model);
         StreamsOutliveTheirEngine(model);
         HostToolsLoadAndBadOnesAreRefused(model);
 
@@ -264,6 +265,23 @@ internal static class Program
         Check("the error code comes from the envelope", unknown?.Code == "model_not_found");
         var malformed = Throws(() => engine.Chat("{not json"));
         Check("malformed JSON is InvalidRequest", malformed?.Status == InferenceStatus.InvalidRequest);
+    }
+
+    private static void ModelsAreManagedAtRuntime(string model)
+    {
+        using var engine = InferenceEngine.Load(Spec(model));
+        var selected = JsonNode.Parse(Spec(model))!["model"]!;
+        var spec = new JsonObject { ["model"] = selected.DeepClone(), ["model_id"] = "second" }.ToJsonString();
+        Check("a model is added at runtime", (string?)JsonNode.Parse(engine.AddModel(spec))!["status"] == "loaded");
+        engine.SetDefaultModel("""{"model_id": "second"}""");
+        Check("the added model becomes the default",
+            JsonNode.Parse(engine.ListModels())!["data"]!.AsArray().Any(card =>
+                (string?)card!["id"] == "second" && (bool?)card["default"] == true));
+        engine.AddModelAlias("""{"alias": "spare", "model_id": "second"}""");
+        Check("an alias names the added model", (bool)JsonNode.Parse(engine.ModelServed("""{"model_id": "spare"}"""))!["served"]!);
+        engine.RemoveModel("""{"model_id": "second"}""");
+        Check("a removed model is no longer served",
+            !(bool)JsonNode.Parse(engine.ModelServed("""{"model_id": "second"}"""))!["served"]!);
     }
 
     private static void FilesRoundTrip(InferenceEngine engine)

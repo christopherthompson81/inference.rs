@@ -1667,3 +1667,89 @@ pub unsafe extern "C" fn inference_model_tune(
         })
     }
 }
+
+/// Safety: as for `inference_chat`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_model_add(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe {
+        json_call(
+            engine,
+            request,
+            request_len,
+            out_response,
+            |engine, request| engine.add_model_json(request).map_err(api_failure),
+        )
+    }
+}
+
+/// Safety: as for `inference_chat`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_model_remove(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe {
+        json_call(
+            engine,
+            request,
+            request_len,
+            out_response,
+            |engine, request| engine.remove_model_json(request).map_err(api_failure),
+        )
+    }
+}
+
+/// Safety: as for `inference_chat`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_model_set_default(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe {
+        json_call(
+            engine,
+            request,
+            request_len,
+            out_response,
+            |engine, request| {
+                engine
+                    .engine()
+                    .set_default_model_json(request)
+                    .map_err(api_failure)
+            },
+        )
+    }
+}
+
+/// Safety: as for `inference_chat`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_model_alias(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe {
+        json_call(
+            engine,
+            request,
+            request_len,
+            out_response,
+            |engine, request| {
+                engine
+                    .engine()
+                    .add_model_alias_json(request)
+                    .map_err(api_failure)
+            },
+        )
+    }
+}
