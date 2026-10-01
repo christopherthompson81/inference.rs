@@ -70,7 +70,7 @@ The result is MCP tool-call content:
 
 ## Authentication
 
-The MCP endpoint has no built-in authentication. For non-localhost use, place an authenticating proxy in front.
+A server started with [API keys](/reference/http-api/#authentication) requires one on the MCP endpoint too, as `Authorization: Bearer <key>` or `x-api-key`, and the chat tool then acts for that key's owner. Without keys the endpoint is open; for non-localhost use, give the server keys and put TLS in front.
 
 ## See also
 

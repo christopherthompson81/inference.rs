@@ -425,6 +425,15 @@ Wire format. Images and video frames are base64 PNGs.
 | `id` | `str` |
 
 
+## `SignInRequest`
+
+`{"key"}` to sign a browser in.
+
+| Field | Type |
+| --- | --- |
+| `key` | `str` |
+
+
 ## `SkillListObject`
 
 | Field | Type |

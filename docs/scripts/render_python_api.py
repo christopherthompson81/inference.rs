@@ -180,6 +180,7 @@ GROUPS = [
                 "Tune",
                 "Serialized",
                 "Session",
+                "SignIn",
                 "Tokenize",
                 "Detokenize",
             )

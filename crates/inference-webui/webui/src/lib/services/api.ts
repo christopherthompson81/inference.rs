@@ -1,3 +1,4 @@
+import { authedFetch } from "./auth";
 import type {
   UiModelInfo,
   ChatFile,
@@ -14,13 +15,13 @@ function apiUrl(path: string): string {
 }
 
 async function get<T>(path: string): Promise<T> {
-  const res = await fetch(apiUrl(path));
+  const res = await authedFetch(apiUrl(path));
   if (!res.ok) throw new Error(`GET ${path}: ${res.statusText}`);
   return res.json();
 }
 
 async function post<T>(path: string, body?: unknown): Promise<T> {
-  const res = await fetch(apiUrl(path), {
+  const res = await authedFetch(apiUrl(path), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: body != null ? JSON.stringify(body) : undefined,
@@ -30,7 +31,7 @@ async function post<T>(path: string, body?: unknown): Promise<T> {
 }
 
 async function postVoid(path: string, body?: unknown): Promise<void> {
-  const res = await fetch(apiUrl(path), {
+  const res = await authedFetch(apiUrl(path), {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: body != null ? JSON.stringify(body) : undefined,
@@ -157,7 +158,7 @@ async function uploadFile(
 ): Promise<{ path: string; url: string }> {
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch(apiUrl(endpoint), {
+  const res = await authedFetch(apiUrl(endpoint), {
     method: "POST",
     body: form,
   });

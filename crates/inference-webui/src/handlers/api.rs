@@ -633,7 +633,7 @@ pub async fn fork_session(
         &req.src_session_id,
         session_id.clone(),
         req.num_turns,
-        None,
+        app.owner.as_deref(),
     );
     if let Err(e) = result {
         error!("fork session error: {}", e);
@@ -743,6 +743,7 @@ pub async fn get_capabilities(Extension(app): Extension<Arc<AppState>>) -> impl 
         "code_execution_enabled": app.code_execution_enabled,
         "shell_enabled": app.shell_enabled,
         "tool_dispatch_url": app.tool_dispatch_url,
+        "signed_in": app.owner.is_some(),
     }))
 }
 
@@ -758,7 +759,10 @@ pub async fn save_chat_session(
     Json(req): Json<SaveChatSessionRequest>,
 ) -> impl IntoResponse {
     // Export the session from the in-memory store
-    let session = match app.inference.export_session(None, &req.session_id, None) {
+    let session = match app
+        .inference
+        .export_session(None, &req.session_id, app.owner.as_deref())
+    {
         Ok(Some(s)) => s,
         Ok(None) => {
             return (StatusCode::NOT_FOUND, "Session not found in store").into_response();
@@ -843,9 +847,9 @@ pub async fn restore_chat_session(
         }
     };
 
-    if let Err(e) = app
-        .inference
-        .import_session(None, session_id.clone(), serialized, None)
+    if let Err(e) =
+        app.inference
+            .import_session(None, session_id.clone(), serialized, app.owner.as_deref())
     {
         error!("import_session error: {}", e);
         return (StatusCode::INTERNAL_SERVER_ERROR, "import failed").into_response();

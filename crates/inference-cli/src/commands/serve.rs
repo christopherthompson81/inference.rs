@@ -19,6 +19,7 @@ use inference_core::{
 };
 use inference_selection::{MmprojSelection, ModelSelected};
 use inference_server_core::{
+    auth::Auth,
     inference_server_router_builder::InferenceRsServerRouterBuilder,
     metrics::install_prometheus_recorder,
     serve::{ServeOptions, serve},
@@ -254,23 +255,20 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
             server.port
         );
     }
-    let api_keys = server.api_keys()?;
-    let keyed = !api_keys.is_empty();
-    if keyed && (!server.no_ui || server.mcp_port.is_some()) {
-        anyhow::bail!(
-            "the web UI and the MCP server don't check API keys yet; pass --no-ui and leave out --mcp-port to serve with keys"
-        );
-    }
-    let ui = (!server.no_ui).then(|| UiOptions::from_agentic(&spec.agentic));
+    let auth = Auth::new(server.api_keys()?);
+    let ui = (!server.no_ui).then(|| UiOptions {
+        auth: auth.clone(),
+        ..UiOptions::from_agentic(&spec.agentic)
+    });
     let engine = Engine::load(spec).await?;
     let mut app = InferenceRsServerRouterBuilder::new()
         .with_engine(&engine)
         .with_observability_config(server.observability_config())
         .with_file_listing(server.allow_file_listing)
-        .with_api_keys(api_keys)
+        .with_auth(auth.clone())
         .build()
         .await?;
-    if keyed {
+    if auth.is_some() {
         info!("API keys required; each key's owner sees only what it stored");
     }
     if let Some(ui) = ui {
@@ -279,10 +277,10 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
             "UI available at http://{}:{}{UI_ROUTE}",
             server.host, server.port
         );
-        if !is_loopback_host(&server.host) {
+        if auth.is_none() && !is_loopback_host(&server.host) {
             warn!(
-                "The web UI is single-user: anyone who can reach {UI_ROUTE} sees every saved chat, and through them its \
-                 sessions and files. Pass --no-ui on a server other people use."
+                "The web UI is single-user without API keys: anyone who can reach {UI_ROUTE} sees every saved chat, \
+                 and through them its sessions and files. Give the server keys (--api-keys-file) or pass --no-ui."
             );
         }
     }
@@ -290,6 +288,7 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
         host: &server.host,
         port: server.port,
         mcp_port: server.mcp_port,
+        auth,
     };
     serve(app, &engine, options).await
 }

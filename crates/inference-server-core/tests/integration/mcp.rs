@@ -24,7 +24,7 @@ async fn mcp(agentic: Value, method: &str, params: Value) -> anyhow::Result<Valu
     }))?;
     let engine = inference_api::Engine::load(spec).await?;
     let body = json!({"jsonrpc": "2.0", "id": 1, "method": method, "params": params});
-    let response = create_mcp_router(&engine)
+    let response = create_mcp_router(&engine, None)
         .oneshot(
             Request::post(MCP_ROUTE)
                 .header("content-type", "application/json")

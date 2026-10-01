@@ -40,6 +40,7 @@ mod generated {
             __path_resolve_agent_approval, ApprovalDecision, ApprovalDecisionRequest,
             ApprovalDecisionResponse,
         },
+        auth::{__path_sign_in, __path_sign_out, SignInRequest},
         chat_completion::__path_chatcompletions,
         completions::__path_completions,
         embeddings::__path_embeddings,
@@ -104,7 +105,7 @@ mod generated {
     pub(super) fn doc() -> utoipa::openapi::OpenApi {
         #[derive(OpenApi)]
         #[openapi(
-            paths(models, model_cache_stats, health, chatcompletions, anthropic_messages, anthropic_count_tokens, completions, embeddings, re_isq, calibration_start, calibration_status, calibration_apply, image_generation, speech_generation, create_response, get_response, delete_response, cancel_response, upload_skill, list_skills, upload_skill_version, list_skill_versions, load_lora_adapter, unload_lora_adapter, list_lora_adapters, unload_model, reload_model, get_model_status, tune_model, system_info, system_doctor, get_session, put_session, delete_session, list_files, upload_file, get_file, get_file_content, delete_file, list_container_files, get_container_file, get_container_file_content, resolve_agent_approval, metrics),
+            paths(models, model_cache_stats, health, chatcompletions, anthropic_messages, anthropic_count_tokens, completions, embeddings, re_isq, calibration_start, calibration_status, calibration_apply, image_generation, speech_generation, create_response, get_response, delete_response, cancel_response, upload_skill, list_skills, upload_skill_version, list_skill_versions, load_lora_adapter, unload_lora_adapter, list_lora_adapters, unload_model, reload_model, get_model_status, tune_model, system_info, system_doctor, get_session, put_session, delete_session, list_files, upload_file, get_file, get_file_content, delete_file, list_container_files, get_container_file, get_container_file_content, resolve_agent_approval, sign_in, sign_out, metrics),
             components(schemas(
                 // Not a route's body: the engine spec the C ABI and bindings load from, typed from this document.
                 inference_api::EngineSpec,
@@ -112,6 +113,7 @@ mod generated {
                 inference_api::operations::SessionList,
                 inference_api::operations::SessionDeleted,
                 inference_api::operations::SessionStored,
+                SignInRequest,
                 inference_api::operations::TokenizeRequest,
                 inference_api::operations::TokenizeResponse,
                 inference_api::operations::DetokenizeRequest,

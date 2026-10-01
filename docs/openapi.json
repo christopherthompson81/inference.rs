@@ -12,6 +12,45 @@
     "version": "0.9.3"
   },
   "paths": {
+    "/auth/session": {
+      "post": {
+        "tags": [
+          "inference.rs"
+        ],
+        "summary": "POST `/auth/session`: exchanges a key for an `HttpOnly`, `SameSite=Strict` session cookie. An open server needs none.",
+        "operationId": "sign_in",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignInRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {
+            "description": "Signed in; the response sets the session cookie"
+          },
+          "401": {
+            "description": "Unknown key"
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "inference.rs"
+        ],
+        "summary": "DELETE `/auth/session`: signs the browser out.",
+        "operationId": "sign_out",
+        "responses": {
+          "204": {
+            "description": "Signed out; the response clears the session cookie"
+          }
+        }
+      }
+    },
     "/calibration/apply": {
       "post": {
         "tags": [
@@ -11416,6 +11455,18 @@
           }
         },
         "additionalProperties": false
+      },
+      "SignInRequest": {
+        "type": "object",
+        "description": "`{\"key\"}` to sign a browser in.",
+        "required": [
+          "key"
+        ],
+        "properties": {
+          "key": {
+            "type": "string"
+          }
+        }
       },
       "SkillListObject": {
         "type": "object",

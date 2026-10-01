@@ -2543,6 +2543,13 @@ class ShellConfig:
 
 
 @dataclass(kw_only=True)
+class SignInRequest:
+    """`{\"key\"}` to sign a browser in."""
+
+    key: str
+
+
+@dataclass(kw_only=True)
 class SkillListObject:
     data: list[SkillObject]
     object: str

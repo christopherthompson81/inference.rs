@@ -1,17 +1,20 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
-use axum::Router;
 use axum::body::Body;
-use axum::extract::DefaultBodyLimit;
-use axum::http::{Response, StatusCode};
-use axum::middleware;
+use axum::extract::{DefaultBodyLimit, Request, State};
+use axum::http::{Method, Response, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::Redirect;
 use axum::routing::{get, get_service, post};
+use axum::{Extension, Router};
 use include_dir::{Dir, include_dir};
 use indexmap::IndexMap;
 use inference_api::{Engine, engine::AgenticSpec};
 use inference_core::{InferenceRs, ModelCategory, SearchEmbeddingModel, SupportedModality};
 use inference_server_core::{
+    auth::{Auth, Guard, Owner, require},
     inference_server_router_builder::DEFAULT_MAX_BODY_LIMIT,
     metrics::{ObservabilityConfig, ObservabilityState, observe_http},
     route_registry::{RouteInfo, RouteKind},
@@ -29,6 +32,7 @@ mod types;
 mod utils;
 
 static STATIC_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/static");
+const UI_API_PREFIX: &str = "/api/";
 
 pub(crate) const UI_UPLOAD_IMAGE_ROUTE: RouteInfo =
     RouteInfo::new("/api/upload_image", "POST", RouteKind::Ui);
@@ -171,6 +175,8 @@ pub struct UiOptions {
     pub code_execution: bool,
     pub shell: bool,
     pub tool_dispatch_url: Option<String>,
+    /// The keys the UI's data needs, shared with the API router so a signed-in browser reaches both.
+    pub auth: Option<Arc<Auth>>,
 }
 
 impl UiOptions {
@@ -180,8 +186,50 @@ impl UiOptions {
             code_execution: agentic.code_execution.is_some(),
             shell: agentic.shell.is_some(),
             tool_dispatch_url: agentic.tool_dispatch_url.clone(),
+            auth: None,
         }
     }
+}
+
+// The page and its assets load without a key, so a browser can show the sign-in prompt; data and media need one.
+fn ui_public_requests(method: &Method, path: &str) -> bool {
+    method == Method::GET
+        && ![UI_API_PREFIX, UI_UPLOADS_ROUTE.path, UI_SPEECH_ROUTE.path]
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+}
+
+/// The UI state for each owner, made on first use from the open one.
+struct OwnerStates {
+    open: Arc<AppState>,
+    by_owner: Mutex<HashMap<String, Arc<AppState>>>,
+}
+
+async fn owner_state(
+    State(states): State<Arc<OwnerStates>>,
+    Extension(owner): Extension<Owner>,
+    mut request: Request,
+    next: Next,
+) -> Result<axum::response::Response, StatusCode> {
+    let state = match owner.as_deref() {
+        None => states.open.clone(),
+        Some(owner) => {
+            let mut by_owner = states.by_owner.lock().unwrap();
+            match by_owner.get(owner) {
+                Some(state) => state.clone(),
+                None => {
+                    let state = Arc::new(states.open.for_owner(owner).map_err(|error| {
+                        tracing::error!("UI state for an owner: {error}");
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?);
+                    by_owner.insert(owner.to_string(), state.clone());
+                    state
+                }
+            }
+        }
+    };
+    request.extensions_mut().insert(state);
+    Ok(next.run(request).await)
 }
 
 /// Nests the UI at `UI_ROUTE` in `app`, with the same request logging and metrics as the API routes.
@@ -197,10 +245,19 @@ pub async fn mount(
         inference.clone(),
         DEFAULT_MAX_BODY_LIMIT,
     );
+    let auth = options.auth.clone();
     let ui = build_ui_router(inference, options)
         .await?
         .layer(middleware::from_fn_with_state(observability, observe_http));
-    Ok(app.nest(UI_ROUTE, ui))
+    let guard = Guard {
+        public: ui_public_requests,
+        cookies: true,
+    };
+    // the page's base is `/ui/`, which the nest itself doesn't route
+    let slash = format!("{UI_ROUTE}/");
+    Ok(app
+        .route(&slash, get(|| async { Redirect::permanent(UI_ROUTE) }))
+        .nest(UI_ROUTE, require(ui, auth, guard)))
 }
 
 async fn build_ui_router(inference: Arc<InferenceRs>, options: UiOptions) -> Result<Router> {
@@ -224,7 +281,9 @@ async fn build_ui_router(inference: Arc<InferenceRs>, options: UiOptions) -> Res
     let app_state = Arc::new(AppState {
         inference,
         models,
+        default_model: default_model.clone(),
         current: tokio::sync::RwLock::new(default_model),
+        owner: None,
         chats_dir: chats_dir.to_string_lossy().to_string(),
         speech_dir: speech_dir.to_string_lossy().to_string(),
         current_chat: tokio::sync::RwLock::new(None),
@@ -272,7 +331,13 @@ async fn build_ui_router(inference: Arc<InferenceRs>, options: UiOptions) -> Res
         .route(UI_ROOT_ROUTE.path, get(static_handler))
         .route(UI_STATIC_ROUTE.path, get(static_handler))
         .layer(DefaultBodyLimit::max(50 * 1024 * 1024))
-        .layer(axum::extract::Extension(app_state));
+        .layer(middleware::from_fn_with_state(
+            Arc::new(OwnerStates {
+                open: app_state,
+                by_owner: Mutex::new(HashMap::new()),
+            }),
+            owner_state,
+        ));
 
     Ok(router)
 }

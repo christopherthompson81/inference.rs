@@ -3213,6 +3213,7 @@ dependencies = [
  "inference-nn",
  "inference-quant",
  "inference-selection",
+ "inference-webui",
  "metrics",
  "metrics-exporter-prometheus",
  "mime",

@@ -208,6 +208,8 @@ export interface Capabilities {
   code_execution_enabled: boolean;
   shell_enabled: boolean;
   tool_dispatch_url: string | null;
+  /** Signed in to a keyed server, so the UI offers to sign out. */
+  signed_in?: boolean;
 }
 
 export interface Settings {

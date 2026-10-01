@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use axum::{
-    Router,
+    Extension, Router,
     extract::{State, rejection::JsonRejection},
     response::Json,
     routing::post,
@@ -154,8 +154,9 @@ struct McpState {
     chat_enabled: bool,
 }
 
-/// Build the MCP router (`POST /mcp`, JSON-RPC 2.0). Mount on its own port or into an existing app.
-pub fn create_mcp_router(engine: &Engine) -> Router {
+/// Build the MCP router (`POST /mcp`, JSON-RPC 2.0), requiring `auth`'s keys when given. Mount on its own port or
+/// into an existing app.
+pub fn create_mcp_router(engine: &Engine, auth: Option<Arc<crate::auth::Auth>>) -> Router {
     let text_model = engine
         .state()
         .config(None)
@@ -171,20 +172,22 @@ pub fn create_mcp_router(engine: &Engine) -> Router {
         engine: engine.clone(),
         chat_enabled,
     });
-    Router::new()
+    let router = Router::new()
         .route(MCP_ROUTE, post(handle_jsonrpc))
-        .with_state(state)
+        .with_state(state);
+    crate::auth::require(router, auth, crate::auth::KEY_ONLY_GUARD)
 }
 
 async fn handle_jsonrpc(
     State(state): State<Arc<McpState>>,
+    Extension(owner): Extension<crate::auth::Owner>,
     payload: Result<Json<JsonRpcRequest>, JsonRejection>,
 ) -> Json<JsonRpcResponse> {
     let request = match payload {
         Ok(Json(request)) => request,
         Err(error) => return Json(json_rejection_response(error)),
     };
-    Json(handle_request(&state, request).await)
+    Json(handle_request(&state, owner.as_deref(), request).await)
 }
 
 fn json_rejection_response(error: JsonRejection) -> JsonRpcResponse {
@@ -195,7 +198,11 @@ fn json_rejection_response(error: JsonRejection) -> JsonRpcResponse {
     error_response(None, code, message.to_string())
 }
 
-async fn handle_request(state: &McpState, request: JsonRpcRequest) -> JsonRpcResponse {
+async fn handle_request(
+    state: &McpState,
+    owner: Option<&str>,
+    request: JsonRpcRequest,
+) -> JsonRpcResponse {
     if request.jsonrpc != JSONRPC_VERSION {
         return error_response(
             request.id,
@@ -221,7 +228,15 @@ async fn handle_request(state: &McpState, request: JsonRpcRequest) -> JsonRpcRes
     }
 
     let args = params.get("arguments").cloned().unwrap_or(json!({}));
-    match call_chat_tool(&state.engine, args).await {
+    let scoped;
+    let engine = match owner {
+        Some(owner) => {
+            scoped = state.engine.for_owner(owner);
+            &scoped
+        }
+        None => &state.engine,
+    };
+    match call_chat_tool(engine, args).await {
         Ok(result) => ok_response(request.id, result),
         Err(McpCallError::InvalidParams(message)) => {
             error_response(request.id, INVALID_PARAMS, message)
