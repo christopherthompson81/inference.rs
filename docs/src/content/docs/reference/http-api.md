@@ -54,7 +54,7 @@ Named events carry the agentic timeline:
 | Event | Body |
 |---|---|
 | (default `data:`) | Chat completion chunk in OpenAI format. Terminator: `data: [DONE]`. |
-| `agentic_tool_call_progress` | Tool-loop progress: `round`, opaque `tool_name`, `phase` (`calling` or `complete`), structured `data`. |
+| `agentic_tool_call_progress` | Tool-loop progress: `round`, `tool_call_id` (pairs a call's phases), `tool_name`, `phase` (`calling` or `complete`), structured `data`. |
 | `agentic_tool_approval_required` | A pending agent approval (see below). |
 | `file_produced` | A `File` object, emitted once per file as it is produced. |
 
@@ -84,7 +84,7 @@ Errors also stream as a named `error` event. The inference.rs `agentic_tool_call
 Non-streaming chat responses carry four inference.rs fields beyond the OpenAI shape (omitted when empty):
 
 - `session_id` (string): reuse in later requests to keep agentic state across messages.
-- `agentic_tool_calls` (array): ordered record of tool calls made during the agentic loop. Each entry has `round`, opaque `name`, `arguments`, `result_content`, plus `result_images_base64` and `file_ids` when present.
+- `agentic_tool_calls` (array): ordered record of tool calls made during the agentic loop. Each entry has `round`, `tool_call_id`, opaque `name`, `arguments`, `result_content`, plus `result_images_base64` and `file_ids` when present.
 - `files` (array of `File` objects): see [file wire schemas](#file-wire-schemas-and-semantics).
 - `adapter_generation` (string): exact immutable LoRA generation used for the response; omitted for base-model requests.
 

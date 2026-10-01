@@ -43,6 +43,7 @@ pub(crate) const ASK_REQUIRES_STREAMING: &str = "agent_permission \"ask\" requir
 
 pub fn serialize_agentic_progress(
     round: usize,
+    tool_call_id: &str,
     tool_name: &str,
     phase: &AgenticToolCallPhase,
 ) -> Value {
@@ -53,6 +54,7 @@ pub fn serialize_agentic_progress(
     json!({
         "type": "agentic_tool_call_progress",
         "round": round,
+        "tool_call_id": tool_call_id,
         "tool_name": tool_name,
         "phase": phase_str,
         "data": data,
@@ -1000,6 +1002,7 @@ pub use inference_core::{
 #[derive(Debug, Clone)]
 pub struct AgenticToolProgress {
     pub round: usize,
+    pub tool_call_id: String,
     pub tool_name: String,
     pub phase: AgenticToolCallPhase,
 }
@@ -1007,7 +1010,7 @@ pub struct AgenticToolProgress {
 impl AgenticToolProgress {
     /// The `agentic_tool_call_progress` payload the HTTP and C ABI streams carry.
     pub fn to_json(&self) -> Value {
-        serialize_agentic_progress(self.round, &self.tool_name, &self.phase)
+        serialize_agentic_progress(self.round, &self.tool_call_id, &self.tool_name, &self.phase)
     }
 }
 
@@ -1129,10 +1132,12 @@ impl ChatStream {
             }
             Response::AgenticToolCallProgress {
                 round,
+                tool_call_id,
                 tool_name,
                 phase,
             } => ChatStreamEvent::AgenticToolCallProgress(AgenticToolProgress {
                 round,
+                tool_call_id,
                 tool_name,
                 phase,
             }),
@@ -1207,6 +1212,7 @@ mod tests {
     fn typed_agentic_events_serialize_to_the_wire_payloads() {
         let progress = AgenticToolProgress {
             round: 2,
+            tool_call_id: "call_lookup".to_string(),
             tool_name: "lookup".to_string(),
             phase: AgenticToolCallPhase::Complete(AgenticToolCallData::Custom {
                 arguments: "{}".to_string(),
@@ -1216,6 +1222,7 @@ mod tests {
         let progress = progress.to_json();
         assert_eq!(progress["type"], "agentic_tool_call_progress");
         assert_eq!(progress["round"], 2);
+        assert_eq!(progress["tool_call_id"], "call_lookup");
         assert_eq!(progress["phase"], "complete");
         assert_eq!(progress["data"]["tool_type"], "custom");
         assert_eq!(progress["data"]["content"], "found");

@@ -45,6 +45,7 @@ fn tool_progress() -> inference_core::Response {
     };
     inference_core::Response::AgenticToolCallProgress {
         round: 0,
+        tool_call_id: "call_lookup".to_string(),
         tool_name: "lookup".to_string(),
         phase: inference_core::AgenticToolCallPhase::Complete(data),
     }

@@ -285,9 +285,7 @@ class ChatStore {
       onToolCallProgress: (event) => {
         const idx = this.streamingBlocks.findIndex(
           (b) =>
-            b.type === "tool_call" &&
-            b.data.round === event.round &&
-            b.data.tool_name === event.tool_name,
+            b.type === "tool_call" && b.data.tool_call_id === event.tool_call_id,
         );
         if (idx >= 0) {
           const existing = this.streamingBlocks[idx] as {

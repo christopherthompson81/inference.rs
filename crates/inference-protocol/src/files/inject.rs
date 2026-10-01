@@ -14,7 +14,7 @@ use super::{
 };
 
 /// Convert a `ToolFile` to a `File` with full body. Elision happens later via `File::elide_for_wire`.
-pub fn tool_file_to_file(tf: &ToolFile, round: usize, turn: usize, tool_name: &str) -> File {
+pub fn tool_file_to_file(tf: &ToolFile, source: FileSource) -> File {
     let id = File::make_output_id();
     let format = if tf.format.is_empty() {
         format_from_name(&tf.name)
@@ -26,12 +26,6 @@ pub fn tool_file_to_file(tf: &ToolFile, round: usize, turn: usize, tool_name: &s
         .clone()
         .or_else(|| format.as_deref().map(mime_for_format))
         .unwrap_or_else(|| "application/octet-stream".to_string());
-    let source = FileSource {
-        tool: tool_name.to_string(),
-        round,
-        turn,
-    };
-
     let created_at = File::now_unix_secs();
 
     if let Some(err) = &tf.error {
@@ -271,6 +265,7 @@ mod tests {
                 tool: "execute_python".into(),
                 round: 0,
                 turn: 0,
+                tool_call_id: None,
             },
             content: FileContent::Text {
                 text: Some(body.into()),

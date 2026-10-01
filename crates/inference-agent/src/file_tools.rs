@@ -2,20 +2,14 @@
 
 use serde_json::Value;
 
-use inference_core::files::{File, FileContent, FileStore, READ_FILE_MAX_SLICE_CHARS};
-use inference_core::{AgenticToolCallData, NormalRequest, ToolCallResponse, ToolChoice};
-
-use crate::agentic_loop::{append_assistant_tool_call, append_tool_response};
+use inference_core::ToolCallResponse;
+use inference_core::files::{FileContent, FileStore, READ_FILE_MAX_SLICE_CHARS};
 
 pub(crate) fn do_read_file(
-    mut request: NormalRequest,
     tc: &ToolCallResponse,
     store: &FileStore,
     owner: Option<&str>,
-) -> (NormalRequest, AgenticToolCallData, Vec<File>) {
-    let messages = request.chat_messages_mut();
-    append_assistant_tool_call(messages, tc);
-
+) -> String {
     let args: Value = serde_json::from_str(&tc.function.arguments).unwrap_or(Value::Null);
     let file_id = args.get("file_id").and_then(|v| v.as_str()).unwrap_or("");
     let start = args
@@ -28,7 +22,7 @@ pub(crate) fn do_read_file(
         .and_then(|v| v.as_u64())
         .and_then(|v| usize::try_from(v).ok());
 
-    let response = match store.get(file_id, owner) {
+    match store.get(file_id, owner) {
         Some(file) => match &file.content {
             FileContent::Text { text: Some(t), .. } => {
                 let total = t.chars().count();
@@ -71,25 +65,10 @@ pub(crate) fn do_read_file(
             "error": "file not found or expired.",
         }),
     }
-    .to_string();
-
-    let messages = request.chat_messages_mut();
-    append_tool_response(messages, &tc.function.name, response.clone());
-
-    request.tool_choice = Some(ToolChoice::Auto);
-    (request, custom(response), Vec::new())
+    .to_string()
 }
 
-pub(crate) fn do_list_files(
-    mut request: NormalRequest,
-    tc: &ToolCallResponse,
-    store: &FileStore,
-    session_id: &str,
-    owner: Option<&str>,
-) -> (NormalRequest, AgenticToolCallData, Vec<File>) {
-    let messages = request.chat_messages_mut();
-    append_assistant_tool_call(messages, tc);
-
+pub(crate) fn do_list_files(store: &FileStore, session_id: &str, owner: Option<&str>) -> String {
     let listed = store.list_for_session(session_id, owner);
     let files: Vec<Value> = listed
         .iter()
@@ -106,18 +85,5 @@ pub(crate) fn do_list_files(
             })
         })
         .collect();
-    let response = serde_json::json!({ "files": files }).to_string();
-
-    let messages = request.chat_messages_mut();
-    append_tool_response(messages, &tc.function.name, response.clone());
-
-    request.tool_choice = Some(ToolChoice::Auto);
-    (request, custom(response), Vec::new())
-}
-
-fn custom(content: String) -> AgenticToolCallData {
-    AgenticToolCallData::Custom {
-        arguments: String::new(),
-        content,
-    }
+    serde_json::json!({ "files": files }).to_string()
 }

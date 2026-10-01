@@ -811,7 +811,7 @@ struct PendingShellCall {
     commands: Vec<String>,
 }
 
-type PendingShellCalls = HashMap<(usize, String), PendingShellCall>;
+type PendingShellCalls = HashMap<String, PendingShellCall>;
 
 #[derive(Clone)]
 struct MessageOutputItemState {
@@ -879,13 +879,12 @@ fn shell_output_parts(data: &AgenticToolCallData) -> Option<Vec<ShellCallOutputP
 fn record_shell_progress_items(
     pending: &mut PendingShellCalls,
     output_items: &mut Vec<OutputItem>,
-    round: usize,
-    tool_name: &str,
+    tool_call_id: &str,
     phase: &AgenticToolCallPhase,
 ) -> Option<Vec<OutputItem>> {
     match phase {
         AgenticToolCallPhase::Calling(AgenticToolCallData::Shell { commands, .. }) => {
-            let call_id = format!("call_{}", Uuid::new_v4().simple());
+            let call_id = tool_call_id.to_string();
             let item = OutputItem::shell_call(
                 format!("sc_{}", Uuid::new_v4().simple()),
                 call_id.clone(),
@@ -893,7 +892,7 @@ fn record_shell_progress_items(
                 ItemStatus::Completed,
             );
             pending.insert(
-                (round, tool_name.to_string()),
+                call_id.clone(),
                 PendingShellCall {
                     call_id,
                     commands: commands.clone(),
@@ -903,11 +902,12 @@ fn record_shell_progress_items(
             Some(vec![item])
         }
         AgenticToolCallPhase::Complete(data @ AgenticToolCallData::Shell { commands, .. }) => {
-            let key = (round, tool_name.to_string());
-            let pending_call = pending.remove(&key).unwrap_or_else(|| PendingShellCall {
-                call_id: format!("call_{}", Uuid::new_v4().simple()),
-                commands: commands.clone(),
-            });
+            let pending_call = pending
+                .remove(tool_call_id)
+                .unwrap_or_else(|| PendingShellCall {
+                    call_id: tool_call_id.to_string(),
+                    commands: commands.clone(),
+                });
             let mut items = Vec::new();
             if !output_items.iter().any(|item| match item {
                 OutputItem::ShellCall { call_id, .. } => call_id == &pending_call.call_id,
@@ -1626,6 +1626,7 @@ impl futures::Stream for OpenResponsesStreamer {
                     }
                     Response::AgenticToolCallProgress {
                         round,
+                        tool_call_id,
                         tool_name,
                         phase,
                     } => {
@@ -1634,8 +1635,7 @@ impl futures::Stream for OpenResponsesStreamer {
                         let shell_items = record_shell_progress_items(
                             &mut pending_shell_calls,
                             &mut shell_output_items,
-                            round,
-                            &tool_name,
+                            &tool_call_id,
                             &phase,
                         );
                         self.pending_shell_calls = pending_shell_calls;
@@ -1664,7 +1664,12 @@ impl futures::Stream for OpenResponsesStreamer {
                             Poll::Ready(Some(ResponsesStreamItem::Event(first)))
                         } else {
                             Poll::Ready(Some(ResponsesStreamItem::AgenticToolCallProgress(
-                                serialize_agentic_progress(round, &tool_name, &phase),
+                                serialize_agentic_progress(
+                                    round,
+                                    &tool_call_id,
+                                    &tool_name,
+                                    &phase,
+                                ),
                             )))
                         }
                     }
@@ -2294,15 +2299,14 @@ async fn run_to_end(
     let response = loop {
         match rx.recv().await {
             Some(Response::AgenticToolCallProgress {
-                round,
-                tool_name,
+                tool_call_id,
                 phase,
+                ..
             }) => {
                 record_shell_progress_items(
                     &mut pending_shell_calls,
                     &mut shell_output_items,
-                    round,
-                    &tool_name,
+                    &tool_call_id,
                     &phase,
                 );
             }

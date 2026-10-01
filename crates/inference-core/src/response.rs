@@ -51,6 +51,8 @@ pub enum Response {
     /// Progress event emitted by the agentic loop during tool execution.
     AgenticToolCallProgress {
         round: usize,
+        /// The model's id for the call, which pairs its phases when a round makes several.
+        tool_call_id: String,
         tool_name: String,
         phase: AgenticToolCallPhase,
     },
@@ -96,6 +98,8 @@ pub enum ResponseOk {
     // Agentic tool progress
     AgenticToolCallProgress {
         round: usize,
+        /// The model's id for the call, which pairs its phases when a round makes several.
+        tool_call_id: String,
         tool_name: String,
         phase: AgenticToolCallPhase,
     },
@@ -197,10 +201,12 @@ impl Response {
             }),
             Self::AgenticToolCallProgress {
                 round,
+                tool_call_id,
                 tool_name,
                 phase,
             } => Ok(ResponseOk::AgenticToolCallProgress {
                 round,
+                tool_call_id,
                 tool_name,
                 phase,
             }),

@@ -2671,6 +2671,7 @@ class SourceMeta:
 
     round: int
     tool: str
+    tool_call_id: str | None = None
     turn: int
 
 

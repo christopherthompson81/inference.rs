@@ -45,6 +45,9 @@ pub struct FileSource {
     /// Zero-based turn within the session. 0 when there is no session.
     #[serde(default)]
     pub turn: usize,
+    /// The id of the call that made it, telling apart two calls of one tool in a round.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 /// File body. Serialized untagged so the wire shape is flat.
@@ -403,6 +406,7 @@ mod tests {
                 tool: "execute_python".into(),
                 round: 0,
                 turn: 0,
+                tool_call_id: None,
             },
             content: FileContent::Text {
                 text: Some(body.into()),
@@ -443,6 +447,7 @@ mod tests {
                 tool: "input_file".to_string(),
                 round: 0,
                 turn: 0,
+                tool_call_id: None,
             },
             text.as_bytes().to_vec(),
         );
@@ -476,6 +481,7 @@ mod tests {
                 tool: "execute_python".into(),
                 round: 0,
                 turn: 0,
+                tool_call_id: None,
             },
             content: FileContent::Binary { data_base64: None },
         };

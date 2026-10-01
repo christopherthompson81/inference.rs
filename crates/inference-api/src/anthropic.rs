@@ -1773,12 +1773,13 @@ impl AnthropicStream {
             }
             Response::AgenticToolCallProgress {
                 round,
+                tool_call_id,
                 tool_name,
                 phase,
             } => {
                 self.stream.enqueue_json(
                     "agentic_tool_call_progress",
-                    serialize_agentic_progress(round, &tool_name, &phase),
+                    serialize_agentic_progress(round, &tool_call_id, &tool_name, &phase),
                 );
             }
             Response::AgenticToolApprovalRequired {

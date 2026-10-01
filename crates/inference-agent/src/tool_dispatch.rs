@@ -27,6 +27,24 @@ pub(crate) struct ToolResult {
     pub files: Vec<inference_mcp::ToolFile>,
 }
 
+impl ToolResult {
+    /// The error a failed call answers the model with.
+    pub(crate) fn failed(name: &str, error: &dyn std::fmt::Display) -> Self {
+        tracing::error!("Tool `{name}` execution failed: {error}");
+        Self {
+            content: serde_json::json!({
+                "error": error.to_string(),
+                "tool": name,
+                "status": "failed"
+            })
+            .to_string(),
+            images: vec![],
+            video_frames: vec![],
+            files: vec![],
+        }
+    }
+}
+
 fn token_budget(opts: &WebSearchOptions) -> usize {
     match opts.return_token_budget.as_ref() {
         Some(WebSearchReturnTokenBudget::Unlimited) => UNLIMITED_SEARCH_TOKEN_BUDGET,
@@ -384,20 +402,7 @@ pub(crate) fn execute_custom_tool(
         };
     };
 
-    let error_result = |e: anyhow::Error| -> ToolResult {
-        tracing::error!("Tool `{name}` execution failed: {e}");
-        ToolResult {
-            content: serde_json::json!({
-                "error": format!("{e}"),
-                "tool": name,
-                "status": "failed"
-            })
-            .to_string(),
-            images: vec![],
-            video_frames: vec![],
-            files: vec![],
-        }
-    };
+    let error_result = |e: anyhow::Error| ToolResult::failed(name, &e);
 
     match &cb_with_tool.callback {
         // Host callbacks may block on I/O, so they must not hold a runtime worker others are waiting on.

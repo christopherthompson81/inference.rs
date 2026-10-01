@@ -18,7 +18,7 @@ use inference_core::{
         is_list_files_tool, is_read_file_tool, is_shell_tool, is_surface_outputs_tool,
     },
     files::{
-        File, RequestedFile, compose_tool_response_with_files, file_to_tool_input_file,
+        File, FileSource, RequestedFile, compose_tool_response_with_files, file_to_tool_input_file,
         merge_required_outputs_into_args, required_files_tool_addendum, tool_file_to_file,
     },
 };
@@ -26,6 +26,7 @@ use inference_core::{
 use crate::file_tools::{do_list_files, do_read_file};
 
 const MAX_SKILL_TREE_ENTRIES: usize = 80;
+const DENIED: &str = "Agent action was denied.";
 const MAX_SKILL_TREE_DEPTH: usize = 4;
 
 /// Turn = number of completed user messages.
@@ -144,27 +145,33 @@ fn inject_shell_skills_message(request: &mut NormalRequest) {
 }
 
 /// Structured `tool_calls` field for the assistant message. Required by templates (Gemma 4 etc.) that render from `message.tool_calls`.
-fn build_tool_calls_field(tc: &ToolCallResponse) -> MessageContent {
-    let mut tc_map = IndexMap::new();
-    tc_map.insert("id".to_string(), Value::String(tc.id.clone()));
-    tc_map.insert("type".to_string(), Value::String("function".to_string()));
-    let mut function_map = serde_json::Map::new();
-    function_map.insert("name".to_string(), Value::String(tc.function.name.clone()));
-    let args_value = serde_json::from_str(&tc.function.arguments)
-        .unwrap_or(Value::String(tc.function.arguments.clone()));
-    function_map.insert("arguments".to_string(), args_value);
-    tc_map.insert("function".to_string(), Value::Object(function_map));
-    Either::Right(vec![tc_map])
+fn build_tool_calls_field(calls: &[ToolCallResponse]) -> MessageContent {
+    let calls = calls
+        .iter()
+        .map(|tc| {
+            let mut tc_map = IndexMap::new();
+            tc_map.insert("id".to_string(), Value::String(tc.id.clone()));
+            tc_map.insert("type".to_string(), Value::String("function".to_string()));
+            let mut function_map = serde_json::Map::new();
+            function_map.insert("name".to_string(), Value::String(tc.function.name.clone()));
+            let args_value = serde_json::from_str(&tc.function.arguments)
+                .unwrap_or(Value::String(tc.function.arguments.clone()));
+            function_map.insert("arguments".to_string(), args_value);
+            tc_map.insert("function".to_string(), Value::Object(function_map));
+            tc_map
+        })
+        .collect();
+    Either::Right(calls)
 }
 
-pub(crate) fn append_assistant_tool_call(
+pub(crate) fn append_assistant_tool_calls(
     messages: &mut Vec<IndexMap<String, MessageContent>>,
-    tc: &ToolCallResponse,
+    calls: &[ToolCallResponse],
 ) {
     let mut message: IndexMap<String, MessageContent> = IndexMap::new();
     message.insert("role".to_string(), Either::Left("assistant".to_string()));
     message.insert("content".to_string(), Either::Left(String::new()));
-    message.insert("tool_calls".to_string(), build_tool_calls_field(tc));
+    message.insert("tool_calls".to_string(), build_tool_calls_field(calls));
     messages.push(message);
 }
 
@@ -187,38 +194,42 @@ fn attach_reasoning_to_latest_assistant_tool_call(
     );
 }
 
-pub(crate) fn append_tool_response(
-    messages: &mut Vec<IndexMap<String, MessageContent>>,
-    tool_name: &str,
-    content: String,
-) {
+fn tool_message(
+    tc: &ToolCallResponse,
+    content: MessageContent,
+) -> IndexMap<String, MessageContent> {
     let mut message: IndexMap<String, MessageContent> = IndexMap::new();
     message.insert("role".to_string(), Either::Left("tool".to_string()));
-    message.insert("name".to_string(), Either::Left(tool_name.to_string()));
-    message.insert("content".to_string(), Either::Left(content));
-    messages.push(message);
+    message.insert("tool_call_id".to_string(), Either::Left(tc.id.clone()));
+    message.insert("name".to_string(), Either::Left(tc.function.name.clone()));
+    message.insert("content".to_string(), content);
+    message
 }
 
-/// Append a tool response, routing images/video to the request's multimodal vecs when supported. Otherwise text-only with an error note.
-fn append_multimodal_tool_response(
+/// Appends a call's answer, routing images and video to the request's media when the model takes them.
+fn append_tool_outcome(
     request: &mut NormalRequest,
-    tool_name: &str,
-    mut content: String,
-    images: Vec<DynamicImage>,
-    video_frames: Vec<DynamicImage>,
-    supports_vision: bool,
-    supports_video: bool,
-) {
-    let inject_images = !images.is_empty() && supports_vision;
-    let inject_video = !video_frames.is_empty() && supports_video;
+    tc: &ToolCallResponse,
+    outcome: ToolOutcome,
+    ctx: &DispatchCtx<'_>,
+) -> (AgenticToolCallData, Vec<File>) {
+    let ToolOutcome {
+        mut content,
+        images,
+        video_frames,
+        data,
+        files,
+    } = outcome;
+    let inject_images = !images.is_empty() && ctx.supports_vision;
+    let inject_video = !video_frames.is_empty() && ctx.supports_video;
 
-    if !images.is_empty() && !supports_vision {
+    if !images.is_empty() && !ctx.supports_vision {
         content.push_str(&format!(
             "\n[ERROR: {} image(s) were generated but this model does not support vision input. Do not attempt to generate images.]",
             images.len()
         ));
     }
-    if !video_frames.is_empty() && !supports_video {
+    if !video_frames.is_empty() && !ctx.supports_video {
         content.push_str(&format!(
             "\n[ERROR: {} video frame(s) were generated but this model does not support video input. Do not attempt to generate video.]",
             video_frames.len()
@@ -226,9 +237,9 @@ fn append_multimodal_tool_response(
     }
 
     if !inject_images && !inject_video {
-        let messages = request.chat_messages_mut();
-        append_tool_response(messages, tool_name, content);
-        return;
+        let message = tool_message(tc, Either::Left(content));
+        request.chat_messages_mut().push(message);
+        return (data, files);
     }
 
     request.upgrade_to_multimodal();
@@ -237,8 +248,8 @@ fn append_multimodal_tool_response(
 
     if inject_images {
         let req_images = request.images_mut();
-        for img in &images {
-            req_images.push(img.clone());
+        for img in images {
+            req_images.push(img);
             let mut part = IndexMap::new();
             part.insert("type".to_string(), Value::String("image".to_string()));
             parts.push(part);
@@ -258,12 +269,9 @@ fn append_multimodal_tool_response(
     text_part.insert("text".to_string(), Value::String(content));
     parts.push(text_part);
 
-    let messages = request.chat_messages_mut();
-    let mut message: IndexMap<String, MessageContent> = IndexMap::new();
-    message.insert("role".to_string(), Either::Left("tool".to_string()));
-    message.insert("name".to_string(), Either::Left(tool_name.to_string()));
-    message.insert("content".to_string(), Either::Right(parts));
-    messages.push(message);
+    let message = tool_message(tc, Either::Right(parts));
+    request.chat_messages_mut().push(message);
+    (data, files)
 }
 
 /// `Some(resp)` for `Done`/`Chunk` (caller handles); forwards everything else and returns `None`.
@@ -582,20 +590,12 @@ async fn approve_agent_tool(
     AgentToolApprovalDecision::deny_with_message(message)
 }
 
-fn denied_tool_result(
-    mut request: NormalRequest,
-    tc: &ToolCallResponse,
-    message: String,
-) -> (NormalRequest, AgenticToolCallData, Vec<File>) {
-    let messages = request.chat_messages_mut();
-    append_assistant_tool_call(messages, tc);
+fn denied_tool_result(tc: &ToolCallResponse, message: String) -> ToolOutcome {
     let content = serde_json::json!({
         "status": "denied",
         "exception": message,
     })
     .to_string();
-    append_tool_response(messages, &tc.function.name, content.clone());
-    request.tool_choice = Some(ToolChoice::Auto);
 
     let data = if is_read_file_tool(&tc.function.name)
         || is_list_files_tool(&tc.function.name)
@@ -603,7 +603,7 @@ fn denied_tool_result(
     {
         AgenticToolCallData::Custom {
             arguments: String::new(),
-            content,
+            content: content.clone(),
         }
     } else if is_code_exec_tool(&tc.function.name) {
         AgenticToolCallData::CodeExecution {
@@ -630,11 +630,11 @@ fn denied_tool_result(
     } else {
         AgenticToolCallData::Custom {
             arguments: String::new(),
-            content,
+            content: content.clone(),
         }
     };
 
-    (request, data, Vec::new())
+    ToolOutcome::text(content, data)
 }
 
 fn shell_completion_data(arguments: &str, content: &str) -> AgenticToolCallData {
@@ -686,9 +686,39 @@ fn shell_completion_data(arguments: &str, content: &str) -> AgenticToolCallData 
     }
 }
 
-/// Per-loop dispatch context. Borrows data owned by the loop's task; round/tc/visible_req are passed alongside.
+/// One call's answer, appended to the conversation once every call of its round has run.
+struct ToolOutcome {
+    content: String,
+    images: Vec<DynamicImage>,
+    video_frames: Vec<DynamicImage>,
+    data: AgenticToolCallData,
+    files: Vec<File>,
+}
+
+impl ToolOutcome {
+    fn text(content: String, data: AgenticToolCallData) -> Self {
+        Self {
+            content,
+            images: Vec::new(),
+            video_frames: Vec::new(),
+            data,
+            files: Vec::new(),
+        }
+    }
+
+    fn custom(content: String) -> Self {
+        let data = AgenticToolCallData::Custom {
+            arguments: String::new(),
+            content: content.clone(),
+        };
+        Self::text(content, data)
+    }
+}
+
+/// Per-loop dispatch context. Borrows data owned by the loop's task; the round and its calls are passed alongside.
 struct DispatchCtx<'a> {
     engine: &'a Arc<Engine>,
+    user_sender: &'a tokio::sync::mpsc::Sender<Response>,
     web_search_options: Option<&'a WebSearchOptions>,
     dispatch_url: Option<&'a str>,
     supports_vision: bool,
@@ -756,81 +786,68 @@ fn extraction_sources(tc: &ToolCallResponse) -> Vec<String> {
 }
 
 async fn do_search(
-    engine: Arc<Engine>,
-    mut request: NormalRequest,
+    engine: &Arc<Engine>,
     tc: &ToolCallResponse,
     opts: &WebSearchOptions,
-) -> (NormalRequest, AgenticToolCallData, Vec<File>) {
-    let messages = request.chat_messages_mut();
-    append_assistant_tool_call(messages, tc);
-
-    let result = tool_dispatch::execute_search(&engine, tc, opts).await;
-
+) -> ToolOutcome {
+    let result = tool_dispatch::execute_search(engine, tc, opts).await;
     let (results_count, sources) = web_search_metadata(&result.content);
-
     let data = AgenticToolCallData::WebSearch {
         query: None, // already sent in Calling phase
         results_count,
         sources,
     };
-    append_tool_response(messages, &tc.function.name, result.content);
-
-    request.tool_choice = Some(ToolChoice::Auto);
-    (request, data, Vec::new())
+    ToolOutcome::text(result.content, data)
 }
 
 async fn do_extraction(
-    engine: Arc<Engine>,
-    mut request: NormalRequest,
+    engine: &Arc<Engine>,
     tc: &ToolCallResponse,
     opts: &WebSearchOptions,
-) -> (NormalRequest, AgenticToolCallData, Vec<File>) {
-    let messages = request.chat_messages_mut();
-    append_assistant_tool_call(messages, tc);
-
-    let result = tool_dispatch::execute_extraction(&engine, tc, opts).await;
+) -> ToolOutcome {
+    let result = tool_dispatch::execute_extraction(engine, tc, opts).await;
     let data = AgenticToolCallData::WebSearch {
         query: None,
         results_count: Some(1),
         sources: extraction_sources(tc),
     };
-    append_tool_response(messages, &tc.function.name, result.content);
-
-    request.tool_choice = Some(ToolChoice::Auto);
-    (request, data, Vec::new())
+    ToolOutcome::text(result.content, data)
 }
 
-async fn do_custom_tool(
-    ctx: &DispatchCtx<'_>,
-    mut request: NormalRequest,
-    tc: &ToolCallResponse,
-    round: usize,
-) -> (NormalRequest, AgenticToolCallData, Vec<File>) {
-    let messages = request.chat_messages_mut();
-    append_assistant_tool_call(messages, tc);
-
+async fn do_custom_tool(ctx: &DispatchCtx<'_>, tc: &ToolCallResponse, round: usize) -> ToolOutcome {
     // Merge required files into `outputs` so the tool surfaces them even if the model omitted them.
-    let dispatched_tc;
-    let dispatched_ref: &ToolCallResponse = if (is_code_exec_tool(&tc.function.name)
-        || is_shell_tool(&tc.function.name))
+    let dispatched = if (is_code_exec_tool(&tc.function.name) || is_shell_tool(&tc.function.name))
         && !ctx.required_files.is_empty()
     {
-        dispatched_tc = merge_required_outputs_into_args(tc, ctx.required_files);
-        &dispatched_tc
+        merge_required_outputs_into_args(tc, ctx.required_files)
     } else {
-        tc
+        tc.clone()
     };
 
-    let mut dispatch_tool_ctx = ctx.tool_call_ctx.clone();
-    dispatch_tool_ctx.round = Some(round);
-    dispatch_tool_ctx.tool_name = Some(tc.function.name.clone());
+    let mut tool_ctx = ctx.tool_call_ctx.clone();
+    tool_ctx.round = Some(round);
+    tool_ctx.tool_name = Some(tc.function.name.clone());
 
-    let result = tool_dispatch::execute_custom_tool(ctx.engine, dispatched_ref, &dispatch_tool_ctx);
+    // On the blocking pool, so the round's other calls run while a host callback blocks.
+    let engine = ctx.engine.clone();
+    let result = tokio::task::spawn_blocking(move || {
+        tool_dispatch::execute_custom_tool(&engine, &dispatched, &tool_ctx)
+    })
+    .await
+    .unwrap_or_else(|error| tool_dispatch::ToolResult::failed(&tc.function.name, &error));
 
     let files: Vec<File> = result
         .files
         .iter()
-        .map(|tf| tool_file_to_file(tf, round, ctx.turn, &tc.function.name))
+        .map(|tf| {
+            let source = FileSource {
+                tool: tc.function.name.clone(),
+                round,
+                turn: ctx.turn,
+                tool_call_id: Some(tc.id.clone()),
+            };
+            tool_file_to_file(tf, source)
+        })
         .collect();
 
     let is_code_exec = is_code_exec_tool(&tc.function.name);
@@ -886,87 +903,179 @@ async fn do_custom_tool(
         }
     };
 
-    let composed_content = compose_tool_response_with_files(&result.content, &files);
-
-    let has_multimodal = !result.images.is_empty() || !result.video_frames.is_empty();
-    if !has_multimodal {
-        let messages = request.chat_messages_mut();
-        append_tool_response(messages, &tc.function.name, composed_content);
-    } else {
-        append_multimodal_tool_response(
-            &mut request,
-            &tc.function.name,
-            composed_content,
-            result.images,
-            result.video_frames,
-            ctx.supports_vision,
-            ctx.supports_video,
-        );
+    let content = compose_tool_response_with_files(&result.content, &files);
+    ToolOutcome {
+        content,
+        images: result.images,
+        video_frames: result.video_frames,
+        data,
+        files,
     }
-
-    request.tool_choice = Some(ToolChoice::Auto);
-    (request, data, files)
 }
 
-fn do_http_tool(
-    mut request: NormalRequest,
-    tc: &ToolCallResponse,
-    url: &str,
-) -> (NormalRequest, AgenticToolCallData, Vec<File>) {
-    let messages = request.chat_messages_mut();
-    append_assistant_tool_call(messages, tc);
-
-    let result = tool_dispatch::execute_http_tool(tc, url);
+async fn do_http_tool(tc: &ToolCallResponse, url: &str) -> ToolOutcome {
+    let (call, url) = (tc.clone(), url.to_string());
+    let result = tokio::task::spawn_blocking(move || tool_dispatch::execute_http_tool(&call, &url))
+        .await
+        .unwrap_or_else(|error| tool_dispatch::ToolResult::failed(&tc.function.name, &error));
     let data = AgenticToolCallData::Custom {
         arguments: String::new(),
         content: result.content.clone(),
     };
-    append_tool_response(messages, &tc.function.name, result.content);
-
-    request.tool_choice = Some(ToolChoice::Auto);
-    (request, data, Vec::new())
+    ToolOutcome::text(result.content, data)
 }
 
-/// `None` when no dispatcher is configured for `tc.function.name`. Caller short-circuits the loop.
-async fn dispatch_tool(
-    ctx: &DispatchCtx<'_>,
-    visible_req: NormalRequest,
-    tc: &ToolCallResponse,
-    round: usize,
-) -> Option<(NormalRequest, AgenticToolCallData, Vec<File>)> {
-    let name = &tc.function.name;
+/// What answers a call.
+enum Dispatcher<'a> {
+    ReadFile,
+    ListFiles,
+    Search(&'a WebSearchOptions),
+    Extract(&'a WebSearchOptions),
+    Custom,
+    Http(&'a str),
+}
+
+/// `None` when nothing here can answer `name`.
+fn dispatcher<'a>(ctx: &DispatchCtx<'a>, name: &str) -> Option<Dispatcher<'a>> {
     if is_read_file_tool(name) {
-        return Some(do_read_file(
-            visible_req,
-            tc,
-            ctx.engine.file_store(),
-            ctx.owner,
-        ));
+        return Some(Dispatcher::ReadFile);
     }
     if is_list_files_tool(name) {
-        return Some(do_list_files(
-            visible_req,
-            tc,
-            ctx.engine.file_store(),
-            ctx.session_id,
-            ctx.owner,
-        ));
+        return Some(Dispatcher::ListFiles);
     }
     if search::search_tool_called(name) {
         let opts = ctx.web_search_options?;
         return Some(if name == search::SEARCH_TOOL_NAME {
-            do_search(ctx.engine.clone(), visible_req, tc, opts).await
+            Dispatcher::Search(opts)
         } else {
-            do_extraction(ctx.engine.clone(), visible_req, tc, opts).await
+            Dispatcher::Extract(opts)
         });
     }
     if ctx.engine.tool_callbacks().contains_key(name) {
-        return Some(do_custom_tool(ctx, visible_req, tc, round).await);
+        return Some(Dispatcher::Custom);
     }
-    if let Some(url) = ctx.dispatch_url {
-        return Some(do_http_tool(visible_req, tc, url));
+    ctx.dispatch_url.map(Dispatcher::Http)
+}
+
+async fn dispatch_tool(
+    ctx: &DispatchCtx<'_>,
+    dispatcher: Dispatcher<'_>,
+    tc: &ToolCallResponse,
+    round: usize,
+) -> ToolOutcome {
+    let store = ctx.engine.file_store();
+    match dispatcher {
+        Dispatcher::ReadFile => ToolOutcome::custom(do_read_file(tc, store, ctx.owner)),
+        Dispatcher::ListFiles => {
+            ToolOutcome::custom(do_list_files(store, ctx.session_id, ctx.owner))
+        }
+        Dispatcher::Search(opts) => do_search(ctx.engine, tc, opts).await,
+        Dispatcher::Extract(opts) => do_extraction(ctx.engine, tc, opts).await,
+        Dispatcher::Custom => do_custom_tool(ctx, tc, round).await,
+        Dispatcher::Http(url) => do_http_tool(tc, url).await,
     }
-    None
+}
+
+async fn run_call(
+    ctx: &DispatchCtx<'_>,
+    tc: &ToolCallResponse,
+    dispatcher: Dispatcher<'_>,
+    approval: AgentToolApprovalDecision,
+    round: usize,
+) -> ToolOutcome {
+    if approval.approve {
+        dispatch_tool(ctx, dispatcher, tc, round).await
+    } else {
+        let message = approval.message.unwrap_or_else(|| DENIED.to_string());
+        denied_tool_result(tc, message)
+    }
+}
+
+fn shares_sandbox(name: &str) -> bool {
+    let python = is_code_exec_tool(name) && !is_read_file_tool(name) && !is_list_files_tool(name);
+    python || is_shell_tool(name) || is_surface_outputs_tool(name)
+}
+
+fn progress(round: usize, tc: &ToolCallResponse, phase: AgenticToolCallPhase) -> Response {
+    Response::AgenticToolCallProgress {
+        round,
+        tool_call_id: tc.id.clone(),
+        tool_name: tc.function.name.clone(),
+        phase,
+    }
+}
+
+/// Runs every call of a round at once and appends them with their answers; `None` hands the round to the client.
+async fn run_round(
+    ctx: &DispatchCtx<'_>,
+    mut request: NormalRequest,
+    calls: &[ToolCallResponse],
+    round: usize,
+    reasoning: Option<&str>,
+) -> Option<NormalRequest> {
+    // One call nothing here can run makes the whole round the client's, so its results arrive together.
+    let dispatchers = calls
+        .iter()
+        .map(|tc| dispatcher(ctx, &tc.function.name))
+        .collect::<Option<Vec<_>>>()?;
+    for tc in calls {
+        let calling = AgenticToolCallPhase::Calling(calling_data_for_tool(tc));
+        let _ = ctx.user_sender.send(progress(round, tc, calling)).await;
+    }
+    tokio::task::yield_now().await;
+
+    // One at a time, since each may wait on the client's answer.
+    let mut approvals = Vec::with_capacity(calls.len());
+    for tc in calls {
+        approvals.push(approve_agent_tool(ctx, tc, round).await);
+    }
+    let (in_order, alongside): (Vec<_>, Vec<_>) = calls
+        .iter()
+        .zip(dispatchers)
+        .zip(approvals)
+        .enumerate()
+        .partition(|(_, ((tc, _), _))| shares_sandbox(&tc.function.name));
+    // Calls into the session's sandbox keep the model's order, since one may build on what another left there.
+    let sequential = async {
+        let mut done = Vec::with_capacity(in_order.len());
+        for (index, ((tc, dispatcher), approval)) in in_order {
+            done.push((index, run_call(ctx, tc, dispatcher, approval, round).await));
+        }
+        done
+    };
+    let concurrent = futures::future::join_all(alongside.into_iter().map(
+        |(index, ((tc, dispatcher), approval))| async move {
+            (index, run_call(ctx, tc, dispatcher, approval, round).await)
+        },
+    ));
+    let (sequential, concurrent) = futures::join!(sequential, concurrent);
+    let mut outcomes: Vec<_> = sequential.into_iter().chain(concurrent).collect();
+    outcomes.sort_by_key(|(index, _)| *index);
+    let outcomes = outcomes.into_iter().map(|(_, outcome)| outcome);
+
+    let messages = request.chat_messages_mut();
+    append_assistant_tool_calls(messages, calls);
+    attach_reasoning_to_latest_assistant_tool_call(messages, reasoning);
+    let completed: Vec<_> = calls
+        .iter()
+        .zip(outcomes)
+        .map(|(tc, outcome)| (tc, append_tool_outcome(&mut request, tc, outcome, ctx)))
+        .collect();
+    request.tool_choice = Some(ToolChoice::Auto);
+
+    for (tc, (data, files)) in completed {
+        emit_files(
+            ctx.engine,
+            ctx.session_id,
+            ctx.owner,
+            files,
+            ctx.user_sender,
+        )
+        .await;
+        let complete = AgenticToolCallPhase::Complete(data);
+        let _ = ctx.user_sender.send(progress(round, tc, complete)).await;
+    }
+    Some(request)
 }
 
 /// Store full file bodies and emit wire-elided clones on the user channel. Truncated bodies stay fetchable via the store.
@@ -1160,6 +1269,7 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
         };
         let dispatch_ctx = DispatchCtx {
             engine: &this_clone,
+            user_sender: &user_sender,
             web_search_options: web_search_options.as_ref(),
             dispatch_url: dispatch_url.as_deref(),
             supports_vision,
@@ -1219,21 +1329,14 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                 };
                 usage_accumulator.add(&done.usage);
 
-                let tc_opt = match &done.choices[0].message.tool_calls {
-                    Some(calls) if !calls.is_empty() => {
-                        if calls.len() > 1 {
-                            tracing::warn!(
-                                "Model returned {} tool calls; executing only the first.",
-                                calls.len()
-                            );
-                        }
-                        Some(&calls[0])
-                    }
-                    _ => None,
-                };
+                let calls = done.choices[0]
+                    .message
+                    .tool_calls
+                    .clone()
+                    .filter(|calls| !calls.is_empty());
 
                 let canceled = cancellation.as_ref().is_some_and(|c| c.is_canceled());
-                if tc_opt.is_none() || round >= max_rounds || canceled {
+                if calls.is_none() || round >= max_rounds || canceled {
                     save_session(&this_clone, &session_id, &visible_req);
                     let mut final_resp = done.clone();
                     if canceled {
@@ -1250,30 +1353,10 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                     return;
                 }
 
-                let tc = tc_opt.unwrap();
-
-                let _ = user_sender
-                    .send(Response::AgenticToolCallProgress {
-                        round,
-                        tool_name: tc.function.name.clone(),
-                        phase: AgenticToolCallPhase::Calling(calling_data_for_tool(tc)),
-                    })
-                    .await;
-                tokio::task::yield_now().await;
-
-                let approval = approve_agent_tool(&dispatch_ctx, tc, round).await;
-                let outcome = if approval.approve {
-                    dispatch_tool(&dispatch_ctx, visible_req.clone(), tc, round).await
-                } else {
-                    Some(denied_tool_result(
-                        visible_req.clone(),
-                        tc,
-                        approval
-                            .message
-                            .unwrap_or_else(|| "Agent action was denied.".to_string()),
-                    ))
-                };
-                let Some((mut next_visible, complete_data, files)) = outcome else {
+                let calls = calls.unwrap();
+                let reasoning = done.choices[0].message.reasoning_content.as_deref();
+                let next = run_round(&dispatch_ctx, visible_req.clone(), &calls, round, reasoning);
+                let Some(next_visible) = next.await else {
                     save_session(&this_clone, &session_id, &visible_req);
                     let mut final_resp = done.clone();
                     if let Some(usage) = usage_accumulator.aggregate() {
@@ -1283,31 +1366,9 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                     let _ = user_sender.send(Response::Done(final_resp)).await;
                     return;
                 };
-                attach_reasoning_to_latest_assistant_tool_call(
-                    next_visible.chat_messages_mut(),
-                    done.choices[0].message.reasoning_content.as_deref(),
-                );
-
-                emit_files(
-                    &this_clone,
-                    &session_id,
-                    owner.as_deref(),
-                    files,
-                    &user_sender,
-                )
-                .await;
-
-                let _ = user_sender
-                    .send(Response::AgenticToolCallProgress {
-                        round,
-                        tool_name: tc.function.name.clone(),
-                        phase: AgenticToolCallPhase::Complete(complete_data),
-                    })
-                    .await;
-
                 round += 1;
 
-                visible_req = next_visible.clone();
+                visible_req = next_visible;
                 visible_req.response = user_sender.clone();
                 current = visible_req.clone();
             } else {
@@ -1366,18 +1427,11 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                     break;
                 };
 
-                let tc_opt = match &choice.delta.tool_calls {
-                    Some(calls) if !calls.is_empty() => {
-                        if calls.len() > 1 {
-                            tracing::warn!(
-                                "Model returned {} tool calls; executing only the first.",
-                                calls.len()
-                            );
-                        }
-                        Some(&calls[0])
-                    }
-                    _ => None,
-                };
+                let calls = choice
+                    .delta
+                    .tool_calls
+                    .clone()
+                    .filter(|calls| !calls.is_empty());
 
                 let canceled = cancellation.as_ref().is_some_and(|c| c.is_canceled());
                 if canceled {
@@ -1393,7 +1447,7 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                                 chunk
                             });
                 }
-                if tc_opt.is_none() || round >= max_rounds || canceled {
+                if calls.is_none() || round >= max_rounds || canceled {
                     save_session(&this_clone, &session_id, &visible_req);
                     let usage = usage_accumulator.aggregate();
                     let held = held_final_chunk.or(tool_call_final_chunk);
@@ -1403,30 +1457,10 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                     break;
                 }
 
-                let tc = tc_opt.unwrap();
-
-                let _ = user_sender
-                    .send(Response::AgenticToolCallProgress {
-                        round,
-                        tool_name: tc.function.name.clone(),
-                        phase: AgenticToolCallPhase::Calling(calling_data_for_tool(tc)),
-                    })
-                    .await;
-                tokio::task::yield_now().await;
-
-                let approval = approve_agent_tool(&dispatch_ctx, tc, round).await;
-                let outcome = if approval.approve {
-                    dispatch_tool(&dispatch_ctx, visible_req.clone(), tc, round).await
-                } else {
-                    Some(denied_tool_result(
-                        visible_req.clone(),
-                        tc,
-                        approval
-                            .message
-                            .unwrap_or_else(|| "Agent action was denied.".to_string()),
-                    ))
-                };
-                let Some((mut next_visible, complete_data, files)) = outcome else {
+                let calls = calls.unwrap();
+                let reasoning = Some(round_reasoning_content.as_str());
+                let next = run_round(&dispatch_ctx, visible_req.clone(), &calls, round, reasoning);
+                let Some(next_visible) = next.await else {
                     save_session(&this_clone, &session_id, &visible_req);
                     let usage = usage_accumulator.aggregate();
                     let held = tool_call_final_chunk;
@@ -1435,31 +1469,9 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                     }
                     break;
                 };
-                attach_reasoning_to_latest_assistant_tool_call(
-                    next_visible.chat_messages_mut(),
-                    Some(&round_reasoning_content),
-                );
-
-                emit_files(
-                    &this_clone,
-                    &session_id,
-                    owner.as_deref(),
-                    files,
-                    &user_sender,
-                )
-                .await;
-
-                let _ = user_sender
-                    .send(Response::AgenticToolCallProgress {
-                        round,
-                        tool_name: tc.function.name.clone(),
-                        phase: AgenticToolCallPhase::Complete(complete_data),
-                    })
-                    .await;
-
                 round += 1;
 
-                visible_req = next_visible.clone();
+                visible_req = next_visible;
                 visible_req.response = user_sender.clone();
                 current = visible_req.clone();
             }
@@ -1502,7 +1514,7 @@ mod tests {
                 arguments: r#"{"city":"Paris"}"#.to_string(),
             },
         };
-        append_assistant_tool_call(&mut messages, &tool_call);
+        append_assistant_tool_calls(&mut messages, std::slice::from_ref(&tool_call));
 
         attach_reasoning_to_latest_assistant_tool_call(&mut messages, Some("Need weather"));
 

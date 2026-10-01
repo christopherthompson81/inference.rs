@@ -115,6 +115,7 @@ impl InputFile {
                     tool: "sdk_input_file".to_string(),
                     round: 0,
                     turn: 0,
+                    tool_call_id: None,
                 },
                 bytes.into(),
             ),

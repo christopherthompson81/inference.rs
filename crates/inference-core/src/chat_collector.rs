@@ -18,7 +18,7 @@ pub(crate) const MAX_FILES_PER_RESPONSE: usize = 64;
 #[derive(Default)]
 pub struct ChatResponseCollector {
     records: Vec<AgenticToolCallRecord>,
-    pending_args: HashMap<(usize, String), String>,
+    pending_args: HashMap<String, String>,
     files: Vec<File>,
 }
 
@@ -28,16 +28,16 @@ impl ChatResponseCollector {
         match response {
             Response::AgenticToolCallProgress {
                 round,
+                tool_call_id,
                 tool_name,
                 phase,
             } => {
-                record_agentic_progress(
-                    &mut self.records,
-                    &mut self.pending_args,
+                let call = ProgressCall {
                     round,
-                    &tool_name,
-                    &phase,
-                );
+                    tool_call_id,
+                    tool_name,
+                };
+                record_agentic_progress(&mut self.records, &mut self.pending_args, call, &phase);
                 None
             }
             Response::File(file) => {
@@ -99,22 +99,25 @@ fn extract_arguments(data: &AgenticToolCallData) -> String {
     }
 }
 
-/// Fold progress events into `AgenticToolCallRecord` for non-streaming responses. `pending_args` keeps Calling-phase args keyed by (round, tool_name).
+struct ProgressCall {
+    round: usize,
+    tool_call_id: String,
+    tool_name: String,
+}
+
+/// Fold progress events into `AgenticToolCallRecord` for non-streaming responses; `pending_args` keys by call id.
 fn record_agentic_progress(
     records: &mut Vec<AgenticToolCallRecord>,
-    pending_args: &mut HashMap<(usize, String), String>,
-    round: usize,
-    tool_name: &str,
+    pending_args: &mut HashMap<String, String>,
+    call: ProgressCall,
     phase: &AgenticToolCallPhase,
 ) {
     match phase {
         AgenticToolCallPhase::Calling(data) => {
-            pending_args.insert((round, tool_name.to_string()), extract_arguments(data));
+            pending_args.insert(call.tool_call_id, extract_arguments(data));
         }
         AgenticToolCallPhase::Complete(data) => {
-            let arguments = pending_args
-                .remove(&(round, tool_name.to_string()))
-                .unwrap_or_default();
+            let arguments = pending_args.remove(&call.tool_call_id).unwrap_or_default();
 
             let (result_content, result_images_base64) = match data {
                 AgenticToolCallData::CodeExecution {
@@ -176,8 +179,9 @@ fn record_agentic_progress(
                 AgenticToolCallData::Custom { content, .. } => (content.clone(), vec![]),
             };
             records.push(AgenticToolCallRecord {
-                round,
-                name: tool_name.to_string(),
+                round: call.round,
+                tool_call_id: call.tool_call_id,
+                name: call.tool_name,
                 arguments,
                 result_content,
                 result_images_base64,
@@ -187,12 +191,19 @@ fn record_agentic_progress(
     }
 }
 
-/// Fill each record's `file_ids` from files whose `source.round` and `source.tool` match.
+/// Fill each record's `file_ids` from the files its call made.
 fn stamp_file_ids(records: &mut [AgenticToolCallRecord], files: &[File]) {
     for r in records.iter_mut() {
         let matched: Vec<String> = files
             .iter()
-            .filter(|f| f.source.round == r.round && f.source.tool == r.name)
+            .filter(|f| {
+                f.source.round == r.round
+                    && f.source.tool == r.name
+                    && f.source
+                        .tool_call_id
+                        .as_ref()
+                        .is_none_or(|id| *id == r.tool_call_id)
+            })
             .map(|f| f.id.clone())
             .collect();
         if !matched.is_empty() {
@@ -247,6 +258,7 @@ mod tests {
     fn progress(phase: AgenticToolCallPhase) -> Response {
         Response::AgenticToolCallProgress {
             round: 1,
+            tool_call_id: "call_lookup".to_string(),
             tool_name: "lookup".to_string(),
             phase,
         }
@@ -273,6 +285,7 @@ mod tests {
             tool: "lookup".to_string(),
             round: 1,
             turn: 0,
+            tool_call_id: None,
         };
         assert!(
             collector
@@ -283,6 +296,7 @@ mod tests {
             tool: "lookup".to_string(),
             round: 2,
             turn: 0,
+            tool_call_id: None,
         };
         assert!(
             collector
@@ -317,6 +331,7 @@ mod tests {
                 tool: "lookup".to_string(),
                 round: 0,
                 turn: 0,
+                tool_call_id: None,
             };
             collector.absorb(Response::File(text_file(&format!("file_{index}"), source)));
         }

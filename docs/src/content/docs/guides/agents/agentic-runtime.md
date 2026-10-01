@@ -77,12 +77,14 @@ Send a streaming chat-completions request:
 }
 ```
 
-Model output arrives as standard chat-completion chunks. Tool progress arrives as named SSE events with `round`, an opaque `tool_name` for correlation, `phase` (`calling` or `complete`), and tool-type-specific `data`:
+Model output arrives as standard chat-completion chunks. Tool progress arrives as named SSE events with `round`, `tool_call_id` (the model's id for the call, which pairs its two phases), `tool_name`, `phase` (`calling` or `complete`), and tool-type-specific `data`:
 
 ```text
 event: agentic_tool_call_progress
-data: {"type":"agentic_tool_call_progress","round":0,"tool_name":"<tool identifier>","phase":"calling","data":{"tool_type":"code_execution","code":"print('hello')"}}
+data: {"type":"agentic_tool_call_progress","round":0,"tool_call_id":"call-1f0c","tool_name":"<tool identifier>","phase":"calling","data":{"tool_type":"code_execution","code":"print('hello')"}}
 ```
+
+When the model calls several tools in one round, the engine runs them all at once: every call's `calling` event arrives first, then each `complete` as the round's results are appended together. If any call in a round has nothing in the engine to run it (a client-side tool), the whole round comes back to the client instead.
 
 Complete events carry tool-type-specific payloads:
 
