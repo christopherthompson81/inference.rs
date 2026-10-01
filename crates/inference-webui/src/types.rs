@@ -4,8 +4,8 @@ use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 
 use inference_api::Engine;
+use inference_api::engine::SearchEmbeddingModel;
 use inference_api::openai::GenerationDefaults;
-use inference_core::SearchEmbeddingModel;
 
 #[derive(Clone, Serialize)]
 pub struct UiModelInfo {
@@ -168,7 +168,7 @@ const CHAT_SESSION_FILE_EXT: &str = "session.json";
 impl AppState {
     /// This UI state as `owner` sees it: the same models and tools, with that owner's own chats directory.
     pub fn for_owner(&self, owner: &str) -> std::io::Result<Self> {
-        let key = inference_core::sandbox_key(Some(owner), "");
+        let key = inference_api::sandbox_key(Some(owner), "");
         let chats_dir = Path::new(&self.chats_dir).join(OWNER_CHATS_DIR).join(key);
         std::fs::create_dir_all(&chats_dir)?;
         Ok(Self {

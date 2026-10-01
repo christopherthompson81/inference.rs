@@ -43,3 +43,5 @@ pub use inference_core::{
     INFERENCE_RS_GIT_REVISION, INFERENCE_RS_VERSION, LogVerbosity, initialize_inference_logging,
     initialize_logging,
 };
+pub use inference_core::{REQUEST_QUEUE_DURATION_METRIC, sandbox_key};
+pub use inference_protocol::response;

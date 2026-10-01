@@ -50,9 +50,10 @@ mod tests {
     };
     use std::time::Duration;
 
+    use inference_api::engine_chat::Response;
     use inference_core::{
         AgentToolApproval, AgentToolApprovalRequest, AgentToolKind, AgentToolMetadata,
-        AgentToolSource, Response,
+        AgentToolSource,
     };
 
     use super::*;

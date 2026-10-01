@@ -9,8 +9,8 @@ use axum::{
     routing::post,
 };
 use inference_api::Engine;
+use inference_api::engine::AgentPermission;
 use inference_api::openai::Modality;
-use inference_core::AgentPermission;
 use serde_json::{Value, json};
 
 use crate::{

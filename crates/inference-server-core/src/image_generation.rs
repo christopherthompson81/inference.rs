@@ -16,7 +16,7 @@ use crate::{
     tag = "inference.rs",
     path = "/v1/images/generations",
     request_body = ImageGenerationRequest,
-    responses((status = 200, description = "Image generation", body = inference_core::ImageGenerationResponse))
+    responses((status = 200, description = "Image generation", body = inference_api::response::ImageGenerationResponse))
 ))]
 pub async fn image_generation(
     OwnedEngine(engine): OwnedEngine,

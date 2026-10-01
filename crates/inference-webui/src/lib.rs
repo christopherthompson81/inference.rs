@@ -11,10 +11,10 @@ use axum::routing::{get, get_service, post};
 use axum::{Extension, Router};
 use include_dir::{Dir, include_dir};
 use indexmap::IndexMap;
+use inference_api::engine::SearchEmbeddingModel;
 use inference_api::lora_routing::DEFAULT_MODEL_ID;
 use inference_api::openai::{Modality, ModelCategory};
 use inference_api::{Engine, engine::AgenticSpec};
-use inference_core::SearchEmbeddingModel;
 use inference_server_core::{
     auth::{Auth, Guard, Owner, require},
     inference_server_router_builder::DEFAULT_MAX_BODY_LIMIT,

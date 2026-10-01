@@ -3,11 +3,8 @@
 use std::sync::Arc;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
-pub use inference_core::File;
-use inference_core::{
-    FILE_PURPOSE_GENERATED_IMAGE, FILE_PURPOSE_USER_DATA, FileContent, FileSource, InferenceRs,
-    InferenceRsError,
-};
+pub use inference_core::{FILE_PURPOSE_GENERATED_IMAGE, FILE_PURPOSE_USER_DATA, File};
+use inference_core::{FileContent, FileSource, InferenceRs, InferenceRsError};
 use serde::Serialize;
 use utoipa::ToSchema;
 

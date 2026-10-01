@@ -9,7 +9,7 @@ use indexmap::IndexMap;
 use inference_core::{
     AgentPermission, AgentToolApprovalHandler, AgentToolApprovalNotifier,
     ChatCompletionChunkResponse, ChatResponseCollector, Constraint, InferenceRs, MessageContent,
-    ModelCategory, NormalRequest, Request, RequestMessage, Response, SamplingParams,
+    ModelCategory, NormalRequest, Request, RequestMessage, SamplingParams,
     encode_agentic_tool_images,
 };
 pub use inference_core::{ReasoningEffort, resolve_reasoning_controls};
@@ -1026,6 +1026,9 @@ impl AgenticToolApproval {
         )
     }
 }
+
+/// The engine's raw responses, as a [`ResponseTap`] sees them.
+pub use inference_core::Response;
 
 /// Observes every engine response before it is mapped, e.g. for usage and latency accounting.
 pub type ResponseTap = Box<dyn Fn(&Response) + Send + Sync>;

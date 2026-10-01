@@ -22,7 +22,6 @@ anyhow.workspace = true
 candle-core.workspace = true
 image.workspace = true
 inference-api = { workspace = true, features = ["all-models"] }
-inference-core.workspace = true
 inference-layout = { path = "../inference-layout" }
 serde_json.workspace = true
 
@@ -41,7 +40,7 @@ tempfile.workspace = true
 default = ["code-execution"]
 cuda = ["candle-core/cuda", "inference-api/cuda", "inference-layout/cuda"]
 metal = ["candle-core/metal", "inference-api/metal", "inference-layout/metal"]
-cutile = ["cuda", "inference-core/cutile", "inference-api/cutile"]
+cutile = ["cuda", "inference-api/cutile"]
 cudnn = ["candle-core/cudnn", "inference-api/cudnn"]
 flash-attn = ["cuda", "inference-api/flash-attn"]
 flash-attn-v3 = ["cuda", "inference-api/flash-attn-v3"]

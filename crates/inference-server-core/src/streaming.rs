@@ -6,7 +6,7 @@ use std::{
     time::Instant,
 };
 
-use inference_core::{Response, Usage};
+use inference_api::{engine_chat::Response, response::Usage};
 
 use crate::{
     engine_chat::ResponseTap,

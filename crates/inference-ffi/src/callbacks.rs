@@ -5,8 +5,9 @@ use std::{
     sync::Arc,
 };
 
-use inference_api::engine::EngineCallbacks;
-use inference_core::{SearchResult, Tool, ToolCallbackKind, ToolCallbackWithTool};
+use inference_api::engine::{
+    EngineCallbacks, SearchResult, Tool, ToolCallbackKind, ToolCallbackWithTool,
+};
 
 use crate::{Failure, FfiResult};
 
@@ -104,8 +105,8 @@ fn host_tool(tool: &inference_host_tool, index: usize) -> FfiResult<ToolCallback
         .map_err(|error| Failure::invalid(format!("tools[{index}].definition: {error}")))?;
     let user_data = UserData(tool.user_data);
     let tool_name = c_string(&definition.function.name);
-    let run = move |called: &inference_core::CalledFunction,
-                    context: &inference_core::ToolCallContext| {
+    let run = move |called: &inference_api::engine::CalledFunction,
+                    context: &inference_api::engine::ToolCallContext| {
         let arguments = c_string(&called.arguments);
         let context = c_string(
             &serde_json::json!({"session_id": context.session_id, "round": context.round})
@@ -160,7 +161,7 @@ pub(crate) unsafe fn engine_callbacks(
         }
         let search = callbacks.search.map(|search| {
             let user_data = UserData(callbacks.search_user_data);
-            let run = move |params: &inference_core::SearchFunctionParameters| {
+            let run = move |params: &inference_api::engine::SearchFunctionParameters| {
                 let query = c_string(&params.query);
                 let json = call_host(|result| {
                     search(
@@ -172,7 +173,7 @@ pub(crate) unsafe fn engine_callbacks(
                 })?;
                 Ok(serde_json::from_str::<Vec<SearchResult>>(&json)?)
             };
-            Arc::new(run) as Arc<inference_core::SearchCallback>
+            Arc::new(run) as Arc<inference_api::engine::SearchCallback>
         });
         Ok(EngineCallbacks { tools, search })
     }
@@ -294,11 +295,11 @@ mod tests {
         let ToolCallbackKind::Text(callback) = &callbacks.tools[0].callback else {
             unreachable!("host tools are text tools");
         };
-        let called = inference_core::CalledFunction {
+        let called = inference_api::engine::CalledFunction {
             name: "echo".to_string(),
             arguments: r#"{"x":1}"#.to_string(),
         };
-        let context = inference_core::ToolCallContext {
+        let context = inference_api::engine::ToolCallContext {
             session_id: Some("s1".to_string()),
             round: Some(2),
             ..Default::default()
@@ -326,7 +327,7 @@ mod tests {
 
         let search = callbacks.search.unwrap();
         let query = |query: &str| {
-            search(&inference_core::SearchFunctionParameters {
+            search(&inference_api::engine::SearchFunctionParameters {
                 query: query.to_string(),
             })
         };
