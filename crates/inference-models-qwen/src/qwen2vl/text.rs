@@ -18,7 +18,7 @@ use crate::{
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
 
-use super::config::Config;
+use super::config::QwenVlConfig;
 
 fn cache_types(
     layer_sliding_windows: &[Option<usize>],
@@ -43,7 +43,11 @@ struct Mlp {
 }
 
 impl Mlp {
-    fn new(cfg: &Config, vb: ShardedVarBuilder, comm: &Arc<inference_quant::Comm>) -> Result<Self> {
+    fn new<V>(
+        cfg: &QwenVlConfig<V>,
+        vb: ShardedVarBuilder,
+        comm: &Arc<inference_quant::Comm>,
+    ) -> Result<Self> {
         let hidden_sz = cfg.hidden_size;
         let intermediate_sz = cfg.intermediate_size;
         let gate_proj = ColumnParallelLayer::new(
@@ -111,9 +115,9 @@ struct AttentionForward<'a> {
 }
 
 impl Attention {
-    fn new(
+    fn new<V>(
         rotary_emb: Arc<Qwen2VLRotaryEmbedding>,
-        cfg: &Config,
+        cfg: &QwenVlConfig<V>,
         sliding_window: Option<usize>,
         vb: ShardedVarBuilder,
         paged_attn: Option<PagedAttention>,
@@ -301,8 +305,8 @@ pub struct DecoderLayer {
     post_attention_layernorm: F32RmsNorm,
 }
 
-struct DecoderLayerLoad<'a> {
-    cfg: &'a Config,
+struct DecoderLayerLoad<'a, V> {
+    cfg: &'a QwenVlConfig<V>,
     mapper: &'a dyn DeviceMapper,
     layer_idx: usize,
     loading_isq: bool,
@@ -312,10 +316,10 @@ struct DecoderLayerLoad<'a> {
 }
 
 impl DecoderLayer {
-    fn new(
+    fn new<V>(
         rotary_emb: Arc<Qwen2VLRotaryEmbedding>,
         vb: ShardedVarBuilder,
-        args: DecoderLayerLoad<'_>,
+        args: DecoderLayerLoad<'_, V>,
     ) -> Result<Self> {
         let DecoderLayerLoad {
             cfg,
@@ -377,21 +381,21 @@ impl DecoderLayer {
 
 pub struct Qwen2VLTextModel {
     embed_tokens: Arc<dyn QuantMethod>,
-    pub(super) norm: F32RmsNorm,
+    pub(crate) norm: F32RmsNorm,
     layers: Vec<DecoderLayer>,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
     lm_head: Arc<dyn QuantMethod>,
-    pub(super) cache: EitherCache,
-    pub(super) cfg: ModelConfigMetadata,
-    pub(super) device: Device,
-    pub(super) dtype: DType,
-    pub(super) max_seq_len: usize,
-    pub(super) sliding_window: Option<usize>,
+    pub(crate) cache: EitherCache,
+    pub(crate) cfg: ModelConfigMetadata,
+    pub(crate) device: Device,
+    pub(crate) dtype: DType,
+    pub(crate) max_seq_len: usize,
+    pub(crate) sliding_window: Option<usize>,
 }
 
 impl Qwen2VLTextModel {
-    pub fn new(
-        cfg: &Config,
+    pub fn new<V: Sync>(
+        cfg: &QwenVlConfig<V>,
         vb: ShardedVarBuilder,
         _is_gptx: bool,
         normal_loading_metadata: NormalLoadingMetadata,
@@ -594,6 +598,24 @@ mod tests {
         assert!(matches!(
             &types[2],
             NormalCacheType::Normal { max_seq_len: 4096 }
+        ));
+    }
+
+    #[test]
+    fn sliding_layers_around_a_full_one_keep_their_windows() {
+        let types = cache_types(&[Some(256), None, Some(256)], 8192);
+
+        assert!(matches!(
+            &types[0],
+            NormalCacheType::SlidingWindow { window: 256 }
+        ));
+        assert!(matches!(
+            &types[1],
+            NormalCacheType::Normal { max_seq_len: 8192 }
+        ));
+        assert!(matches!(
+            &types[2],
+            NormalCacheType::SlidingWindow { window: 256 }
         ));
     }
 }
