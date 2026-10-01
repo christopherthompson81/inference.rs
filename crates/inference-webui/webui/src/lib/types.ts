@@ -49,6 +49,7 @@ export interface Usage {
 export interface AgenticToolCallProgress {
   type: "agentic_tool_call_progress";
   round: number;
+  tool_call_id: string;
   tool_name: string;
   phase: "calling" | "complete";
   data: AgenticToolCallData;

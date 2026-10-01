@@ -11993,6 +11993,13 @@
           "tool": {
             "type": "string"
           },
+          "tool_call_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The id of the tool call that made the file."
+          },
           "turn": {
             "type": "integer",
             "minimum": 0

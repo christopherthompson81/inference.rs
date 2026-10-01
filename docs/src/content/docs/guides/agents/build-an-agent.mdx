@@ -66,8 +66,8 @@ The response keeps the normal OpenAI-compatible `choices` array and adds inferen
     }
   ],
   "agentic_tool_calls": [
-    {"round": 0, "name": "<tool identifier>", "arguments": "{\"query\":\"Tokyo population\"}", "result_content": "..."},
-    {"round": 1, "name": "<tool identifier>", "arguments": "{\"code\":\"...\"}", "result_content": "Tokyo share: ...", "file_ids": ["file_tokyo_r1_0"]}
+    {"round": 0, "tool_call_id": "call-1f0c", "name": "<tool identifier>", "arguments": "{\"query\":\"Tokyo population\"}", "result_content": "..."},
+    {"round": 1, "tool_call_id": "call-7a2e", "name": "<tool identifier>", "arguments": "{\"code\":\"...\"}", "result_content": "Tokyo share: ...", "file_ids": ["file_tokyo_r1_0"]}
   ],
   "files": [
     {"id": "file_tokyo_r1_0", "name": "tokyo-population.png", "format": "png", "mime_type": "image/png", "bytes": 14823, "data_base64": "iVBORw0KGgo..."}
@@ -84,7 +84,7 @@ With `stream: true`, model text arrives as OpenAI-compatible chunks while tool p
 
 ```text
 event: agentic_tool_call_progress
-data: {"type":"agentic_tool_call_progress","round":0,"tool_name":"<tool identifier>","phase":"calling","data":{"tool_type":"web_search","query":"Tokyo population Japan population"}}
+data: {"type":"agentic_tool_call_progress","round":0,"tool_call_id":"call-1f0c","tool_name":"<tool identifier>","phase":"calling","data":{"tool_type":"web_search","query":"Tokyo population Japan population"}}
 
 event: file_produced
 data: {"id":"file_tokyo_r1_0","name":"tokyo-population.png","format":"png","mime_type":"image/png","bytes":14823}

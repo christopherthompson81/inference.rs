@@ -1080,3 +1080,35 @@ Review findings:
 Tests: `a_registered_logits_processor_steers_the_requests_that_name_it` (FFI),
 `a_failing_processor_fails_its_request_and_spares_the_batch`, `responses_and_anthropic_requests_resolve_their_processors`,
 the registry unit tests, and the C# and Python equivalents including a registration outliving its scoped handle.
+
+## Run 38 - 2026-10-01 (time approximate)
+
+Question: the engine's tool loop ran only the first call of each round (`agentic_loop.rs` logged "executing only the
+first"). What does running every call take?
+
+Finding: each tool's dispatcher appended its own assistant message and tool reply to the request, so a round could only
+ever hold one call, and the streaming and non-streaming branches each carried a copy of the round. Progress events and
+the non-streaming collector paired a call's two phases by (round, tool name), as did the Responses shell items and the
+web UI, which two calls of one tool in a round would break.
+
+Change:
+- Dispatchers return a `ToolOutcome`; `run_round` (shared by both branches) resolves every call's dispatcher first, so
+  a round with any client-side call goes back to the client whole, then sends each Calling event, runs approvals one at
+  a time, runs the calls, and appends one assistant message with every call and a reply per call tagged
+  `tool_call_id`. Host callbacks and the HTTP tool run on the blocking pool so they overlap.
+- Calls into the session's sandbox (Python, reset, shell, surface outputs) run in the model's order; everything else
+  runs alongside them. Found by review: concurrent `execute_python` calls race for the session lock, so `x=1` then
+  `print(x)` could run backwards, and two shell calls in one work dir each claimed the other's new files.
+- `tool_call_id` on progress events, `agentic_tool_calls` records, `FileSource` (serde default, so stored files load)
+  and the Files API metadata; every pairing keys by it, and Responses shell items reuse the model's id.
+- Semantic change: an unregistered (client) tool now goes to the client before approval, where it used to be approved
+  or denied first.
+
+Tests: the tiny model is scripted with a logits processor that forces a JSON array of calls token by token (the
+tokenizer's byte fallback encodes any text but spaces). `every_call_of_a_round_runs_at_once_and_reports_its_own_id`
+(two host tools sleeping 300 ms: most concurrent = 2), `a_streamed_round_pairs_each_calls_phases_by_its_id`, and
+`calls_into_the_sandbox_keep_the_models_order` (`x=41` after a sleep, then `print(x+1)` must see 42). With the ordering
+turned off that last test failed 1 run in 3: the session lock decides, so detection is weak but the race is real.
+
+Known limits: approval prompts carry no `tool_call_id`, and several Ask-mode calls are prompted one after another (up
+to the approval timeout each); the CLI prints every call's header before the results.

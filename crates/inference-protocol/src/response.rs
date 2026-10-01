@@ -109,6 +109,8 @@ pub struct Usage {
 #[derive(Debug, Clone, Serialize)]
 pub struct AgenticToolCallRecord {
     pub round: usize,
+    /// The model's id for the call.
+    pub tool_call_id: String,
     pub name: String,
     pub arguments: String,
     pub result_content: String,

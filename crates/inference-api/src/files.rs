@@ -71,6 +71,9 @@ pub struct SourceMeta {
     pub tool: String,
     pub round: usize,
     pub turn: usize,
+    /// The id of the tool call that made the file.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -147,6 +150,7 @@ fn source(file: &File) -> SourceMeta {
         tool: file.source.tool.clone(),
         round: file.source.round,
         turn: file.source.turn,
+        tool_call_id: file.source.tool_call_id.clone(),
     }
 }
 
@@ -211,6 +215,7 @@ pub(crate) fn upload_file(
             tool: UPLOAD_SOURCE_TOOL.to_string(),
             round: 0,
             turn: 0,
+            tool_call_id: None,
         },
         upload.bytes,
     );
@@ -237,6 +242,7 @@ pub(crate) fn store_generated_image(
             tool: GENERATED_IMAGE_SOURCE_TOOL.to_string(),
             round: 0,
             turn: 0,
+            tool_call_id: None,
         },
         png,
     );

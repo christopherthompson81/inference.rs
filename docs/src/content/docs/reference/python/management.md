@@ -579,11 +579,12 @@ Branches a session into a new one, named by the engine, with the source's first 
 
 Which agentic tool produced the file, and when in the session.
 
-| Field | Type |
-| --- | --- |
-| `round` | `int` |
-| `tool` | `str` |
-| `turn` | `int` |
+| Field | Type | Default |
+| --- | --- | --- |
+| `round` | `int` | required |
+| `tool` | `str` | required |
+| `tool_call_id` | `str \| None` | optional |
+| `turn` | `int` | required |
 
 
 ## `SpeechGenerationRequest`

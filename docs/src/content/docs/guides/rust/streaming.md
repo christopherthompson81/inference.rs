@@ -58,7 +58,7 @@ When the [agentic loop](/guides/agents/build-an-agent/) executes a tool mid-stre
 ```rust
 use inference::core::AgenticToolCallPhase;
 
-Response::AgenticToolCallProgress { round, tool_name, phase } => {
+Response::AgenticToolCallProgress { round, tool_name, phase, .. } => {
     match phase {
         AgenticToolCallPhase::Calling(_) => println!("[round {round}: calling {tool_name}]"),
         AgenticToolCallPhase::Complete(_) => println!("[round {round}: completed {tool_name}]"),

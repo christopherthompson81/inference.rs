@@ -293,6 +293,7 @@ mod tests {
                 tool: "execute_python".into(),
                 round: 0,
                 turn: 0,
+                tool_call_id: None,
             },
             content: FileContent::Text {
                 text: Some("hi".into()),
