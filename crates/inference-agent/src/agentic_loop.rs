@@ -978,6 +978,20 @@ async fn emit_files(
     }
 }
 
+/// A streamed run's last chunk (its held final, or the tool call it stopped on), with the run's usage and session.
+fn stopped_round_final_chunk(
+    held: Option<inference_core::ChatCompletionChunkResponse>,
+    usage: Option<Usage>,
+    session_id: &str,
+) -> Option<inference_core::ChatCompletionChunkResponse> {
+    let mut chunk = held?;
+    if usage.is_some() {
+        chunk.usage = usage;
+    }
+    chunk.session_id = Some(session_id.to_string());
+    Some(chunk)
+}
+
 /// Drive tool-use rounds (search, code exec, custom tools) without recursion. Forwards every reply except the first probe.
 pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) {
     let web_search_options = request.web_search_options.clone();
@@ -1341,22 +1355,22 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                 if canceled {
                     // A tool call that finished on the canceled token is dropped, not run.
                     held_final_chunk =
-                        held_final_chunk.or(tool_call_final_chunk).map(|mut chunk| {
-                            for choice in &mut chunk.choices {
-                                choice.finish_reason = Some(FINISH_REASON_CANCELED.to_string());
-                                choice.delta.tool_calls = None;
-                            }
-                            chunk
-                        });
+                        held_final_chunk
+                            .or(tool_call_final_chunk.take())
+                            .map(|mut chunk| {
+                                for choice in &mut chunk.choices {
+                                    choice.finish_reason = Some(FINISH_REASON_CANCELED.to_string());
+                                    choice.delta.tool_calls = None;
+                                }
+                                chunk
+                            });
                 }
                 if tc_opt.is_none() || round >= max_rounds || canceled {
                     save_session(&this_clone, &session_id, &visible_req);
-                    if let Some(mut final_chunk) = held_final_chunk {
-                        if let Some(usage) = usage_accumulator.aggregate() {
-                            final_chunk.usage = Some(usage);
-                        }
-                        final_chunk.session_id = Some(session_id.clone());
-                        let _ = user_sender.send(Response::Chunk(final_chunk)).await;
+                    let usage = usage_accumulator.aggregate();
+                    let held = held_final_chunk.or(tool_call_final_chunk);
+                    if let Some(terminal) = stopped_round_final_chunk(held, usage, &session_id) {
+                        let _ = user_sender.send(Response::Chunk(terminal)).await;
                     }
                     break;
                 }
@@ -1386,6 +1400,11 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                 };
                 let Some((mut next_visible, complete_data, files)) = outcome else {
                     save_session(&this_clone, &session_id, &visible_req);
+                    let usage = usage_accumulator.aggregate();
+                    let held = tool_call_final_chunk;
+                    if let Some(terminal) = stopped_round_final_chunk(held, usage, &session_id) {
+                        let _ = user_sender.send(Response::Chunk(terminal)).await;
+                    }
                     break;
                 };
                 attach_reasoning_to_latest_assistant_tool_call(
@@ -1456,5 +1475,66 @@ mod tests {
             messages[0].get("reasoning_content"),
             Some(&Either::Left("Need weather".to_string()))
         );
+    }
+
+    #[test]
+    fn a_round_stopped_on_its_tool_call_ends_the_stream_with_that_call() {
+        let tool_call = ToolCallResponse {
+            index: 0,
+            id: "call-1".to_string(),
+            tp: ToolCallType::Function,
+            function: CalledFunction {
+                name: "lookup".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+        let chunk = inference_core::ChatCompletionChunkResponse {
+            id: "chunk".to_string(),
+            choices: vec![inference_core::ChunkChoice {
+                finish_reason: Some("tool_calls".to_string()),
+                stop_sequence: None,
+                index: 0,
+                delta: inference_core::Delta {
+                    content: None,
+                    role: "assistant".to_string(),
+                    tool_calls: Some(vec![tool_call]),
+                    reasoning_content: None,
+                },
+                logprobs: None,
+            }],
+            created: 0,
+            model: "model".to_string(),
+            system_fingerprint: "local".to_string(),
+            object: "chat.completion.chunk".to_string(),
+            usage: None,
+            adapter_generation: None,
+            session_id: None,
+        };
+        let mut usage = AgenticUsageAccumulator::default();
+        usage.add(&Usage {
+            completion_tokens: 3,
+            prompt_tokens: 5,
+            total_tokens: 8,
+            prompt_tokens_details: None,
+            avg_tok_per_sec: 0.0,
+            avg_prompt_tok_per_sec: 0.0,
+            avg_compl_tok_per_sec: 0.0,
+            total_time_sec: 0.0,
+            total_prompt_time_sec: 0.0,
+            total_completion_time_sec: 0.0,
+        });
+
+        // No text chunk was held: the tool-call chunk is what ends the run.
+        let last = stopped_round_final_chunk(Some(chunk), usage.aggregate(), "session").unwrap();
+        assert_eq!(last.choices[0].finish_reason.as_deref(), Some("tool_calls"));
+        assert_eq!(
+            last.choices[0].delta.tool_calls.as_ref().unwrap()[0]
+                .function
+                .name,
+            "lookup"
+        );
+        assert_eq!(last.usage.unwrap().completion_tokens, 3);
+        assert_eq!(last.session_id.as_deref(), Some("session"));
+        assert!(stopped_round_final_chunk(None, None, "session").is_none());
     }
 }

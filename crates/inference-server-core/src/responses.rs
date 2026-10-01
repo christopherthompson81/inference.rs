@@ -68,16 +68,16 @@ impl Stream for ResponsesSse {
 }
 
 pub enum OpenResponsesResponder {
-    Sse(Sse<KeepAliveStream<ResponsesSse>>),
-    Json(ResponseResource),
+    Sse(Box<Sse<KeepAliveStream<ResponsesSse>>>),
+    Json(Box<ResponseResource>),
     Error(ApiError),
 }
 
 impl IntoResponse for OpenResponsesResponder {
     fn into_response(self) -> axum::response::Response {
         match self {
-            Self::Sse(sse) => sse.into_response(),
-            Self::Json(response) => Json(response).into_response(),
+            Self::Sse(sse) => (*sse).into_response(),
+            Self::Json(response) => Json(*response).into_response(),
             Self::Error(error) => openai_error_response(error),
         }
     }
@@ -119,7 +119,7 @@ pub async fn create_response(
         Err(error) => return OpenResponsesResponder::Error(error.into_api_error(state)),
     };
     if prepared.background {
-        return OpenResponsesResponder::Json(spawn_background(prepared, state));
+        return OpenResponsesResponder::Json(Box::new(spawn_background(prepared, state)));
     }
     if prepared.stream {
         let tap = stream_outcome.map(|Extension(handle)| handle.tap());
@@ -127,12 +127,12 @@ pub async fn create_response(
             inner: OpenResponsesStreamer::new(prepared, state, tap),
             done: false,
         };
-        return OpenResponsesResponder::Sse(Sse::new(sse).keep_alive(
+        return OpenResponsesResponder::Sse(Box::new(Sse::new(sse).keep_alive(
             KeepAlive::new().interval(Duration::from_millis(get_keep_alive_interval())),
-        ));
+        )));
     }
     match collect_response(prepared, &state).await {
-        Ok(response) => OpenResponsesResponder::Json(response),
+        Ok(response) => OpenResponsesResponder::Json(Box::new(response)),
         Err(error) => OpenResponsesResponder::Error(error),
     }
 }

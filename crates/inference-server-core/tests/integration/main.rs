@@ -8,3 +8,4 @@ mod cancel;
 mod chat_route;
 mod flux;
 mod mcp;
+mod responses_stream;
