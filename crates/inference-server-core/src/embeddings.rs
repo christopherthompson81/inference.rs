@@ -1,37 +1,15 @@
 //! OpenAI-compatible embeddings endpoint.
 
-use axum::{
-    extract::{Json, State},
-    response::IntoResponse,
-};
+use axum::response::Response;
 
 use crate::handler_core::{ApiJson, ApiJsonRejection};
+#[cfg(test)]
+use crate::openai::EmbeddingResponse;
 use crate::{
-    engine_embeddings::{EmbeddingError, embed},
-    handler_core::{ApiErrorKind, openai_error_from_error},
-    openai::{EmbeddingRequest, EmbeddingResponse},
-    types::ExtractedInferenceRsState,
+    handler_core::{json_response, openai_error_response},
+    openai::EmbeddingRequest,
+    types::OwnedEngine,
 };
-
-pub enum EmbeddingResponder {
-    Json(EmbeddingResponse),
-    InternalError(anyhow::Error),
-    ValidationError(anyhow::Error),
-}
-
-impl IntoResponse for EmbeddingResponder {
-    fn into_response(self) -> axum::response::Response {
-        match self {
-            EmbeddingResponder::Json(s) => Json(s).into_response(),
-            EmbeddingResponder::InternalError(e) => {
-                openai_error_from_error(e.as_ref(), ApiErrorKind::Internal)
-            }
-            EmbeddingResponder::ValidationError(e) => {
-                openai_error_from_error(e.as_ref(), ApiErrorKind::InvalidRequest)
-            }
-        }
-    }
-}
 
 #[cfg_attr(test, utoipa::path(
     post,
@@ -41,18 +19,11 @@ impl IntoResponse for EmbeddingResponder {
     responses((status = 200, description = "Embeddings", body = EmbeddingResponse))
 ))]
 pub async fn embeddings(
-    State(state): ExtractedInferenceRsState,
+    OwnedEngine(engine): OwnedEngine,
     payload: Result<ApiJson<EmbeddingRequest>, ApiJsonRejection>,
-) -> EmbeddingResponder {
-    let oairequest = match payload {
-        Ok(ApiJson(request)) => request,
-        Err(ApiJsonRejection(error)) => {
-            return EmbeddingResponder::ValidationError(error.into());
-        }
-    };
-    match embed(state, oairequest).await {
-        Ok(response) => EmbeddingResponder::Json(response),
-        Err(EmbeddingError::Validation(e)) => EmbeddingResponder::ValidationError(e),
-        Err(EmbeddingError::Internal(e)) => EmbeddingResponder::InternalError(e),
+) -> Response {
+    match payload {
+        Ok(ApiJson(request)) => json_response(engine.embeddings(request).await),
+        Err(ApiJsonRejection(error)) => openai_error_response(error),
     }
 }

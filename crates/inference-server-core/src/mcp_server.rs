@@ -9,7 +9,7 @@ use axum::{
     routing::post,
 };
 use inference_api::Engine;
-use inference_core::{AgentPermission, SupportedModality};
+use inference_core::AgentPermission;
 use serde_json::{Value, json};
 
 use crate::{
@@ -157,17 +157,9 @@ struct McpState {
 /// Build the MCP router (`POST /mcp`, JSON-RPC 2.0), requiring `auth`'s keys when given. Mount on its own port or
 /// into an existing app.
 pub fn create_mcp_router(engine: &Engine, auth: Option<Arc<crate::auth::Auth>>) -> Router {
-    let text_model = engine
-        .state()
-        .config(None)
-        .map(|c| {
-            c.modalities.input.contains(&SupportedModality::Text)
-                && c.modalities.output.contains(&SupportedModality::Text)
-        })
-        .unwrap_or(false);
     // `ask` needs a stream to carry approvals and a tool call is one blocking chat, so the tool could never succeed.
-    let asks = engine.chat_engine().agentic.agent_permission == Some(AgentPermission::Ask);
-    let chat_enabled = text_model && !asks;
+    let asks = engine.agent_permission() == Some(AgentPermission::Ask);
+    let chat_enabled = engine.chats_in_text() && !asks;
     let state = Arc::new(McpState {
         engine: engine.clone(),
         chat_enabled,

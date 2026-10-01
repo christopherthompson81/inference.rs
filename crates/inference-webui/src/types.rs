@@ -1,10 +1,10 @@
 use indexmap::IndexMap;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use tokio::sync::RwLock;
 
-use inference_core::{InferenceRs, ModelGenerationDefaults, SearchEmbeddingModel};
+use inference_api::Engine;
+use inference_core::{ModelGenerationDefaults, SearchEmbeddingModel};
 
 #[derive(Clone, Serialize)]
 pub struct UiModelInfo {
@@ -134,7 +134,8 @@ impl GenerationParams {
 }
 
 pub struct AppState {
-    pub inference: Arc<InferenceRs>,
+    /// Acts for `owner`, so the sessions this state forks and restores are that owner's.
+    pub engine: Engine,
     pub models: IndexMap<String, UiModelInfo>,
     /// The model a new owner's UI starts on.
     pub default_model: Option<String>,
@@ -170,7 +171,7 @@ impl AppState {
         let chats_dir = Path::new(&self.chats_dir).join(OWNER_CHATS_DIR).join(key);
         std::fs::create_dir_all(&chats_dir)?;
         Ok(Self {
-            inference: self.inference.clone(),
+            engine: self.engine.for_owner(owner),
             models: self.models.clone(),
             default_model: self.default_model.clone(),
             current: RwLock::new(self.default_model.clone()),

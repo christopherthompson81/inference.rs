@@ -26,12 +26,10 @@ use tracing::{debug, info};
 
 use crate::{
     handler_core::{ApiError, ApiErrorKind, ResponseErrorMessage, openai_error_response},
-    inference_server_router_builder::DEFAULT_MAX_BODY_LIMIT,
-    lora_routing::{is_resolvable_lora_adapter_model, list_lora_adapter_models},
     route_registry::UI_ROUTE,
     streaming::{StreamOutcome, StreamOutcomeHandle},
-    types::SharedInferenceRsState,
 };
+use inference_api::Engine;
 
 static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 const REQUEST_ID_HEADER: &str = "x-request-id";
@@ -122,23 +120,19 @@ fn default_true() -> bool {
 #[derive(Clone)]
 pub struct ObservabilityState {
     config: ObservabilityConfig,
-    inference: SharedInferenceRsState,
+    engine: Engine,
     max_body_bytes: usize,
 }
 
 impl ObservabilityState {
-    pub fn new(config: ObservabilityConfig, inference: SharedInferenceRsState) -> Self {
-        Self::with_max_body_bytes(config, inference, DEFAULT_MAX_BODY_LIMIT)
-    }
-
     pub fn with_max_body_bytes(
         config: ObservabilityConfig,
-        inference: SharedInferenceRsState,
+        engine: Engine,
         max_body_bytes: usize,
     ) -> Self {
         Self {
             config,
-            inference,
+            engine,
             max_body_bytes,
         }
     }
@@ -754,10 +748,8 @@ fn resolve_defaultable_model_label(
 ) -> String {
     match model.filter(|model| !model.is_empty()) {
         Some(DEFAULT_MODEL) | None => observability
-            .inference
-            .get_default_model_id()
-            .ok()
-            .flatten()
+            .engine
+            .default_model_id()
             .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
         Some(model) => known_model_label(model, observability),
     }
@@ -782,27 +774,11 @@ fn normalize_model_label_input(model: Option<&str>) -> Option<&str> {
 }
 
 fn known_model_label(model: &str, observability: &ObservabilityState) -> String {
-    let base_model_exists = observability
-        .inference
-        .get_model_status(model)
-        .ok()
-        .flatten()
-        .is_some();
-    let adapter_model_exists = list_lora_adapter_models(&observability.inference)
-        .ok()
-        .is_some_and(|models| adapter_model_label_is_known(model, &models));
-    if base_model_exists || adapter_model_exists {
+    if observability.engine.serves_model(model) {
         model.to_string()
     } else {
         UNKNOWN_MODEL.to_string()
     }
-}
-
-fn adapter_model_label_is_known(
-    model: &str,
-    models: &[crate::lora_routing::LoraAdapterModel],
-) -> bool {
-    is_resolvable_lora_adapter_model(models, model)
 }
 
 fn is_housekeeping(method: &str, route: &str, uri_path: &str) -> bool {
@@ -970,32 +946,16 @@ fn rounded_duration_ms(latency_seconds: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        ModelLabelField, RequestError, StreamEnd, StreamStats, adapter_model_label_is_known,
-        body_too_large_response, is_anthropic_request, model_label_field,
-        normalize_model_label_input, query_model, request_outcome,
+        ModelLabelField, RequestError, StreamEnd, StreamStats, body_too_large_response,
+        is_anthropic_request, model_label_field, normalize_model_label_input, query_model,
+        request_outcome,
     };
-    use crate::{lora_routing::LoraAdapterModel, streaming::StreamOutcome};
+    use crate::streaming::StreamOutcome;
     use axum::{
         body::to_bytes,
         http::{HeaderMap, HeaderValue, StatusCode},
         response::IntoResponse,
     };
-    use inference_core::{AdapterGenerationId, LoraAdapterInfo};
-
-    fn adapter_model(id: &str, parent: &str, alias: &str) -> LoraAdapterModel {
-        LoraAdapterModel {
-            id: id.to_string(),
-            parent: parent.to_string(),
-            adapter: LoraAdapterInfo {
-                alias: alias.to_string(),
-                source: "source".to_string(),
-                revision: None,
-                generation: AdapterGenerationId::from_bytes([1; 32]),
-                rank: 8,
-                bytes: 16,
-            },
-        }
-    }
 
     #[test]
     fn request_outcomes_are_bounded_and_distinguish_disconnects() {
@@ -1099,23 +1059,6 @@ mod tests {
             "/v1/skills-extra",
             &headers,
             None,
-        ));
-    }
-
-    #[test]
-    fn adapter_model_labels_are_bounded_by_resolvable_cards() {
-        let models = vec![
-            adapter_model("base-a::code", "base-a", "code"),
-            adapter_model("base-b::code", "base-b", "code"),
-            adapter_model("base-a::math", "base-a", "math"),
-        ];
-
-        assert!(adapter_model_label_is_known("base-a::code", &models));
-        assert!(adapter_model_label_is_known("math", &models));
-        assert!(!adapter_model_label_is_known("code", &models));
-        assert!(!adapter_model_label_is_known(
-            "unbounded-user-value",
-            &models
         ));
     }
 

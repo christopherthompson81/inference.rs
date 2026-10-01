@@ -4,17 +4,19 @@ use crate::anthropic::anthropic_error_response;
 use crate::handler_core::{
     ApiError, ApiErrorKind, SERVICE_UNAVAILABLE_MESSAGE, openai_error_response,
 };
+use crate::types::OwnedEngine;
 use anyhow::Result;
 use axum::{
-    Extension, Json,
+    Json,
     extract::{
-        Multipart, Path as AxumPath, Query, RawQuery,
+        FromRequestParts, Multipart, Path as AxumPath, Query, RawQuery,
         multipart::{MultipartError, MultipartRejection},
         rejection::QueryRejection,
     },
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, StatusCode, request::Parts},
     response::IntoResponse,
 };
+use inference_api::Engine;
 
 use crate::skill_store::{
     ANTHROPIC_SKILL_SOURCE, CUSTOM_SKILL_SOURCE, invalid_skill_upload, skill_api_error,
@@ -25,6 +27,35 @@ pub use crate::skill_store::{
     AnthropicSkillVersionObject, SkillFiles, SkillListObject, SkillListQuery, SkillObject,
     SkillStore, SkillVersionObject,
 };
+
+/// The skill store as the request's owner sees it.
+pub struct OwnerSkills {
+    pub store: Arc<SkillStore>,
+    pub owner: Option<String>,
+}
+
+impl FromRequestParts<Engine> for OwnerSkills {
+    type Rejection = axum::response::Response;
+
+    async fn from_request_parts(
+        parts: &mut Parts,
+        engine: &Engine,
+    ) -> Result<Self, Self::Rejection> {
+        let OwnedEngine(engine) = OwnedEngine::from_request_parts(parts, engine)
+            .await
+            .map_err(IntoResponse::into_response)?;
+        match engine.skill_store() {
+            Ok(store) => Ok(Self {
+                store: store.clone(),
+                owner: engine.owner().map(str::to_string),
+            }),
+            Err(error) => {
+                let anthropic = prefers_anthropic_shape(&parts.headers, None, parts.uri.query());
+                Err(protocol_error_response(error, anthropic))
+            }
+        }
+    }
+}
 
 async fn read_skill_files(mut multipart: Multipart) -> Result<SkillFiles> {
     let mut files = SkillFiles::default();
@@ -136,8 +167,7 @@ fn anthropic_list_response(
 pub async fn upload_skill(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
-    Extension(store): Extension<Arc<SkillStore>>,
-    Extension(owner): Extension<crate::auth::Owner>,
+    skills: OwnerSkills,
     payload: std::result::Result<Multipart, MultipartRejection>,
 ) -> axum::response::Response {
     let anthropic = prefers_anthropic_shape(&headers, None, raw_query.as_deref());
@@ -145,7 +175,13 @@ pub async fn upload_skill(
         Ok(multipart) => multipart,
         Err(error) => return protocol_error_response(multipart_rejection_error(error), anthropic),
     };
-    match async { store.create_skill(read_skill_files(multipart).await?, owner.as_deref()) }.await {
+    match async {
+        skills
+            .store
+            .create_skill(read_skill_files(multipart).await?, skills.owner.as_deref())
+    }
+    .await
+    {
         Ok(skill) if anthropic => Json(AnthropicSkillObject::from(&skill)).into_response(),
         Ok(skill) => Json(skill).into_response(),
         Err(error) => skill_error(error, anthropic),
@@ -162,8 +198,7 @@ pub async fn list_skills(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     payload: std::result::Result<Query<SkillListQuery>, QueryRejection>,
-    Extension(store): Extension<Arc<SkillStore>>,
-    Extension(owner): Extension<crate::auth::Owner>,
+    skills: OwnerSkills,
 ) -> axum::response::Response {
     let query = match payload {
         Ok(Query(query)) => query,
@@ -187,7 +222,7 @@ pub async fn list_skills(
         }
         _ => {}
     }
-    match store.list(owner.as_deref()) {
+    match skills.store.list(skills.owner.as_deref()) {
         Ok(data) if anthropic => Json(anthropic_list_response(data, Some(&query))).into_response(),
         Ok(data) => Json(SkillListObject {
             object: "list",
@@ -208,8 +243,7 @@ pub async fn upload_skill_version(
     AxumPath(skill_id): AxumPath<String>,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
-    Extension(store): Extension<Arc<SkillStore>>,
-    Extension(owner): Extension<crate::auth::Owner>,
+    skills: OwnerSkills,
     payload: std::result::Result<Multipart, MultipartRejection>,
 ) -> axum::response::Response {
     let anthropic = prefers_anthropic_shape(&headers, None, raw_query.as_deref());
@@ -218,10 +252,10 @@ pub async fn upload_skill_version(
         Err(error) => return protocol_error_response(multipart_rejection_error(error), anthropic),
     };
     match async {
-        store.create_version(
+        skills.store.create_version(
             &skill_id,
             read_skill_files(multipart).await?,
-            owner.as_deref(),
+            skills.owner.as_deref(),
         )
     }
     .await
@@ -244,11 +278,13 @@ pub async fn list_skill_versions(
     AxumPath(skill_id): AxumPath<String>,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
-    Extension(store): Extension<Arc<SkillStore>>,
-    Extension(owner): Extension<crate::auth::Owner>,
+    skills: OwnerSkills,
 ) -> axum::response::Response {
     let anthropic = prefers_anthropic_shape(&headers, None, raw_query.as_deref());
-    match store.list_versions(&skill_id, owner.as_deref()) {
+    match skills
+        .store
+        .list_versions(&skill_id, skills.owner.as_deref())
+    {
         Ok(versions) => Json(AnthropicSkillVersionListObject {
             data: versions
                 .iter()
@@ -361,8 +397,10 @@ mod tests {
         let response = upload_skill(
             HeaderMap::new(),
             RawQuery(None),
-            Extension(store.clone()),
-            Extension(crate::auth::Owner::default()),
+            OwnerSkills {
+                store: store.clone(),
+                owner: None,
+            },
             invalid_boundary_multipart().await,
         )
         .await;
@@ -374,8 +412,7 @@ mod tests {
         let response = upload_skill(
             anthropic_headers(),
             RawQuery(None),
-            Extension(store),
-            Extension(crate::auth::Owner::default()),
+            OwnerSkills { store, owner: None },
             invalid_boundary_multipart().await,
         )
         .await;
@@ -393,8 +430,7 @@ mod tests {
         let response = upload_skill(
             HeaderMap::new(),
             RawQuery(None),
-            Extension(store),
-            Extension(crate::auth::Owner::default()),
+            OwnerSkills { store, owner: None },
             multipart_with_body(BODY).await,
         )
         .await;
@@ -415,8 +451,7 @@ mod tests {
             HeaderMap::new(),
             RawQuery(Some(raw_query.to_string())),
             payload,
-            Extension(store),
-            Extension(crate::auth::Owner::default()),
+            OwnerSkills { store, owner: None },
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -436,8 +471,7 @@ mod tests {
             HeaderMap::new(),
             RawQuery(Some(raw_query.to_string())),
             payload,
-            Extension(store),
-            Extension(crate::auth::Owner::default()),
+            OwnerSkills { store, owner: None },
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -476,8 +510,7 @@ mod tests {
             AxumPath("skill_missing".to_string()),
             HeaderMap::new(),
             RawQuery(None),
-            Extension(store),
-            Extension(crate::auth::Owner::default()),
+            OwnerSkills { store, owner: None },
         )
         .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);

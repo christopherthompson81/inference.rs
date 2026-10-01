@@ -1,10 +1,10 @@
 //! The OpenResponses routes: HTTP framing over the engine's Responses operations.
 
-use std::{pin::Pin, sync::Arc, task::Poll, time::Duration};
+use std::{pin::Pin, task::Poll, time::Duration};
 
 use axum::{
     Extension,
-    extract::{Json, Path, State},
+    extract::{Json, Path},
     response::{
         IntoResponse, Sse,
         sse::{Event, KeepAlive, KeepAliveStream},
@@ -17,17 +17,11 @@ pub use crate::responses_api::{
     OpenResponsesCreateRequest, OpenResponsesStreamEvent, ResponseDeleted,
 };
 use crate::{
-    agentic::AgenticDefaults,
-    engine_chat::ChatEngine,
     handler_core::{ApiError, openai_error_response},
-    responses_api::{
-        OpenResponsesStreamer, ResponsesStreamItem, cancel_response as cancel, collect_response,
-        delete_response as delete, get_response as get, prepare_response, spawn_background,
-    },
+    responses_api::{OpenResponsesStreamer, ResponsesStreamItem},
     responses_types::resource::ResponseResource,
-    skills::SkillStore,
     streaming::{StreamOutcomeHandle, get_keep_alive_interval},
-    types::ExtractedInferenceRsState,
+    types::OwnedEngine,
 };
 
 /// Frames the engine's Responses stream as Server-Sent Events, ending with `[DONE]`.
@@ -99,10 +93,7 @@ impl IntoResponse for OpenResponsesResponder {
     ))
 ))]
 pub async fn create_response(
-    State(state): ExtractedInferenceRsState,
-    Extension(agentic_defaults): Extension<AgenticDefaults>,
-    Extension(skill_store): Extension<Arc<SkillStore>>,
-    Extension(owner): Extension<crate::auth::Owner>,
+    OwnedEngine(engine): OwnedEngine,
     stream_outcome: Option<Extension<StreamOutcomeHandle>>,
     payload: Result<ApiJson<OpenResponsesCreateRequest>, ApiJsonRejection>,
 ) -> OpenResponsesResponder {
@@ -110,31 +101,23 @@ pub async fn create_response(
         Ok(ApiJson(request)) => request,
         Err(ApiJsonRejection(error)) => return OpenResponsesResponder::Error(error),
     };
-    let chat = ChatEngine {
-        state: state.clone(),
-        agentic: agentic_defaults,
-        skill_store: Some(skill_store),
-        owner: owner.0,
-    };
-    let prepared = match prepare_response(&chat, request).await {
-        Ok(prepared) => prepared,
-        Err(error) => return OpenResponsesResponder::Error(error.into_api_error(state)),
-    };
-    if prepared.background {
-        return OpenResponsesResponder::Json(Box::new(spawn_background(prepared, state)));
-    }
-    if prepared.stream {
-        let tap = stream_outcome.map(|Extension(handle)| handle.tap());
-        let sse = ResponsesSse {
-            inner: OpenResponsesStreamer::new(prepared, state, tap),
-            done: false,
+    if !request.stream.unwrap_or(false) {
+        return match engine.responses(request).await {
+            Ok(response) => OpenResponsesResponder::Json(Box::new(response)),
+            Err(error) => OpenResponsesResponder::Error(error),
         };
-        return OpenResponsesResponder::Sse(Box::new(Sse::new(sse).keep_alive(
-            KeepAlive::new().interval(Duration::from_millis(get_keep_alive_interval())),
-        )));
     }
-    match collect_response(prepared, &state).await {
-        Ok(response) => OpenResponsesResponder::Json(Box::new(response)),
+    let tap = stream_outcome.map(|Extension(handle)| handle.tap());
+    match engine.responses_stream(request).await {
+        Ok(stream) => {
+            let sse = ResponsesSse {
+                inner: stream.with_tap(tap),
+                done: false,
+            };
+            OpenResponsesResponder::Sse(Box::new(Sse::new(sse).keep_alive(
+                KeepAlive::new().interval(Duration::from_millis(get_keep_alive_interval())),
+            )))
+        }
         Err(error) => OpenResponsesResponder::Error(error),
     }
 }
@@ -155,11 +138,10 @@ fn resource_response(result: Result<ResponseResource, ApiError>) -> axum::respon
     responses((status = 200, description = "Response object", body = ResponseResource))
 ))]
 pub async fn get_response(
-    State(state): ExtractedInferenceRsState,
-    Extension(owner): Extension<crate::auth::Owner>,
+    OwnedEngine(engine): OwnedEngine,
     Path(response_id): Path<String>,
 ) -> impl IntoResponse {
-    resource_response(get(&state, &response_id, owner.as_deref()))
+    resource_response(engine.response(&response_id))
 }
 
 /// Delete response by ID endpoint
@@ -171,11 +153,10 @@ pub async fn get_response(
     responses((status = 200, description = "Response deleted", body = ResponseDeleted))
 ))]
 pub async fn delete_response(
-    State(state): ExtractedInferenceRsState,
-    Extension(owner): Extension<crate::auth::Owner>,
+    OwnedEngine(engine): OwnedEngine,
     Path(response_id): Path<String>,
 ) -> impl IntoResponse {
-    match delete(&state, &response_id, owner.as_deref()) {
+    match engine.delete_response(&response_id) {
         Ok(deleted) => Json(deleted).into_response(),
         Err(error) => openai_error_response(error),
     }
@@ -190,11 +171,10 @@ pub async fn delete_response(
     responses((status = 200, description = "Response cancelled", body = ResponseResource))
 ))]
 pub async fn cancel_response(
-    State(state): ExtractedInferenceRsState,
-    Extension(owner): Extension<crate::auth::Owner>,
+    OwnedEngine(engine): OwnedEngine,
     Path(response_id): Path<String>,
 ) -> impl IntoResponse {
-    resource_response(cancel(&state, &response_id, owner.as_deref()))
+    resource_response(engine.cancel_response(&response_id))
 }
 
 #[cfg(test)]

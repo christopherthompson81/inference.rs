@@ -2,7 +2,7 @@
 
 use futures::future::BoxFuture;
 use inference_core::{
-    InferenceRsError, ModelCategory as CoreModelCategory, ModelGenerationDefaults,
+    InferenceRsError, Modalities, ModelCategory as CoreModelCategory, ModelGenerationDefaults,
     ModelStatus as CoreModelStatus, SupportedModality,
 };
 use serde::{Deserialize, Serialize};
@@ -297,6 +297,34 @@ fn status_result(
         }),
         None => Err(core_error(InferenceRsError::ModelNotFound(model_id))),
     }
+}
+
+/// A served model as a client choosing one sees it; `modalities` is `None` when its settings couldn't be read.
+#[derive(Debug, Clone)]
+pub struct ModelDescription {
+    pub id: String,
+    pub category: CoreModelCategory,
+    pub modalities: Option<Modalities>,
+    pub generation_defaults: Option<ModelGenerationDefaults>,
+}
+
+/// Every served model whose category resolves, in listing order.
+pub fn describe_models(state: &SharedInferenceRsState) -> Vec<ModelDescription> {
+    let Ok(ids) = state.list_models() else {
+        return Vec::new();
+    };
+    ids.into_iter()
+        .filter_map(|id| {
+            let category = state.get_model_category(Some(&id)).ok()?;
+            let config = state.config(Some(&id)).ok();
+            Some(ModelDescription {
+                category,
+                modalities: config.as_ref().map(|config| config.modalities.clone()),
+                generation_defaults: config.and_then(|config| config.generation_defaults),
+                id,
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]

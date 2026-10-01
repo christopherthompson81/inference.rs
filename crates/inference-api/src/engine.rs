@@ -9,7 +9,7 @@ use inference_core::{
     CodeExecutionConfig, CompletionResponse, HfConfigOverrides, ImageGenerationResponse,
     InferenceRs, McpClientConfig, MtpConfig, MtpDraftSamplingMethod, NetworkMode, PagedCacheType,
     Response, SandboxMode, SandboxPolicy, SandboxProfile, SearchCallback, SearchEmbeddingModel,
-    SerializedSession, ShellConfig, TokenSource, ToolCallbackWithTool,
+    SerializedSession, ShellConfig, SupportedModality, TokenSource, ToolCallbackWithTool,
 };
 use inference_selection::ModelSelected;
 use inference_selection::quant;
@@ -19,14 +19,17 @@ use crate::{
     agentic::AgenticDefaults,
     agentic::{ApprovalDecisionRequest, ApprovalDecisionResponse, resolve_approval},
     anthropic::{
-        AnthropicMessageResponse, AnthropicMessagesRequest, AnthropicStream, MessagesFailure,
-        collect_messages, prepare_messages,
+        AnthropicCountTokensResponse, AnthropicMessageResponse, AnthropicMessagesRequest,
+        AnthropicStream, MessagesFailure, collect_messages, count_tokens, prepare_messages,
     },
     api_error::{ApiError, ApiErrorKind, ModelErrorMessage},
     engine_chat::{ChatEngine, ChatStream, ChatStreamEvent, collect_chat},
     engine_completion::{CompletionStream, collect_completion, prepare_completion},
     engine_embeddings::{EmbeddingError, embed},
-    files::{self, FileBody, FileMetadata, FileUpload},
+    files::{
+        self, ContainerFileListObject, ContainerFileMetadata, FileBody, FileDeleted,
+        FileListObject, FileMetadata, FileUpload,
+    },
     generation::{SpeechAudio, generate_image, generate_speech},
     inference_for_server_builder::{
         InferenceRsForServerBuilder, ModelConfig, defaults, parse_device_layers,
@@ -36,10 +39,11 @@ use crate::{
         LoraAdapterListResponse, LoraAdapterObject, UnloadLoraAdapterRequest, list_adapters,
         load_adapter, unload_adapter,
     },
+    lora_routing::{is_resolvable_lora_adapter_model, list_lora_adapter_models},
     media_source::MediaAttachments,
     models::{
-        CacheStats, ModelOperationRequest, ModelStatusResponse, cache_stats, list_models,
-        model_status, reload_model, unload_model,
+        CacheStats, ModelDescription, ModelOperationRequest, ModelStatusResponse, cache_stats,
+        describe_models, list_models, model_status, reload_model, unload_model,
     },
     openai::{
         ChatCompletionRequest, CompletionRequest, EmbeddingRequest, EmbeddingResponse,
@@ -695,8 +699,7 @@ pub struct Engine {
 }
 
 impl Engine {
-    /// Wraps an engine the caller already built, with its server-level chat policy and adapter management policy.
-    pub fn new(chat: ChatEngine, adapters: LoraAdapterApiConfig) -> Self {
+    fn new(chat: ChatEngine, adapters: LoraAdapterApiConfig) -> Self {
         Self {
             chat,
             adapters,
@@ -784,6 +787,35 @@ impl Engine {
 
     pub fn adapter_config(&self) -> &LoraAdapterApiConfig {
         &self.adapters
+    }
+
+    pub fn agent_permission(&self) -> Option<AgentPermission> {
+        self.chat.agentic.agent_permission
+    }
+
+    /// Whether the default model reads and writes text, so a plain chat can run on it.
+    pub fn chats_in_text(&self) -> bool {
+        self.state().config(None).is_ok_and(|config| {
+            config.modalities.input.contains(&SupportedModality::Text)
+                && config.modalities.output.contains(&SupportedModality::Text)
+        })
+    }
+
+    /// The model a request without `model` goes to.
+    pub fn default_model_id(&self) -> Option<String> {
+        self.state().get_default_model_id().ok().flatten()
+    }
+
+    /// Whether `model` names a served model or one of its LoRA adapters.
+    pub fn serves_model(&self, model: &str) -> bool {
+        let base = self
+            .state()
+            .get_model_status(model)
+            .ok()
+            .flatten()
+            .is_some();
+        base || list_lora_adapter_models(self.state())
+            .is_ok_and(|models| is_resolvable_lora_adapter_model(&models, model))
     }
 
     /// Runs a chat completion to its end; `media` holds the buffers its `media://N` sources name.
@@ -979,6 +1011,14 @@ impl Engine {
         self.anthropic_messages_stream(parse_json(request)?).await
     }
 
+    /// Counts the prompt tokens an Anthropic Messages request would use.
+    pub async fn count_tokens(
+        &self,
+        request: AnthropicMessagesRequest,
+    ) -> Result<AnthropicCountTokensResponse, ApiError> {
+        count_tokens(self.state(), request, self.owner()).await
+    }
+
     /// Runs a Responses request to its end, or queues it when it asks for `background` and returns it queued.
     pub async fn responses(
         &self,
@@ -1057,6 +1097,17 @@ impl Engine {
         list_models(self.state())
     }
 
+    pub fn describe_models(&self) -> Vec<ModelDescription> {
+        describe_models(self.state())
+    }
+
+    /// The default model's MCP tools as `(name, description)`; built-in tools aren't listed.
+    pub fn mcp_tools(&self) -> Result<Vec<(String, Option<String>)>, ApiError> {
+        self.state()
+            .list_mcp_tools(None)
+            .map_err(|error| ApiError::new(ApiErrorKind::Internal, error, None, None))
+    }
+
     /// Cumulative prefix- and encoder-cache counters of each loaded model.
     pub fn cache_stats(&self) -> Result<CacheStats, ApiError> {
         cache_stats(self.state())
@@ -1107,6 +1158,10 @@ impl Engine {
 
     /// Requantizes the loaded model to another ISQ type.
     pub async fn re_isq(&self, request: ReIsqRequest) -> Result<ReIsqResponse, ApiError> {
+        InferenceRs::maybe_log_request(
+            self.state().clone(),
+            format!("Re ISQ: {:?}", request.ggml_type),
+        );
         operations::re_isq(self.state(), request).await
     }
 
@@ -1115,6 +1170,14 @@ impl Engine {
         &self,
         action: CalibrationAction,
     ) -> Result<CalibrationStatus, ApiError> {
+        let logged = match action {
+            CalibrationAction::Start => Some("Calibration start"),
+            CalibrationAction::Apply { .. } => Some("Calibration apply"),
+            CalibrationAction::Status => None,
+        };
+        if let Some(repr) = logged {
+            InferenceRs::maybe_log_request(self.state().clone(), repr.to_string());
+        }
         operations::calibration(self.state(), action).await
     }
 
@@ -1135,6 +1198,21 @@ impl Engine {
         Ok(SessionStored {
             id: session_id.to_string(),
         })
+    }
+
+    pub fn fork_session(
+        &self,
+        src_session_id: &str,
+        session_id: String,
+        num_turns: usize,
+    ) -> Result<(), ApiError> {
+        operations::fork_session(
+            self.state(),
+            src_session_id,
+            session_id,
+            num_turns,
+            self.owner(),
+        )
     }
 
     pub fn delete_session(&self, session_id: &str) -> Result<SessionDeleted, ApiError> {
@@ -1282,24 +1360,57 @@ impl Engine {
         to_json(&self.upload_file(upload)?)
     }
 
+    pub fn files(&self) -> Result<FileListObject, ApiError> {
+        files::list_files(self.state(), self.owner())
+    }
+
+    pub fn file(&self, file_id: &str) -> Result<FileMetadata, ApiError> {
+        files::get_file(self.state(), file_id, self.owner())
+    }
+
+    pub fn delete_file(&self, file_id: &str) -> Result<FileDeleted, ApiError> {
+        files::delete_file(self.state(), file_id, self.owner())
+    }
+
     pub fn files_json(&self) -> Result<String, ApiError> {
-        to_json(&files::list_files(self.state(), self.owner())?)
+        to_json(&self.files()?)
     }
 
     pub fn file_json(&self, file_id: &str) -> Result<String, ApiError> {
-        to_json(&files::get_file(self.state(), file_id, self.owner())?)
+        to_json(&self.file(file_id)?)
     }
 
     pub fn delete_file_json(&self, file_id: &str) -> Result<String, ApiError> {
-        to_json(&files::delete_file(self.state(), file_id, self.owner())?)
+        to_json(&self.delete_file(file_id)?)
+    }
+
+    /// The files a Responses container (a code-running session) produced.
+    pub fn container_files(&self, container_id: &str) -> Result<ContainerFileListObject, ApiError> {
+        files::list_container_files(self.state(), container_id, self.owner())
+    }
+
+    pub fn container_file(
+        &self,
+        container_id: &str,
+        file_id: &str,
+    ) -> Result<ContainerFileMetadata, ApiError> {
+        files::get_container_file(self.state(), container_id, file_id, self.owner())
+    }
+
+    pub fn container_file_content(
+        &self,
+        container_id: &str,
+        file_id: &str,
+    ) -> Result<FileBody, ApiError> {
+        files::container_file_content(self.state(), container_id, file_id, self.owner())
     }
 
     pub fn file_content(&self, file_id: &str) -> Result<FileBody, ApiError> {
         files::file_content(self.state(), file_id, self.owner())
     }
 
-    fn skill_store(&self) -> Result<&SkillStore, ApiError> {
-        self.chat.skill_store.as_deref().ok_or_else(|| {
+    pub fn skill_store(&self) -> Result<&Arc<SkillStore>, ApiError> {
+        self.chat.skill_store.as_ref().ok_or_else(|| {
             ApiError::new(
                 ApiErrorKind::Unavailable,
                 "this engine has no skill store",

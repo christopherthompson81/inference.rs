@@ -1068,6 +1068,12 @@ impl OpenResponsesStreamer {
         }
     }
 
+    /// Reports each engine response to `tap` as the stream reads it, e.g. for an access log.
+    pub fn with_tap(mut self, tap: Option<ResponseTap>) -> Self {
+        self.tap = tap;
+        self
+    }
+
     /// The request's cancellation, for a caller that cancels from elsewhere, e.g. a signal handler.
     pub fn cancellation(&self) -> RequestCancellation {
         self.cancellation.clone()
