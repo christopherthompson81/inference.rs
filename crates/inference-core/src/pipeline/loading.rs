@@ -424,9 +424,82 @@ pub(crate) fn uqff_placeholders(
     Ok(Some(layers))
 }
 
+/// A model's generation config: a prepared source's, else its `generation_config.json`, else what its config implies.
+pub(crate) fn generation_config(
+    prepared: Option<Option<crate::pipeline::chat_template::GenerationConfig>>,
+    paths: &dyn crate::ModelPaths,
+    config: &str,
+) -> Option<crate::pipeline::chat_template::GenerationConfig> {
+    use crate::pipeline::chat_template::GenerationConfig;
+    let from_files = || {
+        let path = paths.get_gen_conf_filename()?;
+        // a malformed file loses only its sampling defaults, not the model
+        let parsed = std::fs::read_to_string(path)
+            .map_err(anyhow::Error::from)
+            .and_then(|text| Ok(serde_json::from_str::<GenerationConfig>(&text)?));
+        parsed
+            .inspect_err(|error| warn!("Failed to read generation_config.json: {error}"))
+            .ok()
+    };
+    match prepared {
+        Some(prepared) => prepared,
+        None => from_files(),
+    }
+    .or_else(|| GenerationConfig::from_model_config(config))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn paths_with_gen_conf(gen_conf: PathBuf) -> crate::pipeline::LocalModelPaths<PathBuf> {
+        crate::pipeline::LocalModelPaths {
+            tokenizer_filename: PathBuf::new(),
+            config_filename: PathBuf::new(),
+            template_filename: None,
+            filenames: Vec::new(),
+            adapter_paths: crate::pipeline::AdapterPaths::None,
+            gen_conf: Some(gen_conf),
+            preprocessor_config: None,
+            video_preprocessor_config: None,
+            processor_config: None,
+            chat_template_json_filename: None,
+        }
+    }
+
+    fn temperature(conf: Option<crate::pipeline::chat_template::GenerationConfig>) -> Option<f64> {
+        conf.and_then(|conf| conf.generation_defaults())
+            .and_then(|defaults| defaults.temperature)
+    }
+
+    #[test]
+    fn a_malformed_generation_config_falls_back_to_the_model_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("generation_config.json");
+        let config = r#"{"temperature": 0.5}"#;
+
+        std::fs::write(&file, r#"{"temperature": 0.2}"#).unwrap();
+        let paths = paths_with_gen_conf(file.clone());
+        assert_eq!(
+            temperature(generation_config(None, &paths, config)),
+            Some(0.2)
+        );
+
+        std::fs::write(&file, "{not json").unwrap();
+        assert_eq!(
+            temperature(generation_config(None, &paths, config)),
+            Some(0.5)
+        );
+        assert_eq!(
+            temperature(generation_config(Some(None), &paths, config)),
+            Some(0.5)
+        );
+        let prepared = serde_json::from_str(r#"{"temperature": 0.7}"#).unwrap();
+        assert_eq!(
+            temperature(generation_config(Some(Some(prepared)), &paths, config)),
+            Some(0.7)
+        );
+    }
 
     #[test]
     fn a_matformer_slice_without_its_config_is_refused() {

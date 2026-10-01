@@ -510,6 +510,62 @@ fn automatic_recurrent_checkpoint_lanes(
     Ok(selected_lanes)
 }
 
+/// A model whose recurrent state pools are reserved before any KV blocks are sized.
+pub(crate) struct RecurrentReservation<'a> {
+    pub target: &'a dyn inference_nn::speculative::SpeculativeTargetMixin,
+    pub cache: &'a EitherCache,
+    pub paged_attn_config: Option<PagedAttentionConfig>,
+    pub dtype: DType,
+    pub model_config: &'a dyn ModelConfigLike,
+    pub device: &'a Device,
+}
+
+impl RecurrentReservation<'_> {
+    pub fn reserve(self, mapper: &dyn DeviceMapper) -> Result<()> {
+        let checkpoints = self.target.supports_recurrent_speculative_checkpoints();
+        let transitions = self.target.supports_recurrent_speculative_transitions();
+        let mut grew = self
+            .paged_attn_config
+            .map(|config| {
+                let kv_bytes_per_token =
+                    paged_kv_bytes_per_token(config, self.dtype, self.model_config)?;
+                reserve_recurrent_serving_capacity(
+                    self.cache,
+                    config,
+                    checkpoints,
+                    transitions,
+                    self.device,
+                    kv_bytes_per_token,
+                )
+            })
+            .transpose()?
+            .unwrap_or(false);
+        if transitions && uses_recurrent_transition_log(self.cache) {
+            grew = self
+                .target
+                .reserve_recurrent_speculative_transition_storage()?
+                || grew;
+        }
+        grew = self.target.reserve_recurrent_decode_deferred_storage()? || grew;
+        #[cfg(feature = "cuda")]
+        if grew {
+            synchronize_cuda_contexts(self.device, mapper)?;
+        }
+        #[cfg(not(feature = "cuda"))]
+        let _ = (grew, mapper);
+        Ok(())
+    }
+}
+
+/// The number of layers a model's cache holds.
+pub(crate) fn cache_layer_count(cache: &EitherCache) -> usize {
+    match cache {
+        EitherCache::Full(full) => full.lock().len(),
+        EitherCache::Normal(normal) => normal.lock().unwrap().0.len(),
+        EitherCache::Hybrid(hybrid) => hybrid.lock().unwrap().num_layers(),
+    }
+}
+
 fn reserve_recurrent_serving_capacity(
     cache: &EitherCache,
     paged_attn_config: PagedAttentionConfig,

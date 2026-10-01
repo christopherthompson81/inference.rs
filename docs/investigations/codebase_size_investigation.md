@@ -693,3 +693,22 @@ code reads them); the logic moves:
 
 Raw finding: `cargo llvm-lines --lib -p inference-core` 1,569,962 -> 1,559,236 (-10.7k), mostly the cache managers'
 per-pipeline copies; source 179 insertions, 238 deletions (embedding's re-ISQ copy folded in too).
+
+## Run 23 - 2026-10-01 (time approximate)
+
+Question: how much of the normal and multimodal `load_model_from_path` (485 and 691 lines) is one load written twice?
+
+Finding (diff of the two bodies): less than Run 18's 430 differing lines suggested. Most of the shared shape (device
+mapping, the ISQ plan, weight loading, `finish_isq_load`, cache sizing) is already calls to shared functions with
+per-pipeline arguments. The rest differs for real and is interleaved: the multimodal path adds the processor and
+preprocessor configs, the encoder cache budget, a matformer-aware auto device map, block diffusion, the loader's default
+chat template and bos/eos, layer devices for an MTP head, and Metal scratch release; the normal path adds X-LoRA and its
+non-granular state. One function with hooks for these would read worse than two.
+
+Change: the two blocks that were the same code move out. `RecurrentReservation::reserve` (recurrent state pools
+reserved before the paged KV cache is sized, then a CUDA context sync if any grew) replaces both copies, and
+`cache_layer_count` the cache-kind layer counts. `loading::generation_config` reads the generation config for both; the
+multimodal path panicked on a malformed `generation_config.json` (and both on an unreadable one) where the normal path
+warned and fell back to the model config; both now warn.
+
+Tests: `a_malformed_generation_config_falls_back_to_the_model_config`.
