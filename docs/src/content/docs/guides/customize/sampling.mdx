@@ -58,8 +58,8 @@ DRY penalizes continuing token sequences that would reproduce spans from the pre
 
 ## Stopping
 
-Generation stops at the model's EOS tokens, a request-supplied `stop` string or token, or the token
-limit (`max_tokens`), whichever comes first.
+Generation stops at the model's EOS tokens, a request-supplied `stop` string, a `stop_token_ids` id, or the token
+limit (`max_tokens`), whichever comes first. `stop` and `stop_token_ids` can be given together.
 
 Set `ignore_eos: true` to continue after the model emits EOS. Explicit stops and the token limit
 still apply, so set `max_tokens` or `stop` to bound the response. This option can be used with base

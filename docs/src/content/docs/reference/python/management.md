@@ -62,6 +62,7 @@ Cache counters for each loaded model, counted since it loaded (the prefix ones s
 
 | Field | Type | Default |
 | --- | --- | --- |
+| `model` | `str \| None` | optional |
 | `save_cimatrix` | `str \| None` | optional |
 
 
@@ -467,9 +468,10 @@ One of: `Union[str, list[int]]`.
 
 ## `ReIsqRequest`
 
-| Field | Type |
-| --- | --- |
-| `ggml_type` | `str` |
+| Field | Type | Default |
+| --- | --- | --- |
+| `ggml_type` | `str` | required |
+| `model` | `str \| None` | optional |
 
 
 ## `ReIsqResponse`
@@ -596,6 +598,19 @@ Speech generation request
 | `input` | `str` | required |
 | `model` | `str \| None` | optional |
 | `response_format` | `AudioResponseFormat` | required |
+
+
+## `SpeechGenerationSpec`
+
+Speech sampling for every generation of the loaded model; an unset field keeps the architecture's default.
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `cfg_scale` | `float \| None` | optional |
+| `max_tokens` | `int \| None` | optional |
+| `temperature` | `float \| None` | optional |
+| `top_k` | `int \| None` | optional |
+| `top_p` | `float \| None` | optional |
 
 
 ## `TokenizeRequest`

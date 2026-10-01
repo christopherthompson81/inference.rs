@@ -389,6 +389,7 @@ class CacheStats:
 
 @dataclass(kw_only=True)
 class CalibrationApplyRequest:
+    model: str | None = None
     save_cimatrix: str | None = None
 
 
@@ -459,6 +460,7 @@ class ChatCompletionRequest:
     min_p: float | None = None
     model: str | None = None
     n: int | None = None
+    parallel_tool_calls: bool | None = None
     presence_penalty: float | None = None
     reasoning_effort: ReasoningEffort | None = None
     repetition_penalty: float | None = None
@@ -466,6 +468,7 @@ class ChatCompletionRequest:
     seed: int | None = None
     session_id: str | None = None
     stop: StopTokens | None = None
+    stop_token_ids: list[int] | None = None
     stream: bool | None = None
     temperature: float | None = None
     tool_choice: ToolChoice | None = None
@@ -570,6 +573,7 @@ class CompletionRequest:
     repetition_penalty: float | None = None
     seed: int | None = None
     stop: StopTokens | None = None
+    stop_token_ids: list[int] | None = None
     stream: bool | None = None
     suffix: str | None = None
     temperature: float | None = None
@@ -1442,6 +1446,7 @@ class ModelSelectedSpeech:
     arch: SpeechLoaderType
     dac_model_id: str | None = None
     dtype: ModelDType | None = ModelDType.AUTO
+    generation: SpeechGenerationSpec | None = None
     model_id: str
     _external = 'Speech'
 
@@ -1480,6 +1485,7 @@ class ModelSpec:
     device_layers: list[str] | None = None
     encoder_cache_memory_bytes: int | None = None
     hf_config_overrides: dict[str, Any] | None = None
+    hf_revision: str | None = None
     isq: str | None = None
     jinja_explicit: str | None = None
     max_model_len: int | None = None
@@ -2170,6 +2176,7 @@ class PromptTokensDetailsResponse:
 @dataclass(kw_only=True)
 class ReIsqRequest:
     ggml_type: str
+    model: str | None = None
 
 
 @dataclass(kw_only=True)
@@ -2492,6 +2499,7 @@ class RuntimeSpec:
     disable_eos_stop: bool | None = None
     encoder_cache_memory_bytes: int | None = None
     hf_config_overrides: dict[str, Any] | None = None
+    hf_revision: str | None = None
     isq: str | None = None
     jinja_explicit: str | None = None
     log: str | None = None
@@ -2685,6 +2693,17 @@ class SpeechGenerationRequest:
     input: str
     model: str | None = None
     response_format: AudioResponseFormat
+
+
+@dataclass(kw_only=True)
+class SpeechGenerationSpec:
+    """Speech sampling for every generation of the loaded model; an unset field keeps the architecture's default."""
+
+    cfg_scale: float | None = None
+    max_tokens: int | None = None
+    temperature: float | None = None
+    top_k: int | None = None
+    top_p: float | None = None
 
 
 class SpeechLoaderType(str, Enum):

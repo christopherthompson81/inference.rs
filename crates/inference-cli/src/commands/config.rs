@@ -171,6 +171,7 @@ fn build_model_specs(
             encoder_cache_memory_bytes: crate::commands::serve::extract_encoder_cache_memory_bytes(
                 &model_type,
             )?,
+            hf_revision: None,
         });
     }
     Ok((specs, cpu))

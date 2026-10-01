@@ -19,7 +19,7 @@ from ctypes import (
 from pathlib import Path
 
 # The ABI these declarations mirror; while it is 0.0.x any other version may differ anywhere.
-ABI_VERSION = (0 << 16) | (0 << 8) | 19
+ABI_VERSION = (0 << 16) | (0 << 8) | 20
 
 NATIVE_DIR_VARIABLE = "INFERENCE_NATIVE_DIR"
 BUNDLED_DIR = "_lib"
@@ -173,8 +173,8 @@ SIGNATURES = {
     "inference_skills_list": (status, (c_void_p, out)),
     "inference_skill_versions_list": (status, (c_void_p, *buffer, out)),
     "inference_re_isq": (status, (c_void_p, *buffer, out)),
-    "inference_calibration_start": (status, (c_void_p, out)),
-    "inference_calibration_status": (status, (c_void_p, out)),
+    "inference_calibration_start": (status, (c_void_p, *buffer, out)),
+    "inference_calibration_status": (status, (c_void_p, *buffer, out)),
     "inference_models_cache_stats": (status, (c_void_p, out)),
     "inference_calibration_apply": (status, (c_void_p, *buffer, out)),
     "inference_sessions_list": (status, (c_void_p, out)),
@@ -185,6 +185,7 @@ SIGNATURES = {
     "inference_tokenize": (status, (c_void_p, *buffer, out)),
     "inference_prompt_logits": (status, (c_void_p, *buffer, out, out)),
     "inference_detokenize": (status, (c_void_p, *buffer, out)),
+    "inference_tokenize_chat": (status, (c_void_p, *buffer, out)),
     "inference_system_info": (status, (out,)),
     "inference_system_doctor": (status, (out,)),
     "inference_model_tune": (status, (*buffer, out)),

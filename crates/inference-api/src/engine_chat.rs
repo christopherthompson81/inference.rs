@@ -9,8 +9,8 @@ use indexmap::IndexMap;
 use inference_core::{
     AgentPermission, AgentToolApprovalHandler, AgentToolApprovalNotifier,
     ChatCompletionChunkResponse, ChatResponseCollector, Constraint, InferenceRs, MessageContent,
-    ModelCategory, NormalRequest, Request, RequestMessage, SamplingParams,
-    encode_agentic_tool_images,
+    ModelCategory, NormalRequest, Request, RequestMessage, SamplingParams, TokenizationRequest,
+    encode_agentic_tool_images, is_chat_template_request_error,
 };
 pub use inference_core::{ReasoningEffort, resolve_reasoning_controls};
 use itertools::Itertools;
@@ -40,6 +40,7 @@ use crate::{
     video::parse_video_url_for_server,
 };
 
+const ONLY_CHAT_IS_TOKENIZED: &str = "only chat messages can be tokenized as a chat";
 pub(crate) const ASK_REQUIRES_STREAMING: &str = "agent_permission \"ask\" requires stream=true, so approval requests can be delivered and answered.";
 
 pub fn serialize_agentic_progress(
@@ -292,7 +293,7 @@ async fn parse_request_inner(
         Some(store.resolve_references(&normalized_tools.shell_skill_references, owner.as_deref())?)
     };
 
-    let stop_toks = convert_stop_tokens(oairequest.stop_seqs);
+    let stop_toks = convert_stop_tokens(oairequest.stop_seqs, oairequest.stop_token_ids);
     let mut input_files = Vec::new();
 
     let messages = match oairequest.messages {
@@ -768,6 +769,7 @@ async fn parse_request_inner(
             tools: normalized_tools.tools,
             logits_processors: None,
             host_tools: Vec::new(),
+            sequential_tool_calls: oairequest.parallel_tool_calls == Some(false),
             return_raw_logits: false,
             web_search_options: normalized_tools.web_search_options,
             enable_code_execution: normalized_tools.enable_code_execution,
@@ -795,6 +797,81 @@ async fn parse_request_inner(
         })),
         is_streaming,
     ))
+}
+
+/// The prompt tokens `oairequest` renders to, with its tools, reasoning controls and the model's chat template.
+pub(crate) async fn tokenize_chat(
+    state: &SharedInferenceRsState,
+    mut oairequest: ChatCompletionRequest,
+    owner: Option<&str>,
+) -> Result<Vec<u32>, ApiError> {
+    let invalid = |error: &(dyn std::error::Error + 'static)| {
+        ApiError::from_error(error, ApiErrorKind::InvalidRequest)
+    };
+    let internal = |error: &(dyn std::error::Error + 'static)| {
+        InferenceRs::maybe_log_error(state.clone(), error);
+        ApiError::from_error(error, ApiErrorKind::Internal)
+    };
+    oairequest.stream = Some(false);
+    resolve_lora_adapter_model(state, &mut oairequest.model, &mut oairequest.adapter)
+        .map_err(|error| invalid(&error))?;
+    let model_id = (oairequest.model != DEFAULT_MODEL_ID).then(|| oairequest.model.clone());
+
+    // Parsed like a chat request, for its rendered messages and tools, but never sent as one.
+    let (tx, _) = create_response_channel(Some(1));
+    let (parsed, _) = parse_request(
+        oairequest,
+        ChatCompletionParseContext {
+            state: state.clone(),
+            tx,
+            tool_dispatch_url: None,
+            agent_approval_handler: None,
+            agent_approval_notifier: None,
+            tool_surface: OpenAiToolSurface::ChatCompletions,
+            skill_store: None,
+            media: Default::default(),
+            owner: owner.map(str::to_string),
+        },
+    )
+    .await
+    .map_err(|error| invalid(error.as_ref()))?;
+    let Request::Normal(parsed) = parsed else {
+        return Err(ApiError::internal());
+    };
+    let (messages, enable_thinking, reasoning_effort) = match parsed.messages {
+        RequestMessage::Chat {
+            messages,
+            enable_thinking,
+            reasoning_effort,
+        }
+        | RequestMessage::MultimodalChat {
+            messages,
+            enable_thinking,
+            reasoning_effort,
+            ..
+        } => (messages, enable_thinking, reasoning_effort),
+        _ => return Err(ApiError::invalid_request(ONLY_CHAT_IS_TOKENIZED)),
+    };
+
+    let (response, mut rx) = tokio::sync::mpsc::channel(1);
+    let tokenize = Request::Tokenize(TokenizationRequest {
+        text: Either::Left(messages),
+        tools: parsed.tools,
+        add_generation_prompt: true,
+        add_special_tokens: true,
+        enable_thinking,
+        reasoning_effort,
+        response,
+    });
+    send_request_with_model(state, tokenize, model_id.as_deref())
+        .await
+        .map_err(|error| internal(&error))?;
+    match rx.recv().await {
+        Some(Ok(tokens)) => Ok(tokens),
+        Some(Err(error)) if is_chat_template_request_error(&error) => Err(invalid(error.as_ref())),
+        Some(Err(error)) => Err(internal(error.as_ref())),
+        None => Err(ApiError::internal()),
+    }
 }
 
 /// Server-level chat policy and the state a chat request runs against.

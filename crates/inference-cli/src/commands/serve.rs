@@ -497,6 +497,7 @@ pub(crate) fn convert_to_model_selected(
                 dac_model_id: None,
                 arch: SpeechLoaderType::Dia,
                 dtype: model.dtype,
+                generation: None,
             })
         }
 

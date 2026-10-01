@@ -87,6 +87,17 @@
           "inference.rs"
         ],
         "operationId": "calibration_start",
+        "parameters": [
+          {
+            "name": "model",
+            "in": "query",
+            "description": "The model to calibrate; the default model when absent.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Begin collecting activation statistics from live traffic.",
@@ -107,6 +118,17 @@
           "inference.rs"
         ],
         "operationId": "calibration_status",
+        "parameters": [
+          {
+            "name": "model",
+            "in": "query",
+            "description": "The model to report on; the default model when absent.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Per-layer calibration collection progress.",
@@ -3062,6 +3084,13 @@
       "CalibrationApplyRequest": {
         "type": "object",
         "properties": {
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model to requantize; the default model when absent."
+          },
           "save_cimatrix": {
             "type": [
               "string",
@@ -3442,6 +3471,14 @@
             "example": 1,
             "minimum": 0
           },
+          "parallel_tool_calls": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "`false` runs a round's tool calls one at a time, in the model's order, rather than all at once.",
+            "example": null
+          },
           "presence_penalty": {
             "type": [
               "number",
@@ -3509,6 +3546,19 @@
                 "description": "Sequences where generation stops."
               }
             ]
+          },
+          "stop_token_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Token ids that end generation, alongside `stop`.",
+            "example": null
           },
           "stream": {
             "type": [
@@ -4042,6 +4092,19 @@
                 "description": "Sequences where generation stops."
               }
             ]
+          },
+          "stop_token_ids": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "Token ids that end generation, alongside `stop`.",
+            "example": null
           },
           "stream": {
             "type": [
@@ -7608,6 +7671,16 @@
                     ],
                     "default": "auto"
                   },
+                  "generation": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "$ref": "#/components/schemas/SpeechGenerationSpec"
+                      }
+                    ]
+                  },
                   "model_id": {
                     "type": "string",
                     "description": "Model ID to load from. This may be a HF hub repo or a local path."
@@ -7770,6 +7843,13 @@
               "object",
               "null"
             ]
+          },
+          "hf_revision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Hub revision (branch, tag or commit) to load; the default branch when unset."
           },
           "isq": {
             "type": [
@@ -10129,6 +10209,13 @@
             "type": "string",
             "description": "The ISQ type to requantize to, e.g. `Q4K`; numeric shorthands resolve as they would on the CPU.",
             "example": "Q4K"
+          },
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The model to requantize; the default model when absent."
           }
         }
       },
@@ -11437,6 +11524,13 @@
             ],
             "description": "Merged recursively into the model's `config.json` before it loads."
           },
+          "hf_revision": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Hub revision (branch, tag or commit) of `model`; each entry of `models` names its own."
+          },
           "isq": {
             "type": [
               "string",
@@ -12060,6 +12154,49 @@
             "description": "The desired audio format for the generated speech."
           }
         }
+      },
+      "SpeechGenerationSpec": {
+        "type": "object",
+        "description": "Speech sampling for every generation of the loaded model; an unset field keeps the architecture's default.",
+        "properties": {
+          "cfg_scale": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float",
+            "description": "Classifier-free guidance strength."
+          },
+          "max_tokens": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "temperature": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float"
+          },
+          "top_k": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "top_p": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "float"
+          }
+        },
+        "additionalProperties": false
       },
       "SpeechLoaderType": {
         "type": "string",

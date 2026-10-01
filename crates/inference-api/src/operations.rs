@@ -25,6 +25,9 @@ pub struct ReIsqRequest {
     /// The ISQ type to requantize to, e.g. `Q4K`; numeric shorthands resolve as they would on the CPU.
     #[schema(example = "Q4K")]
     pub ggml_type: String,
+    /// The model to requantize; the default model when absent.
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 /// Answered once the requantization is queued behind the requests already running.
@@ -39,6 +42,17 @@ pub struct CalibrationApplyRequest {
     /// the server's working directory.
     #[serde(default)]
     pub save_cimatrix: Option<String>,
+    /// The model to requantize; the default model when absent.
+    #[serde(default)]
+    pub model: Option<String>,
+}
+
+/// The model a calibration start or status acts on; the default model when absent.
+#[derive(Debug, Clone, Default, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct CalibrationTarget {
+    #[serde(default)]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -111,6 +125,11 @@ pub struct DetokenizeResponse {
     pub text: String,
 }
 
+// `default` names the default model, which the engine reaches without a model id.
+fn targeted(model: Option<&str>) -> Option<&str> {
+    model.filter(|model| *model != crate::lora_routing::DEFAULT_MODEL_ID)
+}
+
 fn default_true() -> bool {
     true
 }
@@ -124,7 +143,7 @@ async fn send(
     model: Option<&str>,
     request: Request,
 ) -> Result<(), ApiError> {
-    let sender = state.get_sender(model).map_err(engine_error)?;
+    let sender = state.get_sender(targeted(model)).map_err(engine_error)?;
     sender.send(request).await.map_err(|_| ApiError::internal())
 }
 
@@ -158,7 +177,7 @@ pub(crate) async fn re_isq(
             Some("ggml_type"),
         )
     })?;
-    send(state, None, Request::ReIsq(level)).await?;
+    send(state, request.model.as_deref(), Request::ReIsq(level)).await?;
     Ok(ReIsqResponse {
         ggml_type: request.ggml_type,
     })
@@ -167,20 +186,22 @@ pub(crate) async fn re_isq(
 pub(crate) fn calibration<'a>(
     state: &'a SharedInferenceRsState,
     action: CalibrationAction,
+    model: Option<&'a str>,
 ) -> BoxFuture<'a, Result<CalibrationStatus, ApiError>> {
-    Box::pin(calibration_inner(state, action))
+    Box::pin(calibration_inner(state, action, model))
 }
 
 async fn calibration_inner(
     state: &SharedInferenceRsState,
     action: CalibrationAction,
+    model: Option<&str>,
 ) -> Result<CalibrationStatus, ApiError> {
     let (tx, rx) = tokio::sync::mpsc::channel(1);
     let request = Request::Calibration(CalibrationRequest {
         action,
         response: tx,
     });
-    send(state, None, request).await?;
+    send(state, model, request).await?;
     answer(rx, CALIBRATION_FAILED).await
 }
 

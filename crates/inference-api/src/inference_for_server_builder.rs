@@ -44,6 +44,9 @@ pub struct ModelConfig {
     pub in_situ_quant: Option<String>,
     #[serde(default)]
     pub encoder_cache_memory_bytes: Option<NonZeroUsize>,
+    /// Hub revision (branch, tag or commit) to load; the default branch when unset.
+    #[serde(default)]
+    pub hf_revision: Option<String>,
 }
 
 impl ModelConfig {
@@ -59,6 +62,7 @@ impl ModelConfig {
             num_device_layers: None,
             in_situ_quant: None,
             encoder_cache_memory_bytes: None,
+            hf_revision: None,
         }
     }
 
@@ -217,6 +221,9 @@ pub struct InferenceRsForServerBuilder {
     /// In-situ quantization to apply.
     in_situ_quant: Option<String>,
 
+    /// Hub revision of the single model; listed models carry their own.
+    hf_revision: Option<String>,
+
     /// GPU memory to allocate for KV cache with PagedAttention in MBs.
     /// PagedAttention is supported on CUDA and Metal. It is automatically activated on CUDA but not on Metal.
     /// The priority is as follows: `pa-ctxt-len` > `pa-gpu-mem-usage` > `pa-gpu-mem`.
@@ -306,6 +313,7 @@ impl Default for InferenceRsForServerBuilder {
             prefix_cache_n: defaults::PREFIX_CACHE_N,
             num_device_layers: defaults::NUM_DEVICE_LAYERS,
             in_situ_quant: defaults::IN_SITU_QUANT,
+            hf_revision: None,
             paged_attn_gpu_mem: defaults::PAGED_ATTN_GPU_MEM,
             paged_attn_gpu_mem_usage: defaults::PAGED_ATTN_GPU_MEM_USAGE,
             paged_ctxt_len: defaults::PAGED_CTXT_LEN,
@@ -552,6 +560,12 @@ impl InferenceRsForServerBuilder {
         if let Some(in_situ_quant) = in_situ_quant {
             self = self.with_in_situ_quant(in_situ_quant);
         }
+        self
+    }
+
+    /// Loads the single model at this hub revision (branch, tag or commit).
+    pub fn with_hf_revision_optional(mut self, revision: Option<String>) -> Self {
+        self.hf_revision = revision;
         self
     }
 
@@ -890,7 +904,7 @@ impl InferenceRsForServerBuilder {
         let loader_config = ModelLoaderConfig {
             source: Arc::new(model),
             token_source: self.token_source,
-            hf_revision: None,
+            hf_revision: self.hf_revision,
             dtype,
             device: device.clone(),
             device_map_setting: mapper,
@@ -1292,7 +1306,7 @@ impl ModelLoadSettings {
         let loader_config = ModelLoaderConfig {
             source: Arc::new(model),
             token_source: self.token_source.clone(),
-            hf_revision: None,
+            hf_revision: model_config.hf_revision.clone(),
             dtype,
             device: self.device.clone(),
             device_map_setting: mapper,

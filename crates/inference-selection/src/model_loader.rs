@@ -592,12 +592,15 @@ fn loader_from_model_selected(args: LoaderBuilder) -> anyhow::Result<Box<dyn Loa
             model_id,
             dac_model_id,
             arch,
+            generation,
             ..
         } => Box::new(SpeechLoader {
             model_id,
             dac_model_id,
             arch,
-            cfg: args.overrides.speech_cfg,
+            cfg: generation
+                .map(|generation| generation.into_config(arch))
+                .or(args.overrides.speech_cfg),
         }),
         ModelSelected::XLora {
             model_id,

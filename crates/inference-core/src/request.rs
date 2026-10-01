@@ -113,6 +113,9 @@ pub struct NormalRequest {
     /// Host tools this request offers on top of the engine's, answered by their callbacks.
     #[serde(skip)]
     pub host_tools: Vec<ToolCallbackWithTool>,
+    /// Runs a round's tool calls one at a time, in the model's order.
+    #[serde(default)]
+    pub sequential_tool_calls: bool,
     pub return_raw_logits: bool,
     pub web_search_options: Option<WebSearchOptions>,
     /// When true, registered code-execution tools are injected and the agentic loop runs.
@@ -290,6 +293,7 @@ impl NormalRequest {
             suffix: None,
             logits_processors: None,
             host_tools: Vec::new(),
+            sequential_tool_calls: false,
             return_raw_logits: false,
             web_search_options: None,
             enable_code_execution: false,

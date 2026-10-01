@@ -20,7 +20,7 @@ use crate::{
         AnthropicStream, MessagesFailure, collect_messages, count_tokens, prepare_messages,
     },
     api_error::{ApiError, ApiErrorKind, ModelErrorMessage},
-    engine_chat::{ChatEngine, ChatStream, ChatStreamEvent, collect_chat},
+    engine_chat::{ChatEngine, ChatStream, ChatStreamEvent, collect_chat, tokenize_chat},
     engine_completion::{CompletionStream, collect_completion, prepare_completion},
     engine_embeddings::{EmbeddingError, embed},
     engine_logits::{PromptLogits, PromptLogitsRequest, prompt_logits},
@@ -50,9 +50,9 @@ use crate::{
         ImageGenerationRequest, ModelObjects, OpenAiToolSurface, SpeechGenerationRequest,
     },
     operations::{
-        self, CalibrationApplyRequest, DetokenizeRequest, DetokenizeResponse, McpToolList,
-        McpToolObject, ReIsqRequest, ReIsqResponse, SessionDeleted, SessionForkRequest,
-        SessionList, SessionStored, TokenizeRequest, TokenizeResponse,
+        self, CalibrationApplyRequest, CalibrationTarget, DetokenizeRequest, DetokenizeResponse,
+        McpToolList, McpToolObject, ReIsqRequest, ReIsqResponse, SessionDeleted,
+        SessionForkRequest, SessionList, SessionStored, TokenizeRequest, TokenizeResponse,
     },
     registry::HostTools,
     request_body::JsonRequest,
@@ -91,6 +91,7 @@ const ONE_MODEL_SOURCE: &str = "give either `model` or a non-empty `models`, not
 const DEFAULT_WITHOUT_MODELS: &str =
     "`default_model_id` picks one of `models`; with `model`, use `model_id`";
 const ANYMOE_WITH_MODELS: &str = "`anymoe` wraps the single `model`; it cannot apply to `models`";
+const REVISION_WITH_MODELS: &str = "`runtime.hf_revision` names a revision of `model`; with `models`, give each its own `hf_revision`";
 const MODEL_ID_WITH_MODELS: &str =
     "`model_id` names `model`; with `models`, give each its own `model_id`";
 const PAGED_CACHE_ONE_SIZE: &str =
@@ -155,6 +156,9 @@ pub struct ModelSpec {
     pub isq: Option<String>,
     #[serde(default)]
     pub encoder_cache_memory_bytes: Option<usize>,
+    /// Hub revision (branch, tag or commit) to load; the default branch when unset.
+    #[serde(default)]
+    pub hf_revision: Option<String>,
 }
 
 impl ModelSpec {
@@ -182,6 +186,7 @@ impl ModelSpec {
         config.hf_config_overrides = self.hf_config_overrides;
         config.num_device_layers = self.device_layers;
         config.in_situ_quant = self.isq;
+        config.hf_revision = self.hf_revision;
         if let Some(bytes) = self.encoder_cache_memory_bytes {
             config = config.with_encoder_cache_memory_bytes(bytes);
         }
@@ -274,6 +279,9 @@ pub struct RuntimeSpec {
     /// In-situ quantization, e.g. `q4k`.
     #[serde(default)]
     pub isq: Option<String>,
+    /// Hub revision (branch, tag or commit) of `model`; each entry of `models` names its own.
+    #[serde(default)]
+    pub hf_revision: Option<String>,
     /// Paged attention: unset picks the device default.
     #[serde(default)]
     pub paged_attn: Option<bool>,
@@ -572,6 +580,9 @@ impl EngineSpec {
                 if self.model_id.is_some() {
                     return Err(invalid(MODEL_ID_WITH_MODELS.to_string()));
                 }
+                if runtime.hf_revision.is_some() {
+                    return Err(invalid(REVISION_WITH_MODELS.to_string()));
+                }
                 if self.anymoe.is_some() {
                     return Err(invalid(ANYMOE_WITH_MODELS.to_string()));
                 }
@@ -592,6 +603,7 @@ impl EngineSpec {
             .with_jinja_explicit_optional(runtime.jinja_explicit)
             .with_max_model_len_optional(runtime.max_model_len)
             .with_in_situ_quant_optional(runtime.isq)
+            .with_hf_revision_optional(runtime.hf_revision)
             .with_seed_optional(runtime.seed)
             .set_paged_attn(runtime.paged_attn)
             .with_max_seqs(runtime.max_seqs.unwrap_or(DEFAULT_MAX_SEQS));
@@ -1310,7 +1322,7 @@ impl Engine {
         unload_adapter(self.state(), &self.adapters, request).await
     }
 
-    /// Requantizes the loaded model to another ISQ type.
+    /// Requantizes a model (the default one unless the request names another) to another ISQ type.
     pub async fn re_isq(&self, request: ReIsqRequest) -> Result<ReIsqResponse, ApiError> {
         InferenceRs::maybe_log_request(
             self.state().clone(),
@@ -1323,6 +1335,7 @@ impl Engine {
     pub async fn calibration(
         &self,
         action: CalibrationAction,
+        model: Option<&str>,
     ) -> Result<CalibrationStatus, ApiError> {
         let logged = match action {
             CalibrationAction::Start => Some("Calibration start"),
@@ -1332,7 +1345,7 @@ impl Engine {
         if let Some(repr) = logged {
             InferenceRs::maybe_log_request(self.state().clone(), repr.to_string());
         }
-        operations::calibration(self.state(), action).await
+        operations::calibration(self.state(), action, model).await
     }
 
     pub fn sessions(&self) -> Result<SessionList, ApiError> {
@@ -1416,12 +1429,16 @@ impl Engine {
         to_json(&self.re_isq(parse_json(request)?).await?)
     }
 
-    pub async fn calibration_start_json(&self) -> Result<String, ApiError> {
-        to_json(&self.calibration(CalibrationAction::Start).await?)
+    pub async fn calibration_start_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let target: CalibrationTarget = parse_json(request)?;
+        let started = self.calibration(CalibrationAction::Start, target.model.as_deref());
+        to_json(&started.await?)
     }
 
-    pub async fn calibration_status_json(&self) -> Result<String, ApiError> {
-        to_json(&self.calibration(CalibrationAction::Status).await?)
+    pub async fn calibration_status_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let target: CalibrationTarget = parse_json(request)?;
+        let status = self.calibration(CalibrationAction::Status, target.model.as_deref());
+        to_json(&status.await?)
     }
 
     pub async fn calibration_apply_json(&self, request: &[u8]) -> Result<String, ApiError> {
@@ -1429,7 +1446,7 @@ impl Engine {
         let action = CalibrationAction::Apply {
             save_cimatrix: request.save_cimatrix.map(Into::into),
         };
-        to_json(&self.calibration(action).await?)
+        to_json(&self.calibration(action, request.model.as_deref()).await?)
     }
 
     pub fn sessions_json(&self) -> Result<String, ApiError> {
@@ -1450,6 +1467,19 @@ impl Engine {
 
     pub async fn tokenize_json(&self, request: &[u8]) -> Result<String, ApiError> {
         to_json(&self.tokenize(parse_json(request)?).await?)
+    }
+
+    /// The prompt tokens a chat request renders to, with its tools, reasoning controls and the chat template.
+    pub async fn tokenize_chat(
+        &self,
+        request: ChatCompletionRequest,
+    ) -> Result<TokenizeResponse, ApiError> {
+        let tokens = tokenize_chat(self.state(), request, self.owner()).await?;
+        Ok(TokenizeResponse { tokens })
+    }
+
+    pub async fn tokenize_chat_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.tokenize_chat(parse_json(request)?).await?)
     }
 
     pub async fn detokenize_json(&self, request: &[u8]) -> Result<String, ApiError> {
@@ -1875,6 +1905,25 @@ mod tests {
         }));
         assert_eq!(two.models.len(), 2);
         assert!(two.into_builder().is_ok());
+        assert!(
+            refused(
+                serde_json::json!({"models": [{"model": plain}], "runtime": {"hf_revision": "v1"}})
+            )
+            .contains("give each its own `hf_revision`")
+        );
+        let pinned = spec(serde_json::json!({"models": [{"model": plain, "hf_revision": "v1"}]}));
+        let config = pinned
+            .models
+            .into_iter()
+            .next()
+            .unwrap()
+            .into_config("models[0]")
+            .unwrap();
+        assert_eq!(config.hf_revision.as_deref(), Some("v1"));
+        let single = spec(
+            serde_json::json!({"model": plain, "runtime": {"hf_revision": "v1", "device": "cpu"}}),
+        );
+        assert!(single.into_builder().is_ok());
     }
 
     #[tokio::test]

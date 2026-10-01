@@ -9,7 +9,7 @@ internal static unsafe partial class NativeMethods
     internal const string Library = "inference_ffi";
 
     /// <summary>The ABI these declarations mirror; while it is 0.0.x any other version may differ anywhere.</summary>
-    internal const uint AbiVersion = (0 << 16) | (0 << 8) | 19;
+    internal const uint AbiVersion = (0 << 16) | (0 << 8) | 20;
 
     /// <summary>Refuses a library built for another ABI, before any call into it could misread its memory.</summary>
     internal static void EnsureAbi()
@@ -235,10 +235,12 @@ internal static unsafe partial class NativeMethods
         IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
 
     [LibraryImport(Library)]
-    internal static partial InferenceStatus inference_calibration_start(IntPtr engine, out IntPtr outResponse);
+    internal static partial InferenceStatus inference_calibration_start(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
 
     [LibraryImport(Library)]
-    internal static partial InferenceStatus inference_calibration_status(IntPtr engine, out IntPtr outResponse);
+    internal static partial InferenceStatus inference_calibration_status(
+        IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
 
     [LibraryImport(Library)]
     internal static partial InferenceStatus inference_models_cache_stats(IntPtr engine, out IntPtr outResponse);
@@ -276,6 +278,9 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(Library)]
     internal static partial InferenceStatus inference_detokenize(
         IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_tokenize_chat(IntPtr engine, byte* request, nuint requestLen, out IntPtr outResponse);
 
     // Files, skills and system reports.
 

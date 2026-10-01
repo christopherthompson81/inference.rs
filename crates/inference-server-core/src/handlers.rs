@@ -1,12 +1,15 @@
 //! ## General inference.rs server route handlers.
 
-use axum::extract::{Json, Path};
+use axum::extract::{Json, Path, Query};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 #[cfg(test)]
 use inference_api::operations::ReIsqResponse;
 use inference_api::{
-    operations::{CalibrationAction, CalibrationApplyRequest, ReIsqRequest, SerializedSession},
+    operations::{
+        CalibrationAction, CalibrationApplyRequest, CalibrationTarget, ReIsqRequest,
+        SerializedSession,
+    },
     system::TuneModelRequest,
 };
 
@@ -121,20 +124,36 @@ fn http_save_cimatrix_path(name: &str) -> Result<std::path::PathBuf, ApiError> {
   post,
   tag = "inference.rs",
   path = "/calibration/start",
+  params(("model" = Option<String>, Query, description = "The model to calibrate; the default model when absent.")),
   responses((status = 200, description = "Begin collecting activation statistics from live traffic.", body = inference_api::operations::CalibrationStatus))
 ))]
-pub async fn calibration_start(OwnedEngine(engine): OwnedEngine) -> Response {
-    json_response(engine.calibration(CalibrationAction::Start).await)
+pub async fn calibration_start(
+    OwnedEngine(engine): OwnedEngine,
+    Query(target): Query<CalibrationTarget>,
+) -> Response {
+    json_response(
+        engine
+            .calibration(CalibrationAction::Start, target.model.as_deref())
+            .await,
+    )
 }
 
 #[cfg_attr(test, utoipa::path(
   get,
   tag = "inference.rs",
   path = "/calibration/status",
+  params(("model" = Option<String>, Query, description = "The model to report on; the default model when absent.")),
   responses((status = 200, description = "Per-layer calibration collection progress.", body = inference_api::operations::CalibrationStatus))
 ))]
-pub async fn calibration_status(OwnedEngine(engine): OwnedEngine) -> Response {
-    json_response(engine.calibration(CalibrationAction::Status).await)
+pub async fn calibration_status(
+    OwnedEngine(engine): OwnedEngine,
+    Query(target): Query<CalibrationTarget>,
+) -> Response {
+    json_response(
+        engine
+            .calibration(CalibrationAction::Status, target.model.as_deref())
+            .await,
+    )
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -161,11 +180,8 @@ pub async fn calibration_apply(
         Ok(path) => path,
         Err(error) => return openai_error_response(error),
     };
-    json_response(
-        engine
-            .calibration(CalibrationAction::Apply { save_cimatrix })
-            .await,
-    )
+    let action = CalibrationAction::Apply { save_cimatrix };
+    json_response(engine.calibration(action, request.model.as_deref()).await)
 }
 
 fn model_operation_request(

@@ -1371,9 +1371,19 @@ pub unsafe extern "C" fn inference_re_isq(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn inference_calibration_start(
     engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
     out_response: *mut *mut inference_string,
 ) -> inference_status {
-    unsafe { query_call(engine, out_response, BlockingEngine::calibration_start_json) }
+    unsafe {
+        json_call(
+            engine,
+            request,
+            request_len,
+            out_response,
+            |engine, request| engine.calibration_start_json(request).map_err(api_failure),
+        )
+    }
 }
 
 /// Safety: as for `inference_models_list`.
@@ -1389,13 +1399,17 @@ pub unsafe extern "C" fn inference_models_cache_stats(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn inference_calibration_status(
     engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
     out_response: *mut *mut inference_string,
 ) -> inference_status {
     unsafe {
-        query_call(
+        json_call(
             engine,
+            request,
+            request_len,
             out_response,
-            BlockingEngine::calibration_status_json,
+            |engine, request| engine.calibration_status_json(request).map_err(api_failure),
         )
     }
 }
@@ -1517,6 +1531,25 @@ pub unsafe extern "C" fn inference_session_delete(
             session_id_len,
             out_response,
             Engine::delete_session_json,
+        )
+    }
+}
+
+/// Safety: as for `inference_chat`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_tokenize_chat(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+) -> inference_status {
+    unsafe {
+        json_call(
+            engine,
+            request,
+            request_len,
+            out_response,
+            |engine, request| engine.tokenize_chat_json(request).map_err(api_failure),
         )
     }
 }

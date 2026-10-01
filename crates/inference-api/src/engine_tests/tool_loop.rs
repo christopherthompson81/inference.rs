@@ -1,6 +1,6 @@
 use std::{
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicUsize, Ordering},
     },
     time::Duration,
@@ -54,18 +54,14 @@ fn host_tool(name: &str, seen: Arc<Concurrency>) -> anyhow::Result<ToolCallbackW
     })
 }
 
-// Forces `tokens` then EOS at the start of every generation, which a context that did not grow by one marks.
-fn scripted(tokens: Vec<u32>) -> Arc<dyn inference_core::CustomLogitsProcessor> {
-    let state = Mutex::new((0_usize, 0_usize));
+// Forces `tokens` then EOS: the next token follows the longest start of `tokens` the context already ends with.
+pub(super) fn scripted(tokens: Vec<u32>) -> Arc<dyn inference_core::CustomLogitsProcessor> {
     in_place(move |logits, context| {
-        let mut state = state.lock().unwrap();
-        let (position, last_len) = &mut *state;
-        if context.len() != *last_len + 1 {
-            *position = 0;
-        }
-        *last_len = context.len();
-        let next = tokens.get(*position).copied().unwrap_or(EOS);
-        *position += 1;
+        let played = (0..=tokens.len())
+            .rev()
+            .find(|&n| context.ends_with(&tokens[..n]))
+            .unwrap_or(0);
+        let next = tokens.get(played).copied().unwrap_or(EOS);
         logits.fill(f32::NEG_INFINITY);
         logits[next as usize] = 0.0;
         Ok(())
@@ -271,5 +267,30 @@ async fn a_tool_registered_after_load_answers_the_requests_that_name_it() -> any
         gone.err().and_then(|error| error.param).as_deref(),
         Some("host_tools")
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_request_that_turns_parallel_calls_off_runs_them_one_at_a_time() -> anyhow::Result<()> {
+    let seen = Arc::new(Concurrency::default());
+    let (_dir, engine) = calling_both(&seen).await?;
+    let mut sequential = request(false);
+    sequential["parallel_tool_calls"] = json!(false);
+    let response = engine
+        .chat_json(
+            sequential.to_string().as_bytes(),
+            MediaAttachments::default(),
+        )
+        .await?;
+    let response: Value = serde_json::from_str(&response)?;
+    assert_eq!(seen.calls.load(Ordering::SeqCst), TOOLS.len(), "{response}");
+    assert_eq!(seen.most.load(Ordering::SeqCst), 1, "the calls overlapped");
+    let names: Vec<_> = response["agentic_tool_calls"]
+        .as_array()
+        .expect("tool call records")
+        .iter()
+        .map(|record| record["name"].clone())
+        .collect();
+    assert_eq!(names, TOOLS.map(Value::from));
     Ok(())
 }

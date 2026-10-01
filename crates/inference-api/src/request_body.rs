@@ -74,6 +74,7 @@ json_requests!(
     crate::engine_logits::PromptLogitsRequest,
     crate::operations::ReIsqRequest,
     crate::operations::CalibrationApplyRequest,
+    crate::operations::CalibrationTarget,
     crate::operations::TokenizeRequest,
     crate::operations::DetokenizeRequest,
 );

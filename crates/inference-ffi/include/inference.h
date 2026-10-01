@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 19
+#define INFERENCE_ABI_VERSION_PATCH 20
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -501,20 +501,21 @@ INFERENCE_API inference_status inference_skills_list(const inference_engine *eng
 INFERENCE_API inference_status inference_skill_versions_list(const inference_engine *engine, const char *skill_id,
                                                             size_t skill_id_len, inference_string **out_response);
 
-/* Requantizes the loaded model, which must have loaded with ISQ, to {"ggml_type"} (an ISQ type such as "Q4K";
- * numeric shorthands resolve as on the CPU); out_response echoes it once the engine has queued the requantization
- * behind the running requests. */
+/* Requantizes a model, which must have loaded with ISQ, to {"ggml_type", "model"?} (an ISQ type such as "Q4K";
+ * numeric shorthands resolve as on the CPU; the default model when "model" is absent); out_response echoes it once the
+ * engine has queued the requantization behind the running requests. */
 INFERENCE_API inference_status inference_re_isq(const inference_engine *engine, const char *request, size_t request_len,
                                                inference_string **out_response);
 /* Online calibration: start collecting activation statistics from live traffic, report per-layer progress, or apply
- * them, requantizing from the source weights and hot-swapping each layer. Apply takes {"save_cimatrix"?}, a path to
- * also save the importance matrix to, unrestricted and relative to the process's working directory. Each returns the
+ * them, requantizing from the source weights and hot-swapping each layer. Start and status take {"model"?}; apply
+ * takes {"save_cimatrix"?, "model"?}, save_cimatrix a path to also save the importance matrix to, unrestricted and
+ * relative to the process's working directory. Each acts on the default model when "model" is absent and returns the
  * calibration status JSON, as it stood before an apply; a model without ISQ, or an apply with nothing collected, is
  * INFERENCE_ERR_INVALID_REQUEST with the reason. */
-INFERENCE_API inference_status inference_calibration_start(const inference_engine *engine,
-                                                          inference_string **out_response);
-INFERENCE_API inference_status inference_calibration_status(const inference_engine *engine,
-                                                           inference_string **out_response);
+INFERENCE_API inference_status inference_calibration_start(const inference_engine *engine, const char *request,
+                                                          size_t request_len, inference_string **out_response);
+INFERENCE_API inference_status inference_calibration_status(const inference_engine *engine, const char *request,
+                                                           size_t request_len, inference_string **out_response);
 INFERENCE_API inference_status inference_calibration_apply(const inference_engine *engine, const char *request,
                                                           size_t request_len, inference_string **out_response);
 
@@ -542,6 +543,11 @@ INFERENCE_API inference_status inference_tokenize(const inference_engine *engine
                                                  size_t request_len, inference_string **out_response);
 INFERENCE_API inference_status inference_detokenize(const inference_engine *engine, const char *request,
                                                    size_t request_len, inference_string **out_response);
+/* Tokenizes a chat completion request as the model's chat template renders it, with its tools and reasoning controls
+ * and the generation prompt, to {"tokens"}. Media given as URLs or data URLs are fetched as a chat would fetch them;
+ * "media://N" sources cannot be tokenized, since the call takes no buffers. */
+INFERENCE_API inference_status inference_tokenize_chat(const inference_engine *engine, const char *request,
+                                                      size_t request_len, inference_string **out_response);
 
 /* Host, device and build information, and environment diagnostics (the /v1/system/info and /v1/system/doctor
  * JSON). They need no engine. */

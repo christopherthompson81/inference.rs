@@ -168,7 +168,10 @@ cancel_response(response_id: str) -> types.ResponseResource
 ### `Engine.re_isq`
 
 ```text
-re_isq(ggml_type: str) -> types.ReIsqResponse
+re_isq(
+    ggml_type: str,
+    model: str | None = None,
+) -> types.ReIsqResponse
 ```
 
 Requantizes a model that loaded with ISQ; answers once the engine has queued it.
@@ -176,7 +179,7 @@ Requantizes a model that loaded with ISQ; answers once the engine has queued it.
 ### `Engine.calibration_start`
 
 ```text
-calibration_start() -> types.CalibrationStatus
+calibration_start(model: str | None = None) -> types.CalibrationStatus
 ```
 
 Starts collecting activation statistics from the requests the engine serves.
@@ -184,7 +187,9 @@ Starts collecting activation statistics from the requests the engine serves.
 ### `Engine.calibration_status`
 
 ```text
-calibration_status() -> types.CalibrationStatus
+calibration_status(
+    model: str | None = None,
+) -> types.CalibrationStatus
 ```
 
 ### `Engine.cache_stats`
@@ -198,6 +203,7 @@ cache_stats() -> types.CacheStats
 ```text
 calibration_apply(
     save_cimatrix: str | None = None,
+    model: str | None = None,
 ) -> types.CalibrationStatus
 ```
 
@@ -277,6 +283,14 @@ tokenize(
     model: str | None = None,
 ) -> list[int]
 ```
+
+### `Engine.tokenize_chat`
+
+```text
+tokenize_chat(request: types.ChatCompletionRequest | str) -> list[int]
+```
+
+The prompt tokens a chat request renders to, with its tools, reasoning controls and the chat template.
 
 ### `Engine.detokenize`
 
@@ -886,13 +900,13 @@ re_isq(request_json: str) -> str
 ### `JsonEngine.calibration_start`
 
 ```text
-calibration_start() -> str
+calibration_start(request_json: str = '{}') -> str
 ```
 
 ### `JsonEngine.calibration_status`
 
 ```text
-calibration_status() -> str
+calibration_status(request_json: str = '{}') -> str
 ```
 
 ### `JsonEngine.cache_stats`
@@ -983,6 +997,14 @@ Scores a prompt: the response JSON, and with "output": "logits" its row-major f3
 ```text
 tokenize(request_json: str) -> str
 ```
+
+### `JsonEngine.tokenize_chat`
+
+```text
+tokenize_chat(request_json: str) -> str
+```
+
+Tokenizes a chat completion request as the chat template renders it, to {"tokens"}.
 
 ### `JsonEngine.detokenize`
 

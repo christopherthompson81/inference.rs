@@ -3,8 +3,46 @@ use std::path::PathBuf;
 use inference_core::{
     AutoDeviceMapParams, DiffusionLoaderType, EmbeddingLoaderType, IsqOrganization,
     LoraAdapterSpec, LoraRuntimeConfig, ModelDType, MultimodalLoaderType, NormalLoaderType,
-    SpeechLoaderType, UqffWriteConfig,
+    SpeechGenerationConfig, SpeechLoaderType, UqffWriteConfig,
 };
+
+/// Speech sampling for every generation of the loaded model; an unset field keeps the architecture's default.
+#[cfg_attr(feature = "utoipa", derive(utoipa::ToSchema))]
+#[derive(Debug, Clone, Default, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SpeechGenerationSpec {
+    #[serde(default)]
+    pub max_tokens: Option<usize>,
+    /// Classifier-free guidance strength.
+    #[serde(default)]
+    pub cfg_scale: Option<f32>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub top_k: Option<usize>,
+}
+
+impl SpeechGenerationSpec {
+    pub fn into_config(self, arch: SpeechLoaderType) -> SpeechGenerationConfig {
+        let SpeechLoaderType::Dia = arch;
+        let SpeechGenerationConfig::Dia {
+            max_tokens,
+            cfg_scale,
+            temperature,
+            top_p,
+            top_k,
+        } = SpeechGenerationConfig::dia_default();
+        SpeechGenerationConfig::Dia {
+            max_tokens: self.max_tokens.or(max_tokens),
+            cfg_scale: self.cfg_scale.unwrap_or(cfg_scale),
+            temperature: self.temperature.unwrap_or(temperature),
+            top_p: self.top_p.unwrap_or(top_p),
+            top_k: self.top_k.or(top_k),
+        }
+    }
+}
 
 // Default value functions for serde deserialization
 fn default_model_dtype() -> ModelDType {
@@ -848,6 +886,9 @@ pub enum ModelSelected {
         #[serde(default = "default_model_dtype")]
         #[cfg_attr(feature = "utoipa", schema(default = default_model_dtype))]
         dtype: ModelDType,
+
+        #[serde(default)]
+        generation: Option<SpeechGenerationSpec>,
     },
 
     /// Select an embedding model, without quantization or adapters
@@ -953,6 +994,32 @@ impl ModelSelected {
                 Self::LoraGGUF { quantized_filename, .. } | Self::XLoraGGUF { quantized_filename, .. }
                     if quantized_filename.is_empty()
             )
+    }
+}
+
+#[cfg(test)]
+mod speech_tests {
+    use super::*;
+
+    #[test]
+    fn a_speech_generation_spec_overrides_only_what_it_sets() {
+        let spec: SpeechGenerationSpec =
+            serde_json::from_value(serde_json::json!({"temperature": 0.5, "max_tokens": 64}))
+                .unwrap();
+        let SpeechGenerationConfig::Dia {
+            max_tokens,
+            cfg_scale,
+            temperature,
+            top_k,
+            ..
+        } = spec.into_config(SpeechLoaderType::Dia);
+        let SpeechGenerationConfig::Dia {
+            cfg_scale: default_scale,
+            top_k: default_top_k,
+            ..
+        } = SpeechGenerationConfig::dia_default();
+        assert_eq!((max_tokens, temperature), (Some(64), 0.5));
+        assert_eq!((cfg_scale, top_k), (default_scale, default_top_k));
     }
 }
 

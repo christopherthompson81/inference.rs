@@ -653,56 +653,50 @@ impl Engine {
         }
     }
 
-    // A stop token that prefixes others (e.g. ` `) would fire early: rejected as an id, matched as a string otherwise.
+    // A stop string that is a single token prefixing others (e.g. ` `) would fire early, so it is matched as text.
     fn stop_criteria(
         &self,
         stop: Option<&StopTokens>,
     ) -> Result<(Vec<u32>, Vec<String>), Box<Response>> {
-        match stop {
-            None => Ok((vec![], vec![])),
-            Some(StopTokens::Ids(ids)) => {
-                let tok_env = get_mut_arcmutex!(self.pipeline).get_metadata().tok_env();
-                if let Some(tok_env) = tok_env.as_ref() {
+        let Some(StopTokens { seqs, ids }) = stop else {
+            return Ok((vec![], vec![]));
+        };
+        let mut stop_toks = ids.clone();
+        let mut stop_strings: Vec<String> = Vec::new();
+        let (tok_env, tokenizer) = {
+            let pipeline = get_mut_arcmutex!(self.pipeline);
+            (pipeline.get_metadata().tok_env(), pipeline.tokenizer())
+        };
+        // A requested id matches the sampled token exactly, so only one past the vocabulary is refused.
+        if let Some(tok_env) = tok_env.as_ref()
+            && let Some(id) = ids
+                .iter()
+                .find(|&&id| id as usize >= tok_env.tok_trie().vocab_size())
+        {
+            return Err(Box::new(Response::ValidationError(
+                format!("Stop token id {id} is outside the model's vocabulary.").into(),
+            )));
+        }
+        for stop_txt in seqs {
+            let Some(tokenizer) = &tokenizer else {
+                return Err(Box::new(Response::ValidationError(
+                    "Completion requests require the pipeline to have a tokenizer".into(),
+                )));
+            };
+            let encoded = tokenizer.encode_fast(stop_txt.to_string(), true);
+            let toks = encoded.map_err(Response::InternalError)?.get_ids().to_vec();
+            let single_unambiguous = toks.len() == 1
+                && !tok_env.as_ref().is_some_and(|tok_env| {
                     let tok_trie = tok_env.tok_trie();
-                    for id in ids {
-                        if tok_trie.has_extensions(tok_trie.token(*id)) {
-                            return Err(Box::new(Response::ValidationError(
-                                    format!("Stop token {:?} is also a prefix of other tokens and cannot be used as a stop token.", tok_trie.token_str(*id)).into(),
-                                )));
-                        }
-                    }
-                }
-                Ok((ids.clone(), vec![]))
-            }
-            Some(StopTokens::Seqs(seqs)) => {
-                let mut stop_toks = Vec::new();
-                let mut stop_strings: Vec<String> = Vec::new();
-                let (tok_env, tokenizer) = {
-                    let pipeline = get_mut_arcmutex!(self.pipeline);
-                    (pipeline.get_metadata().tok_env(), pipeline.tokenizer())
-                };
-                for stop_txt in seqs {
-                    let Some(tokenizer) = &tokenizer else {
-                        return Err(Box::new(Response::ValidationError(
-                            "Completion requests require the pipeline to have a tokenizer".into(),
-                        )));
-                    };
-                    let encoded = tokenizer.encode_fast(stop_txt.to_string(), true);
-                    let toks = encoded.map_err(Response::InternalError)?.get_ids().to_vec();
-                    let single_unambiguous = toks.len() == 1
-                        && !tok_env.as_ref().is_some_and(|tok_env| {
-                            let tok_trie = tok_env.tok_trie();
-                            tok_trie.has_extensions(tok_trie.token(toks[0]))
-                        });
-                    if single_unambiguous {
-                        stop_toks.push(toks[0]);
-                    } else {
-                        stop_strings.push(stop_txt.clone());
-                    }
-                }
-                Ok((stop_toks, stop_strings))
+                    tok_trie.has_extensions(tok_trie.token(toks[0]))
+                });
+            if single_unambiguous {
+                stop_toks.push(toks[0]);
+            } else {
+                stop_strings.push(stop_txt.clone());
             }
         }
+        Ok((stop_toks, stop_strings))
     }
 
     // Per-sequence KV templates for layers that own a normal cache, sized to the prompt in CACHE_GROW_SIZE steps.
