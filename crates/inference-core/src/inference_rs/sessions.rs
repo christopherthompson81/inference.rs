@@ -158,7 +158,7 @@ impl InferenceRs {
         Ok(Some(session))
     }
 
-    /// Replaces any existing session with the same ID. Restores its files into the file store.
+    /// Replaces any session under the same ID and restores its files; a file id already stored keeps its body.
     pub fn import_session(
         &self,
         model_id: Option<&str>,
@@ -174,8 +174,18 @@ impl InferenceRs {
                 .map_err(|e| InferenceRsError::Other(e.to_string()))?;
         }
         let file_store = self.get_file_store(model_id)?;
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| InferenceRsError::EnginePoisoned)?;
         for f in files {
-            file_store.insert(f, Some(session_id.clone()));
+            // ids resolve in every engine's store, and a body the import didn't write must not change under its id
+            let held = engines
+                .values()
+                .any(|instance| instance.file_store.retag_live(&f.id, &session_id));
+            if !held {
+                file_store.insert(f, Some(session_id.clone()));
+            }
         }
         Ok(())
     }

@@ -28,7 +28,7 @@ use uuid::Uuid;
 use crate::{
     api_error::{ApiError, ApiErrorKind, ModelErrorMessage, boxed_anyhow},
     background_tasks::get_background_task_manager,
-    cached_responses::get_response_cache,
+    cached_responses::{StoredConversation, get_response_cache},
     dispatch::{create_response_channel, response_model_id, send_request_with_model},
     engine_chat::{
         ASK_REQUIRES_STREAMING, ChatCompletionParseContext, ChatEngine, DispatchError, ResponseTap,
@@ -1003,6 +1003,8 @@ pub struct OpenResponsesStreamer {
     pending_shell_calls: PendingShellCalls,
     /// The calls handed back to the client, stored with the reply so a `function_call_output` can answer them.
     returned_tool_calls: Vec<ToolCall>,
+    /// The agent session the run reported, stored so a follow-up continues it by id.
+    session_id: Option<String>,
     files: Vec<inference_core::File>,
     tap: Option<ResponseTap>,
     cancellation: RequestCancellation,
@@ -1023,6 +1025,7 @@ impl OpenResponsesStreamer {
             history,
             context,
             cancellation,
+            session_id,
             ..
         } = prepared;
         Self {
@@ -1054,6 +1057,7 @@ impl OpenResponsesStreamer {
             function_call_items: Vec::new(),
             pending_shell_calls: HashMap::new(),
             returned_tool_calls: Vec::new(),
+            session_id,
             files: Vec::new(),
             tap,
             cancellation,
@@ -1102,7 +1106,11 @@ impl OpenResponsesStreamer {
                     .then(|| self.accumulated_reasoning.clone()),
             });
         }
-        let _ = cache.store_conversation_history(self.streaming_state.response_id.clone(), history);
+        let conversation = StoredConversation {
+            messages: history,
+            session_id: self.session_id.take(),
+        };
+        let _ = cache.store_conversation(self.streaming_state.response_id.clone(), conversation);
     }
 
     fn claim_output_index(&mut self) -> usize {
@@ -1305,6 +1313,9 @@ impl futures::Stream for OpenResponsesStreamer {
                     }
                     Response::Chunk(chat_chunk) => {
                         let mut events_to_emit = Vec::new();
+                        if chat_chunk.session_id.is_some() {
+                            self.session_id.clone_from(&chat_chunk.session_id);
+                        }
 
                         // Emit response.in_progress if not sent
                         if !self.streaming_state.in_progress_sent {
@@ -1582,6 +1593,9 @@ impl futures::Stream for OpenResponsesStreamer {
                             }
                             let calls = client_tool_calls(&self.request_context, &choice.message);
                             self.returned_tool_calls.extend(calls);
+                        }
+                        if chat_resp.session_id.is_some() {
+                            self.session_id.clone_from(&chat_resp.session_id);
                         }
                         self.finish(Some(&response));
                         let event = terminal_event(seq, response);
@@ -1910,8 +1924,22 @@ async fn parse_openresponses_request(
     // If previous_response_id is provided, get the full conversation history from cache
     let previous_messages = if let Some(prev_id) = &oairequest.previous_response_id {
         let cache = get_response_cache();
-        match cache.get_conversation_history(prev_id) {
-            Ok(Some(messages)) => Some(messages),
+        match cache.get_conversation(prev_id) {
+            Ok(Some(mut conversation)) => {
+                // a follow-up on an older reply branches; continuing the session would rewrite its newer turns
+                let head = conversation
+                    .session_id
+                    .as_deref()
+                    .map(|session| cache.session_head(session))
+                    .transpose()
+                    .ok()
+                    .flatten()
+                    .flatten();
+                if head.as_deref() != Some(prev_id.as_str()) {
+                    conversation.session_id = None;
+                }
+                Some(conversation)
+            }
             Ok(None) => {
                 return Err(ApiError::new(
                     ApiErrorKind::NotFound,
@@ -1933,7 +1961,10 @@ async fn parse_openresponses_request(
     // Get messages from input field
     let messages = oairequest.input.into_either();
 
-    let mut final_messages = previous_messages.unwrap_or_default();
+    let StoredConversation {
+        messages: mut final_messages,
+        session_id,
+    } = previous_messages.unwrap_or_default();
     match messages {
         Either::Left(msgs) => {
             let msgs = without_stored_calls(&final_messages, msgs);
@@ -2025,7 +2056,7 @@ async fn parse_openresponses_request(
         code_execution_permission: None,
         enable_shell: false,
         shell_skill_references: Vec::new(),
-        session_id: None,
+        session_id,
         max_tool_rounds: oairequest.max_tool_rounds,
         top_k: oairequest.top_k,
         grammar: oairequest.grammar,
@@ -2095,6 +2126,8 @@ pub struct PreparedResponse {
     pub history: Vec<Message>,
     pub context: RequestContext,
     pub cancellation: RequestCancellation,
+    /// The agent session the request continues, kept for the reply when its run reports none.
+    pub session_id: Option<String>,
 }
 
 /// Validates a Responses request, resolves the conversation it continues and sends it to its model.
@@ -2130,8 +2163,10 @@ async fn prepare_response_inner(
         .await
         .map_err(|error| DispatchError::Validation(boxed_anyhow(error)))?;
     let cancellation = RequestCancellation::default();
+    let mut session_id = None;
     if let Request::Normal(normal) = &mut core_request {
         normal.cancellation = Some(cancellation.clone());
+        session_id.clone_from(&normal.session_id);
     }
     send_request_with_model(state, core_request, model_id.as_deref())
         .await
@@ -2147,6 +2182,7 @@ async fn prepare_response_inner(
         history,
         context,
         cancellation,
+        session_id,
     })
 }
 
@@ -2155,7 +2191,7 @@ struct StoredResponse {
     id: String,
     response: ResponseResource,
     /// `None` for a response that is not a conversation to continue with `previous_response_id` (failed, cancelled).
-    history: Option<Vec<Message>>,
+    history: Option<StoredConversation>,
 }
 
 impl StoredResponse {
@@ -2163,7 +2199,7 @@ impl StoredResponse {
         let cache = get_response_cache();
         let _ = cache.store_response(self.id.clone(), self.response);
         if let Some(history) = self.history {
-            let _ = cache.store_conversation_history(self.id, history);
+            let _ = cache.store_conversation(self.id, history);
         }
     }
 }
@@ -2199,6 +2235,7 @@ async fn run_to_end(
         store,
         mut history,
         context,
+        session_id,
         ..
     } = prepared;
     // Files stay reachable through the file store; the response cites them.
@@ -2264,7 +2301,12 @@ async fn run_to_end(
                 StoredResponse {
                     id: id.clone(),
                     response: response.clone(),
-                    history: (response.status != ResponseStatus::Cancelled).then_some(history),
+                    history: (response.status != ResponseStatus::Cancelled).then(|| {
+                        StoredConversation {
+                            messages: history,
+                            session_id: chat_resp.session_id.clone().or(session_id),
+                        }
+                    }),
                 }
             });
             (Ok(response), stored)

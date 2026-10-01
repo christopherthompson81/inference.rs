@@ -642,3 +642,48 @@ calls before `finish`. Tests split into `a_streamed_reply_is_stored_with_the_cli
 `a_collected_reply_is_stored_with_the_client_calls_it_returns` (each returns a client call and a server-tool call;
 only the client's is stored), plus `a_follow_up_answers_the_stored_call_without_repeating_it` (an end-to-end
 `prepare_response` with `previous_response_id`, the resent call and its output, checking the merged turn order).
+
+## Run 26 — 2026-09-30 (time approximate)
+
+**Question:** #158's remainder, first part. The user wants both a tokenless server and a keyed one; this run is the
+hardening both share, so an id works as a capability only when it can't be guessed or derived. Keyed mode (owners
+behind API keys) and the web UI/MCP under keys follow as separate PRs.
+
+**Finding (sweep of id sources and shared state):** agent output ids were `file_<run>_r<round>_<idx>` with a 48-bit run
+id shared by the run's files, so one id named its siblings; web UI chats were `chat_<n>` from a counter seeded off
+disk; the UI's fork ids were client-chosen, falling back to `Math.random()` where `crypto.randomUUID` is missing (plain
+HTTP off localhost); session import kept client-chosen file ids, and `FileStore::insert` on a known id swaps the body and
+keeps its tags, so an import could replace another session's or container's file; Responses always set
+`session_id: None`, so a `previous_response_id` follow-up found its agent session only by content matching. The
+Anthropic route already passes its request's `session_id` through (the `None`s the sweep found there were tests).
+
+**Change:** agent outputs get `file_<uuid>` each (`File::make_output_id`; `run_id` is gone); UI chats are
+`chat_<uuid>`; `fork_session` names the fork server-side and returns it. The response cache stores a
+`StoredConversation` (messages plus the run's `session_id`, from the stream's chunks or the collected reply, or the
+session the request continued when the run reports none) and a follow-up sends that id. Open mode keeps content
+matching for clients that pass no id (decided: one trust domain); the guide now says so and that a session id is a
+secret.
+
+**First import fix (rejected in review):** refuse a file id that is live and not tagged with the importing session.
+Review broke it twice. Tags pile up (the agent loop re-inserts every input file under the request's session, Responses
+adds `cntr_<response>`), so citing a known upload as an input file under session `atk` and then importing `atk` with
+that id passed the check and swapped the body: a read capability became a write. And an expired entry the 120 s reaper
+hadn't reached counted as absent, while `insert` carried its old tags onto the new body.
+
+**Import as merged:** an import never replaces a stored body. Each file is retagged if live in any engine's store
+(`FileStore::retag_live`, under the engines lock), else inserted; `insert` over an expired entry starts fresh (new seq,
+no tags). Restoring your own session still works, since its stored files are its own bodies.
+
+**Also from review:** a follow-up on an older reply used to branch (the longer session failed content matching, so it
+got a fresh one); with the id sent, it would have spliced and then overwritten the session, losing the newer turns'
+server-tool messages and sharing the sandbox between branches. The cache now tracks each session's head (the response
+last stored with it, `ResponseCache::session_head`) and only a follow-up on the head sends the id. Not fixed and
+pre-existing: `splice_session_into_request` replaces the request's images with the stored ones, so a follow-up adding
+an image can lose it. The fork-failure path in the UI kept writing into the source session; it now drops the id. The
+web UI's random chat ids protect nothing yet: `/ui/api/list_chats` lists every chat on a keyless server (keyed-mode PR).
+
+**Tests:** `a_session_import_keeps_the_body_of_a_file_already_stored` (an untagged upload and one tagged by a citing
+session both keep their body through an import; a session restores a new file of its own),
+`a_body_stored_over_an_expired_entry_leaves_its_tags_behind`, `only_a_follow_up_on_the_latest_reply_continues_its_session`,
+`a_reply_without_an_agent_run_keeps_the_session_it_continued`, the Responses streamed/collected tests now also check the
+stored session id, and `output_ids_are_random_on_their_own`.

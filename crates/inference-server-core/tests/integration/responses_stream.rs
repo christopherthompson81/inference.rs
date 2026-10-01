@@ -75,6 +75,7 @@ async fn stream_rounds(
         history: Vec::new(),
         context: RequestContext::default(),
         cancellation: Default::default(),
+        session_id: None,
     };
     let mut stream = OpenResponsesStreamer::new(prepared, engine.state().clone(), None);
     let mut index_of = std::collections::HashMap::new();
@@ -150,6 +151,7 @@ async fn each_agentic_round_streams_its_reasoning_into_its_own_item() -> anyhow:
 
 const CLIENT_TOOL: &str = "lookup";
 const SERVER_TOOL: &str = "search_index";
+const RUN_SESSION: &str = "session_run";
 
 fn tool_call(id: &str, name: &str) -> inference_core::ToolCallResponse {
     inference_core::ToolCallResponse {
@@ -203,6 +205,7 @@ fn prepared(
             ..Default::default()
         },
         cancellation: Default::default(),
+        session_id: None,
     })
 }
 
@@ -240,16 +243,20 @@ fn done_with_calls(calls: Vec<inference_core::ToolCallResponse>) -> inference_co
         adapter_generation: None,
         agentic_tool_calls: None,
         files: None,
-        session_id: None,
+        session_id: Some(RUN_SESSION.to_string()),
     })
 }
 
-/// The stored reply's tool calls, as `previous_response_id` will replay them.
+/// The stored reply's tool calls, as `previous_response_id` will replay them in the run's session.
 fn stored_tool_calls(id: &str) -> anyhow::Result<Vec<inference_api::openai::ToolCall>> {
     let history = inference_api::cached_responses::get_response_cache()
-        .get_conversation_history(id)?
+        .get_conversation(id)?
         .expect("the reply was stored");
-    let reply = history.last().expect("the history holds the reply");
+    assert_eq!(history.session_id.as_deref(), Some(RUN_SESSION));
+    let reply = history
+        .messages
+        .last()
+        .expect("the history holds the reply");
     assert_eq!(reply.role, "assistant");
     Ok(reply
         .tool_calls
@@ -270,6 +277,7 @@ async fn stream_returned_calls(engine: &Engine, id: &str) -> anyhow::Result<()> 
     let mut chunk = reasoning_chunk(None, None, Some("tool_calls"));
     if let inference_core::Response::Chunk(chunk) = &mut chunk {
         chunk.choices[0].delta.tool_calls = Some(returned_calls());
+        chunk.session_id = Some(RUN_SESSION.to_string());
     }
     tx.send(chunk).await?;
     drop(tx);
@@ -303,6 +311,57 @@ async fn a_collected_reply_is_stored_with_the_client_calls_it_returns() -> anyho
     .await
     .map_err(anyhow::Error::msg)?;
     assert_only_client_call(&stored_tool_calls("resp_collected_call")?);
+    Ok(())
+}
+
+/// The agent session a `previous_response_id` follow-up would send on its request.
+async fn follow_up_session(engine: &Engine, previous: &str) -> anyhow::Result<Option<String>> {
+    let request =
+        json!({"model": "default", "previous_response_id": previous, "input": "And then?"});
+    let prepared = inference_api::responses::prepare_response(
+        engine.chat_engine(),
+        serde_json::from_value(request)?,
+    )
+    .await
+    .map_err(|error| anyhow::Error::msg(error.into_api_error(engine.state().clone())))?;
+    prepared.cancellation.cancel();
+    Ok(prepared.session_id)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn only_a_follow_up_on_the_latest_reply_continues_its_session() -> anyhow::Result<()> {
+    let (_dir, engine) = tiny_engine().await?;
+    stream_returned_calls(&engine, "resp_first").await?;
+    assert_eq!(
+        follow_up_session(&engine, "resp_first").await?.as_deref(),
+        Some(RUN_SESSION)
+    );
+    stream_returned_calls(&engine, "resp_second").await?;
+    // branching from the first reply must not rewrite the turns the second added to the session
+    assert_eq!(follow_up_session(&engine, "resp_first").await?, None);
+    assert_eq!(
+        follow_up_session(&engine, "resp_second").await?.as_deref(),
+        Some(RUN_SESSION)
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_without_an_agent_run_keeps_the_session_it_continued() -> anyhow::Result<()> {
+    let (_dir, engine) = tiny_engine().await?;
+    let (tx, rx) = tokio::sync::mpsc::channel(4);
+    let inference_core::Response::Done(mut done) = done_with_calls(returned_calls()) else {
+        unreachable!()
+    };
+    done.session_id = None;
+    tx.send(inference_core::Response::Done(done)).await?;
+    drop(tx);
+    let mut prepared = prepared("resp_plain_turn", false, rx)?;
+    prepared.session_id = Some(RUN_SESSION.to_string());
+    inference_api::responses::collect_response(prepared, engine.state())
+        .await
+        .map_err(anyhow::Error::msg)?;
+    assert_only_client_call(&stored_tool_calls("resp_plain_turn")?);
     Ok(())
 }
 

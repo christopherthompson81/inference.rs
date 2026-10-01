@@ -8,6 +8,14 @@ use std::sync::{Arc, RwLock};
 use crate::openai::Message;
 use crate::responses_types::ResponseResource;
 
+/// A stored reply's conversation, which `previous_response_id` continues.
+#[derive(Debug, Clone, Default)]
+pub struct StoredConversation {
+    pub messages: Vec<Message>,
+    /// The agent session the run used, so a follow-up continues it by id rather than by matching messages.
+    pub session_id: Option<String>,
+}
+
 /// Trait for caching responses
 pub trait ResponseCache: Send + Sync {
     /// Store a response object with the given ID
@@ -20,16 +28,20 @@ pub trait ResponseCache: Send + Sync {
     fn delete_response(&self, id: &str) -> Result<bool>;
 
     /// Store conversation history for a response
-    fn store_conversation_history(&self, id: String, messages: Vec<Message>) -> Result<()>;
+    fn store_conversation(&self, id: String, conversation: StoredConversation) -> Result<()>;
 
     /// Retrieve conversation history for a response
-    fn get_conversation_history(&self, id: &str) -> Result<Option<Vec<Message>>>;
+    fn get_conversation(&self, id: &str) -> Result<Option<StoredConversation>>;
+
+    /// The response last stored with `session_id`, the only one a follow-up continues that session from.
+    fn session_head(&self, session_id: &str) -> Result<Option<String>>;
 }
 
 /// In-memory implementation of ResponseCache
 pub struct InMemoryResponseCache {
     responses: Arc<RwLock<HashMap<String, ResponseResource>>>,
-    conversation_histories: Arc<RwLock<HashMap<String, Vec<Message>>>>,
+    conversation_histories: Arc<RwLock<HashMap<String, StoredConversation>>>,
+    session_heads: Arc<RwLock<HashMap<String, String>>>,
 }
 
 impl InMemoryResponseCache {
@@ -38,6 +50,7 @@ impl InMemoryResponseCache {
         Self {
             responses: Arc::new(RwLock::new(HashMap::new())),
             conversation_histories: Arc::new(RwLock::new(HashMap::new())),
+            session_heads: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -76,15 +89,24 @@ impl ResponseCache for InMemoryResponseCache {
         Ok(response_removed || history_removed)
     }
 
-    fn store_conversation_history(&self, id: String, messages: Vec<Message>) -> Result<()> {
+    fn store_conversation(&self, id: String, conversation: StoredConversation) -> Result<()> {
+        if let Some(session_id) = &conversation.session_id {
+            let mut heads = self.session_heads.write().unwrap();
+            heads.insert(session_id.clone(), id.clone());
+        }
         let mut histories = self.conversation_histories.write().unwrap();
-        histories.insert(id, messages);
+        histories.insert(id, conversation);
         Ok(())
     }
 
-    fn get_conversation_history(&self, id: &str) -> Result<Option<Vec<Message>>> {
+    fn get_conversation(&self, id: &str) -> Result<Option<StoredConversation>> {
         let histories = self.conversation_histories.read().unwrap();
         Ok(histories.get(id).cloned())
+    }
+
+    fn session_head(&self, session_id: &str) -> Result<Option<String>> {
+        let heads = self.session_heads.read().unwrap();
+        Ok(heads.get(session_id).cloned())
     }
 }
 
@@ -146,12 +168,16 @@ mod tests {
             reasoning_content: None,
         }];
 
+        let conversation = StoredConversation {
+            messages,
+            session_id: Some("session-a".to_string()),
+        };
         cache
-            .store_conversation_history("test-id".to_string(), messages.clone())
+            .store_conversation("test-id".to_string(), conversation)
             .unwrap();
 
-        let retrieved = cache.get_conversation_history("test-id").unwrap();
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().len(), 1);
+        let retrieved = cache.get_conversation("test-id").unwrap().unwrap();
+        assert_eq!(retrieved.messages.len(), 1);
+        assert_eq!(retrieved.session_id.as_deref(), Some("session-a"));
     }
 }

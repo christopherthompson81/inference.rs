@@ -215,20 +215,6 @@ async fn build_ui_router(inference: Arc<InferenceRs>, options: UiOptions) -> Res
     fs::create_dir_all(&uploads_dir).await?;
     inference_server_core::configure_ui_upload_dir(&uploads_dir).await?;
 
-    let mut next_id = 1u32;
-    if let Ok(mut dir) = fs::read_dir(&chats_dir).await {
-        while let Ok(Some(entry)) = dir.next_entry().await {
-            if let Some(name) = entry.file_name().to_str()
-                && let Some(num) = name
-                    .strip_prefix("chat_")
-                    .and_then(|s| s.strip_suffix(".json"))
-                && let Ok(n) = num.parse::<u32>()
-            {
-                next_id = next_id.max(n + 1);
-            }
-        }
-    }
-
     let default_model = inference
         .get_default_model_id()
         .ok()
@@ -242,7 +228,6 @@ async fn build_ui_router(inference: Arc<InferenceRs>, options: UiOptions) -> Res
         chats_dir: chats_dir.to_string_lossy().to_string(),
         speech_dir: speech_dir.to_string_lossy().to_string(),
         current_chat: tokio::sync::RwLock::new(None),
-        next_chat_id: tokio::sync::RwLock::new(next_id),
         default_params: GenerationParams::default(),
         search_enabled: options.search.is_some(),
         search_embedding_model: options.search,

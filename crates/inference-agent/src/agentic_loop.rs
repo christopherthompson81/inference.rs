@@ -694,7 +694,6 @@ struct DispatchCtx<'a> {
     supports_vision: bool,
     supports_video: bool,
     tool_call_ctx: &'a inference_mcp::ToolCallContext,
-    run_id: &'a str,
     turn: usize,
     session_id: &'a str,
     required_files: &'a [RequestedFile],
@@ -830,8 +829,7 @@ async fn do_custom_tool(
     let files: Vec<File> = result
         .files
         .iter()
-        .enumerate()
-        .map(|(idx, tf)| tool_file_to_file(tf, ctx.run_id, round, ctx.turn, idx, &tc.function.name))
+        .map(|tf| tool_file_to_file(tf, round, ctx.turn, &tc.function.name))
         .collect();
 
     let is_code_exec = is_code_exec_tool(&tc.function.name);
@@ -1005,8 +1003,6 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
     let required_files: Vec<RequestedFile> = request.files.clone().unwrap_or_default();
     let input_files = request.input_files.clone();
 
-    let run_id: String = uuid::Uuid::new_v4().simple().to_string()[..12].to_string();
-
     let mut session_id = request
         .session_id
         .clone()
@@ -1144,7 +1140,6 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
             supports_vision,
             supports_video,
             tool_call_ctx: &tool_call_ctx,
-            run_id: &run_id,
             turn,
             session_id: &session_id,
             required_files: &required_files,

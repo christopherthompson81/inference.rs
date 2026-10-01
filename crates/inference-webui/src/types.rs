@@ -141,7 +141,6 @@ pub struct AppState {
     /// Directory for storing generated speech wav files
     pub speech_dir: String,
     pub current_chat: RwLock<Option<String>>,
-    pub next_chat_id: RwLock<u32>,
     /// Default generation parameters
     pub default_params: GenerationParams,
     /// Whether web search is enabled
@@ -169,7 +168,7 @@ impl AppState {
     }
 }
 
-// ids are server-generated (`chat_<n>`), so anything else is a client trying to leave chats_dir
+// ids are server-generated (`chat_<uuid>`), so anything else is a client trying to leave chats_dir
 fn chat_file_path(chats_dir: &str, chat_id: &str, ext: &str) -> Option<PathBuf> {
     let valid = !chat_id.is_empty()
         && chat_id

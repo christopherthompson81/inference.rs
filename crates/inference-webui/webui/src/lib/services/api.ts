@@ -121,16 +121,13 @@ export async function setTail(chatId: string, tail: string | null): Promise<void
   await postVoid("set_tail", { id: chatId, tail });
 }
 
-export async function forkSession(
-  srcSessionId: string,
-  destSessionId: string,
-  numTurns: number,
-): Promise<void> {
-  await postVoid("fork_session", {
+/** Copies a session's first `numTurns` turns into a new session the server names, and returns its id. */
+export async function forkSession(srcSessionId: string, numTurns: number): Promise<string> {
+  const forked = await post<{ session_id: string }>("fork_session", {
     src_session_id: srcSessionId,
-    dest_session_id: destSessionId,
     num_turns: numTurns,
   });
+  return forked.session_id;
 }
 
 // === Settings & Capabilities ===
