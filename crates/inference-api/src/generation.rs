@@ -104,13 +104,15 @@ fn unexpected(state: &SharedInferenceRsState) -> ApiError {
 pub fn generate_image<'a>(
     state: &'a SharedInferenceRsState,
     request: ImageGenerationRequest,
+    owner: Option<&'a str>,
 ) -> BoxFuture<'a, Result<ImageGenerationResponse, ApiError>> {
-    Box::pin(generate_image_inner(state, request))
+    Box::pin(generate_image_inner(state, request, owner))
 }
 
 async fn generate_image_inner(
     state: &SharedInferenceRsState,
     request: ImageGenerationRequest,
+    owner: Option<&str>,
 ) -> Result<ImageGenerationResponse, ApiError> {
     let repr = serde_json::to_string(&request).map_err(|_| ApiError::internal())?;
     let messages = RequestMessage::ImageGeneration {
@@ -139,6 +141,7 @@ async fn generate_image_inner(
                         state,
                         model,
                         encode_png(image).map_err(encode_error)?,
+                        owner,
                     )?;
                     Ok(ImageChoice {
                         url: Some(url),

@@ -206,13 +206,37 @@ pub unsafe extern "C" fn inference_engine_load_with_callbacks(
     }
 }
 
-/// Safety: `engine` is NULL or a handle from `inference_engine_load` that is not used again.
+/// Safety: `engine` is NULL or a handle from `inference_engine_load*` or `inference_engine_for_owner`, not used again.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn inference_engine_free(engine: *mut inference_engine) {
     unsafe {
         if !engine.is_null() {
             guard_value((), || drop(Box::from_raw(engine)));
         }
+    }
+}
+
+/// Safety: `engine` is a live handle, `owner` valid for `owner_len` bytes, `out_engine` valid for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_engine_for_owner(
+    engine: *const inference_engine,
+    owner: *const c_char,
+    owner_len: usize,
+    out_engine: *mut *mut inference_engine,
+) -> inference_status {
+    unsafe {
+        id_call(
+            engine,
+            (owner, owner_len, "owner"),
+            (out_engine, "out_engine"),
+            |engine, owner| {
+                if owner.is_empty() {
+                    return Err(Failure::invalid("owner is empty"));
+                }
+                let engine = engine.for_owner(owner);
+                Ok(Box::into_raw(Box::new(inference_engine { engine })))
+            },
+        )
     }
 }
 

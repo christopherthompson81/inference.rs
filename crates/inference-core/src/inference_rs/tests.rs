@@ -76,15 +76,15 @@ fn fallible_file_helpers_preserve_poisoned_engine_error() {
     assert!(result.is_err());
 
     assert!(matches!(
-        state.try_find_file("file-id"),
+        state.try_find_file("file-id", None),
         Err(InferenceRsError::EnginePoisoned)
     ));
     assert!(matches!(
-        state.try_list_files(),
+        state.try_list_files(None),
         Err(InferenceRsError::EnginePoisoned)
     ));
     assert!(matches!(
-        state.try_remove_file("file-id"),
+        state.try_remove_file("file-id", None),
         Err(InferenceRsError::EnginePoisoned)
     ));
 }

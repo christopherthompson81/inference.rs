@@ -8,6 +8,7 @@ namespace InferenceRs;
 internal sealed class EngineHandle : SafeHandle
 {
     private readonly nint[] _callbacks;
+    private readonly EngineHandle? _parent;
 
     internal EngineHandle(IntPtr engine, nint[] callbacks)
         : base(IntPtr.Zero, ownsHandle: true)
@@ -16,12 +17,31 @@ internal sealed class EngineHandle : SafeHandle
         _callbacks = callbacks;
     }
 
+    /// <summary>A handle made from <paramref name="parent"/>, holding a reference on it so its callbacks stay registered.</summary>
+    internal EngineHandle(IntPtr engine, EngineHandle parent)
+        : base(IntPtr.Zero, ownsHandle: true)
+    {
+        var added = false;
+        try
+        {
+            parent.DangerousAddRef(ref added);
+        }
+        finally
+        {
+            if (!added) NativeMethods.inference_engine_free(engine);
+        }
+        SetHandle(engine);
+        _callbacks = [];
+        _parent = parent;
+    }
+
     public override bool IsInvalid => handle == IntPtr.Zero;
 
     protected override bool ReleaseHandle()
     {
         NativeMethods.inference_engine_free(handle);
         HostCallbackRegistry.Remove(_callbacks);
+        _parent?.DangerousRelease();
         return true;
     }
 }

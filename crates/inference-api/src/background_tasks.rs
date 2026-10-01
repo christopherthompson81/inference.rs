@@ -43,11 +43,18 @@ pub struct BackgroundTask {
     pub model: String,
     /// Stops the task's request.
     pub cancellation: RequestCancellation,
+    /// Who queued it; only the same owner reads, cancels or deletes it.
+    pub owner: Option<String>,
 }
 
 impl BackgroundTask {
     /// Create a new background task
-    pub fn new(id: String, model: String, cancellation: RequestCancellation) -> Self {
+    pub fn new(
+        id: String,
+        model: String,
+        cancellation: RequestCancellation,
+        owner: Option<String>,
+    ) -> Self {
         let created_at = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -59,6 +66,7 @@ impl BackgroundTask {
             created_at,
             model,
             cancellation,
+            owner,
         }
     }
 
@@ -118,21 +126,29 @@ impl BackgroundTaskManager {
     }
 
     /// Queue a task under the id of the response it produces
-    pub fn create_task(&self, id: String, model: String, cancellation: RequestCancellation) {
-        let task = BackgroundTask::new(id.clone(), model, cancellation);
+    pub fn create_task(
+        &self,
+        id: String,
+        model: String,
+        cancellation: RequestCancellation,
+        owner: Option<String>,
+    ) {
+        let task = BackgroundTask::new(id.clone(), model, cancellation, owner);
         self.tasks.write().unwrap().insert(id, task);
     }
 
-    /// Get the current state of a task
-    pub fn get_task(&self, id: &str) -> Option<BackgroundTask> {
+    /// Get the current state of `owner`'s task
+    pub fn get_task(&self, id: &str, owner: Option<&str>) -> Option<BackgroundTask> {
         let tasks = self.tasks.read().unwrap();
-        tasks.get(id).cloned()
+        tasks
+            .get(id)
+            .filter(|t| t.owner.as_deref() == owner)
+            .cloned()
     }
 
-    /// Get the response resource for a task
-    pub fn get_response(&self, id: &str) -> Option<ResponseResource> {
-        let tasks = self.tasks.read().unwrap();
-        tasks.get(id).map(|t| t.to_response_resource())
+    /// Get the response resource for `owner`'s task
+    pub fn get_response(&self, id: &str, owner: Option<&str>) -> Option<ResponseResource> {
+        self.get_task(id, owner).map(|t| t.to_response_resource())
     }
 
     // A cancelled task stays cancelled when its stopped request comes back; it keeps what was generated.
@@ -173,15 +189,16 @@ impl BackgroundTaskManager {
         self.transition(id, BackgroundTaskState::Failed(error))
     }
 
-    /// Cancel a queued or running task; a finished one is left as it is
-    pub fn cancel(&self, id: &str) -> bool {
+    /// Cancel `owner`'s queued or running task; a finished one is left as it is
+    pub fn cancel(&self, id: &str, owner: Option<&str>) -> bool {
         let mut tasks = self.tasks.write().unwrap();
         match tasks.get_mut(id) {
             Some(task)
-                if matches!(
-                    task.state,
-                    BackgroundTaskState::Queued | BackgroundTaskState::InProgress
-                ) =>
+                if task.owner.as_deref() == owner
+                    && matches!(
+                        task.state,
+                        BackgroundTaskState::Queued | BackgroundTaskState::InProgress
+                    ) =>
             {
                 task.state = BackgroundTaskState::Cancelled(None);
                 task.cancellation.cancel();
@@ -191,9 +208,15 @@ impl BackgroundTaskManager {
         }
     }
 
-    /// Delete a task, stopping its request if it is still running
-    pub fn delete_task(&self, id: &str) -> bool {
+    /// Delete `owner`'s task, stopping its request if it is still running
+    pub fn delete_task(&self, id: &str, owner: Option<&str>) -> bool {
         let mut tasks = self.tasks.write().unwrap();
+        if tasks
+            .get(id)
+            .is_none_or(|task| task.owner.as_deref() != owner)
+        {
+            return false;
+        }
         tasks
             .remove(id)
             .inspect(|task| task.cancellation.cancel())
@@ -222,9 +245,10 @@ mod tests {
             id.clone(),
             "test-model".to_string(),
             RequestCancellation::default(),
+            None,
         );
 
-        let task = manager.get_task(&id).unwrap();
+        let task = manager.get_task(&id, None).unwrap();
         assert_eq!(task.id, id);
         assert!(matches!(task.state, BackgroundTaskState::Queued));
     }
@@ -237,19 +261,23 @@ mod tests {
             id.clone(),
             "test-model".to_string(),
             RequestCancellation::default(),
+            None,
         );
 
         // Move to in_progress
         assert!(manager.mark_in_progress(&id));
-        let task = manager.get_task(&id).unwrap();
+        let task = manager.get_task(&id, None).unwrap();
         assert!(matches!(task.state, BackgroundTaskState::InProgress));
 
         // Mark completed
         let response = ResponseResource::new(id.clone(), "test-model".to_string(), 0);
         assert!(manager.mark_completed(&id, response));
-        let task = manager.get_task(&id).unwrap();
+        let task = manager.get_task(&id, None).unwrap();
         assert!(matches!(task.state, BackgroundTaskState::Completed(_)));
-        assert!(!manager.cancel(&id), "a finished task cannot be cancelled");
+        assert!(
+            !manager.cancel(&id, None),
+            "a finished task cannot be cancelled"
+        );
     }
 
     #[test]
@@ -260,10 +288,11 @@ mod tests {
             id.clone(),
             "test-model".to_string(),
             RequestCancellation::default(),
+            None,
         );
 
-        assert!(manager.cancel(&id));
-        let task = manager.get_task(&id).unwrap();
+        assert!(manager.cancel(&id, None));
+        let task = manager.get_task(&id, None).unwrap();
         assert!(matches!(task.state, BackgroundTaskState::Cancelled(None)));
         assert!(
             task.cancellation.is_canceled(),
@@ -273,12 +302,12 @@ mod tests {
         // The stopped request coming back keeps the cancellation, with what it generated
         let response = ResponseResource::new(id.clone(), "test-model".to_string(), 0);
         assert!(!manager.mark_completed(&id, response));
-        let task = manager.get_task(&id).unwrap();
+        let task = manager.get_task(&id, None).unwrap();
         assert!(matches!(
             task.state,
             BackgroundTaskState::Cancelled(Some(_))
         ));
-        let resource = manager.get_response(&id).unwrap();
+        let resource = manager.get_response(&id, None).unwrap();
         assert_eq!(resource.status, ResponseStatus::Cancelled);
     }
 }

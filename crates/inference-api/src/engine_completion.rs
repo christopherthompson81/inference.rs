@@ -211,6 +211,7 @@ pub fn parse_request(
             adapter,
             truncate_sequence: oairequest.truncate_sequence.unwrap_or(false),
             session_id: None,
+            owner: None,
             files: None,
             input_files: Vec::new(),
             cancellation: None,

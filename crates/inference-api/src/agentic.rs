@@ -38,12 +38,15 @@ pub struct ApprovalBroker {
 struct ApprovalState {
     pending: HashMap<String, PendingApproval>,
     early_decisions: HashMap<String, ApprovalDecisionState>,
+    /// Keyed by `sandbox_key(owner, session_id)`, as the agent loop keys its own.
     approved_sessions: HashSet<String>,
-    notified: HashSet<String>,
+    /// Approvals announced to their requester, by who that requester acts for.
+    notified: HashMap<String, Option<String>>,
 }
 
 struct PendingApproval {
     session_id: String,
+    owner: Option<String>,
     tx: oneshot::Sender<AgentToolApprovalDecision>,
 }
 
@@ -55,25 +58,34 @@ struct ApprovalDecisionState {
 }
 
 impl ApprovalBroker {
-    pub fn callback(&self) -> AgentToolApprovalAsyncCallback {
+    /// Waits on decisions for a request acting for `owner`; only the same owner can answer them.
+    pub fn callback(&self, owner: Option<String>) -> AgentToolApprovalAsyncCallback {
         let broker = self.clone();
         Arc::new(move |approval| {
             let broker = broker.clone();
-            Box::pin(async move { broker.wait_for_decision(approval).await })
+            let owner = owner.clone();
+            Box::pin(async move { broker.wait_for_decision(approval, owner).await })
         })
     }
 
-    pub fn notifier(&self, response: Sender<Response>) -> Arc<AgentToolApprovalNotifier> {
+    pub fn notifier(
+        &self,
+        response: Sender<Response>,
+        owner: Option<String>,
+    ) -> Arc<AgentToolApprovalNotifier> {
         let broker = self.clone();
-        Arc::new(move |approval| broker.notify_approval_required(approval, response.clone()))
+        Arc::new(move |approval| {
+            broker.notify_approval_required(approval, response.clone(), owner.clone())
+        })
     }
 
     fn notify_approval_required(
         &self,
         approval: AgentToolApprovalRequest,
         response: Sender<Response>,
+        owner: Option<String>,
     ) {
-        if self.is_session_approved(&approval.session_id) {
+        if self.is_session_approved(owner.as_deref(), &approval.session_id) {
             return;
         }
 
@@ -82,7 +94,7 @@ impl ApprovalBroker {
             .lock()
             .unwrap()
             .notified
-            .insert(approval_id.clone());
+            .insert(approval_id.clone(), owner.clone());
         let send_result = response.try_send(Response::AgenticToolApprovalRequired {
             approval_id: approval_id.clone(),
             session_id: approval.session_id,
@@ -91,12 +103,16 @@ impl ApprovalBroker {
             arguments: approval.arguments,
         });
         if send_result.is_err() {
-            let _ = self.resolve(&approval_id, false, false, None);
+            let _ = self.resolve(&approval_id, owner.as_deref(), false, false, None);
         }
     }
 
-    async fn wait_for_decision(&self, approval: AgentToolApproval) -> AgentToolApprovalDecision {
-        if self.is_session_approved(&approval.session_id) {
+    async fn wait_for_decision(
+        &self,
+        approval: AgentToolApproval,
+        owner: Option<String>,
+    ) -> AgentToolApprovalDecision {
+        if self.is_session_approved(owner.as_deref(), &approval.session_id) {
             return AgentToolApprovalDecision::approve();
         }
 
@@ -105,7 +121,8 @@ impl ApprovalBroker {
             let mut state = self.inner.lock().unwrap();
             if let Some(decision) = state.early_decisions.remove(&approval.approval_id) {
                 if decision.approve && decision.remember_for_session {
-                    state.approved_sessions.insert(approval.session_id.clone());
+                    let key = inference_core::sandbox_key(owner.as_deref(), &approval.session_id);
+                    state.approved_sessions.insert(key);
                 }
                 return AgentToolApprovalDecision {
                     approve: decision.approve,
@@ -117,6 +134,7 @@ impl ApprovalBroker {
                 approval.approval_id.clone(),
                 PendingApproval {
                     session_id: approval.session_id.clone(),
+                    owner,
                     tx,
                 },
             );
@@ -143,19 +161,29 @@ impl ApprovalBroker {
         self.inner.lock().unwrap().pending.contains_key(approval_id)
     }
 
-    /// Answers a pending approval; a decision that arrives before the request is queued for it.
+    /// Answers `owner`'s pending approval; a decision that arrives before the request is queued for it.
     pub fn resolve(
         &self,
         approval_id: &str,
+        owner: Option<&str>,
         approve: bool,
         remember_for_session: bool,
         message: Option<String>,
     ) -> ApprovalResolveStatus {
         let mut state = self.inner.lock().unwrap();
+        let theirs = |requester: &Option<String>| requester.as_deref() == owner;
+        if state
+            .pending
+            .get(approval_id)
+            .is_some_and(|pending| !theirs(&pending.owner))
+        {
+            return ApprovalResolveStatus::NotFound;
+        }
         let Some(pending) = state.pending.remove(approval_id) else {
-            if !state.notified.remove(approval_id) {
+            if !state.notified.get(approval_id).is_some_and(theirs) {
                 return ApprovalResolveStatus::NotFound;
             }
+            state.notified.remove(approval_id);
             state.early_decisions.insert(
                 approval_id.to_string(),
                 ApprovalDecisionState {
@@ -169,7 +197,8 @@ impl ApprovalBroker {
 
         state.notified.remove(approval_id);
         if approve && remember_for_session {
-            state.approved_sessions.insert(pending.session_id);
+            let key = inference_core::sandbox_key(pending.owner.as_deref(), &pending.session_id);
+            state.approved_sessions.insert(key);
         }
         let _ = pending.tx.send(AgentToolApprovalDecision {
             approve,
@@ -179,12 +208,9 @@ impl ApprovalBroker {
         ApprovalResolveStatus::Resolved
     }
 
-    fn is_session_approved(&self, session_id: &str) -> bool {
-        self.inner
-            .lock()
-            .unwrap()
-            .approved_sessions
-            .contains(session_id)
+    fn is_session_approved(&self, owner: Option<&str>, session_id: &str) -> bool {
+        let key = inference_core::sandbox_key(owner, session_id);
+        self.inner.lock().unwrap().approved_sessions.contains(&key)
     }
 }
 
@@ -193,10 +219,12 @@ pub fn resolve_approval(
     broker: &ApprovalBroker,
     approval_id: &str,
     request: ApprovalDecisionRequest,
+    owner: Option<&str>,
 ) -> Result<ApprovalDecisionResponse, ApiError> {
     let approve = matches!(request.decision, ApprovalDecision::Approve);
     let status = match broker.resolve(
         approval_id,
+        owner,
         approve,
         request.remember_for_session,
         request.message,

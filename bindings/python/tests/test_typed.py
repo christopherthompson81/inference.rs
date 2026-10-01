@@ -278,6 +278,22 @@ class TypedEngine(unittest.TestCase):
             self.engine.model_status("no-such-model")
         self.assertEqual(unknown.exception.status, ir.Status.NOT_FOUND)
 
+    def test_an_owner_reaches_only_what_it_stored(self):
+        with self.engine.for_owner("team-a") as team_a, self.engine.for_owner("team-b") as team_b:
+            uploaded = team_a.upload_file(b"a,b\n", "table.csv", "user_data", "text/csv")
+            self.assertIn(uploaded.id, [f.id for f in team_a.list_files().data])
+            for other in (team_b, self.engine):
+                self.assertNotIn(uploaded.id, [f.id for f in other.list_files().data])
+                with self.assertRaises(ir.InferenceError) as hidden:
+                    other.get_file(uploaded.id)
+                self.assertEqual(hidden.exception.status, ir.Status.NOT_FOUND)
+            session = t.SerializedSession(messages=[{"role": {"Left": "user"}, "content": {"Left": "hi"}}])
+            team_a.put_session("owned-session", session)
+            self.assertNotIn("owned-session", team_b.list_sessions().data)
+            with self.assertRaises(ir.InferenceError):
+                team_b.put_session("owned-session", session)
+            self.assertTrue(team_a.delete_session("owned-session").deleted)
+
     def test_runtime_operations_are_typed(self):
         tokens = self.engine.tokenize("Reply with ok")
         self.assertTrue(tokens and all(isinstance(token, int) for token in tokens))

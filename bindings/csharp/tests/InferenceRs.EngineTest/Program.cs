@@ -39,6 +39,7 @@ internal static class Program
             ResponsesAreStored(engine);
             ErrorsCarryTheEnvelope(engine);
             FilesRoundTrip(engine);
+            OwnersStayApart(engine);
             SkillsAreStored(engine);
             RuntimeOperations(engine);
             ACancelledStreamEndsWithItsUsage(engine);
@@ -260,6 +261,18 @@ internal static class Program
         Check("a deleted file's content is NotFound",
             Throws(() => engine.FileContent(id))?.Status == InferenceStatus.NotFound);
         Check("an empty file uploads", JsonNode.Parse(engine.UploadFile([], "empty.txt", "user_data")) is JsonObject);
+    }
+
+    private static void OwnersStayApart(InferenceEngine engine)
+    {
+        using var teamA = engine.ForOwner("team-a");
+        using var teamB = engine.ForOwner("team-b");
+        var uploaded = JsonNode.Parse(teamA.UploadFile(Encoding.UTF8.GetBytes("a,b\n"), "table.csv", "user_data"))!;
+        var id = (string)uploaded["id"]!;
+        Check("an owner reads its own file", JsonNode.Parse(teamA.GetFile(id)) is JsonObject);
+        Check("another owner can't", Throws(() => teamB.GetFile(id))?.Status == InferenceStatus.NotFound);
+        Check("nor can the unscoped engine", Throws(() => engine.GetFile(id))?.Status == InferenceStatus.NotFound);
+        Check("an empty owner is refused", Throws(() => engine.ForOwner(""))?.Status == InferenceStatus.InvalidArgument);
     }
 
     private static void SkillsAreStored(InferenceEngine engine)

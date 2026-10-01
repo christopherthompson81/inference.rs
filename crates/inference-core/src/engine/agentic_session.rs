@@ -21,11 +21,14 @@ pub struct AgenticSessionEntry {
     pub images: Vec<DynamicImage>,
     pub videos: Vec<VideoInput>,
     last_accessed: Instant,
+    /// Who the session belongs to; only the same owner (or, with none, only an unscoped caller) reaches it.
+    owner: Option<String>,
 }
 
 /// Agentic conversation state, keyed by session ID. Also supports content-based matching for clients that don't pass an ID.
 pub struct AgenticSessionStore {
     sessions: HashMap<String, AgenticSessionEntry>,
+    /// Keyed by `sandbox_key(owner, session_id)`, so an id another owner reuses after expiry starts unapproved.
     approved_agent_sessions: HashMap<String, Instant>,
 }
 
@@ -43,32 +46,43 @@ impl AgenticSessionStore {
         }
     }
 
-    pub fn approve_agent_actions(&mut self, session_id: impl Into<String>) {
+    pub fn approve_agent_actions(&mut self, sandbox_key: impl Into<String>) {
         self.evict();
         self.approved_agent_sessions
-            .insert(session_id.into(), Instant::now());
+            .insert(sandbox_key.into(), Instant::now());
     }
 
-    pub fn agent_actions_approved(&mut self, session_id: &str) -> bool {
+    pub fn agent_actions_approved(&mut self, sandbox_key: &str) -> bool {
         self.evict();
-        let Some(last_accessed) = self.approved_agent_sessions.get_mut(session_id) else {
+        let Some(last_accessed) = self.approved_agent_sessions.get_mut(sandbox_key) else {
             return false;
         };
         *last_accessed = Instant::now();
         true
     }
 
-    /// Updates `last_accessed`.
-    pub fn get(&mut self, session_id: &str) -> Option<AgenticSessionEntry> {
-        let entry = self.sessions.get_mut(session_id)?;
+    /// `owner`'s session under `session_id`. Updates `last_accessed`.
+    pub fn get(&mut self, session_id: &str, owner: Option<&str>) -> Option<AgenticSessionEntry> {
+        let entry = self
+            .sessions
+            .get_mut(session_id)
+            .filter(|entry| entry.owner.as_deref() == owner)?;
         entry.last_accessed = Instant::now();
         Some(entry.clone())
     }
 
-    /// Find a stored session whose user-visible messages (no tool turns) are a prefix of `incoming`.
+    /// Whether `session_id` names a session that isn't `owner`'s, which `owner` may then neither use nor replace.
+    pub fn held_by_other(&self, session_id: &str, owner: Option<&str>) -> bool {
+        self.sessions
+            .get(session_id)
+            .is_some_and(|entry| entry.owner.as_deref() != owner)
+    }
+
+    /// Find one of `owner`'s sessions whose user-visible messages (no tool turns) are a prefix of `incoming`.
     pub fn find_by_messages(
         &mut self,
         incoming: &[IndexMap<String, MessageContent>],
+        owner: Option<&str>,
     ) -> Option<(String, AgenticSessionEntry)> {
         // Need at least 2 messages (system/user + assistant) to match meaningfully.
         if incoming.len() < 2 {
@@ -76,6 +90,9 @@ impl AgenticSessionStore {
         }
 
         for (id, entry) in &mut self.sessions {
+            if entry.owner.as_deref() != owner {
+                continue;
+            }
             let stored_visible = user_visible_messages(&entry.messages);
             if stored_visible.len() > incoming.len() {
                 continue;
@@ -95,41 +112,78 @@ impl AgenticSessionStore {
         None
     }
 
-    /// Save or update. Evicts stale entries if needed.
-    pub fn save(&mut self, session_id: String, entry: AgenticSessionEntry) {
+    /// Save or update as `owner`'s. Evicts stale entries if needed.
+    pub fn save(
+        &mut self,
+        session_id: String,
+        mut entry: AgenticSessionEntry,
+        owner: Option<&str>,
+    ) {
         self.evict();
+        entry.owner = owner.map(str::to_string);
         self.sessions.insert(session_id, entry);
     }
 
-    /// Returns whether the session existed.
-    pub fn delete(&mut self, session_id: &str) -> bool {
-        self.approved_agent_sessions.remove(session_id);
+    /// Returns whether `owner`'s session existed.
+    pub fn delete(&mut self, session_id: &str, owner: Option<&str>) -> bool {
+        if self.held_by_other(session_id, owner) || !self.sessions.contains_key(session_id) {
+            return false;
+        }
+        self.approved_agent_sessions
+            .remove(&crate::sandbox_key(owner, session_id));
         self.sessions.remove(session_id).is_some()
     }
 
-    pub fn list_ids(&self) -> Vec<String> {
-        self.sessions.keys().cloned().collect()
+    pub fn list_ids(&self, owner: Option<&str>) -> Vec<String> {
+        self.sessions
+            .iter()
+            .filter(|(_, entry)| entry.owner.as_deref() == owner)
+            .map(|(id, _)| id.clone())
+            .collect()
     }
 
-    pub fn export(&mut self, session_id: &str) -> Result<Option<SerializedSession>> {
-        let Some(entry) = self.get(session_id) else {
+    pub fn export(
+        &mut self,
+        session_id: &str,
+        owner: Option<&str>,
+    ) -> Result<Option<SerializedSession>> {
+        let Some(entry) = self.get(session_id, owner) else {
             return Ok(None);
         };
         Ok(Some(SerializedSession::from_entry(&entry)?))
     }
 
-    /// Replaces any existing entry with the same ID.
-    pub fn import(&mut self, session_id: String, serialized: SerializedSession) -> Result<()> {
+    /// Replaces any existing entry of `owner`'s with the same ID.
+    pub fn import(
+        &mut self,
+        session_id: String,
+        serialized: SerializedSession,
+        owner: Option<&str>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !self.held_by_other(&session_id, owner),
+            "session id `{session_id}` is in use"
+        );
         let entry = serialized.into_entry()?;
-        self.save(session_id, entry);
+        self.save(session_id, entry, owner);
         Ok(())
     }
 
     /// Clone the first `num_turns` complete turns of `src` into `dest`. A turn ends at the first
     /// `role: assistant` message that has no `tool_calls` field. Images and videos are copied as-is.
-    pub fn fork(&mut self, src: &str, dest: String, num_turns: usize) -> Result<()> {
+    pub fn fork(
+        &mut self,
+        src: &str,
+        dest: String,
+        num_turns: usize,
+        owner: Option<&str>,
+    ) -> Result<()> {
+        anyhow::ensure!(
+            !self.held_by_other(&dest, owner),
+            "session id `{dest}` is in use"
+        );
         let entry = self
-            .get(src)
+            .get(src, owner)
             .ok_or_else(|| anyhow::anyhow!("source session {src} not found"))?;
 
         let mut turns_seen = 0;
@@ -155,7 +209,7 @@ impl AgenticSessionStore {
             None => entry.messages.clone(),
         };
         let forked = AgenticSessionEntry::new(messages, entry.images.clone(), entry.videos.clone());
-        self.save(dest, forked);
+        self.save(dest, forked, owner);
         Ok(())
     }
 
@@ -194,6 +248,7 @@ impl AgenticSessionEntry {
             images,
             videos,
             last_accessed: Instant::now(),
+            owner: None,
         }
     }
 }
@@ -363,6 +418,7 @@ impl SerializedSession {
             images,
             videos,
             last_accessed: Instant::now(),
+            owner: None,
         })
     }
 }
@@ -405,4 +461,51 @@ fn encode_png_base64(img: &DynamicImage) -> Result<String> {
 fn decode_png_base64(s: &str) -> Result<DynamicImage> {
     let bytes = BASE64.decode(s).context("base64 decoding image")?;
     image::load_from_memory(&bytes).context("loading image bytes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const OWNER: Option<&str> = Some("team-a");
+    const OTHER: Option<&str> = Some("team-b");
+
+    fn message(role: &str, text: &str) -> IndexMap<String, MessageContent> {
+        IndexMap::from([
+            ("role".to_string(), Either::Left(role.to_string())),
+            ("content".to_string(), Either::Left(text.to_string())),
+        ])
+    }
+
+    fn conversation() -> Vec<IndexMap<String, MessageContent>> {
+        vec![message("user", "hello"), message("assistant", "hi")]
+    }
+
+    #[test]
+    fn a_session_is_found_used_and_removed_only_by_its_owner() {
+        let mut store = AgenticSessionStore::new();
+        let entry = AgenticSessionEntry::new(conversation(), Vec::new(), Vec::new());
+        store.save("session_a".to_string(), entry, OWNER);
+
+        let mut incoming = conversation();
+        incoming.push(message("user", "and then?"));
+        for other in [OTHER, None] {
+            assert!(store.find_by_messages(&incoming, other).is_none());
+            assert!(store.get("session_a", other).is_none());
+            assert!(store.held_by_other("session_a", other));
+            assert!(store.list_ids(other).is_empty());
+            assert!(!store.delete("session_a", other));
+            assert!(
+                store
+                    .fork("session_a", "session_b".to_string(), 1, other)
+                    .is_err()
+            );
+        }
+        assert_eq!(
+            store.find_by_messages(&incoming, OWNER).unwrap().0,
+            "session_a"
+        );
+        assert!(!store.held_by_other("session_a", OWNER));
+        assert!(store.delete("session_a", OWNER));
+    }
 }

@@ -76,6 +76,7 @@ async fn stream_rounds(
         context: RequestContext::default(),
         cancellation: Default::default(),
         session_id: None,
+        owner: None,
     };
     let mut stream = OpenResponsesStreamer::new(prepared, engine.state().clone(), None);
     let mut index_of = std::collections::HashMap::new();
@@ -206,6 +207,7 @@ fn prepared(
         },
         cancellation: Default::default(),
         session_id: None,
+        owner: None,
     })
 }
 
@@ -250,7 +252,7 @@ fn done_with_calls(calls: Vec<inference_core::ToolCallResponse>) -> inference_co
 /// The stored reply's tool calls, as `previous_response_id` will replay them in the run's session.
 fn stored_tool_calls(id: &str) -> anyhow::Result<Vec<inference_api::openai::ToolCall>> {
     let history = inference_api::cached_responses::get_response_cache()
-        .get_conversation(id)?
+        .get_conversation(id, None)?
         .expect("the reply was stored");
     assert_eq!(history.session_id.as_deref(), Some(RUN_SESSION));
     let reply = history

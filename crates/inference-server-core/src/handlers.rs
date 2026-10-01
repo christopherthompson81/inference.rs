@@ -2,6 +2,7 @@
 
 #[cfg(test)]
 use crate::openai::ModelObjects;
+use axum::Extension;
 use axum::extract::{Json, Path, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -17,6 +18,7 @@ use inference_selection::{AutoTuneRequest, ModelSelected, TuneProfile, auto_tune
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
+use crate::auth::Owner;
 use crate::handler_core::{ApiJson, ApiJsonRejection};
 pub use crate::models_api::ModelOperationRequest;
 #[cfg(test)]
@@ -445,9 +447,14 @@ pub async fn tune_model(payload: Result<ApiJson<TuneModelRequest>, ApiJsonReject
 ))]
 pub async fn get_session(
     State(state): ExtractedInferenceRsState,
+    Extension(owner): Extension<Owner>,
     Path(session_id): Path<String>,
 ) -> Response {
-    json_response(operations::export_session(&state, &session_id))
+    json_response(operations::export_session(
+        &state,
+        &session_id,
+        owner.as_deref(),
+    ))
 }
 
 /// PUT `/v1/sessions/{session_id}`. Replaces any existing session.
@@ -464,6 +471,7 @@ pub async fn get_session(
 ))]
 pub async fn put_session(
     State(state): ExtractedInferenceRsState,
+    Extension(owner): Extension<Owner>,
     Path(session_id): Path<String>,
     payload: Result<ApiJson<SerializedSession>, ApiJsonRejection>,
 ) -> Response {
@@ -471,7 +479,7 @@ pub async fn put_session(
         Ok(ApiJson(session)) => session,
         Err(ApiJsonRejection(error)) => return openai_error_response(error),
     };
-    match operations::import_session(&state, session_id, session) {
+    match operations::import_session(&state, session_id, session, owner.as_deref()) {
         Ok(()) => StatusCode::OK.into_response(),
         Err(error) => openai_error_response(error),
     }
@@ -487,9 +495,10 @@ pub async fn put_session(
 ))]
 pub async fn delete_session(
     State(state): ExtractedInferenceRsState,
+    Extension(owner): Extension<Owner>,
     Path(session_id): Path<String>,
 ) -> Response {
-    match operations::delete_session(&state, &session_id) {
+    match operations::delete_session(&state, &session_id, owner.as_deref()) {
         Ok(_) => StatusCode::OK.into_response(),
         Err(error) => openai_error_response(error),
     }

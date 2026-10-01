@@ -217,9 +217,10 @@ impl ShellManager {
                 let handle = tokio::runtime::Handle::current();
                 tokio::task::block_in_place(|| {
                     handle.block_on(async {
-                        let mut sessions = session_for(&sessions, &ctx, &session_id).await?;
+                        let sandbox = tc.sandbox_key(&session_id);
+                        let mut sessions = session_for(&sessions, &ctx, &sandbox).await?;
                         let session = sessions
-                            .get_mut(&session_id)
+                            .get_mut(&sandbox)
                             .ok_or_else(|| anyhow::anyhow!("missing shell session"))?;
                         mount_skills(session, tc.shell_options.as_ref())?;
                         mount_input_files(session, &tc.input_files)?;
@@ -276,9 +277,10 @@ impl ShellManager {
                 let handle = tokio::runtime::Handle::current();
                 tokio::task::block_in_place(|| {
                     handle.block_on(async {
-                        let mut sessions = session_for(&sessions, &ctx, &session_id).await?;
+                        let sandbox = tc.sandbox_key(&session_id);
+                        let mut sessions = session_for(&sessions, &ctx, &sandbox).await?;
                         let session = sessions
-                            .get_mut(&session_id)
+                            .get_mut(&sandbox)
                             .ok_or_else(|| anyhow::anyhow!("missing shell session"))?;
                         mount_skills(session, tc.shell_options.as_ref())?;
                         mount_input_files(session, &tc.input_files)?;

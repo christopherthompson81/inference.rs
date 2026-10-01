@@ -8,7 +8,7 @@ Work through this list before a `inference serve` deployment receives traffic fr
 ## Network and auth
 
 - [ ] Bind to loopback unless the host network is private: `inference serve --host 127.0.0.1 --port 8080 -m <model>`.
-- [ ] Terminate TLS and validate credentials in a reverse proxy (nginx, Caddy, Traefik). **inference.rs has no built-in authentication** - `Authorization: Bearer ...` headers from OpenAI clients are accepted but never validated by the server.
+- [ ] Give the server API keys (`--api-keys-file`, one `name = key` line per client) so each client reaches only its own files, sessions and stored responses, and terminate TLS in a reverse proxy (nginx, Caddy, Traefik). Without keys, `Authorization: Bearer ...` headers are accepted but never checked. See [authentication](/reference/http-api/#authentication).
 - [ ] Know the defaults you inherit: 50 MB request body limit, CORS allows any origin. Neither is CLI-configurable; embed `inference-server-core`'s router builder for custom values (see [embed in axum](/guides/rust/embed-in-axum/)).
 
 ## Reproducible startup

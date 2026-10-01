@@ -24,6 +24,7 @@ use crate::{
 ))]
 pub async fn image_generation(
     State(state): ExtractedInferenceRsState,
+    axum::Extension(owner): axum::Extension<crate::auth::Owner>,
     OriginalUri(uri): OriginalUri,
     payload: Result<ApiJson<ImageGenerationRequest>, ApiJsonRejection>,
 ) -> Response {
@@ -32,16 +33,20 @@ pub async fn image_generation(
         Err(ApiJsonRejection(error)) => return openai_error_response(error),
     };
     let prefix = router_prefix(uri.path());
-    json_response(generate_image(&state, request).await.map(|mut response| {
-        for url in response
-            .data
-            .iter_mut()
-            .filter_map(|choice| choice.url.as_mut())
-        {
-            url.insert_str(0, prefix);
-        }
-        response
-    }))
+    json_response(
+        generate_image(&state, request, owner.as_deref())
+            .await
+            .map(|mut response| {
+                for url in response
+                    .data
+                    .iter_mut()
+                    .filter_map(|choice| choice.url.as_mut())
+                {
+                    url.insert_str(0, prefix);
+                }
+                response
+            }),
+    )
 }
 
 // File-store urls are relative to this router, which a host app may have nested under a prefix.

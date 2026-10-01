@@ -13,12 +13,13 @@ pub use crate::files_api::{
     SourceMeta,
 };
 use crate::{
+    auth::Owner,
     files_api::{self, FileUpload},
     handler_core::{ApiError, ApiErrorHttp, ApiErrorKind, json_response, openai_error_response},
     types::ExtractedInferenceRsState,
 };
 
-/// Whether `GET /v1/files` lists the store; off unless the server opts in, since it shows every client's files.
+/// Whether an open server's `GET /v1/files` lists its shared store; a keyed one always lists each owner's own.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FileListing(pub bool);
 
@@ -39,6 +40,7 @@ const FILE_LISTING_DISABLED_CODE: &str = "file_listing_disabled";
 ))]
 pub async fn upload_file(
     State(state): ExtractedInferenceRsState,
+    Extension(owner): Extension<Owner>,
     payload: Result<Multipart, MultipartRejection>,
 ) -> Response {
     let multipart = match payload {
@@ -48,7 +50,7 @@ pub async fn upload_file(
         }
     };
     match parse_upload(multipart).await {
-        Ok(upload) => json_response(files_api::upload_file(&state, upload)),
+        Ok(upload) => json_response(files_api::upload_file(&state, upload, owner.as_deref())),
         Err(error) => openai_error_response(error),
     }
 }
@@ -129,8 +131,12 @@ fn multipart_error(error: axum::extract::multipart::MultipartError) -> ApiError 
         (status = 500, description = "Internal server error"),
     )
 ))]
-pub async fn get_file(State(state): ExtractedInferenceRsState, Path(id): Path<String>) -> Response {
-    json_response(files_api::get_file(&state, &id))
+pub async fn get_file(
+    State(state): ExtractedInferenceRsState,
+    Extension(owner): Extension<Owner>,
+    Path(id): Path<String>,
+) -> Response {
+    json_response(files_api::get_file(&state, &id, owner.as_deref()))
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -147,9 +153,10 @@ pub async fn get_file(State(state): ExtractedInferenceRsState, Path(id): Path<St
 ))]
 pub async fn get_file_content(
     State(state): ExtractedInferenceRsState,
+    Extension(owner): Extension<Owner>,
     Path(id): Path<String>,
 ) -> Response {
-    serve_bytes(files_api::file_content(&state, &id))
+    serve_bytes(files_api::file_content(&state, &id, owner.as_deref()))
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -164,11 +171,13 @@ pub async fn get_file_content(
 ))]
 pub async fn list_files(
     State(state): ExtractedInferenceRsState,
+    Extension(owner): Extension<Owner>,
     listing: Option<Extension<FileListing>>,
 ) -> Response {
-    match listing {
-        Some(Extension(FileListing(true))) => json_response(files_api::list_files(&state)),
-        _ => openai_error_response(ApiError::new(
+    let allowed = owner.0.is_some() || matches!(listing, Some(Extension(FileListing(true))));
+    match allowed {
+        true => json_response(files_api::list_files(&state, owner.as_deref())),
+        false => openai_error_response(ApiError::new(
             ApiErrorKind::Forbidden,
             FILE_LISTING_DISABLED,
             Some(FILE_LISTING_DISABLED_CODE),
@@ -190,9 +199,10 @@ pub async fn list_files(
 ))]
 pub async fn delete_file(
     State(state): ExtractedInferenceRsState,
+    Extension(owner): Extension<Owner>,
     Path(id): Path<String>,
 ) -> Response {
-    json_response(files_api::delete_file(&state, &id))
+    json_response(files_api::delete_file(&state, &id, owner.as_deref()))
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -207,9 +217,14 @@ pub async fn delete_file(
 ))]
 pub async fn list_container_files(
     State(state): ExtractedInferenceRsState,
+    Extension(owner): Extension<Owner>,
     Path(container_id): Path<String>,
 ) -> Response {
-    json_response(files_api::list_container_files(&state, &container_id))
+    json_response(files_api::list_container_files(
+        &state,
+        &container_id,
+        owner.as_deref(),
+    ))
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -228,12 +243,14 @@ pub async fn list_container_files(
 ))]
 pub async fn get_container_file(
     State(state): ExtractedInferenceRsState,
+    Extension(owner): Extension<Owner>,
     Path((container_id, file_id)): Path<(String, String)>,
 ) -> Response {
     json_response(files_api::get_container_file(
         &state,
         &container_id,
         &file_id,
+        owner.as_deref(),
     ))
 }
 
@@ -254,12 +271,14 @@ pub async fn get_container_file(
 ))]
 pub async fn get_container_file_content(
     State(state): ExtractedInferenceRsState,
+    Extension(owner): Extension<Owner>,
     Path((container_id, file_id)): Path<(String, String)>,
 ) -> Response {
     serve_bytes(files_api::container_file_content(
         &state,
         &container_id,
         &file_id,
+        owner.as_deref(),
     ))
 }
 

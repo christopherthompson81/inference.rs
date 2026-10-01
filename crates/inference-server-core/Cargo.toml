@@ -26,6 +26,7 @@ inference-core = { workspace = true, features = [
   "utoipa",
 ] }
 serde.workspace = true
+sha2.workspace = true
 # The served document keeps docs/openapi.json's key order.
 serde_json = { workspace = true, features = ["preserve_order"] }
 tokio.workspace = true

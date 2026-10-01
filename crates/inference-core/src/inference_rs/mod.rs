@@ -786,6 +786,7 @@ impl InferenceRs {
                     adapter: None,
                     truncate_sequence: false,
                     session_id: None,
+                    owner: None,
                     files: None,
                     input_files: Vec::new(),
                     cancellation: None,

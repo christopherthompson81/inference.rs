@@ -102,6 +102,7 @@ pub async fn create_response(
     State(state): ExtractedInferenceRsState,
     Extension(agentic_defaults): Extension<AgenticDefaults>,
     Extension(skill_store): Extension<Arc<SkillStore>>,
+    Extension(owner): Extension<crate::auth::Owner>,
     stream_outcome: Option<Extension<StreamOutcomeHandle>>,
     payload: Result<ApiJson<OpenResponsesCreateRequest>, ApiJsonRejection>,
 ) -> OpenResponsesResponder {
@@ -113,6 +114,7 @@ pub async fn create_response(
         state: state.clone(),
         agentic: agentic_defaults,
         skill_store: Some(skill_store),
+        owner: owner.0,
     };
     let prepared = match prepare_response(&chat, request).await {
         Ok(prepared) => prepared,
@@ -154,9 +156,10 @@ fn resource_response(result: Result<ResponseResource, ApiError>) -> axum::respon
 ))]
 pub async fn get_response(
     State(state): ExtractedInferenceRsState,
+    Extension(owner): Extension<crate::auth::Owner>,
     Path(response_id): Path<String>,
 ) -> impl IntoResponse {
-    resource_response(get(&state, &response_id))
+    resource_response(get(&state, &response_id, owner.as_deref()))
 }
 
 /// Delete response by ID endpoint
@@ -169,9 +172,10 @@ pub async fn get_response(
 ))]
 pub async fn delete_response(
     State(state): ExtractedInferenceRsState,
+    Extension(owner): Extension<crate::auth::Owner>,
     Path(response_id): Path<String>,
 ) -> impl IntoResponse {
-    match delete(&state, &response_id) {
+    match delete(&state, &response_id, owner.as_deref()) {
         Ok(deleted) => Json(deleted).into_response(),
         Err(error) => openai_error_response(error),
     }
@@ -187,9 +191,10 @@ pub async fn delete_response(
 ))]
 pub async fn cancel_response(
     State(state): ExtractedInferenceRsState,
+    Extension(owner): Extension<crate::auth::Owner>,
     Path(response_id): Path<String>,
 ) -> impl IntoResponse {
-    resource_response(cancel(&state, &response_id))
+    resource_response(cancel(&state, &response_id, owner.as_deref()))
 }
 
 #[cfg(test)]

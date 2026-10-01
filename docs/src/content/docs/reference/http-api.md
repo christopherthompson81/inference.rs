@@ -13,7 +13,11 @@ Every endpoint, request schema, and response schema is in the [generated HTTP AP
 
 ## Authentication
 
-There is none. The server accepts and ignores `Authorization: Bearer ...` (OpenAI clients) and `x-api-key` plus `anthropic-version` headers (Anthropic clients), so SDKs that require a key at initialization work with any non-empty string. For real authentication and TLS, put a reverse proxy in front.
+A server is open unless it is given API keys. An open server accepts and ignores `Authorization: Bearer ...` (OpenAI clients) and `x-api-key` plus `anthropic-version` headers (Anthropic clients), so SDKs that require a key at initialization work with any non-empty string. Its clients share one store, so an id it hands out is all it takes to reach that file, session or stored response; ids are random and never listed unless the server opts in.
+
+With keys (`--api-keys-file`, or `INFERENCE_RS_API_KEY` for one key; see the [CLI and TOML reference](/reference/cli-toml-config/)), every request but the `GET /health` and `GET /` probes must carry one, as `Authorization: Bearer <key>` or `x-api-key: <key>`; a missing or unknown key gets 401 with code `invalid_api_key` (in the Anthropic envelope on `/v1/messages`). `/metrics` needs a key too. Each key names an owner. The files, agent sessions, code-execution and shell sandboxes, stored responses, background responses, skills and approvals a request creates are its owner's, and another owner's come back as 404. The exception is a session id another owner holds, which is refused with 400 `session_id ... is in use` rather than taken over, so choose random session ids. `GET /v1/files` lists the caller's own files. Skills uploaded before keys were set belong to no owner and are not visible to keyed requests.
+
+Keys separate what clients store, not what they can do. Every key can run the server-wide operations (model load, unload, reload and tuning, ISQ and calibration, LoRA adapter changes when enabled, the system doctor). The stores share their capacity limits (sessions, files and their bytes), so one client can evict another's oldest entries. The KV prefix cache is shared, so the time to the first token can show that another client sent the same prompt prefix. Keys don't encrypt anything: put TLS in front (a reverse proxy) before sending them over a network. The web UI and the MCP endpoint don't check keys yet, so a keyed `serve` refuses to start with either; an application that mounts routes after `build()` must cover them itself.
 
 ## Model routing
 
@@ -158,7 +162,7 @@ Uploading skills does not require shell execution, but running a Responses reque
 
 ## Session semantics
 
-`GET /v1/sessions/{session_id}` exports a `SerializedSession` (404 if missing); `PUT` imports one, replacing any session with the same id (a file id already stored keeps its stored body); `DELETE` always returns 200 whether the session existed or not. Session lifecycle and splicing behavior are on the [sessions page](/guides/agents/persist-sessions/).
+`GET /v1/sessions/{session_id}` exports a `SerializedSession` (404 if missing or another owner's); `PUT` imports one, replacing any session with the same id (a file id already stored keeps its stored body); `DELETE` always returns 200 whether the session existed or not. Session lifecycle and splicing behavior are on the [sessions page](/guides/agents/persist-sessions/).
 
 ## Metrics
 

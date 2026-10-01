@@ -131,6 +131,7 @@ fn anthropic_error_status(kind: ApiErrorKind) -> http::StatusCode {
         }
         ApiErrorKind::NotFound => http::StatusCode::NOT_FOUND,
         ApiErrorKind::Gone => http::StatusCode::GONE,
+        ApiErrorKind::Unauthorized => http::StatusCode::UNAUTHORIZED,
         ApiErrorKind::Forbidden => http::StatusCode::FORBIDDEN,
         ApiErrorKind::Conflict => http::StatusCode::CONFLICT,
         ApiErrorKind::PayloadTooLarge => http::StatusCode::PAYLOAD_TOO_LARGE,
@@ -170,6 +171,7 @@ pub async fn anthropic_messages(
     State(state): ExtractedInferenceRsState,
     Extension(agentic_defaults): Extension<AgenticDefaults>,
     Extension(skill_store): Extension<Arc<SkillStore>>,
+    Extension(owner): Extension<crate::auth::Owner>,
     stream_outcome: Option<Extension<StreamOutcomeHandle>>,
     payload: Result<ApiJson<AnthropicMessagesRequest>, ApiJsonRejection>,
 ) -> AnthropicMessagesResponder {
@@ -185,6 +187,7 @@ pub async fn anthropic_messages(
         state: state.clone(),
         agentic: agentic_defaults,
         skill_store: Some(skill_store),
+        owner: owner.0,
     };
     let prepared = match prepare_messages(&engine, request).await {
         Ok(prepared) => prepared,
@@ -218,6 +221,7 @@ pub async fn anthropic_messages(
 ))]
 pub async fn anthropic_count_tokens(
     State(state): ExtractedInferenceRsState,
+    Extension(owner): Extension<crate::auth::Owner>,
     payload: Result<ApiJson<AnthropicMessagesRequest>, ApiJsonRejection>,
 ) -> AnthropicCountTokensResponder {
     let request = match payload {
@@ -226,7 +230,7 @@ pub async fn anthropic_count_tokens(
             return AnthropicCountTokensResponder::Error(anthropic_json_rejection(error));
         }
     };
-    match count_tokens(&state, request).await {
+    match count_tokens(&state, request, owner.as_deref()).await {
         Ok(count) => AnthropicCountTokensResponder::Json(count),
         Err(error) => AnthropicCountTokensResponder::Error(error),
     }

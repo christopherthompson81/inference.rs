@@ -628,9 +628,13 @@ pub async fn fork_session(
 ) -> impl IntoResponse {
     // server-named, so a fork can't land on a session that already exists
     let session_id = Uuid::new_v4().to_string();
-    let result =
-        app.inference
-            .fork_session(None, &req.src_session_id, session_id.clone(), req.num_turns);
+    let result = app.inference.fork_session(
+        None,
+        &req.src_session_id,
+        session_id.clone(),
+        req.num_turns,
+        None,
+    );
     if let Err(e) = result {
         error!("fork session error: {}", e);
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
@@ -754,7 +758,7 @@ pub async fn save_chat_session(
     Json(req): Json<SaveChatSessionRequest>,
 ) -> impl IntoResponse {
     // Export the session from the in-memory store
-    let session = match app.inference.export_session(None, &req.session_id) {
+    let session = match app.inference.export_session(None, &req.session_id, None) {
         Ok(Some(s)) => s,
         Ok(None) => {
             return (StatusCode::NOT_FOUND, "Session not found in store").into_response();
@@ -841,7 +845,7 @@ pub async fn restore_chat_session(
 
     if let Err(e) = app
         .inference
-        .import_session(None, session_id.clone(), serialized)
+        .import_session(None, session_id.clone(), serialized, None)
     {
         error!("import_session error: {}", e);
         return (StatusCode::INTERNAL_SERVER_ERROR, "import failed").into_response();

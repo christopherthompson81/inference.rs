@@ -350,11 +350,11 @@ fn save_session(engine: &Arc<Engine>, session_id: &str, visible_req: &NormalRequ
         _ => (Vec::new(), Vec::new()),
     };
     let entry = inference_core::agentic_session::AgenticSessionEntry::new(messages, images, videos);
-    engine
-        .session_store()
-        .lock()
-        .unwrap()
-        .save(session_id.to_string(), entry);
+    engine.session_store().lock().unwrap().save(
+        session_id.to_string(),
+        entry,
+        visible_req.owner.as_deref(),
+    );
     engine.file_store().touch_session(session_id);
 }
 
@@ -543,7 +543,7 @@ async fn approve_agent_tool(
                 .session_store()
                 .lock()
                 .unwrap()
-                .agent_actions_approved(ctx.session_id)
+                .agent_actions_approved(&ctx.tool_call_ctx.sandbox_key(ctx.session_id))
             {
                 return AgentToolApprovalDecision::approve();
             }
@@ -574,7 +574,7 @@ async fn approve_agent_tool(
                     .session_store()
                     .lock()
                     .unwrap()
-                    .approve_agent_actions(ctx.session_id.to_string());
+                    .approve_agent_actions(ctx.tool_call_ctx.sandbox_key(ctx.session_id));
             }
             return decision;
         }
@@ -694,6 +694,7 @@ struct DispatchCtx<'a> {
     supports_vision: bool,
     supports_video: bool,
     tool_call_ctx: &'a inference_mcp::ToolCallContext,
+    owner: Option<&'a str>,
     turn: usize,
     session_id: &'a str,
     required_files: &'a [RequestedFile],
@@ -935,7 +936,12 @@ async fn dispatch_tool(
 ) -> Option<(NormalRequest, AgenticToolCallData, Vec<File>)> {
     let name = &tc.function.name;
     if is_read_file_tool(name) {
-        return Some(do_read_file(visible_req, tc, ctx.engine.file_store()));
+        return Some(do_read_file(
+            visible_req,
+            tc,
+            ctx.engine.file_store(),
+            ctx.owner,
+        ));
     }
     if is_list_files_tool(name) {
         return Some(do_list_files(
@@ -943,6 +949,7 @@ async fn dispatch_tool(
             tc,
             ctx.engine.file_store(),
             ctx.session_id,
+            ctx.owner,
         ));
     }
     if search::search_tool_called(name) {
@@ -966,12 +973,15 @@ async fn dispatch_tool(
 async fn emit_files(
     engine: &Engine,
     session_id: &str,
+    owner: Option<&str>,
     files: Vec<File>,
     sender: &tokio::sync::mpsc::Sender<Response>,
 ) {
     for f in files {
         let wire = f.elide_for_wire();
-        engine.file_store().insert(f, Some(session_id.to_string()));
+        engine
+            .file_store()
+            .insert(f, Some(session_id.to_string()), owner);
         let _ = sender.send(Response::File(wire)).await;
     }
 }
@@ -1008,23 +1018,37 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
         .clone()
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
-    {
+    let owner = request.owner.clone();
+    let in_use = {
         let mut store = this.session_store().lock().unwrap();
+        let in_use = store.held_by_other(&session_id, owner.as_deref());
         let existing = if request.session_id.is_some() {
-            store.get(&session_id).map(|e| (session_id.clone(), e))
+            store
+                .get(&session_id, owner.as_deref())
+                .map(|e| (session_id.clone(), e))
         } else {
             let msgs = request.chat_messages();
-            store.find_by_messages(msgs)
+            store.find_by_messages(msgs, owner.as_deref())
         };
         if let Some((matched_id, entry)) = existing {
             session_id = matched_id;
             inference_core::agentic_session::splice_session_into_request(&mut request, &entry);
         }
+        in_use
+    };
+    // another owner's session: the id can be neither read nor taken over
+    if in_use {
+        let message = format!("session_id `{session_id}` is in use");
+        let _ = request
+            .response
+            .send(Response::ValidationError(message.into()))
+            .await;
+        return;
     }
 
     for file in &input_files {
         this.file_store()
-            .insert(file.clone(), Some(session_id.clone()));
+            .insert(file.clone(), Some(session_id.clone()), owner.as_deref());
     }
     this.file_store().touch_session(&session_id);
 
@@ -1124,6 +1148,7 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
     let handle = tokio::spawn(async move {
         let tool_call_ctx = inference_mcp::ToolCallContext {
             session_id: Some(session_id.clone()),
+            owner: owner.clone(),
             round: None,
             tool_name: None,
             agent_permission: Some(agent_permission),
@@ -1140,6 +1165,7 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
             supports_vision,
             supports_video,
             tool_call_ctx: &tool_call_ctx,
+            owner: owner.as_deref(),
             turn,
             session_id: &session_id,
             required_files: &required_files,
@@ -1262,7 +1288,14 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                     done.choices[0].message.reasoning_content.as_deref(),
                 );
 
-                emit_files(&this_clone, &session_id, files, &user_sender).await;
+                emit_files(
+                    &this_clone,
+                    &session_id,
+                    owner.as_deref(),
+                    files,
+                    &user_sender,
+                )
+                .await;
 
                 let _ = user_sender
                     .send(Response::AgenticToolCallProgress {
@@ -1407,7 +1440,14 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
                     Some(&round_reasoning_content),
                 );
 
-                emit_files(&this_clone, &session_id, files, &user_sender).await;
+                emit_files(
+                    &this_clone,
+                    &session_id,
+                    owner.as_deref(),
+                    files,
+                    &user_sender,
+                )
+                .await;
 
                 let _ = user_sender
                     .send(Response::AgenticToolCallProgress {

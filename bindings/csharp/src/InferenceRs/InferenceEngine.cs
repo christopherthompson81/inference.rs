@@ -43,6 +43,17 @@ public sealed unsafe class InferenceEngine : IDisposable
         return new InferenceEngine(new EngineHandle(withCallbacks, pinned.TakeIds()));
     }
 
+    /// <summary>The same engine acting for <paramref name="owner"/>: what it stores is that owner's, and it reaches no one else's.</summary>
+    /// <remarks>Dispose it like any engine; this one keeps its callbacks until every engine made from it is disposed.</remarks>
+    public InferenceEngine ForOwner(string owner)
+    {
+        using var engine = Borrow();
+        using var name = new PinnedBytes(owner);
+        var status = NativeMethods.inference_engine_for_owner(engine.Handle, name.Pointer, name.Length, out var scoped);
+        InferenceException.ThrowIfFailed(status, nameof(NativeMethods.inference_engine_for_owner));
+        return new InferenceEngine(new EngineHandle(scoped, _handle));
+    }
+
     public string Chat(string requestJson, IReadOnlyList<MediaAttachment>? media = null)
     {
         using var engine = Borrow();

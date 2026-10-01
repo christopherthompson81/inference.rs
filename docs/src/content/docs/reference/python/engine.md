@@ -39,6 +39,14 @@ __init__(
 close()
 ```
 
+### `Engine.for_owner`
+
+```text
+for_owner(owner: str) -> 'Engine'
+```
+
+The same engine acting for `owner`; see `JsonEngine.for_owner`.
+
 ### `Engine.__enter__`
 
 ```text
@@ -446,6 +454,16 @@ build_version() -> str
 ```text
 close()
 ```
+
+### `JsonEngine.for_owner`
+
+```text
+for_owner(owner: str) -> 'JsonEngine'
+```
+
+The same engine acting for `owner`: what it stores is that owner's, and it reaches no one else's.
+
+Close it like any engine; this one stays open, with its callbacks, until every engine made from it is closed.
 
 ### `JsonEngine.__enter__`
 

@@ -395,13 +395,15 @@ pub struct AnthropicCountTokensResponse {
 pub fn count_tokens<'a>(
     state: &'a SharedInferenceRsState,
     request: AnthropicMessagesRequest,
+    owner: Option<&'a str>,
 ) -> BoxFuture<'a, Result<AnthropicCountTokensResponse, ApiError>> {
-    Box::pin(count_tokens_inner(state, request))
+    Box::pin(count_tokens_inner(state, request, owner))
 }
 
 async fn count_tokens_inner(
     state: &SharedInferenceRsState,
     request: AnthropicMessagesRequest,
+    owner: Option<&str>,
 ) -> Result<AnthropicCountTokensResponse, ApiError> {
     let invalid =
         |error: &(dyn Error + 'static)| ApiError::from_error(error, ApiErrorKind::InvalidRequest);
@@ -433,6 +435,7 @@ async fn count_tokens_inner(
             tool_surface: OpenAiToolSurface::ChatCompletions,
             skill_store: None,
             media: Default::default(),
+            owner: owner.map(str::to_string),
         },
     )
     .await
@@ -1570,6 +1573,7 @@ pub fn anthropic_error_type(kind: ApiErrorKind) -> &'static str {
             "invalid_request_error"
         }
         ApiErrorKind::NotFound | ApiErrorKind::Gone => "not_found_error",
+        ApiErrorKind::Unauthorized => "authentication_error",
         ApiErrorKind::Forbidden => "permission_error",
         ApiErrorKind::Conflict => "conflict_error",
         ApiErrorKind::PayloadTooLarge => "request_too_large",

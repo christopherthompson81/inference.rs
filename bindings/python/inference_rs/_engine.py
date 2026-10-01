@@ -155,6 +155,28 @@ class JsonEngine:
     def close(self):
         self._finalizer()
 
+    def for_owner(self, owner: str) -> "JsonEngine":
+        """The same engine acting for `owner`: what it stores is that owner's, and it reaches no one else's.
+
+        Close it like any engine; this one stays open, with its callbacks, until every engine made from it is closed.
+        """
+        data = text_arg(owner)
+        engine = ctypes.c_void_p()
+        with Lease(self._handle) as parent:
+            check(
+                lib.inference_engine_for_owner(parent, data, len(data), ctypes.byref(engine)),
+                "inference_engine_for_owner",
+            )
+            try:
+                self._handle.acquire()
+            except ValueError:
+                lib.inference_engine_free(engine)
+                raise
+        scoped = JsonEngine.__new__(JsonEngine)
+        scoped._handle = Handle(engine.value, lib.inference_engine_free, self._handle.release)
+        scoped._finalizer = weakref.finalize(scoped, scoped._handle.close)
+        return scoped
+
     def __enter__(self):
         return self
 

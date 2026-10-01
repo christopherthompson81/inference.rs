@@ -32,7 +32,11 @@ async fn a_session_import_keeps_the_body_of_a_file_already_stored() -> anyhow::R
             bytes: b"original".to_vec(),
         })
         .map_err(anyhow::Error::msg)?;
-    let mut forged = (*engine.state().find_file(&uploaded.id).expect("uploaded")).clone();
+    let mut forged = (*engine
+        .state()
+        .find_file(&uploaded.id, None)
+        .expect("uploaded"))
+    .clone();
     forged.content = FileContent::Text {
         text: Some("replaced".to_string()),
         preview: None,
@@ -41,14 +45,14 @@ async fn a_session_import_keeps_the_body_of_a_file_already_stored() -> anyhow::R
     // An agentic request citing the upload as an input file tags it with that request's session.
     for session in ["session_other", "session_citing"] {
         if session == "session_citing" {
-            assert!(engine.state().try_tag_file(&uploaded.id, session)?);
+            assert!(engine.state().try_tag_file(&uploaded.id, session, None)?);
         }
         engine
             .put_session(session, session_with(forged.clone()))
             .map_err(anyhow::Error::msg)?;
         let kept = engine
             .state()
-            .find_file(&uploaded.id)
+            .find_file(&uploaded.id, None)
             .expect("still stored");
         assert_eq!(text_of(&kept), Some("original"), "{session}");
     }
@@ -57,7 +61,10 @@ async fn a_session_import_keeps_the_body_of_a_file_already_stored() -> anyhow::R
     engine
         .put_session("session_mine", session_with(forged.clone()))
         .map_err(anyhow::Error::msg)?;
-    let restored = engine.state().find_file("file_restored").expect("restored");
+    let restored = engine
+        .state()
+        .find_file("file_restored", None)
+        .expect("restored");
     assert_eq!(text_of(&restored), Some("replaced"));
     let listed = engine.session("session_mine").map_err(anyhow::Error::msg)?;
     assert_eq!(listed.files.len(), 1);

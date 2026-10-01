@@ -1,58 +1,36 @@
 use super::*;
 
+// Each lookup takes the caller's owner (`None` when unscoped) and sees only the entries that owner stored.
 impl InferenceRs {
-    /// Look up a file across all loaded engines. `None` if missing or expired.
-    pub fn find_file(&self, id: &str) -> Option<Arc<files::File>> {
-        self.try_find_file(id).ok().flatten()
+    /// Look up `owner`'s file across all loaded engines. `None` if missing or expired.
+    pub fn find_file(&self, id: &str, owner: Option<&str>) -> Option<Arc<files::File>> {
+        self.try_find_file(id, owner).ok().flatten()
     }
 
     /// Fallible variant of [`Self::find_file`].
-    pub fn try_find_file(&self, id: &str) -> Result<Option<Arc<files::File>>, InferenceRsError> {
-        let engines = self
-            .engines
-            .read()
-            .map_err(|_| InferenceRsError::EnginePoisoned)?;
-        for instance in engines.values() {
-            if let Some(f) = instance.file_store.get(id) {
-                return Ok(Some(f));
-            }
-        }
-        Ok(None)
-    }
-
-    /// Every non-expired file across all loaded engines, including session-less runs. Order unspecified.
-    pub fn list_files(&self) -> Vec<Arc<files::File>> {
-        self.try_list_files().unwrap_or_default()
-    }
-
-    /// Fallible variant of [`Self::list_files`].
-    pub fn try_list_files(&self) -> Result<Vec<Arc<files::File>>, InferenceRsError> {
-        let mut out = Vec::new();
-        let engines = self
-            .engines
-            .read()
-            .map_err(|_| InferenceRsError::EnginePoisoned)?;
-        for instance in engines.values() {
-            out.extend(instance.file_store.list_all());
-        }
-        Ok(out)
-    }
-
-    /// Tags a file, wherever it is stored, so `try_list_tagged_files(tag)` finds it; false if it is not stored.
-    pub fn try_tag_file(&self, id: &str, tag: &str) -> Result<bool, InferenceRsError> {
+    pub fn try_find_file(
+        &self,
+        id: &str,
+        owner: Option<&str>,
+    ) -> Result<Option<Arc<files::File>>, InferenceRsError> {
         let engines = self
             .engines
             .read()
             .map_err(|_| InferenceRsError::EnginePoisoned)?;
         Ok(engines
             .values()
-            .any(|instance| instance.file_store.attach_to_session(id, tag)))
+            .find_map(|instance| instance.file_store.get(id, owner)))
     }
 
-    /// The non-expired files carrying `tag` (a session id, or a Responses container id), oldest first per engine.
-    pub fn try_list_tagged_files(
+    /// Every non-expired file of `owner`'s across all loaded engines, including session-less runs. Order unspecified.
+    pub fn list_files(&self, owner: Option<&str>) -> Vec<Arc<files::File>> {
+        self.try_list_files(owner).unwrap_or_default()
+    }
+
+    /// Fallible variant of [`Self::list_files`].
+    pub fn try_list_files(
         &self,
-        tag: &str,
+        owner: Option<&str>,
     ) -> Result<Vec<Arc<files::File>>, InferenceRsError> {
         let engines = self
             .engines
@@ -60,27 +38,56 @@ impl InferenceRs {
             .map_err(|_| InferenceRsError::EnginePoisoned)?;
         Ok(engines
             .values()
-            .flat_map(|instance| instance.file_store.list_for_session(tag))
+            .flat_map(|instance| instance.file_store.list_all(owner))
             .collect())
     }
 
-    /// Returns whether the file existed.
-    pub fn remove_file(&self, id: &str) -> bool {
-        self.try_remove_file(id).unwrap_or(false)
-    }
-
-    /// Fallible variant of [`Self::remove_file`].
-    pub fn try_remove_file(&self, id: &str) -> Result<bool, InferenceRsError> {
+    /// Tags `owner`'s file, wherever it is stored, so `try_list_tagged_files(tag)` finds it; false if it is not stored.
+    pub fn try_tag_file(
+        &self,
+        id: &str,
+        tag: &str,
+        owner: Option<&str>,
+    ) -> Result<bool, InferenceRsError> {
         let engines = self
             .engines
             .read()
             .map_err(|_| InferenceRsError::EnginePoisoned)?;
-        for instance in engines.values() {
-            if instance.file_store.remove(id) {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        Ok(engines
+            .values()
+            .any(|instance| instance.file_store.attach_to_session(id, tag, owner)))
+    }
+
+    /// `owner`'s non-expired files carrying `tag` (a session id, or a Responses container id), oldest first per engine.
+    pub fn try_list_tagged_files(
+        &self,
+        tag: &str,
+        owner: Option<&str>,
+    ) -> Result<Vec<Arc<files::File>>, InferenceRsError> {
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| InferenceRsError::EnginePoisoned)?;
+        Ok(engines
+            .values()
+            .flat_map(|instance| instance.file_store.list_for_session(tag, owner))
+            .collect())
+    }
+
+    /// Returns whether `owner`'s file existed.
+    pub fn remove_file(&self, id: &str, owner: Option<&str>) -> bool {
+        self.try_remove_file(id, owner).unwrap_or(false)
+    }
+
+    /// Fallible variant of [`Self::remove_file`].
+    pub fn try_remove_file(&self, id: &str, owner: Option<&str>) -> Result<bool, InferenceRsError> {
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| InferenceRsError::EnginePoisoned)?;
+        Ok(engines
+            .values()
+            .any(|instance| instance.file_store.remove(id, owner)))
     }
 
     pub fn insert_file(
@@ -88,8 +95,10 @@ impl InferenceRs {
         model_id: Option<&str>,
         file: files::File,
         session_id: Option<String>,
+        owner: Option<&str>,
     ) -> Result<(), InferenceRsError> {
-        self.get_file_store(model_id)?.insert(file, session_id);
+        self.get_file_store(model_id)?
+            .insert(file, session_id, owner);
         Ok(())
     }
 
@@ -98,10 +107,11 @@ impl InferenceRs {
         model_id: Option<&str>,
         id: &str,
         session_id: &str,
+        owner: Option<&str>,
     ) -> Result<bool, InferenceRsError> {
         Ok(self
             .get_file_store(model_id)?
-            .attach_to_session(id, session_id))
+            .attach_to_session(id, session_id, owner))
     }
 
     /// Agentic session store for `model_id` (or the default model). Returns an `Arc` to lock for inspect/mutate.
@@ -133,17 +143,18 @@ impl InferenceRs {
             .ok_or(InferenceRsError::ModelNotFound(resolved_model_id))
     }
 
-    /// Export an agentic session by ID. Bundles the session's files (full bodies). `None` if missing.
+    /// Export `owner`'s agentic session by ID. Bundles the session's files (full bodies). `None` if missing.
     pub fn export_session(
         &self,
         model_id: Option<&str>,
         session_id: &str,
+        owner: Option<&str>,
     ) -> Result<Option<engine::agentic_session::SerializedSession>, InferenceRsError> {
         let store = self.get_session_store(model_id)?;
         let exported = {
             let mut guard = store.lock().map_err(|_| InferenceRsError::EnginePoisoned)?;
             guard
-                .export(session_id)
+                .export(session_id, owner)
                 .map_err(|e| InferenceRsError::Other(e.to_string()))?
         };
         let Some(mut session) = exported else {
@@ -151,26 +162,27 @@ impl InferenceRs {
         };
         let file_store = self.get_file_store(model_id)?;
         session.files = file_store
-            .list_for_session(session_id)
+            .list_for_session(session_id, owner)
             .into_iter()
             .map(|arc| (*arc).clone())
             .collect();
         Ok(Some(session))
     }
 
-    /// Replaces any session under the same ID and restores its files; a file id already stored keeps its body.
+    /// Replaces `owner`'s session under the same ID and restores its files; a file id already stored keeps its body.
     pub fn import_session(
         &self,
         model_id: Option<&str>,
         session_id: String,
         session: engine::agentic_session::SerializedSession,
+        owner: Option<&str>,
     ) -> Result<(), InferenceRsError> {
         let files = session.files.clone();
         let store = self.get_session_store(model_id)?;
         {
             let mut guard = store.lock().map_err(|_| InferenceRsError::EnginePoisoned)?;
             guard
-                .import(session_id.clone(), session)
+                .import(session_id.clone(), session, owner)
                 .map_err(|e| InferenceRsError::Other(e.to_string()))?;
         }
         let file_store = self.get_file_store(model_id)?;
@@ -180,11 +192,17 @@ impl InferenceRs {
             .map_err(|_| InferenceRsError::EnginePoisoned)?;
         for f in files {
             // ids resolve in every engine's store, and a body the import didn't write must not change under its id
-            let held = engines
-                .values()
-                .any(|instance| instance.file_store.retag_live(&f.id, &session_id));
+            let retagged = engines.values().any(|instance| {
+                instance
+                    .file_store
+                    .attach_to_session(&f.id, &session_id, owner)
+            });
+            let held = retagged
+                || engines
+                    .values()
+                    .any(|instance| instance.file_store.holds(&f.id));
             if !held {
-                file_store.insert(f, Some(session_id.clone()));
+                file_store.insert(f, Some(session_id.clone()), owner);
             }
         }
         Ok(())
@@ -199,32 +217,35 @@ impl InferenceRs {
         src_session_id: &str,
         dest_session_id: String,
         num_turns: usize,
+        owner: Option<&str>,
     ) -> Result<(), InferenceRsError> {
         let store = self.get_session_store(model_id)?;
         let mut guard = store.lock().map_err(|_| InferenceRsError::EnginePoisoned)?;
         guard
-            .fork(src_session_id, dest_session_id, num_turns)
+            .fork(src_session_id, dest_session_id, num_turns, owner)
             .map_err(|e| InferenceRsError::Other(e.to_string()))
     }
 
-    /// Delete an agentic session. Returns whether the session existed.
+    /// Delete `owner`'s agentic session. Returns whether the session existed.
     pub fn delete_session(
         &self,
         model_id: Option<&str>,
         session_id: &str,
+        owner: Option<&str>,
     ) -> Result<bool, InferenceRsError> {
         let store = self.get_session_store(model_id)?;
         let mut guard = store.lock().map_err(|_| InferenceRsError::EnginePoisoned)?;
-        Ok(guard.delete(session_id))
+        Ok(guard.delete(session_id, owner))
     }
 
-    /// All stored session IDs. SDK-only, not exposed via HTTP.
+    /// `owner`'s stored session IDs.
     pub fn list_session_ids(
         &self,
         model_id: Option<&str>,
+        owner: Option<&str>,
     ) -> Result<Vec<String>, InferenceRsError> {
         let store = self.get_session_store(model_id)?;
         let guard = store.lock().map_err(|_| InferenceRsError::EnginePoisoned)?;
-        Ok(guard.list_ids())
+        Ok(guard.list_ids(owner))
     }
 }

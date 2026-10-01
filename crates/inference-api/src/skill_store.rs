@@ -47,6 +47,9 @@ struct SkillMetadata {
     description: String,
     created_at: u64,
     versions: Vec<SkillVersionMetadata>,
+    /// Who uploaded it; only the same owner lists, versions or mounts it.
+    #[serde(default)]
+    owner: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -208,21 +211,30 @@ impl SkillStore {
         Ok(store)
     }
 
-    pub fn list(&self) -> Result<Vec<SkillObject>> {
+    pub fn list(&self, owner: Option<&str>) -> Result<Vec<SkillObject>> {
         let skills = self
             .skills
             .read()
             .map_err(|_| anyhow::anyhow!("skill store lock poisoned"))?;
-        Ok(skills.values().map(SkillObject::from).collect())
+        Ok(skills
+            .values()
+            .filter(|skill| skill.owner.as_deref() == owner)
+            .map(SkillObject::from)
+            .collect())
     }
 
-    pub fn list_versions(&self, skill_id: &str) -> Result<Vec<SkillVersionObject>> {
+    pub fn list_versions(
+        &self,
+        skill_id: &str,
+        owner: Option<&str>,
+    ) -> Result<Vec<SkillVersionObject>> {
         let skills = self
             .skills
             .read()
             .map_err(|_| anyhow::anyhow!("skill store lock poisoned"))?;
         let metadata = skills
             .get(skill_id)
+            .filter(|skill| skill.owner.as_deref() == owner)
             .ok_or_else(|| skill_not_found(format!("Skill `{skill_id}` was not found.")))?;
         metadata
             .versions
@@ -231,7 +243,7 @@ impl SkillStore {
             .collect()
     }
 
-    pub fn create_skill(&self, files: SkillFiles) -> Result<SkillObject> {
+    pub fn create_skill(&self, files: SkillFiles, owner: Option<&str>) -> Result<SkillObject> {
         let upload = stage_upload(files)?;
         let id = format!("skill_{}", uuid::Uuid::new_v4().simple());
         let created_at = unix_now();
@@ -247,6 +259,7 @@ impl SkillStore {
                 created_at,
                 source_path,
             }],
+            owner: owner.map(str::to_string),
         };
         self.persist_metadata(&metadata)?;
         self.skills
@@ -256,7 +269,12 @@ impl SkillStore {
         Ok(SkillObject::from(&metadata))
     }
 
-    pub fn create_version(&self, skill_id: &str, files: SkillFiles) -> Result<SkillVersionObject> {
+    pub fn create_version(
+        &self,
+        skill_id: &str,
+        files: SkillFiles,
+        owner: Option<&str>,
+    ) -> Result<SkillVersionObject> {
         let upload = stage_upload(files)?;
         let mut skills = self
             .skills
@@ -264,6 +282,7 @@ impl SkillStore {
             .map_err(|_| anyhow::anyhow!("skill store lock poisoned"))?;
         let metadata = skills
             .get_mut(skill_id)
+            .filter(|skill| skill.owner.as_deref() == owner)
             .ok_or_else(|| skill_not_found(format!("Skill `{skill_id}` was not found.")))?;
         let version = metadata.versions.last().map(|v| v.version + 1).unwrap_or(1);
         let created_at = unix_now();
@@ -283,22 +302,30 @@ impl SkillStore {
     pub fn resolve_references(
         &self,
         refs: &[OpenAiShellSkillReference],
+        owner: Option<&str>,
     ) -> Result<inference_core::ShellOptions> {
         let mut skills = Vec::new();
         for reference in refs {
-            skills.push(self.resolve_reference(reference)?);
+            skills.push(self.resolve_reference(reference, owner)?);
         }
         Ok(inference_core::ShellOptions { skills })
     }
 
-    fn resolve_reference(&self, reference: &OpenAiShellSkillReference) -> Result<ShellSkillMount> {
+    fn resolve_reference(
+        &self,
+        reference: &OpenAiShellSkillReference,
+        owner: Option<&str>,
+    ) -> Result<ShellSkillMount> {
         let skills = self
             .skills
             .read()
             .map_err(|_| anyhow::anyhow!("skill store lock poisoned"))?;
-        let metadata = skills.get(&reference.skill_id).ok_or_else(|| {
-            skill_not_found(format!("Skill `{}` was not found.", reference.skill_id))
-        })?;
+        let metadata = skills
+            .get(&reference.skill_id)
+            .filter(|skill| skill.owner.as_deref() == owner)
+            .ok_or_else(|| {
+                skill_not_found(format!("Skill `{}` was not found.", reference.skill_id))
+            })?;
         let version = match &reference.version {
             None => metadata.versions.last(),
             Some(Value::String(s)) if s == "latest" => metadata.versions.last(),
@@ -709,7 +736,7 @@ mod tests {
             })
             .is_err()
         );
-        let error = store.list_versions("skill_missing").unwrap_err();
+        let error = store.list_versions("skill_missing", None).unwrap_err();
         let error = ApiError::from_error(error.as_ref(), ApiErrorKind::Internal);
         assert_eq!(error.kind, ApiErrorKind::Internal);
         assert!(!error.message.contains("poison"));
@@ -730,13 +757,17 @@ mod tests {
                     created_at: 1,
                     source_path: PathBuf::new(),
                 }],
+                owner: None,
             },
         );
         let error = store
-            .resolve_references(&[OpenAiShellSkillReference {
-                skill_id: "skill_abc".to_string(),
-                version: Some(Value::String("2".to_string())),
-            }])
+            .resolve_references(
+                &[OpenAiShellSkillReference {
+                    skill_id: "skill_abc".to_string(),
+                    version: Some(Value::String("2".to_string())),
+                }],
+                None,
+            )
             .unwrap_err();
         let error = ApiError::from_error(error.as_ref(), ApiErrorKind::InvalidRequest);
         assert_eq!(error.kind, ApiErrorKind::NotFound);
