@@ -51,6 +51,9 @@ scripts/local_ci.sh [--lint] [--tests] [--cuda] [--metal] [--models] [--slim] [-
 
 # Same, then delete target/debug artifacts the selected modes don't use (including on-request example builds).
 scripts/local_ci.sh --lint --tests --cuda --sweep
+
+# After changing routes, schemas or CLI flags: regenerates docs/openapi.json, the Python types, the CLI and Python references
+make docs-regen
 ```
 
 ### Running Models
@@ -84,9 +87,9 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-models-{llama,qwen,gemma,phi,other}/` - Model families (one crate per family, built on `inference-nn`): text models plus the vision models built on their text stacks, each behind an `inference-core` feature (`models-llama`, ...; all on by default). A multimodal model's input processor (a `MultimodalInputsProcessor` over `inference_nn::media_inputs`) lives beside it; its `Processor` (chat template actions) stays in core. `--slim` checks core with each family alone (skipped when nothing core builds on differs from master)
 - `crates/inference-models-{speech,diffusion}/` - Speech (Dia) and image generation (FLUX) models, always built; their loaders, `SpeechLoaderType`/`DiffusionLoaderType` and request processors stay in core
 - `crates/inference-nn/` - Model-facing building blocks: layers, attention and its metadata, KV/paged caches, GDN, MoE, device mapping, the loader traits with their sizing and placement helpers (`loaders`), and the CUDA/Metal kernels behind them
-- `crates/inference-cli/` - Unified CLI binary (commands: run, serve, bench, from-config)
+- `crates/inference-cli/` - The `inference` binary (run, serve, bench, quantize, uqff, tune, doctor, login, cache, from-config, update, uninstall, completions). A downstream consumer: it depends on inference-api and the server crates, never on core
 - `crates/inference-api/` - The engine surface with no HTTP: OpenAI request/response types, request parsing and dispatch, chat as an engine operation, the server/engine builder. The HTTP server builds on it and the C ABI exposes it; add engine features here, not in the server
-- `crates/inference-server-core/` - HTTP server routing, OpenAI API implementation
+- `crates/inference-server-core/` - HTTP framing over `inference_api::Engine`: routes, auth and keys, SSE, metrics, the MCP server. Each request acts through the `Engine` scoped to its owner; engine logic belongs in inference-api
 - `crates/inference-webui/` - The chat web UI `serve` mounts at `/ui`: its HTTP handlers over the engine, the Svelte source (`webui/`) and the built bundle it embeds (`static/`, rebuilt with `npm run build` in `webui/`)
 - `crates/inference/` - Rust SDK (high-level crate)
 - `crates/inference-vision/` - Image processing utilities
@@ -99,7 +102,12 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-mcp/` - Model Context Protocol client
 - `crates/inference-protocol/` - The wire protocol with no candle dependency (so it compiles alongside the kernel builds): request options, response bodies, tool types with their call parsers and grammars, reasoning parsers, chat templates (rendering messages into prompt text; EOS detection and `generation_config.json` stay in core), image response encoding, files. Core re-exports it; the engine-internal `Request`/`Response` channel types stay in core
 - `crates/inference-layout/` - Document layout detection (PP-DocLayoutV3) with custom CPU/CUDA kernels
-- `crates/inference-ffi/` - C ABI (`libinference_ffi`, header `include/inference.h`) for bindings in other languages
+- `crates/inference-ffi/` - C ABI (`libinference_ffi`, header `include/inference.h`) for bindings in other languages. `tests/integration/engine_coverage.rs` fails when a public `Engine` method has no ABI entry and no listed reason
+- `crates/inference-code-exec/` - The Python code-execution tool the agent layer runs
+- `crates/inference-sandbox/` - OS-level sandboxing for the subprocesses tools spawn
+- `crates/inference-macros/` - Proc macros for defining tools
+- `crates/inference-flash-attn/` - Flash attention kernels
+- `crates/inference-metal-compile/` - Build-time Metal shader compilation for the kernel crates
 - `bindings/csharp/` - .NET bindings over the C ABI (`InferenceRs.slnx`); a new ABI entry point needs its binding, which the coverage test enforces
 - `bindings/python/` - the Python SDK: a pure-Python ctypes package over the C ABI (`inference_rs`); its coverage test enforces the same, and `scripts/release/build_wheels.py` builds wheels that bundle the library. Its typed classes (`inference_rs/types.py`) are generated from `docs/openapi.json`: after regenerating that, run `python3 bindings/python/scripts/generate_types.py`
 - Kernel sources live in `<crate>/kernels/{cuda,metal}/` (inference-layout compiles inline sources with NVRTC); each kernel crate's `third_party/README.md` records upstream provenance and license.
@@ -110,7 +118,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 
 2. **Model Loading**: Models are loaded through `Loader` traits that handle different formats and quantizations. See `crates/inference-core/src/pipeline/loaders/mod.rs` (the `Loader` trait) and `pipeline/loading.rs`.
 
-3. **Request Handling**: The server uses message passing with `InferenceRs` struct managing a background thread pool. Requests flow through `crates/inference-core/src/engine/mod.rs`.
+3. **Request Handling**: Clients (the server, web UI, CLI and C ABI) call `inference_api::Engine`; it sends requests over core's channels to the per-model engine loops in `crates/inference-core/src/engine/mod.rs`. Core state (`Engine::state()`) is private to inference-api.
 
 4. **Device Management**: Automatic and manual device mapping for multi-GPU setups handled in `crates/inference-nn/src/device_map/`.
 

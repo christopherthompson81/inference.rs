@@ -87,7 +87,7 @@ response = client.chat.completions.create(
 print(response.choices[0].message.content)
 ```
 
-The in-process Python `Runner` loads a single model; multi-model loading is server-only.
+In process, the Python bindings serve several models from an engine spec's `models`, and add or remove them at runtime (`add_model`, `remove_model`).
 
 </TabItem>
 <TabItem label="Rust">

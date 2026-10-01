@@ -522,7 +522,7 @@ impl Loader for EmbeddingLoader {
                 llg_factory: None,
                 is_xlora: false,
                 no_prefix_cache: false,
-                num_hidden_layers: 1, // FIXME(EricLBuehler): we know this is only for caching, so its OK.
+                num_hidden_layers: 1, // read only to size caches
                 eos_tok: vec![],
                 kind: ModelKind::Normal,
                 no_kv_cache: true, // NOTE(EricLBuehler): no cache for these.

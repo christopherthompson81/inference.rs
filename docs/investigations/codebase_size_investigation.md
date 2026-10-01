@@ -921,3 +921,75 @@ holding core's `InferenceRs` could still bypass `Engine` through inference-api. 
 server-core's re-export of the raw-channel dispatch helpers (unused) goes. It also caught two coverage gaps from the
 move, now covered again: a cited container file's metadata lookup succeeding, and a stored PNG served over HTTP with its
 media type (`a_stored_image_is_served_as_its_media_type`, seeded by an upload so it runs on CPU).
+
+## Run 32 - 2026-10-01 (time approximate)
+
+Question: after Runs 19-31, what is left of Run 18's list, and what did a fresh pass find?
+
+Commands: `cargo llvm-lines --lib -p <crate>`; `cargo machete`; three read-only sweeps (duplication; layering and API
+surface; cruft, docs, CI, tests, style).
+
+Raw findings:
+- IR lines (Run 18 in brackets): inference-core 1,557,113 (1,599,227); inference-api 1,248,410 (1,137,108);
+  inference-server-core 715,086 (707,573); inference-webui 326,222 (326,731); inference-ffi 114,111 (105,304). The handler logic that moved from the
+  server into `Engine` methods (Runs 24, 26, 30) landed in inference-api without the server shrinking: its framing,
+  extractors and per-route utoipa paths stay.
+- machete: only `anyhow` in third_party/cudaforge, as in Run 18.
+- Layering: server-core, webui and CLI reach core only for plain types: `ChatCompletionResponse` and the other
+  response types, `CalibrationAction`/`CalibrationStatus`, `SerializedSession`, the core `Response` enum through
+  `ResponseTap`, `FILE_PURPOSE_USER_DATA`, `REQUEST_QUEUE_DURATION_METRIC`, `sandbox_key`; the FFI's callbacks need the
+  tool and search types `EngineCallbacks` exposes. All could come through inference-api; server-core and webui still
+  carry core (and selection) dependencies only for them. The skills routes call `SkillStore` directly for their
+  Anthropic shapes rather than an `Engine` method. The `inference` Rust SDK (7,712 lines, 22 files) builds on core
+  directly (`Model` wraps `Arc<InferenceRs>`, `pub use inference_core::*`), a second public surface beside
+  inference-api with its own builders, request types and agent loop; only `examples/rust` uses it. C# has no typed
+  layer; Python's typed `Engine` matches its JSON one.
+- Duplication (largest): DeepSeek2/3 and GLM4-MoE(-lite) ~2.5k lines (DS2 vs DS3 differ by the MoE gate; drift
+  started: DS3 alone has `add_moe_gate_residual_tensors`); Qwen-VL `mod.rs` wrappers ~900 (qwen3_vl vs its MoE: 2 of
+  349 forward lines differ; qwen3_5 vs its MoE: 8 of 318); Qwen-VL input processors ~950; the three
+  `load_model_from_path` callers still ~600 (Run 23 shared only the identical blocks); per-loader sizing ~1.1k in 37
+  files; SigLIP 3 copies ~630; Qwen3-Next vs Qwen3.5-MoE text ~430; Qwen2-VL vs 2.5 vision ~420; Gemma3n vs Gemma4
+  audio ~470; local gated `Mlp` ~10 copies ~500, none with `inference_nn::layers::Mlp`'s merged gate-up fast path;
+  LoRA vs QLoRA linear ~200. To verify: qwen2vl clears the MRoPE delta on every step, qwen3_vl only on a prompt.
+- CI: GitHub runs check, clippy, rustfmt, typos and doc links, but no tests since `tests.yml` went in Run 19; the
+  test suites run only through `local_ci.sh`. `ci_cuda.yaml` carries a PR guard on a dispatch-only workflow;
+  `ci.yml` and `metal_shaders.yml` comments are stale.
+- Cruft: CLAUDE.md's crate list misses five members and its CLI command list most commands, and it still describes
+  the server over `InferenceRs`; docs reference a nonexistent `--multi-model-config`, the retired Python `Runner`, a
+  missing `allowed_tools.mjs` and `banner.png`, a wrong examples path, and an architecture page that predates
+  inference-api; 9 unreferenced scripts (a 4,651-line soak test never discovered); ~15 stale TODO/FIXMEs of 61;
+  ~30 dead public items in core, nn and quant; 7 crates off the one-integration-binary layout (inference-quant 8).
+- Style debt is unchanged: 229 banners, 187 non-ASCII comment lines, 458 `too_many_arguments` allows.
+
+Implication: the API boundary work is done for the server, UI, CLI and bindings; the open architecture item is the
+Rust SDK as a parallel surface. Code size is now model-family duplication; build time favors the core items.
+
+## Run 33 - 2026-10-01 (time approximate)
+
+Question: should the `inference` Rust SDK be rebuilt on inference-api, merged into it, or removed?
+
+Finding (its public surface against inference-api's): nearly everything it does, `Engine` already does. Its model
+builders all end in a `ModelSelected` (`plain_text_selection` and siblings), which is what `EngineSpec`/`ModelSpec`
+carry; multi-model, AnyMoe, paged attention, MTP, MCP, code execution, search and tool callbacks all have spec or
+`EngineCallbacks` fields. Its `RequestBuilder`/`TextMessages` build what `ChatCompletionRequest` holds (grammars,
+response formats, tools, reasoning, files, sessions, adapters); `Model`'s 67 methods map onto `Engine`'s, and its
+`BlockingModel` onto `BlockingEngine`. Its agent loop (`agent.rs`, 841 lines) runs tools client-side by re-sending chat
+requests, a weaker twin of the engine's own loop that every other client uses. Only the SDK has: raw logits
+(`send_raw_chat_request`, two examples), custom logits processors (`add_logits_processor`), typed `Device`/`Topology`
+and `IsqBits` (the spec takes strings), typed structured output and `#[tool]`-derived schemas, image helpers over
+`image::DynamicImage`, and per-request approval closures (the engine's form is the approval event plus
+`resolve_approval`). About 50 of the 59 examples would port with little more than `use` changes; 9 need a missing
+feature or redesign (perplexity, logits processor, device map, topology, the three agent examples, structured output,
+the approval closure). The docs change (the Rust reference, two guides, 35 Rust tabs, 59 example pages) is about the
+same whichever way it goes.
+
+Implication: keep `inference` as the crate name Rust users depend on, but as a facade over inference-api, with the
+builders producing `EngineSpec`/`EngineCallbacks` and requests producing `ChatCompletionRequest` plus media, and
+`Model` wrapping `Engine`. The client-side agent loop goes. Raw logits and logits processors need a decision: an
+explicit low-level escape hatch, engine support, or dropping them.
+
+Decided: `inference` stays the Rust crate name as a thin layer over inference-api with no core dependency, holding the
+Rust-only conveniences, so the crate the C ABI links takes no Rust-only dependencies. Raw logits and logits processors
+become engine features on every surface, as do per-request tool callbacks and tool-result stream events; the SDK's
+client-side agent loop then goes. Order: those engine features, the SDK rebuild on them, then a sweep of the core
+public items the old SDK kept alive.

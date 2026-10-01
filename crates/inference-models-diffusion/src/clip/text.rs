@@ -275,7 +275,7 @@ impl ClipTextTransformer {
         })
     }
 
-    // TODO: rewrrite to newer version
+    // TODO: rewrite to the newer version
     fn build_causal_attention_mask(
         bsz: usize,
         seq_len: usize,

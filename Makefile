@@ -7,6 +7,7 @@ fmt:
 docs-regen:
 	cargo test -p inference-cli regenerate_cli_reference -- --ignored
 	cargo test -p inference-server-core regenerate_openapi -- --ignored
+	python3 bindings/python/scripts/generate_types.py
 	cargo test -p inference-selection regenerate_supported_models -- --ignored
 	python3 docs/scripts/render_python_api.py
 	python3 docs/scripts/render_examples.py

@@ -141,4 +141,4 @@ let request = RequestBuilder::new()
 
 ## Seeds
 
-The engine-wide random seed is set with `--seed` on the CLI or `seed=` on the Python `Runner`. OpenAI-compatible generation requests can instead provide `seed` for a deterministic request-scoped stream. Each choice in an `n > 1` request receives a distinct deterministic stream.
+The engine-wide random seed is set with `--seed` on the CLI or `runtime.seed` in an engine spec (the Python and C# bindings). OpenAI-compatible generation requests can instead provide `seed` for a deterministic request-scoped stream. Each choice in an `n > 1` request receives a distinct deterministic stream.

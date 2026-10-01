@@ -16,7 +16,7 @@ env:
   RUSTFLAGS: "-D warnings"
 
 # Caches are saved from master only, so PRs restore master's and do not churn the repo cache limit
-# Test Suite runs from tests.yml on demand, and Docs runs locally via scripts/local_ci.sh; both are too slow per PR
+# Tests and Docs run locally via scripts/local_ci.sh; both are too slow per PR
 jobs:
   check:
     name: Check

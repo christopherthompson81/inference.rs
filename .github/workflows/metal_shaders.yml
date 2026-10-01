@@ -47,7 +47,7 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/master' }}
       # build.rs precompiles the quant and paged-attn metallibs for macOS, iOS and tvOS, as release builds do
       - run: cargo check -p inference-quant -p inference-paged-attn --features metal
-      # core compiles these from source at runtime; match its MTLCompileOptions (gdn: Metal 3.1, both: fast math)
+      # inference-nn compiles these from source at runtime; match its MTLCompileOptions (gdn: Metal 3.1, both: fast math)
       - run: |
           xcrun -sdk macosx metal -std=metal3.1 -ffast-math -c crates/inference-nn/kernels/metal/gdn.metal -o "$RUNNER_TEMP/gdn.air"
           xcrun -sdk macosx metal -ffast-math -c crates/inference-nn/kernels/metal/ssm.metal -o "$RUNNER_TEMP/ssm.air"
