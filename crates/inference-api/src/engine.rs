@@ -7,7 +7,7 @@ use futures::StreamExt;
 use inference_core::{
     AnyMoeSpec, CalibrationAction, CalibrationStatus, ChatCompletionResponse, CompletionResponse,
     ImageGenerationResponse, InferenceRs, MtpConfig, MtpDraftSamplingMethod, Response,
-    SandboxPolicy, SearchCallback, SerializedSession, ToolCallbackWithTool,
+    SandboxPolicy, SerializedSession,
 };
 use inference_selection::quant;
 use serde::Deserialize;
@@ -78,6 +78,11 @@ pub use inference_core::{
     ShellConfig, SpeechLoaderType, TokenSource, UqffWriteConfig, expand_isq_value, parse_isq_value,
 };
 pub use inference_selection::{MmprojSelection, ModelSelected, get_auto_device_map_params};
+// The types `EngineCallbacks` carries: host tools and the search callback a client registers at load.
+pub use inference_core::{
+    CalledFunction, SearchCallback, SearchFunctionParameters, SearchResult, Tool, ToolCallContext,
+    ToolCallbackKind, ToolCallbackWithTool,
+};
 
 const ONE_MODEL_SOURCE: &str = "give either `model` or a non-empty `models`, not both";
 const DEFAULT_WITHOUT_MODELS: &str =

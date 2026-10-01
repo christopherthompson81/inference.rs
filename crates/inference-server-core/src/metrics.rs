@@ -15,7 +15,7 @@ use axum::{
     response::IntoResponse,
 };
 use http_body::{Body as HttpBody, Frame};
-use inference_core::REQUEST_QUEUE_DURATION_METRIC;
+use inference_api::REQUEST_QUEUE_DURATION_METRIC;
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use std::error::Error as _;
 use std::pin::Pin;

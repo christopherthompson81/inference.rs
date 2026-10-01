@@ -993,3 +993,13 @@ Rust-only conveniences, so the crate the C ABI links takes no Rust-only dependen
 become engine features on every surface, as do per-request tool callbacks and tool-result stream events; the SDK's
 client-side agent loop then goes. Order: those engine features, the SDK rebuild on them, then a sweep of the core
 public items the old SDK kept alive.
+
+## Run 34 - 2026-10-01 (time approximate)
+
+Change: Run 32's plain types come through inference-api: `response` (the protocol's chat, completion and image
+responses and `Usage`), `operations::{CalibrationAction, CalibrationStatus, SerializedSession}`,
+`engine_chat::Response` (what a `ResponseTap` sees), `files::FILE_PURPOSE_*`, the callback types `EngineCallbacks`
+carries in `engine`, and `REQUEST_QUEUE_DURATION_METRIC` and `sandbox_key` at the root. server-core, the web UI and the
+FFI drop their inference-core (and server-core its inference-selection) dependency, server-core keeping core only for
+its tests, and their features forward through inference-api alone. Now every client crate builds on inference-api
+the way an outside project would.

@@ -14,7 +14,7 @@ use axum::{
         sse::{Event, KeepAlive, KeepAliveStream},
     },
 };
-use inference_core::{CompletionChunkResponse, CompletionResponse};
+use inference_api::response::{CompletionChunkResponse, CompletionResponse};
 
 use crate::handler_core::{ApiJson, ApiJsonRejection};
 #[cfg(test)]

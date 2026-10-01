@@ -6,7 +6,7 @@ use axum::{
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
-use inference_core::FILE_PURPOSE_USER_DATA;
+use inference_api::files::FILE_PURPOSE_USER_DATA;
 
 pub use crate::files_api::{
     ContainerFileListObject, ContainerFileMetadata, FileDeleted, FileListObject, FileMetadata,

@@ -1,20 +1,21 @@
 //! ## General inference.rs server route handlers.
 
-#[cfg(test)]
-use crate::openai::ModelObjects;
 use axum::extract::{Json, Path};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 #[cfg(test)]
 use inference_api::operations::ReIsqResponse;
-use inference_api::operations::{CalibrationApplyRequest, ReIsqRequest};
-use inference_api::system::TuneModelRequest;
-use inference_core::{CalibrationAction, SerializedSession};
+use inference_api::{
+    operations::{CalibrationAction, CalibrationApplyRequest, ReIsqRequest, SerializedSession},
+    system::TuneModelRequest,
+};
 
 use crate::handler_core::{ApiJson, ApiJsonRejection};
 pub use crate::models_api::ModelOperationRequest;
 #[cfg(test)]
 pub use crate::models_api::{ModelStatus, ModelStatusResponse};
+#[cfg(test)]
+use crate::openai::ModelObjects;
 use crate::{
     handler_core::{ApiError, json_response, openai_error_response},
     system,
@@ -64,7 +65,7 @@ pub async fn health() -> &'static str {
   path = "/v1/system/info",
   responses((status = 200, description = "Host, device, and build information"))
 ))]
-pub async fn system_info() -> Json<inference_selection::SystemInfo> {
+pub async fn system_info() -> Json<inference_api::system::SystemInfo> {
     Json(system::system_info())
 }
 
@@ -74,7 +75,7 @@ pub async fn system_info() -> Json<inference_selection::SystemInfo> {
   path = "/v1/system/doctor",
   responses((status = 200, description = "Environment diagnostics report"))
 ))]
-pub async fn system_doctor() -> Json<inference_selection::DoctorReport> {
+pub async fn system_doctor() -> Json<inference_api::system::DoctorReport> {
     Json(system::system_doctor())
 }
 
@@ -120,7 +121,7 @@ fn http_save_cimatrix_path(name: &str) -> Result<std::path::PathBuf, ApiError> {
   post,
   tag = "inference.rs",
   path = "/calibration/start",
-  responses((status = 200, description = "Begin collecting activation statistics from live traffic.", body = inference_core::CalibrationStatus))
+  responses((status = 200, description = "Begin collecting activation statistics from live traffic.", body = inference_api::operations::CalibrationStatus))
 ))]
 pub async fn calibration_start(OwnedEngine(engine): OwnedEngine) -> Response {
     json_response(engine.calibration(CalibrationAction::Start).await)
@@ -130,7 +131,7 @@ pub async fn calibration_start(OwnedEngine(engine): OwnedEngine) -> Response {
   get,
   tag = "inference.rs",
   path = "/calibration/status",
-  responses((status = 200, description = "Per-layer calibration collection progress.", body = inference_core::CalibrationStatus))
+  responses((status = 200, description = "Per-layer calibration collection progress.", body = inference_api::operations::CalibrationStatus))
 ))]
 pub async fn calibration_status(OwnedEngine(engine): OwnedEngine) -> Response {
     json_response(engine.calibration(CalibrationAction::Status).await)
@@ -141,7 +142,7 @@ pub async fn calibration_status(OwnedEngine(engine): OwnedEngine) -> Response {
   tag = "inference.rs",
   path = "/calibration/apply",
   request_body = CalibrationApplyRequest,
-  responses((status = 200, description = "Requantize with collected statistics and hot-swap the layers.", body = inference_core::CalibrationStatus))
+  responses((status = 200, description = "Requantize with collected statistics and hot-swap the layers.", body = inference_api::operations::CalibrationStatus))
 ))]
 pub async fn calibration_apply(
     OwnedEngine(engine): OwnedEngine,

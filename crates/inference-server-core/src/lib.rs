@@ -13,7 +13,7 @@
 //! ```no_run
 //! use axum::{extract::State, routing::post, Json, Router};
 //! use inference_api::{Engine, EngineSpec};
-//! use inference_core::ChatCompletionChunkResponse;
+//! use inference_api::response::ChatCompletionChunkResponse;
 //! use inference_server_core::{
 //!     chat_completion::{
 //!         create_streamer, ChatCompletionOnChunkCallback, ChatCompletionOnDoneCallback,

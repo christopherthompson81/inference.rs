@@ -834,13 +834,14 @@ pub async fn restore_chat_session(
         }
     };
 
-    let serialized: inference_core::SerializedSession = match serde_json::from_slice(&bytes) {
-        Ok(s) => s,
-        Err(e) => {
-            error!("parse session sidecar error: {}", e);
-            return (StatusCode::INTERNAL_SERVER_ERROR, "parse sidecar failed").into_response();
-        }
-    };
+    let serialized: inference_api::operations::SerializedSession =
+        match serde_json::from_slice(&bytes) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("parse session sidecar error: {}", e);
+                return (StatusCode::INTERNAL_SERVER_ERROR, "parse sidecar failed").into_response();
+            }
+        };
 
     if let Err(e) = app.engine.put_session(&session_id, serialized) {
         error!("import_session error: {}", e.message);

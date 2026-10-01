@@ -14,7 +14,6 @@ rust-version.workspace = true
 
 [dependencies]
 inference-api = { workspace = true }
-inference-core = { workspace = true }
 inference-server-core = { workspace = true }
 
 anyhow = { workspace = true }

@@ -89,7 +89,7 @@ You should also look for a model.safetensors.index.json file for the model at ha
 - `crates/inference-nn/` - Model-facing building blocks: layers, attention and its metadata, KV/paged caches, GDN, MoE, device mapping, the loader traits with their sizing and placement helpers (`loaders`), and the CUDA/Metal kernels behind them
 - `crates/inference-cli/` - The `inference` binary (run, serve, bench, quantize, uqff, tune, doctor, login, cache, from-config, update, uninstall, completions). A downstream consumer: it depends on inference-api and the server crates, never on core
 - `crates/inference-api/` - The engine surface with no HTTP: OpenAI request/response types, request parsing and dispatch, chat as an engine operation, the server/engine builder. The HTTP server builds on it and the C ABI exposes it; add engine features here, not in the server
-- `crates/inference-server-core/` - HTTP framing over `inference_api::Engine`: routes, auth and keys, SSE, metrics, the MCP server. Each request acts through the `Engine` scoped to its owner; engine logic belongs in inference-api
+- `crates/inference-server-core/` - HTTP framing over `inference_api::Engine`: routes, auth and keys, SSE, metrics, the MCP server. Each request acts through the `Engine` scoped to its owner; engine logic belongs in inference-api. Like the web UI and the C ABI it depends on inference-api, not core (core is a dev-dependency for its tests)
 - `crates/inference-webui/` - The chat web UI `serve` mounts at `/ui`: its HTTP handlers over the engine, the Svelte source (`webui/`) and the built bundle it embeds (`static/`, rebuilt with `npm run build` in `webui/`)
 - `crates/inference/` - Rust SDK (high-level crate)
 - `crates/inference-vision/` - Image processing utilities

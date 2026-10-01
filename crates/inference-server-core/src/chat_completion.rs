@@ -10,7 +10,7 @@ use axum::{
         sse::{Event, KeepAlive, KeepAliveStream},
     },
 };
-use inference_core::{ChatCompletionChunkResponse, ChatCompletionResponse};
+use inference_api::response::{ChatCompletionChunkResponse, ChatCompletionResponse};
 
 use crate::handler_core::{ApiJson, ApiJsonRejection};
 #[cfg(test)]

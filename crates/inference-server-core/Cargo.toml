@@ -20,10 +20,6 @@ http-body = { workspace = true }
 http-body-util.workspace = true
 futures.workspace = true
 inference-api.workspace = true
-inference-selection.workspace = true
-inference-core = { workspace = true, features = [
-  "utoipa",
-] }
 serde.workspace = true
 sha2.workspace = true
 # The served document keeps docs/openapi.json's key order.
@@ -40,6 +36,7 @@ uuid = { workspace = true, features = ["v4"] }
 
 
 [dev-dependencies]
+inference-core.workspace = true
 base64.workspace = true
 candle-core.workspace = true
 tempfile.workspace = true
@@ -57,20 +54,20 @@ inference-webui.workspace = true
 
 [features]
 default = ["swagger-ui", "all-models"]
-all-models = ["inference-core/all-models", "inference-api/all-models"]
-models-gemma = ["inference-core/models-gemma", "inference-api/models-gemma"]
-models-llama = ["inference-core/models-llama", "inference-api/models-llama"]
-models-other = ["inference-core/models-other", "inference-api/models-other"]
-models-phi = ["inference-core/models-phi", "inference-api/models-phi"]
-models-qwen = ["inference-core/models-qwen", "inference-api/models-qwen"]
+all-models = ["inference-api/all-models"]
+models-gemma = ["inference-api/models-gemma"]
+models-llama = ["inference-api/models-llama"]
+models-other = ["inference-api/models-other"]
+models-phi = ["inference-api/models-phi"]
+models-qwen = ["inference-api/models-qwen"]
 swagger-ui = ["dep:utoipa-swagger-ui"]
-cuda = ["inference-core/cuda", "inference-api/cuda"]
-cudnn = ["inference-core/cudnn", "inference-api/cudnn"]
-metal = ["inference-core/metal", "inference-api/metal"]
-flash-attn = ["cuda", "inference-core/flash-attn", "inference-api/flash-attn"]
-flash-attn-v3 = ["cuda", "inference-core/flash-attn-v3", "inference-api/flash-attn-v3"]
-accelerate = ["inference-core/accelerate", "inference-api/accelerate"]
-mkl = ["inference-core/mkl", "inference-api/mkl"]
-nccl = ["inference-core/nccl", "inference-api/nccl"]
-ring = ["inference-core/ring", "inference-api/ring"]
-code-execution = ["inference-core/code-execution", "inference-api/code-execution"]
+cuda = ["inference-api/cuda"]
+cudnn = ["inference-api/cudnn"]
+metal = ["inference-api/metal"]
+flash-attn = ["cuda", "inference-api/flash-attn"]
+flash-attn-v3 = ["cuda", "inference-api/flash-attn-v3"]
+accelerate = ["inference-api/accelerate"]
+mkl = ["inference-api/mkl"]
+nccl = ["inference-api/nccl"]
+ring = ["inference-api/ring"]
+code-execution = ["inference-api/code-execution"]
