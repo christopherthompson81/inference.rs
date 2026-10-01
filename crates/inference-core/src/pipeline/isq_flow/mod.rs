@@ -111,6 +111,17 @@ pub(crate) fn finish_isq_load(inputs: FinishIsqLoad<'_>) -> Result<()> {
     Ok(())
 }
 
+/// Runtime re-ISQ: requantizes a model's tracked layers to `dtype`; one loaded without ISQ has none to requantize.
+pub(crate) fn requantize_tracked_modules(modules: &[TrackedModule], dtype: IsqType) -> Result<()> {
+    if modules.is_empty() {
+        anyhow::bail!("Runtime re-ISQ requires the model to have been loaded with ISQ.");
+    }
+    info!("Re-quantizing {} layers to {dtype}.", modules.len());
+    requantize_and_swap(modules, dtype, |module| module.default_type(dtype), &|_| {
+        None
+    })
+}
+
 pub(crate) fn requantize_and_swap(
     modules: &[TrackedModule],
     pool_ty: IsqType,

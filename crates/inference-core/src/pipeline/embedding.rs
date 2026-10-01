@@ -568,19 +568,7 @@ impl PreProcessingMixin for EmbeddingPipeline {
 
 impl IsqPipelineMixin for EmbeddingPipeline {
     fn re_isq_model(&mut self, dtype: IsqType) -> Result<()> {
-        if self.tracked_modules.is_empty() {
-            anyhow::bail!("Runtime re-ISQ requires the model to have been loaded with ISQ.");
-        }
-        tracing::info!(
-            "Re-quantizing {} layers to {dtype}.",
-            self.tracked_modules.len()
-        );
-        super::isq_flow::requantize_and_swap(
-            &self.tracked_modules,
-            dtype,
-            |module| module.default_type(dtype),
-            &|_| None,
-        )
+        super::isq_flow::requantize_tracked_modules(&self.tracked_modules, dtype)
     }
 
     fn begin_calibration(&mut self) -> Result<()> {

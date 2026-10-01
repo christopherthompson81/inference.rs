@@ -2337,6 +2337,37 @@ fn copy_rope_positions(
     Ok(())
 }
 
+/// Drops a pipeline's captured decode graphs, and the recurrent pad slot they held.
+pub(crate) fn clear_decode_graphs(
+    graphs: &std::sync::Mutex<CudaDecodeGraphState>,
+    cache: &crate::pipeline::EitherCache,
+) {
+    graphs.lock().expect("CUDA graph mutex poisoned").clear();
+    if cache.is_hybrid()
+        && let Err(err) = cache.hybrid().release_graph_pad_slot()
+    {
+        tracing::error!("Failed to release CUDA graph recurrent pad slot: {err}");
+    }
+}
+
+/// Frees up to `max_entries` captured graphs: decode graphs first, then the model's speculative ones.
+pub(crate) fn reclaim_decode_graphs(
+    graphs: &std::sync::Mutex<CudaDecodeGraphState>,
+    model: &dyn inference_nn::speculative::SpeculativeTargetMixin,
+    max_entries: usize,
+) -> usize {
+    reclaim_cuda_graph_entries(
+        max_entries,
+        |limit| {
+            graphs
+                .lock()
+                .expect("CUDA graph mutex poisoned")
+                .evict_lru_for_memory_pressure(limit)
+        },
+        |limit| model.evict_speculative_cuda_graphs(limit),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

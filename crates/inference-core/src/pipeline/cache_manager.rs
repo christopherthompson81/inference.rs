@@ -2,7 +2,7 @@ use candle_core::{Result, Tensor};
 
 use crate::{
     kv_cache::*,
-    pipeline::{CacheManagerMixin, MetadataMixin},
+    pipeline::{CacheManagerMixin, MetadataMixin, Pipeline},
     sequence::Sequence,
 };
 
@@ -21,6 +21,55 @@ pub trait CacheManager<T: CacheManagerMixin + MetadataMixin + ?Sized> {
         modify_draft_cache: bool,
         load_preallocated_cache: bool,
     ) -> Result<()>;
+}
+
+// The pipelines call the managers through `dyn Pipeline`, so each compiles once rather than once per pipeline type.
+
+/// Copies each sequence's cache into the model's, with the manager for the model's cache kind.
+pub(crate) fn clone_in_cache_by_kind(
+    pipeline: &dyn Pipeline,
+    seqs: &mut [&mut Sequence],
+) -> Result<()> {
+    match pipeline.cache() {
+        EitherCache::Full(_) => FullCacheManager.clone_in_cache(pipeline, seqs, false),
+        EitherCache::Normal(_) => NormalCacheManager.clone_in_cache(pipeline, seqs, false),
+        EitherCache::Hybrid(_) => HybridCacheManager.clone_in_cache(pipeline, seqs, false),
+    }
+}
+
+/// Copies the model's cache back into each sequence's, with the manager for the model's cache kind.
+pub(crate) fn clone_out_cache_by_kind(pipeline: &dyn Pipeline, seqs: &mut [&mut Sequence]) {
+    match pipeline.cache() {
+        EitherCache::Full(_) => FullCacheManager.clone_out_cache(pipeline, seqs, false),
+        EitherCache::Normal(_) => NormalCacheManager.clone_out_cache(pipeline, seqs, false),
+        EitherCache::Hybrid(_) => HybridCacheManager.clone_out_cache(pipeline, seqs, false),
+    }
+}
+
+/// Empties the model's cache for `seqs`; a full cache is never preallocated.
+pub(crate) fn set_none_cache_by_kind(
+    pipeline: &dyn Pipeline,
+    seqs: &mut [&mut Sequence],
+    modify_draft_cache: bool,
+    load_preallocated_cache: bool,
+) -> Result<()> {
+    match pipeline.cache() {
+        EitherCache::Full(_) => {
+            FullCacheManager.set_none_cache(pipeline, seqs, modify_draft_cache, false)
+        }
+        EitherCache::Normal(_) => NormalCacheManager.set_none_cache(
+            pipeline,
+            seqs,
+            modify_draft_cache,
+            load_preallocated_cache,
+        ),
+        EitherCache::Hybrid(_) => HybridCacheManager.set_none_cache(
+            pipeline,
+            seqs,
+            modify_draft_cache,
+            load_preallocated_cache,
+        ),
+    }
 }
 
 pub struct NormalCacheManager;

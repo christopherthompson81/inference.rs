@@ -1443,10 +1443,10 @@ impl IsqPipelineMixin for GGUFPipeline {
 
 impl CacheManagerMixin for GGUFPipeline {
     fn clone_in_cache(&self, seqs: &mut [&mut Sequence]) -> candle_core::Result<()> {
-        FullCacheManager.clone_in_cache(self, seqs, false)
+        FullCacheManager.clone_in_cache(self as &dyn Pipeline, seqs, false)
     }
     fn clone_out_cache(&self, seqs: &mut [&mut Sequence]) {
-        FullCacheManager.clone_out_cache(self, seqs, false)
+        FullCacheManager.clone_out_cache(self as &dyn Pipeline, seqs, false)
     }
     fn set_none_cache(
         &self,
@@ -1455,7 +1455,7 @@ impl CacheManagerMixin for GGUFPipeline {
         modify_draft_cache: bool,
         _load_preallocated_cache: bool,
     ) -> candle_core::Result<()> {
-        FullCacheManager.set_none_cache(self, seqs, modify_draft_cache, false)?;
+        FullCacheManager.set_none_cache(self as &dyn Pipeline, seqs, modify_draft_cache, false)?;
         if reset_non_granular {
             self.reset_non_granular_state()
         }

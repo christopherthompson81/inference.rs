@@ -1,7 +1,7 @@
 use super::isq::{UqffFullSer, UqffWriteConfig, WeightLoadingMode, WeightLoadingState};
 use super::loaders::MultimodalLoaderTypeExt;
 use super::{
-    AdapterKind, AnyMoePipelineMixin, AutoMultimodalLoader, CacheManager, CacheManagerMixin,
+    AdapterKind, AnyMoePipelineMixin, AutoMultimodalLoader, CacheManagerMixin,
     DecodeGraphPrecaptureCtx, EitherCache, ForwardInputsResult, ForwardStepResult, GeneralMetadata,
     IsqPipelineMixin, Loader, MetadataMixin, ModelCategory, ModelKind, ModelPaths,
     MultimodalLoaderType, MultimodalModel, MultimodalModelLoader, MultimodalPromptPrefixer,
@@ -15,7 +15,6 @@ use crate::device_map::DeviceMapper;
 use crate::distributed::{self};
 #[cfg(feature = "cuda")]
 use crate::kv_cache::RecurrentCheckpointStateSnapshot;
-use crate::pipeline::cache_manager::{FullCacheManager, HybridCacheManager, NormalCacheManager};
 
 #[cfg(feature = "cuda")]
 type SeqRecurrentCheckpointSnapshots = Vec<(usize, RecurrentCheckpointStateSnapshot)>;
@@ -1284,20 +1283,10 @@ impl PreProcessingMixin for MultimodalPipeline {
 
 impl IsqPipelineMixin for MultimodalPipeline {
     fn re_isq_model(&mut self, dtype: IsqType) -> Result<()> {
-        if self.tracked_modules.is_empty() {
-            anyhow::bail!("Runtime re-ISQ requires the model to have been loaded with ISQ.");
+        if !self.tracked_modules.is_empty() {
+            self.cleanup_cuda_graphs();
         }
-        tracing::info!(
-            "Re-quantizing {} layers to {dtype}.",
-            self.tracked_modules.len()
-        );
-        self.cleanup_cuda_graphs();
-        super::isq_flow::requantize_and_swap(
-            &self.tracked_modules,
-            dtype,
-            |module| module.default_type(dtype),
-            &|_| None,
-        )
+        super::isq_flow::requantize_tracked_modules(&self.tracked_modules, dtype)
     }
 
     fn begin_calibration(&mut self) -> Result<()> {
@@ -1339,44 +1328,24 @@ impl IsqPipelineMixin for MultimodalPipeline {
 
 impl CacheManagerMixin for MultimodalPipeline {
     fn clone_in_cache(&self, seqs: &mut [&mut Sequence]) -> candle_core::Result<()> {
-        match self.model.cache() {
-            EitherCache::Full(_) => FullCacheManager.clone_in_cache(self, seqs, false),
-            EitherCache::Normal(_) => NormalCacheManager.clone_in_cache(self, seqs, false),
-            EitherCache::Hybrid(_) => HybridCacheManager.clone_in_cache(self, seqs, false),
-        }
+        super::cache_manager::clone_in_cache_by_kind(self, seqs)
     }
     fn clone_out_cache(&self, seqs: &mut [&mut Sequence]) {
-        match self.model.cache() {
-            EitherCache::Full(_) => FullCacheManager.clone_out_cache(self, seqs, false),
-            EitherCache::Normal(_) => NormalCacheManager.clone_out_cache(self, seqs, false),
-            EitherCache::Hybrid(_) => HybridCacheManager.clone_out_cache(self, seqs, false),
-        }
+        super::cache_manager::clone_out_cache_by_kind(self, seqs)
     }
     fn set_none_cache(
         &self,
         seqs: &mut [&mut Sequence],
         reset_non_granular: bool,
         modify_draft_cache: bool,
-
         load_preallocated_cache: bool,
     ) -> candle_core::Result<()> {
-        match self.model.cache() {
-            EitherCache::Full(_) => {
-                FullCacheManager.set_none_cache(self, seqs, modify_draft_cache, false)
-            }
-            EitherCache::Normal(_) => NormalCacheManager.set_none_cache(
-                self,
-                seqs,
-                modify_draft_cache,
-                load_preallocated_cache,
-            ),
-            EitherCache::Hybrid(_) => HybridCacheManager.set_none_cache(
-                self,
-                seqs,
-                modify_draft_cache,
-                load_preallocated_cache,
-            ),
-        }?;
+        super::cache_manager::set_none_cache_by_kind(
+            self,
+            seqs,
+            modify_draft_cache,
+            load_preallocated_cache,
+        )?;
         let sequence_ids = seqs.iter().map(|seq| *seq.id()).collect::<Vec<_>>();
         self.model
             .reset_model_specific_state_for_sequences(&sequence_ids);
@@ -1406,30 +1375,15 @@ impl MetadataMixin for MultimodalPipeline {
     }
     fn cleanup_cuda_graphs(&self) {
         #[cfg(feature = "cuda")]
-        {
-            self.cuda_decode_graph
-                .lock()
-                .expect("CUDA graph mutex poisoned")
-                .clear();
-            if self.model.cache().is_hybrid()
-                && let Err(err) = self.model.cache().hybrid().release_graph_pad_slot()
-            {
-                tracing::error!("Failed to release CUDA graph recurrent pad slot: {err}");
-            }
-        }
+        super::cuda_graph::clear_decode_graphs(&self.cuda_decode_graph, self.model.cache());
     }
     fn reclaim_cuda_graph_memory(&self, max_entries: usize) -> usize {
         #[cfg(feature = "cuda")]
         {
-            crate::pipeline::cuda_graph::reclaim_cuda_graph_entries(
+            super::cuda_graph::reclaim_decode_graphs(
+                &self.cuda_decode_graph,
+                &*self.model,
                 max_entries,
-                |limit| {
-                    self.cuda_decode_graph
-                        .lock()
-                        .expect("CUDA graph mutex poisoned")
-                        .evict_lru_for_memory_pressure(limit)
-                },
-                |limit| self.model.evict_speculative_cuda_graphs(limit),
             )
         }
         #[cfg(not(feature = "cuda"))]
@@ -1469,52 +1423,14 @@ impl MetadataMixin for MultimodalPipeline {
 }
 
 impl crate::speculative::driver::SpeculativePipelineExt for MultimodalPipeline {
-    fn has_speculative_proposer(&self) -> bool {
-        self.model.has_speculative_proposer()
+    fn speculative_target(&self) -> &dyn inference_nn::speculative::SpeculativeTargetMixin {
+        &*self.model
     }
 
-    fn speculative_plan(
-        &self,
-        batch_size: usize,
-    ) -> Option<crate::speculative::SpeculativeBatchPlan> {
-        self.model.speculative_plan(batch_size)
-    }
-
-    fn speculative_observe(&self, observation: crate::speculative::SpeculativeBatchObservation) {
-        self.model.speculative_observe(observation);
-    }
-
-    fn speculative_bypass(&mut self, seq_ids: &[usize]) -> candle_core::Result<()> {
-        self.model.speculative_bypass(seq_ids)
-    }
-
-    fn speculative_target_hiddens(
-        &self,
-        rows: &[(usize, usize)],
-    ) -> candle_core::Result<Option<Tensor>> {
-        self.model.speculative_target_hiddens(rows)
-    }
-
-    fn speculative_propose(
+    fn speculative_target_mut(
         &mut self,
-        ctx: crate::speculative::SpeculativeProposeBatchCtx<'_>,
-    ) -> candle_core::Result<Option<crate::speculative::SpeculativeProposalBatch>> {
-        self.model.speculative_propose(ctx)
-    }
-
-    fn speculative_prepare_propose(
-        &mut self,
-        ctx: crate::speculative::SpeculativeProposePrepareCtx<'_>,
-    ) -> candle_core::Result<Option<Box<dyn crate::speculative::SpeculativeProposePreparation>>>
-    {
-        self.model.speculative_prepare_propose(ctx)
-    }
-
-    fn speculative_commit(
-        &mut self,
-        rows: &[crate::speculative::SpeculativeCommitRow],
-    ) -> candle_core::Result<()> {
-        self.model.speculative_commit(rows)
+    ) -> &mut dyn inference_nn::speculative::SpeculativeTargetMixin {
+        &mut *self.model
     }
 
     fn build_speculative_verify_inputs(
