@@ -1,7 +1,7 @@
 use super::llg::build_llg_factory;
 use super::{
     AdapterKind, CacheManager, GeneralMetadata, Loader, ModelKind, ModelPaths, PrettyName,
-    QuantizationKind, TokenSource, get_model_paths, text_models_inputs_processor::ModelInputs,
+    QuantizationKind, TokenSource, text_models_inputs_processor::ModelInputs,
 };
 use super::{
     AnyMoePipelineMixin, CacheManagerMixin, EitherCache, ForwardInputsResult, IsqPipelineMixin,
@@ -64,7 +64,7 @@ use crate::xlora_models::XLoraQPhi3;
 use crate::{
     DeviceMapSetting, GLOBAL_HF_CACHE, LocalModelPaths, LoraAdapterSpec, LoraRuntimeConfig,
     MultimodalLoaderType, PagedAttentionConfig, Pipeline, Topology, TryIntoDType, UqffWriteConfig,
-    distributed, get_mut_arcmutex, get_paths_gguf,
+    distributed, get_mut_arcmutex,
 };
 use anyhow::{Context, Result, bail};
 use candle_core::{Device, Tensor};
@@ -78,7 +78,6 @@ use rand_isaac::Isaac64Rng;
 use std::any::Any;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::str::FromStr;
 use std::sync::Arc;
 use std::{env, fs};
 use tokenizers::Tokenizer;
@@ -1145,31 +1144,27 @@ impl Loader for GGUFLoader {
         {
             bail!("multimodal GGUF does not support legacy LoRA or X-LoRA adapters");
         }
-        let paths: anyhow::Result<Box<dyn ModelPaths>> = get_paths_gguf!(
-            LocalModelPaths,
-            &token_source,
-            Some(revision.clone()),
-            self,
-            self.quantized_model_id.clone(),
-            self.quantized_filenames.clone(),
+        let request = |quantized_filenames| super::paths::GgufPathsRequest {
+            model_id: self.model_id.as_deref(),
+            quantized_model_id: &self.quantized_model_id,
+            quantized_filenames,
+            chat_template: self.chat_template.as_deref(),
+            token_source: &token_source,
+            revision: Some(revision.clone()),
             silent,
-            true
-        );
-        let paths = paths?;
+        };
+        let adapters = crate::pipeline::AdapterPathOptions {
+            xlora_model_id: self.xlora_model_id.as_ref(),
+            lora_adapters: self.dynamic_lora_adapters(),
+            xlora_order: self.xlora_order.as_ref(),
+            xlora_preload: crate::pipeline::XLoraPreload::Load,
+        };
+        let paths =
+            super::paths::get_paths_gguf(request(&self.quantized_filenames), Some(adapters))?;
         if let Some(mmproj_filenames) = self.mmproj_filenames.as_ref() {
-            let mmproj_paths: anyhow::Result<Box<dyn ModelPaths>> = get_paths_gguf!(
-                LocalModelPaths,
-                &token_source,
-                Some(revision),
-                self,
-                self.quantized_model_id.clone(),
-                mmproj_filenames.clone(),
-                silent,
-                false
-            );
-            let mmproj_paths = mmproj_paths?;
+            let mmproj_paths = super::paths::get_paths_gguf(request(mmproj_filenames), None)?;
             let inferred_paths = self.infer_multimodal_asset_paths(
-                paths.as_ref(),
+                &paths,
                 mmproj_paths.get_weight_filenames(),
                 &token_source,
                 silent,
@@ -1177,7 +1172,7 @@ impl Loader for GGUFLoader {
             let paths = inferred_paths
                 .as_ref()
                 .map(|paths| paths as &dyn ModelPaths)
-                .unwrap_or(paths.as_ref());
+                .unwrap_or(&paths);
             return self.load_native_multimodal(NativeMultimodalLoadArgs {
                 paths,
                 mmproj_paths: mmproj_paths.get_weight_filenames(),
@@ -1191,7 +1186,7 @@ impl Loader for GGUFLoader {
         }
 
         self.load_model_from_path(
-            paths.as_ref(),
+            &paths,
             dtype,
             device,
             silent,

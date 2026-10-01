@@ -14,7 +14,7 @@ use tracing::{debug, info, trace, warn};
 use inference_protocol::chat_template::{BeginEndUnkPadTok, ChatTemplate, ChatTemplateValue};
 
 use crate::{
-    LoraAdapterSpec, ModelPaths, Ordering, TokenSource, api_dir_list, api_get_file,
+    LoraAdapterSpec, ModelPaths, Ordering, TokenSource,
     lora::LoraConfig,
     pipeline::{hf::build_api, isq::UQFF_RESIDUAL_SAFETENSORS},
     xlora_models::XLoraConfig,
@@ -86,7 +86,8 @@ pub(crate) fn get_adapter_paths(
                 base_revision.clone(),
             ));
             let model_id = Path::new(&xlora_id);
-            let dir_list = api_dir_list!(api, model_id, true, &base_revision).collect::<Vec<_>>();
+            let dir_list =
+                crate::pipeline::hf::list_repo_files(&api, model_id, true, &base_revision)?;
             // Get the path for the xlora classifier
             let xlora_classifier = &dir_list
                 .clone()
@@ -101,12 +102,8 @@ pub(crate) fn get_adapter_paths(
 
             let classifier_path = xlora_classifier
                 .map(|xlora_classifier| -> candle_core::Result<_> {
-                    Ok(api_get_file!(
-                        api,
-                        xlora_classifier,
-                        model_id,
-                        &base_revision
-                    ))
+                    crate::pipeline::hf::get_file(&api, model_id, xlora_classifier, &base_revision)
+                        .map_err(candle_core::Error::msg)
                 })
                 .transpose()?;
 
@@ -127,7 +124,8 @@ pub(crate) fn get_adapter_paths(
                 if xlora_configs.len() != 1 {
                     warn!("Selecting config: `{}`", config_path);
                 }
-                let config_path = api_get_file!(api, config_path, model_id, &base_revision);
+                let config_path =
+                    crate::pipeline::hf::get_file(&api, model_id, config_path, &base_revision)?;
                 let conf = fs::read_to_string(config_path)?;
                 let deser: Result<XLoraConfig, serde_json::Error> = serde_json::from_str(&conf);
                 match deser {
@@ -175,11 +173,21 @@ pub(crate) fn get_adapter_paths(
             let mut adapters_paths: HashMap<String, Vec<PathBuf>> = HashMap::new();
             for (file, name) in adapter_files {
                 if let Some(paths) = adapters_paths.get_mut(&name) {
-                    paths.push(api_get_file!(api, &file, model_id, &base_revision));
+                    paths.push(crate::pipeline::hf::get_file(
+                        &api,
+                        model_id,
+                        &file,
+                        &base_revision,
+                    )?);
                 } else {
                     adapters_paths.insert(
                         name,
-                        vec![api_get_file!(api, &file, model_id, &base_revision)],
+                        vec![crate::pipeline::hf::get_file(
+                            &api,
+                            model_id,
+                            &file,
+                            &base_revision,
+                        )?],
                     );
                 }
             }
@@ -232,16 +240,21 @@ pub(crate) fn get_adapter_paths(
                     let mut output = HashMap::new();
                     for adapter in preload_adapters {
                         // Get the names and remote paths of the files associated with this adapter
-                        let adapter_files =
-                            api_dir_list!(api, &adapter.adapter_model_id, true, &base_revision)
-                                .filter_map(|f| {
-                                    if f.contains(&adapter.name) {
-                                        Some((f, adapter.name.clone()))
-                                    } else {
-                                        None
-                                    }
-                                })
-                                .collect::<Vec<_>>();
+                        let adapter_files = crate::pipeline::hf::list_repo_files(
+                            &api,
+                            std::path::Path::new(&adapter.adapter_model_id),
+                            true,
+                            &base_revision,
+                        )?
+                        .into_iter()
+                        .filter_map(|f| {
+                            if f.contains(&adapter.name) {
+                                Some((f, adapter.name.clone()))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect::<Vec<_>>();
                         if adapter_files.is_empty() {
                             anyhow::bail!(
                                 "Adapter files are empty. Perhaps the ordering file adapters does not match the actual adapters?"
@@ -251,11 +264,21 @@ pub(crate) fn get_adapter_paths(
                         let mut adapters_paths: HashMap<String, Vec<PathBuf>> = HashMap::new();
                         for (file, name) in adapter_files {
                             if let Some(paths) = adapters_paths.get_mut(&name) {
-                                paths.push(api_get_file!(api, &file, model_id, &base_revision));
+                                paths.push(crate::pipeline::hf::get_file(
+                                    &api,
+                                    model_id,
+                                    &file,
+                                    &base_revision,
+                                )?);
                             } else {
                                 adapters_paths.insert(
                                     name,
-                                    vec![api_get_file!(api, &file, model_id, &base_revision)],
+                                    vec![crate::pipeline::hf::get_file(
+                                        &api,
+                                        model_id,
+                                        &file,
+                                        &base_revision,
+                                    )?],
                                 );
                             }
                         }
@@ -399,7 +422,9 @@ pub fn get_model_paths(
                     revision.clone(),
                 ));
                 let model_id = Path::new(&id);
-                files.push(api_get_file!(qapi, name, model_id, &revision));
+                files.push(crate::pipeline::hf::get_file(
+                    &qapi, model_id, name, &revision,
+                )?);
             }
             Ok(files)
         }
@@ -410,9 +435,10 @@ pub fn get_model_paths(
             let pickle_match = Regex::new(PICKLE_MATCH)?;
 
             let mut filenames = vec![];
-            let repo_files = api_dir_list!(api, model_id, true, &revision).collect::<Vec<_>>();
+            let repo_files = crate::pipeline::hf::list_repo_files(api, model_id, true, &revision)?;
             let safetensors = if repo_files.iter().any(|file| file == SAFETENSOR_INDEX) {
-                let index_path = api_get_file!(api, SAFETENSOR_INDEX, model_id, &revision);
+                let index_path =
+                    crate::pipeline::hf::get_file(api, model_id, SAFETENSOR_INDEX, &revision)?;
                 parse_safetensor_index(&fs::read_to_string(index_path)?)?
             } else {
                 repo_files
@@ -455,7 +481,9 @@ pub fn get_model_paths(
                     .collect::<Vec<_>>()
             );
             for rfilename in files {
-                filenames.push(api_get_file!(api, &rfilename, model_id, &revision));
+                filenames.push(crate::pipeline::hf::get_file(
+                    api, model_id, &rfilename, &revision,
+                )?);
             }
             Ok(filenames)
         }
@@ -724,6 +752,405 @@ pub(crate) fn get_chat_template(
             }
         }
     }
+}
+
+/// One repository (a hub repo or a local directory) at one revision: what it lists, and a fetch for any file.
+pub(crate) struct RepoFiles<'a> {
+    api: ApiRepo,
+    model_id: &'a Path,
+    revision: String,
+    listed: Vec<String>,
+}
+
+impl<'a> RepoFiles<'a> {
+    pub fn open(
+        model_id: &'a str,
+        token_source: &TokenSource,
+        revision: Option<String>,
+        silent: bool,
+    ) -> Result<Self> {
+        let revision = revision.unwrap_or_else(|| "main".to_string());
+        let api = build_api(token_source, !silent)?.repo(Repo::with_revision(
+            model_id.to_string(),
+            RepoType::Model,
+            revision.clone(),
+        ));
+        let model_id = Path::new(model_id);
+        let listed = super::hf::list_repo_files(&api, model_id, false, &revision)?;
+        Ok(Self {
+            api,
+            model_id,
+            revision,
+            listed,
+        })
+    }
+
+    pub fn has(&self, file: &str) -> bool {
+        self.listed.iter().any(|listed| listed == file)
+    }
+
+    pub fn get(&self, file: &str) -> Result<PathBuf> {
+        trace!("Loading `{file}` at `{}`", self.model_id.display());
+        super::hf::get_file(&self.api, self.model_id, file, &self.revision)
+    }
+
+    /// `file` when the repository lists it.
+    pub fn get_listed(&self, file: &str) -> Result<Option<PathBuf>> {
+        self.has(file).then(|| self.get(file)).transpose()
+    }
+
+    /// The weight files: `quantized_filenames` from `quantized_model_id`, or the repository's own safetensors.
+    fn weights(
+        &self,
+        token_source: &TokenSource,
+        quantized_model_id: Option<&String>,
+        quantized_filenames: Option<&Vec<String>>,
+        loading_uqff: bool,
+    ) -> Result<Vec<PathBuf>> {
+        get_model_paths(
+            self.revision.clone(),
+            token_source,
+            quantized_model_id,
+            quantized_filenames,
+            &self.api,
+            self.model_id,
+            loading_uqff,
+        )
+    }
+}
+
+/// What a safetensors (or GGML) model's file lookup takes from its loader.
+pub(crate) struct PathsRequest<'a> {
+    pub model_id: &'a str,
+    pub tokenizer_json: Option<&'a str>,
+    pub chat_template: Option<&'a str>,
+    pub token_source: &'a TokenSource,
+    pub revision: Option<String>,
+    pub quantized_model_id: Option<&'a String>,
+    pub quantized_filenames: Option<&'a Vec<String>>,
+    pub silent: bool,
+    pub loading_uqff: bool,
+}
+
+/// The tokenizer, config, weights, adapters, templates and processor configs a model loads from.
+pub(crate) fn get_paths(
+    request: PathsRequest<'_>,
+    adapters: AdapterPathOptions<'_>,
+) -> Result<crate::pipeline::LocalModelPaths<PathBuf>> {
+    let repo = RepoFiles::open(
+        request.model_id,
+        request.token_source,
+        request.revision,
+        request.silent,
+    )?;
+    let tokenizer_filename = match request.tokenizer_json {
+        Some(path) => {
+            trace!("Using tokenizer.json at `{path}`");
+            PathBuf::from(path)
+        }
+        // Mistral checkpoints ship `tekken.json` in place of a HF tokenizer
+        None if !repo.has("tokenizer.json") && repo.has("tekken.json") => {
+            repo.get("tekken.json")?
+        }
+        None => repo.get("tokenizer.json")?,
+    };
+    // Mistral's native `params.json` takes precedence over `config.json`
+    let config_filename = if repo.has("params.json") {
+        repo.get("params.json")?
+    } else {
+        repo.get("config.json")?
+    };
+    repo.get_listed("hf_quant_config.json")?;
+    let filenames = repo.weights(
+        request.token_source,
+        request.quantized_model_id,
+        request.quantized_filenames,
+        request.loading_uqff,
+    )?;
+    let adapter_paths = get_adapter_paths(
+        request.model_id.to_string(),
+        adapters,
+        request.token_source,
+        repo.revision.clone(),
+    )?;
+    let processor_configs = ProcessorConfigs::fetch(&repo)?;
+    let template_filename = match request.chat_template {
+        Some(path) => {
+            debug!("Using chat template file at `{path}`");
+            Some(PathBuf::from(path))
+        }
+        None => listed_chat_template(&repo)?,
+    };
+    let chat_template_json_filename = repo.get_listed("chat_template.json")?;
+    Ok(
+        processor_configs.into_paths(crate::pipeline::LocalModelPaths {
+            tokenizer_filename,
+            config_filename,
+            filenames,
+            adapter_paths,
+            template_filename,
+            gen_conf: None,
+            preprocessor_config: None,
+            video_preprocessor_config: None,
+            processor_config: None,
+            chat_template_json_filename,
+        }),
+    )
+}
+
+/// The generation and processor configs a repository lists, fetched together.
+struct ProcessorConfigs {
+    gen_conf: Option<PathBuf>,
+    preprocessor_config: Option<PathBuf>,
+    video_preprocessor_config: Option<PathBuf>,
+    processor_config: Option<PathBuf>,
+}
+
+impl ProcessorConfigs {
+    fn fetch(repo: &RepoFiles<'_>) -> Result<Self> {
+        Ok(Self {
+            gen_conf: repo.get_listed("generation_config.json")?,
+            preprocessor_config: repo.get_listed("preprocessor_config.json")?,
+            video_preprocessor_config: repo.get_listed("video_preprocessor_config.json")?,
+            processor_config: repo.get_listed("processor_config.json")?,
+        })
+    }
+
+    fn into_paths(
+        self,
+        paths: crate::pipeline::LocalModelPaths<PathBuf>,
+    ) -> crate::pipeline::LocalModelPaths<PathBuf> {
+        crate::pipeline::LocalModelPaths {
+            gen_conf: self.gen_conf,
+            preprocessor_config: self.preprocessor_config,
+            video_preprocessor_config: self.video_preprocessor_config,
+            processor_config: self.processor_config,
+            ..paths
+        }
+    }
+}
+
+// A `.jinja` template renders the bos/eos tokens `tokenizer_config.json` holds, so that is fetched beside it.
+fn listed_chat_template(repo: &RepoFiles<'_>) -> Result<Option<PathBuf>> {
+    if repo.has("chat_template.jinja") {
+        repo.get_listed("tokenizer_config.json")?;
+        return Ok(Some(repo.get("chat_template.jinja")?));
+    }
+    let template = repo.get_listed("tokenizer_config.json")?;
+    if template.is_none() {
+        debug!(
+            "No chat template or `tokenizer_config.json` found at `{}`",
+            repo.model_id.display()
+        );
+    }
+    Ok(template)
+}
+
+/// An embedding model's files: as [`get_paths`] has them, plus its sentence-transformers modules.
+pub(crate) fn get_embedding_paths(
+    request: PathsRequest<'_>,
+) -> Result<crate::pipeline::EmbeddingModelPaths<PathBuf>> {
+    let repo = RepoFiles::open(
+        request.model_id,
+        request.token_source,
+        request.revision,
+        request.silent,
+    )?;
+    let tokenizer_filename = match request.tokenizer_json {
+        Some(path) => PathBuf::from(path),
+        None if !repo.has("tokenizer.json") && repo.has("tekken.json") => {
+            repo.get("tekken.json")?
+        }
+        None => repo.get("tokenizer.json")?,
+    };
+    let config_filename = if repo.has("params.json") {
+        repo.get("params.json")?
+    } else {
+        repo.get("config.json")?
+    };
+    repo.get_listed("hf_quant_config.json")?;
+    let filenames = repo.weights(
+        request.token_source,
+        request.quantized_model_id,
+        request.quantized_filenames,
+        request.loading_uqff,
+    )?;
+    let modules_path = if repo.model_id.exists() {
+        repo.model_id.join("modules.json")
+    } else {
+        repo.get("modules.json")?
+    };
+    let mut modules = Vec::new();
+    if modules_path.exists() {
+        let listed: Vec<crate::pipeline::EmbeddingModule> =
+            serde_json::from_str(&fs::read_to_string(&modules_path)?)?;
+        for module in listed {
+            use crate::pipeline::{EmbeddingModulePaths as Paths, EmbeddingModuleType as Type};
+            let path = module.path.clone();
+            modules.push(match module.ty {
+                Type::Transformer => Paths::Transformer { path },
+                Type::Pooling => Paths::Pooling {
+                    config: repo.get(&format!("{path}/config.json"))?,
+                    path,
+                },
+                Type::Dense => Paths::Dense {
+                    config: repo.get(&format!("{path}/config.json"))?,
+                    model: repo.get(&format!("{path}/model.safetensors"))?,
+                    path,
+                },
+                Type::Normalize => Paths::Normalize { path },
+            });
+        }
+    }
+    Ok(crate::pipeline::EmbeddingModelPaths {
+        tokenizer_filename,
+        config_filename,
+        filenames,
+        adapter_paths: AdapterPaths::None,
+        modules,
+    })
+}
+
+/// What a GGUF model's file lookup takes from its loader.
+pub(crate) struct GgufPathsRequest<'a> {
+    /// The repository with the tokenizer and configs; `None` loads everything from the GGUF repository.
+    pub model_id: Option<&'a str>,
+    pub quantized_model_id: &'a String,
+    pub quantized_filenames: &'a Vec<String>,
+    pub chat_template: Option<&'a str>,
+    pub token_source: &'a TokenSource,
+    pub revision: Option<String>,
+    pub silent: bool,
+}
+
+/// A GGUF model's files; `adapters`, when given, resolves its LoRA or X-LoRA adapters too.
+pub(crate) fn get_paths_gguf(
+    request: GgufPathsRequest<'_>,
+    adapters: Option<AdapterPathOptions<'_>>,
+) -> Result<crate::pipeline::LocalModelPaths<PathBuf>> {
+    let this_model_id = request.model_id.unwrap_or(request.quantized_model_id);
+    let repo = RepoFiles::open(
+        this_model_id,
+        request.token_source,
+        request.revision,
+        request.silent,
+    )?;
+    let template_filename = match request.chat_template {
+        Some(path) if path.ends_with(".json") || path.ends_with(".jinja") => {
+            debug!("Using chat template file at `{path}`");
+            Some(PathBuf::from(path))
+        }
+        Some(_) => panic!("Specified chat template file must end with .json or .jinja"),
+        None if request.model_id.is_none() => None,
+        None => listed_chat_template(&repo)?,
+    };
+    let filenames = repo.weights(
+        request.token_source,
+        Some(request.quantized_model_id),
+        Some(request.quantized_filenames),
+        false,
+    )?;
+    debug!("GGUF file(s) {:?}", filenames);
+    let adapter_paths = match adapters {
+        Some(adapters) => get_adapter_paths(
+            this_model_id.to_string(),
+            adapters,
+            request.token_source,
+            repo.revision.clone(),
+        )?,
+        None => AdapterPaths::None,
+    };
+    let processor_configs = ProcessorConfigs::fetch(&repo)?;
+    // empty when the repository has none, and the GGUF file's own tokenizer and config are used
+    let tokenizer_filename = repo.get_listed("tokenizer.json")?.unwrap_or_default();
+    let config_filename = match repo.get_listed("config.json")? {
+        Some(path) => path,
+        None => repo.get_listed("params.json")?.unwrap_or_default(),
+    };
+    let chat_template_json_filename = repo.get_listed("chat_template.json")?;
+    Ok(
+        processor_configs.into_paths(crate::pipeline::LocalModelPaths {
+            tokenizer_filename,
+            config_filename,
+            filenames,
+            adapter_paths,
+            template_filename,
+            gen_conf: None,
+            preprocessor_config: None,
+            video_preprocessor_config: None,
+            processor_config: None,
+            chat_template_json_filename,
+        }),
+    )
+}
+
+/// The UQFF files `from_uqff` names, with the shard siblings and report-resolved names the repository lists.
+pub(crate) fn get_uqff_paths(
+    from_uqff: &[PathBuf],
+    model_id: &str,
+    token_source: &TokenSource,
+    revision: Option<String>,
+    silent: bool,
+) -> Result<Vec<PathBuf>> {
+    let revision = revision.unwrap_or_else(|| "main".to_string());
+    let api = build_api(token_source, !silent)?.repo(Repo::with_revision(
+        model_id.to_string(),
+        RepoType::Model,
+        revision.clone(),
+    ));
+    let model_path = Path::new(model_id);
+    let available_files =
+        super::hf::list_repo_files(&api, model_path, false, &revision).unwrap_or_default();
+    let uqff_report = if available_files
+        .iter()
+        .any(|file| file == inference_quant::UQFF_REPORT_JSON)
+    {
+        let report_path = super::hf::get_file(
+            &api,
+            model_path,
+            inference_quant::UQFF_REPORT_JSON,
+            &revision,
+        )?;
+        Some(super::isq::read_uqff_report_file(&report_path)?)
+    } else {
+        None
+    };
+
+    let input_files: Vec<String> = from_uqff.iter().map(|f| f.display().to_string()).collect();
+    let mut expanded_files: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    for input in &input_files {
+        let resolved =
+            super::isq::resolve_uqff_input_files(input, &available_files, uqff_report.as_ref())?;
+        if resolved.len() != 1 || resolved.first() != Some(input) {
+            debug!("Resolved UQFF input `{}` to {:?}", input, resolved);
+        } else if input.parse::<u32>().is_ok() {
+            let available_uqff: Vec<_> = available_files
+                .iter()
+                .filter(|file| file.ends_with(".uqff"))
+                .collect();
+            warn!(
+                "No UQFF file found for shorthand `{}`. Available UQFF files: {:?}",
+                input, available_uqff,
+            );
+        }
+        for file in resolved {
+            if seen.insert(file.clone()) {
+                expanded_files.push(file);
+            }
+        }
+    }
+    if expanded_files.len() > input_files.len() {
+        debug!(
+            "Auto-discovered {} UQFF shard files (from {} specified)",
+            expanded_files.len(),
+            input_files.len()
+        );
+    }
+    expanded_files
+        .iter()
+        .map(|file| super::hf::get_file(&api, model_path, file, &revision))
+        .collect()
 }
 
 #[cfg(test)]

@@ -353,7 +353,12 @@ impl AutoLoader {
         let repo_files = if model_id.exists() {
             Self::list_local_repo_files(model_id)
         } else {
-            crate::api_dir_list!(api, model_id, false, &revision).collect::<Vec<_>>()
+            crate::pipeline::hf::list_repo_files(
+                &api,
+                std::path::Path::new(model_id),
+                false,
+                &revision,
+            )?
         };
         Ok(ConfigArtifacts {
             contents,

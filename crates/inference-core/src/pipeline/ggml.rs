@@ -1,7 +1,7 @@
 use super::llg::build_llg_factory;
 use super::{
     AdapterKind, CacheManager, GeneralMetadata, Loader, ModelKind, ModelPaths, QuantizationKind,
-    TokenSource, get_model_paths, text_models_inputs_processor::ModelInputs,
+    TokenSource, text_models_inputs_processor::ModelInputs,
 };
 use super::{
     AnyMoePipelineMixin, CacheManagerMixin, EitherCache, ForwardInputsResult, IsqPipelineMixin,
@@ -10,12 +10,12 @@ use super::{
 use crate::attention::ATTENTION_CHUNK_SIZE;
 use crate::device_map::DeviceMapper;
 use crate::lora::Ordering;
+use crate::pipeline::ChatTemplate;
 use crate::pipeline::cache_manager::FullCacheManager;
 use crate::pipeline::chat_template::{GenerationConfig, calculate_eos_tokens};
 use crate::pipeline::model_config as ModelConfig;
 use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::tokenizer::get_tokenizer;
-use crate::pipeline::{ChatTemplate, LocalModelPaths};
 use crate::pipeline::{Modalities, SupportedModality, get_chat_template};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
@@ -25,7 +25,6 @@ use crate::utils::progress::ProgressScopeGuard;
 use crate::xlora_models::NonGranularState;
 use crate::{
     DeviceMapSetting, PagedAttentionConfig, Pipeline, Topology, TryIntoDType, get_mut_arcmutex,
-    get_paths,
 };
 #[cfg(feature = "models-llama")]
 use crate::{models::quantized_llama::ModelWeights as QLlama, xlora_models::XLoraQLlama};
@@ -33,14 +32,11 @@ use anyhow::Result;
 use candle_core::quantized::ggml_file;
 use candle_core::{Device, Tensor};
 use futures::future::BoxFuture;
-use hf_hub::{Repo, RepoType};
 use inference_nn::gguf::{QuantizedForwardInputs, QuantizedModel};
 use inference_quant::IsqType;
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
 use std::fs;
-use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::Arc;
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
@@ -400,24 +396,28 @@ impl Loader for GGMLLoader {
         paged_attn_config: Option<PagedAttentionConfig>,
     ) -> Result<Arc<Mutex<dyn Pipeline + Send + Sync>>> {
         let _progress_guard = ProgressScopeGuard::new(silent);
-        let paths: anyhow::Result<Box<dyn ModelPaths>> = get_paths!(
-            LocalModelPaths,
-            &token_source,
-            revision,
-            self,
-            self.quantized_model_id,
-            Some(vec![self.quantized_filename.as_ref().unwrap().clone()]),
-            silent,
-            false,
+        let quantized_filenames = vec![self.quantized_filename.as_ref().unwrap().clone()];
+        let paths = super::paths::get_paths(
+            super::paths::PathsRequest {
+                model_id: &self.model_id,
+                tokenizer_json: self.tokenizer_json.as_deref(),
+                chat_template: self.chat_template.as_deref(),
+                token_source: &token_source,
+                revision,
+                quantized_model_id: self.quantized_model_id.as_ref(),
+                quantized_filenames: Some(&quantized_filenames),
+                silent,
+                loading_uqff: false,
+            },
             crate::pipeline::AdapterPathOptions {
                 xlora_model_id: self.xlora_model_id.as_ref(),
                 lora_adapters: None,
                 xlora_order: self.xlora_order.as_ref(),
                 xlora_preload: crate::pipeline::XLoraPreload::Load,
-            }
+            },
         );
         self.load_model_from_path(
-            paths?.as_ref(),
+            &paths?,
             dtype,
             device,
             silent,
