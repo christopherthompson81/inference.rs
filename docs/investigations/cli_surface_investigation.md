@@ -528,3 +528,23 @@ It now needs non-empty content; the test covers `Some("")`. Found, not fixed (ag
 streaming agentic run whose last allowed round ends in a tool call sends no terminal chunk, so the stream ends with
 "Response channel closed before completion"; and across rounds the streamer keeps one reasoning item, so a second
 round's reasoning streams into an item already marked done.
+
+## Run 22 — 2026-09-30 (time approximate)
+
+**Question:** #157: since generated images default to the file store, nothing bounds the bytes it holds (only 4096
+entries, about 10 GB of 2-3 MB base64 PNGs in the worst case).
+
+**Change:** `FileStore` tracks the bytes its bodies take (`resident_bytes`: base64 or text as held) and, after an
+insert, evicts expired entries and then the oldest until it is under `MAX_FILES` and `MAX_STORE_BYTES` (1 GiB); the
+newest file always stays, so an over-cap upload is still fetchable once. Replacing an entry keeps its place and counts
+only its new size. Storing binary bodies as raw bytes was not done: `FileContent::Binary { data_base64 }` is matched
+across the protocol, agent and code-exec crates (a serde adapter could keep the wire shape, so the cost is internal),
+and it saves only the 4/3 base64 overhead, which bounds nothing on its own. A shorter TTL for generated images would
+cover one producer; the cap also bounds uploads, agent outputs and input files.
+
+**Review:** accounting holds on every path (all `by_id` mutation goes through `Inner::remove` or `insert`; stored
+files are `Arc` and never mutated, so no underflow). The cap is per loaded model (one store per `EngineInstance`),
+now said in the docs; evictions are logged at debug. Known: a session import over 1 GiB evicts its own earlier files,
+and evicted agent outputs or uploads then 404, as expired ones already do.
+
+**Tests:** `the_byte_cap_evicts_the_oldest_and_keeps_the_newest`.

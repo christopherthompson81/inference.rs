@@ -142,7 +142,7 @@ Semantics:
 - Bodies up to 8 MiB ship inline (`text` or `data_base64`); above that the body field is omitted and clients fetch raw bytes from `GET /v1/files/{id}/content`.
 - For agent-produced output files, text is surfaced back to the model as metadata plus the existing 1024-byte preview; agentic runs can inspect more text when file access is available.
 - Shell and code execution automatically surface files created during a tool call. Explicit `outputs` and request `files` still provide names/metadata and produce error placeholders for expected files that are missing. Shell can also surface files created in earlier calls via `inference_surface_outputs`. Other files remain in the session working directory.
-- Files expire 30 minutes after creation (at most 4096 retained).
+- Files expire 30 minutes after creation. Each loaded model's store keeps at most 4096 files and 1 GiB of file bodies (as stored: base64 for binary files); past either, the oldest go first. Uploads and chat input files go to the default model's store, generated images to the image model's.
 - `GET /v1/files/{id}/content` status codes: 200 body returned, 404 unknown or expired id, 410 body was elided, 422 the file is an error placeholder.
 - `GET /v1/containers/{container_id}/files/{file_id}/content` is an OpenAI-compatible alias backed by the same file store.
 - Each `agentic_tool_calls` entry in a chat response carries a `file_ids` array attributing files to that tool round.

@@ -6,13 +6,16 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::File;
+use super::{File, FileContent};
 
 /// Per-entry TTL. Matches the agentic session default.
 pub const DEFAULT_FILE_TTL: Duration = Duration::from_secs(30 * 60);
 
 /// Hard entry cap. Oldest evicted on insert.
 pub const MAX_FILES: usize = 4096;
+
+/// Cap on the bytes the store holds (base64 bodies and text, as kept). Oldest evicted on insert; the newest stays.
+pub const MAX_STORE_BYTES: usize = 1 << 30;
 
 const CLEANUP_INTERVAL: Duration = Duration::from_secs(120);
 
@@ -28,11 +31,45 @@ struct StoredFile {
 pub struct FileStore {
     inner: Arc<RwLock<Inner>>,
     ttl: Duration,
+    max_bytes: usize,
 }
 
 struct Inner {
     by_id: HashMap<String, StoredFile>,
     next_seq: u64,
+    /// What the stored bodies take, kept in step with `by_id`.
+    resident_bytes: usize,
+}
+
+impl Inner {
+    fn remove(&mut self, id: &str) -> Option<StoredFile> {
+        let removed = self.by_id.remove(id)?;
+        self.resident_bytes -= resident_bytes(&removed.file);
+        Some(removed)
+    }
+
+    fn remove_expired(&mut self, now: Instant) -> usize {
+        let expired: Vec<String> = self
+            .by_id
+            .iter()
+            .filter(|(_, entry)| entry.expires_at < now)
+            .map(|(id, _)| id.clone())
+            .collect();
+        for id in &expired {
+            self.remove(id);
+        }
+        expired.len()
+    }
+}
+
+fn resident_bytes(file: &File) -> usize {
+    match &file.content {
+        FileContent::Text { text, preview } => {
+            text.as_ref().map_or(0, String::len) + preview.as_ref().map_or(0, String::len)
+        }
+        FileContent::Binary { data_base64 } => data_base64.as_ref().map_or(0, String::len),
+        FileContent::Error { code, message } => code.len() + message.len(),
+    }
 }
 
 impl FileStore {
@@ -41,32 +78,38 @@ impl FileStore {
     }
 
     pub fn with_ttl(ttl: Duration) -> Self {
+        Self::with_limits(ttl, MAX_STORE_BYTES)
+    }
+
+    pub fn with_limits(ttl: Duration, max_bytes: usize) -> Self {
         Self {
             inner: Arc::new(RwLock::new(Inner {
                 by_id: HashMap::new(),
                 next_seq: 0,
+                resident_bytes: 0,
             })),
             ttl,
+            max_bytes,
         }
     }
 
-    /// Evicts oldest entries to stay under `MAX_FILES`.
+    /// Evicts expired entries, then the oldest, to stay under `MAX_FILES` and the byte cap.
     pub fn insert(&self, file: File, session_id: Option<String>) {
         let id = file.id.clone();
+        let size = resident_bytes(&file);
         let mut guard = self.inner.write().unwrap();
-        if let Some(existing) = guard.by_id.get_mut(&id) {
-            existing.file = Arc::new(file);
-            existing.expires_at = Instant::now() + self.ttl;
-            if let Some(session_id) = session_id {
-                existing.session_ids.insert(session_id);
+        let (seq, mut session_ids) = match guard.remove(&id) {
+            Some(existing) => (existing.seq, existing.session_ids),
+            None => {
+                let seq = guard.next_seq;
+                guard.next_seq += 1;
+                (seq, HashSet::new())
             }
-            return;
-        }
-        let seq = guard.next_seq;
-        guard.next_seq += 1;
-        let session_ids = session_id.into_iter().collect();
+        };
+        session_ids.extend(session_id);
+        guard.resident_bytes += size;
         guard.by_id.insert(
-            id,
+            id.clone(),
             StoredFile {
                 file: Arc::new(file),
                 expires_at: Instant::now() + self.ttl,
@@ -74,20 +117,23 @@ impl FileStore {
                 seq,
             },
         );
-        if guard.by_id.len() > MAX_FILES {
-            let now = Instant::now();
-            guard.by_id.retain(|_, e| e.expires_at >= now);
-            while guard.by_id.len() > MAX_FILES {
-                let Some(oldest_id) = guard
-                    .by_id
-                    .iter()
-                    .min_by_key(|(_, e)| e.seq)
-                    .map(|(k, _)| k.clone())
-                else {
-                    break;
-                };
-                guard.by_id.remove(&oldest_id);
-            }
+        let over =
+            |inner: &Inner| inner.by_id.len() > MAX_FILES || inner.resident_bytes > self.max_bytes;
+        if over(&guard) {
+            guard.remove_expired(Instant::now());
+        }
+        while over(&guard) && guard.by_id.len() > 1 {
+            let Some(oldest_id) = guard
+                .by_id
+                .iter()
+                .filter(|(other, _)| **other != id)
+                .min_by_key(|(_, e)| e.seq)
+                .map(|(k, _)| k.clone())
+            else {
+                break;
+            };
+            guard.remove(&oldest_id);
+            tracing::debug!("FileStore evicted `{oldest_id}` to stay under its file and byte caps");
         }
     }
 
@@ -105,7 +151,7 @@ impl FileStore {
 
     /// Returns true if an entry existed.
     pub fn remove(&self, id: &str) -> bool {
-        self.inner.write().unwrap().by_id.remove(id).is_some()
+        self.inner.write().unwrap().remove(id).is_some()
     }
 
     /// Refresh the TTL on every file tagged with `session_id`. Call when the session is touched.
@@ -156,11 +202,12 @@ impl FileStore {
     }
 
     pub fn cleanup_expired(&self) -> usize {
-        let now = Instant::now();
-        let mut guard = self.inner.write().unwrap();
-        let before = guard.by_id.len();
-        guard.by_id.retain(|_, entry| entry.expires_at >= now);
-        before - guard.by_id.len()
+        self.inner.write().unwrap().remove_expired(Instant::now())
+    }
+
+    /// What the stored bodies take now, as `MAX_STORE_BYTES` counts it.
+    pub fn resident_bytes(&self) -> usize {
+        self.inner.read().unwrap().resident_bytes
     }
 
     /// Periodic reaper bound to the store's lifetime via `Weak`. Dies with the last `Arc`.
@@ -170,13 +217,7 @@ impl FileStore {
             loop {
                 tokio::time::sleep(CLEANUP_INTERVAL).await;
                 let Some(inner) = weak.upgrade() else { break };
-                let now = Instant::now();
-                let reaped = {
-                    let mut guard = inner.write().unwrap();
-                    let before = guard.by_id.len();
-                    guard.by_id.retain(|_, e| e.expires_at >= now);
-                    before - guard.by_id.len()
-                };
+                let reaped = inner.write().unwrap().remove_expired(Instant::now());
                 if reaped > 0 {
                     tracing::debug!("FileStore reaped {reaped} expired file(s)");
                 }
@@ -261,6 +302,39 @@ mod tests {
         assert!(s.attach_to_session("file_a", "sess2"));
         assert_eq!(s.list_for_session("sess1")[0].id, "file_a");
         assert_eq!(s.list_for_session("sess2")[0].id, "file_a");
+    }
+
+    fn sized(id: &str, len: usize) -> File {
+        File {
+            content: FileContent::Text {
+                text: Some("x".repeat(len)),
+                preview: None,
+            },
+            ..make(id)
+        }
+    }
+
+    #[test]
+    fn the_byte_cap_evicts_the_oldest_and_keeps_the_newest() {
+        let s = FileStore::with_limits(DEFAULT_FILE_TTL, 10);
+        s.insert(sized("file_a", 4), None);
+        s.insert(sized("file_b", 4), None);
+        assert_eq!(s.resident_bytes(), 8);
+        s.insert(sized("file_c", 4), None);
+        assert!(s.get("file_a").is_none(), "the oldest goes first");
+        assert!(s.get("file_b").is_some() && s.get("file_c").is_some());
+        assert_eq!(s.resident_bytes(), 8);
+
+        // replacing an entry counts its new size, not both
+        s.insert(sized("file_c", 6), None);
+        assert_eq!(s.resident_bytes(), 10);
+
+        // one file over the cap on its own is still kept, alone
+        s.insert(sized("file_big", 20), None);
+        assert_eq!(s.len(), 1);
+        assert!(s.get("file_big").is_some());
+        assert!(s.remove("file_big"));
+        assert_eq!(s.resident_bytes(), 0);
     }
 
     #[test]
