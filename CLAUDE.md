@@ -29,8 +29,8 @@ cargo install --path crates/inference-cli --features <features>
 
 ### Testing & Quality
 ```bash
-# Run core tests
-cargo test -p inference-core -p inference-agent -p inference-gguf -p inference-selection -p inference-protocol -p inference-nn -p inference-models-llama -p inference-models-qwen -p inference-models-gemma -p inference-models-phi -p inference-models-other -p inference-models-speech -p inference-models-diffusion -p inference-quant -p inference-vision --features inference-protocol/openai
+# Run the workspace tests (CPU, under nextest)
+scripts/local_ci.sh --tests
 
 # Format code (uses rustfmt, ruff, clang-format)
 make fmt

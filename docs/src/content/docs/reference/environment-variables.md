@@ -13,6 +13,7 @@ User-facing environment variables read by `inference` or its build scripts. Stan
 | `HF_HUB_CACHE` | Hugging Face hub cache location. |
 | `HF_TOKEN` | Auth token. Overrides any token saved by `inference login` at `$HF_HOME/token`. |
 | `HF_HUB_TOKEN` | Auth token fallback when `HF_TOKEN` is not set. |
+| `HF_ENDPOINT` | Hub base URL for ranged file reads and FLUX downloads. Default `https://huggingface.co`. Model downloads and repository listings don't use it yet, so it is not enough to point everything at a mirror. |
 | `HF_HUB_OFFLINE` | Set to `1`/`true`/`yes`/`on` to disable all Hugging Face Hub network calls. Files and listings are then served only from `$HF_HUB_CACHE`/`$HF_HOME/hub`, and a missing file errors out. Also skips the `inference doctor` connectivity check. |
 
 If `--token-source env:NAME` is used, inference.rs reads the environment variable named by `NAME` as the token source.
@@ -41,6 +42,8 @@ For the offline workflow (pre-downloading models, local paths), see [run models]
 | `CANDLE_NUM_THREADS` | Sets Candle's CPU worker count. This overrides the fallback from `RAYON_NUM_THREADS` for Candle's own thread pools. |
 | `CANDLE_CPU_MASK` | Linux only. Pins CPU worker threads to a cpulist such as `15-19` or `5-9,15-19`. If no explicit thread-count variable is set, the mask size also becomes the default worker count. |
 | `CANDLE_CPU_AFFINITY` | Linux only. Set to `1` to try Candle's automatic high-capacity CPU affinity mask on heterogeneous CPUs. Default is off. |
+| `INFERENCE_RS_CPU_KV_F32` | Set (to anything but `0`) to keep the CPU KV cache in f32 where it would otherwise use f16 (on CPUs with fast f16 support). |
+| `INFERENCE_RS_FORCE_AVX2` | Set to `1` to use the AVX2 attention kernels on a CPU that also has AVX-512. |
 | `CANDLE_BARRIER_POOL_SPIN_LIMIT` | Advanced CPU tuning. Overrides the spin count used by Candle's persistent barrier pool before worker threads park. |
 
 See [CPU threads and affinity](/guides/perf/throughput-tuning/#cpu-threads-and-affinity) for examples.
@@ -50,6 +53,7 @@ See [CPU threads and affinity](/guides/perf/throughput-tuning/#cpu-threads-and-a
 | Variable | Purpose |
 |---|---|
 | `INFERENCE_RS_SANDBOX` | `auto`, `on`, or `off`. Overrides the sandbox only when the resolved mode is `auto`; `on` and `off` in CLI/TOML win. See [sandbox reference](/reference/sandbox/). |
+| `INFERENCE_RS_MAX_OUTPUT_BYTES` | Largest file, in bytes, that code execution or the shell surfaces as an output; a larger one comes back as an error placeholder. Default 256 MiB. |
 
 ## Server and UI
 
@@ -67,6 +71,7 @@ See [CPU threads and affinity](/guides/perf/throughput-tuning/#cpu-threads-and-a
 
 | Variable | Purpose |
 |---|---|
+| `INFERENCE_RS_CUDA_PHASE_TIMINGS` | Set to `1` or `true` to log per-phase CUDA latencies (component, batch, rows) at info level. For debugging: it synchronizes the stream at every timed phase. |
 | `INFERENCE_RS_CUDA_GRAPHS` | CUDA graph acceleration is enabled by default when supported. Set to `0`, `false`, `no`, or `off` to disable. See [CUDA graphs](/guides/perf/paged-attention/#cuda-graphs). |
 | `INFERENCE_RS_DFLASH_ADAPTIVE` | Set to `1` or `true` to use full DFlash draft depth for batches up to 2 and depth 1 above that. Only applies when `--mtp-n-predict` is not set. |
 | `INFERENCE_RS_DFLASH_ISQ` | ISQ type for DFlash drafter weights (`q4k`, `q6k`, ... or `none` for bf16); defaults to the target's in-situ quantization type. |

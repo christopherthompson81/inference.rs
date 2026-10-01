@@ -568,7 +568,6 @@ impl Pipeline for GGMLPipeline {
     }
 }
 
-// TODO
 impl AnyMoePipelineMixin for GGMLPipeline {}
 
 // GGML files carry no architecture; they are all Llama models.

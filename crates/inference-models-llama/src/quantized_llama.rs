@@ -208,7 +208,7 @@ impl FromGGML for ModelWeights {
                 n_kv_head: ct.hparams.n_head as usize / gqa,
                 head_dim: (ct.hparams.n_embd / ct.hparams.n_head) as usize,
                 rotary: rotary.clone().into(),
-                paged_attn: None, // TODO
+                paged_attn: None,
                 sdpa_params: SdpaParams {
                     n_kv_groups: ct.hparams.n_head as usize / n_kv_head,
                     softcap: None,

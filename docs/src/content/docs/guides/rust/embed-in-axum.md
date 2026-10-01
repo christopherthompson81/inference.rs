@@ -3,64 +3,40 @@ title: Embed inference inside an Axum application
 description: Mount the HTTP API inside an existing Axum router.
 ---
 
-To add inference.rs to an existing Axum app, mount the inference router under a sub-path. The pattern uses two builders from `inference-server-core`:
+To add inference.rs to an existing Axum app, load an engine and mount its router under a sub-path:
 
-- `InferenceRsForServerBuilder` constructs the engine state (`SharedInferenceRsState = Arc<InferenceRs>`, used later for custom handlers).
-- `InferenceRsServerRouterBuilder` produces an Axum `Router` from that state.
+- `inference_api::Engine` loads the models from an `EngineSpec` (the JSON the C ABI and the Python and C# bindings take too) and serves requests on them.
+- `InferenceRsServerRouterBuilder` from `inference-server-core` produces an Axum `Router` over that engine.
 
 ## Dependencies
 
 ```toml
 [dependencies]
 anyhow = "1"
-inference-core = "0.8"
-inference-selection = "0.8"
-inference-server-core = "0.8"
+inference-api = { git = "https://github.com/christopherthompson81/inference.rs" }
+inference-server-core = { git = "https://github.com/christopherthompson81/inference.rs" }
 axum = "0.8"
+serde_json = "1"
 tokio = { version = "1", features = ["full"] }
 ```
-
-The high-level `inference` crate is not needed here; the server builders take a `ModelSelected` from `inference-selection` directly.
 
 ## Mount under a sub-path
 
 ```rust
 use axum::{Router, routing::get};
-use inference_core::{AutoDeviceMapParams, ModelDType};
-use inference_selection::ModelSelected;
-use inference_server_core::{
-    inference_for_server_builder::InferenceRsForServerBuilder,
-    inference_server_router_builder::InferenceRsServerRouterBuilder,
-};
+use inference_api::Engine;
+use inference_server_core::inference_server_router_builder::InferenceRsServerRouterBuilder;
+use serde_json::json;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let model = ModelSelected::Plain {
-        model_id: "Qwen/Qwen3-4B".into(),
-        tokenizer_json: None,
-        arch: None,
-        dtype: ModelDType::Auto,
-        topology: None,
-        organization: None,
-        write_uqff: None,
-        from_uqff: None,
-        imatrix: None,
-        calibration_file: None,
-        max_seq_len: AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
-        max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
-        hf_cache_path: None,
-        matformer_config_path: None,
-        matformer_slice_name: None,
-    };
-
-    let shared_inference = InferenceRsForServerBuilder::new()
-        .with_model(model)
-        .with_in_situ_quant("4".to_string())
-        .build()
-        .await?;
+    let spec = serde_json::from_value(json!({
+        "model": {"Plain": {"model_id": "Qwen/Qwen3-4B", "quant": "4"}},
+    }))?;
+    let engine = Engine::load(spec).await?;
 
     let inference_router = InferenceRsServerRouterBuilder::new()
-        .with_inference(shared_inference)
+        .with_engine(&engine)
         .build()
         .await?;
 
@@ -76,9 +52,7 @@ async fn main() -> anyhow::Result<()> {
 
 `POST /ai/v1/chat/completions` then behaves identically to the standalone server, as do the other routes.
 
-`with_in_situ_quant("4")` applies [ISQ (in-situ quantization)](/reference/quantization-types/) to 4-bit; omit it to run the model unquantized.
-
-`ModelSelected` names every field, so this literal will not compile when new fields are added. For the current field list, see [`ModelSelected`](https://github.com/christopherthompson81/inference.rs/blob/master/crates/inference-selection/src/model_selected.rs), or the `EngineSpec` schema in `docs/openapi.json`.
+`"quant": "4"` picks a 4-bit build the repository publishes, or [quantizes in place](/reference/quantization-types/); omit it to run the model unquantized. The spec's full shape is the `EngineSpec` schema in `docs/openapi.json`: `runtime` (device, batching, paged attention), `agentic` (tools and permissions), several `models`, and so on.
 
 ## Builder options
 
@@ -91,11 +65,9 @@ async fn main() -> anyhow::Result<()> {
 - `with_max_tool_rounds(usize)`
 - `with_tool_dispatch_url(String)`
 - `with_agent_permission(AgentPermission)` and `with_code_execution_permission(CodeExecutionPermission)`
-
-`InferenceRsForServerBuilder` exposes engine-level options (`with_model`, `with_in_situ_quant`, `set_paged_attn`, `with_seed`, multi-model via `add_model`, etc.).
+- `with_api_keys(ApiKeys)`, to require [API keys](/reference/http-api/#authentication)
+- `with_file_listing(bool)` and `with_observability_config(ObservabilityConfig)`
 
 ## Calling the model directly from a handler
 
-For custom request shapes, share the `SharedInferenceRsState` with Axum handlers and prepare chat requests through `chat_completion::ChatEngine::prepare`, which applies the agent policy (permissions, tool-round limits, approvals) that `/v1/chat/completions` applies; build its `AgenticDefaults` the way the router is configured. The `PreparedChat` it returns carries the response channel for `create_streamer` or `process_non_streaming_response`.
-
-A complete example with custom OpenAPI integration is in the `inference-server-core` crate-level documentation (`cargo doc -p inference-server-core --open`).
+For custom request shapes, share the `Engine` (it is cheap to clone) with your handlers and call it: `engine.chat(request, media)` and `engine.chat_stream(...)` apply the same agent policy (permissions, tool-round limits, approvals) that `/v1/chat/completions` applies, and `engine.responses(...)`, `engine.completion(...)`, `engine.embeddings(...)` and the file and session methods mirror their routes. `engine.for_owner(name)` scopes a clone to one owner, as a [keyed server](/reference/http-api/#authentication) does per API key.

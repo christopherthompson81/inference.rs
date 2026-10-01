@@ -635,52 +635,6 @@ impl DiaDecoder {
 
         x.reshape((x.dim(0)?, x.dim(1)?, self.channels, self.vocab_size))
     }
-
-    // /// Forward pass for the Decoder stack, managing KV caches.
-    // pub fn forward(
-    //     &self,
-    //     tgt_ids: &Tensor,
-    //     encoder_out: &Tensor,
-    //     self_attn_mask: Option<&Tensor>,
-    //     cross_attn_mask: Option<&Tensor>,
-    //     encoder_positions: &Tensor,
-    //     decoder_positions: &Tensor,
-    //     self_attn_cache: &mut Vec<Option<DiaKvCache>>,
-    //     cross_attn_cache: &mut Vec<Option<DiaKvCache>>,
-    // ) -> Result<Tensor> {
-    //     let mut x: Option<Tensor> = None;
-    //     for (i, embedding) in self.embeddings.iter().enumerate() {
-    //         let channel_tokens = tgt_ids.narrow(D::Minus1, i, 1)?.squeeze(D::Minus1)?;
-    //         let channel_embed = embedding.forward(&channel_tokens)?;
-    //         x = match x {
-    //             Some(x) => Some((x + channel_embed)?),
-    //             None => Some(channel_embed),
-    //         };
-    //     }
-
-    //     let mut x = x.unwrap();
-
-    //     for (i, layer) in self.layers.iter().enumerate() {
-    //         let self_cache = &mut self_attn_cache[i];
-    //         let cross_cache = &mut cross_attn_cache[i];
-    //         x = layer.forward(
-    //             &x,
-    //             encoder_out,
-    //             encoder_positions,
-    //             decoder_positions,
-    //             None,
-    //             cross_attn_mask,
-    //             self_cache.as_mut(),
-    //             cross_cache.as_mut(),
-    //             true,
-    //             0,
-    //         )?;
-    //     }
-
-    //     x = self.norm.forward(&x)?;
-
-    //     self.logits_dense.forward(&x)
-    // }
 }
 
 pub struct DiaModel {

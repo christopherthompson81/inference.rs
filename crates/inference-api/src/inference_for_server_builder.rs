@@ -1331,24 +1331,6 @@ fn init_cache_config(
     }
 }
 
-/// Configures PagedAttention based on two flags.
-///
-/// This function resolves the tri-state PagedAttention configuration from
-/// the mutually exclusive `paged_attn` and `no_paged_attn` flags.
-pub fn configure_paged_attn_from_flags(
-    paged_attn: bool,
-    no_paged_attn: bool,
-) -> Result<Option<bool>> {
-    match (paged_attn, no_paged_attn) {
-        (true, true) => {
-            anyhow::bail!("Error: `--paged-attn` and `--no-paged-attn` cannot be used together.");
-        }
-        (true, false) => Ok(Some(true)),
-        (false, true) => Ok(Some(false)),
-        (false, false) => Ok(None),
-    }
-}
-
 /// Creates a search embedding model configuration for agentic search reranking.
 pub fn get_search_embedding_model(
     enable_search: bool,

@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore]
+    #[ignore = "writes docs/openapi.json"]
     fn regenerate_openapi() {
         std::fs::write(COMMITTED, render()).expect("write openapi dump");
     }

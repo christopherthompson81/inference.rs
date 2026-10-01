@@ -49,19 +49,7 @@ fn create_attn_mask(q_padding_mask_1d: &Tensor, k_padding_mask_1d: &Tensor) -> R
     let p_mask_q = q_padding_mask_1d.unsqueeze(2)?;
     let p_mask_k = k_padding_mask_1d.unsqueeze(1)?;
 
-    // # Condition A: Non-padding query attends to non-padding key
-    // non_pad_attends_non_pad = p_mask_q & p_mask_k  # Shape [B, Tq, Tk]
-
-    // # Condition B: Padding query attends to padding key
-    // pad_attends_pad = (~p_mask_q) & (~p_mask_k)  # Shape [B, Tq, Tk]
-
-    // # Combine: True if padding status is compatible (both non-pad OR both pad)
-    // mask = non_pad_attends_non_pad | pad_attends_pad  # Shape [B, Tq, Tk]
-
-    // let np_att_np = p_mask_q.bitwise_and(&p_mask_k)?;
-    // let p_att_p = p_mask_q.bitwise_not()?.bitwise_and(&p_mask_k.bitwise_not()?)?;
-    // let mask = np_att_np.bitwise_or(&p_att_p)?;
-
+    // as in HF Dia: a query attends a key when both are padding or both are not
     let mask = p_mask_q.broadcast_eq(&p_mask_k)?;
 
     mask.unsqueeze(1)

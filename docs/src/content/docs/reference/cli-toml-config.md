@@ -47,12 +47,16 @@ quant = "4"
 | Field | CLI flag | Default | Purpose |
 |---|---|---|---|
 | `max_seqs` | `--max-seqs` | 32 | Max concurrent sequences. |
+| `max_num_batched_tokens` | `--max-num-batched-tokens` | 4096 | Most tokens one paged-attention scheduler step processes. |
+| `max_prefill_chunk_tokens` | `--max-prefill-chunk-tokens` | 512 | CUDA prompt-token quantum used while decode is resident, and for recurrent prefill batching. |
+| `max_decode_steps_before_prefill` | `--max-decode-steps-before-prefill` | 8 | Most decode steps before a waiting prefill batch is admitted. |
 | `no_kv_cache` | `--no-kv-cache` | false | Disable KV cache entirely. |
 | `prefix_cache_n` | `--prefix-cache-n` | 16 | Prefix caches retained (0 to disable). |
 | `chat_template` | `-c`, `--chat-template` | not set | Custom chat template file (`.json` or `.jinja`), applied to every model. Per-model `chat_template` in `[[models]]` overrides it. |
 | `jinja_explicit` | `-j`, `--jinja-explicit` | not set | Explicit Jinja template override. Per-model `jinja_explicit` also exists. |
 | `matformer_config_path` | `--matformer-config-path` | not set | MatFormer (nested-submodel) slice config (CSV/JSON). |
 | `matformer_slice_name` | `--matformer-slice-name` | not set | MatFormer slice to load. Requires `matformer_config_path`. |
+| `mtp` | `--mtp` | false | MTP speculative decoding with the head built into the checkpoint. Conflicts with `mtp_model`. |
 | `mtp_model` | `--mtp-model` | not set | [MTP (multi-token prediction)](/guides/perf/speculative-decoding/) assistant model id or path. |
 | `mtp_n_predict` | `--mtp-n-predict` | not set | MTP draft tokens proposed per target step. |
 | `mtp_draft_sampling` | `--mtp-draft-sampling` | `auto` | MTP draft policy: `auto`, `greedy`, or `probabilistic`. |
@@ -145,7 +149,7 @@ Each `[[models]]` entry can carry nested sections whose field shapes mirror the 
 | `[models.adapter]` | LoRA/X-LoRA adapter configuration. |
 | `[models.quantization]` | Quantization and artifact selection: `quant` (same as `--quant`), `isq` (explicit ISQ, same as `--isq`), `from_uqff`, `isq_organization`, `imatrix`, `calibration_file`. |
 | `[models.device]` | Device placement: `cpu`, `device_layers`, `topology`, `hf_cache`, `max_seq_len`, `max_batch_size`. `cpu` must be consistent across every entry. |
-| `[models.multimodal]` | Multimodal load-time caps (image/video/audio limits). |
+| `[models.multimodal]` | Multimodal load-time caps: `max_edge` (resize images to this longest edge, aspect kept), `max_num_images` (per request), `max_image_length` (largest image dimension planned for in device mapping), `encoder_cache_memory_mb` (encoder cache cap in MiB). |
 
 Dynamic LoRA uses structured adapter entries and explicit per-request selection. For `command = "run"`, the top-level `adapter` key selects the initial alias; omit it to run the base model.
 

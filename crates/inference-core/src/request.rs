@@ -40,9 +40,9 @@ pub enum RequestMessage {
     },
     CompletionTokens(Vec<u32>),
     MultimodalChat {
-        #[serde(skip)] // TODO
+        #[serde(skip)]
         images: Vec<image::DynamicImage>,
-        #[serde(skip)] // TODO
+        #[serde(skip)]
         audios: Vec<AudioInput>,
         #[serde(skip)]
         videos: Vec<VideoInput>,

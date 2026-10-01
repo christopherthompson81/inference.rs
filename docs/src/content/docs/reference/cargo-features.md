@@ -34,16 +34,25 @@ For Linux CUDA multi-GPU, add `nccl` when NCCL is installed. The Linux installer
 
 | Feature | Crates | Purpose |
 |---|---|---|
-| `code-execution` | `inference-cli`, `inference`, `inference-core`, `inference-server-core`, `inference-api`, `inference-ffi` | Python code execution tool. In `inference-cli` defaults. |
+| `code-execution` | `inference-cli`, `inference`, `inference-core`, `inference-server-core`, `inference-api`, `inference-ffi` | Python code execution tool. In the `inference-cli` and `inference-ffi` defaults. |
 | `ring` | as above | Multi-machine ring distributed inference. |
-| `swagger-ui` | `inference-server-core` | Mounts Swagger UI on the HTTP server. On by default in `inference-server-core`. |
+| `swagger-ui` | `inference-cli`, `inference-server-core` | Mounts Swagger UI on the HTTP server. On by default in both. |
+
+## Model families
+
+Each model family is its own crate (`inference-models-{gemma,llama,other,phi,qwen}`), compiled only when its feature is on (`inference-ffi` always builds every family). Speech (Dia) and image generation (FLUX) models are always built.
+
+| Feature | Crates | Purpose |
+|---|---|---|
+| `all-models` | `inference-cli`, `inference`, `inference-core`, `inference-server-core`, `inference-api` | Every model family. On by default in each. |
+| `models-gemma`, `models-llama`, `models-other`, `models-phi`, `models-qwen` | as above | One family. With `--no-default-features`, list the families to build; a smaller set builds faster. |
 
 ## Enabling features
 
-From `cargo install`:
+From the repository with `cargo install`:
 
 ```bash
-cargo install inference-cli --features "cuda nccl flash-attn cudnn"
+cargo install --git https://github.com/christopherthompson81/inference.rs inference-cli --features "cuda nccl flash-attn cudnn"
 ```
 
 From a source checkout:
@@ -56,12 +65,12 @@ In a consumer crate depending on `inference`:
 
 ```toml
 [dependencies]
-inference = { version = "0.8", features = ["cuda", "nccl", "flash-attn", "cudnn"] }
+inference = { git = "https://github.com/christopherthompson81/inference.rs", features = ["cuda", "nccl", "flash-attn", "cudnn"] }
 ```
 
 ## Default features
 
-`inference-cli`'s default feature is `code-execution`. `inference-server-core`'s default feature is `swagger-ui`. To exclude defaults, use `--no-default-features`.
+`inference-cli` defaults to `code-execution`, `swagger-ui` and `all-models`; `inference-server-core` to `swagger-ui` and `all-models`; `inference`, `inference-core` and `inference-api` to `all-models`; `inference-ffi` to `code-execution`. To exclude defaults, use `--no-default-features` (then name the model families you want).
 
 No crate enables an accelerator feature by default. Opt in to the accelerator matching your hardware.
 

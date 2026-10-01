@@ -32,12 +32,10 @@ jobs:
             features: cuda,cutile
             cuda: "13.2"
             test_args: "--workspace --exclude inference-flash-attn"
-          # - name: cuda+nccl
-          #   features: cuda,nccl
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install dependencies
         run: |
@@ -46,6 +44,10 @@ jobs:
 
       - name: Install Rust Stable
         uses: dtolnay/rust-toolchain@stable
+
+      # plain `cargo test` shares one CUDA context across a binary's tests, so the memory-pool tests interfere
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
 
       - name: Pin CUDA toolkit to ${{ matrix.cuda }}
         run: |
@@ -76,4 +78,8 @@ jobs:
         run: cargo clippy ${{ matrix.test_args }} --features ${{ matrix.features }} --tests --examples -- -D warnings
 
       - name: Test
-        run: cargo test ${{ matrix.test_args }} --features ${{ matrix.features }}
+        run: cargo nextest run --no-fail-fast --profile cuda ${{ matrix.test_args }} --features ${{ matrix.features }}
+
+      # nextest doesn't run doctests
+      - name: Doctests
+        run: cargo test --doc ${{ matrix.test_args }} --features ${{ matrix.features }}

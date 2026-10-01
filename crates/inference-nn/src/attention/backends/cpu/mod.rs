@@ -184,7 +184,7 @@ mod decode_attn_bench {
     use candle_core::{DType, Device, Tensor};
 
     #[test]
-    #[ignore]
+    #[ignore = "benchmark"]
     fn single_q_throughput() {
         let dev = Device::Cpu;
         let (h, kvh, d) = (32usize, 8usize, 128usize);

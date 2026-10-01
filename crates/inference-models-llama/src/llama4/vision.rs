@@ -80,18 +80,6 @@ impl Llama4UnfoldConvolution {
     }
 
     fn forward(&self, hidden_states: &Tensor) -> Result<Tensor> {
-        // let hidden_states = {
-        //     let mut patches = hidden_states
-        //         .unfold(2, self.kernel_size, self.patch_size)?
-        //         .unfold(3, self.kernel_size, self.patch_size)?;
-        //     patches = patches.contiguous()?.permute((0, 2, 3, 1, 4, 5))?;
-        //     let b = patches.dim(0)?;
-        //     let out_h = patches.dim(1)?;
-        //     let out_w = patches.dim(2)?;
-        //     let c = patches.dim(3)?;
-        //     patches.reshape((b, out_h * out_w, c * self.kernel_size * self.kernel_size))?
-        // };
-
         let mut hidden_states = self.unfold(hidden_states)?;
         hidden_states = hidden_states.transpose(1, 2)?;
         self.linear.forward(&hidden_states)

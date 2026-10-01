@@ -238,7 +238,7 @@ fn emit_toml_config(
 
     if let Some(isq) = result.recommended_isq {
         out.push_str("\n[models.quantization]\n");
-        out.push_str(&format!("in_situ_quant = \"{:?}\"\n", isq));
+        out.push_str(&format!("isq = \"{:?}\"\n", isq));
     }
 
     if let Some(spec) = &result.device_layers_cli {
