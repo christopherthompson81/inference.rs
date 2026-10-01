@@ -493,7 +493,6 @@ impl Sdpa {
             );
         }
 
-        // TODO: bench?
         #[cfg_attr(not(feature = "cuda"), allow(unused_variables))]
         if let (Device::Cuda(_), Some(cublaslt)) = (
             q.device(),

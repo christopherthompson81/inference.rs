@@ -9,7 +9,7 @@ This example shows how to:
 
 Prerequisites:
 - Start the server in multi-model mode:
-  inference serve -p 1234 --multi-model-config example-multi-model-config.json
+  inference from-config -f models.toml  (command = "serve" plus one [[models]] entry per model)
 """
 
 import requests
@@ -264,9 +264,7 @@ if __name__ == "__main__":
     except requests.exceptions.RequestException:
         print("Error: Could not connect to server.")
         print("Please start the server with:")
-        print(
-            "  inference serve -p 1234 --multi-model-config example-multi-model-config.json"
-        )
+        print("  inference from-config -f models.toml")
         exit(1)
 
     # Run examples

@@ -1,7 +1,7 @@
 /// Simple multimodal model "hello world".
 ///
 /// For a comprehensive example with all supported multimodal model IDs,
-/// see `examples/models/multimodal_models/`.
+/// see `examples/rust/models/multimodal_models/`.
 ///
 /// Run with: `cargo run --release --example multimodal_basic -p inference-examples`
 use anyhow::Result;
