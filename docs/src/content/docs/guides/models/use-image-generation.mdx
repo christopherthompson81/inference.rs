@@ -139,7 +139,8 @@ Diffusion models do not support [ISQ (in-situ quantization)](/reference/quantiza
 
 With `url` (the default), the PNG goes into the engine's [file store](/reference/http-api/) and `url` is the path that
 serves it, `/v1/files/<id>/content`, including any prefix the router is nested under. Like other stored files it
-expires after 30 minutes, or sooner if the model is unloaded or the server restarts. Over HTTP, fetch it from the server; through the Python SDK or the C ABI, read it by id:
+expires after 30 minutes, or sooner if the model is unloaded, the server restarts, or newer files push the
+model's store past its 1 GiB cap. Use `b64_json` to keep an image out of the store. Over HTTP, fetch it from the server; through the Python SDK or the C ABI, read it by id:
 
 ```bash
 curl -o out.png http://localhost:1234/v1/files/<id>/content
