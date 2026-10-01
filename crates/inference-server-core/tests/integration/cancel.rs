@@ -17,7 +17,7 @@ const LONG_COMPLETION: usize = 512;
 const BACKGROUND_POLL: Duration = Duration::from_millis(20);
 const BACKGROUND_DEADLINE: Duration = Duration::from_secs(60);
 
-async fn tiny_engine() -> anyhow::Result<(tempfile::TempDir, Engine)> {
+pub(crate) async fn tiny_engine() -> anyhow::Result<(tempfile::TempDir, Engine)> {
     let dir = support::tiny_checkpoint()?;
     let spec = serde_json::from_value(json!({
         "model": {"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}},

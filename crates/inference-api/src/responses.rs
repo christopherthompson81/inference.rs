@@ -963,7 +963,18 @@ pub struct OpenResponsesStreamer {
     metadata: Option<Value>,
     pending_events: Vec<OpenResponsesStreamEvent>,
     accumulated_text: String,
+    /// Every round's reasoning, for the stored history and `reasoning`; each item holds only its own.
     accumulated_reasoning: String,
+    reasoning_item_text: String,
+    /// Reasoning items of earlier agentic rounds, closed before this one began, with their output indices.
+    earlier_reasoning_items: Vec<(usize, OutputItem)>,
+    /// Each item's `output_index` is fixed when it is added, in the order items are added.
+    next_output_index: usize,
+    reasoning_item_index: usize,
+    message_index: Option<usize>,
+    shell_output_indices: Vec<usize>,
+    /// A tool ran since the last delta: reasoning that follows belongs to a new round.
+    round_boundary: bool,
     content_part_added: bool,
     output_item_added: bool,
     reasoning_item_id: String,
@@ -976,7 +987,7 @@ pub struct OpenResponsesStreamer {
     request_context: RequestContext,
     message_output_item: MessageOutputItemState,
     shell_output_items: Vec<OutputItem>,
-    function_call_items: Vec<OutputItem>,
+    function_call_items: Vec<(usize, OutputItem)>,
     pending_shell_calls: PendingShellCalls,
     files: Vec<inference_core::File>,
     tap: Option<ResponseTap>,
@@ -1009,6 +1020,13 @@ impl OpenResponsesStreamer {
             pending_events: Vec::new(),
             accumulated_text: String::new(),
             accumulated_reasoning: String::new(),
+            reasoning_item_text: String::new(),
+            earlier_reasoning_items: Vec::new(),
+            next_output_index: 0,
+            reasoning_item_index: 0,
+            message_index: None,
+            shell_output_indices: Vec::new(),
+            round_boundary: false,
             content_part_added: false,
             output_item_added: false,
             reasoning_item_id: format!("rs_{}", Uuid::new_v4()),
@@ -1067,12 +1085,32 @@ impl OpenResponsesStreamer {
         let _ = cache.store_conversation_history(self.streaming_state.response_id.clone(), history);
     }
 
-    fn reasoning_output_index(&self) -> usize {
-        self.shell_output_items.len()
+    fn claim_output_index(&mut self) -> usize {
+        let index = self.next_output_index;
+        self.next_output_index += 1;
+        index
     }
 
-    fn message_output_index(&self) -> usize {
-        self.shell_output_items.len() + usize::from(self.reasoning_item_added)
+    fn reasoning_output_index(&self) -> usize {
+        self.reasoning_item_index
+    }
+
+    // A later agentic round reasons again after the earlier item closed: it gets an item of its own.
+    fn start_next_reasoning_item(&mut self) {
+        let Some(status) = self.reasoning_item_done.take() else {
+            return;
+        };
+        let item = OutputItem::reasoning(
+            std::mem::replace(
+                &mut self.reasoning_item_id,
+                format!("rs_{}", Uuid::new_v4()),
+            ),
+            std::mem::take(&mut self.reasoning_item_text),
+            status,
+        );
+        self.earlier_reasoning_items
+            .push((self.reasoning_item_index, item));
+        self.reasoning_item_added = false;
     }
 
     // `status` is `completed` when the reply moved on from reasoning, else how the run ended.
@@ -1092,7 +1130,7 @@ impl OpenResponsesStreamer {
             item_id: self.reasoning_item_id.clone(),
             output_index,
             content_index: 0,
-            text: self.accumulated_reasoning.clone(),
+            text: self.reasoning_item_text.clone(),
         });
         let seq = self.streaming_state.next_sequence_number();
         events.push(OpenResponsesStreamEvent::OutputItemDone {
@@ -1100,7 +1138,7 @@ impl OpenResponsesStreamer {
             output_index,
             item: OutputItem::reasoning(
                 self.reasoning_item_id.clone(),
-                self.accumulated_reasoning.clone(),
+                self.reasoning_item_text.clone(),
                 status,
             ),
         });
@@ -1124,19 +1162,30 @@ impl OpenResponsesStreamer {
     /// Build current response resource with output
     fn build_current_response(&self, status: ResponseStatus) -> ResponseResource {
         let mut resource = self.build_response_resource(status);
-        resource.output.extend(self.shell_output_items.clone());
+        // In the order the stream added them, so each item sits at the `output_index` its events named.
+        let mut output: Vec<(usize, OutputItem)> = self
+            .shell_output_indices
+            .iter()
+            .copied()
+            .zip(self.shell_output_items.iter().cloned())
+            .chain(self.earlier_reasoning_items.iter().cloned())
+            .chain(self.function_call_items.iter().cloned())
+            .collect();
         if self.reasoning_item_added {
-            resource.output.push(OutputItem::reasoning(
-                self.reasoning_item_id.clone(),
-                self.accumulated_reasoning.clone(),
-                self.reasoning_item_done
-                    .unwrap_or_else(|| unfinished_item_status(status)),
+            output.push((
+                self.reasoning_item_index,
+                OutputItem::reasoning(
+                    self.reasoning_item_id.clone(),
+                    self.reasoning_item_text.clone(),
+                    self.reasoning_item_done
+                        .unwrap_or_else(|| unfinished_item_status(status)),
+                ),
             ));
         }
-        resource.output.extend(self.function_call_items.clone());
-
-        // Build output items from accumulated state
-        if !self.accumulated_text.is_empty() {
+        if let Some(index) = self
+            .message_index
+            .filter(|_| !self.accumulated_text.is_empty())
+        {
             let item = self.message_output_item.item_with_text(
                 self.accumulated_text.clone(),
                 &self.streaming_state.response_id,
@@ -1147,9 +1196,11 @@ impl OpenResponsesStreamer {
                     unfinished_item_status(status)
                 },
             );
-            resource.output.push(item);
+            output.push((index, item));
             resource.output_text = Some(self.accumulated_text.clone());
         }
+        output.sort_by_key(|(index, _)| *index);
+        resource.output = output.into_iter().map(|(_, item)| item).collect();
 
         // Include reasoning if available
         if !self.accumulated_reasoning.is_empty() {
@@ -1252,6 +1303,17 @@ impl futures::Stream for OpenResponsesStreamer {
 
                         for choice in &chat_chunk.choices {
                             if let Some(reasoning) = &choice.delta.reasoning_content {
+                                // a tool ran since: the round that reasoned before it is over
+                                if std::mem::take(&mut self.round_boundary) {
+                                    self.finish_reasoning_item(
+                                        &mut events_to_emit,
+                                        ItemStatus::Completed,
+                                    );
+                                }
+                                self.start_next_reasoning_item();
+                                if !self.reasoning_item_added {
+                                    self.reasoning_item_index = self.claim_output_index();
+                                }
                                 let output_index = self.reasoning_output_index();
                                 if !self.reasoning_item_added {
                                     self.reasoning_item_added = true;
@@ -1269,6 +1331,7 @@ impl futures::Stream for OpenResponsesStreamer {
                                     );
                                 }
                                 self.accumulated_reasoning.push_str(reasoning);
+                                self.reasoning_item_text.push_str(reasoning);
                                 let seq = self.streaming_state.next_sequence_number();
                                 events_to_emit.push(OpenResponsesStreamEvent::ReasoningTextDelta {
                                     sequence_number: seq,
@@ -1285,10 +1348,17 @@ impl futures::Stream for OpenResponsesStreamer {
                                     ItemStatus::Completed,
                                 );
                             }
-                            let message_output_index = self.message_output_index();
-
                             // Handle text content
                             if let Some(content) = &choice.delta.content {
+                                self.round_boundary = false;
+                                let message_output_index = match self.message_index {
+                                    Some(index) => index,
+                                    None => {
+                                        let index = self.claim_output_index();
+                                        self.message_index = Some(index);
+                                        index
+                                    }
+                                };
                                 // Emit output_item.added if not done
                                 if !self.output_item_added {
                                     self.output_item_added = true;
@@ -1334,8 +1404,7 @@ impl futures::Stream for OpenResponsesStreamer {
                             // Tool calls arrive fully parsed, so each one is a complete output item
                             if let Some(tool_calls) = &choice.delta.tool_calls {
                                 for tool_call in tool_calls {
-                                    let output_index =
-                                        message_output_index + 1 + self.function_call_items.len();
+                                    let output_index = self.claim_output_index();
                                     let (name, namespace) = self
                                         .request_context
                                         .split_tool_name(&tool_call.function.name);
@@ -1379,7 +1448,7 @@ impl futures::Stream for OpenResponsesStreamer {
                                         output_index,
                                         item: item.clone(),
                                     });
-                                    self.function_call_items.push(item);
+                                    self.function_call_items.push((output_index, item));
                                 }
                             }
                         }
@@ -1397,7 +1466,7 @@ impl futures::Stream for OpenResponsesStreamer {
                                 &mut events_to_emit,
                                 finished_item_status(status),
                             );
-                            let message_output_index = self.message_output_index();
+                            let message_output_index = self.message_index.unwrap_or_default();
                             // Emit content_part.done
                             if self.content_part_added {
                                 let seq = self.streaming_state.next_sequence_number();
@@ -1501,12 +1570,12 @@ impl futures::Stream for OpenResponsesStreamer {
                         );
                         self.pending_shell_calls = pending_shell_calls;
                         self.shell_output_items = shell_output_items;
+                        self.round_boundary = true;
                         if let Some(items) = shell_items {
-                            let base_index =
-                                self.shell_output_items.len().saturating_sub(items.len());
                             let mut events = Vec::new();
-                            for (idx, item) in items.into_iter().enumerate() {
-                                let output_index = base_index + idx;
+                            for item in items {
+                                let output_index = self.claim_output_index();
+                                self.shell_output_indices.push(output_index);
                                 let seq = self.streaming_state.next_sequence_number();
                                 events.push(OpenResponsesStreamEvent::OutputItemAdded {
                                     sequence_number: seq,

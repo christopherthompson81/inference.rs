@@ -579,3 +579,39 @@ without `session_id` can be matched to another client's session by message prefi
 the agent's `list_files` sees that session's files; session import accepts client-chosen file ids, which can replace a
 known file's body; agent output ids share their run's prefix (`file_<run>_r<round>_<idx>`), so one id reveals its
 siblings'.
+
+## Run 24 — 2026-09-30 (time approximate)
+
+**Question:** two agent-loop bugs from the Run 21 review. (1) A streaming agentic run whose last allowed round, or a
+round whose tool has no handler, ends on a tool call sends no terminal chunk, so the stream ends with "Response channel
+closed before completion". (2) The Responses streamer keeps one reasoning item for the whole run, so a later round's
+reasoning streams into an item already marked done.
+
+**Finding (1):** the loop holds tool-call chunks back from the client; a round's final chunk goes to
+`tool_call_final_chunk`, and only `held_final_chunk` (text-only finals) was ever sent at the end. The non-streaming loop
+returns the tool call with `finish_reason: tool_calls` in the same cases.
+
+**Change (1):** `stopped_round_final_chunk` sends the held final chunk, or else the tool call the run stopped on, with
+the run's usage and session, on both stop paths (round limit, no handler).
+
+**Change (2):** reasoning arriving after the current item closed starts a new item (its own id and output index); the
+earlier one is kept in `earlier_reasoning_items` and listed before it in the resource. `accumulated_reasoning` still
+spans every round for the stored history and `reasoning`. The streamer grew past clippy's enum-variant size gap in
+server-core's `OpenResponsesResponder`, so its SSE and JSON variants are boxed.
+
+**Tests:** `a_round_stopped_on_its_tool_call_ends_the_stream_with_that_call` (unit). An end-to-end test was tried and
+abandoned: a forced `tool_choice` on the tiny random checkpoint fails with "Tool choice was required but no tools were
+called" within a few ms, with no chunks at all, even with empty-object arguments, so no tiny-model run reaches a tool
+call. `each_agentic_round_streams_its_reasoning_into_its_own_item` feeds the streamer two rounds of synthetic chunks
+on the tiny engine's state.
+
+**Review:** fix (1) is right (core sends each tool call whole in the final chunk, so the terminal chunk carries the
+full call; the cancel path sends at most one terminal). Fix (2) had a real bug: output indices were recomputed from
+item counts, so a new round's reasoning item took the open message item's index and the message's later events moved
+to another. The streamer now fixes each item's `output_index` when it is added (`claim_output_index`) and builds the
+resource in that order, which also removes the old gap where function calls were indexed as if a message existed. A
+tool-progress event now marks a round boundary, so a round that reasons, calls a tool and reasons again also gets two
+items (before, only reply text between them split them). The test streams both shapes and checks every item keeps one
+index matching its position in the resource. Left: stored Responses history has no assistant tool-call message, so a
+streamed run ending on a client tool call can't be continued with its `function_call_output`; a run stopped at its
+round limit hands back a call to a server-side tool the client cannot run (as the non-streaming reply always has).
