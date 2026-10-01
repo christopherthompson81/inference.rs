@@ -866,7 +866,22 @@ async fn sample_and_add_toks_inner(
     };
 
     for (sampled, seq) in std::iter::zip(sampled_vec, seqs.iter_mut()) {
-        let next_token = crate::handle_seq_error_stateaware_ok!(sampled, seq);
+        // A sequence that fails to sample must not cost the rest of the batch this step's token.
+        let next_token = match sampled {
+            Ok(token) => token,
+            Err(error) => {
+                if seq
+                    .responder()
+                    .send(crate::response::Response::InternalError(error.into()))
+                    .await
+                    .is_err()
+                {
+                    tracing::warn!("Receiver disconnected");
+                }
+                seq.set_state(SequenceState::Error);
+                continue;
+            }
+        };
 
         let metadata = this.get_metadata();
         let eos_tok = seq.effective_eos_tokens(&metadata.eos_tok, disable_eos_stop);

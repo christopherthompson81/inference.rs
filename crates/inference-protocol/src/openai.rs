@@ -1256,6 +1256,10 @@ pub struct ChatCompletionRequest {
     #[schema(example = json!(Option::None::<bool>))]
     #[serde(default)]
     pub truncate_sequence: Option<bool>,
+    /// Logits processors the engine's host registered, applied by name in this order after the penalties.
+    #[schema(example = json!(Option::None::<Vec<String>>))]
+    #[serde(default)]
+    pub logits_processors: Option<Vec<String>>,
 }
 
 /// Function for ChatCompletionRequest.messages Schema generation to handle `Either`
@@ -1612,6 +1616,10 @@ pub struct CompletionRequest {
     #[schema(example = json!(Option::None::<bool>))]
     #[serde(default)]
     pub truncate_sequence: Option<bool>,
+    /// Logits processors the engine's host registered, applied by name in this order after the penalties.
+    #[schema(example = json!(Option::None::<Vec<String>>))]
+    #[serde(default)]
+    pub logits_processors: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -197,6 +197,28 @@ internal static class Program
         var vocab = (int)JsonNode.Parse(scoredAgain)!["vocab_size"]!;
         Check("a scored prompt's logits are tokens times vocab", logits?.Length == tokens.AsArray().Count * vocab);
 
+        var steps = 0;
+        var forced = engine.RegisterLogitsProcessor("cs-forced", (stepLogits, _) =>
+        {
+            Interlocked.Increment(ref steps);
+            stepLogits.Fill(float.NegativeInfinity);
+            stepLogits[^1] = 0;
+        });
+        Check("a logits processor name registers once",
+            Throws(() => engine.RegisterLogitsProcessor("cs-forced", (_, _) => { }))?.Status == InferenceStatus.InvalidRequest);
+        const string processed = """{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 3, "logits_processors": ["cs-forced"]}""";
+        var generated = (int)JsonNode.Parse(engine.Chat(processed))!["usage"]!["completion_tokens"]!;
+        Check("a request naming a logits processor runs it each step", steps > 0 && steps == generated);
+        forced.Dispose();
+        Check("a request naming an unregistered logits processor is InvalidRequest",
+            Throws(() => engine.Chat(processed))?.Status == InferenceStatus.InvalidRequest);
+        var scoped = engine.ForOwner("cs-processor-owner");
+        var outliving = scoped.RegisterLogitsProcessor("cs-scoped", (_, _) => { });
+        scoped.Dispose();
+        outliving.Dispose();
+        Check("a registration disposed after its engine still unregisters its name",
+            Throws(() => engine.RegisterLogitsProcessor("cs-scoped", (_, _) => { }).Dispose()) is null);
+
         const string session = """{"messages": [{"role": {"Left": "user"}, "content": {"Left": "hi"}}]}""";
         Check("a session is imported", (string?)JsonNode.Parse(engine.PutSession("cs-session", session))!["id"] == "cs-session");
         Check("an imported session is listed",

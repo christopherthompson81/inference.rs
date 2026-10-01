@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 17
+#define INFERENCE_ABI_VERSION_PATCH 18
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -233,6 +233,25 @@ typedef struct inference_host_callbacks {
 INFERENCE_API inference_status inference_engine_load_with_callbacks(const char *spec, size_t spec_len,
                                                                    const inference_host_callbacks *callbacks,
                                                                    inference_engine **out_engine);
+
+/* Edits one decoding step's logits in place: vocab_size floats, after the sampling penalties and before the token is
+ * picked. context holds every token so far, the prompt's included; both are valid only during the call. A request with
+ * a grammar may call it twice in a step, when the first pick breaks the grammar. Return 0 to go on; any other value
+ * fails the request it runs in (as an internal error). Runs on an engine worker thread under the same rules as the host
+ * callbacks above. */
+typedef int32_t (*inference_logits_processor_callback)(void *user_data, float *logits, size_t vocab_size,
+                                                       const uint32_t *context, size_t context_len);
+/* Makes callback selectable by name (non-empty UTF-8) in a request's "logits_processors" array (chat, completions,
+ * Responses and Anthropic messages), applied in the order listed. Every handle of the engine shares it. A name already
+ * registered is INFERENCE_ERR_INVALID_REQUEST with code "logits_processor_conflict"; a request naming an unregistered
+ * one is INFERENCE_ERR_INVALID_REQUEST with param "logits_processors". */
+INFERENCE_API inference_status inference_engine_register_logits_processor(
+    const inference_engine *engine, const char *name, size_t name_len, inference_logits_processor_callback callback,
+    void *user_data);
+/* Requests already running keep the processor, so user_data must stay valid until they finish. An unknown name is
+ * INFERENCE_ERR_NOT_FOUND. */
+INFERENCE_API inference_status inference_engine_unregister_logits_processor(const inference_engine *engine,
+                                                                          const char *name, size_t name_len);
 
 /* Runs a chat completion to its end; out_response receives the chat.completion JSON. "stream" in the request is
  * ignored. */

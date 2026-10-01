@@ -54,6 +54,21 @@ public sealed unsafe class InferenceEngine : IDisposable
         return new InferenceEngine(new EngineHandle(scoped, _handle));
     }
 
+    /// <summary>Makes <paramref name="processor"/> selectable by name in a request's <c>logits_processors</c>, on every engine sharing this one.</summary>
+    /// <remarks>The result keeps the engine open until disposed, which unregisters it; requests still running that named it then fail.</remarks>
+    public IDisposable RegisterLogitsProcessor(string name, LogitsProcessor processor)
+    {
+        using var engine = Borrow();
+        using var bytes = new PinnedBytes(name);
+        var id = HostCallbackRegistry.Add(processor);
+        var status = NativeMethods.inference_engine_register_logits_processor(
+            engine.Handle, bytes.Pointer, bytes.Length, &HostCallbackBridge.Logits, id);
+        if (status != InferenceStatus.Ok) HostCallbackRegistry.Remove([id]);
+        InferenceException.ThrowIfFailed(status, nameof(NativeMethods.inference_engine_register_logits_processor));
+        // The borrow still holds the engine, so the registration's own reference cannot fail.
+        return new LogitsProcessorRegistration(_handle, name, id);
+    }
+
     public string Chat(string requestJson, IReadOnlyList<MediaAttachment>? media = null)
     {
         using var engine = Borrow();

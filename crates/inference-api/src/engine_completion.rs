@@ -20,6 +20,7 @@ use crate::{
         apply_model_override, create_response_channel, response_model_id, send_request_with_model,
     },
     engine_chat::{DispatchError, ResponseTap},
+    logits_processors::LogitsProcessors,
     lora_routing::{DEFAULT_MODEL_ID, resolve_lora_adapter_model},
     openai::{CompletionPrompt, CompletionRequest, Grammar},
     sampling::{convert_stop_tokens, get_dry_sampling_params},
@@ -39,13 +40,19 @@ pub struct PreparedCompletion {
 /// Resolves the request's model (LoRA aliases included), parses it and sends it to its model.
 pub(crate) fn prepare_completion<'a>(
     state: &'a SharedInferenceRsState,
+    logits_processors: &'a LogitsProcessors,
     oairequest: CompletionRequest,
 ) -> BoxFuture<'a, Result<PreparedCompletion, DispatchError>> {
-    Box::pin(prepare_completion_inner(state, oairequest))
+    Box::pin(prepare_completion_inner(
+        state,
+        logits_processors,
+        oairequest,
+    ))
 }
 
 async fn prepare_completion_inner(
     state: &SharedInferenceRsState,
+    logits_processors: &LogitsProcessors,
     mut oairequest: CompletionRequest,
 ) -> Result<PreparedCompletion, DispatchError> {
     let (tx, rx) = create_response_channel(None);
@@ -53,12 +60,16 @@ async fn prepare_completion_inner(
     resolve_lora_adapter_model(state, &mut oairequest.model, &mut oairequest.adapter)
         .map_err(|error| DispatchError::Validation(Box::new(error)))?;
     let model_override = response_model_id(state, requested_model, &oairequest.model);
+    let logits_processors = logits_processors
+        .resolve(oairequest.logits_processors.as_deref())
+        .map_err(|error| DispatchError::Validation(Box::new(error)))?;
     let model_id = (oairequest.model != DEFAULT_MODEL_ID).then(|| oairequest.model.clone());
     let (mut request, is_streaming) = parse_request(oairequest, state.clone(), tx)
         .map_err(|error| DispatchError::Validation(boxed_anyhow(error)))?;
     let cancellation = RequestCancellation::default();
     if let Request::Normal(normal) = &mut request {
         normal.cancellation = Some(cancellation.clone());
+        normal.logits_processors = logits_processors;
     }
     send_request_with_model(state, request, model_id.as_deref())
         .await

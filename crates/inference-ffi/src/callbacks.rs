@@ -5,8 +5,9 @@ use std::{
     sync::Arc,
 };
 
-use inference_api::engine::{
-    EngineCallbacks, SearchResult, Tool, ToolCallbackKind, ToolCallbackWithTool,
+use inference_api::{
+    engine::{EngineCallbacks, SearchResult, Tool, ToolCallbackKind, ToolCallbackWithTool},
+    logits_processors::{self, CustomLogitsProcessor},
 };
 
 use crate::{Failure, FfiResult};
@@ -38,6 +39,16 @@ pub type inference_search_callback = unsafe extern "C" fn(
     result: *mut inference_callback_result,
 );
 
+/// Mirrors `inference_logits_processor_callback`.
+#[allow(non_camel_case_types)]
+pub type inference_logits_processor_callback = unsafe extern "C" fn(
+    user_data: *mut c_void,
+    logits: *mut f32,
+    vocab_size: usize,
+    context: *const u32,
+    context_len: usize,
+) -> i32;
+
 /// Mirrors `inference_host_tool`.
 #[repr(C)]
 #[allow(non_camel_case_types)]
@@ -68,6 +79,34 @@ impl UserData {
     fn get(&self) -> *mut c_void {
         self.0
     }
+}
+
+/// The host's callback as a processor; any status but 0 fails the request it runs in.
+pub(crate) fn host_logits_processor(
+    name: &str,
+    callback: inference_logits_processor_callback,
+    user_data: *mut c_void,
+) -> Arc<dyn CustomLogitsProcessor> {
+    let user_data = UserData(user_data);
+    let name = name.to_string();
+    logits_processors::in_place(move |logits, context| {
+        // Safety: both slices outlive the call, which the header lets edit `logits` and read `context`.
+        let status = unsafe {
+            callback(
+                user_data.get(),
+                logits.as_mut_ptr(),
+                logits.len(),
+                context.as_ptr(),
+                context.len(),
+            )
+        };
+        match status {
+            0 => Ok(()),
+            status => Err(format!(
+                "logits processor `{name}` failed with status {status}"
+            )),
+        }
+    })
 }
 
 const NO_RESULT: &str = "the host callback returned without setting a result";

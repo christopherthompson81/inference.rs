@@ -164,6 +164,7 @@ Chat completion request following OpenAI's specification
 | `grammar` | `Grammar \| None` | optional |
 | `ignore_eos` | `bool \| None` | optional |
 | `logit_bias` | `dict[str, float] \| None` | optional |
+| `logits_processors` | `list[str] \| None` | optional |
 | `logprobs` | `bool \| None` | optional |
 | `max_tokens` | `int \| None` | optional |
 | `max_tool_rounds` | `int \| None` | optional |
@@ -271,6 +272,7 @@ Legacy OpenAI compatible text completion request
 | `grammar` | `Grammar \| None` | optional |
 | `ignore_eos` | `bool \| None` | optional |
 | `logit_bias` | `dict[str, float] \| None` | optional |
+| `logits_processors` | `list[str] \| None` | optional |
 | `logprobs` | `int \| None` | optional |
 | `max_tokens` | `int \| None` | optional |
 | `min_p` | `float \| None` | optional |

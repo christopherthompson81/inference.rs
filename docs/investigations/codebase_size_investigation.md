@@ -1044,3 +1044,39 @@ don't route scoring as they route completions.
 Tests: `a_prompt_is_scored_by_log_probabilities_and_its_logits_agree` (FFI: log-softmax of the logits blob equals the
 scores), the C# and Python equivalents, `each_token_is_scored_by_the_row_before_it`,
 `a_token_outside_the_vocabulary_is_an_error`.
+
+## Run 37 - 2026-10-01 (time approximate)
+
+Change (ABI 0.0.18): logits processors are an engine feature. A host registers one by name
+(`Engine::register_logits_processor`, `inference_engine_register_logits_processor`, C# `RegisterLogitsProcessor`,
+Python `register_logits_processor`) and a chat, completion, Responses or Anthropic messages request selects it with
+`"logits_processors": ["name"]`. The registry lives beside the chat engine, shared by every owner's handle. The core
+`CustomLogitsProcessor` trait is unchanged: `inference_api::logits_processors::in_place` adapts a
+`Fn(&mut [f32], &[u32])`, and both sampler call sites hand processors the 1-D f32 CPU tensor `apply_penalties` builds,
+so the adapter's conversions cost nothing. The C callback edits the floats in place and returns 0, or a status that
+fails its request. A duplicate name is a conflict (INVALID_REQUEST with `logits_processor_conflict`); an unknown name in
+a request is a 400 with param `logits_processors`.
+
+First run of the FFI test: the forced-token half passed, and the failing-processor half's message check failed. A
+host's failure surfaces as an internal error, whose detail the engine keeps out of error bodies, so the test checks
+INFERENCE_ERR_RUNTIME instead. First full CI: everything passed except the Python coverage test, which had no mapping
+for a callback-typed parameter; it now maps `inference_logits_processor_callback` to its CFUNCTYPE.
+
+Review findings:
+- A sampling error fails only its own sequence (`handle_seq_error_stateaware_ok!`), but the macro's `return Ok(())`
+  left the loop in `sample_and_add_toks_inner`, so every later sequence in the batch lost that step's token while its
+  KV cache advanced. Measured with a counting processor on a healthy request batched beside one whose processor fails
+  at step 3: old code 7 samplings for 6 tokens in 2 of 3 runs (6/6 when the failing sequence sorted after it), fixed
+  code 6/6 every run. The tiny model's greedy text matched either way, so the test asserts samplings == tokens. The
+  loop now fails the one sequence and continues. This predates processors (any per-sequence sampling error hit it).
+- Binding registrations released the engine when the handle that made them closed, so closing a scoped handle before
+  the registration skipped the native unregister and left the name taken by a dead id. Both now hold an engine
+  reference until closed, as streams do.
+- Responses and Anthropic messages accepted the field and ignored it. Anthropic already ran through `ChatEngine::prepare`
+  once the field was passed through; Responses builds its core request separately and now resolves the names too.
+- Documented: a grammar request may run a processor twice in a step (the resample after masking), and the views the
+  callback gets are valid only during the call.
+
+Tests: `a_registered_logits_processor_steers_the_requests_that_name_it` (FFI),
+`a_failing_processor_fails_its_request_and_spares_the_batch`, `responses_and_anthropic_requests_resolve_their_processors`,
+the registry unit tests, and the C# and Python equivalents including a registration outliving its scoped handle.

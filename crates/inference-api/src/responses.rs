@@ -576,6 +576,10 @@ pub struct OpenResponsesCreateRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logit_bias: Option<HashMap<u32, f32>>,
 
+    /// Logits processors the engine's host registered, applied by name in this order after the penalties.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub logits_processors: Option<Vec<String>>,
+
     /// Whether to return log probabilities
     #[serde(default)]
     pub logprobs: bool,
@@ -2092,6 +2096,7 @@ async fn parse_openresponses_request(
         dry_sequence_breakers: oairequest.dry_sequence_breakers,
         enable_thinking,
         truncate_sequence,
+        logits_processors: oairequest.logits_processors,
         reasoning_effort,
         chat_template_kwargs: None,
         files: oairequest.files,
@@ -2194,6 +2199,10 @@ async fn prepare_response_inner(
     let model_id = (request.model != DEFAULT_MODEL_ID).then(|| request.model.clone());
     let metadata = request.metadata.clone();
     let store = request.store.unwrap_or(true);
+    let logits_processors = chat
+        .logits_processors
+        .resolve(request.logits_processors.as_deref())
+        .map_err(|error| DispatchError::Validation(Box::new(error)))?;
     let (mut core_request, history, context) = parse_openresponses_request(request, chat, tx)
         .await
         .map_err(|error| DispatchError::Validation(boxed_anyhow(error)))?;
@@ -2201,6 +2210,7 @@ async fn prepare_response_inner(
     let mut session_id = None;
     if let Request::Normal(normal) = &mut core_request {
         normal.cancellation = Some(cancellation.clone());
+        normal.logits_processors = logits_processors;
         session_id.clone_from(&normal.session_id);
     }
     send_request_with_model(state, core_request, model_id.as_deref())

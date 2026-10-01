@@ -91,6 +91,7 @@ OpenResponses API create request
 | `input` | `OpenResponsesInput` | required |
 | `instructions` | `str \| None` | optional |
 | `logit_bias` | `dict[str, float] \| None` | optional |
+| `logits_processors` | `list[str] \| None` | optional |
 | `logprobs` | `bool \| None` | optional |
 | `max_output_tokens` | `int \| None` | optional |
 | `max_tool_calls` | `int \| None` | optional |

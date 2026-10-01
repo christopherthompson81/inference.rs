@@ -33,6 +33,9 @@ STRUCTS = {
     "inference_skill_file": _native.SkillFile,
     "inference_host_callbacks": _native.HostCallbacks,
 }
+CALLBACKS = {
+    "inference_logits_processor_callback": _native.LOGITS_PROCESSOR_CALLBACK,
+}
 SCALARS = {
     "uint32_t": ctypes.c_uint32,
     "int32_t": ctypes.c_int32,
@@ -49,6 +52,8 @@ def expected(c_type: str, returned: bool):
     base = c_type.replace("*", " ").split()[0]
     depth = c_type.count("*")
     if depth == 0:
+        if base in CALLBACKS:
+            return {CALLBACKS[base]}
         return {SCALARS[base]} if base in SCALARS else {None}
     if depth == 2:
         return {_native.out}

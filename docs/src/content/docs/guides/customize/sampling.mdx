@@ -23,7 +23,7 @@ Fields a request leaves unset fall back to the model's `generation_config.json` 
 When a request is sampled, the engine applies filters in this order:
 
 1. Penalties, on the raw logits: DRY first, then frequency/presence/repetition in one pass, then logit bias.
-2. Custom logits processors (Rust SDK only).
+2. [Logits processors](#logits-processors) the request names, in its order.
 3. Temperature scaling and softmax. Temperature absent or `0.0` means greedy argmax, skipping step 4.
 4. On the resulting probabilities: top-k, then top-p, then min-p.
 
@@ -138,6 +138,63 @@ let request = RequestBuilder::new()
 
 </TabItem>
 </Tabs>
+
+## Logits processors
+
+A host registers a logits processor with the engine under a name, and a chat, completion, Responses or Anthropic messages request selects it with `"logits_processors": ["name"]`. Each decoding step the processor edits that step's f32 logits in place, after the penalties, given every token so far (the prompt's included). A request with a grammar may run it twice in a step, when the first pick breaks the grammar. An unknown name is a 400, and a processor that fails ends its request (only that one) with an internal error.
+
+In the bindings, a registration keeps the engine open until it is closed, and closing it unregisters the processor; requests still running that named it then fail.
+
+<Tabs>
+<TabItem label="Rust">
+
+```rust
+use inference_api::logits_processors::in_place;
+
+engine.register_logits_processor(
+    "no-42",
+    in_place(|logits, _context| {
+        logits[42] = f32::NEG_INFINITY;
+        Ok(())
+    }),
+)?;
+```
+
+</TabItem>
+<TabItem label="Python">
+
+```python
+def ban_token(logits, context):
+    logits[42] = float("-inf")
+
+with engine.register_logits_processor("no-42", ban_token):
+    engine.chat(t.ChatCompletionRequest(model="default", messages=[...], logits_processors=["no-42"]))
+```
+
+</TabItem>
+<TabItem label="C#">
+
+```csharp
+using var registration = engine.RegisterLogitsProcessor("no-42", (logits, context) => logits[42] = float.NegativeInfinity);
+```
+
+</TabItem>
+<TabItem label="C">
+
+```c
+static int32_t ban_token(void *user_data, float *logits, size_t vocab_size, const uint32_t *context,
+                         size_t context_len) {
+    logits[42] = -INFINITY;
+    return 0;
+}
+
+inference_engine_register_logits_processor(engine, "no-42", 5, ban_token, NULL);
+```
+
+</TabItem>
+</Tabs>
+
+Processors run on the CPU, so a request that names one samples there rather than on the GPU.
 
 ## Seeds
 
