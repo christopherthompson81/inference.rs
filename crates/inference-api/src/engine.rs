@@ -54,6 +54,7 @@ use crate::{
         McpToolObject, ReIsqRequest, ReIsqResponse, SessionDeleted, SessionForkRequest,
         SessionList, SessionStored, TokenizeRequest, TokenizeResponse,
     },
+    registry::HostTools,
     request_body::JsonRequest,
     responses::{
         OpenResponsesCreateRequest, OpenResponsesStreamer, PreparedResponse, ResponseDeleted,
@@ -766,6 +767,7 @@ impl Engine {
                 skill_store: Some(Arc::new(skill_store)),
                 owner: None,
                 logits_processors: LogitsProcessors::default(),
+                host_tools: HostTools::default(),
             },
             adapters,
             models,
@@ -810,6 +812,18 @@ impl Engine {
     /// Requests already running keep the processor; new ones naming it are refused.
     pub fn unregister_logits_processor(&self, name: &str) -> Result<(), ApiError> {
         self.chat.logits_processors.unregister(name)
+    }
+
+    /// Makes `tool` one a chat request can offer the model by naming it in `host_tools`.
+    pub fn register_tool(&self, tool: ToolCallbackWithTool) -> Result<(), ApiError> {
+        self.chat
+            .host_tools
+            .register(tool.tool.function.name.clone(), tool)
+    }
+
+    /// Requests already running keep the tool; new ones naming it are refused.
+    pub fn unregister_tool(&self, name: &str) -> Result<(), ApiError> {
+        self.chat.host_tools.unregister(name)
     }
 
     /// Stops the engine threads and waits for them; fails while another clone of this engine is alive.

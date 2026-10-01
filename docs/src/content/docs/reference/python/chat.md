@@ -162,6 +162,7 @@ Chat completion request following OpenAI's specification
 | `files` | `list[Any] \| None` | optional |
 | `frequency_penalty` | `float \| None` | optional |
 | `grammar` | `Grammar \| None` | optional |
+| `host_tools` | `list[str] \| None` | optional |
 | `ignore_eos` | `bool \| None` | optional |
 | `logit_bias` | `dict[str, float] \| None` | optional |
 | `logits_processors` | `list[str] \| None` | optional |

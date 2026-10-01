@@ -57,6 +57,7 @@ async fn process_chunk(
         tools: None,
         tool_choice: None,
         logits_processors: None,
+        host_tools: Vec::new(),
         return_raw_logits: true,
         web_search_options: None,
         enable_code_execution: false,

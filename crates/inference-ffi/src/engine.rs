@@ -20,8 +20,8 @@ use inference_api::{
 use crate::{
     Failure, FfiResult,
     callbacks::{
-        engine_callbacks, host_logits_processor, inference_host_callbacks,
-        inference_logits_processor_callback,
+        engine_callbacks, host_logits_processor, host_tool, inference_host_callbacks,
+        inference_host_tool, inference_logits_processor_callback,
     },
     guard, guard_value, inference_status,
     inference_status::{
@@ -281,6 +281,40 @@ pub unsafe extern "C" fn inference_engine_unregister_logits_processor(
                 .engine()
                 .unregister_logits_processor(name)
                 .map_err(api_failure)
+        })
+    }
+}
+
+/// Safety: `engine` is a live handle and `tool` valid, its definition for `definition_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_engine_register_tool(
+    engine: *const inference_engine,
+    tool: *const inference_host_tool,
+) -> inference_status {
+    unsafe {
+        guard(|| {
+            let engine = live_engine(engine)?;
+            let tool = tool
+                .as_ref()
+                .ok_or_else(|| Failure::invalid("tool is NULL"))?;
+            let tool = host_tool(tool, "tool")?;
+            engine.engine().register_tool(tool).map_err(api_failure)
+        })
+    }
+}
+
+/// Safety: `engine` is a live handle and `name` valid for `name_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_engine_unregister_tool(
+    engine: *const inference_engine,
+    name: *const c_char,
+    name_len: usize,
+) -> inference_status {
+    unsafe {
+        guard(|| {
+            let engine = live_engine(engine)?;
+            let name = arg_utf8(name, name_len, "name")?;
+            engine.engine().unregister_tool(name).map_err(api_failure)
         })
     }
 }

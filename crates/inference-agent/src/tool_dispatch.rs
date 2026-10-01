@@ -381,30 +381,15 @@ pub(crate) async fn execute_extraction(
 }
 
 pub(crate) fn execute_custom_tool(
-    engine: &Engine,
+    callback: &ToolCallbackKind,
     tc: &ToolCallResponse,
     ctx: &inference_mcp::ToolCallContext,
 ) -> ToolResult {
     let name = &tc.function.name;
 
-    let Some(cb_with_tool) = engine.tool_callbacks().get(name) else {
-        tracing::error!("Tool `{name}` not found in registered callbacks.");
-        return ToolResult {
-            content: serde_json::json!({
-                "error": format!("Tool `{name}` is not registered."),
-                "tool": name,
-                "status": "not_found"
-            })
-            .to_string(),
-            images: vec![],
-            video_frames: vec![],
-            files: vec![],
-        };
-    };
-
     let error_result = |e: anyhow::Error| ToolResult::failed(name, &e);
 
-    match &cb_with_tool.callback {
+    match callback {
         // Host callbacks may block on I/O, so they must not hold a runtime worker others are waiting on.
         ToolCallbackKind::Text(callback) => {
             match tokio::task::block_in_place(|| callback(&tc.function, ctx)) {

@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 18
+#define INFERENCE_ABI_VERSION_PATCH 19
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -233,6 +233,21 @@ typedef struct inference_host_callbacks {
 INFERENCE_API inference_status inference_engine_load_with_callbacks(const char *spec, size_t spec_len,
                                                                    const inference_host_callbacks *callbacks,
                                                                    inference_engine **out_engine);
+
+/* Registers a host tool after load, under its definition's function name. Unlike the tools passed at load, which every
+ * chat request offers, a registered tool is offered only by a request (chat, Responses or Anthropic messages) that
+ * names it in its "host_tools" array. Every handle of the engine shares it. A name already registered is
+ * INFERENCE_ERR_INVALID_REQUEST with code "host_tool_conflict"; a request naming an unregistered one is
+ * INFERENCE_ERR_INVALID_REQUEST with param "host_tools", and one naming a tool that clashes with another of its tools
+ * (one it declares, a tool given at load, an MCP or built-in tool) is INFERENCE_ERR_INVALID_REQUEST. Registering a
+ * name a tool given at load already has succeeds, but every request naming it is refused that way. tool_choice sees
+ * only a request's declared tools. The callback runs under the host callback rules above; the definition is copied. */
+INFERENCE_API inference_status inference_engine_register_tool(const inference_engine *engine,
+                                                             const inference_host_tool *tool);
+/* Requests already running keep the tool, so user_data must stay valid until they finish. An unknown name is
+ * INFERENCE_ERR_NOT_FOUND. */
+INFERENCE_API inference_status inference_engine_unregister_tool(const inference_engine *engine, const char *name,
+                                                               size_t name_len);
 
 /* Edits one decoding step's logits in place: vocab_size floats, after the sampling penalties and before the token is
  * picked. context holds every token so far, the prompt's included; both are valid only during the call. A request with

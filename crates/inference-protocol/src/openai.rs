@@ -1260,6 +1260,10 @@ pub struct ChatCompletionRequest {
     #[schema(example = json!(Option::None::<Vec<String>>))]
     #[serde(default)]
     pub logits_processors: Option<Vec<String>>,
+    /// Tools the engine's host registered after load, offered to the model by name and answered by the host.
+    #[schema(example = json!(Option::None::<Vec<String>>))]
+    #[serde(default)]
+    pub host_tools: Option<Vec<String>>,
 }
 
 /// Function for ChatCompletionRequest.messages Schema generation to handle `Either`

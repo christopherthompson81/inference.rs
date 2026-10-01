@@ -28,6 +28,7 @@ pub mod media_source;
 pub mod models;
 pub use inference_protocol::openai;
 pub mod operations;
+pub mod registry;
 pub mod request_body;
 pub mod responses;
 pub use inference_protocol::responses_types;

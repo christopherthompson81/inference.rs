@@ -8,9 +8,9 @@ use crate::Engine;
 mod support;
 
 mod logits_processors;
-mod parallel_tools;
 mod responses_stream;
 mod store;
+mod tool_loop;
 
 async fn tiny_engine() -> anyhow::Result<(tempfile::TempDir, Engine)> {
     tiny_engine_with(crate::engine::EngineCallbacks::default()).await

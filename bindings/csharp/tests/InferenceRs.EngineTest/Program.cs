@@ -212,6 +212,14 @@ internal static class Program
         forced.Dispose();
         Check("a request naming an unregistered logits processor is InvalidRequest",
             Throws(() => engine.Chat(processed))?.Status == InferenceStatus.InvalidRequest);
+        const string lateTool = """{"type": "function", "function": {"name": "cs_late", "parameters": {"type": "object"}}}""";
+        var late = engine.RegisterTool(new HostTool(lateTool, _ => "found"));
+        Check("a tool registered after load registers its name once",
+            Throws(() => engine.RegisterTool(new HostTool(lateTool, _ => "found")))?.Status == InferenceStatus.InvalidRequest);
+        late.Dispose();
+        Check("a request naming an unregistered tool is InvalidRequest",
+            Throws(() => engine.Chat("""{"messages": [{"role": "user", "content": "hi"}], "max_tokens": 1, "host_tools": ["cs_late"]}"""))?.Status
+                == InferenceStatus.InvalidRequest);
         var scoped = engine.ForOwner("cs-processor-owner");
         var outliving = scoped.RegisterLogitsProcessor("cs-scoped", (_, _) => { });
         scoped.Dispose();

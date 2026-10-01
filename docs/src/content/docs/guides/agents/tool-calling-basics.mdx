@@ -391,6 +391,16 @@ inference serve --enable-search --enable-code-execution -m <model>
 
 For custom tools, the cleanest path is to run them as an MCP server and connect inference as a client; see [connect to an MCP server](/guides/agents/connect-mcp-server/). The SDKs can also register custom callbacks directly: Python passes `ir.HostCallbacks(tools=[ir.HostTool(definition_json, handler)])` to `ir.Engine` ([full example](/examples/python/custom-tool-call/)); Rust builders use `with_tool_callback(...)` or `with_tool_callback_and_tool(...)` ([full example](/examples/rust/advanced/tool-callback/)).
 
+Tools given at load are offered to every chat request. A tool can also be registered on a running engine, and then only the requests that name it in `"host_tools"` offer it to the model:
+
+```python
+lookup = ir.HostTool(definition_json, handler)
+with engine.register_tool(lookup):
+    engine.chat(t.ChatCompletionRequest(model="default", messages=[...], host_tools=["lookup"]))
+```
+
+C# has `engine.RegisterTool(new HostTool(definitionJson, handler))`, which returns an `IDisposable`. The C ABI has `inference_engine_register_tool`, and Rust has `Engine::register_tool`. A request is refused if a tool it names clashes with another tool it has (one it declares, a tool given at load, an MCP or built-in tool). `tool_choice` sees only the request's declared tools.
+
 ## Configuring the tool loop
 
 ### Maximum tool rounds

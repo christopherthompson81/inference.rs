@@ -165,6 +165,7 @@ class AnthropicMessagesRequest:
     files: list[Any] | None = None
     frequency_penalty: float | None = None
     grammar: Grammar | None = None
+    host_tools: list[str] | None = None
     logit_bias: dict[str, float] | None = None
     logits_processors: list[str] | None = None
     logprobs: bool | None = None
@@ -447,6 +448,7 @@ class ChatCompletionRequest:
     files: list[Any] | None = None
     frequency_penalty: float | None = None
     grammar: Grammar | None = None
+    host_tools: list[str] | None = None
     ignore_eos: bool | None = None
     logit_bias: dict[str, float] | None = None
     logits_processors: list[str] | None = None
@@ -1714,6 +1716,7 @@ class OpenResponsesCreateRequest:
     files: list[Any] | None = None
     frequency_penalty: float | None = None
     grammar: Grammar | None = None
+    host_tools: list[str] | None = None
     ignore_eos: bool | None = None
     include: list[IncludeOption] | None = None
     input: OpenResponsesInput

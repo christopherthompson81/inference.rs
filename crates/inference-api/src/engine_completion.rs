@@ -202,6 +202,7 @@ pub(crate) fn parse_request(
             tool_choice: oairequest.tool_choice,
             tools: oairequest.tools,
             logits_processors: None,
+            host_tools: Vec::new(),
             return_raw_logits: false,
             web_search_options: None,
             enable_code_execution: false,

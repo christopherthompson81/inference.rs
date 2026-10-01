@@ -153,6 +153,9 @@ pub struct AnthropicMessagesRequest {
     /// Logits processors the engine's host registered, applied by name in this order after the penalties.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub logits_processors: Option<Vec<String>>,
+    /// Tools the engine's host registered after load, offered to the model by name and answered by the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_tools: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -728,6 +731,7 @@ impl AnthropicMessagesRequest {
             max_tool_rounds: self.max_tool_rounds,
             truncate_sequence: self.truncate_sequence,
             logits_processors: self.logits_processors,
+            host_tools: self.host_tools,
         })
     }
 }

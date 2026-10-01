@@ -1,7 +1,7 @@
 """inference.rs over its C ABI (libinference_ffi), with typed requests and responses from `inference_rs.types`."""
 
 from . import types
-from ._callbacks import HostCallbacks, HostTool, HostToolCall, LogitsProcessor
+from ._callbacks import HostCallbacks, HostRegistration, HostTool, HostToolCall
 from ._codec import from_data, from_json, to_data, to_json
 from ._engine import (
     JsonEngine,
@@ -29,6 +29,7 @@ __all__ = [
     "Blob",
     "Engine",
     "HostCallbacks",
+    "HostRegistration",
     "HostTool",
     "HostToolCall",
     "InferenceError",
@@ -36,7 +37,6 @@ __all__ = [
     "LayoutDetection",
     "LayoutImage",
     "LayoutModel",
-    "LogitsProcessor",
     "MediaAttachment",
     "PixelFormat",
     "SkillFile",

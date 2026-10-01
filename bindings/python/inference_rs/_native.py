@@ -19,7 +19,7 @@ from ctypes import (
 from pathlib import Path
 
 # The ABI these declarations mirror; while it is 0.0.x any other version may differ anywhere.
-ABI_VERSION = (0 << 16) | (0 << 8) | 18
+ABI_VERSION = (0 << 16) | (0 << 8) | 19
 
 NATIVE_DIR_VARIABLE = "INFERENCE_NATIVE_DIR"
 BUNDLED_DIR = "_lib"
@@ -113,6 +113,8 @@ SIGNATURES = {
         (c_void_p, *buffer, LOGITS_PROCESSOR_CALLBACK, c_void_p),
     ),
     "inference_engine_unregister_logits_processor": (status, (c_void_p, *buffer)),
+    "inference_engine_register_tool": (status, (c_void_p, POINTER(HostTool))),
+    "inference_engine_unregister_tool": (status, (c_void_p, *buffer)),
     "inference_callback_result_set": (None, (c_void_p, c_char_p, c_size_t)),
     "inference_callback_result_fail": (None, (c_void_p, c_char_p)),
     "inference_chat": (status, (c_void_p, *buffer, out)),

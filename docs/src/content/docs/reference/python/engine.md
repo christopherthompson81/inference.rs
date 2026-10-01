@@ -255,10 +255,18 @@ Each prompt token's log-probability, and with ``output="logits"`` the row-major 
 ### `Engine.register_logits_processor`
 
 ```text
-register_logits_processor(name: str, processor) -> LogitsProcessor
+register_logits_processor(name: str, processor) -> HostRegistration
 ```
 
 See `JsonEngine.register_logits_processor`.
+
+### `Engine.register_tool`
+
+```text
+register_tool(tool: HostTool) -> HostRegistration
+```
+
+See `JsonEngine.register_tool`.
 
 ### `Engine.tokenize`
 
@@ -484,6 +492,43 @@ list_skill_versions(
 
 
 ## `HostCallbacks`
+
+
+## `HostRegistration`
+
+A logits processor or tool registered on a running engine, holding it open until closed (or its `with` ends).
+
+Closing it unregisters the entry; requests still running that named it fail once it is closed.
+
+### `HostRegistration.__init__`
+
+```text
+__init__(
+    handle,
+    engine,
+    unregister_native,
+    name: bytes,
+    entry_id: int,
+)
+```
+
+### `HostRegistration.close`
+
+```text
+close() -> None
+```
+
+### `HostRegistration.__enter__`
+
+```text
+__enter__()
+```
+
+### `HostRegistration.__exit__`
+
+```text
+__exit__()
+```
 
 
 ## `HostTool`
@@ -888,7 +933,7 @@ put_session(session_id: str, session_json: str) -> str
 register_logits_processor(
     name: str,
     processor,
-) -> _callbacks.LogitsProcessor
+) -> _callbacks.HostRegistration
 ```
 
 Makes `processor(logits, context)` selectable by name in a request's "logits_processors".
@@ -897,6 +942,19 @@ Each decoding step it edits `logits` (a ctypes float array of the vocabulary's s
 every token so far, the prompt's included; both are valid only during the call. It runs on engine worker
 threads, and an exception fails the request. Every engine sharing this one sees it. The result keeps the
 engine open until it is closed, which unregisters the processor.
+
+### `JsonEngine.register_tool`
+
+```text
+register_tool(
+    tool: _callbacks.HostTool,
+) -> _callbacks.HostRegistration
+```
+
+Registers `tool` after load; a chat request offers it to the model by naming it in "host_tools".
+
+Every engine sharing this one sees it. The result keeps the engine open until it is closed, which
+unregisters the tool.
 
 ### `JsonEngine.fork_session`
 
@@ -998,37 +1056,6 @@ list_skills() -> str
 
 ```text
 list_skill_versions(skill_id: str) -> str
-```
-
-
-## `LogitsProcessor`
-
-A registered logits processor, holding its engine open until it is closed (or leaves its `with`).
-
-Requests still running that named it fail once it is closed.
-
-### `LogitsProcessor.__init__`
-
-```text
-__init__(handle, engine, name: bytes, processor_id: int)
-```
-
-### `LogitsProcessor.close`
-
-```text
-close() -> None
-```
-
-### `LogitsProcessor.__enter__`
-
-```text
-__enter__()
-```
-
-### `LogitsProcessor.__exit__`
-
-```text
-__exit__()
 ```
 
 

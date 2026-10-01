@@ -32,6 +32,7 @@ use crate::{
         OpenAiToolSurface, ResponseFormat, normalize_chat_completion_tools,
         normalize_responses_tools, validate_openai_tool_choice,
     },
+    registry::HostTools,
     sampling::{convert_stop_tokens, get_dry_sampling_params},
     skill_store::SkillStore,
     types::SharedInferenceRsState,
@@ -766,6 +767,7 @@ async fn parse_request_inner(
             tool_choice: oairequest.tool_choice,
             tools: normalized_tools.tools,
             logits_processors: None,
+            host_tools: Vec::new(),
             return_raw_logits: false,
             web_search_options: normalized_tools.web_search_options,
             enable_code_execution: normalized_tools.enable_code_execution,
@@ -804,6 +806,7 @@ pub struct ChatEngine {
     /// Who requests act for; their sessions and files are that owner's. `None` for an unscoped caller.
     pub owner: Option<String>,
     pub logits_processors: LogitsProcessors,
+    pub host_tools: HostTools,
 }
 
 /// A dispatched chat request: its response channel and how to present what comes back.
@@ -909,6 +912,10 @@ impl ChatEngine {
             .logits_processors
             .resolve(oairequest.logits_processors.as_deref())
             .map_err(|error| DispatchError::Validation(Box::new(error)))?;
+        let host_tools = self
+            .host_tools
+            .resolve(oairequest.host_tools.as_deref())
+            .map_err(|error| DispatchError::Validation(Box::new(error)))?;
         let model_id = (oairequest.model != DEFAULT_MODEL_ID).then(|| oairequest.model.clone());
         let (mut request, is_streaming) = parse_request(
             oairequest,
@@ -930,6 +937,7 @@ impl ChatEngine {
         if let Request::Normal(normal) = &mut request {
             normal.cancellation = Some(cancellation.clone());
             normal.logits_processors = logits_processors;
+            normal.host_tools = host_tools.unwrap_or_default();
         }
         send_request_with_model(&self.state, request, model_id.as_deref())
             .await

@@ -5,7 +5,7 @@ import json
 from collections.abc import Sequence
 
 from . import types
-from ._callbacks import HostCallbacks, LogitsProcessor
+from ._callbacks import HostCallbacks, HostRegistration, HostTool
 from ._codec import from_data, from_json, to_json
 from ._engine import JsonEngine, MediaAttachment, SkillFile, Stream
 from ._owned import Blob
@@ -163,9 +163,13 @@ class Engine:
         scores, logits = self.json.prompt_logits(json.dumps(request))
         return from_json(types.PromptLogits, scores), logits
 
-    def register_logits_processor(self, name: str, processor) -> LogitsProcessor:
+    def register_logits_processor(self, name: str, processor) -> HostRegistration:
         """See `JsonEngine.register_logits_processor`."""
         return self.json.register_logits_processor(name, processor)
+
+    def register_tool(self, tool: HostTool) -> HostRegistration:
+        """See `JsonEngine.register_tool`."""
+        return self.json.register_tool(tool)
 
     def tokenize(self, text: str, add_special_tokens: bool = True, model: str | None = None) -> list[int]:
         request = {"text": text, "add_special_tokens": add_special_tokens, "model": model}

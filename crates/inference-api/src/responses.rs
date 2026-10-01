@@ -580,6 +580,10 @@ pub struct OpenResponsesCreateRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub logits_processors: Option<Vec<String>>,
 
+    /// Tools the engine's host registered after load, offered to the model by name and answered by the host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host_tools: Option<Vec<String>>,
+
     /// Whether to return log probabilities
     #[serde(default)]
     pub logprobs: bool,
@@ -2102,6 +2106,7 @@ async fn parse_openresponses_request(
         enable_thinking,
         truncate_sequence,
         logits_processors: oairequest.logits_processors,
+        host_tools: oairequest.host_tools,
         reasoning_effort,
         chat_template_kwargs: None,
         files: oairequest.files,
@@ -2208,6 +2213,10 @@ async fn prepare_response_inner(
         .logits_processors
         .resolve(request.logits_processors.as_deref())
         .map_err(|error| DispatchError::Validation(Box::new(error)))?;
+    let host_tools = chat
+        .host_tools
+        .resolve(request.host_tools.as_deref())
+        .map_err(|error| DispatchError::Validation(Box::new(error)))?;
     let (mut core_request, history, context) = parse_openresponses_request(request, chat, tx)
         .await
         .map_err(|error| DispatchError::Validation(boxed_anyhow(error)))?;
@@ -2216,6 +2225,7 @@ async fn prepare_response_inner(
     if let Request::Normal(normal) = &mut core_request {
         normal.cancellation = Some(cancellation.clone());
         normal.logits_processors = logits_processors;
+        normal.host_tools = host_tools.unwrap_or_default();
         session_id.clone_from(&normal.session_id);
     }
     send_request_with_model(state, core_request, model_id.as_deref())

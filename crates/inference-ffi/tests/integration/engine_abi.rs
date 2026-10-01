@@ -16,6 +16,8 @@ const MAX_TOKENS: usize = 6;
 const PROMPT: &str = "Reply with the single word: ok";
 // Long enough that the first poll never has to wait on a slow CI machine, short enough to fail a hang quickly.
 const POLL_TIMEOUT_MS: i64 = 60_000;
+// The tiny tokenizer's `</s>`.
+const TINY_EOS: u32 = 2;
 
 fn last_error() -> String {
     unsafe { CStr::from_ptr(inference_last_error()) }
@@ -2014,5 +2016,132 @@ fn a_registered_logits_processor_steers_the_requests_that_name_it() {
     assert_eq!(unregister(engine, FORCED), INFERENCE_ERR_NOT_FOUND);
     let (status, _) = processed_chat(engine, &[FORCED]);
     assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{}", last_error());
+    unsafe { inference_engine_free(engine) };
+}
+
+const LATE_TOOL: &str = "late_lookup";
+
+// Tokens a processor forces from the start of each generation; a context that grew by more than one starts a new one.
+struct Script {
+    tokens: Vec<u32>,
+    // (next position, context length last seen)
+    state: std::sync::Mutex<(usize, usize)>,
+}
+
+unsafe extern "C" fn play_script(
+    user_data: *mut std::ffi::c_void,
+    logits: *mut f32,
+    vocab_size: usize,
+    _: *const u32,
+    context_len: usize,
+) -> i32 {
+    let script = unsafe { &*user_data.cast::<Script>() };
+    let mut state = script.state.lock().unwrap();
+    if context_len != state.1 + 1 {
+        state.0 = 0;
+    }
+    state.1 = context_len;
+    let next = script.tokens.get(state.0).copied().unwrap_or(TINY_EOS);
+    state.0 += 1;
+    let logits = unsafe { std::slice::from_raw_parts_mut(logits, vocab_size) };
+    logits.fill(f32::NEG_INFINITY);
+    logits[next as usize] = 0.0;
+    0
+}
+
+unsafe extern "C" fn counted_tool(
+    user_data: *mut std::ffi::c_void,
+    _: *const c_char,
+    _: *const c_char,
+    _: usize,
+    _: *const c_char,
+    _: usize,
+    result: *mut inference_ffi::callbacks::inference_callback_result,
+) {
+    let calls = unsafe { &*user_data.cast::<std::sync::atomic::AtomicUsize>() };
+    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let answer = "found";
+    unsafe {
+        inference_ffi::callbacks::inference_callback_result_set(
+            result,
+            answer.as_ptr().cast(),
+            answer.len(),
+        )
+    };
+}
+
+#[test]
+fn a_tool_registered_after_load_answers_the_requests_that_name_it() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let (status, engine) = load(&spec(dir.path()));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+
+    let calls = json!([{"name": LATE_TOOL, "arguments": {}}]).to_string();
+    let request = json!({"text": calls, "add_special_tokens": false});
+    let (status, tokenized) = request_call(inference_tokenize, engine, &request);
+    assert_eq!(status, INFERENCE_OK, "{tokenized}");
+    let tokens = tokenized["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_u64().unwrap() as u32);
+    let script = Box::new(Script {
+        tokens: tokens.collect(),
+        state: std::sync::Mutex::new((0, 0)),
+    });
+    let script_data = std::ptr::from_ref(&*script).cast_mut().cast();
+    assert_eq!(
+        register(engine, "late-script", play_script, script_data),
+        INFERENCE_OK
+    );
+
+    let counter = Box::new(std::sync::atomic::AtomicUsize::new(0));
+    let definition = json!({
+        "type": "function",
+        "function": {"name": LATE_TOOL, "parameters": {"type": "object", "properties": {}}},
+    })
+    .to_string();
+    let tool = inference_ffi::callbacks::inference_host_tool {
+        definition: definition.as_ptr().cast(),
+        definition_len: definition.len(),
+        callback: Some(counted_tool),
+        user_data: std::ptr::from_ref(&*counter).cast_mut().cast(),
+    };
+    assert_eq!(
+        unsafe { inference_engine_register_tool(engine, &tool) },
+        INFERENCE_OK
+    );
+    assert_eq!(
+        unsafe { inference_engine_register_tool(engine, &tool) },
+        INFERENCE_ERR_INVALID_REQUEST
+    );
+    assert!(
+        last_error().contains("host_tool_conflict"),
+        "{}",
+        last_error()
+    );
+
+    let request = json!({
+        "model": "default",
+        "messages": [{"role": "user", "content": PROMPT}],
+        "max_tokens": 128,
+        "max_tool_rounds": 1,
+        "logits_processors": ["late-script"],
+        "host_tools": [LATE_TOOL],
+    });
+    let (status, response) = chat(engine, &request.to_string());
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let response: Value = serde_json::from_str(&response.unwrap()).unwrap();
+    assert_eq!(
+        response["agentic_tool_calls"][0]["result_content"], "found",
+        "{response}"
+    );
+    assert_eq!(counter.load(std::sync::atomic::Ordering::SeqCst), 1);
+
+    let unregister_tool = |name: &str| unsafe {
+        inference_engine_unregister_tool(engine, name.as_ptr().cast(), name.len())
+    };
+    assert_eq!(unregister_tool(LATE_TOOL), INFERENCE_OK);
+    assert_eq!(unregister_tool(LATE_TOOL), INFERENCE_ERR_NOT_FOUND);
     unsafe { inference_engine_free(engine) };
 }

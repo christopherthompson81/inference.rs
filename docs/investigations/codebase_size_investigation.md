@@ -1112,3 +1112,33 @@ turned off that last test failed 1 run in 3: the session lock decides, so detect
 
 Known limits: approval prompts carry no `tool_call_id`, and several Ask-mode calls are prompted one after another (up
 to the approval timeout each); the CLI prints every call's header before the results.
+
+## Run 39 - 2026-10-01 (time approximate)
+
+Change (ABI 0.0.19): host tools can be registered on a running engine and offered per request. `Engine::register_tool`
+/ `unregister_tool`, `inference_engine_register_tool` (taking the existing `inference_host_tool`) /
+`inference_engine_unregister_tool`, C# `RegisterTool` and Python `register_tool`. Tools given at load stay offered to
+every chat request; a registered tool only to a chat, Responses or Anthropic messages request naming it in
+`"host_tools"`. The names resolve in the API layer into a new core `NormalRequest.host_tools`, which also makes core
+enter the agent loop; the loop takes them, refuses a name clashing with the request's declared, search, engine or
+other host tools, offers their definitions every round and dispatches through the resolved callback, so
+`execute_custom_tool` now takes the callback rather than looking the name up on the engine.
+
+Logits processors and host tools share one `Registry<T: Registered>` (moved out of `logits_processors.rs`); the
+bindings' registration objects became one generic `HostRegistration` each (Python's `LogitsProcessor` from Run 37
+renamed, unreleased).
+
+First full CI: the `inference` SDK and the perplexity example build `NormalRequest` literals I had not checked; both
+fixed, and `cargo check --workspace --tests --examples` plus `-p inference-examples --examples` added to my pre-CI
+checks.
+
+Review: the header promised `host_tool_conflict` on a clashing request, but the loop's refusal is a plain validation
+error with no code; header corrected (status only). Not fixed, documented: registering a name a tool given at load
+already has succeeds, and every request naming it is then refused (the API layer does not see the engines' tool
+tables); `tool_choice` sees only declared tools; a refused request leaves its input files in the store, as the existing
+internal-tool clash check already did.
+
+Tests: `a_tool_registered_after_load_answers_the_requests_that_name_it` in the engine (named: answered by the
+callback; unnamed: never called; clashing with a declared tool: refused; unregistered: 400 on `host_tools`) and in the
+ABI (registration through `inference_host_tool`, duplicate refused, chat answered, unregister twice NOT_FOUND), and the
+C# and Python registration checks.

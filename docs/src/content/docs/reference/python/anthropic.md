@@ -116,6 +116,7 @@ One of: `Union[str, list[AnthropicContentBlock]]`.
 | `files` | `list[Any] \| None` | optional |
 | `frequency_penalty` | `float \| None` | optional |
 | `grammar` | `Grammar \| None` | optional |
+| `host_tools` | `list[str] \| None` | optional |
 | `logit_bias` | `dict[str, float] \| None` | optional |
 | `logits_processors` | `list[str] \| None` | optional |
 | `logprobs` | `bool \| None` | optional |

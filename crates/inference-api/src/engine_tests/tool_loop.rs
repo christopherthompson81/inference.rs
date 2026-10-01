@@ -221,3 +221,55 @@ async fn calls_into_the_sandbox_keep_the_models_order() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+const LATE: &str = "late_lookup";
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_tool_registered_after_load_answers_the_requests_that_name_it() -> anyhow::Result<()> {
+    let seen = Arc::new(Concurrency::default());
+    let (_dir, engine) = tiny_engine_with(EngineCallbacks::default()).await?;
+    engine.register_tool(host_tool(LATE, seen.clone())?)?;
+    let conflict = engine.register_tool(host_tool(LATE, seen.clone())?).err();
+    assert_eq!(
+        conflict.and_then(|error| error.code).as_deref(),
+        Some("host_tool_conflict")
+    );
+    script(&engine, json!([{"name": LATE, "arguments": {}}])).await?;
+
+    let mut named = request(false);
+    named["host_tools"] = json!([LATE]);
+    let response = engine
+        .chat_json(named.to_string().as_bytes(), MediaAttachments::default())
+        .await?;
+    let response: Value = serde_json::from_str(&response)?;
+    assert_eq!(
+        response["agentic_tool_calls"][0]["name"], LATE,
+        "{response}"
+    );
+    assert_eq!(seen.calls.load(Ordering::SeqCst), 1);
+
+    // Unnamed, the tool is not offered, so the scripted call is text rather than a call the host answers.
+    let unnamed = request(false).to_string();
+    engine
+        .chat_json(unnamed.as_bytes(), MediaAttachments::default())
+        .await?;
+    assert_eq!(seen.calls.load(Ordering::SeqCst), 1);
+
+    let mut clashing = named.clone();
+    clashing["tools"] = json!([{"type": "function", "function": {"name": LATE, "parameters": {}}}]);
+    let refused = engine
+        .chat_json(clashing.to_string().as_bytes(), MediaAttachments::default())
+        .await;
+    let refused = refused.err().map(|error| error.message).unwrap_or_default();
+    assert!(refused.contains("conflicts"), "{refused}");
+
+    engine.unregister_tool(LATE)?;
+    let gone = engine
+        .chat_json(named.to_string().as_bytes(), MediaAttachments::default())
+        .await;
+    assert_eq!(
+        gone.err().and_then(|error| error.param).as_deref(),
+        Some("host_tools")
+    );
+    Ok(())
+}

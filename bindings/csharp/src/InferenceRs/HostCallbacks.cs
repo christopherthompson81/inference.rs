@@ -123,7 +123,7 @@ internal static unsafe class HostCallbackBridge
     }
 
     [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
-    private static void Tool(
+    internal static void Tool(
         IntPtr userData, byte* toolName, byte* arguments, nuint argumentsLen, byte* context, nuint contextLen, IntPtr result)
     {
         try
@@ -215,22 +215,25 @@ internal static unsafe class HostCallbackBridge
     }
 }
 
-/// <summary>A logits processor's registration, holding its engine open until disposed, which unregisters it.</summary>
-internal sealed unsafe class LogitsProcessorRegistration : IDisposable
+/// <summary>A host registration (a logits processor or tool), holding its engine open until disposed, which unregisters it.</summary>
+internal sealed unsafe class HostRegistration : IDisposable
 {
     private readonly EngineHandle _engine;
     private readonly string _name;
     private readonly nint _id;
+    private readonly delegate*<IntPtr, byte*, nuint, InferenceStatus> _unregister;
     private int _disposed;
 
     /// <summary>Takes a reference on <paramref name="engine"/>, so unregistering never meets a disposed handle.</summary>
-    internal LogitsProcessorRegistration(EngineHandle engine, string name, nint id)
+    internal HostRegistration(
+        EngineHandle engine, string name, nint id, delegate*<IntPtr, byte*, nuint, InferenceStatus> unregister)
     {
         var added = false;
         engine.DangerousAddRef(ref added);
         _engine = engine;
         _name = name;
         _id = id;
+        _unregister = unregister;
     }
 
     public void Dispose()
@@ -239,8 +242,7 @@ internal sealed unsafe class LogitsProcessorRegistration : IDisposable
         try
         {
             using var bytes = new PinnedBytes(_name);
-            NativeMethods.inference_engine_unregister_logits_processor(
-                _engine.DangerousGetHandle(), bytes.Pointer, bytes.Length);
+            _unregister(_engine.DangerousGetHandle(), bytes.Pointer, bytes.Length);
         }
         finally
         {

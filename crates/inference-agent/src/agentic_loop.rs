@@ -1,4 +1,8 @@
-use std::{path::Path, sync::Arc};
+use std::{
+    collections::{HashMap, HashSet},
+    path::Path,
+    sync::Arc,
+};
 
 use either::Either;
 use image::DynamicImage;
@@ -12,7 +16,7 @@ use inference_core::{
     AgentToolApprovalHandler, AgentToolKind, AgentToolMetadata, AgentToolSource,
     AgenticToolCallData, AgenticToolCallPhase, Engine, FINISH_REASON_CANCELED, MessageContent,
     NormalRequest, Request, RequestMessage, Response, SupportedModality, ToolCallResponse,
-    ToolChoice, Usage, WebSearchOptions,
+    ToolCallbackKind, ToolCallbackWithTool, ToolChoice, Usage, WebSearchOptions,
     agent::{
         AGENTIC_LOOP_REENTRY_SENTINEL, CODE_EXECUTION, DEFAULT_MAX_TOOL_ROUNDS, is_code_exec_tool,
         is_list_files_tool, is_read_file_tool, is_shell_tool, is_surface_outputs_tool,
@@ -484,7 +488,7 @@ fn tool_metadata_for(ctx: &DispatchCtx<'_>, tc: &ToolCallResponse) -> AgentToolM
             kind: AgentToolKind::Shell,
             label: "Shell command".to_string(),
         }
-    } else if ctx.engine.tool_callbacks().contains_key(name) {
+    } else if ctx.callback(name).is_some() {
         AgentToolMetadata {
             source: AgentToolSource::User,
             kind: AgentToolKind::Custom,
@@ -718,6 +722,7 @@ impl ToolOutcome {
 /// Per-loop dispatch context. Borrows data owned by the loop's task; the round and its calls are passed alongside.
 struct DispatchCtx<'a> {
     engine: &'a Arc<Engine>,
+    host_tools: &'a HashMap<String, ToolCallbackWithTool>,
     user_sender: &'a tokio::sync::mpsc::Sender<Response>,
     web_search_options: Option<&'a WebSearchOptions>,
     dispatch_url: Option<&'a str>,
@@ -730,6 +735,15 @@ struct DispatchCtx<'a> {
     required_files: &'a [RequestedFile],
     agent_permission: AgentPermission,
     agent_approval_handler: Option<AgentToolApprovalHandler>,
+}
+
+impl<'a> DispatchCtx<'a> {
+    /// The callback answering `name`: one of this request's host tools, else one registered with the engine.
+    fn callback(&self, name: &str) -> Option<&'a ToolCallbackWithTool> {
+        self.host_tools
+            .get(name)
+            .or_else(|| self.engine.tool_callbacks().get(name))
+    }
 }
 
 fn web_search_metadata(content: &str) -> (Option<usize>, Vec<String>) {
@@ -814,7 +828,12 @@ async fn do_extraction(
     ToolOutcome::text(result.content, data)
 }
 
-async fn do_custom_tool(ctx: &DispatchCtx<'_>, tc: &ToolCallResponse, round: usize) -> ToolOutcome {
+async fn do_custom_tool(
+    ctx: &DispatchCtx<'_>,
+    callback: &ToolCallbackKind,
+    tc: &ToolCallResponse,
+    round: usize,
+) -> ToolOutcome {
     // Merge required files into `outputs` so the tool surfaces them even if the model omitted them.
     let dispatched = if (is_code_exec_tool(&tc.function.name) || is_shell_tool(&tc.function.name))
         && !ctx.required_files.is_empty()
@@ -829,9 +848,9 @@ async fn do_custom_tool(ctx: &DispatchCtx<'_>, tc: &ToolCallResponse, round: usi
     tool_ctx.tool_name = Some(tc.function.name.clone());
 
     // On the blocking pool, so the round's other calls run while a host callback blocks.
-    let engine = ctx.engine.clone();
+    let callback = callback.clone();
     let result = tokio::task::spawn_blocking(move || {
-        tool_dispatch::execute_custom_tool(&engine, &dispatched, &tool_ctx)
+        tool_dispatch::execute_custom_tool(&callback, &dispatched, &tool_ctx)
     })
     .await
     .unwrap_or_else(|error| tool_dispatch::ToolResult::failed(&tc.function.name, &error));
@@ -931,7 +950,7 @@ enum Dispatcher<'a> {
     ListFiles,
     Search(&'a WebSearchOptions),
     Extract(&'a WebSearchOptions),
-    Custom,
+    Custom(&'a ToolCallbackKind),
     Http(&'a str),
 }
 
@@ -951,8 +970,8 @@ fn dispatcher<'a>(ctx: &DispatchCtx<'a>, name: &str) -> Option<Dispatcher<'a>> {
             Dispatcher::Extract(opts)
         });
     }
-    if ctx.engine.tool_callbacks().contains_key(name) {
-        return Some(Dispatcher::Custom);
+    if let Some(tool) = ctx.callback(name) {
+        return Some(Dispatcher::Custom(&tool.callback));
     }
     ctx.dispatch_url.map(Dispatcher::Http)
 }
@@ -971,7 +990,7 @@ async fn dispatch_tool(
         }
         Dispatcher::Search(opts) => do_search(ctx.engine, tc, opts).await,
         Dispatcher::Extract(opts) => do_extraction(ctx.engine, tc, opts).await,
-        Dispatcher::Custom => do_custom_tool(ctx, tc, round).await,
+        Dispatcher::Custom(callback) => do_custom_tool(ctx, callback, tc, round).await,
         Dispatcher::Http(url) => do_http_tool(tc, url).await,
     }
 }
@@ -1120,6 +1139,7 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
     let agent_approval_handler = request.agent_approval_handler.clone();
     let agent_approval_notifier = request.agent_approval_notifier.clone();
     let required_files: Vec<RequestedFile> = request.files.clone().unwrap_or_default();
+    let host_tool_list = std::mem::take(&mut request.host_tools);
     let input_files = request.input_files.clone();
 
     let mut session_id = request
@@ -1198,6 +1218,29 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
         }
     }
 
+    let declared: HashSet<&str> = probe
+        .tools
+        .iter()
+        .flatten()
+        .map(|t| t.function.name.as_str())
+        .collect();
+    let mut host_tools = HashMap::with_capacity(host_tool_list.len());
+    for tool in &host_tool_list {
+        let name = &tool.tool.function.name;
+        let taken = declared.contains(name.as_str()) || this.tool_callbacks().contains_key(name);
+        if taken || host_tools.insert(name.clone(), tool.clone()).is_some() {
+            let message = format!("Host tool '{name}' conflicts with another tool of the request.");
+            let _ = user_sender
+                .send(Response::ValidationError(message.into()))
+                .await;
+            return;
+        }
+    }
+    if !host_tool_list.is_empty() {
+        let tools = probe.tools.get_or_insert_with(Vec::new);
+        tools.extend(host_tool_list.into_iter().map(|tool| tool.tool));
+    }
+
     if !this.tool_callbacks().is_empty() {
         let tools = probe.tools.get_or_insert_with(Vec::new);
 
@@ -1269,6 +1312,7 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
         };
         let dispatch_ctx = DispatchCtx {
             engine: &this_clone,
+            host_tools: &host_tools,
             user_sender: &user_sender,
             web_search_options: web_search_options.as_ref(),
             dispatch_url: dispatch_url.as_deref(),
