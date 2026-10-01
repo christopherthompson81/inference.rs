@@ -6,7 +6,6 @@ use super::{
     IsqPipelineMixin, Loader, MetadataMixin, ModelCategory, ModelKind, ModelPaths,
     MultimodalLoaderType, MultimodalModel, MultimodalModelLoader, MultimodalPromptPrefixer,
     PreProcessingMixin, Processor, TokenSource, paged_attention_memory_reservations,
-    reserve_recurrent_serving_capacity,
 };
 use crate::attention::ATTENTION_CHUNK_SIZE;
 #[cfg(feature = "cuda")]
@@ -1008,13 +1007,13 @@ impl Loader for MultimodalLoader {
             }
         }
 
-        let gen_conf: Option<GenerationConfig> = match self.prepared_source.as_ref() {
-            Some(source) => source.generation_config.clone(),
-            None => paths
-                .get_gen_conf_filename()
-                .map(|f| serde_json::from_str(&fs::read_to_string(f).unwrap()).unwrap()),
-        };
-        let gen_conf = gen_conf.or_else(|| GenerationConfig::from_model_config(&config));
+        let gen_conf = super::loading::generation_config(
+            self.prepared_source
+                .as_ref()
+                .map(|source| source.generation_config.clone()),
+            paths,
+            &config,
+        );
         if model.is_block_diffusion()
             && let Some(raw) = paths
                 .get_gen_conf_filename()
@@ -1132,38 +1131,15 @@ impl Loader for MultimodalLoader {
         #[cfg(feature = "cuda")]
         super::synchronize_cuda_contexts(&device, pipeline_mapper.as_ref())?;
 
-        let recurrent_checkpoints_supported = model.supports_recurrent_speculative_checkpoints();
-        let recurrent_transitions_supported = model.supports_recurrent_speculative_transitions();
-        let recurrent_pool_grew = paged_attn_config
-            .map(|config| {
-                let kv_bytes_per_token =
-                    super::paged_kv_bytes_per_token(config, dtype, model_metadata.as_ref())?;
-                reserve_recurrent_serving_capacity(
-                    model.cache(),
-                    config,
-                    recurrent_checkpoints_supported,
-                    recurrent_transitions_supported,
-                    &device,
-                    kv_bytes_per_token,
-                )
-            })
-            .transpose()?
-            .unwrap_or(false);
-        let recurrent_pool_grew = if recurrent_transitions_supported
-            && super::uses_recurrent_transition_log(model.cache())
-        {
-            model.reserve_recurrent_speculative_transition_storage()? || recurrent_pool_grew
-        } else {
-            recurrent_pool_grew
-        };
-        let recurrent_pool_grew =
-            model.reserve_recurrent_decode_deferred_storage()? || recurrent_pool_grew;
-        #[cfg(feature = "cuda")]
-        if recurrent_pool_grew {
-            super::synchronize_cuda_contexts(&device, pipeline_mapper.as_ref())?;
+        super::RecurrentReservation {
+            target: &*model,
+            cache: model.cache(),
+            paged_attn_config,
+            dtype,
+            model_config: model_metadata.as_ref(),
+            device: &device,
         }
-        #[cfg(not(feature = "cuda"))]
-        let _ = recurrent_pool_grew;
+        .reserve(pipeline_mapper.as_ref())?;
 
         let (cache_config, cache_engine) = if let Some(paged_attn_config) = paged_attn_config {
             let cache_config = calculate_cache_config(
@@ -1192,11 +1168,7 @@ impl Loader for MultimodalLoader {
         };
 
         let max_seq_len = model.max_seq_len();
-        let num_hidden_layers = match model.cache() {
-            EitherCache::Full(full) => full.lock().len(),
-            EitherCache::Normal(normal) => normal.lock().unwrap().0.len(),
-            EitherCache::Hybrid(hybrid) => hybrid.lock().unwrap().num_layers(),
-        };
+        let num_hidden_layers = super::cache_layer_count(model.cache());
         let mut generation_defaults = gen_conf
             .as_ref()
             .and_then(GenerationConfig::generation_defaults);

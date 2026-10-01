@@ -3,7 +3,7 @@ use super::loaders::NormalLoaderTypeExt;
 use super::{
     AdapterKind, DecodeGraphPrecaptureCtx, GeneralMetadata, Loader, ModelKind, ModelPaths,
     NormalModel, NormalModelLoader, TokenSource, paged_attention_memory_reservations,
-    reserve_recurrent_serving_capacity, text_models_inputs_processor::ModelInputs,
+    text_models_inputs_processor::ModelInputs,
 };
 use super::{
     AnyMoePipelineMixin, CacheManagerMixin, EitherCache, ForwardInputsResult, ForwardStepResult,
@@ -84,7 +84,6 @@ use inference_quant::IsqType;
 use inference_quant::log::once_log_info;
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
-use std::fs;
 use std::path::PathBuf;
 #[cfg(feature = "cuda")]
 use std::sync::Mutex as StdMutex;
@@ -163,42 +162,16 @@ pub(crate) fn build_normal_pipeline(
     } = args;
 
     let model_metadata = model.model_config();
-    let num_hidden_layers = match model.cache() {
-        EitherCache::Full(full) => full.lock().len(),
-        EitherCache::Normal(normal) => normal.lock().unwrap().0.len(),
-        EitherCache::Hybrid(hybrid) => hybrid.lock().unwrap().num_layers(),
-    };
-    let recurrent_checkpoints_supported = model.supports_recurrent_speculative_checkpoints();
-    let recurrent_transitions_supported = model.supports_recurrent_speculative_transitions();
-    let recurrent_pool_grew = paged_attn_config
-        .map(|config| {
-            let kv_bytes_per_token =
-                super::paged_kv_bytes_per_token(config, dtype, model_metadata.as_ref())?;
-            reserve_recurrent_serving_capacity(
-                model.cache(),
-                config,
-                recurrent_checkpoints_supported,
-                recurrent_transitions_supported,
-                &device,
-                kv_bytes_per_token,
-            )
-        })
-        .transpose()?
-        .unwrap_or(false);
-    let recurrent_pool_grew =
-        if recurrent_transitions_supported && super::uses_recurrent_transition_log(model.cache()) {
-            model.reserve_recurrent_speculative_transition_storage()? || recurrent_pool_grew
-        } else {
-            recurrent_pool_grew
-        };
-    let recurrent_pool_grew =
-        model.reserve_recurrent_decode_deferred_storage()? || recurrent_pool_grew;
-    #[cfg(feature = "cuda")]
-    if recurrent_pool_grew {
-        super::synchronize_cuda_contexts(&device, mapper.as_ref())?;
+    let num_hidden_layers = super::cache_layer_count(model.cache());
+    super::RecurrentReservation {
+        target: &*model,
+        cache: model.cache(),
+        paged_attn_config,
+        dtype,
+        model_config: model_metadata.as_ref(),
+        device: &device,
     }
-    #[cfg(not(feature = "cuda"))]
-    let _ = recurrent_pool_grew;
+    .reserve(mapper.as_ref())?;
 
     let (cache_config, cache_engine) = if let Some(paged_attn_config) = paged_attn_config {
         let cache_config = calculate_cache_config(
@@ -1044,19 +1017,13 @@ impl Loader for NormalLoader {
             Some(source) => source.tokenizer.clone(),
             None => get_tokenizer(paths.get_tokenizer_filename(), None)?,
         };
-        let gen_conf: Option<GenerationConfig> = match self.prepared_source.as_ref() {
-            Some(source) => source.generation_config.clone(),
-            None => paths.get_gen_conf_filename().and_then(|f| {
-                match serde_json::from_str::<GenerationConfig>(&fs::read_to_string(f).unwrap()) {
-                    Ok(conf) => Some(conf),
-                    Err(e) => {
-                        warn!("Failed to parse generation_config.json: {}", e);
-                        None
-                    }
-                }
-            }),
-        };
-        let gen_conf = gen_conf.or_else(|| GenerationConfig::from_model_config(&config));
+        let gen_conf = super::loading::generation_config(
+            self.prepared_source
+                .as_ref()
+                .map(|source| source.generation_config.clone()),
+            paths,
+            &config,
+        );
 
         let chat_template_explicit = paths
             .get_chat_template_explicit()
