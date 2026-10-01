@@ -11,6 +11,7 @@ pub mod engine;
 pub mod engine_chat;
 pub mod engine_completion;
 pub mod engine_embeddings;
+pub mod engine_logits;
 #[cfg(test)]
 mod engine_tests;
 pub mod files;

@@ -924,6 +924,13 @@ class LoadLoraAdapterRequest:
     model: str | None = None
 
 
+class LogitsOutput(str, Enum):
+    """What a scored prompt carries besides the token log-probabilities."""
+
+    LOGPROBS = "logprobs"
+    LOGITS = "logits"
+
+
 @dataclass(kw_only=True)
 class LoraAdapterListResponse:
     data: list[LoraAdapterObject]
@@ -2135,6 +2142,20 @@ class PagedCacheType(str, Enum):
 
 
 @dataclass(kw_only=True)
+class PromptLogits:
+    token_logprobs: list[float | None]
+    tokens: list[int]
+    vocab_size: int
+
+
+@dataclass(kw_only=True)
+class PromptLogitsRequest:
+    model: str | None = None
+    output: LogitsOutput | None = None
+    prompt: PromptInput
+
+
+@dataclass(kw_only=True)
 class PromptTokensDetailsResponse:
     cached_tokens: int
 
@@ -2851,6 +2872,7 @@ OpenResponsesInput = Union[str, list[Union[OpenResponsesInputMessage, OpenRespon
 OpenResponsesStreamEvent = Union[OpenResponsesStreamEventResponseCreated, OpenResponsesStreamEventResponseInProgress, OpenResponsesStreamEventResponseOutputItemAdded, OpenResponsesStreamEventResponseContentPartAdded, OpenResponsesStreamEventResponseOutputTextDelta, OpenResponsesStreamEventResponseContentPartDone, OpenResponsesStreamEventResponseOutputItemDone, OpenResponsesStreamEventResponseFunctionCallArgumentsDelta, OpenResponsesStreamEventResponseFunctionCallArgumentsDone, OpenResponsesStreamEventResponseReasoningTextDelta, OpenResponsesStreamEventResponseReasoningTextDone, OpenResponsesStreamEventResponseCompleted, OpenResponsesStreamEventResponseFailed, OpenResponsesStreamEventResponseIncomplete, OpenResponsesStreamEventResponseCancelled, OpenResponsesStreamEventError]
 OutputContent = Union[OutputContentOutputText, OutputContentRefusal]
 OutputItem = Union[OutputItemMessage, OutputItemFunctionCall, OutputItemShellCall, OutputItemShellCallOutput, OutputItemReasoning]
+PromptInput = Union[str, list[int]]
 ResponseFormat = Union[ResponseFormatText, ResponseFormatJsonObject, ResponseFormatJsonSchema]
 ResponsesMessages = Union[list[Message], str]
 StopTokens = Union[list[str], str]

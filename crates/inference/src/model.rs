@@ -302,9 +302,7 @@ impl Model {
         }
     }
 
-    /// Generate with the model, returning raw logits of the first token generated.
-    ///
-    /// Returns the chunks of the logits (1 or more, determined by prompt batchsize) and the tokens.
+    /// Runs the prompt once and returns its logits, one row per prompt position, and its tokens; nothing is generated.
     pub async fn send_raw_chat_request<R: RequestLike>(
         &self,
         request: R,
@@ -312,8 +310,7 @@ impl Model {
         self.send_raw_chat_request_with_model(request, None).await
     }
 
-    /// Generate with a specific model, returning raw logits of the first token generated.
-    /// If `model_id` is `None`, the request is sent to the default model.
+    /// As [`Self::send_raw_chat_request`], on a specific model; `None` sends it to the default model.
     pub async fn send_raw_chat_request_with_model<R: RequestLike>(
         &self,
         request: R,

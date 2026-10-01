@@ -1803,3 +1803,94 @@ fn models_are_added_made_default_aliased_and_removed_at_runtime() {
     );
     unsafe { inference_engine_free(engine) };
 }
+
+fn score(
+    engine: *const inference_engine,
+    request: &Value,
+    logits: bool,
+) -> (inference_status, Value, Vec<f32>) {
+    let request = request.to_string();
+    let (mut response, mut blob): (*mut inference_string, *mut inference_blob) =
+        (null_mut(), null_mut());
+    let out_blob = if logits {
+        &mut blob as *mut _
+    } else {
+        null_mut()
+    };
+    let status = unsafe {
+        inference_prompt_logits(
+            engine,
+            request.as_ptr().cast::<c_char>(),
+            request.len(),
+            &mut response,
+            out_blob,
+        )
+    };
+    // An invalid argument's detail is plain text, not an error envelope.
+    let body = match status {
+        INFERENCE_ERR_INVALID_ARGUMENT => Value::String(last_error()),
+        status => stored_body(status, response),
+    };
+    let floats = if blob.is_null() {
+        Vec::new()
+    } else {
+        let bytes = unsafe {
+            std::slice::from_raw_parts(inference_blob_data(blob), inference_blob_len(blob))
+        };
+        let floats = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        unsafe { inference_blob_free(blob) };
+        floats
+    };
+    (status, body, floats)
+}
+
+#[test]
+fn a_prompt_is_scored_by_log_probabilities_and_its_logits_agree() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let (status, engine) = load(&spec(dir.path()));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+
+    let (status, scored, none) = score(engine, &json!({"prompt": PROMPT}), false);
+    assert_eq!(status, INFERENCE_OK, "{scored}");
+    assert!(none.is_empty());
+    let tokens = scored["tokens"].as_array().unwrap().len();
+    let logprobs = scored["token_logprobs"].as_array().unwrap();
+    assert_eq!(logprobs.len(), tokens);
+    assert!(logprobs[0].is_null());
+    assert!(
+        logprobs[1..].iter().all(|p| p.as_f64().unwrap() <= 0.0),
+        "{scored}"
+    );
+
+    let ids: Vec<u32> = scored["tokens"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|t| t.as_u64().unwrap() as u32)
+        .collect();
+    let (status, again, logits) = score(engine, &json!({"prompt": ids, "output": "logits"}), true);
+    assert_eq!(status, INFERENCE_OK, "{again}");
+    let vocab = again["vocab_size"].as_u64().unwrap() as usize;
+    assert_eq!(logits.len(), tokens * vocab);
+    // The logprob of token 1 is the log-softmax of row 0 at that token.
+    let row = &logits[..vocab];
+    let max = row.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+    let lse = max + row.iter().map(|x| (x - max).exp()).sum::<f32>().ln();
+    let expected = row[ids[1] as usize] - lse;
+    assert!((again["token_logprobs"][1].as_f64().unwrap() as f32 - expected).abs() < 1e-3);
+
+    let (status, error, _) = score(
+        engine,
+        &json!({"prompt": PROMPT, "output": "logits"}),
+        false,
+    );
+    assert_eq!(status, INFERENCE_ERR_INVALID_ARGUMENT, "{error}");
+    let (status, error, _) = score(engine, &json!({"prompt": [ids[0]]}), false);
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+    unsafe { inference_engine_free(engine) };
+}

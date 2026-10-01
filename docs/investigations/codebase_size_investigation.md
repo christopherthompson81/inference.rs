@@ -1011,4 +1011,36 @@ Change: GitHub CI gets a `Test` job: the CPU suite as `local_ci.sh --tests` runs
 dispatch, not per PR: the dev profile builds at opt-level 3 and a full test build of the workspace is the slowest thing
 CI could do (local `target/debug` is 36 GB with the CUDA variants), so PRs keep the fast check, clippy, fmt and typos
 jobs and a regression that local CI missed shows on master right after its merge. The job frees the runner's preinstalled
-toolchains first to fit the build. Unknown until the first run: its wall time, and whether any test reaches the network.
+toolchains first to fit the build. The first run, dispatched on the branch, passed in 12 minutes.
+
+## Run 36 - 2026-10-01 (time approximate)
+
+Question: what are the SDK's raw logits, and what should the engine offer in their place?
+
+Finding (the `return_raw_logits` path in core): one prefill pass over the prompt, every position kept, returning a
+`[prompt_tokens, vocab]` tensor per chunk and the prompt's tokens; nothing is generated (the SDK's doc said "the first
+token generated"). There is always one chunk, since raw-logits requests turn prompt chunking off. They run alone
+(batch of one, `n` 1, no prefix cache, CUDA graph or speculation), and the whole prompt must fit one forward. The
+perplexity example uses them only for each prompt token's log-probability, and it no longer runs: core now rejects its
+`max_tokens: 0`, though a raw-logits request ends after the prefill whatever the limit.
+
+Change (ABI 0.0.17): `Engine::prompt_logits` scores a prompt (text tokenized with the model's special tokens, or token
+ids): each token's log-probability, and with `"output": "logits"` the row-major f32 logits. `inference_prompt_logits`
+returns the scores as JSON and the logits as an `application/x-f32le` blob; C# returns them as a `float[]`, Python as an
+`array('f')`. It refuses non-text models, one-token prompts and prompts longer than the model's context up front.
+Planned next, in order: logits processors as named callbacks (a C callback editing the f32 logits in place, selected per
+request), the engine's tool loop running every call of a round in parallel with each result tagged by its call id, and
+tools registered after load. The design found the SDK's agent examples could already run on `Engine` by executing the
+returned tool calls themselves, but the engine's loop runs only the first call of each round, which every client meets.
+
+Review: the core path holds (no token is generated, a raw request always runs alone, no prefix cache). Fixed: a
+row/token count mismatch or a token id past the vocabulary is an error rather than a short result or a panic, and a
+non-finite score an error rather than a null that reads like the first token's; the log-probabilities come from tensor
+ops, so the full logits are copied out only when asked for; an unloaded model gets "reload it first" and `default`
+means the default model; the ABI nulls `*out_blob` on entry and refuses a missing one before the forward pass. Known
+limits: logits past 2 GiB overflow C#'s byte arrays (about 3.5k tokens at a 152k vocabulary), and adapter aliases
+don't route scoring as they route completions.
+
+Tests: `a_prompt_is_scored_by_log_probabilities_and_its_logits_agree` (FFI: log-softmax of the logits blob equals the
+scores), the C# and Python equivalents, `each_token_is_scored_by_the_row_before_it`,
+`a_token_outside_the_vocabulary_is_an_error`.

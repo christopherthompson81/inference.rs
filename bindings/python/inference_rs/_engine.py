@@ -1,3 +1,4 @@
+import array
 import ctypes
 import json
 import weakref
@@ -422,6 +423,24 @@ class JsonEngine:
 
     def delete_session(self, session_id: str) -> str:
         return self._call("inference_session_delete", session_id)
+
+    def prompt_logits(self, request_json: str) -> tuple[str, array.array | None]:
+        """Scores a prompt: the response JSON, and with "output": "logits" its row-major f32 logits."""
+        data = text_arg(request_json)
+        response, blob = ctypes.c_void_p(), ctypes.c_void_p()
+        with Lease(self._handle) as engine:
+            check(
+                lib.inference_prompt_logits(
+                    engine, data, len(data), ctypes.byref(response), ctypes.byref(blob)
+                ),
+                "inference_prompt_logits",
+            )
+        scores = take_string(response)
+        if not blob.value:
+            return scores, None
+        logits = array.array("f")
+        logits.frombytes(take_blob(blob).data)
+        return scores, logits
 
     def tokenize(self, request_json: str) -> str:
         return self._call("inference_tokenize", request_json)

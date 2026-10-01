@@ -189,6 +189,13 @@ internal static class Program
         // The tiny tokenizer has no decoder, so its word-boundary markers come back as they are.
         var text = ((string?)JsonNode.Parse(engine.Detokenize(detokenize))!["text"])?.Replace('\u2581', ' ');
         Check("detokenizing tokens gives the text back", text == "Reply with ok");
+        var (scored, noLogits) = engine.PromptLogits("""{"prompt": "Reply with ok"}""");
+        var logprobs = JsonNode.Parse(scored)!["token_logprobs"]!.AsArray();
+        Check("a scored prompt has a log-probability per token", logprobs.Count > 1 && logprobs[0] is null && noLogits is null);
+        var withLogits = new JsonObject { ["prompt"] = tokens.DeepClone(), ["output"] = "logits" }.ToJsonString();
+        var (scoredAgain, logits) = engine.PromptLogits(withLogits);
+        var vocab = (int)JsonNode.Parse(scoredAgain)!["vocab_size"]!;
+        Check("a scored prompt's logits are tokens times vocab", logits?.Length == tokens.AsArray().Count * vocab);
 
         const string session = """{"messages": [{"role": {"Left": "user"}, "content": {"Left": "hi"}}]}""";
         Check("a session is imported", (string?)JsonNode.Parse(engine.PutSession("cs-session", session))!["id"] == "cs-session");

@@ -340,6 +340,21 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Text(status, response, nameof(NativeMethods.inference_session_delete));
     }
 
+    /// <summary>Scores a prompt: each token's log-probability, and its row-major logits when asked for.</summary>
+    public (string Scores, float[]? Logits) PromptLogits(string requestJson)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_prompt_logits(
+            engine.Handle, request.Pointer, request.Length, out var response, out var blob);
+        var scores = Text(status, response, nameof(NativeMethods.inference_prompt_logits));
+        if (blob == IntPtr.Zero) return (scores, null);
+        var bytes = Owned.TakeBlob(blob).Data;
+        var logits = new float[bytes.Length / sizeof(float)];
+        Buffer.BlockCopy(bytes, 0, logits, 0, bytes.Length);
+        return (scores, logits);
+    }
+
     public string Tokenize(string requestJson)
     {
         using var engine = Borrow();

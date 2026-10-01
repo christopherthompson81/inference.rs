@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 16
+#define INFERENCE_ABI_VERSION_PATCH 17
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -394,6 +394,16 @@ INFERENCE_API inference_status inference_lora_adapter_unload(const inference_eng
  * inference_file_content. */
 INFERENCE_API inference_status inference_image_generation(const inference_engine *engine, const char *request,
                                                          size_t request_len, inference_string **out_response);
+/* Scores a prompt in one forward pass. The request is {"model"?, "prompt": text | [token ids], "output"?:
+ * "logprobs" | "logits"}; text is tokenized with the model's special tokens. out_response receives {"tokens",
+ * "vocab_size", "token_logprobs"}, token_logprobs[i] being log p(tokens[i] | tokens[..i]) and null for the first token.
+ * With "output": "logits", out_blob (then required) receives tokens * vocab_size little-endian f32 values, row-major,
+ * MIME "application/x-f32le", and a NULL out_blob is INFERENCE_ERR_INVALID_ARGUMENT; otherwise *out_blob is set NULL
+ * when out_blob is given. The prompt must fit the model's context; a model that isn't a text or multimodal one, a
+ * one-token prompt or one past the context is INFERENCE_ERR_INVALID_REQUEST. */
+INFERENCE_API inference_status inference_prompt_logits(const inference_engine *engine, const char *request,
+                                                      size_t request_len, inference_string **out_response,
+                                                      inference_blob **out_blob);
 /* Speaks text with a speech model (the POST /v1/audio/speech body; "response_format" is "wav" or "pcm"). out_blob
  * receives the encoded audio; its MIME type carries the sample rate and channel count, e.g.
  * "audio/pcm; codecs=1; format=s16le; rate=44100; channels=1". */

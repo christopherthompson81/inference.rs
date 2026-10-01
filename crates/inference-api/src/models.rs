@@ -109,7 +109,7 @@ fn known_model(state: &SharedInferenceRsState, model_id: &str) -> Result<(), Api
 }
 
 // Removing a model or making it the default needs it running; an unloaded one is reloaded first.
-fn loaded_model(state: &SharedInferenceRsState, model_id: &str) -> Result<(), ApiError> {
+pub(crate) fn loaded_model(state: &SharedInferenceRsState, model_id: &str) -> Result<(), ApiError> {
     known_model(state, model_id)?;
     match state.is_model_loaded(model_id) {
         Ok(true) => Ok(()),

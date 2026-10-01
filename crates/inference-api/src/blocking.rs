@@ -225,6 +225,15 @@ impl BlockingEngine {
         })
     }
 
+    pub fn prompt_logits_json(
+        &self,
+        request: &[u8],
+    ) -> Result<(String, Option<Vec<f32>>), ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.prompt_logits_json(&request).await
+        })
+    }
+
     pub fn re_isq_json(&self, request: &[u8]) -> Result<String, ApiError> {
         self.call(request, |engine, request| async move {
             engine.re_isq_json(&request).await
