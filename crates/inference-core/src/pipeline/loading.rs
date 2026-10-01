@@ -298,6 +298,7 @@ pub(crate) fn resolve_map_setting(
 /// The load-time metadata every model constructor receives, less its mapper and rope pairing.
 pub(crate) struct LoadMetadataParts {
     pub loading_isq: bool,
+    pub attention: inference_nn::paged_attention::AttentionImplementation,
     pub device: Device,
     pub multi_progress: Arc<indicatif::MultiProgress>,
     pub matformer: Option<MatformerSliceConfig>,
@@ -318,6 +319,109 @@ impl LoadMetadataParts {
             rope_pairing,
         }
     }
+}
+
+type DeviceForTensor = Arc<
+    dyn Fn(String) -> crate::utils::varbuilder_utils::DeviceForLoadTensor + Send + Sync + 'static,
+>;
+
+/// The files a model's weights load from and where they land; every branch of a pipeline's load shares them.
+pub(crate) struct WeightFiles<'a> {
+    pub paths: &'a dyn crate::ModelPaths,
+    pub dtype: DType,
+    pub device: &'a Device,
+    pub layer_devices: Vec<Option<Device>>,
+    pub silent: bool,
+    pub uqff_reader: Option<Arc<UqffReader>>,
+}
+
+impl WeightFiles<'_> {
+    /// The model's weights; the `placeholders` layers get dummy weights, for a UQFF load to fill.
+    pub fn load(
+        &self,
+        placeholders: Option<Vec<regex::Regex>>,
+        device_for_tensor: DeviceForTensor,
+    ) -> Result<inference_quant::ShardedVarBuilder> {
+        let files = self.paths.get_weight_filenames().to_vec();
+        self.load_files(files, Vec::new(), placeholders, device_for_tensor)
+    }
+
+    /// An X-LoRA model's weights: the model's, its classifier's and its adapters'.
+    pub fn load_xlora(
+        &self,
+        device_for_tensor: DeviceForTensor,
+    ) -> Result<inference_quant::ShardedVarBuilder> {
+        let super::AdapterPaths::XLora {
+            adapter_safetensors,
+            classifier_path,
+            ..
+        } = self.paths.get_adapter_paths()
+        else {
+            unreachable!("X-LoRA loaders require resolved X-LoRA adapter paths")
+        };
+        let classifier = classifier_path
+            .clone()
+            .expect("X-LoRA adapters name a classifier");
+        let mut files = self.paths.get_weight_filenames().to_vec();
+        files.push(classifier);
+        let adapters = adapter_safetensors
+            .iter()
+            .flatten()
+            .map(|(_, path)| path.clone())
+            .collect();
+        self.load_files(files, adapters, None, device_for_tensor)
+    }
+
+    fn load_files(
+        &self,
+        files: Vec<PathBuf>,
+        adapter_files: Vec<PathBuf>,
+        placeholders: Option<Vec<regex::Regex>>,
+        device_for_tensor: DeviceForTensor,
+    ) -> Result<inference_quant::ShardedVarBuilder> {
+        let vb = crate::utils::varbuilder_utils::from_mmaped_safetensors(
+            files,
+            adapter_files,
+            Some(self.dtype),
+            self.device,
+            self.layer_devices.clone(),
+            self.silent,
+            placeholders.map(Arc::new),
+            |_| true,
+            device_for_tensor,
+        )?;
+        Ok(with_uqff(vb, self.uqff_reader.clone()))
+    }
+}
+
+/// `vb` reading quantized layers from `uqff_reader`, when there is one.
+pub(crate) fn with_uqff(
+    vb: inference_quant::ShardedVarBuilder,
+    uqff_reader: Option<Arc<UqffReader>>,
+) -> inference_quant::ShardedVarBuilder {
+    match uqff_reader {
+        Some(reader) => vb.with_uqff_reader(reader),
+        None => vb,
+    }
+}
+
+/// The ISQ layers a UQFF load fills (MoQE's expert layers with `moqe`); `None` unless loading both.
+pub(crate) fn uqff_placeholders(
+    loader: &dyn super::isq::IsqModelLoader,
+    config: &str,
+    loading_isq: bool,
+    from_uqff: bool,
+    moqe: bool,
+) -> Result<Option<Vec<regex::Regex>>> {
+    if !(loading_isq && from_uqff) {
+        return Ok(None);
+    }
+    let layers = if moqe {
+        loader.isq_layer_regexes_moqe(config)?
+    } else {
+        loader.isq_layer_regexes(config)?
+    };
+    Ok(Some(layers))
 }
 
 #[cfg(test)]

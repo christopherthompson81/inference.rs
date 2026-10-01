@@ -22,13 +22,12 @@ use inference_models_diffusion::flux::{
     },
 };
 
-use crate::{
-    api_dir_list, api_get_file,
-    pipeline::{EmbeddingModulePaths, hf, paths::AdapterPaths},
-};
+use crate::pipeline::{EmbeddingModulePaths, hf, paths::AdapterPaths};
 
 const AE_FILE: &str = "ae.safetensors";
 const CLIP_L_FILE: &str = "clip_l.safetensors";
+const FLUX_WEIGHTS_MISSING: &str =
+    "Expected at least 1 .safetensors file matching the FLUX regex, please raise an issue.";
 const FLUX_SAFETENSORS_PATTERN: &str = r"^flux\d+-(schnell|dev)\.safetensors$";
 const FLUX_GGUF_PATTERN: &str = r"^flux\d+-(dev|schnell).*\.gguf$";
 const T5_GGUF_PATTERN: &str = r"^t5.*\.gguf$";
@@ -250,12 +249,12 @@ impl DiffusionModelLoader for FluxLoader {
         revision: &str,
     ) -> Result<Vec<PathBuf>> {
         let regex = Regex::new(FLUX_SAFETENSORS_PATTERN)?;
-        let flux_name = api_dir_list!(api, model_id, true, revision)
-            .filter(|x| regex.is_match(x))
-            .nth(0)
-            .with_context(|| "Expected at least 1 .safetensors file matching the FLUX regex, please raise an issue.")?;
-        let flux_file = api_get_file!(api, &flux_name, model_id, revision);
-        let ae_file = api_get_file!(api, "ae.safetensors", model_id, revision);
+        let flux_name = crate::pipeline::hf::list_repo_files(api, model_id, true, revision)?
+            .into_iter()
+            .find(|x| regex.is_match(x))
+            .context(FLUX_WEIGHTS_MISSING)?;
+        let flux_file = crate::pipeline::hf::get_file(api, model_id, &flux_name, revision)?;
+        let ae_file = crate::pipeline::hf::get_file(api, model_id, "ae.safetensors", revision)?;
 
         // NOTE(EricLBuehler): disgusting way of doing this but the 0th path is the flux, 1 is ae
         Ok(vec![flux_file, ae_file])
@@ -266,8 +265,9 @@ impl DiffusionModelLoader for FluxLoader {
         model_id: &Path,
         revision: &str,
     ) -> Result<Vec<PathBuf>> {
-        let flux_file = api_get_file!(api, "transformer/config.json", model_id, revision);
-        let ae_file = api_get_file!(api, "vae/config.json", model_id, revision);
+        let flux_file =
+            crate::pipeline::hf::get_file(api, model_id, "transformer/config.json", revision)?;
+        let ae_file = crate::pipeline::hf::get_file(api, model_id, "vae/config.json", revision)?;
 
         // NOTE(EricLBuehler): disgusting way of doing this but the 0th path is the flux, 1 is ae
         Ok(vec![flux_file, ae_file])

@@ -2,7 +2,7 @@ use super::isq::{UqffFullSer, UqffWriteConfig, WeightLoadingMode, WeightLoadingS
 use super::{
     AnyMoePipelineMixin, CacheManagerMixin, EitherCache, ForwardInputsResult, GeneralMetadata,
     IsqPipelineMixin, Loader, MetadataMixin, ModelCategory, ModelKind, ModelPaths,
-    PreProcessingMixin, TokenSource, get_model_paths,
+    PreProcessingMixin, TokenSource,
 };
 use crate::Modalities;
 use crate::SupportedModality;
@@ -11,9 +11,6 @@ use crate::device_map::DeviceMapper;
 use crate::distributed;
 use crate::embedding_models::inputs_processor::{EmbeddingProcessor, ModelInputs};
 use crate::embedding_models::{Dense, DenseActivation, Normalize, Pooling};
-use crate::embedding_normal_model_loader;
-use crate::embedding_normal_model_loader_sharded;
-use crate::get_embedding_paths;
 use crate::paged_attention::AttentionImplementation;
 use crate::pipeline::EmbeddingLoaderType;
 use crate::pipeline::EmbeddingModel;
@@ -21,16 +18,12 @@ use crate::pipeline::EmbeddingModelLoader;
 use crate::pipeline::sampling::sample_and_add_toks;
 use crate::pipeline::tokenizer::get_tokenizer;
 use crate::pipeline::{AutoEmbeddingLoader, EmbeddingModulePaths};
-use crate::pipeline::{ChatTemplate, EmbeddingModelPaths, IsqOrganization, Processor};
+use crate::pipeline::{ChatTemplate, IsqOrganization, Processor};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
-use crate::utils::{
-    progress::{ProgressScopeGuard, new_multi_progress},
-    varbuilder_utils::from_mmaped_safetensors,
-};
+use crate::utils::progress::{ProgressScopeGuard, new_multi_progress};
 use crate::{
     DeviceMapSetting, GLOBAL_HF_CACHE, PagedAttentionConfig, Pipeline, Topology, TryIntoDType,
-    get_uqff_paths,
 };
 use anyhow::Context;
 use anyhow::Result;
@@ -38,14 +31,12 @@ use candle_core::{Device, Tensor};
 use candle_nn::{Linear, Module};
 use futures::future::BoxFuture;
 use hf_hub::Cache;
-use hf_hub::{Repo, RepoType};
 use inference_quant::IsqType;
 use inference_quant::log::once_log_info;
 use inference_quant::safetensors::MmapedSafetensors;
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
-use std::path::{Path, PathBuf};
-use std::str::FromStr;
+use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
@@ -72,8 +63,6 @@ pub struct EmbeddingLoader {
     config: EmbeddingSpecificConfig,
     kind: ModelKind,
     tokenizer_json: Option<String>,
-    token_source: RwLock<Option<TokenSource>>,
-    revision: RwLock<Option<String>>,
     from_uqff: RwLock<Option<Vec<PathBuf>>>,
     hf_cache_path: Option<PathBuf>,
     load_context: EmbeddingLoadContext,
@@ -155,8 +144,6 @@ impl EmbeddingLoaderBuilder {
             config: self.config,
             kind: self.kind,
             tokenizer_json: self.tokenizer_json,
-            token_source: RwLock::new(None),
-            revision: RwLock::new(None),
             from_uqff: RwLock::new(None),
             hf_cache_path: self.hf_cache_path,
             load_context: self.load_context,
@@ -185,26 +172,29 @@ impl Loader for EmbeddingLoader {
             .unwrap_or_default();
         GLOBAL_HF_CACHE.get_or_init(|| cache);
 
-        let paths: anyhow::Result<Box<dyn ModelPaths>> = get_embedding_paths!(
-            EmbeddingModelPaths,
-            &token_source,
-            revision.clone(),
-            self,
-            None,
-            None,
+        let paths = super::paths::get_embedding_paths(super::paths::PathsRequest {
+            model_id: &self.model_id,
+            tokenizer_json: self.tokenizer_json.as_deref(),
+            chat_template: None,
+            token_source: &token_source,
+            revision: revision.clone(),
+            quantized_model_id: None,
+            quantized_filenames: None,
             silent,
-            self.config.from_uqff.is_some()
-        );
-        *self
-            .token_source
-            .write()
-            .expect("Failed to write to token source") = Some(token_source);
-        *self.revision.write().expect("Failed to write to revision") = revision.clone();
-        if let Some(from_uqff) = self.config.from_uqff.clone() {
-            *self.from_uqff.write().unwrap() = Some(get_uqff_paths!(&from_uqff, self, silent));
+            loading_uqff: self.config.from_uqff.is_some(),
+        });
+        if let Some(from_uqff) = self.config.from_uqff.as_ref() {
+            let files = super::paths::get_uqff_paths(
+                from_uqff,
+                &self.model_id,
+                &token_source,
+                revision.clone(),
+                silent,
+            )?;
+            *self.from_uqff.write().unwrap() = Some(files);
         }
         self.load_model_from_path(
-            paths?.as_ref(),
+            &paths?,
             dtype,
             device,
             silent,
@@ -393,6 +383,13 @@ impl Loader for EmbeddingLoader {
             .message(self.load_context.weight_target())
         );
 
+        let load_parts = super::loading::LoadMetadataParts {
+            loading_isq,
+            attention: attention_mechanism,
+            device: device.clone(),
+            multi_progress: multi_progress.clone(),
+            matformer: None,
+        };
         let (model, tracker) = if use_distributed {
             let (mapper, sharded_vb) =
                 distributed::prepare_distributed_mapper(distributed::DistributedMapperConfig {
@@ -417,37 +414,49 @@ impl Loader for EmbeddingLoader {
 
             // Special case for where things can be more optimially loaded.
             match self.kind {
-                ModelKind::Normal => embedding_normal_model_loader_sharded!(
-                    sharded_vb,
-                    config,
-                    self.inner,
-                    mapper,
-                    loading_isq,
-                    device.clone(),
-                    attention_mechanism,
-                    multi_progress.clone(),
-                    uqff_reader.clone(),
-                ),
+                ModelKind::Normal => {
+                    let tracker = sharded_vb.tracker().clone();
+                    let model = self.inner.load(
+                        &config,
+                        sharded_vb,
+                        load_parts.metadata(mapper, None),
+                        attention_mechanism,
+                    )?;
+                    (model, tracker)
+                }
                 _ => unreachable!(),
             }
         } else {
             match self.kind {
-                ModelKind::Normal => embedding_normal_model_loader!(
-                    paths,
-                    Some(dtype),
-                    &load_device,
-                    layer_devices.clone(),
-                    config,
-                    self.inner,
-                    silent,
-                    mapper,
-                    loading_isq,
-                    self.config.from_uqff.is_some(),
-                    device.clone(),
-                    attention_mechanism,
-                    multi_progress,
-                    uqff_reader.clone(),
-                ),
+                ModelKind::Normal => {
+                    let weights = super::loading::WeightFiles {
+                        paths,
+                        dtype,
+                        device: &load_device,
+                        layer_devices: layer_devices.clone(),
+                        silent,
+                        uqff_reader: uqff_reader.clone(),
+                    };
+                    let placeholders = super::loading::uqff_placeholders(
+                        &*self.inner,
+                        &config,
+                        loading_isq,
+                        self.config.from_uqff.is_some(),
+                        false,
+                    )?;
+                    let device_for_tensor =
+                        self.inner
+                            .get_device_for_tensor(&config, &*mapper, loading_isq)?;
+                    let vb = weights.load(placeholders, device_for_tensor)?;
+                    let tracker = vb.tracker().clone();
+                    let model = self.inner.load(
+                        &config,
+                        vb,
+                        load_parts.metadata(mapper, None),
+                        attention_mechanism,
+                    )?;
+                    (model, tracker)
+                }
                 _ => unreachable!(),
             }
         };

@@ -24,7 +24,6 @@ use crate::{
     DeviceMapSetting, Loader, ModelCategory, ModelKind, ModelPaths, PagedAttentionConfig, Pipeline,
     Response, TokenSource, TryIntoDType,
     amoe::{AnyMoeConfig, AnyMoeTrainingInputRow, AnyMoeTrainingInputs, AnyMoeTrainingResult},
-    api_dir_list, api_get_file,
     device_map::DeviceMapper,
     get_mut_arcmutex,
     pipeline::hf::build_api,
@@ -808,9 +807,20 @@ fn repo_safetensors(
     ));
     let mut filenames = vec![];
     for rfilename in
-        api_dir_list!(api, model_id, true, &revision).filter(|x| x.ends_with(".safetensors"))
+        crate::pipeline::hf::list_repo_files(&api, std::path::Path::new(model_id), true, &revision)
+            .map_err(candle_core::Error::msg)?
+            .into_iter()
+            .filter(|x| x.ends_with(".safetensors"))
     {
-        filenames.push(api_get_file!(api, &rfilename, model_id, &revision));
+        filenames.push(
+            crate::pipeline::hf::get_file(
+                &api,
+                std::path::Path::new(model_id),
+                &rfilename,
+                &revision,
+            )
+            .map_err(candle_core::Error::msg)?,
+        );
     }
     Ok(filenames)
 }

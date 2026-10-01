@@ -26,7 +26,6 @@ pub use isq_flow::CalibrationStatus;
 pub(crate) mod llg;
 mod loaders;
 mod loading;
-mod macros;
 pub(crate) mod model_config;
 mod multimodal;
 mod normal;
@@ -166,9 +165,7 @@ fn finish_dynamic_lora_runtime(
 use inference_quant::IsqType;
 pub use multimodal::{MultimodalLoader, MultimodalLoaderBuilder, MultimodalSpecificConfig};
 pub use normal::{NormalLoader, NormalLoaderBuilder, NormalSpecificConfig};
-pub(crate) use paths::{
-    AdapterPathOptions, XLoraPreload, get_adapter_paths, get_chat_template, get_model_paths,
-};
+pub(crate) use paths::{AdapterPathOptions, XLoraPreload, get_chat_template};
 pub use paths::{AdapterPaths, ResolvedLoraAdapter};
 #[cfg(feature = "models-llama")]
 pub(crate) use processing::apply_chat_template;

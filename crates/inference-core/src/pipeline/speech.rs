@@ -16,7 +16,7 @@ use crate::utils::varbuilder_utils::DeviceForLoadTensor;
 use crate::utils::varbuilder_utils::from_mmaped_safetensors;
 use crate::{
     DeviceMapSetting, MessageContent, PagedAttentionConfig, Pipeline, SpeechGenerationConfig,
-    TryIntoDType, api_get_file, distributed,
+    TryIntoDType, distributed,
 };
 use anyhow::Result;
 use candle_core::{Device, Tensor};
@@ -221,8 +221,10 @@ impl Loader for SpeechLoader {
                 ));
                 let model_id = std::path::Path::new(&self.model_id);
 
-                let weight = api_get_file!(api, "model.safetensors", &model_id, &revision);
-                let config = api_get_file!(api, "config.json", &model_id, &revision);
+                let weight =
+                    crate::pipeline::hf::get_file(&api, model_id, "model.safetensors", &revision)?;
+                let config =
+                    crate::pipeline::hf::get_file(&api, model_id, "config.json", &revision)?;
                 weights.push(weight);
                 config
             };
@@ -250,7 +252,8 @@ impl Loader for SpeechLoader {
                 ));
                 let model_id = std::path::Path::new(&dac_model);
 
-                let weight = api_get_file!(api, "model.safetensors", &model_id, &revision);
+                let weight =
+                    crate::pipeline::hf::get_file(&api, model_id, "model.safetensors", &revision)?;
                 weights.push(weight);
             }
 

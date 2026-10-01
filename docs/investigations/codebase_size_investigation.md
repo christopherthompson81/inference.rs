@@ -624,3 +624,33 @@ Sweep corrections: `scripts/convert` and `testgen` were reported unreferenced, b
 features (AWQ to Marlin, GPTQ conversion, X-LoRA ordering, the NVFP4 fixture fetch a quant test names), so they stay;
 `[models.format] direct_file_only` is `#[serde(skip)]`, not a TOML key. Left: `inference-sandbox/tests/linux.rs`
 creates a per-process temp dir it never removes.
+
+## Run 20 - 2026-09-30 (time approximate)
+
+Question: Run 18's first build-time item, core's pipeline duplication. How much of it is the `pipeline/macros.rs`
+macros, which expand fresh code at every call site?
+
+Change: `macros.rs` (1,127 lines) is gone. Its path-lookup macros (`get_paths!`, `get_embedding_paths!`,
+`get_paths_gguf!`, `get_uqff_paths!`) become functions in `pipeline/paths.rs` over a `RepoFiles` (one repository at one
+revision: its listing and a fetch), with `PathsRequest`/`GgufPathsRequest` carrying the loader's fields; every branch
+keeps its old order (tokenizer.json over tekken.json, params.json over config.json for safetensors and the reverse for
+GGUF, the `.jinja` template fetching `tokenizer_config.json` beside it). The model-loader macros
+(`normal_model_loader!`, `multimodal_normal_model_loader!`, the `_sharded` and embedding variants, `xlora_model_loader!`,
+`lora_model_loader!`) become `loading::WeightFiles` (files, dtype, device, layer devices, UQFF reader, shared by every
+branch of a load) with `load`/`load_xlora`, `loading::uqff_placeholders`, and per-pipeline `load_from_files`,
+`load_with_dynamic_lora` and (normal) `load_xlora` methods; the existing `LoadMetadataParts::metadata` and
+`finish_dynamic_lora_runtime` replace the macros' inline copies. `api_get_file!`/`api_dir_list!` become direct
+`hf::get_file`/`hf::list_repo_files` calls. One behavior detail: the multimodal distributed path attached the UQFF
+reader twice (once after the sharded mapper, again inside the macro); it now attaches it once.
+
+Raw finding: `cargo llvm-lines --lib -p inference-core` 1,599,227 -> 1,571,814 (-27.4k, -1.7%).
+
+Implication: the macro expansions were a small share of core; the larger duplication is the normal vs multimodal
+pipeline bodies themselves (mixins, CUDA-graph driver, `load_model_from_path`), the next item.
+
+Review: no regression on a real load path. Kept from it: X-LoRA's missing classifier or config fail before loading
+again (the first version skipped a missing classifier and failed inside the model); the generation and processor
+configs fetch in the macros' order again (`ProcessorConfigs`), so the first failing download is the same; the loaders'
+`token_source`/`revision` locks lost their only reader (`get_uqff_paths!`) and are gone; the attention mode moves into
+`LoadMetadataParts` so the new methods stay under six arguments. Trace wording changed slightly (the "(Mistral
+tokenizer)" notes), and `hf` errors now keep their anyhow chain instead of a flattened candle message.
