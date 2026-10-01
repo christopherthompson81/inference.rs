@@ -1,17 +1,13 @@
 //! The image generation route: HTTP framing over the engine's image generation.
 
-use axum::{
-    extract::{OriginalUri, State},
-    response::Response,
-};
+use axum::{extract::OriginalUri, response::Response};
 
 use crate::handler_core::{ApiJson, ApiJsonRejection};
 use crate::{
-    generation::generate_image,
     handler_core::{json_response, openai_error_response},
     openai::ImageGenerationRequest,
     route_registry::IMAGE_GENERATION_ROUTE,
-    types::ExtractedInferenceRsState,
+    types::OwnedEngine,
 };
 
 /// Image generation endpoint handler.
@@ -23,8 +19,7 @@ use crate::{
     responses((status = 200, description = "Image generation", body = inference_core::ImageGenerationResponse))
 ))]
 pub async fn image_generation(
-    State(state): ExtractedInferenceRsState,
-    axum::Extension(owner): axum::Extension<crate::auth::Owner>,
+    OwnedEngine(engine): OwnedEngine,
     OriginalUri(uri): OriginalUri,
     payload: Result<ApiJson<ImageGenerationRequest>, ApiJsonRejection>,
 ) -> Response {
@@ -33,20 +28,16 @@ pub async fn image_generation(
         Err(ApiJsonRejection(error)) => return openai_error_response(error),
     };
     let prefix = router_prefix(uri.path());
-    json_response(
-        generate_image(&state, request, owner.as_deref())
-            .await
-            .map(|mut response| {
-                for url in response
-                    .data
-                    .iter_mut()
-                    .filter_map(|choice| choice.url.as_mut())
-                {
-                    url.insert_str(0, prefix);
-                }
-                response
-            }),
-    )
+    json_response(engine.image_generation(request).await.map(|mut response| {
+        for url in response
+            .data
+            .iter_mut()
+            .filter_map(|choice| choice.url.as_mut())
+        {
+            url.insert_str(0, prefix);
+        }
+        response
+    }))
 }
 
 // File-store urls are relative to this router, which a host app may have nested under a prefix.

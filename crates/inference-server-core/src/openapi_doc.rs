@@ -55,7 +55,6 @@ mod generated {
             __path_model_cache_stats, __path_models, __path_put_session, __path_re_isq,
             __path_reload_model, __path_system_doctor, __path_system_info, __path_tune_model,
             __path_unload_model, ModelOperationRequest, ModelStatus, ModelStatusResponse,
-            TuneModelRequest, TuneProfileRequest,
         },
         image_generation::__path_image_generation,
         lora_adapters::{
@@ -93,6 +92,7 @@ mod generated {
             SkillListQuery, SkillObject, SkillVersionObject,
         },
         speech_generation::__path_speech_generation,
+        system::{TuneModelRequest, TuneProfileRequest},
     };
     use inference_api::operations::{CalibrationApplyRequest, ReIsqRequest, ReIsqResponse};
     use inference_core::{

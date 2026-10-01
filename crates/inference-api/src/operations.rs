@@ -208,6 +208,27 @@ pub fn import_session(
         })
 }
 
+/// Copies `src_session_id`'s first `num_turns` turns into a new session `session_id`, so the two diverge from there.
+pub fn fork_session(
+    state: &SharedInferenceRsState,
+    src_session_id: &str,
+    session_id: String,
+    num_turns: usize,
+    owner: Option<&str>,
+) -> Result<(), ApiError> {
+    state
+        .fork_session(None, src_session_id, session_id, num_turns, owner)
+        .map_err(|error| match error {
+            InferenceRsError::Other(message) => ApiError::new(
+                ApiErrorKind::InvalidRequest,
+                message,
+                Some(INVALID_SESSION),
+                Some("src_session_id"),
+            ),
+            error => engine_error(error),
+        })
+}
+
 pub fn delete_session(
     state: &SharedInferenceRsState,
     session_id: &str,

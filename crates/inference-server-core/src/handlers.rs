@@ -2,54 +2,24 @@
 
 #[cfg(test)]
 use crate::openai::ModelObjects;
-use axum::Extension;
-use axum::extract::{Json, Path, State};
+use axum::extract::{Json, Path};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 #[cfg(test)]
 use inference_api::operations::ReIsqResponse;
-use inference_api::operations::{self, CalibrationApplyRequest, ReIsqRequest};
-use inference_api::request_body::{JsonRequest, parse_json};
-use inference_core::{
-    AutoDeviceMapParams, CalibrationAction, InferenceRs, ModelDType, SerializedSession,
-    TokenSource, parse_isq_value,
-};
-use inference_selection::{AutoTuneRequest, ModelSelected, TuneProfile, auto_tune};
-use serde::{Deserialize, Serialize};
-use utoipa::ToSchema;
+use inference_api::operations::{CalibrationApplyRequest, ReIsqRequest};
+use inference_api::system::TuneModelRequest;
+use inference_core::{CalibrationAction, SerializedSession};
 
-use crate::auth::Owner;
 use crate::handler_core::{ApiJson, ApiJsonRejection};
 pub use crate::models_api::ModelOperationRequest;
 #[cfg(test)]
 pub use crate::models_api::{ModelStatus, ModelStatusResponse};
 use crate::{
-    handler_core::{ApiError, ApiErrorKind, json_response, openai_error_response},
-    models_api::{
-        cache_stats, list_models, model_status as status, reload_model as reload,
-        unload_model as unload,
-    },
+    handler_core::{ApiError, json_response, openai_error_response},
     system,
-    types::ExtractedInferenceRsState,
+    types::OwnedEngine,
 };
-
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, ToSchema)]
-#[serde(rename_all = "kebab-case")]
-pub enum TuneProfileRequest {
-    Quality,
-    Balanced,
-    Fast,
-}
-
-impl From<TuneProfileRequest> for TuneProfile {
-    fn from(value: TuneProfileRequest) -> Self {
-        match value {
-            TuneProfileRequest::Quality => TuneProfile::Quality,
-            TuneProfileRequest::Balanced => TuneProfile::Balanced,
-            TuneProfileRequest::Fast => TuneProfile::Fast,
-        }
-    }
-}
 
 #[cfg_attr(test, utoipa::path(
   get,
@@ -60,8 +30,8 @@ impl From<TuneProfileRequest> for TuneProfile {
     (status = 500, description = "Failed to inspect the model registry")
   )
 ))]
-pub async fn models(State(state): ExtractedInferenceRsState) -> Response {
-    json_response(list_models(&state))
+pub async fn models(OwnedEngine(engine): OwnedEngine) -> Response {
+    json_response(engine.models())
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -74,8 +44,8 @@ pub async fn models(State(state): ExtractedInferenceRsState) -> Response {
     (status = 500, description = "Failed to inspect the model registry")
   )
 ))]
-pub async fn model_cache_stats(State(state): ExtractedInferenceRsState) -> Response {
-    json_response(cache_stats(&state))
+pub async fn model_cache_stats(OwnedEngine(engine): OwnedEngine) -> Response {
+    json_response(engine.cache_stats())
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -120,15 +90,14 @@ pub async fn system_doctor() -> Json<inference_selection::DoctorReport> {
   )
 ))]
 pub async fn re_isq(
-    State(state): ExtractedInferenceRsState,
+    OwnedEngine(engine): OwnedEngine,
     payload: Result<ApiJson<ReIsqRequest>, ApiJsonRejection>,
 ) -> Response {
     let request = match payload {
         Ok(ApiJson(request)) => request,
         Err(ApiJsonRejection(error)) => return openai_error_response(error),
     };
-    InferenceRs::maybe_log_request(state.clone(), format!("Re ISQ: {:?}", request.ggml_type));
-    json_response(operations::re_isq(&state, request).await)
+    json_response(engine.re_isq(request).await)
 }
 
 // remote clients only get a bare file name so the write can't leave the working directory
@@ -153,9 +122,8 @@ fn http_save_cimatrix_path(name: &str) -> Result<std::path::PathBuf, ApiError> {
   path = "/calibration/start",
   responses((status = 200, description = "Begin collecting activation statistics from live traffic.", body = inference_core::CalibrationStatus))
 ))]
-pub async fn calibration_start(State(state): ExtractedInferenceRsState) -> Response {
-    InferenceRs::maybe_log_request(state.clone(), "Calibration start".to_string());
-    json_response(operations::calibration(&state, CalibrationAction::Start).await)
+pub async fn calibration_start(OwnedEngine(engine): OwnedEngine) -> Response {
+    json_response(engine.calibration(CalibrationAction::Start).await)
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -164,8 +132,8 @@ pub async fn calibration_start(State(state): ExtractedInferenceRsState) -> Respo
   path = "/calibration/status",
   responses((status = 200, description = "Per-layer calibration collection progress.", body = inference_core::CalibrationStatus))
 ))]
-pub async fn calibration_status(State(state): ExtractedInferenceRsState) -> Response {
-    json_response(operations::calibration(&state, CalibrationAction::Status).await)
+pub async fn calibration_status(OwnedEngine(engine): OwnedEngine) -> Response {
+    json_response(engine.calibration(CalibrationAction::Status).await)
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -176,7 +144,7 @@ pub async fn calibration_status(State(state): ExtractedInferenceRsState) -> Resp
   responses((status = 200, description = "Requantize with collected statistics and hot-swap the layers.", body = inference_core::CalibrationStatus))
 ))]
 pub async fn calibration_apply(
-    State(state): ExtractedInferenceRsState,
+    OwnedEngine(engine): OwnedEngine,
     payload: Result<ApiJson<CalibrationApplyRequest>, ApiJsonRejection>,
 ) -> Response {
     let request = match payload {
@@ -192,8 +160,11 @@ pub async fn calibration_apply(
         Ok(path) => path,
         Err(error) => return openai_error_response(error),
     };
-    InferenceRs::maybe_log_request(state.clone(), "Calibration apply".to_string());
-    json_response(operations::calibration(&state, CalibrationAction::Apply { save_cimatrix }).await)
+    json_response(
+        engine
+            .calibration(CalibrationAction::Apply { save_cimatrix })
+            .await,
+    )
 }
 
 fn model_operation_request(
@@ -220,11 +191,11 @@ fn model_operation_request(
   )
 ))]
 pub async fn unload_model(
-    State(state): ExtractedInferenceRsState,
+    OwnedEngine(engine): OwnedEngine,
     payload: Result<ApiJson<ModelOperationRequest>, ApiJsonRejection>,
 ) -> Response {
     match model_operation_request(payload) {
-        Ok(request) => json_response(unload(&state, request)),
+        Ok(request) => json_response(engine.unload_model(request)),
         Err(error) => openai_error_response(error),
     }
 }
@@ -245,11 +216,11 @@ pub async fn unload_model(
   )
 ))]
 pub async fn reload_model(
-    State(state): ExtractedInferenceRsState,
+    OwnedEngine(engine): OwnedEngine,
     payload: Result<ApiJson<ModelOperationRequest>, ApiJsonRejection>,
 ) -> Response {
     match model_operation_request(payload) {
-        Ok(request) => json_response(reload(&state, request).await),
+        Ok(request) => json_response(engine.reload_model(request).await),
         Err(error) => openai_error_response(error),
     }
 }
@@ -269,54 +240,12 @@ pub async fn reload_model(
   )
 ))]
 pub async fn get_model_status(
-    State(state): ExtractedInferenceRsState,
+    OwnedEngine(engine): OwnedEngine,
     payload: Result<ApiJson<ModelOperationRequest>, ApiJsonRejection>,
 ) -> Response {
     match model_operation_request(payload) {
-        Ok(request) => json_response(status(&state, request)),
+        Ok(request) => json_response(engine.model_status(request)),
         Err(error) => openai_error_response(error),
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
-pub struct TuneModelRequest {
-    #[schema(example = "meta-llama/Llama-3.2-3B-Instruct")]
-    pub model_id: String,
-    /// Optional model dtype (auto, f16, bf16, etc)
-    #[serde(default)]
-    pub dtype: Option<String>,
-    /// Optional max sequence length for tuning
-    #[serde(default)]
-    pub max_seq_len: Option<usize>,
-    /// Optional max batch size for tuning
-    #[serde(default)]
-    pub max_batch_size: Option<usize>,
-    /// Optional max num images (multimodal)
-    #[serde(default)]
-    pub max_num_images: Option<usize>,
-    /// Optional max image length (multimodal)
-    #[serde(default)]
-    pub max_image_length: Option<usize>,
-    /// Optional tuning profile
-    #[serde(default)]
-    pub profile: Option<TuneProfileRequest>,
-    /// Optional fixed ISQ level to test (e.g., Q4K)
-    #[serde(default)]
-    pub requested_isq: Option<String>,
-    /// Optional HF token source
-    #[serde(default)]
-    pub token_source: Option<String>,
-    /// Optional HF revision
-    #[serde(default)]
-    pub hf_revision: Option<String>,
-    /// Force CPU-only tuning
-    #[serde(default)]
-    pub cpu: Option<bool>,
-}
-
-impl JsonRequest for TuneModelRequest {
-    fn from_json(body: &[u8]) -> Result<Self, ApiError> {
-        parse_json(body)
     }
 }
 
@@ -338,99 +267,9 @@ pub async fn tune_model(payload: Result<ApiJson<TuneModelRequest>, ApiJsonReject
         Ok(ApiJson(request)) => request,
         Err(ApiJsonRejection(error)) => return openai_error_response(error),
     };
-    let token_source = match request.token_source {
-        Some(value) => match value.parse() {
-            Ok(token_source) => token_source,
-            Err(error) => {
-                return openai_error_response(ApiError::new(
-                    ApiErrorKind::InvalidRequest,
-                    format!("Invalid token_source: {error}"),
-                    Some("invalid_token_source"),
-                    Some("token_source"),
-                ));
-            }
-        },
-        None => TokenSource::CacheToken,
-    };
-
-    let dtype = match request
-        .dtype
-        .as_deref()
-        .unwrap_or("auto")
-        .parse::<ModelDType>()
-    {
-        Ok(dtype) => dtype,
-        Err(error) => {
-            return openai_error_response(ApiError::new(
-                ApiErrorKind::InvalidRequest,
-                format!("Invalid dtype: {error}"),
-                Some("invalid_dtype"),
-                Some("dtype"),
-            ));
-        }
-    };
-
-    let max_seq_len = request
-        .max_seq_len
-        .unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN);
-    let max_batch_size = request
-        .max_batch_size
-        .unwrap_or(AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE);
-
-    let model_selected = ModelSelected::Run {
-        model_id: request.model_id.clone(),
-        quant: None,
-        tokenizer_json: None,
-        dtype,
-        topology: None,
-        organization: None,
-        write_uqff: None,
-        from_uqff: None,
-        imatrix: None,
-        calibration_file: None,
-        max_edge: None,
-        max_seq_len,
-        max_batch_size,
-        max_num_images: request.max_num_images,
-        max_image_length: request.max_image_length,
-        hf_cache_path: None,
-        matformer_config_path: None,
-        matformer_slice_name: None,
-    };
-
-    let requested_isq = match request.requested_isq {
-        Some(value) => match parse_isq_value(&value, None) {
-            Ok(value) => Some(value),
-            Err(error) => {
-                return openai_error_response(ApiError::new(
-                    ApiErrorKind::InvalidRequest,
-                    format!("Invalid isq value: {error}"),
-                    Some("invalid_isq"),
-                    Some("requested_isq"),
-                ));
-            }
-        },
-        None => None,
-    };
-
-    let tune_request = AutoTuneRequest {
-        model: model_selected,
-        token_source,
-        hf_revision: request.hf_revision,
-        force_cpu: request.cpu.unwrap_or(false),
-        profile: request
-            .profile
-            .map(Into::into)
-            .unwrap_or(TuneProfile::Balanced),
-        requested_isq,
-    };
-
-    match auto_tune(tune_request) {
+    match system::tune_model(request) {
         Ok(result) => Json(result).into_response(),
-        Err(error) => {
-            tracing::error!(%error, "model auto-tuning failed");
-            openai_error_response(ApiError::internal())
-        }
+        Err(error) => openai_error_response(error),
     }
 }
 
@@ -446,15 +285,10 @@ pub async fn tune_model(payload: Result<ApiJson<TuneModelRequest>, ApiJsonReject
     )
 ))]
 pub async fn get_session(
-    State(state): ExtractedInferenceRsState,
-    Extension(owner): Extension<Owner>,
+    OwnedEngine(engine): OwnedEngine,
     Path(session_id): Path<String>,
 ) -> Response {
-    json_response(operations::export_session(
-        &state,
-        &session_id,
-        owner.as_deref(),
-    ))
+    json_response(engine.session(&session_id))
 }
 
 /// PUT `/v1/sessions/{session_id}`. Replaces any existing session.
@@ -470,8 +304,7 @@ pub async fn get_session(
     )
 ))]
 pub async fn put_session(
-    State(state): ExtractedInferenceRsState,
-    Extension(owner): Extension<Owner>,
+    OwnedEngine(engine): OwnedEngine,
     Path(session_id): Path<String>,
     payload: Result<ApiJson<SerializedSession>, ApiJsonRejection>,
 ) -> Response {
@@ -479,8 +312,8 @@ pub async fn put_session(
         Ok(ApiJson(session)) => session,
         Err(ApiJsonRejection(error)) => return openai_error_response(error),
     };
-    match operations::import_session(&state, session_id, session, owner.as_deref()) {
-        Ok(()) => StatusCode::OK.into_response(),
+    match engine.put_session(&session_id, session) {
+        Ok(_) => StatusCode::OK.into_response(),
         Err(error) => openai_error_response(error),
     }
 }
@@ -494,11 +327,10 @@ pub async fn put_session(
     responses((status = 200, description = "Session deleted (or did not exist)"))
 ))]
 pub async fn delete_session(
-    State(state): ExtractedInferenceRsState,
-    Extension(owner): Extension<Owner>,
+    OwnedEngine(engine): OwnedEngine,
     Path(session_id): Path<String>,
 ) -> Response {
-    match operations::delete_session(&state, &session_id, owner.as_deref()) {
+    match engine.delete_session(&session_id) {
         Ok(_) => StatusCode::OK.into_response(),
         Err(error) => openai_error_response(error),
     }

@@ -280,7 +280,12 @@ mod tests {
         resolve_lora_adapter_model_from_models(&models, &mut model, &mut adapter).unwrap();
         assert_eq!(model, "base-a");
         assert!(is_resolvable_lora_adapter_model(&models, "math"));
+        assert!(is_resolvable_lora_adapter_model(&models, "base-a::code"));
         assert!(!is_resolvable_lora_adapter_model(&models, "code"));
+        assert!(!is_resolvable_lora_adapter_model(
+            &models,
+            "unbounded-user-value"
+        ));
 
         let mut model = "code".to_string();
         let mut adapter = None;

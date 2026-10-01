@@ -17,7 +17,7 @@ use utoipa_swagger_ui::SwaggerUi;
 use crate::openapi_doc::get_openapi_doc;
 use crate::{
     anthropic::{anthropic_count_tokens, anthropic_error_response, anthropic_messages},
-    approvals::{ApprovalBroker, resolve_agent_approval},
+    approvals::resolve_agent_approval,
     chat_completion::chatcompletions,
     completions::completions,
     embeddings::embeddings,
@@ -32,9 +32,7 @@ use crate::{
         system_doctor, system_info, tune_model, unload_model,
     },
     image_generation::image_generation,
-    lora_adapters::{
-        LoraAdapterApiConfig, list_lora_adapters, load_lora_adapter, unload_lora_adapter,
-    },
+    lora_adapters::{list_lora_adapters, load_lora_adapter, unload_lora_adapter},
     metrics::{ObservabilityConfig, ObservabilityState, metrics, metrics_disabled, observe_http},
     responses::{cancel_response, create_response, delete_response, get_response},
     route_registry::{
@@ -49,12 +47,10 @@ use crate::{
         SKILL_VERSIONS_ROUTE, SKILLS_ROUTE, SPEECH_GENERATION_ROUTE, SYSTEM_DOCTOR_ROUTE,
         SYSTEM_INFO_ROUTE, TUNE_MODEL_ROUTE, UNLOAD_LORA_ADAPTER_ROUTE, UNLOAD_MODEL_ROUTE,
     },
-    skills::{SkillStore, list_skill_versions, list_skills, upload_skill, upload_skill_version},
+    skills::{list_skill_versions, list_skills, upload_skill, upload_skill_version},
     speech_generation::speech_generation,
-    types::SharedInferenceRsState,
 };
-
-pub use crate::agentic::AgenticDefaults;
+use inference_api::Engine;
 
 // NOTE(EricLBuehler): Accept up to 50mb input
 const N_INPUT_SIZE: usize = 50;
@@ -74,7 +70,7 @@ pub const DEFAULT_MAX_BODY_LIMIT: usize = N_INPUT_SIZE * MB_TO_B;
 /// use inference_server_core::inference_server_router_builder::InferenceRsServerRouterBuilder;
 ///
 /// let router = InferenceRsServerRouterBuilder::new()
-///     .with_inference(inference_instance)
+///     .with_engine(&engine)
 ///     .build()
 ///     .await?;
 /// ```
@@ -84,15 +80,15 @@ pub const DEFAULT_MAX_BODY_LIMIT: usize = N_INPUT_SIZE * MB_TO_B;
 /// use inference_server_core::inference_server_router_builder::InferenceRsServerRouterBuilder;
 ///
 /// let router = InferenceRsServerRouterBuilder::new()
-///     .with_inference(inference_instance)
+///     .with_engine(&engine)
 ///     .with_include_swagger_routes(false)
 ///     .with_base_path("/api/inference")
 ///     .build()
 ///     .await?;
 /// ```
 pub struct InferenceRsServerRouterBuilder {
-    /// The shared inference.rs instance
-    inference: Option<SharedInferenceRsState>,
+    /// The engine the routes serve; its agent policy, skill store and adapter policy apply to every request.
+    engine: Option<Engine>,
     /// Whether to include Swagger/OpenAPI documentation routes.
     /// Only available when the `swagger-ui` feature is enabled.
     #[cfg(feature = "swagger-ui")]
@@ -105,14 +101,7 @@ pub struct InferenceRsServerRouterBuilder {
     allowed_origins: Option<Vec<String>>,
     /// Optional axum default request body limit
     max_body_limit: Option<usize>,
-    /// Server-level agentic defaults
-    agentic_defaults: AgenticDefaults,
-    skills_dir: Option<std::path::PathBuf>,
-    skill_store: Option<std::sync::Arc<SkillStore>>,
-    // Held by the router so an engine-owned skill directory outlives the engine value the caller passed.
-    engine: Option<inference_api::Engine>,
     observability: ObservabilityConfig,
-    lora_adapter_api: LoraAdapterApiConfig,
     file_listing: bool,
     auth: Option<std::sync::Arc<crate::auth::Auth>>,
 }
@@ -121,19 +110,14 @@ impl Default for InferenceRsServerRouterBuilder {
     /// Creates a new builder with default configuration.
     fn default() -> Self {
         Self {
-            inference: None,
+            engine: None,
             #[cfg(feature = "swagger-ui")]
             include_swagger_routes: true,
             #[cfg(feature = "swagger-ui")]
             base_path: None,
             allowed_origins: None,
             max_body_limit: None,
-            agentic_defaults: AgenticDefaults::default(),
-            skills_dir: None,
-            skill_store: None,
-            engine: None,
             observability: ObservabilityConfig::default(),
-            lora_adapter_api: LoraAdapterApiConfig::from_env(),
             file_listing: false,
             auth: None,
         }
@@ -144,32 +128,12 @@ impl InferenceRsServerRouterBuilder {
     /// Creates a new `InferenceRsServerRouterBuilder` with default settings.
     ///
     /// This is equivalent to calling `Default::default()`.
-    ///
-    /// ### Examples
-    ///
-    /// ```ignore
-    /// use inference_server_core::inference_server_router_builder::InferenceRsServerRouterBuilder;
-    ///
-    /// let builder = InferenceRsServerRouterBuilder::new();
-    /// ```
     pub fn new() -> Self {
         Default::default()
     }
 
-    /// Sets the shared inference.rs instance
-    pub fn with_inference(mut self, inference: SharedInferenceRsState) -> Self {
-        self.inference = Some(inference);
-        self
-    }
-
-    /// Serves a loaded engine: its state, agentic policy, skill store and adapter policy, replacing any set
-    /// before; the `with_*` calls that adjust those still apply when made after it.
-    pub fn with_engine(mut self, engine: &inference_api::Engine) -> Self {
-        let chat = engine.chat_engine();
-        self.inference = Some(chat.state.clone());
-        self.agentic_defaults = chat.agentic.clone();
-        self.skill_store = chat.skill_store.clone();
-        self.lora_adapter_api = engine.adapter_config().clone();
+    /// Serves a loaded engine; each request acts through it for the request's owner.
+    pub fn with_engine(mut self, engine: &Engine) -> Self {
         self.engine = Some(engine.clone());
         self
     }
@@ -211,63 +175,6 @@ impl InferenceRsServerRouterBuilder {
         self
     }
 
-    /// Sets the default maximum tool-call rounds for the agentic loop.
-    pub fn with_max_tool_rounds(mut self, rounds: usize) -> Self {
-        self.agentic_defaults.max_tool_rounds = Some(rounds);
-        self
-    }
-
-    /// Sets the default maximum tool-call rounds if provided.
-    pub fn with_max_tool_rounds_optional(mut self, rounds: Option<usize>) -> Self {
-        if let Some(rounds) = rounds {
-            self = self.with_max_tool_rounds(rounds);
-        }
-        self
-    }
-
-    /// Sets the URL to POST tool calls to for server-side execution.
-    pub fn with_tool_dispatch_url(mut self, url: String) -> Self {
-        self.agentic_defaults.tool_dispatch_url = Some(url);
-        self
-    }
-
-    /// Sets the tool dispatch URL if provided.
-    pub fn with_tool_dispatch_url_optional(mut self, url: Option<String>) -> Self {
-        if let Some(url) = url {
-            self = self.with_tool_dispatch_url(url);
-        }
-        self
-    }
-
-    pub fn with_agent_permission(mut self, permission: inference_core::AgentPermission) -> Self {
-        self.agentic_defaults.agent_permission = Some(permission);
-        self
-    }
-
-    pub fn with_code_execution_permission(
-        self,
-        permission: inference_core::CodeExecutionPermission,
-    ) -> Self {
-        self.with_agent_permission(permission.into())
-    }
-
-    pub fn with_approval_broker(mut self, broker: ApprovalBroker) -> Self {
-        self.agentic_defaults.approval_broker = broker;
-        self
-    }
-
-    pub fn with_skills_dir(mut self, skills_dir: impl Into<std::path::PathBuf>) -> Self {
-        self.skills_dir = Some(skills_dir.into());
-        self
-    }
-
-    pub fn with_skills_dir_optional(mut self, skills_dir: Option<std::path::PathBuf>) -> Self {
-        if let Some(skills_dir) = skills_dir {
-            self = self.with_skills_dir(skills_dir);
-        }
-        self
-    }
-
     /// Lets `GET /v1/files` list every stored file. Off by default: the store is shared by every client, and file ids
     /// otherwise reach only the clients they were handed to.
     pub fn with_file_listing(mut self, file_listing: bool) -> Self {
@@ -292,50 +199,26 @@ impl InferenceRsServerRouterBuilder {
         self
     }
 
-    /// Configures runtime LoRA management routes and their allowed adapter root.
-    pub fn with_lora_adapter_api_config(mut self, config: LoraAdapterApiConfig) -> Self {
-        self.lora_adapter_api = config;
-        self
-    }
-
     /// Builds the configured axum router.
-    ///
-    /// ### Examples
-    ///
-    /// ```ignore
-    /// use inference_server_core::inference_server_router_builder::InferenceRsServerRouterBuilder;
-    ///
-    /// let router = InferenceRsServerRouterBuilder::new()
-    ///     .with_inference(inference_instance)
-    ///     .build()
-    ///     .await?;
-    /// ```
     pub async fn build(self) -> Result<Router> {
         if self.observability.metrics {
             crate::metrics::install_prometheus_recorder();
         }
-        let lora_adapter_api = self.lora_adapter_api.prepare()?;
-        let inference = self.inference.ok_or_else(|| {
-            anyhow::anyhow!("`inference` instance must be set. Use `with_inference`.")
-        })?;
+        let engine = self
+            .engine
+            .ok_or_else(|| anyhow::anyhow!("an engine must be set; use `with_engine`"))?;
         let router_max_body_limit = self.max_body_limit.unwrap_or(DEFAULT_MAX_BODY_LIMIT);
         let observability = ObservabilityState::with_max_body_bytes(
             self.observability.clone(),
-            inference.clone(),
+            engine.clone(),
             router_max_body_limit,
         );
 
         let mut router = init_router(
-            inference,
+            engine,
             self.allowed_origins,
             router_max_body_limit,
-            self.agentic_defaults,
-            SkillSource {
-                store: self.skill_store,
-                dir: self.skills_dir,
-            },
-            self.observability,
-            lora_adapter_api,
+            &self.observability,
         )?;
 
         #[cfg(feature = "swagger-ui")]
@@ -351,9 +234,6 @@ impl InferenceRsServerRouterBuilder {
         router = router
             .layer(Extension(crate::files::FileListing(self.file_listing)))
             .layer(middleware::from_fn_with_state(observability, observe_http));
-        if let Some(engine) = self.engine {
-            router = router.layer(Extension(engine));
-        }
         if let Some(auth) = &self.auth {
             router = router.layer(Extension(auth.clone()));
         }
@@ -365,24 +245,15 @@ impl InferenceRsServerRouterBuilder {
     }
 }
 
-// An engine brings its own store; otherwise the router opens one at the configured directory.
-struct SkillSource {
-    store: Option<std::sync::Arc<SkillStore>>,
-    dir: Option<std::path::PathBuf>,
-}
-
 /// Initializes and configures the underlying axum router with InferenceRs API endpoints.
 ///
 /// This function creates a router with all the necessary API endpoints,
 /// CORS configuration, and body size limits.
 fn init_router(
-    state: SharedInferenceRsState,
+    engine: Engine,
     allowed_origins: Option<Vec<String>>,
     router_max_body_limit: usize,
-    agentic_defaults: AgenticDefaults,
-    skills: SkillSource,
-    observability: ObservabilityConfig,
-    lora_adapter_api: LoraAdapterApiConfig,
+    observability: &ObservabilityConfig,
 ) -> Result<Router> {
     let allow_origin = if let Some(origins) = allowed_origins {
         let parsed_origins: Result<Vec<_>, _> = origins.into_iter().map(|o| o.parse()).collect();
@@ -395,12 +266,6 @@ fn init_router(
         AllowOrigin::any()
     };
 
-    let skill_store = match skills.store {
-        Some(store) => store,
-        None => std::sync::Arc::new(SkillStore::new(
-            skills.dir.unwrap_or_else(SkillStore::default_root),
-        )?),
-    };
     let metrics_route = if observability.metrics {
         get(metrics)
     } else {
@@ -484,6 +349,7 @@ fn init_router(
             get(get_session).put(put_session).delete(delete_session),
         );
 
+    let lora_adapter_api = engine.adapter_config();
     if lora_adapter_api.enabled() {
         if let Some(root) = lora_adapter_api.allowed_root() {
             tracing::warn!(
@@ -505,11 +371,7 @@ fn init_router(
         .method_not_allowed_fallback(api_method_not_allowed)
         .layer(cors_layer)
         .layer(DefaultBodyLimit::max(router_max_body_limit))
-        .layer(Extension(agentic_defaults.approval_broker.clone()))
-        .layer(Extension(skill_store))
-        .layer(Extension(agentic_defaults))
-        .layer(Extension(lora_adapter_api))
-        .with_state(state);
+        .with_state(engine);
 
     Ok(router)
 }

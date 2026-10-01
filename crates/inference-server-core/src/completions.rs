@@ -8,33 +8,24 @@ use std::{
 
 use axum::{
     Extension,
-    extract::{Json, State},
+    extract::Json,
     response::{
         IntoResponse, Sse,
         sse::{Event, KeepAlive, KeepAliveStream},
     },
 };
-use inference_core::{CompletionChunkResponse, CompletionResponse, InferenceRs, Response};
-use tokio::sync::mpsc::Receiver;
+use inference_core::{CompletionChunkResponse, CompletionResponse};
 
-pub use crate::engine_completion::parse_request;
 use crate::handler_core::{ApiJson, ApiJsonRejection};
 #[cfg(test)]
 use crate::openai::{CompletionChunkResponseBody, CompletionResponseBody};
 use crate::{
-    completion_core::{
-        BaseCompletionResponder, handle_completion_error, handle_completion_validation_error,
-    },
-    engine_chat::DispatchError,
-    engine_completion::{
-        CompletionStream, CompletionStreamEvent, collect_completion, prepare_completion,
-    },
-    handler_core::{
-        ApiError, ApiErrorKind, ModelErrorMessage, openai_error_from_error, openai_error_response,
-    },
+    completion_core::BaseCompletionResponder,
+    engine_completion::{CompletionStream, CompletionStreamEvent},
+    handler_core::openai_error_response,
     openai::CompletionRequest,
     streaming::{DoneState, StreamOutcomeHandle, get_keep_alive_interval, openai_error_event},
-    types::{ExtractedInferenceRsState, OnChunkCallback, OnDoneCallback, SharedInferenceRsState},
+    types::{OnChunkCallback, OnDoneCallback, OwnedEngine},
 };
 
 /// A callback function that processes streaming response chunks before they are sent to the client.
@@ -131,13 +122,7 @@ impl IntoResponse for CompletionResponder {
         match self {
             CompletionResponder::Sse(s) => s.into_response(),
             CompletionResponder::Json(s) => Json(s).into_response(),
-            CompletionResponder::InternalError(e) => {
-                openai_error_from_error(e.as_ref(), ApiErrorKind::Internal)
-            }
-            CompletionResponder::ValidationError(e) => {
-                openai_error_from_error(e.as_ref(), ApiErrorKind::InvalidRequest)
-            }
-            CompletionResponder::ModelError(_, _) => openai_error_response(ApiError::model_error()),
+            CompletionResponder::Error(error) => openai_error_response(error),
         }
     }
 }
@@ -158,67 +143,32 @@ impl IntoResponse for CompletionResponder {
     ))
 ))]
 pub async fn completions(
-    State(state): ExtractedInferenceRsState,
+    OwnedEngine(engine): OwnedEngine,
     stream_outcome: Option<Extension<StreamOutcomeHandle>>,
     payload: Result<ApiJson<CompletionRequest>, ApiJsonRejection>,
 ) -> CompletionResponder {
-    let oairequest = match payload {
+    let request = match payload {
         Ok(ApiJson(request)) => request,
-        Err(ApiJsonRejection(error)) => {
-            return CompletionResponder::ValidationError(Box::new(error));
-        }
+        Err(ApiJsonRejection(error)) => return CompletionResponder::Error(error),
     };
-    let prepared = match prepare_completion(&state, oairequest).await {
-        Ok(prepared) => prepared,
-        Err(DispatchError::Validation(e)) => return handle_completion_validation_error(state, e),
-        Err(DispatchError::Internal(e)) => return handle_error(state, e),
-    };
-    if prepared.is_streaming {
+    if request.stream.unwrap_or(false) {
         let tap = stream_outcome.map(|Extension(handle)| handle.tap());
-        let stream = CompletionStream::new(prepared.rx, state, prepared.model_override, tap);
-        CompletionResponder::Sse(sse(stream, None, None))
+        match engine.completion_stream(request).await {
+            Ok(stream) => {
+                CompletionResponder::Sse(create_streamer(stream.with_tap(tap), None, None))
+            }
+            Err(error) => CompletionResponder::Error(error),
+        }
     } else {
-        let mut rx = prepared.rx;
-        let response = collect_completion(&mut rx, prepared.model_override.as_deref()).await;
-        match_responses(state, response)
+        match engine.completion(request).await {
+            Ok(response) => CompletionResponder::Json(response),
+            Err(error) => CompletionResponder::Error(error),
+        }
     }
 }
 
-/// Handle route / generation errors and logging them.
-pub fn handle_error(
-    state: SharedInferenceRsState,
-    e: Box<dyn std::error::Error + Send + Sync + 'static>,
-) -> CompletionResponder {
-    handle_completion_error(state, e)
-}
-
-/// Creates a SSE streamer for chat completions with optional callbacks.
+/// Frames `stream` (from [`inference_api::Engine::completion_stream`]) as SSE, with optional per-chunk and end hooks.
 pub fn create_streamer(
-    rx: Receiver<Response>,
-    state: SharedInferenceRsState,
-    on_chunk: Option<CompletionOnChunkCallback>,
-    on_done: Option<CompletionOnDoneCallback>,
-) -> Sse<KeepAliveStream<CompletionStreamer>> {
-    create_streamer_with_outcome(rx, state, on_chunk, on_done, None)
-}
-
-/// Like [`create_streamer`], also reporting usage and errors to the access log at stream end.
-pub fn create_streamer_with_outcome(
-    rx: Receiver<Response>,
-    state: SharedInferenceRsState,
-    on_chunk: Option<CompletionOnChunkCallback>,
-    on_done: Option<CompletionOnDoneCallback>,
-    outcome: Option<StreamOutcomeHandle>,
-) -> Sse<KeepAliveStream<CompletionStreamer>> {
-    let tap = outcome.map(StreamOutcomeHandle::tap);
-    sse(
-        CompletionStream::new(rx, state, None, tap),
-        on_chunk,
-        on_done,
-    )
-}
-
-fn sse(
     inner: CompletionStream,
     on_chunk: Option<CompletionOnChunkCallback>,
     on_done: Option<CompletionOnDoneCallback>,
@@ -231,44 +181,4 @@ fn sse(
         chunks: Vec::new(),
     })
     .keep_alive(KeepAlive::new().interval(Duration::from_millis(get_keep_alive_interval())))
-}
-
-/// Process non-streaming completion responses.
-pub async fn process_non_streaming_response(
-    rx: &mut Receiver<Response>,
-    state: SharedInferenceRsState,
-) -> CompletionResponder {
-    match_responses(state, collect_completion(rx, None).await)
-}
-
-/// Matches and processes different types of model responses into appropriate completion responses.
-pub fn match_responses(state: SharedInferenceRsState, response: Response) -> CompletionResponder {
-    match response {
-        Response::InternalError(e) => {
-            InferenceRs::maybe_log_error(state, &*e);
-            CompletionResponder::InternalError(e)
-        }
-        Response::CompletionModelError(msg, response) => {
-            InferenceRs::maybe_log_error(state.clone(), &ModelErrorMessage(msg.to_string()));
-            InferenceRs::maybe_log_response(state, &response);
-            CompletionResponder::ModelError(msg, response)
-        }
-        Response::ValidationError(e) => CompletionResponder::ValidationError(e),
-        Response::CompletionDone(response) => {
-            InferenceRs::maybe_log_response(state, &response);
-            CompletionResponder::Json(response)
-        }
-        Response::CompletionChunk(_) => unreachable!(),
-        Response::Chunk(_) => unreachable!(),
-        Response::Done(_) => unreachable!(),
-        Response::ModelError(_, _) => unreachable!(),
-        Response::ImageGeneration(_) => unreachable!(),
-        Response::Speech { .. } => unreachable!(),
-        Response::Raw { .. } => unreachable!(),
-        Response::Embeddings { .. } => unreachable!(),
-        Response::AgenticToolCallProgress { .. } => unreachable!(),
-        Response::BlockDenoisingProgress(_) => unreachable!(),
-        Response::AgenticToolApprovalRequired { .. } => unreachable!(),
-        Response::File(_) => unreachable!(),
-    }
 }

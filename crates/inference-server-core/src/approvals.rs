@@ -1,12 +1,10 @@
-use axum::{Extension, extract::Path};
+use axum::extract::Path;
 
-pub use crate::agentic::{
-    ApprovalBroker, ApprovalDecision, ApprovalDecisionRequest, ApprovalDecisionResponse,
-};
+pub use crate::agentic::{ApprovalDecision, ApprovalDecisionRequest, ApprovalDecisionResponse};
 use crate::handler_core::{ApiJson, ApiJsonRejection};
 use crate::{
-    agentic::resolve_approval,
-    handler_core::{json_response, openai_error_response},
+    handler_core::{ApiError, json_response, openai_error_response},
+    types::OwnedEngine,
 };
 
 #[cfg_attr(test, utoipa::path(
@@ -24,18 +22,21 @@ use crate::{
     )
 ))]
 pub async fn resolve_agent_approval(
-    Extension(broker): Extension<ApprovalBroker>,
-    Extension(owner): Extension<crate::auth::Owner>,
+    OwnedEngine(engine): OwnedEngine,
     Path(approval_id): Path<String>,
     payload: Result<ApiJson<ApprovalDecisionRequest>, ApiJsonRejection>,
 ) -> axum::response::Response {
+    decide(payload, |request| {
+        engine.resolve_approval(&approval_id, request)
+    })
+}
+
+fn decide(
+    payload: Result<ApiJson<ApprovalDecisionRequest>, ApiJsonRejection>,
+    resolve: impl FnOnce(ApprovalDecisionRequest) -> Result<ApprovalDecisionResponse, ApiError>,
+) -> axum::response::Response {
     match payload {
-        Ok(ApiJson(request)) => json_response(resolve_approval(
-            &broker,
-            &approval_id,
-            request,
-            owner.as_deref(),
-        )),
+        Ok(ApiJson(request)) => json_response(resolve(request)),
         Err(ApiJsonRejection(error)) => openai_error_response(error),
     }
 }
@@ -55,7 +56,7 @@ mod tests {
     };
 
     use super::*;
-    use crate::agentic::ApprovalResolveStatus;
+    use crate::agentic::{ApprovalBroker, ApprovalResolveStatus, resolve_approval};
 
     const TEST_PENDING_WAIT_TIMEOUT: Duration = Duration::from_secs(1);
     const TEST_PENDING_WAIT_RETRY: Duration = Duration::from_millis(1);
@@ -124,13 +125,7 @@ mod tests {
         ];
 
         for (rejection, status, code) in cases {
-            let response = resolve_agent_approval(
-                Extension(ApprovalBroker::default()),
-                Extension(crate::auth::Owner::default()),
-                Path("approval".to_string()),
-                Err(rejection),
-            )
-            .await;
+            let response = decide(Err(rejection), |_| unreachable!("the body was rejected"));
             assert_eq!(response.status(), status);
             let body = error_body(response).await;
             assert_eq!(body["error"]["type"], "invalid_request_error");
@@ -140,17 +135,15 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_approval_response_uses_openai_error() {
-        let response = resolve_agent_approval(
-            Extension(ApprovalBroker::default()),
-            Extension(crate::auth::Owner::default()),
-            Path("missing".to_string()),
-            Ok(ApiJson(ApprovalDecisionRequest {
-                decision: ApprovalDecision::Approve,
-                remember_for_session: false,
-                message: None,
-            })),
-        )
-        .await;
+        let request = ApprovalDecisionRequest {
+            decision: ApprovalDecision::Approve,
+            remember_for_session: false,
+            message: None,
+        };
+        let broker = ApprovalBroker::default();
+        let response = decide(Ok(ApiJson(request)), |request| {
+            resolve_approval(&broker, "missing", request, None)
+        });
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
         let body = error_body(response).await;

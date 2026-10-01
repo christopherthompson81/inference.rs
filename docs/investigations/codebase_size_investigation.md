@@ -712,3 +712,37 @@ multimodal path panicked on a malformed `generation_config.json` (and both on an
 warned and fell back to the model config; both now warn.
 
 Tests: `a_malformed_generation_config_falls_back_to_the_model_config`.
+
+## Run 24 - 2026-10-01 (time approximate)
+
+Question: can the HTTP server and web UI run on `inference_api::Engine` alone (Run 18's layering item), and what does
+`Engine` lack for that without changing what a client sees?
+
+Finding (a map of every handler to its closest `Engine` method): every route had one or nearly one. Error bodies match
+already: the server's `ModelError` responder sent `ApiError::model_error()` with no partial response, as `Engine::chat`
+does, and validation and internal errors map through the same `ApiError::from_error`. The gaps were: no way to attach
+the access-log tap (usage, TTFT/ITL) to an engine stream; no `count_tokens`, container-file or typed file/skill methods;
+the `re_isq`/calibration request log lines lived in the handlers; metrics' model-label lookups and MCP's text-model and
+permission checks read core directly; the web UI forked, exported and imported sessions and listed models and MCP tools
+on `InferenceRs`. Dead ends found on the way: the router's agentic, skills-dir and LoRA setters had no callers (every
+router is built `with_engine`), its skill-store fallback was unreachable (every loaded engine has one), and the public
+`create_streamer(rx, state, ...)`/`match_responses` helpers were used only by the crate-docs example.
+
+Change: the router's state is the `Engine`; `types::OwnedEngine` scopes it to the request's owner, and handlers call its
+methods. `Engine` gains files and container files, `count_tokens`, `fork_session`, `mcp_tools`, `describe_models`,
+`default_model_id`, `serves_model`, `agent_permission` and `chats_in_text`, and logs re-ISQ and calibration requests
+itself; the stream types gain `with_tap`. `tune_model`'s parsing moves into `inference_api::system`. The responders
+collapse to `Sse`/`Json`/`Error(ApiError)`, and `create_streamer` takes the engine's stream, keeping the documented
+per-chunk and end hooks. Raw-state uses: server-core 67 -> 0 (the remaining matches are the `RouteKind::InferenceRs`
+label), web UI 6 -> 0. Intended differences: an Anthropic prepare failure that is internal now logs, as the other
+routes always did; re-ISQ and calibration requests log for C ABI callers too.
+
+Review: no HTTP route changed status, envelope, framing, owner scoping or tap. It caught that the web UI's fork error
+would collapse to the generic internal message (fork now maps the store's message to an invalid-request error, so the
+UI shows it again), that a public `Engine::new` could hand the router an unprepared adapter root or no skill store (now
+private: `Engine::load` is the only constructor, and it prepares both), and leftover re-exports (removed). Kept: the
+UI's export and import logs print the `ApiError` message, and a save-chat on an unloaded default model is a 404 where
+it was a 500.
+
+Next: the CLI on inference-api re-exports, `quantize` through `Engine::shutdown`, then `Engine::state()` made
+crate-private (server-core's integration tests still use it to seed files and drive `OpenResponsesStreamer`).

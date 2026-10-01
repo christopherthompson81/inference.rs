@@ -1,10 +1,10 @@
 //! Anthropic-compatible Messages API over HTTP; the operation itself lives in `inference_api::anthropic`.
 
-use std::{pin::Pin, sync::Arc, task::Poll, time::Duration};
+use std::{pin::Pin, task::Poll, time::Duration};
 
 use axum::{
     Extension,
-    extract::{Json, State},
+    extract::Json,
     http,
     response::{
         IntoResponse, Sse,
@@ -22,21 +22,13 @@ pub use crate::anthropic_api::{
     AnthropicThinking, AnthropicTool, AnthropicToolChoice, AnthropicUsage,
     AnthropicWebSearchUserLocation,
 };
-use crate::anthropic_api::{
-    AnthropicStream, AnthropicStreamEvent, MessagesFailure, anthropic_error_body, collect_messages,
-    count_tokens, prepare_messages,
-};
+use crate::anthropic_api::{AnthropicStream, AnthropicStreamEvent, anthropic_error_body};
 use crate::handler_core::{ApiJson, ApiJsonRejection};
 use crate::{
-    agentic::AgenticDefaults,
-    engine_chat::{ChatEngine, DispatchError},
     handler_core::{ApiError, ApiErrorKind, ResponseErrorMessage},
-    skills::SkillStore,
     streaming::{StreamOutcomeHandle, get_keep_alive_interval},
-    types::ExtractedInferenceRsState,
+    types::OwnedEngine,
 };
-
-type BoxError = Box<dyn std::error::Error + Send + Sync + 'static>;
 
 const ANTHROPIC_OVERLOADED_STATUS: u16 = 529;
 
@@ -87,9 +79,7 @@ pub type AnthropicMessagesSse = Sse<KeepAliveStream<AnthropicStreamer>>;
 pub enum AnthropicMessagesResponder {
     Sse(AnthropicMessagesSse),
     Json(AnthropicMessageResponse),
-    InternalError(BoxError),
-    ValidationError(BoxError),
-    ModelError(String),
+    Error(ApiError),
 }
 
 pub enum AnthropicCountTokensResponder {
@@ -102,15 +92,7 @@ impl IntoResponse for AnthropicMessagesResponder {
         match self {
             AnthropicMessagesResponder::Sse(s) => s.into_response(),
             AnthropicMessagesResponder::Json(s) => Json(s).into_response(),
-            AnthropicMessagesResponder::InternalError(e) => {
-                anthropic_error_response(ApiError::from_error(e.as_ref(), ApiErrorKind::Internal))
-            }
-            AnthropicMessagesResponder::ValidationError(e) => anthropic_error_response(
-                ApiError::from_error(e.as_ref(), ApiErrorKind::InvalidRequest),
-            ),
-            AnthropicMessagesResponder::ModelError(_) => {
-                anthropic_error_response(ApiError::model_error())
-            }
+            AnthropicMessagesResponder::Error(error) => anthropic_error_response(error),
         }
     }
 }
@@ -168,46 +150,31 @@ pub(crate) fn anthropic_error_response(error: ApiError) -> axum::response::Respo
     responses((status = 200, description = "Anthropic messages", body = AnthropicMessageResponse))
 ))]
 pub async fn anthropic_messages(
-    State(state): ExtractedInferenceRsState,
-    Extension(agentic_defaults): Extension<AgenticDefaults>,
-    Extension(skill_store): Extension<Arc<SkillStore>>,
-    Extension(owner): Extension<crate::auth::Owner>,
+    OwnedEngine(engine): OwnedEngine,
     stream_outcome: Option<Extension<StreamOutcomeHandle>>,
     payload: Result<ApiJson<AnthropicMessagesRequest>, ApiJsonRejection>,
 ) -> AnthropicMessagesResponder {
     let request = match payload {
         Ok(ApiJson(request)) => request,
         Err(ApiJsonRejection(error)) => {
-            return AnthropicMessagesResponder::ValidationError(Box::new(
-                anthropic_json_rejection(error),
-            ));
+            return AnthropicMessagesResponder::Error(anthropic_json_rejection(error));
         }
     };
-    let engine = ChatEngine {
-        state: state.clone(),
-        agentic: agentic_defaults,
-        skill_store: Some(skill_store),
-        owner: owner.0,
-    };
-    let prepared = match prepare_messages(&engine, request).await {
-        Ok(prepared) => prepared,
-        Err(DispatchError::Validation(e)) => return AnthropicMessagesResponder::ValidationError(e),
-        Err(DispatchError::Internal(e)) => return AnthropicMessagesResponder::InternalError(e),
-    };
-    if prepared.chat.is_streaming {
+    if request.stream.unwrap_or(false) {
         let tap = stream_outcome.map(|Extension(handle)| handle.tap());
-        let streamer = AnthropicStreamer::new(AnthropicStream::new(prepared, state, tap));
-        AnthropicMessagesResponder::Sse(Sse::new(streamer).keep_alive(
-            KeepAlive::new().interval(Duration::from_millis(get_keep_alive_interval())),
-        ))
+        match engine.anthropic_messages_stream(request).await {
+            Ok(stream) => {
+                let streamer = AnthropicStreamer::new(stream.with_tap(tap));
+                AnthropicMessagesResponder::Sse(Sse::new(streamer).keep_alive(
+                    KeepAlive::new().interval(Duration::from_millis(get_keep_alive_interval())),
+                ))
+            }
+            Err(error) => AnthropicMessagesResponder::Error(error),
+        }
     } else {
-        let (omit_thinking, override_) = (prepared.omit_thinking, prepared.chat.model_override);
-        let mut rx = prepared.chat.rx;
-        match collect_messages(&mut rx, state, override_.as_deref(), omit_thinking).await {
+        match engine.anthropic_messages(request).await {
             Ok(response) => AnthropicMessagesResponder::Json(response),
-            Err(MessagesFailure::Validation(e)) => AnthropicMessagesResponder::ValidationError(e),
-            Err(MessagesFailure::Internal(e)) => AnthropicMessagesResponder::InternalError(e),
-            Err(MessagesFailure::Model(msg)) => AnthropicMessagesResponder::ModelError(msg),
+            Err(error) => AnthropicMessagesResponder::Error(error),
         }
     }
 }
@@ -220,8 +187,7 @@ pub async fn anthropic_messages(
     responses((status = 200, description = "Anthropic message token count", body = AnthropicCountTokensResponse))
 ))]
 pub async fn anthropic_count_tokens(
-    State(state): ExtractedInferenceRsState,
-    Extension(owner): Extension<crate::auth::Owner>,
+    OwnedEngine(engine): OwnedEngine,
     payload: Result<ApiJson<AnthropicMessagesRequest>, ApiJsonRejection>,
 ) -> AnthropicCountTokensResponder {
     let request = match payload {
@@ -230,7 +196,7 @@ pub async fn anthropic_count_tokens(
             return AnthropicCountTokensResponder::Error(anthropic_json_rejection(error));
         }
     };
-    match count_tokens(&state, request, owner.as_deref()).await {
+    match engine.count_tokens(request).await {
         Ok(count) => AnthropicCountTokensResponder::Json(count),
         Err(error) => AnthropicCountTokensResponder::Error(error),
     }
@@ -322,11 +288,16 @@ mod tests {
         let validation =
             anyhow::Error::new(InferenceRsError::ModelNotFound("missing-model".to_string()))
                 .context("request validation failed");
+        let internal = InferenceRsError::ModelNotFound("missing-model".to_string());
         let responses = [
-            AnthropicMessagesResponder::ValidationError(validation.into()),
-            AnthropicMessagesResponder::InternalError(Box::new(InferenceRsError::ModelNotFound(
-                "missing-model".to_string(),
-            ))),
+            AnthropicMessagesResponder::Error(ApiError::from_error(
+                validation.as_ref(),
+                ApiErrorKind::InvalidRequest,
+            )),
+            AnthropicMessagesResponder::Error(ApiError::from_error(
+                &internal,
+                ApiErrorKind::Internal,
+            )),
         ];
 
         for response in responses {
@@ -339,8 +310,10 @@ mod tests {
 
     #[tokio::test]
     async fn reloading_model_uses_anthropic_conflict_error() {
-        let response = AnthropicMessagesResponder::ValidationError(Box::new(
-            InferenceRsError::ModelReloading("model".to_string()),
+        let reloading = InferenceRsError::ModelReloading("model".to_string());
+        let response = AnthropicMessagesResponder::Error(ApiError::from_error(
+            &reloading,
+            ApiErrorKind::InvalidRequest,
         ))
         .into_response();
 
@@ -352,23 +325,23 @@ mod tests {
 
     #[tokio::test]
     async fn internal_and_model_errors_do_not_expose_details() {
-        let response = AnthropicMessagesResponder::InternalError(Box::new(std::io::Error::other(
-            "private internal detail",
-        )))
+        let internal = std::io::Error::other("private internal detail");
+        let response = AnthropicMessagesResponder::Error(ApiError::from_error(
+            &internal,
+            ApiErrorKind::Internal,
+        ))
         .into_response();
         assert_eq!(response.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
         let body = error_body(response).await;
         assert_eq!(body["error"]["message"], INTERNAL_ERROR_MESSAGE);
         assert!(!body.to_string().contains("private internal detail"));
 
-        let response = AnthropicMessagesResponder::ModelError("private model detail".to_string())
-            .into_response();
+        let response = AnthropicMessagesResponder::Error(ApiError::model_error()).into_response();
         let body = error_body(response).await;
         assert_eq!(
             body["error"]["message"],
             crate::api_error::MODEL_ERROR_MESSAGE
         );
-        assert!(!body.to_string().contains("private model detail"));
     }
 
     #[tokio::test]

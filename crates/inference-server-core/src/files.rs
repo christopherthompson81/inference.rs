@@ -2,7 +2,7 @@
 
 use axum::{
     Extension,
-    extract::{Multipart, Path, State, multipart::MultipartRejection},
+    extract::{Multipart, Path, multipart::MultipartRejection},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
@@ -13,10 +13,9 @@ pub use crate::files_api::{
     SourceMeta,
 };
 use crate::{
-    auth::Owner,
     files_api::{self, FileUpload},
     handler_core::{ApiError, ApiErrorHttp, ApiErrorKind, json_response, openai_error_response},
-    types::ExtractedInferenceRsState,
+    types::OwnedEngine,
 };
 
 /// Whether an open server's `GET /v1/files` lists its shared store; a keyed one always lists each owner's own.
@@ -39,8 +38,7 @@ const FILE_LISTING_DISABLED_CODE: &str = "file_listing_disabled";
     )
 ))]
 pub async fn upload_file(
-    State(state): ExtractedInferenceRsState,
-    Extension(owner): Extension<Owner>,
+    OwnedEngine(engine): OwnedEngine,
     payload: Result<Multipart, MultipartRejection>,
 ) -> Response {
     let multipart = match payload {
@@ -50,7 +48,7 @@ pub async fn upload_file(
         }
     };
     match parse_upload(multipart).await {
-        Ok(upload) => json_response(files_api::upload_file(&state, upload, owner.as_deref())),
+        Ok(upload) => json_response(engine.upload_file(upload)),
         Err(error) => openai_error_response(error),
     }
 }
@@ -131,12 +129,8 @@ fn multipart_error(error: axum::extract::multipart::MultipartError) -> ApiError 
         (status = 500, description = "Internal server error"),
     )
 ))]
-pub async fn get_file(
-    State(state): ExtractedInferenceRsState,
-    Extension(owner): Extension<Owner>,
-    Path(id): Path<String>,
-) -> Response {
-    json_response(files_api::get_file(&state, &id, owner.as_deref()))
+pub async fn get_file(OwnedEngine(engine): OwnedEngine, Path(id): Path<String>) -> Response {
+    json_response(engine.file(&id))
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -152,11 +146,10 @@ pub async fn get_file(
     )
 ))]
 pub async fn get_file_content(
-    State(state): ExtractedInferenceRsState,
-    Extension(owner): Extension<Owner>,
+    OwnedEngine(engine): OwnedEngine,
     Path(id): Path<String>,
 ) -> Response {
-    serve_bytes(files_api::file_content(&state, &id, owner.as_deref()))
+    serve_bytes(engine.file_content(&id))
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -170,13 +163,12 @@ pub async fn get_file_content(
     )
 ))]
 pub async fn list_files(
-    State(state): ExtractedInferenceRsState,
-    Extension(owner): Extension<Owner>,
+    OwnedEngine(engine): OwnedEngine,
     listing: Option<Extension<FileListing>>,
 ) -> Response {
-    let allowed = owner.0.is_some() || matches!(listing, Some(Extension(FileListing(true))));
+    let allowed = engine.owner().is_some() || matches!(listing, Some(Extension(FileListing(true))));
     match allowed {
-        true => json_response(files_api::list_files(&state, owner.as_deref())),
+        true => json_response(engine.files()),
         false => openai_error_response(ApiError::new(
             ApiErrorKind::Forbidden,
             FILE_LISTING_DISABLED,
@@ -197,12 +189,8 @@ pub async fn list_files(
         (status = 500, description = "Internal server error"),
     )
 ))]
-pub async fn delete_file(
-    State(state): ExtractedInferenceRsState,
-    Extension(owner): Extension<Owner>,
-    Path(id): Path<String>,
-) -> Response {
-    json_response(files_api::delete_file(&state, &id, owner.as_deref()))
+pub async fn delete_file(OwnedEngine(engine): OwnedEngine, Path(id): Path<String>) -> Response {
+    json_response(engine.delete_file(&id))
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -216,15 +204,10 @@ pub async fn delete_file(
     )
 ))]
 pub async fn list_container_files(
-    State(state): ExtractedInferenceRsState,
-    Extension(owner): Extension<Owner>,
+    OwnedEngine(engine): OwnedEngine,
     Path(container_id): Path<String>,
 ) -> Response {
-    json_response(files_api::list_container_files(
-        &state,
-        &container_id,
-        owner.as_deref(),
-    ))
+    json_response(engine.container_files(&container_id))
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -242,16 +225,10 @@ pub async fn list_container_files(
     )
 ))]
 pub async fn get_container_file(
-    State(state): ExtractedInferenceRsState,
-    Extension(owner): Extension<Owner>,
+    OwnedEngine(engine): OwnedEngine,
     Path((container_id, file_id)): Path<(String, String)>,
 ) -> Response {
-    json_response(files_api::get_container_file(
-        &state,
-        &container_id,
-        &file_id,
-        owner.as_deref(),
-    ))
+    json_response(engine.container_file(&container_id, &file_id))
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -270,16 +247,10 @@ pub async fn get_container_file(
     )
 ))]
 pub async fn get_container_file_content(
-    State(state): ExtractedInferenceRsState,
-    Extension(owner): Extension<Owner>,
+    OwnedEngine(engine): OwnedEngine,
     Path((container_id, file_id)): Path<(String, String)>,
 ) -> Response {
-    serve_bytes(files_api::container_file_content(
-        &state,
-        &container_id,
-        &file_id,
-        owner.as_deref(),
-    ))
+    serve_bytes(engine.container_file_content(&container_id, &file_id))
 }
 
 fn serve_bytes(body: Result<files_api::FileBody, ApiError>) -> Response {

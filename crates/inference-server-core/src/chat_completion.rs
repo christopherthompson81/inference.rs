@@ -1,35 +1,27 @@
 //! ## Chat Completions functionality and route handler.
 
-use std::{pin::Pin, sync::Arc, task::Poll, time::Duration};
+use std::{pin::Pin, task::Poll, time::Duration};
 
 use axum::{
     Extension,
-    extract::{Json, State},
+    extract::Json,
     response::{
         IntoResponse, Sse,
         sse::{Event, KeepAlive, KeepAliveStream},
     },
 };
-use inference_core::{ChatCompletionChunkResponse, ChatCompletionResponse, InferenceRs, Response};
-use tokio::sync::mpsc::Receiver;
+use inference_core::{ChatCompletionChunkResponse, ChatCompletionResponse};
 
-pub use crate::engine_chat::{ChatEngine, PreparedChat, serialize_agentic_progress};
 use crate::handler_core::{ApiJson, ApiJsonRejection};
 #[cfg(test)]
 use crate::openai::{ChatCompletionChunkResponseBody, ChatCompletionResponseBody};
 use crate::{
-    agentic::AgenticDefaults,
-    completion_core::{
-        BaseCompletionResponder, handle_completion_error, handle_completion_validation_error,
-    },
-    engine_chat::{ChatStream, ChatStreamEvent, DispatchError, collect_chat},
-    handler_core::{
-        ApiError, ApiErrorKind, ModelErrorMessage, openai_error_from_error, openai_error_response,
-    },
-    openai::{ChatCompletionRequest, OpenAiToolSurface},
-    skills::SkillStore,
+    completion_core::BaseCompletionResponder,
+    engine_chat::{ChatStream, ChatStreamEvent},
+    handler_core::openai_error_response,
+    openai::ChatCompletionRequest,
     streaming::{DoneState, StreamOutcomeHandle, get_keep_alive_interval, openai_error_event},
-    types::{ExtractedInferenceRsState, OnChunkCallback, OnDoneCallback, SharedInferenceRsState},
+    types::{OnChunkCallback, OnDoneCallback, OwnedEngine},
 };
 
 /// A callback function that processes streaming response chunks before they are sent to the client.
@@ -174,15 +166,7 @@ impl IntoResponse for ChatCompletionResponder {
         match self {
             ChatCompletionResponder::Sse(s) => s.into_response(),
             ChatCompletionResponder::Json(s) => Json(s).into_response(),
-            ChatCompletionResponder::InternalError(e) => {
-                openai_error_from_error(e.as_ref(), ApiErrorKind::Internal)
-            }
-            ChatCompletionResponder::ValidationError(e) => {
-                openai_error_from_error(e.as_ref(), ApiErrorKind::InvalidRequest)
-            }
-            ChatCompletionResponder::ModelError(_, _) => {
-                openai_error_response(ApiError::model_error())
-            }
+            ChatCompletionResponder::Error(error) => openai_error_response(error),
         }
     }
 }
@@ -203,77 +187,36 @@ impl IntoResponse for ChatCompletionResponder {
     ))
 ))]
 pub async fn chatcompletions(
-    State(state): ExtractedInferenceRsState,
-    Extension(agentic_defaults): Extension<AgenticDefaults>,
-    Extension(skill_store): Extension<Arc<SkillStore>>,
-    Extension(owner): Extension<crate::auth::Owner>,
+    OwnedEngine(engine): OwnedEngine,
     stream_outcome: Option<Extension<StreamOutcomeHandle>>,
     payload: Result<ApiJson<ChatCompletionRequest>, ApiJsonRejection>,
 ) -> ChatCompletionResponder {
-    let oairequest = match payload {
+    let request = match payload {
         Ok(ApiJson(request)) => request,
-        Err(ApiJsonRejection(error)) => {
-            return ChatCompletionResponder::ValidationError(Box::new(error));
-        }
+        Err(ApiJsonRejection(error)) => return ChatCompletionResponder::Error(error),
     };
-    let engine = ChatEngine {
-        state: state.clone(),
-        agentic: agentic_defaults,
-        skill_store: Some(skill_store),
-        owner: owner.0,
-    };
-    let prepared = match engine
-        .prepare(
-            oairequest,
-            OpenAiToolSurface::ChatCompletions,
-            Default::default(),
-        )
-        .await
-    {
-        Ok(prepared) => prepared,
-        Err(DispatchError::Validation(e)) => return handle_completion_validation_error(state, e),
-        Err(DispatchError::Internal(e)) => return handle_error(state, e),
-    };
-
-    if prepared.is_streaming {
+    if request.stream.unwrap_or(false) {
         let tap = stream_outcome.map(|Extension(handle)| handle.tap());
-        let stream = ChatStream::new(prepared.rx, state, prepared.model_override, tap);
-        ChatCompletionResponder::Sse(sse(ChatCompletionStreamer::new(stream, None, None)))
+        match engine.chat_stream(request, Default::default()).await {
+            Ok(stream) => {
+                ChatCompletionResponder::Sse(create_streamer(stream.with_tap(tap), None, None))
+            }
+            Err(error) => ChatCompletionResponder::Error(error),
+        }
     } else {
-        let mut rx = prepared.rx;
-        let response = collect_chat(&mut rx, prepared.model_override.as_deref()).await;
-        match_responses(state, response)
+        match engine.chat(request, Default::default()).await {
+            Ok(response) => ChatCompletionResponder::Json(response),
+            Err(error) => ChatCompletionResponder::Error(error),
+        }
     }
 }
 
-/// Handle route / generation errors and logging them.
-pub fn handle_error(
-    state: SharedInferenceRsState,
-    e: Box<dyn std::error::Error + Send + Sync + 'static>,
-) -> ChatCompletionResponder {
-    handle_completion_error(state, e)
-}
-
-/// Creates a SSE streamer for chat completions with optional callbacks.
+/// Frames `stream` (from [`inference_api::Engine::chat_stream`]) as SSE, with optional per-chunk and end hooks.
 pub fn create_streamer(
-    rx: Receiver<Response>,
-    state: SharedInferenceRsState,
+    stream: ChatStream,
     on_chunk: Option<ChatCompletionOnChunkCallback>,
     on_done: Option<ChatCompletionOnDoneCallback>,
 ) -> Sse<KeepAliveStream<ChatCompletionStreamer>> {
-    create_streamer_with_outcome(rx, state, on_chunk, on_done, None)
-}
-
-/// Like [`create_streamer`], also reporting usage and errors to the access log at stream end.
-pub fn create_streamer_with_outcome(
-    rx: Receiver<Response>,
-    state: SharedInferenceRsState,
-    on_chunk: Option<ChatCompletionOnChunkCallback>,
-    on_done: Option<ChatCompletionOnDoneCallback>,
-    outcome: Option<StreamOutcomeHandle>,
-) -> Sse<KeepAliveStream<ChatCompletionStreamer>> {
-    let tap = outcome.map(StreamOutcomeHandle::tap);
-    let stream = ChatStream::new(rx, state, None, tap);
     sse(ChatCompletionStreamer::new(stream, on_chunk, on_done))
 }
 
@@ -291,47 +234,4 @@ fn sse_event_name(event: &ChatStreamEvent) -> Option<&'static str> {
 fn sse(streamer: ChatCompletionStreamer) -> Sse<KeepAliveStream<ChatCompletionStreamer>> {
     Sse::new(streamer)
         .keep_alive(KeepAlive::new().interval(Duration::from_millis(get_keep_alive_interval())))
-}
-
-/// Process non-streaming chat completion responses.
-pub async fn process_non_streaming_response(
-    rx: &mut Receiver<Response>,
-    state: SharedInferenceRsState,
-) -> ChatCompletionResponder {
-    match_responses(state, collect_chat(rx, None).await)
-}
-
-/// Matches and processes different types of model responses into appropriate chat completion responses.
-pub fn match_responses(
-    state: SharedInferenceRsState,
-    response: Response,
-) -> ChatCompletionResponder {
-    match response {
-        Response::InternalError(e) => {
-            InferenceRs::maybe_log_error(state, &*e);
-            ChatCompletionResponder::InternalError(e)
-        }
-        Response::ModelError(msg, response) => {
-            InferenceRs::maybe_log_error(state.clone(), &ModelErrorMessage(msg.to_string()));
-            InferenceRs::maybe_log_response(state, &response);
-            ChatCompletionResponder::ModelError(msg, response)
-        }
-        Response::ValidationError(e) => ChatCompletionResponder::ValidationError(e),
-        Response::Done(response) => {
-            InferenceRs::maybe_log_response(state, &response);
-            ChatCompletionResponder::Json(response)
-        }
-        Response::Chunk(_) => unreachable!(),
-        Response::CompletionDone(_) => unreachable!(),
-        Response::CompletionModelError(_, _) => unreachable!(),
-        Response::CompletionChunk(_) => unreachable!(),
-        Response::ImageGeneration(_) => unreachable!(),
-        Response::Speech { .. } => unreachable!(),
-        Response::Raw { .. } => unreachable!(),
-        Response::Embeddings { .. } => unreachable!(),
-        Response::AgenticToolCallProgress { .. } => unreachable!(),
-        Response::BlockDenoisingProgress(_) => unreachable!(),
-        Response::AgenticToolApprovalRequired { .. } => unreachable!(),
-        Response::File(_) => unreachable!(),
-    }
 }

@@ -13,6 +13,7 @@ use tokio::fs;
 use tracing::error;
 use uuid::Uuid;
 
+use inference_api::api_error::ApiErrorKind;
 use inference_api::media_source::{
     AUDIO_UPLOAD_EXTENSIONS, IMAGE_UPLOAD_EXTENSIONS, VIDEO_UPLOAD_EXTENSIONS,
 };
@@ -628,16 +629,12 @@ pub async fn fork_session(
 ) -> impl IntoResponse {
     // server-named, so a fork can't land on a session that already exists
     let session_id = Uuid::new_v4().to_string();
-    let result = app.inference.fork_session(
-        None,
-        &req.src_session_id,
-        session_id.clone(),
-        req.num_turns,
-        app.owner.as_deref(),
-    );
+    let result = app
+        .engine
+        .fork_session(&req.src_session_id, session_id.clone(), req.num_turns);
     if let Err(e) = result {
-        error!("fork session error: {}", e);
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+        error!("fork session error: {}", e.message);
+        return (StatusCode::INTERNAL_SERVER_ERROR, e.message).into_response();
     }
     Json(json!({ "session_id": session_id })).into_response()
 }
@@ -710,7 +707,7 @@ pub async fn generate_speech(
         input: req.text,
         response_format: AudioResponseFormat::Wav,
     };
-    let audio = match inference_api::generation::generate_speech(&app.inference, request).await {
+    let audio = match app.engine.speech_generation(request).await {
         Ok(audio) => audio,
         Err(e) => {
             error!("speech generation error: {}", e);
@@ -759,16 +756,13 @@ pub async fn save_chat_session(
     Json(req): Json<SaveChatSessionRequest>,
 ) -> impl IntoResponse {
     // Export the session from the in-memory store
-    let session = match app
-        .inference
-        .export_session(None, &req.session_id, app.owner.as_deref())
-    {
-        Ok(Some(s)) => s,
-        Ok(None) => {
+    let session = match app.engine.session(&req.session_id) {
+        Ok(s) => s,
+        Err(e) if e.kind == ApiErrorKind::NotFound => {
             return (StatusCode::NOT_FOUND, "Session not found in store").into_response();
         }
         Err(e) => {
-            error!("export_session error: {}", e);
+            error!("export_session error: {}", e.message);
             return (StatusCode::INTERNAL_SERVER_ERROR, "export failed").into_response();
         }
     };
@@ -847,11 +841,8 @@ pub async fn restore_chat_session(
         }
     };
 
-    if let Err(e) =
-        app.inference
-            .import_session(None, session_id.clone(), serialized, app.owner.as_deref())
-    {
-        error!("import_session error: {}", e);
+    if let Err(e) = app.engine.put_session(&session_id, serialized) {
+        error!("import_session error: {}", e.message);
         return (StatusCode::INTERNAL_SERVER_ERROR, "import failed").into_response();
     }
 
@@ -860,7 +851,7 @@ pub async fn restore_chat_session(
 
 /// Return the list of MCP-provided tools registered on the default model.
 pub async fn list_mcp_tools(Extension(app): Extension<Arc<AppState>>) -> impl IntoResponse {
-    match app.inference.list_mcp_tools(None) {
+    match app.engine.mcp_tools() {
         Ok(tools) => {
             let payload: Vec<_> = tools
                 .into_iter()
@@ -869,8 +860,8 @@ pub async fn list_mcp_tools(Extension(app): Extension<Arc<AppState>>) -> impl In
             Json(json!({ "tools": payload })).into_response()
         }
         Err(e) => {
-            error!("list_mcp_tools error: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, e).into_response()
+            error!("list_mcp_tools error: {}", e.message);
+            (StatusCode::INTERNAL_SERVER_ERROR, e.message).into_response()
         }
     }
 }

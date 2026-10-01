@@ -62,12 +62,11 @@ async fn main() -> anyhow::Result<()> {
 - `with_base_path(&str)`
 - `with_allowed_origins(Vec<String>)`
 - `with_max_body_limit(usize)`
-- `with_max_tool_rounds(usize)`
-- `with_tool_dispatch_url(String)`
-- `with_agent_permission(AgentPermission)` and `with_code_execution_permission(CodeExecutionPermission)`
 - `with_api_keys(ApiKeys)`, to require [API keys](/reference/http-api/#authentication)
 - `with_file_listing(bool)` and `with_observability_config(ObservabilityConfig)`
 
+The agent policy (tool-round limit, tool dispatch URL, permissions), the skill store and runtime LoRA management come from the engine's spec (`agentic`, `skills` and `adapters`), so every route and the engine's own methods share them.
+
 ## Calling the model directly from a handler
 
-For custom request shapes, share the `Engine` (it is cheap to clone) with your handlers and call it: `engine.chat(request, media)` and `engine.chat_stream(...)` apply the same agent policy (permissions, tool-round limits, approvals) that `/v1/chat/completions` applies, and `engine.responses(...)`, `engine.completion(...)`, `engine.embeddings(...)` and the file and session methods mirror their routes. `engine.for_owner(name)` scopes a clone to one owner, as a [keyed server](/reference/http-api/#authentication) does per API key.
+For custom request shapes, share the `Engine` (it is cheap to clone) with your handlers and call it: `engine.chat(request, media)` and `engine.chat_stream(...)` apply the same agent policy (permissions, tool-round limits, approvals) that `/v1/chat/completions` applies, and `engine.responses(...)`, `engine.completion(...)`, `engine.embeddings(...)` and the file and session methods mirror their routes. `engine.for_owner(name)` scopes a clone to one owner, as a [keyed server](/reference/http-api/#authentication) does per API key. To change what a stream sends, `chat_completion::create_streamer(stream, on_chunk, on_done)` frames an `engine.chat_stream(...)` as SSE with a hook on each chunk and one at the end; `completions::create_streamer` does the same for completions.

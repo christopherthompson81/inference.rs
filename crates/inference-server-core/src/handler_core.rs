@@ -8,9 +8,7 @@ use axum::{
 };
 use inference_api::request_body::{INVALID_REQUEST_BODY, JsonRequest, MALFORMED_JSON};
 
-pub(crate) use crate::api_error::{
-    ApiError, ApiErrorKind, ModelErrorMessage, SERVICE_UNAVAILABLE_MESSAGE,
-};
+pub(crate) use crate::api_error::{ApiError, ApiErrorKind, SERVICE_UNAVAILABLE_MESSAGE};
 pub use crate::dispatch::{
     DEFAULT_CHANNEL_BUFFER_SIZE, create_response_channel, send_request, send_request_with_model,
 };
@@ -48,13 +46,6 @@ pub(crate) fn json_response<T: serde::Serialize>(
         Ok(body) => Json(body).into_response(),
         Err(error) => openai_error_response(error),
     }
-}
-
-pub(crate) fn openai_error_from_error(
-    error: &(dyn std::error::Error + 'static),
-    fallback: ApiErrorKind,
-) -> axum::response::Response {
-    openai_error_response(ApiError::from_error(error, fallback))
 }
 
 /// A JSON body parsed by its type's [`JsonRequest`] impl, whose deserializer is compiled once in inference-api.

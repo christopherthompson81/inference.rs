@@ -12,7 +12,7 @@ use axum::{Extension, Router};
 use include_dir::{Dir, include_dir};
 use indexmap::IndexMap;
 use inference_api::{Engine, engine::AgenticSpec};
-use inference_core::{InferenceRs, ModelCategory, SearchEmbeddingModel, SupportedModality};
+use inference_core::{ModelCategory, SearchEmbeddingModel, SupportedModality};
 use inference_server_core::{
     auth::{Auth, Guard, Owner, require},
     inference_server_router_builder::DEFAULT_MAX_BODY_LIMIT,
@@ -120,47 +120,41 @@ fn modality_label(m: &SupportedModality) -> String {
     .to_string()
 }
 
-fn build_model_list(inference: &Arc<InferenceRs>) -> IndexMap<String, UiModelInfo> {
+fn build_model_list(engine: &Engine) -> IndexMap<String, UiModelInfo> {
     let mut models = IndexMap::new();
-    if let Ok(list) = inference.list_models() {
-        for model_id in list {
-            if let Ok(category) = inference.get_model_category(Some(&model_id)) {
-                let kind = match category {
-                    ModelCategory::Text => "text",
-                    ModelCategory::Multimodal { .. } => "multimodal",
-                    ModelCategory::Speech => "speech",
-                    ModelCategory::Audio => "audio",
-                    ModelCategory::Embedding => "embedding",
-                    ModelCategory::Diffusion => "diffusion",
-                };
-                if matches!(kind, "text" | "multimodal" | "speech") {
-                    let cfg = inference.config(Some(&model_id)).ok();
-                    let generation_defaults =
-                        cfg.as_ref().and_then(|c| c.generation_defaults.clone());
-                    let (input_modalities, output_modalities) = cfg
-                        .as_ref()
-                        .map(|c| {
-                            (
-                                c.modalities.input.iter().map(modality_label).collect(),
-                                c.modalities.output.iter().map(modality_label).collect(),
-                            )
-                        })
-                        .unwrap_or_default();
-                    models.insert(
-                        model_id.clone(),
-                        UiModelInfo {
-                            name: model_id,
-                            kind: kind.to_string(),
-                            input_modalities,
-                            output_modalities,
-                            generation_defaults: GenerationParams::from_model_defaults(
-                                generation_defaults.as_ref(),
-                            ),
-                        },
-                    );
-                }
-            }
+    for model in engine.describe_models() {
+        let kind = match model.category {
+            ModelCategory::Text => "text",
+            ModelCategory::Multimodal { .. } => "multimodal",
+            ModelCategory::Speech => "speech",
+            ModelCategory::Audio => "audio",
+            ModelCategory::Embedding => "embedding",
+            ModelCategory::Diffusion => "diffusion",
+        };
+        if !matches!(kind, "text" | "multimodal" | "speech") {
+            continue;
         }
+        let (input_modalities, output_modalities) = model
+            .modalities
+            .map(|modalities| {
+                (
+                    modalities.input.iter().map(modality_label).collect(),
+                    modalities.output.iter().map(modality_label).collect(),
+                )
+            })
+            .unwrap_or_default();
+        models.insert(
+            model.id.clone(),
+            UiModelInfo {
+                name: model.id,
+                kind: kind.to_string(),
+                input_modalities,
+                output_modalities,
+                generation_defaults: GenerationParams::from_model_defaults(
+                    model.generation_defaults.as_ref(),
+                ),
+            },
+        );
     }
     models
 }
@@ -239,14 +233,13 @@ pub async fn mount(
     options: UiOptions,
     observability: ObservabilityConfig,
 ) -> Result<Router> {
-    let inference = engine.state().clone();
     let observability = ObservabilityState::with_max_body_bytes(
         observability,
-        inference.clone(),
+        engine.clone(),
         DEFAULT_MAX_BODY_LIMIT,
     );
     let auth = options.auth.clone();
-    let ui = build_ui_router(inference, options)
+    let ui = build_ui_router(engine, options)
         .await?
         .layer(middleware::from_fn_with_state(observability, observe_http));
     let guard = Guard {
@@ -260,8 +253,8 @@ pub async fn mount(
         .nest(UI_ROUTE, require(ui, auth, guard)))
 }
 
-async fn build_ui_router(inference: Arc<InferenceRs>, options: UiOptions) -> Result<Router> {
-    let models = build_model_list(&inference);
+async fn build_ui_router(engine: &Engine, options: UiOptions) -> Result<Router> {
+    let models = build_model_list(engine);
 
     let base_cache = get_cache_dir();
     let chats_dir = base_cache.join("chats");
@@ -272,14 +265,12 @@ async fn build_ui_router(inference: Arc<InferenceRs>, options: UiOptions) -> Res
     fs::create_dir_all(&uploads_dir).await?;
     inference_server_core::configure_ui_upload_dir(&uploads_dir).await?;
 
-    let default_model = inference
-        .get_default_model_id()
-        .ok()
-        .flatten()
+    let default_model = engine
+        .default_model_id()
         .or_else(|| models.keys().next().cloned());
 
     let app_state = Arc::new(AppState {
-        inference,
+        engine: engine.clone(),
         models,
         default_model: default_model.clone(),
         current: tokio::sync::RwLock::new(default_model),

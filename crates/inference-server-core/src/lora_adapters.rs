@@ -1,8 +1,7 @@
 //! The LoRA adapter routes: HTTP framing over the engine's adapter management.
 
 use axum::{
-    Extension,
-    extract::{Query, State, rejection::QueryRejection},
+    extract::{Query, rejection::QueryRejection},
     response::Response,
 };
 
@@ -14,8 +13,7 @@ pub use crate::lora_adapters_api::{
 };
 use crate::{
     handler_core::{ApiError, ApiErrorKind, json_response, openai_error_response},
-    lora_adapters_api::{list_adapters, load_adapter, unload_adapter},
-    types::ExtractedInferenceRsState,
+    types::OwnedEngine,
 };
 
 const INVALID_QUERY: &str = "invalid_query";
@@ -43,12 +41,11 @@ const INVALID_QUERY: &str = "invalid_query";
     )
 ))]
 pub(crate) async fn load_lora_adapter(
-    State(state): ExtractedInferenceRsState,
-    Extension(config): Extension<LoraAdapterApiConfig>,
+    OwnedEngine(engine): OwnedEngine,
     payload: Result<ApiJson<LoadLoraAdapterRequest>, ApiJsonRejection>,
 ) -> Response {
     match payload {
-        Ok(ApiJson(request)) => json_response(load_adapter(&state, &config, request).await),
+        Ok(ApiJson(request)) => json_response(engine.load_lora_adapter(request).await),
         Err(ApiJsonRejection(error)) => openai_error_response(error),
     }
 }
@@ -73,12 +70,11 @@ pub(crate) async fn load_lora_adapter(
     )
 ))]
 pub(crate) async fn unload_lora_adapter(
-    State(state): ExtractedInferenceRsState,
-    Extension(config): Extension<LoraAdapterApiConfig>,
+    OwnedEngine(engine): OwnedEngine,
     payload: Result<ApiJson<UnloadLoraAdapterRequest>, ApiJsonRejection>,
 ) -> Response {
     match payload {
-        Ok(ApiJson(request)) => json_response(unload_adapter(&state, &config, request).await),
+        Ok(ApiJson(request)) => json_response(engine.unload_lora_adapter(request).await),
         Err(ApiJsonRejection(error)) => openai_error_response(error),
     }
 }
@@ -98,12 +94,11 @@ pub(crate) async fn unload_lora_adapter(
     )
 ))]
 pub(crate) async fn list_lora_adapters(
-    State(state): ExtractedInferenceRsState,
-    Extension(config): Extension<LoraAdapterApiConfig>,
+    OwnedEngine(engine): OwnedEngine,
     payload: Result<Query<ListLoraAdaptersQuery>, QueryRejection>,
 ) -> Response {
     match payload {
-        Ok(Query(query)) => json_response(list_adapters(&state, &config, query).await),
+        Ok(Query(query)) => json_response(engine.lora_adapters(query).await),
         Err(error) => openai_error_response(ApiError::new(
             ApiErrorKind::InvalidRequest,
             error.body_text(),
