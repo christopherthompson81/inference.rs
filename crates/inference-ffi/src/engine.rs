@@ -1,7 +1,7 @@
 //! The engine surface: load an engine from a JSON spec and run OpenAI-style chat completions on it.
 
 use std::{
-    ffi::{CString, c_char},
+    ffi::{CString, c_char, c_void},
     time::Duration,
 };
 
@@ -19,7 +19,10 @@ use inference_api::{
 
 use crate::{
     Failure, FfiResult,
-    callbacks::{engine_callbacks, inference_host_callbacks},
+    callbacks::{
+        engine_callbacks, host_logits_processor, inference_host_callbacks,
+        inference_logits_processor_callback,
+    },
     guard, guard_value, inference_status,
     inference_status::{
         INFERENCE_ERR_INVALID_REQUEST, INFERENCE_ERR_LOAD_FAILED, INFERENCE_ERR_NOT_AVAILABLE,
@@ -240,6 +243,48 @@ pub unsafe extern "C" fn inference_engine_for_owner(
     }
 }
 
+/// Safety: `engine` is a live handle, `name` valid for `name_len` bytes; `user_data` as the header requires.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_engine_register_logits_processor(
+    engine: *const inference_engine,
+    name: *const c_char,
+    name_len: usize,
+    callback: Option<inference_logits_processor_callback>,
+    user_data: *mut c_void,
+) -> inference_status {
+    unsafe {
+        guard(|| {
+            let engine = live_engine(engine)?;
+            let name = arg_utf8(name, name_len, "name")?;
+            let callback = callback.ok_or_else(|| Failure::invalid("callback is NULL"))?;
+            let processor = host_logits_processor(name, callback, user_data);
+            engine
+                .engine()
+                .register_logits_processor(name, processor)
+                .map_err(api_failure)
+        })
+    }
+}
+
+/// Safety: `engine` is a live handle and `name` valid for `name_len` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_engine_unregister_logits_processor(
+    engine: *const inference_engine,
+    name: *const c_char,
+    name_len: usize,
+) -> inference_status {
+    unsafe {
+        guard(|| {
+            let engine = live_engine(engine)?;
+            let name = arg_utf8(name, name_len, "name")?;
+            engine
+                .engine()
+                .unregister_logits_processor(name)
+                .map_err(api_failure)
+        })
+    }
+}
+
 /// Safety: `engine` is a live handle, `request` valid for `request_len` bytes, `out_response` valid for a write.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn inference_chat(
@@ -354,6 +399,16 @@ unsafe fn stream_call(
 }
 
 // Every blocking operation has the same shape: engine and request in, an owned handle out.
+// Safety: `engine` is NULL or a live handle.
+unsafe fn live_engine<'a>(engine: *const inference_engine) -> FfiResult<&'a BlockingEngine> {
+    unsafe {
+        engine
+            .as_ref()
+            .map(|engine| &engine.engine)
+            .ok_or_else(|| Failure::invalid("engine is NULL"))
+    }
+}
+
 unsafe fn engine_call<H>(
     engine: *const inference_engine,
     input: (*const c_char, usize, &str),
@@ -364,11 +419,9 @@ unsafe fn engine_call<H>(
         let ((input, input_len, input_name), (out, out_name)) = (input, out);
         guard(|| {
             out_arg(out, out_name)?;
-            let engine = engine
-                .as_ref()
-                .ok_or_else(|| Failure::invalid("engine is NULL"))?;
+            let engine = live_engine(engine)?;
             let request = arg_bytes(input, input_len, input_name)?;
-            out.write(call(&engine.engine, request)?);
+            out.write(call(engine, request)?);
             Ok(())
         })
     }
@@ -642,10 +695,8 @@ unsafe fn query_call(
     unsafe {
         guard(|| {
             out_arg(out_response, "out_response")?;
-            let engine = engine
-                .as_ref()
-                .ok_or_else(|| Failure::invalid("engine is NULL"))?;
-            let response = call(&engine.engine).map_err(api_failure)?;
+            let engine = live_engine(engine)?;
+            let response = call(engine).map_err(api_failure)?;
             out_response.write(string_handle(response));
             Ok(())
         })
@@ -1018,12 +1069,9 @@ pub unsafe extern "C" fn inference_skill_upload(
     unsafe {
         guard(|| {
             out_arg(out_response, "out_response")?;
-            let engine = engine
-                .as_ref()
-                .ok_or_else(|| Failure::invalid("engine is NULL"))?;
+            let engine = live_engine(engine)?;
             let files = arg_skill_files(files, file_count)?;
             let response = engine
-                .engine
                 .engine()
                 .upload_skill_json(files)
                 .map_err(api_failure)?;
@@ -1069,10 +1117,8 @@ pub unsafe extern "C" fn inference_skills_list(
     unsafe {
         guard(|| {
             out_arg(out_response, "out_response")?;
-            let engine = engine
-                .as_ref()
-                .ok_or_else(|| Failure::invalid("engine is NULL"))?;
-            let response = engine.engine.engine().skills_json().map_err(api_failure)?;
+            let engine = live_engine(engine)?;
+            let response = engine.engine().skills_json().map_err(api_failure)?;
             out_response.write(string_handle(response));
             Ok(())
         })

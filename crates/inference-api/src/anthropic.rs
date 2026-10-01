@@ -150,6 +150,9 @@ pub struct AnthropicMessagesRequest {
     pub web_search_options: Option<WebSearchOptions>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub truncate_sequence: Option<bool>,
+    /// Logits processors the engine's host registered, applied by name in this order after the penalties.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub logits_processors: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
@@ -724,6 +727,7 @@ impl AnthropicMessagesRequest {
             chat_template_kwargs: None,
             max_tool_rounds: self.max_tool_rounds,
             truncate_sequence: self.truncate_sequence,
+            logits_processors: self.logits_processors,
         })
     }
 }

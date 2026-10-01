@@ -2211,6 +2211,16 @@
               "minimum": 0
             }
           },
+          "logits_processors": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Logits processors the engine's host registered, applied by name in this order after the penalties."
+          },
           "logprobs": {
             "type": "boolean"
           },
@@ -3344,6 +3354,17 @@
             },
             "example": null
           },
+          "logits_processors": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Logits processors the engine's host registered, applied by name in this order after the penalties.",
+            "example": null
+          },
           "logprobs": {
             "type": "boolean",
             "description": "Return log probabilities of the output tokens.",
@@ -3908,6 +3929,17 @@
               "format": "int32",
               "minimum": 0
             },
+            "example": null
+          },
+          "logits_processors": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Logits processors the engine's host registered, applied by name in this order after the penalties.",
             "example": null
           },
           "logprobs": {
@@ -8436,6 +8468,16 @@
               "format": "int32",
               "minimum": 0
             }
+          },
+          "logits_processors": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Logits processors the engine's host registered, applied by name in this order after the penalties."
           },
           "logprobs": {
             "type": "boolean",

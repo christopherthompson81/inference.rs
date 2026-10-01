@@ -1894,3 +1894,125 @@ fn a_prompt_is_scored_by_log_probabilities_and_its_logits_agree() {
     assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
     unsafe { inference_engine_free(engine) };
 }
+
+const FORCED: &str = "forced";
+
+// Leaves only the vocabulary's last token sampleable, counting the steps it ran in.
+unsafe extern "C" fn force_last_token(
+    user_data: *mut std::ffi::c_void,
+    logits: *mut f32,
+    vocab_size: usize,
+    _: *const u32,
+    context_len: usize,
+) -> i32 {
+    let calls = unsafe { &*user_data.cast::<std::sync::atomic::AtomicUsize>() };
+    calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    if context_len == 0 {
+        return 1;
+    }
+    let logits = unsafe { std::slice::from_raw_parts_mut(logits, vocab_size) };
+    logits.fill(f32::NEG_INFINITY);
+    logits[vocab_size - 1] = 0.0;
+    0
+}
+
+unsafe extern "C" fn refuse(
+    _: *mut std::ffi::c_void,
+    _: *mut f32,
+    _: usize,
+    _: *const u32,
+    _: usize,
+) -> i32 {
+    1
+}
+
+fn register(
+    engine: *const inference_engine,
+    name: &str,
+    callback: inference_ffi::callbacks::inference_logits_processor_callback,
+    user_data: *mut std::ffi::c_void,
+) -> inference_status {
+    unsafe {
+        inference_engine_register_logits_processor(
+            engine,
+            name.as_ptr().cast::<c_char>(),
+            name.len(),
+            Some(callback),
+            user_data,
+        )
+    }
+}
+
+fn unregister(engine: *const inference_engine, name: &str) -> inference_status {
+    unsafe {
+        inference_engine_unregister_logits_processor(
+            engine,
+            name.as_ptr().cast::<c_char>(),
+            name.len(),
+        )
+    }
+}
+
+fn processed_chat(
+    engine: *const inference_engine,
+    names: &[&str],
+) -> (inference_status, Option<String>) {
+    let request = json!({
+        "model": "default",
+        "messages": [{"role": "user", "content": PROMPT}],
+        "max_tokens": MAX_TOKENS,
+        "temperature": 0.0,
+        "logprobs": true,
+        "top_logprobs": 1,
+        "logits_processors": names,
+    });
+    chat(engine, &request.to_string())
+}
+
+#[test]
+fn a_registered_logits_processor_steers_the_requests_that_name_it() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let (status, engine) = load(&spec(dir.path()));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let calls = Box::new(std::sync::atomic::AtomicUsize::new(0));
+    let user_data = std::ptr::from_ref(&*calls).cast_mut().cast();
+
+    assert_eq!(
+        register(engine, FORCED, force_last_token, user_data),
+        INFERENCE_OK
+    );
+    assert_eq!(
+        register(engine, FORCED, force_last_token, user_data),
+        INFERENCE_ERR_INVALID_REQUEST
+    );
+    assert!(
+        last_error().contains("logits_processor_conflict"),
+        "{}",
+        last_error()
+    );
+
+    let (status, response) = processed_chat(engine, &[FORCED]);
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let response: Value = serde_json::from_str(&response.unwrap()).unwrap();
+    let tokens = decoded_tokens(&response);
+    assert!(!tokens.is_empty(), "{response}");
+    assert!(tokens.iter().all(|token| *token == tokens[0]), "{response}");
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::SeqCst),
+        tokens.len()
+    );
+
+    assert_eq!(
+        register(engine, "refusing", refuse, null_mut()),
+        INFERENCE_OK
+    );
+    // The host's failure is the engine's to report, so its detail stays out of the error body.
+    let (status, _) = processed_chat(engine, &["refusing"]);
+    assert_eq!(status, INFERENCE_ERR_RUNTIME, "{}", last_error());
+
+    assert_eq!(unregister(engine, FORCED), INFERENCE_OK);
+    assert_eq!(unregister(engine, FORCED), INFERENCE_ERR_NOT_FOUND);
+    let (status, _) = processed_chat(engine, &[FORCED]);
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{}", last_error());
+    unsafe { inference_engine_free(engine) };
+}

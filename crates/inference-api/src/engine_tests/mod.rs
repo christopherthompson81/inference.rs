@@ -7,6 +7,7 @@ use crate::Engine;
 #[path = "../../../inference/tests/support/paddleocr_vl_tiny.rs"]
 mod support;
 
+mod logits_processors;
 mod responses_stream;
 mod store;
 

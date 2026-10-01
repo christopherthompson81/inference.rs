@@ -24,6 +24,7 @@ use crate::{
         apply_model_override, create_response_channel, response_model_id, send_request_with_model,
     },
     input_files::{InputFileSpec, resolve_input_file},
+    logits_processors::LogitsProcessors,
     lora_routing::{DEFAULT_MODEL_ID, resolve_lora_adapter_model},
     media_source::MediaAttachments,
     openai::{
@@ -800,6 +801,7 @@ pub struct ChatEngine {
     pub skill_store: Option<Arc<SkillStore>>,
     /// Who requests act for; their sessions and files are that owner's. `None` for an unscoped caller.
     pub owner: Option<String>,
+    pub logits_processors: LogitsProcessors,
 }
 
 /// A dispatched chat request: its response channel and how to present what comes back.
@@ -901,6 +903,10 @@ impl ChatEngine {
                 .notifier(tx.clone(), self.owner.clone())
         });
 
+        let logits_processors = self
+            .logits_processors
+            .resolve(oairequest.logits_processors.as_deref())
+            .map_err(|error| DispatchError::Validation(Box::new(error)))?;
         let model_id = (oairequest.model != DEFAULT_MODEL_ID).then(|| oairequest.model.clone());
         let (mut request, is_streaming) = parse_request(
             oairequest,
@@ -921,6 +927,7 @@ impl ChatEngine {
         let cancellation = RequestCancellation::default();
         if let Request::Normal(normal) = &mut request {
             normal.cancellation = Some(cancellation.clone());
+            normal.logits_processors = logits_processors;
         }
         send_request_with_model(&self.state, request, model_id.as_deref())
             .await

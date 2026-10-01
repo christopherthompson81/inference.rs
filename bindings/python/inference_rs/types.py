@@ -166,6 +166,7 @@ class AnthropicMessagesRequest:
     frequency_penalty: float | None = None
     grammar: Grammar | None = None
     logit_bias: dict[str, float] | None = None
+    logits_processors: list[str] | None = None
     logprobs: bool | None = None
     max_tokens: int | None = None
     max_tool_rounds: int | None = None
@@ -448,6 +449,7 @@ class ChatCompletionRequest:
     grammar: Grammar | None = None
     ignore_eos: bool | None = None
     logit_bias: dict[str, float] | None = None
+    logits_processors: list[str] | None = None
     logprobs: bool | None = None
     max_tokens: int | None = None
     max_tool_rounds: int | None = None
@@ -555,6 +557,7 @@ class CompletionRequest:
     grammar: Grammar | None = None
     ignore_eos: bool | None = None
     logit_bias: dict[str, float] | None = None
+    logits_processors: list[str] | None = None
     logprobs: int | None = None
     max_tokens: int | None = None
     min_p: float | None = None
@@ -1716,6 +1719,7 @@ class OpenResponsesCreateRequest:
     input: OpenResponsesInput
     instructions: str | None = None
     logit_bias: dict[str, float] | None = None
+    logits_processors: list[str] | None = None
     logprobs: bool | None = None
     max_output_tokens: int | None = None
     max_tool_calls: int | None = None

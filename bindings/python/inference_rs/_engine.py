@@ -417,6 +417,16 @@ class JsonEngine:
     def put_session(self, session_id: str, session_json: str) -> str:
         return self._call2("inference_session_put", session_id, session_json)
 
+    def register_logits_processor(self, name: str, processor) -> _callbacks.LogitsProcessor:
+        """Makes `processor(logits, context)` selectable by name in a request's "logits_processors".
+
+        Each decoding step it edits `logits` (a ctypes float array of the vocabulary's size) in place, given `context`,
+        every token so far, the prompt's included; both are valid only during the call. It runs on engine worker
+        threads, and an exception fails the request. Every engine sharing this one sees it. The result keeps the
+        engine open until it is closed, which unregisters the processor.
+        """
+        return _callbacks.register_logits_processor(self._handle, name, processor)
+
     def fork_session(self, session_id: str, request_json: str) -> str:
         """Branches a session into a new one the engine names; the request is {"num_turns"}, the answer {"id"}."""
         return self._call2("inference_session_fork", session_id, request_json)

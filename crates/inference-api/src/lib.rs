@@ -19,6 +19,7 @@ pub mod generation;
 pub(crate) mod inference_for_server_builder;
 #[doc(hidden)]
 pub mod input_files;
+pub mod logits_processors;
 pub mod lora_adapters;
 #[doc(hidden)]
 pub mod lora_routing;

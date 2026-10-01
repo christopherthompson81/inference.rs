@@ -32,6 +32,7 @@ use crate::{
     inference_for_server_builder::{
         InferenceRsForServerBuilder, ModelConfig, ModelLoadSettings, defaults, parse_device_layers,
     },
+    logits_processors::{CustomLogitsProcessor, LogitsProcessors},
     lora_adapters::{
         ListLoraAdaptersQuery, LoadLoraAdapterRequest, LoraAdapterApiConfig,
         LoraAdapterListResponse, LoraAdapterObject, UnloadLoraAdapterRequest, list_adapters,
@@ -764,6 +765,7 @@ impl Engine {
                 agentic,
                 skill_store: Some(Arc::new(skill_store)),
                 owner: None,
+                logits_processors: LogitsProcessors::default(),
             },
             adapters,
             models,
@@ -794,6 +796,20 @@ impl Engine {
     /// Who this engine acts for; `None` when unscoped.
     pub fn owner(&self) -> Option<&str> {
         self.chat.owner.as_deref()
+    }
+
+    /// Makes `processor` selectable by `name` in a chat or completion request's `logits_processors`.
+    pub fn register_logits_processor(
+        &self,
+        name: impl Into<String>,
+        processor: Arc<dyn CustomLogitsProcessor>,
+    ) -> Result<(), ApiError> {
+        self.chat.logits_processors.register(name.into(), processor)
+    }
+
+    /// Requests already running keep the processor; new ones naming it are refused.
+    pub fn unregister_logits_processor(&self, name: &str) -> Result<(), ApiError> {
+        self.chat.logits_processors.unregister(name)
     }
 
     /// Stops the engine threads and waits for them; fails while another clone of this engine is alive.
@@ -923,7 +939,7 @@ impl Engine {
     ) -> Result<CompletionResponse, ApiError> {
         request.stream = Some(false);
         let state = self.state().clone();
-        let prepared = prepare_completion(&state, request)
+        let prepared = prepare_completion(&state, &self.chat.logits_processors, request)
             .await
             .map_err(|error| error.into_api_error(state.clone()))?;
         let mut rx = prepared.rx;
@@ -956,7 +972,7 @@ impl Engine {
     ) -> Result<CompletionStream, ApiError> {
         request.stream = Some(true);
         let state = self.state().clone();
-        let prepared = prepare_completion(&state, request)
+        let prepared = prepare_completion(&state, &self.chat.logits_processors, request)
             .await
             .map_err(|error| error.into_api_error(state.clone()))?;
         Ok(

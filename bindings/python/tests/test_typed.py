@@ -331,6 +331,35 @@ class TypedEngine(unittest.TestCase):
         _, logits = self.engine.prompt_logits(scores.tokens, output="logits")
         self.assertEqual(len(logits), len(scores.tokens) * scores.vocab_size)
 
+    def test_a_registered_logits_processor_steers_the_requests_that_name_it(self):
+        steps = []
+
+        def force_last_token(logits, context):
+            steps.append(len(context))
+            for index in range(len(logits)):
+                logits[index] = float("-inf")
+            logits[len(logits) - 1] = 0.0
+
+        request = chat_request()
+        request.logits_processors = ["py-forced"]
+        with self.engine.register_logits_processor("py-forced", force_last_token):
+            with self.assertRaises(ir.InferenceError) as again:
+                self.engine.register_logits_processor("py-forced", force_last_token)
+            self.assertEqual(again.exception.status, ir.Status.INVALID_REQUEST)
+            response = self.engine.chat(request)
+        self.assertEqual(len(steps), response.usage.completion_tokens)
+        self.assertTrue(all(a < b for a, b in zip(steps, steps[1:])), steps)
+        with self.assertRaises(ir.InferenceError) as unknown:
+            self.engine.chat(request)
+        self.assertEqual(unknown.exception.status, ir.Status.INVALID_REQUEST)
+
+        # A registration outlives the handle it came through, and closing it afterwards still unregisters the name.
+        scoped = self.engine.json.for_owner("py-processor-owner")
+        registration = scoped.register_logits_processor("py-scoped", force_last_token)
+        scoped.close()
+        registration.close()
+        self.engine.register_logits_processor("py-scoped", force_last_token).close()
+
     def test_runtime_operations_are_typed(self):
         tokens = self.engine.tokenize("Reply with ok")
         self.assertTrue(tokens and all(isinstance(token, int) for token in tokens))

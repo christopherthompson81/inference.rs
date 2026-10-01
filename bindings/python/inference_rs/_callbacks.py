@@ -8,6 +8,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 
 from . import _native
+from ._errors import check
 from ._native import lib
 
 ENGINE_GONE = "the engine that registered this callback has been freed"
@@ -118,6 +119,74 @@ def _search(user_data, query, query_len, result):
         _answer(result, handler(ctypes.string_at(query, query_len).decode("utf-8")))
     except BaseException as error:  # noqa: BLE001 - a handler's failure reaches the model, not the engine
         _fail(result, error)
+
+
+@_native.LOGITS_PROCESSOR_CALLBACK
+def _logits(user_data, logits, vocab_size, context, context_len):
+    try:
+        processor = _find(user_data)
+        if processor is None:
+            return 1
+        # Views of engine memory, valid only during this call.
+        step = (ctypes.c_float * vocab_size).from_address(ctypes.addressof(logits.contents))
+        tokens = (ctypes.c_uint32 * context_len).from_address(ctypes.addressof(context.contents)) if context_len else ()
+        processor(step, tokens)
+        return 0
+    except BaseException:  # noqa: BLE001 - nothing may raise through a C callback; the request fails instead
+        return 1
+
+
+def register_logits_processor(handle, name: str, processor) -> "LogitsProcessor":
+    data = name.encode("utf-8")
+    processor_id = _register(processor)
+    try:
+        # Held until the registration closes, so unregistering never needs a handle its caller may have closed.
+        engine = handle.acquire()
+    except BaseException:
+        unregister([processor_id])
+        raise
+    try:
+        check(
+            lib.inference_engine_register_logits_processor(engine, data, len(data), _logits, processor_id),
+            "inference_engine_register_logits_processor",
+        )
+    except BaseException:
+        handle.release()
+        unregister([processor_id])
+        raise
+    return LogitsProcessor(handle, engine, data, processor_id)
+
+
+class LogitsProcessor:
+    """A registered logits processor, holding its engine open until it is closed (or leaves its `with`).
+
+    Requests still running that named it fail once it is closed.
+    """
+
+    def __init__(self, handle, engine, name: bytes, processor_id: int):
+        self._handle = handle
+        self._engine = engine
+        self._name = name
+        self._id = processor_id
+        self._closed = False
+        self._lock = threading.Lock()
+
+    def close(self) -> None:
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        try:
+            lib.inference_engine_unregister_logits_processor(self._engine, self._name, len(self._name))
+        finally:
+            unregister([self._id])
+            self._handle.release()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
 
 class Registration:

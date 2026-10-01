@@ -9,7 +9,7 @@ internal static unsafe partial class NativeMethods
     internal const string Library = "inference_ffi";
 
     /// <summary>The ABI these declarations mirror; while it is 0.0.x any other version may differ anywhere.</summary>
-    internal const uint AbiVersion = (0 << 16) | (0 << 8) | 17;
+    internal const uint AbiVersion = (0 << 16) | (0 << 8) | 18;
 
     /// <summary>Refuses a library built for another ABI, before any call into it could misread its memory.</summary>
     internal static void EnsureAbi()
@@ -86,6 +86,15 @@ internal static unsafe partial class NativeMethods
     [LibraryImport(Library)]
     internal static partial InferenceStatus inference_engine_for_owner(
         IntPtr engine, byte* owner, nuint ownerLen, out IntPtr outEngine);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_engine_register_logits_processor(
+        IntPtr engine, byte* name, nuint nameLen,
+        delegate* unmanaged[Cdecl]<IntPtr, float*, nuint, uint*, nuint, int> callback, nint userData);
+
+    [LibraryImport(Library)]
+    internal static partial InferenceStatus inference_engine_unregister_logits_processor(
+        IntPtr engine, byte* name, nuint nameLen);
 
     [LibraryImport(Library)]
     internal static partial void inference_callback_result_set(IntPtr result, byte* data, nuint len);

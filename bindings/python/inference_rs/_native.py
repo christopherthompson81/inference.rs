@@ -19,7 +19,7 @@ from ctypes import (
 from pathlib import Path
 
 # The ABI these declarations mirror; while it is 0.0.x any other version may differ anywhere.
-ABI_VERSION = (0 << 16) | (0 << 8) | 17
+ABI_VERSION = (0 << 16) | (0 << 8) | 18
 
 NATIVE_DIR_VARIABLE = "INFERENCE_NATIVE_DIR"
 BUNDLED_DIR = "_lib"
@@ -55,6 +55,7 @@ class SkillFile(Structure):
 
 TOOL_CALLBACK = CFUNCTYPE(None, c_void_p, c_char_p, c_void_p, c_size_t, c_void_p, c_size_t, c_void_p)
 SEARCH_CALLBACK = CFUNCTYPE(None, c_void_p, c_void_p, c_size_t, c_void_p)
+LOGITS_PROCESSOR_CALLBACK = CFUNCTYPE(c_int32, c_void_p, POINTER(c_float), c_size_t, POINTER(c_uint32), c_size_t)
 
 
 class HostTool(Structure):
@@ -107,6 +108,11 @@ SIGNATURES = {
     ),
     "inference_engine_free": (None, (c_void_p,)),
     "inference_engine_for_owner": (status, (c_void_p, *buffer, out)),
+    "inference_engine_register_logits_processor": (
+        status,
+        (c_void_p, *buffer, LOGITS_PROCESSOR_CALLBACK, c_void_p),
+    ),
+    "inference_engine_unregister_logits_processor": (status, (c_void_p, *buffer)),
     "inference_callback_result_set": (None, (c_void_p, c_char_p, c_size_t)),
     "inference_callback_result_fail": (None, (c_void_p, c_char_p)),
     "inference_chat": (status, (c_void_p, *buffer, out)),

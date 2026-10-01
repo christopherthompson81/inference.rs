@@ -16,6 +16,10 @@ public sealed record HostToolCall(string Name, string ArgumentsJson, string? Ses
 /// <remarks>Handlers run on engine worker threads, possibly several at once, and must not call back into the engine.</remarks>
 public sealed record HostTool(string DefinitionJson, Func<HostToolCall, string> Handler);
 
+/// <summary>Edits one decoding step's logits in place; <paramref name="context"/> is every token so far, the prompt's included.</summary>
+/// <remarks>Runs on engine worker threads; an exception fails the request it runs in.</remarks>
+public delegate void LogitsProcessor(Span<float> logits, ReadOnlySpan<uint> context);
+
 /// <summary>Host functions the agent loop calls, fixed when the engine loads.</summary>
 public sealed class HostCallbacks
 {
@@ -160,6 +164,22 @@ internal static unsafe class HostCallbackBridge
         }
     }
 
+    [UnmanagedCallersOnly(CallConvs = [typeof(CallConvCdecl)])]
+    internal static int Logits(IntPtr userData, float* logits, nuint vocabSize, uint* context, nuint contextLen)
+    {
+        try
+        {
+            var processor = HostCallbackRegistry.Find<LogitsProcessor>(userData);
+            if (processor is null) return 1;
+            processor(new Span<float>(logits, checked((int)vocabSize)), new ReadOnlySpan<uint>(context, checked((int)contextLen)));
+            return 0;
+        }
+        catch
+        {
+            return 1;
+        }
+    }
+
     private static void Answer(IntPtr result, string text)
     {
         var bytes = Encoding.UTF8.GetBytes(text);
@@ -192,5 +212,40 @@ internal static unsafe class HostCallbackBridge
         int? round = root.TryGetProperty("round", out var value) && value.ValueKind == JsonValueKind.Number
             && value.TryGetInt32(out var parsed) ? parsed : null;
         return (sessionId, round);
+    }
+}
+
+/// <summary>A logits processor's registration, holding its engine open until disposed, which unregisters it.</summary>
+internal sealed unsafe class LogitsProcessorRegistration : IDisposable
+{
+    private readonly EngineHandle _engine;
+    private readonly string _name;
+    private readonly nint _id;
+    private int _disposed;
+
+    /// <summary>Takes a reference on <paramref name="engine"/>, so unregistering never meets a disposed handle.</summary>
+    internal LogitsProcessorRegistration(EngineHandle engine, string name, nint id)
+    {
+        var added = false;
+        engine.DangerousAddRef(ref added);
+        _engine = engine;
+        _name = name;
+        _id = id;
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 1) return;
+        try
+        {
+            using var bytes = new PinnedBytes(_name);
+            NativeMethods.inference_engine_unregister_logits_processor(
+                _engine.DangerousGetHandle(), bytes.Pointer, bytes.Length);
+        }
+        finally
+        {
+            HostCallbackRegistry.Remove([_id]);
+            _engine.DangerousRelease();
+        }
     }
 }
