@@ -1142,3 +1142,28 @@ Tests: `a_tool_registered_after_load_answers_the_requests_that_name_it` in the e
 callback; unnamed: never called; clashing with a declared tool: refused; unregistered: 400 on `host_tools`) and in the
 ABI (registration through `inference_host_tool`, duplicate refused, chat answered, unregister twice NOT_FOUND), and the
 C# and Python registration checks.
+
+## Run 40 - 2026-10-01 (time approximate)
+
+Question: what does moving the `inference` SDK onto inference-api take, and what has no route there yet?
+
+Finding (a read-only mapping of every public SDK item onto inference-api): most of the SDK maps directly; `Model`
+wraps `Engine`, the builders produce `EngineSpec` + `EngineCallbacks`, the message builders produce a
+`ChatCompletionRequest` plus `MediaAttachments`, streaming reuses `ChatStream`/`ChatStreamEvent`, and agent.rs goes
+(host tools, `max_tool_rounds`, the engine's parallel round). `examples/rust/Cargo.toml` has 59 examples.
+
+Gaps with no inference-api route today:
+- Engine (needs ABI and bindings): tokenizing chat messages (`TokenizeRequest` takes text only), a `model` on re-ISQ
+  and calibration, `hf_revision`, inline topology and ordering (paths only), the speech generation config, a
+  best-effort paged-cache size, stop token ids, a per-request `tool_dispatch_url`, sequential tool rounds
+  (`parallel_tool_calls`), f32 speech samples (PCM16 today).
+- Rust-only (no ABI form): decoded media attachments (`DynamicImage`, `AudioInput`, pre-decoded `VideoInput`),
+  `Default` on the request types, a private field blocking `LoadLoraAdapterRequest` literals, custom `Pipeline`
+  injection, `Model::inner()` access to core.
+- Kept in the SDK as conveniences: an async tool adapter, `chat_with_approval` (stream, answer approvals through
+  `resolve_approval`), `with_shell_skill(path)` (upload, then reference), `generate_structured`, `save_file`.
+
+Behaviour changes the move brings: Ask permission needs streaming, the engine names forked sessions, sessions are
+scoped by owner rather than model, the engine's throughput logging defaults on. `inference-macros` emits SDK agent
+types, so it changes with `Model`. Planned phases: A engine additions, B builders to specs, C `Model` on `Engine`, D
+remaining examples, E drop the core dependency, F docs.
