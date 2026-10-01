@@ -18,6 +18,7 @@ use crate::{
 };
 
 const MODEL_OBJECT: &str = "model";
+const MODEL_CONFLICT: &str = "model_conflict";
 const MODEL_LIST_OBJECT: &str = "list";
 const MODEL_OWNER: &str = "local";
 
@@ -76,6 +77,92 @@ pub fn cache_stats(state: &SharedInferenceRsState) -> Result<CacheStats, ApiErro
         object: MODEL_LIST_OBJECT.to_string(),
         data,
     })
+}
+
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct ModelRemoved {
+    pub model_id: String,
+}
+
+/// The model a request without `model`, or naming `default`, goes to.
+#[derive(Debug, Clone, Serialize, ToSchema)]
+pub struct DefaultModel {
+    pub model_id: String,
+}
+
+/// Another id requests can name a served model by.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+#[serde(deny_unknown_fields)]
+pub struct ModelAlias {
+    pub alias: String,
+    pub model_id: String,
+}
+
+fn known_model(state: &SharedInferenceRsState, model_id: &str) -> Result<(), ApiError> {
+    match state.model_exists(model_id) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(core_error(InferenceRsError::ModelNotFound(
+            model_id.to_string(),
+        ))),
+        Err(error) => Err(core_error(error)),
+    }
+}
+
+// Removing a model or making it the default needs it running; an unloaded one is reloaded first.
+fn loaded_model(state: &SharedInferenceRsState, model_id: &str) -> Result<(), ApiError> {
+    known_model(state, model_id)?;
+    match state.is_model_loaded(model_id) {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(model_conflict(format!(
+            "model `{model_id}` is not loaded; reload it first"
+        ))),
+        Err(error) => Err(core_error(error)),
+    }
+}
+
+fn model_conflict(message: String) -> ApiError {
+    ApiError::new(ApiErrorKind::Conflict, message, Some(MODEL_CONFLICT), None)
+}
+
+/// Stops serving a model and frees it; when it was the default, another served model becomes the default.
+pub async fn remove_model(
+    state: &SharedInferenceRsState,
+    request: ModelOperationRequest,
+) -> Result<ModelRemoved, ApiError> {
+    loaded_model(state, &request.model_id)?;
+    let (state, model_id) = (state.clone(), request.model_id.clone());
+    // Removal hands the model's engine a blocking terminate.
+    tokio::task::spawn_blocking(move || state.remove_model(&model_id))
+        .await
+        .map_err(|_| ApiError::internal())?
+        .map_err(model_conflict)?;
+    Ok(ModelRemoved {
+        model_id: request.model_id,
+    })
+}
+
+pub fn set_default_model(
+    state: &SharedInferenceRsState,
+    request: ModelOperationRequest,
+) -> Result<DefaultModel, ApiError> {
+    loaded_model(state, &request.model_id)?;
+    state
+        .set_default_model_id(&request.model_id)
+        .map_err(model_conflict)?;
+    Ok(DefaultModel {
+        model_id: request.model_id,
+    })
+}
+
+pub fn add_model_alias(
+    state: &SharedInferenceRsState,
+    alias: ModelAlias,
+) -> Result<ModelAlias, ApiError> {
+    known_model(state, &alias.model_id)?;
+    state
+        .register_model_alias(alias.alias.clone(), &alias.model_id)
+        .map_err(model_conflict)?;
+    Ok(alias)
 }
 
 /// Whether a request naming `model_id` would be routed: a served model, the `default` alias, or a LoRA adapter.

@@ -165,6 +165,20 @@ class Engine:
     def list_models(self) -> types.ModelObjects:
         return from_json(types.ModelObjects, self.json.list_models())
 
+    def add_model(self, spec: types.ModelSpec | str) -> types.ModelStatusResponse:
+        """Loads another model into the running engine with the runtime settings it was loaded with."""
+        return from_json(types.ModelStatusResponse, self.json.add_model(to_json(spec)))
+
+    def remove_model(self, model_id: str) -> types.ModelRemoved:
+        return from_json(types.ModelRemoved, self.json.remove_model(_model(model_id)))
+
+    def set_default_model(self, model_id: str) -> types.DefaultModel:
+        return from_json(types.DefaultModel, self.json.set_default_model(_model(model_id)))
+
+    def add_model_alias(self, alias: str, model_id: str) -> types.ModelAlias:
+        request = types.ModelAlias(alias=alias, model_id=model_id)
+        return from_json(types.ModelAlias, self.json.add_model_alias(to_json(request)))
+
     def model_served(self, model_id: str) -> bool:
         """Whether a request naming `model_id` would be routed, adapter aliases included."""
         return from_json(types.ModelServed, self.json.model_served(_model(model_id))).served

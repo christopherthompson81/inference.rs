@@ -252,6 +252,93 @@ pub async fn get_model_status(
 #[cfg_attr(test, utoipa::path(
   post,
   tag = "inference.rs",
+  path = "/v1/models/add",
+  description = "Registered only when model management is on (`--allow-model-management`).",
+  request_body = inference_api::engine::ModelSpec,
+  responses(
+    (status = 200, description = "Model loaded and served", body = ModelStatusResponse),
+    (status = 400, description = "Invalid spec or the model failed to load"),
+    (status = 409, description = "A model with this id is already served")
+  )
+))]
+pub async fn add_model(
+    OwnedEngine(engine): OwnedEngine,
+    payload: Result<ApiJson<inference_api::engine::ModelSpec>, ApiJsonRejection>,
+) -> Response {
+    match payload {
+        Ok(ApiJson(spec)) => json_response(engine.add_model(spec).await),
+        Err(ApiJsonRejection(error)) => openai_error_response(error),
+    }
+}
+
+#[cfg_attr(test, utoipa::path(
+  post,
+  tag = "inference.rs",
+  path = "/v1/models/remove",
+  description = "Registered only when model management is on (`--allow-model-management`).",
+  request_body = ModelOperationRequest,
+  responses(
+    (status = 200, description = "Model removed", body = inference_api::models::ModelRemoved),
+    (status = 404, description = "Model not found"),
+    (status = 409, description = "The last model can't be removed")
+  )
+))]
+pub async fn remove_model(
+    OwnedEngine(engine): OwnedEngine,
+    payload: Result<ApiJson<ModelOperationRequest>, ApiJsonRejection>,
+) -> Response {
+    match model_operation_request(payload) {
+        Ok(request) => json_response(engine.remove_model(request).await),
+        Err(error) => openai_error_response(error),
+    }
+}
+
+#[cfg_attr(test, utoipa::path(
+  post,
+  tag = "inference.rs",
+  path = "/v1/models/default",
+  description = "Registered only when model management is on (`--allow-model-management`).",
+  request_body = ModelOperationRequest,
+  responses(
+    (status = 200, description = "The default model", body = inference_api::models::DefaultModel),
+    (status = 404, description = "Model not found")
+  )
+))]
+pub async fn set_default_model(
+    OwnedEngine(engine): OwnedEngine,
+    payload: Result<ApiJson<ModelOperationRequest>, ApiJsonRejection>,
+) -> Response {
+    match model_operation_request(payload) {
+        Ok(request) => json_response(engine.set_default_model(request)),
+        Err(error) => openai_error_response(error),
+    }
+}
+
+#[cfg_attr(test, utoipa::path(
+  post,
+  tag = "inference.rs",
+  path = "/v1/models/alias",
+  description = "Registered only when model management is on (`--allow-model-management`).",
+  request_body = inference_api::models::ModelAlias,
+  responses(
+    (status = 200, description = "Alias registered", body = inference_api::models::ModelAlias),
+    (status = 404, description = "Model not found"),
+    (status = 409, description = "The alias is already a model's id")
+  )
+))]
+pub async fn add_model_alias(
+    OwnedEngine(engine): OwnedEngine,
+    payload: Result<ApiJson<inference_api::models::ModelAlias>, ApiJsonRejection>,
+) -> Response {
+    match payload {
+        Ok(ApiJson(alias)) => json_response(engine.add_model_alias(alias)),
+        Err(ApiJsonRejection(error)) => openai_error_response(error),
+    }
+}
+
+#[cfg_attr(test, utoipa::path(
+  post,
+  tag = "inference.rs",
   path = "/v1/models/tune",
   request_body = TuneModelRequest,
   responses(

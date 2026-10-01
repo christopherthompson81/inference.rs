@@ -29,7 +29,7 @@ use crate::{
     },
     generation::{SpeechAudio, generate_image, generate_speech},
     inference_for_server_builder::{
-        InferenceRsForServerBuilder, ModelConfig, defaults, parse_device_layers,
+        InferenceRsForServerBuilder, ModelConfig, ModelLoadSettings, defaults, parse_device_layers,
     },
     lora_adapters::{
         ListLoraAdaptersQuery, LoadLoraAdapterRequest, LoraAdapterApiConfig,
@@ -39,8 +39,9 @@ use crate::{
     lora_routing::{DEFAULT_MODEL_ID, is_resolvable_lora_adapter_model, list_lora_adapter_models},
     media_source::MediaAttachments,
     models::{
-        CacheStats, ModelOperationRequest, ModelServed, ModelStatusResponse, cache_stats,
-        list_models, model_status, reload_model, unload_model,
+        CacheStats, DefaultModel, ModelAlias, ModelOperationRequest, ModelRemoved, ModelServed,
+        ModelStatus, ModelStatusResponse, add_model_alias, cache_stats, list_models, model_status,
+        reload_model, remove_model, set_default_model, unload_model,
     },
     openai::{
         ChatCompletionRequest, CompletionRequest, EmbeddingRequest, EmbeddingResponse,
@@ -88,6 +89,8 @@ const PAGED_CACHE_ONE_SIZE: &str =
     "paged_cache takes at most one of context_len, memory_mb and memory_fraction";
 const CODE_EXECUTION_UNAVAILABLE: &str =
     "code execution and the shell tool need a build with the `code-execution` feature";
+// How an added model's spec is named in its errors.
+const ADDED_MODEL: &str = "spec";
 const QUANT_WITH_ISQ: &str = "`quant` picks the quantization itself; drop `isq`";
 // Matches `inference serve`'s default, so an engine loaded from a spec batches like the server.
 pub const DEFAULT_MAX_SEQS: usize = 32;
@@ -147,14 +150,13 @@ pub struct ModelSpec {
 }
 
 impl ModelSpec {
-    fn into_config(self, index: usize) -> Result<ModelConfig, EngineLoadError> {
+    fn into_config(self, label: &str) -> Result<ModelConfig, EngineLoadError> {
         if let Some(device_layers) = &self.device_layers {
-            parse_device_layers(device_layers).map_err(|error| {
-                EngineLoadError::InvalidSpec(format!("models[{index}]: {error:#}"))
-            })?;
+            parse_device_layers(device_layers)
+                .map_err(|error| EngineLoadError::InvalidSpec(format!("{label}: {error:#}")))?;
         }
         let zero = |field: &str| {
-            EngineLoadError::InvalidSpec(format!("models[{index}].{field} must be at least 1"))
+            EngineLoadError::InvalidSpec(format!("{label}.{field} must be at least 1"))
         };
         if self.max_model_len == Some(0) {
             return Err(zero("max_model_len"));
@@ -163,10 +165,7 @@ impl ModelSpec {
             return Err(zero("encoder_cache_memory_bytes"));
         }
         // The builder names a model in its errors by this key; the alias is what requests use.
-        let key = self
-            .model_id
-            .clone()
-            .unwrap_or_else(|| format!("models[{index}]"));
+        let key = self.model_id.clone().unwrap_or_else(|| label.to_string());
         let mut config = ModelConfig::new(key, self.model);
         config.alias = self.model_id;
         config.chat_template = self.chat_template;
@@ -569,7 +568,8 @@ impl EngineSpec {
                     return Err(invalid(ANYMOE_WITH_MODELS.to_string()));
                 }
                 for (index, model) in self.models.into_iter().enumerate() {
-                    builder = builder.add_model_config(model.into_config(index)?);
+                    builder =
+                        builder.add_model_config(model.into_config(&format!("models[{index}]"))?);
                 }
                 match self.default_model_id {
                     Some(id) => builder.with_default_model_id(id),
@@ -704,15 +704,17 @@ fn explicit_device(device: &str, seed: Option<u64>) -> Result<Device, EngineLoad
 pub struct Engine {
     chat: ChatEngine,
     adapters: LoraAdapterApiConfig,
+    models: Arc<ModelLoadSettings>,
     // Removed with the last clone, when the engine owns its skill directory.
     _skill_dir: Option<Arc<tempfile::TempDir>>,
 }
 
 impl Engine {
-    fn new(chat: ChatEngine, adapters: LoraAdapterApiConfig) -> Self {
+    fn new(chat: ChatEngine, adapters: LoraAdapterApiConfig, models: ModelLoadSettings) -> Self {
         Self {
             chat,
             adapters,
+            models: Arc::new(models),
             _skill_dir: None,
         }
     }
@@ -746,6 +748,9 @@ impl Engine {
         for tool in callbacks.tools {
             builder = builder.with_tool_callback(tool.tool.function.name.clone(), tool);
         }
+        let models = builder
+            .model_load_settings()
+            .map_err(EngineLoadError::Load)?;
         let state = builder.build().await.map_err(EngineLoadError::Load)?;
         Ok(Self::new(
             ChatEngine {
@@ -755,6 +760,7 @@ impl Engine {
                 owner: None,
             },
             adapters,
+            models,
         )
         .with_skill_dir(skill_dir))
     }
@@ -1158,6 +1164,96 @@ impl Engine {
         model_status(self.state(), request)
     }
 
+    /// Loads and serves another model, under its `model_id` or its own id, with the engine's runtime settings.
+    pub async fn add_model(&self, mut spec: ModelSpec) -> Result<ModelStatusResponse, ApiError> {
+        if inference_quant::distributed::use_nccl() {
+            return Err(ApiError::new(
+                ApiErrorKind::Unavailable,
+                "a tensor-parallel engine serves the models it started with; its workers can't load more",
+                Some("model_management_unavailable"),
+                None,
+            ));
+        }
+        if let Some(model_id) = &spec.model_id {
+            self.unclaimed(model_id)?;
+        }
+        if spec.model.quant().is_some() && self.models.has_isq() {
+            return Err(ApiError::invalid_request(QUANT_WITH_ISQ));
+        }
+        let force_cpu = self.models.device().is_cpu();
+        let (model_id, isq) = (&mut spec.model_id, &mut spec.isq);
+        spec.model = resolve_model_source(
+            spec.model,
+            model_id,
+            isq,
+            self.models.token_source(),
+            force_cpu,
+        )
+        .await
+        .map_err(add_model_error)?;
+        let config = spec.into_config(ADDED_MODEL).map_err(add_model_error)?;
+        let loaded = self
+            .models
+            .load_additional(&config)
+            .await
+            .map_err(|error| add_model_error(EngineLoadError::Load(error)))?;
+        self.unclaimed(&loaded.model_id)?;
+        // A concurrent add that took the id first is the only way registration fails here.
+        let model_id = loaded
+            .add_to(self.state(), &config.model_id)
+            .await
+            .map_err(|error| model_name_conflict(format!("{error:#}")))?;
+        Ok(ModelStatusResponse {
+            model_id,
+            status: ModelStatus::Loaded,
+        })
+    }
+
+    pub async fn remove_model(
+        &self,
+        request: ModelOperationRequest,
+    ) -> Result<ModelRemoved, ApiError> {
+        remove_model(self.state(), request).await
+    }
+
+    pub fn set_default_model(
+        &self,
+        request: ModelOperationRequest,
+    ) -> Result<DefaultModel, ApiError> {
+        set_default_model(self.state(), request)
+    }
+
+    pub fn add_model_alias(&self, alias: ModelAlias) -> Result<ModelAlias, ApiError> {
+        self.unclaimed(&alias.alias)?;
+        add_model_alias(self.state(), alias)
+    }
+
+    // A new model id or alias can't shadow the `default` alias, a model or a LoRA adapter.
+    fn unclaimed(&self, name: &str) -> Result<(), ApiError> {
+        if name == DEFAULT_MODEL_ID || self.model_served(name) {
+            return Err(model_name_conflict(format!(
+                "`{name}` already names a model"
+            )));
+        }
+        Ok(())
+    }
+
+    pub async fn add_model_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.add_model(parse_json(request)?).await?)
+    }
+
+    pub async fn remove_model_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.remove_model(parse_json(request)?).await?)
+    }
+
+    pub fn set_default_model_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.set_default_model(parse_json(request)?)?)
+    }
+
+    pub fn add_model_alias_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.add_model_alias(parse_json(request)?)?)
+    }
+
     pub async fn lora_adapters(
         &self,
         query: ListLoraAdaptersQuery,
@@ -1534,6 +1630,19 @@ impl Engine {
         let response = self.embeddings(parse_json(request)?).await?;
         to_json(&response)
     }
+}
+
+fn add_model_error(error: EngineLoadError) -> ApiError {
+    ApiError::invalid_request(error.to_string())
+}
+
+fn model_name_conflict(message: String) -> ApiError {
+    ApiError::new(
+        ApiErrorKind::Conflict,
+        message,
+        Some("model_conflict"),
+        Some("model_id"),
+    )
 }
 
 fn parse_json<T: JsonRequest>(request: &[u8]) -> Result<T, ApiError> {

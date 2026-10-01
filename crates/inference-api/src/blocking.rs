@@ -213,6 +213,18 @@ impl BlockingEngine {
         })
     }
 
+    pub fn add_model_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.add_model_json(&request).await
+        })
+    }
+
+    pub fn remove_model_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.remove_model_json(&request).await
+        })
+    }
+
     pub fn re_isq_json(&self, request: &[u8]) -> Result<String, ApiError> {
         self.call(request, |engine, request| async move {
             engine.re_isq_json(&request).await

@@ -111,15 +111,19 @@ The id is the model's `model_id`, or its alias when added with `add_model_with_a
 curl http://localhost:1234/v1/models
 ```
 
-Each entry includes `id`, `object`, `created`, `owned_by`, plus optional `status` (`loaded`/`unloaded`/`reloading`), `tools_available`, `mcp_tools_count`/`mcp_servers_connected` for [MCP (Model Context Protocol)](/guides/agents/connect-mcp-server/) servers, and `max_model_len`, the longest sequence a loaded model accepts.
+Each entry includes `id`, `object`, `created`, `owned_by`, plus optional `status` (`loaded`/`unloaded`/`reloading`), `tools_available`, `mcp_tools_count`/`mcp_servers_connected` for [MCP (Model Context Protocol)](/guides/agents/connect-mcp-server/) servers, `max_model_len`, the longest sequence a loaded model accepts, and `default: true` on the model a request without `model` goes to.
 
 ## Unloading and reloading on demand
 
 `POST /v1/models/unload` frees a model's memory, `POST /v1/models/reload` brings it back, and `POST /v1/models/status` queries its state; each takes `{"model_id": "..."}`. `GET /v1/models/cache_stats` reports each loaded model's cumulative prefix- and encoder-cache counters. Request and response schemas are in the [generated HTTP API reference](/reference/http-api-generated/).
 
+## Adding and removing models at runtime
+
+On a server started with `--allow-model-management`, `POST /v1/models/add` loads another model beside the served ones; its body is one entry of the spec's `models` (`{"model": {...}, "model_id": "..."}`, with the same per-model overrides), and it loads with the server's runtime settings. `POST /v1/models/remove` stops serving a model and frees it, `POST /v1/models/default` changes the model a request without `model` goes to, and `POST /v1/models/alias` (`{"alias", "model_id"}`) lets requests name a model by another id. The routes are off by default because adding a model reads any local path or hub repo the server can reach. The same operations are in the C ABI (`inference_model_add`, `inference_model_remove`, `inference_model_set_default`, `inference_model_alias`) and the C# and Python bindings.
+
 ## Multi-model from code (Rust)
 
-In-process multi-model loading is Rust-only (`MultiModelBuilder`); the Python `Runner` and CLI load a single model. Route per request with the `_with_model` methods shown above.
+In process, the Rust SDK loads several models with `MultiModelBuilder`; the bindings do it with the engine spec's `models` and the model management calls above. Route per request with the `_with_model` methods shown above.
 
 ```rust
 use inference::{IsqType, MultiModelBuilder, TextModelBuilder, MultimodalModelBuilder};

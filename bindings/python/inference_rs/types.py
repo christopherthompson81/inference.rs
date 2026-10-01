@@ -632,6 +632,13 @@ class ContainerFileMetadata:
 
 
 @dataclass(kw_only=True)
+class DefaultModel:
+    """The model a request without `model`, or naming `default`, goes to."""
+
+    model_id: str
+
+
+@dataclass(kw_only=True)
 class DetokenizeRequest:
     model: str | None = None
     skip_special_tokens: bool | None = True
@@ -1068,6 +1075,14 @@ class Modality(str, Enum):
 
 
 @dataclass(kw_only=True)
+class ModelAlias:
+    """Another id requests can name a served model by."""
+
+    alias: str
+    model_id: str
+
+
+@dataclass(kw_only=True)
 class ModelCacheStats:
     encoder_cache: EncoderCacheStats | None = None
     model_id: str
@@ -1133,6 +1148,11 @@ class ModelObjects:
 class ModelOperationRequest:
     """The body of an unload, reload or status request."""
 
+    model_id: str
+
+
+@dataclass(kw_only=True)
+class ModelRemoved:
     model_id: str
 
 

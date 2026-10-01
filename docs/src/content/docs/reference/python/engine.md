@@ -266,6 +266,32 @@ detokenize(
 list_models() -> types.ModelObjects
 ```
 
+### `Engine.add_model`
+
+```text
+add_model(spec: types.ModelSpec | str) -> types.ModelStatusResponse
+```
+
+Loads another model into the running engine with the runtime settings it was loaded with.
+
+### `Engine.remove_model`
+
+```text
+remove_model(model_id: str) -> types.ModelRemoved
+```
+
+### `Engine.set_default_model`
+
+```text
+set_default_model(model_id: str) -> types.DefaultModel
+```
+
+### `Engine.add_model_alias`
+
+```text
+add_model_alias(alias: str, model_id: str) -> types.ModelAlias
+```
+
 ### `Engine.model_served`
 
 ```text
@@ -655,6 +681,32 @@ cancel_response(response_id: str) -> str
 
 ```text
 list_models() -> str
+```
+
+### `JsonEngine.add_model`
+
+```text
+add_model(request_json: str) -> str
+```
+
+Loads another model into the running engine; the request is one entry of the spec's "models".
+
+### `JsonEngine.remove_model`
+
+```text
+remove_model(request_json: str) -> str
+```
+
+### `JsonEngine.set_default_model`
+
+```text
+set_default_model(request_json: str) -> str
+```
+
+### `JsonEngine.add_model_alias`
+
+```text
+add_model_alias(request_json: str) -> str
 ```
 
 ### `JsonEngine.model_served`

@@ -262,6 +262,7 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
         .with_engine(&engine)
         .with_observability_config(server.observability_config())
         .with_file_listing(server.allow_file_listing)
+        .with_model_management(server.allow_model_management)
         .with_auth(auth.clone())
         .build()
         .await?;

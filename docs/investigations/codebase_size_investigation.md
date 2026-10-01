@@ -861,3 +861,45 @@ config loses its copy of the shared half; its test cases join the Qwen2-VL ones
 window). `Qwen2_5VLRotaryEmbedding` in inference-nn, a copy of Qwen2-VL's that only this text model used, goes too. A type with a
 default parameter (`Config<V = VisionConfig>`) was the first try: `json_config!`'s inherent `from_json` on two
 instantiations made `Config::from_json` ambiguous, hence the named generic and one alias per model.
+
+## Run 29 - 2026-10-01 (time approximate)
+
+Question: does a test-support crate pay for itself, and can `Engine::state()` then go crate-private?
+
+Finding: the shared support is 238 lines (the tiny PaddleOCR-VL, Llama and Qwen3-embedding checkpoints and the
+recording backend), included by `#[path]` in five places; a crate would save a few seconds at most. `state()`'s callers
+are tests that seed or read core state no request reaches on a random-weight model (a file tagged into a container, a
+generated image). A first take stopped here, as if those tests set the boundary. The better question is what
+`state()` gives a client. It hands out all of `InferenceRs`, about 100 methods: internals (the raw request channel,
+loggers, request ids, builders, file-store bookkeeping), what `Engine` already wraps, and four capabilities nothing else
+reaches: adding a model to a running engine, removing one, changing the default model and registering an alias. No
+binding can call `state()`, so it adds nothing to the integration package; for Rust callers it is a hole beside the ABI
+coverage test, since anything done through it never shows up as an `Engine` method.
+
+Implication: export the four (Run 30), then make `state()` crate-private, moving the tests to where what they test
+lives: store semantics into inference-api, HTTP framing kept in server-core.
+
+## Run 30 - 2026-10-01 (time approximate)
+
+Change (ABI 0.0.16): `Engine::add_model` (one entry of the spec's `models`, loaded with the runtime settings the engine
+started with), `remove_model`, `set_default_model` and `add_model_alias`, as `inference_model_add`, `_remove`,
+`_set_default` and `_alias`, in C# and Python, and over HTTP as `POST /v1/models/add`, `/remove`, `/default` and
+`/alias`, served only with `--allow-model-management` (`with_model_management` on the router builder), since adding a
+model reads any path or hub repo the server can reach. The settings live in `ModelLoadSettings`, which
+`build_multi_model` now loads each model through too, so a runtime add and a startup load are one path.
+
+Found on the way: a second copy of a checkpoint under another `model_id` failed at registration, at startup as well
+as at runtime, because each copy claimed the pipeline's own name as an alias; a taken name is now left to the model
+holding it.
+
+Review: removing or defaulting to an unloaded model came back as a conflict "not found" (the existence check counted
+unloaded models; core only looks at running ones), and every core string error read as a conflict; an unloaded model
+now gets "reload it first". Core sent the removed engine's terminate while holding the engines lock, so a full request
+channel would stall every lookup; it now sends after the locks drop. A named duplicate was refused only after the whole
+model loaded; it is checked first now, and an alias or id can't take `default`, a model's or an adapter's name. An
+engine whose first model is a non-granular X-LoRA kept 32 sequences in its saved settings though startup ran 1; an
+added model of that kind now runs 1 without changing startup. A tensor-parallel engine refuses to add a model, since
+its worker processes only load the models they started with.
+
+Tests: `models_are_added_made_default_aliased_and_removed_at_runtime` (FFI), the C# and Python equivalents, and
+`model_management_routes_are_served_only_when_enabled`.

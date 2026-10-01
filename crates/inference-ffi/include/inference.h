@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 15
+#define INFERENCE_ABI_VERSION_PATCH 16
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -357,6 +357,24 @@ INFERENCE_API inference_status inference_model_reload(const inference_engine *en
                                                      size_t request_len, inference_string **out_response);
 INFERENCE_API inference_status inference_model_status(const inference_engine *engine, const char *request,
                                                      size_t request_len, inference_string **out_response);
+/* Adds a model to a running engine; the request is one entry of the spec's "models" ({"model", "model_id"?, ...})
+ * and it loads with the engine's runtime settings, out_response receiving {"model_id", "status": "loaded"}. A bad spec,
+ * a failed load or a model_id already served (code "model_conflict") is INFERENCE_ERR_INVALID_REQUEST; a
+ * tensor-parallel engine refuses with INFERENCE_ERR_UNAVAILABLE. Blocks while the model loads. */
+INFERENCE_API inference_status inference_model_add(const inference_engine *engine, const char *request,
+                                                  size_t request_len, inference_string **out_response);
+/* Removes a served model and frees it ({"model_id"} in, {"model_id"} out); when it was the default, another model
+ * becomes the default. An unknown model is INFERENCE_ERR_NOT_FOUND; removing the last one, or an unloaded one, is
+ * INFERENCE_ERR_INVALID_REQUEST with code "model_conflict". */
+INFERENCE_API inference_status inference_model_remove(const inference_engine *engine, const char *request,
+                                                     size_t request_len, inference_string **out_response);
+/* Makes a served model the one requests without "model", or naming "default", go to ({"model_id"} in and out). */
+INFERENCE_API inference_status inference_model_set_default(const inference_engine *engine, const char *request,
+                                                          size_t request_len, inference_string **out_response);
+/* Lets requests name a served model by another id ({"alias", "model_id"} in and out). An alias that already names a
+ * model, an adapter or "default" is INFERENCE_ERR_INVALID_REQUEST with code "model_conflict". */
+INFERENCE_API inference_status inference_model_alias(const inference_engine *engine, const char *request,
+                                                    size_t request_len, inference_string **out_response);
 
 /* LoRA adapters. Listing takes {"model"?} and returns the GET /v1/lora_adapters body. Loading takes {"lora_name",
  * "lora_path", "load_inplace"?, "expected_generation"?, "model"?} and unloading {"lora_name", "expected_generation"?,

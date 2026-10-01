@@ -102,6 +102,15 @@ OpenAI-compatible container file metadata backed by the same in-process file sto
 | `source` | `SourceMeta` | required |
 
 
+## `DefaultModel`
+
+The model a request without `model`, or naming `default`, goes to.
+
+| Field | Type |
+| --- | --- |
+| `model_id` | `str` |
+
+
 ## `DetokenizeRequest`
 
 | Field | Type | Default |
@@ -300,6 +309,16 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `Modality.EMBEDDING` | `'embedding'` |
 
 
+## `ModelAlias`
+
+Another id requests can name a served model by.
+
+| Field | Type |
+| --- | --- |
+| `alias` | `str` |
+| `model_id` | `str` |
+
+
 ## `ModelCacheStats`
 
 | Field | Type | Default |
@@ -369,6 +388,13 @@ Collection of available models
 ## `ModelOperationRequest`
 
 The body of an unload, reload or status request.
+
+| Field | Type |
+| --- | --- |
+| `model_id` | `str` |
+
+
+## `ModelRemoved`
 
 | Field | Type |
 | --- | --- |

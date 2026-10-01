@@ -308,6 +308,20 @@ class TypedEngine(unittest.TestCase):
                 team_b.put_session("owned-session", session)
             self.assertTrue(team_a.delete_session("owned-session").deleted)
 
+    def test_models_are_added_and_removed_at_runtime(self):
+        model = os.environ[MODEL_VARIABLE]
+        selected = t.ModelSelectedMultimodalPlain(model_id=model, dtype=t.ModelDType.F32)
+        spec = t.EngineSpec(model=selected, runtime=t.RuntimeSpec(device="cpu"))
+        with ir.Engine(spec) as engine:
+            added = engine.add_model(t.ModelSpec(model=selected, model_id="second"))
+            self.assertEqual((added.model_id, added.status), ("second", t.ModelStatus.LOADED))
+            self.assertEqual(engine.set_default_model("second").model_id, "second")
+            self.assertEqual(next(m.id for m in engine.list_models().data if m.default), "second")
+            self.assertEqual(engine.add_model_alias("spare", "second").alias, "spare")
+            self.assertTrue(engine.model_served("spare"))
+            self.assertEqual(engine.remove_model("second").model_id, "second")
+            self.assertFalse(engine.model_served("second"))
+
     def test_runtime_operations_are_typed(self):
         tokens = self.engine.tokenize("Reply with ok")
         self.assertTrue(tokens and all(isinstance(token, int) for token in tokens))

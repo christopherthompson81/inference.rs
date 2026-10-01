@@ -11,7 +11,6 @@ use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 
 use crate::api_error::{ApiError, ApiErrorKind};
-use crate::request_body::{JsonRequest, parse_json};
 use crate::types::SharedInferenceRsState;
 
 const SESSION_NOT_FOUND: &str = "session_not_found";
@@ -51,12 +50,6 @@ pub struct SessionList {
 #[serde(deny_unknown_fields)]
 pub struct SessionForkRequest {
     pub num_turns: usize,
-}
-
-impl JsonRequest for SessionForkRequest {
-    fn from_json(body: &[u8]) -> Result<Self, ApiError> {
-        parse_json(body)
-    }
 }
 
 /// The tools the engine's MCP servers provide to the default model; built-in tools aren't listed.

@@ -49,6 +49,14 @@ pub const RELOAD_MODEL_ROUTE: RouteInfo =
     RouteInfo::new("/v1/models/reload", "POST", RouteKind::InferenceRs);
 pub const MODEL_STATUS_ROUTE: RouteInfo =
     RouteInfo::new("/v1/models/status", "POST", RouteKind::InferenceRs);
+pub const ADD_MODEL_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/models/add", "POST", RouteKind::InferenceRs);
+pub const REMOVE_MODEL_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/models/remove", "POST", RouteKind::InferenceRs);
+pub const DEFAULT_MODEL_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/models/default", "POST", RouteKind::InferenceRs);
+pub const MODEL_ALIAS_ROUTE: RouteInfo =
+    RouteInfo::new("/v1/models/alias", "POST", RouteKind::InferenceRs);
 pub const MODEL_CACHE_STATS_ROUTE: RouteInfo =
     RouteInfo::new("/v1/models/cache_stats", "GET", RouteKind::InferenceRs);
 pub const TUNE_MODEL_ROUTE: RouteInfo =

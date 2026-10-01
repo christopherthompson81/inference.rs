@@ -280,9 +280,6 @@ impl InferenceRs {
 
         match engines.remove(&resolved_model_id) {
             Some(engine_instance) => {
-                // Send terminate signal to the engine
-                let _ = engine_instance.sender.blocking_send(Request::Terminate);
-
                 // If this was the default engine, set a new default
                 let mut default_lock = self
                     .default_engine_id
@@ -303,7 +300,10 @@ impl InferenceRs {
                     .write()
                     .map_err(|_| "Failed to acquire write lock on model_aliases")?;
                 aliases.retain(|_, target| target != &resolved_model_id);
+                drop(aliases);
 
+                // Sent with no lock held: a full request channel would otherwise stall every lookup until it drained.
+                let _ = engine_instance.sender.blocking_send(Request::Terminate);
                 Ok(())
             }
             _ => Err(format!("Model {resolved_model_id} not found")),

@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use candle_core::Device;
 use inference_core::{
     AutoDeviceMapParams, DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting,
-    HfConfigOverrides, InferenceRsBuilder, Loader, McpClientConfig, MemoryGpuConfig,
+    HfConfigOverrides, InferenceRs, InferenceRsBuilder, Loader, McpClientConfig, MemoryGpuConfig,
     ModelLoaderConfig, MtpConfig, MtpRuntimeConfig, PagedAttentionConfig, PagedCacheType,
     SchedulerConfig, SchedulerLimits, SearchCallback, SearchEmbeddingModel, TokenSource,
     ToolCallbackWithTool, paged_attn_supported, parse_isq_value,
@@ -814,6 +814,57 @@ impl InferenceRsForServerBuilder {
         self
     }
 
+    /// The settings this builder loads each model with, keeping the device it resolves for the build that follows.
+    pub fn model_load_settings(&mut self) -> Result<ModelLoadSettings> {
+        let device = match &self.device {
+            Some(device) => device.clone(),
+            None => {
+                let device = init_device(self.cpu, self.seed)?;
+                self.device = Some(device.clone());
+                device
+            }
+        };
+        let paged_attn = configure_paged_attn(&device, self.paged_attn);
+        let requested_cache = init_cache_config(
+            self.paged_attn_block_size,
+            self.paged_attn_gpu_mem,
+            self.paged_attn_gpu_mem_usage,
+            self.paged_ctxt_len,
+            self.paged_cache_type,
+            !paged_attn,
+        )?
+        .map(|config| config.with_serving_capacity(self.max_seqs))
+        .transpose()?
+        .map(|config| config.with_recurrent_prefix_capacity(self.prefix_cache_n));
+        // A non-granular X-LoRA first model runs every model one sequence at a time.
+        let first = self
+            .models
+            .first()
+            .map(|config| &config.model)
+            .or(self.model.as_ref());
+        let max_seqs = match first.and_then(get_tgt_non_granular_index) {
+            Some(_) => 1,
+            None => self.max_seqs,
+        };
+        Ok(ModelLoadSettings {
+            device,
+            token_source: self.token_source.clone(),
+            num_device_layers: self.num_device_layers.clone(),
+            in_situ_quant: self.in_situ_quant.clone(),
+            chat_template: self.chat_template.clone(),
+            jinja_explicit: self.jinja_explicit.clone(),
+            max_model_len: self.max_model_len,
+            hf_config_overrides: self.hf_config_overrides.clone(),
+            encoder_cache_memory_bytes: self.encoder_cache_memory_bytes,
+            requested_cache,
+            max_seqs,
+            limits: self.scheduler_limits(),
+            no_kv_cache: self.no_kv_cache,
+            add_model_config: self.shared_model_config(),
+            mtp_runtime: MtpRuntimeConfig::new(self.prefix_cache_n),
+        })
+    }
+
     /// What every model this builder loads shares, short of its loader config.
     fn shared_model_config(&self) -> inference_core::AddModelConfig {
         let engine_config = inference_core::EngineConfig {
@@ -964,9 +1015,6 @@ impl InferenceRsForServerBuilder {
 
     /// Build a multi-model instance
     pub async fn build_multi_model(mut self) -> Result<SharedInferenceRsState> {
-        let mtp_runtime = MtpRuntimeConfig::new(self.prefix_cache_n);
-        let add_model_config = self.shared_model_config();
-        let limits = self.scheduler_limits();
         if self.models.is_empty() {
             anyhow::bail!("No models configured for multi-model mode");
         }
@@ -979,32 +1027,15 @@ impl InferenceRsForServerBuilder {
         if tgt_non_granular_index.is_some() {
             self.max_seqs = 1;
         }
+        let settings = self.model_load_settings()?;
 
-        let device = if let Some(device) = self.device {
-            device
-        } else {
-            init_device(self.cpu, self.seed)?
-        };
-        let paged_attn = configure_paged_attn(&device, self.paged_attn);
-
-        let requested_cache_config = init_cache_config(
-            self.paged_attn_block_size,
-            self.paged_attn_gpu_mem,
-            self.paged_attn_gpu_mem_usage,
-            self.paged_ctxt_len,
-            self.paged_cache_type,
-            !paged_attn,
-        )?
-        .map(|config| config.with_serving_capacity(self.max_seqs))
-        .transpose()?
-        .map(|config| config.with_recurrent_prefix_capacity(self.prefix_cache_n));
         let mut paged_kv_plan = plan_paged_kv(
             &self
                 .models
                 .iter()
                 .map(|_| PagedKvModelRequest {
-                    paged_attn: requested_cache_config,
-                    max_num_seqs: self.max_seqs,
+                    paged_attn: settings.requested_cache,
+                    max_num_seqs: settings.max_seqs,
                 })
                 .collect::<Vec<_>>(),
             Default::default(),
@@ -1013,9 +1044,9 @@ impl InferenceRsForServerBuilder {
             *first = reserve_external_mtp_memory_with_runtime(
                 *first,
                 self.mtp_config.as_ref(),
-                mtp_runtime,
+                settings.mtp_runtime,
                 &first_dtype,
-                &device,
+                &settings.device,
             )?;
         }
 
@@ -1029,115 +1060,47 @@ impl InferenceRsForServerBuilder {
                     model_config.model_id
                 );
             }
-            let model = model_config.model.clone();
-            let dtype = get_model_dtype(&model)?;
-            let mapper = init_mapper(
-                &model_config
-                    .num_device_layers
-                    .clone()
-                    .or(self.num_device_layers.clone()),
-                &get_auto_device_map_params(&model)?,
-            )?;
-            let isq = model_config
-                .in_situ_quant
-                .as_ref()
-                .or(self.in_situ_quant.as_ref())
-                .map(|isq| parse_isq_value(isq, Some(&device)).map_err(|e| anyhow::anyhow!("{e}")))
-                .transpose()?;
-            let paged_attn_config = paged_kv_plan.paged_attn[model_index];
-            let loader_config = ModelLoaderConfig {
-                source: Arc::new(model),
-                token_source: self.token_source.clone(),
-                hf_revision: None,
-                dtype,
-                device: device.clone(),
-                device_map_setting: mapper,
-                isq,
-                paged_attn_config,
-                silent: false,
-                chat_template: model_config
-                    .chat_template
-                    .clone()
-                    .or(self.chat_template.clone()),
-                jinja_explicit: model_config
-                    .jinja_explicit
-                    .clone()
-                    .or(self.jinja_explicit.clone()),
-                max_model_len: model_config.max_model_len.or(self.max_model_len),
-                hf_config_overrides: model_config
-                    .hf_config_overrides
-                    .clone()
-                    .or(self.hf_config_overrides.clone()),
-                // the global MTP setting and its memory reservation belong to the first model only
-                mtp_config: self.mtp_config.clone().filter(|_| model_index == 0),
-                encoder_cache_memory_bytes: model_config
-                    .encoder_cache_memory_bytes
-                    .map(NonZeroUsize::get)
-                    .or(self.encoder_cache_memory_bytes),
-                overrides: Default::default(),
-            };
-            let loader = loader_config.build_loader(self.no_kv_cache)?;
-            if model_index == 0 {
-                inference_instance_info(&*loader);
-            }
-            let pipeline: LoadedPipeline = loader_config.load(&*loader, mtp_runtime).await?;
-            let scheduler_config = SchedulerConfig::for_pipeline(
-                &pipeline,
-                paged_attn_config.is_some(),
-                self.max_seqs,
-                limits,
-            )
-            .await?;
-
-            // Use the pipeline's name() as the canonical ID, but allow an alias.
-            let pipeline_name = pipeline.lock().await.name();
-            let primary_id = model_config
-                .alias
-                .clone()
-                .unwrap_or_else(|| pipeline_name.clone());
-            if !registered_ids.insert(primary_id.clone()) {
+            // the global MTP setting and its memory reservation belong to the first model only
+            let mtp_config = self.mtp_config.clone().filter(|_| model_index == 0);
+            let loaded = settings
+                .load(
+                    model_config,
+                    paged_kv_plan.paged_attn[model_index],
+                    mtp_config,
+                    settings.max_seqs,
+                    model_index == 0,
+                )
+                .await?;
+            if !registered_ids.insert(loaded.model_id.clone()) {
                 anyhow::bail!(
                     "Model ID conflict: '{}' is already registered (config key: {}).",
-                    primary_id,
+                    loaded.model_id,
                     model_config.model_id
                 );
             }
-
-            let config = add_model_config.clone().with_loader_config(loader_config);
-            let inference = match &inference {
-                Some(inference) => {
-                    inference
-                        .add_model(primary_id.clone(), pipeline, scheduler_config, config)
-                        .await
-                        .map_err(|e| anyhow::anyhow!("Failed to add model {primary_id}: {e}"))?;
-                    inference
-                }
+            let model_id = match &inference {
+                Some(inference) => loaded.add_to(inference, &model_config.model_id).await?,
                 None => {
+                    let LoadedModel {
+                        model_id,
+                        pipeline_name,
+                        pipeline,
+                        scheduler_config,
+                        config,
+                    } = loaded;
                     let mut builder =
                         InferenceRsBuilder::from_config(pipeline, scheduler_config, config)
                             .with_opt_log(self.log.clone())
                             .with_deferred_daemon_start(true);
-                    if primary_id != pipeline_name {
-                        builder = builder.with_model_id(primary_id.clone());
+                    if model_id != pipeline_name {
+                        builder = builder.with_model_id(model_id.clone());
                     }
-                    inference.insert(builder.build().await)
+                    let built = inference.insert(builder.build().await);
+                    register_alias(built, &model_id, &pipeline_name, &model_config.model_id)?;
+                    model_id
                 }
             };
-            if primary_id != pipeline_name {
-                inference
-                    .register_model_alias(pipeline_name.clone(), &primary_id)
-                    .map_err(|e| anyhow::anyhow!(e))?;
-                info!(
-                    "Model `{}` loaded (pipeline: `{}`; config key: {})",
-                    primary_id, pipeline_name, model_config.model_id
-                );
-            } else {
-                info!(
-                    "Model `{}` loaded (from config key: {})",
-                    primary_id, model_config.model_id
-                );
-            }
-            loaded_model_ids.push(primary_id);
+            loaded_model_ids.push(model_id);
         }
         let inference = inference.expect("at least one model is configured");
 
@@ -1341,4 +1304,190 @@ pub fn get_search_embedding_model(
     } else {
         None
     }
+}
+
+/// The runtime settings an engine loads its models with, kept so [`ModelLoadSettings::load_additional`] can add one.
+#[derive(Clone)]
+pub struct ModelLoadSettings {
+    device: Device,
+    token_source: TokenSource,
+    num_device_layers: Option<Vec<String>>,
+    in_situ_quant: Option<String>,
+    chat_template: Option<String>,
+    jinja_explicit: Option<String>,
+    max_model_len: Option<usize>,
+    hf_config_overrides: Option<HfConfigOverrides>,
+    encoder_cache_memory_bytes: Option<usize>,
+    requested_cache: Option<PagedAttentionConfig>,
+    max_seqs: usize,
+    limits: SchedulerLimits,
+    no_kv_cache: bool,
+    add_model_config: inference_core::AddModelConfig,
+    mtp_runtime: MtpRuntimeConfig,
+}
+
+/// A loaded model not yet served: its pipeline, the scheduler it runs under and the id requests will use.
+pub struct LoadedModel {
+    pub model_id: String,
+    pipeline_name: String,
+    pipeline: LoadedPipeline,
+    scheduler_config: SchedulerConfig,
+    config: inference_core::AddModelConfig,
+}
+
+impl ModelLoadSettings {
+    pub fn device(&self) -> &Device {
+        &self.device
+    }
+
+    pub fn token_source(&self) -> &TokenSource {
+        &self.token_source
+    }
+
+    /// Whether listed models inherit an ISQ setting, which a `quant` choice would land on top of.
+    pub fn has_isq(&self) -> bool {
+        self.in_situ_quant.is_some()
+    }
+
+    async fn load(
+        &self,
+        model_config: &ModelConfig,
+        paged_attn_config: Option<PagedAttentionConfig>,
+        mtp_config: Option<MtpConfig>,
+        max_seqs: usize,
+        announce: bool,
+    ) -> Result<LoadedModel> {
+        let model = model_config.model.clone();
+        let dtype = get_model_dtype(&model)?;
+        let mapper = init_mapper(
+            &model_config
+                .num_device_layers
+                .clone()
+                .or(self.num_device_layers.clone()),
+            &get_auto_device_map_params(&model)?,
+        )?;
+        let isq = model_config
+            .in_situ_quant
+            .as_ref()
+            .or(self.in_situ_quant.as_ref())
+            .map(|isq| parse_isq_value(isq, Some(&self.device)).map_err(|e| anyhow::anyhow!("{e}")))
+            .transpose()?;
+        let loader_config = ModelLoaderConfig {
+            source: Arc::new(model),
+            token_source: self.token_source.clone(),
+            hf_revision: None,
+            dtype,
+            device: self.device.clone(),
+            device_map_setting: mapper,
+            isq,
+            paged_attn_config,
+            silent: false,
+            chat_template: model_config
+                .chat_template
+                .clone()
+                .or(self.chat_template.clone()),
+            jinja_explicit: model_config
+                .jinja_explicit
+                .clone()
+                .or(self.jinja_explicit.clone()),
+            max_model_len: model_config.max_model_len.or(self.max_model_len),
+            hf_config_overrides: model_config
+                .hf_config_overrides
+                .clone()
+                .or(self.hf_config_overrides.clone()),
+            mtp_config,
+            encoder_cache_memory_bytes: model_config
+                .encoder_cache_memory_bytes
+                .map(NonZeroUsize::get)
+                .or(self.encoder_cache_memory_bytes),
+            overrides: Default::default(),
+        };
+        let loader = loader_config.build_loader(self.no_kv_cache)?;
+        if announce {
+            inference_instance_info(&*loader);
+        }
+        let pipeline: LoadedPipeline = loader_config.load(&*loader, self.mtp_runtime).await?;
+        let scheduler_config = SchedulerConfig::for_pipeline(
+            &pipeline,
+            paged_attn_config.is_some(),
+            max_seqs,
+            self.limits,
+        )
+        .await?;
+        // Use the pipeline's name() as the canonical ID, but allow an alias.
+        let pipeline_name = pipeline.lock().await.name();
+        Ok(LoadedModel {
+            model_id: model_config
+                .alias
+                .clone()
+                .unwrap_or_else(|| pipeline_name.clone()),
+            pipeline_name,
+            pipeline,
+            scheduler_config,
+            config: self
+                .add_model_config
+                .clone()
+                .with_loader_config(loader_config),
+        })
+    }
+
+    /// Loads one more model for an engine already serving others, sizing its paged cache from the memory left now.
+    pub async fn load_additional(&self, model_config: &ModelConfig) -> Result<LoadedModel> {
+        let max_seqs = match get_tgt_non_granular_index(&model_config.model) {
+            Some(_) => 1,
+            None => self.max_seqs,
+        };
+        let plan = plan_paged_kv(
+            &[PagedKvModelRequest {
+                paged_attn: self.requested_cache,
+                max_num_seqs: max_seqs,
+            }],
+            Default::default(),
+        )?;
+        self.load(model_config, plan.paged_attn[0], None, max_seqs, false)
+            .await
+    }
+}
+
+impl LoadedModel {
+    /// Serves this model from `inference` beside the models it has; returns the id requests use.
+    pub async fn add_to(self, inference: &InferenceRs, config_key: &str) -> Result<String> {
+        let Self {
+            model_id,
+            pipeline_name,
+            pipeline,
+            scheduler_config,
+            config,
+        } = self;
+        inference
+            .add_model(model_id.clone(), pipeline, scheduler_config, config)
+            .await
+            .map_err(|e| anyhow::anyhow!("Failed to add model {model_id}: {e}"))?;
+        register_alias(inference, &model_id, &pipeline_name, config_key)?;
+        Ok(model_id)
+    }
+}
+
+fn register_alias(
+    inference: &InferenceRs,
+    model_id: &str,
+    pipeline_name: &str,
+    config_key: &str,
+) -> Result<()> {
+    if model_id != pipeline_name {
+        // The pipeline's own name is a convenience alias; another copy of the same checkpoint may already hold it.
+        if inference.model_exists(pipeline_name)? {
+            info!(
+                "Model `{model_id}` loaded (config key: {config_key}; `{pipeline_name}` names another model)"
+            );
+            return Ok(());
+        }
+        inference
+            .register_model_alias(pipeline_name.to_string(), model_id)
+            .map_err(|e| anyhow::anyhow!(e))?;
+        info!("Model `{model_id}` loaded (pipeline: `{pipeline_name}`; config key: {config_key})");
+    } else {
+        info!("Model `{model_id}` loaded (from config key: {config_key})");
+    }
+    Ok(())
 }
