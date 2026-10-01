@@ -433,9 +433,7 @@ pub async fn new_chat(
         return (StatusCode::BAD_REQUEST, "Unknown model").into_response();
     }
 
-    let mut next_id = app.next_chat_id.write().await;
-    let chat_id = format!("chat_{}", *next_id);
-    *next_id += 1;
+    let chat_id = format!("chat_{}", Uuid::new_v4().simple());
 
     let now = Utc::now().to_rfc3339();
     let kind = app
@@ -621,7 +619,6 @@ pub async fn set_tail(
 #[derive(Deserialize)]
 pub struct ForkSessionRequest {
     pub src_session_id: String,
-    pub dest_session_id: String,
     pub num_turns: usize,
 }
 
@@ -629,17 +626,16 @@ pub async fn fork_session(
     Extension(app): Extension<Arc<AppState>>,
     Json(req): Json<ForkSessionRequest>,
 ) -> impl IntoResponse {
-    let result = app.inference.fork_session(
-        None,
-        &req.src_session_id,
-        req.dest_session_id,
-        req.num_turns,
-    );
+    // server-named, so a fork can't land on a session that already exists
+    let session_id = Uuid::new_v4().to_string();
+    let result =
+        app.inference
+            .fork_session(None, &req.src_session_id, session_id.clone(), req.num_turns);
     if let Err(e) = result {
         error!("fork session error: {}", e);
         return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
     }
-    (StatusCode::OK, "OK").into_response()
+    Json(json!({ "session_id": session_id })).into_response()
 }
 
 #[derive(Default)]

@@ -535,12 +535,12 @@ class ChatStore {
       ).length;
       const srcSessionId = this.lastAssistantSessionId();
       if (srcSessionId && priorTurns > 0) {
-        const newSessionId = newId();
         try {
-          await api.forkSession(srcSessionId, newSessionId, priorTurns);
-          this.currentSessionId = newSessionId;
+          this.currentSessionId = await api.forkSession(srcSessionId, priorTurns);
         } catch (e) {
           console.error("Failed to fork session:", e);
+        this.currentSessionId = null;
+          this.currentSessionId = null;
         }
       } else {
         this.currentSessionId = null;
@@ -585,12 +585,11 @@ class ChatStore {
     ).length;
     const srcSessionId = node.sessionId ?? this.currentSessionId;
     if (srcSessionId && priorTurns > 0) {
-      const newSessionId = newId();
       try {
-        await api.forkSession(srcSessionId, newSessionId, priorTurns);
-        this.currentSessionId = newSessionId;
+        this.currentSessionId = await api.forkSession(srcSessionId, priorTurns);
       } catch (e) {
         console.error("Failed to fork session:", e);
+        this.currentSessionId = null;
       }
     } else {
       this.currentSessionId = null;

@@ -22,13 +22,16 @@ The response body includes a top-level `session_id` field.
 ## How a request finds its session
 
 - **Explicit `session_id` on the request**: direct lookup. An existing session continues; an unknown id starts a new session under that id.
+- **Responses `previous_response_id`**: a follow-up on the latest reply in a session continues that session by its id; one on an older reply branches, and finds its session by content matching as below.
 - **No `session_id`**: the server falls back to content matching. It matches the incoming messages against the user-visible message prefix of a stored session, subject to two conditions:
   - tool-role entries in stored history are skipped;
   - at least two incoming messages are required.
 
   On a match, that session and its id are reused; otherwise a fresh id is generated. Either way the id is returned in the response.
 
-Content matching exists for clients that cannot pass `session_id`. When two clients send identical opening messages, it can route them to the same session; pass an explicit `session_id` in correctness-sensitive deployments.
+Content matching exists for clients that cannot pass `session_id`. When two clients send identical opening messages, it can route them to the same session, with its history, files and sandbox; pass an explicit `session_id` in correctness-sensitive deployments.
+
+A session id is all it takes to read and continue a session, so treat one as a secret: let the server generate it, or use a random value such as a UUID rather than a name like the example's.
 
 A session holds:
 
@@ -56,7 +59,7 @@ curl -X PUT http://localhost:1234/v1/sessions/user-42-chat-abc \
 curl -X DELETE http://localhost:1234/v1/sessions/user-42-chat-abc
 ```
 
-`PUT` replaces any existing session with the same id and returns 400 for an invalid payload.
+`PUT` replaces any existing session with the same id and returns 400 for an invalid payload. It restores the session's files, but a file id that is already stored keeps its stored body, so an import can't change a file it didn't write.
 
 </TabItem>
 <TabItem label="Python">

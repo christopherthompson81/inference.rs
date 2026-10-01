@@ -98,7 +98,9 @@ impl FileStore {
         let id = file.id.clone();
         let size = resident_bytes(&file);
         let mut guard = self.inner.write().unwrap();
-        let (seq, mut session_ids) = match guard.remove(&id) {
+        let now = Instant::now();
+        // an expired entry the reaper hasn't reached is gone: its tags don't pass to a new body
+        let (seq, mut session_ids) = match guard.remove(&id).filter(|e| e.expires_at >= now) {
             Some(existing) => (existing.seq, existing.session_ids),
             None => {
                 let seq = guard.next_seq;
@@ -172,6 +174,18 @@ impl FileStore {
         };
         entry.session_ids.insert(session_id.into());
         entry.expires_at = Instant::now() + self.ttl;
+        true
+    }
+
+    /// Tags a live file under `id` with `session_id`, keeping its body; false if there is none.
+    pub fn retag_live(&self, id: &str, session_id: &str) -> bool {
+        let mut guard = self.inner.write().unwrap();
+        let now = Instant::now();
+        let Some(entry) = guard.by_id.get_mut(id).filter(|e| e.expires_at >= now) else {
+            return false;
+        };
+        entry.session_ids.insert(session_id.to_string());
+        entry.expires_at = now + self.ttl;
         true
     }
 
@@ -264,6 +278,18 @@ mod tests {
                 preview: None,
             },
         }
+    }
+
+    #[test]
+    fn a_body_stored_over_an_expired_entry_leaves_its_tags_behind() {
+        const SHORT_TTL: Duration = Duration::from_millis(5);
+        let s = FileStore::with_ttl(SHORT_TTL);
+        s.insert(make("file_a"), Some("sess_old".into()));
+        std::thread::sleep(SHORT_TTL * 2);
+        assert!(!s.retag_live("file_a", "sess_new"));
+        s.insert(make("file_a"), Some("sess_new".into()));
+        assert!(s.list_for_session("sess_old").is_empty());
+        assert_eq!(s.list_for_session("sess_new").len(), 1);
     }
 
     #[test]

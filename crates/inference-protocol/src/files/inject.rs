@@ -14,15 +14,8 @@ use super::{
 };
 
 /// Convert a `ToolFile` to a `File` with full body. Elision happens later via `File::elide_for_wire`.
-pub fn tool_file_to_file(
-    tf: &ToolFile,
-    run_id: &str,
-    round: usize,
-    turn: usize,
-    idx: usize,
-    tool_name: &str,
-) -> File {
-    let id = File::make_id(run_id, round, idx);
+pub fn tool_file_to_file(tf: &ToolFile, round: usize, turn: usize, tool_name: &str) -> File {
+    let id = File::make_output_id();
     let format = if tf.format.is_empty() {
         format_from_name(&tf.name)
     } else {

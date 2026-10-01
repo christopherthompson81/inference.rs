@@ -84,7 +84,7 @@ impl FileContent {
 /// A file produced by an agentic run.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct File {
-    /// `file_<run>_r<round>_<idx>`.
+    /// `file_<uuid>` for an agent output, `file-<uuid>` for an upload.
     pub id: String,
     pub name: String,
     /// `csv`, `json`, `png`, `parquet`, etc. Inferred from the filename extension if not set.
@@ -104,8 +104,9 @@ pub struct File {
 }
 
 impl File {
-    pub(crate) fn make_id(run_id: &str, round: usize, idx: usize) -> String {
-        format!("file_{run_id}_r{round}_{idx}")
+    /// An agent output's id, random on its own so no id gives away its run's other files.
+    pub(crate) fn make_output_id() -> String {
+        format!("file_{}", uuid::Uuid::new_v4().simple())
     }
 
     pub fn make_upload_id() -> String {
@@ -411,9 +412,13 @@ mod tests {
     }
 
     #[test]
-    fn id_format() {
-        assert_eq!(File::make_id("abc", 0, 0), "file_abc_r0_0");
-        assert_eq!(File::make_id("xyz", 3, 7), "file_xyz_r3_7");
+    fn output_ids_are_random_on_their_own() {
+        let (a, b) = (File::make_output_id(), File::make_output_id());
+        for id in [&a, &b] {
+            let random = id.strip_prefix("file_").expect("agent output prefix");
+            assert!(uuid::Uuid::parse_str(random).is_ok(), "{id}");
+        }
+        assert_ne!(a, b);
     }
 
     #[test]

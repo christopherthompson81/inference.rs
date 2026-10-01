@@ -118,7 +118,7 @@ Requesting files (`files` on chat, Responses, and Anthropic Messages requests):
 
 | Field | Type | Notes |
 |---|---|---|
-| `id` | string | Stable id. Agent outputs use `file_<run>_r<round>_<idx>`; uploaded/request files and generated images use `file-...`. |
+| `id` | string | Stable id. Agent outputs use `file_...`; uploaded/request files and generated images use `file-...`. Each id is random on its own. |
 | `name` | string | Filename as written. |
 | `format` | string | Open-ended format string. |
 | `mime_type` | string | Content-Type. |
@@ -158,7 +158,7 @@ Uploading skills does not require shell execution, but running a Responses reque
 
 ## Session semantics
 
-`GET /v1/sessions/{session_id}` exports a `SerializedSession` (404 if missing); `PUT` imports one, replacing any session with the same id; `DELETE` always returns 200 whether the session existed or not. Session lifecycle and splicing behavior are on the [sessions page](/guides/agents/persist-sessions/).
+`GET /v1/sessions/{session_id}` exports a `SerializedSession` (404 if missing); `PUT` imports one, replacing any session with the same id (a file id already stored keeps its stored body); `DELETE` always returns 200 whether the session existed or not. Session lifecycle and splicing behavior are on the [sessions page](/guides/agents/persist-sessions/).
 
 ## Metrics
 
