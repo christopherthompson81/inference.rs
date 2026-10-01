@@ -133,9 +133,13 @@ fn content_gone(message: &str) -> ApiError {
     )
 }
 
-fn find(state: &SharedInferenceRsState, id: &str) -> Result<Arc<CoreFile>, ApiError> {
+fn find(
+    state: &SharedInferenceRsState,
+    id: &str,
+    owner: Option<&str>,
+) -> Result<Arc<CoreFile>, ApiError> {
     state
-        .try_find_file(id)
+        .try_find_file(id, owner)
         .map_err(|error| store_error(state, error))?
         .ok_or_else(|| not_found(id))
 }
@@ -187,6 +191,7 @@ fn container_metadata(container_id: &str, file: &CoreFile) -> ContainerFileMetad
 pub fn upload_file(
     state: &SharedInferenceRsState,
     upload: FileUpload,
+    owner: Option<&str>,
 ) -> Result<FileMetadata, ApiError> {
     if upload.purpose.trim().is_empty() {
         return Err(ApiError::new(
@@ -212,7 +217,7 @@ pub fn upload_file(
         upload.bytes,
     );
     state
-        .insert_file(None, file.clone(), None)
+        .insert_file(None, file.clone(), None, owner)
         .map_err(|error| store_error(state, error))?;
     Ok(metadata(&file))
 }
@@ -222,6 +227,7 @@ pub fn store_generated_image(
     state: &SharedInferenceRsState,
     model: Option<&str>,
     png: Vec<u8>,
+    owner: Option<&str>,
 ) -> Result<String, ApiError> {
     let id = CoreFile::make_upload_id();
     let file = CoreFile::from_bytes(
@@ -237,18 +243,25 @@ pub fn store_generated_image(
         png,
     );
     state
-        .insert_file(model, file, None)
+        .insert_file(model, file, None, owner)
         .map_err(|error| store_error(state, error))?;
     Ok(FILE_CONTENT_PATH.replace(FILE_ID_PARAM, &id))
 }
 
-pub fn get_file(state: &SharedInferenceRsState, id: &str) -> Result<FileMetadata, ApiError> {
-    find(state, id).map(|file| metadata(&file))
+pub fn get_file(
+    state: &SharedInferenceRsState,
+    id: &str,
+    owner: Option<&str>,
+) -> Result<FileMetadata, ApiError> {
+    find(state, id, owner).map(|file| metadata(&file))
 }
 
-pub fn list_files(state: &SharedInferenceRsState) -> Result<FileListObject, ApiError> {
+pub fn list_files(
+    state: &SharedInferenceRsState,
+    owner: Option<&str>,
+) -> Result<FileListObject, ApiError> {
     let files = state
-        .try_list_files()
+        .try_list_files(owner)
         .map_err(|error| store_error(state, error))?;
     Ok(FileListObject {
         object: LIST_OBJECT,
@@ -256,9 +269,13 @@ pub fn list_files(state: &SharedInferenceRsState) -> Result<FileListObject, ApiE
     })
 }
 
-pub fn delete_file(state: &SharedInferenceRsState, id: &str) -> Result<FileDeleted, ApiError> {
+pub fn delete_file(
+    state: &SharedInferenceRsState,
+    id: &str,
+    owner: Option<&str>,
+) -> Result<FileDeleted, ApiError> {
     if !state
-        .try_remove_file(id)
+        .try_remove_file(id, owner)
         .map_err(|error| store_error(state, error))?
     {
         return Err(not_found(id));
@@ -271,8 +288,12 @@ pub fn delete_file(state: &SharedInferenceRsState, id: &str) -> Result<FileDelet
 }
 
 /// A file's body; a body the store elided to bound memory is Gone.
-pub fn file_content(state: &SharedInferenceRsState, id: &str) -> Result<FileBody, ApiError> {
-    let file = find(state, id)?;
+pub fn file_content(
+    state: &SharedInferenceRsState,
+    id: &str,
+    owner: Option<&str>,
+) -> Result<FileBody, ApiError> {
+    let file = find(state, id, owner)?;
     let bytes = match &file.content {
         FileContent::Text {
             text: Some(text), ..
@@ -312,9 +333,10 @@ pub fn file_content(state: &SharedInferenceRsState, id: &str) -> Result<FileBody
 pub fn list_container_files(
     state: &SharedInferenceRsState,
     container_id: &str,
+    owner: Option<&str>,
 ) -> Result<ContainerFileListObject, ApiError> {
     let files = state
-        .try_list_tagged_files(container_id)
+        .try_list_tagged_files(container_id, owner)
         .map_err(|error| store_error(state, error))?;
     Ok(ContainerFileListObject {
         object: LIST_OBJECT,
@@ -329,8 +351,9 @@ pub fn get_container_file(
     state: &SharedInferenceRsState,
     container_id: &str,
     file_id: &str,
+    owner: Option<&str>,
 ) -> Result<ContainerFileMetadata, ApiError> {
-    find_in_container(state, container_id, file_id)
+    find_in_container(state, container_id, file_id, owner)
         .map(|file| container_metadata(container_id, &file))
 }
 
@@ -339,18 +362,20 @@ pub fn container_file_content(
     state: &SharedInferenceRsState,
     container_id: &str,
     file_id: &str,
+    owner: Option<&str>,
 ) -> Result<FileBody, ApiError> {
-    find_in_container(state, container_id, file_id)?;
-    file_content(state, file_id)
+    find_in_container(state, container_id, file_id, owner)?;
+    file_content(state, file_id, owner)
 }
 
 fn find_in_container(
     state: &SharedInferenceRsState,
     container_id: &str,
     file_id: &str,
+    owner: Option<&str>,
 ) -> Result<Arc<CoreFile>, ApiError> {
     state
-        .try_list_tagged_files(container_id)
+        .try_list_tagged_files(container_id, owner)
         .map_err(|error| store_error(state, error))?
         .into_iter()
         .find(|file| file.id == file_id)

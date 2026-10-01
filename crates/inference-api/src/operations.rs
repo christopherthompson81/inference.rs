@@ -162,17 +162,21 @@ async fn calibration_inner(
     answer(rx, CALIBRATION_FAILED).await
 }
 
-pub fn list_sessions(state: &SharedInferenceRsState) -> Result<SessionList, ApiError> {
-    let data = state.list_session_ids(None).map_err(engine_error)?;
+pub fn list_sessions(
+    state: &SharedInferenceRsState,
+    owner: Option<&str>,
+) -> Result<SessionList, ApiError> {
+    let data = state.list_session_ids(None, owner).map_err(engine_error)?;
     Ok(SessionList { data })
 }
 
 pub fn export_session(
     state: &SharedInferenceRsState,
     session_id: &str,
+    owner: Option<&str>,
 ) -> Result<SerializedSession, ApiError> {
     state
-        .export_session(None, session_id)
+        .export_session(None, session_id, owner)
         .map_err(engine_error)?
         .ok_or_else(|| {
             ApiError::new(
@@ -189,9 +193,10 @@ pub fn import_session(
     state: &SharedInferenceRsState,
     session_id: String,
     session: SerializedSession,
+    owner: Option<&str>,
 ) -> Result<(), ApiError> {
     state
-        .import_session(None, session_id, session)
+        .import_session(None, session_id, session, owner)
         .map_err(|error| match error {
             InferenceRsError::Other(message) => ApiError::new(
                 ApiErrorKind::InvalidRequest,
@@ -206,9 +211,10 @@ pub fn import_session(
 pub fn delete_session(
     state: &SharedInferenceRsState,
     session_id: &str,
+    owner: Option<&str>,
 ) -> Result<SessionDeleted, ApiError> {
     let deleted = state
-        .delete_session(None, session_id)
+        .delete_session(None, session_id, owner)
         .map_err(engine_error)?;
     Ok(SessionDeleted {
         id: session_id.to_string(),

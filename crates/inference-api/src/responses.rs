@@ -752,6 +752,7 @@ fn api_error_code(error: &ApiError) -> String {
         ApiErrorKind::InvalidRequest => "invalid_request".to_string(),
         ApiErrorKind::NotFound => "not_found".to_string(),
         ApiErrorKind::Gone => "gone".to_string(),
+        ApiErrorKind::Unauthorized => "invalid_api_key".to_string(),
         ApiErrorKind::Forbidden => "forbidden".to_string(),
         ApiErrorKind::Conflict => "conflict".to_string(),
         ApiErrorKind::PayloadTooLarge => "request_body_too_large".to_string(),
@@ -1005,6 +1006,7 @@ pub struct OpenResponsesStreamer {
     returned_tool_calls: Vec<ToolCall>,
     /// The agent session the run reported, stored so a follow-up continues it by id.
     session_id: Option<String>,
+    owner: Option<String>,
     files: Vec<inference_core::File>,
     tap: Option<ResponseTap>,
     cancellation: RequestCancellation,
@@ -1026,6 +1028,7 @@ impl OpenResponsesStreamer {
             context,
             cancellation,
             session_id,
+            owner,
             ..
         } = prepared;
         Self {
@@ -1058,6 +1061,7 @@ impl OpenResponsesStreamer {
             pending_shell_calls: HashMap::new(),
             returned_tool_calls: Vec::new(),
             session_id,
+            owner,
             files: Vec::new(),
             tap,
             cancellation,
@@ -1085,7 +1089,12 @@ impl OpenResponsesStreamer {
         let Some(response) = response else {
             return;
         };
-        let _ = cache.store_response(self.streaming_state.response_id.clone(), response.clone());
+        let owner = self.owner.as_deref();
+        let _ = cache.store_response(
+            self.streaming_state.response_id.clone(),
+            response.clone(),
+            owner,
+        );
         // Its reply was cut short or failed; only a finished one is a conversation to continue.
         if matches!(
             response.status,
@@ -1110,7 +1119,11 @@ impl OpenResponsesStreamer {
             messages: history,
             session_id: self.session_id.take(),
         };
-        let _ = cache.store_conversation(self.streaming_state.response_id.clone(), conversation);
+        let _ = cache.store_conversation(
+            self.streaming_state.response_id.clone(),
+            conversation,
+            self.owner.as_deref(),
+        );
     }
 
     fn claim_output_index(&mut self) -> usize {
@@ -1661,7 +1674,12 @@ impl futures::Stream for OpenResponsesStreamer {
                         ),
                     ))),
                     Response::File(file) => {
-                        tag_with_container(&self.state, &file, &self.streaming_state.response_id);
+                        tag_with_container(
+                            &self.state,
+                            &file,
+                            &self.streaming_state.response_id,
+                            self.owner.as_deref(),
+                        );
                         self.files.push(file.clone());
                         Poll::Ready(Some(ResponsesStreamItem::FileProduced(file)))
                     }
@@ -1714,8 +1732,9 @@ fn tag_with_container(
     state: &SharedInferenceRsState,
     file: &inference_core::File,
     response_id: &str,
+    owner: Option<&str>,
 ) {
-    let _ = state.try_tag_file(&file.id, &response_container_id(response_id));
+    let _ = state.try_tag_file(&file.id, &response_container_id(response_id), owner);
 }
 
 fn response_container_id(response_id: &str) -> String {
@@ -1924,13 +1943,13 @@ async fn parse_openresponses_request(
     // If previous_response_id is provided, get the full conversation history from cache
     let previous_messages = if let Some(prev_id) = &oairequest.previous_response_id {
         let cache = get_response_cache();
-        match cache.get_conversation(prev_id) {
+        match cache.get_conversation(prev_id, chat.owner.as_deref()) {
             Ok(Some(mut conversation)) => {
                 // a follow-up on an older reply branches; continuing the session would rewrite its newer turns
                 let head = conversation
                     .session_id
                     .as_deref()
-                    .map(|session| cache.session_head(session))
+                    .map(|session| cache.session_head(session, chat.owner.as_deref()))
                     .transpose()
                     .ok()
                     .flatten()
@@ -2083,9 +2102,16 @@ async fn parse_openresponses_request(
         )
         .into());
     }
-    let agent_approval_handler =
-        asks.then(|| AgentToolApprovalHandler::from_async(chat.agentic.approval_broker.callback()));
-    let agent_approval_notifier = asks.then(|| chat.agentic.approval_broker.notifier(tx.clone()));
+    let agent_approval_handler = asks.then(|| {
+        AgentToolApprovalHandler::from_async(
+            chat.agentic.approval_broker.callback(chat.owner.clone()),
+        )
+    });
+    let agent_approval_notifier = asks.then(|| {
+        chat.agentic
+            .approval_broker
+            .notifier(tx.clone(), chat.owner.clone())
+    });
     let (request, _) = parse_chat_request(
         chat_request,
         ChatCompletionParseContext {
@@ -2097,6 +2123,7 @@ async fn parse_openresponses_request(
             tool_surface: OpenAiToolSurface::Responses,
             skill_store: chat.skill_store.clone(),
             media: Default::default(),
+            owner: chat.owner.clone(),
         },
     )
     .await?;
@@ -2128,6 +2155,8 @@ pub struct PreparedResponse {
     pub cancellation: RequestCancellation,
     /// The agent session the request continues, kept for the reply when its run reports none.
     pub session_id: Option<String>,
+    /// Who the request acts for; the stored reply is theirs alone.
+    pub owner: Option<String>,
 }
 
 /// Validates a Responses request, resolves the conversation it continues and sends it to its model.
@@ -2183,12 +2212,14 @@ async fn prepare_response_inner(
         context,
         cancellation,
         session_id,
+        owner: chat.owner.clone(),
     })
 }
 
 /// What a finished request leaves in the response cache when it asked to be stored.
 struct StoredResponse {
     id: String,
+    owner: Option<String>,
     response: ResponseResource,
     /// `None` for a response that is not a conversation to continue with `previous_response_id` (failed, cancelled).
     history: Option<StoredConversation>,
@@ -2197,9 +2228,10 @@ struct StoredResponse {
 impl StoredResponse {
     fn save(self) {
         let cache = get_response_cache();
-        let _ = cache.store_response(self.id.clone(), self.response);
+        let owner = self.owner.as_deref();
+        let _ = cache.store_response(self.id.clone(), self.response, owner);
         if let Some(history) = self.history {
-            let _ = cache.store_conversation(self.id, history);
+            let _ = cache.store_conversation(self.id, history, owner);
         }
     }
 }
@@ -2236,6 +2268,7 @@ async fn run_to_end(
         mut history,
         context,
         session_id,
+        owner,
         ..
     } = prepared;
     // Files stay reachable through the file store; the response cites them.
@@ -2259,7 +2292,7 @@ async fn run_to_end(
             }
             Some(Response::BlockDenoisingProgress(_)) => {}
             Some(Response::File(file)) => {
-                tag_with_container(state, &file, &id);
+                tag_with_container(state, &file, &id, owner.as_deref());
                 files.push(file);
             }
             other => break other,
@@ -2300,6 +2333,7 @@ async fn run_to_end(
                 }
                 StoredResponse {
                     id: id.clone(),
+                    owner: owner.clone(),
                     response: response.clone(),
                     history: (response.status != ResponseStatus::Cancelled).then(|| {
                         StoredConversation {
@@ -2319,6 +2353,7 @@ async fn run_to_end(
                 response.status = ResponseStatus::Failed;
                 StoredResponse {
                     id: id.clone(),
+                    owner: owner.clone(),
                     response,
                     history: None,
                 }
@@ -2366,6 +2401,7 @@ pub fn spawn_background(
         id.clone(),
         prepared.model.clone(),
         prepared.cancellation.clone(),
+        prepared.owner.clone(),
     );
     let queued = ResponseResource::new(id.clone(), prepared.model.clone(), unix_now())
         .with_status(ResponseStatus::Queued)
@@ -2389,11 +2425,12 @@ pub fn spawn_background(
 pub fn get_response(
     state: &SharedInferenceRsState,
     response_id: &str,
+    owner: Option<&str>,
 ) -> Result<ResponseResource, ApiError> {
-    if let Some(response) = get_background_task_manager().get_response(response_id) {
+    if let Some(response) = get_background_task_manager().get_response(response_id, owner) {
         return Ok(response);
     }
-    match get_response_cache().get_response(response_id) {
+    match get_response_cache().get_response(response_id, owner) {
         Ok(Some(response)) => Ok(response),
         Ok(None) => Err(response_not_found_error(response_id)),
         Err(error) => Err(classify_api_error(
@@ -2416,9 +2453,10 @@ pub struct ResponseDeleted {
 pub fn delete_response(
     state: &SharedInferenceRsState,
     response_id: &str,
+    owner: Option<&str>,
 ) -> Result<ResponseDeleted, ApiError> {
-    let task_deleted = get_background_task_manager().delete_task(response_id);
-    match get_response_cache().delete_response(response_id) {
+    let task_deleted = get_background_task_manager().delete_task(response_id, owner);
+    match get_response_cache().delete_response(response_id, owner) {
         Ok(cache_deleted) if task_deleted || cache_deleted => Ok(ResponseDeleted {
             id: response_id.to_string(),
             object: "response.deleted",
@@ -2437,9 +2475,10 @@ pub fn delete_response(
 pub fn cancel_response(
     state: &SharedInferenceRsState,
     response_id: &str,
+    owner: Option<&str>,
 ) -> Result<ResponseResource, ApiError> {
-    get_background_task_manager().cancel(response_id);
-    get_response(state, response_id)
+    get_background_task_manager().cancel(response_id, owner);
+    get_response(state, response_id, owner)
 }
 
 /// The input minus `function_call` items the stored history holds, which a client resends with their outputs.

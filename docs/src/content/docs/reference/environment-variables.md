@@ -56,6 +56,7 @@ See [CPU threads and affinity](/guides/perf/throughput-tuning/#cpu-threads-and-a
 | Variable | Purpose |
 |---|---|
 | `MCP_CONFIG_PATH` | [MCP (Model Context Protocol)](/guides/agents/connect-mcp-server/) client configuration path used when `--mcp-config` is not passed. |
+| `INFERENCE_RS_API_KEY` | One more API key for `serve`, owned by `default`, alongside any in `--api-keys-file`. With either, every request but `/health` must carry a key. See [authentication](/reference/http-api/#authentication). |
 | `KEEP_ALIVE_INTERVAL` | SSE (Server-Sent Events) keep-alive interval in milliseconds. Falls back to the default if missing or invalid. |
 | `INFERENCE_RS_ALLOW_RUNTIME_LORA_UPDATING` | Set to `1`, `true`, `yes`, or `on` to enable runtime LoRA load and unload endpoints. Disabled by default; the read-only route remains registered, but the target model must have a dynamic LoRA runtime. See [LoRA adapters](/guides/customize/lora-adapters/#enable-http-mutation). |
 | `INFERENCE_RS_LORA_ADAPTER_ROOT` | Canonical directory root allowed for runtime LoRA adapter paths. Use this whenever runtime LoRA updating is enabled in production. |

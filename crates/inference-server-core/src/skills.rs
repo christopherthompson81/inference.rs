@@ -137,6 +137,7 @@ pub async fn upload_skill(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     Extension(store): Extension<Arc<SkillStore>>,
+    Extension(owner): Extension<crate::auth::Owner>,
     payload: std::result::Result<Multipart, MultipartRejection>,
 ) -> axum::response::Response {
     let anthropic = prefers_anthropic_shape(&headers, None, raw_query.as_deref());
@@ -144,7 +145,7 @@ pub async fn upload_skill(
         Ok(multipart) => multipart,
         Err(error) => return protocol_error_response(multipart_rejection_error(error), anthropic),
     };
-    match async { store.create_skill(read_skill_files(multipart).await?) }.await {
+    match async { store.create_skill(read_skill_files(multipart).await?, owner.as_deref()) }.await {
         Ok(skill) if anthropic => Json(AnthropicSkillObject::from(&skill)).into_response(),
         Ok(skill) => Json(skill).into_response(),
         Err(error) => skill_error(error, anthropic),
@@ -162,6 +163,7 @@ pub async fn list_skills(
     RawQuery(raw_query): RawQuery,
     payload: std::result::Result<Query<SkillListQuery>, QueryRejection>,
     Extension(store): Extension<Arc<SkillStore>>,
+    Extension(owner): Extension<crate::auth::Owner>,
 ) -> axum::response::Response {
     let query = match payload {
         Ok(Query(query)) => query,
@@ -185,7 +187,7 @@ pub async fn list_skills(
         }
         _ => {}
     }
-    match store.list() {
+    match store.list(owner.as_deref()) {
         Ok(data) if anthropic => Json(anthropic_list_response(data, Some(&query))).into_response(),
         Ok(data) => Json(SkillListObject {
             object: "list",
@@ -207,6 +209,7 @@ pub async fn upload_skill_version(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     Extension(store): Extension<Arc<SkillStore>>,
+    Extension(owner): Extension<crate::auth::Owner>,
     payload: std::result::Result<Multipart, MultipartRejection>,
 ) -> axum::response::Response {
     let anthropic = prefers_anthropic_shape(&headers, None, raw_query.as_deref());
@@ -214,7 +217,15 @@ pub async fn upload_skill_version(
         Ok(multipart) => multipart,
         Err(error) => return protocol_error_response(multipart_rejection_error(error), anthropic),
     };
-    match async { store.create_version(&skill_id, read_skill_files(multipart).await?) }.await {
+    match async {
+        store.create_version(
+            &skill_id,
+            read_skill_files(multipart).await?,
+            owner.as_deref(),
+        )
+    }
+    .await
+    {
         Ok(version) if anthropic => {
             Json(AnthropicSkillVersionObject::from(&version)).into_response()
         }
@@ -234,9 +245,10 @@ pub async fn list_skill_versions(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     Extension(store): Extension<Arc<SkillStore>>,
+    Extension(owner): Extension<crate::auth::Owner>,
 ) -> axum::response::Response {
     let anthropic = prefers_anthropic_shape(&headers, None, raw_query.as_deref());
-    match store.list_versions(&skill_id) {
+    match store.list_versions(&skill_id, owner.as_deref()) {
         Ok(versions) => Json(AnthropicSkillVersionListObject {
             data: versions
                 .iter()
@@ -350,6 +362,7 @@ mod tests {
             HeaderMap::new(),
             RawQuery(None),
             Extension(store.clone()),
+            Extension(crate::auth::Owner::default()),
             invalid_boundary_multipart().await,
         )
         .await;
@@ -362,6 +375,7 @@ mod tests {
             anthropic_headers(),
             RawQuery(None),
             Extension(store),
+            Extension(crate::auth::Owner::default()),
             invalid_boundary_multipart().await,
         )
         .await;
@@ -380,6 +394,7 @@ mod tests {
             HeaderMap::new(),
             RawQuery(None),
             Extension(store),
+            Extension(crate::auth::Owner::default()),
             multipart_with_body(BODY).await,
         )
         .await;
@@ -401,6 +416,7 @@ mod tests {
             RawQuery(Some(raw_query.to_string())),
             payload,
             Extension(store),
+            Extension(crate::auth::Owner::default()),
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -421,6 +437,7 @@ mod tests {
             RawQuery(Some(raw_query.to_string())),
             payload,
             Extension(store),
+            Extension(crate::auth::Owner::default()),
         )
         .await;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -460,6 +477,7 @@ mod tests {
             HeaderMap::new(),
             RawQuery(None),
             Extension(store),
+            Extension(crate::auth::Owner::default()),
         )
         .await;
         assert_eq!(response.status(), StatusCode::NOT_FOUND);

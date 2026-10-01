@@ -206,6 +206,7 @@ pub(crate) struct ChatCompletionParseContext {
     pub skill_store: Option<Arc<SkillStore>>,
     /// Buffers the request's `media://N` sources name.
     pub media: MediaAttachments,
+    pub owner: Option<String>,
 }
 
 /// Parses and validates a chat completion request.
@@ -232,6 +233,7 @@ async fn parse_request_inner(
         tool_surface,
         skill_store,
         media,
+        owner,
     } = ctx;
     let repr = serde_json::to_string(&oairequest)
         .context("Failed to serialize chat completion request for logging")?;
@@ -282,7 +284,7 @@ async fn parse_request_inner(
         let store = skill_store
             .as_ref()
             .context("tools[].type=\"shell\" skill references require a configured skill store.")?;
-        Some(store.resolve_references(&normalized_tools.shell_skill_references)?)
+        Some(store.resolve_references(&normalized_tools.shell_skill_references, owner.as_deref())?)
     };
 
     let stop_toks = convert_stop_tokens(oairequest.stop_seqs);
@@ -535,9 +537,14 @@ async fn parse_request_inner(
                             })
                             .collect::<Vec<_>>();
                         for spec in file_specs_iter {
-                            let file =
-                                resolve_input_file(state.clone(), spec, "input_file").await?;
-                            state.insert_file(None, file.clone(), None)?;
+                            let file = resolve_input_file(
+                                state.clone(),
+                                spec,
+                                "input_file",
+                                owner.as_deref(),
+                            )
+                            .await?;
+                            state.insert_file(None, file.clone(), None, owner.as_deref())?;
                             input_files.push(file);
                         }
 
@@ -766,6 +773,7 @@ async fn parse_request_inner(
             agent_approval_handler,
             agent_approval_notifier,
             session_id: oairequest.session_id,
+            owner,
             files: oairequest.files,
             input_files,
             cancellation: None,
@@ -789,6 +797,8 @@ pub struct ChatEngine {
     pub state: SharedInferenceRsState,
     pub agentic: AgenticDefaults,
     pub skill_store: Option<Arc<SkillStore>>,
+    /// Who requests act for; their sessions and files are that owner's. `None` for an unscoped caller.
+    pub owner: Option<String>,
 }
 
 /// A dispatched chat request: its response channel and how to present what comes back.
@@ -879,10 +889,16 @@ impl ChatEngine {
                 Some("agent_permission"),
             ))));
         }
-        let agent_approval_handler = asks
-            .then(|| AgentToolApprovalHandler::from_async(self.agentic.approval_broker.callback()));
-        let agent_approval_notifier =
-            asks.then(|| self.agentic.approval_broker.notifier(tx.clone()));
+        let agent_approval_handler = asks.then(|| {
+            AgentToolApprovalHandler::from_async(
+                self.agentic.approval_broker.callback(self.owner.clone()),
+            )
+        });
+        let agent_approval_notifier = asks.then(|| {
+            self.agentic
+                .approval_broker
+                .notifier(tx.clone(), self.owner.clone())
+        });
 
         let model_id = (oairequest.model != DEFAULT_MODEL_ID).then(|| oairequest.model.clone());
         let (mut request, is_streaming) = parse_request(
@@ -896,6 +912,7 @@ impl ChatEngine {
                 tool_surface,
                 skill_store: self.skill_store.clone(),
                 media,
+                owner: self.owner.clone(),
             },
         )
         .await

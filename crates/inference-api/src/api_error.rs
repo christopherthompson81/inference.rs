@@ -13,6 +13,8 @@ pub enum ApiErrorKind {
     NotFound,
     /// Existed once but is no longer available.
     Gone,
+    /// The caller gave no API key, or one the server doesn't know.
+    Unauthorized,
     Forbidden,
     Conflict,
     PayloadTooLarge,

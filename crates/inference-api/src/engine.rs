@@ -739,6 +739,7 @@ impl Engine {
                 state,
                 agentic,
                 skill_store: Some(Arc::new(skill_store)),
+                owner: None,
             },
             adapters,
         )
@@ -756,6 +757,18 @@ impl Engine {
 
     pub fn state(&self) -> &SharedInferenceRsState {
         &self.chat.state
+    }
+
+    /// The same engine acting for `owner`: its sessions, files and stored responses are that owner's alone.
+    pub fn for_owner(&self, owner: impl Into<String>) -> Self {
+        let mut scoped = self.clone();
+        scoped.chat.owner = Some(owner.into());
+        scoped
+    }
+
+    /// Who this engine acts for; `None` when unscoped.
+    pub fn owner(&self) -> Option<&str> {
+        self.chat.owner.as_deref()
     }
 
     /// Stops the engine threads and waits for them; fails while another clone of this engine is alive.
@@ -1005,16 +1018,16 @@ impl Engine {
 
     /// A background response in its current state, or a stored one. The store is shared by the process's engines.
     pub fn response(&self, response_id: &str) -> Result<ResponseResource, ApiError> {
-        get_response(self.state(), response_id)
+        get_response(self.state(), response_id, self.owner())
     }
 
     pub fn delete_response(&self, response_id: &str) -> Result<ResponseDeleted, ApiError> {
-        delete_response(self.state(), response_id)
+        delete_response(self.state(), response_id, self.owner())
     }
 
     /// Cancels a background response that has not finished, and returns it.
     pub fn cancel_response(&self, response_id: &str) -> Result<ResponseResource, ApiError> {
-        cancel_response(self.state(), response_id)
+        cancel_response(self.state(), response_id, self.owner())
     }
 
     pub async fn responses_json(&self, request: &[u8]) -> Result<String, ApiError> {
@@ -1106,11 +1119,11 @@ impl Engine {
     }
 
     pub fn sessions(&self) -> Result<SessionList, ApiError> {
-        operations::list_sessions(self.state())
+        operations::list_sessions(self.state(), self.owner())
     }
 
     pub fn session(&self, session_id: &str) -> Result<SerializedSession, ApiError> {
-        operations::export_session(self.state(), session_id)
+        operations::export_session(self.state(), session_id, self.owner())
     }
 
     pub fn put_session(
@@ -1118,14 +1131,14 @@ impl Engine {
         session_id: &str,
         session: SerializedSession,
     ) -> Result<SessionStored, ApiError> {
-        operations::import_session(self.state(), session_id.to_string(), session)?;
+        operations::import_session(self.state(), session_id.to_string(), session, self.owner())?;
         Ok(SessionStored {
             id: session_id.to_string(),
         })
     }
 
     pub fn delete_session(&self, session_id: &str) -> Result<SessionDeleted, ApiError> {
-        operations::delete_session(self.state(), session_id)
+        operations::delete_session(self.state(), session_id, self.owner())
     }
 
     pub async fn tokenize(&self, request: TokenizeRequest) -> Result<TokenizeResponse, ApiError> {
@@ -1220,7 +1233,7 @@ impl Engine {
         &self,
         request: ImageGenerationRequest,
     ) -> Result<ImageGenerationResponse, ApiError> {
-        generate_image(self.state(), request).await
+        generate_image(self.state(), request, self.owner()).await
     }
 
     /// Speaks text with a speech model, as WAV or 16-bit PCM.
@@ -1245,7 +1258,12 @@ impl Engine {
         approval_id: &str,
         request: ApprovalDecisionRequest,
     ) -> Result<ApprovalDecisionResponse, ApiError> {
-        resolve_approval(&self.chat.agentic.approval_broker, approval_id, request)
+        resolve_approval(
+            &self.chat.agentic.approval_broker,
+            approval_id,
+            request,
+            self.owner(),
+        )
     }
 
     pub fn resolve_approval_json(
@@ -1257,7 +1275,7 @@ impl Engine {
     }
 
     pub fn upload_file(&self, upload: FileUpload) -> Result<FileMetadata, ApiError> {
-        files::upload_file(self.state(), upload)
+        files::upload_file(self.state(), upload, self.owner())
     }
 
     pub fn upload_file_json(&self, upload: FileUpload) -> Result<String, ApiError> {
@@ -1265,19 +1283,19 @@ impl Engine {
     }
 
     pub fn files_json(&self) -> Result<String, ApiError> {
-        to_json(&files::list_files(self.state())?)
+        to_json(&files::list_files(self.state(), self.owner())?)
     }
 
     pub fn file_json(&self, file_id: &str) -> Result<String, ApiError> {
-        to_json(&files::get_file(self.state(), file_id)?)
+        to_json(&files::get_file(self.state(), file_id, self.owner())?)
     }
 
     pub fn delete_file_json(&self, file_id: &str) -> Result<String, ApiError> {
-        to_json(&files::delete_file(self.state(), file_id)?)
+        to_json(&files::delete_file(self.state(), file_id, self.owner())?)
     }
 
     pub fn file_content(&self, file_id: &str) -> Result<FileBody, ApiError> {
-        files::file_content(self.state(), file_id)
+        files::file_content(self.state(), file_id, self.owner())
     }
 
     fn skill_store(&self) -> Result<&SkillStore, ApiError> {
@@ -1292,7 +1310,10 @@ impl Engine {
     }
 
     pub fn skills_json(&self) -> Result<String, ApiError> {
-        let data = self.skill_store()?.list().map_err(skill_api_error)?;
+        let data = self
+            .skill_store()?
+            .list(self.owner())
+            .map_err(skill_api_error)?;
         to_json(&SkillListObject {
             object: "list",
             data,
@@ -1302,7 +1323,7 @@ impl Engine {
     pub fn skill_versions_json(&self, skill_id: &str) -> Result<String, ApiError> {
         let data = self
             .skill_store()?
-            .list_versions(skill_id)
+            .list_versions(skill_id, self.owner())
             .map_err(skill_api_error)?;
         to_json(&AnthropicSkillVersionListObject {
             data: data.iter().map(AnthropicSkillVersionObject::from).collect(),
@@ -1316,7 +1337,7 @@ impl Engine {
         to_json(
             &self
                 .skill_store()?
-                .create_skill(files)
+                .create_skill(files, self.owner())
                 .map_err(skill_api_error)?,
         )
     }
@@ -1329,7 +1350,7 @@ impl Engine {
         to_json(
             &self
                 .skill_store()?
-                .create_version(skill_id, files)
+                .create_version(skill_id, files, self.owner())
                 .map_err(skill_api_error)?,
         )
     }

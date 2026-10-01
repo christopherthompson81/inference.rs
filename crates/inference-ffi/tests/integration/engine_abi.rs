@@ -1166,6 +1166,75 @@ unsafe extern "C" fn unused_tool(
     }
 }
 
+fn upload(engine: *const inference_engine) -> String {
+    let contents = b"a,b\n";
+    let mut response = null_mut();
+    let status = unsafe {
+        inference_file_upload(
+            engine,
+            contents.as_ptr(),
+            contents.len(),
+            c"table.csv".as_ptr(),
+            c"text/csv".as_ptr(),
+            c"user_data".as_ptr(),
+            &mut response,
+        )
+    };
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let uploaded: Value = serde_json::from_str(&take_string(response)).unwrap();
+    uploaded["id"].as_str().unwrap().to_string()
+}
+
+fn for_owner(
+    engine: *const inference_engine,
+    owner: &str,
+) -> (inference_status, *mut inference_engine) {
+    let mut scoped = null_mut();
+    let status = unsafe {
+        inference_engine_for_owner(
+            engine,
+            owner.as_ptr().cast::<c_char>(),
+            owner.len(),
+            &mut scoped,
+        )
+    };
+    (status, scoped)
+}
+
+#[test]
+fn an_owner_handle_reaches_only_what_it_stored() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let (status, engine) = load(&spec(dir.path()));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let (status, team_a) = for_owner(engine, "team-a");
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    let (status, team_b) = for_owner(engine, "team-b");
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+    assert_eq!(for_owner(engine, "").0, INFERENCE_ERR_INVALID_ARGUMENT);
+
+    let owned = upload(team_a);
+    assert_eq!(by_id(inference_file_get, team_a, &owned).0, INFERENCE_OK);
+    for other in [team_b, engine] {
+        assert_eq!(
+            by_id(inference_file_get, other, &owned).0,
+            INFERENCE_ERR_NOT_FOUND
+        );
+    }
+    let unscoped = upload(engine);
+    assert_eq!(
+        by_id(inference_file_get, team_a, &unscoped).0,
+        INFERENCE_ERR_NOT_FOUND
+    );
+
+    // the engine stays loaded for the handles still open
+    unsafe { inference_engine_free(engine) };
+    assert_eq!(by_id(inference_file_get, team_a, &owned).0, INFERENCE_OK);
+    unsafe {
+        inference_engine_free(team_a);
+        inference_engine_free(team_b);
+    }
+}
+
 fn skill_files(skill_md: &str) -> [inference_skill_file; 1] {
     [inference_skill_file {
         path: c"SKILL.md".as_ptr(),

@@ -687,3 +687,55 @@ session both keep their body through an import; a session restores a new file of
 `a_body_stored_over_an_expired_entry_leaves_its_tags_behind`, `only_a_follow_up_on_the_latest_reply_continues_its_session`,
 `a_reply_without_an_agent_run_keeps_the_session_it_continued`, the Responses streamed/collected tests now also check the
 stored session id, and `output_ids_are_random_on_their_own`.
+
+## Run 27 — 2026-09-30 (time approximate)
+
+**Question:** #158's remainder, keyed mode. With API keys, can each key's owner reach only what it stored, through the
+engine API first (ABI-first), with the HTTP server mapping keys to owners on top?
+
+**Design (decided with the user):** named keys file (`name = key`; `--api-keys-file`, `[server] api_keys_file`) plus
+`INFERENCE_RS_API_KEY` for one key owned by `default`; the owner is the name, so a key rotates without orphaning data.
+Visibility is exact-match on the owner, with `None` (open mode, or an unscoped ABI handle) as an owner of its own: a
+lookup that forgets to pass its owner finds nothing rather than everything.
+
+**Change:** owners on every per-client store. `FileStore` entries (`get`, `list_all`, `list_for_session`, `remove`,
+`attach_to_session` filter by owner; `insert` leaves another owner's live file alone, found while writing the store
+test); `AgenticSessionStore` entries (`get`, `find_by_messages`, `list_ids`, `delete`, `export`, `import`, `fork`;
+`held_by_other` refuses a session id another owner holds, so it can be neither read nor taken over); `NormalRequest.owner`, which the agent loop uses for
+session lookup, input and output files and the `read_file`/`list_files` tools; the Responses cache and background tasks
+(`Owned<T>` entries; get/delete/cancel/`previous_response_id` by owner); skills (persisted `owner`, serde default);
+approvals (the broker records the requesting owner per approval; another owner's decision is `NotFound`). The engine
+API carries it as `ChatEngine.owner`, set by `Engine::for_owner(name)`, a clone acting for that owner. The server's
+`auth::authenticate` layer maps `Authorization: Bearer` or `x-api-key` to an `Owner` extension (SHA-256 digests compared
+in full; `/health` and CORS preflights pass without a key; 401 `invalid_api_key` otherwise) and every per-client
+handler reads it. A keyed server always lists `GET /v1/files` (each owner sees its own). The C ABI gets
+`inference_engine_for_owner` (ABI 0.0.14); Python `Engine.for_owner`, C# `InferenceEngine.ForOwner`, each holding a
+reference on its parent handle so the parent's host callbacks stay registered. The Rust SDK stays unscoped.
+
+**Not covered yet:** the web UI and the MCP server sit outside the router build and act unscoped, so `serve` refuses
+keys with either (`--no-ui`, no `--mcp-port`) until the next PR. The KV prefix cache stays shared (time to first token
+can reveal a shared prefix), documented.
+
+**Tests:** `keyed::*` (401 without or with an unknown key, `x-api-key` accepted, `/health` open; files listed, read and
+deleted only by their owner; a session id held by one owner is 404 to read and 400 to import or chat under for
+another; a stored response read and continued only by its owner), `a_keys_file_maps_each_key_to_its_owner`,
+`a_keys_file_with_a_repeat_or_a_bad_line_is_refused`, `only_the_requesting_owner_answers_an_approval`,
+`a_session_is_found_used_and_removed_only_by_its_owner`, `a_file_is_reached_only_by_its_owner`,
+`a_response_is_reached_and_deleted_only_by_its_owner`, `a_conversation_is_continued_only_by_its_owner`,
+`an_owner_handle_reaches_only_what_it_stored` (ABI), and the Python and C# binding tests.
+
+**Review:** the first version had six holes. (1) The `/health` exemption was `path.ends_with("/health")`, so every
+route ending in an id ran keyless as owner `None` when the id was `health` (`PUT /v1/sessions/health` could import
+files under chosen ids, filling the shared byte cap and probing whether an id existed elsewhere); now only exact
+`GET /health` and `GET /`. (2) Code-exec and shell sandboxes, the agent loop's remembered approvals, the broker's and
+the Responses session heads were keyed by session id alone; `held_by_other` only guards while the session entry lives,
+and it goes on idle expiry (30 min, under the sandbox's 60), on DELETE, on the 128-session cap any key can force, and
+before the first round saves it. In those windows another owner sending the same id joined the live interpreter. All
+of them now key by `sandbox_key(owner, session_id)` (a SHA-256 prefix in hex, carried on `ToolCallContext.owner`),
+which also fixes a pre-existing path traversal: the shell work dir was `root.join(session_id)` with a client-chosen id.
+(3) Auth sat inside `observe_http`, which buffers the body for its model label, so a keyless request could make the
+server read up to the body limit; auth is now the outermost layer. (4) `count_tokens` ran unscoped. (5) A non-UTF-8
+`INFERENCE_RS_API_KEY` was silently ignored, starting the server open; now an error (and an empty one is unset).
+(6) A 401 on `/v1/messages` used the OpenAI envelope; the `Bearer` scheme is now case-insensitive. Documented rather
+than changed: keys don't gate server-wide operations (any key may unload a model), and owners share the stores'
+capacity caps, so one can evict another's oldest entries.

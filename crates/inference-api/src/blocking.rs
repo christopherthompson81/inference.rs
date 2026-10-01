@@ -59,6 +59,13 @@ impl BlockingEngine {
         &self.engine
     }
 
+    /// The same engine acting for `owner`; see [`Engine::for_owner`].
+    pub fn for_owner(&self, owner: &str) -> Self {
+        Self {
+            engine: self.engine.for_owner(owner),
+        }
+    }
+
     // Runs `op` on a runtime worker with owned copies of the engine and the request.
     fn call<T, Fut>(&self, request: &[u8], op: impl FnOnce(Engine, Vec<u8>) -> Fut) -> T
     where

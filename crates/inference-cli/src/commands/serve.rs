@@ -254,14 +254,25 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
             server.port
         );
     }
+    let api_keys = server.api_keys()?;
+    let keyed = !api_keys.is_empty();
+    if keyed && (!server.no_ui || server.mcp_port.is_some()) {
+        anyhow::bail!(
+            "the web UI and the MCP server don't check API keys yet; pass --no-ui and leave out --mcp-port to serve with keys"
+        );
+    }
     let ui = (!server.no_ui).then(|| UiOptions::from_agentic(&spec.agentic));
     let engine = Engine::load(spec).await?;
     let mut app = InferenceRsServerRouterBuilder::new()
         .with_engine(&engine)
         .with_observability_config(server.observability_config())
         .with_file_listing(server.allow_file_listing)
+        .with_api_keys(api_keys)
         .build()
         .await?;
+    if keyed {
+        info!("API keys required; each key's owner sees only what it stored");
+    }
     if let Some(ui) = ui {
         app = inference_webui::mount(app, &engine, ui, server.observability_config()).await?;
         info!(

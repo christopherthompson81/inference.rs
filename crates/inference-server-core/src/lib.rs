@@ -170,6 +170,7 @@
 //!         state: inference_state.clone(),
 //!         agentic: AgenticDefaults::default(),
 //!         skill_store: None,
+//!         owner: None,
 //!     };
 //!     let prepared = match chat
 //!         .prepare(oai_request, OpenAiToolSurface::ChatCompletions, Default::default())
@@ -231,6 +232,7 @@
 
 pub mod anthropic;
 pub mod approvals;
+pub mod auth;
 pub mod chat_completion;
 mod completion_core;
 pub mod completions;

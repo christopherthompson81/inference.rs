@@ -23,6 +23,8 @@ struct StoredFile {
     file: Arc<File>,
     expires_at: Instant,
     session_ids: HashSet<String>,
+    /// Who stored it; only the same owner (or, with none, only an unscoped caller) sees it.
+    owner: Option<String>,
     /// Insertion order. `list_for_session` returns oldest first.
     seq: u64,
 }
@@ -39,6 +41,12 @@ struct Inner {
     next_seq: u64,
     /// What the stored bodies take, kept in step with `by_id`.
     resident_bytes: usize,
+}
+
+impl StoredFile {
+    fn visible(&self, now: Instant, owner: Option<&str>) -> bool {
+        self.expires_at >= now && self.owner.as_deref() == owner
+    }
 }
 
 impl Inner {
@@ -93,14 +101,21 @@ impl FileStore {
         }
     }
 
-    /// Evicts expired entries, then the oldest, to stay under `MAX_FILES` and the byte cap.
-    pub fn insert(&self, file: File, session_id: Option<String>) {
+    /// Stores `file` for `owner` unless another owner's live file holds its id; evicts to stay under both caps.
+    pub fn insert(&self, file: File, session_id: Option<String>, owner: Option<&str>) {
         let id = file.id.clone();
         let size = resident_bytes(&file);
         let mut guard = self.inner.write().unwrap();
         let now = Instant::now();
-        // an expired entry the reaper hasn't reached is gone: its tags don't pass to a new body
-        let (seq, mut session_ids) = match guard.remove(&id).filter(|e| e.expires_at >= now) {
+        let held_by_other = guard
+            .by_id
+            .get(&id)
+            .is_some_and(|e| e.expires_at >= now && e.owner.as_deref() != owner);
+        if held_by_other {
+            return;
+        }
+        // an expired entry is gone: its tags don't pass to a new body
+        let (seq, mut session_ids) = match guard.remove(&id).filter(|e| e.visible(now, owner)) {
             Some(existing) => (existing.seq, existing.session_ids),
             None => {
                 let seq = guard.next_seq;
@@ -116,6 +131,7 @@ impl FileStore {
                 file: Arc::new(file),
                 expires_at: Instant::now() + self.ttl,
                 session_ids,
+                owner: owner.map(str::to_string),
                 seq,
             },
         );
@@ -139,21 +155,32 @@ impl FileStore {
         }
     }
 
-    /// `None` if missing or expired.
-    pub fn get(&self, id: &str) -> Option<Arc<File>> {
-        let now = Instant::now();
+    /// `None` if missing, expired or another owner's.
+    pub fn get(&self, id: &str, owner: Option<&str>) -> Option<Arc<File>> {
         let guard = self.inner.read().unwrap();
         let entry = guard.by_id.get(id)?;
-        if entry.expires_at < now {
-            None
-        } else {
-            Some(Arc::clone(&entry.file))
-        }
+        entry
+            .visible(Instant::now(), owner)
+            .then(|| Arc::clone(&entry.file))
     }
 
-    /// Returns true if an entry existed.
-    pub fn remove(&self, id: &str) -> bool {
-        self.inner.write().unwrap().remove(id).is_some()
+    /// Whether any live entry holds `id`, whoever owns it.
+    pub fn holds(&self, id: &str) -> bool {
+        let guard = self.inner.read().unwrap();
+        guard
+            .by_id
+            .get(id)
+            .is_some_and(|entry| entry.expires_at >= Instant::now())
+    }
+
+    /// Returns true if `owner`'s entry existed.
+    pub fn remove(&self, id: &str, owner: Option<&str>) -> bool {
+        let mut guard = self.inner.write().unwrap();
+        let visible = guard
+            .by_id
+            .get(id)
+            .is_some_and(|entry| entry.visible(Instant::now(), owner));
+        visible && guard.remove(id).is_some()
     }
 
     /// Refresh the TTL on every file tagged with `session_id`. Call when the session is touched.
@@ -167,9 +194,15 @@ impl FileStore {
         }
     }
 
-    pub fn attach_to_session(&self, id: &str, session_id: impl Into<String>) -> bool {
+    pub fn attach_to_session(
+        &self,
+        id: &str,
+        session_id: impl Into<String>,
+        owner: Option<&str>,
+    ) -> bool {
         let mut guard = self.inner.write().unwrap();
-        let Some(entry) = guard.by_id.get_mut(id) else {
+        let now = Instant::now();
+        let Some(entry) = guard.by_id.get_mut(id).filter(|e| e.visible(now, owner)) else {
             return false;
         };
         entry.session_ids.insert(session_id.into());
@@ -177,39 +210,27 @@ impl FileStore {
         true
     }
 
-    /// Tags a live file under `id` with `session_id`, keeping its body; false if there is none.
-    pub fn retag_live(&self, id: &str, session_id: &str) -> bool {
-        let mut guard = self.inner.write().unwrap();
-        let now = Instant::now();
-        let Some(entry) = guard.by_id.get_mut(id).filter(|e| e.expires_at >= now) else {
-            return false;
-        };
-        entry.session_ids.insert(session_id.to_string());
-        entry.expires_at = now + self.ttl;
-        true
-    }
-
-    /// Non-expired files tagged with `session_id`, oldest first.
-    pub fn list_for_session(&self, session_id: &str) -> Vec<Arc<File>> {
+    /// `owner`'s non-expired files tagged with `session_id`, oldest first.
+    pub fn list_for_session(&self, session_id: &str, owner: Option<&str>) -> Vec<Arc<File>> {
         let now = Instant::now();
         let guard = self.inner.read().unwrap();
         let mut hits: Vec<&StoredFile> = guard
             .by_id
             .values()
-            .filter(|s| s.expires_at >= now && s.session_ids.contains(session_id))
+            .filter(|s| s.visible(now, owner) && s.session_ids.contains(session_id))
             .collect();
         hits.sort_by_key(|s| s.seq);
         hits.into_iter().map(|s| Arc::clone(&s.file)).collect()
     }
 
-    /// Every non-expired file regardless of session, oldest first.
-    pub fn list_all(&self) -> Vec<Arc<File>> {
+    /// Every non-expired file of `owner`'s regardless of session, oldest first.
+    pub fn list_all(&self, owner: Option<&str>) -> Vec<Arc<File>> {
         let now = Instant::now();
         let guard = self.inner.read().unwrap();
         let mut hits: Vec<&StoredFile> = guard
             .by_id
             .values()
-            .filter(|s| s.expires_at >= now)
+            .filter(|s| s.visible(now, owner))
             .collect();
         hits.sort_by_key(|s| s.seq);
         hits.into_iter().map(|s| Arc::clone(&s.file)).collect()
@@ -284,36 +305,61 @@ mod tests {
     fn a_body_stored_over_an_expired_entry_leaves_its_tags_behind() {
         const SHORT_TTL: Duration = Duration::from_millis(5);
         let s = FileStore::with_ttl(SHORT_TTL);
-        s.insert(make("file_a"), Some("sess_old".into()));
+        s.insert(make("file_a"), Some("sess_old".into()), None);
         std::thread::sleep(SHORT_TTL * 2);
-        assert!(!s.retag_live("file_a", "sess_new"));
-        s.insert(make("file_a"), Some("sess_new".into()));
-        assert!(s.list_for_session("sess_old").is_empty());
-        assert_eq!(s.list_for_session("sess_new").len(), 1);
+        assert!(!s.holds("file_a"));
+        s.insert(make("file_a"), Some("sess_new".into()), None);
+        assert!(s.list_for_session("sess_old", None).is_empty());
+        assert_eq!(s.list_for_session("sess_new", None).len(), 1);
+    }
+
+    #[test]
+    fn a_file_is_reached_only_by_its_owner() {
+        const OWNER: Option<&str> = Some("team-a");
+        let s = FileStore::new();
+        s.insert(make("file_a"), Some("sess1".into()), OWNER);
+        for other in [Some("team-b"), None] {
+            assert!(s.get("file_a", other).is_none());
+            assert!(s.list_all(other).is_empty());
+            assert!(s.list_for_session("sess1", other).is_empty());
+            assert!(!s.attach_to_session("file_a", "sess2", other));
+            assert!(!s.remove("file_a", other));
+        }
+        assert!(s.holds("file_a"));
+        assert_eq!(s.get("file_a", OWNER).unwrap().as_text(), Some("hi"));
+        // another owner storing under the id leaves the first owner's file as it was
+        let mut forged = make("file_a");
+        forged.content = FileContent::Text {
+            text: Some("forged".into()),
+            preview: None,
+        };
+        s.insert(forged, Some("sess2".into()), Some("team-b"));
+        assert!(s.get("file_a", Some("team-b")).is_none());
+        assert_eq!(s.get("file_a", OWNER).unwrap().as_text(), Some("hi"));
     }
 
     #[test]
     fn insert_and_get() {
         let s = FileStore::new();
-        s.insert(make("file_a"), None);
-        assert_eq!(s.get("file_a").unwrap().as_text(), Some("hi"));
-        assert!(s.get("missing").is_none());
+        s.insert(make("file_a"), None, None);
+        assert_eq!(s.get("file_a", None).unwrap().as_text(), Some("hi"));
+        assert!(s.get("missing", None).is_none());
     }
 
     #[test]
     fn list_by_session_oldest_first() {
         let s = FileStore::new();
-        s.insert(make("file_a"), Some("sess1".into()));
-        s.insert(make("file_b"), Some("sess1".into()));
-        s.insert(make("file_c"), Some("sess2".into()));
+        s.insert(make("file_a"), Some("sess1".into()), None);
+        s.insert(make("file_b"), Some("sess1".into()), None);
+        s.insert(make("file_c"), Some("sess2".into()), None);
         let list: Vec<_> = s
-            .list_for_session("sess1")
+            .list_for_session("sess1", None)
             .iter()
             .map(|f| f.id.clone())
             .collect();
         assert_eq!(list, vec!["file_a".to_string(), "file_b".to_string()]);
         let list2: Vec<_> = s
-            .list_for_session("sess2")
+            .list_for_session("sess2", None)
             .iter()
             .map(|f| f.id.clone())
             .collect();
@@ -323,11 +369,11 @@ mod tests {
     #[test]
     fn attach_existing_file_to_multiple_sessions() {
         let s = FileStore::new();
-        s.insert(make("file_a"), None);
-        assert!(s.attach_to_session("file_a", "sess1"));
-        assert!(s.attach_to_session("file_a", "sess2"));
-        assert_eq!(s.list_for_session("sess1")[0].id, "file_a");
-        assert_eq!(s.list_for_session("sess2")[0].id, "file_a");
+        s.insert(make("file_a"), None, None);
+        assert!(s.attach_to_session("file_a", "sess1", None));
+        assert!(s.attach_to_session("file_a", "sess2", None));
+        assert_eq!(s.list_for_session("sess1", None)[0].id, "file_a");
+        assert_eq!(s.list_for_session("sess2", None)[0].id, "file_a");
     }
 
     fn sized(id: &str, len: usize) -> File {
@@ -343,32 +389,32 @@ mod tests {
     #[test]
     fn the_byte_cap_evicts_the_oldest_and_keeps_the_newest() {
         let s = FileStore::with_limits(DEFAULT_FILE_TTL, 10);
-        s.insert(sized("file_a", 4), None);
-        s.insert(sized("file_b", 4), None);
+        s.insert(sized("file_a", 4), None, None);
+        s.insert(sized("file_b", 4), None, None);
         assert_eq!(s.resident_bytes(), 8);
-        s.insert(sized("file_c", 4), None);
-        assert!(s.get("file_a").is_none(), "the oldest goes first");
-        assert!(s.get("file_b").is_some() && s.get("file_c").is_some());
+        s.insert(sized("file_c", 4), None, None);
+        assert!(s.get("file_a", None).is_none(), "the oldest goes first");
+        assert!(s.get("file_b", None).is_some() && s.get("file_c", None).is_some());
         assert_eq!(s.resident_bytes(), 8);
 
         // replacing an entry counts its new size, not both
-        s.insert(sized("file_c", 6), None);
+        s.insert(sized("file_c", 6), None, None);
         assert_eq!(s.resident_bytes(), 10);
 
         // one file over the cap on its own is still kept, alone
-        s.insert(sized("file_big", 20), None);
+        s.insert(sized("file_big", 20), None, None);
         assert_eq!(s.len(), 1);
-        assert!(s.get("file_big").is_some());
-        assert!(s.remove("file_big"));
+        assert!(s.get("file_big", None).is_some());
+        assert!(s.remove("file_big", None));
         assert_eq!(s.resident_bytes(), 0);
     }
 
     #[test]
     fn ttl_eviction() {
         let s = FileStore::with_ttl(Duration::from_millis(1));
-        s.insert(make("file_a"), None);
+        s.insert(make("file_a"), None, None);
         std::thread::sleep(Duration::from_millis(5));
-        assert!(s.get("file_a").is_none());
+        assert!(s.get("file_a", None).is_none());
         let swept = s.cleanup_expired();
         assert_eq!(swept, 1);
         assert!(s.is_empty());

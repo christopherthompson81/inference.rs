@@ -48,6 +48,7 @@ fn exec_json_with_permission(
     };
     let ctx = ToolCallContext {
         session_id: Some(session_id.to_string()),
+        owner: None,
         round: None,
         tool_name: None,
         code_execution_permission,
@@ -83,6 +84,7 @@ fn reset_json(
     };
     let ctx = ToolCallContext {
         session_id: Some(session_id.to_string()),
+        owner: None,
         round: None,
         tool_name: None,
         code_execution_permission: None,

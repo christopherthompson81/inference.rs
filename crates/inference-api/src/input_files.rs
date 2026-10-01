@@ -22,10 +22,11 @@ pub async fn resolve_input_file(
     state: SharedInferenceRsState,
     spec: InputFileSpec,
     source: &str,
+    owner: Option<&str>,
 ) -> anyhow::Result<File> {
     if let Some(file_id) = spec.file_id {
         return state
-            .find_file(&file_id)
+            .find_file(&file_id, owner)
             .map(|file| (*file).clone())
             .ok_or_else(|| anyhow::anyhow!("Input file `{file_id}` was not found."));
     }

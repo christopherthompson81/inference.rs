@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 13
+#define INFERENCE_ABI_VERSION_PATCH 14
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -180,6 +180,12 @@ typedef struct inference_blob inference_blob;
 INFERENCE_API inference_status inference_engine_load(const char *spec, size_t spec_len,
                                                     inference_engine **out_engine);
 INFERENCE_API void inference_engine_free(inference_engine *engine);
+/* A second handle to the same loaded engine that acts for owner (non-empty UTF-8): the sessions, files, stored
+ * responses, skills and approvals it creates are owner's, and it reaches no one else's. A handle from
+ * inference_engine_load is unscoped and likewise reaches only unscoped data. Free each handle with
+ * inference_engine_free; the engine stays loaded until every handle is freed. Serving several users, make one each. */
+INFERENCE_API inference_status inference_engine_for_owner(const inference_engine *engine, const char *owner,
+                                                         size_t owner_len, inference_engine **out_engine);
 
 /* Host callbacks: C functions the agent loop calls. A callback answers through the library-owned result it is given,
  * with inference_callback_result_set (text, copied; NULL with len 0 is empty, invalid UTF-8 is replaced) or

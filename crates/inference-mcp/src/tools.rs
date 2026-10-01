@@ -6,6 +6,8 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+const SANDBOX_KEY_BYTES: usize = 16;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentToolSource {
@@ -137,8 +139,10 @@ impl From<AgentPermission> for CodeExecutionPermission {
 /// Context provided to tool callbacks by the agentic loop.
 #[derive(Clone, Default)]
 pub struct ToolCallContext {
-    /// Use to key per-session state across invocations.
+    /// Use to key per-session state across invocations; see [`ToolCallContext::sandbox_key`].
     pub session_id: Option<String>,
+    /// Who the request acts for; two owners' sessions of the same id must not share state.
+    pub owner: Option<String>,
     pub round: Option<usize>,
     pub tool_name: Option<String>,
     pub agent_permission: Option<AgentPermission>,
@@ -149,10 +153,34 @@ pub struct ToolCallContext {
     pub input_files: Vec<ToolInputFile>,
 }
 
+impl ToolCallContext {
+    /// See [`sandbox_key`].
+    pub fn sandbox_key(&self, session_id: &str) -> String {
+        sandbox_key(self.owner.as_deref(), session_id)
+    }
+}
+
+/// A file-name-safe key for state an owner's session keeps (an interpreter, a work dir, approvals), distinct per owner.
+pub fn sandbox_key(owner: Option<&str>, session_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    if let Some(owner) = owner {
+        hasher.update((owner.len() as u64).to_le_bytes());
+        hasher.update(owner.as_bytes());
+    }
+    hasher.update(session_id.as_bytes());
+    let digest = hasher.finalize();
+    digest[..SANDBOX_KEY_BYTES]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
 impl fmt::Debug for ToolCallContext {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ToolCallContext")
             .field("session_id", &self.session_id)
+            .field("owner", &self.owner)
             .field("round", &self.round)
             .field("tool_name", &self.tool_name)
             .field("agent_permission", &self.agent_permission)
@@ -385,4 +413,29 @@ pub struct Tool {
 pub struct CalledFunction {
     pub name: String,
     pub arguments: String,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sandbox_key;
+
+    #[test]
+    fn a_sandbox_key_differs_per_owner_and_is_a_safe_file_name() {
+        let keys = [
+            sandbox_key(None, "chat-1"),
+            sandbox_key(Some("team-a"), "chat-1"),
+            sandbox_key(Some("team-b"), "chat-1"),
+            sandbox_key(Some("team-a"), "chat-2"),
+        ];
+        for (index, key) in keys.iter().enumerate() {
+            assert!(key.bytes().all(|b| b.is_ascii_hexdigit()), "{key}");
+            assert!(!keys[index + 1..].contains(key), "{key}");
+        }
+        assert_eq!(sandbox_key(Some("team-a"), "chat-1"), keys[1]);
+        let traversal = sandbox_key(None, "../../outside");
+        assert!(
+            !traversal.contains('/') && !traversal.contains('.'),
+            "{traversal}"
+        );
+    }
 }

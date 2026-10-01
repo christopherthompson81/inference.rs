@@ -46,6 +46,12 @@ class Engine:
     def close(self):
         self.json.close()
 
+    def for_owner(self, owner: str) -> "Engine":
+        """The same engine acting for `owner`; see `JsonEngine.for_owner`."""
+        scoped = Engine.__new__(Engine)
+        scoped.json = self.json.for_owner(owner)
+        return scoped
+
     def __enter__(self):
         return self
 

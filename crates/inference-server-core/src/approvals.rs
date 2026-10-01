@@ -25,11 +25,17 @@ use crate::{
 ))]
 pub async fn resolve_agent_approval(
     Extension(broker): Extension<ApprovalBroker>,
+    Extension(owner): Extension<crate::auth::Owner>,
     Path(approval_id): Path<String>,
     payload: Result<ApiJson<ApprovalDecisionRequest>, ApiJsonRejection>,
 ) -> axum::response::Response {
     match payload {
-        Ok(ApiJson(request)) => json_response(resolve_approval(&broker, &approval_id, request)),
+        Ok(ApiJson(request)) => json_response(resolve_approval(
+            &broker,
+            &approval_id,
+            request,
+            owner.as_deref(),
+        )),
         Err(ApiJsonRejection(error)) => openai_error_response(error),
     }
 }
@@ -92,7 +98,7 @@ mod tests {
         let broker = ApprovalBroker::default();
 
         assert!(matches!(
-            broker.resolve("missing", true, false, None),
+            broker.resolve("missing", None, true, false, None),
             ApprovalResolveStatus::NotFound
         ));
     }
@@ -120,6 +126,7 @@ mod tests {
         for (rejection, status, code) in cases {
             let response = resolve_agent_approval(
                 Extension(ApprovalBroker::default()),
+                Extension(crate::auth::Owner::default()),
                 Path("approval".to_string()),
                 Err(rejection),
             )
@@ -135,6 +142,7 @@ mod tests {
     async fn unknown_approval_response_uses_openai_error() {
         let response = resolve_agent_approval(
             Extension(ApprovalBroker::default()),
+            Extension(crate::auth::Owner::default()),
             Path("missing".to_string()),
             Ok(ApiJson(ApprovalDecisionRequest {
                 decision: ApprovalDecision::Approve,
@@ -152,12 +160,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_the_requesting_owner_answers_an_approval() {
+        let broker = ApprovalBroker::default();
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let notifier = broker.notifier(tx, Some("team-a".to_string()));
+        notifier(AgentToolApprovalRequest {
+            approval_id: "appr_owned".to_string(),
+            session_id: "session".to_string(),
+            round: 0,
+            tool: AgentToolMetadata {
+                source: AgentToolSource::BuiltIn,
+                kind: AgentToolKind::CodeExecution,
+                label: "Python code".to_string(),
+            },
+            arguments: serde_json::json!({"code": "print('hello')"}),
+        });
+        for other in [Some("team-b"), None] {
+            assert!(matches!(
+                broker.resolve("appr_owned", other, true, false, None),
+                ApprovalResolveStatus::NotFound
+            ));
+        }
+        assert!(matches!(
+            broker.resolve("appr_owned", Some("team-a"), true, false, None),
+            ApprovalResolveStatus::Queued
+        ));
+    }
+
+    #[tokio::test]
     async fn early_http_decision_unblocks_callback() {
         let broker = ApprovalBroker::default();
         let approval_id = "appr_test".to_string();
         let session_id = "session".to_string();
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let notifier = broker.notifier(tx);
+        let notifier = broker.notifier(tx, None);
 
         notifier(AgentToolApprovalRequest {
             approval_id: approval_id.clone(),
@@ -176,11 +212,11 @@ mod tests {
             Response::AgenticToolApprovalRequired { .. }
         ));
         assert!(matches!(
-            broker.resolve(&approval_id, true, false, None),
+            broker.resolve(&approval_id, None, true, false, None),
             ApprovalResolveStatus::Queued
         ));
 
-        let callback = broker.callback();
+        let callback = broker.callback(None);
         assert!(
             callback(AgentToolApproval {
                 approval_id,
@@ -203,7 +239,7 @@ mod tests {
         let broker = ApprovalBroker::default();
         let approval_id = "appr_waiting".to_string();
         let session_id = "session".to_string();
-        let callback = broker.callback();
+        let callback = broker.callback(None);
 
         let decision_task = tokio::spawn({
             let approval_id = approval_id.clone();
@@ -227,7 +263,7 @@ mod tests {
         wait_for_pending(&broker, &approval_id).await;
 
         assert!(matches!(
-            broker.resolve(&approval_id, true, true, None),
+            broker.resolve(&approval_id, None, true, true, None),
             ApprovalResolveStatus::Resolved
         ));
         let decision = decision_task.await.unwrap();

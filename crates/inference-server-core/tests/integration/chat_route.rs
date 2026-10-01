@@ -42,7 +42,7 @@ fn chat(stream: bool) -> Request<Body> {
         .unwrap()
 }
 
-async fn body_text(response: axum::response::Response) -> anyhow::Result<String> {
+pub(crate) async fn body_text(response: axum::response::Response) -> anyhow::Result<String> {
     Ok(String::from_utf8(
         to_bytes(response.into_body(), usize::MAX).await?.to_vec(),
     )?)
@@ -279,7 +279,7 @@ async fn adapter_routes_use_the_openai_error_envelope() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn multipart_upload(fields: &[(&str, Option<&str>, &str)]) -> Request<Body> {
+pub(crate) fn multipart_upload(fields: &[(&str, Option<&str>, &str)]) -> Request<Body> {
     const BOUNDARY: &str = "inference-test-boundary";
     let mut body = String::new();
     for (name, filename, value) in fields {
@@ -354,7 +354,7 @@ async fn only_an_opted_in_server_lists_files_and_a_container_lists_its_own() -> 
     };
     assert!(container_ids(container("cntr_mine").await?).is_empty());
     // A Responses run tags the files it cites with its container id.
-    assert!(engine.state().try_tag_file(&id, "cntr_mine")?);
+    assert!(engine.state().try_tag_file(&id, "cntr_mine", None)?);
     assert_eq!(
         container_ids(container("cntr_mine").await?),
         vec![id.clone()]
@@ -435,7 +435,7 @@ async fn generated_images_are_served_from_the_file_store() -> anyhow::Result<()>
     }))?;
     let engine = inference_api::Engine::load(spec).await?;
     let png = inference_core::images::encode_png(&image::DynamicImage::new_rgb8(5, 3))?;
-    let url = inference_api::files::store_generated_image(engine.state(), None, png.clone())
+    let url = inference_api::files::store_generated_image(engine.state(), None, png.clone(), None)
         .map_err(anyhow::Error::msg)?;
     let app = InferenceRsServerRouterBuilder::new()
         .with_engine(&engine)

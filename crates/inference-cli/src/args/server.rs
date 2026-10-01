@@ -1,7 +1,12 @@
 //! Server configuration options
 
+use std::path::PathBuf;
+
 use clap::{Args, ValueEnum};
-use inference_server_core::metrics::{AccessLogFormat, ObservabilityConfig};
+use inference_server_core::{
+    auth::{API_KEY_ENV, ApiKeys, ENV_KEY_OWNER},
+    metrics::{AccessLogFormat, ObservabilityConfig},
+};
 use serde::Deserialize;
 
 /// HTTP server configuration
@@ -22,10 +27,15 @@ pub struct ServerOptions {
     #[serde(default)]
     pub no_ui: bool,
 
-    /// Let GET /v1/files list every stored file. The store is shared by every client, so only for trusted ones.
+    /// Let an open server's GET /v1/files list every stored file (a keyed one lists each owner's own).
     #[arg(long)]
     #[serde(default)]
     pub allow_file_listing: bool,
+
+    /// File of `name = key` lines; each request must carry a key and sees only its owner's data (and INFERENCE_RS_API_KEY).
+    #[arg(long)]
+    #[serde(default)]
+    pub api_keys_file: Option<PathBuf>,
 
     /// Also expose the loaded model as an MCP server on this port (JSON-RPC 2.0 at POST /mcp).
     #[arg(long)]
@@ -70,6 +80,26 @@ pub struct ServerOptions {
     pub disable_metrics: bool,
 }
 
+impl ServerOptions {
+    /// The keys the server accepts: the keys file's, plus the environment's single key. Empty means an open server.
+    pub fn api_keys(&self) -> anyhow::Result<ApiKeys> {
+        let mut keys = match &self.api_keys_file {
+            Some(path) => ApiKeys::from_file(path)?,
+            None => ApiKeys::default(),
+        };
+        match std::env::var(API_KEY_ENV) {
+            Ok(key) if key.trim().is_empty() => {}
+            Ok(key) => keys
+                .add(ENV_KEY_OWNER, key.trim())
+                .map_err(|error| anyhow::anyhow!("{API_KEY_ENV}: {error}"))?,
+            Err(std::env::VarError::NotPresent) => {}
+            // starting open when a key was meant would be the wrong way to fail
+            Err(std::env::VarError::NotUnicode(_)) => anyhow::bail!("{API_KEY_ENV} is not UTF-8"),
+        }
+        Ok(keys)
+    }
+}
+
 impl Default for ServerOptions {
     fn default() -> Self {
         Self {
@@ -77,6 +107,7 @@ impl Default for ServerOptions {
             host: "0.0.0.0".to_string(),
             no_ui: false,
             allow_file_listing: false,
+            api_keys_file: None,
             mcp_port: None,
             max_tool_rounds: None,
             tool_dispatch_url: None,

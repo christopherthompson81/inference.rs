@@ -78,7 +78,8 @@ quant = "4"
 | `host` | `--host` | `0.0.0.0` | Bind address. |
 | `port` | `-p`, `--port` | 1234 | TCP port. |
 | `no_ui` | `--no-ui` | false | Disable the built-in web UI (mounted at `/ui` by default). |
-| `allow_file_listing` | `--allow-file-listing` | false | Let `GET /v1/files` list every stored file. The store is shared by every client, so enable it only for trusted ones. |
+| `allow_file_listing` | `--allow-file-listing` | false | Let an open server's `GET /v1/files` list every stored file. Its store is shared by every client, so enable it only for trusted ones. A keyed server always lists each owner's own files. |
+| `api_keys_file` | `--api-keys-file` | not set | File of `name = key` lines (blank lines and `#` comments skipped). Every request but `/health` must then carry a key, and each name is an owner that reaches only what it stored. `INFERENCE_RS_API_KEY` adds one more key, owned by `default`. See [authentication](/reference/http-api/#authentication). |
 | `mcp_port` | `--mcp-port` | not set | Also expose the loaded model as an MCP server on this port (JSON-RPC 2.0 at `POST /mcp`). See [serve over MCP](/guides/agents/expose-as-mcp/). |
 | `max_tool_rounds` | `--max-tool-rounds` | not set | Default cap on agentic tool loop rounds. Per-request values from the HTTP API override it; the safety cap is 256 when unset. |
 | `tool_dispatch_url` | `--tool-dispatch-url` | not set | URL to POST tool calls to for server-side execution. Only configurable server-side, never per-request. |
@@ -89,7 +90,7 @@ quant = "4"
 | `disable_metrics` | `--disable-metrics` | false | Disable Prometheus HTTP metrics and recorder installation. |
 
 :::caution
-The default `host = "0.0.0.0"` binds on all interfaces, exposing the server to your network. There is no built-in authentication. Set `host = "127.0.0.1"` for local-only access, or put an authenticating reverse proxy in front before exposing it.
+The default `host = "0.0.0.0"` binds on all interfaces, exposing the server to your network. Without `api_keys_file` (or `INFERENCE_RS_API_KEY`) the server is open to anyone who can reach it. Set `host = "127.0.0.1"` for local-only access, or give it keys, and put TLS in front before exposing it.
 :::
 
 The MCP *client* configuration (`mcp_config`) lives under `[runtime]`, not `[server]`: it applies to `run` as well as `serve`.

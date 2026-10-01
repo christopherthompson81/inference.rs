@@ -160,6 +160,7 @@ pub use tools::{
     CodeExecutionApprovalRequest, CodeExecutionPermission, Function, MultimodalToolCallback,
     ShellOptions, ShellSkillMount, Tool, ToolCallContext, ToolCallback, ToolCallbackKind,
     ToolCallbackWithTool, ToolCallbacksWithTools, ToolFile, ToolInputFile, ToolOutput, ToolType,
+    sandbox_key,
 };
 pub use types::McpToolResult;
 

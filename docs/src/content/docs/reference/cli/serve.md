@@ -61,7 +61,8 @@ inference serve [OPTIONS] [COMMAND]
 | `-p, --port <PORT>` | `1234` | HTTP server port |
 | `--host <HOST>` | `0.0.0.0` | Bind address |
 | `--no-ui` | `false` | Disable the built-in web UI (served at /ui by default) |
-| `--allow-file-listing` | `false` | Let GET /v1/files list every stored file. The store is shared by every client, so only for trusted ones |
+| `--allow-file-listing` | `false` | Let an open server's GET /v1/files list every stored file (a keyed one lists each owner's own) |
+| `--api-keys-file <API_KEYS_FILE>` |  | File of `name = key` lines; each request must carry a key and sees only its owner's data (and INFERENCE_RS_API_KEY) |
 | `--mcp-port <MCP_PORT>` |  | Also expose the loaded model as an MCP server on this port (JSON-RPC 2.0 at POST /mcp) |
 | `--max-tool-rounds <MAX_TOOL_ROUNDS>` |  | Default maximum tool-call rounds for the agentic loop. Per-request values from the HTTP API override this. Safety cap: 256 if unset |
 | `--tool-dispatch-url <TOOL_DISPATCH_URL>` |  | URL to POST tool calls to for server-side execution. For security, this is only configurable server-side (not per-request via HTTP API) |

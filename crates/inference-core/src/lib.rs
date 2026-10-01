@@ -151,7 +151,7 @@ pub use inference_mcp::{
     AgentToolMetadata, AgentToolSource, CalledFunction, CodeExecutionApprovalNotifier,
     CodeExecutionApprovalRequest, CodeExecutionPermission, Function, MultimodalToolCallback,
     ShellOptions, ShellSkillMount, Tool, ToolCallContext, ToolCallback, ToolCallbackKind,
-    ToolCallbackWithTool, ToolOutput, ToolType,
+    ToolCallbackWithTool, ToolOutput, ToolType, sandbox_key,
 };
 pub use inference_mcp::{
     McpClient, McpClientConfig, McpServerConfig, McpServerSource, McpToolInfo,

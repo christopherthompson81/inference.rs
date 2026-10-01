@@ -141,6 +141,9 @@ pub struct NormalRequest {
     /// Persistent agentic state. If `None`, a new session is created and the ID is returned in the response.
     #[serde(default)]
     pub session_id: Option<String>,
+    /// Who the request acts for: its sessions and files are that owner's, and it sees no one else's.
+    #[serde(default)]
+    pub owner: Option<String>,
     /// Required output files. The runtime asks the model to produce them and surfaces a `File` (or error placeholder) for each.
     #[serde(default)]
     pub files: Option<Vec<crate::files::RequestedFile>>,
@@ -299,6 +302,7 @@ impl NormalRequest {
             adapter: None,
             truncate_sequence: false,
             session_id: None,
+            owner: None,
             files: None,
             input_files: Vec::new(),
             cancellation: None,

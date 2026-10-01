@@ -119,7 +119,7 @@ impl Model {
 
     /// Look up a file by id. Returns the full body, so callers with a wire-truncated `File` can fetch the real bytes here.
     pub fn find_file(&self, id: &str) -> Option<Arc<inference_core::File>> {
-        self.runner.find_file(id)
+        self.runner.find_file(id, None)
     }
 
     /// Load a local LoRA adapter directory under a new alias.
@@ -397,6 +397,7 @@ impl Model {
             adapter: request.take_adapter(),
             truncate_sequence,
             session_id: request.session_id().map(|s| s.to_string()),
+            owner: None,
             files: request.take_files(),
             input_files: request.take_input_files(),
             cancellation: None,
@@ -999,7 +1000,7 @@ impl Model {
         model_id: Option<&str>,
         session_id: &str,
     ) -> crate::error::Result<Option<inference_core::SerializedSession>> {
-        Ok(self.runner.export_session(model_id, session_id)?)
+        Ok(self.runner.export_session(model_id, session_id, None)?)
     }
 
     /// Import an agentic session. Replaces any existing session with the same ID.
@@ -1011,7 +1012,7 @@ impl Model {
     ) -> crate::error::Result<()> {
         Ok(self
             .runner
-            .import_session(model_id, session_id.into(), session)?)
+            .import_session(model_id, session_id.into(), session, None)?)
     }
 
     /// Delete an agentic session. Returns whether the session existed.
@@ -1020,7 +1021,7 @@ impl Model {
         model_id: Option<&str>,
         session_id: &str,
     ) -> crate::error::Result<bool> {
-        Ok(self.runner.delete_session(model_id, session_id)?)
+        Ok(self.runner.delete_session(model_id, session_id, None)?)
     }
 
     /// Fork the first `num_turns` complete turns of `src` into `dest`. A turn ends at the first
@@ -1032,14 +1033,18 @@ impl Model {
         dest_session_id: impl Into<String>,
         num_turns: usize,
     ) -> crate::error::Result<()> {
-        Ok(self
-            .runner
-            .fork_session(model_id, src_session_id, dest_session_id.into(), num_turns)?)
+        Ok(self.runner.fork_session(
+            model_id,
+            src_session_id,
+            dest_session_id.into(),
+            num_turns,
+            None,
+        )?)
     }
 
     /// All stored agentic session IDs.
     pub fn list_session_ids(&self, model_id: Option<&str>) -> crate::error::Result<Vec<String>> {
-        Ok(self.runner.list_session_ids(model_id)?)
+        Ok(self.runner.list_session_ids(model_id, None)?)
     }
 
     /// MCP-provided tools registered for `model_id`. Excludes built-ins (search, code exec). Returns `(name, description)` per tool.

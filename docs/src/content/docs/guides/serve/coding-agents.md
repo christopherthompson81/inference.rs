@@ -62,9 +62,10 @@ To keep inference.rs as a switchable alternative instead, move the `model` and
 `model_provider` lines into a profile file (`~/.codex/inference.config.toml`)
 and launch with `codex --profile inference`.
 
-If a reverse proxy enforces authentication, add `env_key = "INFERENCE_RS_API_KEY"`
-under `[model_providers.inference]` and export that variable before launching
-Codex. The local inference.rs server itself does not validate API keys.
+If the server is started with [API keys](/reference/http-api/#authentication) (or a
+reverse proxy enforces them), add `env_key = "INFERENCE_RS_API_KEY"` under
+`[model_providers.inference]` and export that variable, holding the key, before
+launching Codex.
 
 Codex tool calls arrive through `/v1/responses` as Responses function tools.
 inference.rs routes them through the same tool-calling path used by Chat

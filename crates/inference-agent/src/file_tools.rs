@@ -11,6 +11,7 @@ pub(crate) fn do_read_file(
     mut request: NormalRequest,
     tc: &ToolCallResponse,
     store: &FileStore,
+    owner: Option<&str>,
 ) -> (NormalRequest, AgenticToolCallData, Vec<File>) {
     let messages = request.chat_messages_mut();
     append_assistant_tool_call(messages, tc);
@@ -27,7 +28,7 @@ pub(crate) fn do_read_file(
         .and_then(|v| v.as_u64())
         .and_then(|v| usize::try_from(v).ok());
 
-    let response = match store.get(file_id) {
+    let response = match store.get(file_id, owner) {
         Some(file) => match &file.content {
             FileContent::Text { text: Some(t), .. } => {
                 let total = t.chars().count();
@@ -84,11 +85,12 @@ pub(crate) fn do_list_files(
     tc: &ToolCallResponse,
     store: &FileStore,
     session_id: &str,
+    owner: Option<&str>,
 ) -> (NormalRequest, AgenticToolCallData, Vec<File>) {
     let messages = request.chat_messages_mut();
     append_assistant_tool_call(messages, tc);
 
-    let listed = store.list_for_session(session_id);
+    let listed = store.list_for_session(session_id, owner);
     let files: Vec<Value> = listed
         .iter()
         .map(|f| {

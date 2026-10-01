@@ -245,6 +245,7 @@ impl McpCallError {
             ApiErrorKind::InvalidRequest
             | ApiErrorKind::NotFound
             | ApiErrorKind::Gone
+            | ApiErrorKind::Unauthorized
             | ApiErrorKind::Forbidden
             | ApiErrorKind::Conflict
             | ApiErrorKind::PayloadTooLarge

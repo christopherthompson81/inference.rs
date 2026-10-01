@@ -114,6 +114,7 @@ pub struct InferenceRsServerRouterBuilder {
     observability: ObservabilityConfig,
     lora_adapter_api: LoraAdapterApiConfig,
     file_listing: bool,
+    api_keys: Option<std::sync::Arc<crate::auth::ApiKeys>>,
 }
 
 impl Default for InferenceRsServerRouterBuilder {
@@ -134,6 +135,7 @@ impl Default for InferenceRsServerRouterBuilder {
             observability: ObservabilityConfig::default(),
             lora_adapter_api: LoraAdapterApiConfig::from_env(),
             file_listing: false,
+            api_keys: None,
         }
     }
 }
@@ -273,6 +275,12 @@ impl InferenceRsServerRouterBuilder {
         self
     }
 
+    /// Requires a key on all but health probes and scopes each request to its owner; routes added after `build` aren't.
+    pub fn with_api_keys(mut self, keys: crate::auth::ApiKeys) -> Self {
+        self.api_keys = (!keys.is_empty()).then(|| std::sync::Arc::new(keys));
+        self
+    }
+
     /// Sets server observability options.
     pub fn with_observability_config(mut self, observability: ObservabilityConfig) -> Self {
         self.observability = observability;
@@ -341,6 +349,11 @@ impl InferenceRsServerRouterBuilder {
         if let Some(engine) = self.engine {
             router = router.layer(Extension(engine));
         }
+        // outermost, so a request without a known key is refused before any layer reads its body
+        router = router.layer(middleware::from_fn_with_state(
+            self.api_keys,
+            crate::auth::authenticate,
+        ));
 
         Ok(router)
     }
@@ -393,7 +406,7 @@ fn init_router(
         .allow_headers([
             http::header::CONTENT_TYPE,
             http::header::AUTHORIZATION,
-            HeaderName::from_static("x-api-key"),
+            HeaderName::from_static(crate::auth::API_KEY_HEADER),
             HeaderName::from_static("anthropic-version"),
             HeaderName::from_static("anthropic-beta"),
             HeaderName::from_static("x-request-id"),

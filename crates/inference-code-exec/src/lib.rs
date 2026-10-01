@@ -495,7 +495,9 @@ impl CodeExecutionManager {
                 let handle = tokio::runtime::Handle::current();
                 tokio::task::block_in_place(|| {
                     handle.block_on(async {
-                        let session_arc = ctx.session_handle(&sessions, &session_id).await?;
+                        let session_arc = ctx
+                            .session_handle(&sessions, &tc.sandbox_key(&session_id))
+                            .await?;
 
                         let mut session = session_arc.lock().await;
                         session.mount_input_files(&tc.input_files)?;
@@ -544,7 +546,7 @@ impl CodeExecutionManager {
                 let handle = tokio::runtime::Handle::current();
                 tokio::task::block_in_place(|| {
                     handle.block_on(async {
-                        let session_arc = ctx.session_handle(&sessions, &session_id).await?;
+                        let session_arc = ctx.session_handle(&sessions, &tc.sandbox_key(&session_id)).await?;
 
                         let mut session = session_arc.lock().await;
                         session.reset().await?;

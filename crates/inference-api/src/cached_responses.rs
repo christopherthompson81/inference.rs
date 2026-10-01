@@ -16,31 +16,66 @@ pub struct StoredConversation {
     pub session_id: Option<String>,
 }
 
-/// Trait for caching responses
+/// Trait for caching responses. Each entry belongs to the owner that stored it, and only that owner reaches it.
 pub trait ResponseCache: Send + Sync {
-    /// Store a response object with the given ID
-    fn store_response(&self, id: String, response: ResponseResource) -> Result<()>;
+    /// Store `owner`'s response object with the given ID
+    fn store_response(
+        &self,
+        id: String,
+        response: ResponseResource,
+        owner: Option<&str>,
+    ) -> Result<()>;
 
-    /// Retrieve a response object by ID
-    fn get_response(&self, id: &str) -> Result<Option<ResponseResource>>;
+    /// Retrieve `owner`'s response object by ID
+    fn get_response(&self, id: &str, owner: Option<&str>) -> Result<Option<ResponseResource>>;
 
-    /// Delete a response object by ID
-    fn delete_response(&self, id: &str) -> Result<bool>;
+    /// Delete `owner`'s response object, and its conversation, by ID
+    fn delete_response(&self, id: &str, owner: Option<&str>) -> Result<bool>;
 
-    /// Store conversation history for a response
-    fn store_conversation(&self, id: String, conversation: StoredConversation) -> Result<()>;
+    /// Store `owner`'s conversation history for a response
+    fn store_conversation(
+        &self,
+        id: String,
+        conversation: StoredConversation,
+        owner: Option<&str>,
+    ) -> Result<()>;
 
-    /// Retrieve conversation history for a response
-    fn get_conversation(&self, id: &str) -> Result<Option<StoredConversation>>;
+    /// Retrieve `owner`'s conversation history for a response
+    fn get_conversation(&self, id: &str, owner: Option<&str>)
+    -> Result<Option<StoredConversation>>;
 
-    /// The response last stored with `session_id`, the only one a follow-up continues that session from.
-    fn session_head(&self, session_id: &str) -> Result<Option<String>>;
+    /// The response `owner` last stored with `session_id`, the only one a follow-up continues that session from.
+    fn session_head(&self, session_id: &str, owner: Option<&str>) -> Result<Option<String>>;
+}
+
+/// An entry and the owner that stored it.
+struct Owned<T> {
+    owner: Option<String>,
+    value: T,
+}
+
+impl<T: Clone> Owned<T> {
+    fn new(value: T, owner: Option<&str>) -> Self {
+        Self {
+            owner: owner.map(str::to_string),
+            value,
+        }
+    }
+
+    fn is_owned_by(&self, owner: Option<&str>) -> bool {
+        self.owner.as_deref() == owner
+    }
+
+    fn visible_to(&self, owner: Option<&str>) -> Option<T> {
+        self.is_owned_by(owner).then(|| self.value.clone())
+    }
 }
 
 /// In-memory implementation of ResponseCache
 pub struct InMemoryResponseCache {
-    responses: Arc<RwLock<HashMap<String, ResponseResource>>>,
-    conversation_histories: Arc<RwLock<HashMap<String, StoredConversation>>>,
+    responses: Arc<RwLock<HashMap<String, Owned<ResponseResource>>>>,
+    conversation_histories: Arc<RwLock<HashMap<String, Owned<StoredConversation>>>>,
+    /// Keyed by `sandbox_key(owner, session_id)`, so another owner reusing a session id moves no one else's head.
     session_heads: Arc<RwLock<HashMap<String, String>>>,
 }
 
@@ -62,51 +97,62 @@ impl Default for InMemoryResponseCache {
 }
 
 impl ResponseCache for InMemoryResponseCache {
-    fn store_response(&self, id: String, response: ResponseResource) -> Result<()> {
+    fn store_response(
+        &self,
+        id: String,
+        response: ResponseResource,
+        owner: Option<&str>,
+    ) -> Result<()> {
         let mut responses = self.responses.write().unwrap();
-        responses.insert(id, response);
+        responses.insert(id, Owned::new(response, owner));
         Ok(())
     }
 
-    fn get_response(&self, id: &str) -> Result<Option<ResponseResource>> {
+    fn get_response(&self, id: &str, owner: Option<&str>) -> Result<Option<ResponseResource>> {
         let responses = self.responses.read().unwrap();
-        Ok(responses.get(id).cloned())
+        Ok(responses.get(id).and_then(|entry| entry.visible_to(owner)))
     }
 
-    fn delete_response(&self, id: &str) -> Result<bool> {
-        // IMPORTANT: Lock ordering must be maintained to prevent deadlocks.
-        // Order: responses -> conversation_histories
-        // All methods that acquire multiple locks must follow this order.
-        //
-        // We acquire all locks before any modifications to ensure atomicity.
-        // The locks are released in reverse order when dropped at end of scope.
+    fn delete_response(&self, id: &str, owner: Option<&str>) -> Result<bool> {
+        // Lock order: responses, then conversation_histories, in every method that takes both.
         let mut responses = self.responses.write().unwrap();
         let mut histories = self.conversation_histories.write().unwrap();
-
-        let response_removed = responses.remove(id).is_some();
-        let history_removed = histories.remove(id).is_some();
-
+        let response_removed = responses.get(id).is_some_and(|e| e.is_owned_by(owner))
+            && responses.remove(id).is_some();
+        let history_removed = histories.get(id).is_some_and(|e| e.is_owned_by(owner))
+            && histories.remove(id).is_some();
         Ok(response_removed || history_removed)
     }
 
-    fn store_conversation(&self, id: String, conversation: StoredConversation) -> Result<()> {
+    fn store_conversation(
+        &self,
+        id: String,
+        conversation: StoredConversation,
+        owner: Option<&str>,
+    ) -> Result<()> {
         if let Some(session_id) = &conversation.session_id {
             let mut heads = self.session_heads.write().unwrap();
-            heads.insert(session_id.clone(), id.clone());
+            heads.insert(inference_core::sandbox_key(owner, session_id), id.clone());
         }
         let mut histories = self.conversation_histories.write().unwrap();
-        histories.insert(id, conversation);
+        histories.insert(id, Owned::new(conversation, owner));
         Ok(())
     }
 
-    fn get_conversation(&self, id: &str) -> Result<Option<StoredConversation>> {
+    fn get_conversation(
+        &self,
+        id: &str,
+        owner: Option<&str>,
+    ) -> Result<Option<StoredConversation>> {
         let histories = self.conversation_histories.read().unwrap();
-        Ok(histories.get(id).cloned())
+        Ok(histories.get(id).and_then(|entry| entry.visible_to(owner)))
     }
 
-    fn session_head(&self, session_id: &str) -> Result<Option<String>> {
+    fn session_head(&self, session_id: &str, owner: Option<&str>) -> Result<Option<String>> {
         let heads = self.session_heads.read().unwrap();
-        Ok(heads.get(session_id).cloned())
+        Ok(heads
+            .get(&inference_core::sandbox_key(owner, session_id))
+            .cloned())
     }
 }
 
@@ -124,11 +170,12 @@ mod tests {
     use super::*;
     use crate::responses_types::{ItemStatus, OutputContent, OutputItem, ResponseStatus};
 
-    #[test]
-    fn test_in_memory_cache() {
-        let cache = InMemoryResponseCache::new();
+    const OWNER: Option<&str> = Some("team-a");
+    const OTHER: Option<&str> = Some("team-b");
 
-        // Create a test response
+    #[test]
+    fn a_response_is_reached_and_deleted_only_by_its_owner() {
+        let cache = InMemoryResponseCache::new();
         let response =
             ResponseResource::new("test-id".to_string(), "test-model".to_string(), 1234567890)
                 .with_status(ResponseStatus::Completed)
@@ -137,26 +184,25 @@ mod tests {
                     vec![OutputContent::text("Hello".to_string())],
                     ItemStatus::Completed,
                 )]);
-
-        // Store and retrieve
         cache
-            .store_response("test-id".to_string(), response.clone())
+            .store_response("test-id".to_string(), response, OWNER)
             .unwrap();
-        let retrieved = cache.get_response("test-id").unwrap();
-        assert!(retrieved.is_some());
-        assert_eq!(retrieved.unwrap().id, "test-id");
 
-        // Delete
-        let deleted = cache.delete_response("test-id").unwrap();
-        assert!(deleted);
-        let retrieved = cache.get_response("test-id").unwrap();
-        assert!(retrieved.is_none());
+        for other in [OTHER, None] {
+            assert!(cache.get_response("test-id", other).unwrap().is_none());
+            assert!(!cache.delete_response("test-id", other).unwrap());
+        }
+        assert_eq!(
+            cache.get_response("test-id", OWNER).unwrap().unwrap().id,
+            "test-id"
+        );
+        assert!(cache.delete_response("test-id", OWNER).unwrap());
+        assert!(cache.get_response("test-id", OWNER).unwrap().is_none());
     }
 
     #[test]
-    fn test_conversation_history() {
+    fn a_conversation_is_continued_only_by_its_owner() {
         let cache = InMemoryResponseCache::new();
-
         let messages = vec![Message {
             content: Some(crate::openai::MessageContent::from_text(
                 "Hello".to_string(),
@@ -167,16 +213,16 @@ mod tests {
             tool_call_id: None,
             reasoning_content: None,
         }];
-
         let conversation = StoredConversation {
             messages,
             session_id: Some("session-a".to_string()),
         };
         cache
-            .store_conversation("test-id".to_string(), conversation)
+            .store_conversation("test-id".to_string(), conversation, OWNER)
             .unwrap();
 
-        let retrieved = cache.get_conversation("test-id").unwrap().unwrap();
+        assert!(cache.get_conversation("test-id", OTHER).unwrap().is_none());
+        let retrieved = cache.get_conversation("test-id", OWNER).unwrap().unwrap();
         assert_eq!(retrieved.messages.len(), 1);
         assert_eq!(retrieved.session_id.as_deref(), Some("session-a"));
     }

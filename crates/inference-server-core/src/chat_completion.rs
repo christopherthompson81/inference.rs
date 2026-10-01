@@ -206,6 +206,7 @@ pub async fn chatcompletions(
     State(state): ExtractedInferenceRsState,
     Extension(agentic_defaults): Extension<AgenticDefaults>,
     Extension(skill_store): Extension<Arc<SkillStore>>,
+    Extension(owner): Extension<crate::auth::Owner>,
     stream_outcome: Option<Extension<StreamOutcomeHandle>>,
     payload: Result<ApiJson<ChatCompletionRequest>, ApiJsonRejection>,
 ) -> ChatCompletionResponder {
@@ -219,6 +220,7 @@ pub async fn chatcompletions(
         state: state.clone(),
         agentic: agentic_defaults,
         skill_store: Some(skill_store),
+        owner: owner.0,
     };
     let prepared = match engine
         .prepare(
