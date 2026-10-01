@@ -189,7 +189,7 @@ fn container_metadata(container_id: &str, file: &File) -> ContainerFileMetadata 
 }
 
 /// Stores an uploaded file; requests then name it by the returned id.
-pub fn upload_file(
+pub(crate) fn upload_file(
     state: &SharedInferenceRsState,
     upload: FileUpload,
     owner: Option<&str>,
@@ -224,7 +224,7 @@ pub fn upload_file(
 }
 
 /// Stores a generated PNG in `model`'s file store and returns the url that serves it.
-pub fn store_generated_image(
+pub(crate) fn store_generated_image(
     state: &SharedInferenceRsState,
     model: Option<&str>,
     png: Vec<u8>,
@@ -249,7 +249,7 @@ pub fn store_generated_image(
     Ok(FILE_CONTENT_PATH.replace(FILE_ID_PARAM, &id))
 }
 
-pub fn get_file(
+pub(crate) fn get_file(
     state: &SharedInferenceRsState,
     id: &str,
     owner: Option<&str>,
@@ -257,7 +257,7 @@ pub fn get_file(
     find(state, id, owner).map(|file| metadata(&file))
 }
 
-pub fn list_files(
+pub(crate) fn list_files(
     state: &SharedInferenceRsState,
     owner: Option<&str>,
 ) -> Result<FileListObject, ApiError> {
@@ -270,7 +270,7 @@ pub fn list_files(
     })
 }
 
-pub fn delete_file(
+pub(crate) fn delete_file(
     state: &SharedInferenceRsState,
     id: &str,
     owner: Option<&str>,
@@ -289,7 +289,7 @@ pub fn delete_file(
 }
 
 /// A file's body; a body the store elided to bound memory is Gone.
-pub fn file_content(
+pub(crate) fn file_content(
     state: &SharedInferenceRsState,
     id: &str,
     owner: Option<&str>,
@@ -331,7 +331,7 @@ pub fn file_content(
     })
 }
 
-pub fn list_container_files(
+pub(crate) fn list_container_files(
     state: &SharedInferenceRsState,
     container_id: &str,
     owner: Option<&str>,
@@ -348,7 +348,7 @@ pub fn list_container_files(
     })
 }
 
-pub fn get_container_file(
+pub(crate) fn get_container_file(
     state: &SharedInferenceRsState,
     container_id: &str,
     file_id: &str,
@@ -359,7 +359,7 @@ pub fn get_container_file(
 }
 
 /// A container file's body; a file the container's response did not cite is not found there.
-pub fn container_file_content(
+pub(crate) fn container_file_content(
     state: &SharedInferenceRsState,
     container_id: &str,
     file_id: &str,

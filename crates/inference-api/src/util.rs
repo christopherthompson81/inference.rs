@@ -97,7 +97,7 @@ async fn parse_audio_url_with_policy(
 /// ### Returns
 ///
 /// Returns `Ok(())` if the model is available or if "default" is specified, otherwise returns an error.
-pub fn validate_model_name(
+pub(crate) fn validate_model_name(
     requested_model: &str,
     state: Arc<InferenceRs>,
 ) -> Result<(), InferenceRsError> {

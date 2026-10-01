@@ -145,7 +145,7 @@ async fn answer<T>(
     }
 }
 
-pub async fn re_isq(
+pub(crate) async fn re_isq(
     state: &SharedInferenceRsState,
     request: ReIsqRequest,
 ) -> Result<ReIsqResponse, ApiError> {
@@ -163,7 +163,7 @@ pub async fn re_isq(
     })
 }
 
-pub fn calibration<'a>(
+pub(crate) fn calibration<'a>(
     state: &'a SharedInferenceRsState,
     action: CalibrationAction,
 ) -> BoxFuture<'a, Result<CalibrationStatus, ApiError>> {
@@ -183,7 +183,7 @@ async fn calibration_inner(
     answer(rx, CALIBRATION_FAILED).await
 }
 
-pub fn list_sessions(
+pub(crate) fn list_sessions(
     state: &SharedInferenceRsState,
     owner: Option<&str>,
 ) -> Result<SessionList, ApiError> {
@@ -191,7 +191,7 @@ pub fn list_sessions(
     Ok(SessionList { data })
 }
 
-pub fn export_session(
+pub(crate) fn export_session(
     state: &SharedInferenceRsState,
     session_id: &str,
     owner: Option<&str>,
@@ -210,7 +210,7 @@ pub fn export_session(
 }
 
 /// Replaces any session already under `session_id`.
-pub fn import_session(
+pub(crate) fn import_session(
     state: &SharedInferenceRsState,
     session_id: String,
     session: SerializedSession,
@@ -230,7 +230,7 @@ pub fn import_session(
 }
 
 /// Copies `src_session_id`'s first `num_turns` turns into a new session `session_id`, so the two diverge from there.
-pub fn fork_session(
+pub(crate) fn fork_session(
     state: &SharedInferenceRsState,
     src_session_id: &str,
     session_id: String,
@@ -250,7 +250,7 @@ pub fn fork_session(
         })
 }
 
-pub fn delete_session(
+pub(crate) fn delete_session(
     state: &SharedInferenceRsState,
     session_id: &str,
     owner: Option<&str>,
@@ -264,7 +264,7 @@ pub fn delete_session(
     })
 }
 
-pub async fn tokenize(
+pub(crate) async fn tokenize(
     state: &SharedInferenceRsState,
     request: TokenizeRequest,
 ) -> Result<TokenizeResponse, ApiError> {
@@ -284,7 +284,7 @@ pub async fn tokenize(
     })
 }
 
-pub async fn detokenize(
+pub(crate) async fn detokenize(
     state: &SharedInferenceRsState,
     request: DetokenizeRequest,
 ) -> Result<DetokenizeResponse, ApiError> {

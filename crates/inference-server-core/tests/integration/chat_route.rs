@@ -11,6 +11,7 @@ use tower::ServiceExt;
 use crate::support;
 
 const MAX_TOKENS: usize = 6;
+const BOUNDARY: &str = "inference-test-boundary";
 // Streamed and non-streamed decodes share the model and greedy sampling, so they must agree exactly.
 const PROMPT: &str = "Reply with the single word: ok";
 
@@ -280,7 +281,6 @@ async fn adapter_routes_use_the_openai_error_envelope() -> anyhow::Result<()> {
 }
 
 pub(crate) fn multipart_upload(fields: &[(&str, Option<&str>, &str)]) -> Request<Body> {
-    const BOUNDARY: &str = "inference-test-boundary";
     let mut body = String::new();
     for (name, filename, value) in fields {
         body.push_str(&format!(
@@ -304,7 +304,8 @@ pub(crate) fn multipart_upload(fields: &[(&str, Option<&str>, &str)]) -> Request
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn only_an_opted_in_server_lists_files_and_a_container_lists_its_own() -> anyhow::Result<()> {
+async fn only_an_opted_in_server_lists_files_and_a_container_serves_none_it_wasnt_given()
+-> anyhow::Result<()> {
     let dir = support::tiny_checkpoint()?;
     let spec = serde_json::from_value(json!({
         "model": {"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}},
@@ -336,41 +337,20 @@ async fn only_an_opted_in_server_lists_files_and_a_container_lists_its_own() -> 
     assert_eq!(listed.status(), StatusCode::OK);
     assert!(body_text(listed).await?.contains(&id));
 
-    let container_ids = |body: Value| -> Vec<String> {
-        body["data"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|file| file["id"].as_str().unwrap().to_string())
-            .collect()
-    };
-    let container = |name: &str| {
-        let shared = shared.clone();
-        let path = format!("/v1/containers/{name}/files");
-        async move {
-            let response = shared.oneshot(get(&path)?).await?;
-            anyhow::Ok(serde_json::from_str::<Value>(&body_text(response).await?)?)
-        }
-    };
-    assert!(container_ids(container("cntr_mine").await?).is_empty());
-    // A Responses run tags the files it cites with its container id.
-    assert!(engine.state().try_tag_file(&id, "cntr_mine", None)?);
-    assert_eq!(
-        container_ids(container("cntr_mine").await?),
-        vec![id.clone()]
-    );
-    assert!(container_ids(container("cntr_other").await?).is_empty());
-    for (name, status) in [
-        ("cntr_mine", StatusCode::OK),
-        ("cntr_other", StatusCode::NOT_FOUND),
+    // Which files a container holds is the engine's (inference-api's store tests); here only the routes' framing.
+    let response = shared
+        .clone()
+        .oneshot(get("/v1/containers/cntr_unused/files")?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    let listed: Value = serde_json::from_str(&body_text(response).await?)?;
+    assert_eq!(listed["data"], json!([]));
+    for path in [
+        format!("/v1/containers/cntr_unused/files/{id}"),
+        format!("/v1/containers/cntr_unused/files/{id}/content"),
     ] {
-        for path in [
-            format!("/v1/containers/{name}/files/{id}"),
-            format!("/v1/containers/{name}/files/{id}/content"),
-        ] {
-            let response = shared.clone().oneshot(get(&path)?).await?;
-            assert_eq!(response.status(), status, "{path}");
-        }
+        let response = shared.clone().oneshot(get(&path)?).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path}");
     }
     Ok(())
 }
@@ -413,6 +393,36 @@ async fn files_upload_and_serve_their_content() -> anyhow::Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn a_stored_image_is_served_as_its_media_type() -> anyhow::Result<()> {
+    let dir = support::tiny_checkpoint()?;
+    let app = router(dir.path()).await?;
+    let png = inference_core::images::encode_png(&image::DynamicImage::new_rgb8(5, 3))?;
+    let mut body = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"purpose\"\r\n\r\nuser_data\r\n--{BOUNDARY}\r\n\
+         Content-Disposition: form-data; name=\"file\"; filename=\"pixel.png\"\r\nContent-Type: image/png\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(&png);
+    body.extend_from_slice(format!("\r\n--{BOUNDARY}--\r\n").as_bytes());
+    let upload = Request::post("/v1/files")
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(Body::from(body))?;
+    let uploaded: Value =
+        serde_json::from_str(&body_text(app.clone().oneshot(upload).await?).await?)?;
+    let id = uploaded["id"].as_str().unwrap();
+    let response = app
+        .oneshot(Request::get(format!("/v1/files/{id}/content")).body(Body::empty())?)
+        .await?;
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert_eq!(to_bytes(response.into_body(), usize::MAX).await?, png);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn an_engine_shuts_down_from_its_last_clone() -> anyhow::Result<()> {
     let dir = support::tiny_checkpoint()?;
     let spec = serde_json::from_value(json!({
@@ -423,28 +433,6 @@ async fn an_engine_shuts_down_from_its_last_clone() -> anyhow::Result<()> {
     let other = engine.clone();
     assert!(engine.shutdown().await.is_err());
     other.shutdown().await.map_err(anyhow::Error::msg)?;
-    Ok(())
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn generated_images_are_served_from_the_file_store() -> anyhow::Result<()> {
-    let dir = support::tiny_checkpoint()?;
-    let spec = serde_json::from_value(json!({
-        "model": {"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}},
-        "runtime": {"device": "cpu"},
-    }))?;
-    let engine = inference_api::Engine::load(spec).await?;
-    let png = inference_core::images::encode_png(&image::DynamicImage::new_rgb8(5, 3))?;
-    let url = inference_api::files::store_generated_image(engine.state(), None, png.clone(), None)
-        .map_err(anyhow::Error::msg)?;
-    let app = InferenceRsServerRouterBuilder::new()
-        .with_engine(&engine)
-        .build()
-        .await?;
-    let response = app.oneshot(Request::get(&url).body(Body::empty())?).await?;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["content-type"], "image/png");
-    assert_eq!(to_bytes(response.into_body(), usize::MAX).await?, png);
     Ok(())
 }
 

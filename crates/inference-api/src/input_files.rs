@@ -18,7 +18,7 @@ pub struct InputFileSpec {
     pub filename: Option<String>,
 }
 
-pub async fn resolve_input_file(
+pub(crate) async fn resolve_input_file(
     state: SharedInferenceRsState,
     spec: InputFileSpec,
     source: &str,

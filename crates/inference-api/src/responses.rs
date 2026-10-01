@@ -1013,7 +1013,7 @@ pub struct OpenResponsesStreamer {
 }
 
 impl OpenResponsesStreamer {
-    pub fn new(
+    pub(crate) fn new(
         prepared: PreparedResponse,
         state: SharedInferenceRsState,
         tap: Option<ResponseTap>,
@@ -2166,7 +2166,7 @@ pub struct PreparedResponse {
 }
 
 /// Validates a Responses request, resolves the conversation it continues and sends it to its model.
-pub fn prepare_response<'a>(
+pub(crate) fn prepare_response<'a>(
     chat: &'a ChatEngine,
     request: OpenResponsesCreateRequest,
 ) -> BoxFuture<'a, Result<PreparedResponse, DispatchError>> {
@@ -2243,7 +2243,7 @@ impl StoredResponse {
 }
 
 /// Waits for a non-streaming request's reply, storing it and its conversation when the request asked to.
-pub fn collect_response<'a>(
+pub(crate) fn collect_response<'a>(
     prepared: PreparedResponse,
     state: &'a SharedInferenceRsState,
 ) -> BoxFuture<'a, Result<ResponseResource, ApiError>> {
@@ -2397,7 +2397,7 @@ async fn run_to_end(
 }
 
 /// Answers `prepared` off the caller's task and returns its queued resource; [`get_response`] follows it.
-pub fn spawn_background(
+pub(crate) fn spawn_background(
     prepared: PreparedResponse,
     state: SharedInferenceRsState,
 ) -> ResponseResource {
@@ -2428,7 +2428,7 @@ pub fn spawn_background(
 }
 
 /// A background response in whatever state it has reached, or a stored one.
-pub fn get_response(
+pub(crate) fn get_response(
     state: &SharedInferenceRsState,
     response_id: &str,
     owner: Option<&str>,
@@ -2456,7 +2456,7 @@ pub struct ResponseDeleted {
 }
 
 /// Forgets a response: its background task, the stored resource and its conversation.
-pub fn delete_response(
+pub(crate) fn delete_response(
     state: &SharedInferenceRsState,
     response_id: &str,
     owner: Option<&str>,
@@ -2478,7 +2478,7 @@ pub fn delete_response(
 }
 
 /// Cancels a queued or running background response and returns it; finished responses come back unchanged.
-pub fn cancel_response(
+pub(crate) fn cancel_response(
     state: &SharedInferenceRsState,
     response_id: &str,
     owner: Option<&str>,

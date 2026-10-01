@@ -101,8 +101,8 @@ pub mod speech_generation;
 pub mod streaming;
 pub mod types;
 use inference_api::{
-    agentic, anthropic as anthropic_api, api_error, dispatch, engine_chat, engine_completion,
+    agentic, anthropic as anthropic_api, api_error, engine_chat, engine_completion,
     files as files_api, lora_adapters as lora_adapters_api, media_source, models as models_api,
     responses as responses_api, responses_types, skill_store, system,
 };
-pub use inference_api::{inference_for_server_builder, openai, util, video};
+pub use inference_api::{openai, util, video};

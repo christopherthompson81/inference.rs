@@ -774,9 +774,7 @@ impl Engine {
         Self::load_with_callbacks(spec, callbacks).await
     }
 
-    /// The core state behind this engine, for tests that seed or read the store; clients call the engine's methods.
-    #[doc(hidden)]
-    pub fn state(&self) -> &SharedInferenceRsState {
+    pub(crate) fn state(&self) -> &SharedInferenceRsState {
         &self.chat.state
     }
 
@@ -798,8 +796,8 @@ impl Engine {
         chat.state.shutdown().await
     }
 
-    /// The chat policy and skill store an HTTP server over this engine shares.
-    pub fn chat_engine(&self) -> &ChatEngine {
+    #[cfg(test)]
+    pub(crate) fn chat_engine(&self) -> &ChatEngine {
         &self.chat
     }
 

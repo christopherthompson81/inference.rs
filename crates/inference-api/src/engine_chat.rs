@@ -820,7 +820,7 @@ pub enum DispatchError {
 
 impl DispatchError {
     /// The error to report, logging it when it is the engine's fault.
-    pub fn into_api_error(self, state: SharedInferenceRsState) -> ApiError {
+    pub(crate) fn into_api_error(self, state: SharedInferenceRsState) -> ApiError {
         match self {
             DispatchError::Validation(error) => {
                 let api = ApiError::from_error(error.as_ref(), ApiErrorKind::InvalidRequest);
@@ -1042,7 +1042,7 @@ pub struct ChatStream {
 }
 
 impl ChatStream {
-    pub fn new(
+    pub(crate) fn new(
         rx: Receiver<Response>,
         state: SharedInferenceRsState,
         model_override: Option<String>,

@@ -9,9 +9,6 @@ use axum::{
 use inference_api::request_body::{INVALID_REQUEST_BODY, JsonRequest, MALFORMED_JSON};
 
 pub(crate) use crate::api_error::{ApiError, ApiErrorKind, SERVICE_UNAVAILABLE_MESSAGE};
-pub use crate::dispatch::{
-    DEFAULT_CHANNEL_BUFFER_SIZE, create_response_channel, send_request, send_request_with_model,
-};
 
 const INVALID_CONTENT_TYPE: &str = "invalid_content_type";
 const REQUEST_BODY_TOO_LARGE: &str = "request_body_too_large";
