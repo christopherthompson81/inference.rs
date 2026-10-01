@@ -14,6 +14,8 @@ use tokio::sync::Semaphore;
 use tracing::warn;
 
 /// Trait for MCP server connections
+// async_trait marks its boxed futures `#[must_use]`, which they already are
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait McpServerConnection: Send + Sync {
     /// Get the server ID
