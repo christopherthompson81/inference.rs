@@ -24,10 +24,13 @@ use crate::{
     kv_cache::LayerCaches,
     layers::{CausalMasker, RmsNorm, embedding},
     llama::Config,
-    model::{NormalLoadingMetadata, NormalModel, extract_logits},
+    model::{NormalLoadingMetadata, NormalModel},
 };
 
-use inference_nn::xlora::{NonGranularState, ScalingsMaker, XLoraClassifier, XLoraConfig};
+use inference_nn::xlora::{
+    NonGranularState, ScalingsMaker, XLoraClassifier, XLoraConfig, XLoraForward, XLoraPass,
+    pass_cache, xlora_forward,
+};
 
 struct CausalSelfAttention {
     q_proj: Arc<dyn LinearLayerLike + Send + Sync>,
@@ -395,132 +398,6 @@ pub struct XLoraLlama {
 
 impl XLoraLlama {
     #[allow(clippy::too_many_arguments)]
-    fn inner_forward(
-        &self,
-        input_ids: &Tensor,
-        seqlen_offsets: &[usize],
-        scalings: Option<Tensor>,
-        is_full_pass: bool,
-        no_kv_cache: bool,
-        is_scaling_pass: Option<f64>,
-        flash_params: &FlashParams,
-    ) -> Result<Tensor> {
-        let mut x = self.wte.embedding_forward(input_ids, self.dtype)?;
-        let mut cache = if is_full_pass {
-            if no_kv_cache {
-                let mut new_cache = Vec::new();
-                for _ in 0..self.kv_cache.full().xlora_lock().len() {
-                    new_cache.push(None);
-                }
-
-                self.kv_cache.full().xlora_lock().clone_from(&new_cache);
-            }
-            self.kv_cache.full().xlora_lock()
-        } else {
-            self.kv_cache.full().lock()
-        };
-        let mask = CausalMasker.make_causal_mask(
-            input_ids,
-            &*cache,
-            x.dtype(),
-            &CausalMaskConfig::default(),
-        )?;
-        let mask = DeviceMappedMask::new(mask, &*self.mapper)?;
-        for (block_idx, block) in self.blocks.iter().enumerate() {
-            x = self.mapper.map(x, block_idx)?;
-            x = block.forward(
-                &x,
-                &mask.get(x.device()),
-                seqlen_offsets,
-                block_idx,
-                &mut cache,
-                scalings.clone(),
-                self.xlora_classifier
-                    .as_ref()
-                    .map(|classifier| classifier.get_global_scaling_weight())
-                    .unwrap_or(1.0),
-                is_scaling_pass,
-                flash_params,
-            )?;
-        }
-        let x = x.to_device(&self.device)?;
-        self.ln_f.forward(&x)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn forward(
-        &self,
-        input_ids: &Tensor,
-        input_ids_full: &Tensor,
-        seqlen_offsets: &[usize],
-        seqlen_offsets_full: &[usize],
-        no_kv_cache: bool,
-        non_granular_state: &Option<NonGranularState>,
-        context_lens: Vec<(usize, usize)>,
-        flash_params: &FlashParams,
-        flash_params_full: &FlashParams,
-    ) -> Result<Tensor> {
-        if self.xlora_classifier.is_some() {
-            let scalings = self.get_scalings(
-                input_ids,
-                input_ids_full,
-                seqlen_offsets,
-                seqlen_offsets_full,
-                no_kv_cache,
-                non_granular_state,
-                &vec![usize::MAX; context_lens.len()],
-                flash_params,
-                flash_params_full,
-            )?;
-
-            if no_kv_cache {
-                let res = self
-                    .inner_forward(
-                        input_ids_full,
-                        seqlen_offsets_full,
-                        Some(scalings),
-                        true,
-                        no_kv_cache,
-                        None,
-                        flash_params_full,
-                    )?
-                    .contiguous()?;
-                let res = extract_logits(&res, context_lens)?;
-                self.lm_head.lora_forward(&res, None, 1.0, None)
-            } else {
-                // is_full_pass=true is ok because no_kv_cache=false
-                let res = self
-                    .inner_forward(
-                        input_ids,
-                        seqlen_offsets,
-                        Some(scalings),
-                        true,
-                        no_kv_cache,
-                        None,
-                        flash_params,
-                    )?
-                    .contiguous()?;
-                let res = extract_logits(&res, context_lens)?;
-                self.lm_head.lora_forward(&res, None, 1.0, None)
-            }
-        } else {
-            let res = self
-                .inner_forward(
-                    input_ids,
-                    seqlen_offsets,
-                    None,
-                    false,
-                    no_kv_cache,
-                    None,
-                    flash_params,
-                )?
-                .contiguous()?;
-            let res = extract_logits(&res, context_lens)?;
-            self.lm_head.lora_forward(&res, None, 1.0, None)
-        }
-    }
-
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         cfg: &Config,
         vb: ShardedVarBuilder,
@@ -686,20 +563,24 @@ impl NormalModel for XLoraLlama {
         no_kv_cache: bool,
         non_granular_state: &Option<NonGranularState>,
         context_lens: Vec<(usize, usize)>,
-        _position_ids: Vec<usize>,
+        position_ids: Vec<usize>,
         flash_params: &FlashParams,
         flash_params_full: &FlashParams,
     ) -> Result<Tensor> {
-        self.forward(
-            input_ids,
-            input_ids_full,
-            seqlen_offsets,
-            seqlen_offsets_full,
-            no_kv_cache,
-            non_granular_state,
-            context_lens,
-            flash_params,
-            flash_params_full,
+        xlora_forward(
+            self,
+            XLoraForward {
+                input_ids,
+                input_ids_full,
+                seqlen_offsets,
+                seqlen_offsets_full,
+                no_kv_cache,
+                non_granular_state,
+                context_lens,
+                position_ids: &position_ids,
+                flash_params,
+                flash_params_full,
+            },
         )
     }
     fn cache(&self) -> &crate::kv_cache::EitherCache {
@@ -726,29 +607,51 @@ impl ScalingsMaker for XLoraLlama {
     fn get_cache(&self) -> &crate::kv_cache::EitherCache {
         &self.kv_cache
     }
-    fn get_classifier(&self) -> &XLoraClassifier {
-        self.xlora_classifier.as_ref().unwrap()
+    fn classifier(&self) -> Option<&XLoraClassifier> {
+        self.xlora_classifier.as_ref()
     }
-    fn forward(
-        &self,
-        input_ids: &Tensor,
-        seqlen_offsets: &[usize],
-        scalings: Tensor,
-        is_full_pass: bool,
-        no_kv_cache: bool,
-        is_scaling_pass: Option<f64>,
-        _context_lens: &[usize],
-        flash_params: &FlashParams,
-    ) -> Result<Tensor> {
-        self.inner_forward(
+    fn inner_forward(&self, pass: XLoraPass<'_>) -> Result<Tensor> {
+        let XLoraPass {
             input_ids,
             seqlen_offsets,
-            Some(scalings),
+            scalings,
             is_full_pass,
             no_kv_cache,
             is_scaling_pass,
             flash_params,
-        )
+            ..
+        } = pass;
+        let mut x = self.wte.embedding_forward(input_ids, self.dtype)?;
+        let mut cache = pass_cache(&self.kv_cache, is_full_pass, no_kv_cache);
+        let mask = CausalMasker.make_causal_mask(
+            input_ids,
+            &*cache,
+            x.dtype(),
+            &CausalMaskConfig::default(),
+        )?;
+        let mask = DeviceMappedMask::new(mask, &*self.mapper)?;
+        for (block_idx, block) in self.blocks.iter().enumerate() {
+            x = self.mapper.map(x, block_idx)?;
+            x = block.forward(
+                &x,
+                &mask.get(x.device()),
+                seqlen_offsets,
+                block_idx,
+                &mut cache,
+                scalings.clone(),
+                self.xlora_classifier
+                    .as_ref()
+                    .map(|classifier| classifier.get_global_scaling_weight())
+                    .unwrap_or(1.0),
+                is_scaling_pass,
+                flash_params,
+            )?;
+        }
+        let x = x.to_device(&self.device)?;
+        self.ln_f.forward(&x)
+    }
+    fn lm_head(&self, hidden: &Tensor) -> Result<Tensor> {
+        self.lm_head.lora_forward(hidden, None, 1.0, None)
     }
 }
 

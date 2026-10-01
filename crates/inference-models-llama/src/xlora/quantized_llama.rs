@@ -19,13 +19,15 @@ use tracing::info;
 use crate::device_map::{DeviceMappedMask, DeviceMapper};
 use crate::kv_cache::{Cache, EitherCache};
 use crate::layers::{CausalMaskConfig, CausalMasker, QRmsNorm, RotaryEmbedding, Sdpa};
-use crate::model::extract_logits;
 
 use crate::gguf::metadata::ContentMetadata;
 use crate::gguf::{FromAdapterGGML, FromAdapterGGUF};
 use crate::quantized_llama::PropsGGUF;
 use inference_nn::xlora::XLoraClassifier;
-use inference_nn::xlora::{NonGranularState, ScalingsMaker, XLoraConfig, verify_sanity_adapters};
+use inference_nn::xlora::{
+    ScalingsMaker, XLoraConfig, XLoraForward, XLoraPass, pass_cache, verify_sanity_adapters,
+    xlora_forward,
+};
 
 const DEFAULT_MAX_SEQ_LEN: u32 = 4096;
 const SUPPORTED_LAYERS: [&str; 8] = [
@@ -749,32 +751,29 @@ impl FromAdapterGGUF for ModelWeights {
     }
 }
 
-impl ModelWeights {
-    #[allow(clippy::too_many_arguments)]
-    fn inner_forward(
-        &self,
-        x: &Tensor,
-        start_offsets: &[usize],
-        scalings: Option<Tensor>,
-        is_full_pass: bool,
-        no_kv_cache: bool,
-        is_scaling_pass: Option<f64>,
-        flash_params: &FlashParams,
-    ) -> Result<Tensor> {
+impl ScalingsMaker for ModelWeights {
+    fn dtype(&self) -> DType {
+        DType::F32 // for dummy scalings
+    }
+    fn get_cache(&self) -> &EitherCache {
+        &self.cache
+    }
+    fn classifier(&self) -> Option<&XLoraClassifier> {
+        self.xlora_classifier.as_ref()
+    }
+    fn inner_forward(&self, pass: XLoraPass<'_>) -> Result<Tensor> {
+        let XLoraPass {
+            input_ids: x,
+            seqlen_offsets: start_offsets,
+            scalings,
+            is_full_pass,
+            no_kv_cache,
+            is_scaling_pass,
+            flash_params,
+            ..
+        } = pass;
         let mut layer_in = self.tok_embeddings.forward(x)?;
-        let mut cache = if is_full_pass {
-            if no_kv_cache {
-                let mut new_cache = Vec::new();
-                for _ in 0..self.cache.full().xlora_lock().len() {
-                    new_cache.push(None);
-                }
-
-                self.cache.full().xlora_lock().clone_from(&new_cache);
-            }
-            self.cache.full().xlora_lock()
-        } else {
-            self.cache.full().lock()
-        };
+        let mut cache = pass_cache(&self.cache, is_full_pass, no_kv_cache);
         let mask =
             CausalMasker.make_causal_mask(x, &*cache, self.dtype, &CausalMaskConfig::default())?;
         let mask = match self.mapper {
@@ -821,126 +820,27 @@ impl ModelWeights {
         let layer_in = layer_in.to_device(&self.device)?;
         self.norm.forward(&layer_in)
     }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn forward(
-        &self,
-        input_ids: &Tensor,
-        input_ids_full: &Tensor,
-        seqlen_offsets: &[usize],
-        seqlen_offsets_full: &[usize],
-        no_kv_cache: bool,
-        non_granular_state: &Option<NonGranularState>,
-        context_lens: Vec<(usize, usize)>,
-        flash_params: &FlashParams,
-        flash_params_full: &FlashParams,
-    ) -> Result<Tensor> {
-        if self.xlora_classifier.is_some() {
-            let scalings = self.get_scalings(
-                input_ids,
-                input_ids_full,
-                seqlen_offsets,
-                seqlen_offsets_full,
-                no_kv_cache,
-                non_granular_state,
-                &vec![usize::MAX; context_lens.len()],
-                flash_params,
-                flash_params_full,
-            )?;
-
-            if no_kv_cache {
-                let hidden = self
-                    .inner_forward(
-                        input_ids_full,
-                        seqlen_offsets_full,
-                        Some(scalings),
-                        true,
-                        no_kv_cache,
-                        None,
-                        flash_params_full,
-                    )?
-                    .contiguous()?;
-                let hidden = extract_logits(&hidden, context_lens)?;
-                self.output.lora_forward(&hidden, None, 1.0, None)
-            } else {
-                // is_full_pass=true is ok because no_kv_cache=false
-                let hidden = self
-                    .inner_forward(
-                        input_ids,
-                        seqlen_offsets,
-                        Some(scalings),
-                        true,
-                        no_kv_cache,
-                        None,
-                        flash_params,
-                    )?
-                    .contiguous()?;
-                let hidden = extract_logits(&hidden, context_lens)?;
-                self.output.lora_forward(&hidden, None, 1.0, None)
-            }
-        } else {
-            let hidden = self
-                .inner_forward(
-                    input_ids,
-                    seqlen_offsets,
-                    None,
-                    false,
-                    no_kv_cache,
-                    None,
-                    flash_params,
-                )?
-                .contiguous()?;
-            let hidden = extract_logits(&hidden, context_lens)?;
-            self.output.lora_forward(&hidden, None, 1.0, None)
-        }
-    }
-}
-
-impl ScalingsMaker for ModelWeights {
-    fn dtype(&self) -> DType {
-        DType::F32 // for dummy scalings
-    }
-    fn get_cache(&self) -> &EitherCache {
-        &self.cache
-    }
-    fn get_classifier(&self) -> &XLoraClassifier {
-        self.xlora_classifier.as_ref().unwrap()
-    }
-    fn forward(
-        &self,
-        input_ids: &Tensor,
-        seqlen_offsets: &[usize],
-        scalings: Tensor,
-        is_full_pass: bool,
-        no_kv_cache: bool,
-        is_scaling_pass: Option<f64>,
-        _context_lens: &[usize],
-        flash_params: &FlashParams,
-    ) -> Result<Tensor> {
-        self.inner_forward(
-            input_ids,
-            seqlen_offsets,
-            Some(scalings),
-            is_full_pass,
-            no_kv_cache,
-            is_scaling_pass,
-            flash_params,
-        )
+    fn lm_head(&self, hidden: &Tensor) -> Result<Tensor> {
+        self.output.lora_forward(hidden, None, 1.0, None)
     }
 }
 
 impl crate::gguf::QuantizedModel for ModelWeights {
     fn forward_step(&self, inputs: crate::gguf::QuantizedForwardInputs<'_>) -> Result<Tensor> {
-        self.forward(
-            inputs.input_ids,
-            inputs.input_ids_full,
-            inputs.seqlen_offsets,
-            inputs.seqlen_offsets_full,
-            inputs.no_kv_cache,
-            inputs.non_granular_state,
-            inputs.context_lens,
-            inputs.flash_params,
-            inputs.flash_params_full,
+        xlora_forward(
+            self,
+            XLoraForward {
+                input_ids: inputs.input_ids,
+                input_ids_full: inputs.input_ids_full,
+                seqlen_offsets: inputs.seqlen_offsets,
+                seqlen_offsets_full: inputs.seqlen_offsets_full,
+                no_kv_cache: inputs.no_kv_cache,
+                non_granular_state: inputs.non_granular_state,
+                context_lens: inputs.context_lens,
+                position_ids: &[],
+                flash_params: inputs.flash_params,
+                flash_params_full: inputs.flash_params_full,
+            },
         )
     }
     fn cache(&self) -> &EitherCache {

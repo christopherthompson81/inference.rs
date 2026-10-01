@@ -17,12 +17,15 @@ use crate::{
     kv_cache::{Cache, EitherCache},
     layers::{self, Activation, CausalMasker, GemmaRmsNorm, RotaryEmbedding, Sdpa},
     lora::{LinearLayerLike, LoraConfig, Ordering, linear_b, linear_no_bias},
-    model::{IsqModel, NormalLoadingMetadata, NormalModel, extract_logits},
+    model::{IsqModel, NormalLoadingMetadata, NormalModel},
     paged_attention::ModelConfigMetadata,
     utils::progress::NiceProgressBar,
 };
 
-use inference_nn::xlora::{NonGranularState, ScalingsMaker, XLoraClassifier, XLoraConfig};
+use inference_nn::xlora::{
+    NonGranularState, ScalingsMaker, XLoraClassifier, XLoraConfig, XLoraForward, XLoraPass,
+    pass_cache, xlora_forward,
+};
 
 #[derive(Clone)]
 #[allow(clippy::upper_case_acronyms)]
@@ -594,33 +597,94 @@ impl Model {
             },
         })
     }
+}
 
-    #[allow(clippy::too_many_arguments)]
-    fn inner_forward(
+impl IsqModel for Model {
+    fn residual_tensors(&self) -> Vec<(String, Tensor)> {
+        panic!("Cannot generate UQFF for an adapter model.")
+    }
+}
+
+impl crate::speculative::SpeculativeTargetMixin for Model {}
+
+impl NormalModel for Model {
+    fn forward(
+        &self,
+        _input_ids: &Tensor,
+        _ctx: &mut crate::model::ModelForwardContext<'_>,
+    ) -> Result<Tensor> {
+        unreachable!()
+    }
+    fn xlora_forward(
         &self,
         input_ids: &Tensor,
+        input_ids_full: &Tensor,
         seqlen_offsets: &[usize],
-        scalings: Option<Tensor>,
-        is_full_pass: bool,
+        seqlen_offsets_full: &[usize],
         no_kv_cache: bool,
-        is_scaling_pass: Option<f64>,
+        non_granular_state: &Option<NonGranularState>,
+        context_lens: Vec<(usize, usize)>,
+        position_ids: Vec<usize>,
         flash_params: &FlashParams,
+        flash_params_full: &FlashParams,
     ) -> Result<Tensor> {
+        xlora_forward(
+            self,
+            XLoraForward {
+                input_ids,
+                input_ids_full,
+                seqlen_offsets,
+                seqlen_offsets_full,
+                no_kv_cache,
+                non_granular_state,
+                context_lens,
+                position_ids: &position_ids,
+                flash_params,
+                flash_params_full,
+            },
+        )
+    }
+    fn cache(&self) -> &EitherCache {
+        &self.cache
+    }
+    fn device(&self) -> &Device {
+        &self.device
+    }
+    fn is_xlora(&self) -> bool {
+        false
+    }
+    fn max_seq_len(&self) -> usize {
+        self.max_seq_len
+    }
+    fn config(&self) -> &ModelConfigMetadata {
+        &self.cfg
+    }
+}
+
+impl ScalingsMaker for Model {
+    fn dtype(&self) -> DType {
+        self.dtype
+    }
+    fn get_cache(&self) -> &EitherCache {
+        &self.cache
+    }
+    fn classifier(&self) -> Option<&XLoraClassifier> {
+        self.xlora_classifier.as_ref()
+    }
+    fn inner_forward(&self, pass: XLoraPass<'_>) -> Result<Tensor> {
+        let XLoraPass {
+            input_ids,
+            seqlen_offsets,
+            scalings,
+            is_full_pass,
+            no_kv_cache,
+            is_scaling_pass,
+            flash_params,
+            ..
+        } = pass;
         let xs = self.embed_tokens.embedding_forward(input_ids, self.dtype)?;
         let mut xs = (xs * (self.hidden_size as f64).sqrt())?;
-        let mut cache = if is_full_pass {
-            if no_kv_cache {
-                let mut new_cache = Vec::new();
-                for _ in 0..self.cache.full().xlora_lock().len() {
-                    new_cache.push(None);
-                }
-
-                self.cache.full().xlora_lock().clone_from(&new_cache);
-            }
-            self.cache.full().xlora_lock()
-        } else {
-            self.cache.full().lock()
-        };
+        let mut cache = pass_cache(&self.cache, is_full_pass, no_kv_cache);
         let attention_mask = CausalMasker.make_causal_mask(
             input_ids,
             &*cache,
@@ -656,179 +720,14 @@ impl Model {
             )?;
         }
         let xs = xs.to_device(&self.device)?;
-        let xs = xs.apply(&self.norm)?;
-        let mut xs = self.lm_head.lora_forward(&xs, None, 1.0, None)?;
-
-        if let Some(final_logit_softcapping) = self.final_logit_softcapping {
-            let dtype = xs.dtype();
-            xs = softcap(&xs, final_logit_softcapping as f32)?.to_dtype(dtype)?;
+        xs.apply(&self.norm)
+    }
+    fn lm_head(&self, hidden: &Tensor) -> Result<Tensor> {
+        let logits = self.lm_head.lora_forward(hidden, None, 1.0, None)?;
+        match self.final_logit_softcapping {
+            Some(cap) => softcap(&logits, cap as f32)?.to_dtype(logits.dtype()),
+            None => Ok(logits),
         }
-
-        Ok(xs)
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub fn forward(
-        &self,
-        input_ids: &Tensor,
-        input_ids_full: &Tensor,
-        seqlen_offsets: &[usize],
-        seqlen_offsets_full: &[usize],
-        no_kv_cache: bool,
-        non_granular_state: &Option<NonGranularState>,
-        context_lens: Vec<(usize, usize)>,
-        flash_params: &FlashParams,
-        flash_params_full: &FlashParams,
-    ) -> Result<Tensor> {
-        if self.xlora_classifier.is_some() {
-            let scalings = self.get_scalings(
-                input_ids,
-                input_ids_full,
-                seqlen_offsets,
-                seqlen_offsets_full,
-                no_kv_cache,
-                non_granular_state,
-                &vec![usize::MAX; context_lens.len()],
-                flash_params,
-                flash_params_full,
-            )?;
-
-            if no_kv_cache {
-                let res = self
-                    .inner_forward(
-                        input_ids_full,
-                        seqlen_offsets_full,
-                        Some(scalings),
-                        true,
-                        no_kv_cache,
-                        None,
-                        flash_params_full,
-                    )?
-                    .contiguous()?;
-                let res = extract_logits(&res, context_lens)?;
-                self.lm_head.lora_forward(&res, None, 1.0, None)
-            } else {
-                // is_full_pass=true is ok because no_kv_cache=false
-                let res = self
-                    .inner_forward(
-                        input_ids,
-                        seqlen_offsets,
-                        Some(scalings),
-                        true,
-                        no_kv_cache,
-                        None,
-                        flash_params,
-                    )?
-                    .contiguous()?;
-                let res = extract_logits(&res, context_lens)?;
-                self.lm_head.lora_forward(&res, None, 1.0, None)
-            }
-        } else {
-            let res = self
-                .inner_forward(
-                    input_ids,
-                    seqlen_offsets,
-                    None,
-                    false,
-                    no_kv_cache,
-                    None,
-                    flash_params,
-                )?
-                .contiguous()?;
-            let res = extract_logits(&res, context_lens)?;
-            self.lm_head.lora_forward(&res, None, 1.0, None)
-        }
-    }
-}
-
-impl IsqModel for Model {
-    fn residual_tensors(&self) -> Vec<(String, Tensor)> {
-        panic!("Cannot generate UQFF for an adapter model.")
-    }
-}
-
-impl crate::speculative::SpeculativeTargetMixin for Model {}
-
-impl NormalModel for Model {
-    fn forward(
-        &self,
-        _input_ids: &Tensor,
-        _ctx: &mut crate::model::ModelForwardContext<'_>,
-    ) -> Result<Tensor> {
-        unreachable!()
-    }
-    fn xlora_forward(
-        &self,
-        input_ids: &Tensor,
-        input_ids_full: &Tensor,
-        seqlen_offsets: &[usize],
-        seqlen_offsets_full: &[usize],
-        no_kv_cache: bool,
-        non_granular_state: &Option<NonGranularState>,
-        context_lens: Vec<(usize, usize)>,
-        _position_ids: Vec<usize>,
-        flash_params: &FlashParams,
-        flash_params_full: &FlashParams,
-    ) -> Result<Tensor> {
-        self.forward(
-            input_ids,
-            input_ids_full,
-            seqlen_offsets,
-            seqlen_offsets_full,
-            no_kv_cache,
-            non_granular_state,
-            context_lens,
-            flash_params,
-            flash_params_full,
-        )
-    }
-    fn cache(&self) -> &EitherCache {
-        &self.cache
-    }
-    fn device(&self) -> &Device {
-        &self.device
-    }
-    fn is_xlora(&self) -> bool {
-        false
-    }
-    fn max_seq_len(&self) -> usize {
-        self.max_seq_len
-    }
-    fn config(&self) -> &ModelConfigMetadata {
-        &self.cfg
-    }
-}
-
-impl ScalingsMaker for Model {
-    fn dtype(&self) -> DType {
-        self.dtype
-    }
-    fn get_cache(&self) -> &EitherCache {
-        &self.cache
-    }
-    fn get_classifier(&self) -> &XLoraClassifier {
-        self.xlora_classifier.as_ref().unwrap()
-    }
-    fn forward(
-        &self,
-        input_ids: &Tensor,
-        seqlen_offsets: &[usize],
-        scalings: Tensor,
-        is_full_pass: bool,
-        no_kv_cache: bool,
-        is_scaling_pass: Option<f64>,
-        _context_lens: &[usize],
-        flash_params: &FlashParams,
-    ) -> Result<Tensor> {
-        self.inner_forward(
-            input_ids,
-            seqlen_offsets,
-            Some(scalings),
-            is_full_pass,
-            no_kv_cache,
-            is_scaling_pass,
-            flash_params,
-        )
     }
 }
 
