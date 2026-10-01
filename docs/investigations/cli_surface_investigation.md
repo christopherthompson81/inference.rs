@@ -548,3 +548,34 @@ now said in the docs; evictions are logged at debug. Known: a session import ove
 and evicted agent outputs or uploads then 404, as expired ones already do.
 
 **Tests:** `the_byte_cap_evicts_the_oldest_and_keeps_the_newest`.
+
+## Run 23 — 2026-09-30 (time approximate)
+
+**Question:** #158: `GET /v1/files` and the C ABI's `inference_files_list` list every engine's files, and
+`GET /v1/containers/{id}/files` ignores the container id, so any client of a shared server can enumerate and download
+the others' files.
+
+**Finding:** the server has no client identity (no API keys; `Authorization` is only allowed through CORS), so there is
+nothing to scope by. File ids are random: uploads and generated images are v4 UUIDs, agent outputs carry a 48-bit random
+run id. The web UI never lists files. So an id works as a capability, and the leak is the listing.
+
+**Change:** `GET /v1/files` lists only on a server built `with_file_listing(true)` (`--allow-file-listing`,
+`allow_file_listing` in TOML); otherwise 403 naming the option. A Responses run tags the files it produces with its
+container id (`InferenceRs::try_tag_file`, the store's session tags), and the container listing returns only files
+carrying that tag (`try_list_tagged_files`). The C ABI's `inference_files_list` stays a full listing for the host
+application, documented as such.
+
+**Tests:** `only_an_opted_in_server_lists_files_and_a_container_lists_its_own` (403 by default, listing when opted in,
+container listing empty until a file carries its tag, another container's still empty).
+
+**Review:** found the bigger remaining path: the web UI's chat history (`/ui/api/list_chats`) returns every saved chat
+to anyone who can reach `/ui`, and a chat carries file ids and its `session_id`, whose export (`GET /v1/sessions/{id}`)
+includes the files' bodies; saved sessions also restore their files after the TTL. "The web UI never lists files" was
+true but beside the point. The UI stays on by default (the user wants it in the demo binary); `serve` now warns when
+it is mounted on a non-loopback address and the docs say it is single-user. Also fixed: a container's file and content
+routes served any file under any container id (now 404 unless the container cited it); two docs still advertised the
+listing; the 403 names the builder option too and carries `file_listing_disabled`. Not fixed, left on #158: a request
+without `session_id` can be matched to another client's session by message prefix (same prompt and greedy reply), so
+the agent's `list_files` sees that session's files; session import accepts client-chosen file ids, which can replace a
+known file's body; agent output ids share their run's prefix (`file_<run>_r<round>_<idx>`), so one id reveals its
+siblings'.

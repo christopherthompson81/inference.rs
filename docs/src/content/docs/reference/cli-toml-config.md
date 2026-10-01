@@ -78,6 +78,7 @@ quant = "4"
 | `host` | `--host` | `0.0.0.0` | Bind address. |
 | `port` | `-p`, `--port` | 1234 | TCP port. |
 | `no_ui` | `--no-ui` | false | Disable the built-in web UI (mounted at `/ui` by default). |
+| `allow_file_listing` | `--allow-file-listing` | false | Let `GET /v1/files` list every stored file. The store is shared by every client, so enable it only for trusted ones. |
 | `mcp_port` | `--mcp-port` | not set | Also expose the loaded model as an MCP server on this port (JSON-RPC 2.0 at `POST /mcp`). See [serve over MCP](/guides/agents/expose-as-mcp/). |
 | `max_tool_rounds` | `--max-tool-rounds` | not set | Default cap on agentic tool loop rounds. Per-request values from the HTTP API override it; the safety cap is 256 when unset. |
 | `tool_dispatch_url` | `--tool-dispatch-url` | not set | URL to POST tool calls to for server-side execution. Only configurable server-side, never per-request. |

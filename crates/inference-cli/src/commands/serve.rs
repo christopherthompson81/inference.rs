@@ -259,6 +259,7 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
     let mut app = InferenceRsServerRouterBuilder::new()
         .with_engine(&engine)
         .with_observability_config(server.observability_config())
+        .with_file_listing(server.allow_file_listing)
         .build()
         .await?;
     if let Some(ui) = ui {
@@ -267,6 +268,12 @@ pub(crate) async fn serve_engine(spec: EngineSpec, server: &ServerOptions) -> Re
             "UI available at http://{}:{}{UI_ROUTE}",
             server.host, server.port
         );
+        if !is_loopback_host(&server.host) {
+            warn!(
+                "The web UI is single-user: anyone who can reach {UI_ROUTE} sees every saved chat, and through them its \
+                 sessions and files. Pass --no-ui on a server other people use."
+            );
+        }
     }
     let options = ServeOptions {
         host: &server.host,
@@ -518,6 +525,13 @@ pub(crate) fn convert_to_model_selected(
             })
         }
     }
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host == "localhost"
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
 }
 
 /// An explicit multimodal model needs its projector, whether named, found beside the file or found by `quant`.
@@ -1467,6 +1481,16 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn only_loopback_hosts_skip_the_shared_ui_warning() {
+        for host in ["localhost", "127.0.0.1", "::1"] {
+            assert!(is_loopback_host(host), "{host}");
+        }
+        for host in ["0.0.0.0", "::", "192.168.1.20", "example.org"] {
+            assert!(!is_loopback_host(host), "{host}");
+        }
     }
 
     #[test]

@@ -1545,6 +1545,7 @@ impl futures::Stream for OpenResponsesStreamer {
                         ),
                     ))),
                     Response::File(file) => {
+                        tag_with_container(&self.state, &file, &self.streaming_state.response_id);
                         self.files.push(file.clone());
                         Poll::Ready(Some(ResponsesStreamItem::FileProduced(file)))
                     }
@@ -1590,6 +1591,15 @@ impl OpenResponsesStreamEvent {
             Self::Error { .. } => "error",
         }
     }
+}
+
+// The response cites its files under its container id; listing that container returns them and nothing else.
+fn tag_with_container(
+    state: &SharedInferenceRsState,
+    file: &inference_core::File,
+    response_id: &str,
+) {
+    let _ = state.try_tag_file(&file.id, &response_container_id(response_id));
 }
 
 fn response_container_id(response_id: &str) -> String {
@@ -2109,7 +2119,10 @@ async fn run_to_end(
                 );
             }
             Some(Response::BlockDenoisingProgress(_)) => {}
-            Some(Response::File(file)) => files.push(file),
+            Some(Response::File(file)) => {
+                tag_with_container(state, &file, &id);
+                files.push(file);
+            }
             other => break other,
         }
     };

@@ -314,7 +314,7 @@ pub fn list_container_files(
     container_id: &str,
 ) -> Result<ContainerFileListObject, ApiError> {
     let files = state
-        .try_list_files()
+        .try_list_tagged_files(container_id)
         .map_err(|error| store_error(state, error))?;
     Ok(ContainerFileListObject {
         object: LIST_OBJECT,
@@ -330,5 +330,29 @@ pub fn get_container_file(
     container_id: &str,
     file_id: &str,
 ) -> Result<ContainerFileMetadata, ApiError> {
-    find(state, file_id).map(|file| container_metadata(container_id, &file))
+    find_in_container(state, container_id, file_id)
+        .map(|file| container_metadata(container_id, &file))
+}
+
+/// A container file's body; a file the container's response did not cite is not found there.
+pub fn container_file_content(
+    state: &SharedInferenceRsState,
+    container_id: &str,
+    file_id: &str,
+) -> Result<FileBody, ApiError> {
+    find_in_container(state, container_id, file_id)?;
+    file_content(state, file_id)
+}
+
+fn find_in_container(
+    state: &SharedInferenceRsState,
+    container_id: &str,
+    file_id: &str,
+) -> Result<Arc<CoreFile>, ApiError> {
+    state
+        .try_list_tagged_files(container_id)
+        .map_err(|error| store_error(state, error))?
+        .into_iter()
+        .find(|file| file.id == file_id)
+        .ok_or_else(|| not_found(file_id))
 }

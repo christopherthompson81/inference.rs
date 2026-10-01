@@ -47,3 +47,7 @@ Clearing browser local storage for the site resets all UI state.
 ## Disabling the UI
 
 Pass `--no-ui` to `inference serve` to skip mounting the UI router. The HTTP API continues to serve normally.
+
+The UI is single-user: anyone who can reach `/ui` sees every saved chat, and through them the sessions and files those
+chats used. On a server other people use, pass `--no-ui` (`serve` warns when the UI is mounted on a non-loopback
+address) or put the server behind an authenticating proxy.

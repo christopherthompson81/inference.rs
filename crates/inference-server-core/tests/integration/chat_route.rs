@@ -304,6 +304,78 @@ fn multipart_upload(fields: &[(&str, Option<&str>, &str)]) -> Request<Body> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn only_an_opted_in_server_lists_files_and_a_container_lists_its_own() -> anyhow::Result<()> {
+    let dir = support::tiny_checkpoint()?;
+    let spec = serde_json::from_value(json!({
+        "model": {"MultimodalPlain": {"model_id": dir.path().to_string_lossy(), "dtype": "f32"}},
+        "runtime": {"device": "cpu"},
+    }))?;
+    let engine = inference_api::Engine::load(spec).await?;
+    let app = |listing| {
+        InferenceRsServerRouterBuilder::new()
+            .with_engine(&engine)
+            .with_file_listing(listing)
+            .build()
+    };
+    let get = |path: &str| Request::get(path).body(Body::empty());
+    let shared = app(false).await?;
+    let response = shared
+        .clone()
+        .oneshot(multipart_upload(&[
+            ("purpose", None, "user_data"),
+            ("file", Some("table.csv"), "a,b\n1,2\n"),
+        ]))
+        .await?;
+    let uploaded: Value = serde_json::from_str(&body_text(response).await?)?;
+    let id = uploaded["id"].as_str().unwrap().to_string();
+
+    let refused = shared.clone().oneshot(get("/v1/files")?).await?;
+    assert_eq!(refused.status(), StatusCode::FORBIDDEN);
+    assert!(body_text(refused).await?.contains("--allow-file-listing"));
+    let listed = app(true).await?.oneshot(get("/v1/files")?).await?;
+    assert_eq!(listed.status(), StatusCode::OK);
+    assert!(body_text(listed).await?.contains(&id));
+
+    let container_ids = |body: Value| -> Vec<String> {
+        body["data"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|file| file["id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let container = |name: &str| {
+        let shared = shared.clone();
+        let path = format!("/v1/containers/{name}/files");
+        async move {
+            let response = shared.oneshot(get(&path)?).await?;
+            anyhow::Ok(serde_json::from_str::<Value>(&body_text(response).await?)?)
+        }
+    };
+    assert!(container_ids(container("cntr_mine").await?).is_empty());
+    // A Responses run tags the files it cites with its container id.
+    assert!(engine.state().try_tag_file(&id, "cntr_mine")?);
+    assert_eq!(
+        container_ids(container("cntr_mine").await?),
+        vec![id.clone()]
+    );
+    assert!(container_ids(container("cntr_other").await?).is_empty());
+    for (name, status) in [
+        ("cntr_mine", StatusCode::OK),
+        ("cntr_other", StatusCode::NOT_FOUND),
+    ] {
+        for path in [
+            format!("/v1/containers/{name}/files/{id}"),
+            format!("/v1/containers/{name}/files/{id}/content"),
+        ] {
+            let response = shared.clone().oneshot(get(&path)?).await?;
+            assert_eq!(response.status(), status, "{path}");
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn files_upload_and_serve_their_content() -> anyhow::Result<()> {
     let dir = support::tiny_checkpoint()?;
     let app = router(dir.path()).await?;

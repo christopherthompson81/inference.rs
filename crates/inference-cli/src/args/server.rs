@@ -22,6 +22,11 @@ pub struct ServerOptions {
     #[serde(default)]
     pub no_ui: bool,
 
+    /// Let GET /v1/files list every stored file. The store is shared by every client, so only for trusted ones.
+    #[arg(long)]
+    #[serde(default)]
+    pub allow_file_listing: bool,
+
     /// Also expose the loaded model as an MCP server on this port (JSON-RPC 2.0 at POST /mcp).
     #[arg(long)]
     #[serde(default)]
@@ -71,6 +76,7 @@ impl Default for ServerOptions {
             port: 1234,
             host: "0.0.0.0".to_string(),
             no_ui: false,
+            allow_file_listing: false,
             mcp_port: None,
             max_tool_rounds: None,
             tool_dispatch_url: None,
