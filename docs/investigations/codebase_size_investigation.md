@@ -813,3 +813,33 @@ the new tests in all three languages caught; the alias now counts when a default
 OpenAI-shaped errors where the HTTP route and the Messages entries use the Anthropic envelope; fixed. A reloading model
 can be listed twice, so only its first card is marked default. Clean: every new signature agrees across the header, the
 Rust externs, C# and ctypes; the web UI lists the same models in the same order; MCP's text check is equivalent.
+
+## Run 27 - 2026-10-01 (time approximate)
+
+Question: of the ~8.4k lines in the ten X-LoRA model files (Run 18's largest duplicate), how much is one thing written
+ten times?
+
+Finding (each method's body hashed per file, the model type name normalized): the attention, MLP and decoder layers are
+model-specific, as in their plain twins; what repeats is the frame around them. The top-level `forward` (scaling pass,
+then the scaled pass over the full sequence without a KV cache or the new tokens with one, then the head, ~70 lines) is
+identical in seven files; Phi-3 differs only in passing its position ids, and the two quantized models only in calling
+the head `output`. The `ScalingsMaker::forward` wrapper is identical in nine, the cache selection at the top of
+`inner_forward` in all ten (up to the field name). No test ran any of it.
+
+Change: `ScalingsMaker` asks each model for `classifier`, `dtype`, `get_cache`, `inner_forward(XLoraPass)` and
+`lm_head`; `xlora_forward` and the scaling pass are free functions over `&dyn ScalingsMaker` in inference-nn, compiled
+once rather than per model, and `pass_cache` is the cache selection. Every model's pass now receives the position ids;
+only Phi-3 reads them, as before (the others ignored the context lens the old scaling pass handed them). The ten files go
+from 7,922 to 6,939 lines. IR of inference-models-llama (four of the ten): 793,066 -> 786,043 lines, so the win is
+the source and one tested copy of the control flow, not codegen.
+
+Tests: `without_a_classifier_one_unscaled_pass_runs_on_the_new_tokens`,
+`a_classifier_scores_a_scaling_pass_then_scales_the_new_tokens`,
+`without_a_kv_cache_both_passes_run_over_the_whole_sequence` (a recording model with a real classifier).
+
+Review: the conversion is faithful in all ten (branch for branch, the destructured names, each model's cache field and
+head). It found a bug the duplication had hidden: X-LoRA Gemma2's pass already ended in `lm_head` and the final
+softcap, and the frame applied `lm_head` again, so the classifier was fed logits and the head met vocab-sized input;
+Gemma2 X-LoRA could not have run on a real checkpoint. The pass now ends at the final norm and `lm_head` applies the
+head and the softcap, as the plain Gemma2 does. The tests also record offsets, position ids, no_kv_cache and which
+flash params a pass got, and `pass_cache` has its own test.
