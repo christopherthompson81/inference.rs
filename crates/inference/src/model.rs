@@ -379,6 +379,7 @@ impl Model {
             tool_choice,
             logits_processors: request.take_logits_processors(),
             host_tools: Vec::new(),
+            sequential_tool_calls: false,
             return_raw_logits,
             web_search_options: request.take_web_search_options(),
             enable_code_execution: request.enable_code_execution(),

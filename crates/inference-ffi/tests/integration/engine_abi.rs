@@ -1451,16 +1451,25 @@ fn tokens_sessions_and_quantization_operations() {
         &json!({"ggml_type": "no-such-type"}),
     );
     assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
-    let (status, report) = query(inference_calibration_status, engine);
+    let (status, report) = request_call(inference_calibration_status, engine, &json!({}));
     assert_eq!(
         (status, report["layers"].clone()),
         (INFERENCE_OK, json!(0)),
         "{report}"
     );
+    let elsewhere = json!({"model": "no-such-model"});
+    let (status, error) = request_call(inference_calibration_status, engine, &elsewhere);
+    assert_eq!(status, INFERENCE_ERR_NOT_FOUND, "{error}");
+    let (status, error) = request_call(
+        inference_re_isq,
+        engine,
+        &json!({"ggml_type": "q8_0", "model": "no-such-model"}),
+    );
+    assert_eq!(status, INFERENCE_ERR_NOT_FOUND, "{error}");
     let (status, stats) = query(inference_models_cache_stats, engine);
     assert_eq!(status, INFERENCE_OK, "{stats}");
     assert!(stats["data"][0]["encoder_cache"].is_object(), "{stats}");
-    let (status, error) = query(inference_calibration_start, engine);
+    let (status, error) = request_call(inference_calibration_start, engine, &json!({}));
     assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
     assert!(
         error["error"]["message"].as_str().unwrap().contains("ISQ"),
@@ -1488,7 +1497,7 @@ fn online_calibration_collects_from_traffic_and_applies() {
     let (status, engine) = load(&spec.to_string());
     assert_eq!(status, INFERENCE_OK, "{}", last_error());
 
-    let (status, started) = query(inference_calibration_start, engine);
+    let (status, started) = request_call(inference_calibration_start, engine, &json!({}));
     assert_eq!(
         (status, started["collecting"].clone()),
         (INFERENCE_OK, json!(true)),
@@ -1500,7 +1509,7 @@ fn online_calibration_collects_from_traffic_and_applies() {
     );
     let (status, _) = chat(engine, &chat_request(false));
     assert_eq!(status, INFERENCE_OK, "{}", last_error());
-    let (_, collected) = query(inference_calibration_status, engine);
+    let (_, collected) = request_call(inference_calibration_status, engine, &json!({}));
     assert!(collected["total_rows"].as_u64().unwrap() > 0, "{collected}");
     let dir = tempfile::tempdir().unwrap();
     let cimatrix = dir.path().join("traffic.cimatrix");
@@ -1508,7 +1517,7 @@ fn online_calibration_collects_from_traffic_and_applies() {
     let (status, applied) = request_call(inference_calibration_apply, engine, &request);
     assert_eq!(status, INFERENCE_OK, "{applied}");
     assert!(cimatrix.exists());
-    let (_, after) = query(inference_calibration_status, engine);
+    let (_, after) = request_call(inference_calibration_status, engine, &json!({}));
     assert_eq!(after["collecting"], json!(false), "{after}");
     // The requantized model still serves.
     let (status, _) = chat(engine, &chat_request(false));
@@ -2021,28 +2030,25 @@ fn a_registered_logits_processor_steers_the_requests_that_name_it() {
 
 const LATE_TOOL: &str = "late_lookup";
 
-// Tokens a processor forces from the start of each generation; a context that grew by more than one starts a new one.
+// Forces its tokens then EOS: the next token follows the longest start of them the context already ends with.
 struct Script {
     tokens: Vec<u32>,
-    // (next position, context length last seen)
-    state: std::sync::Mutex<(usize, usize)>,
 }
 
 unsafe extern "C" fn play_script(
     user_data: *mut std::ffi::c_void,
     logits: *mut f32,
     vocab_size: usize,
-    _: *const u32,
+    context: *const u32,
     context_len: usize,
 ) -> i32 {
     let script = unsafe { &*user_data.cast::<Script>() };
-    let mut state = script.state.lock().unwrap();
-    if context_len != state.1 + 1 {
-        state.0 = 0;
-    }
-    state.1 = context_len;
-    let next = script.tokens.get(state.0).copied().unwrap_or(TINY_EOS);
-    state.0 += 1;
+    let context = unsafe { std::slice::from_raw_parts(context, context_len) };
+    let played = (0..=script.tokens.len())
+        .rev()
+        .find(|&n| context.ends_with(&script.tokens[..n]))
+        .unwrap_or(0);
+    let next = script.tokens.get(played).copied().unwrap_or(TINY_EOS);
     let logits = unsafe { std::slice::from_raw_parts_mut(logits, vocab_size) };
     logits.fill(f32::NEG_INFINITY);
     logits[next as usize] = 0.0;
@@ -2087,7 +2093,6 @@ fn a_tool_registered_after_load_answers_the_requests_that_name_it() {
         .map(|t| t.as_u64().unwrap() as u32);
     let script = Box::new(Script {
         tokens: tokens.collect(),
-        state: std::sync::Mutex::new((0, 0)),
     });
     let script_data = std::ptr::from_ref(&*script).cast_mut().cast();
     assert_eq!(
@@ -2143,5 +2148,38 @@ fn a_tool_registered_after_load_answers_the_requests_that_name_it() {
     };
     assert_eq!(unregister_tool(LATE_TOOL), INFERENCE_OK);
     assert_eq!(unregister_tool(LATE_TOOL), INFERENCE_ERR_NOT_FOUND);
+    unsafe { inference_engine_free(engine) };
+}
+
+#[test]
+fn a_chat_tokenizes_as_its_template_renders_it_and_counts_the_same() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let (status, engine) = load(&spec(dir.path()));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+
+    let text = json!({"text": PROMPT, "add_special_tokens": false});
+    let (status, plain) = request_call(inference_tokenize, engine, &text);
+    assert_eq!(status, INFERENCE_OK, "{plain}");
+    let chat = json!({"model": "default", "messages": [{"role": "user", "content": PROMPT}]});
+    let (status, templated) = request_call(inference_tokenize_chat, engine, &chat);
+    assert_eq!(status, INFERENCE_OK, "{templated}");
+    let (plain, templated) = (
+        plain["tokens"].as_array().unwrap(),
+        templated["tokens"].as_array().unwrap(),
+    );
+    assert!(templated.len() > plain.len(), "{templated:?}");
+    assert!(
+        templated
+            .windows(plain.len())
+            .any(|window| window == plain.as_slice())
+    );
+
+    let anthropic = json!({"model": "default", "messages": [{"role": "user", "content": PROMPT}]});
+    let (status, counted) = request_call(inference_anthropic_count_tokens, engine, &anthropic);
+    assert_eq!(status, INFERENCE_OK, "{counted}");
+    assert_eq!(
+        counted["input_tokens"].as_u64(),
+        Some(templated.len() as u64)
+    );
     unsafe { inference_engine_free(engine) };
 }

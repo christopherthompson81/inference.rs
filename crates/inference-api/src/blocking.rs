@@ -240,9 +240,9 @@ impl BlockingEngine {
         })
     }
 
-    pub fn calibration_start_json(&self) -> Result<String, ApiError> {
-        self.call(&[], |engine, _| async move {
-            engine.calibration_start_json().await
+    pub fn calibration_start_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.calibration_start_json(&request).await
         })
     }
 
@@ -250,9 +250,9 @@ impl BlockingEngine {
         self.call(&[], |engine, _| async move { engine.cache_stats_json() })
     }
 
-    pub fn calibration_status_json(&self) -> Result<String, ApiError> {
-        self.call(&[], |engine, _| async move {
-            engine.calibration_status_json().await
+    pub fn calibration_status_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.calibration_status_json(&request).await
         })
     }
 
@@ -265,6 +265,12 @@ impl BlockingEngine {
     pub fn tokenize_json(&self, request: &[u8]) -> Result<String, ApiError> {
         self.call(request, |engine, request| async move {
             engine.tokenize_json(&request).await
+        })
+    }
+
+    pub fn tokenize_chat_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        self.call(request, |engine, request| async move {
+            engine.tokenize_chat_json(&request).await
         })
     }
 

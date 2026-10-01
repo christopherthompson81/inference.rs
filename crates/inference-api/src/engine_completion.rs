@@ -148,7 +148,7 @@ pub(crate) fn parse_request(
         anyhow::bail!("echo and best_of need a text prompt, not token ids.");
     }
 
-    let stop_toks = convert_stop_tokens(oairequest.stop_seqs);
+    let stop_toks = convert_stop_tokens(oairequest.stop_seqs, oairequest.stop_token_ids);
 
     let is_streaming = oairequest.stream.unwrap_or(false);
 
@@ -203,6 +203,7 @@ pub(crate) fn parse_request(
             tools: oairequest.tools,
             logits_processors: None,
             host_tools: Vec::new(),
+            sequential_tool_calls: false,
             return_raw_logits: false,
             web_search_options: None,
             enable_code_execution: false,

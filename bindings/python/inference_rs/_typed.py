@@ -118,23 +118,26 @@ class Engine:
     def cancel_response(self, response_id: str) -> types.ResponseResource:
         return from_json(types.ResponseResource, self.json.cancel_response(response_id))
 
-    def re_isq(self, ggml_type: str) -> types.ReIsqResponse:
+    def re_isq(self, ggml_type: str, model: str | None = None) -> types.ReIsqResponse:
         """Requantizes a model that loaded with ISQ; answers once the engine has queued it."""
-        return from_json(types.ReIsqResponse, self.json.re_isq(json.dumps({"ggml_type": ggml_type})))
+        request = json.dumps({"ggml_type": ggml_type, "model": model})
+        return from_json(types.ReIsqResponse, self.json.re_isq(request))
 
-    def calibration_start(self) -> types.CalibrationStatus:
+    def calibration_start(self, model: str | None = None) -> types.CalibrationStatus:
         """Starts collecting activation statistics from the requests the engine serves."""
-        return from_json(types.CalibrationStatus, self.json.calibration_start())
+        request = json.dumps({"model": model})
+        return from_json(types.CalibrationStatus, self.json.calibration_start(request))
 
-    def calibration_status(self) -> types.CalibrationStatus:
-        return from_json(types.CalibrationStatus, self.json.calibration_status())
+    def calibration_status(self, model: str | None = None) -> types.CalibrationStatus:
+        request = json.dumps({"model": model})
+        return from_json(types.CalibrationStatus, self.json.calibration_status(request))
 
     def cache_stats(self) -> types.CacheStats:
         return from_json(types.CacheStats, self.json.cache_stats())
 
-    def calibration_apply(self, save_cimatrix: str | None = None) -> types.CalibrationStatus:
+    def calibration_apply(self, save_cimatrix: str | None = None, model: str | None = None) -> types.CalibrationStatus:
         """Requantizes from the collected statistics; returns the status as it stood before."""
-        request = {} if save_cimatrix is None else {"save_cimatrix": str(save_cimatrix)}
+        request = {"model": model, "save_cimatrix": None if save_cimatrix is None else str(save_cimatrix)}
         return from_json(types.CalibrationStatus, self.json.calibration_apply(json.dumps(request)))
 
     def list_sessions(self) -> types.SessionList:
@@ -174,6 +177,10 @@ class Engine:
     def tokenize(self, text: str, add_special_tokens: bool = True, model: str | None = None) -> list[int]:
         request = {"text": text, "add_special_tokens": add_special_tokens, "model": model}
         return from_json(types.TokenizeResponse, self.json.tokenize(json.dumps(request))).tokens
+
+    def tokenize_chat(self, request: types.ChatCompletionRequest | str) -> list[int]:
+        """The prompt tokens a chat request renders to, with its tools, reasoning controls and the chat template."""
+        return from_json(types.TokenizeResponse, self.json.tokenize_chat(to_json(request))).tokens
 
     def detokenize(self, tokens: Sequence[int], skip_special_tokens: bool = True, model: str | None = None) -> str:
         request = {"tokens": list(tokens), "skip_special_tokens": skip_special_tokens, "model": model}

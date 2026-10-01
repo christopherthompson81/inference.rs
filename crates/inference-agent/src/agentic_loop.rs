@@ -723,6 +723,8 @@ impl ToolOutcome {
 struct DispatchCtx<'a> {
     engine: &'a Arc<Engine>,
     host_tools: &'a HashMap<String, ToolCallbackWithTool>,
+    /// The request asked for its calls one at a time (`parallel_tool_calls: false`).
+    sequential: bool,
     user_sender: &'a tokio::sync::mpsc::Sender<Response>,
     web_search_options: Option<&'a WebSearchOptions>,
     dispatch_url: Option<&'a str>,
@@ -1053,7 +1055,7 @@ async fn run_round(
         .zip(dispatchers)
         .zip(approvals)
         .enumerate()
-        .partition(|(_, ((tc, _), _))| shares_sandbox(&tc.function.name));
+        .partition(|(_, ((tc, _), _))| ctx.sequential || shares_sandbox(&tc.function.name));
     // Calls into the session's sandbox keep the model's order, since one may build on what another left there.
     let sequential = async {
         let mut done = Vec::with_capacity(in_order.len());
@@ -1140,6 +1142,7 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
     let agent_approval_notifier = request.agent_approval_notifier.clone();
     let required_files: Vec<RequestedFile> = request.files.clone().unwrap_or_default();
     let host_tool_list = std::mem::take(&mut request.host_tools);
+    let sequential = request.sequential_tool_calls;
     let input_files = request.input_files.clone();
 
     let mut session_id = request
@@ -1313,6 +1316,7 @@ pub(crate) async fn agentic_loop(this: Arc<Engine>, mut request: NormalRequest) 
         let dispatch_ctx = DispatchCtx {
             engine: &this_clone,
             host_tools: &host_tools,
+            sequential,
             user_sender: &user_sender,
             web_search_options: web_search_options.as_ref(),
             dispatch_url: dispatch_url.as_deref(),

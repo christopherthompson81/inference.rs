@@ -376,6 +376,11 @@ class TypedEngine(unittest.TestCase):
 
     def test_runtime_operations_are_typed(self):
         tokens = self.engine.tokenize("Reply with ok")
+        chat = self.engine.tokenize_chat(t.ChatCompletionRequest(messages=[t.Message(role="user", content="Reply with ok")]))
+        self.assertGreater(len(chat), len(tokens))
+        with self.assertRaises(ir.InferenceError) as elsewhere:
+            self.engine.calibration_status(model="no-such-model")
+        self.assertEqual(elsewhere.exception.status, ir.Status.NOT_FOUND)
         self.assertTrue(tokens and all(isinstance(token, int) for token in tokens))
         # The tiny tokenizer has no decoder, so its word-boundary markers come back as they are.
         self.assertEqual(self.engine.detokenize(tokens).replace("\u2581", " "), "Reply with ok")

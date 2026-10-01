@@ -48,11 +48,11 @@ impl ModelGenerationDefaults {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-/// Stop sequences or ids.
-pub enum StopTokens {
-    Seqs(Vec<String>),
-    Ids(Vec<u32>),
+/// What ends a generation besides EOS: strings, and token ids.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct StopTokens {
+    pub seqs: Vec<String>,
+    pub ids: Vec<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

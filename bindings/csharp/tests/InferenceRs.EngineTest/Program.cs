@@ -242,6 +242,10 @@ internal static class Program
         Check("a deleted session is NotFound", Throws(() => engine.GetSession("cs-session"))?.Status == InferenceStatus.NotFound);
 
         Check("calibration reports its status", JsonNode.Parse(engine.CalibrationStatus())!["collecting"] is not null);
+        Check("calibration of an unknown model is NotFound",
+            Throws(() => engine.CalibrationStatus("""{"model": "no-such-model"}"""))?.Status == InferenceStatus.NotFound);
+        var chatTokens = JsonNode.Parse(engine.TokenizeChat("""{"messages": [{"role": "user", "content": "Reply with ok"}]}"""))!["tokens"]!.AsArray();
+        Check("a chat tokenizes to more than its text", chatTokens.Count > tokens.AsArray().Count);
         var cacheStats = JsonNode.Parse(engine.CacheStats())!["data"]!.AsArray();
         Check("cache stats list the model's encoder cache", cacheStats.Count > 0 && cacheStats[0]!["encoder_cache"] is JsonObject);
         var badIsq = Throws(() => engine.ReIsq("""{"ggml_type": "no-such-type"}"""));

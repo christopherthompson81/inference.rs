@@ -395,11 +395,11 @@ class JsonEngine:
     def re_isq(self, request_json: str) -> str:
         return self._call("inference_re_isq", request_json)
 
-    def calibration_start(self) -> str:
-        return self._get("inference_calibration_start")
+    def calibration_start(self, request_json: str = "{}") -> str:
+        return self._call("inference_calibration_start", request_json)
 
-    def calibration_status(self) -> str:
-        return self._get("inference_calibration_status")
+    def calibration_status(self, request_json: str = "{}") -> str:
+        return self._call("inference_calibration_status", request_json)
 
     def cache_stats(self) -> str:
         """Each loaded model's cumulative prefix- and encoder-cache counters; diff two readings for a span."""
@@ -462,6 +462,10 @@ class JsonEngine:
 
     def tokenize(self, request_json: str) -> str:
         return self._call("inference_tokenize", request_json)
+
+    def tokenize_chat(self, request_json: str) -> str:
+        """Tokenizes a chat completion request as the chat template renders it, to {"tokens"}."""
+        return self._call("inference_tokenize_chat", request_json)
 
     def detokenize(self, request_json: str) -> str:
         return self._call("inference_detokenize", request_json)

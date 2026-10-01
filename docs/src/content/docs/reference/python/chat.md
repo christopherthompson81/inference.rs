@@ -173,6 +173,7 @@ Chat completion request following OpenAI's specification
 | `min_p` | `float \| None` | optional |
 | `model` | `str \| None` | optional |
 | `n` | `int \| None` | optional |
+| `parallel_tool_calls` | `bool \| None` | optional |
 | `presence_penalty` | `float \| None` | optional |
 | `reasoning_effort` | `ReasoningEffort \| None` | optional |
 | `repetition_penalty` | `float \| None` | optional |
@@ -180,6 +181,7 @@ Chat completion request following OpenAI's specification
 | `seed` | `int \| None` | optional |
 | `session_id` | `str \| None` | optional |
 | `stop` | `StopTokens \| None` | optional |
+| `stop_token_ids` | `list[int] \| None` | optional |
 | `stream` | `bool \| None` | optional |
 | `temperature` | `float \| None` | optional |
 | `tool_choice` | `ToolChoice \| None` | optional |
@@ -284,6 +286,7 @@ Legacy OpenAI compatible text completion request
 | `repetition_penalty` | `float \| None` | optional |
 | `seed` | `int \| None` | optional |
 | `stop` | `StopTokens \| None` | optional |
+| `stop_token_ids` | `list[int] \| None` | optional |
 | `stream` | `bool \| None` | optional |
 | `suffix` | `str \| None` | optional |
 | `temperature` | `float \| None` | optional |

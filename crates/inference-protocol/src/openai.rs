@@ -1256,10 +1256,18 @@ pub struct ChatCompletionRequest {
     #[schema(example = json!(Option::None::<bool>))]
     #[serde(default)]
     pub truncate_sequence: Option<bool>,
+    /// Token ids that end generation, alongside `stop`.
+    #[schema(example = json!(Option::None::<Vec<u32>>))]
+    #[serde(default)]
+    pub stop_token_ids: Option<Vec<u32>>,
     /// Logits processors the engine's host registered, applied by name in this order after the penalties.
     #[schema(example = json!(Option::None::<Vec<String>>))]
     #[serde(default)]
     pub logits_processors: Option<Vec<String>>,
+    /// `false` runs a round's tool calls one at a time, in the model's order, rather than all at once.
+    #[schema(example = json!(Option::None::<bool>))]
+    #[serde(default)]
+    pub parallel_tool_calls: Option<bool>,
     /// Tools the engine's host registered after load, offered to the model by name and answered by the host.
     #[schema(example = json!(Option::None::<Vec<String>>))]
     #[serde(default)]
@@ -1620,6 +1628,10 @@ pub struct CompletionRequest {
     #[schema(example = json!(Option::None::<bool>))]
     #[serde(default)]
     pub truncate_sequence: Option<bool>,
+    /// Token ids that end generation, alongside `stop`.
+    #[schema(example = json!(Option::None::<Vec<u32>>))]
+    #[serde(default)]
+    pub stop_token_ids: Option<Vec<u32>>,
     /// Logits processors the engine's host registered, applied by name in this order after the penalties.
     #[schema(example = json!(Option::None::<Vec<String>>))]
     #[serde(default)]

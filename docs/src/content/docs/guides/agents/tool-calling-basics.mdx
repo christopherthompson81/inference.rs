@@ -452,6 +452,10 @@ let request = RequestBuilder::new()
 </TabItem>
 </Tabs>
 
+### Running a round's calls in order
+
+The engine runs every call of a round at once. A request with `"parallel_tool_calls": false` runs them one at a time, in the order the model gave them, for tools that depend on each other's effects. Calls into the session's sandbox (Python and shell) always keep the model's order. The model may still make several calls in a round; the flag only changes how the engine runs them.
+
 ### Dispatch URL
 
 `--tool-dispatch-url` POSTs each tool call to an external URL instead of running it in-process:

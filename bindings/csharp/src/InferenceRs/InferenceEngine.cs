@@ -303,10 +303,11 @@ public sealed unsafe class InferenceEngine : IDisposable
     }
 
     /// <summary>Starts collecting activation statistics from the requests the engine serves.</summary>
-    public string CalibrationStart()
+    public string CalibrationStart(string requestJson = "{}")
     {
         using var engine = Borrow();
-        var status = NativeMethods.inference_calibration_start(engine.Handle, out var response);
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_calibration_start(engine.Handle, request.Pointer, request.Length, out var response);
         return Text(status, response, nameof(NativeMethods.inference_calibration_start));
     }
 
@@ -318,10 +319,11 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Text(status, response, nameof(NativeMethods.inference_models_cache_stats));
     }
 
-    public string CalibrationStatus()
+    public string CalibrationStatus(string requestJson = "{}")
     {
         using var engine = Borrow();
-        var status = NativeMethods.inference_calibration_status(engine.Handle, out var response);
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_calibration_status(engine.Handle, request.Pointer, request.Length, out var response);
         return Text(status, response, nameof(NativeMethods.inference_calibration_status));
     }
 
@@ -400,6 +402,15 @@ public sealed unsafe class InferenceEngine : IDisposable
         using var request = new PinnedBytes(requestJson);
         var status = NativeMethods.inference_tokenize(engine.Handle, request.Pointer, request.Length, out var response);
         return Text(status, response, nameof(NativeMethods.inference_tokenize));
+    }
+
+    /// <summary>Tokenizes a chat completion request as the model's chat template renders it, to <c>{"tokens"}</c>.</summary>
+    public string TokenizeChat(string requestJson)
+    {
+        using var engine = Borrow();
+        using var request = new PinnedBytes(requestJson);
+        var status = NativeMethods.inference_tokenize_chat(engine.Handle, request.Pointer, request.Length, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_tokenize_chat));
     }
 
     public string Detokenize(string requestJson)

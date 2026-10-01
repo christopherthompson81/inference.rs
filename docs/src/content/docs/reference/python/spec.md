@@ -520,6 +520,7 @@ Select a model for running via auto loader
 | `arch` | `SpeechLoaderType` | required |
 | `dac_model_id` | `str \| None` | optional |
 | `dtype` | `ModelDType \| None` | `ModelDType.AUTO` |
+| `generation` | `SpeechGenerationSpec \| None` | optional |
 | `model_id` | `str` | required |
 
 
@@ -603,6 +604,7 @@ One of several models an engine serves; unset settings fall back to `runtime`'s.
 | `device_layers` | `list[str] \| None` | optional |
 | `encoder_cache_memory_bytes` | `int \| None` | optional |
 | `hf_config_overrides` | `dict[str, Any] \| None` | optional |
+| `hf_revision` | `str \| None` | optional |
 | `isq` | `str \| None` | optional |
 | `jinja_explicit` | `str \| None` | optional |
 | `max_model_len` | `int \| None` | optional |
@@ -748,6 +750,7 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `disable_eos_stop` | `bool \| None` | optional |
 | `encoder_cache_memory_bytes` | `int \| None` | optional |
 | `hf_config_overrides` | `dict[str, Any] \| None` | optional |
+| `hf_revision` | `str \| None` | optional |
 | `isq` | `str \| None` | optional |
 | `jinja_explicit` | `str \| None` | optional |
 | `log` | `str \| None` | optional |

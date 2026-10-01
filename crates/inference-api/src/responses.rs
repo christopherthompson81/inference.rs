@@ -1929,7 +1929,7 @@ async fn parse_openresponses_request(
     tx: Sender<Response>,
 ) -> Result<(Request, Vec<Message>, RequestContext)> {
     let state = chat.state.clone();
-    // parallel_tool_calls=false is accepted best-effort; max_tool_calls has no engine support
+    // max_tool_calls has no engine support
     if oairequest.max_tool_calls.is_some() {
         anyhow::bail!(
             "max_tool_calls is not supported. \
@@ -2106,7 +2106,9 @@ async fn parse_openresponses_request(
         enable_thinking,
         truncate_sequence,
         logits_processors: oairequest.logits_processors,
+        stop_token_ids: None,
         host_tools: oairequest.host_tools,
+        parallel_tool_calls: oairequest.parallel_tool_calls,
         reasoning_effort,
         chat_template_kwargs: None,
         files: oairequest.files,

@@ -835,6 +835,7 @@ pub async fn build_speech_pipeline(
             dac_model_id: builder.dac_model_id.clone(),
             arch: builder.loader_type,
             dtype: builder.dtype,
+            generation: None,
         }),
         token_source: builder.token_source.clone(),
         hf_revision: builder.hf_revision.clone(),

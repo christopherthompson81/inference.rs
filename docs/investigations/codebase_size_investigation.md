@@ -1142,3 +1142,63 @@ Tests: `a_tool_registered_after_load_answers_the_requests_that_name_it` in the e
 callback; unnamed: never called; clashing with a declared tool: refused; unregistered: 400 on `host_tools`) and in the
 ABI (registration through `inference_host_tool`, duplicate refused, chat answered, unregister twice NOT_FOUND), and the
 C# and Python registration checks.
+
+## Run 40 - 2026-10-01 (time approximate)
+
+Question: what does moving the `inference` SDK onto inference-api take, and what has no route there yet?
+
+Finding (a read-only mapping of every public SDK item onto inference-api): most of the SDK maps directly; `Model`
+wraps `Engine`, the builders produce `EngineSpec` + `EngineCallbacks`, the message builders produce a
+`ChatCompletionRequest` plus `MediaAttachments`, streaming reuses `ChatStream`/`ChatStreamEvent`, and agent.rs goes
+(host tools, `max_tool_rounds`, the engine's parallel round). `examples/rust/Cargo.toml` has 59 examples.
+
+Gaps with no inference-api route today:
+- Engine (needs ABI and bindings): tokenizing chat messages (`TokenizeRequest` takes text only), a `model` on re-ISQ
+  and calibration, `hf_revision`, inline topology and ordering (paths only), the speech generation config, a
+  best-effort paged-cache size, stop token ids, a per-request `tool_dispatch_url`, sequential tool rounds
+  (`parallel_tool_calls`), f32 speech samples (PCM16 today).
+- Rust-only (no ABI form): decoded media attachments (`DynamicImage`, `AudioInput`, pre-decoded `VideoInput`),
+  `Default` on the request types, a private field blocking `LoadLoraAdapterRequest` literals, custom `Pipeline`
+  injection, `Model::inner()` access to core.
+- Kept in the SDK as conveniences: an async tool adapter, `chat_with_approval` (stream, answer approvals through
+  `resolve_approval`), `with_shell_skill(path)` (upload, then reference), `generate_structured`, `save_file`.
+
+Behaviour changes the move brings: Ask permission needs streaming, the engine names forked sessions, sessions are
+scoped by owner rather than model, the engine's throughput logging defaults on. `inference-macros` emits SDK agent
+types, so it changes with `Model`. Planned phases: A engine additions, B builders to specs, C `Model` on `Engine`, D
+remaining examples, E drop the core dependency, F docs.
+
+## Run 41 - 2026-10-01 (time approximate)
+
+Change (ABI 0.0.20), the engine gaps worth keeping from Run 40:
+- `Engine::tokenize_chat` / `inference_tokenize_chat`: a chat request tokenized as its template renders it, with
+  tools, reasoning controls and the generation prompt. The Anthropic count-tokens path now calls the same function.
+- A `model` on `ReIsqRequest` and `CalibrationApplyRequest`, and `CalibrationTarget {model}` for calibration start
+  and status; the ABI's start and status take a request (an ABI break, allowed at 0.0.x), HTTP takes `?model=`.
+- `hf_revision` on `runtime` (the single `model`) and on each `ModelSpec`, through to `ModelLoaderConfig`, where both
+  sites had hard-coded `None`; `runtime.hf_revision` with `models` is refused.
+- `stop_token_ids` beside `stop`: core's `StopTokens` became `{seqs, ids}` so a request can carry both.
+- `parallel_tool_calls: false` (chat, and Responses where it was accepted and ignored) runs a round's calls one at a
+  time in the model's order, the only reading the engine can honour for calls it runs; the model may still make several.
+- `ModelSelected::Speech { generation }`: Dia's sampling per load, each unset field keeping its default.
+Dropped, as decided: inline topology and ordering, a best-effort paged cache size, a per-request dispatch URL, f32
+speech samples.
+
+Dead end: the scripted-token test helper tracked its position by context length and restarted when the engine sampled
+the same context twice (output "aab" for "abcdefgh"); it now plays the longest start of its script the context ends
+with, so it holds no state.
+
+Review:
+- `operations::send` had started checking the named model was loaded, which broke on-demand reload for tokenize and
+  detokenize (409 instead of waking the model) and bought nothing, since `get_sender`'s `ModelNotFound` already maps
+  to NOT_FOUND. Removed; the not-found tests still pass.
+- Stop ids went through the prefix check meant for single-token stop strings, so a newline id was refused, and an
+  id past the vocabulary got a message about an empty string. Ids now only have to be inside the vocabulary.
+- Header: `tokenize_chat` cannot resolve `media://N` sources (the call takes no buffers).
+Not fixed: the server has no `/tokenize` or `/detokenize` routes (it never did; count_tokens is Anthropic's).
+
+Tests: `a_chat_tokenizes_as_its_template_renders_it_and_counts_the_same` (ABI: chat tokens wrap the text's, and match
+count_tokens), calibration and re-ISQ of an unknown model are NOT_FOUND (ABI, C#, Python),
+`a_stop_token_id_ends_the_generation_where_it_is_produced` (scripted tokens, stop on the third: 3 tokens, `stop`;
+an out-of-vocabulary id refused), `a_request_that_turns_parallel_calls_off_runs_them_one_at_a_time` (most
+concurrent = 1, model order kept), the hf_revision spec rules, `a_speech_generation_spec_overrides_only_what_it_sets`.
