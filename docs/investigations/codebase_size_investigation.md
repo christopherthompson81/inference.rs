@@ -843,3 +843,21 @@ softcap, and the frame applied `lm_head` again, so the classifier was fed logits
 Gemma2 X-LoRA could not have run on a real checkpoint. The pass now ends at the final norm and `lm_head` applies the
 head and the softcap, as the plain Gemma2 does. The tests also record offsets, position ids, no_kv_cache and which
 flash params a pass got, and `pass_cache` has its own test.
+
+## Run 28 - 2026-10-01 (time approximate)
+
+Question: Run 18 listed Qwen2-VL vs Qwen2.5-VL text as 32 differing lines of 597. Is it one model?
+
+Finding (`diff` of the two `text.rs` with the type names normalized): yes. The differences are a local renamed
+`cos_sin_relocated`, an import moved, and the cache-layout test's values. The two configs' text fields, serde
+defaults, `MRopeScaling`, `AttentionType` and the sliding-window resolution are identical too; only `VisionConfig`
+differs (Qwen2.5-VL's windowed vision tower). The vision models and the model forward really differ and stay apart.
+
+Change: `qwen2vl::config::QwenVlConfig<V>` holds the shared fields over the family member's vision config, each model
+aliasing its own `Config`; Qwen2.5-VL builds `qwen2vl::text::Qwen2VLTextModel`, whose constructors take any
+`QwenVlConfig<V>` (the forward isn't generic and compiles once; the constructors compile per vision config). `qwen2_5_vl/text.rs` (597 lines) goes, and the
+config loses its copy of the shared half; its test cases join the Qwen2-VL ones
+(`sliding_layers_around_a_full_one_keep_their_windows`, the 5-layer window resolution, sliding attention with no
+window). `Qwen2_5VLRotaryEmbedding` in inference-nn, a copy of Qwen2-VL's that only this text model used, goes too. A type with a
+default parameter (`Config<V = VisionConfig>`) was the first try: `json_config!`'s inherent `from_json` on two
+instantiations made `Config::from_json` ambiguous, hence the named generic and one alias per model.

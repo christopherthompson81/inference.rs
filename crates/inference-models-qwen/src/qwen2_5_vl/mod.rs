@@ -8,9 +8,9 @@ use std::{
 };
 
 use crate::qwen2vl::Qwen2VLVisionSpecificArgs;
+use crate::qwen2vl::text::Qwen2VLTextModel;
 use candle_core::{Context, Device, IndexOp, Result, Tensor};
 use inference_quant::ShardedVarBuilder;
-use text::Qwen2_5VLTextModel;
 use vision::Qwen2_5VLVisionModel;
 
 use crate::{
@@ -33,13 +33,12 @@ use crate::{
 };
 
 pub mod config;
-pub mod text;
 pub mod vision;
 
 pub use config::Config;
 
 pub struct Qwen2_5VLModel {
-    text: Qwen2_5VLTextModel,
+    text: Qwen2VLTextModel,
     vision: Qwen2_5VLVisionModel,
     vision_prefix: &'static str,
     spatial_merge_size: usize,
@@ -68,7 +67,7 @@ impl Qwen2_5VLModel {
             vision_vb.set_device(normal_loading_metadata.real_device.clone()),
             &normal_loading_metadata.mapper.get_comm_for(0)?,
         )?;
-        let text = Qwen2_5VLTextModel::new(
+        let text = Qwen2VLTextModel::new(
             cfg,
             vb.clone(),
             is_gptx,

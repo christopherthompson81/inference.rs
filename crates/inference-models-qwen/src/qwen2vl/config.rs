@@ -38,8 +38,11 @@ pub struct MRopeScaling {
     pub mrope_section: Vec<usize>,
 }
 
+pub type Config = QwenVlConfig<VisionConfig>;
+
+/// The text model and token ids Qwen2-VL and Qwen2.5-VL share; `V` is the family member's vision config.
 #[derive(Debug, Clone, serde::Deserialize)]
-pub struct Config {
+pub struct QwenVlConfig<V> {
     pub vocab_size: usize,
     pub hidden_size: usize,
     pub intermediate_size: usize,
@@ -58,7 +61,7 @@ pub struct Config {
     pub max_window_layers: usize,
     #[serde(default)]
     pub layer_types: Option<Vec<AttentionType>>,
-    pub vision_config: VisionConfig,
+    pub vision_config: V,
     pub rope_scaling: MRopeScaling,
     pub quantization_config: Option<QuantizedConfig>,
     pub image_token_id: u32,
@@ -86,7 +89,7 @@ fn resolve_layer_sliding_windows(
     });
     if layer_types.len() != num_hidden_layers {
         candle_core::bail!(
-            "Qwen2-VL layer_types has {} entries for {} layers",
+            "layer_types has {} entries for {} layers",
             layer_types.len(),
             num_hidden_layers
         );
@@ -97,15 +100,15 @@ fn resolve_layer_sliding_windows(
             AttentionType::FullAttention => Ok(None),
             AttentionType::SlidingAttention => sliding_window.map(Some).ok_or_else(|| {
                 candle_core::Error::msg(
-                    "Qwen2-VL sliding_attention requires use_sliding_window and sliding_window",
+                    "sliding_attention requires use_sliding_window and sliding_window",
                 )
             }),
         })
         .collect()
 }
 
-impl Config {
-    pub(super) fn layer_sliding_windows(&self) -> candle_core::Result<Vec<Option<usize>>> {
+impl<V> QwenVlConfig<V> {
+    pub(crate) fn layer_sliding_windows(&self) -> candle_core::Result<Vec<Option<usize>>> {
         resolve_layer_sliding_windows(
             self.num_hidden_layers,
             self.use_sliding_window,
@@ -130,6 +133,10 @@ mod tests {
             resolve_layer_sliding_windows(4, false, Some(128), 2, None)?,
             vec![None; 4]
         );
+        assert_eq!(
+            resolve_layer_sliding_windows(5, true, Some(256), 3, None)?,
+            vec![None, None, None, Some(256), Some(256)]
+        );
         Ok(())
     }
 
@@ -145,16 +152,18 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
-            resolve_layer_sliding_windows(
-                1,
-                false,
-                Some(128),
-                0,
-                Some(vec![AttentionType::SlidingAttention]),
-            )
-            .is_err()
-        );
+        for (use_sliding_window, sliding_window) in [(false, Some(128)), (true, None)] {
+            assert!(
+                resolve_layer_sliding_windows(
+                    1,
+                    use_sliding_window,
+                    sliding_window,
+                    0,
+                    Some(vec![AttentionType::SlidingAttention]),
+                )
+                .is_err()
+            );
+        }
     }
 
     #[test]
