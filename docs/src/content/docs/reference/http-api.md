@@ -145,6 +145,7 @@ Semantics:
 - Files expire 30 minutes after creation. Each loaded model's store keeps at most 4096 files and 1 GiB of file bodies (as stored: base64 for binary files); past either, the oldest go first. Uploads and chat input files go to the default model's store, generated images to the image model's.
 - `GET /v1/files/{id}/content` status codes: 200 body returned, 404 unknown or expired id, 410 body was elided, 422 the file is an error placeholder.
 - `GET /v1/containers/{container_id}/files/{file_id}/content` is an OpenAI-compatible alias backed by the same file store.
+- The store is shared by every client of a server, and the server has no notion of who a client is. A file id (random) is what grants access: `GET /v1/files` does not list the store unless the server is started with `--allow-file-listing` (it answers 403 otherwise), and a container's routes only list and serve the files that response cited. The web UI is single-user and shows every saved chat, with the file ids in them, so a shared server should run with `--no-ui`; put it behind an authenticating proxy if clients must not reach each other's ids at all.
 - Each `agentic_tool_calls` entry in a chat response carries a `file_ids` array attributing files to that tool round.
 
 For examples and supported file-type behavior, see [OpenAI-compatible file inputs](/guides/agents/file-inputs/).

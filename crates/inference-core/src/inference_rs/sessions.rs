@@ -38,6 +38,32 @@ impl InferenceRs {
         Ok(out)
     }
 
+    /// Tags a file, wherever it is stored, so `try_list_tagged_files(tag)` finds it; false if it is not stored.
+    pub fn try_tag_file(&self, id: &str, tag: &str) -> Result<bool, InferenceRsError> {
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| InferenceRsError::EnginePoisoned)?;
+        Ok(engines
+            .values()
+            .any(|instance| instance.file_store.attach_to_session(id, tag)))
+    }
+
+    /// The non-expired files carrying `tag` (a session id, or a Responses container id), oldest first per engine.
+    pub fn try_list_tagged_files(
+        &self,
+        tag: &str,
+    ) -> Result<Vec<Arc<files::File>>, InferenceRsError> {
+        let engines = self
+            .engines
+            .read()
+            .map_err(|_| InferenceRsError::EnginePoisoned)?;
+        Ok(engines
+            .values()
+            .flat_map(|instance| instance.file_store.list_for_session(tag))
+            .collect())
+    }
+
     /// Returns whether the file existed.
     pub fn remove_file(&self, id: &str) -> bool {
         self.try_remove_file(id).unwrap_or(false)

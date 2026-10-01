@@ -1,6 +1,7 @@
 //! OpenAI-compatible Files routes: HTTP framing over the engine's file store.
 
 use axum::{
+    Extension,
     extract::{Multipart, Path, State, multipart::MultipartRejection},
     http::{StatusCode, header},
     response::{IntoResponse, Response},
@@ -16,6 +17,15 @@ use crate::{
     handler_core::{ApiError, ApiErrorHttp, ApiErrorKind, json_response, openai_error_response},
     types::ExtractedInferenceRsState,
 };
+
+/// Whether `GET /v1/files` lists the store; off unless the server opts in, since it shows every client's files.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FileListing(pub bool);
+
+const FILE_LISTING_DISABLED: &str = "Listing files is off on this server: the store is shared by every client. \
+    Fetch a file by the id it was given, list a Responses container's files, or enable listing \
+    (`--allow-file-listing`, or `with_file_listing(true)` on the router builder).";
+const FILE_LISTING_DISABLED_CODE: &str = "file_listing_disabled";
 
 #[cfg_attr(test, utoipa::path(
     post,
@@ -148,11 +158,23 @@ pub async fn get_file_content(
     path = "/v1/files",
     responses(
         (status = 200, description = "List of file metadata", body = FileListObject),
+        (status = 403, description = "File listing is off on this server"),
         (status = 500, description = "Internal server error"),
     )
 ))]
-pub async fn list_files(State(state): ExtractedInferenceRsState) -> Response {
-    json_response(files_api::list_files(&state))
+pub async fn list_files(
+    State(state): ExtractedInferenceRsState,
+    listing: Option<Extension<FileListing>>,
+) -> Response {
+    match listing {
+        Some(Extension(FileListing(true))) => json_response(files_api::list_files(&state)),
+        _ => openai_error_response(ApiError::new(
+            ApiErrorKind::Forbidden,
+            FILE_LISTING_DISABLED,
+            Some(FILE_LISTING_DISABLED_CODE),
+            None,
+        )),
+    }
 }
 
 #[cfg_attr(test, utoipa::path(
@@ -232,9 +254,13 @@ pub async fn get_container_file(
 ))]
 pub async fn get_container_file_content(
     State(state): ExtractedInferenceRsState,
-    Path((_container_id, file_id)): Path<(String, String)>,
+    Path((container_id, file_id)): Path<(String, String)>,
 ) -> Response {
-    serve_bytes(files_api::file_content(&state, &file_id))
+    serve_bytes(files_api::container_file_content(
+        &state,
+        &container_id,
+        &file_id,
+    ))
 }
 
 fn serve_bytes(body: Result<files_api::FileBody, ApiError>) -> Response {

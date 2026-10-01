@@ -379,6 +379,8 @@ INFERENCE_API inference_status inference_approval_resolve(const inference_engine
 INFERENCE_API inference_status inference_file_upload(const inference_engine *engine, const uint8_t *data, size_t len,
                                                     const char *filename, const char *mime_type, const char *purpose,
                                                     inference_string **out_response);
+/* Every stored file, for the host application. The HTTP server only lists them when started with --allow-file-listing,
+ * since its store is shared by every client; a host relaying this to several users should scope it itself. */
 INFERENCE_API inference_status inference_files_list(const inference_engine *engine, inference_string **out_response);
 INFERENCE_API inference_status inference_file_get(const inference_engine *engine, const char *file_id,
                                                  size_t file_id_len, inference_string **out_response);

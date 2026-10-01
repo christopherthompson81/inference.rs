@@ -186,7 +186,7 @@ Not supported. inference.rs has no built-in moderation model; run one as a separ
 
 ## Files and Assistants APIs
 
-`POST /v1/files` multipart uploads are supported for user-provided input files. Use `purpose="user_data"` for OpenAI-compatible request attachments. Uploaded files, inline request files, URL-fetched request files, agent-produced files, and generated images (`response_format: "url"`) are available through `GET /v1/files`, `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, and `DELETE /v1/files/{id}`.
+`POST /v1/files` multipart uploads are supported for user-provided input files. Use `purpose="user_data"` for OpenAI-compatible request attachments. Uploaded files, inline request files, URL-fetched request files, agent-produced files, and generated images (`response_format: "url"`) are available by id through `GET /v1/files/{id}`, `GET /v1/files/{id}/content`, and `DELETE /v1/files/{id}`. `GET /v1/files` lists the store only on a server started with `--allow-file-listing`, since the store is shared by every client; otherwise it answers 403.
 
 Text-like UTF-8 files are exposed to the model as bounded decoded previews, with additional text available during agentic runs when file access is active. Binary files are stored, downloadable, and mounted into shell/code workdirs when those tools are active, but inference.rs does not perform OpenAI's private PDF/image/spreadsheet extraction pipeline. The Assistants API is not supported; the inference.rs equivalent is the session-based agentic loop on the chat completions endpoint.
 

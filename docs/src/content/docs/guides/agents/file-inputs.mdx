@@ -23,7 +23,7 @@ For field-level compatibility notes, see [OpenAI compatibility](/reference/opena
 
 Uploaded, inline, URL-fetched, and SDK-provided files are visible through the server file endpoints:
 
-- [`GET /v1/files`](/reference/http-api-generated/operations/list_files/)
+- [`GET /v1/files`](/reference/http-api-generated/operations/list_files/) (only on a server started with `--allow-file-listing`; the store is shared by every client)
 - [`GET /v1/files/{id}`](/reference/http-api-generated/operations/get_file/)
 - [`GET /v1/files/{id}/content`](/reference/http-api-generated/operations/get_file_content/)
 

@@ -113,6 +113,7 @@ pub struct InferenceRsServerRouterBuilder {
     engine: Option<inference_api::Engine>,
     observability: ObservabilityConfig,
     lora_adapter_api: LoraAdapterApiConfig,
+    file_listing: bool,
 }
 
 impl Default for InferenceRsServerRouterBuilder {
@@ -132,6 +133,7 @@ impl Default for InferenceRsServerRouterBuilder {
             engine: None,
             observability: ObservabilityConfig::default(),
             lora_adapter_api: LoraAdapterApiConfig::from_env(),
+            file_listing: false,
         }
     }
 }
@@ -264,6 +266,13 @@ impl InferenceRsServerRouterBuilder {
         self
     }
 
+    /// Lets `GET /v1/files` list every stored file. Off by default: the store is shared by every client, and file ids
+    /// otherwise reach only the clients they were handed to.
+    pub fn with_file_listing(mut self, file_listing: bool) -> Self {
+        self.file_listing = file_listing;
+        self
+    }
+
     /// Sets server observability options.
     pub fn with_observability_config(mut self, observability: ObservabilityConfig) -> Self {
         self.observability = observability;
@@ -326,7 +335,9 @@ impl InferenceRsServerRouterBuilder {
             );
         }
 
-        router = router.layer(middleware::from_fn_with_state(observability, observe_http));
+        router = router
+            .layer(Extension(crate::files::FileListing(self.file_listing)))
+            .layer(middleware::from_fn_with_state(observability, observe_http));
         if let Some(engine) = self.engine {
             router = router.layer(Extension(engine));
         }

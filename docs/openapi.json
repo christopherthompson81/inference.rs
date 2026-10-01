@@ -469,6 +469,9 @@
               }
             }
           },
+          "403": {
+            "description": "File listing is off on this server"
+          },
           "500": {
             "description": "Internal server error"
           }
