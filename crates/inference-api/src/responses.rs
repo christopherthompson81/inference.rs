@@ -968,7 +968,8 @@ pub struct OpenResponsesStreamer {
     output_item_added: bool,
     reasoning_item_id: String,
     reasoning_item_added: bool,
-    reasoning_item_done: bool,
+    /// How the reasoning item ended, once it has.
+    reasoning_item_done: Option<ItemStatus>,
     store: bool,
     /// Taken when the stream finishes and stored for `previous_response_id`.
     conversation_history: Option<Vec<Message>>,
@@ -1012,7 +1013,7 @@ impl OpenResponsesStreamer {
             output_item_added: false,
             reasoning_item_id: format!("rs_{}", Uuid::new_v4()),
             reasoning_item_added: false,
-            reasoning_item_done: false,
+            reasoning_item_done: None,
             store,
             conversation_history: Some(history),
             request_context: context,
@@ -1074,11 +1075,16 @@ impl OpenResponsesStreamer {
         self.shell_output_items.len() + usize::from(self.reasoning_item_added)
     }
 
-    fn finish_reasoning_item(&mut self, events: &mut Vec<OpenResponsesStreamEvent>) {
-        if !self.reasoning_item_added || self.reasoning_item_done {
+    // `status` is `completed` when the reply moved on from reasoning, else how the run ended.
+    fn finish_reasoning_item(
+        &mut self,
+        events: &mut Vec<OpenResponsesStreamEvent>,
+        status: ItemStatus,
+    ) {
+        if !self.reasoning_item_added || self.reasoning_item_done.is_some() {
             return;
         }
-        self.reasoning_item_done = true;
+        self.reasoning_item_done = Some(status);
         let output_index = self.reasoning_output_index();
         let seq = self.streaming_state.next_sequence_number();
         events.push(OpenResponsesStreamEvent::ReasoningTextDone {
@@ -1095,7 +1101,7 @@ impl OpenResponsesStreamer {
             item: OutputItem::reasoning(
                 self.reasoning_item_id.clone(),
                 self.accumulated_reasoning.clone(),
-                ItemStatus::Completed,
+                status,
             ),
         });
     }
@@ -1123,11 +1129,8 @@ impl OpenResponsesStreamer {
             resource.output.push(OutputItem::reasoning(
                 self.reasoning_item_id.clone(),
                 self.accumulated_reasoning.clone(),
-                if self.reasoning_item_done {
-                    ItemStatus::Completed
-                } else {
-                    unfinished_item_status(status)
-                },
+                self.reasoning_item_done
+                    .unwrap_or_else(|| unfinished_item_status(status)),
             ));
         }
         resource.output.extend(self.function_call_items.clone());
@@ -1277,7 +1280,10 @@ impl futures::Stream for OpenResponsesStreamer {
                             }
 
                             if choice.delta.content.is_some() || choice.delta.tool_calls.is_some() {
-                                self.finish_reasoning_item(&mut events_to_emit);
+                                self.finish_reasoning_item(
+                                    &mut events_to_emit,
+                                    ItemStatus::Completed,
+                                );
                             }
                             let message_output_index = self.message_output_index();
 
@@ -1386,7 +1392,11 @@ impl futures::Stream for OpenResponsesStreamer {
                                     .iter()
                                     .map(|choice| choice.finish_reason.as_deref()),
                             );
-                            self.finish_reasoning_item(&mut events_to_emit);
+                            // still reasoning when the run stopped: it ended with the run
+                            self.finish_reasoning_item(
+                                &mut events_to_emit,
+                                finished_item_status(status),
+                            );
                             let message_output_index = self.message_output_index();
                             // Emit content_part.done
                             if self.content_part_added {
@@ -1653,6 +1663,8 @@ fn chat_response_to_response_resource(
     let mut reasoning_parts = Vec::new();
 
     for choice in &chat_resp.choices {
+        let choice_status =
+            finished_item_status(finished_status([Some(choice.finish_reason.as_str())]));
         let mut content_items = Vec::new();
 
         // Handle text content
@@ -1668,10 +1680,22 @@ fn chat_response_to_response_resource(
         // Handle reasoning content
         if let Some(reasoning) = &choice.message.reasoning_content {
             reasoning_parts.push(reasoning.clone());
+            // Reasoning followed by a reply or tool call finished; reasoning alone ended with its choice.
+            // reasoning models report no reply as `Some("")`
+            let replied = choice
+                .message
+                .content
+                .as_deref()
+                .is_some_and(|text| !text.is_empty());
+            let moved_on = replied || choice.message.tool_calls.is_some();
             output_items.push(OutputItem::reasoning(
                 format!("rs_{}", Uuid::new_v4()),
                 reasoning.clone(),
-                ItemStatus::Completed,
+                if moved_on {
+                    ItemStatus::Completed
+                } else {
+                    choice_status
+                },
             ));
         }
 
@@ -1696,7 +1720,7 @@ fn chat_response_to_response_resource(
             let item = OutputItem::message(
                 format!("msg_{}", Uuid::new_v4()),
                 content_items,
-                finished_item_status(finished_status([Some(choice.finish_reason.as_str())])),
+                choice_status,
             );
             output_items.push(item);
         }
@@ -2483,6 +2507,86 @@ mod tests {
             panic!("expected one output text content part");
         };
         assert_eq!(text, "hello");
+    }
+
+    fn chat_response(choices: Vec<inference_core::Choice>) -> ChatCompletionResponse {
+        ChatCompletionResponse {
+            id: "chatcmpl_test".to_string(),
+            choices,
+            created: 1,
+            model: "base-model".to_string(),
+            system_fingerprint: "local".to_string(),
+            object: "chat.completion".to_string(),
+            usage: inference_core::Usage {
+                completion_tokens: 0,
+                prompt_tokens: 0,
+                total_tokens: 0,
+                prompt_tokens_details: None,
+                avg_tok_per_sec: 0.0,
+                avg_prompt_tok_per_sec: 0.0,
+                avg_compl_tok_per_sec: 0.0,
+                total_time_sec: 0.0,
+                total_prompt_time_sec: 0.0,
+                total_completion_time_sec: 0.0,
+            },
+            adapter_generation: None,
+            agentic_tool_calls: None,
+            files: None,
+            session_id: None,
+        }
+    }
+
+    fn choice(finish_reason: &str, content: Option<&str>) -> inference_core::Choice {
+        inference_core::Choice {
+            finish_reason: finish_reason.to_string(),
+            stop_sequence: None,
+            index: 0,
+            message: inference_core::ResponseMessage {
+                content: content.map(str::to_string),
+                role: "assistant".to_string(),
+                tool_calls: None,
+                reasoning_content: Some("thinking".to_string()),
+            },
+            logprobs: None,
+        }
+    }
+
+    #[test]
+    fn reasoning_cut_off_by_the_cap_is_incomplete_but_reasoning_before_a_reply_is_not() {
+        let convert = |choice| {
+            chat_response_to_response_resource(
+                &chat_response(vec![choice]),
+                "resp_test".to_string(),
+                "base-model".to_string(),
+                None,
+                &RequestContext::default(),
+                &[],
+                &[],
+            )
+        };
+        let reasoning_status = |response: &ResponseResource| {
+            response
+                .output
+                .iter()
+                .find(|item| matches!(item, OutputItem::Reasoning { .. }))
+                .map(OutputItem::status)
+        };
+
+        let capped = convert(choice(FINISH_REASON_LENGTH, None));
+        assert_eq!(capped.status, ResponseStatus::Incomplete);
+        assert_eq!(reasoning_status(&capped), Some(ItemStatus::Incomplete));
+        // what a tag-based reasoning model reports when the cap lands before its reply
+        let capped_empty = convert(choice(FINISH_REASON_LENGTH, Some("")));
+        assert_eq!(
+            reasoning_status(&capped_empty),
+            Some(ItemStatus::Incomplete)
+        );
+
+        let capped_reply = convert(choice(FINISH_REASON_LENGTH, Some("ok")));
+        assert_eq!(reasoning_status(&capped_reply), Some(ItemStatus::Completed));
+
+        let finished = convert(choice("stop", None));
+        assert_eq!(reasoning_status(&finished), Some(ItemStatus::Completed));
     }
 
     #[test]
