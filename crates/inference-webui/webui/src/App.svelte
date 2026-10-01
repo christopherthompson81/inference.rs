@@ -6,6 +6,8 @@
   import SettingsPanel from "./lib/components/SettingsPanel.svelte";
   import ToolsPanel from "./lib/components/ToolsPanel.svelte";
   import StatusBar from "./lib/components/StatusBar.svelte";
+  import SignIn from "./lib/components/SignIn.svelte";
+  import { authStore } from "./lib/stores/auth.svelte";
   import { chatStore } from "./lib/stores/chat.svelte";
   import { modelStore } from "./lib/stores/models.svelte";
   import { settingsStore } from "./lib/stores/settings.svelte";
@@ -102,3 +104,7 @@
 
   <StatusBar />
 </div>
+
+{#if authStore.required}
+  <SignIn />
+{/if}

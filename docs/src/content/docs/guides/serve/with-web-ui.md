@@ -48,6 +48,9 @@ Clearing browser local storage for the site resets all UI state.
 
 Pass `--no-ui` to `inference serve` to skip mounting the UI router. The HTTP API continues to serve normally.
 
-The UI is single-user: anyone who can reach `/ui` sees every saved chat, and through them the sessions and files those
-chats used. On a server other people use, pass `--no-ui` (`serve` warns when the UI is mounted on a non-loopback
-address) or put the server behind an authenticating proxy.
+Without [API keys](/reference/http-api/#authentication) the UI is single-user: anyone who can reach `/ui` sees every
+saved chat, and through them the sessions and files those chats used (`serve` warns when it is mounted on a
+non-loopback address). With keys, the UI asks for one, signs the browser in with a cookie, and each key's owner sees
+only its own saved chats, sessions and files; **sign out** in the status bar ends the session. Chats saved before the
+server had keys belong to no owner and don't show. Uploaded media and generated speech sit under random names in
+shared directories, so anyone signed in who is given such a URL can fetch it.

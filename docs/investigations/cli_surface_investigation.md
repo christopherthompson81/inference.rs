@@ -739,3 +739,49 @@ server read up to the body limit; auth is now the outermost layer. (4) `count_to
 (6) A 401 on `/v1/messages` used the OpenAI envelope; the `Bearer` scheme is now case-insensitive. Documented rather
 than changed: keys don't gate server-wide operations (any key may unload a model), and owners share the stores'
 capacity caps, so one can evict another's oldest entries.
+
+## Run 28 — 2026-09-30 (time approximate)
+
+**Question:** #158's remainder, last part: the web UI and the MCP server under keys, so a keyed `serve` no longer has to
+drop them.
+
+**Finding:** the UI talks to the main API directly (chat streaming, approvals, `<img src>` for file content), so the
+browser needs credentials that ride on requests it can't add headers to, and its own data (saved chats, the current
+chat and model) was one global `AppState`. `Router::layer` covers only routes that exist when it is called, so the UI
+nested after `build()` and MCP's separate router were outside the API's auth layer.
+
+**Change:** `auth::Auth` holds the keys and the signed-in browser sessions; `POST /auth/session` exchanges a key for an
+`HttpOnly`, `SameSite=Strict` cookie naming a 12-hour server-side session (two v4 UUIDs, never the key), `DELETE`
+signs out, and the auth layer accepts the cookie wherever it accepts a key. `auth::require(router, auth, public)` is
+the one way routers are guarded (outermost, with a per-router policy for keyless requests): the API's probes and sign
+in, the UI's page and assets (everything but `/api/`, `/uploads`, `/speech`), nothing on MCP. One `Auth` is shared by
+the API builder (`with_auth`), `UiOptions.auth` and `ServeOptions.auth`. The UI keeps an `AppState` per owner, made on
+first use (`AppState::for_owner`: its own chats dir under `chats/owners/<sandbox_key>`, its own current chat and
+model), picked per request by a middleware after auth; its session fork, export and import act for that owner. MCP's
+chat tool runs through `engine.for_owner`. The Svelte UI wraps `fetch` (`authedFetch`): a 401 shows a sign-in prompt,
+which posts the key and reloads. `serve` no longer refuses keys with the UI or MCP.
+
+**Negative result:** the first UI test fetched `/ui/` and got the API's 401: the nested UI root is `/ui`, and `/ui/`
+falls to the API router's fallback, which is guarded. `/ui` and `/ui/index.html` load keyless.
+
+**Left:** UI uploads and generated speech live in shared directories under random names; any signed-in owner holding
+a URL can fetch one (the names only appear in their owner's chats).
+
+**Tests:** `a_browser_signs_in_with_a_key_and_out_again` (unknown key 401, cookie is `HttpOnly`/`SameSite=Strict` and
+not the key, works in place of a key, a forged token 401, sign out invalidates it), `mcp_requires_a_key_on_a_keyed_server`,
+`each_owner_keeps_its_own_web_ui_chats` (page keyless, UI data 401 without a key, one owner's chat absent from the
+other's list and 404 to load).
+
+**Review:** no bypass found in the public-path predicates (axum's nest strips `/ui`; every data route is an exact
+match; `HEAD` is gated). Fixed: (1) `SameSite=Strict` stops other sites, not other ports or subdomains of the same
+host, which could submit forms (multipart, bodiless POSTs need no preflight) with the victim's cookie, or plant a second
+`inference_session` with a narrower `Path` that the parser picked first, fixing the victim's UI on the planter's
+owner. A cookie now counts for a state-changing request only from the same origin (`Sec-Fetch-Site: same-origin`, else
+`Origin` matching `Host`), and two session cookies count as none. (2) Sign-ins were unbounded (12 h each, pruned only
+on the next sign-in, under one global lock); now at most 32 per owner, oldest dropped. (3) The cookie gets `Secure`
+behind a TLS proxy (`x-forwarded-proto: https`); MCP accepts keys only, never the cookie (`Guard { public, cookies }`,
+`KEY_ONLY_GUARD`). (4) `Debug` on `Auth` printed live tokens; it now names the owners only. (5) `/ui/` fell to the API
+fallback (a bare JSON 401 on a keyed server); it redirects to `/ui`. A sign-out control shows when signed in
+(`signed_in` in the UI capabilities), and `DELETE /auth/session` passes keyless so an expired cookie still gets
+cleared. `/auth/session` is in the OpenAPI document. Documented: open-mode chats aren't any owner's, UI media and
+speech are shared by URL.

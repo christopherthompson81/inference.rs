@@ -17,6 +17,8 @@ pub struct ServeOptions<'a> {
     pub port: u16,
     /// Serves MCP on its own port too; it must differ from `port`.
     pub mcp_port: Option<u16>,
+    /// The keys MCP requires, as the HTTP router does; `None` for an open server.
+    pub auth: Option<std::sync::Arc<crate::auth::Auth>>,
 }
 
 /// Serves `app` until the listener fails, with an MCP server on `mcp_port` when one is given.
@@ -25,9 +27,10 @@ pub async fn serve(app: Router, engine: &Engine, options: ServeOptions<'_>) -> R
         host,
         port,
         mcp_port,
+        auth,
     } = options;
     if let Some(mcp_port) = mcp_port {
-        spawn_mcp_server(engine, host, mcp_port, port).await?;
+        spawn_mcp_server(engine, auth, host, mcp_port, port).await?;
     }
     let listener = tokio::net::TcpListener::bind(format!("{host}:{port}"))
         .await
@@ -40,6 +43,7 @@ pub async fn serve(app: Router, engine: &Engine, options: ServeOptions<'_>) -> R
 
 async fn spawn_mcp_server(
     engine: &Engine,
+    auth: Option<std::sync::Arc<crate::auth::Auth>>,
     host: &str,
     mcp_port: u16,
     http_port: u16,
@@ -50,7 +54,7 @@ async fn spawn_mcp_server(
     let listener = tokio::net::TcpListener::bind(format!("{host}:{mcp_port}"))
         .await
         .with_context(|| format!("Failed to bind MCP server to {host}:{mcp_port}"))?;
-    let router = create_mcp_router(engine);
+    let router = create_mcp_router(engine, auth);
     info!("MCP server listening on http://{host}:{mcp_port}{MCP_ROUTE}");
     info!("MCP protocol version is {MCP_PROTOCOL_VERSION}");
     tokio::spawn(async move {

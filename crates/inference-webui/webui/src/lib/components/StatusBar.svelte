@@ -1,6 +1,7 @@
 <script lang="ts">
   import { chatStore } from "../stores/chat.svelte";
   import { modelStore } from "../stores/models.svelte";
+  import { signOut } from "../services/auth";
 
   let elapsedTick = $state(0);
   $effect(() => {
@@ -40,6 +41,9 @@
     {/if}
     {#if modelStore.models.length > 0}
       <span><span class="text-gray-400 dark:text-gray-500">loaded</span> <span class="text-gray-700 dark:text-gray-200">{modelStore.models.length}</span></span>
+    {/if}
+    {#if modelStore.capabilities.signed_in}
+      <button class="hover:text-gray-700 dark:hover:text-gray-200" onclick={() => signOut()}>sign out</button>
     {/if}
   </div>
 </footer>

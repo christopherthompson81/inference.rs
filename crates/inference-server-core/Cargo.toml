@@ -53,6 +53,8 @@ inference-quant.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
 tower = { workspace = true, features = ["util"] }
+# the keyed tests cover the UI mounted beside the API, as `serve` mounts it
+inference-webui.workspace = true
 
 [features]
 default = ["swagger-ui", "all-models"]

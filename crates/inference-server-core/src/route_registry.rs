@@ -59,6 +59,9 @@ pub const SYSTEM_DOCTOR_ROUTE: RouteInfo =
     RouteInfo::new("/v1/system/doctor", "POST", RouteKind::InferenceRs);
 pub const HEALTH_ROUTE: RouteInfo = RouteInfo::new("/health", "GET", RouteKind::InferenceRs);
 pub const ROOT_ROUTE: RouteInfo = RouteInfo::new("/", "GET", RouteKind::InferenceRs);
+/// Signs a browser in with an API key (POST) or out (DELETE).
+pub const AUTH_SESSION_ROUTE: RouteInfo =
+    RouteInfo::new("/auth/session", "POST, DELETE", RouteKind::InferenceRs);
 pub const RE_ISQ_ROUTE: RouteInfo = RouteInfo::new("/re_isq", "POST", RouteKind::InferenceRs);
 pub const CALIBRATION_START_ROUTE: RouteInfo =
     RouteInfo::new("/calibration/start", "POST", RouteKind::InferenceRs);
@@ -124,6 +127,7 @@ pub const SESSION_ROUTE: RouteInfo = RouteInfo::new(
 pub const INFERENCE_RS_API_ROUTES: &[RouteInfo] = &[
     ROOT_ROUTE,
     HEALTH_ROUTE,
+    AUTH_SESSION_ROUTE,
     MODELS_ROUTE,
     LIST_LORA_ADAPTERS_ROUTE,
     UNLOAD_MODEL_ROUTE,

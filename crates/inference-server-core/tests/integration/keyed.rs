@@ -6,7 +6,9 @@ use axum::{
     http::{Request, StatusCode, header::AUTHORIZATION},
 };
 use inference_server_core::{
-    auth::ApiKeys, inference_server_router_builder::InferenceRsServerRouterBuilder,
+    auth::{ApiKeys, Auth, SESSION_COOKIE},
+    inference_server_router_builder::InferenceRsServerRouterBuilder,
+    mcp_server::{MCP_ROUTE, create_mcp_router},
 };
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -236,5 +238,236 @@ async fn a_stored_response_is_read_and_continued_only_by_its_owner() -> anyhow::
         status_and_body(&app, follow_up(ALPHA)).await?.0,
         StatusCode::OK
     );
+    Ok(())
+}
+
+fn with_cookie(mut request: Request<Body>, cookie: &str) -> Request<Body> {
+    request
+        .headers_mut()
+        .insert("cookie", cookie.parse().expect("cookie"));
+    request
+}
+
+/// Signs a browser in with `key` and returns the cookie it then carries.
+async fn sign_in(app: &Router, key: &str) -> anyhow::Result<String> {
+    let request = Request::post("/auth/session")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"key": key}).to_string()))?;
+    let response = app.clone().oneshot(request).await?;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let set_cookie = response.headers()["set-cookie"].to_str()?.to_string();
+    assert!(
+        set_cookie.contains("HttpOnly") && set_cookie.contains("SameSite=Strict"),
+        "{set_cookie}"
+    );
+    let pair = set_cookie.split(';').next().unwrap().to_string();
+    assert!(pair.starts_with(&format!("{SESSION_COOKIE}=")), "{pair}");
+    assert!(
+        !pair.contains(key),
+        "the cookie names a session, never the key"
+    );
+    Ok(pair)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_browser_signs_in_with_a_key_and_out_again() -> anyhow::Result<()> {
+    let (_dir, engine) = tiny_engine().await?;
+    let app = keyed_router(&engine).await?;
+    let wrong = Request::post("/auth/session")
+        .header("content-type", "application/json")
+        .body(Body::from(json!({"key": "key-gamma"}).to_string()))?;
+    assert_eq!(
+        status_and_body(&app, wrong).await?.0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let cookie = sign_in(&app, ALPHA).await?;
+    let models = || Request::get("/v1/models").body(Body::empty()).unwrap();
+    assert_eq!(
+        status_and_body(&app, with_cookie(models(), &cookie))
+            .await?
+            .0,
+        StatusCode::OK
+    );
+    let forged = format!("{SESSION_COOKIE}=0123456789abcdef");
+    assert_eq!(
+        status_and_body(&app, with_cookie(models(), &forged))
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    // another port or subdomain of this host is the same site, so only the origin tells its forms apart
+    let upload = || {
+        let request = multipart_upload(&[
+            ("purpose", None, "user_data"),
+            ("file", Some("table.csv"), "a,b\n"),
+        ]);
+        with_cookie(request, &cookie)
+    };
+    let mut same_site = upload();
+    same_site
+        .headers_mut()
+        .insert("sec-fetch-site", "same-site".parse()?);
+    assert_eq!(
+        status_and_body(&app, same_site).await?.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let mut other_port = upload();
+    other_port
+        .headers_mut()
+        .insert("origin", "http://localhost:8080".parse()?);
+    other_port
+        .headers_mut()
+        .insert("host", "localhost:1234".parse()?);
+    assert_eq!(
+        status_and_body(&app, other_port).await?.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let mut same_origin = upload();
+    same_origin
+        .headers_mut()
+        .insert("sec-fetch-site", "same-origin".parse()?);
+    assert_eq!(status_and_body(&app, same_origin).await?.0, StatusCode::OK);
+    let planted = format!("{cookie}; {SESSION_COOKIE}=0123456789abcdef");
+    assert_eq!(
+        status_and_body(&app, with_cookie(models(), &planted))
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let sign_out = with_cookie(
+        Request::delete("/auth/session").body(Body::empty())?,
+        &cookie,
+    );
+    assert_eq!(
+        status_and_body(&app, sign_out).await?.0,
+        StatusCode::NO_CONTENT
+    );
+    assert_eq!(
+        status_and_body(&app, with_cookie(models(), &cookie))
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn mcp_requires_a_key_on_a_keyed_server() -> anyhow::Result<()> {
+    let (_dir, engine) = tiny_engine().await?;
+    let auth = Auth::new(ApiKeys::parse(KEYS)?);
+    let app = create_mcp_router(&engine, auth.clone());
+    let initialize = || {
+        Request::post(MCP_ROUTE)
+            .header("content-type", "application/json")
+            .body(Body::from(
+                json!({"jsonrpc": "2.0", "id": 1, "method": "initialize"}).to_string(),
+            ))
+            .unwrap()
+    };
+    assert_eq!(
+        status_and_body(&app, initialize()).await?.0,
+        StatusCode::UNAUTHORIZED
+    );
+    let (status, body) = status_and_body(&app, with_key(initialize(), BETA)).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    // no browser talks MCP, so a signed-in cookie is no key there
+    let token = auth.as_ref().unwrap().sign_in(ALPHA).unwrap();
+    let cookie = format!("{SESSION_COOKIE}={token}");
+    assert_eq!(
+        status_and_body(&app, with_cookie(initialize(), &cookie))
+            .await?
+            .0,
+        StatusCode::UNAUTHORIZED
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn each_owner_keeps_its_own_web_ui_chats() -> anyhow::Result<()> {
+    let cache = tempfile::tempdir()?;
+    // the UI keeps its chats under the cache dir; nextest runs each test in its own process
+    unsafe { std::env::set_var("XDG_CACHE_HOME", cache.path()) };
+    let (_dir, engine) = tiny_engine().await?;
+    let auth = Auth::new(ApiKeys::parse(KEYS)?);
+    let api = InferenceRsServerRouterBuilder::new()
+        .with_engine(&engine)
+        .with_auth(auth.clone())
+        .build()
+        .await?;
+    let options = inference_webui::UiOptions {
+        auth,
+        ..Default::default()
+    };
+    let app = inference_webui::mount(api, &engine, options, Default::default()).await?;
+
+    for page in ["/ui", "/ui/index.html"] {
+        let request = Request::get(page).body(Body::empty())?;
+        let status = status_and_body(&app, request).await?.0;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "{page} loads to show the sign-in prompt"
+        );
+    }
+    let slash = Request::get("/ui/").body(Body::empty())?;
+    assert_eq!(
+        status_and_body(&app, slash).await?.0,
+        StatusCode::PERMANENT_REDIRECT
+    );
+    let unkeyed = Request::get("/ui/api/list_chats").body(Body::empty())?;
+    assert_eq!(
+        status_and_body(&app, unkeyed).await?.0,
+        StatusCode::UNAUTHORIZED
+    );
+
+    let (alpha, beta) = (sign_in(&app, ALPHA).await?, sign_in(&app, BETA).await?);
+    let models = with_cookie(
+        Request::get("/ui/api/list_models").body(Body::empty())?,
+        &alpha,
+    );
+    let (_, models) = status_and_body(&app, models).await?;
+    let model = serde_json::from_str::<Value>(&models)?["models"][0]["name"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let new_chat = with_cookie(
+        send_json("POST", "/ui/api/new_chat", "", json!({"model": model})),
+        &alpha,
+    );
+    let (status, body) = status_and_body(&app, new_chat).await?;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let chat_id = serde_json::from_str::<Value>(&body)?["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let list = |cookie: &str| {
+        with_cookie(
+            Request::get("/ui/api/list_chats")
+                .body(Body::empty())
+                .unwrap(),
+            cookie,
+        )
+    };
+    assert!(
+        status_and_body(&app, list(&alpha))
+            .await?
+            .1
+            .contains(&chat_id)
+    );
+    assert!(
+        !status_and_body(&app, list(&beta))
+            .await?
+            .1
+            .contains(&chat_id)
+    );
+    let load = with_cookie(
+        send_json("POST", "/ui/api/load_chat", "", json!({"id": chat_id})),
+        &beta,
+    );
+    assert_eq!(status_and_body(&app, load).await?.0, StatusCode::NOT_FOUND);
     Ok(())
 }

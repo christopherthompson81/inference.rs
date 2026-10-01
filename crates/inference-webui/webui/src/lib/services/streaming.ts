@@ -1,3 +1,4 @@
+import { apiRoot, authedFetch } from "./auth";
 import type {
   ChatCompletionMessage,
   ChatCompletionChunk,
@@ -8,15 +9,7 @@ import type {
   StreamCallbacks,
 } from "../types";
 
-function getApiBase(): string {
-  const base = document.querySelector("base")?.getAttribute("href") ?? "/ui/";
-  // Go from /ui/ up to /
-  try {
-    return new URL("../", new URL(base, window.location.origin)).pathname;
-  } catch {
-    return "/";
-  }
-}
+const getApiBase = apiRoot;
 
 export async function streamChatCompletion(
   messages: ChatCompletionMessage[],
@@ -59,7 +52,7 @@ export async function streamChatCompletion(
 
   let response: Response;
   try {
-    response = await fetch(url, {
+    response = await authedFetch(url, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -192,7 +185,7 @@ export async function resolveAgentApproval(
   };
   if (message) body.message = message;
 
-  const response = await fetch(
+  const response = await authedFetch(
     `${apiBase}v1/agent/approvals/${encodeURIComponent(approvalId)}`,
     {
       method: "POST",

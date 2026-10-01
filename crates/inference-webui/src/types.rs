@@ -136,7 +136,11 @@ impl GenerationParams {
 pub struct AppState {
     pub inference: Arc<InferenceRs>,
     pub models: IndexMap<String, UiModelInfo>,
+    /// The model a new owner's UI starts on.
+    pub default_model: Option<String>,
     pub current: RwLock<Option<String>>,
+    /// Who this UI state is for; its chats and the sessions it forks and restores are that owner's.
+    pub owner: Option<String>,
     pub chats_dir: String,
     /// Directory for storing generated speech wav files
     pub speech_dir: String,
@@ -156,9 +160,33 @@ pub struct AppState {
 }
 
 const CHAT_FILE_EXT: &str = "json";
+const OWNER_CHATS_DIR: &str = "owners";
 const CHAT_SESSION_FILE_EXT: &str = "session.json";
 
 impl AppState {
+    /// This UI state as `owner` sees it: the same models and tools, with that owner's own chats directory.
+    pub fn for_owner(&self, owner: &str) -> std::io::Result<Self> {
+        let key = inference_core::sandbox_key(Some(owner), "");
+        let chats_dir = Path::new(&self.chats_dir).join(OWNER_CHATS_DIR).join(key);
+        std::fs::create_dir_all(&chats_dir)?;
+        Ok(Self {
+            inference: self.inference.clone(),
+            models: self.models.clone(),
+            default_model: self.default_model.clone(),
+            current: RwLock::new(self.default_model.clone()),
+            owner: Some(owner.to_string()),
+            chats_dir: chats_dir.to_string_lossy().to_string(),
+            speech_dir: self.speech_dir.clone(),
+            current_chat: RwLock::new(None),
+            default_params: self.default_params.clone(),
+            search_enabled: self.search_enabled,
+            search_embedding_model: self.search_embedding_model,
+            code_execution_enabled: self.code_execution_enabled,
+            shell_enabled: self.shell_enabled,
+            tool_dispatch_url: self.tool_dispatch_url.clone(),
+        })
+    }
+
     pub fn chat_path(&self, chat_id: &str) -> Option<PathBuf> {
         chat_file_path(&self.chats_dir, chat_id, CHAT_FILE_EXT)
     }

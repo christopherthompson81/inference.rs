@@ -39,8 +39,8 @@ use crate::{
     responses::{cancel_response, create_response, delete_response, get_response},
     route_registry::{
         AGENT_APPROVAL_ROUTE, ANTHROPIC_COUNT_TOKENS_ROUTE, ANTHROPIC_MESSAGES_ROUTE,
-        CALIBRATION_APPLY_ROUTE, CALIBRATION_START_ROUTE, CALIBRATION_STATUS_ROUTE,
-        CANCEL_RESPONSE_ROUTE, CHAT_COMPLETIONS_ROUTE, COMPLETIONS_ROUTE,
+        AUTH_SESSION_ROUTE, CALIBRATION_APPLY_ROUTE, CALIBRATION_START_ROUTE,
+        CALIBRATION_STATUS_ROUTE, CANCEL_RESPONSE_ROUTE, CHAT_COMPLETIONS_ROUTE, COMPLETIONS_ROUTE,
         CONTAINER_FILE_CONTENT_ROUTE, CONTAINER_FILE_ROUTE, CONTAINER_FILES_ROUTE,
         EMBEDDINGS_ROUTE, FILE_CONTENT_ROUTE, FILE_ROUTE, FILES_ROUTE, HEALTH_ROUTE,
         IMAGE_GENERATION_ROUTE, LIST_LORA_ADAPTERS_ROUTE, LOAD_LORA_ADAPTER_ROUTE,
@@ -114,7 +114,7 @@ pub struct InferenceRsServerRouterBuilder {
     observability: ObservabilityConfig,
     lora_adapter_api: LoraAdapterApiConfig,
     file_listing: bool,
-    api_keys: Option<std::sync::Arc<crate::auth::ApiKeys>>,
+    auth: Option<std::sync::Arc<crate::auth::Auth>>,
 }
 
 impl Default for InferenceRsServerRouterBuilder {
@@ -135,7 +135,7 @@ impl Default for InferenceRsServerRouterBuilder {
             observability: ObservabilityConfig::default(),
             lora_adapter_api: LoraAdapterApiConfig::from_env(),
             file_listing: false,
-            api_keys: None,
+            auth: None,
         }
     }
 }
@@ -275,9 +275,14 @@ impl InferenceRsServerRouterBuilder {
         self
     }
 
-    /// Requires a key on all but health probes and scopes each request to its owner; routes added after `build` aren't.
-    pub fn with_api_keys(mut self, keys: crate::auth::ApiKeys) -> Self {
-        self.api_keys = (!keys.is_empty()).then(|| std::sync::Arc::new(keys));
+    /// Requires a key on all but health probes and sign in, scoping each request to its owner; later routes aren't.
+    pub fn with_api_keys(self, keys: crate::auth::ApiKeys) -> Self {
+        self.with_auth(crate::auth::Auth::new(keys))
+    }
+
+    /// As [`Self::with_api_keys`], sharing `auth` (and its signed-in browsers) with routers built beside this one.
+    pub fn with_auth(mut self, auth: Option<std::sync::Arc<crate::auth::Auth>>) -> Self {
+        self.auth = auth;
         self
     }
 
@@ -349,13 +354,14 @@ impl InferenceRsServerRouterBuilder {
         if let Some(engine) = self.engine {
             router = router.layer(Extension(engine));
         }
-        // outermost, so a request without a known key is refused before any layer reads its body
-        router = router.layer(middleware::from_fn_with_state(
-            self.api_keys,
-            crate::auth::authenticate,
-        ));
-
-        Ok(router)
+        if let Some(auth) = &self.auth {
+            router = router.layer(Extension(auth.clone()));
+        }
+        Ok(crate::auth::require(
+            router,
+            self.auth,
+            crate::auth::API_GUARD,
+        ))
     }
 }
 
@@ -437,6 +443,10 @@ fn init_router(
         .route(SYSTEM_INFO_ROUTE.path, get(system_info))
         .route(SYSTEM_DOCTOR_ROUTE.path, post(system_doctor))
         .route(HEALTH_ROUTE.path, get(health))
+        .route(
+            AUTH_SESSION_ROUTE.path,
+            post(crate::auth::sign_in).delete(crate::auth::sign_out),
+        )
         .route("/metrics", metrics_route)
         .route(ROOT_ROUTE.path, get(health))
         .route(RE_ISQ_ROUTE.path, post(re_isq))
