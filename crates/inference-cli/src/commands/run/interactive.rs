@@ -5,10 +5,11 @@ use std::{fs, path::PathBuf, time::Instant};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use inference_api::{
     Engine,
+    engine::AgentPermission,
+    engine_chat::ReasoningEffort,
     lora_adapters::ListLoraAdaptersQuery,
     openai::{ImageGenerationRequest, ModelCategory, SpeechGenerationRequest},
 };
-use inference_core::{AgentPermission, ReasoningEffort};
 use regex::Regex;
 use rustyline::{DefaultEditor, Editor, Helper, error::ReadlineError, history::History};
 use serde_json::{Value, json};

@@ -2,7 +2,7 @@
 
 use super::{parse_arch, parse_dtype};
 use clap::{Args, Subcommand, ValueEnum};
-use inference_core::{AutoDeviceMapParams, IsqOrganization, ModelDType, NormalLoaderType};
+use inference_api::engine::{AutoDeviceMapParams, IsqOrganization, ModelDType, NormalLoaderType};
 use std::path::PathBuf;
 
 use super::{FormatOptions, ModelFormat};

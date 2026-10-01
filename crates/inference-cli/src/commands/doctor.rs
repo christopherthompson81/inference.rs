@@ -1,6 +1,6 @@
 use anyhow::Result;
 
-use inference_selection::{DoctorStatus, run_doctor as run_doctor_report};
+use inference_api::system::{DoctorStatus, system_doctor as run_doctor_report};
 
 const UNKNOWN: &str = "unknown";
 

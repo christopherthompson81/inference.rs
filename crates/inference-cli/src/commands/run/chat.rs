@@ -9,15 +9,16 @@ use std::{
 use inference_api::{
     Engine,
     agentic::{ApprovalDecision, ApprovalDecisionRequest},
+    engine::AgentPermission,
     engine_chat::{
         AgentToolKind, AgenticToolApproval, AgenticToolCallData, AgenticToolCallPhase,
-        BlockDenoisingProgress, ChatStreamEvent, RequestCancellation, Usage,
+        BlockDenoisingProgress, ChatStreamEvent, ReasoningEffort, RequestCancellation, Usage,
     },
+    files::File,
     media_source::{MediaAttachment, MediaAttachments, MediaSourcePolicy, load_media_source},
     models::EncoderCacheStats,
     openai::{ChatCompletionRequest, GenerationDefaults, ModelObject},
 };
-use inference_core::{AgentPermission, ReasoningEffort, files::File};
 use serde_json::{Value, json};
 use tracing::info;
 

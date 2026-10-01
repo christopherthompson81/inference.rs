@@ -12,7 +12,10 @@ use crate::args::{
     ModelType, MultimodalAdapterOptions, MultimodalOptions, PagedAttentionOptions,
     QuantizationOptions, RuntimeOptions, SandboxOptions, ServerOptions,
 };
-use inference_core::{ModelDType, NormalLoaderType, ReasoningEffort, TokenSource};
+use inference_api::{
+    engine::{ModelDType, NormalLoaderType, TokenSource},
+    engine_chat::ReasoningEffort,
+};
 
 #[derive(Deserialize)]
 #[serde(tag = "command", rename_all = "kebab-case")]
@@ -93,7 +96,7 @@ pub struct ModelEntry {
     #[serde(default)]
     pub dtype: ModelDType,
     #[serde(default)]
-    pub hf_overrides: Option<inference_core::HfConfigOverrides>,
+    pub hf_overrides: Option<inference_api::engine::HfConfigOverrides>,
     #[serde(default)]
     pub max_model_len: Option<usize>,
     #[serde(default)]

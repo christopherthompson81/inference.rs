@@ -3,9 +3,10 @@
 use std::sync::Arc;
 
 use base64::{Engine, engine::general_purpose::STANDARD};
+pub use inference_core::File;
 use inference_core::{
-    FILE_PURPOSE_GENERATED_IMAGE, FILE_PURPOSE_USER_DATA, File as CoreFile, FileContent,
-    FileSource, InferenceRs, InferenceRsError,
+    FILE_PURPOSE_GENERATED_IMAGE, FILE_PURPOSE_USER_DATA, FileContent, FileSource, InferenceRs,
+    InferenceRsError,
 };
 use serde::Serialize;
 use utoipa::ToSchema;
@@ -137,14 +138,14 @@ fn find(
     state: &SharedInferenceRsState,
     id: &str,
     owner: Option<&str>,
-) -> Result<Arc<CoreFile>, ApiError> {
+) -> Result<Arc<File>, ApiError> {
     state
         .try_find_file(id, owner)
         .map_err(|error| store_error(state, error))?
         .ok_or_else(|| not_found(id))
 }
 
-fn source(file: &CoreFile) -> SourceMeta {
+fn source(file: &File) -> SourceMeta {
     SourceMeta {
         tool: file.source.tool.clone(),
         round: file.source.round,
@@ -152,13 +153,13 @@ fn source(file: &CoreFile) -> SourceMeta {
     }
 }
 
-fn mime_type(file: &CoreFile) -> String {
+fn mime_type(file: &File) -> String {
     file.mime_type
         .clone()
         .unwrap_or_else(|| DEFAULT_MIME_TYPE.to_string())
 }
 
-fn metadata(file: &CoreFile) -> FileMetadata {
+fn metadata(file: &File) -> FileMetadata {
     FileMetadata {
         id: file.id.clone(),
         object: FILE_OBJECT,
@@ -173,7 +174,7 @@ fn metadata(file: &CoreFile) -> FileMetadata {
     }
 }
 
-fn container_metadata(container_id: &str, file: &CoreFile) -> ContainerFileMetadata {
+fn container_metadata(container_id: &str, file: &File) -> ContainerFileMetadata {
     ContainerFileMetadata {
         id: file.id.clone(),
         object: CONTAINER_FILE_OBJECT,
@@ -204,8 +205,8 @@ pub fn upload_file(
     if upload.bytes.len() > MAX_FILE_UPLOAD_BYTES {
         return Err(file_too_large());
     }
-    let file = CoreFile::from_bytes(
-        CoreFile::make_upload_id(),
+    let file = File::from_bytes(
+        File::make_upload_id(),
         upload.filename,
         upload.mime_type,
         upload.purpose,
@@ -229,8 +230,8 @@ pub fn store_generated_image(
     png: Vec<u8>,
     owner: Option<&str>,
 ) -> Result<String, ApiError> {
-    let id = CoreFile::make_upload_id();
-    let file = CoreFile::from_bytes(
+    let id = File::make_upload_id();
+    let file = File::from_bytes(
         id.clone(),
         format!("{id}.png"),
         Some(PNG_MIME_TYPE.to_string()),
@@ -373,7 +374,7 @@ fn find_in_container(
     container_id: &str,
     file_id: &str,
     owner: Option<&str>,
-) -> Result<Arc<CoreFile>, ApiError> {
+) -> Result<Arc<File>, ApiError> {
     state
         .try_list_tagged_files(container_id, owner)
         .map_err(|error| store_error(state, error))?

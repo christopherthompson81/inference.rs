@@ -30,11 +30,11 @@ pub use tune::run_tune;
 pub use uqff::run_uqff;
 
 use crate::args::ModelType;
-use inference_core::MAX_LORA_ALIAS_BYTES;
+use inference_api::engine::MAX_LORA_ALIAS_BYTES;
 
 fn dynamic_adapter_options(
     model_type: &ModelType,
-) -> Option<(bool, &[inference_core::LoraAdapterSpec])> {
+) -> Option<(bool, &[inference_api::engine::LoraAdapterSpec])> {
     match model_type {
         ModelType::Auto { adapter, .. } | ModelType::Text { adapter, .. } => {
             Some((adapter.dynamic_lora_enabled(), &adapter.lora))
@@ -82,7 +82,7 @@ pub(crate) fn normalize_requested_adapter(
 
 #[cfg(test)]
 mod tests {
-    use inference_core::{LoraAdapterSpec, ModelDType};
+    use inference_api::engine::{LoraAdapterSpec, ModelDType};
 
     use super::*;
     use crate::args::{

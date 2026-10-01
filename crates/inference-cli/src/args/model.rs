@@ -2,7 +2,7 @@
 
 use super::{parse_arch, parse_dtype};
 use clap::{Args, ValueEnum};
-use inference_core::{
+use inference_api::engine::{
     AutoDeviceMapParams, DEFAULT_LORA_MAX_ADAPTERS, DEFAULT_LORA_MAX_BYTES, DEFAULT_LORA_MAX_RANK,
     HfConfigOverrides, IsqOrganization, LoraAdapterSpec, LoraRuntimeConfig, MAX_LORA_ALIAS_BYTES,
     ModelDType, NormalLoaderType,

@@ -27,7 +27,7 @@ pub fn run_login(token: Option<String>) -> Result<()> {
     }
 
     // Write to cache
-    let token_path = inference_core::hf_token_path()
+    let token_path = inference_api::system::hf_token_path()
         .ok_or_else(|| anyhow::anyhow!("Cannot determine Hugging Face token path"))?;
     if let Some(parent) = token_path.parent() {
         std::fs::create_dir_all(parent)?;

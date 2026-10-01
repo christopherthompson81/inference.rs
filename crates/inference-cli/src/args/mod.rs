@@ -17,9 +17,12 @@ pub use server::*;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_complete::Shell;
-use inference_core::{
-    DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_NUM_BATCHED_TOKENS,
-    DEFAULT_MAX_PREFILL_CHUNK_TOKENS, ReasoningEffort, TokenSource,
+use inference_api::{
+    engine::{
+        DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_NUM_BATCHED_TOKENS,
+        DEFAULT_MAX_PREFILL_CHUNK_TOKENS, TokenSource,
+    },
+    engine_chat::ReasoningEffort,
 };
 use serde::Deserialize;
 use std::{num::NonZeroUsize, path::PathBuf};
@@ -348,15 +351,15 @@ pub struct DefaultModelOptions {
 
     /// Model architecture (auto-detected if not specified)
     #[arg(short = 'a', long, value_parser = parse_arch)]
-    pub arch: Option<inference_core::NormalLoaderType>,
+    pub arch: Option<inference_api::engine::NormalLoaderType>,
 
     /// Model data type
     #[arg(long, default_value = "auto", value_parser = parse_dtype)]
-    pub dtype: inference_core::ModelDType,
+    pub dtype: inference_api::engine::ModelDType,
 
     /// Recursively merged JSON overrides for the Hugging Face model config
     #[arg(long)]
-    pub hf_overrides: Option<inference_core::HfConfigOverrides>,
+    pub hf_overrides: Option<inference_api::engine::HfConfigOverrides>,
 
     /// Runtime model context length
     #[arg(long, value_parser = crate::args::model::parse_positive_usize)]
@@ -447,11 +450,11 @@ impl ModelType {
     }
 }
 
-fn parse_arch(s: &str) -> Result<inference_core::NormalLoaderType, String> {
+fn parse_arch(s: &str) -> Result<inference_api::engine::NormalLoaderType, String> {
     s.parse()
 }
 
-fn parse_dtype(s: &str) -> Result<inference_core::ModelDType, String> {
+fn parse_dtype(s: &str) -> Result<inference_api::engine::ModelDType, String> {
     s.parse()
 }
 
@@ -918,42 +921,42 @@ impl RuntimeOptions {
     }
 }
 
-impl From<TuneProfileArg> for inference_selection::TuneProfile {
+impl From<TuneProfileArg> for inference_api::system::TuneProfile {
     fn from(value: TuneProfileArg) -> Self {
         match value {
-            TuneProfileArg::Quality => inference_selection::TuneProfile::Quality,
-            TuneProfileArg::Balanced => inference_selection::TuneProfile::Balanced,
-            TuneProfileArg::Fast => inference_selection::TuneProfile::Fast,
+            TuneProfileArg::Quality => inference_api::system::TuneProfile::Quality,
+            TuneProfileArg::Balanced => inference_api::system::TuneProfile::Balanced,
+            TuneProfileArg::Fast => inference_api::system::TuneProfile::Fast,
         }
     }
 }
 
-impl From<SearchEmbeddingModelArg> for inference_core::SearchEmbeddingModel {
+impl From<SearchEmbeddingModelArg> for inference_api::engine::SearchEmbeddingModel {
     fn from(value: SearchEmbeddingModelArg) -> Self {
         match value {
             SearchEmbeddingModelArg::EmbeddingGemma => {
-                inference_core::SearchEmbeddingModel::EmbeddingGemma300M
+                inference_api::engine::SearchEmbeddingModel::EmbeddingGemma300M
             }
         }
     }
 }
 
-impl From<CodeExecPermissionArg> for inference_core::CodeExecutionPermission {
+impl From<CodeExecPermissionArg> for inference_api::engine::CodeExecutionPermission {
     fn from(value: CodeExecPermissionArg) -> Self {
         match value {
-            CodeExecPermissionArg::Auto => inference_core::CodeExecutionPermission::Auto,
-            CodeExecPermissionArg::Ask => inference_core::CodeExecutionPermission::Ask,
-            CodeExecPermissionArg::Deny => inference_core::CodeExecutionPermission::Deny,
+            CodeExecPermissionArg::Auto => inference_api::engine::CodeExecutionPermission::Auto,
+            CodeExecPermissionArg::Ask => inference_api::engine::CodeExecutionPermission::Ask,
+            CodeExecPermissionArg::Deny => inference_api::engine::CodeExecutionPermission::Deny,
         }
     }
 }
 
-impl From<CodeExecPermissionArg> for inference_core::AgentPermission {
+impl From<CodeExecPermissionArg> for inference_api::engine::AgentPermission {
     fn from(value: CodeExecPermissionArg) -> Self {
         match value {
-            CodeExecPermissionArg::Auto => inference_core::AgentPermission::Auto,
-            CodeExecPermissionArg::Ask => inference_core::AgentPermission::Ask,
-            CodeExecPermissionArg::Deny => inference_core::AgentPermission::Deny,
+            CodeExecPermissionArg::Auto => inference_api::engine::AgentPermission::Auto,
+            CodeExecPermissionArg::Ask => inference_api::engine::AgentPermission::Ask,
+            CodeExecPermissionArg::Deny => inference_api::engine::AgentPermission::Deny,
         }
     }
 }

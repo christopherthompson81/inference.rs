@@ -1,10 +1,12 @@
-//! Engine-independent reports about the host: devices and build, environment diagnostics, and model auto-tuning.
+//! Engine-independent facts about the host: devices and build, diagnostics, the Hugging Face cache, auto-tuning.
 
 use inference_core::{AutoDeviceMapParams, ModelDType, TokenSource, parse_isq_value};
-use inference_selection::{
-    AutoTuneRequest, AutoTuneResult, DoctorReport, ModelSelected, SystemInfo, TuneProfile,
-    auto_tune, collect_system_info, run_doctor,
+pub use inference_core::{hf_hub_cache_dir, hf_token_path};
+pub use inference_selection::{
+    AutoTuneRequest, AutoTuneResult, DoctorReport, DoctorStatus, FitStatus, QualityTier,
+    SystemInfo, TuneProfile, auto_tune,
 };
+use inference_selection::{ModelSelected, collect_system_info, run_doctor};
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 

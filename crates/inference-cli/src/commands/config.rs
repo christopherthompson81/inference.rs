@@ -6,8 +6,8 @@ use tracing::info;
 use inference_api::{
     Engine, EngineSpec,
     engine::{AdapterSpec, ModelSpec, PagedCacheSpec, RuntimeSpec, SkillsSpec},
+    initialize_logging,
 };
-use inference_core::initialize_logging;
 use inference_server_core::metrics::install_prometheus_recorder;
 
 use crate::args::{
@@ -80,7 +80,7 @@ async fn run_run_config(cfg: crate::config::RunConfig) -> Result<()> {
         adapter,
     } = cfg;
 
-    inference_core::resolve_reasoning_controls(thinking, reasoning_effort)?;
+    inference_api::engine_chat::resolve_reasoning_controls(thinking, reasoning_effort)?;
 
     let global = global.to_global_options()?;
     apply_agent_mode(&mut runtime);
@@ -233,8 +233,7 @@ fn config_spec(inputs: ConfigSpecInputs<'_>) -> Result<EngineSpec> {
 mod tests {
     use std::fs;
 
-    use inference_core::AutoDeviceMapParams;
-    use inference_selection::ModelSelected;
+    use inference_api::engine::{AutoDeviceMapParams, ModelSelected};
 
     use super::*;
 

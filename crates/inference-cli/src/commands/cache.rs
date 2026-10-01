@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 /// Get the Hugging Face Hub directory
 fn hf_hub_dir() -> Result<PathBuf> {
-    inference_core::hf_hub_cache_dir()
+    inference_api::system::hf_hub_cache_dir()
         .ok_or_else(|| anyhow::anyhow!("Cannot determine Hugging Face hub cache directory"))
 }
 

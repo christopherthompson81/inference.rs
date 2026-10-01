@@ -3,7 +3,7 @@
 //! Unified design replacing the confusing 5-flag system with clear semantics.
 
 use clap::{Args, ValueEnum};
-use inference_core::PagedCacheType;
+use inference_api::engine::PagedCacheType;
 use serde::Deserialize;
 
 /// Cache and attention configuration

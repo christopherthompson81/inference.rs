@@ -7,17 +7,14 @@ use tracing::{info, warn};
 use inference_api::{
     Engine, EngineSpec,
     engine::{
-        AdapterSpec, AgenticSpec, MtpSpec, PagedCacheSpec, RuntimeSpec, SandboxLimits, SearchSpec,
-        SkillsSpec,
+        AdapterSpec, AgenticSpec, AutoDeviceMapParams, DiffusionLoaderType, HfConfigOverrides,
+        McpClientConfig, MmprojSelection, ModelSelected, MtpSpec, PagedCacheSpec, PagedCacheType,
+        RuntimeSpec, SandboxLimits, SearchSpec, SkillsSpec, SpeechLoaderType,
     },
+    initialize_logging,
     lora_adapters::LoraAdapterApiConfig,
     skill_store::SkillStore,
 };
-use inference_core::{
-    AutoDeviceMapParams, DiffusionLoaderType, McpClientConfig, PagedCacheType, SpeechLoaderType,
-    initialize_logging,
-};
-use inference_selection::{MmprojSelection, ModelSelected};
 use inference_server_core::{
     auth::Auth,
     inference_server_router_builder::InferenceRsServerRouterBuilder,
@@ -964,7 +961,7 @@ pub(crate) fn extract_quant_flag(model_type: &ModelType) -> Option<String> {
 
 pub(crate) fn extract_hf_config_settings(
     model_type: &ModelType,
-) -> (Option<usize>, Option<inference_core::HfConfigOverrides>) {
+) -> (Option<usize>, Option<HfConfigOverrides>) {
     let model = match model_type {
         ModelType::Auto { model, .. }
         | ModelType::Text { model, .. }
@@ -1031,11 +1028,11 @@ pub(crate) fn load_mcp_config(path: Option<&Path>) -> Result<Option<McpClientCon
 #[cfg(feature = "code-execution")]
 pub(crate) fn build_code_exec_config(
     runtime: &RuntimeOptions,
-) -> Option<inference_core::CodeExecutionConfig> {
+) -> Option<inference_api::engine::CodeExecutionConfig> {
     if !runtime.enable_code_execution {
         return None;
     }
-    let mut config = inference_core::CodeExecutionConfig::default();
+    let mut config = inference_api::engine::CodeExecutionConfig::default();
     if let Some(python) = runtime.code_exec_python.clone() {
         config.python_path = python;
     }
@@ -1048,11 +1045,13 @@ pub(crate) fn build_code_exec_config(
 
 /// Build a `ShellConfig` from runtime options. Returns `None` when shell execution is off.
 #[cfg(feature = "code-execution")]
-pub(crate) fn build_shell_config(runtime: &RuntimeOptions) -> Option<inference_core::ShellConfig> {
+pub(crate) fn build_shell_config(
+    runtime: &RuntimeOptions,
+) -> Option<inference_api::engine::ShellConfig> {
     if !runtime.enable_shell {
         return None;
     }
-    let mut config = inference_core::ShellConfig::default();
+    let mut config = inference_api::engine::ShellConfig::default();
     if let Some(shell_path) = runtime.shell_path.clone() {
         config.shell_path = shell_path;
     }
@@ -1114,7 +1113,7 @@ pub(crate) fn log_agent_runtime(runtime: &RuntimeOptions, max_tool_rounds: Optio
         return;
     }
 
-    let rounds = max_tool_rounds.unwrap_or(inference_core::DEFAULT_MAX_TOOL_ROUNDS);
+    let rounds = max_tool_rounds.unwrap_or(inference_api::engine::DEFAULT_MAX_TOOL_ROUNDS);
     let mode = if runtime.agent { "agent" } else { "tools" };
     tracing::info!(
         "{mode}: search {}, code execution {}, shell {}, approvals {}, max tool rounds {rounds}",
@@ -1132,7 +1131,7 @@ fn search_summary(runtime: &RuntimeOptions) -> String {
     }
     let model = runtime
         .search_embedding_model
-        .map(inference_core::SearchEmbeddingModel::from)
+        .map(inference_api::engine::SearchEmbeddingModel::from)
         .unwrap_or_default();
     format!("on (reranker {model})")
 }
@@ -1192,7 +1191,7 @@ fn log_agent_runtime_details(runtime: &RuntimeOptions) {
             || {
                 format!(
                     "{}s (default)",
-                    inference_core::DEFAULT_CODE_EXEC_TIMEOUT_SECS
+                    inference_api::engine::DEFAULT_CODE_EXEC_TIMEOUT_SECS
                 )
             },
             |t| format!("{t}s"),
@@ -1214,7 +1213,12 @@ fn log_agent_runtime_details(runtime: &RuntimeOptions) {
             .map(|p| p.display().to_string())
             .unwrap_or_else(|| "/bin/sh (default)".to_string());
         let timeout = runtime.shell_timeout.map_or_else(
-            || format!("{}s (default)", inference_core::DEFAULT_SHELL_TIMEOUT_SECS),
+            || {
+                format!(
+                    "{}s (default)",
+                    inference_api::engine::DEFAULT_SHELL_TIMEOUT_SECS
+                )
+            },
             |t| format!("{t}s"),
         );
         let workdir = runtime
@@ -1262,7 +1266,7 @@ fn log_agent_runtime_details(runtime: &RuntimeOptions) {
 
 #[cfg(test)]
 mod tests {
-    use inference_core::{
+    use inference_api::engine::{
         AutoDeviceMapParams, IsqOrganization, LoraAdapterSpec, ModelDType, NormalLoaderType,
     };
     use std::{num::NonZeroUsize, path::PathBuf};
@@ -1607,7 +1611,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            inference_selection::get_auto_device_map_params(&selected).unwrap(),
+            inference_api::engine::get_auto_device_map_params(&selected).unwrap(),
             AutoDeviceMapParams::Text { .. }
         ));
         match selected {
@@ -1677,7 +1681,7 @@ mod tests {
         };
         let selected = convert_to_model_selected(&model_type, &matformer).unwrap();
 
-        match inference_selection::get_auto_device_map_params(&selected).unwrap() {
+        match inference_api::engine::get_auto_device_map_params(&selected).unwrap() {
             AutoDeviceMapParams::Multimodal {
                 max_seq_len,
                 max_batch_size,
@@ -1751,7 +1755,7 @@ mod tests {
             panic!("expected dynamic LoRA model")
         };
         assert!(arch.is_none());
-        match inference_selection::get_auto_device_map_params(&selected).unwrap() {
+        match inference_api::engine::get_auto_device_map_params(&selected).unwrap() {
             AutoDeviceMapParams::Multimodal {
                 max_seq_len,
                 max_batch_size,
@@ -1992,7 +1996,7 @@ mod tests {
         )
         .unwrap();
 
-        match inference_selection::get_auto_device_map_params(&selected).unwrap() {
+        match inference_api::engine::get_auto_device_map_params(&selected).unwrap() {
             AutoDeviceMapParams::Multimodal {
                 max_seq_len,
                 max_batch_size,
@@ -2116,7 +2120,7 @@ mod tests {
         .unwrap();
 
         assert!(matches!(
-            inference_selection::get_auto_device_map_params(&selected).unwrap(),
+            inference_api::engine::get_auto_device_map_params(&selected).unwrap(),
             AutoDeviceMapParams::Text { .. }
         ));
     }
@@ -2274,7 +2278,10 @@ mod tests {
             (mtp.model.as_deref(), mtp.n_predict),
             (Some("org/draft"), Some(3))
         );
-        assert_eq!(spec.agentic.sandbox, inference_core::SandboxMode::Auto);
+        assert_eq!(
+            spec.agentic.sandbox,
+            inference_api::engine::SandboxMode::Auto
+        );
         assert!(spec.agentic.sandbox_profile.is_none());
 
         let spec = serve_spec(&[
@@ -2292,15 +2299,15 @@ mod tests {
             "loopback",
         ]);
         let agentic = spec.agentic;
-        assert_eq!(agentic.sandbox, inference_core::SandboxMode::On);
+        assert_eq!(agentic.sandbox, inference_api::engine::SandboxMode::On);
         assert_eq!(
             agentic.sandbox_profile,
-            Some(inference_core::SandboxProfile::Restricted)
+            Some(inference_api::engine::SandboxProfile::Restricted)
         );
         assert_eq!(agentic.sandbox_limits.max_procs, Some(7));
         assert_eq!(
             agentic.sandbox_limits.network,
-            Some(inference_core::NetworkMode::Loopback)
+            Some(inference_api::engine::NetworkMode::Loopback)
         );
         // the engine applies the sandbox, so a tool config carries no policy of its own
         #[cfg(feature = "code-execution")]

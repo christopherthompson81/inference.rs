@@ -3,7 +3,10 @@ use std::path::PathBuf;
 use anyhow::Result;
 use comfy_table::{Cell, Color, ContentArrangement, Table, presets::UTF8_FULL};
 
-use inference_selection::{AutoTuneRequest, FitStatus, ModelSelected, QualityTier, auto_tune};
+use inference_api::{
+    engine::ModelSelected,
+    system::{AutoTuneRequest, FitStatus, QualityTier, auto_tune},
+};
 
 use crate::args::{AdapterOptions, GlobalOptions, MatformerSelection, ModelType, TuneProfileArg};
 
@@ -33,7 +36,7 @@ pub async fn run_tune(
     let requested_isq = requested
         .as_deref()
         .map(|s| {
-            inference_core::parse_isq_value(s, None)
+            inference_api::engine::parse_isq_value(s, None)
                 .map_err(|err| anyhow::anyhow!("Invalid quantization value: {err}"))
         })
         .transpose()?;
@@ -206,7 +209,7 @@ fn reject_configured_adapters(adapter: &AdapterOptions) -> Result<()> {
 fn emit_toml_config(
     model_type: &ModelType,
     model_selected: &ModelSelected,
-    result: &inference_selection::AutoTuneResult,
+    result: &inference_api::system::AutoTuneResult,
 ) -> Result<String> {
     let mut out = String::new();
     out.push_str("command = \"serve\"\n\n");
@@ -267,7 +270,7 @@ fn model_kind(model_type: &ModelType) -> &'static str {
 }
 
 fn model_dtype(model_selected: &ModelSelected) -> Option<&'static str> {
-    use inference_core::ModelDType;
+    use inference_api::engine::ModelDType;
     match model_selected {
         ModelSelected::Plain { dtype, .. }
         | ModelSelected::Lora { dtype, .. }
@@ -293,7 +296,7 @@ fn model_dtype(model_selected: &ModelSelected) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
-    use inference_core::LoraAdapterSpec;
+    use inference_api::engine::LoraAdapterSpec;
 
     use super::*;
 
@@ -303,9 +306,9 @@ mod tests {
             "Plain": {"model_id": "org/model", "arch": "qwen3"}
         }))
         .unwrap();
-        let result = inference_selection::AutoTuneResult {
+        let result = inference_api::system::AutoTuneResult {
             model_id: "org/model".to_string(),
-            profile: inference_selection::TuneProfile::Balanced,
+            profile: inference_api::system::TuneProfile::Balanced,
             backend: "cpu".to_string(),
             candidates: Vec::new(),
             recommended_isq: None,
@@ -332,7 +335,7 @@ mod tests {
         };
         assert_eq!(
             config.models[0].arch,
-            Some(inference_core::NormalLoaderType::Qwen3)
+            Some(inference_api::engine::NormalLoaderType::Qwen3)
         );
     }
 
