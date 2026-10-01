@@ -1003,3 +1003,12 @@ carries in `engine`, and `REQUEST_QUEUE_DURATION_METRIC` and `sandbox_key` at th
 FFI drop their inference-core (and server-core its inference-selection) dependency, server-core keeping core only for
 its tests, and their features forward through inference-api alone. Now every client crate builds on inference-api
 the way an outside project would.
+
+## Run 35 - 2026-10-01 (time approximate)
+
+Change: GitHub CI gets a `Test` job: the CPU suite as `local_ci.sh --tests` runs it (`cargo nextest run --workspace
+--lib --bins --tests`, the doctests, the examples smoke build). It runs on pushes to master, the weekly schedule and
+dispatch, not per PR: the dev profile builds at opt-level 3 and a full test build of the workspace is the slowest thing
+CI could do (local `target/debug` is 36 GB with the CUDA variants), so PRs keep the fast check, clippy, fmt and typos
+jobs and a regression that local CI missed shows on master right after its merge. The job frees the runner's preinstalled
+toolchains first to fit the build. Unknown until the first run: its wall time, and whether any test reaches the network.
