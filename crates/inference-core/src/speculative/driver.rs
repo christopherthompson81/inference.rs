@@ -97,28 +97,52 @@ fn commit_then_publish_verified_batch<T: ?Sized>(
     publish(target)
 }
 
+/// A pipeline whose model takes speculative decoding; the proposer steps go straight to that model.
 pub trait SpeculativePipelineExt: Pipeline {
-    fn has_speculative_proposer(&self) -> bool;
+    fn speculative_target(&self) -> &dyn inference_nn::speculative::SpeculativeTargetMixin;
 
-    fn speculative_plan(&self, batch_size: usize) -> Option<SpeculativeBatchPlan>;
+    fn speculative_target_mut(
+        &mut self,
+    ) -> &mut dyn inference_nn::speculative::SpeculativeTargetMixin;
 
-    fn speculative_observe(&self, observation: SpeculativeBatchObservation);
+    fn has_speculative_proposer(&self) -> bool {
+        self.speculative_target().has_speculative_proposer()
+    }
 
-    fn speculative_bypass(&mut self, seq_ids: &[usize]) -> Result<()>;
+    fn speculative_plan(&self, batch_size: usize) -> Option<SpeculativeBatchPlan> {
+        self.speculative_target().speculative_plan(batch_size)
+    }
 
-    fn speculative_target_hiddens(&self, rows: &[(usize, usize)]) -> Result<Option<Tensor>>;
+    fn speculative_observe(&self, observation: SpeculativeBatchObservation) {
+        self.speculative_target().speculative_observe(observation);
+    }
+
+    fn speculative_bypass(&mut self, seq_ids: &[usize]) -> Result<()> {
+        self.speculative_target_mut().speculative_bypass(seq_ids)
+    }
+
+    fn speculative_target_hiddens(&self, rows: &[(usize, usize)]) -> Result<Option<Tensor>> {
+        self.speculative_target().speculative_target_hiddens(rows)
+    }
 
     fn speculative_propose(
         &mut self,
         ctx: SpeculativeProposeBatchCtx<'_>,
-    ) -> Result<Option<SpeculativeProposalBatch>>;
+    ) -> Result<Option<SpeculativeProposalBatch>> {
+        self.speculative_target_mut().speculative_propose(ctx)
+    }
 
     fn speculative_prepare_propose(
         &mut self,
         ctx: SpeculativeProposePrepareCtx<'_>,
-    ) -> Result<Option<Box<dyn SpeculativeProposePreparation>>>;
+    ) -> Result<Option<Box<dyn SpeculativeProposePreparation>>> {
+        self.speculative_target_mut()
+            .speculative_prepare_propose(ctx)
+    }
 
-    fn speculative_commit(&mut self, rows: &[SpeculativeCommitRow]) -> Result<()>;
+    fn speculative_commit(&mut self, rows: &[SpeculativeCommitRow]) -> Result<()> {
+        self.speculative_target_mut().speculative_commit(rows)
+    }
 
     fn build_speculative_verify_inputs(&self, input_meta: InputMetadata) -> Result<Box<dyn Any>>;
 

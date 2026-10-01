@@ -19,7 +19,6 @@ candle-core.workspace = true
 candle-flash-attn-v3 = { workspace = true, optional = true }
 candle-nn.workspace = true
 csv.workspace = true
-derive-new.workspace = true
 either.workspace = true
 float8.workspace = true
 half.workspace = true

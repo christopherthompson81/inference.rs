@@ -13,7 +13,6 @@ use regex::Regex;
 
 use crate::lora::LoraConfig;
 use crate::utils::progress::{NiceProgressBar, new_multi_progress};
-use derive_new::new;
 use indicatif::MultiProgress;
 
 const INFERENCE_RS_NO_MMAP: &str = "INFERENCE_RS_NO_MMAP";
@@ -152,8 +151,8 @@ fn load_safetensors(
                     make_dummy_predicate: &*make_dummy,
                 };
                 match xlora_index {
-                    None => Common::new().load_tensors_from_path(load),
-                    Some(adapter_index) => XLora::new(adapter_index).load_tensors_from_path(load),
+                    None => Common.load_tensors_from_path(load),
+                    Some(adapter_index) => XLora { adapter_index }.load_tensors_from_path(load),
                 }
             })
         })
@@ -185,7 +184,7 @@ pub fn load_preload_adapters(
     if let Some(paths) = paths {
         let mut map = HashMap::new();
         for (name, (path, config)) in paths {
-            let loader = Common::new();
+            let loader = Common;
             let loaded_tensors = loader.load_tensors_from_path(TensorLoad {
                 path,
                 base_device: device,
@@ -297,11 +296,9 @@ trait LoadTensors {
     }
 }
 
-#[derive(new)]
-struct Common {}
+struct Common;
 impl LoadTensors for Common {}
 
-#[derive(new)]
 struct XLora {
     // Matches the associated path instance for reference in `get_name_key_pairs()`
     adapter_index: usize,

@@ -9,6 +9,8 @@ use tokio::net::TcpStream;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async, tungstenite::Message};
 
 /// Transport layer for MCP communication
+// async_trait marks its boxed futures `#[must_use]`, which they already are
+#[allow(clippy::double_must_use)]
 #[async_trait::async_trait]
 pub trait McpTransport: Send + Sync {
     /// Send a JSON-RPC request and receive a response

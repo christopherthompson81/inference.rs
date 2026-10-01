@@ -654,3 +654,42 @@ configs fetch in the macros' order again (`ProcessorConfigs`), so the first fail
 `token_source`/`revision` locks lost their only reader (`get_uqff_paths!`) and are gone; the attention mode moves into
 `LoadMetadataParts` so the new methods stay under six arguments. Trace wording changed slightly (the "(Mistral
 tokenizer)" notes), and `hf` errors now keep their anyhow chain instead of a flattened candle message.
+
+## Run 21 - 2026-10-01 (time approximate)
+
+Question: before merging the normal and multimodal pipelines, what would it buy? Run 18 put a core edit at 57 s.
+
+Commands: `cargo llvm-lines --lib -p inference-core` (top functions); `cargo build -p inference-cli --bin inference
+--timings` after (a) `touch` of a core file, (b) a new `pub const` in core's `engine/mod.rs`, (c) a `trace!` added to
+the body of core's `prompt_chunk_inputs`, (d) a `trace!` added to `RmsNorm::new` in inference-nn's `layers/mod.rs`;
+each from a warm build of the same binary, each reverted after.
+
+Raw findings:
+- Core's IR is flat: the largest function is 0.5% (`prompt_chunk_inputs` 7.8k lines); the three safetensors
+  `load_model_from_path`s are 7.5k (multimodal), 4.8k (normal) and 3.9k (embedding); the mixins are a few hundred lines
+  each. Merging normal and multimodal would remove on the order of 10k of 1.57M lines (under 1%).
+- Rebuild of the binary: (a) 5.8 s, (b) 6.9 s, (c) 7.1 s (core 2.2 s, then api, server-core, webui, link 1.9 s), (d)
+  13.0 s (nn 4.6 s, then the five family crates in parallel, qwen longest at 7.8 s, then core 3.7 s).
+- Negative result: Run 18's 57 s was an artifact. It ran right after `cargo llvm-lines`, whose build leaves the
+  upstream crates built differently, so the timed build rebuilt inference-nn, protocol and every family crate (a first
+  repeat measured 70 s the same way). A warm edit to core costs about 7 s.
+
+Implication: the edit-compile loop is already short; the pipeline merge's value is maintenance (one copy of the
+CUDA-graph driver and load path to keep right), not build time, and it carries the CUDA-graph risk. The family-crate
+twins (X-LoRA, Qwen2/2.5-VL) are what an inference-nn edit waits on (7.8 s for qwen), and cold builds.
+
+## Run 22 - 2026-10-01 (time approximate)
+
+Change: normal vs multimodal mixins, kept for maintenance (Run 21). Fields stay on each pipeline (the CUDA forward
+code reads them); the logic moves:
+- `SpeculativePipelineExt` gains required `speculative_target`/`speculative_target_mut` (the model, upcast to
+  `dyn SpeculativeTargetMixin`) and defaults for its eight proposer steps, so each pipeline's impl is the two
+  accessors, its verify inputs and its CUDA workspace.
+- `cache_manager::{clone_in,clone_out,set_none}_cache_by_kind` dispatch on the cache kind over `&dyn Pipeline`; GGUF
+  and GGML call `FullCacheManager` through `dyn Pipeline` too. The managers, generic over the pipeline, now
+  instantiate once instead of once per pipeline type.
+- `isq_flow::requantize_tracked_modules` (runtime re-ISQ), `cuda_graph::clear_decode_graphs` and
+  `cuda_graph::reclaim_decode_graphs` replace the copies in both pipelines.
+
+Raw finding: `cargo llvm-lines --lib -p inference-core` 1,569,962 -> 1,559,236 (-10.7k), mostly the cache managers'
+per-pipeline copies; source 179 insertions, 238 deletions (embedding's re-ISQ copy folded in too).
