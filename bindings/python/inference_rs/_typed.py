@@ -1,5 +1,6 @@
 """The engine with typed requests and responses, over the JSON engine (`Engine.json`)."""
 
+import array
 import json
 from collections.abc import Sequence
 
@@ -153,6 +154,14 @@ class Engine:
 
     def delete_session(self, session_id: str) -> types.SessionDeleted:
         return from_json(types.SessionDeleted, self.json.delete_session(session_id))
+
+    def prompt_logits(
+        self, prompt: str | list[int], output: str = "logprobs", model: str | None = None
+    ) -> tuple[types.PromptLogits, array.array | None]:
+        """Each prompt token's log-probability, and with ``output="logits"`` the row-major logits."""
+        request = {"prompt": prompt, "output": output, "model": model}
+        scores, logits = self.json.prompt_logits(json.dumps(request))
+        return from_json(types.PromptLogits, scores), logits
 
     def tokenize(self, text: str, add_special_tokens: bool = True, model: str | None = None) -> list[int]:
         request = {"text": text, "add_special_tokens": add_special_tokens, "model": model}

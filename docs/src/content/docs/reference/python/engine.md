@@ -240,6 +240,18 @@ Branches a session into a new one, named by the engine, holding its first `num_t
 delete_session(session_id: str) -> types.SessionDeleted
 ```
 
+### `Engine.prompt_logits`
+
+```text
+prompt_logits(
+    prompt: str | list[int],
+    output: str = 'logprobs',
+    model: str | None = None,
+) -> tuple[types.PromptLogits, array.array | None]
+```
+
+Each prompt token's log-probability, and with ``output="logits"`` the row-major logits.
+
 ### `Engine.tokenize`
 
 ```text
@@ -875,6 +887,14 @@ Branches a session into a new one the engine names; the request is {"num_turns"}
 ```text
 delete_session(session_id: str) -> str
 ```
+
+### `JsonEngine.prompt_logits`
+
+```text
+prompt_logits(request_json: str) -> tuple[str, array.array | None]
+```
+
+Scores a prompt: the response JSON, and with "output": "logits" its row-major f32 logits.
 
 ### `JsonEngine.tokenize`
 

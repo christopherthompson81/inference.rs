@@ -156,7 +156,7 @@ GROUPS = [
     (
         "Models, adapters, files and skills",
         "management",
-        "Model status and cache counters, LoRA adapters, files, skills, approvals, sessions, MCP tools, calibration, tokenization and the media generation calls.",
+        "Model status and cache counters, LoRA adapters, files, skills, approvals, sessions, MCP tools, calibration, tokenization, prompt scoring and the media generation calls.",
         lambda n: n.startswith(
             (
                 "Model",
@@ -186,6 +186,8 @@ GROUPS = [
                 "Detokenize",
                 "McpTool",
                 "DefaultModel",
+                "Prompt",
+                "LogitsOutput",
             )
         ),
     ),

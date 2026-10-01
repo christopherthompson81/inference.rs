@@ -1,6 +1,6 @@
 ---
 title: Models, adapters, files and skills
-description: "Model status and cache counters, LoRA adapters, files, skills, approvals, sessions, MCP tools, calibration, tokenization and the media generation calls."
+description: "Model status and cache counters, LoRA adapters, files, skills, approvals, sessions, MCP tools, calibration, tokenization, prompt scoring and the media generation calls."
 sidebar:
   order: 7
 ---
@@ -238,6 +238,18 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | `model` | `str \| None` | optional |
 
 
+## `LogitsOutput`
+
+What a scored prompt carries besides the token log-probabilities.
+
+Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.
+
+| Member | Wire/config name |
+| --- | --- |
+| `LogitsOutput.LOGPROBS` | `'logprobs'` |
+| `LogitsOutput.LOGITS` | `'logits'` |
+
+
 ## `LoraAdapterListResponse`
 
 | Field | Type |
@@ -428,6 +440,29 @@ Members and the names they are sent as; each member is a `str` enum whose `.valu
 | --- | --- |
 | `model_id` | `str` |
 | `status` | `ModelStatus` |
+
+
+## `PromptInput`
+
+One of: `Union[str, list[int]]`.
+
+
+## `PromptLogits`
+
+| Field | Type |
+| --- | --- |
+| `token_logprobs` | `list[float \| None]` |
+| `tokens` | `list[int]` |
+| `vocab_size` | `int` |
+
+
+## `PromptLogitsRequest`
+
+| Field | Type | Default |
+| --- | --- | --- |
+| `model` | `str \| None` | optional |
+| `output` | `LogitsOutput \| None` | optional |
+| `prompt` | `PromptInput` | required |
 
 
 ## `ReIsqRequest`

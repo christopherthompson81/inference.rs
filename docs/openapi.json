@@ -5165,6 +5165,14 @@
         },
         "additionalProperties": false
       },
+      "LogitsOutput": {
+        "type": "string",
+        "description": "What a scored prompt carries besides the token log-probabilities.",
+        "enum": [
+          "logprobs",
+          "logits"
+        ]
+      },
       "LoraAdapterListResponse": {
         "type": "object",
         "required": [
@@ -9954,6 +9962,76 @@
           "auto",
           "f8e4m3"
         ]
+      },
+      "PromptInput": {
+        "oneOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          }
+        ],
+        "description": "The prompt to score, as text (tokenized with the model's special tokens) or as token ids."
+      },
+      "PromptLogits": {
+        "type": "object",
+        "required": [
+          "tokens",
+          "vocab_size",
+          "token_logprobs"
+        ],
+        "properties": {
+          "token_logprobs": {
+            "type": "array",
+            "items": {
+              "type": [
+                "number",
+                "null"
+              ],
+              "format": "float"
+            },
+            "description": "`log p(tokens[i] | tokens[..i])`; null for the first token, which nothing predicts."
+          },
+          "tokens": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            }
+          },
+          "vocab_size": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      },
+      "PromptLogitsRequest": {
+        "type": "object",
+        "required": [
+          "prompt"
+        ],
+        "properties": {
+          "model": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output": {
+            "$ref": "#/components/schemas/LogitsOutput"
+          },
+          "prompt": {
+            "$ref": "#/components/schemas/PromptInput"
+          }
+        },
+        "additionalProperties": false
       },
       "PromptTokensDetailsResponse": {
         "type": "object",

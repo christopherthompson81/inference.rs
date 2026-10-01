@@ -71,6 +71,7 @@ json_requests!(
     crate::models::ModelAlias,
     crate::engine::ModelSpec,
     crate::operations::SessionForkRequest,
+    crate::engine_logits::PromptLogitsRequest,
     crate::operations::ReIsqRequest,
     crate::operations::CalibrationApplyRequest,
     crate::operations::TokenizeRequest,

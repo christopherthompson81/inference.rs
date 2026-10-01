@@ -322,6 +322,15 @@ class TypedEngine(unittest.TestCase):
             self.assertEqual(engine.remove_model("second").model_id, "second")
             self.assertFalse(engine.model_served("second"))
 
+    def test_a_prompt_is_scored(self):
+        scores, logits = self.engine.prompt_logits("Reply with ok")
+        self.assertIsInstance(scores, t.PromptLogits)
+        self.assertIsNone(logits)
+        self.assertIsNone(scores.token_logprobs[0])
+        self.assertTrue(all(p <= 0.0 for p in scores.token_logprobs[1:]))
+        _, logits = self.engine.prompt_logits(scores.tokens, output="logits")
+        self.assertEqual(len(logits), len(scores.tokens) * scores.vocab_size)
+
     def test_runtime_operations_are_typed(self):
         tokens = self.engine.tokenize("Reply with ok")
         self.assertTrue(tokens and all(isinstance(token, int) for token in tokens))

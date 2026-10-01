@@ -1753,3 +1753,47 @@ pub unsafe extern "C" fn inference_model_alias(
         )
     }
 }
+
+const F32_BLOB_MIME: &str = "application/x-f32le";
+
+/// Safety: as for `inference_chat`, and `out_blob` is NULL or valid for a write.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn inference_prompt_logits(
+    engine: *const inference_engine,
+    request: *const c_char,
+    request_len: usize,
+    out_response: *mut *mut inference_string,
+    out_blob: *mut *mut inference_blob,
+) -> inference_status {
+    unsafe {
+        if !out_blob.is_null() {
+            out_blob.write(std::ptr::null_mut());
+        }
+        json_call(
+            engine,
+            request,
+            request_len,
+            out_response,
+            |engine, request| {
+                if out_blob.is_null() && asks_for_logits(request) {
+                    return Err(Failure::invalid(
+                        "out_blob is NULL but the request asks for logits",
+                    ));
+                }
+                let (scored, logits) = engine.prompt_logits_json(request).map_err(api_failure)?;
+                if let Some(logits) = logits {
+                    let mut bytes = Vec::with_capacity(logits.len() * size_of::<f32>());
+                    bytes.extend(logits.iter().flat_map(|x| x.to_le_bytes()));
+                    out_blob.write(blob_handle(bytes, F32_BLOB_MIME.to_string()));
+                }
+                Ok(scored)
+            },
+        )
+    }
+}
+
+// Checked before the forward pass, so a missing out_blob fails fast; a malformed request fails in the call itself.
+fn asks_for_logits(request: &[u8]) -> bool {
+    serde_json::from_slice::<serde_json::Value>(request)
+        .is_ok_and(|request| request["output"] == "logits")
+}

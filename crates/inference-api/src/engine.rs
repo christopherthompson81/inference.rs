@@ -23,6 +23,7 @@ use crate::{
     engine_chat::{ChatEngine, ChatStream, ChatStreamEvent, collect_chat},
     engine_completion::{CompletionStream, collect_completion, prepare_completion},
     engine_embeddings::{EmbeddingError, embed},
+    engine_logits::{PromptLogits, PromptLogitsRequest, prompt_logits},
     files::{
         self, ContainerFileListObject, ContainerFileMetadata, FileBody, FileDeleted,
         FileListObject, FileMetadata, FileUpload,
@@ -1350,6 +1351,24 @@ impl Engine {
 
     pub fn delete_session(&self, session_id: &str) -> Result<SessionDeleted, ApiError> {
         operations::delete_session(self.state(), session_id, self.owner())
+    }
+
+    /// Scores a prompt in one forward pass: each token's log-probability, and its logits when asked for.
+    pub async fn prompt_logits(
+        &self,
+        request: PromptLogitsRequest,
+    ) -> Result<PromptLogits, ApiError> {
+        prompt_logits(self.state(), request).await
+    }
+
+    /// [`Engine::prompt_logits`] over JSON: the response without its logits, and the logits apart.
+    pub async fn prompt_logits_json(
+        &self,
+        request: &[u8],
+    ) -> Result<(String, Option<Vec<f32>>), ApiError> {
+        let mut scored = self.prompt_logits(parse_json(request)?).await?;
+        let logits = scored.logits.take();
+        Ok((to_json(&scored)?, logits))
     }
 
     pub async fn tokenize(&self, request: TokenizeRequest) -> Result<TokenizeResponse, ApiError> {
