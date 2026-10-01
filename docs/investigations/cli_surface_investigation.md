@@ -508,3 +508,23 @@ live on the engine's logger and restart with it; the encoder ones are the model'
 covered by a reused prefix is neither an encoder hit nor a miss; the observability page implied the Prometheus
 counters were these (they are one process-wide series); the field is `model_id` like `/v1/models/status`; entries are
 sorted by model id; the C ABI integration test calls the new entry point.
+
+## Run 21 — 2026-09-30 (time approximate)
+
+**Question:** Run 19 left one inconsistency: when the token cap (or a cancel) lands while the model is still reasoning,
+the response is `incomplete`/`cancelled` but its reasoning item says `completed`.
+
+**Change:** the stream records how its reasoning item ended: `completed` when text or a tool call followed it, the
+run's item status (`incomplete` unless the run completed) when the run stopped mid-reasoning. The non-streaming and
+background path applies the same rule per choice: reasoning with a reply or tool call after it is `completed`,
+reasoning alone takes its choice's status.
+
+**Tests:** `reasoning_cut_off_by_the_cap_is_incomplete_but_reasoning_before_a_reply_is_not` (resource conversion;
+the streamer needs an engine state, and the tiny checkpoint does not reason).
+
+**Review:** the non-streaming half missed the common case: a tag-based reasoning model's content is `Some("")`, not
+`None`, when it produced no reply (sampling.rs keeps reasoning state that way), so "a reply followed" was always true.
+It now needs non-empty content; the test covers `Some("")`. Found, not fixed (agentic loop, separate issues): a
+streaming agentic run whose last allowed round ends in a tool call sends no terminal chunk, so the stream ends with
+"Response channel closed before completion"; and across rounds the streamer keeps one reasoning item, so a second
+round's reasoning streams into an item already marked done.
