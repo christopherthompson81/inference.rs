@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 14
+#define INFERENCE_ABI_VERSION_PATCH 15
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -300,6 +300,10 @@ INFERENCE_API inference_status inference_anthropic_messages(const inference_engi
 INFERENCE_API inference_status inference_anthropic_messages_stream_open(const inference_engine *engine,
                                                                        const char *request, size_t request_len,
                                                                        inference_stream **out_stream);
+/* Counts the prompt tokens an Anthropic Messages request would use (the POST /v1/messages/count_tokens body);
+ * out_response receives {"input_tokens"}, and a failure's error JSON is the Anthropic envelope. */
+INFERENCE_API inference_status inference_anthropic_count_tokens(const inference_engine *engine, const char *request,
+                                                               size_t request_len, inference_string **out_response);
 
 /* Runs a Responses request (the POST /v1/responses body); out_response receives the response resource JSON. A request
  * with "background": true returns at once with status "queued"; follow it with inference_responses_get. "stream" in
@@ -327,8 +331,17 @@ INFERENCE_API inference_status inference_responses_cancel(const inference_engine
                                                          size_t response_id_len, inference_string **out_response);
 
 /* The served models (the GET /v1/models body): the "default" alias, each model with its status, and each loaded LoRA
- * adapter as a model of its own. */
+ * adapter as a model of its own. The model the alias goes to has "default": true. */
 INFERENCE_API inference_status inference_models_list(const inference_engine *engine, inference_string **out_response);
+/* Whether a request naming a model would be routed: the request is {"model_id"} and out_response receives {"model_id",
+ * "served"}, true for a served model, the "default" alias or a LoRA adapter (as "parent::alias", or the alias alone
+ * when only one model has it). */
+INFERENCE_API inference_status inference_model_served(const inference_engine *engine, const char *request,
+                                                     size_t request_len, inference_string **out_response);
+/* The tools the engine's MCP servers give the default model, built-in ones aside: {"object": "list", "data":
+ * [{"name", "description"}]}, description null when the server gave none. */
+INFERENCE_API inference_status inference_mcp_tools_list(const inference_engine *engine,
+                                                       inference_string **out_response);
 /* Each loaded model's cache counters (the GET /v1/models/cache_stats body): {"object": "list", "data": [{"model_id",
  * "prefix_cache_hits", "prefix_cache_sequences", "encoder_cache": {"hits", "misses"}}]}, sorted by model_id. They
  * count since the model loaded (the prefix ones since its engine last started); encoder_cache is absent for a model
@@ -394,6 +407,18 @@ INFERENCE_API inference_status inference_file_delete(const inference_engine *eng
                                                     size_t file_id_len, inference_string **out_response);
 INFERENCE_API inference_status inference_file_content(const inference_engine *engine, const char *file_id,
                                                      size_t file_id_len, inference_blob **out_blob);
+/* The files a Responses container (a code-running session, its "container_id") produced, as the
+ * /v1/containers/{id}/files JSON; a file of another container is INFERENCE_ERR_NOT_FOUND. */
+INFERENCE_API inference_status inference_container_files_list(const inference_engine *engine,
+                                                             const char *container_id, size_t container_id_len,
+                                                             inference_string **out_response);
+INFERENCE_API inference_status inference_container_file_get(const inference_engine *engine, const char *container_id,
+                                                           size_t container_id_len, const char *file_id,
+                                                           size_t file_id_len, inference_string **out_response);
+INFERENCE_API inference_status inference_container_file_content(const inference_engine *engine,
+                                                               const char *container_id, size_t container_id_len,
+                                                               const char *file_id, size_t file_id_len,
+                                                               inference_blob **out_blob);
 
 /* One file of a skill upload: path within the skill (e.g. "SKILL.md", "scripts/run.py") and its bytes. */
 typedef struct inference_skill_file {
@@ -442,6 +467,12 @@ INFERENCE_API inference_status inference_session_put(const inference_engine *eng
                                                     inference_string **out_response);
 INFERENCE_API inference_status inference_session_delete(const inference_engine *engine, const char *session_id,
                                                        size_t session_id_len, inference_string **out_response);
+/* Branches a session: the request is {"num_turns"} and out_response receives {"id"} of a new session, named by the
+ * engine, holding the first num_turns turns (a turn ends at an assistant message without tool calls); 0, or more turns
+ * than the session has, copies all of it. An unknown session is INFERENCE_ERR_INVALID_REQUEST. */
+INFERENCE_API inference_status inference_session_fork(const inference_engine *engine, const char *session_id,
+                                                     size_t session_id_len, const char *request, size_t request_len,
+                                                     inference_string **out_response);
 
 /* Tokenizes {"text", "add_special_tokens"?, "model"?} to {"tokens"}, and detokenizes {"tokens",
  * "skip_special_tokens"?, "model"?} to {"text"}; both flags default to true. */
@@ -454,6 +485,10 @@ INFERENCE_API inference_status inference_detokenize(const inference_engine *engi
  * JSON). They need no engine. */
 INFERENCE_API inference_status inference_system_info(inference_string **out_response);
 INFERENCE_API inference_status inference_system_doctor(inference_string **out_response);
+/* Picks the quantization and settings that fit a model on this machine without loading it (the POST /v1/models/tune
+ * body: {"model_id", "profile"?, ...}); out_response receives the candidates and the recommended one. */
+INFERENCE_API inference_status inference_model_tune(const char *request, size_t request_len,
+                                                   inference_string **out_response);
 
 /* The blob's bytes; valid until the blob is freed. NULL for NULL. */
 INFERENCE_API const uint8_t *inference_blob_data(const inference_blob *blob);

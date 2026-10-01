@@ -7,7 +7,7 @@ use futures::StreamExt;
 use inference_core::{
     AnyMoeSpec, CalibrationAction, CalibrationStatus, ChatCompletionResponse, CompletionResponse,
     ImageGenerationResponse, InferenceRs, MtpConfig, MtpDraftSamplingMethod, Response,
-    SandboxPolicy, SearchCallback, SerializedSession, SupportedModality, ToolCallbackWithTool,
+    SandboxPolicy, SearchCallback, SerializedSession, ToolCallbackWithTool,
 };
 use inference_selection::quant;
 use serde::Deserialize;
@@ -36,20 +36,20 @@ use crate::{
         LoraAdapterListResponse, LoraAdapterObject, UnloadLoraAdapterRequest, list_adapters,
         load_adapter, unload_adapter,
     },
-    lora_routing::{is_resolvable_lora_adapter_model, list_lora_adapter_models},
+    lora_routing::{DEFAULT_MODEL_ID, is_resolvable_lora_adapter_model, list_lora_adapter_models},
     media_source::MediaAttachments,
     models::{
-        CacheStats, ModelDescription, ModelOperationRequest, ModelStatusResponse, cache_stats,
-        describe_models, list_models, model_status, reload_model, unload_model,
+        CacheStats, ModelOperationRequest, ModelServed, ModelStatusResponse, cache_stats,
+        list_models, model_status, reload_model, unload_model,
     },
     openai::{
         ChatCompletionRequest, CompletionRequest, EmbeddingRequest, EmbeddingResponse,
         ImageGenerationRequest, ModelObjects, OpenAiToolSurface, SpeechGenerationRequest,
     },
     operations::{
-        self, CalibrationApplyRequest, DetokenizeRequest, DetokenizeResponse, ReIsqRequest,
-        ReIsqResponse, SessionDeleted, SessionList, SessionStored, TokenizeRequest,
-        TokenizeResponse,
+        self, CalibrationApplyRequest, DetokenizeRequest, DetokenizeResponse, McpToolList,
+        McpToolObject, ReIsqRequest, ReIsqResponse, SessionDeleted, SessionForkRequest,
+        SessionList, SessionStored, TokenizeRequest, TokenizeResponse,
     },
     request_body::JsonRequest,
     responses::{
@@ -805,21 +805,16 @@ impl Engine {
         self.chat.agentic.agent_permission
     }
 
-    /// Whether the default model reads and writes text, so a plain chat can run on it.
-    pub fn chats_in_text(&self) -> bool {
-        self.state().config(None).is_ok_and(|config| {
-            config.modalities.input.contains(&SupportedModality::Text)
-                && config.modalities.output.contains(&SupportedModality::Text)
-        })
-    }
-
     /// The model a request without `model` goes to.
     pub fn default_model_id(&self) -> Option<String> {
         self.state().get_default_model_id().ok().flatten()
     }
 
-    /// Whether `model` names a served model or one of its LoRA adapters.
-    pub fn serves_model(&self, model: &str) -> bool {
+    /// Whether `model` names a served model, the `default` alias, or one of the LoRA adapters.
+    pub fn model_served(&self, model: &str) -> bool {
+        if model == DEFAULT_MODEL_ID {
+            return self.default_model_id().is_some();
+        }
         let base = self
             .state()
             .get_model_status(model)
@@ -1031,6 +1026,10 @@ impl Engine {
         count_tokens(self.state(), request, self.owner()).await
     }
 
+    pub async fn count_tokens_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        to_json(&self.count_tokens(parse_json(request)?).await?)
+    }
+
     /// Runs a Responses request to its end, or queues it when it asks for `background` and returns it queued.
     pub async fn responses(
         &self,
@@ -1109,15 +1108,28 @@ impl Engine {
         list_models(self.state())
     }
 
-    pub fn describe_models(&self) -> Vec<ModelDescription> {
-        describe_models(self.state())
+    pub fn model_served_json(&self, request: &[u8]) -> Result<String, ApiError> {
+        let ModelOperationRequest { model_id } = parse_json(request)?;
+        let served = self.model_served(&model_id);
+        to_json(&ModelServed { model_id, served })
     }
 
-    /// The default model's MCP tools as `(name, description)`; built-in tools aren't listed.
-    pub fn mcp_tools(&self) -> Result<Vec<(String, Option<String>)>, ApiError> {
-        self.state()
+    pub fn mcp_tools(&self) -> Result<McpToolList, ApiError> {
+        let tools = self
+            .state()
             .list_mcp_tools(None)
-            .map_err(|error| ApiError::new(ApiErrorKind::Internal, error, None, None))
+            .map_err(|error| ApiError::new(ApiErrorKind::Internal, error, None, None))?;
+        Ok(McpToolList {
+            object: "list",
+            data: tools
+                .into_iter()
+                .map(|(name, description)| McpToolObject { name, description })
+                .collect(),
+        })
+    }
+
+    pub fn mcp_tools_json(&self) -> Result<String, ApiError> {
+        to_json(&self.mcp_tools()?)
     }
 
     /// Cumulative prefix- and encoder-cache counters of each loaded model.
@@ -1212,19 +1224,29 @@ impl Engine {
         })
     }
 
+    /// Branches `src_session_id` into a new session the engine names, so a fork can't land on an existing one.
     pub fn fork_session(
         &self,
         src_session_id: &str,
-        session_id: String,
-        num_turns: usize,
-    ) -> Result<(), ApiError> {
+        request: SessionForkRequest,
+    ) -> Result<SessionStored, ApiError> {
+        let id = uuid::Uuid::new_v4().to_string();
         operations::fork_session(
             self.state(),
             src_session_id,
-            session_id,
-            num_turns,
+            id.clone(),
+            request.num_turns,
             self.owner(),
-        )
+        )?;
+        Ok(SessionStored { id })
+    }
+
+    pub fn fork_session_json(
+        &self,
+        src_session_id: &str,
+        request: &[u8],
+    ) -> Result<String, ApiError> {
+        to_json(&self.fork_session(src_session_id, parse_json(request)?)?)
     }
 
     pub fn delete_session(&self, session_id: &str) -> Result<SessionDeleted, ApiError> {
@@ -1415,6 +1437,18 @@ impl Engine {
         file_id: &str,
     ) -> Result<FileBody, ApiError> {
         files::container_file_content(self.state(), container_id, file_id, self.owner())
+    }
+
+    pub fn container_files_json(&self, container_id: &str) -> Result<String, ApiError> {
+        to_json(&self.container_files(container_id)?)
+    }
+
+    pub fn container_file_json(
+        &self,
+        container_id: &str,
+        file_id: &str,
+    ) -> Result<String, ApiError> {
+        to_json(&self.container_file(container_id, file_id)?)
     }
 
     pub fn file_content(&self, file_id: &str) -> Result<FileBody, ApiError> {

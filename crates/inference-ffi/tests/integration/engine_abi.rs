@@ -1578,3 +1578,124 @@ fn one_engine_serves_several_models_by_id() {
     }
     unsafe { inference_engine_free(engine) };
 }
+
+// Two ids and a string answer, as `inference_container_file_get` and `inference_session_fork` take them.
+fn by_two(
+    call: unsafe extern "C" fn(
+        *const inference_engine,
+        *const c_char,
+        usize,
+        *const c_char,
+        usize,
+        *mut *mut inference_string,
+    ) -> inference_status,
+    engine: *const inference_engine,
+    first: &str,
+    second: &str,
+) -> (inference_status, Value) {
+    let mut response = null_mut();
+    let status = unsafe {
+        call(
+            engine,
+            first.as_ptr().cast::<c_char>(),
+            first.len(),
+            second.as_ptr().cast::<c_char>(),
+            second.len(),
+            &mut response,
+        )
+    };
+    (status, stored_body(status, response))
+}
+
+#[test]
+fn what_a_server_needs_beyond_requests_is_exported() {
+    let dir = support::tiny_checkpoint().unwrap();
+    let (status, engine) = load(&spec(dir.path()));
+    assert_eq!(status, INFERENCE_OK, "{}", last_error());
+
+    let (_, models) = query(inference_models_list, engine);
+    let defaults = models["data"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|card| card["default"] == json!(true));
+    assert_eq!(defaults.count(), 1, "{models}");
+    for (model, served) in [("default", true), ("no-such-model", false)] {
+        let (status, answer) =
+            request_call(inference_model_served, engine, &json!({"model_id": model}));
+        assert_eq!(
+            (status, answer["served"].clone()),
+            (INFERENCE_OK, json!(served)),
+            "{answer}"
+        );
+    }
+    let (status, tools) = query(inference_mcp_tools_list, engine);
+    assert_eq!(
+        (status, tools["data"].clone()),
+        (INFERENCE_OK, json!([])),
+        "{tools}"
+    );
+    let request = json!({"model": "default", "max_tokens": 8, "messages": [{"role": "user", "content": PROMPT}]});
+    let (status, counted) = request_call(inference_anthropic_count_tokens, engine, &request);
+    assert_eq!(status, INFERENCE_OK, "{counted}");
+    assert!(counted["input_tokens"].as_u64().unwrap() > 0, "{counted}");
+
+    let (status, listed) = by_id(inference_container_files_list, engine, "cntr_unused");
+    assert_eq!(
+        (status, listed["data"].clone()),
+        (INFERENCE_OK, json!([])),
+        "{listed}"
+    );
+    let file_id = upload(engine);
+    let (status, outside) = by_two(
+        inference_container_file_get,
+        engine,
+        "cntr_unused",
+        &file_id,
+    );
+    assert_eq!(status, INFERENCE_ERR_NOT_FOUND, "{outside}");
+    let mut blob = null_mut();
+    let status = unsafe {
+        inference_container_file_content(
+            engine,
+            c"cntr_unused".as_ptr(),
+            "cntr_unused".len(),
+            file_id.as_ptr().cast::<c_char>(),
+            file_id.len(),
+            &mut blob,
+        )
+    };
+    assert_eq!((status, blob.is_null()), (INFERENCE_ERR_NOT_FOUND, true));
+
+    let session =
+        json!({"messages": [{"role": {"Left": "user"}, "content": {"Left": PROMPT}}]}).to_string();
+    let (status, stored) = by_two(inference_session_put, engine, "fork-source", &session);
+    assert_eq!(status, INFERENCE_OK, "{stored}");
+    let (status, forked) = by_two(
+        inference_session_fork,
+        engine,
+        "fork-source",
+        r#"{"num_turns": 0}"#,
+    );
+    assert_eq!(status, INFERENCE_OK, "{forked}");
+    let fork = forked["id"].as_str().unwrap();
+    assert_ne!(fork, "fork-source");
+    assert_eq!(by_id(inference_session_get, engine, fork).0, INFERENCE_OK);
+    let (status, error) = by_two(
+        inference_session_fork,
+        engine,
+        "no-such-session",
+        r#"{"num_turns": 0}"#,
+    );
+    assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
+
+    let tune = r#"{"model_id": "org/model", "dtype": "no-such-dtype"}"#;
+    let mut response = null_mut();
+    let status =
+        unsafe { inference_model_tune(tune.as_ptr().cast::<c_char>(), tune.len(), &mut response) };
+    assert_eq!(
+        (status, response.is_null()),
+        (INFERENCE_ERR_INVALID_REQUEST, true)
+    );
+    unsafe { inference_engine_free(engine) };
+}

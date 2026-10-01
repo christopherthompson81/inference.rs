@@ -774,7 +774,7 @@ fn normalize_model_label_input(model: Option<&str>) -> Option<&str> {
 }
 
 fn known_model_label(model: &str, observability: &ObservabilityState) -> String {
-    if observability.engine.serves_model(model) {
+    if observability.engine.model_served(model) {
         model.to_string()
     } else {
         UNKNOWN_MODEL.to_string()

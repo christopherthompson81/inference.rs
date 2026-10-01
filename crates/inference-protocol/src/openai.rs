@@ -1317,6 +1317,9 @@ pub struct ModelObject {
     /// From the model's `generation_config.json`; its temperature, top-k/p, min-p and repetition penalty fill unset fields
     #[serde(skip_serializing_if = "Option::is_none")]
     pub generation_defaults: Option<GenerationDefaults>,
+    /// True on the model a request without `model`, or naming `default`, goes to
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default: Option<bool>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ToSchema)]

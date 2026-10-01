@@ -30,6 +30,8 @@ internal static class Program
             return 77;
         }
         Check("system info is JSON", JsonNode.Parse(InferenceEngine.SystemInfo()) is JsonObject);
+        var badTune = Throws(() => InferenceEngine.TuneModel("""{"model_id": "org/model", "dtype": "no-such-dtype"}"""));
+        Check("tuning with an unknown dtype is InvalidRequest", badTune?.Status == InferenceStatus.InvalidRequest);
 
         using (var engine = InferenceEngine.Load(Spec(model)))
         {
@@ -164,6 +166,15 @@ internal static class Program
 
         var models = JsonNode.Parse(engine.ListModels())!["data"]!.AsArray();
         Check("the model list starts with the default alias", (string?)models[0]!["id"] == "default");
+        Check("one model card is marked default", models.Count(card => (bool?)card!["default"] == true) == 1);
+        Check("the default alias is served", (bool)JsonNode.Parse(engine.ModelServed("""{"model_id": "default"}"""))!["served"]!);
+        Check("an unknown model is not served",
+            !(bool)JsonNode.Parse(engine.ModelServed("""{"model_id": "no-such-model"}"""))!["served"]!);
+        Check("a model without MCP servers lists no MCP tools",
+            JsonNode.Parse(engine.ListMcpTools())!["data"]!.AsArray().Count == 0);
+        var counted = JsonNode.Parse(engine.AnthropicCountTokens(
+            """{"model": "default", "max_tokens": 8, "messages": [{"role": "user", "content": "Reply with ok"}]}"""))!;
+        Check("a Messages request counts its prompt tokens", (int)counted["input_tokens"]! > 0);
         var unknown = Throws(() => engine.ModelStatus("""{"model_id": "no-such-model"}"""));
         Check("an unknown model's status is NotFound", unknown?.Status == InferenceStatus.NotFound);
         var approval = Throws(() => engine.ResolveApproval("never-issued", """{"decision": "approve"}"""));
@@ -183,6 +194,12 @@ internal static class Program
         Check("an imported session is listed",
             JsonNode.Parse(engine.ListSessions())!["data"]!.AsArray().Any(id => (string?)id == "cs-session"));
         Check("an imported session exports", JsonNode.Parse(engine.GetSession("cs-session"))!["messages"] is JsonArray);
+        var fork = (string?)JsonNode.Parse(engine.ForkSession("cs-session", """{"num_turns": 0}"""))!["id"];
+        Check("a forked session gets its own id", fork is not null && fork != "cs-session");
+        Check("a forked session exports", JsonNode.Parse(engine.GetSession(fork!))!["messages"] is JsonArray);
+        engine.DeleteSession(fork!);
+        var unknownFork = Throws(() => engine.ForkSession("no-such-session", """{"num_turns": 0}"""));
+        Check("forking an unknown session is InvalidRequest", unknownFork?.Status == InferenceStatus.InvalidRequest);
         Check("a session is deleted", (bool)JsonNode.Parse(engine.DeleteSession("cs-session"))!["deleted"]!);
         Check("a deleted session is NotFound", Throws(() => engine.GetSession("cs-session"))?.Status == InferenceStatus.NotFound);
 
@@ -256,6 +273,12 @@ internal static class Program
         var id = (string)uploaded["id"]!;
         var blob = engine.FileContent(id);
         Check("file content round-trips", blob.Data.SequenceEqual(contents) && blob.MimeType == "text/csv");
+        Check("a container no run used has no files",
+            JsonNode.Parse(engine.ListContainerFiles("cntr_unused"))!["data"]!.AsArray().Count == 0);
+        Check("a file outside the container is NotFound",
+            Throws(() => engine.GetContainerFile("cntr_unused", id))?.Status == InferenceStatus.NotFound);
+        Check("its content is NotFound too",
+            Throws(() => engine.ContainerFileContent("cntr_unused", id))?.Status == InferenceStatus.NotFound);
         engine.DeleteFile(id);
         Check("a deleted file is NotFound", Throws(() => engine.GetFile(id))?.Status == InferenceStatus.NotFound);
         Check("a deleted file's content is NotFound",

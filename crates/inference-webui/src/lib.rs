@@ -11,8 +11,10 @@ use axum::routing::{get, get_service, post};
 use axum::{Extension, Router};
 use include_dir::{Dir, include_dir};
 use indexmap::IndexMap;
+use inference_api::lora_routing::DEFAULT_MODEL_ID;
+use inference_api::openai::{Modality, ModelCategory};
 use inference_api::{Engine, engine::AgenticSpec};
-use inference_core::{ModelCategory, SearchEmbeddingModel, SupportedModality};
+use inference_core::SearchEmbeddingModel;
 use inference_server_core::{
     auth::{Auth, Guard, Owner, require},
     inference_server_router_builder::DEFAULT_MAX_BODY_LIMIT,
@@ -109,54 +111,52 @@ async fn static_handler(uri: axum::http::Uri) -> Response<Body> {
     }
 }
 
-fn modality_label(m: &SupportedModality) -> String {
-    match m {
-        SupportedModality::Text => "text",
-        SupportedModality::Audio => "audio",
-        SupportedModality::Vision => "vision",
-        SupportedModality::Video => "video",
-        SupportedModality::Embedding => "embedding",
-    }
-    .to_string()
-}
-
+// The models a chat can pick: loaded text, multimodal and speech models, without the `default` alias or adapter cards.
 fn build_model_list(engine: &Engine) -> IndexMap<String, UiModelInfo> {
     let mut models = IndexMap::new();
-    for model in engine.describe_models() {
-        let kind = match model.category {
-            ModelCategory::Text => "text",
-            ModelCategory::Multimodal { .. } => "multimodal",
-            ModelCategory::Speech => "speech",
-            ModelCategory::Audio => "audio",
-            ModelCategory::Embedding => "embedding",
-            ModelCategory::Diffusion => "diffusion",
-        };
-        if !matches!(kind, "text" | "multimodal" | "speech") {
+    let Ok(cards) = engine.models() else {
+        return models;
+    };
+    for card in cards.data {
+        if card.id == DEFAULT_MODEL_ID || card.parent.is_some() {
             continue;
         }
-        let (input_modalities, output_modalities) = model
+        let kind = match card.category {
+            Some(ModelCategory::Text) => "text",
+            Some(ModelCategory::Multimodal) => "multimodal",
+            Some(ModelCategory::Speech) => "speech",
+            _ => continue,
+        };
+        let labels = |modalities: &[Modality]| modalities.iter().map(modality_label).collect();
+        let (input_modalities, output_modalities) = card
             .modalities
-            .map(|modalities| {
-                (
-                    modalities.input.iter().map(modality_label).collect(),
-                    modalities.output.iter().map(modality_label).collect(),
-                )
-            })
+            .map(|modalities| (labels(&modalities.input), labels(&modalities.output)))
             .unwrap_or_default();
         models.insert(
-            model.id.clone(),
+            card.id.clone(),
             UiModelInfo {
-                name: model.id,
+                name: card.id,
                 kind: kind.to_string(),
                 input_modalities,
                 output_modalities,
                 generation_defaults: GenerationParams::from_model_defaults(
-                    model.generation_defaults.as_ref(),
+                    card.generation_defaults.as_ref(),
                 ),
             },
         );
     }
     models
+}
+
+fn modality_label(modality: &Modality) -> String {
+    match modality {
+        Modality::Text => "text",
+        Modality::Audio => "audio",
+        Modality::Vision => "vision",
+        Modality::Video => "video",
+        Modality::Embedding => "embedding",
+    }
+    .to_string()
 }
 
 pub use inference_server_core::route_registry::UI_ROUTE;

@@ -111,6 +111,14 @@ anthropic_messages(
 ) -> types.AnthropicMessageResponse
 ```
 
+### `Engine.anthropic_count_tokens`
+
+```text
+anthropic_count_tokens(
+    request: types.AnthropicMessagesRequest | str,
+) -> types.AnthropicCountTokensResponse
+```
+
 ### `Engine.anthropic_messages_stream`
 
 ```text
@@ -218,6 +226,14 @@ put_session(
 
 Imports a session under `session_id`, replacing any session there.
 
+### `Engine.fork_session`
+
+```text
+fork_session(session_id: str, num_turns: int) -> types.SessionStored
+```
+
+Branches a session into a new one, named by the engine, holding its first `num_turns` turns.
+
 ### `Engine.delete_session`
 
 ```text
@@ -248,6 +264,20 @@ detokenize(
 
 ```text
 list_models() -> types.ModelObjects
+```
+
+### `Engine.model_served`
+
+```text
+model_served(model_id: str) -> bool
+```
+
+Whether a request naming `model_id` would be routed, adapter aliases included.
+
+### `Engine.list_mcp_tools`
+
+```text
+list_mcp_tools() -> types.McpToolList
 ```
 
 ### `Engine.unload_model`
@@ -352,6 +382,29 @@ delete_file(file_id: str) -> types.FileDeleted
 
 ```text
 file_content(file_id: str) -> Blob
+```
+
+### `Engine.list_container_files`
+
+```text
+list_container_files(
+    container_id: str,
+) -> types.ContainerFileListObject
+```
+
+### `Engine.get_container_file`
+
+```text
+get_container_file(
+    container_id: str,
+    file_id: str,
+) -> types.ContainerFileMetadata
+```
+
+### `Engine.container_file_content`
+
+```text
+container_file_content(container_id: str, file_id: str) -> Blob
 ```
 
 ### `Engine.upload_skill`
@@ -554,6 +607,14 @@ anthropic_messages(request_json: str) -> str
 
 An Anthropic Messages request; failures carry the Anthropic error envelope.
 
+### `JsonEngine.anthropic_count_tokens`
+
+```text
+anthropic_count_tokens(request_json: str) -> str
+```
+
+The prompt tokens an Anthropic Messages request would use: {"input_tokens"}.
+
 ### `JsonEngine.anthropic_messages_stream`
 
 ```text
@@ -595,6 +656,22 @@ cancel_response(response_id: str) -> str
 ```text
 list_models() -> str
 ```
+
+### `JsonEngine.model_served`
+
+```text
+model_served(request_json: str) -> str
+```
+
+Whether a request naming the model in {"model_id"} would be routed: {"model_id", "served"}.
+
+### `JsonEngine.list_mcp_tools`
+
+```text
+list_mcp_tools() -> str
+```
+
+The tools the engine's MCP servers give the default model.
 
 ### `JsonEngine.unload_model`
 
@@ -650,6 +727,18 @@ Speaks text; the blob's MIME type carries the sample rate and channel count.
 
 ```text
 _call2(name: str, first: str, second: str) -> str
+```
+
+### `JsonEngine._blob2`
+
+```text
+_blob2(name: str, first: str, second: str) -> Blob
+```
+
+### `JsonEngine._pair`
+
+```text
+_pair(name: str, first: str, second: str) -> ctypes.c_void_p
 ```
 
 ### `JsonEngine.resolve_approval`
@@ -721,6 +810,14 @@ get_session(session_id: str) -> str
 put_session(session_id: str, session_json: str) -> str
 ```
 
+### `JsonEngine.fork_session`
+
+```text
+fork_session(session_id: str, request_json: str) -> str
+```
+
+Branches a session into a new one the engine names; the request is {"num_turns"}, the answer {"id"}.
+
 ### `JsonEngine.delete_session`
 
 ```text
@@ -761,6 +858,26 @@ delete_file(file_id: str) -> str
 
 ```text
 file_content(file_id: str) -> Blob
+```
+
+### `JsonEngine.list_container_files`
+
+```text
+list_container_files(container_id: str) -> str
+```
+
+The files a Responses container (a code-running session) produced.
+
+### `JsonEngine.get_container_file`
+
+```text
+get_container_file(container_id: str, file_id: str) -> str
+```
+
+### `JsonEngine.container_file_content`
+
+```text
+container_file_content(container_id: str, file_id: str) -> Blob
 ```
 
 ### `JsonEngine.upload_skill`

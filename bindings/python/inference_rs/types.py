@@ -1025,6 +1025,20 @@ class McpServerSourceWebSocket:
 
 
 @dataclass(kw_only=True)
+class McpToolList:
+    """The tools the engine's MCP servers provide to the default model; built-in tools aren't listed."""
+
+    data: list[McpToolObject]
+    object: str
+
+
+@dataclass(kw_only=True)
+class McpToolObject:
+    description: str | None = None
+    name: str
+
+
+@dataclass(kw_only=True)
 class Message:
     """Represents a single message in a conversation"""
 
@@ -1092,6 +1106,7 @@ class ModelObject:
     adapter_generation: str | None = None
     category: ModelCategory | None = None
     created: int
+    default: bool | None = None
     generation_defaults: GenerationDefaults | None = None
     id: str
     max_model_len: int | None = None
@@ -1415,6 +1430,14 @@ class ModelSelectedEmbedding:
     topology: str | None = None
     write_uqff: UqffWriteSpec | None = None
     _external = 'Embedding'
+
+
+@dataclass(kw_only=True)
+class ModelServed:
+    """Whether a request naming `model_id` would be routed: a served model, the `default` alias, or a LoRA adapter."""
+
+    model_id: str
+    served: bool
 
 
 @dataclass(kw_only=True)
@@ -2519,6 +2542,13 @@ class SerializedVideo:
 class SessionDeleted:
     deleted: bool
     id: str
+
+
+@dataclass(kw_only=True)
+class SessionForkRequest:
+    """Branches a session into a new one, named by the engine, with the source's first `num_turns` turns (0 copies all)."""
+
+    num_turns: int
 
 
 @dataclass(kw_only=True)

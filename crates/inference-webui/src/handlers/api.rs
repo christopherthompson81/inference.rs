@@ -18,6 +18,7 @@ use inference_api::media_source::{
     AUDIO_UPLOAD_EXTENSIONS, IMAGE_UPLOAD_EXTENSIONS, VIDEO_UPLOAD_EXTENSIONS,
 };
 use inference_api::openai::{AudioResponseFormat, SpeechGenerationRequest};
+use inference_api::operations::SessionForkRequest;
 
 use crate::chat::append_chat_message;
 use crate::types::{
@@ -627,16 +628,16 @@ pub async fn fork_session(
     Extension(app): Extension<Arc<AppState>>,
     Json(req): Json<ForkSessionRequest>,
 ) -> impl IntoResponse {
-    // server-named, so a fork can't land on a session that already exists
-    let session_id = Uuid::new_v4().to_string();
-    let result = app
-        .engine
-        .fork_session(&req.src_session_id, session_id.clone(), req.num_turns);
-    if let Err(e) = result {
-        error!("fork session error: {}", e.message);
-        return (StatusCode::INTERNAL_SERVER_ERROR, e.message).into_response();
+    let request = SessionForkRequest {
+        num_turns: req.num_turns,
+    };
+    match app.engine.fork_session(&req.src_session_id, request) {
+        Ok(forked) => Json(json!({ "session_id": forked.id })).into_response(),
+        Err(e) => {
+            error!("fork session error: {}", e.message);
+            (StatusCode::INTERNAL_SERVER_ERROR, e.message).into_response()
+        }
     }
-    Json(json!({ "session_id": session_id })).into_response()
 }
 
 #[derive(Default)]
@@ -852,13 +853,7 @@ pub async fn restore_chat_session(
 /// Return the list of MCP-provided tools registered on the default model.
 pub async fn list_mcp_tools(Extension(app): Extension<Arc<AppState>>) -> impl IntoResponse {
     match app.engine.mcp_tools() {
-        Ok(tools) => {
-            let payload: Vec<_> = tools
-                .into_iter()
-                .map(|(name, description)| json!({ "name": name, "description": description }))
-                .collect();
-            Json(json!({ "tools": payload })).into_response()
-        }
+        Ok(tools) => Json(json!({ "tools": tools.data })).into_response(),
         Err(e) => {
             error!("list_mcp_tools error: {}", e.message);
             (StatusCode::INTERNAL_SERVER_ERROR, e.message).into_response()

@@ -277,6 +277,20 @@ class TypedEngine(unittest.TestCase):
         with self.assertRaises(ir.InferenceError) as unknown:
             self.engine.model_status("no-such-model")
         self.assertEqual(unknown.exception.status, ir.Status.NOT_FOUND)
+        self.assertEqual(sum(1 for m in models.data if m.default), 1)
+        self.assertTrue(self.engine.model_served("default"))
+        self.assertFalse(self.engine.model_served("no-such-model"))
+        self.assertEqual(self.engine.list_mcp_tools().data, [])
+        request = {"model": "default", "max_tokens": 8, "messages": [{"role": "user", "content": "Reply with ok"}]}
+        self.assertGreater(self.engine.anthropic_count_tokens(json.dumps(request)).input_tokens, 0)
+        self.assertEqual(self.engine.list_container_files("cntr_unused").data, [])
+        for call in (self.engine.get_container_file, self.engine.container_file_content):
+            with self.assertRaises(ir.InferenceError) as outside:
+                call("cntr_unused", uploaded.id)
+            self.assertEqual(outside.exception.status, ir.Status.NOT_FOUND)
+        with self.assertRaises(ir.InferenceError) as bad_tune:
+            ir.tune_model(json.dumps({"model_id": "org/model", "dtype": "no-such-dtype"}))
+        self.assertEqual(bad_tune.exception.status, ir.Status.INVALID_REQUEST)
 
     def test_an_owner_reaches_only_what_it_stored(self):
         with self.engine.for_owner("team-a") as team_a, self.engine.for_owner("team-b") as team_b:
@@ -303,6 +317,13 @@ class TypedEngine(unittest.TestCase):
         self.assertEqual(self.engine.put_session("typed-session", session).id, "typed-session")
         self.assertIn("typed-session", self.engine.list_sessions().data)
         self.assertEqual(self.engine.get_session("typed-session").messages, session.messages)
+        fork = self.engine.fork_session("typed-session", 0).id
+        self.assertNotEqual(fork, "typed-session")
+        self.assertIsInstance(self.engine.get_session(fork), t.SerializedSession)
+        self.engine.delete_session(fork)
+        with self.assertRaises(ir.InferenceError) as unknown_fork:
+            self.engine.fork_session("no-such-session", 0)
+        self.assertEqual(unknown_fork.exception.status, ir.Status.INVALID_REQUEST)
         self.assertTrue(self.engine.delete_session("typed-session").deleted)
         with self.assertRaises(ir.InferenceError) as gone:
             self.engine.get_session("typed-session")
