@@ -298,7 +298,6 @@ pub(crate) fn resolve_map_setting(
 /// The load-time metadata every model constructor receives, less its mapper and rope pairing.
 pub(crate) struct LoadMetadataParts {
     pub loading_isq: bool,
-    pub attention: inference_nn::paged_attention::AttentionImplementation,
     pub device: Device,
     pub multi_progress: Arc<indicatif::MultiProgress>,
     pub matformer: Option<MatformerSliceConfig>,
@@ -446,6 +445,411 @@ pub(crate) fn generation_config(
         None => from_files(),
     }
     .or_else(|| GenerationConfig::from_model_config(config))
+}
+
+/// The load settings each pipeline's own config carries.
+pub(crate) struct LoadSettings<'a> {
+    pub topology: Option<&'a Topology>,
+    pub organization: super::IsqOrganization,
+    pub write_uqff: Option<&'a super::isq::UqffWriteConfig>,
+    pub from_uqff: bool,
+    pub has_imatrix: bool,
+    pub has_calibration: bool,
+}
+
+pub(crate) type AdjustAutoParams<'a> =
+    dyn Fn(&device_map::AutoDeviceMapParams) -> Result<device_map::AutoDeviceMapParams> + 'a;
+
+/// What [`open_load_session`] needs from a pipeline loader; the fields name where the pipelines differ.
+pub(crate) struct LoadSessionInputs<'a> {
+    pub mapped: &'a dyn super::loaders::DeviceMappedModelLoader,
+    pub isq: &'a dyn super::IsqModelLoader,
+    pub config: &'a str,
+    pub settings: LoadSettings<'a>,
+    pub paths: &'a dyn super::ModelPaths,
+    pub device: &'a Device,
+    pub dtype: &'a dyn TryIntoDType,
+    pub mapper: DeviceMapSetting,
+    pub in_situ_quant: Option<inference_quant::IsqType>,
+    pub uqff_files: Option<&'a [PathBuf]>,
+    pub prepared_weight_source: Option<Arc<dyn QuantizedWeightSource>>,
+    pub has_lora: bool,
+    pub matformer: Option<MatformerSliceConfig>,
+    // whether the auto device map sizes layers with the matformer slice applied
+    pub matformer_sizing: bool,
+    pub non_mapped_unpacked: bool,
+    pub auto_device_map_params: Option<&'a AdjustAutoParams<'a>>,
+    pub weight_target: &'static str,
+}
+
+/// Devices, weight sources, device mappers and the installed ISQ plan for one load.
+pub(crate) struct LoadSession {
+    pub tensor_parallelism: TensorParallelism,
+    pub device: Device,
+    pub available_devices: Vec<Device>,
+    pub uqff_reader: Option<Arc<UqffReader>>,
+    pub weight_source: Option<Arc<dyn QuantizedWeightSource>>,
+    pub max_kv_tokens: Option<usize>,
+    pub pipeline_mapper: Box<dyn DeviceMapper + Send + Sync>,
+    pub layer_devices: Vec<Option<Device>>,
+    pub dtype: DType,
+    pub plan: super::isq_flow::IsqLoadPlan,
+    pub attention: inference_nn::paged_attention::AttentionImplementation,
+    pub load_parts: LoadMetadataParts,
+}
+
+/// Opens the load; the mapper it returns builds the model unless `load_model` shards it for tensor parallelism.
+pub(crate) fn open_load_session(
+    inputs: LoadSessionInputs<'_>,
+    paged_attn_config: &mut Option<PagedAttentionConfig>,
+) -> Result<(LoadSession, Box<dyn DeviceMapper + Send + Sync>)> {
+    let LoadSessionInputs {
+        mapped,
+        isq,
+        config,
+        settings,
+        paths,
+        device,
+        dtype,
+        mut mapper,
+        in_situ_quant,
+        uqff_files,
+        prepared_weight_source,
+        has_lora,
+        matformer,
+        matformer_sizing,
+        non_mapped_unpacked,
+        auto_device_map_params,
+        weight_target,
+    } = inputs;
+    let write_uqff = settings.write_uqff.is_some();
+    let LoadDevices {
+        tensor_parallelism,
+        device,
+        available_devices,
+    } = resolve_load_devices(mapped.model_config(config)?.as_ref(), device, write_uqff)?;
+    let distributed = tensor_parallelism.is_enabled();
+    let WeightSources {
+        uqff_reader,
+        prepared: prepared_weight_source,
+        combined: weight_source,
+    } = open_weight_sources(uqff_files, prepared_weight_source)?;
+
+    if let (Some(adjust), false, false, DeviceMapSetting::Auto(params)) =
+        (auto_device_map_params, write_uqff, distributed, &mapper)
+    {
+        mapper = DeviceMapSetting::Auto(adjust(params)?);
+    }
+    let ResolvedMapSetting {
+        setting: mapper,
+        max_kv_tokens,
+    } = resolve_map_setting(
+        MapSettingInputs {
+            setting: mapper,
+            write_uqff,
+            distributed,
+            available_devices: &available_devices,
+            dtype,
+            sizing: super::isq_flow::AutoDeviceMapSizingInputs {
+                loader: mapped,
+                config,
+                sizing: super::isq_flow::resolve_auto_device_map_sizing(
+                    uqff_reader.is_some(),
+                    prepared_weight_source.is_some(),
+                    in_situ_quant,
+                ),
+                weight_source: weight_source.as_ref(),
+                prepared_weight_source: prepared_weight_source.as_ref(),
+                topology: settings.topology,
+                organization: settings.organization,
+                weight_filenames: paths.get_weight_filenames(),
+                has_lora,
+                matformer: matformer.as_ref().filter(|_| matformer_sizing),
+                non_mapped_unpacked,
+            },
+        },
+        paged_attn_config,
+    )?;
+
+    let MaterializedDeviceMapper {
+        pipeline_mapper,
+        mapper,
+        layer_devices,
+        dtype,
+    } = materialize_device_mapper(
+        DeviceMapperInputs {
+            setting: &mapper,
+            num_layers: mapped.num_layers(config)?,
+            device: &device,
+            available_devices: &available_devices,
+            topology: settings.topology,
+            write_uqff,
+            dtype,
+        },
+        paged_attn_config,
+    )?;
+
+    if crate::using_flash_attn() {
+        inference_quant::log::once_log_info("FlashAttention is enabled.");
+    }
+
+    let plan = super::isq_flow::resolve_and_install_isq_plan(super::isq_flow::IsqPlanInputs {
+        in_situ_quant,
+        has_imatrix: settings.has_imatrix,
+        has_calibration: settings.has_calibration,
+        write_uqff_types: settings.write_uqff.map(|c| c.types.clone()),
+        has_write_uqff: write_uqff,
+        loading_from_uqff: settings.from_uqff,
+        organization: settings.organization,
+        topology_overrides: settings
+            .topology
+            .map(|topology| topology.immediate_overrides())
+            .unwrap_or_default(),
+        loader: isq,
+        config,
+        device: &device,
+    })?;
+
+    let attention = if paged_attn_config.is_some() {
+        inference_nn::paged_attention::AttentionImplementation::PagedAttention
+    } else {
+        inference_nn::paged_attention::AttentionImplementation::Eager
+    };
+    let load_parts = LoadMetadataParts {
+        loading_isq: plan.loading_isq,
+        device: device.clone(),
+        multi_progress: Arc::new(crate::utils::progress::new_multi_progress()),
+        matformer,
+    };
+
+    info!(
+        "{}",
+        super::isq::WeightLoadingMode::from(super::isq::WeightLoadingState {
+            from_uqff: settings.from_uqff,
+            loading_isq: plan.loading_isq,
+            immediate_isq: plan.immediate_isq_installed,
+            write_uqff,
+        })
+        .message(weight_target)
+    );
+
+    Ok((
+        LoadSession {
+            tensor_parallelism,
+            device,
+            available_devices,
+            uqff_reader,
+            weight_source,
+            max_kv_tokens,
+            pipeline_mapper,
+            layer_devices,
+            dtype,
+            plan,
+            attention,
+            load_parts,
+        },
+        mapper,
+    ))
+}
+
+/// The model-building half of a pipeline loader, so [`load_model`] drives all three pipelines.
+pub(crate) trait BuildModel {
+    type Model: ?Sized;
+    fn as_isq(&self) -> &dyn super::IsqModelLoader;
+    fn as_mapped(&self) -> &dyn super::loaders::DeviceMappedModelLoader;
+    fn build(
+        &self,
+        config: &str,
+        vb: inference_quant::ShardedVarBuilder,
+        metadata: crate::pipeline::NormalLoadingMetadata,
+        attention: inference_nn::paged_attention::AttentionImplementation,
+    ) -> Result<Box<Self::Model>>;
+    fn device_for_tensor(
+        &self,
+        config: &str,
+        mapper: &dyn DeviceMapper,
+        loading_isq: bool,
+    ) -> Result<DeviceForTensor>;
+}
+
+macro_rules! build_model_for {
+    ($loader:path => $model:path) => {
+        impl BuildModel for dyn $loader {
+            type Model = dyn $model + Send + Sync;
+            fn as_isq(&self) -> &dyn super::IsqModelLoader {
+                self
+            }
+            fn as_mapped(&self) -> &dyn super::loaders::DeviceMappedModelLoader {
+                self
+            }
+            fn build(
+                &self,
+                config: &str,
+                vb: inference_quant::ShardedVarBuilder,
+                metadata: crate::pipeline::NormalLoadingMetadata,
+                attention: inference_nn::paged_attention::AttentionImplementation,
+            ) -> Result<Box<Self::Model>> {
+                self.load(config, vb, metadata, attention)
+            }
+            fn device_for_tensor(
+                &self,
+                config: &str,
+                mapper: &dyn DeviceMapper,
+                loading_isq: bool,
+            ) -> Result<DeviceForTensor> {
+                self.get_device_for_tensor(config, mapper, loading_isq)
+            }
+        }
+    };
+}
+
+build_model_for!(super::loaders::NormalModelLoader => crate::pipeline::NormalModel);
+build_model_for!(super::loaders::MultimodalModelLoader => crate::pipeline::MultimodalModel);
+build_model_for!(super::loaders::EmbeddingModelLoader => crate::pipeline::EmbeddingModel);
+
+pub(crate) type LoadedModel<M> = (
+    Box<M>,
+    inference_quant::Tracker,
+    Option<Arc<crate::DynamicLoraRuntime>>,
+);
+
+pub(crate) type XLoraLoad<'a, M> = dyn Fn(
+        &WeightFiles<'_>,
+        Box<dyn DeviceMapper + Send + Sync>,
+    ) -> Result<(Box<M>, inference_quant::Tracker)>
+    + 'a;
+
+/// What [`load_model`] reads beyond the session.
+pub(crate) struct ModelLoadInputs<'a, M: ?Sized> {
+    pub config: &'a str,
+    // the config the session sized from, which a tensor-parallel mapper is built from too
+    pub session_config: &'a str,
+    pub paths: &'a dyn super::ModelPaths,
+    pub silent: bool,
+    pub organization: super::IsqOrganization,
+    pub from_uqff: bool,
+    pub write_uqff: bool,
+    pub prepared: Option<(
+        &'a inference_quant::ShardedVarBuilder,
+        crate::model::RopePairing,
+    )>,
+    pub lora: Option<crate::LoraRuntimeConfig>,
+    pub xlora: Option<&'a XLoraLoad<'a, M>>,
+}
+
+/// Builds the model over a tensor-parallel shard, a prepared source or the weight files, with LoRA if asked.
+pub(crate) fn load_model<L: BuildModel + ?Sized>(
+    loader: &L,
+    session: &LoadSession,
+    mapper: Box<dyn DeviceMapper + Send + Sync>,
+    inputs: ModelLoadInputs<'_, L::Model>,
+) -> Result<LoadedModel<L::Model>> {
+    let ModelLoadInputs {
+        config,
+        session_config,
+        paths,
+        silent,
+        organization,
+        from_uqff,
+        write_uqff,
+        prepared,
+        lora,
+        xlora,
+    } = inputs;
+    let loading_isq = session.plan.loading_isq;
+    let distributed = session.tensor_parallelism.is_enabled();
+    let weights = WeightFiles {
+        paths,
+        dtype: session.dtype,
+        device: &session.plan.load_device,
+        layer_devices: session.layer_devices.clone(),
+        silent,
+        uqff_reader: session.uqff_reader.clone(),
+    };
+    let from_files = |mapper: &dyn DeviceMapper| -> Result<inference_quant::ShardedVarBuilder> {
+        let placeholders = uqff_placeholders(
+            loader.as_isq(),
+            config,
+            loading_isq,
+            from_uqff,
+            matches!(organization, super::IsqOrganization::MoeExpertsOnly),
+        )?;
+        weights.load(
+            placeholders,
+            loader.device_for_tensor(config, mapper, loading_isq)?,
+        )
+    };
+
+    let (mapper, sharded) = if distributed {
+        let (mapper, sharded) =
+            distributed::prepare_distributed_mapper(distributed::DistributedMapperConfig {
+                dtype: session.dtype,
+                device: &session.device,
+                available_devices: &session.available_devices,
+                global_world_size_override: session.tensor_parallelism.world_size(),
+                silent,
+                config: session_config,
+                loading_isq,
+                from_uqff,
+                write_uqff,
+                organization,
+                isq_loader: loader.as_isq(),
+                mapped_loader: loader.as_mapped(),
+                weights: match prepared {
+                    Some((weights, _)) => {
+                        distributed::DistributedWeightSource::Prepared(weights.clone())
+                    }
+                    None => distributed::DistributedWeightSource::Paths(paths),
+                },
+            })?;
+        let sharded = match session.uqff_reader.clone() {
+            Some(reader) => sharded.with_uqff_reader(reader),
+            None => sharded,
+        };
+        (mapper, Some(sharded))
+    } else {
+        (mapper, None)
+    };
+    if let Some(xlora) = xlora {
+        let (model, tracker) = xlora(&weights, mapper)?;
+        return Ok((model, tracker, None));
+    }
+
+    let vb = match (sharded, prepared) {
+        // a LoRA load with no prepared source reads the files even when tensor parallel
+        (Some(_), None) if lora.is_some() => from_files(&*mapper)?,
+        (Some(sharded), _) => sharded,
+        (None, Some((weights, _))) => weights
+            .clone()
+            .set_dtype(session.dtype)
+            .set_device(session.plan.load_device.clone()),
+        (None, None) => from_files(&*mapper)?,
+    };
+    let layers = lora
+        .map(|_| super::normal::new_dynamic_lora_registry(config))
+        .transpose()?;
+    let vb = match &layers {
+        Some(layers) => vb.with_lora_registry(layers.clone()),
+        None => vb,
+    };
+    let tracker = vb.tracker().clone();
+    let rope_pairing = prepared.map(|(_, rope_pairing)| rope_pairing);
+    let model = loader.build(
+        config,
+        vb,
+        session.load_parts.metadata(mapper, rope_pairing),
+        session.attention,
+    )?;
+    let dynamic_lora = match (layers, lora) {
+        (Some(layers), Some(runtime)) => Some(super::finish_dynamic_lora_runtime(
+            paths,
+            layers,
+            runtime,
+            !distributed,
+        )?),
+        _ => None,
+    };
+    Ok((model, tracker, dynamic_lora))
 }
 
 #[cfg(test)]

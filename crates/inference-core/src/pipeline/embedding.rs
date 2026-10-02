@@ -1,4 +1,4 @@
-use super::isq::{UqffFullSer, UqffWriteConfig, WeightLoadingMode, WeightLoadingState};
+use super::isq::{UqffFullSer, UqffWriteConfig};
 use super::{
     AnyMoePipelineMixin, CacheManagerMixin, EitherCache, ForwardInputsResult, GeneralMetadata,
     IsqPipelineMixin, Loader, MetadataMixin, ModelCategory, ModelKind, ModelPaths,
@@ -8,10 +8,8 @@ use crate::Modalities;
 use crate::SupportedModality;
 use crate::attention::ATTENTION_CHUNK_SIZE;
 use crate::device_map::DeviceMapper;
-use crate::distributed;
 use crate::embedding_models::inputs_processor::{EmbeddingProcessor, ModelInputs};
 use crate::embedding_models::{Dense, DenseActivation, Normalize, Pooling};
-use crate::paged_attention::AttentionImplementation;
 use crate::pipeline::EmbeddingLoaderType;
 use crate::pipeline::EmbeddingModel;
 use crate::pipeline::EmbeddingModelLoader;
@@ -21,7 +19,7 @@ use crate::pipeline::{AutoEmbeddingLoader, EmbeddingModulePaths};
 use crate::pipeline::{ChatTemplate, IsqOrganization, Processor};
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
-use crate::utils::progress::{ProgressScopeGuard, new_multi_progress};
+use crate::utils::progress::ProgressScopeGuard;
 use crate::{
     DeviceMapSetting, GLOBAL_HF_CACHE, PagedAttentionConfig, Pipeline, Topology, TryIntoDType,
 };
@@ -32,7 +30,6 @@ use candle_nn::{Linear, Module};
 use futures::future::BoxFuture;
 use hf_hub::Cache;
 use inference_quant::IsqType;
-use inference_quant::log::once_log_info;
 use inference_quant::safetensors::MmapedSafetensors;
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
@@ -40,7 +37,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 use tokenizers::Tokenizer;
 use tokio::sync::Mutex;
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, trace, warn};
 
 pub struct EmbeddingPipeline {
     model: Box<dyn EmbeddingModel + Send + Sync>,
@@ -231,107 +228,36 @@ impl Loader for EmbeddingLoader {
 
         debug!("Prompt chunk size is {ATTENTION_CHUNK_SIZE}.");
 
-        let write_uqff = self.config.write_uqff.is_some();
-        let super::loading::LoadDevices {
-            tensor_parallelism,
-            device,
-            available_devices,
-        } = super::loading::resolve_load_devices(
-            self.inner.model_config(&config)?.as_ref(),
-            device,
-            write_uqff,
-        )?;
-        let use_distributed = tensor_parallelism.is_enabled();
-        let super::loading::WeightSources {
-            uqff_reader,
-            combined: weight_source,
-            ..
-        } = super::loading::open_weight_sources(self.from_uqff.read().unwrap().as_deref(), None)?;
-
-        let super::loading::ResolvedMapSetting {
-            setting: mapper, ..
-        } = super::loading::resolve_map_setting(
-            super::loading::MapSettingInputs {
-                setting: mapper,
-                write_uqff,
-                distributed: use_distributed,
-                available_devices: &available_devices,
-                dtype,
-                sizing: super::isq_flow::AutoDeviceMapSizingInputs {
-                    loader: &*self.inner,
-                    config: &config,
-                    sizing: super::isq_flow::resolve_auto_device_map_sizing(
-                        uqff_reader.is_some(),
-                        false,
-                        in_situ_quant,
-                    ),
-                    weight_source: weight_source.as_ref(),
-                    prepared_weight_source: None,
+        let (session, mapper) = super::loading::open_load_session(
+            super::loading::LoadSessionInputs {
+                mapped: &*self.inner,
+                isq: &*self.inner,
+                config: &config,
+                settings: super::loading::LoadSettings {
                     topology: self.config.topology.as_ref(),
                     organization: IsqOrganization::Default,
-                    weight_filenames: paths.get_weight_filenames(),
-                    has_lora: false,
-                    matformer: None,
-                    non_mapped_unpacked: false,
+                    write_uqff: self.config.write_uqff.as_ref(),
+                    from_uqff: self.config.from_uqff.is_some(),
+                    has_imatrix: self.config.imatrix.is_some(),
+                    has_calibration: self.config.calibration_file.is_some(),
                 },
-            },
-            &mut paged_attn_config,
-        )?;
-
-        let super::loading::MaterializedDeviceMapper {
-            pipeline_mapper,
-            mapper,
-            layer_devices,
-            dtype,
-        } = super::loading::materialize_device_mapper(
-            super::loading::DeviceMapperInputs {
-                setting: &mapper,
-                num_layers: self.inner.num_layers(&config)?,
-                device: &device,
-                available_devices: &available_devices,
-                topology: self.config.topology.as_ref(),
-                write_uqff,
+                paths,
+                device,
                 dtype,
+                mapper,
+                in_situ_quant,
+                uqff_files: self.from_uqff.read().unwrap().as_deref(),
+                prepared_weight_source: None,
+                has_lora: false,
+                matformer: None,
+                matformer_sizing: false,
+                non_mapped_unpacked: false,
+                auto_device_map_params: None,
+                weight_target: self.load_context.weight_target(),
             },
             &mut paged_attn_config,
         )?;
-
         trace!("Model config: {:?}", self.inner.get_config_repr(&config)?);
-        if crate::using_flash_attn() {
-            once_log_info("FlashAttention is enabled.");
-        }
-
-        let topology_overrides = self
-            .config
-            .topology
-            .as_ref()
-            .map(|topology| topology.immediate_overrides())
-            .unwrap_or_default();
-
-        let plan = super::isq_flow::resolve_and_install_isq_plan(super::isq_flow::IsqPlanInputs {
-            in_situ_quant,
-            has_imatrix: self.config.imatrix.is_some(),
-            has_calibration: self.config.calibration_file.is_some(),
-            write_uqff_types: self.config.write_uqff.as_ref().map(|c| c.types.clone()),
-            has_write_uqff: self.config.write_uqff.is_some(),
-            loading_from_uqff: self.config.from_uqff.is_some(),
-            organization: Default::default(),
-            topology_overrides,
-            loader: &*self.inner,
-            config: &config,
-            device: &device,
-        })?;
-        let use_immediate = plan.immediate_isq_installed;
-        let loading_isq = plan.loading_isq;
-        let load_device = plan.load_device.clone();
-
-        let attention_mechanism = if paged_attn_config.is_some() {
-            AttentionImplementation::PagedAttention
-        } else {
-            AttentionImplementation::Eager
-        };
-
-        let multi_progress = Arc::new(new_multi_progress());
 
         let modules_config: Vec<_> = paths
             .get_modules()
@@ -353,9 +279,14 @@ impl Loader for EmbeddingLoader {
                 EmbeddingModulePaths::Dense { config, model, .. } => {
                     let config: Dense = serde_json::from_str(&std::fs::read_to_string(config)?)?;
                     let safetensors = unsafe { MmapedSafetensors::new(model)? };
-                    let weight = safetensors.load("linear.weight", &device, Some(dtype))?;
+                    let weight =
+                        safetensors.load("linear.weight", &session.device, Some(session.dtype))?;
                     let bias = if config.bias {
-                        Some(safetensors.load("linear.bias", &device, Some(dtype))?)
+                        Some(safetensors.load(
+                            "linear.bias",
+                            &session.device,
+                            Some(session.dtype),
+                        )?)
                     } else {
                         None
                     };
@@ -372,94 +303,30 @@ impl Loader for EmbeddingLoader {
                 }
             }
         }
-        info!(
-            "{}",
-            WeightLoadingMode::from(WeightLoadingState {
+        let (model, tracker, _) = super::loading::load_model(
+            &*self.inner,
+            &session,
+            mapper,
+            super::loading::ModelLoadInputs {
+                config: &config,
+                session_config: &config,
+                paths,
+                silent,
+                organization: IsqOrganization::Default,
                 from_uqff: self.config.from_uqff.is_some(),
-                loading_isq,
-                immediate_isq: use_immediate,
                 write_uqff: self.config.write_uqff.is_some(),
-            })
-            .message(self.load_context.weight_target())
-        );
-
-        let load_parts = super::loading::LoadMetadataParts {
-            loading_isq,
-            attention: attention_mechanism,
-            device: device.clone(),
-            multi_progress: multi_progress.clone(),
-            matformer: None,
-        };
-        let (model, tracker) = if use_distributed {
-            let (mapper, sharded_vb) =
-                distributed::prepare_distributed_mapper(distributed::DistributedMapperConfig {
-                    dtype,
-                    device: &device,
-                    available_devices: &available_devices,
-                    global_world_size_override: tensor_parallelism.world_size(),
-                    silent,
-                    config: &config,
-                    loading_isq,
-                    from_uqff: self.config.from_uqff.is_some(),
-                    write_uqff: self.config.write_uqff.is_some(),
-                    organization: IsqOrganization::Default,
-                    isq_loader: &*self.inner,
-                    mapped_loader: &*self.inner,
-                    weights: distributed::DistributedWeightSource::Paths(paths),
-                })?;
-            let sharded_vb = match uqff_reader.clone() {
-                Some(reader) => sharded_vb.with_uqff_reader(reader),
-                _ => sharded_vb,
-            };
-
-            // Special case for where things can be more optimially loaded.
-            match self.kind {
-                ModelKind::Normal => {
-                    let tracker = sharded_vb.tracker().clone();
-                    let model = self.inner.load(
-                        &config,
-                        sharded_vb,
-                        load_parts.metadata(mapper, None),
-                        attention_mechanism,
-                    )?;
-                    (model, tracker)
-                }
-                _ => unreachable!(),
-            }
-        } else {
-            match self.kind {
-                ModelKind::Normal => {
-                    let weights = super::loading::WeightFiles {
-                        paths,
-                        dtype,
-                        device: &load_device,
-                        layer_devices: layer_devices.clone(),
-                        silent,
-                        uqff_reader: uqff_reader.clone(),
-                    };
-                    let placeholders = super::loading::uqff_placeholders(
-                        &*self.inner,
-                        &config,
-                        loading_isq,
-                        self.config.from_uqff.is_some(),
-                        false,
-                    )?;
-                    let device_for_tensor =
-                        self.inner
-                            .get_device_for_tensor(&config, &*mapper, loading_isq)?;
-                    let vb = weights.load(placeholders, device_for_tensor)?;
-                    let tracker = vb.tracker().clone();
-                    let model = self.inner.load(
-                        &config,
-                        vb,
-                        load_parts.metadata(mapper, None),
-                        attention_mechanism,
-                    )?;
-                    (model, tracker)
-                }
-                _ => unreachable!(),
-            }
-        };
+                prepared: None,
+                lora: None,
+                xlora: None,
+            },
+        )?;
+        let super::loading::LoadSession {
+            pipeline_mapper,
+            dtype,
+            plan,
+            ..
+        } = session;
+        let load_device = plan.load_device.clone();
 
         let tokenizer = get_tokenizer(paths.get_tokenizer_filename(), None)?;
 

@@ -1444,3 +1444,45 @@ Left: HF uses the F32-then-cast RMSNorm for Qwen3-VL-MoE too, so the fused norm 
 difference from HF that predates the branch; a real-checkpoint parity run would say whether `TextNorm` can go (#215).
 `inference_nn::testing` stays compiled into normal builds: a dev-dependency feature would build inference-nn and
 everything above it twice (test and non-test feature sets).
+
+## Run 49 - 2026-10-01 (time approximate)
+
+Question: how much of the three `load_model_from_path` copies (normal 479, multimodal 664, embedding 339 lines) is
+one load, and what actually differs?
+
+Finding (`diff` of the function bodies): most single steps were already shared `super::loading` helpers; the
+duplication was the orchestration around them. Two blocks repeat in all three:
+- devices, weight sources, map setting, mapper, ISQ plan, attention choice, load metadata, the weight-mode log;
+- the weight dispatch: tensor parallel or not, times plain, LoRA or X-LoRA, times prepared source or files.
+The real differences, kept as explicit inputs:
+- the config: normal sizes everything from the runtime config (after `max_model_len`); multimodal sizes devices,
+  the device map, the ISQ plan and a tensor-parallel mapper from the source config but builds the model from the
+  runtime config.
+- matformer: both load the slice for the model, but only multimodal applies it to device-map sizing.
+- `non_mapped_unpacked` (multimodal), the multimodal `auto_device_map_params` adjustment, embedding's fixed
+  organization and no LoRA, prepared source or matformer.
+- tensor-parallel X-LoRA uses the distributed mapper, and a tensor-parallel LoRA load with no prepared source reads
+  the weight files (the sharded var builder is dropped). Both kept.
+- multimodal's prepared-source LoRA path built a plain `LoraLayerRegistry` where everything else used
+  `new_dynamic_lora_registry`; that only differs for the Qwen3-Next text architecture, so sharing it changes nothing.
+
+Changes: `open_load_session` returns a `LoadSession` and the mapper; `load_model` (generic over a small
+`BuildModel` trait implemented for the three loader trait objects) builds the model, with X-LoRA as a hook.
+The per-pipeline `weights_vb`/`load_from_files`/`load_with_dynamic_lora` are gone. The three functions went from
+1482 to 931 lines; core is -901/+611.
+
+Checks: the tiny engine tests drive all three pipelines (plain, ISQ, UQFF write and reload, calibration, paged
+multimodal) and pass. LoRA had no test, so `llama_tiny::a_lora_adapter_applies_only_when_a_request_selects_it`
+pins it (no adapter decodes like the base model, the adapter moves the logits); it passes on master's loader too.
+Still untested: X-LoRA, tensor parallel, prepared-source loads.
+
+Drifts left as found: the normal pipeline ignores the matformer slice when sizing the device map; multimodal sizes
+from the pre-`max_model_len` config; multimodal's LoRA qk-rope layout check ignores X-LoRA (it has no X-LoRA path).
+
+Review of the branch (subagent): every case matches master, across all 12 weight-dispatch combinations and each
+step's config. Low items, accepted as they are: multimodal prepared-source LoRA now builds its registry with
+`new_dynamic_lora_registry` (same result for every config that exists); kinds that hit `unreachable!()` now load as
+plain, though no builder produces them; normal's matformer slice and the LoRA runtime `expect` now run before the
+devices are set up, which only changes which error shows first; the config trace logs after the ISQ plan. Fixed: an
+empty `impl`, a redundant destructure field, a doc on `open_load_session` that was wrong under tensor parallelism,
+two comments restating field names. CI passed (CPU 2333, CUDA 2654) before these cosmetic fixes.
