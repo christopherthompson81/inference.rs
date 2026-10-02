@@ -1804,3 +1804,26 @@ Question: fix #224, #225 and #212, each pinned by a test that fails on master's 
 - #212: `moe_layer_freq: 0` panicked in the DeepSeek-family loaders' `%` while the models' `is_multiple_of` treated
   only layer 0 as MoE. DeepSeek-V2, DeepSeek-V3 and GLM4-MoE-Lite configs now reject 0 at parse time ("moe_layer_freq
   must be at least 1", tested per model), so the loader uses the model's rule.
+
+## Run 59 - 2026-10-02 (time approximate)
+
+Question: what do Qwen3.5 dense (`qwen3_5/`, 6386 lines) and Qwen3.5-MoE (`qwen3_5_moe/`, 1790) share, and is
+merging them worth it?
+
+Commands: item-by-item `diff` of `qwen3_5/text.rs` and `qwen3_5_moe/text.rs`, the configs and wrappers; the
+released Qwen/Qwen3.5-35B-A3B `config.json`.
+- already shared: `GatedDeltaNet` (inference-nn), `qwen3_5::packed_gdn`, `qwen3_5::packed_visual`, `RopeParameters`;
+  `impl GdnConfig for TextConfig` is identical in both (29 lines).
+- the decoder layers differ only in the MLP (`Mlp` vs `SparseMoeBlock`) plus the dense model's quantized-input
+  plumbing; the wrappers' `mod.rs` differ in 60 lines.
+- `FullAttention` diverged: the dense one (317 lines) has merged QKV, grouped output-gate handling, activation-
+  quantized fused input paths and speculative hooks; the MoE one (164) has none, an older snapshot.
+- the text models: dense 1466 lines (MTP head, speculative verification, DFlash drafter, spec graph state), MoE 401.
+Finding beyond duplication: the MoE config has no MTP fields, while Qwen3.5-35B-A3B ships
+`"mtp_num_hidden_layers": 1` (and `attn_output_gate: true`, head_dim 256), so our MoE ignores the checkpoint's MTP
+head; MTP speculation and DFlash exist only for the dense model.
+
+Options weighed: (1) one text model generic over its MLP kind, including the MTP block (the MoE checkpoint's MTP
+layer is MoE), with MoE pins first and MoE MTP as its own step: about 1000 lines and MoE gains the fast attention
+paths and MTP, at the cost of changing MoE behaviour with no real-checkpoint check that fits a 24 GB GPU easily;
+(2) move MoE onto the dense attention only (about 150 lines, the fast paths, no MTP); (3) leave it and file the gap.

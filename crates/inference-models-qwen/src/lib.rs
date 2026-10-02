@@ -18,6 +18,8 @@ pub mod qwen2vl;
 pub mod qwen3;
 pub mod qwen3_5;
 pub mod qwen3_5_moe;
+#[cfg(test)]
+mod qwen3_5_tests;
 pub mod qwen3_embedding;
 pub mod qwen3_moe;
 #[cfg(test)]
