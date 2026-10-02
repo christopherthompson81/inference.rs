@@ -4,10 +4,13 @@
 use std::path::Path;
 
 use inference::{
-    Model, ModelDType, MultimodalModelBuilder, RequestBuilder, TextMessageRole, TextModelBuilder,
+    GgufModelBuilder, Model, ModelDType, MultimodalModelBuilder, RequestBuilder, TextMessageRole,
+    TextModelBuilder,
 };
 
 const MODEL_ENV: &str = "INFERENCE_TEST_QWEN3_5_MODEL";
+// A Qwen3.5 or Qwen3.8 GGUF that keeps its `nextn` (MTP) blocks, as llama.cpp's converter writes by default.
+const GGUF_ENV: &str = "INFERENCE_TEST_QWEN3_5_GGUF";
 const ON_GPU: bool = cfg!(any(feature = "cuda", feature = "metal"));
 const MAX_LEN: usize = 64;
 const N_PREDICT: usize = 2;
@@ -18,6 +21,12 @@ const PROMPTS: &[&str] = &[
 ];
 // Real heads land most of their drafts on prose this predictable; a broken head or verifier lands next to none.
 const MIN_ACCEPT_RATE: f64 = 0.3;
+// The two paths move logprobs by up to ~0.12 on Qwen3.5-0.8B (BF16 and Q8_0); a closer top two can swap.
+const TIE_MARGIN: f32 = 0.25;
+// Both prompts run well past this before their first near tie.
+const MIN_AGREED: usize = 16;
+
+type Step = (u32, f32, u32, f32);
 #[cfg(unix)]
 const TEXT_VIEW_FILES: [&str; 4] = [
     "model.safetensors.index.json",
@@ -85,40 +94,71 @@ fn text_only_view(dir: &str) -> anyhow::Result<tempfile::TempDir> {
     Ok(view)
 }
 
-async fn greedy_ids(model: &Model, prompt: &str) -> anyhow::Result<Vec<u32>> {
+// Each step's greedy id and logprob, then the runner-up's id and logprob.
+async fn greedy_trace(model: &Model, prompt: &str) -> anyhow::Result<Vec<Step>> {
     let request = RequestBuilder::new()
         .add_message(TextMessageRole::User, prompt)
         .enable_thinking(false)
         .set_sampler_max_len(MAX_LEN)
         .set_sampler_topk(1)
         .return_logprobs(true)
-        .set_sampler_topn_logprobs(1);
+        .set_sampler_topn_logprobs(2);
     let response = model.send_chat_request(request).await?;
-    let ids = response.choices[0]
+    let steps = response.choices[0]
         .logprobs
         .as_ref()
         .and_then(|lp| lp.content.as_ref())
-        .map(|toks| toks.iter().map(|t| t.top_logprobs[0].token).collect())
+        .map(|toks| {
+            toks.iter()
+                .map(|t| {
+                    let (runner_up, runner_up_logprob) = t
+                        .top_logprobs
+                        .get(1)
+                        .map_or((u32::MAX, f32::NEG_INFINITY), |r| (r.token, r.logprob));
+                    (
+                        t.top_logprobs[0].token,
+                        t.top_logprobs[0].logprob,
+                        runner_up,
+                        runner_up_logprob,
+                    )
+                })
+                .collect()
+        })
         .unwrap_or_default();
-    Ok(ids)
+    Ok(steps)
+}
+
+async fn traces(model: &Model) -> anyhow::Result<Vec<Vec<Step>>> {
+    let mut traces = Vec::new();
+    for prompt in PROMPTS {
+        traces.push(greedy_trace(model, prompt).await?);
+    }
+    Ok(traces)
 }
 
 async fn check_mtp(plain: &Model, mtp: &Model) -> anyhow::Result<()> {
-    for prompt in PROMPTS {
-        let expected = greedy_ids(plain, prompt).await?;
-        let drafted = greedy_ids(mtp, prompt).await?;
+    check_against(&traces(plain).await?, mtp).await
+}
+
+// The verify kernels round differently from decode, so drafting may only swap a near-tied top two.
+async fn check_against(expected: &[Vec<Step>], mtp: &Model) -> anyhow::Result<()> {
+    for (prompt, expected) in PROMPTS.iter().zip(expected) {
+        let drafted = greedy_trace(mtp, prompt).await?;
         let agreed = expected
             .iter()
             .zip(&drafted)
-            .take_while(|(e, d)| e == d)
+            .take_while(|(e, d)| e.0 == d.0)
             .count();
         eprintln!("{prompt:?}: {agreed} of {} ids agree", expected.len());
+        let parted_at_a_tie = match (expected.get(agreed), drafted.get(agreed)) {
+            (Some(&(_, top, runner_up, runner_up_logprob)), Some(&(swapped, ..))) => {
+                swapped == runner_up && top - runner_up_logprob < TIE_MARGIN
+            }
+            (None, None) => true,
+            _ => false,
+        };
         anyhow::ensure!(
-            !expected.is_empty(),
-            "the model generated nothing for {prompt:?}"
-        );
-        anyhow::ensure!(
-            agreed == expected.len() && drafted.len() == expected.len(),
+            parted_at_a_tie && agreed >= MIN_AGREED,
             "MTP drafting changed the greedy output of {prompt:?} at step {agreed}: {drafted:?} vs {expected:?}"
         );
     }
@@ -167,4 +207,39 @@ async fn text_only_builtin_mtp_accepts_drafts_and_keeps_greedy_output() -> anyho
         &build_text(view.path(), true).await?,
     )
     .await
+}
+
+async fn build_gguf(file: &Path, mtp: bool) -> anyhow::Result<Model> {
+    let dir = file.parent().unwrap_or(Path::new("."));
+    let name = file.file_name().unwrap_or_default().to_string_lossy();
+    let builder =
+        GgufModelBuilder::new(dir.to_string_lossy(), vec![name]).with_paged_attn(paged()?);
+    let builder = if mtp {
+        builder.with_builtin_mtp(Some(N_PREDICT))
+    } else {
+        builder
+    };
+    Ok(builder.build().await?)
+}
+
+#[tokio::test]
+async fn gguf_builtin_mtp_accepts_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
+    let Some(file) = std::env::var(GGUF_ENV)
+        .ok()
+        .filter(|f| Path::new(f).is_file())
+    else {
+        eprintln!("SKIP: {GGUF_ENV} is not a local GGUF file");
+        return Ok(());
+    };
+    if !ON_GPU {
+        eprintln!("SKIP: built-in MTP needs a GPU build");
+        return Ok(());
+    }
+    let file = Path::new(&file);
+    // one model at a time: a 27B quant leaves no room for a second copy on one card
+    let plain = build_gguf(file, false).await?;
+    let expected = traces(&plain).await?;
+    drop(plain);
+    let mtp = build_gguf(file, true).await?;
+    check_against(&expected, &mtp).await
 }

@@ -143,12 +143,19 @@ pub fn build_qwen_multimodal_bindings(archive: &GgufArchive) -> Result<GgufBindi
     } else {
         None
     };
-    build_qwen_multimodal_bindings_from_inventory(
+    let mut bindings = build_qwen_multimodal_bindings_from_inventory(
         &inventory,
         family,
         deepstack_layers.as_deref(),
         gdn,
-    )
+    )?;
+    if matches!(
+        family,
+        QwenMultimodalFamily::Qwen35 | QwenMultimodalFamily::Qwen35Moe
+    ) {
+        bind_mtp(archive, &inventory, family, &mut bindings)?;
+    }
+    Ok(bindings)
 }
 
 pub fn normalize_qwen_multimodal_config(
@@ -187,13 +194,71 @@ pub fn build_qwen35_text_bindings(archive: &GgufArchive) -> Result<GgufBindingMa
     }
     let inventory = TensorInventory::from_archive(archive);
     let mut bindings = GgufBindingMap::new();
-    bind_text(
+    let gdn = Some(read_gdn_metadata(archive)?);
+    bind_text(&inventory, QwenMultimodalFamily::Qwen35, gdn, &mut bindings)?;
+    bind_mtp(
+        archive,
         &inventory,
         QwenMultimodalFamily::Qwen35,
-        Some(read_gdn_metadata(archive)?),
         &mut bindings,
     )?;
     Ok(bindings)
+}
+
+// llama.cpp stores the built-in MTP head as the blocks after the main stack, plus `nextn` fc and norm tensors.
+fn bind_mtp(
+    archive: &GgufArchive,
+    inventory: &TensorInventory,
+    family: QwenMultimodalFamily,
+    bindings: &mut GgufBindingMap,
+) -> Result<()> {
+    let architecture = metadata_string(archive, GENERAL_ARCHITECTURE)?
+        .context("GGUF metadata is missing `general.architecture`")?;
+    let nextn_key = format!("{architecture}.nextn_predict_layers");
+    if archive.metadata().get(&nextn_key).is_none() {
+        return Ok(());
+    }
+    let block_count = metadata_usize(archive, &format!("{architecture}.block_count"))?;
+    let nextn_layers = metadata_usize(archive, &nextn_key)?;
+    let first = block_count.checked_sub(nextn_layers).with_context(|| {
+        format!("`{nextn_key}` ({nextn_layers}) exceeds the block count {block_count}")
+    })?;
+    bind_mtp_layers(inventory, family, first, nextn_layers, bindings)
+}
+
+fn bind_mtp_layers(
+    inventory: &TensorInventory,
+    family: QwenMultimodalFamily,
+    first: usize,
+    nextn_layers: usize,
+    bindings: &mut GgufBindingMap,
+) -> Result<()> {
+    for mtp_layer in 0..nextn_layers {
+        let native = format!("mtp.layers.{mtp_layer}");
+        let source = format!("blk.{}", first + mtp_layer);
+        bind_layer(inventory, family, None, &native, &source, bindings)?;
+    }
+    let source = format!("blk.{first}.nextn");
+    bind(
+        inventory,
+        bindings,
+        "mtp.fc.weight",
+        format!("{source}.eh_proj.weight"),
+    );
+    for (target, role) in [
+        ("mtp.pre_fc_norm_embedding.weight", "enorm.weight"),
+        ("mtp.pre_fc_norm_hidden.weight", "hnorm.weight"),
+        ("mtp.norm.weight", "shared_head_norm.weight"),
+    ] {
+        bind_text_norm(
+            inventory,
+            bindings,
+            family,
+            target,
+            format!("{source}.{role}"),
+        );
+    }
+    Ok(())
 }
 
 fn qwen_family(archive: &GgufArchive) -> Result<QwenMultimodalFamily> {
@@ -372,51 +437,64 @@ fn bind_text(
     for layer in inventory.layer_indices("blk.") {
         let native = format!("{model}.layers.{layer}");
         let source = format!("blk.{layer}");
-        for suffix in ["weight", "bias"] {
-            for (target, role) in [
-                ("self_attn.q_proj", "attn_q"),
-                ("self_attn.k_proj", "attn_k"),
-                ("self_attn.v_proj", "attn_v"),
-                ("self_attn.o_proj", "attn_output"),
-                ("mlp.gate_proj", "ffn_gate"),
-                ("mlp.up_proj", "ffn_up"),
-                ("mlp.down_proj", "ffn_down"),
-                ("mlp.gate", "ffn_gate_inp"),
-            ] {
-                bind(
-                    inventory,
-                    bindings,
-                    format!("{native}.{target}.{suffix}"),
-                    format!("{source}.{role}.{suffix}"),
-                );
-            }
-        }
+        bind_layer(inventory, family, gdn, &native, &source, bindings)?;
+    }
+    Ok(())
+}
+
+// One decoder layer's tensors: attention, norms, feed-forward (dense or experts) and GDN.
+fn bind_layer(
+    inventory: &TensorInventory,
+    family: QwenMultimodalFamily,
+    gdn: Option<GdnMetadata>,
+    native: &str,
+    source: &str,
+    bindings: &mut GgufBindingMap,
+) -> Result<()> {
+    for suffix in ["weight", "bias"] {
         for (target, role) in [
-            ("input_layernorm.weight", "attn_norm.weight"),
-            (
-                "post_attention_layernorm.weight",
-                if family.has_gemma_norm_offsets() {
-                    "post_attention_norm.weight"
-                } else {
-                    "ffn_norm.weight"
-                },
-            ),
-            ("self_attn.q_norm.weight", "attn_q_norm.weight"),
-            ("self_attn.k_norm.weight", "attn_k_norm.weight"),
+            ("self_attn.q_proj", "attn_q"),
+            ("self_attn.k_proj", "attn_k"),
+            ("self_attn.v_proj", "attn_v"),
+            ("self_attn.o_proj", "attn_output"),
+            ("mlp.gate_proj", "ffn_gate"),
+            ("mlp.up_proj", "ffn_up"),
+            ("mlp.down_proj", "ffn_down"),
+            ("mlp.gate", "ffn_gate_inp"),
         ] {
-            bind_text_norm(
+            bind(
                 inventory,
                 bindings,
-                family,
-                format!("{native}.{target}"),
-                format!("{source}.{role}"),
+                format!("{native}.{target}.{suffix}"),
+                format!("{source}.{role}.{suffix}"),
             );
         }
-        bind_experts(inventory, &native, &source, bindings);
-        bind_shared_expert(inventory, &native, &source, bindings)?;
-        if let Some(gdn) = gdn {
-            bind_gdn(inventory, &native, &source, gdn, bindings)?;
-        }
+    }
+    for (target, role) in [
+        ("input_layernorm.weight", "attn_norm.weight"),
+        (
+            "post_attention_layernorm.weight",
+            if family.has_gemma_norm_offsets() {
+                "post_attention_norm.weight"
+            } else {
+                "ffn_norm.weight"
+            },
+        ),
+        ("self_attn.q_norm.weight", "attn_q_norm.weight"),
+        ("self_attn.k_norm.weight", "attn_k_norm.weight"),
+    ] {
+        bind_text_norm(
+            inventory,
+            bindings,
+            family,
+            format!("{native}.{target}"),
+            format!("{source}.{role}"),
+        );
+    }
+    bind_experts(inventory, native, source, bindings);
+    bind_shared_expert(inventory, native, source, bindings)?;
+    if let Some(gdn) = gdn {
+        bind_gdn(inventory, native, source, gdn, bindings)?;
     }
     Ok(())
 }
@@ -1253,6 +1331,53 @@ mod tests {
                 )),
                 Some(GgufTensorBinding::Tensor(actual)) if actual == source
             ));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn qwen35_nextn_block_binds_the_built_in_mtp_head() -> Result<()> {
+        let inventory = inventory(&[
+            ("blk.1.attn_q.weight", &[8, 16]),
+            ("blk.1.attn_norm.weight", &[8]),
+            ("blk.1.ffn_gate.weight", &[8, 12]),
+            ("blk.1.nextn.eh_proj.weight", &[16, 8]),
+            ("blk.1.nextn.enorm.weight", &[8]),
+            ("blk.1.nextn.hnorm.weight", &[8]),
+            ("blk.1.nextn.shared_head_norm.weight", &[8]),
+        ]);
+        let mut bindings = GgufBindingMap::new();
+        bind_mtp_layers(
+            &inventory,
+            QwenMultimodalFamily::Qwen35,
+            1,
+            1,
+            &mut bindings,
+        )?;
+        for (target, source) in [
+            (
+                "mtp.layers.0.self_attn.q_proj.weight",
+                "blk.1.attn_q.weight",
+            ),
+            ("mtp.layers.0.mlp.gate_proj.weight", "blk.1.ffn_gate.weight"),
+            ("mtp.fc.weight", "blk.1.nextn.eh_proj.weight"),
+        ] {
+            assert!(
+                matches!(bindings.get(target), Some(GgufTensorBinding::Tensor(actual)) if actual == source),
+                "{target}"
+            );
+        }
+        // llama.cpp stores Qwen3.5 norms with the Gemma offset folded in, the MTP ones too
+        for target in [
+            "mtp.layers.0.input_layernorm.weight",
+            "mtp.pre_fc_norm_embedding.weight",
+            "mtp.pre_fc_norm_hidden.weight",
+            "mtp.norm.weight",
+        ] {
+            assert!(
+                matches!(bindings.get(target), Some(GgufTensorBinding::Affine { add, .. }) if *add == -1.0),
+                "{target}"
+            );
         }
         Ok(())
     }
