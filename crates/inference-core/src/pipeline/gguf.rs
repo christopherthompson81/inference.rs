@@ -179,6 +179,8 @@ pub struct GGUFSpecificConfig {
     pub hf_cache_path: Option<PathBuf>,
     pub matformer_config_path: Option<PathBuf>,
     pub matformer_slice_name: Option<String>,
+    /// Load the checkpoint's built-in MTP head (`nextn` layers) for speculative decoding.
+    pub mtp: bool,
 }
 
 impl GGUFSpecificConfig {
@@ -723,7 +725,8 @@ impl GGUFLoader {
             Some(self.quantized_model_id.clone()),
             self.no_kv_cache,
             self.jinja_explicit.clone(),
-        );
+        )
+        .with_mtp(self.config.mtp);
         if let Some(dynamic_lora) = self.dynamic_lora.as_ref() {
             loader = loader.with_lora(dynamic_lora.adapters.clone(), dynamic_lora.runtime);
         }
@@ -937,7 +940,8 @@ impl GGUFLoader {
             Some(self.quantized_model_id.clone()),
             self.jinja_explicit.clone(),
         )
-        .with_encoder_cache_memory_bytes(self.encoder_cache_memory_bytes);
+        .with_encoder_cache_memory_bytes(self.encoder_cache_memory_bytes)
+        .with_mtp(self.config.mtp);
         if let Some(dynamic_lora) = self.dynamic_lora.as_ref() {
             loader = loader.with_lora(dynamic_lora.adapters.clone(), dynamic_lora.runtime);
         }

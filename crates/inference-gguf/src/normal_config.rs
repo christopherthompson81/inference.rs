@@ -1903,6 +1903,15 @@ fn build_qwen35(metadata: &MetadataView<'_>) -> SynthesisResult<JsonValue> {
     config.insert("linear_value_head_dim".into(), json!(value_head_dim));
     config.insert("linear_num_key_heads".into(), json!(key_head_count));
     config.insert("linear_num_value_heads".into(), json!(value_head_count));
+    // the built-in MTP head is the `nextn` blocks after the main stack
+    config.insert(
+        "mtp_num_hidden_layers".into(),
+        json!(
+            metadata
+                .optional_usize("nextn_predict_layers")?
+                .unwrap_or(0)
+        ),
+    );
     config.insert(GDN_V_HEAD_LAYOUT_CONFIG_KEY.into(), json!("tiled"));
     Ok(JsonValue::Object(config))
 }

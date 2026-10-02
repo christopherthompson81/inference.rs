@@ -2065,3 +2065,50 @@ Tests:
 Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`.
 Result: exit 0, 2397 + 2719 + 1 tests passed.
 Next: GGUF bindings for `blk.{n}.*` / `nextn.*`, and speculative attach in the GGUF pipeline.
+
+## Run 67 - 2026-10-02 (time approximate)
+
+Question: does built-in MTP load and accept drafts from a GGUF checkpoint?
+
+Survey:
+- Native GGUF Qwen3.5 loads through a `NormalLoader` built over the prepared source, so it runs on the normal
+  pipeline, which Run 66 made MTP-capable. No GGUF pipeline speculative work was needed.
+- Missing pieces: the GGUF loader had no MTP flag, the bindings dropped the `nextn` blocks, and the synthesized config
+  had no `mtp_num_hidden_layers`.
+
+Change:
+- `GGUFSpecificConfig.mtp` is set from selection and passed to the native normal and multimodal loaders.
+- `bind_mtp` binds `blk.{n_layers+i}.*` to `mtp.layers.{i}.*` (the per-layer binding, factored out as `bind_layer`)
+  and `blk.{n_layers}.nextn.{eh_proj,enorm,hnorm,shared_head_norm}` to `mtp.{fc,pre_fc_norm_embedding,
+  pre_fc_norm_hidden,norm}`, with the Gemma norm offset. llama.cpp adds 1 to every `*norm.weight` after renaming the
+  MTP tensors, the nextn ones included.
+- The dense qwen35 config builder records `nextn_predict_layers`.
+- qwen35moe GGUF resolves to Qwen3Next, which has no MTP, so it is left out.
+
+Local Qwen3.8-27B IQ4_XS: not usable. It fails before MTP, because direct GGUF loading has no IQ4_XS
+(`blk.0.attn_gate.weight uses dtype IQ4_XS`). That is a separate gap.
+
+Instead: converted the real Qwen3.5-0.8B with llama.cpp's `convert_hf_to_gguf.py --outtype q8_0`, in a throwaway venv,
+to an 834 MB file. The converter keeps `blk.24.*` plus the nextn tensors by default.
+
+Command: `qwen3_5_mtp::gguf_builtin_mtp_accepts_drafts_and_keeps_greedy_output` with `INFERENCE_TEST_QWEN3_5_GGUF`.
+First result:
+- prompt 1: 40/40 ids agree;
+- prompt 2: parts after 18 ids.
+Probe (top-2 logprobs): at step 18 the plain run has an exact tie, ids 11 and 466 both at -1.3738525. MTP's verify
+pass splits them by 0.125 and takes 466, the plain runner-up. The two paths move logprobs by up to ~0.12.
+
+So all real-checkpoint MTP tests now use a tie-aware check:
+- ids agree up to the first mismatch, and at least 16 agree;
+- the swapped token must be the plain runner-up, within 0.25 of the top;
+- equal lengths if the runs never part.
+
+GGUF acceptance: 44 of 66 (0.67), per position [28, 16].
+
+Review follow-ups:
+- `--mmproj --mtp` now binds the head too. It had loaded without it and then failed with a misleading "pass --mtp".
+- The Qwen3Next config no longer gets the key.
+- `bind_mtp` checks `nextn_predict_layers` before reading `block_count`; tiny test archives have no block count.
+
+Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`.
+Result: exit 0, 2399 + 2721 + 1 tests passed.
