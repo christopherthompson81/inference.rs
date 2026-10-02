@@ -27,6 +27,7 @@ use crate::{
 };
 
 pub mod config;
+mod feed_forward;
 pub mod mtp;
 pub mod packed_gdn;
 pub mod packed_visual;

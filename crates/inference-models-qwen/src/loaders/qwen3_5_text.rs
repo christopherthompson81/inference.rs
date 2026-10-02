@@ -5,6 +5,7 @@ pub struct Qwen3_5TextLoader;
 
 fn parse_qwen35_text_config(config: &str) -> Result<crate::qwen3_5::TextConfig> {
     let cfg = crate::qwen3_5::TextConfig::from_json(config)?;
+    cfg.check_experts(false)?;
     cfg.validate()?;
     Ok(cfg)
 }
@@ -164,7 +165,7 @@ impl DeviceMappedModelLoader for Qwen3_5TextLoader {
                     projections + out_proj + residual
                 }
             };
-            let mlp = cfg.hidden_size * cfg.intermediate_size * 3 / weight_pack_factor;
+            let mlp = cfg.hidden_size * cfg.dense_intermediate_size()? * 3 / weight_pack_factor;
             sizes.push((cfg.hidden_size * 2 + attention + mlp) * dtype.size_in_bytes());
         }
         Ok(sizes)

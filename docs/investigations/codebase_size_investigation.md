@@ -1804,3 +1804,145 @@ Question: fix #224, #225 and #212, each pinned by a test that fails on master's 
 - #212: `moe_layer_freq: 0` panicked in the DeepSeek-family loaders' `%` while the models' `is_multiple_of` treated
   only layer 0 as MoE. DeepSeek-V2, DeepSeek-V3 and GLM4-MoE-Lite configs now reject 0 at parse time ("moe_layer_freq
   must be at least 1", tested per model), so the loader uses the model's rule.
+
+## Run 59 - 2026-10-02 (time approximate)
+
+Question: what do Qwen3.5 dense (`qwen3_5/`, 6386 lines) and Qwen3.5-MoE (`qwen3_5_moe/`, 1790) share, and is
+merging them worth it?
+
+Commands: item-by-item `diff` of `qwen3_5/text.rs` and `qwen3_5_moe/text.rs`, the configs and wrappers; the
+released Qwen/Qwen3.5-35B-A3B `config.json`.
+- already shared: `GatedDeltaNet` (inference-nn), `qwen3_5::packed_gdn`, `qwen3_5::packed_visual`, `RopeParameters`;
+  `impl GdnConfig for TextConfig` is identical in both (29 lines).
+- the decoder layers differ only in the MLP (`Mlp` vs `SparseMoeBlock`) plus the dense model's quantized-input
+  plumbing; the wrappers' `mod.rs` differ in 60 lines.
+- `FullAttention` diverged: the dense one (317 lines) has merged QKV, grouped output-gate handling, activation-
+  quantized fused input paths and speculative hooks; the MoE one (164) has none, an older snapshot.
+- the text models: dense 1466 lines (MTP head, speculative verification, DFlash drafter, spec graph state), MoE 401.
+Finding beyond duplication: the MoE config has no MTP fields, while Qwen3.5-35B-A3B ships
+`"mtp_num_hidden_layers": 1` (and `attn_output_gate: true`, head_dim 256), so our MoE ignores the checkpoint's MTP
+head; MTP speculation and DFlash exist only for the dense model.
+
+Options weighed: (1) one text model generic over its MLP kind, including the MTP block (the MoE checkpoint's MTP
+layer is MoE), with MoE pins first and MoE MTP as its own step: about 1000 lines and MoE gains the fast attention
+paths and MTP, at the cost of changing MoE behaviour with no real-checkpoint check that fits a 24 GB GPU easily;
+(2) move MoE onto the dense attention only (about 150 lines, the fast paths, no MTP); (3) leave it and file the gap.
+
+## Run 60 - 2026-10-02 (time approximate)
+
+Question: does Qwen3.5-MoE run on the dense Qwen3.5 text model and wrapper (option 1 of Run 59 without MoE MTP)
+without moving its prefill pins?
+
+Change: one `TextConfig` (MoE fields default to "no experts", `intermediate_size: Option`, `check_experts(moe)` per
+loader, MoE consistency in `validate`); `qwen3_5/feed_forward.rs` holds `FeedForward::{Dense, Sparse}` with the moved
+`SparseMoeBlock`; `qwen3_5_moe` is a 4-line re-export module. A MoE text model given the MTP flag is a load error.
+
+Command: `cargo nextest run -p inference-models-qwen`.
+- dense F32 pin and MoE F32 pin pass unchanged, both tensor-name digests unchanged.
+- MoE BF16 pin moved: old probes [-1.1015625, -0.6640625, 4.3125, 6.625], sum 32.989548, l2 52.179066; new
+  [-1.09375, -0.671875, 4.3125, 6.625], sum 32.894012, l2 52.16037.
+- bisect 1: feeding the old 3-plane text MRoPE positions instead of the dense 2-D text positions: no change (still the
+  new values). Not the cause.
+- bisect 2: replacing the dense output gate `ops::mul_and_act(gate, y, Sigmoid)` (fused GLU kernel, which on CPU
+  computes sigmoid(gate) * y in f32 and rounds once) with the old `y * sigmoid(gate)` (two BF16 roundings): all three
+  pins pass. That is the whole move; reverted, pin left unedited for review.
+Implication: the move is a rounding change from MoE now running the dense fused output gate, not a routing or
+weight change (F32 is bit-stable within tolerance and names are unchanged).
+Accepted: the BF16 pin is updated with master's values in its comment. The dense model already runs that fused gate
+for dense checkpoints, so MoE now matches dense; HF computes the gate in the model dtype, so neither rounding is
+HF-exact. Differences between the copies and how they went (from the merge):
+- the MoE copy rejected dynamic LoRA on `language_model.model.*` names (its LoRA sites use the HF names, so adapters
+  would silently not match); dense lacked the guard and now has it too.
+- dense paged attention with no metadata and no mask panicked (`assert!`); it now errors, as MoE did.
+- MoE wrote residual tensors under `model.language_model.*` even for `language_model.model.*` checkpoints; dense keeps
+  the checkpoint's prefix, which is what the merge keeps.
+- MoE gains merged QKV, grouped gating, the quantized fused input paths, fused add+norm and the fused output gate, and
+  the speculative-target implementation (built-in MTP excepted); DFlash is allowed.
+Lines: 277 added, 1835 removed. Not run: CUDA and Metal for MoE (the pins are CPU), a real MoE checkpoint, ISQ/UQFF.
+
+## Run 61 - 2026-10-02 (time approximate)
+
+Question: do Run 60's review findings hold up, and does Qwen3.5-MoE run on the GPU paged path?
+
+Review corrections:
+- the LoRA namespace guard Run 60 credited to the MoE copy was based on a false premise. `validate_consumption`
+  already fails loudly when adapter tensors go unused, and the guard rejected a dense setup that used to load. Removed
+  it, along with its test.
+- the MoE MTP refusal now sits inside the "no MTP head loaded" branch, so a MoE model without `--mtp` gets the plain
+  "not loaded" error.
+
+New engine test: `qwen_vl_tiny::qwen3_5_moe_text_and_image`, run on a tiny synthesized Qwen3.5-MoE checkpoint
+(`make_tiny.py` `qwen3_5_moe`, 4 layers, 4 experts, top-2). It decodes text and image prompts. On CPU it pins F32
+traces; with CUDA it compares a GPU BF16 build with a CPU BF16 build. The recording support gained
+`record_checkpoint_with_shapes`, because MoE expert layout detection reads the declared tensor shapes.
+
+GPU findings, from a temporary tracing subscriber:
+- `causal_conv1d_cuda` only takes F16/BF16, so the GPU side runs BF16.
+- with 32-wide experts, `moe_gemm` threw a C++ exception that aborted the process. Its K tile is 64. The Rust wrapper
+  now bails with an error when `size_k % 64 != 0` (`MOE_GEMM_K_TILE`). Before the fix, decode-graph precapture died;
+  after it, precapture failed gracefully and graphs were captured lazily.
+- the fixture experts were widened to 64, so that `moe_gemm` graph capture actually runs. This moved the F32 pins, as
+  expected for new weights, and they were re-pinned.
+
+BF16 calibration on the 32-wide fixture:
+- GPU BF16 vs CPU BF16: the ids were equal at every step, with a largest logprob gap of 0.15 (text) and 0.17 (image).
+- CPU BF16 vs CPU F32: the ids differ, with logprob gaps above 1.2.
+- the tolerance is therefore 0.25 (`BF16_LOGPROB_TOLERANCE`).
+
+Command: `cargo nextest run --profile cuda --features cuda --workspace -E 'package(inference) &
+test(/qwen_vl_tiny|qwen3_5_text_tiny|paddleocr_vl/)'`.
+Result: 14 passed, including the MoE test with 64-wide experts.
+
+Implication: stage 2 is complete. Stage 3 is built-in MTP for MoE, whose MTP layer is an MoE `DecoderLayer`.
+
+## Run 62 - 2026-10-02 (time approximate)
+
+Question: does Qwen3.5-MoE built-in MTP work (stage 3), and does drafting keep greedy output on the CUDA paged path?
+
+Change:
+- The MTP layer now loads its feed-forward through `FeedForward::load`, which builds the sparse block for MoE.
+- Both MoE refusals are removed.
+- The MoE loader quantizes `mtp.*` (fc, attention, experts in both layouts, shared expert) and counts the MTP KV layer.
+- Real checkpoint layout (published Qwen3.6-35B-A3B weight index): the MTP experts are stacked
+  (`mtp.layers.0.mlp.experts.gate_up_proj` / `down_proj`, no `.weight`), like the main stack.
+
+New tests:
+- `qwen_vl_tiny::{qwen3_5,qwen3_5_moe}_builtin_mtp_keeps_greedy_output` (GPU only; MTP needs paged KV), run on tiny
+  dense and MoE checkpoints with the MTP head recorded.
+- A tiny sort padding test (CUDA).
+- An ISQ regex test for `mtp.*`.
+
+Findings, in order:
+1. MoE MTP engine build aborted with "Rust cannot catch foreign exceptions".
+   - gdb `catch throw`: `thrust::inclusive_scan` in `moe_gemm_wmma` during decode-graph precapture. The verify graph
+     has several query tokens, so the MoE runs its prefill kernel.
+   - compute-sanitizer: `cudaStreamSynchronize` during capture, from thrust's `par` policy.
+   - Fix: the expert offsets are a lower-bound kernel over the sorted ids (no sync, temporary buffer or thrust).
+2. Capture then succeeded, but replay hit `CUDA_ERROR_ILLEGAL_ADDRESS`.
+   - memcheck: `bmul_bf16` wrote out of bounds on `cuGraphLaunch`.
+   - Cause: `ArgSortOp::sort` (prefill MoE path) padded rows with H2D memcpys from malloc'd host buffers that are freed
+     right after capture, so every replay reads freed host memory.
+   - Fix: a device pad kernel. Restoring the old `sort.cu` makes the MoE MTP test fail again.
+   - Latent: descending sorts padded with `numeric_limits<T>::min()` (smallest positive for floats; 0 for half/bf16,
+     which have no `numeric_limits` specialization). The new test returned 1.17e-38 for a desc f32 row of negatives
+     on the old kernel. Padding is now the typed infinity (half/bf16 spelled out), else max/lowest. Only ascending
+     u32 MoE sorts use it today.
+3. With graphs off, MoE MTP diverged from plain greedy at step 13 of 16. Probe with top-2 logprobs:
+   - the plain run had an exact BF16 tie there (ids 18 and 74 at -1.4117); the MTP run picked 74;
+   - the agreeing steps differ by up to 0.035 in logprob (wmma/chunked-GDN verify vs gemv/recurrent decode);
+   - the dense run ties at step 1 as well.
+   So exact text equality is the wrong check. The test now requires:
+   - agreement up to the first id mismatch, at least 4 steps;
+   - logprobs within 0.25 over the agreeing steps;
+   - the mismatch only where the plain top two are within 0.1, or equal lengths if the runs never part.
+   - Both pass with CUDA graphs on and off.
+4. Review follow-ups: the length hole above, an ISQ regex test, the half/bf16 padding, and the regenerated
+   supported-models doc row (it comes from `model_metadata.rs`).
+
+Not covered:
+- The test can't prove drafts were accepted (no speculative stats on the API).
+- Neither Qwen3.5 loader sizes the MTP layer for device mapping; for MoE that is a whole expert layer.
+- No real MoE checkpoint run.
+
+Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`.
+Result: exit 0, 2390 + 2712 + 1 tests passed.

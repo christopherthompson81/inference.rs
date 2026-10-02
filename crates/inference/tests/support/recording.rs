@@ -25,16 +25,19 @@ const WEIGHT_SEED: u64 = 0x0CE1_2024;
 struct RecordingWeights(
     Arc<Mutex<(StdRng, HashMap<String, Tensor>)>>,
     Arc<Vec<String>>,
+    // shapes a loader reads before any tensor (stacked or per-expert MoE layouts)
+    Arc<HashMap<String, Vec<usize>>>,
 );
 
 impl RecordingWeights {
-    fn new(absent: &[&str]) -> Self {
+    fn new(absent: &[&str], shapes: HashMap<String, Vec<usize>>) -> Self {
         Self(
             Arc::new(Mutex::new((
                 StdRng::seed_from_u64(WEIGHT_SEED),
                 HashMap::new(),
             ))),
             Arc::new(absent.iter().map(|name| name.to_string()).collect()),
+            Arc::new(shapes),
         )
     }
 }
@@ -62,8 +65,11 @@ impl SimpleBackend for RecordingWeights {
         t.to_device(dev)
     }
 
-    fn get_unchecked(&self, name: &str, _: DType, _: &Device) -> CandleResult<Tensor> {
-        candle_core::bail!("no shape for {name}")
+    fn get_unchecked(&self, name: &str, dtype: DType, dev: &Device) -> CandleResult<Tensor> {
+        let Some(shape) = self.2.get(name) else {
+            candle_core::bail!("no shape for {name}")
+        };
+        self.get(shape.as_slice().into(), name, Init::Const(0.), dtype, dev)
     }
 
     fn contains_tensor(&self, name: &str) -> bool {
@@ -73,7 +79,7 @@ impl SimpleBackend for RecordingWeights {
 
 impl TensorShapes for RecordingWeights {
     fn tensor_shapes(&self) -> HashMap<String, Vec<usize>> {
-        HashMap::new()
+        self.2.as_ref().clone()
     }
 }
 
@@ -84,11 +90,22 @@ pub fn record_checkpoint(
     absent: &[&str],
     build: impl FnOnce(ShardedVarBuilder, NormalLoadingMetadata) -> CandleResult<()>,
 ) -> anyhow::Result<tempfile::TempDir> {
+    record_checkpoint_with_shapes(files, num_layers, absent, HashMap::new(), build)
+}
+
+/// As [`record_checkpoint`], with the shapes of tensors the loader inspects before reading them.
+pub fn record_checkpoint_with_shapes(
+    files: &[&Path],
+    num_layers: usize,
+    absent: &[&str],
+    shapes: HashMap<String, Vec<usize>>,
+    build: impl FnOnce(ShardedVarBuilder, NormalLoadingMetadata) -> CandleResult<()>,
+) -> anyhow::Result<tempfile::TempDir> {
     let dir = tempfile::tempdir()?;
     for file in files {
         std::fs::copy(file, dir.path().join(file.file_name().unwrap()))?;
     }
-    let weights = RecordingWeights::new(absent);
+    let weights = RecordingWeights::new(absent, shapes);
     let metadata = NormalLoadingMetadata {
         mapper: DeviceMapSetting::dummy().into_mapper(
             num_layers,

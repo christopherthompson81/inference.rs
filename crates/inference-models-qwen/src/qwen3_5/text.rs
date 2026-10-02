@@ -19,6 +19,7 @@ use inference_quant::{
 
 use super::{
     config::{LayerType, TextConfig},
+    feed_forward::FeedForward,
     mtp::Qwen3_5MtpHead,
     packed_gdn::{forward_packed_gdn, packed_gdn_layout},
 };
@@ -37,7 +38,7 @@ use crate::{
         HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, RecurrentLayerConfig,
     },
     layers::masker::{CausalMaskConfig, PastKvLenCache},
-    layers::{self, CausalMasker, GemmaRmsNorm, Mlp, Qwen3VLRotaryEmbedding, Sdpa, YarnRopeConfig},
+    layers::{self, CausalMasker, GemmaRmsNorm, Qwen3VLRotaryEmbedding, Sdpa, YarnRopeConfig},
     model::{ForwardMaskCache, IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     paged_attention::{
         AttentionImplementation, ModelConfigMetadata, PagedAttention, load_fp8_attention_scales,
@@ -365,8 +366,12 @@ impl FullAttention {
                     Some(flash_params),
                 )?,
                 None => {
+                    if matches!(attention_mask, AttentionMask::None) {
+                        candle_core::bail!(
+                            "paged attention without cache metadata needs a prompt attention mask"
+                        );
+                    }
                     let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
-                    assert!(!matches!(attention_mask, AttentionMask::None));
                     paged_attn.forward(
                         &q,
                         &k,
@@ -429,7 +434,7 @@ pub(super) struct DecoderLayer {
     pub(super) layer_impl: LayerImpl,
     pub(super) input_layernorm: GemmaRmsNorm,
     pub(super) post_attention_layernorm: GemmaRmsNorm,
-    mlp: Mlp,
+    pub(super) mlp: FeedForward,
 }
 
 struct DecoderLayerOutput {
@@ -569,6 +574,7 @@ impl DecoderLayer {
         cfg: &TextConfig,
         rotary_emb: Arc<Qwen3VLRotaryEmbedding>,
         paged_attn: Option<PagedAttention>,
+        mlp: FeedForward,
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
         let attn = FullAttention::load_with(
@@ -588,14 +594,6 @@ impl DecoderLayer {
             cfg.hidden_size,
             cfg.rms_norm_eps,
             vb_plain.pp("post_attention_layernorm"),
-        )?;
-        let mlp = Mlp::new(
-            vb_quant.pp("mlp"),
-            cfg.hidden_size,
-            cfg.intermediate_size,
-            &cfg.quantization_config,
-            cfg.hidden_act,
-            comm,
         )?;
         Ok(Self {
             layer_impl: LayerImpl::FullAttention(attn),
@@ -1335,16 +1333,18 @@ impl Qwen3_5TextModel {
                 ),
             )?;
 
-            let mlp = Mlp::new(
+            let mlp = FeedForward::load(
+                cfg,
                 mapper.set_device(
                     layer_idx,
                     vb_l.pp(layer_idx).pp("mlp"),
                     normal_loading_metadata.loading_isq,
                 ),
-                cfg.hidden_size,
-                cfg.intermediate_size,
-                &cfg.quantization_config,
-                cfg.hidden_act,
+                mapper
+                    .device_for(layer_idx, false)
+                    .cloned()
+                    .unwrap_or_else(|| normal_loading_metadata.real_device.clone()),
+                normal_loading_metadata.loading_isq,
                 &comm,
             )?;
 
@@ -2694,6 +2694,7 @@ impl IsqModel for Qwen3_5TextModel {
                         .add_tensor("weight", gdn.norm.weight.clone());
                 }
             }
+            layer.mlp.residual_tensors(&uvb_l.pp("mlp"));
         }
         if let Some(mtp) = &self.mtp {
             mtp.residual_tensors(&uvb);

@@ -97,6 +97,8 @@ pub fn moe_gemm(
 
         // Threshold for using GEMV kernel (optimized for small batch sizes)
         const GEMV_THRESHOLD: i32 = 8;
+        // moe_gemm's K tile; the kernel throws a C++ exception, which aborts the process, on any other K
+        const MOE_GEMM_K_TILE: usize = 64;
 
         let num_experts_i32 = i32::try_from(num_experts).expect("num_experts too large for i32");
         let topk_i32 = i32::try_from(topk).expect("topk too large for i32");
@@ -113,6 +115,11 @@ pub fn moe_gemm(
         } else if size_m_i32 <= GEMV_THRESHOLD {
             crate::cuda::ffi::moe_gemv
         } else {
+            if !size_k.is_multiple_of(MOE_GEMM_K_TILE) {
+                candle_core::bail!(
+                    "moe_gemm needs the expert input width ({size_k}) to be a multiple of {MOE_GEMM_K_TILE}"
+                );
+            }
             crate::cuda::ffi::moe_gemm
         };
 

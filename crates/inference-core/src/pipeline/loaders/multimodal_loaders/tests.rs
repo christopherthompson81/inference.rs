@@ -462,6 +462,9 @@ fn qwen3_5_moe_isq_matches_stacked_experts() -> Result<()> {
         "model.language_model.layers.0.mlp.experts.down_proj.weight",
         "language_model.model.layers.0.mlp.experts.gate_up_proj.weight",
         "language_model.model.layers.0.mlp.experts.down_proj.weight",
+        "mtp.layers.0.mlp.experts.gate_up_proj.weight",
+        "mtp.layers.0.mlp.experts.down_proj.weight",
+        "mtp.layers.0.mlp.experts.1.up_proj.weight",
     ];
 
     for regexes in [
@@ -473,6 +476,27 @@ fn qwen3_5_moe_isq_matches_stacked_experts() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+#[test]
+fn qwen3_5_moe_isq_quantizes_the_mtp_head() -> Result<()> {
+    let isq = Qwen3_5MoeLoader.immediate_isq_predicates("")?;
+    for name in [
+        "mtp.fc.weight",
+        "mtp.layers.0.self_attn.q_proj.weight",
+        "mtp.layers.0.self_attn.o_proj.weight",
+        "mtp.layers.0.mlp.shared_expert.down_proj.weight",
+    ] {
+        assert!(matches_any(&isq, name), "{name} was not matched");
+    }
+    for name in [
+        "mtp.layers.0.mlp.gate.weight",
+        "mtp.layers.0.mlp.shared_expert_gate.weight",
+        "mtp.norm.weight",
+    ] {
+        assert!(!matches_any(&isq, name), "{name} should stay dense");
+    }
     Ok(())
 }
 

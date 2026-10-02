@@ -256,8 +256,15 @@ fn prompt_forward(
     let context_lens = [(0, PROMPT.len())];
     let position_ids = [PROMPT.len()];
     let flash_params = crate::attention::FlashParams::empty(true);
+    // Hybrid models keep the one sequence's recurrent state in slot 0; attention-only models ignore it.
+    let recurrent = crate::model::RecurrentMetadata::new(
+        crate::gdn::RecurrentBatchKind::Prefill,
+        Tensor::new(&[0u32], &Device::Cpu)?,
+        Some(vec![0]),
+    );
     let mut ctx =
-        ModelForwardContext::new(&offsets, &context_lens, &position_ids, None, &flash_params);
+        ModelForwardContext::new(&offsets, &context_lens, &position_ids, None, &flash_params)
+            .with_recurrent_metadata(Some(recurrent));
     Ok(run(&input, &mut ctx)?.to_dtype(DType::F32)?)
 }
 
@@ -268,6 +275,13 @@ pub fn forward_normal(model: &(dyn NormalModel + Send + Sync)) -> Result<Tensor>
 
 /// Logits of `PROMPT` as one text-only prefill.
 pub fn forward_multimodal(model: &(dyn MultimodalModel + Send + Sync)) -> Result<Tensor> {
+    if model.cache().is_hybrid() {
+        // the engine's cache manager binds each step's recurrent slots before the forward
+        model
+            .cache()
+            .hybrid()
+            .set_state_indices(Some(Tensor::new(&[0u32], &Device::Cpu)?))?;
+    }
     prompt_forward(|input, ctx| {
         model.forward(input, None, model.default_model_specific_args(input), ctx)
     })

@@ -21,7 +21,7 @@ use crate::{
     utils::unvarbuilder::UnVarBuilder,
 };
 
-use super::{config::TextConfig, text::DecoderLayer};
+use super::{config::TextConfig, feed_forward::FeedForward, text::DecoderLayer};
 
 pub const MTP_FC_WEIGHT: &str = "mtp.fc.weight";
 
@@ -116,12 +116,20 @@ impl Qwen3_5MtpHead {
             }
         };
         let vb_layer_quant = vb_quant.pp("layers").pp(0);
+        let mlp = FeedForward::load(
+            cfg,
+            vb_layer_quant.pp("mlp"),
+            device.clone(),
+            loading_isq,
+            &comm,
+        )?;
         let layer = DecoderLayer::load_full_attention(
             vb_layer_quant,
             vb_layer,
             cfg,
             rotary_emb,
             paged_attn,
+            mlp,
             &comm,
         )?;
         let norm = GemmaRmsNorm::new(cfg.hidden_size, cfg.rms_norm_eps, vb_plain.pp("norm"))?;
@@ -205,5 +213,6 @@ impl Qwen3_5MtpHead {
             uvb_l.pp("self_attn").pp("q_norm").add(&attn.q_norm);
             uvb_l.pp("self_attn").pp("k_norm").add(&attn.k_norm);
         }
+        self.layer.mlp.residual_tensors(&uvb_l.pp("mlp"));
     }
 }

@@ -217,7 +217,9 @@ pub struct TextConfig {
     pub head_dim: usize,
     pub vocab_size: usize,
     pub hidden_size: usize,
-    pub intermediate_size: usize,
+    // MoE checkpoints omit it; every dense MLP needs it
+    #[serde(default)]
+    pub intermediate_size: Option<usize>,
     pub num_hidden_layers: usize,
     pub num_attention_heads: usize,
     pub num_key_value_heads: usize,
@@ -238,6 +240,19 @@ pub struct TextConfig {
     pub linear_num_value_heads: usize,
     #[serde(default)]
     pub mamba_ssm_dtype: GdnStateDType,
+    // Sparse feed-forward; zero experts makes every layer a dense MLP
+    #[serde(default)]
+    pub num_experts: usize,
+    #[serde(default)]
+    pub num_experts_per_tok: usize,
+    #[serde(default)]
+    pub moe_intermediate_size: usize,
+    #[serde(default)]
+    pub shared_expert_intermediate_size: usize,
+    #[serde(default = "default_true")]
+    pub norm_topk_prob: bool,
+    #[serde(default)]
+    pub mlp_only_layers: Vec<usize>,
     // Other
     #[serde(default)]
     pub tie_word_embeddings: bool,
@@ -341,8 +356,60 @@ impl TextConfig {
                 section_width.saturating_mul(2)
             );
         }
+        self.validate_feed_forward()?;
         self.validate_rope_scaling()?;
         Ok(())
+    }
+
+    fn validate_feed_forward(&self) -> candle_core::Result<()> {
+        if !self.is_moe() {
+            self.dense_intermediate_size()?;
+            return Ok(());
+        }
+        if self.num_experts_per_tok == 0 || self.num_experts_per_tok > self.num_experts {
+            candle_core::bail!(
+                "Qwen3.5 has invalid MoE routing: {} of {} experts",
+                self.num_experts_per_tok,
+                self.num_experts
+            );
+        }
+        if self.moe_intermediate_size == 0 || self.shared_expert_intermediate_size == 0 {
+            candle_core::bail!(
+                "Qwen3.5 MoE needs nonzero moe_intermediate_size and shared_expert_intermediate_size"
+            );
+        }
+        if !self.mlp_only_layers.is_empty() {
+            candle_core::bail!(
+                "Qwen3.5 MoE `mlp_only_layers` is not implemented yet in inference.rs."
+            );
+        }
+        Ok(())
+    }
+
+    /// Every decoder layer is sparse when the config names experts.
+    pub fn is_moe(&self) -> bool {
+        self.num_experts > 0
+    }
+
+    pub fn dense_intermediate_size(&self) -> candle_core::Result<usize> {
+        match self.intermediate_size {
+            Some(size) if size > 0 => Ok(size),
+            _ => candle_core::bail!("Qwen3.5 dense MLP needs a positive intermediate_size"),
+        }
+    }
+
+    /// Rejects a checkpoint whose experts do not match the loader it was given.
+    pub fn check_experts(&self, moe: bool) -> candle_core::Result<()> {
+        match (moe, self.is_moe()) {
+            (false, true) => candle_core::bail!(
+                "text_config names {} experts: load it as qwen3_5moe",
+                self.num_experts
+            ),
+            (true, false) => {
+                candle_core::bail!("Qwen3.5 MoE needs nonzero num_experts in text_config")
+            }
+            _ => Ok(()),
+        }
     }
 
     fn validate_rope_scaling(&self) -> candle_core::Result<()> {
@@ -461,6 +528,112 @@ mod tests {
             "linear_num_value_heads": 4
         }))
         .unwrap()
+    }
+
+    fn moe_text_config(patch: serde_json::Value) -> serde_json::Value {
+        let mut cfg = serde_json::json!({
+            "head_dim": 64,
+            "vocab_size": 32,
+            "hidden_size": 128,
+            "num_hidden_layers": 8,
+            "num_attention_heads": 4,
+            "num_key_value_heads": 2,
+            "hidden_act": "silu",
+            "max_position_embeddings": 1024,
+            "rms_norm_eps": 1e-6,
+            "rope_parameters": { "mrope_section": [4, 2, 2] },
+            "linear_key_head_dim": 16,
+            "linear_value_head_dim": 16,
+            "linear_num_key_heads": 2,
+            "linear_num_value_heads": 4,
+            "moe_intermediate_size": 32,
+            "shared_expert_intermediate_size": 64,
+            "num_experts": 4,
+            "num_experts_per_tok": 2
+        });
+        let (serde_json::Value::Object(cfg_map), serde_json::Value::Object(patch)) =
+            (&mut cfg, patch)
+        else {
+            unreachable!("configs are JSON objects")
+        };
+        cfg_map.extend(patch);
+        cfg
+    }
+
+    fn validation_error(cfg: serde_json::Value) -> String {
+        serde_json::from_value::<TextConfig>(cfg)
+            .unwrap()
+            .validate()
+            .unwrap_err()
+            .to_string()
+    }
+
+    #[test]
+    fn moe_config_needs_no_dense_intermediate_size() {
+        let cfg: TextConfig =
+            serde_json::from_value(moe_text_config(serde_json::json!({}))).unwrap();
+        cfg.validate().unwrap();
+        assert!(cfg.is_moe());
+        assert!(cfg.norm_topk_prob);
+        cfg.check_experts(true).unwrap();
+        assert!(
+            cfg.check_experts(false)
+                .unwrap_err()
+                .to_string()
+                .contains("load it as qwen3_5moe")
+        );
+    }
+
+    #[test]
+    fn dense_config_without_intermediate_size_is_rejected() {
+        let error = validation_error(moe_text_config(serde_json::json!({ "num_experts": 0 })));
+        assert!(error.contains("positive intermediate_size"), "{error}");
+        let cfg: TextConfig =
+            serde_json::from_value(moe_text_config(serde_json::json!({ "num_experts": 0 })))
+                .unwrap();
+        assert!(
+            cfg.check_experts(true)
+                .unwrap_err()
+                .to_string()
+                .contains("nonzero num_experts")
+        );
+    }
+
+    #[test]
+    fn moe_config_rejects_inconsistent_experts() {
+        for patch in [
+            serde_json::json!({ "num_experts_per_tok": 0 }),
+            serde_json::json!({ "num_experts_per_tok": 5 }),
+        ] {
+            assert!(validation_error(moe_text_config(patch)).contains("invalid MoE routing"));
+        }
+        for patch in [
+            serde_json::json!({ "moe_intermediate_size": 0 }),
+            serde_json::json!({ "shared_expert_intermediate_size": 0 }),
+        ] {
+            assert!(
+                validation_error(moe_text_config(patch)).contains("nonzero moe_intermediate_size")
+            );
+        }
+        assert!(
+            validation_error(moe_text_config(
+                serde_json::json!({ "mlp_only_layers": [0] })
+            ))
+            .contains("mlp_only_layers")
+        );
+    }
+
+    #[test]
+    fn gdn_head_layout_defaults_to_grouped_and_accepts_tiled_override() {
+        use crate::gdn::GdnConfig;
+        let default: TextConfig =
+            serde_json::from_value(moe_text_config(serde_json::json!({}))).unwrap();
+        assert_eq!(default.v_head_layout(), GdnVHeadLayout::Grouped);
+        let tiled: TextConfig = serde_json::from_value(moe_text_config(
+            serde_json::json!({ "_inference_gdn_v_head_layout": "tiled" }),
+        ))
+        .unwrap();
+        assert_eq!(tiled.v_head_layout(), GdnVHeadLayout::Tiled);
     }
 
     #[test]

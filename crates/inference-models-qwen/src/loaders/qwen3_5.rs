@@ -32,7 +32,7 @@ impl MultimodalModelLoader for Qwen3_5Loader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg = Qwen3_5Config::from_json(config)?;
+        let cfg = parse_config(config)?;
         Ok(Box::new(Qwen3_5Model::new(
             &cfg,
             vb,
@@ -42,7 +42,7 @@ impl MultimodalModelLoader for Qwen3_5Loader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let config = Qwen3_5Config::from_json(config)?;
+        let config = parse_config(config)?;
         Ok(Box::new(config))
     }
     fn supports_paged_attention(&self, _config: &str) -> bool {
@@ -125,7 +125,7 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg = Qwen3_5Config::from_json(config)?;
+        let cfg = parse_config(config)?;
 
         let img_seq_len = {
             let cfg = &cfg.vision_config;
@@ -158,7 +158,7 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg = Qwen3_5Config::from_json(config)?;
+        let cfg = parse_config(config)?;
 
         let img_seq_len = {
             let cfg = &cfg.vision_config;
@@ -182,7 +182,7 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = Qwen3_5Config::from_json(config)?;
+        let cfg = parse_config(config)?;
         let tie = cfg.tie_word_embeddings;
         let text_elems = {
             let cfg = &cfg.text_config;
@@ -275,7 +275,7 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = Qwen3_5Config::from_json(config)?;
+        let cfg = parse_config(config)?;
         let text_cfg = &cfg.text_config;
         let layer_types = text_cfg.layer_types();
 
@@ -326,7 +326,7 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
             // Dense MLP
             let mlp_elems = {
                 let h_size = text_cfg.hidden_size;
-                let i_size = text_cfg.intermediate_size;
+                let i_size = text_cfg.dense_intermediate_size()?;
                 let gate_proj = h_size * i_size / weight_pack_factor;
                 let up_proj = h_size * i_size / weight_pack_factor;
                 let down_proj = i_size * h_size / weight_pack_factor;
@@ -342,11 +342,11 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
         Ok(layer_sizes)
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg = Qwen3_5Config::from_json(config)?;
+        let cfg = parse_config(config)?;
         Ok(cfg.text_config.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = Qwen3_5Config::from_json(config)?;
+        let cfg = parse_config(config)?;
         let mtp = cfg.mtp;
         let cfg = &cfg.text_config;
 
@@ -371,4 +371,10 @@ impl DeviceMappedModelLoader for Qwen3_5Loader {
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
         Some(vec![NonMappedSubModel::Vision])
     }
+}
+
+fn parse_config(config: &str) -> Result<Qwen3_5Config> {
+    let cfg = Qwen3_5Config::from_json(config)?;
+    cfg.text_config.check_experts(false)?;
+    Ok(cfg)
 }
