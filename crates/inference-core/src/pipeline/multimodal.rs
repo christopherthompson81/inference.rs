@@ -166,7 +166,6 @@ use crate::pipeline::cuda_graph::{
 };
 use crate::pipeline::llg::build_llg_factory;
 use crate::pipeline::sampling::{sample_and_add_toks, sample_and_add_toks_batched};
-use crate::pipeline::text_models_inputs_processor::InputMetadata;
 use crate::pipeline::tokenizer::get_tokenizer;
 use crate::pipeline::{
     ChatTemplate, IsqOrganization, ModelForwardContext, RecurrentMetadata, get_chat_template,
@@ -1403,26 +1402,6 @@ impl crate::speculative::driver::SpeculativePipelineExt for MultimodalPipeline {
         &mut self,
     ) -> &mut dyn inference_nn::speculative::SpeculativeTargetMixin {
         &mut *self.model
-    }
-
-    fn build_speculative_verify_inputs(
-        &self,
-        input_meta: InputMetadata,
-    ) -> candle_core::Result<Box<dyn Any>> {
-        let model_specific_args = self.model.default_model_specific_args(&input_meta.input);
-        let adapter_leases = vec![None; input_meta.input.dim(0)?].into();
-        Ok(Box::new(ModelInputs {
-            input_ids: input_meta.input,
-            seqlen_offsets: input_meta.positions,
-            context_lens: input_meta.context_lens,
-            position_ids: input_meta.position_ids,
-            pixel_values: None,
-            model_specific_args,
-            paged_attn_meta: input_meta.paged_attn_meta,
-            flash_meta: input_meta.flash_meta,
-            recurrent_batch_kind: RecurrentBatchKind::SpeculativeDecode,
-            adapter_leases,
-        }))
     }
 
     #[cfg(feature = "cuda")]

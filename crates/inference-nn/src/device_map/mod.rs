@@ -482,18 +482,6 @@ impl AutoDeviceMapParams {
             max_batch_size: Self::DEFAULT_MAX_BATCH_SIZE,
         }
     }
-
-    pub fn default_multimodal() -> Self {
-        Self::Multimodal {
-            max_seq_len: Self::DEFAULT_MAX_SEQ_LEN,
-            max_batch_size: Self::DEFAULT_MAX_BATCH_SIZE,
-            max_num_images: Self::DEFAULT_MAX_NUM_IMAGES,
-            max_image_shape: (
-                Self::DEFAULT_MAX_IMAGE_LENGTH,
-                Self::DEFAULT_MAX_IMAGE_LENGTH,
-            ),
-        }
-    }
 }
 
 #[cfg(test)]

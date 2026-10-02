@@ -298,21 +298,6 @@ async fn list_model_files_inner(
     list_repo_files_async(&repo, Path::new(model_id), should_error, revision).await
 }
 
-pub fn get_model_file(
-    model_id: &str,
-    revision: &str,
-    file: &str,
-    token_source: &crate::pipeline::TokenSource,
-) -> Result<PathBuf> {
-    let api = build_api(token_source, true)?;
-    let repo = api.repo(Repo::with_revision(
-        model_id.to_string(),
-        RepoType::Model,
-        revision.to_string(),
-    ));
-    get_file(&repo, Path::new(model_id), file, revision)
-}
-
 pub async fn try_get_model_file(
     model_id: &str,
     revision: &str,

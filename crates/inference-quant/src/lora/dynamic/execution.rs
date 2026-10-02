@@ -59,14 +59,6 @@ impl LoraExecutionArena {
     }
 
     #[cfg(feature = "cuda")]
-    pub fn cached_expert_cuda_resources(&self) -> usize {
-        self.expert_cuda
-            .lock()
-            .expect("expert LoRA CUDA arena poisoned")
-            .len()
-    }
-
-    #[cfg(feature = "cuda")]
     pub fn cuda_stats(&self) -> LoraExecutionArenaStats {
         let cache = self
             .expert_cuda

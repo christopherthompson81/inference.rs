@@ -61,7 +61,6 @@ use crate::pipeline::cuda_graph::{
 };
 use crate::pipeline::isq::{UqffFullSer, UqffWriteConfig, WeightLoadingMode, WeightLoadingState};
 use crate::pipeline::sampling::{sample_and_add_toks, sample_and_add_toks_batched};
-use crate::pipeline::text_models_inputs_processor::InputMetadata;
 use crate::pipeline::tokenizer::get_tokenizer;
 use crate::pipeline::{
     Modalities, ModelForwardContext, RecurrentMetadata, SupportedModality, get_chat_template,
@@ -1323,25 +1322,6 @@ impl crate::speculative::driver::SpeculativePipelineExt for NormalPipeline {
         &mut self,
     ) -> &mut dyn inference_nn::speculative::SpeculativeTargetMixin {
         &mut *self.model
-    }
-
-    fn build_speculative_verify_inputs(
-        &self,
-        input_meta: InputMetadata,
-    ) -> candle_core::Result<Box<dyn Any>> {
-        Ok(Box::new(ModelInputs {
-            input_ids: input_meta.input,
-            input_ids_full: None,
-            seqlen_offsets: input_meta.positions,
-            seqlen_offsets_full: None,
-            context_lens: input_meta.context_lens,
-            position_ids: input_meta.position_ids,
-            paged_attn_meta: input_meta.paged_attn_meta,
-            flash_meta: input_meta.flash_meta,
-            flash_meta_full: None,
-            recurrent_batch_kind: RecurrentBatchKind::SpeculativeDecode,
-            adapter_leases: Arc::from([]),
-        }))
     }
 
     #[cfg(feature = "cuda")]

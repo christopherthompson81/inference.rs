@@ -13,10 +13,8 @@ pub use config::{
     reserve_external_mtp_memory, reserve_external_mtp_memory_with_runtime,
     resolve_speculative_model,
 };
-#[cfg(feature = "models-qwen")]
-pub use dflash::DFlashDraftModel;
 pub use inference_nn::speculative::*;
-pub use inference_nn::speculative::{logging, paged_rows, policy, proposer, target};
+pub use inference_nn::speculative::{proposer, target};
 
 #[cfg(test)]
 mod tests {

@@ -116,22 +116,12 @@ impl InferenceRsBuilder {
         self.no_kv_cache = Some(no_kv_cache);
         self
     }
-    pub fn with_no_prefix_cache(mut self, no_prefix_cache: bool) -> Self {
-        self.no_prefix_cache = Some(no_prefix_cache);
-        self
-    }
     pub fn with_prefix_cache_n(mut self, prefix_cache_n: usize) -> Self {
         self.prefix_cache_n = Some(prefix_cache_n);
         self
     }
     pub fn with_disable_eos_stop(mut self, disable_eos_stop: bool) -> Self {
         self.disable_eos_stop = Some(disable_eos_stop);
-        self
-    }
-
-    /// Install the runner for agentic requests (tools, web search), e.g. `inference_agent::runner()`.
-    pub fn with_agent_runner(mut self, runner: Arc<dyn AgentRunner>) -> Self {
-        self.agent_runner = Some(runner);
         self
     }
 
@@ -183,16 +173,6 @@ impl InferenceRsBuilder {
                 tool,
             },
         );
-        self
-    }
-
-    /// Register a pre-built tool callback with its Tool definition.
-    pub fn with_tool_callback_with_tool(
-        mut self,
-        name: impl Into<String>,
-        callback_with_tool: ToolCallbackWithTool,
-    ) -> Self {
-        self.tool_callbacks.insert(name.into(), callback_with_tool);
         self
     }
 

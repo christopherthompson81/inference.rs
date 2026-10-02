@@ -393,12 +393,20 @@ async fn handle_daemon_request(req: Request, dispatch: &DaemonDispatch<'_>) {
                     Some(crate::Response::AgenticToolCallProgress { .. })
                     | Some(crate::Response::BlockDenoisingProgress(_))
                     | Some(crate::Response::File(_)) => continue,
-                    Some(resp) => {
-                        if let Err(e) = resp.as_result() {
-                            tracing::error!("Normal response error: {e}");
-                        }
+                    Some(
+                        crate::Response::InternalError(e) | crate::Response::ValidationError(e),
+                    ) => {
+                        tracing::error!("Normal response error: {e}");
                         break;
                     }
+                    Some(
+                        crate::Response::ModelError(e, _)
+                        | crate::Response::CompletionModelError(e, _),
+                    ) => {
+                        tracing::error!("Normal response error: {e}");
+                        break;
+                    }
+                    Some(_) => break,
                     None => {
                         tracing::error!("Normal response channel closed");
                         break;

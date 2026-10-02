@@ -102,18 +102,6 @@ impl InferenceRs {
         Ok(())
     }
 
-    pub fn attach_file_to_session(
-        &self,
-        model_id: Option<&str>,
-        id: &str,
-        session_id: &str,
-        owner: Option<&str>,
-    ) -> Result<bool, InferenceRsError> {
-        Ok(self
-            .get_file_store(model_id)?
-            .attach_to_session(id, session_id, owner))
-    }
-
     /// Agentic session store for `model_id` (or the default model). Returns an `Arc` to lock for inspect/mutate.
     pub fn get_session_store(
         &self,

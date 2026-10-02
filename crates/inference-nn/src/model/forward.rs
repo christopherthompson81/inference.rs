@@ -86,13 +86,6 @@ impl<'a> ForwardCache<'a> {
             Self::Normal(_) | Self::None => true,
         }
     }
-
-    pub fn normal_mut(&mut self) -> Option<&mut [KvCache]> {
-        match self {
-            Self::Normal(cache) => Some(cache),
-            Self::Paged { .. } | Self::None => None,
-        }
-    }
 }
 
 pub enum ForwardPositions<'a> {
@@ -246,10 +239,6 @@ impl<'a> ModelForwardContext<'a> {
         &self.cache
     }
 
-    pub fn cache_mut(&mut self) -> &mut ForwardCache<'a> {
-        &mut self.cache
-    }
-
     pub fn is_paged(&self) -> bool {
         matches!(self.cache, ForwardCache::Paged { .. })
     }
@@ -263,10 +252,6 @@ impl<'a> ModelForwardContext<'a> {
 
     pub fn context_lens(&self) -> &[(usize, usize)] {
         self.context_lens
-    }
-
-    pub fn context_lens_vec(&self) -> Vec<(usize, usize)> {
-        self.context_lens.to_vec()
     }
 
     pub fn position_ids(&self) -> &[usize] {

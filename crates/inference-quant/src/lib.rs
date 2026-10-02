@@ -26,10 +26,10 @@ mod cuda_headers;
 pub mod cutile;
 pub mod distributed;
 mod dummy;
-pub mod f8q8;
+mod f8q8;
 mod fp8;
 mod fp8_config;
-pub mod gemv;
+mod gemv;
 mod gguf;
 mod gptq;
 mod hqq;
@@ -181,16 +181,13 @@ pub use distributed::{
     socket::{Client, Server},
 };
 pub use dummy::{DummyLayer, DummyLayerInfo};
-pub use f8q8::F8Q8Linear;
+use f8q8::F8Q8Linear;
 pub use fp8::FP8Linear;
 pub use fp8_config::{
     CheckpointDialect, CheckpointLinearSpec, CheckpointQuantConfig, Fp8ActivationMode,
     Fp8LinearSpec, Fp8ScaleNames, Fp8WeightScaleLayout, NVFP4_BLOCK_SIZE, Nvfp4ActivationMode,
     Nvfp4LinearSpec, Nvfp4ScaleNames, ScaleConvention,
 };
-#[cfg(feature = "cuda")]
-pub use gemv::gemv;
-pub use gemv::{GEMV_CONTROLLER, should_use_gemv};
 pub use gguf::GgufMatMul;
 pub use gguf::archive::{
     GgufArchive, GgufDType, GgufEndian, GgufShardInfo, GgufTensorData, GgufTensorInfo, GgufVersion,
@@ -244,7 +241,8 @@ pub use lora::{
     RoutedLoraGroupedLaunch, launch_routed_lora_direct, launch_routed_lora_grouped,
 };
 pub use mxfp4::MXFP4Layer;
-pub use nvfp4::{Nvfp4InputCalibration, Nvfp4Layer, Nvfp4LayerParts};
+use nvfp4::Nvfp4InputCalibration;
+pub use nvfp4::{Nvfp4Layer, Nvfp4LayerParts};
 pub use pending_layer::{PendingIsqLayer, pending_isq_channel};
 pub use pertensor_fp8::{Fp8W8A8LinearArgs, PerTensorFP8Linear, fp8_w8a8_linear, fp8_w8a16_linear};
 pub use unquantized::UnquantLinear;
@@ -406,29 +404,6 @@ unsafe fn set_isq_thread_affinity() {
 
 #[cfg(not(target_os = "macos"))]
 unsafe fn set_isq_thread_affinity() {}
-
-/// Legacy Rayon pool helper for callers that still need raw pool semantics.
-/// New ISQ scheduling should use `create_isq_executor`.
-pub fn create_isq_thread_pool(ty: Option<IsqType>) -> (rayon::ThreadPool, usize) {
-    let num_threads = if std::env::var("INFERENCE_RS_ISQ_SINGLETHREAD").is_ok() {
-        1
-    } else if let Some(ty) = ty {
-        ty.get_max_isq_cpu_threads()
-            .map(usize::from)
-            .unwrap_or_else(rayon::current_num_threads)
-    } else {
-        rayon::current_num_threads()
-    };
-
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(num_threads)
-        .start_handler(|_| unsafe {
-            set_isq_thread_affinity();
-        })
-        .build()
-        .expect("Failed to create ISQ thread pool");
-    (pool, num_threads)
-}
 
 pub fn create_isq_executor(config: IsqExecutorConfig) -> (IsqExecutor, usize) {
     let executor = IsqExecutor::new(config);
@@ -904,13 +879,6 @@ impl MatMul {
                 a.matmul(b)
             }
         }
-    }
-
-    /// Compute matrix-matrix product.
-    /// The result will be divided by the `scale` parameter in an affine division.
-    pub fn matmul_affine_div(&self, a: &Tensor, b: &Tensor, scale: f64) -> Result<Tensor> {
-        // TODO(EricLBuehler): Optimize this by using the gemm parameter?
-        self.matmul(a, b)? / scale
     }
 
     /// Compute matrix-matrix product.

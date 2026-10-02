@@ -230,10 +230,6 @@ pub(super) struct ExpertCudaCache {
 }
 
 impl ExpertCudaCache {
-    pub(super) fn len(&self) -> usize {
-        self.resources.len()
-    }
-
     pub(super) fn stats(&self) -> (usize, usize, usize, usize, usize) {
         (
             self.resources.len(),

@@ -286,62 +286,6 @@ impl KvCache {
         }
     }
 
-    pub fn restore_after_speculative_append(
-        &mut self,
-        snapshot: &KvCacheSnapshot,
-        post_forward_layer: Option<&KvCache>,
-        keep_len: usize,
-        row_idx: usize,
-        batch_len: usize,
-    ) -> Result<()> {
-        match (self, snapshot) {
-            (Self::Normal { k, v }, KvCacheSnapshot::Normal { .. }) => {
-                k.rollback_to(keep_len)?;
-                v.rollback_to(keep_len)?;
-            }
-            (
-                Self::Rotating { k, v },
-                KvCacheSnapshot::Rotating {
-                    k: k_snapshot,
-                    v: v_snapshot,
-                },
-            ) => {
-                let Some(KvCache::Rotating {
-                    k: post_k,
-                    v: post_v,
-                }) = post_forward_layer
-                else {
-                    candle_core::bail!(
-                        "rotating cache speculative rollback requires post-forward rotating layer"
-                    );
-                };
-                let accepted_k = post_k.accepted_append_from_batched_append(
-                    k_snapshot, keep_len, row_idx, batch_len,
-                )?;
-                let accepted_v = post_v.accepted_append_from_batched_append(
-                    v_snapshot, keep_len, row_idx, batch_len,
-                )?;
-                *k = RotatingCache::restore_from_snapshot(k_snapshot, accepted_k, keep_len)?;
-                *v = RotatingCache::restore_from_snapshot(v_snapshot, accepted_v, keep_len)?;
-            }
-            (
-                Self::Shared { owner },
-                KvCacheSnapshot::Shared {
-                    owner: snapshot_owner,
-                },
-            ) => {
-                *owner = *snapshot_owner;
-            }
-            (layer, KvCacheSnapshot::Shared { owner }) => {
-                *layer = KvCache::Shared { owner: *owner };
-            }
-            _ => {
-                candle_core::bail!("kv-cache speculative rollback snapshot kind mismatch");
-            }
-        }
-        Ok(())
-    }
-
     pub fn reset(&mut self) {
         match self {
             Self::Normal { k, v } => {

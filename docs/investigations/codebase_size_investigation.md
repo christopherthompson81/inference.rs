@@ -1240,3 +1240,36 @@ dispatch URL; `with_shell_skill(path)` (`upload_skill(dir)` then the id). Change
 `MultiModelBuilder` are what `ModelSpec` carries (template, ISQ, device layers, revision, encoder cache); engine-wide
 ones come from the multi-builder. Not reachable any more: the client loop's stop reason and per-tool OK/error status,
 and its "calling N tools" / "round done" events; loads always log (the engine has no silent load).
+
+## Run 43 - 2026-10-01 (time approximate)
+
+Question: with the SDK off core (Run 42), what in core, nn and quant is now dead?
+
+Method: an audit parsed every `inference_core::...` path outside core (crates/ and examples/) against core's re-exports,
+and for nn and quant counted each public item's name outside its crate, cfg-gated code included. Candidates were then
+cut and the CPU and CUDA builds (`--features inference-core/cuda`) checked after each step, since the dead-code lint
+only sees what a narrowed visibility exposes.
+
+Change (1288 lines removed):
+- Dead functions: core's per-engine terminate flags (and their static) and `get_model_file`; 19 nn methods (KV cache
+  views, masker helpers, `from_qparts`, topology helpers, a CUDA pool query, ...); 10 quant functions (the legacy ISQ
+  rayon pool, `matmul_affine_div`, four Metal kernel wrappers, ...). Deleting them exposed a second layer: a private
+  mask helper, the csv import, two LoRA runtime helpers.
+- `Response::as_result` with `ResponseOk` / `ResponseErr` (about 150 lines): the old SDK's, now used only to log one
+  error in distributed.rs, which matches the error variants directly.
+- `InferenceRs` methods nothing calls, found iteratively (removing a wrapper left its delegate unused): the blocking
+  and file-based LoRA variants, `with_agent_runner`, `with_no_prefix_cache`, `with_tool_callback_with_tool`,
+  `list_unloaded_models`, `attach_file_to_session`.
+- About 30 re-exports in core's lib.rs nobody reads through core (protocol reasoning and file helpers, nn logging
+  filters, `layers`, code-exec approval types, `SpeculativeConfig` / `matformer` now private uses).
+- `speculative` became `pub(crate)`, which surfaced dead trait methods (`begin`, `make_verify_input_metadata`,
+  `build_speculative_verify_inputs` with their impls) and helpers; `speculative_prepare_propose` is CUDA-only and now
+  says so. quant's `f8q8` and `gemv` became private: with `set_enabled` gone the GEMV controller could never be off,
+  so it is removed, and the CPU stubs of `gemv` / `should_use_gemv` had no caller (every call site is CUDA-gated).
+
+Dead end: `cargo fix` on the CPU build removed imports the CUDA build needed (`LazyLock` in gemv,
+`SpeculativeProposePrepareCtx` in the driver); both restored behind `cfg(feature = "cuda")`. Metal-only deletions are
+in `metal_kernels` files that import by glob, so the PR's metal check is the verification.
+
+Not done: narrowing the remaining crate-only `pub` items (about 540 in nn, a few hundred in quant, the per-family
+loaders in core) to `pub(crate)`; it deletes nothing by itself, though it would let the lint find more.

@@ -1,6 +1,5 @@
 use crate::speculative::DraftSequence;
 use futures::future::BoxFuture;
-use std::any::Any;
 use std::sync::Arc;
 
 use candle_core::{Result, Tensor};
@@ -11,15 +10,15 @@ use crate::pipeline::Pipeline;
 use crate::pipeline::sampling::{
     cache_finished_sequence, finish_or_add_toks_to_seq, sample_sequence,
 };
-use crate::pipeline::text_models_inputs_processor::InputMetadata;
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::{Sequence, SequenceState};
 
 use super::cache::{SpeculativeCacheAccess, SpeculativeCacheGuard, SpeculativeCacheOutcome};
+#[cfg(feature = "cuda")]
+use super::proposer::SpeculativeProposePrepareCtx;
 use super::proposer::{
     SpeculativeCommitRow, SpeculativeProposalBatch, SpeculativeProposalDistribution,
-    SpeculativeProposeBatchCtx, SpeculativeProposePreparation, SpeculativeProposePrepareCtx,
-    SpeculativeTokens,
+    SpeculativeProposeBatchCtx, SpeculativeProposePreparation, SpeculativeTokens,
 };
 use super::staging::{StagedBatchState, staged_batch_state};
 use super::verifier::{
@@ -132,6 +131,7 @@ pub trait SpeculativePipelineExt: Pipeline {
         self.speculative_target_mut().speculative_propose(ctx)
     }
 
+    #[cfg(feature = "cuda")]
     fn speculative_prepare_propose(
         &mut self,
         ctx: SpeculativeProposePrepareCtx<'_>,
@@ -143,8 +143,6 @@ pub trait SpeculativePipelineExt: Pipeline {
     fn speculative_commit(&mut self, rows: &[SpeculativeCommitRow]) -> Result<()> {
         self.speculative_target_mut().speculative_commit(rows)
     }
-
-    fn build_speculative_verify_inputs(&self, input_meta: InputMetadata) -> Result<Box<dyn Any>>;
 
     #[cfg(feature = "cuda")]
     fn cuda_sparse_rejection_workspace(
