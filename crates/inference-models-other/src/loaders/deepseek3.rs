@@ -1,3 +1,4 @@
+use super::deepseek_family::*;
 use super::*;
 
 /// `NormalLoader` for a DeepSeekV3 model.
@@ -13,7 +14,7 @@ impl NormalModelLoader for DeepSeekV3Loader {
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
         let cfg = crate::deepseek3::DeepSeekV3Config::from_json(config)?;
         Ok(Box::new(crate::deepseek3::DeepSeekV3::new(
-            &cfg,
+            &cfg.family(),
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
             normal_loading_metadata,
@@ -38,209 +39,49 @@ impl NormalModelLoader for DeepSeekV3Loader {
     }
 }
 
-impl IsqModelLoader for DeepSeekV3Loader {
-    fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-        isq_regexes(&[
-            r"^model\.embed_tokens\.weight$",
-            r"^lm_head\.(weight|bias)$",
-        ])
-    }
-    fn isq_layer_regexes(&self, config: &str) -> Result<Vec<Regex>> {
-        let mut data = isq_regexes(&[
-            r"lm_head\.(weight|bias)$",
-            // Attention
-            r"layers\.(\d+)\.self_attn\.kv_a_proj_with_mqa\.(weight|bias)$",
-            r"layers\.(\d+)\.self_attn\.(kv_b|k_b|v_b)_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
-        ])?;
+impl DeepSeekV3Loader {
+    fn spec(config: &str) -> Result<FamilyLoaderSpec> {
         let cfg = crate::deepseek3::DeepSeekV3Config::from_json(config)?;
+        let mut isq_head = vec![LM_HEAD];
+        isq_head.extend(MLA_ATTENTION);
+        isq_head.push(STACKED_EXPERTS);
         if cfg.q_lora_rank.is_some() {
-            data.extend(isq_regexes(&[
-                r"layers\.(\d+)\.self_attn\.q_a_proj\.(weight|bias)$",
-                r"layers\.(\d+)\.self_attn\.q_b_proj\.(weight|bias)$",
-            ])?);
+            isq_head.extend(Q_LORA);
         } else {
-            data.push(Regex::new(
-                r"layers\.(\d+)\.self_attn\.q_proj\.(weight|bias)$",
-            )?);
+            isq_head.push(Q_PROJ);
         }
-        for layer_idx in 0..cfg.num_hidden_layers {
-            if let Some(n_routed_experts) = cfg.n_routed_experts.filter(|_| {
-                layer_idx >= cfg.first_k_dense_replace && layer_idx % cfg.moe_layer_freq == 0
-            }) {
-                for i in 0..n_routed_experts {
-                    data.extend(isq_regexes(&[
-                        format!(
-                            r"layers\.{layer_idx}\.mlp\.experts\.{i}\.gate_proj\.(weight|bias)$"
-                        ),
-                        format!(r"layers\.{layer_idx}\.mlp\.experts\.{i}\.up_proj\.(weight|bias)$"),
-                        format!(
-                            r"layers\.{layer_idx}\.mlp\.experts\.{i}\.down_proj\.(weight|bias)$"
-                        ),
-                    ])?);
-                }
-                if cfg.n_shared_experts.is_some() {
-                    data.extend(isq_regexes(&[
-                        format!(
-                            r"layers\.{layer_idx}\.mlp\.shared_experts\.gate_proj\.(weight|bias)$"
-                        ),
-                        format!(
-                            r"layers\.{layer_idx}\.mlp\.shared_experts\.up_proj\.(weight|bias)$"
-                        ),
-                        format!(
-                            r"layers\.{layer_idx}\.mlp\.shared_experts\.down_proj\.(weight|bias)$"
-                        ),
-                    ])?);
-                }
-            } else {
-                data.extend(isq_regexes(&[
-                    format!(r"layers\.{layer_idx}\.mlp\.gate_proj\.(weight|bias)$"),
-                    format!(r"layers.{layer_idx}.mlp\.up_proj\.(weight|bias)$"),
-                    format!(r"layers\.{layer_idx}\.mlp\.down_proj\.(weight|bias)$"),
-                ])?);
-            };
-        }
-        Ok(data)
-    }
-    fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
-        self.isq_layer_regexes(config)
-    }
-    fn isq_layer_regexes_moqe(&self, _config: &str) -> Result<Vec<Regex>> {
-        isq_regexes(&[
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
-        ])
-    }
-    fn immediate_isq_predicates_moqe(&self, config: &str) -> Result<Vec<Regex>> {
-        self.isq_layer_regexes_moqe(config)
-    }
-}
-
-impl DeviceMappedModelLoader for DeepSeekV3Loader {
-    fn non_mapped_size_in_bytes(
-        &self,
-        config: &str,
-        dtype: DType,
-        weight_pack_factor: usize,
-        quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
-        _matformer_config: Option<&MatformerSliceConfig>,
-    ) -> Result<usize> {
-        let cfg = crate::deepseek3::DeepSeekV3Config::from_json(config)?;
-        standard_non_mapped_size_in_bytes(
-            LanguageModelEnds {
-                hidden_size: cfg.hidden_size,
-                vocab_size: cfg.vocab_size,
-                tie_word_embeddings: cfg.tie_word_embeddings,
-            },
-            quantization,
-            dtype,
-            weight_pack_factor,
-        )
-    }
-    fn layer_sizes_in_bytes(
-        &self,
-        config: &str,
-        dtype: DType,
-        weight_pack_factor: usize,
-        _matformer_config: Option<&MatformerSliceConfig>,
-    ) -> Result<Vec<usize>> {
-        let cfg = crate::deepseek3::DeepSeekV3Config::from_json(config)?;
-        let mut per_layer_elems = Vec::new();
-
-        for layer_idx in 0..cfg.num_hidden_layers {
-            let input_layernorm = cfg.hidden_size;
-            let post_attention_layernorm = cfg.hidden_size;
-
-            let q_proj = match cfg.q_lora_rank {
-                Some(lora_rank) => {
-                    let a = cfg.hidden_size * lora_rank;
-                    let norm = lora_rank;
-                    let b = (cfg.num_attention_heads * cfg.q_head_dim()) * lora_rank;
-                    a + norm + b
-                }
-                None => (cfg.num_attention_heads * cfg.q_head_dim()) * cfg.hidden_size,
-            };
-            let kv_a_proj_with_mqa = cfg.hidden_size * (cfg.kv_lora_rank + cfg.qk_rope_head_dim)
-                / weight_pack_factor
-                + bias_if!(cfg.attention_bias, cfg.kv_lora_rank + cfg.qk_rope_head_dim);
-            let kv_a_layernorm = cfg.kv_lora_rank;
-            let kv_b_proj = cfg.kv_lora_rank
-                * cfg.num_attention_heads
-                * (cfg.q_head_dim() - cfg.qk_rope_head_dim + cfg.v_head_dim)
-                / weight_pack_factor;
-            let o_proj = cfg.num_attention_heads * cfg.v_head_dim * cfg.hidden_size
-                / weight_pack_factor
-                + bias_if!(cfg.attention_bias, cfg.hidden_size);
-
-            let moe_block = {
-                let mut sum = 0;
-                if let Some(n_routed_experts) = cfg.n_routed_experts.filter(|_| {
-                    layer_idx >= cfg.first_k_dense_replace && layer_idx % cfg.moe_layer_freq == 0
-                }) {
-                    let h_size = cfg.hidden_size;
-                    let gate_proj =
-                        h_size * cfg.moe_intermediate_size / weight_pack_factor * n_routed_experts;
-                    let up_proj =
-                        h_size * cfg.moe_intermediate_size / weight_pack_factor * n_routed_experts;
-                    let down_proj =
-                        cfg.moe_intermediate_size * h_size / weight_pack_factor * n_routed_experts;
-                    let shared_experts = if let Some(n_shared_experts) = cfg.n_shared_experts {
-                        let gate_proj = h_size * (cfg.intermediate_size * n_shared_experts)
-                            / weight_pack_factor;
-                        let up_proj = h_size * (cfg.intermediate_size * n_shared_experts)
-                            / weight_pack_factor;
-                        let down_proj = (cfg.intermediate_size * n_shared_experts) * h_size
-                            / weight_pack_factor;
-                        gate_proj + up_proj + down_proj
-                    } else {
-                        0
-                    };
-                    let gate_weight = n_routed_experts * cfg.hidden_size;
-                    sum += gate_proj + up_proj + down_proj + shared_experts + gate_weight;
-                } else {
-                    let h_size = cfg.hidden_size;
-                    let i_size = cfg.intermediate_size;
-                    let gate_proj = h_size * i_size / weight_pack_factor;
-                    let up_proj = h_size * i_size / weight_pack_factor;
-                    let down_proj = i_size * h_size / weight_pack_factor;
-                    sum += gate_proj + up_proj + down_proj;
-                }
-                sum
-            };
-
-            per_layer_elems.push(
-                input_layernorm
-                    + post_attention_layernorm
-                    + q_proj
-                    + kv_a_layernorm
-                    + kv_a_proj_with_mqa
-                    + kv_b_proj
-                    + o_proj
-                    + moe_block,
-            );
-        }
-
-        Ok(per_layer_elems
-            .into_iter()
-            .map(|x| x * dtype.size_in_bytes())
-            .collect())
-    }
-    fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = crate::deepseek3::DeepSeekV3Config::from_json(config)?;
-
-        let cfg = ModelConfigMetadata {
-            max_seq_len: cfg.max_position_embeddings,
-            num_layers: cfg.num_hidden_layers,
+        Ok(FamilyLoaderSpec {
             hidden_size: cfg.hidden_size,
+            vocab_size: cfg.vocab_size,
+            intermediate_size: cfg.intermediate_size,
+            num_hidden_layers: cfg.num_hidden_layers,
+            num_attention_heads: cfg.num_attention_heads,
+            max_position_embeddings: cfg.max_position_embeddings,
+            tie_word_embeddings: cfg.tie_word_embeddings,
             num_kv_heads: cfg.num_attention_heads,
-            num_attn_heads: cfg.num_attention_heads,
-            sliding_window: None,
             k_head_dim: cfg.qk_rope_head_dim + cfg.qk_nope_head_dim,
             v_head_dim: cfg.v_head_dim,
-            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
-        };
-
-        Ok(Box::new(cfg))
+            attention: AttentionSizing::Mla {
+                q_lora_rank: cfg.q_lora_rank,
+                q_head_dim: cfg.q_head_dim(),
+                kv_lora_rank: cfg.kv_lora_rank,
+                qk_rope_head_dim: cfg.qk_rope_head_dim,
+                v_head_dim: cfg.v_head_dim,
+                attention_bias: cfg.attention_bias,
+                packed_q: false,
+            },
+            moe: cfg.n_routed_experts.map(|n_routed_experts| MoeSizing {
+                n_routed_experts,
+                moe_intermediate_size: cfg.moe_intermediate_size,
+                first_k_dense_replace: cfg.first_k_dense_replace,
+                moe_layer_freq: Some(cfg.moe_layer_freq),
+                shared_intermediate: cfg.n_shared_experts.map(|n| cfg.moe_intermediate_size * n),
+                correction_bias: false,
+            }),
+            isq_head,
+            loose_dense_up: true,
+        })
     }
 }
+
+family_loader!(DeepSeekV3Loader);

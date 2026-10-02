@@ -15,10 +15,14 @@ fn sdpa(softcap: Option<f32>) -> SdpaParams {
 }
 
 fn assert_close(lhs: &Tensor, rhs: &Tensor) -> CandleResult<()> {
-    let lhs = lhs.flatten_all()?.to_vec1::<f32>()?;
-    let rhs = rhs.flatten_all()?.to_vec1::<f32>()?;
+    assert_within(lhs, rhs, EPS)
+}
+
+fn assert_within(lhs: &Tensor, rhs: &Tensor, tol: f32) -> CandleResult<()> {
+    let lhs = lhs.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
+    let rhs = rhs.to_dtype(DType::F32)?.flatten_all()?.to_vec1::<f32>()?;
     for (lhs, rhs) in lhs.iter().zip(rhs.iter()) {
-        assert!((lhs - rhs).abs() < EPS);
+        assert!((lhs - rhs).abs() < tol, "{lhs} vs {rhs}");
     }
     Ok(())
 }
@@ -32,6 +36,7 @@ fn naive_attention(
 ) -> CandleResult<Tensor> {
     let (b, q_len, h, d) = q.dims4()?;
     let kv_len = k.dim(1)?;
+    let dv = v.dim(3)?;
     let q = q
         .clone()
         .permute((0, 2, 1, 3))?
@@ -43,7 +48,7 @@ fn naive_attention(
     let v = v
         .clone()
         .permute((0, 2, 1, 3))?
-        .reshape(&[b * h, kv_len, d])?;
+        .reshape(&[b * h, kv_len, dv])?;
 
     let mut logits = q.matmul(&k.transpose(1, 2)?)?;
     if let Some(softcap) = softcap {
@@ -54,7 +59,82 @@ fn naive_attention(
         logits = logits.broadcast_add(mask)?;
     }
     let weights = softmax(&logits, D::Minus1)?;
-    weights.matmul(&v)?.reshape(&[b, h, q_len, d])
+    weights.matmul(&v)?.reshape(&[b, h, q_len, dv])
+}
+
+// Distinct values, so a kernel that reads value rows at the query width gets them wrong.
+fn ramp(dims: (usize, usize, usize, usize), scale: f32) -> CandleResult<Tensor> {
+    let n = dims.0 * dims.1 * dims.2 * dims.3;
+    let values = (0..n).map(|i| ((i % 7) as f32 - 3.0) * scale).collect();
+    Tensor::from_vec(values, dims, &Device::Cpu)
+}
+
+// MLA checkpoints (DeepSeek-V2/V3) have value heads narrower than their query and key heads.
+const QK_DIM: usize = 6;
+const NARROW_V_DIM: usize = 4;
+const HALF_EPS: f32 = 3e-2;
+
+#[test]
+fn test_flash_attn_cpu_narrower_value_heads() -> CandleResult<()> {
+    let (b, h, kv_len) = (1, 2, 3);
+    for q_len in [1, 3] {
+        let q = ramp((b, q_len, h, QK_DIM), 0.1)?;
+        let k = ramp((b, kv_len, h, QK_DIM), 0.2)?;
+        let v = ramp((b, kv_len, h, NARROW_V_DIM), 0.3)?;
+        let out = run_flash_attn_cpu::<f32>(&q, &k, &v, None, &sdpa(None))?;
+        assert_eq!(out.shape().dims(), &[b, h, q_len, NARROW_V_DIM]);
+        assert_close(&out, &naive_attention(&q, &k, &v, None, None)?)?;
+    }
+    Ok(())
+}
+
+#[test]
+fn test_flash_attn_cpu_narrower_value_heads_masked_and_softcapped() -> CandleResult<()> {
+    let (b, h, kv_len) = (1, 2, 3);
+    for q_len in [1, 3] {
+        let q = ramp((b, q_len, h, QK_DIM), 0.1)?;
+        let k = ramp((b, kv_len, h, QK_DIM), 0.2)?;
+        let v = ramp((b, kv_len, h, NARROW_V_DIM), 0.3)?;
+        let causal = (0..q_len)
+            .flat_map(|i| {
+                (0..kv_len).map(move |j| {
+                    if j + q_len > i + kv_len {
+                        f32::MIN
+                    } else {
+                        0.0
+                    }
+                })
+            })
+            .collect();
+        let mask = Tensor::from_vec(causal, (1, q_len, kv_len), &Device::Cpu)?;
+        for (mask, softcap) in [
+            (Some(&mask), None),
+            (None, Some(0.5)),
+            (Some(&mask), Some(0.5)),
+        ] {
+            let out = run_flash_attn_cpu::<f32>(&q, &k, &v, mask, &sdpa(softcap))?;
+            assert_close(&out, &naive_attention(&q, &k, &v, mask, softcap)?)?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn test_flash_attn_cpu_narrower_value_heads_half_precision() -> CandleResult<()> {
+    let (b, h, kv_len) = (1, 2, 3);
+    for q_len in [1, 3] {
+        let q = ramp((b, q_len, h, QK_DIM), 0.1)?;
+        let k = ramp((b, kv_len, h, QK_DIM), 0.2)?;
+        let v = ramp((b, kv_len, h, NARROW_V_DIM), 0.3)?;
+        let expected = naive_attention(&q, &k, &v, None, None)?;
+        let [qb, kb, vb] = [&q, &k, &v].map(|t| t.to_dtype(DType::BF16));
+        let out = run_flash_attn_cpu::<half::bf16>(&qb?, &kb?, &vb?, None, &sdpa(None))?;
+        assert_within(&out, &expected, HALF_EPS)?;
+        let [qh, kh, vh] = [&q, &k, &v].map(|t| t.to_dtype(DType::F16));
+        let out = run_flash_attn_cpu::<half::f16>(&qh?, &kh?, &vh?, None, &sdpa(None))?;
+        assert_within(&out, &expected, HALF_EPS)?;
+    }
+    Ok(())
 }
 
 #[test]

@@ -122,8 +122,8 @@ pub(super) fn run<T>(ctx: &CpuAttnCtx<'_, T>) -> Result<Tensor>
 where
     T: WithDType + ElemOps + Send + Sync,
 {
-    let [b, q_len, h, d] = ctx.q.dims;
-    let dv = d;
+    let [b, q_len, h, _] = ctx.q.dims;
+    let dv = ctx.v.dims[3];
 
     assert_eq!(ctx.q.stride[3], 1, "q must have contiguous rows");
     assert_eq!(ctx.k.stride[3], 1, "k must have contiguous rows");
@@ -210,7 +210,7 @@ where
     let kv_len = ctx.k.dims[1];
     let rk2 = h / ctx.k.dims[2];
     let rv2 = h / ctx.v.dims[2];
-    let dv = d;
+    let dv = ctx.v.dims[3];
     let n2 = 2_usize.pow((h as f32).log2().ceil() as u32);
     let nq = q_end - q_start;
     let pivot_offset = kv_len.saturating_sub(q_len);
@@ -467,7 +467,7 @@ fn compute_full_qblock<T>(
     let kv_len = ctx.k.dims[1];
     let rk2 = h / ctx.k.dims[2];
     let rv2 = h / ctx.v.dims[2];
-    let dv = d;
+    let dv = ctx.v.dims[3];
     let n2 = 2_usize.pow((h as f32).log2().ceil() as u32);
     let nq = q_end - q_start;
     let pivot_offset = kv_len.saturating_sub(q_len);
@@ -588,7 +588,7 @@ where
     let kv_len = ctx.k.dims[1];
     let rk2 = h / ctx.k.dims[2];
     let rv2 = h / ctx.v.dims[2];
-    let dv = d;
+    let dv = ctx.v.dims[3];
     let n2 = 2_usize.pow((h as f32).log2().ceil() as u32);
 
     let rows_per_batch = h * q_len;

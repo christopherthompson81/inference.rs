@@ -9,6 +9,9 @@ use inference_nn::{
 
 pub mod deepseek2;
 pub mod deepseek3;
+pub mod deepseek_family;
+#[cfg(test)]
+mod deepseek_family_tests;
 pub mod glm4;
 pub mod glm4_moe;
 pub mod glm4_moe_lite;

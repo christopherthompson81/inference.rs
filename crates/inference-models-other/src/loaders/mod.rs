@@ -26,6 +26,7 @@ use crate::paddleocr_vl::{PaddleOcrVlModel, config::Config as PaddleOcrVlConfig}
 
 mod deepseek2;
 mod deepseek3;
+mod deepseek_family;
 mod glm4;
 mod glm4_moe;
 mod glm4_moe_lite;

@@ -32,7 +32,7 @@ where
     let meta = SingleQMeta {
         h,
         d,
-        dv: d,
+        dv: ctx.v.dims[3],
         kv_len,
         rk2: h / ctx.k.dims[2],
         rv2: h / ctx.v.dims[2],
