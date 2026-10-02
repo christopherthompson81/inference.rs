@@ -2003,3 +2003,31 @@ next, the Qwen3.8-27B GGUF's `nextn` layer.
 
 Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`.
 Result: exit 0, 2394 + 2716 + 1 tests passed, bindings included.
+
+## Run 65 - 2026-10-02 (time approximate)
+
+Question: does built-in MTP accept drafts on real weights, and does accepting them keep greedy output? The tiny
+random-weight checkpoints only exercised the reject path (Run 64: 27 drafts, 0 accepted).
+
+Survey first (GGUF MTP for the local Qwen3.8-27B IQ4_XS):
+- The GGUF ships the head: `blk.64.*` (a full-attention layer) plus `blk.64.nextn.{eh_proj,enorm,hnorm,
+  shared_head_norm}`, and `qwen35.nextn_predict_layers = 1`.
+- llama.cpp's converter maps `mtp.layers.N` to `blk.{n_layers+N}` and fc / pre_fc_norm_embedding /
+  pre_fc_norm_hidden / norm to eh_proj / enorm / hnorm / shared_head_norm.
+- Our GGUF path subtracts the nextn layers and never loads them. The GGUF pipeline can't attach a speculative
+  proposer, and MTP/DFlash are implemented only on the multimodal wrapper, not on `Qwen3_5TextModel`. That is a
+  separate, larger change.
+- Every published Qwen3.5 size ships `mtp.*` (15 tensors), so a cheaper check exists.
+
+Command: `cargo nextest run --profile cuda --features cuda --workspace -E 'package(inference) & test(/qwen3_5_mtp/)'`
+with `INFERENCE_TEST_QWEN3_5_MODEL=/mnt/data/models/Qwen3.5-0.8B` (BF16, paged, n_predict 2, two prose prompts,
+thinking off).
+
+Result:
+- Greedy ids are identical with and without MTP: 40/40 and 25/25 (both end at EOS).
+- Speculative stats: drafts 25, proposed 50, accepted 37 (0.74), accepted per position [22, 15].
+
+Full CI: exit 0 (2395 + 2717 + 1); the test skips on CPU and passes on CUDA in 18.7 s.
+Implication: the dense MTP accept path works on real weights. The test asserts exact greedy equality and an accept
+rate of at least 0.3. MoE acceptance would need the 70 GB Qwen3.6-35B-A3B safetensors; not done. Next: GGUF MTP plus
+moving speculative support to the text model.
