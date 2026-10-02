@@ -839,6 +839,40 @@ int next_power_of_2(int x) {
   return n;
 }
 
+// The value every element sorts before; std::numeric_limits has no half or bf16 specialization, so those are spelled out
+template <typename T> T sort_pad(bool asc) {
+  if constexpr (std::numeric_limits<T>::has_infinity) {
+    return asc ? std::numeric_limits<T>::infinity()
+               : -std::numeric_limits<T>::infinity();
+  } else {
+    return asc ? std::numeric_limits<T>::max()
+               : std::numeric_limits<T>::lowest();
+  }
+}
+
+template <> __half sort_pad<__half>(bool asc) {
+  __half_raw raw;
+  raw.x = asc ? 0x7c00 : 0xfc00;
+  return __half(raw);
+}
+
+template <> __nv_bfloat16 sort_pad<__nv_bfloat16>(bool asc) {
+  __nv_bfloat16_raw raw;
+  raw.x = asc ? 0x7f80 : 0xff80;
+  return __nv_bfloat16(raw);
+}
+
+// Pads on the device, so a captured sort references no host buffers that are gone by replay
+template <typename T>
+__global__ void bitonic_pad_kernel(const T *x_row, T *x_pad, uint32_t *dst_pad,
+                                   int ncols, int ncols_pad, T pad) {
+  int i = threadIdx.x + blockDim.x * blockIdx.x;
+  if (i < ncols_pad) {
+    x_pad[i] = i < ncols ? x_row[i] : pad;
+    dst_pad[i] = i;
+  }
+}
+
 #define ASORT_OP(T, RUST_NAME, ASC)                                            \
   extern "C" void RUST_NAME(void *x1, void *dst1, const int nrows,             \
                             const int ncols, bool inplace, int64_t stream) {   \
@@ -851,16 +885,7 @@ int next_power_of_2(int x) {
     cudaMallocAsync((void **)&x_row_padded, ncols_pad * sizeof(T), custream);  \
     cudaMallocAsync((void **)&dst_row_padded, ncols_pad * sizeof(uint32_t),    \
                     custream);                                                 \
-    uint32_t *indices_padded =                                                 \
-        (uint32_t *)malloc(ncols_pad * sizeof(uint32_t));                      \
-    for (int i = 0; i < ncols_pad; i++) {                                      \
-      indices_padded[i] = i;                                                   \
-    }                                                                          \
-    T *values_padded = (T *)malloc((ncols_pad - ncols) * sizeof(T));           \
-    for (int i = 0; i < ncols_pad - ncols; i++) {                              \
-      values_padded[i] =                                                       \
-          ASC ? std::numeric_limits<T>::max() : std::numeric_limits<T>::min(); \
-    }                                                                          \
+    const T pad = sort_pad<T>(ASC);                                            \
     int max_threads_per_block = 1024;                                          \
     int threads_per_block =                                                    \
         max_threads_per_block > ncols_pad ? ncols_pad : max_threads_per_block; \
@@ -869,15 +894,9 @@ int next_power_of_2(int x) {
     for (int row = 0; row < nrows; row++) {                                    \
       T *x_row = x + row * ncols;                                              \
       uint32_t *dst_row = dst + row * ncols;                                   \
-      cudaMemcpyAsync(x_row_padded, x_row, ncols * sizeof(T),                  \
-                      cudaMemcpyDeviceToDevice, custream);                     \
-      if (ncols_pad - ncols > 0)                                               \
-        cudaMemcpyAsync(x_row_padded + ncols, values_padded,                   \
-                        (ncols_pad - ncols) * sizeof(T),                       \
-                        cudaMemcpyHostToDevice, custream);                     \
-      cudaMemcpyAsync(dst_row_padded, indices_padded,                          \
-                      ncols_pad * sizeof(uint32_t), cudaMemcpyHostToDevice,    \
-                      custream);                                               \
+      bitonic_pad_kernel<T>                                                    \
+          <<<blocks_per_row, threads_per_block, 0, custream>>>(                \
+              x_row, x_row_padded, dst_row_padded, ncols, ncols_pad, pad);     \
       for (int k = 2; k <= ncols_pad; k <<= 1) {                               \
         for (int j = k >> 1; j > 0; j = j >> 1) {                              \
           bitonic_sort_kernel<T, ASC>                                          \
@@ -893,8 +912,6 @@ int next_power_of_2(int x) {
     }                                                                          \
     cudaFreeAsync(x_row_padded, custream);                                     \
     cudaFreeAsync(dst_row_padded, custream);                                   \
-    free(indices_padded);                                                      \
-    free(values_padded);                                                       \
   }
 
 ASORT_OP(__nv_bfloat16, asort_asc_bf16, true)

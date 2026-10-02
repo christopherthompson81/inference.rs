@@ -28,6 +28,7 @@ const MOE_EXPERTS: usize = 4;
 const MOE_HIDDEN: usize = 128;
 // moe_gemm takes expert widths in multiples of 64
 const MOE_INTERMEDIATE: usize = 64;
+const DENSE_INTERMEDIATE: usize = 128;
 // The MLX layout the constructors probe for; reporting it absent selects the HF tensor names.
 const MLX_PROBES: &[&str] = &[
     "vision_tower.patch_embed.proj.weight",
@@ -83,16 +84,67 @@ fn qwen3_5_moe_expert_shapes() -> std::collections::HashMap<String, Vec<usize>> 
 }
 
 pub fn tiny_qwen3_5_moe() -> anyhow::Result<tempfile::TempDir> {
-    let cfg: Qwen3_5Config = serde_json::from_str(&std::fs::read_to_string(format!(
+    record_qwen3_5(true, false)
+}
+
+/// The same checkpoint plus the built-in MTP head, whose experts are stacked as in the released MoE checkpoints.
+pub fn tiny_qwen3_5_moe_mtp() -> anyhow::Result<tempfile::TempDir> {
+    record_qwen3_5(true, true)
+}
+
+/// The MoE checkpoint with a dense MLP in place of the experts, plus the built-in MTP head.
+pub fn tiny_qwen3_5_mtp() -> anyhow::Result<tempfile::TempDir> {
+    record_qwen3_5(false, true)
+}
+
+fn record_qwen3_5(moe: bool, mtp: bool) -> anyhow::Result<tempfile::TempDir> {
+    let mut config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!(
         "{QWEN3_5_MOE}/config.json"
     ))?)?;
-    let files = files(QWEN3_5_MOE)?;
+    if !moe {
+        config["architectures"] = serde_json::json!(["Qwen3_5ForConditionalGeneration"]);
+        config["model_type"] = "qwen3_5".into();
+        let text = config["text_config"].as_object_mut().unwrap();
+        for key in [
+            "num_experts",
+            "num_experts_per_tok",
+            "moe_intermediate_size",
+            "shared_expert_intermediate_size",
+        ] {
+            text.remove(key);
+        }
+        text.insert("intermediate_size".into(), DENSE_INTERMEDIATE.into());
+    }
+    let mut cfg: Qwen3_5Config = serde_json::from_value(config.clone())?;
+    cfg.mtp = mtp;
+    let mut shapes = if moe {
+        qwen3_5_moe_expert_shapes()
+    } else {
+        Default::default()
+    };
+    if moe && mtp {
+        let p = "mtp.layers.0.mlp.experts";
+        shapes.insert(
+            format!("{p}.gate_up_proj"),
+            vec![MOE_EXPERTS, 2 * MOE_INTERMEDIATE, MOE_HIDDEN],
+        );
+        shapes.insert(
+            format!("{p}.down_proj"),
+            vec![MOE_EXPERTS, MOE_HIDDEN, MOE_INTERMEDIATE],
+        );
+    }
+    let scratch = tempfile::tempdir()?;
+    let config_path = scratch.path().join("config.json");
+    std::fs::write(&config_path, config.to_string())?;
+    let mut files = files(QWEN3_5_MOE)?;
+    files.retain(|path| path.file_name() != Some("config.json".as_ref()));
+    files.push(config_path);
     let files = files.iter().map(|path| path.as_path()).collect::<Vec<_>>();
     recording::record_checkpoint_with_shapes(
         &files,
-        MOE_LAYERS,
+        MOE_LAYERS + usize::from(mtp),
         MLX_PROBES,
-        qwen3_5_moe_expert_shapes(),
+        shapes,
         |vb, metadata| {
             Qwen3_5Model::new(&cfg, vb, true, metadata, AttentionImplementation::Eager).map(|_| ())
         },

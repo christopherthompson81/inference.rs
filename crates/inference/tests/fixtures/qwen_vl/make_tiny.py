@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Writes qwen2_vl/ and qwen3_vl/: tiny Qwen-VL checkpoint skeletons (no weights) for engine-behavior tests.
+"""Writes qwen2_vl/, qwen3_vl/ and qwen3_5_moe/: tiny Qwen-VL checkpoint skeletons (no weights) for engine-behavior tests.
 
 The tokenizer is a byte-fallback BPE with only the special tokens the processors and chat template use; the configs
 shrink every dimension and the preprocessor configs keep images to a handful of patches. The tests generate random
@@ -132,7 +132,7 @@ qwen3_5_text = {
                         "mrope_section": [2, 3, 3]},
     "linear_key_head_dim": 16, "linear_value_head_dim": 16, "linear_num_key_heads": 2, "linear_num_value_heads": 2,
     "moe_intermediate_size": 64, "shared_expert_intermediate_size": 64, "num_experts": QWEN3_5_MOE_EXPERTS,
-    "num_experts_per_tok": 2,
+    "num_experts_per_tok": 2, "mtp_num_hidden_layers": 1,
 }
 models["qwen3_5_moe"] = {
     "config": {

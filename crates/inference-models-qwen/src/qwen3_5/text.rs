@@ -434,7 +434,7 @@ pub(super) struct DecoderLayer {
     pub(super) layer_impl: LayerImpl,
     pub(super) input_layernorm: GemmaRmsNorm,
     pub(super) post_attention_layernorm: GemmaRmsNorm,
-    mlp: FeedForward,
+    pub(super) mlp: FeedForward,
 }
 
 struct DecoderLayerOutput {
@@ -574,6 +574,7 @@ impl DecoderLayer {
         cfg: &TextConfig,
         rotary_emb: Arc<Qwen3VLRotaryEmbedding>,
         paged_attn: Option<PagedAttention>,
+        mlp: FeedForward,
         comm: &Arc<inference_quant::Comm>,
     ) -> Result<Self> {
         let attn = FullAttention::load_with(
@@ -594,7 +595,6 @@ impl DecoderLayer {
             cfg.rms_norm_eps,
             vb_plain.pp("post_attention_layernorm"),
         )?;
-        let mlp = FeedForward::Dense(FeedForward::dense_mlp(cfg, vb_quant.pp("mlp"), comm)?);
         Ok(Self {
             layer_impl: LayerImpl::FullAttention(attn),
             input_layernorm,
@@ -1197,9 +1197,6 @@ impl Qwen3_5TextModel {
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
         cfg.validate()?;
-        if mtp && cfg.is_moe() {
-            candle_core::bail!("the built-in MTP head is not supported for Qwen3.5 MoE yet");
-        }
         let yarn_rope_config = cfg.yarn_rope_config()?;
         if let Some(yarn) = &yarn_rope_config {
             tracing::info!(
@@ -2239,12 +2236,6 @@ impl Qwen3_5TextModel {
             .lock()
             .expect("spec capture poisoned")
             .clone()
-    }
-
-    pub(super) fn is_moe(&self) -> bool {
-        self.layers
-            .iter()
-            .any(|layer| matches!(layer.mlp, FeedForward::Sparse(_)))
     }
 
     pub(super) fn lm_head(&self) -> &Arc<dyn QuantMethod> {

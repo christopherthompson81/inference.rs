@@ -105,6 +105,12 @@ impl IsqModelLoader for Qwen3_5MoeLoader {
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.shared_expert\.gate_proj\.(weight|bias)$",
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.shared_expert\.up_proj\.(weight|bias)$",
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.shared_expert\.down_proj\.(weight|bias)$",
+            // Built-in MTP head: quantize its projections with the rest of the model
+            r"^mtp\.fc\.weight$",
+            r"^mtp\.layers\.(\d+)\.self_attn\.(q|k|v|o)_proj\.(weight|bias)$",
+            r"^mtp\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate|up|down)_proj\.(weight|bias)$",
+            r"^mtp\.layers\.(\d+)\.mlp\.experts\.(gate_up_proj|gate_proj|up_proj|down_proj)\.weight$",
+            r"^mtp\.layers\.(\d+)\.mlp\.shared_expert\.(gate|up|down)_proj\.(weight|bias)$",
         ])
     }
     fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
@@ -119,6 +125,8 @@ impl IsqModelLoader for Qwen3_5MoeLoader {
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.experts\.gate_up_proj\.weight$",
             r"^(language_model\.model|model\.language_model)\.layers\.(\d+)\.mlp\.experts\.down_proj\.weight$",
+            r"^mtp\.layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate|up|down)_proj\.(weight|bias)$",
+            r"^mtp\.layers\.(\d+)\.mlp\.experts\.(gate_up_proj|gate_proj|up_proj|down_proj)\.weight$",
         ])
     }
     fn immediate_isq_predicates_moqe(&self, config: &str) -> Result<Vec<Regex>> {
@@ -380,11 +388,12 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg = parse_config(config)?;
+        let mtp = cfg.mtp;
         let cfg = &cfg.text_config;
 
         let base = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,
-            num_layers: cfg.num_hidden_layers,
+            num_layers: cfg.num_hidden_layers + cfg.mtp_layers(mtp),
             hidden_size: cfg.hidden_size,
             num_kv_heads: cfg.num_key_value_heads,
             num_attn_heads: cfg.num_attention_heads,
@@ -394,9 +403,8 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
             kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
-        // no MTP head: the model rejects one for MoE checkpoints
         Ok(Box::new(
-            HybridPagedKvCacheConfig::new(base, cfg.paged_kv_layers(false))
+            HybridPagedKvCacheConfig::new(base, cfg.paged_kv_layers(mtp))
                 .with_uniform_prefix_prefill_attention_features(Default::default()),
         ))
     }

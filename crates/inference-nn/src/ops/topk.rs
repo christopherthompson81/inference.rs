@@ -368,3 +368,39 @@ pub struct TopKLogitsPackedOutput {
     pub k: usize,
     pub(super) _workspace: Vec<Tensor>,
 }
+
+#[cfg(all(test, feature = "cuda"))]
+mod tests {
+    use candle_core::{DType, Device, Result, Tensor};
+
+    use super::ArgSortOp;
+
+    // Three columns pad to four, so the padding has to sort past every value in either direction and dtype.
+    #[test]
+    fn cuda_sort_pads_a_row_with_negatives() -> Result<()> {
+        skip_without_cuda!();
+        let device = Device::new_cuda(0)?;
+        let row = Tensor::new(&[[-3f32, -1., -2.]], &device)?;
+        let (desc, desc_ids) = row.sort(false)?;
+        assert_eq!(desc.to_vec2::<f32>()?, [[-1., -2., -3.]]);
+        assert_eq!(desc_ids.to_vec2::<u32>()?, [[1, 2, 0]]);
+        let (asc, asc_ids) = row.sort(true)?;
+        assert_eq!(asc.to_vec2::<f32>()?, [[-3., -2., -1.]]);
+        assert_eq!(asc_ids.to_vec2::<u32>()?, [[0, 2, 1]]);
+        for dtype in [DType::BF16, DType::F16] {
+            let row = Tensor::new(&[[-3f32, 1., -2.]], &device)?.to_dtype(dtype)?;
+            assert_eq!(
+                row.arg_sort(false)?.to_vec2::<u32>()?,
+                [[1, 2, 0]],
+                "{dtype:?}"
+            );
+            let row = Tensor::new(&[[3f32, -1., 2.]], &device)?.to_dtype(dtype)?;
+            assert_eq!(
+                row.arg_sort(true)?.to_vec2::<u32>()?,
+                [[1, 2, 0]],
+                "{dtype:?}"
+            );
+        }
+        Ok(())
+    }
+}

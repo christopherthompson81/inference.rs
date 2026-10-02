@@ -1894,3 +1894,55 @@ test(/qwen_vl_tiny|qwen3_5_text_tiny|paddleocr_vl/)'`.
 Result: 14 passed, including the MoE test with 64-wide experts.
 
 Implication: stage 2 is complete. Stage 3 is built-in MTP for MoE, whose MTP layer is an MoE `DecoderLayer`.
+
+## Run 62 - 2026-10-02 (time approximate)
+
+Question: does Qwen3.5-MoE built-in MTP work (stage 3), and does drafting keep greedy output on the CUDA paged path?
+
+Change:
+- The MTP layer now loads its feed-forward through `FeedForward::load`, which builds the sparse block for MoE.
+- Both MoE refusals are removed.
+- The MoE loader quantizes `mtp.*` (fc, attention, experts in both layouts, shared expert) and counts the MTP KV layer.
+- Real checkpoint layout (published Qwen3.6-35B-A3B weight index): the MTP experts are stacked
+  (`mtp.layers.0.mlp.experts.gate_up_proj` / `down_proj`, no `.weight`), like the main stack.
+
+New tests:
+- `qwen_vl_tiny::{qwen3_5,qwen3_5_moe}_builtin_mtp_keeps_greedy_output` (GPU only; MTP needs paged KV), run on tiny
+  dense and MoE checkpoints with the MTP head recorded.
+- A tiny sort padding test (CUDA).
+- An ISQ regex test for `mtp.*`.
+
+Findings, in order:
+1. MoE MTP engine build aborted with "Rust cannot catch foreign exceptions".
+   - gdb `catch throw`: `thrust::inclusive_scan` in `moe_gemm_wmma` during decode-graph precapture. The verify graph
+     has several query tokens, so the MoE runs its prefill kernel.
+   - compute-sanitizer: `cudaStreamSynchronize` during capture, from thrust's `par` policy.
+   - Fix: the expert offsets are a lower-bound kernel over the sorted ids (no sync, temporary buffer or thrust).
+2. Capture then succeeded, but replay hit `CUDA_ERROR_ILLEGAL_ADDRESS`.
+   - memcheck: `bmul_bf16` wrote out of bounds on `cuGraphLaunch`.
+   - Cause: `ArgSortOp::sort` (prefill MoE path) padded rows with H2D memcpys from malloc'd host buffers that are freed
+     right after capture, so every replay reads freed host memory.
+   - Fix: a device pad kernel. Restoring the old `sort.cu` makes the MoE MTP test fail again.
+   - Latent: descending sorts padded with `numeric_limits<T>::min()` (smallest positive for floats; 0 for half/bf16,
+     which have no `numeric_limits` specialization). The new test returned 1.17e-38 for a desc f32 row of negatives
+     on the old kernel. Padding is now the typed infinity (half/bf16 spelled out), else max/lowest. Only ascending
+     u32 MoE sorts use it today.
+3. With graphs off, MoE MTP diverged from plain greedy at step 13 of 16. Probe with top-2 logprobs:
+   - the plain run had an exact BF16 tie there (ids 18 and 74 at -1.4117); the MTP run picked 74;
+   - the agreeing steps differ by up to 0.035 in logprob (wmma/chunked-GDN verify vs gemv/recurrent decode);
+   - the dense run ties at step 1 as well.
+   So exact text equality is the wrong check. The test now requires:
+   - agreement up to the first id mismatch, at least 4 steps;
+   - logprobs within 0.25 over the agreeing steps;
+   - the mismatch only where the plain top two are within 0.1, or equal lengths if the runs never part.
+   - Both pass with CUDA graphs on and off.
+4. Review follow-ups: the length hole above, an ISQ regex test, the half/bf16 padding, and the regenerated
+   supported-models doc row (it comes from `model_metadata.rs`).
+
+Not covered:
+- The test can't prove drafts were accepted (no speculative stats on the API).
+- Neither Qwen3.5 loader sizes the MTP layer for device mapping; for MoE that is a whole expert layer.
+- No real MoE checkpoint run.
+
+Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`.
+Result: exit 0, 2390 + 2712 + 1 tests passed.

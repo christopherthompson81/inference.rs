@@ -956,9 +956,6 @@ impl SpeculativeTargetMixin for Qwen3_5Model {
             return self.attach_dflash(config, runtime);
         }
         if self.text.mtp.is_none() {
-            if self.text.is_moe() {
-                candle_core::bail!("the built-in MTP head is not supported for Qwen3.5 MoE yet");
-            }
             candle_core::bail!(
                 "The built-in MTP head was not loaded; pass `--mtp` when loading the model."
             );
