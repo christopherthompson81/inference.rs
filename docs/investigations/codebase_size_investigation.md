@@ -1859,3 +1859,38 @@ HF-exact. Differences between the copies and how they went (from the merge):
 - MoE gains merged QKV, grouped gating, the quantized fused input paths, fused add+norm and the fused output gate, and
   the speculative-target implementation (built-in MTP excepted); DFlash is allowed.
 Lines: 277 added, 1835 removed. Not run: CUDA and Metal for MoE (the pins are CPU), a real MoE checkpoint, ISQ/UQFF.
+
+## Run 61 - 2026-10-02 (time approximate)
+
+Question: do Run 60's review findings hold up, and does Qwen3.5-MoE run on the GPU paged path?
+
+Review corrections:
+- the LoRA namespace guard Run 60 credited to the MoE copy was based on a false premise. `validate_consumption`
+  already fails loudly when adapter tensors go unused, and the guard rejected a dense setup that used to load. Removed
+  it, along with its test.
+- the MoE MTP refusal now sits inside the "no MTP head loaded" branch, so a MoE model without `--mtp` gets the plain
+  "not loaded" error.
+
+New engine test: `qwen_vl_tiny::qwen3_5_moe_text_and_image`, run on a tiny synthesized Qwen3.5-MoE checkpoint
+(`make_tiny.py` `qwen3_5_moe`, 4 layers, 4 experts, top-2). It decodes text and image prompts. On CPU it pins F32
+traces; with CUDA it compares a GPU BF16 build with a CPU BF16 build. The recording support gained
+`record_checkpoint_with_shapes`, because MoE expert layout detection reads the declared tensor shapes.
+
+GPU findings, from a temporary tracing subscriber:
+- `causal_conv1d_cuda` only takes F16/BF16, so the GPU side runs BF16.
+- with 32-wide experts, `moe_gemm` threw a C++ exception that aborted the process. Its K tile is 64. The Rust wrapper
+  now bails with an error when `size_k % 64 != 0` (`MOE_GEMM_K_TILE`). Before the fix, decode-graph precapture died;
+  after it, precapture failed gracefully and graphs were captured lazily.
+- the fixture experts were widened to 64, so that `moe_gemm` graph capture actually runs. This moved the F32 pins, as
+  expected for new weights, and they were re-pinned.
+
+BF16 calibration on the 32-wide fixture:
+- GPU BF16 vs CPU BF16: the ids were equal at every step, with a largest logprob gap of 0.15 (text) and 0.17 (image).
+- CPU BF16 vs CPU F32: the ids differ, with logprob gaps above 1.2.
+- the tolerance is therefore 0.25 (`BF16_LOGPROB_TOLERANCE`).
+
+Command: `cargo nextest run --profile cuda --features cuda --workspace -E 'package(inference) &
+test(/qwen_vl_tiny|qwen3_5_text_tiny|paddleocr_vl/)'`.
+Result: 14 passed, including the MoE test with 64-wide experts.
+
+Implication: stage 2 is complete. Stage 3 is built-in MTP for MoE, whose MTP layer is an MoE `DecoderLayer`.

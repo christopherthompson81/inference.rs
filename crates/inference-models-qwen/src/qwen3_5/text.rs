@@ -755,18 +755,6 @@ impl DecoderLayer {
 
 // ====================== Text Model ======================
 
-// Dynamic LoRA sites are keyed by the canonical HF names, so an alternate text namespace would never match
-fn validate_text_checkpoint_namespace(vb: &ShardedVarBuilder) -> Result<()> {
-    if layers::contains_tensor_or_uqff(vb, "language_model.model.embed_tokens.weight")
-        && vb.lora_registry().is_some()
-    {
-        candle_core::bail!(
-            "dynamic LoRA for Qwen3.5/3.6 requires canonical `model.language_model.*` checkpoint tensor names; `language_model.model.*` is not supported"
-        );
-    }
-    Ok(())
-}
-
 #[derive(Clone, Copy)]
 enum TextWeightPrefix {
     LanguageModelModel,
@@ -1212,7 +1200,6 @@ impl Qwen3_5TextModel {
         if mtp && cfg.is_moe() {
             candle_core::bail!("the built-in MTP head is not supported for Qwen3.5 MoE yet");
         }
-        validate_text_checkpoint_namespace(&vb)?;
         let yarn_rope_config = cfg.yarn_rope_config()?;
         if let Some(yarn) = &yarn_rope_config {
             tracing::info!(
@@ -2873,29 +2860,6 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     use super::SUPPORTS_CUDA_DECODE_GRAPHS;
-
-    #[test]
-    fn dynamic_lora_rejects_alternate_text_checkpoint_namespace() -> candle_core::Result<()> {
-        let vb = inference_quant::ShardedSafeTensors::wrap_with_dummy_regexes(
-            std::collections::HashMap::from([(
-                "language_model.model.embed_tokens.weight".to_string(),
-                Tensor::zeros((1, 1), DType::F32, &Device::Cpu)?,
-            )]),
-            DType::F32,
-            Device::Cpu,
-            None,
-        )
-        .with_lora_registry(std::sync::Arc::new(
-            inference_quant::LoraLayerRegistry::new(),
-        ));
-        let error = super::validate_text_checkpoint_namespace(&vb).unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("requires canonical `model.language_model.*`")
-        );
-        Ok(())
-    }
 
     #[test]
     fn gdn_replay_batches_group_by_prefix_and_preserve_row_order() {

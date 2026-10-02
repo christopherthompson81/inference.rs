@@ -178,8 +178,7 @@ fn qwen3_5_moe_prefill_bf16() -> Result<()> {
         logits,
         digest,
         0xdcb1_500e_458e_6eb2,
-        // the dense model's fused output gate rounds sigmoid(gate) * y to BF16 once; the old MoE copy rounded twice
-        // (master: probes [-1.1015625, -0.6640625, 4.3125, 6.625], sum 32.989548, l2 52.179066)
+        // the fused output gate rounds sigmoid(gate) * y to BF16 once
         Snapshot {
             probes: [-1.09375, -0.671875, 4.3125, 6.625],
             sum: 32.894012,

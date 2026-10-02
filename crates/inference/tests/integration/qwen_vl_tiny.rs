@@ -10,7 +10,7 @@ use inference::{
 
 #[path = "../support/qwen_vl_tiny.rs"]
 mod support;
-use support::{tiny_qwen2_vl, tiny_qwen3_vl};
+use support::{tiny_qwen2_vl, tiny_qwen3_5_moe, tiny_qwen3_vl};
 
 const PROMPT: &str = "describe";
 // Long enough that a shared prefix runs past the media into whole paged blocks; paged hits never end inside media.
@@ -25,6 +25,9 @@ const ON_GPU: bool = cfg!(any(feature = "cuda", feature = "metal"));
 const PREFIX_CACHE_SEQS: usize = 16;
 // Cached or chunked KV comes from a different prefill than a full recompute, so logprobs match only to rounding.
 const LOGPROB_TOLERANCE: f32 = 1e-3;
+// GPU and CPU BF16 runs round differently at each layer; on the tiny Qwen3.5-MoE they agree on every id within
+// 0.17, where BF16 against F32 on CPU already moves ids and logprobs by over 1.
+const BF16_LOGPROB_TOLERANCE: f32 = 0.25;
 // A scheduler spin never completes either request, so the mixed-batch check fails on this instead of hanging.
 const MIXED_BATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
@@ -271,4 +274,70 @@ async fn qwen2_vl_text_in_the_batch_leaves_media_unchanged() -> anyhow::Result<(
 #[tokio::test]
 async fn qwen3_vl_text_in_the_batch_leaves_media_unchanged() -> anyhow::Result<()> {
     text_in_the_batch_leaves_media_unchanged(tiny_qwen3_vl()?.path()).await
+}
+
+// Qwen3.5-MoE runs the Qwen3.5 text model with sparse feed-forwards. On CUDA its GDN layers need BF16 (the causal
+// conv kernel takes F16/BF16), so a GPU build checks its paged, deferred-state decode against the same checkpoint on CPU.
+async fn qwen3_5_moe_traces(model: &Model) -> anyhow::Result<[Vec<(u32, f32)>; 2]> {
+    let text = RequestBuilder::new().add_message(TextMessageRole::User, PROMPT);
+    // random weights favour one continuation for any prompt, so the logprobs carry what the prompt changes
+    let (text, _) = trace(model, text).await?;
+    let (image, _) = trace(model, images(&IMAGE_SIDES[..1])).await?;
+    Ok([text, image])
+}
+
+#[tokio::test]
+async fn qwen3_5_moe_text_and_image() -> anyhow::Result<()> {
+    let checkpoint = tiny_qwen3_5_moe()?;
+    if ON_GPU {
+        let gpu = builder(checkpoint.path())
+            .with_dtype(ModelDType::BF16)
+            .build()
+            .await?;
+        let cpu = MultimodalModelBuilder::new(checkpoint.path().to_string_lossy())
+            .with_dtype(ModelDType::BF16)
+            .with_force_cpu()
+            .build()
+            .await?;
+        let (gpu, cpu) = (
+            qwen3_5_moe_traces(&gpu).await?,
+            qwen3_5_moe_traces(&cpu).await?,
+        );
+        for (gpu, cpu) in gpu.iter().zip(&cpu) {
+            let close = gpu.len() == cpu.len()
+                && gpu
+                    .iter()
+                    .zip(cpu)
+                    .all(|(g, c)| g.0 == c.0 && (g.1 - c.1).abs() < BF16_LOGPROB_TOLERANCE);
+            anyhow::ensure!(close, "GPU decode {gpu:?} differs from CPU {cpu:?}");
+        }
+        return Ok(());
+    }
+    let model = build(checkpoint.path()).await?;
+    let [text, image] = qwen3_5_moe_traces(&model).await?;
+    let expected_text = [
+        (260, -0.91792876),
+        (174, -0.0019233831),
+        (4, -0.18916462),
+        (49, -0.6902862),
+        (79, -0.08116475),
+        (244, -0.87973154),
+    ];
+    let expected_image = [
+        (260, -0.91860574),
+        (174, -0.0017912925),
+        (4, -0.16398197),
+        (49, -0.80053025),
+        (79, -0.063517146),
+        (244, -0.8995498),
+    ];
+    anyhow::ensure!(
+        same_decode(&text, &expected_text),
+        "text decode moved: {text:?}"
+    );
+    anyhow::ensure!(
+        same_decode(&image, &expected_image),
+        "image decode moved: {image:?}"
+    );
+    Ok(())
 }
