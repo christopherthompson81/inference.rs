@@ -202,41 +202,12 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = PaddleOcrVlConfig::from_json(config)?;
-        let tcfg = cfg.text_config();
-        let per_layer_elems = {
-            let input_layernorm = tcfg.hidden_size;
-            let post_attention_layernorm = tcfg.hidden_size;
-
-            let size_in = tcfg.hidden_size;
-            let size_q = tcfg.head_dim * tcfg.num_attention_heads;
-            let size_kv = tcfg.head_dim * tcfg.num_key_value_heads;
-            // ERNIE projections are bias-free.
-            let q_proj = size_in * size_q / weight_pack_factor;
-            let k_proj = size_in * size_kv / weight_pack_factor;
-            let v_proj = size_in * size_kv / weight_pack_factor;
-            let o_proj = size_q * size_in / weight_pack_factor;
-
-            let h_size = tcfg.hidden_size;
-            let i_size = tcfg.intermediate_size;
-            let gate_proj = h_size * i_size / weight_pack_factor;
-            let up_proj = h_size * i_size / weight_pack_factor;
-            let down_proj = i_size * h_size / weight_pack_factor;
-
-            input_layernorm
-                + post_attention_layernorm
-                + q_proj
-                + k_proj
-                + v_proj
-                + o_proj
-                + gate_proj
-                + up_proj
-                + down_proj
-        };
-        Ok(vec![
-            per_layer_elems * dtype.size_in_bytes();
-            tcfg.num_hidden_layers
-        ])
+        let tcfg = PaddleOcrVlConfig::from_json(config)?.text_config();
+        Ok(text_decoder_shape(&tcfg).layer_sizes_in_bytes(
+            tcfg.num_hidden_layers,
+            dtype,
+            weight_pack_factor,
+        ))
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg = PaddleOcrVlConfig::from_json(config)?;
@@ -245,23 +216,30 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg = PaddleOcrVlConfig::from_json(config)?;
         let tcfg = cfg.text_config();
-
-        let meta = ModelConfigMetadata {
-            max_seq_len: cfg.max_position_embeddings,
-            num_layers: tcfg.num_hidden_layers,
-            hidden_size: tcfg.hidden_size,
-            num_kv_heads: tcfg.num_key_value_heads,
-            num_attn_heads: tcfg.num_attention_heads,
-            sliding_window: None,
-            k_head_dim: tcfg.head_dim,
-            v_head_dim: tcfg.head_dim,
-            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
-        };
-
-        Ok(Box::new(meta))
+        Ok(Box::new(text_decoder_shape(&tcfg).model_config(
+            tcfg.num_hidden_layers,
+            cfg.max_position_embeddings,
+            None,
+        )))
     }
 
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
         Some(vec![NonMappedSubModel::Vision])
+    }
+}
+
+fn text_decoder_shape(tcfg: &crate::paddleocr_vl::config::TextConfig) -> DecoderLayerShape {
+    DecoderLayerShape {
+        hidden_size: tcfg.hidden_size,
+        num_attention_heads: tcfg.num_attention_heads,
+        num_key_value_heads: tcfg.num_key_value_heads,
+        head_dim: tcfg.head_dim,
+        qkv_bias: false,
+        o_bias: false,
+        qk_norm: false,
+        norms: 2,
+        mlp: MlpShape::Gated {
+            intermediate_size: tcfg.intermediate_size,
+        },
     }
 }

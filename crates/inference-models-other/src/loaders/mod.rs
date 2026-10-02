@@ -39,6 +39,9 @@ mod lfm2vl;
 mod paddleocr_vl;
 mod starcoder2;
 
+#[cfg(test)]
+mod sizing_tests;
+
 pub use deepseek2::*;
 pub use deepseek3::*;
 pub use glm4::*;

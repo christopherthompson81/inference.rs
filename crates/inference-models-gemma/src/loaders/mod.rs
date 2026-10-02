@@ -37,6 +37,8 @@ mod gemma2;
 mod gemma3;
 mod gemma3n;
 mod gemma4;
+#[cfg(test)]
+mod sizing_tests;
 
 pub use diffusion_gemma::*;
 pub use embedding_gemma::*;
