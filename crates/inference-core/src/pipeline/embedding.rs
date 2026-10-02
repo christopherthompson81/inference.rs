@@ -309,7 +309,6 @@ impl Loader for EmbeddingLoader {
             mapper,
             super::loading::ModelLoadInputs {
                 config: &config,
-                session_config: &config,
                 paths,
                 silent,
                 organization: IsqOrganization::Default,
