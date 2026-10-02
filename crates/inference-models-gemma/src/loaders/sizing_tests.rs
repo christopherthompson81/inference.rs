@@ -1,7 +1,8 @@
-//! Pins each loader's device-map layer sizes and KV planning metadata, so sharing the sizing code moves nothing
-//! silently; a value that changes is a drift against the model code.
+//! Pins each loader's device-map layer sizes and KV planning metadata; a value that moves is a drift to verify.
 
 use serde_json::{Value, json};
+
+use inference_nn::testing::{LoaderSizing, loader_sizing};
 
 use super::*;
 
@@ -14,28 +15,8 @@ const INTERMEDIATE: usize = 96;
 const LAYERS: usize = 3;
 const PACK: usize = 2;
 
-/// Per-layer bytes at F32 unpacked and with `PACK`, then (kv heads, k head dim, v head dim).
-fn sizing(
-    loader: &dyn DeviceMappedModelLoader,
-    config: &Value,
-) -> ((usize, usize), (usize, usize, usize)) {
-    let config = config.to_string();
-    let sizes = |pack| {
-        let sizes = loader
-            .layer_sizes_in_bytes(&config, DType::F32, pack, None)
-            .unwrap();
-        assert_eq!(sizes.len(), LAYERS);
-        assert!(
-            sizes.iter().all(|&size| size == sizes[0]),
-            "layers differ: {sizes:?}"
-        );
-        sizes[0]
-    };
-    let meta = loader.model_config(&config).unwrap();
-    (
-        (sizes(1), sizes(PACK)),
-        (meta.num_kv_heads(), meta.k_head_dim(), meta.v_head_dim()),
-    )
+fn sizing(loader: &dyn DeviceMappedModelLoader, config: &Value) -> LoaderSizing {
+    loader_sizing(loader, config, PACK)
 }
 
 fn gemma_text() -> Value {
@@ -72,7 +53,7 @@ fn gemma_sizing() {
     config["attention_bias"] = json!(true);
     assert_eq!(
         sizing(&GemmaLoader, &config),
-        ((173824, 87808), (2, 32, 32))
+        ((173824, 87808), (2, 32, 32), (256, 3, 64, 4))
     );
 }
 
@@ -81,7 +62,7 @@ fn gemma2_sizing() {
     assert_eq!(
         sizing(&Gemma2Loader, &gemma2_text()),
         // pre/post feedforward norms counted and KV sized with the config head_dim; master: 172544 and 16
-        ((173056, 87040), (2, 32, 32))
+        ((173056, 87040), (2, 32, 32), (256, 3, 64, 4))
     );
 }
 
@@ -90,7 +71,7 @@ fn embedding_gemma_sizing() {
     assert_eq!(
         sizing(&EmbeddingGemmaLoader, &gemma2_text()),
         // feedforward and q/k norms counted, KV sized with the config head_dim; master: 172544 and 16
-        ((173312, 87296), (2, 32, 32))
+        ((173312, 87296), (2, 32, 32), (256, 3, 64, 4))
     );
 }
 
@@ -99,6 +80,6 @@ fn gemma3_sizing() {
     assert_eq!(
         sizing(&Gemma3Loader, &gemma2_text()),
         // pre/post feedforward and q/k norms counted; master: 172544
-        ((173312, 87296), (2, 32, 32))
+        ((173312, 87296), (2, 32, 32), (256, 3, 64, 4))
     );
 }

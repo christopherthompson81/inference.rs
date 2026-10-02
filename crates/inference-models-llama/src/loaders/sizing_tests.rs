@@ -1,7 +1,8 @@
-//! Pins each loader's device-map layer sizes and KV planning metadata, so sharing the sizing code moves nothing
-//! silently; a value that changes is a drift against the model code.
+//! Pins each loader's device-map layer sizes and KV planning metadata; a value that moves is a drift to verify.
 
 use serde_json::{Value, json};
+
+use inference_nn::testing::{LoaderSizing, loader_sizing};
 
 use super::*;
 
@@ -14,28 +15,8 @@ const INTERMEDIATE: usize = 96;
 const LAYERS: usize = 3;
 const PACK: usize = 2;
 
-/// Per-layer bytes at F32 unpacked and with `PACK`, then (kv heads, k head dim, v head dim).
-fn sizing(
-    loader: &dyn DeviceMappedModelLoader,
-    config: &Value,
-) -> ((usize, usize), (usize, usize, usize)) {
-    let config = config.to_string();
-    let sizes = |pack| {
-        let sizes = loader
-            .layer_sizes_in_bytes(&config, DType::F32, pack, None)
-            .unwrap();
-        assert_eq!(sizes.len(), LAYERS);
-        assert!(
-            sizes.iter().all(|&size| size == sizes[0]),
-            "layers differ: {sizes:?}"
-        );
-        sizes[0]
-    };
-    let meta = loader.model_config(&config).unwrap();
-    (
-        (sizes(1), sizes(PACK)),
-        (meta.num_kv_heads(), meta.k_head_dim(), meta.v_head_dim()),
-    )
+fn sizing(loader: &dyn DeviceMappedModelLoader, config: &Value) -> LoaderSizing {
+    loader_sizing(loader, config, PACK)
 }
 
 fn llama_text() -> Value {
@@ -60,7 +41,7 @@ fn llama_text() -> Value {
 fn llama_sizing() {
     assert_eq!(
         sizing(&LlamaLoader, &llama_text()),
-        ((123392, 61952), (2, 16, 16))
+        ((123392, 61952), (2, 16, 16), (256, 3, 64, 4))
     );
 }
 
@@ -72,7 +53,7 @@ fn mistral_sizing() {
     assert_eq!(
         sizing(&MistralLoader, &config),
         // sized with the config head_dim the model builds with; master used hidden_size / heads (123392)
-        ((172544, 86528), (2, 32, 32))
+        ((172544, 86528), (2, 32, 32), (256, 3, 64, 4))
     );
 }
 
@@ -92,7 +73,7 @@ fn smollm3_sizing() {
     config["head_dim"] = json!(HEAD_DIM);
     assert_eq!(
         sizing(&SmolLm3Loader, &config),
-        ((123392, 61952), (2, 16, 16))
+        ((123392, 61952), (2, 16, 16), (256, 3, 64, 4))
     );
 }
 
@@ -105,7 +86,7 @@ fn idefics2_sizing() {
     });
     assert_eq!(
         sizing(&Idefics2Loader, &config),
-        ((123392, 61952), (2, 16, 16))
+        ((123392, 61952), (2, 16, 16), (256, 3, 64, 4))
     );
 }
 
@@ -131,7 +112,7 @@ fn idefics3_sizing() {
     });
     assert_eq!(
         sizing(&Idefics3Loader, &config),
-        ((123392, 61952), (2, 16, 16))
+        ((123392, 61952), (2, 16, 16), (256, 3, 64, 4))
     );
 }
 
@@ -149,7 +130,7 @@ fn mistral3_sizing() {
     assert_eq!(
         sizing(&Mistral3Loader, &config),
         // the Mistral text stack builds with the config head_dim; master sized with hidden_size / heads (123392)
-        ((172544, 86528), (2, 32, 32))
+        ((172544, 86528), (2, 32, 32), (256, 3, 64, 4))
     );
 }
 
@@ -180,7 +161,7 @@ fn llava_sizing() {
     for model_type in ["llama", "mistral"] {
         assert_eq!(
             sizing(&LLaVALoader, &llava(model_type)),
-            ((123392, 61952), (2, 16, 16))
+            ((123392, 61952), (2, 16, 16), (256, 3, 64, 4))
         );
     }
 }
@@ -190,7 +171,7 @@ fn llava_next_sizing() {
     for model_type in ["llama", "mistral"] {
         assert_eq!(
             sizing(&LLaVANextLoader, &llava(model_type)),
-            ((123392, 61952), (2, 16, 16))
+            ((123392, 61952), (2, 16, 16), (256, 3, 64, 4))
         );
     }
 }

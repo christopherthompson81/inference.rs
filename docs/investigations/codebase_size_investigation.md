@@ -1572,6 +1572,8 @@ SmolLM3, Idefics2/3, Mistral3, LLaVA/LLaVA-Next; Qwen2, Qwen2-VL, Qwen2.5-VL, Qw
 MiniCPM-o; Gemma, Gemma 2, EmbeddingGemma, Gemma 3; Phi-2, Phi-3, Phi-3-vision, Phi-4-MM; GLM-4, StarCoder2,
 Hunyuan dense, PaddleOCR-VL. Done by one agent per model crate after the Llama/Mistral pattern, each pinning master's
 values first (configs with head_dim 32 against hidden/heads 16) and setting the flags from the model code.
+Commands: per crate `cargo nextest run -p inference-models-<family> -E 'test(/sizing_tests/)'`, pins read from the
+assertion output on unmodified loaders, then rerun after each migration.
 
 Pins that moved (13), each against the model code:
 - head dim: Mistral and Mistral3 sized q/k/v/o with hidden/heads (+40% at the test dims); Gemma 2, EmbeddingGemma,
@@ -1594,3 +1596,16 @@ Noticed by the agents, not changed (model code or out of scope):
 - Idefics2's non-mapped sizing counts one vision layer instead of `num_hidden_layers` of them (Idefics3 multiplies).
 - Phi-2's affine final LayerNorm bias and PaddleOCR-VL's quantization-blind non-mapped sizing.
 Lines: -1200/+778 across the 27 loaders, with 34 sizing pins added.
+
+Review of the branch (subagent): every loader's flags match the model code and all 13 moves are justified (it
+recomputed each). Acted on:
+- The pins only covered KV heads and head dims; `max_seq_len`, layer count, hidden size and attention heads are
+  passed by hand and were unpinned. The shared helper (now `inference_nn::testing::loader_sizing`, replacing five
+  copies) returns all of them. With master's 27 loader files checked out, the new pins fail in exactly the 11 tests
+  that hold the 13 known moves, each only in layer bytes or head dims; the planning metadata matches master in all
+  27. `sliding_window` is not pinned: `ModelConfigLike` has no accessor for it, so pre-load planning never reads
+  the loader's value (the runtime reads come from the model's own metadata). That makes #223 latent; corrected
+  there.
+- The two test modules in `sizing.rs` merged; the `norms` field documented.
+Expected visible change: small Qwen3 checkpoints (head_dim 128 where hidden/heads is 64 or 80) now plan KV with 128,
+so their pre-load KV budgets grow by 60-100%, matching what the model allocates.

@@ -256,7 +256,7 @@ pub struct DecoderLayerShape {
     pub qkv_bias: bool,
     pub o_bias: bool,
     pub qk_norm: bool,
-    // hidden-size norms per layer: 2 for pre-attention and pre-MLP, 4 with post-norms (Gemma 2/3)
+    /// Hidden-size norm vectors per layer: 2 for pre-attention and pre-MLP, 4 with post-norms or LayerNorm biases.
     pub norms: usize,
     pub mlp: MlpShape,
 }
@@ -478,10 +478,6 @@ mod tests {
         );
         Ok(())
     }
-}
-#[cfg(test)]
-mod decoder_layer_tests {
-    use super::*;
 
     const HIDDEN: usize = 64;
     const HEADS: usize = 4;

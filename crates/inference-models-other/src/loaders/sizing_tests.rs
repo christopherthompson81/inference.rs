@@ -1,7 +1,8 @@
-//! Pins each loader's device-map layer sizes and KV planning metadata, so sharing the sizing code moves nothing
-//! silently; a value that changes is a drift against the model code.
+//! Pins each loader's device-map layer sizes and KV planning metadata; a value that moves is a drift to verify.
 
 use serde_json::{Value, json};
+
+use inference_nn::testing::{LoaderSizing, loader_sizing};
 
 use super::*;
 
@@ -14,28 +15,8 @@ const INTERMEDIATE: usize = 96;
 const LAYERS: usize = 3;
 const PACK: usize = 2;
 
-/// Per-layer bytes at F32 unpacked and with `PACK`, then (kv heads, k head dim, v head dim).
-fn sizing(
-    loader: &dyn DeviceMappedModelLoader,
-    config: &Value,
-) -> ((usize, usize), (usize, usize, usize)) {
-    let config = config.to_string();
-    let sizes = |pack| {
-        let sizes = loader
-            .layer_sizes_in_bytes(&config, DType::F32, pack, None)
-            .unwrap();
-        assert_eq!(sizes.len(), LAYERS);
-        assert!(
-            sizes.iter().all(|&size| size == sizes[0]),
-            "layers differ: {sizes:?}"
-        );
-        sizes[0]
-    };
-    let meta = loader.model_config(&config).unwrap();
-    (
-        (sizes(1), sizes(PACK)),
-        (meta.num_kv_heads(), meta.k_head_dim(), meta.v_head_dim()),
-    )
+fn sizing(loader: &dyn DeviceMappedModelLoader, config: &Value) -> LoaderSizing {
+    loader_sizing(loader, config, PACK)
 }
 
 fn decoder_text() -> Value {
@@ -66,13 +47,13 @@ fn glm4_sizing() {
     assert_eq!(
         sizing(&GLM4Loader, &config),
         // KV metadata reports the config head_dim the model builds with; master reported hidden_size / heads (16)
-        ((174080, 88064), (2, 32, 32))
+        ((174080, 88064), (2, 32, 32), (256, 3, 64, 4))
     );
     config["attention_bias"] = json!(null);
     assert_eq!(
         sizing(&GLM4Loader, &config),
         // q/k/v biases only when attention_bias is set, as the model loads them; master always counted them (174080)
-        ((173056, 87040), (2, 32, 32))
+        ((173056, 87040), (2, 32, 32), (256, 3, 64, 4))
     );
 }
 
@@ -85,7 +66,7 @@ fn starcoder2_sizing() {
     config["sliding_window"] = json!(null);
     assert_eq!(
         sizing(&Starcoder2Loader, &config),
-        ((100736, 51584), (2, 16, 16))
+        ((100736, 51584), (2, 16, 16), (256, 3, 64, 4))
     );
 }
 
@@ -95,7 +76,7 @@ fn hunyuan_v1_dense_sizing() {
     config["head_dim"] = json!(HEAD_DIM);
     assert_eq!(
         sizing(&HunYuanDenseV1Loader, &config),
-        ((172800, 86784), (2, 32, 32))
+        ((172800, 86784), (2, 32, 32), (256, 3, 64, 4))
     );
 }
 
@@ -110,6 +91,6 @@ fn paddleocr_vl_text_sizing() {
     config["rope_scaling"] = json!({"mrope_section": [4, 6, 6], "rope_type": "default"});
     assert_eq!(
         sizing(&PaddleOcrVlLoader, &config),
-        ((172544, 86528), (2, 32, 32))
+        ((172544, 86528), (2, 32, 32), (256, 3, 64, 4))
     );
 }

@@ -1,7 +1,8 @@
-//! Pins each loader's device-map layer sizes and KV planning metadata, so sharing the sizing code moves nothing
-//! silently; a value that changes is a drift against the model code.
+//! Pins each loader's device-map layer sizes and KV planning metadata; a value that moves is a drift to verify.
 
 use serde_json::{Value, json};
+
+use inference_nn::testing::{LoaderSizing, loader_sizing};
 
 use super::*;
 
@@ -14,28 +15,8 @@ const INTERMEDIATE: usize = 96;
 const LAYERS: usize = 3;
 const PACK: usize = 2;
 
-/// Per-layer bytes at F32 unpacked and with `PACK`, then (kv heads, k head dim, v head dim).
-fn sizing(
-    loader: &dyn DeviceMappedModelLoader,
-    config: &Value,
-) -> ((usize, usize), (usize, usize, usize)) {
-    let config = config.to_string();
-    let sizes = |pack| {
-        let sizes = loader
-            .layer_sizes_in_bytes(&config, DType::F32, pack, None)
-            .unwrap();
-        assert_eq!(sizes.len(), LAYERS);
-        assert!(
-            sizes.iter().all(|&size| size == sizes[0]),
-            "layers differ: {sizes:?}"
-        );
-        sizes[0]
-    };
-    let meta = loader.model_config(&config).unwrap();
-    (
-        (sizes(1), sizes(PACK)),
-        (meta.num_kv_heads(), meta.k_head_dim(), meta.v_head_dim()),
-    )
+fn sizing(loader: &dyn DeviceMappedModelLoader, config: &Value) -> LoaderSizing {
+    loader_sizing(loader, config, PACK)
 }
 
 fn qwen2_text() -> Value {
@@ -77,7 +58,7 @@ fn qwen_vl(vision_config: Value) -> Value {
 fn qwen2_sizing() {
     assert_eq!(
         sizing(&Qwen2Loader, &qwen2_text()),
-        ((123904, 62464), (2, 16, 16))
+        ((123904, 62464), (2, 16, 16), (256, 3, 64, 4))
     );
 }
 
@@ -86,7 +67,7 @@ fn qwen3_sizing() {
     assert_eq!(
         sizing(&Qwen3Loader, &qwen3_text()),
         // q/k/v are built without bias and KV is planned with the config head_dim; master: ((173824, 87808), 16)
-        ((172800, 86784), (2, 32, 32))
+        ((172800, 86784), (2, 32, 32), (256, 3, 64, 4))
     );
 }
 
@@ -95,7 +76,7 @@ fn qwen3_embedding_sizing() {
     assert_eq!(
         sizing(&Qwen3EmbeddingLoader, &qwen3_text()),
         // q/k/v are built without bias and KV is planned with the config head_dim; master: ((173824, 87808), 16)
-        ((172800, 86784), (2, 32, 32))
+        ((172800, 86784), (2, 32, 32), (256, 3, 64, 4))
     );
 }
 
@@ -113,7 +94,7 @@ fn qwen2vl_sizing() {
     }));
     assert_eq!(
         sizing(&Qwen2VLLoader, &config),
-        ((123904, 62464), (2, 16, 16))
+        ((123904, 62464), (2, 16, 16), (256, 3, 64, 4))
     );
 }
 
@@ -122,7 +103,7 @@ fn qwen2_5vl_sizing() {
     let config = qwen_vl(json!({ "depth": 2, "hidden_size": 32, "out_hidden_size": HIDDEN }));
     assert_eq!(
         sizing(&Qwen2_5VLLoader, &config),
-        ((123904, 62464), (2, 16, 16))
+        ((123904, 62464), (2, 16, 16), (256, 3, 64, 4))
     );
 }
 
@@ -142,7 +123,7 @@ fn qwen3vl_sizing() {
     });
     assert_eq!(
         sizing(&Qwen3VLLoader, &config),
-        ((172800, 86784), (2, 32, 32))
+        ((172800, 86784), (2, 32, 32), (256, 3, 64, 4))
     );
 }
 
@@ -155,6 +136,6 @@ fn minicpm_o_sizing() {
     assert_eq!(
         sizing(&MiniCpmOLoader, &config),
         // the Qwen2 LLM it builds has q/k/v biases master left out (123392, 61952)
-        ((123904, 62464), (2, 16, 16))
+        ((123904, 62464), (2, 16, 16), (256, 3, 64, 4))
     );
 }

@@ -1,7 +1,8 @@
-//! Pins each loader's device-map layer sizes and KV planning metadata, so sharing the sizing code moves nothing
-//! silently; a value that changes is a drift against the model code.
+//! Pins each loader's device-map layer sizes and KV planning metadata; a value that moves is a drift to verify.
 
 use serde_json::{Value, json};
+
+use inference_nn::testing::{LoaderSizing, loader_sizing};
 
 use super::*;
 
@@ -12,28 +13,8 @@ const INTERMEDIATE: usize = 96;
 const LAYERS: usize = 3;
 const PACK: usize = 2;
 
-/// Per-layer bytes at F32 unpacked and with `PACK`, then (kv heads, k head dim, v head dim).
-fn sizing(
-    loader: &dyn DeviceMappedModelLoader,
-    config: &Value,
-) -> ((usize, usize), (usize, usize, usize)) {
-    let config = config.to_string();
-    let sizes = |pack| {
-        let sizes = loader
-            .layer_sizes_in_bytes(&config, DType::F32, pack, None)
-            .unwrap();
-        assert_eq!(sizes.len(), LAYERS);
-        assert!(
-            sizes.iter().all(|&size| size == sizes[0]),
-            "layers differ: {sizes:?}"
-        );
-        sizes[0]
-    };
-    let meta = loader.model_config(&config).unwrap();
-    (
-        (sizes(1), sizes(PACK)),
-        (meta.num_kv_heads(), meta.k_head_dim(), meta.v_head_dim()),
-    )
+fn sizing(loader: &dyn DeviceMappedModelLoader, config: &Value) -> LoaderSizing {
+    loader_sizing(loader, config, PACK)
 }
 
 fn phi2_text(qk_layernorm: bool) -> Value {
@@ -79,12 +60,12 @@ fn phi2_sizing() {
     assert_eq!(
         sizing(&Phi2Loader, &phi2_text(false)),
         // counts the fc1/fc2 biases the model loads; master left them out (99584, 50432)
-        ((100224, 51072), (2, 16, 16))
+        ((100224, 51072), (2, 16, 16), (256, 3, 64, 4))
     );
     assert_eq!(
         sizing(&Phi2Loader, &phi2_text(true)),
         // also counts the q/k layernorm biases; master had (99712, 50560)
-        ((100480, 51328), (2, 16, 16))
+        ((100480, 51328), (2, 16, 16), (256, 3, 64, 4))
     );
 }
 
@@ -93,7 +74,7 @@ fn phi3_sizing() {
     assert_eq!(
         sizing(&Phi3Loader, &phi3_text()),
         // o_proj is built without a bias; master counted one (123648, 62208)
-        ((123392, 61952), (2, 16, 16))
+        ((123392, 61952), (2, 16, 16), (256, 3, 64, 4))
     );
 }
 
@@ -108,7 +89,7 @@ fn phi3v_sizing() {
     });
     assert_eq!(
         sizing(&Phi3VLoader, &config),
-        ((123392, 61952), (2, 16, 16))
+        ((123392, 61952), (2, 16, 16), (256, 3, 64, 4))
     );
 }
 
@@ -131,6 +112,6 @@ fn phi4mm_sizing() {
     config["speech_lora"] = lora;
     assert_eq!(
         sizing(&Phi4MMLoader, &config),
-        ((123392, 61952), (2, 16, 16))
+        ((123392, 61952), (2, 16, 16), (256, 3, 64, 4))
     );
 }

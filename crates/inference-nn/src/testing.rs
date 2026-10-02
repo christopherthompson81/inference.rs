@@ -316,3 +316,42 @@ pub fn assert_err_contains<T, E: std::fmt::Display>(
         }
     }
 }
+
+/// Per-layer bytes at F32 unpacked and packed, the KV planning dims (kv heads, k, v head dim), and the rest of the
+/// metadata pre-load planning reads (max_seq_len, layers, hidden size, attention heads).
+pub type LoaderSizing = (
+    (usize, usize),
+    (usize, usize, usize),
+    (usize, usize, usize, usize),
+);
+
+/// What a loader's device-map sizing reports for `config`, asserting its layers are all the same size.
+pub fn loader_sizing(
+    loader: &dyn crate::loaders::DeviceMappedModelLoader,
+    config: &Value,
+    pack: usize,
+) -> LoaderSizing {
+    let config = config.to_string();
+    let meta = loader.model_config(&config).unwrap();
+    let sizes = |pack| {
+        let sizes = loader
+            .layer_sizes_in_bytes(&config, DType::F32, pack, None)
+            .unwrap();
+        assert_eq!(sizes.len(), meta.num_layers());
+        assert!(
+            sizes.iter().all(|&size| size == sizes[0]),
+            "layers differ: {sizes:?}"
+        );
+        sizes[0]
+    };
+    (
+        (sizes(1), sizes(pack)),
+        (meta.num_kv_heads(), meta.k_head_dim(), meta.v_head_dim()),
+        (
+            meta.max_seq_len(),
+            meta.num_layers(),
+            meta.hidden_size(),
+            meta.num_attn_heads(),
+        ),
+    )
+}
