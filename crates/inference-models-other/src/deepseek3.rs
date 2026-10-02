@@ -24,7 +24,6 @@ use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
-    layers::masker::masked_fill,
     layers::{
         Activation, CausalMasker, DeepSeekV2RopeConfig, DeepSeekV2RopeScaling,
         DeepSeekV2RotaryEmbedding, Mlp, RmsNorm, Sdpa, embedding_with_legacy_tied_uqff,
@@ -33,8 +32,11 @@ use crate::{
         MlaKvBProjection, MlaWeights, mla_cache_forward, mla_decode_forward, should_use_mla_cache,
         should_use_mla_decode,
     },
-    moe::{MoEExperts, MoEExpertsConfig},
-    ops::{SplitOp, TopKLastDimOp, TopKOutput},
+    moe::{
+        GroupedRouter, GroupedRouterConfig, MoEExperts, MoEExpertsConfig, RouterMethod,
+        RouterRenorm, RouterScoring,
+    },
+    ops::SplitOp,
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
@@ -107,6 +109,24 @@ pub struct DeepSeekV3Config {
 }
 
 impl DeepSeekV3Config {
+    fn router_config(&self) -> GroupedRouterConfig {
+        GroupedRouterConfig {
+            scoring: match self.scoring_func {
+                ScoringFunc::Softmax => RouterScoring::Softmax,
+                ScoringFunc::Sigmoid => RouterScoring::Sigmoid,
+            },
+            method: match self.topk_method {
+                TopkMethod::Greedy => RouterMethod::Greedy,
+                TopkMethod::GroupLimitedGreedy => RouterMethod::GroupLimitedGreedy,
+                TopkMethod::NoAuxTc => RouterMethod::NoAuxTc,
+            },
+            n_group: self.n_group,
+            topk_group: self.topk_group,
+            routed_scaling_factor: self.routed_scaling_factor,
+            renorm: RouterRenorm::SigmoidOnly,
+        }
+    }
+
     pub fn q_head_dim(&self) -> usize {
         self.qk_rope_head_dim + self.qk_nope_head_dim
     }
@@ -497,10 +517,7 @@ impl Attention {
 struct MoeGate {
     weight: Tensor,
     lora_site: Option<Arc<inference_quant::LoraSiteHandle>>,
-    cfg: DeepSeekV3Config,
-    top_k: usize,
-    n_routed_experts: usize,
-    e_score_correction_bias: Option<Tensor>,
+    router: GroupedRouter,
 }
 
 impl MoeGate {
@@ -510,143 +527,29 @@ impl MoeGate {
             &vb.clone().set_dtype(DType::F32),
             inference_quant::LoraLinearSpec::replicated(cfg.hidden_size, n_routed_experts),
         )?;
-        let e_score_correction_bias = if matches!(cfg.topk_method, TopkMethod::NoAuxTc) {
-            Some(vb.get_with_hints_dtype(
-                n_routed_experts,
-                "e_score_correction_bias",
-                Default::default(),
-                DType::F32,
-            )?)
-        } else {
-            None
-        };
+        let router = GroupedRouter::load(
+            cfg.router_config(),
+            cfg.num_experts_per_tok.unwrap(),
+            &vb,
+            n_routed_experts,
+        )?;
         Ok(Self {
             weight,
             lora_site,
-            cfg: cfg.clone(),
-            top_k: cfg.num_experts_per_tok.unwrap(),
-            n_routed_experts,
-            e_score_correction_bias,
+            router,
         })
     }
 
     /// (topk_idx, topk_weight)
     fn forward(&self, xs: &Tensor) -> Result<(Tensor, Tensor)> {
-        let (bs, seq_len, h) = xs.dims3()?;
-        // Compute gating score
+        let (_, _, h) = xs.dims3()?;
         let xs = xs.reshape(((), h))?.to_dtype(DType::F32)?;
         let logits = xs.broadcast_matmul(&self.weight.t()?.to_dtype(DType::F32)?)?;
         let logits = match &self.lora_site {
             Some(site) => inference_quant::apply_dynamic_lora_delta(site, &xs, logits)?,
             None => logits,
         };
-        if matches!(self.cfg.topk_method, TopkMethod::Greedy) {
-            let topk = crate::ops::moe_router_topk(
-                &logits,
-                crate::ops::MoeRouterTopKConfig {
-                    top_k: self.top_k,
-                    score_function: match self.cfg.scoring_func {
-                        ScoringFunc::Softmax => crate::ops::MoeRouterScoreFunction::Softmax,
-                        ScoringFunc::Sigmoid => crate::ops::MoeRouterScoreFunction::Sigmoid,
-                    },
-                    selected_weight: crate::ops::MoeRouterSelectedWeight::Score,
-                    renormalize: matches!(self.cfg.scoring_func, ScoringFunc::Sigmoid),
-                    norm_min: 1e-20,
-                    output_scale: self.cfg.routed_scaling_factor as f32,
-                    logit_clip: None,
-                },
-                None,
-                None,
-            )?;
-            return Ok((topk.indices, topk.values));
-        }
-        let scores = match self.cfg.scoring_func {
-            ScoringFunc::Softmax => candle_nn::ops::softmax_last_dim(&logits)?,
-            ScoringFunc::Sigmoid => candle_nn::ops::sigmoid(&logits)?,
-        };
-
-        // Select top-k experts
-        let (mut topk_weight, topk_idx) = match self.cfg.topk_method {
-            TopkMethod::Greedy => unreachable!(),
-            TopkMethod::NoAuxTc => {
-                let Some(e_score_correction_bias) = &self.e_score_correction_bias else {
-                    candle_core::bail!("Expected e_score_correction_bias")
-                };
-                let scores_for_choice = scores
-                    .reshape((bs * seq_len, ()))?
-                    .broadcast_add(&e_score_correction_bias.unsqueeze(0)?)?;
-                // (n, n_group)
-                let group_scores = scores_for_choice
-                    .reshape((bs * seq_len, self.cfg.n_group, ()))?
-                    .topk(2)?
-                    .values
-                    .sum(D::Minus1)?;
-                // (n, topk_group)
-                let group_idx = group_scores.topk(self.cfg.topk_group)?.indices;
-                // (n, n_group)
-                let mut group_mask = group_scores.zeros_like()?;
-                // (n, n_group)
-                group_mask = group_mask.scatter_add(
-                    &group_idx,
-                    &group_idx.ones_like()?.to_dtype(group_mask.dtype())?,
-                    1,
-                )?;
-                // (n, e)
-                let score_mask = group_mask
-                    .unsqueeze(D::Minus1)?
-                    .expand((
-                        bs * seq_len,
-                        self.cfg.n_group,
-                        self.n_routed_experts / self.cfg.n_group,
-                    ))?
-                    .reshape((bs * seq_len, ()))?;
-                // (n, e)
-                // Invert the mask
-                let tmp_scores = scores_for_choice.broadcast_mul(&score_mask)?;
-                let topk_idx = tmp_scores.topk(self.top_k)?.indices;
-                (scores.gather(&topk_idx, 1)?, topk_idx)
-            }
-            TopkMethod::GroupLimitedGreedy => {
-                // (n, n_group)
-                let group_scores = scores
-                    .reshape((bs * seq_len, self.cfg.n_group, ()))?
-                    .max(D::Minus1)?;
-                // (n, topk_group)
-                let group_idx = group_scores.topk_unsorted(self.cfg.topk_group)?.indices;
-                // (n, n_group)
-                let mut group_mask = group_scores.zeros_like()?;
-                // (n, n_group)
-                group_mask = group_mask.scatter_add(
-                    &group_idx,
-                    &group_idx.ones_like()?.to_dtype(group_mask.dtype())?,
-                    1,
-                )?;
-                // (n, e)
-                let score_mask = group_mask
-                    .unsqueeze(D::Minus1)?
-                    .expand((
-                        bs * seq_len,
-                        self.cfg.n_group,
-                        self.n_routed_experts / self.cfg.n_group,
-                    ))?
-                    .reshape((bs * seq_len, ()))?;
-                // (n, e)
-                // Invert the mask
-                let tmp_scores = masked_fill(&score_mask, &(1. - &score_mask.ne(0.)?)?, 0.)?;
-                let TopKOutput { values, indices } = tmp_scores.topk_unsorted(self.top_k)?;
-                (values, indices)
-            }
-        };
-
-        if matches!(self.cfg.scoring_func, ScoringFunc::Sigmoid) {
-            let denmoninator = (topk_weight.sum_keepdim(D::Minus1)? + 1e-20)?;
-            topk_weight = topk_weight.broadcast_div(&denmoninator)?;
-        }
-
-        // Must multiply the scaling factor
-        topk_weight = (topk_weight * self.cfg.routed_scaling_factor)?;
-
-        Ok((topk_idx, topk_weight))
+        self.router.route(&logits)
     }
 }
 
@@ -1060,7 +963,7 @@ impl IsqModel for DeepSeekV3 {
                     add_moe_gate_residual_tensors(
                         &uvb_l.pp("mlp").pp("gate"),
                         &moe.gate.weight,
-                        moe.gate.e_score_correction_bias.as_ref(),
+                        moe.gate.router.e_score_correction_bias(),
                     );
                 }
                 MoeOrMlp::Mlp(_) => (),
@@ -1101,7 +1004,7 @@ impl IsqModel for DeepSeekV3 {
                     add_moe_gate_residual_tensors(
                         &uvb_l.pp("mlp").pp("gate"),
                         &moe.gate.weight,
-                        moe.gate.e_score_correction_bias.as_ref(),
+                        moe.gate.router.e_score_correction_bias(),
                     );
                 }
                 MoeOrMlp::Mlp(_) => (),

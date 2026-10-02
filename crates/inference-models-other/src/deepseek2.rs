@@ -24,7 +24,6 @@ use crate::{
     amoe::AnyMoeBaseModelMixin,
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
-    layers::masker::masked_fill,
     layers::{
         Activation, CausalMasker, DeepSeekV2RopeConfig, DeepSeekV2RopeScaling,
         DeepSeekV2RotaryEmbedding, Mlp, RmsNorm, Sdpa, embedding_with_legacy_tied_uqff,
@@ -33,8 +32,11 @@ use crate::{
         MlaKvBProjection, MlaWeights, mla_cache_forward, mla_decode_forward, should_use_mla_cache,
         should_use_mla_decode,
     },
-    moe::{MoEExperts, MoEExpertsConfig},
-    ops::{SplitOp, TopKLastDimOp, TopKOutput},
+    moe::{
+        GroupedRouter, GroupedRouterConfig, MoEExperts, MoEExpertsConfig, RouterMethod,
+        RouterRenorm, RouterScoring,
+    },
+    ops::SplitOp,
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
@@ -106,6 +108,24 @@ pub struct DeepSeekV2Config {
 }
 
 impl DeepSeekV2Config {
+    fn router_config(&self) -> GroupedRouterConfig {
+        GroupedRouterConfig {
+            scoring: match self.scoring_func {
+                ScoringFunc::Softmax => RouterScoring::Softmax,
+            },
+            method: match self.topk_method {
+                TopkMethod::Greedy => RouterMethod::Greedy,
+                TopkMethod::GroupLimitedGreedy => RouterMethod::GroupLimitedGreedy,
+            },
+            n_group: self.n_group,
+            topk_group: self.topk_group,
+            routed_scaling_factor: self.routed_scaling_factor,
+            renorm: RouterRenorm::TopkProbSkipsScale {
+                norm_topk_prob: self.norm_topk_prob,
+            },
+        }
+    }
+
     pub fn q_head_dim(&self) -> usize {
         self.qk_rope_head_dim + self.qk_nope_head_dim
     }
@@ -496,105 +516,39 @@ impl Attention {
 struct MoeGate {
     weight: Tensor,
     lora_site: Option<Arc<inference_quant::LoraSiteHandle>>,
-    cfg: DeepSeekV2Config,
-    top_k: usize,
-    n_routed_experts: usize,
+    router: GroupedRouter,
 }
 
 impl MoeGate {
     fn new(cfg: &DeepSeekV2Config, vb: ShardedVarBuilder, n_routed_experts: usize) -> Result<Self> {
         let weight = vb.get((n_routed_experts, cfg.hidden_size), "weight")?;
         let lora_site = inference_quant::register_dynamic_lora_site(
-            &vb.set_dtype(DType::F32),
+            &vb.clone().set_dtype(DType::F32),
             inference_quant::LoraLinearSpec::replicated(cfg.hidden_size, n_routed_experts),
+        )?;
+        let router = GroupedRouter::load(
+            cfg.router_config(),
+            cfg.num_experts_per_tok.unwrap(),
+            &vb,
+            n_routed_experts,
         )?;
         Ok(Self {
             weight,
             lora_site,
-            cfg: cfg.clone(),
-            top_k: cfg.num_experts_per_tok.unwrap(),
-            n_routed_experts,
+            router,
         })
     }
 
     /// (topk_idx, topk_weight)
     fn forward(&self, xs: &Tensor) -> Result<(Tensor, Tensor)> {
-        let (bs, seq_len, h) = xs.dims3()?;
-        // Compute gating score
+        let (_, _, h) = xs.dims3()?;
         let xs = xs.reshape(((), h))?.to_dtype(DType::F32)?;
         let logits = xs.broadcast_matmul(&self.weight.t()?.to_dtype(DType::F32)?)?;
         let logits = match &self.lora_site {
             Some(site) => inference_quant::apply_dynamic_lora_delta(site, &xs, logits)?,
             None => logits,
         };
-        if matches!(self.cfg.topk_method, TopkMethod::Greedy) {
-            let renormalize = self.top_k > 1 && self.cfg.norm_topk_prob;
-            let topk = crate::ops::moe_router_topk(
-                &logits,
-                crate::ops::MoeRouterTopKConfig {
-                    top_k: self.top_k,
-                    score_function: crate::ops::MoeRouterScoreFunction::Softmax,
-                    selected_weight: crate::ops::MoeRouterSelectedWeight::Score,
-                    renormalize,
-                    norm_min: 1e-20,
-                    output_scale: if renormalize {
-                        1.0
-                    } else {
-                        self.cfg.routed_scaling_factor as f32
-                    },
-                    logit_clip: None,
-                },
-                None,
-                None,
-            )?;
-            return Ok((topk.indices, topk.values));
-        }
-        let scores = match self.cfg.scoring_func {
-            ScoringFunc::Softmax => candle_nn::ops::softmax_last_dim(&logits)?,
-        };
-
-        // Select top-k experts
-        let (mut topk_weight, topk_idx) = match self.cfg.topk_method {
-            TopkMethod::Greedy => unreachable!(),
-            TopkMethod::GroupLimitedGreedy => {
-                // (n, n_group)
-                let group_scores = scores
-                    .reshape((bs * seq_len, self.cfg.n_group, ()))?
-                    .max(D::Minus1)?;
-                // (n, topk_group)
-                let group_idx = group_scores.topk_unsorted(self.cfg.topk_group)?.indices;
-                // (n, n_group)
-                let mut group_mask = group_scores.zeros_like()?;
-                // (n, n_group)
-                group_mask = group_mask.scatter_add(
-                    &group_idx,
-                    &group_idx.ones_like()?.to_dtype(group_mask.dtype())?,
-                    1,
-                )?;
-                // (n, e)
-                let score_mask = group_mask
-                    .unsqueeze(D::Minus1)?
-                    .expand((
-                        bs * seq_len,
-                        self.cfg.n_group,
-                        self.n_routed_experts / self.cfg.n_group,
-                    ))?
-                    .reshape((bs * seq_len, ()))?;
-                // (n, e)
-                // Invert the mask
-                let tmp_scores = masked_fill(&score_mask, &(1. - &score_mask.ne(0.)?)?, 0.)?;
-                let TopKOutput { values, indices } = tmp_scores.topk_unsorted(self.top_k)?;
-                (values, indices)
-            }
-        };
-
-        if self.top_k > 1 && self.cfg.norm_topk_prob {
-            let denmoninator = (topk_weight.sum_keepdim(D::Minus1)? + 1e-20)?;
-            topk_weight = (topk_weight / denmoninator)?;
-        } else {
-            topk_weight = (topk_weight * self.cfg.routed_scaling_factor)?;
-        }
-        Ok((topk_idx, topk_weight))
+        self.router.route(&logits)
     }
 }
 

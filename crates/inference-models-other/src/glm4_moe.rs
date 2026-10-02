@@ -4,7 +4,7 @@ use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use std::sync::Arc;
 
-use candle_core::{D, DType, Device, Module, Result, Tensor};
+use candle_core::{DType, Device, Module, Result, Tensor};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, QuantizedConfig, ReplicatedLayer, RowParallelLayer,
     ShardedVarBuilder,
@@ -25,8 +25,10 @@ use crate::{
     layers::{
         Activation, CausalMasker, Mlp, RmsNorm, apply_rotary_q, embedding_with_legacy_tied_uqff,
     },
-    moe::{MoEExperts, MoEExpertsConfig},
-    ops::TopKLastDimOp,
+    moe::{
+        GroupedRouter, GroupedRouterConfig, MoEExperts, MoEExpertsConfig, RouterMethod,
+        RouterRenorm, RouterScoring,
+    },
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     serde_default_fn,
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
@@ -82,6 +84,19 @@ pub struct Glm4MoeConfig {
 }
 
 impl Glm4MoeConfig {
+    fn router_config(&self) -> GroupedRouterConfig {
+        GroupedRouterConfig {
+            scoring: RouterScoring::Sigmoid,
+            method: RouterMethod::NoAuxTc,
+            n_group: self.n_group,
+            topk_group: self.topk_group,
+            routed_scaling_factor: self.routed_scaling_factor,
+            renorm: RouterRenorm::TopkProb {
+                norm_topk_prob: self.norm_topk_prob,
+            },
+        }
+    }
+
     pub fn head_dim(&self) -> usize {
         self.head_dim
             .unwrap_or(self.hidden_size / self.num_attention_heads)
@@ -382,14 +397,10 @@ impl Expert {
     }
 }
 
-/// MoE gate with sigmoid scoring and e_score_correction_bias (NoAuxTc routing)
 struct MoeGate {
     weight: Tensor,
     lora_site: Option<Arc<inference_quant::LoraSiteHandle>>,
-    cfg: Glm4MoeConfig,
-    top_k: usize,
-    n_routed_experts: usize,
-    e_score_correction_bias: Tensor,
+    router: GroupedRouter,
 }
 
 impl MoeGate {
@@ -399,71 +410,29 @@ impl MoeGate {
             &vb.clone().set_dtype(DType::F32),
             inference_quant::LoraLinearSpec::replicated(cfg.hidden_size, n_routed_experts),
         )?;
-        let e_score_correction_bias = vb.get_with_hints_dtype(
+        let router = GroupedRouter::load(
+            cfg.router_config(),
+            cfg.num_experts_per_tok,
+            &vb,
             n_routed_experts,
-            "e_score_correction_bias",
-            Default::default(),
-            DType::F32,
         )?;
         Ok(Self {
             weight,
             lora_site,
-            cfg: cfg.clone(),
-            top_k: cfg.num_experts_per_tok,
-            n_routed_experts,
-            e_score_correction_bias,
+            router,
         })
     }
 
-    /// Returns (topk_idx, topk_weight)
+    /// (topk_idx, topk_weight)
     fn forward(&self, xs: &Tensor) -> Result<(Tensor, Tensor)> {
-        let (bs, seq_len, h) = xs.dims3()?;
+        let (_, _, h) = xs.dims3()?;
         let xs = xs.reshape(((), h))?.to_dtype(DType::F32)?;
         let logits = xs.broadcast_matmul(&self.weight.t()?.to_dtype(DType::F32)?)?;
         let logits = match &self.lora_site {
             Some(site) => inference_quant::apply_dynamic_lora_delta(site, &xs, logits)?,
             None => logits,
         };
-        // Sigmoid scoring
-        let scores = candle_nn::ops::sigmoid(&logits)?;
-
-        // NoAuxTc routing with e_score_correction_bias
-        let scores_for_choice = scores
-            .reshape((bs * seq_len, ()))?
-            .broadcast_add(&self.e_score_correction_bias.unsqueeze(0)?)?;
-        let group_scores = scores_for_choice
-            .reshape((bs * seq_len, self.cfg.n_group, ()))?
-            .topk(2)?
-            .values
-            .sum(D::Minus1)?;
-        let group_idx = group_scores.topk(self.cfg.topk_group)?.indices;
-        let mut group_mask = group_scores.zeros_like()?;
-        group_mask = group_mask.scatter_add(
-            &group_idx,
-            &group_idx.ones_like()?.to_dtype(group_mask.dtype())?,
-            1,
-        )?;
-        let score_mask = group_mask
-            .unsqueeze(D::Minus1)?
-            .expand((
-                bs * seq_len,
-                self.cfg.n_group,
-                self.n_routed_experts / self.cfg.n_group,
-            ))?
-            .reshape((bs * seq_len, ()))?;
-        let tmp_scores = scores_for_choice.broadcast_mul(&score_mask)?;
-        let topk_idx = tmp_scores.topk(self.top_k)?.indices;
-        let mut topk_weight = scores.gather(&topk_idx, 1)?;
-
-        if self.cfg.norm_topk_prob {
-            let denominator = (topk_weight.sum_keepdim(D::Minus1)? + 1e-20)?;
-            topk_weight = topk_weight.broadcast_div(&denominator)?;
-        }
-
-        // Apply routing scaling factor
-        topk_weight = (topk_weight * self.cfg.routed_scaling_factor)?;
-
-        Ok((topk_idx, topk_weight))
+        self.router.route(&logits)
     }
 }
 
@@ -845,14 +814,11 @@ impl IsqModel for Glm4Moe {
 
             match &layer.moe_or_mlp {
                 MoeOrMlp::Moe(moe) => {
-                    uvb_l
-                        .pp("mlp")
-                        .pp("gate")
-                        .add_tensor("weight", moe.gate.weight.clone());
-                    uvb_l.pp("mlp").pp("gate").add_tensor(
-                        "e_score_correction_bias",
-                        moe.gate.e_score_correction_bias.clone(),
-                    );
+                    let uvb_gate = uvb_l.pp("mlp").pp("gate");
+                    uvb_gate.add_tensor("weight", moe.gate.weight.clone());
+                    if let Some(bias) = moe.gate.router.e_score_correction_bias() {
+                        uvb_gate.add_tensor("e_score_correction_bias", bias.clone());
+                    }
                 }
                 MoeOrMlp::Mlp(_) => (),
             }
@@ -890,14 +856,11 @@ impl IsqModel for Glm4Moe {
 
             match &layer.moe_or_mlp {
                 MoeOrMlp::Moe(moe) => {
-                    uvb_l
-                        .pp("mlp")
-                        .pp("gate")
-                        .add_tensor("weight", moe.gate.weight.clone());
-                    uvb_l.pp("mlp").pp("gate").add_tensor(
-                        "e_score_correction_bias",
-                        moe.gate.e_score_correction_bias.clone(),
-                    );
+                    let uvb_gate = uvb_l.pp("mlp").pp("gate");
+                    uvb_gate.add_tensor("weight", moe.gate.weight.clone());
+                    if let Some(bias) = moe.gate.router.e_score_correction_bias() {
+                        uvb_gate.add_tensor("e_score_correction_bias", bias.clone());
+                    }
                 }
                 MoeOrMlp::Mlp(_) => (),
             }
