@@ -56,10 +56,10 @@ fn llava_llama_prefill() -> Result<()> {
         )
     })?;
     assert_eq!(
-        names_digest(&names),
+        names_digest(names.keys()),
         0x4089_c6c3_0a5b_bc83,
         "tensor names moved: {:#x}",
-        names_digest(&names)
+        names_digest(names.keys())
     );
     let expected = Snapshot {
         probes: [-0.44500175, 0.26666418, 0.32315516, -0.076289274],

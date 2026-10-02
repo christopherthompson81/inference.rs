@@ -132,7 +132,7 @@ fn phi2_loads_and_sizes_its_head_and_final_norm_biases() {
     })
     .unwrap();
     for bias in ["lm_head.bias", "model.final_layernorm.bias"] {
-        assert!(names.contains(bias), "{bias} is not loaded");
+        assert!(names.contains_key(bias), "{bias} is not loaded");
     }
     let vocab = usize::try_from(config["vocab_size"].as_u64().unwrap()).unwrap();
     let non_mapped = Phi2Loader

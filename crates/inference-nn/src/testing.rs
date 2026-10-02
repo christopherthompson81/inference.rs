@@ -148,7 +148,8 @@ pub fn load_checked<T>(
 struct Synthesizing {
     absent: Arc<Vec<String>>,
     shapes: Arc<HashMap<String, Vec<usize>>>,
-    seen: Arc<Mutex<BTreeSet<String>>>,
+    // element count of each tensor read
+    seen: Arc<Mutex<BTreeMap<String, usize>>>,
 }
 
 impl SimpleBackend for Synthesizing {
@@ -160,7 +161,10 @@ impl SimpleBackend for Synthesizing {
         dtype: DType,
         dev: &Device,
     ) -> candle_core::Result<Tensor> {
-        self.seen.lock().unwrap().insert(name.to_string());
+        self.seen
+            .lock()
+            .unwrap()
+            .insert(name.to_string(), s.elem_count());
         fill(name, s.dims())
             .map_err(candle_core::Error::msg)?
             .to_dtype(dtype)?
@@ -191,14 +195,14 @@ impl TensorShapes for Synthesizing {
     }
 }
 
-/// Runs `load` over made-up `dtype` weights where every name exists except under `absent`; returns the names read too.
+/// Runs `load` over made-up `dtype` weights where every name exists except under `absent`; returns what it read, sized.
 /// `shapes` declares the tensors a loader inspects before reading (stacked MoE experts, say).
 pub fn load_synthesized<T>(
     absent: &[&str],
     shapes: HashMap<String, Vec<usize>>,
     dtype: DType,
     load: impl FnOnce(ShardedVarBuilder) -> Result<T>,
-) -> Result<(T, BTreeSet<String>)> {
+) -> Result<(T, BTreeMap<String, usize>)> {
     let backend = Synthesizing {
         absent: Arc::new(absent.iter().map(|p| p.to_string()).collect()),
         shapes: Arc::new(shapes),
@@ -214,8 +218,8 @@ pub fn load_synthesized<T>(
 }
 
 /// Order-independent FNV digest of tensor names, to pin which weights a loader reads.
-pub fn names_digest(names: &BTreeSet<String>) -> u64 {
-    names.iter().fold(FNV_OFFSET, |h, name| {
+pub fn names_digest<'a>(names: impl IntoIterator<Item = &'a String>) -> u64 {
+    names.into_iter().fold(FNV_OFFSET, |h, name| {
         name.bytes()
             .chain([0])
             .fold(h, |h, b| (h ^ u64::from(b)).wrapping_mul(FNV_PRIME))

@@ -1946,3 +1946,35 @@ Not covered:
 
 Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`.
 Result: exit 0, 2390 + 2712 + 1 tests passed.
+
+## Run 63 - 2026-10-02 (time approximate)
+
+Question: does device-map sizing count the built-in MTP head, and can the two Qwen3.5 multimodal loaders share one
+implementation?
+
+Finding before the change: neither Qwen3.5 loader sized the MTP head (fc, three norms, one full-attention decoder
+layer). For MoE that layer holds the full expert set, and it loads on the non-mapped device. The two loader files
+(about 400 lines each) differed only in the feed-forward ISQ patterns, the feed-forward sizing and `check_experts`.
+
+Change:
+- `loaders/qwen3_5.rs` generates `Qwen3_5Loader` and `Qwen3_5MoeLoader` from one `qwen3_5_loader!` with an MoE flag;
+  `qwen3_5_moe.rs` is deleted. A type alias over a const-generic unit struct can't be used as a value
+  (`Box::new(Qwen3_5Loader)`), so the two unit structs stay.
+- ISQ patterns are shared lists placed under the main-stack prefix and under `mtp.layers.N`.
+- Sizing is shared: `decoder_layer_elems`, with the feed-forward chosen by `is_moe`, is also used by the text loader.
+  `non_mapped_size_in_bytes` adds `mtp_head_elems` when the injected `_inference_mtp` flag is set.
+- `testing::load_synthesized` now returns each tensor read with its element count.
+
+New tests: `qwen3_5{,_moe}_sizing_matches_the_loaded_weights`.
+- Declared layer bytes equal the bytes loaded under `model.language_model.layers.`.
+- The MTP non-mapped delta equals the bytes loaded under `mtp.`.
+- Both pass exactly at pack 1. On master the MTP delta is 0, so that assertion fails there; the layer assertion is a
+  regression guard only, since the formulas agree at pack 1.
+
+Review notes, left as they are:
+- ISQ: the multimodal path sizes the non-mapped device unpacked, so the MTP head is over-counted. That is
+  conservative.
+- `tune` and the doctor size from the raw `config.json` and have no MTP option, so they never count the head.
+
+Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`.
+Result: exit 0, 2392 + 2714 + 1 tests passed.

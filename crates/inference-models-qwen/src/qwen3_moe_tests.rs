@@ -77,10 +77,10 @@ fn qwen3_moe_prefill() -> Result<()> {
         )
     })?;
     assert_eq!(
-        names_digest(&names),
+        names_digest(names.keys()),
         0xf93e_432d_ce05_497d,
         "tensor names moved: {:#x}",
-        names_digest(&names)
+        names_digest(names.keys())
     );
     let expected = Snapshot {
         probes: [0.40193462, 1.4729915, 1.4494103, 1.1353827],
