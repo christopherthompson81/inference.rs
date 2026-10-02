@@ -37,9 +37,179 @@ pub mod vision;
 
 pub use config::Config;
 
-pub struct Qwen2VLModel {
+/// The vision tower a Qwen2-VL family member plugs into the shared text model and wrapper.
+pub trait QwenVlVision: Sized + Send + Sync {
+    type Config: Sync;
+    fn new(
+        cfg: &Self::Config,
+        vb: ShardedVarBuilder,
+        comm: &Arc<inference_quant::Comm>,
+    ) -> Result<Self>;
+    fn spatial_merge_size(cfg: &Self::Config) -> usize;
+    fn forward(&self, xs: &Tensor, grid_thw: &Tensor) -> Result<Tensor>;
+    fn residual_tensors(&self) -> Vec<(String, Tensor)>;
+}
+
+impl QwenVlVision for Qwen2VLVisionModel {
+    type Config = config::VisionConfig;
+    fn new(
+        cfg: &Self::Config,
+        vb: ShardedVarBuilder,
+        comm: &Arc<inference_quant::Comm>,
+    ) -> Result<Self> {
+        Qwen2VLVisionModel::new(cfg, vb, comm)
+    }
+    fn spatial_merge_size(cfg: &Self::Config) -> usize {
+        cfg.spatial_merge_size
+    }
+    fn forward(&self, xs: &Tensor, grid_thw: &Tensor) -> Result<Tensor> {
+        Qwen2VLVisionModel::forward(self, xs, grid_thw)
+    }
+    fn residual_tensors(&self) -> Vec<(String, Tensor)> {
+        Qwen2VLVisionModel::residual_tensors(self)
+    }
+}
+
+pub type Qwen2VLModel = QwenVlModel<Qwen2VLVisionModel>;
+
+/// 3D MRoPE position ids and per-row position deltas for the Qwen2-VL family.
+pub fn compute_rope_index(
+    input_ids: &Tensor,
+    image_grid_thw: Option<&Tensor>,
+    video_grid_thw: Option<&Tensor>,
+    attention_mask: &AttentionMask,
+    spatial_merge_size: usize,
+    image_token_id: u32,
+    video_token_id: u32,
+) -> Result<(Tensor, Tensor)> {
+    let (batch, seq_len) = input_ids.dims2()?;
+    let input_rows = input_ids.to_vec2::<u32>()?;
+    let masks = match attention_mask {
+        AttentionMask::Custom(mask) => mask.to_dtype(DType::F32)?.to_vec2::<f32>()?,
+        _ => vec![vec![1.; seq_len]; batch],
+    };
+    let image_grids = image_grid_thw
+        .map(Tensor::to_vec2::<u32>)
+        .transpose()?
+        .unwrap_or_default();
+    let video_grids = video_grid_thw
+        .map(Tensor::to_vec2::<u32>)
+        .transpose()?
+        .unwrap_or_default();
+    let mut image_index = 0;
+    let mut video_index = 0;
+    let mut data = vec![1i64; 3 * batch * seq_len];
+    let mut deltas = Vec::with_capacity(batch);
+
+    for batch_index in 0..batch {
+        let valid = input_rows[batch_index]
+            .iter()
+            .zip(&masks[batch_index])
+            .enumerate()
+            .filter_map(|(index, (&token, &mask))| (mask != 0.).then_some((index, token)))
+            .collect::<Vec<_>>();
+        let mut positions = Vec::with_capacity(valid.len());
+        let mut cursor = 0;
+        let mut next_position = 0i64;
+
+        while cursor < valid.len() {
+            let media_start = valid[cursor..]
+                .iter()
+                .position(|(_, token)| *token == image_token_id || *token == video_token_id)
+                .map(|offset| cursor + offset);
+            let Some(media_start) = media_start else {
+                for offset in 0..valid.len() - cursor {
+                    let position = next_position + offset as i64;
+                    positions.push([position; 3]);
+                }
+                break;
+            };
+            for offset in 0..media_start - cursor {
+                let position = next_position + offset as i64;
+                positions.push([position; 3]);
+            }
+            next_position += (media_start - cursor) as i64;
+
+            let media_token = valid[media_start].1;
+            let media_end = valid[media_start..]
+                .iter()
+                .position(|(_, token)| *token != media_token)
+                .map_or(valid.len(), |offset| media_start + offset);
+            let grid = if media_token == image_token_id {
+                let grid = image_grids.get(image_index).ok_or_else(|| {
+                    candle_core::Error::msg("missing image grid for Qwen placeholder")
+                })?;
+                image_index += 1;
+                grid
+            } else {
+                let grid = video_grids.get(video_index).ok_or_else(|| {
+                    candle_core::Error::msg("missing video grid for Qwen placeholder")
+                })?;
+                video_index += 1;
+                grid
+            };
+            if grid.len() != 3
+                || grid[1] % spatial_merge_size as u32 != 0
+                || grid[2] % spatial_merge_size as u32 != 0
+            {
+                candle_core::bail!("invalid Qwen multimodal grid");
+            }
+            let (grid_t, grid_h, grid_w) = (
+                grid[0] as usize,
+                grid[1] as usize / spatial_merge_size,
+                grid[2] as usize / spatial_merge_size,
+            );
+            let media_len = grid_t * grid_h * grid_w;
+            if media_end - media_start != media_len {
+                candle_core::bail!(
+                    "Qwen placeholder length {} does not match grid output {}",
+                    media_end - media_start,
+                    media_len
+                );
+            }
+            for t in 0..grid_t {
+                for h in 0..grid_h {
+                    for w in 0..grid_w {
+                        positions.push([
+                            next_position + t as i64,
+                            next_position + h as i64,
+                            next_position + w as i64,
+                        ]);
+                    }
+                }
+            }
+            next_position += grid_t.max(grid_h).max(grid_w) as i64;
+            cursor = media_end;
+        }
+
+        if positions.len() != valid.len() {
+            candle_core::bail!("Qwen MRoPE position count mismatch");
+        }
+        let max_position = positions
+            .iter()
+            .flat_map(|position| position.iter())
+            .copied()
+            .max()
+            .unwrap_or(-1);
+        deltas.push(max_position + 1 - valid.len() as i64);
+        for ((original_index, _), position) in valid.iter().zip(positions) {
+            for axis in 0..3 {
+                data[(axis * batch + batch_index) * seq_len + original_index] = position[axis];
+            }
+        }
+    }
+    if image_index != image_grids.len() || video_index != video_grids.len() {
+        candle_core::bail!("Qwen grid count does not match placeholder count");
+    }
+    Ok((
+        Tensor::from_vec(data, (3, batch, seq_len), input_ids.device())?,
+        Tensor::from_vec(deltas, (batch, 1), input_ids.device())?,
+    ))
+}
+
+pub struct QwenVlModel<V> {
     text: Qwen2VLTextModel,
-    vision: Qwen2VLVisionModel,
+    vision: V,
     vision_prefix: &'static str,
     spatial_merge_size: usize,
     image_token_id: u32,
@@ -66,9 +236,9 @@ pub fn insert_current_visual_outputs(
     Ok(())
 }
 
-impl Qwen2VLModel {
+impl<V: QwenVlVision> QwenVlModel<V> {
     pub fn new(
-        cfg: &Config,
+        cfg: &config::QwenVlConfig<V::Config>,
         vb: ShardedVarBuilder,
         is_gptx: bool,
         normal_loading_metadata: NormalLoadingMetadata,
@@ -81,7 +251,7 @@ impl Qwen2VLModel {
                 (vb.pp("visual"), "visual")
             };
         let vision_vb = vision_vb.without_lora_registry();
-        let vision = Qwen2VLVisionModel::new(
+        let vision = V::new(
             &cfg.vision_config,
             vision_vb.set_device(normal_loading_metadata.real_device.clone()),
             &normal_loading_metadata.mapper.get_comm_for(0)?,
@@ -97,7 +267,7 @@ impl Qwen2VLModel {
             text,
             vision,
             vision_prefix,
-            spatial_merge_size: cfg.vision_config.spatial_merge_size,
+            spatial_merge_size: V::spatial_merge_size(&cfg.vision_config),
             image_token_id: cfg.image_token_id,
             video_token_id: cfg.video_token_id,
             encoder_cache: Arc::new(Mutex::new(EncoderCacheManager::new(32))),
@@ -182,140 +352,6 @@ impl Qwen2VLModel {
                 output.ok_or_else(|| candle_core::Error::msg("missing Qwen visual output"))
             })
             .collect()
-    }
-
-    pub fn compute_rope_index(
-        input_ids: &Tensor,
-        image_grid_thw: Option<&Tensor>,
-        video_grid_thw: Option<&Tensor>,
-        attention_mask: &AttentionMask,
-        spatial_merge_size: usize,
-        image_token_id: u32,
-        video_token_id: u32,
-    ) -> Result<(Tensor, Tensor)> {
-        let (batch, seq_len) = input_ids.dims2()?;
-        let input_rows = input_ids.to_vec2::<u32>()?;
-        let masks = match attention_mask {
-            AttentionMask::Custom(mask) => mask.to_dtype(DType::F32)?.to_vec2::<f32>()?,
-            _ => vec![vec![1.; seq_len]; batch],
-        };
-        let image_grids = image_grid_thw
-            .map(Tensor::to_vec2::<u32>)
-            .transpose()?
-            .unwrap_or_default();
-        let video_grids = video_grid_thw
-            .map(Tensor::to_vec2::<u32>)
-            .transpose()?
-            .unwrap_or_default();
-        let mut image_index = 0;
-        let mut video_index = 0;
-        let mut data = vec![1i64; 3 * batch * seq_len];
-        let mut deltas = Vec::with_capacity(batch);
-
-        for batch_index in 0..batch {
-            let valid = input_rows[batch_index]
-                .iter()
-                .zip(&masks[batch_index])
-                .enumerate()
-                .filter_map(|(index, (&token, &mask))| (mask != 0.).then_some((index, token)))
-                .collect::<Vec<_>>();
-            let mut positions = Vec::with_capacity(valid.len());
-            let mut cursor = 0;
-            let mut next_position = 0i64;
-
-            while cursor < valid.len() {
-                let media_start = valid[cursor..]
-                    .iter()
-                    .position(|(_, token)| *token == image_token_id || *token == video_token_id)
-                    .map(|offset| cursor + offset);
-                let Some(media_start) = media_start else {
-                    for offset in 0..valid.len() - cursor {
-                        let position = next_position + offset as i64;
-                        positions.push([position; 3]);
-                    }
-                    break;
-                };
-                for offset in 0..media_start - cursor {
-                    let position = next_position + offset as i64;
-                    positions.push([position; 3]);
-                }
-                next_position += (media_start - cursor) as i64;
-
-                let media_token = valid[media_start].1;
-                let media_end = valid[media_start..]
-                    .iter()
-                    .position(|(_, token)| *token != media_token)
-                    .map_or(valid.len(), |offset| media_start + offset);
-                let grid = if media_token == image_token_id {
-                    let grid = image_grids.get(image_index).ok_or_else(|| {
-                        candle_core::Error::msg("missing image grid for Qwen placeholder")
-                    })?;
-                    image_index += 1;
-                    grid
-                } else {
-                    let grid = video_grids.get(video_index).ok_or_else(|| {
-                        candle_core::Error::msg("missing video grid for Qwen placeholder")
-                    })?;
-                    video_index += 1;
-                    grid
-                };
-                if grid.len() != 3
-                    || grid[1] % spatial_merge_size as u32 != 0
-                    || grid[2] % spatial_merge_size as u32 != 0
-                {
-                    candle_core::bail!("invalid Qwen multimodal grid");
-                }
-                let (grid_t, grid_h, grid_w) = (
-                    grid[0] as usize,
-                    grid[1] as usize / spatial_merge_size,
-                    grid[2] as usize / spatial_merge_size,
-                );
-                let media_len = grid_t * grid_h * grid_w;
-                if media_end - media_start != media_len {
-                    candle_core::bail!(
-                        "Qwen placeholder length {} does not match grid output {}",
-                        media_end - media_start,
-                        media_len
-                    );
-                }
-                for t in 0..grid_t {
-                    for h in 0..grid_h {
-                        for w in 0..grid_w {
-                            positions.push([
-                                next_position + t as i64,
-                                next_position + h as i64,
-                                next_position + w as i64,
-                            ]);
-                        }
-                    }
-                }
-                next_position += grid_t.max(grid_h).max(grid_w) as i64;
-                cursor = media_end;
-            }
-
-            if positions.len() != valid.len() {
-                candle_core::bail!("Qwen MRoPE position count mismatch");
-            }
-            let max_position = positions
-                .iter()
-                .flat_map(|position| position.iter())
-                .copied()
-                .max()
-                .unwrap_or(-1);
-            deltas.push(max_position + 1 - valid.len() as i64);
-            for ((original_index, _), position) in valid.iter().zip(positions) {
-                for axis in 0..3 {
-                    data[(axis * batch + batch_index) * seq_len + original_index] = position[axis];
-                }
-            }
-        }
-        if image_index != image_grids.len() || video_index != video_grids.len() {
-            candle_core::bail!("Qwen grid count does not match placeholder count");
-        }
-        Ok((
-            Tensor::from_vec(data, (3, batch, seq_len), input_ids.device())?,
-            Tensor::from_vec(deltas, (batch, 1), input_ids.device())?,
-        ))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -485,7 +521,7 @@ impl Qwen2VLModel {
             } else {
                 input_ids_full
             };
-            let (position_ids, mrope_position_deltas) = Self::compute_rope_index(
+            let (position_ids, mrope_position_deltas) = compute_rope_index(
                 ropeidx_input_ids,
                 rope_img_grid_thw.as_ref(),
                 rope_vid_grid_thw.as_ref(),
@@ -544,11 +580,11 @@ pub struct Qwen2VLVisionSpecificArgs {
     pub prompt_position_ids: Option<Tensor>,
 }
 
-impl crate::speculative::SpeculativeTargetMixin for Qwen2VLModel {}
+impl<V: QwenVlVision> crate::speculative::SpeculativeTargetMixin for QwenVlModel<V> {}
 
-impl crate::model::BlockDiffusionMixin for Qwen2VLModel {}
+impl<V: QwenVlVision> crate::model::BlockDiffusionMixin for QwenVlModel<V> {}
 
-impl MultimodalModel for Qwen2VLModel {
+impl<V: QwenVlVision> MultimodalModel for QwenVlModel<V> {
     fn supports_packed_prefill(&self) -> bool {
         true
     }
@@ -656,7 +692,7 @@ impl MultimodalModel for Qwen2VLModel {
     }
 }
 
-impl IsqModel for Qwen2VLModel {
+impl<V: QwenVlVision> IsqModel for QwenVlModel<V> {
     fn residual_tensors(&self) -> Vec<(String, Tensor)> {
         let uvb = UnVarBuilder::new();
         uvb.extend(self.text.residual_tensors());
@@ -666,7 +702,7 @@ impl IsqModel for Qwen2VLModel {
     }
 }
 
-impl AnyMoeBaseModelMixin for Qwen2VLModel {}
+impl<V: QwenVlVision> AnyMoeBaseModelMixin for QwenVlModel<V> {}
 
 #[cfg(test)]
 mod tests {
@@ -719,7 +755,7 @@ mod tests {
         )?;
         let image_grid = Tensor::new(&[[1u32, 4, 4]], &Device::Cpu)?;
         let video_grid = Tensor::new(&[[2u32, 2, 4]], &Device::Cpu)?;
-        let (positions, deltas) = Qwen2VLModel::compute_rope_index(
+        let (positions, deltas) = compute_rope_index(
             &input_ids,
             Some(&image_grid),
             Some(&video_grid),
@@ -750,7 +786,7 @@ mod tests {
     fn mrope_rejects_placeholder_grid_mismatch() -> Result<()> {
         let input_ids = Tensor::new(&[[20u32, 20, 20]], &Device::Cpu)?;
         let image_grid = Tensor::new(&[[1u32, 4, 4]], &Device::Cpu)?;
-        let result = Qwen2VLModel::compute_rope_index(
+        let result = compute_rope_index(
             &input_ids,
             Some(&image_grid),
             None,

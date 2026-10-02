@@ -476,7 +476,7 @@ fn prompt_mrope(
             seq.multimodal().rope_vid_grid_thw.as_ref(),
         )?;
         let full_ids = Tensor::new(seq.prompt_position_source_toks(), device)?.unsqueeze(0)?;
-        let (positions, deltas) = super::Qwen2VLModel::compute_rope_index(
+        let (positions, deltas) = super::compute_rope_index(
             &full_ids,
             image_grid.as_ref(),
             video_grid.as_ref(),

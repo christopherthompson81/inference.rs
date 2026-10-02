@@ -1389,3 +1389,58 @@ Also left as found: GLM4-MoE shards KV for tensor parallelism from `hidden_size 
   feature built, `topk_unsorted` and the MoE gather backend's prefill sort always used the custom `ArgSort` op, whose
   CPU path panics, so a CPU-device DS2 group-limited model in a CUDA build crashed. `ArgSortOp` now sends non-CUDA
   tensors to candle's `arg_sort_last_dim`/`sort_last_dim`, and the callers' `cfg(feature = "cuda")` splits are gone.
+
+Issues filed for what Run 47 left as found: #209 (MLA loaders report a Standard KV layout), #210 (GLM4-MoE KV shard
+head dim), #211 (MLA paged layout device condition), #212 (`moe_layer_freq: 0`), #213 (loader sizing drifts), #214
+(GLM4-MoE-Lite ignores `norm_topk_prob`). Writing #212 up showed the models use `is_multiple_of`, which treats only
+layer 0 as MoE at frequency 0, so the loaders and models also disagree there.
+
+## Run 48 - 2026-10-01 (time approximate)
+
+Question: how much of the Qwen-VL family's wrapper and text code is one implementation in two copies?
+
+Measured (`diff` line counts between the pairs):
+- `qwen2vl/mod.rs` vs `qwen2_5_vl/mod.rs`: the wrappers differ only in the vision tower type; the text model and
+  config were already generic over the vision config.
+- `qwen3_vl/mod.rs` vs `qwen3_vl_moe/mod.rs`: the wrapper bodies differ only in the text model type.
+- `qwen3_vl/text.rs` vs `qwen3_vl_moe/text.rs`: 196 lines. The MoE text config is a superset of the dense one, and
+  with no experts the MoE layer selection builds every layer dense. The real differences: the dense model uses
+  `F32RmsNorm` for the layer and final norms where the MoE one uses the fused `RmsNorm`, and the dense MLP casts its
+  output back to the input dtype.
+- `qwen3_5/mod.rs` vs `qwen3_5_moe/mod.rs`: 60 lines, but the dense model carries MTP speculative decoding and the
+  DFlash drafter (text 3135 vs 1005 lines) and the two use different decode MRoPE position helpers. Not a type-level
+  merge; left for its own investigation.
+
+Pinning first: there were no model-level tests for any of these. `inference_nn::testing` now holds the tiny
+random-weight fixtures the DeepSeek-family tests used (moved, not copied; those 27 tests pass unchanged), plus
+`load_synthesized`, which makes up each tensor a loader asks for at the requested shape, seeded by name, with the
+MLX-layout probes answered absent. Two snags: the quantised linear layers check `contains_tensor` before loading,
+so presence is "everything but the listed prefixes", and MoE expert layout detection reads tensor shapes up front,
+so the stacked expert shapes (HF's transposed `[E, H, 2I]` / `[E, I, H]`) are declared. Text-only prefill snapshots
+for Qwen2-VL, Qwen2.5-VL, Qwen3-VL and Qwen3-VL-MoE; the Qwen2 pair give identical logits, as they should with the
+vision tower idle. The Qwen2 snapshots also pass with the pre-refactor wrapper files checked out.
+
+Changes:
+- `QwenVlModel<V: QwenVlVision>`: Qwen2VLModel and Qwen2_5VLModel are aliases; `compute_rope_index` is a free function.
+- One Qwen3-VL text config and text model; a model without experts keeps the F32 norms. Qwen3VLMoEModel is an alias.
+- Lines: the four Qwen-VL modules went from 11122 to 9512; the branch is -2251/+958 including the moved fixtures
+  and the new tests.
+
+Next: the Qwen2-VL and Qwen3-VL input processors (1501 of ~1900 lines differ, so a spec-driven share, not a merge).
+
+Review of the branch (subagent): no behaviour change for real checkpoints of the four models. Acted on:
+- Defaulting the MoE fields turned a missing `num_experts_per_tok` into `top_k = 0` routing and a missing
+  `num_experts` into a misleading dense-weights error, and let the dense loader take a MoE checkpoint (sized and
+  ISQ'd as dense). `TextConfig::check_experts` now runs in both loaders: qwen3vl rejects experts, qwen3vlmoe
+  requires nonzero experts, top-k, expert width and `decoder_sparse_step` (whose 0 already panicked the loader's `%`).
+- The F32 snapshots could not see the norm choice (F32RmsNorm and the fused RmsNorm agree far inside 1e-4 in F32)
+  or vision-side weight names (a text-only prefill never runs the tower). Added BF16 snapshots for dense and MoE,
+  which fail when the norm choice is flipped, a pinned digest of every tensor name each load reads, and a check that
+  every `residual_tensors()` name is one the load read (the names ISQ and UQFF serialise). With the pre-merge Qwen3-VL
+  sources checked out, all of these pass unchanged; only the new validation test fails there, as it should.
+- Narrating comments carried over from the MoE text file removed; the dense file's imatrix note restored as one
+  line; unused `max_window_layers`/`use_sliding_window` dropped; `TextNorm::new` takes the config, not a flag.
+Left: HF uses the F32-then-cast RMSNorm for Qwen3-VL-MoE too, so the fused norm there is a small BF16 rounding
+difference from HF that predates the branch; a real-checkpoint parity run would say whether `TextNorm` can go (#215).
+`inference_nn::testing` stays compiled into normal builds: a dev-dependency feature would build inference-nn and
+everything above it twice (test and non-test feature sets).

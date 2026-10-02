@@ -19,6 +19,8 @@ serde_default_fn!(usize, default_patch_size, 16);
 serde_default_fn!(usize, default_spatial_merge_size, 2);
 serde_default_fn!(usize, default_temporal_patch_size, 2);
 serde_default_fn!(usize, default_num_position_embeddings, 2304);
+serde_default_fn!(usize, default_decoder_sparse_step, 1);
+serde_default_fn!(bool, default_norm_topk_prob, true);
 serde_default_fn!(
     Vec<usize>,
     default_deepstack_visual_indexes,
@@ -75,8 +77,42 @@ pub struct TextConfig {
     pub rope_scaling: MRopeScaling,
     #[serde(default)]
     pub quantization_config: Option<QuantizedConfig>,
+    // MoE fields; Qwen3-VL-MoE sets them, and with no experts every layer is a dense MLP.
     #[serde(default)]
-    pub max_window_layers: usize,
+    pub moe_intermediate_size: usize,
+    #[serde(default)]
+    pub num_experts: usize,
+    #[serde(default)]
+    pub num_experts_per_tok: usize,
+    #[serde(default)]
+    pub mlp_only_layers: Vec<usize>,
+    #[serde(default = "default_decoder_sparse_step")]
+    pub decoder_sparse_step: usize,
+    #[serde(default = "default_norm_topk_prob")]
+    pub norm_topk_prob: bool,
+}
+
+impl TextConfig {
+    /// Errors unless the experts fields fit the loader: Qwen3-VL-MoE needs experts, Qwen3-VL must have none.
+    pub fn check_experts(&self, moe: bool) -> anyhow::Result<()> {
+        if !moe && self.num_experts > 0 {
+            anyhow::bail!(
+                "text_config names {} experts: load it as qwen3vlmoe",
+                self.num_experts
+            );
+        }
+        if moe
+            && (self.num_experts == 0
+                || self.num_experts_per_tok == 0
+                || self.moe_intermediate_size == 0
+                || self.decoder_sparse_step == 0)
+        {
+            anyhow::bail!(
+                "Qwen3-VL-MoE needs nonzero num_experts, num_experts_per_tok, moe_intermediate_size, decoder_sparse_step"
+            );
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

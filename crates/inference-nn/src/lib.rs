@@ -44,6 +44,8 @@ pub mod paged_attention;
 pub mod perf_flags;
 pub mod sampler;
 pub mod speculative;
+#[doc(hidden)]
+pub mod testing;
 pub mod topology;
 pub mod utils;
 pub mod vision;
