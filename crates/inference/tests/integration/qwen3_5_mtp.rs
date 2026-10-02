@@ -11,6 +11,7 @@ use inference::{
 const MODEL_ENV: &str = "INFERENCE_TEST_QWEN3_5_MODEL";
 // A Qwen3.5 or Qwen3.8 GGUF that keeps its `nextn` (MTP) blocks, as llama.cpp's converter writes by default.
 const GGUF_ENV: &str = "INFERENCE_TEST_QWEN3_5_GGUF";
+const GGUF_MAX_SEQS: usize = 2;
 const ON_GPU: bool = cfg!(any(feature = "cuda", feature = "metal"));
 const MAX_LEN: usize = 64;
 const N_PREDICT: usize = 2;
@@ -212,8 +213,10 @@ async fn text_only_builtin_mtp_accepts_drafts_and_keeps_greedy_output() -> anyho
 async fn build_gguf(file: &Path, mtp: bool) -> anyhow::Result<Model> {
     let dir = file.parent().unwrap_or(Path::new("."));
     let name = file.file_name().unwrap_or_default().to_string_lossy();
-    let builder =
-        GgufModelBuilder::new(dir.to_string_lossy(), vec![name]).with_paged_attn(paged()?);
+    // GDN keeps a full recurrent state per sequence slot, so a 27B on one card has room for few
+    let builder = GgufModelBuilder::new(dir.to_string_lossy(), vec![name])
+        .with_paged_attn(paged()?)
+        .with_max_num_seqs(GGUF_MAX_SEQS);
     let builder = if mtp {
         builder.with_builtin_mtp(Some(N_PREDICT))
     } else {

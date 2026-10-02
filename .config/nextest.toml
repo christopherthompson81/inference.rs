@@ -44,6 +44,12 @@ not (
 filter = '(package(inference) & test(/^(paddleocr_vl|qwen3_5_mtp)::/))'
 test-group = 'gpu-model'
 
+# The IQ4_XS 27B takes ~15 GB of VRAM, so it runs alone like FLUX.
+[[profile.cuda.overrides]]
+filter = 'package(inference) & test(/^gguf_iq::/)'
+threads-required = 'num-test-threads'
+priority = 100
+
 # Real-weight FLUX takes ~18 GB of VRAM, so it runs alone, first so the rest of the suite follows it.
 [[profile.cuda.overrides]]
 filter = 'package(inference-server-core) & test(/^flux::/)'

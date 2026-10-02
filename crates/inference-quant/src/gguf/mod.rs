@@ -8,8 +8,10 @@ pub mod fast_mmq;
 pub mod fast_mmvq;
 #[cfg(feature = "cuda")]
 mod ffi;
+pub mod kernel;
 #[cfg(all(feature = "cuda", has_marlin_kernels))]
 mod packed_affine;
+pub mod raw;
 mod weight_source;
 
 pub use weight_source::{
@@ -312,12 +314,12 @@ impl GgufMatMul {
 
         // Batch 1-8: use MMVQ (decode kernel)
         if (1..=fast_mmvq::MMVQ_MAX_BATCH).contains(&flat_batch) {
-            return Ok(Some(fast_mmvq::plain(q, a)?));
+            return Ok(Some(fast_mmvq::plain(q.as_ref(), a)?));
         }
 
         // Batch > 8: use MMQ (prompt kernel)
         if flat_batch > fast_mmvq::MMVQ_MAX_BATCH {
-            return Ok(Some(fast_mmq::plain(q, a)?));
+            return Ok(Some(fast_mmq::plain(q.as_ref(), a)?));
         }
 
         Ok(None)

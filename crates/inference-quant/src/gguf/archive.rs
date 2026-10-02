@@ -159,6 +159,14 @@ impl GgufDType {
         }
     }
 
+    /// The type our kernels read this as: Candle's, or one we keep as raw ggml blocks.
+    pub fn gguf_type(self) -> Option<super::kernel::GgufType> {
+        match self.candle_dtype() {
+            Ok(dtype) => Some(dtype.into()),
+            Err(_) => super::kernel::GgufType::raw_from_id(self.0),
+        }
+    }
+
     pub fn candle_dtype(self) -> Result<GgmlDType> {
         let dtype = match self.0 {
             0 => GgmlDType::F32,

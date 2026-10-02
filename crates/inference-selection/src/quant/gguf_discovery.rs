@@ -501,6 +501,9 @@ struct QuantPreferences {
     bit_width: Option<usize>,
 }
 
+// IQ formats our GGUF kernels read; requested by name only, never as a fallback for a bit width
+const SUPPORTED_IQ_QUANTS: &[&str] = &["IQ4_NL", "IQ4_XS"];
+
 fn quant_preferences(requested: &str) -> Result<QuantPreferences> {
     let lowered = requested.trim().to_ascii_lowercase();
     if lowered.is_empty() {
@@ -509,8 +512,16 @@ fn quant_preferences(requested: &str) -> Result<QuantPreferences> {
     if lowered == "auto" {
         bail!("`quant = auto` does not select a GGUF artifact; choose a bit width or quant name");
     }
-    if is_iq_quant(&normalize_label(&lowered)) {
-        bail!("IQ GGUF formats are not supported; choose a supported Q/K quant");
+    let normalized = normalize_label(&lowered);
+    let family = normalized.strip_prefix("UD").unwrap_or(&normalized);
+    let supported = SUPPORTED_IQ_QUANTS
+        .iter()
+        .any(|quant| normalize_label(quant) == family);
+    if is_iq_quant(&normalized) && !supported {
+        bail!(
+            "IQ GGUF format `{requested}` is not supported; the supported IQ quants are {}",
+            SUPPORTED_IQ_QUANTS.join(", ")
+        );
     }
     if lowered.chars().all(|ch| ch.is_ascii_digit())
         && !NUMERIC_QUANT_LEVELS.contains(&lowered.as_str())
@@ -784,19 +795,24 @@ mod tests {
     }
 
     #[test]
-    fn explicit_iq_is_rejected_and_ud_names_do_not_cross_families() {
+    fn explicit_iq_resolves_only_when_supported_and_ud_names_do_not_cross_families() {
         let listing = files(&[
+            "model-IQ3_XXS.gguf",
             "model-IQ4_NL.gguf",
             "model-IQ4_XS.gguf",
             "model-Q4_K_M.gguf",
             "model-UD-Q4_K_XL.gguf",
         ]);
-        let error = resolve_gguf_quant(&listing, "iq4_xs").unwrap_err();
-        assert!(
-            error
-                .to_string()
-                .contains("IQ GGUF formats are not supported")
+        assert_eq!(
+            resolve_gguf_quant(&listing, "iq4_xs").unwrap().label,
+            "IQ4_XS"
         );
+        assert_eq!(
+            resolve_gguf_quant(&listing, "iq4_nl").unwrap().label,
+            "IQ4_NL"
+        );
+        let error = resolve_gguf_quant(&listing, "iq3_xxs").unwrap_err();
+        assert!(error.to_string().contains("is not supported"), "{error}");
         assert_eq!(
             resolve_gguf_quant(&listing, "ud-q4_k_xl").unwrap().label,
             "UD-Q4_K_XL"

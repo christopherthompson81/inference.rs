@@ -10,9 +10,10 @@ use candle_core::cuda::cudarc::driver::{
 };
 use candle_core::cuda_backend::CudaDType;
 use candle_core::{
-    CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor,
-    quantized::{GgmlDType, QTensor},
+    CudaDevice, CudaStorage, DType, Device, Result, Shape, Storage, Tensor, quantized::QTensor,
 };
+
+use super::kernel::{GgufType, KernelWeight};
 
 use super::ffi;
 use crate::{
@@ -50,29 +51,40 @@ fn wrap_cuda_output<T: CudaDType + DeviceRepr>(
 }
 
 /// Quant types supported by MMQ kernels (same as MMVQ).
-pub fn supports(dtype: GgmlDType) -> bool {
+pub fn supports(dtype: impl Into<GgufType>) -> bool {
+    let dtype = dtype.into();
     matches!(
         dtype,
-        GgmlDType::Q4_0
-            | GgmlDType::Q4_1
-            | GgmlDType::Q5_0
-            | GgmlDType::Q5_1
-            | GgmlDType::Q8_0
-            | GgmlDType::Q2K
-            | GgmlDType::Q3K
-            | GgmlDType::Q4K
-            | GgmlDType::Q5K
-            | GgmlDType::Q6K
+        GgufType::Q4_0
+            | GgufType::Q4_1
+            | GgufType::Q5_0
+            | GgufType::Q5_1
+            | GgufType::Q8_0
+            | GgufType::Q2K
+            | GgufType::Q3K
+            | GgufType::Q4K
+            | GgufType::Q5K
+            | GgufType::Q6K
+            | GgufType::Iq4Nl
+            | GgufType::Iq4Xs
     )
 }
 
 /// qk (block quantization size) per dtype.
-fn qk_for(dtype: GgmlDType) -> usize {
+fn qk_for(dtype: GgufType) -> usize {
     match dtype {
-        GgmlDType::Q4_0 | GgmlDType::Q4_1 | GgmlDType::Q5_0 | GgmlDType::Q5_1 | GgmlDType::Q8_0 => {
-            32
-        }
-        GgmlDType::Q2K | GgmlDType::Q3K | GgmlDType::Q4K | GgmlDType::Q5K | GgmlDType::Q6K => 256,
+        GgufType::Q4_0
+        | GgufType::Q4_1
+        | GgufType::Q5_0
+        | GgufType::Q5_1
+        | GgufType::Q8_0
+        | GgufType::Iq4Nl => 32,
+        GgufType::Q2K
+        | GgufType::Q3K
+        | GgufType::Q4K
+        | GgufType::Q5K
+        | GgufType::Q6K
+        | GgufType::Iq4Xs => 256,
         _ => unreachable!(),
     }
 }
@@ -85,16 +97,16 @@ enum DsLayout {
     D2S6,
 }
 
-fn ds_layout_for(dtype: GgmlDType) -> DsLayout {
+fn ds_layout_for(dtype: GgufType) -> DsLayout {
     match dtype {
-        GgmlDType::Q4_0 | GgmlDType::Q4_1 => DsLayout::DS4,
-        GgmlDType::Q5_0 => DsLayout::D4,
-        GgmlDType::Q5_1 => DsLayout::DS4,
-        GgmlDType::Q8_0 => DsLayout::D4,
-        GgmlDType::Q2K => DsLayout::D2S6,
-        GgmlDType::Q3K => DsLayout::D4,
-        GgmlDType::Q4K | GgmlDType::Q5K => DsLayout::DS4,
-        GgmlDType::Q6K => DsLayout::D4,
+        GgufType::Q4_0 | GgufType::Q4_1 => DsLayout::DS4,
+        GgufType::Q5_0 => DsLayout::D4,
+        GgufType::Q5_1 => DsLayout::DS4,
+        GgufType::Q8_0 => DsLayout::D4,
+        GgufType::Q2K => DsLayout::D2S6,
+        GgufType::Q3K => DsLayout::D4,
+        GgufType::Q4K | GgufType::Q5K => DsLayout::DS4,
+        GgufType::Q6K | GgufType::Iq4Nl | GgufType::Iq4Xs => DsLayout::D4,
         _ => unreachable!(),
     }
 }
@@ -205,35 +217,37 @@ type MmqMoeLauncher = unsafe extern "C" fn(
     stream: *mut std::ffi::c_void,
 );
 
-fn mmq_launcher(dtype: GgmlDType) -> Option<MmqLauncher> {
+fn mmq_launcher(dtype: GgufType) -> Option<MmqLauncher> {
     let f: MmqLauncher = match dtype {
-        GgmlDType::Q4_0 => ffi::launch_mmq_gguf_q4_0,
-        GgmlDType::Q4_1 => ffi::launch_mmq_gguf_q4_1,
-        GgmlDType::Q5_0 => ffi::launch_mmq_gguf_q5_0,
-        GgmlDType::Q5_1 => ffi::launch_mmq_gguf_q5_1,
-        GgmlDType::Q8_0 => ffi::launch_mmq_gguf_q8_0,
-        GgmlDType::Q2K => ffi::launch_mmq_gguf_q2_k,
-        GgmlDType::Q3K => ffi::launch_mmq_gguf_q3_k,
-        GgmlDType::Q4K => ffi::launch_mmq_gguf_q4_k,
-        GgmlDType::Q5K => ffi::launch_mmq_gguf_q5_k,
-        GgmlDType::Q6K => ffi::launch_mmq_gguf_q6_k,
+        GgufType::Q4_0 => ffi::launch_mmq_gguf_q4_0,
+        GgufType::Q4_1 => ffi::launch_mmq_gguf_q4_1,
+        GgufType::Q5_0 => ffi::launch_mmq_gguf_q5_0,
+        GgufType::Q5_1 => ffi::launch_mmq_gguf_q5_1,
+        GgufType::Q8_0 => ffi::launch_mmq_gguf_q8_0,
+        GgufType::Q2K => ffi::launch_mmq_gguf_q2_k,
+        GgufType::Q3K => ffi::launch_mmq_gguf_q3_k,
+        GgufType::Q4K => ffi::launch_mmq_gguf_q4_k,
+        GgufType::Q5K => ffi::launch_mmq_gguf_q5_k,
+        GgufType::Q6K => ffi::launch_mmq_gguf_q6_k,
+        GgufType::Iq4Nl => ffi::launch_mmq_gguf_iq4_nl,
+        GgufType::Iq4Xs => ffi::launch_mmq_gguf_iq4_xs,
         _ => return None,
     };
     Some(f)
 }
 
-fn mmq_moe_launcher(dtype: GgmlDType) -> Option<MmqMoeLauncher> {
+fn mmq_moe_launcher(dtype: GgufType) -> Option<MmqMoeLauncher> {
     let f: MmqMoeLauncher = match dtype {
-        GgmlDType::Q4_0 => ffi::launch_mmq_gguf_q4_0_moe,
-        GgmlDType::Q4_1 => ffi::launch_mmq_gguf_q4_1_moe,
-        GgmlDType::Q5_0 => ffi::launch_mmq_gguf_q5_0_moe,
-        GgmlDType::Q5_1 => ffi::launch_mmq_gguf_q5_1_moe,
-        GgmlDType::Q8_0 => ffi::launch_mmq_gguf_q8_0_moe,
-        GgmlDType::Q2K => ffi::launch_mmq_gguf_q2_k_moe,
-        GgmlDType::Q3K => ffi::launch_mmq_gguf_q3_k_moe,
-        GgmlDType::Q4K => ffi::launch_mmq_gguf_q4_k_moe,
-        GgmlDType::Q5K => ffi::launch_mmq_gguf_q5_k_moe,
-        GgmlDType::Q6K => ffi::launch_mmq_gguf_q6_k_moe,
+        GgufType::Q4_0 => ffi::launch_mmq_gguf_q4_0_moe,
+        GgufType::Q4_1 => ffi::launch_mmq_gguf_q4_1_moe,
+        GgufType::Q5_0 => ffi::launch_mmq_gguf_q5_0_moe,
+        GgufType::Q5_1 => ffi::launch_mmq_gguf_q5_1_moe,
+        GgufType::Q8_0 => ffi::launch_mmq_gguf_q8_0_moe,
+        GgufType::Q2K => ffi::launch_mmq_gguf_q2_k_moe,
+        GgufType::Q3K => ffi::launch_mmq_gguf_q3_k_moe,
+        GgufType::Q4K => ffi::launch_mmq_gguf_q4_k_moe,
+        GgufType::Q5K => ffi::launch_mmq_gguf_q5_k_moe,
+        GgufType::Q6K => ffi::launch_mmq_gguf_q6_k_moe,
         _ => return None,
     };
     Some(f)
@@ -367,8 +381,8 @@ fn workspace_ensure<'a>(
     Ok(WorkspaceGuard { slot, stream })
 }
 
-struct DenseMmqRun<'a> {
-    weights: &'a [&'a QTensor],
+struct DenseMmqRun<'a, W: KernelWeight + ?Sized> {
+    weights: &'a [&'a W],
     xs: &'a Tensor,
     dev: &'a CudaDevice,
     stream: &'a CudaStream,
@@ -384,7 +398,7 @@ struct DenseMmqRun<'a> {
     type_x: i32,
 }
 
-impl DenseMmqRun<'_> {
+impl<W: KernelWeight + ?Sized> DenseMmqRun<'_, W> {
     fn launch<T: CudaDType + DeviceRepr>(
         &self,
         xs_slice: &CudaSlice<T>,
@@ -412,8 +426,8 @@ impl DenseMmqRun<'_> {
 
         let mut outputs = Vec::with_capacity(self.weights.len());
         for weight in self.weights {
-            let (nrows, _) = weight.shape().dims2()?;
-            let (weight_ptr, _weight_guard) = weight.device_ptr_with_guard(self.stream)?;
+            let (nrows, _) = weight.kernel_shape().dims2()?;
+            let (weight_ptr, _weight_guard) = weight.kernel_ptr(self.stream)?;
             let mut out = unsafe { self.dev.alloc::<T>(nrows * self.batch_size)? };
             {
                 let (out_ptr, _out_guard) = slice_ptr_mut_on_stream(&mut out, 0, self.stream);
@@ -525,36 +539,36 @@ impl DenseGluDownRun<'_> {
     }
 }
 
-fn shared_lhs(weights: &[&QTensor], xs: &Tensor) -> Result<Vec<Tensor>> {
+fn shared_lhs<W: KernelWeight + ?Sized>(weights: &[&W], xs: &Tensor) -> Result<Vec<Tensor>> {
     let Some(first) = weights.first() else {
         candle_core::bail!("fast_mmq shared_lhs: at least one weight is required");
     };
-    let dtype = first.dtype();
+    let dtype = first.gguf_type();
     if !supports(dtype) {
         candle_core::bail!("fast_mmq shared_lhs: unsupported quant dtype {dtype:?}");
     }
-    let Device::Cuda(dev) = first.device() else {
+    let Device::Cuda(dev) = first.kernel_device() else {
         candle_core::bail!("fast_mmq shared_lhs: weights must live on CUDA");
     };
-    let (_, ncols) = first.shape().dims2()?;
+    let (_, ncols) = first.kernel_shape().dims2()?;
     for weight in &weights[1..] {
-        if weight.dtype() != dtype {
+        if weight.gguf_type() != dtype {
             candle_core::bail!("fast_mmq shared_lhs: weight dtype mismatch");
         }
-        let Device::Cuda(weight_dev) = weight.device() else {
+        let Device::Cuda(weight_dev) = weight.kernel_device() else {
             candle_core::bail!("fast_mmq shared_lhs: weights must live on CUDA");
         };
         if weight_dev.id() != dev.id() {
             candle_core::bail!("fast_mmq shared_lhs: weights are on different CUDA devices");
         }
-        let (_, weight_ncols) = weight.shape().dims2()?;
+        let (_, weight_ncols) = weight.kernel_shape().dims2()?;
         if weight_ncols != ncols {
             candle_core::bail!(
                 "fast_mmq shared_lhs: weight ncols mismatch {ncols} vs {weight_ncols}"
             );
         }
     }
-    if !xs.device().same_device(&first.device()) {
+    if !xs.device().same_device(&first.kernel_device()) {
         candle_core::bail!("fast_mmq shared_lhs: input and weights are on different devices");
     }
 
@@ -640,7 +654,7 @@ fn down_from_glu(
     up: &Tensor,
     activation: GluActivationType,
 ) -> Result<Tensor> {
-    let dtype = down.dtype();
+    let dtype = down.gguf_type();
     if !supports(dtype) {
         candle_core::bail!("fast_mmq down_from_glu: unsupported quant dtype {dtype:?}");
     }
@@ -759,7 +773,7 @@ fn down_from_glu(
 }
 
 /// Compute one GGUF-quantized projection while preserving the input dtype.
-pub fn plain(w: &QTensor, xs: &Tensor) -> Result<Tensor> {
+pub fn plain<W: KernelWeight + ?Sized>(w: &W, xs: &Tensor) -> Result<Tensor> {
     let mut outputs = shared_lhs(&[w], xs)?;
     Ok(outputs.pop().expect("one weight produces one output"))
 }
@@ -836,7 +850,7 @@ pub fn grouped(
     num_experts: usize,
     dev: &CudaDevice,
 ) -> Result<Tensor> {
-    let dtype = weight.dtype();
+    let dtype = weight.gguf_type();
     if !supports(dtype) {
         candle_core::bail!("fast_mmq grouped: unsupported quant dtype {dtype:?}");
     }
@@ -1037,7 +1051,7 @@ fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
         activation,
         dev,
     } = run;
-    let dtype = weight.dtype();
+    let dtype = weight.gguf_type();
     if !supports(dtype) {
         candle_core::bail!("fast_mmq grouped_from_glu_pair: unsupported quant dtype {dtype:?}");
     }
@@ -1299,12 +1313,12 @@ pub fn grouped_pair_packed(
     num_experts: usize,
     dev: &CudaDevice,
 ) -> Result<Tensor> {
-    let dtype = gate.dtype();
-    if dtype != up.dtype() {
+    let dtype = gate.gguf_type();
+    if dtype != up.gguf_type() {
         candle_core::bail!(
             "fast_mmq grouped_pair requires matching gate/up dtypes, got {:?} and {:?}",
             dtype,
-            up.dtype()
+            up.gguf_type()
         );
     }
     if !supports(dtype) {
