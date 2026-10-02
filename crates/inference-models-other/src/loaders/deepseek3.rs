@@ -13,7 +13,7 @@ impl NormalModelLoader for DeepSeekV3Loader {
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
         let cfg = crate::deepseek3::DeepSeekV3Config::from_json(config)?;
         Ok(Box::new(crate::deepseek3::DeepSeekV3::new(
-            &cfg,
+            &cfg.family(),
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
             normal_loading_metadata,
