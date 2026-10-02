@@ -8,6 +8,7 @@ use super::config::TextConfig;
 use crate::attention::{AttentionMask, Sdpa, SdpaParams};
 use crate::device_map::DeviceMapper;
 use crate::kv_cache::KvCache as EngineKvCache;
+use crate::layers::{Activation, Mlp};
 use crate::paged_attention::{AttentionImplementation, PagedAttention};
 use crate::utils::unvarbuilder::UnVarBuilder;
 use candle_core::{D, DType, Device, Result, Tensor};
@@ -263,7 +264,7 @@ struct DecoderLayer {
     input_layernorm: RmsNorm,
     self_attn: Attention,
     post_attention_layernorm: RmsNorm,
-    mlp: crate::layers::Mlp,
+    mlp: Mlp,
 }
 
 impl DecoderLayer {
@@ -296,12 +297,12 @@ impl DecoderLayer {
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
             )?,
-            mlp: crate::layers::Mlp::new(
+            mlp: Mlp::new(
                 mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq),
                 cfg.hidden_size,
                 cfg.intermediate_size,
                 &cfg.quantization_config,
-                crate::layers::Activation::Silu,
+                Activation::Silu,
                 comm,
             )?,
         })

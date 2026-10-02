@@ -547,8 +547,8 @@ impl AnyMoeBaseModelMixin for Llama {
                         let (dtype, device) = self.blocks[layer].mlp.dtype_device();
                         row.push(Box::new(Mlp::new(
                             vb.pp(layer).pp(&mlp).set_dtype(dtype).set_device(device),
-                            self.blocks[layer].mlp.get_params()[0],
-                            self.blocks[layer].mlp.get_params()[1],
+                            hidden_size,
+                            intermediate_size,
                             &None,
                             Activation::Silu,
                             &self.mapper.get_comm_for(layer)?,

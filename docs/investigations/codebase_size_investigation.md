@@ -1519,9 +1519,23 @@ the X-LoRA copies, which are built on LoRA layers.
 Pinned first: Qwen3-MoE (layer 0 dense, layer 1 MoE, per-expert shapes declared) and LLaVA 1.5 got synthesized
 prefill snapshots plus name digests; the Qwen-VL tests and the PaddleOCR-VL engine tests covered the rest.
 
-Change: five of the six now use the shared Mlp (MLlama's takes a `candle_nn::Activation`, so it stays). The shared
-forward goes through `quantized_ffn`, which adds the fused CUDA/Metal gate-up kernels and a CPU shared-LHS gemv, but
-on CPU in F32 prefill it reduces to the same `mul_and_act`: every pin, F32 and BF16, is unchanged. Two local quirks
-went with the copies: Qwen2-VL/Qwen3-VL cast the MLP output back to the input dtype (a no-op, since the projections
-return it), and LLaVA's AnyMoE expert path now passes its SiLU and no quantization config explicitly, as before.
-Lines: the model code is -350/+37.
+Change: five of the six now use the shared Mlp (MLlama's takes a `candle_nn::Activation`, so it stays). LLaVA's
+AnyMoE expert path passes its SiLU and no quantization config explicitly, as before. Lines: the model code is
+-350/+37. Every pin, F32 and BF16, is unchanged, and the `--cuda` run's real-checkpoint PaddleOCR-VL checks
+(greedy ids against transformers, ISQ Q8_0 OCR text) pass.
+
+Review of the branch (subagent), acted on:
+- Which forward runs: for unquantized loads with no immediate ISQ or weight source, `ColumnParallelLayer::new_packed`
+  succeeds and the gate/up run as one packed matmul into `split_mul_and_act`/`fused_split_glu`; `quantized_ffn`
+  (fused CUDA/Metal gate-up, CPU shared-LHS gemv) only runs when packing is declined (immediate ISQ, UQFF or another
+  weight source, GPTQ/AWQ, bias). Prequantized block-FP8 checkpoints now get the packed BlockwiseFp8 gate/up.
+  PaddleOCR-VL alone did `silu(gate) * up` with two roundings, so its BF16 numerics moved by ulps; the GPU parity
+  check above still passes.
+- A fix this brings: master's Qwen3-MoE dense MLP built `up_proj` row-parallel and `down_proj` column-parallel
+  (swapped), so tensor-parallel loads with dense layers (`mlp_only_layers`, `decoder_sparse_step > 1`) sharded them
+  on the wrong axes. The shared Mlp shards them correctly; single-rank loads are unchanged.
+- The dropped dtype cast in Qwen2-VL/Qwen3-VL was not always a no-op: on sm_89+ `FP8Linear`'s cuBLASLt path returns
+  BF16 whatever the activation dtype, so an F16 model with F8E4M3 ISQ on its MLP would hand BF16 to the residual
+  add. Fixed at the source: that path now returns the activation dtype, as the dequantize path and every other
+  QuantMethod do. This machine is sm_86, where the path never runs; the test for it is `#[ignore]`d for sm_89+.
+- Style: `Mlp` imported where it was spelled out; LLaVA's AnyMoE construction reuses its size locals.

@@ -25,7 +25,8 @@ use crate::{
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
-        self, Activation, CausalMasker, RmsNorm, RotaryEmbedding, embedding_with_legacy_tied_uqff,
+        self, Activation, CausalMasker, Mlp, RmsNorm, RotaryEmbedding,
+        embedding_with_legacy_tied_uqff,
     },
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     serde_default_fn,
@@ -339,7 +340,7 @@ impl MoeMlp {
 
 enum MoeOrMlp {
     Moe(MoeMlp),
-    Mlp(crate::layers::Mlp),
+    Mlp(Mlp),
 }
 
 impl MoeOrMlp {
@@ -393,7 +394,7 @@ impl DecoderLayer {
 
             MoeOrMlp::Moe(MoeMlp::new(cfg, vb, layer_device, comm, loading_isq)?)
         } else {
-            MoeOrMlp::Mlp(crate::layers::Mlp::new(
+            MoeOrMlp::Mlp(Mlp::new(
                 mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq),
                 cfg.hidden_size,
                 cfg.intermediate_size,
