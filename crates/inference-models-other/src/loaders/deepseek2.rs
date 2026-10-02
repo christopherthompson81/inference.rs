@@ -14,7 +14,7 @@ impl NormalModelLoader for DeepSeekV2Loader {
         let cfg = crate::deepseek2::DeepSeekV2Config::from_json(config)?;
 
         Ok(Box::new(crate::deepseek2::DeepSeekV2::new(
-            &cfg,
+            &cfg.family(),
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
             normal_loading_metadata,
