@@ -1297,3 +1297,30 @@ Plan: tests first (router goldens per variant; tiny random-weight checkpoints of
 snapshotted logits; a check that every tensor a checkpoint provides is consumed), then a shared router in
 inference-nn, a `deepseek_family` module the four delegate to, shared loader helpers, and the bug fixes last, each
 on its own with its golden updated. Estimated saving about 2.4k lines after the tests.
+
+## Run 45 - 2026-10-01 19:50
+
+Question: lock today's behaviour of the four DeepSeek/GLM4-MoE models before the Run 44 refactor.
+
+Command: `cargo nextest run -p inference-models-other -E 'test(/family_tests/)'` (26 tests; shared fixtures in
+`src/deepseek_family_tests/mod.rs`, one `family_tests` file per model attached with `#[path]`). Router goldens use an
+identity gate so the hidden states are the logits; the non-pinned goldens match a numpy reference to 1e-6. Each
+forward test builds a 2-layer checkpoint (dense layer 0, MoE layer 1, 8 experts, hidden 32) through the model's
+loader, asserts the provided and requested tensor name sets are equal, and snapshots 4 logits plus sum and L2.
+
+Findings:
+- Run 44 was wrong about the group-limited weights: they are 0.0, not 1.0. `1. - &score_mask.ne(0.)?` on a u8
+  tensor does not invert (every element comes out 1), so `masked_fill` zeroes everything and `topk` lands on experts
+  0 and 1 for every token with zero weight: the routed experts contribute nothing in DS2/DS3 group-limited models.
+- CPU eager attention (`run_flash_attn_cpu`) sets `dv = d` from the query head, so any MLA model with
+  `v_head_dim != qk_nope_head_dim + qk_rope_head_dim` (DeepSeek-V2/V3: 128 vs 192) produces
+  rows of the wrong width and fails at `o_proj`. The tiny checkpoints use v_head_dim = 16 to get a forward at all;
+  `forward_narrow_v_head_errors_on_cpu` pins the failure.
+- The split `k_b_proj`/`v_b_proj` path only works with 3-D (GGUF-bound) weights. 2-D safetensors k_b/v_b load (the
+  names are consumed) and then fail in `expanded_split_weights` with "unexpected rank"; pinned per MLA model. The
+  absorbed path would also hit the CPU `dv = d` issue (q is kv_lora + rope wide, v is kv_lora wide).
+- GLM4-MoE and Lite build the shared expert at `moe_intermediate_size` regardless of `n_shared_experts`; the tests
+  use n_shared_experts = 2 so a fix to multiply would show up as a coverage failure.
+
+Not covered: paged attention, the CUDA MLA decode/cache paths, yarn rope scaling, tied embeddings, and the GGUF
+split-weight load; the forward tests are CPU F32 eager only.

@@ -1115,3 +1115,7 @@ impl NormalModel for DeepSeekV2 {
 }
 
 impl AnyMoeBaseModelMixin for DeepSeekV2 {}
+
+#[cfg(test)]
+#[path = "deepseek_family_tests/deepseek2.rs"]
+mod family_tests;

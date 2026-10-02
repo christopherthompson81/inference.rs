@@ -953,3 +953,7 @@ impl NormalModel for Glm4Moe {
 }
 
 impl AnyMoeBaseModelMixin for Glm4Moe {}
+
+#[cfg(test)]
+#[path = "deepseek_family_tests/glm4_moe.rs"]
+mod family_tests;

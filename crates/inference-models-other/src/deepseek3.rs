@@ -1211,3 +1211,7 @@ mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "deepseek_family_tests/deepseek3.rs"]
+mod family_tests;
