@@ -292,6 +292,24 @@ macro_rules! load_options_methods {
             self
         }
 
+        /// Most tokens one scheduler step batches across sequences.
+        pub fn with_max_num_batched_tokens(mut self, tokens: usize) -> Self {
+            self.options.runtime.max_num_batched_tokens = Some(tokens);
+            self
+        }
+
+        /// Longest prompt chunk one prefill step takes; longer prompts prefill in chunks.
+        pub fn with_max_prefill_chunk_tokens(mut self, tokens: usize) -> Self {
+            self.options.runtime.max_prefill_chunk_tokens = Some(tokens);
+            self
+        }
+
+        /// Decode steps the scheduler runs before admitting a waiting prefill.
+        pub fn with_max_decode_steps_before_prefill(mut self, steps: usize) -> Self {
+            self.options.runtime.max_decode_steps_before_prefill = Some(steps);
+            self
+        }
+
         pub fn with_hf_config_overrides(mut self, overrides: $crate::load::Overrides) -> Self {
             self.options.runtime.hf_config_overrides = Some(overrides);
             self

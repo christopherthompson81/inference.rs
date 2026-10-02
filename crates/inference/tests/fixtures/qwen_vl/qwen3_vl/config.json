@@ -12,8 +12,8 @@
   "quantization_config": null,
   "text_config": {
     "vocab_size": 265,
-    "hidden_size": 32,
-    "intermediate_size": 64,
+    "hidden_size": 128,
+    "intermediate_size": 256,
     "num_hidden_layers": 2,
     "num_attention_heads": 2,
     "num_key_value_heads": 1,
@@ -23,19 +23,19 @@
     "rope_theta": 10000.0,
     "sliding_window": null,
     "tie_word_embeddings": false,
-    "head_dim": 16,
+    "head_dim": 64,
     "rope_scaling": {
       "mrope_section": [
-        2,
-        3,
-        3
+        8,
+        12,
+        12
       ]
     }
   },
   "vision_config": {
     "depth": 2,
     "hidden_size": 32,
-    "out_hidden_size": 32,
+    "out_hidden_size": 128,
     "hidden_act": "gelu_pytorch_tanh",
     "intermediate_size": 64,
     "num_heads": 2,

@@ -258,7 +258,7 @@ impl QwenVlSpec for Qwen3VLImageProcessor {
         )
     }
 
-    fn video_runs_per_item(&self, grid: Option<&Tensor>, _run_count: usize) -> Result<Vec<usize>> {
+    fn video_runs_per_item(&self, grid: Option<&Tensor>) -> Result<Vec<usize>> {
         video_grid_temporal_patches(grid)
     }
 

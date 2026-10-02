@@ -1235,7 +1235,10 @@ impl Qwen2VLRotaryEmbedding {
         q: &mut Tensor,
         k: &mut Tensor,
     ) -> Result<()> {
-        let (q_out, k_out) = apply_rotary_preselected_qk(q, k, cos, sin, true)?;
+        // A batch keeps its (batch, seq, dim) caches after the squeeze; the fused kernels take one row per token.
+        let (batch, _, seq_len, _) = q.dims4()?;
+        let (cos, sin) = flattened_mrope_cache(cos, sin, batch, seq_len, q)?;
+        let (q_out, k_out) = apply_rotary_preselected_qk(q, k, &cos, &sin, true)?;
         *q = q_out;
         *k = k_out;
         Ok(())

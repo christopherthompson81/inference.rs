@@ -69,9 +69,9 @@ chat_template = """{%- for message in messages -%}
     {{- '<|im_start|>assistant\\n' -}}
 {%- endif -%}
 """
-# head_dim 16, so each MRoPE section list sums to 8.
+# head_dim 64, the smallest the CUDA and Metal paged attention kernels take; each MRoPE section list sums to 32.
 text = {
-    "vocab_size": vocab_size, "hidden_size": 32, "intermediate_size": 64, "num_hidden_layers": 2,
+    "vocab_size": vocab_size, "hidden_size": 128, "intermediate_size": 256, "num_hidden_layers": 2,
     "num_attention_heads": 2, "num_key_value_heads": 1, "hidden_act": "silu", "max_position_embeddings": 4096,
     "rms_norm_eps": 1e-06, "rope_theta": 10000.0, "sliding_window": None, "tie_word_embeddings": False,
 }
@@ -97,9 +97,9 @@ models = {
     "qwen2_vl": {
         "config": {
             "architectures": ["Qwen2VLForConditionalGeneration"], "model_type": "qwen2_vl", **text, **token_ids,
-            "rope_scaling": {"type": "mrope", "mrope_section": [2, 3, 3]}, "quantization_config": None,
+            "rope_scaling": {"type": "mrope", "mrope_section": [8, 12, 12]}, "quantization_config": None,
             "vision_config": {
-                "depth": 2, "embed_dim": 32, "hidden_size": 32, "hidden_act": "quick_gelu", "mlp_ratio": 2.0,
+                "depth": 2, "embed_dim": 32, "hidden_size": 128, "hidden_act": "quick_gelu", "mlp_ratio": 2.0,
                 "num_heads": 2, "in_channels": 3, "patch_size": 14, "spatial_merge_size": 2, "temporal_patch_size": 2,
             },
         },
@@ -110,9 +110,9 @@ models = {
         "config": {
             "architectures": ["Qwen3VLForConditionalGeneration"], "model_type": "qwen3_vl", **token_ids,
             "tie_word_embeddings": False, "quantization_config": None,
-            "text_config": {**text, "head_dim": 16, "rope_scaling": {"mrope_section": [2, 3, 3]}},
+            "text_config": {**text, "head_dim": 64, "rope_scaling": {"mrope_section": [8, 12, 12]}},
             "vision_config": {
-                "depth": 2, "hidden_size": 32, "out_hidden_size": 32, "hidden_act": "gelu_pytorch_tanh",
+                "depth": 2, "hidden_size": 32, "out_hidden_size": 128, "hidden_act": "gelu_pytorch_tanh",
                 "intermediate_size": 64, "num_heads": 2, "in_channels": 3, "patch_size": 16, "spatial_merge_size": 2,
                 "temporal_patch_size": 2, "num_position_embeddings": 64, "deepstack_visual_indexes": [0],
             },
