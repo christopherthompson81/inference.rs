@@ -171,7 +171,13 @@ impl SimpleBackend for Synthesizing {
         let Some(shape) = self.shapes.get(name) else {
             candle_core::bail!("{name} has no shape to synthesize from")
         };
-        self.get(shape.as_slice().into(), name, candle_nn::Init::Const(0.), dtype, dev)
+        self.get(
+            shape.as_slice().into(),
+            name,
+            candle_nn::Init::Const(0.),
+            dtype,
+            dev,
+        )
     }
 
     fn contains_tensor(&self, name: &str) -> bool {
@@ -185,11 +191,12 @@ impl TensorShapes for Synthesizing {
     }
 }
 
-/// Runs `load` over made-up weights where every name exists except under `absent`; returns the model and the names read.
+/// Runs `load` over made-up `dtype` weights where every name exists except under `absent`; returns the names read too.
 /// `shapes` declares the tensors a loader inspects before reading (stacked MoE experts, say).
 pub fn load_synthesized<T>(
     absent: &[&str],
     shapes: HashMap<String, Vec<usize>>,
+    dtype: DType,
     load: impl FnOnce(ShardedVarBuilder) -> Result<T>,
 ) -> Result<(T, BTreeSet<String>)> {
     let backend = Synthesizing {
@@ -199,11 +206,20 @@ pub fn load_synthesized<T>(
     };
     let model = load(ShardedSafeTensors::wrap(
         backend.clone(),
-        DType::F32,
+        dtype,
         Device::Cpu,
     ))?;
     let seen = backend.seen.lock().unwrap().clone();
     Ok((model, seen))
+}
+
+/// Order-independent FNV digest of tensor names, to pin which weights a loader reads.
+pub fn names_digest(names: &BTreeSet<String>) -> u64 {
+    names.iter().fold(FNV_OFFSET, |h, name| {
+        name.bytes()
+            .chain([0])
+            .fold(h, |h, b| (h ^ u64::from(b)).wrapping_mul(FNV_PRIME))
+    })
 }
 
 pub fn metadata() -> NormalLoadingMetadata {
@@ -287,7 +303,7 @@ pub fn assert_snapshot(logits: &Tensor, vocab: usize, expected: &Snapshot) -> Re
     Ok(())
 }
 
-/// Asserts `result` failed with an error whose message names `needle`, so a pinned failure cannot change cause silently.
+/// Asserts `result` failed with an error naming `needle`, so a pinned failure cannot change cause silently.
 pub fn assert_err_contains<T, E: std::fmt::Display>(
     result: std::result::Result<T, E>,
     needle: &str,

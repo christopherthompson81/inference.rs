@@ -33,8 +33,9 @@ enum TextNorm {
 }
 
 impl TextNorm {
-    fn new(f32: bool, size: usize, eps: f64, vb: ShardedVarBuilder) -> Result<Self> {
-        Ok(if f32 {
+    fn new(cfg: &TextConfig, vb: ShardedVarBuilder) -> Result<Self> {
+        let (size, eps) = (cfg.hidden_size, cfg.rms_norm_eps);
+        Ok(if cfg.num_experts == 0 {
             Self::F32(F32RmsNorm::new(size, eps, vb)?)
         } else {
             Self::Fused(RmsNorm::new(size, eps, vb)?)
@@ -60,7 +61,6 @@ impl ToTensors for TextNorm {
     }
 }
 
-// Dense MLP for non-MoE layers
 #[derive(Clone)]
 struct Mlp {
     gate_proj: Arc<dyn QuantMethod>,
@@ -120,7 +120,6 @@ impl Mlp {
     }
 }
 
-/// MoE MLP layer for Qwen3 VL MoE
 struct MoeMlp {
     gate: Linear,
     gate_lora: Option<Arc<inference_quant::LoraSiteHandle>>,
@@ -152,7 +151,6 @@ impl MoeMlp {
             expert_proj_names: crate::moe::ExpertProjNames::DEFAULT,
         };
 
-        // Load experts with automatic backend selection
         let experts = MoEExperts::new(
             &moe_cfg,
             vb,
@@ -389,6 +387,7 @@ impl Attention {
                     Some(flash_params),
                 )?,
                 None => {
+                    // No metadata means an imatrix run over prompts only, so dummy metadata keeps the cache unpopulated
                     let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
                     assert!(!matches!(attention_mask, AttentionMask::None));
                     paged_attn.forward(
@@ -458,7 +457,6 @@ impl DecoderLayer {
             comm,
         )?;
 
-        // Check if this layer should be MoE or dense MLP
         let is_moe = !cfg.mlp_only_layers.contains(&layer_idx)
             && (cfg.num_experts > 0 && (layer_idx + 1).is_multiple_of(cfg.decoder_sparse_step));
 
@@ -480,15 +478,11 @@ impl DecoderLayer {
         };
 
         let input_layernorm = TextNorm::new(
-            cfg.num_experts == 0,
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
+            cfg,
             mapper.set_device(layer_idx, vb.pp("input_layernorm"), false),
         )?;
         let post_attention_layernorm = TextNorm::new(
-            cfg.num_experts == 0,
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
+            cfg,
             mapper.set_device(layer_idx, vb.pp("post_attention_layernorm"), false),
         )?;
         Ok(Self {
@@ -614,12 +608,7 @@ impl Qwen3VLTextModel {
                 normal_loading_metadata.real_device.clone(),
             )
         })?;
-        let norm = TextNorm::new(
-            cfg.num_experts == 0,
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_nm_device(vb_m.pp("norm"), false),
-        )?;
+        let norm = TextNorm::new(cfg, mapper.set_nm_device(vb_m.pp("norm"), false))?;
         let lm_head = if !tie {
             ReplicatedLayer::new(
                 cfg.hidden_size,
@@ -691,7 +680,6 @@ impl Qwen3VLTextModel {
                 ctx.flash_params(),
             )?;
 
-            // Integrate DeepStack visual features when provided.
             if let (Some(visual_pos_masks), Some(deepstack)) =
                 (visual_pos_masks, deepstack_visual_embeds)
                 && i < deepstack.len()
@@ -705,9 +693,7 @@ impl Qwen3VLTextModel {
         ctx.lm_head(&*self.lm_head, &xs)
     }
 
-    /// Matches transformers `_deepstack_process`:
-    ///   hidden_states = hidden_states.clone()
-    ///   hidden_states[visual_pos_masks, :] += visual_embeds
+    /// transformers' `_deepstack_process`: `hidden_states[visual_pos_masks, :] += visual_embeds` on a copy.
     fn deepstack_process(
         &self,
         hidden_states: Tensor,
@@ -722,7 +708,6 @@ impl Qwen3VLTextModel {
         let total = batch * seq;
         let hidden_flat = hidden_states.reshape((total, hidden))?;
 
-        // Get flat boolean mask and find nonzero positions
         let mask_flat: Vec<f32> = visual_pos_masks
             .to_device(device)?
             .to_dtype(DType::F32)?
