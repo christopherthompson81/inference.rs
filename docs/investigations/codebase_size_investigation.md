@@ -1609,3 +1609,27 @@ recomputed each). Acted on:
 - The two test modules in `sizing.rs` merged; the `norms` field documented.
 Expected visible change: small Qwen3 checkpoints (head_dim 128 where hidden/heads is 64 or 80) now plan KV with 128,
 so their pre-load KV budgets grow by 60-100%, matching what the model allocates.
+
+## Run 53 - 2026-10-01 (time approximate)
+
+Question (#210, #222): which models shard K/V for tensor parallelism with a head dim other than the one their K/V
+projections are built with?
+
+Command: every `compute_kv_shard(` call in the model crates, paired with the K projection width in the same
+function. 34 call sites: 9 already pass the projections' head dim; 4 (Llama, SmolLM3, Llama 4, the LLaVA Llama
+stack) build K with `hidden_size / num_attention_heads` too, so they are consistent; 19 pass
+`hidden_size / num_attention_heads` while K is built `num_kv_heads * head_dim` with `head_dim` from the config
+(Gemma, Gemma 2, EmbeddingGemma, Gemma 3n, Mistral and the LLaVA Mistral stack, GLM-4, GLM4-MoE, Qwen3,
+Qwen3-Embedding, Qwen3-MoE, Qwen3-VL, Phi-3.5-MoE, GPT-OSS) or with a local `head_dim` that equals it (Mixtral,
+StarCoder2, Qwen2, Qwen2-VL, Phi-2). Phi-2 also passed `num_attention_heads` as the KV head count.
+
+Finding: `compute_kv_shard` only uses the head dim for `Shard::Offset { offset: kv_shard_id * head_dim }`, the path
+when the world size exceeds the KV heads, so the first group misread real checkpoints there: GPT-OSS (head_dim 64,
+2880/64 = 45), Qwen3-MoE 30B-A3B-style (128 vs 64), Qwen3 0.6B-4B and 32B, Gemma 7B (256 vs 192), Gemma 2 9B (256
+vs 224), Mistral-Nemo-style (128 vs 160), GLM-4.5-Air (128 vs 42).
+
+Change: all 19 now pass the expression their K/V width uses (`head_dim` in scope, `cfg.head_dim` for Qwen3-VL),
+and Phi-2 passes `num_key_value_heads()`. For the second group the value is unchanged. No test covers it: the dummy
+`Comm` reports world size 1 whatever it is built with, and the ring backend needs live peers, so a shard offset
+cannot be exercised on one CPU process; the check is the pairing above plus the build (each `head_dim` is the
+function's own).

@@ -137,11 +137,7 @@ impl Attention {
             comm,
             vb.pp("q_proj"),
         )?;
-        let kv_shard = inference_quant::compute_kv_shard(
-            cfg.num_key_value_heads,
-            cfg.hidden_size / cfg.num_attention_heads,
-            comm,
-        )?;
+        let kv_shard = inference_quant::compute_kv_shard(cfg.num_key_value_heads, head_dim, comm)?;
         let k_proj = ColumnParallelLayer::new_with_shard(
             hidden_sz,
             num_kv_heads * head_dim,
