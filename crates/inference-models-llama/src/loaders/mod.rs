@@ -45,6 +45,8 @@ mod llava_next;
 mod mistral;
 mod mistral3;
 mod mixtral;
+#[cfg(test)]
+mod sizing_tests;
 mod smollm3;
 mod vllama;
 mod vllama4;

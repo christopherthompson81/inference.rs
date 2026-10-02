@@ -234,6 +234,87 @@ pub fn language_model_pack_factors_with_aliases(
     Ok((embedding, head))
 }
 
+/// A decoder layer's MLP, as the device map sizes it.
+#[derive(Clone, Copy, Debug)]
+pub enum MlpShape {
+    /// gate, up and down projections (SwiGLU and friends), stored split or as one `gate_up_proj`.
+    Gated { intermediate_size: usize },
+    /// an up and a down projection (`c_fc`/`c_proj`, `fc1`/`fc2`).
+    Plain {
+        intermediate_size: usize,
+        bias: bool,
+    },
+}
+
+/// One standard decoder layer: hidden-size norms, q/k/v/o attention and an MLP, with the model's own head dim.
+#[derive(Clone, Copy, Debug)]
+pub struct DecoderLayerShape {
+    pub hidden_size: usize,
+    pub num_attention_heads: usize,
+    pub num_key_value_heads: usize,
+    pub head_dim: usize,
+    pub qkv_bias: bool,
+    pub o_bias: bool,
+    pub qk_norm: bool,
+    // hidden-size norms per layer: 2 for pre-attention and pre-MLP, 4 with post-norms (Gemma 2/3)
+    pub norms: usize,
+    pub mlp: MlpShape,
+}
+
+impl DecoderLayerShape {
+    /// Elements of one layer; matrices shrink by `weight_pack_factor`, biases and norms do not.
+    pub fn elems(&self, weight_pack_factor: usize) -> usize {
+        let h = self.hidden_size;
+        let q = self.num_attention_heads * self.head_dim;
+        let kv = self.num_key_value_heads * self.head_dim;
+        // each matrix packs on its own, as the layers are quantized one by one
+        let packed = |rows: usize, cols: usize| rows * cols / weight_pack_factor;
+        let attention = packed(h, q)
+            + 2 * packed(h, kv)
+            + packed(q, h)
+            + bias_if!(self.qkv_bias, q + 2 * kv)
+            + bias_if!(self.o_bias, h)
+            + bias_if!(self.qk_norm, 2 * self.head_dim);
+        let mlp = match self.mlp {
+            MlpShape::Gated { intermediate_size } => 3 * packed(h, intermediate_size),
+            MlpShape::Plain {
+                intermediate_size,
+                bias,
+            } => 2 * packed(h, intermediate_size) + bias_if!(bias, intermediate_size + h),
+        };
+        self.norms * h + attention + mlp
+    }
+
+    pub fn layer_sizes_in_bytes(
+        &self,
+        num_layers: usize,
+        dtype: DType,
+        weight_pack_factor: usize,
+    ) -> Vec<usize> {
+        vec![self.elems(weight_pack_factor) * dtype.size_in_bytes(); num_layers]
+    }
+
+    /// The paged-KV metadata of a model made of these layers, so sizing and KV planning share one head dim.
+    pub fn model_config(
+        &self,
+        num_layers: usize,
+        max_seq_len: usize,
+        sliding_window: Option<usize>,
+    ) -> crate::paged_attention::ModelConfigMetadata {
+        crate::paged_attention::ModelConfigMetadata {
+            max_seq_len,
+            num_layers,
+            hidden_size: self.hidden_size,
+            num_kv_heads: self.num_key_value_heads,
+            num_attn_heads: self.num_attention_heads,
+            sliding_window,
+            k_head_dim: self.head_dim,
+            v_head_dim: self.head_dim,
+            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use candle_core::Device;
@@ -396,5 +477,63 @@ mod tests {
             1
         );
         Ok(())
+    }
+}
+#[cfg(test)]
+mod decoder_layer_tests {
+    use super::*;
+
+    const HIDDEN: usize = 64;
+    const HEADS: usize = 4;
+    const KV_HEADS: usize = 2;
+    const HEAD_DIM: usize = 32;
+    const INTERMEDIATE: usize = 96;
+
+    fn llama_like() -> DecoderLayerShape {
+        DecoderLayerShape {
+            hidden_size: HIDDEN,
+            num_attention_heads: HEADS,
+            num_key_value_heads: KV_HEADS,
+            head_dim: HEAD_DIM,
+            qkv_bias: false,
+            o_bias: false,
+            qk_norm: false,
+            norms: 2,
+            mlp: MlpShape::Gated {
+                intermediate_size: INTERMEDIATE,
+            },
+        }
+    }
+
+    #[test]
+    fn decoder_layer_elems_count_each_tensor_once() {
+        let (q, kv) = (HEADS * HEAD_DIM, KV_HEADS * HEAD_DIM);
+        let matrices = HIDDEN * q * 2 + HIDDEN * kv * 2 + 3 * HIDDEN * INTERMEDIATE;
+        assert_eq!(llama_like().elems(1), 2 * HIDDEN + matrices);
+        assert_eq!(llama_like().elems(2), 2 * HIDDEN + matrices / 2);
+        let biased = DecoderLayerShape {
+            qkv_bias: true,
+            o_bias: true,
+            qk_norm: true,
+            norms: 4,
+            mlp: MlpShape::Plain {
+                intermediate_size: INTERMEDIATE,
+                bias: true,
+            },
+            ..llama_like()
+        };
+        let plain = HIDDEN * q * 2 + HIDDEN * kv * 2 + 2 * HIDDEN * INTERMEDIATE;
+        let extras = (q + 2 * kv) + HIDDEN + 2 * HEAD_DIM + INTERMEDIATE + HIDDEN;
+        assert_eq!(biased.elems(1), 4 * HIDDEN + plain + extras);
+    }
+
+    #[test]
+    fn decoder_model_config_reports_the_layer_head_dim() {
+        let cfg = llama_like().model_config(3, 128, Some(16));
+        assert_eq!((cfg.k_head_dim, cfg.v_head_dim), (HEAD_DIM, HEAD_DIM));
+        assert_eq!(
+            (cfg.num_kv_heads, cfg.num_attn_heads, cfg.num_layers),
+            (KV_HEADS, HEADS, 3)
+        );
     }
 }
