@@ -132,3 +132,46 @@ Result: exit 0, 2401 + 2724 + 1 tests passed, the 27B parity test included (16 s
 
 Not covered: IQ4 MoE expert stacks (rank 3 is rejected), IQ4 on Metal, the other IQ types, and the trellis and `IQ*_K`
 types.
+
+## Run 5 - 2026-10-02 (time approximate)
+
+Question: can the 27B load at the default `max_num_seqs` (32) instead of the tests capping it at 2?
+
+Change: the GDN recurrent pool is sized to the memory left.
+- Before the pool is reserved, `automatic_recurrent_capacity_budget` caps the slot count. It uses the formula the
+  checkpoint-lane budget already used: free or utilization-target memory, counting the current layout as reusable, less
+  the reservations still to come and the KV floor.
+- `HybridCache::fitted_serving_capacity` records the fitted count, and `Engine::new` lowers the scheduler's
+  `max_num_seqs` to it. Without that, the engine would grow the pool back.
+
+First tries, from the logs and temporary prints of the budget against the KV planner's inputs:
+1. Fitted 28; the KV planner then had 48 MB for a 256 MB floor. Missing: the GDN deferred-state storage reserved right
+   after (183 MB, scaling with capacity). Added `SpeculativeTargetMixin::recurrent_decode_deferred_slot_bytes`
+   (6.3 MB/slot here) and `HybridCache::gdn_deferred_state_slot_bytes`, both forwarded by the delegate macro.
+2. Fitted 27, 176 MB for 256. Also added the GGUF affine repack budget the KV planner subtracts (0 in this build), and
+   stopped counting deferred bytes into the reusable current layout.
+3. Plain load OK (27 slots). The MTP load had 249 MB for a 272 MB floor: the estimate left 17 MB of slack, and
+   allocator rounding plus small per-pool tensors are outside `snapshot_bytes`. A binding budget now keeps one slot
+   spare.
+
+Result: at defaults, the plain 27B fits 25 sequences and the MTP build 22, both with the full 4064-token KV. Both
+real-file tests pass without the cap. A unit test pins the measured 27B budget: 27 slots fit, 26 kept.
+
+Not changed:
+- The prefix cache reserves recurrent snapshots up front: 2.68 GB of `future_reserved_bytes` here, for 16 prefix
+  slots. That is a separate trade-off.
+- The paged KV can be F8E4M3 or capped; the recurrent state stays F32.
+
+Run 5 review follow-ups, all fixed:
+- The allocation check counted the current layout as freeable at the peak, but the new layout is allocated beside it.
+  The peak check is now `allocation_available / layout_bytes`; the current layout is counted only for the deferred
+  storage allocated after it is freed.
+- Deferred bytes were the whole model's on every device. `gdn_deferred_state_slot_bytes_by_device` is per device, and
+  the trait now reports the deferred-state spec, not a byte count.
+- Explicit (non-auto) checkpoint lanes fit capacity at that lane count. Auto lanes still fit sequences first, then
+  depth.
+- Only CUDA devices are capped, and the GGUF affine budget applies only on CUDA, as in the KV planner.
+- The lane-adjust log prints the capped count.
+Unit test: measured 27B numbers give 26 slots at one lane and 13 at a fixed two lanes. Full CI: exit 0 (2402 + 2725 + 1).
+31 recurrent tests and the 4
+real-checkpoint tests pass at default `max_num_seqs`.

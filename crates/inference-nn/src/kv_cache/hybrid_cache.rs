@@ -289,6 +289,40 @@ pub struct GdnDeferredStatePool {
 }
 
 impl GdnDeferredStatePool {
+    // (value heads, key head dim, value head dim) of a GDN state, whichever axis order it is stored in
+    fn gdn_dims(
+        state_layout: RecurrentStateLayout,
+        state_dims: &[usize],
+    ) -> Result<(usize, usize, usize)> {
+        match (state_layout, state_dims) {
+            (RecurrentStateLayout::GdnKeyMajor, [heads, key_dim, value_dim])
+            | (RecurrentStateLayout::GdnValueMajor, [heads, value_dim, key_dim]) => {
+                Ok((*heads, *key_dim, *value_dim))
+            }
+            _ => candle_core::bail!("deferred state requires a GDN recurrent state layout"),
+        }
+    }
+
+    /// Bytes one slot takes in a pool over `state_dims`: F32 key, delta and decay rows plus its U32 pending count.
+    fn slot_bytes(
+        state_dims: &[usize],
+        state_layout: RecurrentStateLayout,
+        spec: GdnDeferredStateSpec,
+    ) -> Result<usize> {
+        let (num_v_heads, head_k_dim, head_v_dim) = Self::gdn_dims(state_layout, state_dims)?;
+        let overflow = || candle_core::Error::msg("GDN deferred state slot size overflow");
+        let row_elems = spec
+            .num_k_heads
+            .checked_mul(head_k_dim)
+            .and_then(|k| Some(k + num_v_heads.checked_mul(head_v_dim)? + num_v_heads))
+            .ok_or_else(overflow)?;
+        spec.depth
+            .checked_mul(row_elems)
+            .and_then(|elems| elems.checked_mul(DType::F32.size_in_bytes()))
+            .and_then(|bytes| bytes.checked_add(DType::U32.size_in_bytes()))
+            .ok_or_else(overflow)
+    }
+
     fn new(
         capacity: usize,
         state_dims: &[usize],
@@ -296,15 +330,7 @@ impl GdnDeferredStatePool {
         device: &Device,
         spec: GdnDeferredStateSpec,
     ) -> Result<Self> {
-        let (num_v_heads, head_k_dim, head_v_dim) = match (state_layout, state_dims) {
-            (RecurrentStateLayout::GdnKeyMajor, [heads, key_dim, value_dim]) => {
-                (*heads, *key_dim, *value_dim)
-            }
-            (RecurrentStateLayout::GdnValueMajor, [heads, value_dim, key_dim]) => {
-                (*heads, *key_dim, *value_dim)
-            }
-            _ => candle_core::bail!("deferred state requires a GDN recurrent state layout"),
-        };
+        let (num_v_heads, head_k_dim, head_v_dim) = Self::gdn_dims(state_layout, state_dims)?;
         if spec.num_k_heads == 0
             || spec.depth != crate::cuda::gdn::GDN_DEFERRED_STATE_DEPTH
             || num_v_heads == 0
@@ -1049,6 +1075,8 @@ pub struct HybridCache {
     last_released_sequence_owners: Vec<Option<usize>>,
     recurrent_storage_generation: u64,
     recurrent_storage_locked: bool,
+    // Sequences the load-time reservation found room for, below the requested maximum when memory ran short
+    fitted_serving_capacity: Option<usize>,
     // Scratch slot CUDA graph pad rows write into; allocated on first use, dropped on reset
     graph_pad_slot: Option<usize>,
 }
@@ -1112,6 +1140,7 @@ impl HybridCache {
             last_released_sequence_owners: vec![None; INITIAL_POOL_CAPACITY],
             recurrent_storage_generation: 0,
             recurrent_storage_locked: false,
+            fitted_serving_capacity: None,
             graph_pad_slot: None,
         };
         cache.publish_recurrent_slot_metrics();
@@ -1380,6 +1409,15 @@ impl HybridCache {
         self.cache_device_state_indices();
     }
 
+    pub fn set_fitted_serving_capacity(&mut self, sequences: usize) {
+        self.fitted_serving_capacity = Some(sequences);
+    }
+
+    /// Concurrent sequences the recurrent pools were sized for at load, if a load-time reservation ran.
+    pub fn fitted_serving_capacity(&self) -> Option<usize> {
+        self.fitted_serving_capacity
+    }
+
     /// Slot capacity of the recurrent pools; changes whenever the pool storage is reallocated.
     pub fn recurrent_capacity(&self) -> usize {
         if self
@@ -1644,6 +1682,27 @@ impl HybridCache {
         self.advance_recurrent_storage_generation();
         tracing::info!(storage_bytes, "Reserved GDN speculative transition storage");
         Ok(true)
+    }
+
+    /// Bytes each recurrent slot would add on each device once GDN deferred state is reserved.
+    pub fn gdn_deferred_state_slot_bytes_by_device(
+        &self,
+        spec: GdnDeferredStateSpec,
+    ) -> Result<HashMap<DeviceLocation, usize>> {
+        let mut bytes_by_device: HashMap<DeviceLocation, usize> = HashMap::new();
+        for pool in self
+            .caches
+            .iter()
+            .filter_map(HybridLayerCache::as_recurrent_pool)
+        {
+            let bytes =
+                GdnDeferredStatePool::slot_bytes(&pool.state_dims, pool.state_layout, spec)?;
+            let entry = bytes_by_device.entry(pool.device().location()).or_default();
+            *entry = (*entry).checked_add(bytes).ok_or_else(|| {
+                candle_core::Error::msg("GDN deferred state device size overflow")
+            })?;
+        }
+        Ok(bytes_by_device)
     }
 
     pub fn reserve_gdn_deferred_state(&mut self, spec: GdnDeferredStateSpec) -> Result<bool> {

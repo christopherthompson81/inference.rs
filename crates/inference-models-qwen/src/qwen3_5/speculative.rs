@@ -1017,6 +1017,16 @@ impl SpeculativeTargetMixin for Qwen3_5TextModel {
         Qwen3_5TextModel::disable_recurrent_decode_deferred_storage(self)
     }
 
+    fn recurrent_decode_deferred_state_spec(
+        &self,
+    ) -> Result<Option<crate::kv_cache::GdnDeferredStateSpec>> {
+        if self.has_speculative_proposer() {
+            Ok(None)
+        } else {
+            self.gdn_deferred_state_spec()
+        }
+    }
+
     fn apply_recurrent_speculative_transitions_for_current_batch(&self) -> Result<bool> {
         self.apply_current_recurrent_transitions()
     }
