@@ -23,6 +23,8 @@ pub mod qwen3_moe;
 pub mod qwen3_next;
 pub mod qwen3_vl;
 pub mod qwen3_vl_moe;
+#[cfg(test)]
+mod qwen_vl_tests;
 
 inference_nn::json_config!(
     minicpmo::config::MiniCpmOConfig,

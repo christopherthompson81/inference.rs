@@ -143,6 +143,69 @@ pub fn load_checked<T>(
     Ok(model)
 }
 
+/// A backend that makes up every tensor the model asks for, at the shape it asks, seeded by name.
+#[derive(Clone)]
+struct Synthesizing {
+    absent: Arc<Vec<String>>,
+    shapes: Arc<HashMap<String, Vec<usize>>>,
+    seen: Arc<Mutex<BTreeSet<String>>>,
+}
+
+impl SimpleBackend for Synthesizing {
+    fn get(
+        &self,
+        s: Shape,
+        name: &str,
+        _: candle_nn::Init,
+        dtype: DType,
+        dev: &Device,
+    ) -> candle_core::Result<Tensor> {
+        self.seen.lock().unwrap().insert(name.to_string());
+        fill(name, s.dims())
+            .map_err(candle_core::Error::msg)?
+            .to_dtype(dtype)?
+            .to_device(dev)
+    }
+
+    fn get_unchecked(&self, name: &str, dtype: DType, dev: &Device) -> candle_core::Result<Tensor> {
+        let Some(shape) = self.shapes.get(name) else {
+            candle_core::bail!("{name} has no shape to synthesize from")
+        };
+        self.get(shape.as_slice().into(), name, candle_nn::Init::Const(0.), dtype, dev)
+    }
+
+    fn contains_tensor(&self, name: &str) -> bool {
+        !self.absent.iter().any(|prefix| name.starts_with(prefix))
+    }
+}
+
+impl TensorShapes for Synthesizing {
+    fn tensor_shapes(&self) -> HashMap<String, Vec<usize>> {
+        self.shapes.as_ref().clone()
+    }
+}
+
+/// Runs `load` over made-up weights where every name exists except under `absent`; returns the model and the names read.
+/// `shapes` declares the tensors a loader inspects before reading (stacked MoE experts, say).
+pub fn load_synthesized<T>(
+    absent: &[&str],
+    shapes: HashMap<String, Vec<usize>>,
+    load: impl FnOnce(ShardedVarBuilder) -> Result<T>,
+) -> Result<(T, BTreeSet<String>)> {
+    let backend = Synthesizing {
+        absent: Arc::new(absent.iter().map(|p| p.to_string()).collect()),
+        shapes: Arc::new(shapes),
+        seen: Arc::default(),
+    };
+    let model = load(ShardedSafeTensors::wrap(
+        backend.clone(),
+        DType::F32,
+        Device::Cpu,
+    ))?;
+    let seen = backend.seen.lock().unwrap().clone();
+    Ok((model, seen))
+}
+
 pub fn metadata() -> NormalLoadingMetadata {
     NormalLoadingMetadata {
         mapper: Box::new(DummyDeviceMapper {
