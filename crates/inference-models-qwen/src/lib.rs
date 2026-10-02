@@ -40,7 +40,6 @@ inference_nn::json_config!(
     qwen3::Config,
     qwen3_5::config::Config,
     qwen3_5::config::TextConfig,
-    qwen3_5_moe::config::Config,
     qwen3_embedding::Config,
     qwen3_moe::Config,
     qwen3_next::Config,

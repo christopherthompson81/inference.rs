@@ -32,7 +32,7 @@ impl MultimodalModelLoader for Qwen3_5MoeLoader {
         normal_loading_metadata: NormalLoadingMetadata,
         attention_mechanism: AttentionImplementation,
     ) -> Result<Box<dyn MultimodalModel + Send + Sync>> {
-        let cfg = Qwen3_5MoeConfig::from_json(config)?;
+        let cfg = parse_config(config)?;
         Ok(Box::new(Qwen3_5MoeModel::new(
             &cfg,
             vb,
@@ -42,7 +42,7 @@ impl MultimodalModelLoader for Qwen3_5MoeLoader {
         )?))
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
-        let config = Qwen3_5MoeConfig::from_json(config)?;
+        let config = parse_config(config)?;
         Ok(Box::new(config))
     }
     fn supports_paged_attention(&self, _config: &str) -> bool {
@@ -142,7 +142,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg = Qwen3_5MoeConfig::from_json(config)?;
+        let cfg = parse_config(config)?;
 
         let img_seq_len = {
             let cfg = &cfg.vision_config;
@@ -175,7 +175,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
             anyhow::bail!("Expected multimodal AutoDeviceMapParams for this model!")
         };
 
-        let cfg = Qwen3_5MoeConfig::from_json(config)?;
+        let cfg = parse_config(config)?;
 
         let img_seq_len = {
             let cfg = &cfg.vision_config;
@@ -199,7 +199,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
-        let cfg = Qwen3_5MoeConfig::from_json(config)?;
+        let cfg = parse_config(config)?;
         let tie = cfg.tie_word_embeddings;
         let text_elems = {
             let cfg = &cfg.text_config;
@@ -292,7 +292,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         weight_pack_factor: usize,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
-        let cfg = Qwen3_5MoeConfig::from_json(config)?;
+        let cfg = parse_config(config)?;
         let text_cfg = &cfg.text_config;
         let layer_types = text_cfg.layer_types();
 
@@ -303,7 +303,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
             let post_attention_layernorm = text_cfg.hidden_size;
 
             let attn_elems = match layer_type {
-                crate::qwen3_5_moe::config::LayerType::FullAttention => {
+                crate::qwen3_5::config::LayerType::FullAttention => {
                     let size_in = text_cfg.hidden_size;
                     let size_q = text_cfg.head_dim * text_cfg.num_attention_heads;
                     let size_kv = text_cfg.head_dim * text_cfg.num_key_value_heads;
@@ -315,7 +315,7 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
                     let k_norm = text_cfg.head_dim;
                     q_proj + k_proj + v_proj + o_proj + q_norm + k_norm
                 }
-                crate::qwen3_5_moe::config::LayerType::LinearAttention => {
+                crate::qwen3_5::config::LayerType::LinearAttention => {
                     let hidden = text_cfg.hidden_size;
                     let value_dim = text_cfg.linear_value_dim();
                     let conv_dim = text_cfg.linear_conv_dim();
@@ -375,11 +375,11 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
         Ok(layer_sizes)
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
-        let cfg = Qwen3_5MoeConfig::from_json(config)?;
+        let cfg = parse_config(config)?;
         Ok(cfg.text_config.num_hidden_layers)
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = Qwen3_5MoeConfig::from_json(config)?;
+        let cfg = parse_config(config)?;
         let cfg = &cfg.text_config;
 
         let base = ModelConfigMetadata {
@@ -394,14 +394,9 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
             kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
         };
 
-        let paged_layers = cfg
-            .layer_types()
-            .into_iter()
-            .map(|ty| matches!(ty, crate::qwen3_5_moe::config::LayerType::FullAttention))
-            .collect();
-
+        // no MTP head: the model rejects one for MoE checkpoints
         Ok(Box::new(
-            HybridPagedKvCacheConfig::new(base, paged_layers)
+            HybridPagedKvCacheConfig::new(base, cfg.paged_kv_layers(false))
                 .with_uniform_prefix_prefill_attention_features(Default::default()),
         ))
     }
@@ -409,4 +404,10 @@ impl DeviceMappedModelLoader for Qwen3_5MoeLoader {
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
         Some(vec![NonMappedSubModel::Vision])
     }
+}
+
+fn parse_config(config: &str) -> Result<Qwen3_5MoeConfig> {
+    let cfg = Qwen3_5MoeConfig::from_json(config)?;
+    cfg.text_config.check_experts(true)?;
+    Ok(cfg)
 }

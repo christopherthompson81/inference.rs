@@ -1827,3 +1827,35 @@ Options weighed: (1) one text model generic over its MLP kind, including the MTP
 layer is MoE), with MoE pins first and MoE MTP as its own step: about 1000 lines and MoE gains the fast attention
 paths and MTP, at the cost of changing MoE behaviour with no real-checkpoint check that fits a 24 GB GPU easily;
 (2) move MoE onto the dense attention only (about 150 lines, the fast paths, no MTP); (3) leave it and file the gap.
+
+## Run 60 - 2026-10-02 (time approximate)
+
+Question: does Qwen3.5-MoE run on the dense Qwen3.5 text model and wrapper (option 1 of Run 59 without MoE MTP)
+without moving its prefill pins?
+
+Change: one `TextConfig` (MoE fields default to "no experts", `intermediate_size: Option`, `check_experts(moe)` per
+loader, MoE consistency in `validate`); `qwen3_5/feed_forward.rs` holds `FeedForward::{Dense, Sparse}` with the moved
+`SparseMoeBlock`; `qwen3_5_moe` is a 4-line re-export module. A MoE text model given the MTP flag is a load error.
+
+Command: `cargo nextest run -p inference-models-qwen`.
+- dense F32 pin and MoE F32 pin pass unchanged, both tensor-name digests unchanged.
+- MoE BF16 pin moved: old probes [-1.1015625, -0.6640625, 4.3125, 6.625], sum 32.989548, l2 52.179066; new
+  [-1.09375, -0.671875, 4.3125, 6.625], sum 32.894012, l2 52.16037.
+- bisect 1: feeding the old 3-plane text MRoPE positions instead of the dense 2-D text positions: no change (still the
+  new values). Not the cause.
+- bisect 2: replacing the dense output gate `ops::mul_and_act(gate, y, Sigmoid)` (fused GLU kernel, which on CPU
+  computes sigmoid(gate) * y in f32 and rounds once) with the old `y * sigmoid(gate)` (two BF16 roundings): all three
+  pins pass. That is the whole move; reverted, pin left unedited for review.
+Implication: the move is a rounding change from MoE now running the dense fused output gate, not a routing or
+weight change (F32 is bit-stable within tolerance and names are unchanged).
+Accepted: the BF16 pin is updated with master's values in its comment. The dense model already runs that fused gate
+for dense checkpoints, so MoE now matches dense; HF computes the gate in the model dtype, so neither rounding is
+HF-exact. Differences between the copies and how they went (from the merge):
+- the MoE copy rejected dynamic LoRA on `language_model.model.*` names (its LoRA sites use the HF names, so adapters
+  would silently not match); dense lacked the guard and now has it too.
+- dense paged attention with no metadata and no mask panicked (`assert!`); it now errors, as MoE did.
+- MoE wrote residual tensors under `model.language_model.*` even for `language_model.model.*` checkpoints; dense keeps
+  the checkpoint's prefix, which is what the merge keeps.
+- MoE gains merged QKV, grouped gating, the quantized fused input paths, fused add+norm and the fused output gate, and
+  the speculative-target implementation (built-in MTP excepted); DFlash is allowed.
+Lines: 277 added, 1835 removed. Not run: CUDA and Metal for MoE (the pins are CPU), a real MoE checkpoint, ISQ/UQFF.

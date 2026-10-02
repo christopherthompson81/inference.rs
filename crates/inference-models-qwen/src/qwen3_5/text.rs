@@ -19,6 +19,7 @@ use inference_quant::{
 
 use super::{
     config::{LayerType, TextConfig},
+    feed_forward::FeedForward,
     mtp::Qwen3_5MtpHead,
     packed_gdn::{forward_packed_gdn, packed_gdn_layout},
 };
@@ -37,7 +38,7 @@ use crate::{
         HybridCache, HybridCacheConfig, HybridLayerCache, HybridLayerType, RecurrentLayerConfig,
     },
     layers::masker::{CausalMaskConfig, PastKvLenCache},
-    layers::{self, CausalMasker, GemmaRmsNorm, Mlp, Qwen3VLRotaryEmbedding, Sdpa, YarnRopeConfig},
+    layers::{self, CausalMasker, GemmaRmsNorm, Qwen3VLRotaryEmbedding, Sdpa, YarnRopeConfig},
     model::{ForwardMaskCache, IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     paged_attention::{
         AttentionImplementation, ModelConfigMetadata, PagedAttention, load_fp8_attention_scales,
@@ -365,8 +366,12 @@ impl FullAttention {
                     Some(flash_params),
                 )?,
                 None => {
+                    if matches!(attention_mask, AttentionMask::None) {
+                        candle_core::bail!(
+                            "paged attention without cache metadata needs a prompt attention mask"
+                        );
+                    }
                     let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
-                    assert!(!matches!(attention_mask, AttentionMask::None));
                     paged_attn.forward(
                         &q,
                         &k,
@@ -429,7 +434,7 @@ pub(super) struct DecoderLayer {
     pub(super) layer_impl: LayerImpl,
     pub(super) input_layernorm: GemmaRmsNorm,
     pub(super) post_attention_layernorm: GemmaRmsNorm,
-    mlp: Mlp,
+    mlp: FeedForward,
 }
 
 struct DecoderLayerOutput {
@@ -589,14 +594,7 @@ impl DecoderLayer {
             cfg.rms_norm_eps,
             vb_plain.pp("post_attention_layernorm"),
         )?;
-        let mlp = Mlp::new(
-            vb_quant.pp("mlp"),
-            cfg.hidden_size,
-            cfg.intermediate_size,
-            &cfg.quantization_config,
-            cfg.hidden_act,
-            comm,
-        )?;
+        let mlp = FeedForward::Dense(FeedForward::dense_mlp(cfg, vb_quant.pp("mlp"), comm)?);
         Ok(Self {
             layer_impl: LayerImpl::FullAttention(attn),
             input_layernorm,
@@ -756,6 +754,18 @@ impl DecoderLayer {
 }
 
 // ====================== Text Model ======================
+
+// Dynamic LoRA sites are keyed by the canonical HF names, so an alternate text namespace would never match
+fn validate_text_checkpoint_namespace(vb: &ShardedVarBuilder) -> Result<()> {
+    if layers::contains_tensor_or_uqff(vb, "language_model.model.embed_tokens.weight")
+        && vb.lora_registry().is_some()
+    {
+        candle_core::bail!(
+            "dynamic LoRA for Qwen3.5/3.6 requires canonical `model.language_model.*` checkpoint tensor names; `language_model.model.*` is not supported"
+        );
+    }
+    Ok(())
+}
 
 #[derive(Clone, Copy)]
 enum TextWeightPrefix {
@@ -1199,6 +1209,10 @@ impl Qwen3_5TextModel {
         attention_mechanism: AttentionImplementation,
     ) -> Result<Self> {
         cfg.validate()?;
+        if mtp && cfg.is_moe() {
+            candle_core::bail!("the built-in MTP head is not supported for Qwen3.5 MoE yet");
+        }
+        validate_text_checkpoint_namespace(&vb)?;
         let yarn_rope_config = cfg.yarn_rope_config()?;
         if let Some(yarn) = &yarn_rope_config {
             tracing::info!(
@@ -1335,16 +1349,18 @@ impl Qwen3_5TextModel {
                 ),
             )?;
 
-            let mlp = Mlp::new(
+            let mlp = FeedForward::load(
+                cfg,
                 mapper.set_device(
                     layer_idx,
                     vb_l.pp(layer_idx).pp("mlp"),
                     normal_loading_metadata.loading_isq,
                 ),
-                cfg.hidden_size,
-                cfg.intermediate_size,
-                &cfg.quantization_config,
-                cfg.hidden_act,
+                mapper
+                    .device_for(layer_idx, false)
+                    .cloned()
+                    .unwrap_or_else(|| normal_loading_metadata.real_device.clone()),
+                normal_loading_metadata.loading_isq,
                 &comm,
             )?;
 
@@ -2238,6 +2254,12 @@ impl Qwen3_5TextModel {
             .clone()
     }
 
+    pub(super) fn is_moe(&self) -> bool {
+        self.layers
+            .iter()
+            .any(|layer| matches!(layer.mlp, FeedForward::Sparse(_)))
+    }
+
     pub(super) fn lm_head(&self) -> &Arc<dyn QuantMethod> {
         &self.lm_head
     }
@@ -2694,6 +2716,7 @@ impl IsqModel for Qwen3_5TextModel {
                         .add_tensor("weight", gdn.norm.weight.clone());
                 }
             }
+            layer.mlp.residual_tensors(&uvb_l.pp("mlp"));
         }
         if let Some(mtp) = &self.mtp {
             mtp.residual_tensors(&uvb);
@@ -2850,6 +2873,29 @@ mod tests {
 
     #[cfg(feature = "cuda")]
     use super::SUPPORTS_CUDA_DECODE_GRAPHS;
+
+    #[test]
+    fn dynamic_lora_rejects_alternate_text_checkpoint_namespace() -> candle_core::Result<()> {
+        let vb = inference_quant::ShardedSafeTensors::wrap_with_dummy_regexes(
+            std::collections::HashMap::from([(
+                "language_model.model.embed_tokens.weight".to_string(),
+                Tensor::zeros((1, 1), DType::F32, &Device::Cpu)?,
+            )]),
+            DType::F32,
+            Device::Cpu,
+            None,
+        )
+        .with_lora_registry(std::sync::Arc::new(
+            inference_quant::LoraLayerRegistry::new(),
+        ));
+        let error = super::validate_text_checkpoint_namespace(&vb).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("requires canonical `model.language_model.*`")
+        );
+        Ok(())
+    }
 
     #[test]
     fn gdn_replay_batches_group_by_prefix_and_preserve_row_order() {
