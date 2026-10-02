@@ -79,28 +79,35 @@ fn router_greedy_norm_topk_prob_renormalises_and_skips_scale() -> Result<()> {
 }
 
 #[test]
-fn router_group_limited_greedy() -> Result<()> {
-    // pins current behaviour; see Run 44
-    // the inverted u8 mask is all ones, so every token lands on experts 0 and 1 with zero weight
-    let cfg = json!({"topk_method": "group_limited_greedy", "n_group": 4, "topk_group": 2});
+fn router_group_limited_greedy_picks_within_the_best_group() -> Result<()> {
+    // One group kept: each token's two experts come from its best pair (HF's DeepSeek-V2 values).
+    let cfg = json!({"topk_method": "group_limited_greedy", "n_group": 4, "topk_group": 1});
     let routes = gate(cfg)?.forward(&router_input()?)?;
-    assert_routes(routes, [[(0, 0.0), (1, 0.0)], [(0, 0.0), (1, 0.0)]])
+    assert_routes(
+        routes,
+        [
+            [(0, 0.143_028), (1, 0.956_273)],
+            [(2, 0.204_37), (3, 1.118_709)],
+        ],
+    )
 }
 
 #[test]
-fn router_group_limited_greedy_norm_topk_prob_errors() -> Result<()> {
-    // pins current behaviour; see Run 44
+fn router_group_limited_greedy_norm_topk_prob_renormalises() -> Result<()> {
     let cfg = json!({
         "topk_method": "group_limited_greedy",
         "n_group": 4,
-        "topk_group": 2,
+        "topk_group": 1,
         "norm_topk_prob": true,
     });
-    assert_err_contains(
-        gate(cfg)?.forward(&router_input()?),
-        "shape mismatch in div",
-    );
-    Ok(())
+    let routes = gate(cfg)?.forward(&router_input()?)?;
+    assert_routes(
+        routes,
+        [
+            [(0, 0.130_108), (1, 0.869_892)],
+            [(2, 0.154_465), (3, 0.845_535)],
+        ],
+    )
 }
 
 fn forward_case(q_lora: Option<usize>, split_kv_b: bool, v_dim: usize) -> Result<Tensor> {

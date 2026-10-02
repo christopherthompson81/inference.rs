@@ -1,7 +1,6 @@
 use candle_core::{D, DType, Result, Tensor};
 use inference_quant::ShardedVarBuilder;
 
-use crate::layers::masker::masked_fill;
 use crate::ops::{
     MoeRouterScoreFunction, MoeRouterSelectedWeight, MoeRouterTopKConfig, TopKLastDimOp,
     TopKOutput, moe_router_topk,
@@ -158,8 +157,8 @@ impl GroupedRouter {
                 // (n, topk_group)
                 let group_idx = group_scores.topk_unsorted(cfg.topk_group)?.indices;
                 let score_mask = self.group_score_mask(&group_scores, &group_idx, n)?;
-                // matches the shipped behaviour; Run 44 tracks the fix
-                let tmp_scores = masked_fill(&score_mask, &(1. - &score_mask.ne(0.)?)?, 0.)?;
+                // Experts outside the chosen groups score 0, as HF's `scores.masked_fill(~score_mask, 0.0)`.
+                let tmp_scores = scores.broadcast_mul(&score_mask)?;
                 let TopKOutput { values, indices } = tmp_scores.topk_unsorted(self.top_k)?;
                 (values, indices)
             }
@@ -167,12 +166,7 @@ impl GroupedRouter {
 
         if renormalize {
             let denominator = (topk_weight.sum_keepdim(D::Minus1)? + RENORM_EPS)?;
-            topk_weight = if matches!(cfg.renorm, RouterRenorm::TopkProbSkipsScale { .. }) {
-                // matches the shipped behaviour; Run 44 tracks the fix
-                (topk_weight / denominator)?
-            } else {
-                topk_weight.broadcast_div(&denominator)?
-            };
+            topk_weight = topk_weight.broadcast_div(&denominator)?;
         }
         if !skip_scale {
             topk_weight = (topk_weight * cfg.routed_scaling_factor)?;

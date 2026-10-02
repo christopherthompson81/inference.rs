@@ -97,12 +97,21 @@ fn router_noaux_tc_requires_bias() -> Result<()> {
 }
 
 #[test]
-fn router_group_limited_greedy() -> Result<()> {
-    // pins current behaviour; see Run 44
-    // the inverted u8 mask is all ones, so every token lands on experts 0 and 1 with zero weight
-    let cfg = json!({"topk_method": "group_limited_greedy", "scoring_func": "softmax"});
+fn router_group_limited_greedy_picks_within_the_best_group() -> Result<()> {
+    let cfg = json!({
+        "topk_method": "group_limited_greedy",
+        "scoring_func": "softmax",
+        "n_group": 4,
+        "topk_group": 1,
+    });
     let routes = gate(cfg, false)?.forward(&router_input()?)?;
-    assert_routes(routes, [[(0, 0.0), (1, 0.0)], [(0, 0.0), (1, 0.0)]])
+    assert_routes(
+        routes,
+        [
+            [(0, 0.143_028), (1, 0.956_273)],
+            [(2, 0.204_37), (3, 1.118_709)],
+        ],
+    )
 }
 
 fn forward_case(q_lora: Option<usize>, split_kv_b: bool) -> Result<Tensor> {
