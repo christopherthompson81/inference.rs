@@ -1,11 +1,13 @@
 use std::{collections::HashMap, sync::Arc};
 
-use candle_core::{DType, Device, Error, Result, Shape, Tensor, quantized::GgmlDType};
+use candle_core::{DType, Device, Error, Result, Shape, Tensor};
 use candle_nn::{Linear, var_builder::SimpleBackend};
 
 use super::{
     GgufMatMul,
-    archive::{GgufArchive, GgufEndian, qtensor_from_gguf_data},
+    archive::{GgufArchive, GgufDType, GgufEndian, qtensor_from_gguf_data},
+    kernel::GgufType,
+    raw::{GgufRawMatMul, RawGgufTensor},
 };
 use crate::{
     BiasShard, QuantMethod, QuantMethodConfig, QuantizedWeightSource, Shard, ShardedSafeTensors,
@@ -14,7 +16,7 @@ use crate::{
 };
 
 const DIRECT_GGUF_DTYPES: &str =
-    "F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, and Q2_K through Q8_K";
+    "F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, Q2_K through Q8_K, IQ4_NL, and IQ4_XS";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum GgufTensorBinding {
@@ -274,7 +276,7 @@ pub struct GgufWeightSource {
 }
 
 struct PackedBinding {
-    dtype: GgmlDType,
+    dtype: GgufType,
     dims: Vec<usize>,
     data: Vec<u8>,
 }
@@ -389,8 +391,33 @@ impl GgufWeightSource {
         format!("{}.weight", self.layer_key(key))
     }
 
+    // A tensor Candle cannot hold, as its ggml blocks in little-endian order.
+    fn raw_tensor(&self, name: &str) -> Result<PackedBinding> {
+        let info = self.archive.tensor_info(name)?;
+        if self.archive.shards()[info.shard_index()].endian() != GgufEndian::Little {
+            candle_core::bail!("big-endian GGUF tensor loading is not supported");
+        }
+        Ok(PackedBinding {
+            dtype: quant_type(info.dtype(), name)?,
+            dims: info.shape().to_vec(),
+            data: self.archive.tensor_data(name)?.bytes().to_vec(),
+        })
+    }
+
     fn materialize_binding(&self, binding: &GgufTensorBinding, device: &Device) -> Result<Tensor> {
         match binding {
+            GgufTensorBinding::Tensor(name)
+                if self
+                    .archive
+                    .tensor_info(name)?
+                    .dtype()
+                    .candle_dtype()
+                    .is_err() =>
+            {
+                let raw = self.raw_tensor(name)?;
+                let values = super::raw::dequantize_blocks(raw.dtype, &raw.data)?;
+                Tensor::from_vec(values, raw.dims, &Device::Cpu)?.to_device(device)
+            }
             GgufTensorBinding::Tensor(name) => {
                 let tensor = self.archive.load_qtensor(name, device)?;
                 tensor.dequantize(device)
@@ -542,7 +569,7 @@ impl GgufWeightSource {
             if shard_info.endian() != GgufEndian::Little {
                 candle_core::bail!("big-endian GGUF tensor loading is not supported");
             }
-            let dtype = info.dtype().candle_dtype()?;
+            let dtype = quant_type(info.dtype(), source_name)?;
             let data = self.archive.tensor_data(source_name)?;
             let bytes = slice_blocked_data(
                 data.bytes(),
@@ -554,12 +581,20 @@ impl GgufWeightSource {
                 len,
             )?;
             dims[dim] = len;
-            qtensor_from_gguf_data(dtype, &bytes, dims.clone(), device)?
+            PackedBinding {
+                dtype,
+                dims: dims.clone(),
+                data: bytes,
+            }
+        } else if info.dtype().candle_dtype().is_err() {
+            self.raw_tensor(source_name)?
         } else {
-            self.archive.load_qtensor(source_name, device)?
+            let weight = self.archive.load_qtensor(source_name, device)?;
+            let bias = self.load_bias(key, device, range, dims.len())?;
+            return Ok(Arc::new(GgufMatMul::from_qtensor(weight, bias)));
         };
         let bias = self.load_bias(key, device, range, dims.len())?;
-        Ok(Arc::new(GgufMatMul::from_qtensor(weight, bias)))
+        quant_linear(weight, bias, device)
     }
 
     fn load_structural_linear(
@@ -591,10 +626,8 @@ impl GgufWeightSource {
             )?;
             packed.dims[dim] = len;
         }
-        let rank = packed.dims.len();
-        let weight = qtensor_from_gguf_data(packed.dtype, &packed.data, packed.dims, device)?;
-        let bias = self.load_bias(key, device, range, rank)?;
-        Ok(Some(Arc::new(GgufMatMul::from_qtensor(weight, bias))))
+        let bias = self.load_bias(key, device, range, packed.dims.len())?;
+        quant_linear(packed, bias, device).map(Some)
     }
 
     fn materialize_packed_binding(
@@ -604,10 +637,10 @@ impl GgufWeightSource {
         match binding {
             GgufTensorBinding::Tensor(name) => {
                 let info = self.archive.tensor_info(name)?;
-                let dtype = info.dtype().candle_dtype()?;
                 if matches!(info.dtype().raw(), 0 | 1 | 30) {
                     return Ok(None);
                 }
+                let dtype = quant_type(info.dtype(), name)?;
                 Ok(Some(PackedBinding {
                     dtype,
                     dims: info.shape().to_vec(),
@@ -649,14 +682,14 @@ impl GgufWeightSource {
         }
     }
 
-    fn structural_quant_dtype(&self, binding: &GgufTensorBinding) -> Result<Option<GgmlDType>> {
+    fn structural_quant_dtype(&self, binding: &GgufTensorBinding) -> Result<Option<GgufType>> {
         match binding {
             GgufTensorBinding::Tensor(name) => {
                 let info = self.archive.tensor_info(name)?;
                 if matches!(info.dtype().raw(), 0 | 1 | 30) {
                     Ok(None)
                 } else {
-                    info.dtype().candle_dtype().map(Some)
+                    Ok(info.dtype().gguf_type())
                 }
             }
             GgufTensorBinding::Slice { input, .. } => self.structural_quant_dtype(input),
@@ -978,7 +1011,35 @@ fn concat_packed_bindings(inputs: Vec<PackedBinding>, dim: usize) -> Result<Pack
     Ok(PackedBinding { dtype, dims, data })
 }
 
-fn packed_byte_len(dims: &[usize], dtype: GgmlDType) -> Result<usize> {
+// The ggml type of a quantized source tensor, whether Candle holds it or our raw-block kernels do.
+fn quant_type(dtype: GgufDType, name: &str) -> Result<GgufType> {
+    dtype.gguf_type().ok_or_else(|| {
+        Error::msg(format!(
+            "GGUF tensor `{name}` uses dtype {} ({}), which no GGUF matmul here reads",
+            dtype.name(),
+            dtype.raw()
+        ))
+    })
+}
+
+fn quant_linear(
+    weight: PackedBinding,
+    bias: Option<Tensor>,
+    device: &Device,
+) -> Result<Arc<dyn QuantMethod>> {
+    Ok(match weight.dtype.candle() {
+        Some(dtype) => Arc::new(GgufMatMul::from_qtensor(
+            qtensor_from_gguf_data(dtype, &weight.data, weight.dims, device)?,
+            bias,
+        )),
+        None => Arc::new(GgufRawMatMul::new(
+            RawGgufTensor::new(weight.dtype, &weight.dims, weight.data, device)?,
+            bias,
+        )),
+    })
+}
+
+fn packed_byte_len(dims: &[usize], dtype: GgufType) -> Result<usize> {
     let Some(last) = dims.last() else {
         candle_core::bail!("packed GGUF tensors cannot be scalar");
     };
@@ -1068,7 +1129,7 @@ fn validate_binding_storage(
     match binding {
         GgufTensorBinding::Tensor(name) => {
             let dtype = archive.tensor_info(name)?.dtype();
-            if dtype.candle_dtype().is_err() {
+            if dtype.gguf_type().is_none() {
                 candle_core::bail!(
                     "GGUF tensor `{name}` uses dtype {} ({}) for native binding `{native_name}`; \
                      direct GGUF loading currently supports {DIRECT_GGUF_DTYPES}, while \

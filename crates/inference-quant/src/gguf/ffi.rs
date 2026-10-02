@@ -63,6 +63,44 @@ macro_rules! declare_moe_lora_decode {
     };
 }
 
+macro_rules! declare_mmvq_plain {
+    ($($fn_name:ident),* $(,)?) => {$(
+        pub fn $fn_name(
+            vx: *const c_void,
+            vy: *const c_void,
+            dst: *mut c_void,
+            ncols_x: i32,
+            nrows_x: i32,
+            stride_col_y: i32,
+            stride_col_dst: i32,
+            b_size: i32,
+            stream: *mut c_void,
+        );
+    )*};
+}
+
+macro_rules! declare_mmq {
+    ($($fn_name:ident),* $(,)?) => {$(
+        pub fn $fn_name(
+            tmp_fixup: *mut c_void,
+            x: *const c_void,
+            y: *const c_void,
+            dst: *mut c_void,
+            ncols_x: i64,
+            nrows_x: i64,
+            ncols_y: i64,
+            stride_row_x: i64,
+            stride_col_dst: i64,
+            cc: i32,
+            nsm: i32,
+            smpbo: i64,
+            warp_size: i32,
+            type_dst: i32,
+            stream: *mut c_void,
+        );
+    )*};
+}
+
 macro_rules! declare_mmvq_fused_glu {
     ($fn_name:ident) => {
         pub fn $fn_name(
@@ -1211,6 +1249,15 @@ unsafe extern "C" {
         stream: *mut c_void,
     );
 
+    declare_mmvq_plain!(
+        launch_mmvq_gguf_iq4_nl_bf16_plain,
+        launch_mmvq_gguf_iq4_xs_bf16_plain,
+        launch_mmvq_gguf_iq4_nl_f16_plain,
+        launch_mmvq_gguf_iq4_xs_f16_plain,
+        launch_mmvq_gguf_iq4_nl_f32_plain,
+        launch_mmvq_gguf_iq4_xs_f32_plain,
+    );
+    declare_mmq!(launch_mmq_gguf_iq4_nl, launch_mmq_gguf_iq4_xs);
     declare_mmvq_fused_glu!(launch_mmvq_gguf_q4_0_bf16_fused_glu);
     declare_mmvq_fused_glu!(launch_mmvq_gguf_q4_1_bf16_fused_glu);
     declare_mmvq_fused_glu!(launch_mmvq_gguf_q5_0_bf16_fused_glu);

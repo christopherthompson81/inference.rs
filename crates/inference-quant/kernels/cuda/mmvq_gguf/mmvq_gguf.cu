@@ -991,6 +991,100 @@ static __device__ void mmvq_core_fused_qkv_impl(
   }
 }
 
+// IQ4_NL / IQ4_XS: 4-bit indices into a nonlinear 16-value codebook, from ggml-cuda's vecdotq.cuh.
+#define QK4_NL 32
+#define QR4_NL 2
+#define QI4_NL (QK4_NL / (4 * QR4_NL))
+typedef struct {
+  half d;
+  uint8_t qs[QK4_NL / 2];
+} block_iq4_nl;
+
+#define QR4_XS 2
+#define QI4_XS (QK_K / (4 * QR4_XS))
+typedef struct {
+  half d;
+  uint16_t scales_h;
+  uint8_t scales_l[QK_K / 64];
+  uint8_t qs[QK_K / 2];
+} block_iq4_xs;
+
+static const __device__ int8_t kvalues_iq4nl[16] = {
+    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113};
+
+static __device__ __forceinline__ int get_int_b2(const void *x, const int &i32) {
+  const uint16_t *x16 = (const uint16_t *)x;
+  int x32 = x16[2 * i32 + 0] << 0;
+  x32 |= x16[2 * i32 + 1] << 16;
+  return x32;
+}
+
+static __device__ __forceinline__ int get_int_b4(const void *x, const int &i32) {
+  return ((const int *)x)[i32];
+}
+
+// The bytes of `table` at the eight 4-bit indices in q4: even indices in .x, odd in .y.
+static __device__ __forceinline__ int2 get_int_from_table_16(const int &q4,
+                                                             const int8_t *table) {
+  const uint32_t *table32 = (const uint32_t *)table;
+  uint32_t tmp[2];
+  const uint32_t low_high_selection_indices =
+      (0x32103210 | ((q4 & 0x88888888) >> 1));
+#pragma unroll
+  for (uint32_t i = 0; i < 2; ++i) {
+    const uint32_t shift = 16 * i;
+    const uint32_t low = __byte_perm(table32[0], table32[1], q4 >> shift);
+    const uint32_t high = __byte_perm(table32[2], table32[3], q4 >> shift);
+    tmp[i] = __byte_perm(low, high, low_high_selection_indices >> shift);
+  }
+  return make_int2(__byte_perm(tmp[0], tmp[1], 0x6420),
+                   __byte_perm(tmp[0], tmp[1], 0x7531));
+}
+
+#define VDR_IQ4_NL_Q8_1_MMVQ 2
+
+static __device__ __forceinline__ float
+vec_dot_iq4_nl_q8_1(const void *__restrict__ vbq,
+                    const block_q8_1 *__restrict__ bq8_1, const int &kbx,
+                    const int &iqs) {
+  const block_iq4_nl *bq4 = (const block_iq4_nl *)vbq + kbx;
+  const int *q8 = (const int *)bq8_1->qs + iqs;
+  int sumi = 0;
+#pragma unroll
+  for (int l = 0; l < VDR_IQ4_NL_Q8_1_MMVQ; ++l) {
+    const int aux_q4 = get_int_b2(bq4->qs, iqs + l);
+    const int2 v = get_int_from_table_16(aux_q4, kvalues_iq4nl);
+    sumi = ggml_cuda_dp4a(v.x, q8[l + 0], sumi);
+    sumi = ggml_cuda_dp4a(v.y, q8[l + 4], sumi);
+  }
+  const float d = __half2float(bq4->d) * __low2float(bq8_1->ds);
+  return d * sumi;
+}
+
+#define VDR_IQ4_XS_Q8_1_MMVQ 4
+
+static __device__ __forceinline__ float
+vec_dot_iq4_xs_q8_1(const void *__restrict__ vbq,
+                    const block_q8_1 *__restrict__ bq8_1, const int &kbx,
+                    const int &iqs) {
+  const block_iq4_xs *bq4 = (const block_iq4_xs *)vbq + kbx;
+  int sumi = 0;
+#pragma unroll
+  for (int j = 0; j < 4; ++j) {
+    const int aux_q4 = get_int_b4(bq4->qs, iqs + j);
+    const int2 v = get_int_from_table_16(aux_q4, kvalues_iq4nl);
+    const int u0 = get_int_b4(bq8_1[iqs / 4].qs, j + 0);
+    const int u1 = get_int_b4(bq8_1[iqs / 4].qs, j + 4);
+    sumi = ggml_cuda_dp4a(v.x, u0, sumi);
+    sumi = ggml_cuda_dp4a(v.y, u1, sumi);
+  }
+  const int ls = ((bq4->scales_l[iqs / 8] >> (iqs & 0x04)) & 0x0F) |
+                 (((bq4->scales_h >> (iqs / 2)) & 0x03) << 4);
+  sumi *= ls - 32;
+  const float d = __half2float(bq4->d) * __low2float(bq8_1[iqs / 4].ds);
+  return d * sumi;
+}
+
 // ---------------------------------------------------------------------------
 // Extern-C kernel entry points
 //
@@ -1154,6 +1248,10 @@ MMVQ_PLAIN_BATCH_SET(q5_k, block_q5_K, QK_K, QI5_K, VDR_Q5_K_Q8_1_MMVQ,
                      vec_dot_q5_K_q8_1)
 MMVQ_PLAIN_BATCH_SET(q6_k, block_q6_K, QK_K, QI6_K, VDR_Q6_K_Q8_1_MMVQ,
                      vec_dot_q6_K_q8_1)
+MMVQ_PLAIN_BATCH_SET(iq4_nl, block_iq4_nl, QK4_NL, QI4_NL, VDR_IQ4_NL_Q8_1_MMVQ,
+                     vec_dot_iq4_nl_q8_1)
+MMVQ_PLAIN_BATCH_SET(iq4_xs, block_iq4_xs, QK_K, QI4_XS, VDR_IQ4_XS_Q8_1_MMVQ,
+                     vec_dot_iq4_xs_q8_1)
 
 #define MMVQ_FUSED_GLU_TYPE_SET(tag, block_q_t, qk_val, qi_val, vdr_val,       \
                                 vec_dot)                                       \
@@ -1546,6 +1644,8 @@ MMVQ_LAUNCHER_PLAIN(q3_k, bf16, __nv_bfloat16)
 MMVQ_LAUNCHER_PLAIN(q4_k, bf16, __nv_bfloat16)
 MMVQ_LAUNCHER_PLAIN(q5_k, bf16, __nv_bfloat16)
 MMVQ_LAUNCHER_PLAIN(q6_k, bf16, __nv_bfloat16)
+MMVQ_LAUNCHER_PLAIN(iq4_nl, bf16, __nv_bfloat16)
+MMVQ_LAUNCHER_PLAIN(iq4_xs, bf16, __nv_bfloat16)
 
 MMVQ_LAUNCHER_PLAIN(q4_0, f16, half)
 MMVQ_LAUNCHER_PLAIN(q4_1, f16, half)
@@ -1557,6 +1657,8 @@ MMVQ_LAUNCHER_PLAIN(q3_k, f16, half)
 MMVQ_LAUNCHER_PLAIN(q4_k, f16, half)
 MMVQ_LAUNCHER_PLAIN(q5_k, f16, half)
 MMVQ_LAUNCHER_PLAIN(q6_k, f16, half)
+MMVQ_LAUNCHER_PLAIN(iq4_nl, f16, half)
+MMVQ_LAUNCHER_PLAIN(iq4_xs, f16, half)
 
 MMVQ_LAUNCHER_PLAIN(q4_0, f32, float)
 MMVQ_LAUNCHER_PLAIN(q4_1, f32, float)
@@ -1568,6 +1670,8 @@ MMVQ_LAUNCHER_PLAIN(q3_k, f32, float)
 MMVQ_LAUNCHER_PLAIN(q4_k, f32, float)
 MMVQ_LAUNCHER_PLAIN(q5_k, f32, float)
 MMVQ_LAUNCHER_PLAIN(q6_k, f32, float)
+MMVQ_LAUNCHER_PLAIN(iq4_nl, f32, float)
+MMVQ_LAUNCHER_PLAIN(iq4_xs, f32, float)
 
 #define MMVQ_LAUNCHER_FUSED_GLU_TYPE_SET(tag)                                  \
   MMVQ_LAUNCHER_FUSED_GLU(tag, bf16, __nv_bfloat16)                            \
