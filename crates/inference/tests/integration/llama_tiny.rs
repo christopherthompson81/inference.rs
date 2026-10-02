@@ -1,8 +1,7 @@
 //! The text-model load paths on a tiny random-weight Llama: plain, in-situ quantized, and reloaded from the UQFF it wrote.
 
-use std::path::{Path, PathBuf};
-
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 use candle_core::{Device, Tensor};
 use inference::{

@@ -464,7 +464,6 @@ pub(crate) type AdjustAutoParams<'a> =
 pub(crate) struct LoadSessionInputs<'a> {
     pub mapped: &'a dyn super::loaders::DeviceMappedModelLoader,
     pub isq: &'a dyn super::IsqModelLoader,
-    // the config devices, the device map and the ISQ plan are sized from
     pub config: &'a str,
     pub settings: LoadSettings<'a>,
     pub paths: &'a dyn super::ModelPaths,
@@ -499,7 +498,7 @@ pub(crate) struct LoadSession {
     pub load_parts: LoadMetadataParts,
 }
 
-/// Opens the load; the mapper it returns is the one the model is built with.
+/// Opens the load; the mapper it returns builds the model unless `load_model` shards it for tensor parallelism.
 pub(crate) fn open_load_session(
     inputs: LoadSessionInputs<'_>,
     paged_attn_config: &mut Option<PagedAttentionConfig>,
@@ -722,7 +721,6 @@ pub(crate) type XLoraLoad<'a, M> = dyn Fn(
 
 /// What [`load_model`] reads beyond the session.
 pub(crate) struct ModelLoadInputs<'a, M: ?Sized> {
-    // the config the model is built from
     pub config: &'a str,
     // the config the session sized from, which a tensor-parallel mapper is built from too
     pub session_config: &'a str,

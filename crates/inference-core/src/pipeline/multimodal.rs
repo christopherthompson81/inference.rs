@@ -428,8 +428,6 @@ pub(super) fn supports_dynamic_lora_loader(loader: &MultimodalLoaderType) -> boo
     )
 }
 
-impl MultimodalLoader {}
-
 impl Loader for MultimodalLoader {
     #[allow(clippy::type_complexity, clippy::too_many_arguments)]
     fn load_model_from_hf(

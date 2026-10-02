@@ -719,7 +719,6 @@ impl Loader for NormalLoader {
         )?;
         let super::loading::LoadSession {
             device,
-            available_devices: _,
             weight_source,
             max_kv_tokens,
             pipeline_mapper,
