@@ -1324,3 +1324,31 @@ Findings:
 
 Not covered: paged attention, the CUDA MLA decode/cache paths, yarn rope scaling, tied embeddings, and the GGUF
 split-weight load; the forward tests are CPU F32 eager only.
+
+## Run 46 - 2026-10-01 (time approximate)
+
+Question: does the Run 44 consolidation (shared router, `deepseek_family` module, shared loader helpers) keep every
+pinned behaviour of DeepSeek-V2/V3 and GLM4-MoE(-Lite)?
+
+Commands: after each step `cargo nextest run -p inference-models-other`, `cargo check --workspace --tests`,
+`cargo clippy -p inference-models-other -p inference-nn --tests -- -D warnings`, and
+`cargo check -p inference-models-other --features cuda`; once at the end
+`cargo nextest run -p inference-core -p inference-gguf -E '(package(inference-core) & test(/normal_loaders|loaders::/)) | package(inference-gguf)'`
+(172 passed). For the loader step, a throwaway test dumped every loader output (promoted/ISQ/MoQE regex strings in
+order, layer sizes at pack factors 1, 2 and 4, non-mapped size, model config) for 7 DeepSeek and 5 GLM config
+variants before and after; the dumps were byte-identical. A smaller pin of the layer sizes was committed.
+
+Findings:
+- The family tests passed unchanged through all six steps; only the gate constructor's path moved
+  (`deepseek_family::MoeGate::new(&cfg.family(), ..)`).
+- Flake at the starting commit (8cb99e5e), before any change: `deepseek2::family_tests::forward_narrow_v_head_errors_on_cpu`
+  failed twice (forward returned Ok instead of "shape mismatch in matmul"), both on the first run after a fresh
+  build, then passed in about 20 runs since. Cause not found; worth a look before anyone leans on that pin.
+- Differences that looked identical but are not, kept as switches: DS2's non-greedy renormalisation divides
+  without broadcasting (DS3/GLM broadcast); DS2 lacks the `quantization` serde alias; Lite builds the paged MLA KV
+  layout only on a CUDA device while DS2/DS3 build it whenever paged attention is on; the DS loaders size the q
+  projections unpacked and write the dense up_proj ISQ pattern with bare dots; DS3's loader leaves the
+  correction bias out of the layer size while Lite/GLM count it; GLM4-MoE ignores `moe_layer_freq`.
+- Lines: the four models and their loaders went from 5401 to 2822, plus the 204-line router in inference-nn.
+
+Next: the Run 44 bug fixes, each with its golden updated, and the flake above.
