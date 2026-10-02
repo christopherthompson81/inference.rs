@@ -59,6 +59,11 @@ pub const MODEL_ALIAS_ROUTE: RouteInfo =
     RouteInfo::new("/v1/models/alias", "POST", RouteKind::InferenceRs);
 pub const MODEL_CACHE_STATS_ROUTE: RouteInfo =
     RouteInfo::new("/v1/models/cache_stats", "GET", RouteKind::InferenceRs);
+pub const MODEL_SPECULATIVE_STATS_ROUTE: RouteInfo = RouteInfo::new(
+    "/v1/models/speculative_stats",
+    "GET",
+    RouteKind::InferenceRs,
+);
 pub const TUNE_MODEL_ROUTE: RouteInfo =
     RouteInfo::new("/v1/models/tune", "POST", RouteKind::InferenceRs);
 pub const SYSTEM_INFO_ROUTE: RouteInfo =
@@ -142,6 +147,7 @@ pub const INFERENCE_RS_API_ROUTES: &[RouteInfo] = &[
     RELOAD_MODEL_ROUTE,
     MODEL_STATUS_ROUTE,
     MODEL_CACHE_STATS_ROUTE,
+    MODEL_SPECULATIVE_STATS_ROUTE,
     TUNE_MODEL_ROUTE,
     SYSTEM_INFO_ROUTE,
     SYSTEM_DOCTOR_ROUTE,

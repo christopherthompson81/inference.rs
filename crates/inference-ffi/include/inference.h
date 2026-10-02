@@ -48,7 +48,7 @@ extern "C" {
 
 #define INFERENCE_ABI_VERSION_MAJOR 0
 #define INFERENCE_ABI_VERSION_MINOR 0
-#define INFERENCE_ABI_VERSION_PATCH 20
+#define INFERENCE_ABI_VERSION_PATCH 21
 
 typedef enum inference_status {
     INFERENCE_OK = 0,
@@ -382,6 +382,11 @@ INFERENCE_API inference_status inference_mcp_tools_list(const inference_engine *
  * without one. Diff two readings to see what the requests between them used. */
 INFERENCE_API inference_status inference_models_cache_stats(const inference_engine *engine,
                                                           inference_string **out_response);
+/* Each loaded model's speculative decoding counters (the GET /v1/models/speculative_stats body): {"object": "list",
+ * "data": [{"model_id", "drafts", "draft_tokens_proposed", "draft_tokens_accepted", "accepted_per_position"}]}, sorted
+ * by model_id. They count since the model loaded and stay zero without a speculative proposer. */
+INFERENCE_API inference_status inference_models_speculative_stats(const inference_engine *engine,
+                                                                inference_string **out_response);
 /* Unloads, reloads or reports a model; the request is {"model_id"} and out_response receives {"model_id", "status":
  * "loaded" | "unloaded" | "reloading"}. Unloading an unloaded model or reloading a loaded one succeeds. An unknown
  * model is INFERENCE_ERR_NOT_FOUND. */

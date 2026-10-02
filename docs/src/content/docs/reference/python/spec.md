@@ -612,6 +612,17 @@ One of several models an engine serves; unset settings fall back to `runtime`'s.
 | `model_id` | `str \| None` | optional |
 
 
+## `ModelSpeculativeStats`
+
+| Field | Type |
+| --- | --- |
+| `accepted_per_position` | `list[int]` |
+| `draft_tokens_accepted` | `int` |
+| `draft_tokens_proposed` | `int` |
+| `drafts` | `int` |
+| `model_id` | `str` |
+
+
 ## `MtpDraftSampling`
 
 Members and the names they are sent as; each member is a `str` enum whose `.value` is that name.

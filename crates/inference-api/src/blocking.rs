@@ -250,6 +250,13 @@ impl BlockingEngine {
         self.call(&[], |engine, _| async move { engine.cache_stats_json() })
     }
 
+    pub fn speculative_stats_json(&self) -> Result<String, ApiError> {
+        self.call(
+            &[],
+            |engine, _| async move { engine.speculative_stats_json() },
+        )
+    }
+
     pub fn calibration_status_json(&self, request: &[u8]) -> Result<String, ApiError> {
         self.call(request, |engine, request| async move {
             engine.calibration_status_json(&request).await

@@ -42,8 +42,9 @@ use crate::{
     media_source::MediaAttachments,
     models::{
         CacheStats, DefaultModel, ModelAlias, ModelOperationRequest, ModelRemoved, ModelServed,
-        ModelStatus, ModelStatusResponse, add_model_alias, cache_stats, list_models, model_status,
-        reload_model, remove_model, set_default_model, unload_model,
+        ModelStatus, ModelStatusResponse, SpeculativeStats, add_model_alias, cache_stats,
+        list_models, model_status, reload_model, remove_model, set_default_model,
+        speculative_stats, unload_model,
     },
     openai::{
         ChatCompletionRequest, CompletionRequest, EmbeddingRequest, EmbeddingResponse,
@@ -1220,6 +1221,11 @@ impl Engine {
         cache_stats(self.state())
     }
 
+    /// Cumulative speculative decoding counters of each loaded model.
+    pub fn speculative_stats(&self) -> Result<SpeculativeStats, ApiError> {
+        speculative_stats(self.state())
+    }
+
     pub fn unload_model(
         &self,
         request: ModelOperationRequest,
@@ -1523,6 +1529,10 @@ impl Engine {
 
     pub fn cache_stats_json(&self) -> Result<String, ApiError> {
         to_json(&self.cache_stats()?)
+    }
+
+    pub fn speculative_stats_json(&self) -> Result<String, ApiError> {
+        to_json(&self.speculative_stats()?)
     }
 
     pub fn unload_model_json(&self, request: &[u8]) -> Result<String, ApiError> {

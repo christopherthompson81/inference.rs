@@ -248,6 +248,8 @@ internal static class Program
         Check("a chat tokenizes to more than its text", chatTokens.Count > tokens.AsArray().Count);
         var cacheStats = JsonNode.Parse(engine.CacheStats())!["data"]!.AsArray();
         Check("cache stats list the model's encoder cache", cacheStats.Count > 0 && cacheStats[0]!["encoder_cache"] is JsonObject);
+        var speculativeStats = JsonNode.Parse(engine.SpeculativeStats())!["data"]!.AsArray();
+        Check("speculative stats stay zero without a proposer", speculativeStats.Count > 0 && (int)speculativeStats[0]!["drafts"]! == 0);
         var badIsq = Throws(() => engine.ReIsq("""{"ggml_type": "no-such-type"}"""));
         Check("an unknown ISQ type is InvalidRequest", badIsq?.Status == InferenceStatus.InvalidRequest);
     }

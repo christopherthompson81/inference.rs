@@ -42,15 +42,14 @@ async fn main() -> Result<()> {
     let model = MultiModelBuilder::new()
         .add_model_with_alias(
             GEMMA_ALIAS,
-            MultimodalModelBuilder::new(GEMMA_MODEL_ID)
-                .with_auto_isq(IsqBits::Four)
-                .with_logging(),
+            MultimodalModelBuilder::new(GEMMA_MODEL_ID).with_auto_isq(IsqBits::Four),
         )
         .add_model_with_alias(
             QWEN_ALIAS,
             TextModelBuilder::new(QWEN_MODEL_ID).with_auto_isq(IsqBits::Four),
         )
         .with_default_model(GEMMA_ALIAS)
+        .with_logging()
         .build()
         .await?;
 

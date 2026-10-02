@@ -79,6 +79,54 @@ pub(crate) fn cache_stats(state: &SharedInferenceRsState) -> Result<CacheStats, 
     })
 }
 
+/// Speculative decoding counters for each loaded model, counted since it loaded; all zero without a proposer.
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct SpeculativeStats {
+    #[schema(example = "list")]
+    pub object: String,
+    pub data: Vec<ModelSpeculativeStats>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, ToSchema)]
+pub struct ModelSpeculativeStats {
+    pub model_id: String,
+    /// Sequences verified: one per sequence per step that ran speculative verification.
+    pub drafts: usize,
+    pub draft_tokens_proposed: usize,
+    pub draft_tokens_accepted: usize,
+    /// Accepted draft tokens at each 0-based proposal position; the drop-off shows where proposals start failing.
+    pub accepted_per_position: Vec<usize>,
+}
+
+pub(crate) fn speculative_stats(
+    state: &SharedInferenceRsState,
+) -> Result<SpeculativeStats, ApiError> {
+    let mut data = Vec::new();
+    let mut models = state.list_models_with_status().map_err(core_error)?;
+    models.sort_by(|(a, _), (b, _)| a.cmp(b));
+    for (model_id, status) in models {
+        if status != CoreModelStatus::Loaded {
+            continue;
+        }
+        // A model unloading between the listing and this lookup is left out rather than failing the call.
+        let Ok(logger) = state.get_logger(Some(&model_id)) else {
+            continue;
+        };
+        let stats = logger.speculative_stats();
+        data.push(ModelSpeculativeStats {
+            model_id,
+            drafts: stats.drafts,
+            draft_tokens_proposed: stats.draft_tokens_proposed,
+            draft_tokens_accepted: stats.draft_tokens_accepted,
+            accepted_per_position: stats.accepted_per_position,
+        });
+    }
+    Ok(SpeculativeStats {
+        object: MODEL_LIST_OBJECT.to_string(),
+        data,
+    })
+}
+
 #[derive(Debug, Clone, Serialize, ToSchema)]
 pub struct ModelRemoved {
     pub model_id: String,

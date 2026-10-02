@@ -1105,6 +1105,29 @@
         }
       }
     },
+    "/v1/models/speculative_stats": {
+      "get": {
+        "tags": [
+          "inference.rs"
+        ],
+        "operationId": "model_speculative_stats",
+        "responses": {
+          "200": {
+            "description": "Each loaded model's cumulative speculative decoding counters",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SpeculativeStats"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Failed to inspect the model registry"
+          }
+        }
+      }
+    },
     "/v1/models/status": {
       "post": {
         "tags": [
@@ -7883,6 +7906,42 @@
         },
         "additionalProperties": false
       },
+      "ModelSpeculativeStats": {
+        "type": "object",
+        "required": [
+          "model_id",
+          "drafts",
+          "draft_tokens_proposed",
+          "draft_tokens_accepted",
+          "accepted_per_position"
+        ],
+        "properties": {
+          "accepted_per_position": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "minimum": 0
+            },
+            "description": "Accepted draft tokens at each 0-based proposal position; the drop-off shows where proposals start failing."
+          },
+          "draft_tokens_accepted": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "draft_tokens_proposed": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "drafts": {
+            "type": "integer",
+            "description": "Sequences verified: one per sequence per step that ran speculative verification.",
+            "minimum": 0
+          },
+          "model_id": {
+            "type": "string"
+          }
+        }
+      },
       "ModelStatus": {
         "type": "string",
         "enum": [
@@ -12128,6 +12187,26 @@
           "turn": {
             "type": "integer",
             "minimum": 0
+          }
+        }
+      },
+      "SpeculativeStats": {
+        "type": "object",
+        "description": "Speculative decoding counters for each loaded model, counted since it loaded; all zero without a proposer.",
+        "required": [
+          "object",
+          "data"
+        ],
+        "properties": {
+          "data": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ModelSpeculativeStats"
+            }
+          },
+          "object": {
+            "type": "string",
+            "example": "list"
           }
         }
       },

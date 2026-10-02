@@ -1493,6 +1493,15 @@ class ModelSpec:
     model_id: str | None = None
 
 
+@dataclass(kw_only=True)
+class ModelSpeculativeStats:
+    accepted_per_position: list[int]
+    draft_tokens_accepted: int
+    draft_tokens_proposed: int
+    drafts: int
+    model_id: str
+
+
 class ModelStatus(str, Enum):
     LOADED = "loaded"
     UNLOADED = "unloaded"
@@ -2684,6 +2693,14 @@ class SourceMeta:
     tool: str
     tool_call_id: str | None = None
     turn: int
+
+
+@dataclass(kw_only=True)
+class SpeculativeStats:
+    """Speculative decoding counters for each loaded model, counted since it loaded; all zero without a proposer."""
+
+    data: list[ModelSpeculativeStats]
+    object: str
 
 
 @dataclass(kw_only=True)

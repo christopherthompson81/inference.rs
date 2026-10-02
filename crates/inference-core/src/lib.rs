@@ -13,7 +13,8 @@
 use candle_core::Device;
 pub use engine::{
     AgentRunner, DEFAULT_MAX_TOOL_ROUNDS, ENGINE_INSTRUCTIONS, Engine, EngineInstruction,
-    IntervalLogger, SearchEmbeddingModel, TERMINATE_ALL_NEXT_STEP, agent, agentic_session,
+    IntervalLogger, SearchEmbeddingModel, SpeculativeStats, TERMINATE_ALL_NEXT_STEP, agent,
+    agentic_session,
     agentic_session::{AgenticSessionStore, SerializedSession, SerializedVideo},
 };
 use hf_hub::Cache;

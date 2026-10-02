@@ -1978,3 +1978,28 @@ Review notes, left as they are:
 
 Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`.
 Result: exit 0, 2392 + 2714 + 1 tests passed.
+
+## Run 64 - 2026-10-02 (time approximate)
+
+Question: can a bindings-based server read speculative decoding counters, and do the MTP tests actually draft?
+
+Finding before the change: the engine logger kept `spec_*` atomics that the logging thread swapped to 0 each
+interval, and it published the counts only through the Rust `metrics` facade. Only the Rust server installs a recorder
+(Prometheus), so the C ABI, C# and Python had nothing.
+
+Change:
+- Core keeps one cumulative `SpeculativeStats` per model: drafts, proposed, accepted, accepted per position. The
+  logging thread diffs it against its last snapshot, starting over when the counters fall below it after the warmup
+  reset.
+- Exposed as `Engine::speculative_stats`, `GET /v1/models/speculative_stats`, `inference_models_speculative_stats`
+  (ABI 0.0.21), C# `SpeculativeStats()` and Python `speculative_stats()`, with a test at each layer.
+- Staged drops stay Prometheus-only: they are counted in the scheduler and driver, which have no logger.
+
+Finding: with the stats in place, the GPU MTP tests (tiny dense and MoE, n_predict 2, 16 tokens, two prompts)
+verified 27 drafts and accepted 0 tokens, for both. A random-weight head is independent of the target, so with a
+266-token vocabulary it agrees only by chance. The greedy-equivalence check therefore only exercises the reject path.
+The tests now assert drafts were verified (and none for the plain model). Acceptance is left to a real checkpoint:
+next, the Qwen3.8-27B GGUF's `nextn` layer.
+
+Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`.
+Result: exit 0, 2394 + 2716 + 1 tests passed, bindings included.

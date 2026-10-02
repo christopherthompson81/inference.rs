@@ -589,6 +589,16 @@ Which agentic tool produced the file, and when in the session.
 | `turn` | `int` | required |
 
 
+## `SpeculativeStats`
+
+Speculative decoding counters for each loaded model, counted since it loaded; all zero without a proposer.
+
+| Field | Type |
+| --- | --- |
+| `data` | `list[ModelSpeculativeStats]` |
+| `object` | `str` |
+
+
 ## `SpeechGenerationRequest`
 
 Speech generation request

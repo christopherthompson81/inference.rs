@@ -28,9 +28,9 @@ use crate::{
     handler_core::{ApiError, ApiErrorKind, openai_error_response},
     handlers::{
         add_model, add_model_alias, calibration_apply, calibration_start, calibration_status,
-        delete_session, get_model_status, get_session, health, model_cache_stats, models,
-        put_session, re_isq, reload_model, remove_model, set_default_model, system_doctor,
-        system_info, tune_model, unload_model,
+        delete_session, get_model_status, get_session, health, model_cache_stats,
+        model_speculative_stats, models, put_session, re_isq, reload_model, remove_model,
+        set_default_model, system_doctor, system_info, tune_model, unload_model,
     },
     image_generation::image_generation,
     lora_adapters::{list_lora_adapters, load_lora_adapter, unload_lora_adapter},
@@ -44,9 +44,9 @@ use crate::{
         CONTAINER_FILE_ROUTE, CONTAINER_FILES_ROUTE, DEFAULT_MODEL_ROUTE, EMBEDDINGS_ROUTE,
         FILE_CONTENT_ROUTE, FILE_ROUTE, FILES_ROUTE, HEALTH_ROUTE, IMAGE_GENERATION_ROUTE,
         LIST_LORA_ADAPTERS_ROUTE, LOAD_LORA_ADAPTER_ROUTE, MODEL_ALIAS_ROUTE,
-        MODEL_CACHE_STATS_ROUTE, MODEL_STATUS_ROUTE, MODELS_ROUTE, RE_ISQ_ROUTE,
-        RELOAD_MODEL_ROUTE, REMOVE_MODEL_ROUTE, RESPONSE_ROUTE, RESPONSES_ROUTE, ROOT_ROUTE,
-        SESSION_ROUTE, SKILL_VERSIONS_ROUTE, SKILLS_ROUTE, SPEECH_GENERATION_ROUTE,
+        MODEL_CACHE_STATS_ROUTE, MODEL_SPECULATIVE_STATS_ROUTE, MODEL_STATUS_ROUTE, MODELS_ROUTE,
+        RE_ISQ_ROUTE, RELOAD_MODEL_ROUTE, REMOVE_MODEL_ROUTE, RESPONSE_ROUTE, RESPONSES_ROUTE,
+        ROOT_ROUTE, SESSION_ROUTE, SKILL_VERSIONS_ROUTE, SKILLS_ROUTE, SPEECH_GENERATION_ROUTE,
         SYSTEM_DOCTOR_ROUTE, SYSTEM_INFO_ROUTE, TUNE_MODEL_ROUTE, UNLOAD_LORA_ADAPTER_ROUTE,
         UNLOAD_MODEL_ROUTE,
     },
@@ -317,6 +317,10 @@ fn init_router(
         .route(RELOAD_MODEL_ROUTE.path, post(reload_model))
         .route(MODEL_STATUS_ROUTE.path, post(get_model_status))
         .route(MODEL_CACHE_STATS_ROUTE.path, get(model_cache_stats))
+        .route(
+            MODEL_SPECULATIVE_STATS_ROUTE.path,
+            get(model_speculative_stats),
+        )
         .route(TUNE_MODEL_ROUTE.path, post(tune_model))
         .route(SYSTEM_INFO_ROUTE.path, get(system_info))
         .route(SYSTEM_DOCTOR_ROUTE.path, post(system_doctor))
