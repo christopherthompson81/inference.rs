@@ -101,7 +101,7 @@ pub(super) fn decoder_layer_elems(
 }
 
 // The built-in MTP head sits on the non-mapped device: fc, three norms and its full-attention layers.
-fn mtp_head_elems(cfg: &TextConfig, weight_pack_factor: usize) -> Result<usize> {
+pub(super) fn mtp_head_elems(cfg: &TextConfig, weight_pack_factor: usize) -> Result<usize> {
     let fc = 2 * cfg.hidden_size * cfg.hidden_size / weight_pack_factor;
     let layer = decoder_layer_elems(cfg, LayerType::FullAttention, weight_pack_factor)?;
     Ok(fc + cfg.hidden_size * 3 + layer * cfg.mtp_num_hidden_layers)

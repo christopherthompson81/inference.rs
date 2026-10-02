@@ -35,7 +35,7 @@ use crate::{
 use super::{
     Qwen3_5Model,
     mtp::{MtpAttentionInputs, Qwen3_5MtpHead},
-    text::{SpecCapture, SpecGraphState},
+    text::{Qwen3_5TextModel, SpecCapture, SpecGraphState},
 };
 
 /// vLLM's documented setting for these single-layer MTP heads.
@@ -153,14 +153,13 @@ fn resolve_dflash_n_predict(
     Ok(reserved)
 }
 
-impl Qwen3_5Model {
+impl Qwen3_5TextModel {
     fn mtp_n_predict(&self) -> usize {
         self.mtp_n_predict.load(Ordering::Relaxed)
     }
 
     fn mtp_head(&self) -> Result<&Qwen3_5MtpHead> {
-        self.text
-            .mtp
+        self.mtp
             .as_ref()
             .ok_or_else(|| candle_core::Error::msg("Qwen3.5 MTP head is not loaded"))
     }
@@ -190,7 +189,7 @@ impl Qwen3_5Model {
         let seq_ids = rows.iter().map(|row| row.seq_id).collect::<Vec<_>>();
         let context_lens = rows.iter().map(|row| row.position + 1).collect::<Vec<_>>();
         let metadata = make_paged_rows_metadata(&seq_ids, &context_lens, paged_meta, device)?;
-        let embeds = self.text.embed_tokens(&tokens)?.to_dtype(head.dtype())?;
+        let embeds = self.embed_tokens(&tokens)?.to_dtype(head.dtype())?;
         let target_hidden = target_hidden.to_device(device)?.to_dtype(head.dtype())?;
         head.forward(
             &embeds,
@@ -237,7 +236,7 @@ impl Qwen3_5Model {
             }
         }
         let tokens = Tensor::from_vec(shifted, (batch, seq_len), device)?;
-        let embeds = self.text.embed_tokens(&tokens)?.to_dtype(head.dtype())?;
+        let embeds = self.embed_tokens(&tokens)?.to_dtype(head.dtype())?;
         let target_hidden = capture.hidden.to_device(device)?.to_dtype(head.dtype())?;
         let positions = capture.positions.to_device(device)?;
         // Same mask policy as the target's prompt forward: explicit causal mask on the first chunk only
@@ -267,7 +266,7 @@ impl Qwen3_5Model {
 
     fn draft_logits(&self, normed_hidden: &Tensor) -> Result<Tensor> {
         let draft_head = self.draft_lm_head.lock().expect("draft lm_head poisoned");
-        let head = draft_head.as_ref().unwrap_or_else(|| self.text.lm_head());
+        let head = draft_head.as_ref().unwrap_or_else(|| self.lm_head());
         // [1, rows, hidden] -> [rows, vocab]
         head.forward(normed_hidden)?.squeeze(0)
     }
@@ -280,28 +279,27 @@ impl Qwen3_5Model {
         let mut drafter = DFlashDraftModel::load(
             &config,
             DFlashLoadTarget {
-                num_layers: self.text.layer_types.len(),
-                hidden_size: self.text.cfg.hidden_size,
-                yarn_rope_config: self.text.yarn_rope_config.as_ref(),
-                device: &self.text.device,
-                dtype: self.text.dtype,
+                num_layers: self.layer_types.len(),
+                hidden_size: self.cfg.hidden_size,
+                yarn_rope_config: self.yarn_rope_config.as_ref(),
+                device: &self.device,
+                dtype: self.dtype,
             },
             false,
         )?;
         let block = drafter.block_size();
-        let checkpoint_lanes = self.text.cache.hybrid().checkpoint_lanes();
+        let checkpoint_lanes = self.cache.hybrid().checkpoint_lanes();
         let n_predict = resolve_dflash_n_predict(config.n_predict, block, checkpoint_lanes)?;
-        let sequence_capacity = self.text.cache.hybrid().recurrent_capacity();
+        let sequence_capacity = self.cache.hybrid().recurrent_capacity();
         let windowed_kv =
             drafter.enable_windowed_kv(sequence_capacity, runtime.prefix_cache_capacity())?;
-        self.text
-            .set_dflash_tap_layers(drafter.target_layer_ids.clone());
+        self.set_dflash_tap_layers(drafter.target_layer_ids.clone());
         self.mtp_n_predict.store(n_predict, Ordering::Relaxed);
-        self.text.set_store_spec_hidden(true);
+        self.set_store_spec_hidden(true);
         if let Some(ty) = config.draft_lm_head_isq {
-            let head = self.text.lm_head().clone().apply_isq(
+            let head = self.lm_head().clone().apply_isq(
                 Some(ty),
-                self.text.device.clone(),
+                self.device.clone(),
                 &std::sync::atomic::AtomicUsize::new(0),
                 None,
                 inference_quant::QuantizeOntoGuard::new(),
@@ -352,8 +350,8 @@ impl Qwen3_5Model {
             ids.push(*anchor);
             ids.extend(std::iter::repeat_n(drafter.mask_token_id(), n));
         }
-        let ids = Tensor::from_vec(ids, (anchors.len(), block), &self.text.device)?;
-        let mut emb = self.text.embed_tokens(&ids)?;
+        let ids = Tensor::from_vec(ids, (anchors.len(), block), &self.device)?;
+        let mut emb = self.embed_tokens(&ids)?;
         let scale = drafter.input_embedding_scale();
         if (scale - 1.0).abs() > f64::EPSILON {
             emb = (emb * scale)?;
@@ -380,7 +378,7 @@ impl Qwen3_5Model {
         {
             return Ok(None);
         }
-        let Some(capture) = self.text.last_spec_capture() else {
+        let Some(capture) = self.last_spec_capture() else {
             return Ok(None);
         };
         if capture.taps.len() != drafter.target_layer_ids.len() {
@@ -448,7 +446,7 @@ impl Qwen3_5Model {
                 "DFlash proposal length {n_predict} exceeds configured maximum {max_n}"
             );
         }
-        let Some(capture) = self.text.last_spec_capture() else {
+        let Some(capture) = self.last_spec_capture() else {
             return Ok(None);
         };
         if capture.taps.len() != drafter.target_layer_ids.len() {
@@ -582,14 +580,14 @@ impl Qwen3_5Model {
                 uniforms,
             });
         let draft_head = self.draft_lm_head.lock().expect("draft lm_head poisoned");
-        let lm_head = draft_head.as_ref().unwrap_or_else(|| self.text.lm_head());
+        let lm_head = draft_head.as_ref().unwrap_or_else(|| self.lm_head());
         let graph_proposals = drafter.proposals_cuda_graph(&DFlashGraphProposalInputs {
             seq_ids: ctx.seq_ids,
             anchors: ctx.sampled_tokens,
             start_positions: ctx.base_lens,
             n_predict,
             sampling,
-            token_embedding: self.text.token_embedding(),
+            token_embedding: self.token_embedding(),
             lm_head,
         })?;
         if let Some(proposals) = graph_proposals {
@@ -623,7 +621,7 @@ impl Qwen3_5Model {
             .expect("dflash poisoned")
             .clone()
             .ok_or_else(|| candle_core::Error::msg("DFlash prefill without a drafter"))?;
-        let Some(capture) = self.text.last_full_capture() else {
+        let Some(capture) = self.last_full_capture() else {
             return Ok(());
         };
         if capture.taps.len() != drafter.target_layer_ids.len() {
@@ -686,7 +684,7 @@ impl Qwen3_5Model {
             .get(head.kv_layer_idx())
             .ok_or_else(|| candle_core::Error::msg("paged cache has no MTP layer"))?
             .clone();
-        let Some(capture) = self.text.last_spec_capture() else {
+        let Some(capture) = self.last_spec_capture() else {
             return Ok(None);
         };
         let CaptureView { hidden, mrope } = capture_view(&capture)?;
@@ -821,7 +819,7 @@ impl Qwen3_5Model {
             .get(head.kv_layer_idx())
             .ok_or_else(|| candle_core::Error::msg("paged cache has no MTP layer"))?
             .clone();
-        let Some(capture) = self.text.last_full_capture() else {
+        let Some(capture) = self.last_full_capture() else {
             return Ok(());
         };
         let CaptureView { hidden, mrope } = capture_view(&capture)?;
@@ -932,7 +930,7 @@ fn mrope_at(mrope: &[Vec<Vec<u32>>], batch_idx: usize, row: usize) -> Result<[u3
     Ok(out)
 }
 
-impl SpeculativeTargetMixin for Qwen3_5Model {
+impl SpeculativeTargetMixin for Qwen3_5TextModel {
     fn attach_speculative(
         &mut self,
         config: SpeculativeConfig,
@@ -947,20 +945,20 @@ impl SpeculativeTargetMixin for Qwen3_5Model {
     ) -> Result<Option<SpeculativeAttachInfo>> {
         let SpeculativeConfig::Mtp(config) = config else {
             self.mtp_n_predict.store(0, Ordering::Relaxed);
-            self.text.set_store_spec_hidden(false);
-            self.text.set_dflash_tap_layers(Vec::new());
+            self.set_store_spec_hidden(false);
+            self.set_dflash_tap_layers(Vec::new());
             *self.dflash.lock().expect("dflash poisoned") = None;
             return Ok(None);
         };
         if !config.is_builtin() {
             return self.attach_dflash(config, runtime);
         }
-        if self.text.mtp.is_none() {
+        if self.mtp.is_none() {
             candle_core::bail!(
                 "The built-in MTP head was not loaded; pass `--mtp` when loading the model."
             );
         }
-        let default_n_predict = if self.text.cfg.hidden_size >= MTP_LARGE_HIDDEN_SIZE {
+        let default_n_predict = if self.cfg.hidden_size >= MTP_LARGE_HIDDEN_SIZE {
             DEFAULT_MTP_N_PREDICT_LARGE
         } else {
             DEFAULT_MTP_N_PREDICT
@@ -970,13 +968,13 @@ impl SpeculativeTargetMixin for Qwen3_5Model {
             candle_core::bail!("MTP n_predict must be at least 1.");
         }
         self.mtp_n_predict.store(n_predict, Ordering::Relaxed);
-        self.text.set_store_spec_hidden(true);
+        self.set_store_spec_hidden(true);
         // The promoted (sensitive) lm_head is read once per draft; a base-type copy makes the
         // drafter cheaper without touching what the target verifies with
         if let Some(ty) = config.draft_lm_head_isq {
-            let head = self.text.lm_head().clone().apply_isq(
+            let head = self.lm_head().clone().apply_isq(
                 Some(ty),
-                self.text.device.clone(),
+                self.device.clone(),
                 &std::sync::atomic::AtomicUsize::new(0),
                 None,
                 inference_quant::QuantizeOntoGuard::new(),
@@ -996,39 +994,39 @@ impl SpeculativeTargetMixin for Qwen3_5Model {
     }
 
     fn supports_recurrent_speculative_checkpoints(&self) -> bool {
-        self.text.supports_recurrent_speculative_checkpoints()
+        Qwen3_5TextModel::supports_recurrent_speculative_checkpoints(self)
     }
 
     fn supports_recurrent_speculative_transitions(&self) -> bool {
-        self.text.supports_recurrent_speculative_transitions()
+        Qwen3_5TextModel::supports_recurrent_speculative_transitions(self)
     }
 
     fn reserve_recurrent_speculative_transition_storage(&self) -> Result<bool> {
-        self.text.reserve_recurrent_transition_storage()
+        self.reserve_recurrent_transition_storage()
     }
 
     fn reserve_recurrent_decode_deferred_storage(&self) -> Result<bool> {
         if self.has_speculative_proposer() {
             Ok(false)
         } else {
-            self.text.reserve_recurrent_decode_deferred_storage()
+            Qwen3_5TextModel::reserve_recurrent_decode_deferred_storage(self)
         }
     }
 
     fn disable_recurrent_decode_deferred_storage(&self) -> Result<bool> {
-        self.text.disable_recurrent_decode_deferred_storage()
+        Qwen3_5TextModel::disable_recurrent_decode_deferred_storage(self)
     }
 
     fn apply_recurrent_speculative_transitions_for_current_batch(&self) -> Result<bool> {
-        self.text.apply_current_recurrent_transitions()
+        self.apply_current_recurrent_transitions()
     }
 
     fn flush_recurrent_state_for_current_batch(&self) -> Result<()> {
-        self.text.flush_current_recurrent_state()
+        self.flush_current_recurrent_state()
     }
 
     fn flush_recurrent_speculative_transitions(&self, seq_ids: &[usize]) -> Result<()> {
-        self.text.flush_recurrent_transitions_for_sequences(seq_ids)
+        self.flush_recurrent_transitions_for_sequences(seq_ids)
     }
 
     fn supports_speculative_prompt_bootstrap(&self) -> bool {
@@ -1120,8 +1118,8 @@ impl SpeculativeTargetMixin for Qwen3_5Model {
             return Ok(());
         };
         let draft_head = self.draft_lm_head.lock().expect("draft lm_head poisoned");
-        let lm_head = draft_head.as_ref().unwrap_or_else(|| self.text.lm_head());
-        drafter.precapture_cuda_graphs(self.mtp_n_predict(), self.text.token_embedding(), lm_head)
+        let lm_head = draft_head.as_ref().unwrap_or_else(|| self.lm_head());
+        drafter.precapture_cuda_graphs(self.mtp_n_predict(), self.token_embedding(), lm_head)
     }
 
     fn evict_speculative_cuda_graphs(&self, max_entries: usize) -> usize {
@@ -1132,7 +1130,7 @@ impl SpeculativeTargetMixin for Qwen3_5Model {
     }
 
     fn speculative_bypass(&mut self, seq_ids: &[usize]) -> Result<()> {
-        let flush_result = self.text.flush_recurrent_transitions_for_sequences(seq_ids);
+        let flush_result = self.flush_recurrent_transitions_for_sequences(seq_ids);
         if let Some(drafter) = self.dflash.lock().expect("dflash poisoned").as_ref() {
             drafter.mark_seqs_dormant(seq_ids);
         }
@@ -1140,7 +1138,7 @@ impl SpeculativeTargetMixin for Qwen3_5Model {
     }
 
     fn release_speculative_sequences(&mut self, seq_ids: &[usize]) -> Result<()> {
-        let flush_result = self.text.flush_recurrent_transitions_for_sequences(seq_ids);
+        let flush_result = self.flush_recurrent_transitions_for_sequences(seq_ids);
         if let Some(drafter) = self.dflash.lock().expect("dflash poisoned").as_ref() {
             drafter.release_seqs(seq_ids);
         }
@@ -1168,7 +1166,7 @@ impl SpeculativeTargetMixin for Qwen3_5Model {
     }
 
     fn speculative_target_hiddens(&self, rows: &[(usize, usize)]) -> Result<Option<Tensor>> {
-        let Some(capture) = self.text.last_spec_capture() else {
+        let Some(capture) = self.last_spec_capture() else {
             return Ok(None);
         };
         let hidden = capture_view(&capture)?.hidden;
@@ -1194,21 +1192,20 @@ impl SpeculativeTargetMixin for Qwen3_5Model {
             .iter()
             .map(|row| (row.batch_idx, row.keep_rows))
             .collect::<Vec<_>>();
-        if self.text.cache.hybrid().uses_recurrent_transition_log() {
-            if !self.text.stage_recurrent_prefixes(rows)? {
-                self.text.replay_recurrent_prefixes(&checkpoint_rows)?;
+        if self.cache.hybrid().uses_recurrent_transition_log() {
+            if !self.stage_recurrent_prefixes(rows)? {
+                self.replay_recurrent_prefixes(&checkpoint_rows)?;
             }
-            self.text.clear_gdn_replay_stash();
+            self.clear_gdn_replay_stash();
             return Ok(());
         }
         let checkpointed = {
-            let mut cache = self.text.cache.hybrid();
-            self.text
-                .supports_recurrent_speculative_checkpoints_with_cache(&cache)
+            let mut cache = self.cache.hybrid();
+            self.supports_recurrent_speculative_checkpoints_with_cache(&cache)
                 && cache.commit_speculative_rows(&checkpoint_rows)?
         };
         if checkpointed {
-            self.text.clear_gdn_replay_stash();
+            self.clear_gdn_replay_stash();
             return Ok(());
         }
         let rejected = rows
@@ -1216,14 +1213,13 @@ impl SpeculativeTargetMixin for Qwen3_5Model {
             .filter(|row| !row.accepted_all)
             .map(|row| (row.batch_idx, row.keep_rows))
             .collect::<Vec<_>>();
-        self.text.replay_recurrent_prefixes(&rejected)?;
-        self.text.clear_gdn_replay_stash();
+        self.replay_recurrent_prefixes(&rejected)?;
+        self.clear_gdn_replay_stash();
         Ok(())
     }
 
     fn take_speculative_graph_state(&self) -> Option<Box<dyn SpeculativeGraphState>> {
-        self.text
-            .take_spec_graph_state()
+        self.take_spec_graph_state()
             .map(|state| Box::new(state) as Box<dyn SpeculativeGraphState>)
     }
 
@@ -1234,9 +1230,12 @@ impl SpeculativeTargetMixin for Qwen3_5Model {
             .ok_or_else(|| {
                 candle_core::Error::msg("foreign speculative graph state for Qwen3.5")
             })?;
-        self.text.install_spec_graph_state(state)
+        self.install_spec_graph_state(state)
     }
 }
+
+// The wrapper adds media inputs only; speculative decoding is the text model's.
+inference_nn::delegate_speculative_target!(Qwen3_5Model, text: Qwen3_5TextModel);
 
 #[cfg(test)]
 mod tests {

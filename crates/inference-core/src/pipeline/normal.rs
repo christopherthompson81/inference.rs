@@ -188,8 +188,15 @@ pub(crate) fn build_normal_pipeline(
             None,
             max_kv_tokens,
         )?;
-        let layer_devices = (0..num_hidden_layers)
-            .map(|layer| mapper.device_for(layer, false).cloned())
+        // Layers past the mapped stack (e.g. an MTP head) live on the non-mapped device.
+        let layer_devices = (0..model_metadata.num_layers().max(num_hidden_layers))
+            .map(|layer| {
+                if layer < num_hidden_layers {
+                    mapper.device_for(layer, false).cloned()
+                } else {
+                    Some(device.clone())
+                }
+            })
             .collect();
         let cache_engine = CacheEngine::new(
             model_metadata.as_ref(),

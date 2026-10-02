@@ -3,7 +3,9 @@
 
 use std::path::Path;
 
-use inference::{Model, ModelDType, MultimodalModelBuilder, RequestBuilder, TextMessageRole};
+use inference::{
+    Model, ModelDType, MultimodalModelBuilder, RequestBuilder, TextMessageRole, TextModelBuilder,
+};
 
 const MODEL_ENV: &str = "INFERENCE_TEST_QWEN3_5_MODEL";
 const ON_GPU: bool = cfg!(any(feature = "cuda", feature = "metal"));
@@ -16,6 +18,13 @@ const PROMPTS: &[&str] = &[
 ];
 // Real heads land most of their drafts on prose this predictable; a broken head or verifier lands next to none.
 const MIN_ACCEPT_RATE: f64 = 0.3;
+#[cfg(unix)]
+const TEXT_VIEW_FILES: [&str; 4] = [
+    "model.safetensors.index.json",
+    "tokenizer.json",
+    "tokenizer_config.json",
+    "chat_template.jinja",
+];
 
 fn model_dir() -> Option<String> {
     std::env::var(MODEL_ENV)
@@ -23,16 +32,57 @@ fn model_dir() -> Option<String> {
         .filter(|d| Path::new(d).exists())
 }
 
+fn paged() -> anyhow::Result<inference::PagedCacheSpec> {
+    Ok(inference::PagedAttentionMetaBuilder::default().build()?)
+}
+
 async fn build(dir: &str, mtp: bool) -> anyhow::Result<Model> {
     let builder = MultimodalModelBuilder::new(dir)
         .with_dtype(ModelDType::BF16)
-        .with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?);
+        .with_paged_attn(paged()?);
     let builder = if mtp {
         builder.with_builtin_mtp(Some(N_PREDICT))
     } else {
         builder
     };
     Ok(builder.build().await?)
+}
+
+#[cfg(unix)]
+async fn build_text(dir: &Path, mtp: bool) -> anyhow::Result<Model> {
+    let builder = TextModelBuilder::new(dir.to_string_lossy())
+        .with_dtype(ModelDType::BF16)
+        .with_paged_attn(paged()?);
+    let builder = if mtp {
+        builder.with_builtin_mtp(Some(N_PREDICT))
+    } else {
+        builder
+    };
+    Ok(builder.build().await?)
+}
+
+// The text backbone alone, as a text-only Qwen3.5 checkpoint: its text config, the same weights and tokenizer.
+#[cfg(unix)]
+fn text_only_view(dir: &str) -> anyhow::Result<tempfile::TempDir> {
+    let view = tempfile::tempdir()?;
+    let config: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(
+        Path::new(dir).join("config.json"),
+    )?)?;
+    let mut text = config["text_config"].clone();
+    text["architectures"] = serde_json::json!(["Qwen3_5ForCausalLM"]);
+    text["model_type"] = "qwen3_5_text".into();
+    text["tie_word_embeddings"] = config["tie_word_embeddings"].clone();
+    std::fs::write(view.path().join("config.json"), text.to_string())?;
+    for entry in std::fs::read_dir(dir)? {
+        let path = entry?.path();
+        let name = path.file_name().unwrap_or_default();
+        let keep = path.extension().is_some_and(|ext| ext == "safetensors")
+            || TEXT_VIEW_FILES.map(std::ffi::OsStr::new).contains(&name);
+        if keep {
+            std::os::unix::fs::symlink(&path, view.path().join(name))?;
+        }
+    }
+    Ok(view)
 }
 
 async fn greedy_ids(model: &Model, prompt: &str) -> anyhow::Result<Vec<u32>> {
@@ -53,21 +103,10 @@ async fn greedy_ids(model: &Model, prompt: &str) -> anyhow::Result<Vec<u32>> {
     Ok(ids)
 }
 
-#[tokio::test]
-async fn builtin_mtp_accepts_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
-    let Some(dir) = model_dir() else {
-        eprintln!("SKIP: {MODEL_ENV} is not a local checkpoint dir");
-        return Ok(());
-    };
-    if !ON_GPU {
-        eprintln!("SKIP: built-in MTP needs a GPU build");
-        return Ok(());
-    }
-    let plain = build(&dir, false).await?;
-    let mtp = build(&dir, true).await?;
+async fn check_mtp(plain: &Model, mtp: &Model) -> anyhow::Result<()> {
     for prompt in PROMPTS {
-        let expected = greedy_ids(&plain, prompt).await?;
-        let drafted = greedy_ids(&mtp, prompt).await?;
+        let expected = greedy_ids(plain, prompt).await?;
+        let drafted = greedy_ids(mtp, prompt).await?;
         let agreed = expected
             .iter()
             .zip(&drafted)
@@ -94,4 +133,38 @@ async fn builtin_mtp_accepts_drafts_and_keeps_greedy_output() -> anyhow::Result<
         "MTP accepted {accepted} of {proposed} draft tokens"
     );
     Ok(())
+}
+
+fn gpu_model_dir() -> Option<String> {
+    let Some(dir) = model_dir() else {
+        eprintln!("SKIP: {MODEL_ENV} is not a local checkpoint dir");
+        return None;
+    };
+    if !ON_GPU {
+        eprintln!("SKIP: built-in MTP needs a GPU build");
+        return None;
+    }
+    Some(dir)
+}
+
+#[tokio::test]
+async fn builtin_mtp_accepts_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
+    let Some(dir) = gpu_model_dir() else {
+        return Ok(());
+    };
+    check_mtp(&build(&dir, false).await?, &build(&dir, true).await?).await
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn text_only_builtin_mtp_accepts_drafts_and_keeps_greedy_output() -> anyhow::Result<()> {
+    let Some(dir) = gpu_model_dir() else {
+        return Ok(());
+    };
+    let view = text_only_view(&dir)?;
+    check_mtp(
+        &build_text(view.path(), false).await?,
+        &build_text(view.path(), true).await?,
+    )
+    .await
 }

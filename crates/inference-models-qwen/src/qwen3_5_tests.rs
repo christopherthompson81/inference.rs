@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 use candle_core::{DType, Tensor};
-use inference_nn::loaders::MultimodalModelLoader;
+use inference_nn::loaders::{DeviceMappedModelLoader, MultimodalModelLoader};
 use inference_nn::paged_attention::AttentionImplementation;
 use inference_nn::testing::{
     Snapshot, assert_snapshot, forward_multimodal, load_synthesized, metadata, names_digest,
@@ -13,7 +13,7 @@ use inference_nn::testing::{
 };
 use serde_json::{Value, json};
 
-use crate::loaders::{Qwen3_5Loader, Qwen3_5MoeLoader};
+use crate::loaders::{Qwen3_5Loader, Qwen3_5MoeLoader, Qwen3_5TextLoader};
 
 const VOCAB: usize = 64;
 const HIDDEN: usize = 64;
@@ -239,4 +239,31 @@ fn qwen3_5_sizing_matches_the_loaded_weights() -> Result<()> {
 #[test]
 fn qwen3_5_moe_sizing_matches_the_loaded_weights() -> Result<()> {
     sizing_matches_the_loaded_weights(&Qwen3_5MoeLoader, moe_text(), expert_shapes())
+}
+
+#[test]
+fn text_loader_reserves_the_mtp_layer_when_asked() -> Result<()> {
+    let text = patched(text(), json!({ "mtp_num_hidden_layers": 1 }));
+    let with_mtp = patched(text.clone(), json!({ "_inference_mtp": true }));
+    let layers = |config: &Value| -> Result<usize> {
+        Ok(Qwen3_5TextLoader
+            .model_config(&config.to_string())?
+            .num_layers())
+    };
+    assert_eq!(layers(&text)?, LAYERS);
+    assert_eq!(layers(&with_mtp)?, LAYERS + 1);
+    let head = |loader: &dyn DeviceMappedModelLoader, base: &Value, mtp: &Value| -> Result<usize> {
+        let size = |config: &Value| {
+            loader.non_mapped_size_in_bytes(&config.to_string(), DType::F32, 1, None, None)
+        };
+        Ok(size(mtp)? - size(base)?)
+    };
+    // the text-only and multimodal loaders size the same head
+    let multimodal = config(text.clone());
+    let multimodal_mtp = patched(multimodal.clone(), json!({ "_inference_mtp": true }));
+    assert_eq!(
+        head(&Qwen3_5TextLoader, &text, &with_mtp)?,
+        head(&Qwen3_5Loader, &multimodal, &multimodal_mtp)?
+    );
+    Ok(())
 }
