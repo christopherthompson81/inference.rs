@@ -318,11 +318,11 @@ mod tests {
 
     use super::*;
 
-    // pins current sizing, including the DeepSeek shared experts sized at intermediate_size
-    const DS2_PLAIN_Q: [usize; 5] = [26432, 61248, 61248, 61248, 61248];
-    const DS3_LORA_Q: [usize; 5] = [24448, 59264, 59264, 59264, 59264];
-    const LITE: [usize; 5] = [21376, 40864, 40864, 40864, 40864];
-    const GLM: [usize; 5] = [15936, 35424, 35424, 35424, 35424];
+    // shared experts are moe_intermediate_size * n_shared_experts wide, as in HF
+    const DS2_PLAIN_Q: [usize; 5] = [26432, 48960, 48960, 48960, 48960];
+    const DS3_LORA_Q: [usize; 5] = [24448, 46976, 46976, 46976, 46976];
+    const LITE: [usize; 5] = [21376, 43936, 43936, 43936, 43936];
+    const GLM: [usize; 5] = [15936, 38496, 38496, 38496, 38496];
     const PACK_FACTOR: usize = 2;
 
     fn deepseek(q_lora_rank: Option<usize>) -> Value {

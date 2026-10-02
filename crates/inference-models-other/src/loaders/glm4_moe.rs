@@ -69,7 +69,7 @@ impl GLM4MoeLoader {
                 first_k_dense_replace: cfg.first_k_dense_replace,
                 moe_layer_freq: None,
                 shared_intermediate: (cfg.n_shared_experts > 0)
-                    .then_some(cfg.moe_intermediate_size),
+                    .then_some(cfg.moe_intermediate_size * cfg.n_shared_experts),
                 correction_bias: true,
             }),
             isq_head: vec![

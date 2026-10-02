@@ -68,8 +68,7 @@ fn router_requires_bias() -> Result<()> {
 
 fn forward_case(split_kv_b: bool) -> Result<Tensor> {
     let mut checkpoint = Checkpoint::default();
-    // shared expert width ignores n_shared_experts today
-    checkpoint.skeleton(MOE_INTERMEDIATE, true);
+    checkpoint.skeleton(MOE_INTERMEDIATE * N_SHARED, true);
     checkpoint.mla_attention(Some(Q_LORA), split_kv_b, V_DIM);
     load_and_forward(&GLM4MoeLiteLoader, &base_config(), &checkpoint)
 }
@@ -77,9 +76,9 @@ fn forward_case(split_kv_b: bool) -> Result<Tensor> {
 #[test]
 fn forward_fused_kv_b() -> Result<()> {
     let expected = Snapshot {
-        probes: [-0.032716457, 0.21129695, -0.36346126, -0.14436774],
-        sum: 5.1760826,
-        l2: 17.334364,
+        probes: [-0.6860662, -0.2246428, -0.63331395, -0.32600886],
+        sum: 0.9202633,
+        l2: 17.03426,
     };
     assert_snapshot(&forward_case(false)?, &expected)
 }

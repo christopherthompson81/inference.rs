@@ -91,9 +91,9 @@ impl Glm4MoeLiteConfig {
                 moe_intermediate_size: self.moe_intermediate_size,
                 first_k_dense_replace: self.first_k_dense_replace,
                 moe_layer_freq: Some(self.moe_layer_freq),
-                // sized at one expert whatever n_shared_experts says
-                shared_expert: (self.n_shared_experts > 0)
-                    .then_some(SharedExpert::Replicated(self.moe_intermediate_size)),
+                shared_expert: (self.n_shared_experts > 0).then_some(SharedExpert::Replicated(
+                    self.moe_intermediate_size * self.n_shared_experts,
+                )),
                 router: self.router_config(),
             }),
             attn: MlaConfig {

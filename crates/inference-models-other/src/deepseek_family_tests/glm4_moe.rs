@@ -102,8 +102,7 @@ fn forward_case(qk_norm: bool, bias: bool) -> Result<Tensor> {
         json!({"use_qk_norm": qk_norm, "attention_bias": bias}),
     );
     let mut checkpoint = Checkpoint::default();
-    // shared expert width ignores n_shared_experts today
-    checkpoint.skeleton(MOE_INTERMEDIATE, true);
+    checkpoint.skeleton(MOE_INTERMEDIATE * N_SHARED, true);
     gqa_attention(&mut checkpoint, qk_norm, bias);
     load_and_forward(&GLM4MoeLoader, &config, &checkpoint)
 }
@@ -111,9 +110,9 @@ fn forward_case(qk_norm: bool, bias: bool) -> Result<Tensor> {
 #[test]
 fn forward_qk_norm_with_bias() -> Result<()> {
     let expected = Snapshot {
-        probes: [1.2364452, 1.4078764, 0.6092725, 0.45861205],
-        sum: 63.415905,
-        l2: 19.252851,
+        probes: [1.445884, 1.9424833, 0.63571715, 0.3474533],
+        sum: 60.966694,
+        l2: 19.007177,
     };
     assert_snapshot(&forward_case(true, true)?, &expected)
 }
@@ -121,9 +120,9 @@ fn forward_qk_norm_with_bias() -> Result<()> {
 #[test]
 fn forward_plain_attention() -> Result<()> {
     let expected = Snapshot {
-        probes: [1.2770244, 1.4468794, 0.3916812, 1.2174238],
-        sum: 56.134796,
-        l2: 19.152615,
+        probes: [1.3618726, 1.9371514, 0.4728809, 0.7134509],
+        sum: 58.569862,
+        l2: 19.065742,
     };
     assert_snapshot(&forward_case(false, false)?, &expected)
 }
