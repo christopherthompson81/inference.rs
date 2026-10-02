@@ -40,5 +40,4 @@ inference_nn::json_config!(
     qwen3_moe::Config,
     qwen3_next::Config,
     qwen3_vl::config::Config,
-    qwen3_vl_moe::config::Config,
 );

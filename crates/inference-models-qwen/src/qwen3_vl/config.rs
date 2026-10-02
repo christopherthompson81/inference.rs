@@ -19,6 +19,8 @@ serde_default_fn!(usize, default_patch_size, 16);
 serde_default_fn!(usize, default_spatial_merge_size, 2);
 serde_default_fn!(usize, default_temporal_patch_size, 2);
 serde_default_fn!(usize, default_num_position_embeddings, 2304);
+serde_default_fn!(usize, default_decoder_sparse_step, 1);
+serde_default_fn!(bool, default_norm_topk_prob, true);
 serde_default_fn!(
     Vec<usize>,
     default_deepstack_visual_indexes,
@@ -77,6 +79,21 @@ pub struct TextConfig {
     pub quantization_config: Option<QuantizedConfig>,
     #[serde(default)]
     pub max_window_layers: usize,
+    #[serde(default)]
+    pub use_sliding_window: bool,
+    // MoE fields; Qwen3-VL-MoE sets them, and with no experts every layer is a dense MLP.
+    #[serde(default)]
+    pub moe_intermediate_size: usize,
+    #[serde(default)]
+    pub num_experts: usize,
+    #[serde(default)]
+    pub num_experts_per_tok: usize,
+    #[serde(default)]
+    pub mlp_only_layers: Vec<usize>,
+    #[serde(default = "default_decoder_sparse_step")]
+    pub decoder_sparse_step: usize,
+    #[serde(default = "default_norm_topk_prob")]
+    pub norm_topk_prob: bool,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]

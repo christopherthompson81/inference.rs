@@ -1,9 +1,11 @@
+#![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+
 use crate::attention::FlashParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use std::sync::Arc;
 
 use candle_core::{DType, Device, Result, Tensor};
-use candle_nn::Module;
+use candle_nn::{Linear, Module};
 use inference_quant::{
     ColumnParallelLayer, QuantMethod, ReplicatedLayer, RowParallelLayer, ShardedVarBuilder,
 };
@@ -15,10 +17,51 @@ use crate::{
     kv_cache::{EitherCache, KvCache, NormalCache},
     layers::{self, Activation, F32RmsNorm, Qwen3VLRotaryEmbedding, RmsNorm, Sdpa},
     model::{IsqModel, ModelForwardContext, NormalLoadingMetadata},
+    moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
-    utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
+    utils::{
+        progress::NiceProgressBar,
+        unvarbuilder::{ToTensors, UnVarBuilder},
+    },
 };
 
+// The dense checkpoints normalise layers in F32; the MoE ones have always used the fused RmsNorm.
+#[derive(Clone)]
+enum TextNorm {
+    F32(F32RmsNorm),
+    Fused(RmsNorm),
+}
+
+impl TextNorm {
+    fn new(f32: bool, size: usize, eps: f64, vb: ShardedVarBuilder) -> Result<Self> {
+        Ok(if f32 {
+            Self::F32(F32RmsNorm::new(size, eps, vb)?)
+        } else {
+            Self::Fused(RmsNorm::new(size, eps, vb)?)
+        })
+    }
+}
+
+impl Module for TextNorm {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::F32(norm) => norm.forward(xs),
+            Self::Fused(norm) => norm.forward(xs),
+        }
+    }
+}
+
+impl ToTensors for TextNorm {
+    fn to_tensors(&self) -> std::collections::HashMap<String, Tensor> {
+        match self {
+            Self::F32(norm) => norm.to_tensors(),
+            Self::Fused(norm) => norm.to_tensors(),
+        }
+    }
+}
+
+// Dense MLP for non-MoE layers
+#[derive(Clone)]
 struct Mlp {
     gate_proj: Arc<dyn QuantMethod>,
     up_proj: Arc<dyn QuantMethod>,
@@ -31,33 +74,35 @@ impl Mlp {
         cfg: &TextConfig,
         vb: ShardedVarBuilder,
         comm: &Arc<inference_quant::Comm>,
+        i_size: usize,
     ) -> Result<Self> {
-        let hidden_sz = cfg.hidden_size;
-        let intermediate_sz = cfg.intermediate_size;
+        let hidden_size = cfg.hidden_size;
+
         let gate_proj = ColumnParallelLayer::new(
-            hidden_sz,
-            intermediate_sz,
+            hidden_size,
+            i_size,
             &cfg.quantization_config,
             false,
             comm,
             vb.pp("gate_proj"),
         )?;
         let up_proj = ColumnParallelLayer::new(
-            hidden_sz,
-            intermediate_sz,
+            hidden_size,
+            i_size,
             &cfg.quantization_config,
             false,
             comm,
             vb.pp("up_proj"),
         )?;
         let down_proj = RowParallelLayer::new(
-            intermediate_sz,
-            hidden_sz,
+            i_size,
+            hidden_size,
             &cfg.quantization_config,
             false,
             comm,
             vb.pp("down_proj"),
         )?;
+
         Ok(Self {
             gate_proj,
             up_proj,
@@ -67,13 +112,111 @@ impl Mlp {
     }
 
     fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let original_dtype = xs.dtype();
-        let xs = xs.clone();
-        let lhs = self.gate_proj.forward(&xs)?;
-        let rhs = self.up_proj.forward(&xs)?;
+        let lhs = self.gate_proj.forward(xs)?;
+        let rhs = self.up_proj.forward(xs)?;
         self.down_proj
             .forward(&crate::ops::mul_and_act(&lhs, &rhs, self.act_fn)?)?
-            .to_dtype(original_dtype)
+            .to_dtype(xs.dtype())
+    }
+}
+
+/// MoE MLP layer for Qwen3 VL MoE
+struct MoeMlp {
+    gate: Linear,
+    gate_lora: Option<Arc<inference_quant::LoraSiteHandle>>,
+    experts: MoEExperts,
+    num_experts_per_tok: usize,
+    norm_topk_prob: bool,
+}
+
+impl MoeMlp {
+    fn new(
+        cfg: &TextConfig,
+        vb: ShardedVarBuilder,
+        layer_device: Device,
+        comm: &Arc<inference_quant::Comm>,
+        loading_isq: bool,
+    ) -> Result<Self> {
+        let gate_vb = vb.pp("gate").set_device(layer_device.clone());
+        let gate = layers::linear_no_bias(cfg.hidden_size, cfg.num_experts, gate_vb.clone())?;
+        let gate_lora = inference_quant::register_dynamic_lora_site(
+            &gate_vb,
+            inference_quant::LoraLinearSpec::replicated(cfg.hidden_size, cfg.num_experts),
+        )?;
+
+        let moe_cfg = MoEExpertsConfig {
+            num_experts: cfg.num_experts,
+            num_experts_per_tok: cfg.num_experts_per_tok,
+            hidden_size: cfg.hidden_size,
+            moe_intermediate_size: cfg.moe_intermediate_size,
+            expert_proj_names: crate::moe::ExpertProjNames::DEFAULT,
+        };
+
+        // Load experts with automatic backend selection
+        let experts = MoEExperts::new(
+            &moe_cfg,
+            vb,
+            layer_device,
+            comm,
+            loading_isq,
+            &cfg.quantization_config,
+            cfg.hidden_act,
+        )?;
+
+        Ok(Self {
+            gate,
+            gate_lora,
+            experts,
+            num_experts_per_tok: cfg.num_experts_per_tok,
+            norm_topk_prob: cfg.norm_topk_prob,
+        })
+    }
+
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        let (b_size, seq_len, hidden_dim) = xs.dims3()?;
+        let xs_flat = xs.reshape(((), hidden_dim))?;
+
+        let router_logits = self.gate.forward(&xs_flat)?;
+        let router_logits = match &self.gate_lora {
+            Some(site) => inference_quant::apply_dynamic_lora_delta(site, &xs_flat, router_logits)?,
+            None => router_logits,
+        };
+        let topk = crate::ops::moe_router_topk(
+            &router_logits,
+            crate::ops::MoeRouterTopKConfig {
+                top_k: self.num_experts_per_tok,
+                score_function: crate::ops::MoeRouterScoreFunction::Softmax,
+                selected_weight: crate::ops::MoeRouterSelectedWeight::Score,
+                renormalize: self.norm_topk_prob,
+                norm_min: 0.0,
+                output_scale: 1.0,
+                logit_clip: None,
+            },
+            None,
+            None,
+        )?;
+
+        let ys = self.experts.forward(xs, topk.values, &topk.indices)?;
+
+        ys.reshape((b_size, seq_len, hidden_dim))
+    }
+
+    fn gate(&self) -> &Linear {
+        &self.gate
+    }
+}
+
+enum MoeOrMlp {
+    Moe(MoeMlp),
+    Mlp(Mlp),
+}
+
+impl MoeOrMlp {
+    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
+        match self {
+            Self::Mlp(m) => m.forward(xs),
+            Self::Moe(m) => m.forward(xs),
+        }
     }
 }
 
@@ -246,10 +389,7 @@ impl Attention {
                     Some(flash_params),
                 )?,
                 None => {
-                    // If we don't have metadata, we are most likely generating an imatrix so we don't want to populate that.
-                    // Generating the dummy metadata with the assumption that we are not generating text (only processing prompts).
                     let input_metadata = PagedAttentionInputMetadata::dummy(q.device())?;
-                    // Sanity check.
                     assert!(!matches!(attention_mask, AttentionMask::None));
                     paged_attn.forward(
                         &q,
@@ -289,9 +429,9 @@ impl Attention {
 
 pub struct DecoderLayer {
     self_attn: Attention,
-    mlp: Mlp,
-    input_layernorm: F32RmsNorm,
-    post_attention_layernorm: F32RmsNorm,
+    mlp: MoeOrMlp,
+    input_layernorm: TextNorm,
+    post_attention_layernorm: TextNorm,
 }
 
 impl DecoderLayer {
@@ -305,6 +445,7 @@ impl DecoderLayer {
         loading_isq: bool,
         paged_attn: Option<PagedAttention>,
         comm: &Arc<inference_quant::Comm>,
+        real_device: Device,
     ) -> Result<Self> {
         let self_attn = Attention::new(
             rotary_emb,
@@ -316,17 +457,36 @@ impl DecoderLayer {
             paged_attn,
             comm,
         )?;
-        let mlp = Mlp::new(
-            cfg,
-            mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq),
-            comm,
-        )?;
-        let input_layernorm = F32RmsNorm::new(
+
+        // Check if this layer should be MoE or dense MLP
+        let is_moe = !cfg.mlp_only_layers.contains(&layer_idx)
+            && (cfg.num_experts > 0 && (layer_idx + 1).is_multiple_of(cfg.decoder_sparse_step));
+
+        let mlp = if is_moe {
+            let vb = mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq);
+            let layer_device = mapper
+                .device_for(layer_idx, false)
+                .cloned()
+                .unwrap_or(real_device.clone());
+
+            MoeOrMlp::Moe(MoeMlp::new(cfg, vb, layer_device, comm, loading_isq)?)
+        } else {
+            MoeOrMlp::Mlp(Mlp::new(
+                cfg,
+                mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq),
+                comm,
+                cfg.intermediate_size,
+            )?)
+        };
+
+        let input_layernorm = TextNorm::new(
+            cfg.num_experts == 0,
             cfg.hidden_size,
             cfg.rms_norm_eps,
             mapper.set_device(layer_idx, vb.pp("input_layernorm"), false),
         )?;
-        let post_attention_layernorm = F32RmsNorm::new(
+        let post_attention_layernorm = TextNorm::new(
+            cfg.num_experts == 0,
             cfg.hidden_size,
             cfg.rms_norm_eps,
             mapper.set_device(layer_idx, vb.pp("post_attention_layernorm"), false),
@@ -370,7 +530,7 @@ impl DecoderLayer {
 
 pub struct Qwen3VLTextModel {
     embed_tokens: Arc<dyn QuantMethod>,
-    pub(super) norm: F32RmsNorm,
+    norm: TextNorm,
     layers: Vec<DecoderLayer>,
     mapper: Box<dyn DeviceMapper + Send + Sync>,
     lm_head: Arc<dyn QuantMethod>,
@@ -451,9 +611,11 @@ impl Qwen3VLTextModel {
                 normal_loading_metadata.loading_isq,
                 paged_attn,
                 &comm,
+                normal_loading_metadata.real_device.clone(),
             )
         })?;
-        let norm = F32RmsNorm::new(
+        let norm = TextNorm::new(
+            cfg.num_experts == 0,
             cfg.hidden_size,
             cfg.rms_norm_eps,
             mapper.set_nm_device(vb_m.pp("norm"), false),
@@ -614,6 +776,10 @@ impl IsqModel for Qwen3VLTextModel {
                 .pp("self_attn")
                 .pp("k_norm")
                 .add(&layer.self_attn.k_norm);
+
+            if let MoeOrMlp::Moe(moe) = &layer.mlp {
+                uvb_l.pp("mlp").pp("gate").add(moe.gate());
+            }
         }
 
         uvb.to_safetensors()
