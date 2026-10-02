@@ -659,3 +659,16 @@ impl<T: FamilyAttention> NormalModel for FamilyModel<T> {
 }
 
 impl<T: FamilyAttention> AnyMoeBaseModelMixin for FamilyModel<T> {}
+
+/// A `moe_layer_freq` of 0 would make no layer past the first a MoE layer and divide by zero in the sizing.
+pub(crate) fn nonzero_moe_layer_freq<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<usize, D::Error> {
+    let freq = <usize as serde::Deserialize>::deserialize(deserializer)?;
+    if freq == 0 {
+        return Err(serde::de::Error::custom(
+            "moe_layer_freq must be at least 1",
+        ));
+    }
+    Ok(freq)
+}

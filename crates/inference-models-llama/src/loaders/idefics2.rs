@@ -269,7 +269,10 @@ impl DeviceMappedModelLoader for Idefics2Loader {
                 layer_norm_1 + layer_norm_2 + fc1 + fc2 + q_proj + k_proj + v_proj + o_proj
             };
 
-            post_layernorm + patch_embedding + position_embedding + layer_elems
+            post_layernorm
+                + patch_embedding
+                + position_embedding
+                + layer_elems * cfg.num_hidden_layers
         };
 
         let elems = text_elems + connector_elems + vision_transformer;

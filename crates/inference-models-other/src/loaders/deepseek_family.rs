@@ -74,12 +74,13 @@ pub(super) struct FamilyLoaderSpec {
 }
 
 impl FamilyLoaderSpec {
-    // `%` rather than is_multiple_of: a zero moe_layer_freq panics here as it always has
-    #[allow(clippy::manual_is_multiple_of)]
+    // The same rule as the model's is_moe_layer; config parsing rejects a zero frequency.
     fn moe_layer(&self, layer_idx: usize) -> Option<&MoeSizing> {
         self.moe.as_ref().filter(|moe| {
             layer_idx >= moe.first_k_dense_replace
-                && moe.moe_layer_freq.is_none_or(|freq| layer_idx % freq == 0)
+                && moe
+                    .moe_layer_freq
+                    .is_none_or(|freq| layer_idx.is_multiple_of(freq))
         })
     }
 

@@ -147,17 +147,25 @@ impl DeviceMappedModelLoader for PaddleOcrVlLoader {
         config: &str,
         dtype: DType,
         weight_pack_factor: usize,
-        _quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
+        quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
         let cfg = PaddleOcrVlConfig::from_json(config)?;
         let tcfg = cfg.text_config();
         let vcfg = cfg.vision_config();
 
+        // the model always builds an untied lm_head
+        let (embed_pack_factor, lm_head_pack_factor) = language_model_pack_factors(
+            quantization,
+            "model.embed_tokens.weight",
+            "lm_head.weight",
+            false,
+            dtype,
+            weight_pack_factor,
+        )?;
         let text_elems = {
-            let embed_tokens = tcfg.hidden_size * tcfg.vocab_size / weight_pack_factor;
-            // tie_word_embeddings=false
-            let lm_head = tcfg.hidden_size * tcfg.vocab_size / weight_pack_factor;
+            let embed_tokens = tcfg.hidden_size * tcfg.vocab_size / embed_pack_factor;
+            let lm_head = tcfg.hidden_size * tcfg.vocab_size / lm_head_pack_factor;
             let norm = tcfg.hidden_size;
             embed_tokens + lm_head + norm
         };

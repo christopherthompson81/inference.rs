@@ -115,3 +115,30 @@ fn phi4mm_sizing() {
         ((123392, 61952), (2, 16, 16), (256, 3, 64, 4))
     );
 }
+
+// HF's Phi has a biased lm_head and an affine final LayerNorm, and microsoft/phi-2 ships both biases.
+#[test]
+fn phi2_loads_and_sizes_its_head_and_final_norm_biases() {
+    use inference_nn::paged_attention::AttentionImplementation;
+    use inference_nn::testing::{load_synthesized, metadata};
+    let config = phi2_text(false);
+    let (_, names) = load_synthesized(&[], Default::default(), DType::F32, |vb| {
+        Phi2Loader.load(
+            &config.to_string(),
+            vb,
+            metadata(),
+            AttentionImplementation::Eager,
+        )
+    })
+    .unwrap();
+    for bias in ["lm_head.bias", "model.final_layernorm.bias"] {
+        assert!(names.contains(bias), "{bias} is not loaded");
+    }
+    let vocab = usize::try_from(config["vocab_size"].as_u64().unwrap()).unwrap();
+    let non_mapped = Phi2Loader
+        .non_mapped_size_in_bytes(&config.to_string(), DType::F32, 1, None, None)
+        .unwrap();
+    // embeddings, lm_head weight and bias, final norm weight and bias
+    let expected = 2 * vocab * HIDDEN + vocab + 2 * HIDDEN;
+    assert_eq!(non_mapped, expected * DType::F32.size_in_bytes());
+}

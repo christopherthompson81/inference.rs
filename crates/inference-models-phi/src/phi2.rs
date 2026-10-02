@@ -460,11 +460,12 @@ impl Model {
             )
         })?;
         let lm_head = if !cfg.tie_word_embeddings {
+            // HF's PhiForCausalLM lm_head is biased
             ReplicatedLayer::new(
                 cfg.hidden_size,
                 cfg.vocab_size,
                 &cfg.quantization_config,
-                false,
+                true,
                 mapper.set_nm_device(vb.pp("lm_head"), normal_loading_metadata.loading_isq),
             )?
         } else {

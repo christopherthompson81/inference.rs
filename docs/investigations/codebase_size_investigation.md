@@ -1784,3 +1784,23 @@ Also from the review: `prompt_media` re-tokenized and re-committed text-only seq
 their tokens, prefix length and KV slots mid-step (a real BPE tokenizer can change tokens on that round trip);
 existed before #229 for Qwen3-VL and became reachable for Qwen2-VL with failure 3 fixed. Text-only sequences are now
 skipped. The SDK doc for `with_max_prefill_chunk_tokens` now says when it applies.
+
+## Run 58 - 2026-10-02 (time approximate)
+
+Question: fix #224, #225 and #212, each pinned by a test that fails on master's code first.
+
+- #224, Idefics2: the new test `idefics2_sizes_every_vision_layer` (1 vs 3 vision layers must differ by two
+  hand-computed SigLIP layers, 60032 bytes) got 0 on master: `non_mapped_size_in_bytes` added the vision layer once.
+  It now multiplies by `vision_config.num_hidden_layers`, which the encoder builds (`idefics2/mod.rs`).
+- #225, Phi-2: checking the final LayerNorm bias against the model turned up a larger bug. transformers'
+  `PhiForCausalLM` builds `lm_head = nn.Linear(..., bias=True)` and microsoft/phi-2's index ships `lm_head.bias`
+  (and `model.final_layernorm.bias`), but our Phi-2 built its lm_head without a bias, so every logit was missing its
+  learned bias. Test `phi2_loads_and_sizes_its_head_and_final_norm_biases` failed with "lm_head.bias is not loaded";
+  the head is biased now (the X-LoRA Phi-2 already was; GGUF binds `lm_head.bias` to llama.cpp's `output.bias`), and
+  the non-mapped size counts both biases.
+- #225, PaddleOCR-VL: counting an untied lm_head matches the model, which always builds one; the real gap was that
+  the embedding and head ignored the quantization argument. They now go through `language_model_pack_factors` like
+  every other loader (no quantization: the same sizes).
+- #212: `moe_layer_freq: 0` panicked in the DeepSeek-family loaders' `%` while the models' `is_multiple_of` treated
+  only layer 0 as MoE. DeepSeek-V2, DeepSeek-V3 and GLM4-MoE-Lite configs now reject 0 at parse time ("moe_layer_freq
+  must be at least 1", tested per model), so the loader uses the model's rule.
