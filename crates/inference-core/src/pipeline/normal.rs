@@ -691,7 +691,6 @@ impl Loader for NormalLoader {
             mapper,
             super::loading::ModelLoadInputs {
                 config: &config,
-                session_config: &config,
                 paths,
                 silent,
                 organization: self.config.organization,

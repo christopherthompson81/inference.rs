@@ -722,8 +722,6 @@ pub(crate) type XLoraLoad<'a, M> = dyn Fn(
 /// What [`load_model`] reads beyond the session.
 pub(crate) struct ModelLoadInputs<'a, M: ?Sized> {
     pub config: &'a str,
-    // the config the session sized from, which a tensor-parallel mapper is built from too
-    pub session_config: &'a str,
     pub paths: &'a dyn super::ModelPaths,
     pub silent: bool,
     pub organization: super::IsqOrganization,
@@ -746,7 +744,6 @@ pub(crate) fn load_model<L: BuildModel + ?Sized>(
 ) -> Result<LoadedModel<L::Model>> {
     let ModelLoadInputs {
         config,
-        session_config,
         paths,
         silent,
         organization,
@@ -788,7 +785,7 @@ pub(crate) fn load_model<L: BuildModel + ?Sized>(
                 available_devices: &session.available_devices,
                 global_world_size_override: session.tensor_parallelism.world_size(),
                 silent,
-                config: session_config,
+                config,
                 loading_isq,
                 from_uqff,
                 write_uqff,

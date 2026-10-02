@@ -627,13 +627,13 @@ impl Loader for MultimodalLoader {
             self.config.matformer_slice_name.as_deref(),
         )?;
         let auto_device_map_params = |params: &crate::device_map::AutoDeviceMapParams| {
-            self.inner.auto_device_map_params(&config, params)
+            self.inner.auto_device_map_params(&runtime_config, params)
         };
         let (session, mapper) = super::loading::open_load_session(
             super::loading::LoadSessionInputs {
                 mapped: &*self.inner,
                 isq: &*self.inner,
-                config: &config,
+                config: &runtime_config,
                 settings: super::loading::LoadSettings {
                     topology: self.config.topology.as_ref(),
                     organization: self.config.organization,
@@ -668,7 +668,6 @@ impl Loader for MultimodalLoader {
             mapper,
             super::loading::ModelLoadInputs {
                 config: &runtime_config,
-                session_config: &config,
                 paths,
                 silent,
                 organization: self.config.organization,

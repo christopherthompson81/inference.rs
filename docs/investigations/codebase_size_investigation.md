@@ -1478,6 +1478,7 @@ Still untested: X-LoRA, tensor parallel, prepared-source loads.
 
 Drifts left as found: the normal pipeline ignores the matformer slice when sizing the device map; multimodal sizes
 from the pre-`max_model_len` config; multimodal's LoRA qk-rope layout check ignores X-LoRA (it has no X-LoRA path).
+Filed: #218 (the config drift, with the matformer note) and #219 (the untested load paths).
 
 Review of the branch (subagent): every case matches master, across all 12 weight-dispatch combinations and each
 step's config. Low items, accepted as they are: multimodal prepared-source LoRA now builds its registry with
@@ -1486,3 +1487,19 @@ plain, though no builder produces them; normal's matformer slice and the LoRA ru
 devices are set up, which only changes which error shows first; the config trace logs after the ISQ plan. Fixed: an
 empty `impl`, a redundant destructure field, a doc on `open_load_session` that was wrong under tensor parallelism,
 two comments restating field names. CI passed (CPU 2333, CUDA 2654) before these cosmetic fixes.
+
+## Run 50 - 2026-10-01 (time approximate)
+
+Question (#218): does the multimodal pipeline sizing from the pre-`max_model_len` config change any load?
+
+Traced every consumer of the sizing config in `open_load_session` and the tensor-parallel mapper for the four
+multimodal loaders that rewrite `max_position_embeddings` (Qwen3.5, Qwen3.5-MoE, Muse-Glimmer, Gemma 4):
+- `get_device_layers` takes `max_seq_len` from the auto params; its paged-KV estimate hands `calculate_cache_config`
+  an explicit `max_seq_len * max_batch_size`, so `model_config().max_seq_len()` (the fallback) is never read there.
+- layer sizes, activation sizes (the params' `max_seq_len` again), the tensor-parallel decision (head counts) and
+  the ISQ plan read nothing context-dependent.
+Finding: latent, not live; no load changes today. The issue overstated it and got a correcting comment.
+
+Change: the multimodal session, its auto device map adjustment and the tensor-parallel mapper now take the runtime
+config, as normal's do; the UQFF artifact still keeps the source config. Every pipeline now sizes and builds from
+one config, so `ModelLoadInputs::session_config` is gone. No test can see the difference, since nothing reads it.
