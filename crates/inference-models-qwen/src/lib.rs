@@ -25,6 +25,7 @@ mod qwen3_moe_tests;
 pub mod qwen3_next;
 pub mod qwen3_vl;
 pub mod qwen3_vl_moe;
+mod qwen_vl_inputs;
 #[cfg(test)]
 mod qwen_vl_tests;
 
