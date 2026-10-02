@@ -1506,8 +1506,11 @@ impl Qwen3_5TextModel {
         cache.reserve_gdn_pending_transitions(spec)
     }
 
-    pub(super) fn reserve_recurrent_decode_deferred_storage(&self) -> Result<bool> {
-        let mut cache = self.cache.hybrid();
+    // The GDN deferred-state shape every linear-attention layer shares, or None when a layer cannot defer.
+    pub(super) fn gdn_deferred_state_spec(
+        &self,
+    ) -> Result<Option<crate::kv_cache::GdnDeferredStateSpec>> {
+        let cache = self.cache.hybrid();
         let mut spec = None;
         for (layer_idx, layer_type) in self.layer_types.iter().enumerate() {
             if *layer_type != LayerType::LinearAttention {
@@ -1519,7 +1522,7 @@ impl Qwen3_5TextModel {
                 candle_core::bail!("Qwen3.5 GDN layer has no recurrent state pool");
             };
             if !gdn.deferred_decode_supported(pool, self.dtype) {
-                return Ok(false);
+                return Ok(None);
             }
             let layer_spec = gdn.deferred_state_spec();
             if spec
@@ -1529,10 +1532,14 @@ impl Qwen3_5TextModel {
                 candle_core::bail!("Qwen3.5 GDN deferred-state dimensions diverge across layers");
             }
         }
-        let Some(spec) = spec else {
+        Ok(spec)
+    }
+
+    pub(super) fn reserve_recurrent_decode_deferred_storage(&self) -> Result<bool> {
+        let Some(spec) = self.gdn_deferred_state_spec()? else {
             return Ok(false);
         };
-        cache.reserve_gdn_deferred_state(spec)
+        self.cache.hybrid().reserve_gdn_deferred_state(spec)
     }
 
     pub(super) fn disable_recurrent_decode_deferred_storage(&self) -> Result<bool> {

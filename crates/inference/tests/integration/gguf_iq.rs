@@ -13,14 +13,11 @@ const MAX_TOKENS: usize = 32;
 // `llama-simple -n 32` on the same Qwen3.8-27B IQ4_XS file, without the space it prints before the continuation
 const LLAMA_CPP_CONTINUATION: &str = "red, green, and blue. When these colors are combined in equal intensities, they \
 produce white light. This phenomenon is known as additive color mixing. In";
-// GDN keeps a full recurrent state per sequence slot, so a 27B on one card has room for few
-const MAX_SEQS: usize = 2;
 
 async fn build(file: &Path) -> anyhow::Result<Model> {
     let dir = file.parent().unwrap_or(Path::new("."));
     let name = file.file_name().unwrap_or_default().to_string_lossy();
     Ok(GgufModelBuilder::new(dir.to_string_lossy(), vec![name])
-        .with_max_num_seqs(MAX_SEQS)
         .build()
         .await?)
 }

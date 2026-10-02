@@ -45,7 +45,7 @@ use crate::PagedAttentionConfig;
 use crate::amoe::{AnyMoeConfig, AnyMoeExpertType, AnyMoeTrainingInputs, AnyMoeTrainingResult};
 use crate::attention::FlashParams;
 use crate::device_map::DeviceMapper;
-use crate::kv_cache::PagedAuxiliaryPrefixState;
+use crate::kv_cache::{GdnDeferredStateSpec, PagedAuxiliaryPrefixState};
 pub use crate::model::DiffusionGenerationParams;
 use crate::paged_attention::PagedAttentionInputMetadata;
 use crate::paged_attention::{
@@ -351,22 +351,13 @@ fn effective_recurrent_checkpoint_lanes(requested: usize, supported: bool) -> us
     if supported { requested } else { 1 }
 }
 
+// Steady bytes for the recurrent layout: free (or utilization) memory plus the current layout, less reservations and KV.
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
-fn automatic_recurrent_checkpoint_lane_budget(budget: RecurrentCheckpointBudget) -> Result<usize> {
-    let current_layout_bytes = budget
-        .snapshot_bytes
-        .checked_mul(budget.current_capacity)
-        .and_then(|bytes| bytes.checked_mul(budget.current_lanes))
-        .ok_or_else(|| anyhow::anyhow!("current recurrent layout size overflow"))?;
-    let capacity = budget.capacity.max(budget.current_capacity);
-    let bytes_per_lane = budget
-        .snapshot_bytes
-        .checked_mul(capacity)
-        .ok_or_else(|| anyhow::anyhow!("recurrent checkpoint lane size overflow"))?;
-    if bytes_per_lane == 0 {
-        anyhow::bail!("recurrent checkpoint lane size must be nonzero");
-    }
-    let steady_layout_budget = match budget.memory_utilization {
+fn steady_recurrent_layout_budget(
+    budget: &RecurrentCheckpointBudget,
+    current_layout_bytes: usize,
+) -> usize {
+    match budget.memory_utilization {
         Some(fraction) => {
             let target_used = (budget.memory_total as f64 * f64::from(fraction)) as usize;
             let current_used_without_layout = budget
@@ -383,8 +374,71 @@ fn automatic_recurrent_checkpoint_lane_budget(budget: RecurrentCheckpointBudget)
             .saturating_add(current_layout_bytes)
             .saturating_sub(budget.future_reserved_bytes)
             .saturating_sub(budget.kv_floor_bytes),
+    }
+}
+
+// Per slot: the recurrent layout at `layout_lanes` lanes, and the deferred storage reserved after it.
+#[derive(Clone, Copy)]
+struct RecurrentSlotBytes {
+    layout_lanes: usize,
+    deferred: usize,
+}
+
+/// Recurrent slots that fit, at least one serving slot plus the graph pad.
+fn automatic_recurrent_capacity_budget(
+    budget: RecurrentCheckpointBudget,
+    slot: RecurrentSlotBytes,
+) -> Result<usize> {
+    let overflow = || anyhow::anyhow!("recurrent slot size overflow");
+    let current_layout_bytes = budget
+        .snapshot_bytes
+        .checked_mul(budget.current_capacity)
+        .and_then(|bytes| bytes.checked_mul(budget.current_lanes))
+        .ok_or_else(overflow)?;
+    let layout_bytes = budget
+        .snapshot_bytes
+        .checked_mul(slot.layout_lanes)
+        .ok_or_else(overflow)?;
+    let slot_bytes = layout_bytes
+        .checked_add(slot.deferred)
+        .ok_or_else(overflow)?;
+    if layout_bytes == 0 {
+        anyhow::bail!("recurrent slot size must be nonzero");
+    }
+    let steady_slots = steady_recurrent_layout_budget(&budget, current_layout_bytes) / slot_bytes;
+    // the new layout is allocated beside the current one, which is freed before the deferred storage is allocated
+    let layout_peak_slots = budget.allocation_available / layout_bytes;
+    let deferred_peak_slots = budget
+        .allocation_available
+        .saturating_add(current_layout_bytes)
+        / slot_bytes;
+    let fitted = steady_slots.min(layout_peak_slots).min(deferred_peak_slots);
+    // slot_bytes misses allocator rounding and the small per-pool tensors, so a binding budget keeps one slot spare
+    let fitted = if fitted < budget.capacity {
+        fitted.saturating_sub(1)
+    } else {
+        budget.capacity
     };
-    let steady_lanes = steady_layout_budget / bytes_per_lane;
+    Ok(fitted.max(RECURRENT_GRAPH_PAD_SLOTS + 1))
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn automatic_recurrent_checkpoint_lane_budget(budget: RecurrentCheckpointBudget) -> Result<usize> {
+    let current_layout_bytes = budget
+        .snapshot_bytes
+        .checked_mul(budget.current_capacity)
+        .and_then(|bytes| bytes.checked_mul(budget.current_lanes))
+        .ok_or_else(|| anyhow::anyhow!("current recurrent layout size overflow"))?;
+    let capacity = budget.capacity.max(budget.current_capacity);
+    let bytes_per_lane = budget
+        .snapshot_bytes
+        .checked_mul(capacity)
+        .ok_or_else(|| anyhow::anyhow!("recurrent checkpoint lane size overflow"))?;
+    if bytes_per_lane == 0 {
+        anyhow::bail!("recurrent checkpoint lane size must be nonzero");
+    }
+    let steady_lanes =
+        steady_recurrent_layout_budget(&budget, current_layout_bytes) / bytes_per_lane;
     let allocation_lanes = budget.allocation_available / bytes_per_lane;
     let checkpoint_lanes = budget
         .requested_lanes
@@ -445,22 +499,48 @@ fn paged_kv_bytes_per_token(
         .ok_or_else(|| anyhow::anyhow!("PagedAttention token memory size overflow"))
 }
 
-fn automatic_recurrent_checkpoint_lanes(
-    cache: &EitherCache,
+struct RecurrentBudgetContext<'a> {
+    cache: &'a EitherCache,
     paged_attn_config: PagedAttentionConfig,
-    primary_device: &Device,
-    capacity: usize,
+    primary_device: &'a Device,
     kv_bytes_per_token: usize,
-) -> Result<usize> {
+    model_dtype: DType,
+    deferred_spec: Option<GdnDeferredStateSpec>,
+}
+
+// One device's budget, its deferred bytes per slot, and whether the slot count may be capped there.
+struct DeviceRecurrentBudget {
+    budget: RecurrentCheckpointBudget,
+    deferred_slot_bytes: usize,
+    capped: bool,
+}
+
+// One budget per device that holds recurrent state, for a layout of `capacity` slots.
+fn recurrent_budgets(
+    context: &RecurrentBudgetContext<'_>,
+    capacity: usize,
+) -> Result<Vec<DeviceRecurrentBudget>> {
+    let RecurrentBudgetContext {
+        cache,
+        paged_attn_config,
+        primary_device,
+        kv_bytes_per_token,
+        model_dtype,
+        deferred_spec,
+    } = *context;
     let hybrid = cache.hybrid();
     let snapshot_bytes_by_device = hybrid.recurrent_snapshot_bytes_by_device()?;
+    let deferred_bytes_by_device = deferred_spec
+        .map(|spec| hybrid.gdn_deferred_state_slot_bytes_by_device(spec))
+        .transpose()?
+        .unwrap_or_default();
     let recurrent_devices = hybrid.recurrent_devices();
     let current_capacity = hybrid.recurrent_capacity();
     let current_lanes = hybrid.checkpoint_lanes();
     drop(hybrid);
     let reservations =
         paged_attention_memory_reservations(cache, paged_attn_config, primary_device)?;
-    let mut selected_lanes = paged_attn_config.recurrent_checkpoint_lanes;
+    let mut budgets = Vec::with_capacity(recurrent_devices.len());
     for device in recurrent_devices {
         #[cfg(feature = "cuda")]
         if device.is_cuda() {
@@ -475,39 +555,53 @@ fn automatic_recurrent_checkpoint_lanes(
                     "recurrent device is missing from the snapshot memory inventory",
                 )
             })?;
-        let future_reserved_bytes = if device.same_device(primary_device) {
+        let reserved_bytes = if device.same_device(primary_device) {
             reservations.primary_device_bytes
         } else {
             reservations.secondary_device_bytes
+        };
+        // the KV planner holds back the CUDA GGUF affine repack budget too
+        let future_reserved_bytes = if device.is_cuda() {
+            reserved_bytes + inference_quant::gguf_affine_budget_bytes(&device, model_dtype)
+        } else {
+            reserved_bytes
         };
         let kv_floor_bytes = recurrent_kv_floor_bytes(
             paged_attn_config.mem_gpu,
             memory.total(),
             kv_bytes_per_token,
         )?;
-        selected_lanes = selected_lanes.min(automatic_recurrent_checkpoint_lane_budget(
-            RecurrentCheckpointBudget {
-                requested_lanes: paged_attn_config.recurrent_checkpoint_lanes,
-                capacity,
-                snapshot_bytes,
-                current_capacity,
-                current_lanes,
-                memory_total: memory.total(),
-                memory_available: memory.available(),
-                allocation_available: crate::paged_attention::device_memory_cap(
-                    memory.available(),
-                    &device,
-                ),
-                future_reserved_bytes,
-                kv_floor_bytes,
-                memory_utilization: match paged_attn_config.mem_gpu {
-                    MemoryGpuConfig::Utilization(fraction) => Some(fraction),
-                    _ => None,
-                },
+        let deferred_slot_bytes = deferred_bytes_by_device
+            .get(&device.location())
+            .copied()
+            .unwrap_or_default();
+        let capped = device.is_cuda();
+        let budget = RecurrentCheckpointBudget {
+            requested_lanes: paged_attn_config.recurrent_checkpoint_lanes,
+            capacity,
+            snapshot_bytes,
+            current_capacity,
+            current_lanes,
+            memory_total: memory.total(),
+            memory_available: memory.available(),
+            allocation_available: crate::paged_attention::device_memory_cap(
+                memory.available(),
+                &device,
+            ),
+            future_reserved_bytes,
+            kv_floor_bytes,
+            memory_utilization: match paged_attn_config.mem_gpu {
+                MemoryGpuConfig::Utilization(fraction) => Some(fraction),
+                _ => None,
             },
-        )?);
+        };
+        budgets.push(DeviceRecurrentBudget {
+            budget,
+            deferred_slot_bytes,
+            capped,
+        });
     }
-    Ok(selected_lanes)
+    Ok(budgets)
 }
 
 /// A model whose recurrent state pools are reserved before any KV blocks are sized.
@@ -532,8 +626,12 @@ impl RecurrentReservation<'_> {
                 reserve_recurrent_serving_capacity(
                     self.cache,
                     config,
-                    checkpoints,
-                    transitions,
+                    RecurrentReservationInputs {
+                        checkpoints,
+                        transitions,
+                        deferred_spec: self.target.recurrent_decode_deferred_state_spec()?,
+                        model_dtype: self.dtype,
+                    },
                     self.device,
                     kv_bytes_per_token,
                 )
@@ -566,14 +664,27 @@ pub(crate) fn cache_layer_count(cache: &EitherCache) -> usize {
     }
 }
 
+// The model's recurrent support, the deferred storage reserved after the pool, and the dtype the KV planner budgets.
+struct RecurrentReservationInputs {
+    checkpoints: bool,
+    transitions: bool,
+    deferred_spec: Option<GdnDeferredStateSpec>,
+    model_dtype: DType,
+}
+
 fn reserve_recurrent_serving_capacity(
     cache: &EitherCache,
     paged_attn_config: PagedAttentionConfig,
-    recurrent_checkpoints_supported: bool,
-    recurrent_transitions_supported: bool,
+    support: RecurrentReservationInputs,
     primary_device: &Device,
     kv_bytes_per_token: usize,
 ) -> Result<bool> {
+    let RecurrentReservationInputs {
+        checkpoints: recurrent_checkpoints_supported,
+        transitions: recurrent_transitions_supported,
+        deferred_spec,
+        model_dtype,
+    } = support;
     if !cache.is_hybrid() {
         return Ok(false);
     }
@@ -591,20 +702,53 @@ fn reserve_recurrent_serving_capacity(
             cache.hybrid().configure_checkpoint_lanes(requested_lanes)?
         });
     };
-    let capacity = serving_capacity
+    let requested_capacity = serving_capacity
         .checked_add(RECURRENT_GRAPH_PAD_SLOTS)
         .ok_or_else(|| candle_core::Error::msg("recurrent serving capacity overflow"))?;
-    let checkpoint_lanes = if !transition_log
-        && paged_attn_config.recurrent_checkpoint_lanes_auto
-        && requested_lanes > 1
-    {
-        automatic_recurrent_checkpoint_lanes(
-            cache,
-            paged_attn_config,
-            primary_device,
-            capacity,
-            kv_bytes_per_token,
-        )?
+    let context = RecurrentBudgetContext {
+        cache,
+        paged_attn_config,
+        primary_device,
+        kv_bytes_per_token,
+        model_dtype,
+        deferred_spec,
+    };
+    let budget = |capacity| recurrent_budgets(&context, capacity);
+    let auto_lanes =
+        !transition_log && paged_attn_config.recurrent_checkpoint_lanes_auto && requested_lanes > 1;
+    // sequences fit first at one lane, then automatic checkpoint depth takes what is left; fixed depth fits at once
+    let layout_lanes = if transition_log || auto_lanes {
+        1
+    } else {
+        requested_lanes
+    };
+    let mut capacity = requested_capacity;
+    for device in budget(requested_capacity)? {
+        if device.capped {
+            let slot = RecurrentSlotBytes {
+                layout_lanes,
+                deferred: device.deferred_slot_bytes,
+            };
+            capacity = capacity.min(automatic_recurrent_capacity_budget(device.budget, slot)?);
+        }
+    }
+    if capacity < requested_capacity {
+        tracing::warn!(
+            max_num_seqs = serving_capacity,
+            fitted_seqs = capacity - RECURRENT_GRAPH_PAD_SLOTS,
+            "Recurrent state for every sequence slot does not fit beside the weights and KV floor; serving fewer \
+             sequences at once"
+        );
+    }
+    cache
+        .hybrid()
+        .set_fitted_serving_capacity(capacity - RECURRENT_GRAPH_PAD_SLOTS);
+    let checkpoint_lanes = if auto_lanes {
+        let mut lanes = paged_attn_config.recurrent_checkpoint_lanes;
+        for device in budget(capacity)? {
+            lanes = lanes.min(automatic_recurrent_checkpoint_lane_budget(device.budget)?);
+        }
+        lanes
     } else {
         requested_lanes
     };
@@ -612,7 +756,7 @@ fn reserve_recurrent_serving_capacity(
         tracing::info!(
             requested_lanes = paged_attn_config.recurrent_checkpoint_lanes,
             checkpoint_lanes,
-            serving_capacity,
+            serving_capacity = capacity - RECURRENT_GRAPH_PAD_SLOTS,
             "Adjusted recurrent speculative checkpoint depth for the serving memory budget"
         );
     }
@@ -1416,12 +1560,14 @@ mod tests {
     use crate::model::decode_positions_tensor;
 
     use super::{
-        CacheMemoryReservations, ModelForwardContext, RecurrentCheckpointBudget,
-        add_recurrent_prefix_memory_reservations, automatic_recurrent_checkpoint_lane_budget,
-        effective_recurrent_checkpoint_lanes, next_pipeline_prompt_chunk_group,
-        paged_attention_memory_reservations, prompt_chunk_is_final, recurrent_batch_kind_for_input,
-        recurrent_kv_floor_bytes, reserve_recurrent_serving_capacity, resolve_lora_execution,
-        should_sample_step, should_try_speculative_sampling,
+        CacheMemoryReservations, ModelForwardContext, RECURRENT_GRAPH_PAD_SLOTS,
+        RecurrentCheckpointBudget, RecurrentReservationInputs, RecurrentSlotBytes,
+        add_recurrent_prefix_memory_reservations, automatic_recurrent_capacity_budget,
+        automatic_recurrent_checkpoint_lane_budget, effective_recurrent_checkpoint_lanes,
+        next_pipeline_prompt_chunk_group, paged_attention_memory_reservations,
+        prompt_chunk_is_final, recurrent_batch_kind_for_input, recurrent_kv_floor_bytes,
+        reserve_recurrent_serving_capacity, resolve_lora_execution, should_sample_step,
+        should_try_speculative_sampling,
     };
     use crate::gdn::RecurrentBatchKind;
     use crate::model::{ForwardCache, LogitsSelection};
@@ -1567,6 +1713,43 @@ mod tests {
         assert_eq!(lanes, 4);
     }
 
+    // Measured on a Qwen3.8-27B IQ4_XS load on a 24 GiB card, with the BF16 F32-state GDN pool and deferred storage.
+    fn measured_27b_budget(capacity: usize) -> RecurrentCheckpointBudget {
+        RecurrentCheckpointBudget {
+            requested_lanes: 1,
+            capacity,
+            snapshot_bytes: 154_927_104,
+            current_capacity: 9,
+            current_lanes: 1,
+            memory_total: 24 * 1024 * 1024 * 1024,
+            memory_available: 6_593_118_208,
+            allocation_available: 6_056_247_296,
+            future_reserved_bytes: 2_684_092_416,
+            kv_floor_bytes: 268_435_456,
+            memory_utilization: None,
+        }
+    }
+
+    #[test]
+    fn recurrent_capacity_shrinks_to_the_budget_with_a_spare_slot() {
+        let slot = |layout_lanes| RecurrentSlotBytes {
+            layout_lanes,
+            deferred: 6_328_512,
+        };
+        let requested = 32 + RECURRENT_GRAPH_PAD_SLOTS;
+        let fit = |budget, lanes| automatic_recurrent_capacity_budget(budget, slot(lanes)).unwrap();
+        // 27 slots fit exactly; one stays free for allocator rounding
+        assert_eq!(fit(measured_27b_budget(requested), 1), 26);
+        assert_eq!(fit(measured_27b_budget(8), 1), 8);
+        // a fixed two-lane checkpoint depth doubles the layout per slot
+        assert_eq!(fit(measured_27b_budget(requested), 2), 13);
+        let starved = RecurrentCheckpointBudget {
+            allocation_available: 0,
+            ..measured_27b_budget(requested)
+        };
+        assert_eq!(fit(starved, 1), RECURRENT_GRAPH_PAD_SLOTS + 1);
+    }
+
     #[test]
     fn automatic_recurrent_checkpoint_depth_keeps_requested_small_capacity() {
         const GIB: usize = 1024 * 1024 * 1024;
@@ -1679,7 +1862,19 @@ mod tests {
                 .with_recurrent_checkpoint_lanes(8)
                 .unwrap();
 
-        reserve_recurrent_serving_capacity(&cache, config, false, false, &Device::Cpu, 1).unwrap();
+        reserve_recurrent_serving_capacity(
+            &cache,
+            config,
+            RecurrentReservationInputs {
+                checkpoints: false,
+                transitions: false,
+                deferred_spec: None,
+                model_dtype: candle_core::DType::F32,
+            },
+            &Device::Cpu,
+            1,
+        )
+        .unwrap();
 
         let cache = cache.hybrid();
         assert_eq!(cache.checkpoint_lanes(), 1);
@@ -1718,7 +1913,19 @@ mod tests {
                 .with_recurrent_checkpoint_lanes(8)
                 .unwrap();
 
-        reserve_recurrent_serving_capacity(&cache, config, true, true, &Device::Cpu, 1).unwrap();
+        reserve_recurrent_serving_capacity(
+            &cache,
+            config,
+            RecurrentReservationInputs {
+                checkpoints: true,
+                transitions: true,
+                deferred_spec: None,
+                model_dtype: candle_core::DType::F32,
+            },
+            &Device::Cpu,
+            1,
+        )
+        .unwrap();
 
         let cache = cache.hybrid();
         assert_eq!(cache.recurrent_capacity(), 65);
@@ -1760,7 +1967,19 @@ mod tests {
                 .with_recurrent_checkpoint_lanes(1)
                 .unwrap();
 
-        reserve_recurrent_serving_capacity(&cache, config, true, true, &Device::Cpu, 1).unwrap();
+        reserve_recurrent_serving_capacity(
+            &cache,
+            config,
+            RecurrentReservationInputs {
+                checkpoints: true,
+                transitions: true,
+                deferred_spec: None,
+                model_dtype: candle_core::DType::F32,
+            },
+            &Device::Cpu,
+            1,
+        )
+        .unwrap();
 
         let cache = cache.hybrid();
         assert_eq!(cache.recurrent_capacity(), 65);

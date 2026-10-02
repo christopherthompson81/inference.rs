@@ -550,6 +550,17 @@ impl Engine {
         } else {
             config
         };
+        // The pipeline may have fitted fewer recurrent slots than requested; never schedule past them.
+        let mut config = config;
+        if let SchedulerConfig::PagedAttentionMeta { max_num_seqs, .. } = &mut config {
+            let pipeline = get_mut_arcmutex!(pipeline);
+            let cache = pipeline.cache();
+            if cache.is_hybrid()
+                && let Some(fitted) = cache.hybrid().fitted_serving_capacity()
+            {
+                *max_num_seqs = (*max_num_seqs).min(fitted);
+            }
+        }
         let max_active_sequences = match &config {
             SchedulerConfig::DefaultScheduler {
                 method: DefaultSchedulerMethod::Fixed(max_num_seqs),

@@ -133,6 +133,13 @@ pub trait SpeculativeTargetMixin {
         Ok(false)
     }
 
+    /// The deferred decode storage the next reservation will add, for sizing the slot pool before it exists.
+    fn recurrent_decode_deferred_state_spec(
+        &self,
+    ) -> Result<Option<crate::kv_cache::GdnDeferredStateSpec>> {
+        Ok(None)
+    }
+
     fn apply_recurrent_speculative_transitions_for_current_batch(&self) -> Result<bool> {
         Ok(false)
     }
@@ -318,6 +325,14 @@ macro_rules! delegate_speculative_target {
                 <$inner as $crate::speculative::SpeculativeTargetMixin>::disable_recurrent_decode_deferred_storage(
                             &self.$field,
                         )
+            }
+
+            fn recurrent_decode_deferred_state_spec(
+                &self,
+            ) -> ::candle_core::Result<Option<$crate::kv_cache::GdnDeferredStateSpec>> {
+                <$inner as $crate::speculative::SpeculativeTargetMixin>::recurrent_decode_deferred_state_spec(
+                    &self.$field,
+                )
             }
 
             fn apply_recurrent_speculative_transitions_for_current_batch(
