@@ -7,3 +7,4 @@ mod llama_tiny;
 mod paddleocr_vl;
 mod paddleocr_vl_tiny;
 mod qwen3_5_text_tiny;
+mod qwen_vl_tiny;
