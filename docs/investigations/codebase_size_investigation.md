@@ -1692,3 +1692,32 @@ Findings, in order:
   are built, or the prompt lengths could not come out as above; the ordering difference does not change this path.
 
 Next: the shared processor core, checked against these pins and the existing processor unit tests.
+
+## Run 56 - 2026-10-02 (time approximate)
+
+Question: does one spec-driven processor core for Qwen2-VL and Qwen3-VL hold the Run 55 pins?
+
+Change: `qwen_vl_inputs.rs` holds `prepare_for_paged_prompt_planning` and `process_inputs` once (`QwenVlInputs`, over
+a `&dyn QwenVlSpec`); each processor implements the spec (name, preprocess, resize-validation factors, merge size,
+video placeholder expansion, video pad runs per item, whether packed text-only prefill takes processor MRoPE, the
+MRoPE position source). Qwen3-VL's per-video grouping/shift/packed layout became the generic forms with runs per item
+(all 1 for Qwen2-VL, which reduces them to the old Qwen2-VL behaviour). Text inputs are built after expansion (Qwen3-VL
+order). Lines: qwen2vl 1947 -> 1037, qwen3_vl 1854 -> 848, new shared 1026 (3801 -> 2911).
+
+Commands: `cargo nextest run -p inference -E 'test(/qwen_vl_tiny|paddleocr_vl_tiny|qwen3_5_text_tiny/)'` (7 passed),
+`cargo nextest run -p inference-models-qwen` (144 passed), clippy `-D warnings` on both crates and fmt clean,
+`cargo check -p inference-core` clean.
+
+Not covered by any test: paged/chunked-prefill and packed-prefill media paths (pins run the CPU non-paged path).
+Differences found while merging, and what was done:
+- correction to Run 54: both processors already returned early on decode with the same path (MRoPE deltas applied in
+  the processor, `recurrent_batch_kind_for_input`); the later `is_prompt` branches were dead in both.
+- kept per model (spec hooks): resize validation (Qwen2-VL needs patch and merge size; Qwen3-VL defaults and checks
+  videos against its video config), merge size (Qwen2-VL errors when missing), video expansion, the MRoPE source
+  (Qwen2-VL narrows grids to completed items), and whether packed text-only prefill takes processor MRoPE.
+- fixed: both copies named "MLlamaInputProcessor" in the missing-tokenizer error; Qwen2-VL panicked (`expect`,
+  `unwrap`) on a missing merge size, on the host input calls and on encoding, now errors.
+- taken from Qwen3-VL: all videos are checked for empty frames before sizes (only which validation error a request
+  with both problems gets); Qwen2-VL's prompt MRoPE now reads the vision start/end ids from the tokenizer, which its
+  feature recording already required; Qwen2-VL builds `input_ids_full` from the sequence when it has rope grids but no
+  new media, which its model reads only when there are no prompt position ids (never, once grids exist).
