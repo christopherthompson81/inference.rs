@@ -127,7 +127,7 @@ pub fn get_device_layers_for_loader(
     )
 }
 
-fn finish_dynamic_lora_runtime(
+pub(crate) fn finish_dynamic_lora_runtime(
     paths: &dyn ModelPaths,
     layers: Arc<inference_quant::LoraLayerRegistry>,
     runtime_config: crate::LoraRuntimeConfig,

@@ -2,9 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
+use std::collections::HashMap;
+
+use candle_core::{Device, Tensor};
 use inference::{
-    IsqType, Model, ModelDType, RequestBuilder, TextMessageRole, TextMessages, TextModelBuilder,
-    UqffTextModelBuilder,
+    IsqType, LoraModelBuilder, Model, ModelDType, RequestBuilder, TextMessageRole, TextMessages,
+    TextModelBuilder, UqffTextModelBuilder,
 };
 
 #[path = "../support/llama_tiny.rs"]
@@ -14,6 +17,11 @@ use support::tiny_llama_checkpoint;
 const PROMPT: &str = "hello";
 const MAX_LEN: usize = 8;
 const UQFF_EXTENSION: &str = "uqff";
+const ADAPTER: &str = "q-proj-adapter";
+const ADAPTER_RANK: usize = 2;
+// From tests/fixtures/llama_tiny/config.json; q_proj is hidden x hidden there.
+const TINY_LAYERS: usize = 2;
+const TINY_HIDDEN: usize = 32;
 
 fn cpu_text_builder(dir: &Path) -> TextModelBuilder {
     TextModelBuilder::new(dir.to_string_lossy())
@@ -41,6 +49,62 @@ async fn greedy_ids(model: &Model) -> anyhow::Result<Vec<u32>> {
         .unwrap_or_default();
     anyhow::ensure!(!tokens.is_empty(), "the model generated nothing");
     Ok(tokens)
+}
+
+// (token, logprob) per greedy step, so an adapter that moves the logits shows even when the argmax holds.
+async fn greedy_trace(model: &Model, adapter: Option<&str>) -> anyhow::Result<Vec<(u32, f32)>> {
+    let mut request =
+        RequestBuilder::from(TextMessages::new().add_message(TextMessageRole::User, PROMPT))
+            .set_sampler_max_len(MAX_LEN)
+            .set_sampler_topk(1)
+            .return_logprobs(true)
+            .set_sampler_topn_logprobs(1);
+    if let Some(adapter) = adapter {
+        request = request.set_adapter(adapter);
+    }
+    let response = model.send_chat_request(request).await?;
+    let trace = response.choices[0]
+        .logprobs
+        .as_ref()
+        .and_then(|lp| lp.content.as_ref())
+        .map(|toks| {
+            toks.iter()
+                .map(|t| (t.top_logprobs[0].token, t.top_logprobs[0].logprob))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    anyhow::ensure!(!trace.is_empty(), "the model generated nothing");
+    Ok(trace)
+}
+
+// A rank-2 PEFT adapter on every layer's q_proj, large enough to move the tiny model's logits.
+fn write_q_proj_adapter(dir: &Path) -> anyhow::Result<()> {
+    std::fs::write(
+        dir.join("adapter_config.json"),
+        format!(
+            r#"{{"r":{ADAPTER_RANK},"lora_alpha":{ADAPTER_RANK},"target_modules":["q_proj"]}}"#
+        ),
+    )?;
+    let ramp = |rows: usize, cols: usize, scale: f32| {
+        let data = (0..rows * cols)
+            .map(|i| ((i % 7) as f32 - 3.0) * scale)
+            .collect::<Vec<_>>();
+        Tensor::from_vec(data, (rows, cols), &Device::Cpu)
+    };
+    let mut tensors = HashMap::new();
+    for layer in 0..TINY_LAYERS {
+        let prefix = format!("base_model.model.model.layers.{layer}.self_attn.q_proj");
+        tensors.insert(
+            format!("{prefix}.lora_A.weight"),
+            ramp(ADAPTER_RANK, TINY_HIDDEN, 0.3)?,
+        );
+        tensors.insert(
+            format!("{prefix}.lora_B.weight"),
+            ramp(TINY_HIDDEN, ADAPTER_RANK, 0.5)?,
+        );
+    }
+    candle_core::safetensors::save(&tensors, dir.join("adapter_model.safetensors"))?;
+    Ok(())
 }
 
 fn uqff_files(dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
@@ -105,5 +169,22 @@ async fn an_isq_load_can_calibrate_on_a_text_file_first() -> anyhow::Result<()> 
         .build()
         .await?;
     greedy_ids(&model).await?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_lora_adapter_applies_only_when_a_request_selects_it() -> anyhow::Result<()> {
+    let checkpoint = tiny_llama_checkpoint()?;
+    let adapter = tempfile::tempdir()?;
+    write_q_proj_adapter(adapter.path())?;
+    let base = cpu_text_builder(checkpoint.path()).build().await?;
+    let base_trace = greedy_trace(&base, None).await?;
+    let lora = LoraModelBuilder::from_text_model_builder(cpu_text_builder(checkpoint.path()))
+        .with_adapter(ADAPTER, adapter.path().to_string_lossy())
+        .build()
+        .await?;
+    assert_eq!(greedy_trace(&lora, None).await?, base_trace);
+    let adapted = greedy_trace(&lora, Some(ADAPTER)).await?;
+    assert_ne!(adapted, base_trace, "the adapter did not change the decode");
     Ok(())
 }

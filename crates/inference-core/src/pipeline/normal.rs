@@ -15,7 +15,6 @@ use crate::attention::ATTENTION_CHUNK_SIZE;
 #[cfg(feature = "cuda")]
 use crate::cuda::gdn::GDN_PAD_SLOT;
 use crate::device_map::DeviceMapper;
-use crate::distributed::{self};
 #[cfg(feature = "cuda")]
 use crate::kv_cache::RecurrentCheckpointStateSnapshot;
 #[cfg(feature = "cuda")]
@@ -45,7 +44,7 @@ use crate::gdn::RecurrentBatchKind;
 use crate::lora::Ordering;
 #[cfg(feature = "cuda")]
 use crate::paged_attention::PagedAttentionInputMetadata;
-use crate::paged_attention::{AttentionImplementation, CacheEngine, calculate_cache_config};
+use crate::paged_attention::{CacheEngine, calculate_cache_config};
 use crate::pipeline::ChatTemplate;
 use crate::pipeline::chat_template::{GenerationConfig, calculate_eos_tokens};
 #[cfg(feature = "cuda")]
@@ -59,7 +58,7 @@ use crate::pipeline::cuda_graph::{
     cuda_graph_precapture_max_batch, hybrid_graph_slots, install_hybrid_graph_state_indices,
     record_cuda_graph_dispatch,
 };
-use crate::pipeline::isq::{UqffFullSer, UqffWriteConfig, WeightLoadingMode, WeightLoadingState};
+use crate::pipeline::isq::{UqffFullSer, UqffWriteConfig};
 use crate::pipeline::sampling::{sample_and_add_toks, sample_and_add_toks_batched};
 use crate::pipeline::tokenizer::get_tokenizer;
 use crate::pipeline::{
@@ -67,7 +66,7 @@ use crate::pipeline::{
 };
 use crate::prefix_cacher::PrefixCacheManagerV2;
 use crate::sequence::Sequence;
-use crate::utils::progress::{ProgressScopeGuard, new_multi_progress};
+use crate::utils::progress::ProgressScopeGuard;
 use crate::xlora_models::NonGranularState;
 use crate::{
     DeviceMapSetting, DynamicLoraRuntime, GLOBAL_HF_CACHE, LoraAdapterSpec, LoraRuntimeConfig,
@@ -80,7 +79,6 @@ use futures::{FutureExt, future::BoxFuture};
 use hf_hub::Cache;
 use inference_protocol::chat_template::BeginEndUnkPadTok;
 use inference_quant::IsqType;
-use inference_quant::log::once_log_info;
 use rand_isaac::Isaac64Rng;
 use std::any::Any;
 use std::path::PathBuf;
@@ -502,74 +500,7 @@ impl NormalLoaderBuilder {
 }
 
 type LoadedNormalModel = (Box<dyn NormalModel + Send + Sync>, inference_quant::Tracker);
-type LoadedNormalLoraModel = (
-    Box<dyn NormalModel + Send + Sync>,
-    inference_quant::Tracker,
-    Option<Arc<crate::DynamicLoraRuntime>>,
-);
-
 impl NormalLoader {
-    fn weights_vb(
-        &self,
-        weights: &super::loading::WeightFiles<'_>,
-        config: &str,
-        mapper: &dyn DeviceMapper,
-        loading_isq: bool,
-    ) -> Result<inference_quant::ShardedVarBuilder> {
-        let placeholders = super::loading::uqff_placeholders(
-            &*self.inner,
-            config,
-            loading_isq,
-            self.config.from_uqff.is_some(),
-            matches!(self.config.organization, IsqOrganization::MoeExpertsOnly),
-        )?;
-        let device_for_tensor = self
-            .inner
-            .get_device_for_tensor(config, mapper, loading_isq)?;
-        weights.load(placeholders, device_for_tensor)
-    }
-
-    fn load_from_files(
-        &self,
-        weights: &super::loading::WeightFiles<'_>,
-        config: &str,
-        mapper: Box<dyn DeviceMapper + Send + Sync>,
-        parts: &super::loading::LoadMetadataParts,
-    ) -> Result<LoadedNormalModel> {
-        let vb = self.weights_vb(weights, config, &*mapper, parts.loading_isq)?;
-        let tracker = vb.tracker().clone();
-        let model = self
-            .inner
-            .load(config, vb, parts.metadata(mapper, None), parts.attention)?;
-        Ok((model, tracker))
-    }
-
-    fn load_with_dynamic_lora(
-        &self,
-        weights: &super::loading::WeightFiles<'_>,
-        config: &str,
-        mapper: Box<dyn DeviceMapper + Send + Sync>,
-        parts: &super::loading::LoadMetadataParts,
-        live_updates: bool,
-    ) -> Result<LoadedNormalLoraModel> {
-        let layers = new_dynamic_lora_registry(config)?;
-        let vb = self
-            .weights_vb(weights, config, &*mapper, parts.loading_isq)?
-            .with_lora_registry(layers.clone());
-        let tracker = vb.tracker().clone();
-        let model = self
-            .inner
-            .load(config, vb, parts.metadata(mapper, None), parts.attention)?;
-        let runtime = super::finish_dynamic_lora_runtime(
-            weights.paths,
-            layers,
-            self.lora_runtime_config
-                .expect("LoRA loaders have a runtime config"),
-            live_updates,
-        )?;
-        Ok((model, tracker, Some(runtime)))
-    }
-
     fn load_xlora(
         &self,
         weights: &super::loading::WeightFiles<'_>,
@@ -712,305 +643,91 @@ impl Loader for NormalLoader {
 
         debug!("Prompt chunk size is {ATTENTION_CHUNK_SIZE}.");
 
-        let write_uqff = self.config.write_uqff.is_some();
-        let super::loading::LoadDevices {
-            tensor_parallelism,
-            device,
-            available_devices,
-        } = super::loading::resolve_load_devices(
-            self.inner.model_config(&config)?.as_ref(),
-            device,
-            write_uqff,
-        )?;
-        let use_distributed = tensor_parallelism.is_enabled();
-        let super::loading::WeightSources {
-            uqff_reader,
-            prepared: prepared_weight_source,
-            combined: weight_source,
-        } = super::loading::open_weight_sources(
-            self.from_uqff.read().unwrap().as_deref(),
-            self.prepared_source
-                .as_ref()
-                .and_then(|source| source.weights.weight_source().cloned()),
-        )?;
-        let has_prepared_weight_source = prepared_weight_source.is_some();
-
-        let super::loading::ResolvedMapSetting {
-            setting: mapper,
-            max_kv_tokens,
-        } = super::loading::resolve_map_setting(
-            super::loading::MapSettingInputs {
-                setting: mapper,
-                write_uqff,
-                distributed: use_distributed,
-                available_devices: &available_devices,
-                dtype,
-                sizing: super::isq_flow::AutoDeviceMapSizingInputs {
-                    loader: &*self.inner,
-                    config: &config,
-                    sizing: super::isq_flow::resolve_auto_device_map_sizing(
-                        uqff_reader.is_some(),
-                        has_prepared_weight_source,
-                        in_situ_quant,
-                    ),
-                    weight_source: weight_source.as_ref(),
-                    prepared_weight_source: prepared_weight_source.as_ref(),
-                    topology: self.config.topology.as_ref(),
-                    organization: self.config.organization,
-                    weight_filenames: paths.get_weight_filenames(),
-                    has_lora: self.lora_adapters.is_some(),
-                    matformer: None,
-                    non_mapped_unpacked: false,
-                },
-            },
-            &mut paged_attn_config,
-        )?;
-
-        let super::loading::MaterializedDeviceMapper {
-            pipeline_mapper,
-            mapper,
-            layer_devices,
-            dtype,
-        } = super::loading::materialize_device_mapper(
-            super::loading::DeviceMapperInputs {
-                setting: &mapper,
-                num_layers: self.inner.num_layers(&config)?,
-                device: &device,
-                available_devices: &available_devices,
-                topology: self.config.topology.as_ref(),
-                write_uqff,
-                dtype,
-            },
-            &mut paged_attn_config,
-        )?;
-
-        trace!("Model config: {:?}", self.inner.get_config_repr(&config)?);
-        if crate::using_flash_attn() {
-            once_log_info("FlashAttention is enabled.");
-        }
-
-        let topology_overrides = self
-            .config
-            .topology
-            .as_ref()
-            .map(|topology| topology.immediate_overrides())
-            .unwrap_or_default();
-
-        let plan = super::isq_flow::resolve_and_install_isq_plan(super::isq_flow::IsqPlanInputs {
-            in_situ_quant,
-            has_imatrix: self.config.imatrix.is_some(),
-            has_calibration: self.config.calibration_file.is_some(),
-            write_uqff_types: self.config.write_uqff.as_ref().map(|c| c.types.clone()),
-            has_write_uqff: self.config.write_uqff.is_some(),
-            loading_from_uqff: self.config.from_uqff.is_some(),
-            organization: self.config.organization,
-            topology_overrides,
-            loader: &*self.inner,
-            config: &config,
-            device: &device,
-        })?;
-        let use_immediate = plan.immediate_isq_installed;
-        let loading_isq = plan.loading_isq;
-        let load_device = plan.load_device.clone();
-
-        let is_xlora = self.kind.is_adapted_and(|a| a.is_x_lora());
-
-        let attention_mechanism = if paged_attn_config.is_some() {
-            AttentionImplementation::PagedAttention
-        } else {
-            AttentionImplementation::Eager
-        };
-
-        let multi_progress = Arc::new(new_multi_progress());
-
-        let matformer_slicing_config = super::loading::load_matformer_slice(
+        let matformer = super::loading::load_matformer_slice(
             self.config.matformer_config_path.as_deref(),
             self.config.matformer_slice_name.as_deref(),
         )?;
-        let load_parts = super::loading::LoadMetadataParts {
-            loading_isq,
-            attention: attention_mechanism,
-            device: device.clone(),
-            multi_progress: multi_progress.clone(),
-            matformer: matformer_slicing_config.clone(),
-        };
-
-        info!(
-            "{}",
-            WeightLoadingMode::from(WeightLoadingState {
-                from_uqff: self.config.from_uqff.is_some(),
-                loading_isq,
-                immediate_isq: use_immediate,
-                write_uqff: self.config.write_uqff.is_some(),
-            })
-            .message("model")
-        );
-
-        let weights = super::loading::WeightFiles {
-            paths,
-            dtype,
-            device: &load_device,
-            layer_devices: layer_devices.clone(),
-            silent,
-            uqff_reader: uqff_reader.clone(),
-        };
-        let (model, tracker, dynamic_lora) = if use_distributed {
-            let distributed_weights = match self.prepared_source.as_ref() {
-                Some(source) => {
-                    distributed::DistributedWeightSource::Prepared(source.weights.clone())
-                }
-                None => distributed::DistributedWeightSource::Paths(paths),
-            };
-            let (mapper, sharded_vb) =
-                distributed::prepare_distributed_mapper(distributed::DistributedMapperConfig {
-                    dtype,
-                    device: &device,
-                    available_devices: &available_devices,
-                    global_world_size_override: tensor_parallelism.world_size(),
-                    silent,
-                    config: &config,
-                    loading_isq,
-                    from_uqff: self.config.from_uqff.is_some(),
-                    write_uqff: self.config.write_uqff.is_some(),
+        let (session, mapper) = super::loading::open_load_session(
+            super::loading::LoadSessionInputs {
+                mapped: &*self.inner,
+                isq: &*self.inner,
+                config: &config,
+                settings: super::loading::LoadSettings {
+                    topology: self.config.topology.as_ref(),
                     organization: self.config.organization,
-                    isq_loader: &*self.inner,
-                    mapped_loader: &*self.inner,
-                    weights: distributed_weights,
-                })?;
-            let sharded_vb = match uqff_reader.clone() {
-                Some(reader) => sharded_vb.with_uqff_reader(reader),
-                _ => sharded_vb,
-            };
-
-            // Special case for where things can be more optimially loaded.
-            match self.kind {
-                ModelKind::Normal | ModelKind::GgufQuantized { .. } => {
-                    let tracker = sharded_vb.tracker().clone();
-                    let model = self.inner.load(
-                        &config,
-                        sharded_vb,
-                        load_parts.metadata(
-                            mapper,
-                            self.prepared_source
-                                .as_ref()
-                                .map(|source| source.rope_pairing),
-                        ),
-                        attention_mechanism,
-                    )?;
-                    (model, tracker, None)
-                }
-                ModelKind::Adapter {
-                    adapter: AdapterKind::XLora,
-                }
-                | ModelKind::GgufAdapter {
-                    adapter: AdapterKind::XLora,
-                    ..
-                } => {
-                    let (model, tracker) =
-                        self.load_xlora(&weights, &config, mapper, &load_parts)?;
-                    (model, tracker, None)
-                }
-                ModelKind::Adapter {
-                    adapter: AdapterKind::Lora,
-                }
-                | ModelKind::GgufAdapter {
-                    adapter: AdapterKind::Lora,
-                    ..
-                } => {
-                    if let Some(source) = self.prepared_source.as_ref() {
-                        let layers = new_dynamic_lora_registry(&config)?;
-                        let sharded_vb = sharded_vb.with_lora_registry(layers.clone());
-                        let tracker = sharded_vb.tracker().clone();
-                        let model = self.inner.load(
-                            &config,
-                            sharded_vb,
-                            load_parts.metadata(mapper, Some(source.rope_pairing)),
-                            attention_mechanism,
-                        )?;
-                        let dynamic_lora = super::finish_dynamic_lora_runtime(
-                            paths,
-                            layers,
-                            self.lora_runtime_config
-                                .expect("LoRA loaders have a runtime config"),
-                            false,
-                        )?;
-                        (model, tracker, Some(dynamic_lora))
-                    } else {
-                        self.load_with_dynamic_lora(&weights, &config, mapper, &load_parts, false)?
-                    }
-                }
-                _ => unreachable!(),
-            }
-        } else {
-            match self.kind {
-                ModelKind::Normal | ModelKind::GgufQuantized { .. } => {
-                    let (model, tracker) = if let Some(source) = self.prepared_source.as_ref() {
-                        let vb = source
-                            .weights
-                            .clone()
-                            .set_dtype(dtype)
-                            .set_device(load_device.clone());
-                        let tracker = vb.tracker().clone();
-                        let model = self.inner.load(
-                            &config,
-                            vb,
-                            load_parts.metadata(mapper, Some(source.rope_pairing)),
-                            attention_mechanism,
-                        )?;
-                        (model, tracker)
-                    } else {
-                        self.load_from_files(&weights, &config, mapper, &load_parts)?
-                    };
-                    (model, tracker, None)
-                }
-                ModelKind::Adapter {
-                    adapter: AdapterKind::XLora,
-                }
-                | ModelKind::GgufAdapter {
-                    adapter: AdapterKind::XLora,
-                    ..
-                } => {
-                    let (model, tracker) =
-                        self.load_xlora(&weights, &config, mapper, &load_parts)?;
-                    (model, tracker, None)
-                }
-                ModelKind::Adapter {
-                    adapter: AdapterKind::Lora,
-                }
-                | ModelKind::GgufAdapter {
-                    adapter: AdapterKind::Lora,
-                    ..
-                } => {
-                    if let Some(source) = self.prepared_source.as_ref() {
-                        let layers = new_dynamic_lora_registry(&config)?;
-                        let vb = source
-                            .weights
-                            .clone()
-                            .set_dtype(dtype)
-                            .set_device(load_device.clone())
-                            .with_lora_registry(layers.clone());
-                        let tracker = vb.tracker().clone();
-                        let model = self.inner.load(
-                            &config,
-                            vb,
-                            load_parts.metadata(mapper, Some(source.rope_pairing)),
-                            attention_mechanism,
-                        )?;
-                        let dynamic_lora = super::finish_dynamic_lora_runtime(
-                            paths,
-                            layers,
-                            self.lora_runtime_config
-                                .expect("LoRA loaders have a runtime config"),
-                            true,
-                        )?;
-                        (model, tracker, Some(dynamic_lora))
-                    } else {
-                        self.load_with_dynamic_lora(&weights, &config, mapper, &load_parts, true)?
-                    }
-                }
-                _ => unreachable!(),
-            }
+                    write_uqff: self.config.write_uqff.as_ref(),
+                    from_uqff: self.config.from_uqff.is_some(),
+                    has_imatrix: self.config.imatrix.is_some(),
+                    has_calibration: self.config.calibration_file.is_some(),
+                },
+                paths,
+                device,
+                dtype,
+                mapper,
+                in_situ_quant,
+                uqff_files: self.from_uqff.read().unwrap().as_deref(),
+                prepared_weight_source: self
+                    .prepared_source
+                    .as_ref()
+                    .and_then(|source| source.weights.weight_source().cloned()),
+                has_lora: self.lora_adapters.is_some(),
+                matformer,
+                matformer_sizing: false,
+                non_mapped_unpacked: false,
+                auto_device_map_params: None,
+                weight_target: "model",
+            },
+            &mut paged_attn_config,
+        )?;
+        trace!("Model config: {:?}", self.inner.get_config_repr(&config)?);
+        let is_xlora = self.kind.is_adapted_and(|a| a.is_x_lora());
+        let load_xlora = |weights: &super::loading::WeightFiles<'_>,
+                          mapper: Box<dyn DeviceMapper + Send + Sync>| {
+            self.load_xlora(weights, &config, mapper, &session.load_parts)
         };
+        let (model, tracker, dynamic_lora) = super::loading::load_model(
+            &*self.inner,
+            &session,
+            mapper,
+            super::loading::ModelLoadInputs {
+                config: &config,
+                session_config: &config,
+                paths,
+                silent,
+                organization: self.config.organization,
+                from_uqff: self.config.from_uqff.is_some(),
+                write_uqff: self.config.write_uqff.is_some(),
+                prepared: self
+                    .prepared_source
+                    .as_ref()
+                    .map(|source| (&source.weights, source.rope_pairing)),
+                lora: match self.kind {
+                    ModelKind::Adapter {
+                        adapter: AdapterKind::Lora,
+                    }
+                    | ModelKind::GgufAdapter {
+                        adapter: AdapterKind::Lora,
+                        ..
+                    } => Some(
+                        self.lora_runtime_config
+                            .expect("LoRA loaders have a runtime config"),
+                    ),
+                    _ => None,
+                },
+                xlora: is_xlora.then_some(&load_xlora as &super::loading::XLoraLoad<'_, _>),
+            },
+        )?;
+        let super::loading::LoadSession {
+            device,
+            available_devices: _,
+            weight_source,
+            max_kv_tokens,
+            pipeline_mapper,
+            dtype,
+            plan,
+            ..
+        } = session;
+        let load_device = plan.load_device.clone();
 
         let tokenizer = match self.prepared_source.as_ref() {
             Some(source) => source.tokenizer.clone(),
