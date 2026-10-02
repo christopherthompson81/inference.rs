@@ -1273,3 +1273,27 @@ in `metal_kernels` files that import by glob, so the PR's metal check is the ver
 
 Not done: narrowing the remaining crate-only `pub` items (about 540 in nn, a few hundred in quant, the per-family
 loaders in core) to `pub(crate)`; it deletes nothing by itself, though it would let the lint find more.
+
+## Run 44 - 2026-10-01 (time approximate)
+
+Question: how much of DeepSeek-V2, DeepSeek-V3, GLM4-MoE and GLM4-MoE-Lite (inference-models-other) is one model?
+
+Finding (a read-only diff map):
+- DS3 is DS2 with a different router: about 89 of 1117 lines differ, all in `MoeGate` (noaux_tc with an optional
+  `e_score_correction_bias`, a different renormalisation rule).
+- GLM4-MoE-Lite (GLM-4.7-Flash) is a DS3 clone with hard-coded choices (required q_lora and bias, no yarn mscale,
+  replicated shared expert); plain GLM4-MoE shares the MoE half (router body, `Moe` skeleton, decoder forward).
+- Four distinct renormalisation rules exist and must stay distinct: DS2 renormalises with `norm_topk_prob` and then
+  skips the scale; DS3 renormalises only under sigmoid scoring and always scales (ignoring `norm_topk_prob`); Lite
+  always renormalises; GLM renormalises on `norm_topk_prob` (default true) and scales.
+- No test runs a forward pass of any of the four; coverage is loader predicates, residual names and MLA helpers.
+- Two existing bugs: `GroupLimitedGreedy` masks with `masked_fill(&score_mask, ..)` where it should mask the scores,
+  so expert choice within the allowed groups is arbitrary and every weight is 1.0 (full DeepSeek-V2/V2.5
+  checkpoints); DS2's non-greedy renormalisation divides (n,k) by (n,1) without broadcasting, so it errors.
+- Smaller drifts: loader memory sizing uses `intermediate_size * n_shared` for DS shared experts where the model uses
+  `moe_intermediate_size`; loaders report a `Standard` KV layout while the models use MLA.
+
+Plan: tests first (router goldens per variant; tiny random-weight checkpoints of each model with a CPU forward and
+snapshotted logits; a check that every tensor a checkpoint provides is consumed), then a shared router in
+inference-nn, a `deepseek_family` module the four delegate to, shared loader helpers, and the bug fixes last, each
+on its own with its golden updated. Estimated saving about 2.4k lines after the tests.
