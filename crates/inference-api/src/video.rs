@@ -25,7 +25,7 @@ use std::path::Path;
 use tokio::fs;
 
 use crate::media_source::{
-    LoadedMedia, MediaAttachments, MediaSourcePolicy, SERVER_VIDEO_FRAME_LIMIT,
+    LoadedMedia, Media, MediaAttachments, MediaSourcePolicy, SERVER_VIDEO_FRAME_LIMIT,
 };
 
 /// Default frames-per-second assumed when metadata is unavailable (e.g. GIF).
@@ -88,6 +88,9 @@ async fn parse_video_url_with_policy(
     policy: MediaSourcePolicy,
     attachments: &MediaAttachments,
 ) -> Result<VideoInput> {
+    if let Some(Media::Video(video)) = attachments.attached(url_unparsed, "video")? {
+        return Ok(video.clone());
+    }
     let media = attachments.load(url_unparsed, policy, "video").await?;
 
     if is_gif_source(url_unparsed, &media) {

@@ -8,7 +8,7 @@ const FFI_SOURCES: [&str; 3] = [
 ];
 
 // Methods the ABI covers some other way, or that a binding has no use for.
-const NOT_EXPORTED: [(&str, &str); 8] = [
+const NOT_EXPORTED: [(&str, &str); 9] = [
     (
         "load_with_callbacks",
         "the ABI loads through load_json, which takes the callbacks",
@@ -23,6 +23,10 @@ const NOT_EXPORTED: [(&str, &str); 8] = [
     ),
     ("skill_store", "the store the skill entries already reach"),
     ("owner", "the caller made the owner's handle"),
+    (
+        "chat_with_approver",
+        "a binding answers approvals from the stream's events with resolve_approval",
+    ),
     ("shutdown", "freeing the last handle shuts the engine down"),
     (
         "default_model_id",

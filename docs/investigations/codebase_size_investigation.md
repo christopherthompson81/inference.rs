@@ -1202,3 +1202,41 @@ count_tokens), calibration and re-ISQ of an unknown model are NOT_FOUND (ABI, C#
 `a_stop_token_id_ends_the_generation_where_it_is_produced` (scripted tokens, stop on the third: 3 tokens, `stop`;
 an out-of-vocabulary id refused), `a_request_that_turns_parallel_calls_off_runs_them_one_at_a_time` (most
 concurrent = 1, model order kept), the hf_revision spec rules, `a_speech_generation_spec_overrides_only_what_it_sets`.
+
+## Run 42 - 2026-10-01 (time approximate)
+
+Change: the `inference` Rust SDK is rebuilt on inference-api. It depends on inference-api (and inference-macros) only:
+no inference-core, inference-selection, inference-agent or candle outside its test fixtures.
+- `Model` wraps `Engine` and derefs to it, so every engine operation is the same call the server and the C ABI make;
+  `Model` adds Rust conveniences (builder-typed chat and streams, structured output, embeddings, generation,
+  request-scoped logits processors registered and unregistered around the request, `upload_skill`, `re_isq_model`).
+- `RequestBuilder` / `TextMessages` / `MultimodalMessages` build a `ChatCompletionRequest` (messages as JSON, since
+  `MessageContent` has a private field) plus decoded `Media` attachments named `media://N`, a new Rust-only
+  `inference_api::media_source::Media` the image, audio and video loaders take without decoding.
+- Every builder produces an `EngineSpec` + `EngineCallbacks` (`into_spec()`), sharing `LoadOptions` and one
+  `load_options_methods!` set; the old `model_builder_trait.rs` pipeline construction is gone.
+- agent.rs (the client-side tool loop) is deleted; `#[tool]` emits a `ToolCallbackWithTool` for the engine's loop.
+- Engine additions: `Engine::chat_with_approver` (Ask answered by an in-process handler, no stream needed),
+  `inference_api::sdk` re-exports of the engine-internal types a Rust caller names, protocol constructors.
+- 59 examples, the SDK's integration tests (all passing, the 7 real-checkpoint parity tests included) and the Rust
+  docs are ported; the queue-drop test that reached core's request channel moved into inference-api's engine tests.
+Net about 4.4k fewer lines.
+
+Dead ends and catches:
+- The SDK's old requests were greedy by default (`SamplingParams::deterministic()`, top-k 1); the first rebuild sent
+  the engine's defaults, which silently changes outputs. `RequestBuilder::new` sets top-k 1 again.
+- Review: with no `with_paged_attn` the engine turns paged attention on for CUDA and sizes it at 90% of memory, where
+  the old SDK used a plain KV cache; `LoadOptions` now sets it off until asked. `with_device("cuda")` failed (the spec
+  wants `cuda:0`); bare names now mean the first device. An approval callback on a stream was silently ignored; a
+  stream with one is now refused. `blocking.rs` was never declared as a module, and the crate docs still showed
+  `Response::Chunk`; both fixed (the doctests and rustdoc caught them in CI).
+- Two example bugs the port found: the AnyMoE examples passed path, prefix and mlp in the wrong order; the streaming
+  example's buffered stdout was never flushed.
+
+Dropped, as decided or with a replacement: custom pipeline injection and `Model::inner()`; in-memory `Topology` and
+`Ordering` (file paths); `DeviceMapSetting` (`with_device_layers`, `with_auto_map_sizing`); `MtpConfig`
+(`with_mtp_model`, `with_builtin_mtp`, `with_mtp_draft_sampling`); f32 speech samples (WAV/PCM bytes); a per-request
+dispatch URL; `with_shell_skill(path)` (`upload_skill(dir)` then the id). Changed, not dropped: per-model settings in
+`MultiModelBuilder` are what `ModelSpec` carries (template, ISQ, device layers, revision, encoder cache); engine-wide
+ones come from the multi-builder. Not reachable any more: the client loop's stop reason and per-tool OK/error status,
+and its "calling N tools" / "round done" events; loads always log (the engine has no silent load).

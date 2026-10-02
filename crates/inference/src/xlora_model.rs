@@ -1,66 +1,73 @@
-use inference_core::{AutoDeviceMapParams, LoadOverrides, Ordering, UQFF_MULTI_FILE_DELIMITER};
-use inference_selection::ModelSelected;
+//! A text model with an X-LoRA classifier mixing its adapters per token.
 
-use crate::{
-    Model, TextModelBuilder,
-    model_builder_trait::{build_model_from_pipeline, build_text_pipeline_as, join_path_list},
-};
+use std::path::Path;
 
-/// Wrapper of [`TextModelBuilder`] for X-LoRA models.
+use inference_api::engine::ModelSelected;
+
+use crate::{Model, TextModelBuilder, error::Result, text_model::uqff_files};
+
+/// Loads a text model with the X-LoRA adapters and classifier of `xlora_model_id`.
 pub struct XLoraModelBuilder {
-    text_model: TextModelBuilder,
-    xlora_model_id: String,
-    ordering: Ordering,
-    tgt_non_granular_index: Option<usize>,
+    pub(crate) text_model: TextModelBuilder,
+    pub(crate) xlora_model_id: String,
+    pub(crate) order: String,
+    pub(crate) tgt_non_granular_index: Option<usize>,
 }
 
 impl XLoraModelBuilder {
-    /// Create an X-LoRA builder from a [`TextModelBuilder`], X-LoRA model ID, and ordering.
+    /// `order` is the ordering file naming the adapters and the layers they apply to.
     pub fn from_text_model_builder(
         text_model: TextModelBuilder,
         xlora_model_id: impl ToString,
-        ordering: Ordering,
+        order: impl AsRef<Path>,
     ) -> Self {
         Self {
             text_model,
             xlora_model_id: xlora_model_id.to_string(),
-            ordering,
+            order: order.as_ref().to_string_lossy().into_owned(),
             tgt_non_granular_index: None,
         }
     }
 
-    /// Set the target non-granular index for X-LoRA scaling.
+    /// Runs the classifier only until this token index, then reuses its scalings.
     pub fn tgt_non_granular_index(mut self, tgt_non_granular_idx: usize) -> Self {
         self.tgt_non_granular_index = Some(tgt_non_granular_idx);
         self
     }
 
-    /// Load the X-LoRA model and return a ready-to-use [`Model`].
-    pub async fn build(self) -> anyhow::Result<Model> {
-        let builder = &self.text_model;
-        let model_selected = ModelSelected::XLora {
+    pub(crate) fn model_selected(&self) -> ModelSelected {
+        let base = &self.text_model;
+        ModelSelected::XLora {
+            model_id: Some(base.model_id.clone()),
             quant: None,
-            model_id: Some(builder.model_id.clone()),
-            tokenizer_json: builder.tokenizer_json.clone(),
-            xlora_model_id: self.xlora_model_id,
-            order: String::new(), // the inline ordering override is used instead
+            tokenizer_json: base.tokenizer_json.clone(),
+            xlora_model_id: self.xlora_model_id.clone(),
+            order: self.order.clone(),
             tgt_non_granular_index: self.tgt_non_granular_index,
-            arch: builder.loader_type.clone(),
-            dtype: builder.dtype,
-            topology: builder.topology_path.clone(),
-            write_uqff: builder.write_uqff.clone(),
-            from_uqff: join_path_list(builder.from_uqff.as_deref(), UQFF_MULTI_FILE_DELIMITER),
-            max_seq_len: AutoDeviceMapParams::DEFAULT_MAX_SEQ_LEN,
-            max_batch_size: AutoDeviceMapParams::DEFAULT_MAX_BATCH_SIZE,
-            hf_cache_path: builder.hf_cache_path.clone(),
-            organization: Some(builder.organization),
-        };
-        let overrides = LoadOverrides {
-            ordering: Some(self.ordering),
-            ..Default::default()
-        };
-        let (pipeline, scheduler_config, add_model_config) =
-            build_text_pipeline_as(self.text_model, model_selected, overrides).await?;
-        Ok(build_model_from_pipeline(pipeline, scheduler_config, add_model_config).await)
+            arch: base.loader_type.clone(),
+            dtype: base.dtype,
+            topology: base.topology.clone(),
+            write_uqff: base.write_uqff.clone(),
+            from_uqff: uqff_files(base.from_uqff.as_deref()),
+            max_seq_len: base.options.auto_map.max_seq_len,
+            max_batch_size: base.options.auto_map.max_batch_size,
+            hf_cache_path: base.hf_cache_path.clone(),
+            organization: base.organization,
+        }
+    }
+
+    pub fn into_spec(
+        self,
+    ) -> (
+        inference_api::EngineSpec,
+        inference_api::engine::EngineCallbacks,
+    ) {
+        let model = self.model_selected();
+        self.text_model.options.spec(model)
+    }
+
+    pub async fn build(self) -> Result<Model> {
+        let model = self.model_selected();
+        self.text_model.options.load(model).await
     }
 }

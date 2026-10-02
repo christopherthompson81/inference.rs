@@ -1,1117 +1,256 @@
-use candle_core::{Device, Result, Tensor};
-use either::Either;
-use futures::future::join_all;
-use inference_core::*;
-use std::pin::Pin;
-use std::task::{Context as TaskContext, Poll};
-use std::{path::PathBuf, sync::Arc};
-use tokio::sync::mpsc::{Receiver, channel};
+//! A loaded engine with the conveniences a Rust caller wants: typed chat, streaming, structured output, embeddings.
 
-use crate::error::Error as SdkError;
-use crate::{EmbeddingRequest, EmbeddingRequestBuilder, RequestLike, TextMessages};
+use std::{
+    ops::Deref,
+    pin::Pin,
+    task::{Context, Poll},
+};
 
-// Re-export for convenience
-pub use inference_core::{AddModelConfig, ModelStatus, Pipeline, SchedulerConfig};
+use futures::{Stream, StreamExt};
+use inference_api::{
+    Engine,
+    engine_chat::{ChatStream, ChatStreamEvent},
+    openai::{
+        EmbeddingInput, EmbeddingRequest, EmbeddingResponse, Grammar, ImageGenerationRequest,
+        SpeechGenerationRequest,
+    },
+    response::ChatCompletionResponse,
+};
+use serde::de::DeserializeOwned;
 
-/// Gets the best device, cpu, cuda if compiled with CUDA, or Metal
-pub fn best_device(force_cpu: bool) -> Result<Device> {
-    if force_cpu {
-        return Ok(Device::Cpu);
-    }
-    #[cfg(not(feature = "metal"))]
-    {
-        Device::cuda_if_available(0)
-    }
-    #[cfg(feature = "metal")]
-    {
-        Device::new_metal(0)
-    }
-}
+use crate::{
+    error::{Error, Result},
+    request::{ChatRequest, RequestBuilder, TextMessageRole},
+};
 
-fn validate_reasoning_controls(message: &RequestMessage) -> crate::error::Result<()> {
-    let controls = match message {
-        RequestMessage::Chat {
-            enable_thinking,
-            reasoning_effort,
-            ..
-        }
-        | RequestMessage::MultimodalChat {
-            enable_thinking,
-            reasoning_effort,
-            ..
-        } => Some((*enable_thinking, *reasoning_effort)),
-        _ => None,
-    };
-    if let Some((enable_thinking, reasoning_effort)) = controls {
-        resolve_reasoning_controls(enable_thinking, reasoning_effort)
-            .map_err(|error| SdkError::RequestValidation(error.to_string()))?;
-    }
-    Ok(())
-}
+const SCOPED_PROCESSOR_PREFIX: &str = "sdk-request-";
+const STREAMED_APPROVAL: &str = "an approval callback answers non-streaming requests; a stream answers its \
+     approval events with resolve_approval";
 
-/// The object used to interact with the model. This can be used with many varieties of models, \
-/// and as such may be created with one of:
-/// - [`ModelBuilder`] (auto-detecting)
-/// - [`TextModelBuilder`]
-/// - [`MultimodalModelBuilder`]
-/// - [`GgufModelBuilder`]
-/// - [`EmbeddingModelBuilder`]
-/// - [`DiffusionModelBuilder`]
-/// - [`SpeechModelBuilder`]
-/// - [`LoraModelBuilder`]
-/// - [`XLoraModelBuilder`]
-/// - [`GgufLoraModelBuilder`]
-/// - [`GgufXLoraModelBuilder`]
-/// - [`AnyMoeModelBuilder`]
-///
-/// [`ModelBuilder`]: crate::ModelBuilder
-/// [`TextModelBuilder`]: crate::TextModelBuilder
-/// [`MultimodalModelBuilder`]: crate::MultimodalModelBuilder
-/// [`GgufModelBuilder`]: crate::GgufModelBuilder
-/// [`EmbeddingModelBuilder`]: crate::EmbeddingModelBuilder
-/// [`DiffusionModelBuilder`]: crate::DiffusionModelBuilder
-/// [`SpeechModelBuilder`]: crate::SpeechModelBuilder
-/// [`LoraModelBuilder`]: crate::LoraModelBuilder
-/// [`XLoraModelBuilder`]: crate::XLoraModelBuilder
-/// [`GgufLoraModelBuilder`]: crate::GgufLoraModelBuilder
-/// [`GgufXLoraModelBuilder`]: crate::GgufXLoraModelBuilder
-/// [`AnyMoeModelBuilder`]: crate::AnyMoeModelBuilder
-///
+/// A loaded engine. Every [`Engine`] operation is reachable through it; the methods here add Rust types on top.
+#[derive(Clone)]
 pub struct Model {
-    pub(crate) runner: Arc<InferenceRs>,
+    engine: Engine,
 }
 
-/// Token-by-token stream returned by [`Model::stream_chat_request`].
-///
-/// Implements [`futures::Stream`], so you can use `StreamExt` combinators
-/// (e.g., `stream.next().await`).
-pub struct Stream<'a> {
-    _server: &'a Model,
-    rx: Receiver<Response>,
-}
+impl Deref for Model {
+    type Target = Engine;
 
-impl Stream<'_> {
-    /// Receive the next response chunk, or `None` when the stream is exhausted.
-    pub async fn next(&mut self) -> Option<Response> {
-        self.rx.recv().await
-    }
-
-    /// Consume this stream, returning the underlying receiver.
-    pub(crate) fn into_receiver(self) -> Receiver<Response> {
-        self.rx
+    fn deref(&self) -> &Engine {
+        &self.engine
     }
 }
 
-impl futures::Stream for Stream<'_> {
-    type Item = Response;
+impl From<Engine> for Model {
+    fn from(engine: Engine) -> Self {
+        Self { engine }
+    }
+}
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Option<Self::Item>> {
-        self.rx.poll_recv(cx)
+// Registered for one request under names of its own, and unregistered when it ends.
+struct ScopedProcessors {
+    engine: Engine,
+    names: Vec<String>,
+}
+
+impl Drop for ScopedProcessors {
+    fn drop(&mut self) {
+        for name in &self.names {
+            let _ = self.engine.unregister_logits_processor(name);
+        }
+    }
+}
+
+/// A streaming chat; ending it early (or dropping it) abandons the request.
+pub struct ChatEventStream {
+    inner: ChatStream,
+    _processors: ScopedProcessors,
+}
+
+impl Stream for ChatEventStream {
+    type Item = ChatStreamEvent;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        Pin::new(&mut self.inner).poll_next(cx)
+    }
+}
+
+impl ChatEventStream {
+    pub async fn next(&mut self) -> Option<ChatStreamEvent> {
+        StreamExt::next(self).await
     }
 }
 
 impl Model {
-    /// Wrap an existing [`InferenceRs`] engine instance.
-    /// Prefer using a builder (e.g., [`ModelBuilder`](crate::ModelBuilder)) instead.
-    pub fn new(runner: Arc<InferenceRs>) -> Self {
-        Self { runner }
+    pub fn engine(&self) -> &Engine {
+        &self.engine
     }
 
-    /// Look up a file by id. Returns the full body, so callers with a wire-truncated `File` can fetch the real bytes here.
-    pub fn find_file(&self, id: &str) -> Option<Arc<inference_core::File>> {
-        self.runner.find_file(id, None)
+    /// The same engine acting for `owner`, whose sessions and files are that owner's alone.
+    pub fn for_owner(&self, owner: impl Into<String>) -> Self {
+        self.engine.for_owner(owner).into()
     }
 
-    /// Load a local LoRA adapter directory under a new alias.
-    pub async fn load_lora_adapter(
-        &self,
-        alias: impl Into<String>,
-        adapter_dir: impl Into<PathBuf>,
-    ) -> crate::error::Result<LoraAdapterInfo> {
-        self.runner
-            .load_lora_adapter(None, alias, adapter_dir)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Load an adapter using an explicit atomic publication policy.
-    pub async fn load_lora_adapter_with_policy(
-        &self,
-        alias: impl Into<String>,
-        adapter_dir: impl Into<PathBuf>,
-        policy: LoraAdapterLoadPolicy,
-    ) -> crate::error::Result<LoraAdapterInfo> {
-        self.runner
-            .load_lora_adapter_with_policy(None, alias, adapter_dir, policy)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Load an adapter under a new alias on a selected model.
-    pub async fn load_lora_adapter_with_model(
-        &self,
-        alias: impl Into<String>,
-        adapter_dir: impl Into<PathBuf>,
-        model_id: &str,
-    ) -> crate::error::Result<LoraAdapterInfo> {
-        self.runner
-            .load_lora_adapter(Some(model_id), alias, adapter_dir)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Load an adapter on a selected model using an atomic publication policy.
-    pub async fn load_lora_adapter_with_model_and_policy(
-        &self,
-        alias: impl Into<String>,
-        adapter_dir: impl Into<PathBuf>,
-        model_id: &str,
-        policy: LoraAdapterLoadPolicy,
-    ) -> crate::error::Result<LoraAdapterInfo> {
-        self.runner
-            .load_lora_adapter_with_policy(Some(model_id), alias, adapter_dir, policy)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Unregister an adapter alias while allowing in-flight requests to finish.
-    pub async fn unload_lora_adapter(&self, alias: &str) -> crate::error::Result<LoraAdapterInfo> {
-        self.runner
-            .unload_lora_adapter(None, alias)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Unregister an alias only if it still points at the expected generation.
-    pub async fn unload_lora_adapter_if_generation(
-        &self,
-        alias: &str,
-        expected_generation: AdapterGenerationId,
-    ) -> crate::error::Result<LoraAdapterInfo> {
-        self.runner
-            .unload_lora_adapter_if_generation(None, alias, Some(expected_generation))
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Unregister an adapter alias from a selected model in a multi-model engine.
-    pub async fn unload_lora_adapter_with_model(
-        &self,
-        alias: &str,
-        model_id: &str,
-    ) -> crate::error::Result<LoraAdapterInfo> {
-        self.runner
-            .unload_lora_adapter(Some(model_id), alias)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Conditionally unregister an alias from a selected model.
-    pub async fn unload_lora_adapter_with_model_if_generation(
-        &self,
-        alias: &str,
-        model_id: &str,
-        expected_generation: AdapterGenerationId,
-    ) -> crate::error::Result<LoraAdapterInfo> {
-        self.runner
-            .unload_lora_adapter_if_generation(Some(model_id), alias, Some(expected_generation))
-            .await
-            .map_err(Into::into)
-    }
-
-    /// List the loaded adapter aliases on the default model.
-    pub async fn list_lora_adapters(&self) -> crate::error::Result<Vec<LoraAdapterInfo>> {
-        self.runner
-            .list_lora_adapters(None)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// List the loaded adapter aliases on a selected model.
-    pub async fn list_lora_adapters_with_model(
-        &self,
-        model_id: &str,
-    ) -> crate::error::Result<Vec<LoraAdapterInfo>> {
-        self.runner
-            .list_lora_adapters(Some(model_id))
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Return loaded aliases and complete resident-generation capacity usage.
-    pub async fn lora_adapter_status(&self) -> crate::error::Result<LoraRuntimeStatus> {
-        self.runner
-            .lora_adapter_status(None)
-            .await
-            .map_err(Into::into)
-    }
-
-    /// Return dynamic LoRA capacity usage for a selected model.
-    pub async fn lora_adapter_status_with_model(
-        &self,
-        model_id: &str,
-    ) -> crate::error::Result<LoraRuntimeStatus> {
-        self.runner
-            .lora_adapter_status(Some(model_id))
-            .await
-            .map_err(Into::into)
-    }
-
-    // ========================================================================
-    // Chat Request Methods
-    // ========================================================================
-
-    /// Generate with the model (streaming).
-    pub async fn stream_chat_request<R: RequestLike>(
-        &self,
-        request: R,
-    ) -> crate::error::Result<Stream<'_>> {
-        self.stream_chat_request_with_model(request, None).await
-    }
-
-    /// Generate with a specific model (streaming).
-    /// If `model_id` is `None`, the request is sent to the default model.
-    pub async fn stream_chat_request_with_model<R: RequestLike>(
-        &self,
-        request: R,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<Stream<'_>> {
-        let rx = self.submit_chat(request, model_id, true, false).await?;
-        Ok(Stream { _server: self, rx })
-    }
-
-    /// Generate with the model (non-streaming).
-    pub async fn send_chat_request<R: RequestLike>(
-        &self,
-        request: R,
-    ) -> crate::error::Result<ChatCompletionResponse> {
-        self.send_chat_request_with_model(request, None).await
-    }
-
-    /// Send a chat request to a specific model.
-    /// If `model_id` is `None`, the request is sent to the default model.
-    pub async fn send_chat_request_with_model<R: RequestLike>(
-        &self,
-        request: R,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<ChatCompletionResponse> {
-        let mut rx = self.submit_chat(request, model_id, false, false).await?;
-        match final_response(&mut rx).await? {
-            ResponseOk::Done(response) => Ok(response),
-            _ => Err(SdkError::UnexpectedResponse { expected: "Done" }),
+    fn scope(&self, request: &mut ChatRequest) -> Result<ScopedProcessors> {
+        let mut scoped = ScopedProcessors {
+            engine: self.engine.clone(),
+            names: Vec::new(),
+        };
+        for processor in std::mem::take(&mut request.logits_processors) {
+            let name = format!("{SCOPED_PROCESSOR_PREFIX}{}", uuid::Uuid::new_v4().simple());
+            self.engine
+                .register_logits_processor(name.clone(), processor)?;
+            scoped.names.push(name.clone());
+            request
+                .request
+                .logits_processors
+                .get_or_insert_with(Vec::new)
+                .push(name);
         }
+        Ok(scoped)
     }
 
-    /// Runs the prompt once and returns its logits, one row per prompt position, and its tokens; nothing is generated.
-    pub async fn send_raw_chat_request<R: RequestLike>(
+    /// Runs a chat request to its end, answering approval prompts with the request's callback.
+    pub async fn send_chat_request(
         &self,
-        request: R,
-    ) -> crate::error::Result<(Vec<Tensor>, Vec<u32>)> {
-        self.send_raw_chat_request_with_model(request, None).await
+        request: impl Into<ChatRequest>,
+    ) -> Result<ChatCompletionResponse> {
+        let mut request = request.into();
+        let _processors = self.scope(&mut request)?;
+        let response = match request.approval.take() {
+            Some(approver) => {
+                let chat = self
+                    .engine
+                    .chat_with_approver(request.request, request.media, approver);
+                chat.await?
+            }
+            None => self.engine.chat(request.request, request.media).await?,
+        };
+        Ok(response)
     }
 
-    /// As [`Self::send_raw_chat_request`], on a specific model; `None` sends it to the default model.
-    pub async fn send_raw_chat_request_with_model<R: RequestLike>(
+    pub async fn stream_chat_request(
         &self,
-        request: R,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<(Vec<Tensor>, Vec<u32>)> {
-        let mut rx = self.submit_chat(request, model_id, false, true).await?;
-        match final_response(&mut rx).await? {
-            ResponseOk::Raw {
-                logits_chunks,
-                tokens,
-            } => Ok((logits_chunks, tokens)),
-            _ => Err(SdkError::UnexpectedResponse { expected: "Raw" }),
+        request: impl Into<ChatRequest>,
+    ) -> Result<ChatEventStream> {
+        let mut request = request.into();
+        if request.approval.is_some() {
+            return Err(Error::Request(STREAMED_APPROVAL.to_string()));
         }
-    }
-
-    // Image, speech and embedding requests are one-shot and deterministic, with no tools.
-    async fn send_simple(
-        &self,
-        messages: RequestMessage,
-        model_id: Option<&str>,
-        truncate_sequence: bool,
-    ) -> crate::error::Result<ResponseOk> {
-        let (tx, mut rx) = channel(1);
-        let mut request =
-            NormalRequest::new_simple(messages, SamplingParams::deterministic(), tx, 0, None, None);
-        request.model_id = model_id.map(str::to_string);
-        request.truncate_sequence = truncate_sequence;
-        self.runner
-            .get_sender(model_id)?
-            .send(Request::Normal(Box::new(request)))
+        let processors = self.scope(&mut request)?;
+        let inner = self
+            .engine
+            .chat_stream(request.request, request.media)
             .await?;
-        Ok(rx
-            .recv()
-            .await
-            .ok_or(SdkError::Channel("channel closed unexpectedly".into()))?
-            .as_result()?)
+        Ok(ChatEventStream {
+            inner,
+            _processors: processors,
+        })
     }
 
-    async fn submit_chat<R: RequestLike>(
-        &self,
-        mut request: R,
-        model_id: Option<&str>,
-        is_streaming: bool,
-        return_raw_logits: bool,
-    ) -> crate::error::Result<Receiver<Response>> {
-        let (tx, rx) = channel(1);
-        if let Ok(config) = self.config_with_model(model_id) {
-            request.resolve_pending_prefixes(&config.category);
-        }
-        let truncate_sequence = request.truncate_sequence();
-        let (tools, tool_choice) = request.take_tools().unzip();
-        let messages = request.take_messages();
-        validate_reasoning_controls(&messages)?;
-        let request = Request::Normal(Box::new(NormalRequest {
-            messages,
-            sampling_params: request.take_sampling_params(),
-            seed: None,
-            response: tx,
-            return_logprobs: request.return_logprobs(),
-            is_streaming,
-            id: 0,
-            queued_at: None,
-            constraint: request.take_constraint(),
-            suffix: None,
-            tools,
-            tool_choice,
-            logits_processors: request.take_logits_processors(),
-            host_tools: Vec::new(),
-            sequential_tool_calls: false,
-            return_raw_logits,
-            web_search_options: request.take_web_search_options(),
-            enable_code_execution: request.enable_code_execution(),
-            enable_shell: request.enable_shell(),
-            shell_options: request.take_shell_options(),
-            code_execution_permission: request.code_execution_permission(),
-            code_execution_approval_notifier: None,
-            agent_permission: request.agent_permission(),
-            agent_approval_handler: request.agent_approval_handler(),
-            agent_approval_notifier: None,
-            max_tool_rounds: request.max_tool_rounds(),
-            tool_dispatch_url: request.tool_dispatch_url().map(|s| s.to_string()),
-            model_id: model_id.map(|s| s.to_string()),
-            adapter: request.take_adapter(),
-            truncate_sequence,
-            session_id: request.session_id().map(|s| s.to_string()),
-            owner: None,
-            files: request.take_files(),
-            input_files: request.take_input_files(),
-            cancellation: None,
-        }));
-        self.runner.get_sender(model_id)?.send(request).await?;
-        Ok(rx)
+    /// One user message in, the reply's text out.
+    pub async fn chat(&self, message: impl ToString) -> Result<String> {
+        let request = RequestBuilder::new().add_message(TextMessageRole::User, message);
+        let response = self.send_chat_request(request).await?;
+        Ok(reply_text(&response))
     }
 
-    // ========================================================================
-    // Convenience Methods
-    // ========================================================================
-
-    /// Quick chat: send a single user message and get the assistant's text reply.
-    ///
-    /// For more control (system prompt, sampling, tools, etc.), use
-    /// [`send_chat_request`](Self::send_chat_request) with a [`RequestBuilder`](crate::RequestBuilder).
-    pub async fn chat(&self, message: impl ToString) -> crate::error::Result<String> {
-        let messages = TextMessages::new().add_message(crate::TextMessageRole::User, message);
-        let response = self.send_chat_request(messages).await?;
-        response
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|c| c.message.content)
-            .ok_or(SdkError::UnexpectedResponse {
-                expected: "content",
-            })
-    }
-
-    /// Send a chat request constrained to a JSON schema derived from `T`, then
-    /// deserialize the response into the target type.
-    ///
-    /// `T` must implement both [`serde::de::DeserializeOwned`] and
-    /// [`schemars::JsonSchema`]. The JSON schema is automatically derived from
-    /// `T` and used to constrain the model's output.
-    ///
-    /// # Example
-    /// ```no_run
-    /// use schemars::JsonSchema;
-    /// use serde::Deserialize;
-    /// # use inference::*;
-    ///
-    /// #[derive(Deserialize, JsonSchema)]
-    /// struct Address {
-    ///     street: String,
-    ///     city: String,
-    ///     state: String,
-    ///     zip: u32,
-    /// }
-    ///
-    /// # async fn example(model: Model) -> anyhow::Result<()> {
-    /// let address: Address = model
-    ///     .generate_structured(
-    ///         TextMessages::new()
-    ///             .add_message(TextMessageRole::User, "Give me a sample US address."),
-    ///     )
-    ///     .await?;
-    /// # Ok(())
-    /// # }
-    /// ```
-    pub async fn generate_structured<T>(
-        &self,
-        messages: impl Into<crate::RequestBuilder>,
-    ) -> crate::error::Result<T>
+    /// The reply constrained to `T`'s JSON schema and parsed into it.
+    pub async fn generate_structured<T>(&self, request: impl Into<RequestBuilder>) -> Result<T>
     where
-        T: serde::de::DeserializeOwned + schemars::JsonSchema,
+        T: DeserializeOwned + schemars::JsonSchema,
     {
-        self.generate_structured_with_model::<T>(messages, None)
-            .await
+        let schema = serde_json::to_value(schemars::schema_for!(T))?;
+        let request = request.into().set_grammar(Grammar::JsonSchema(schema));
+        let response = self.send_chat_request(request).await?;
+        Ok(serde_json::from_str(&reply_text(&response))?)
     }
 
-    /// Send a structured request to a specific model.
-    /// If `model_id` is `None`, the request is sent to the default model.
-    pub async fn generate_structured_with_model<T>(
-        &self,
-        messages: impl Into<crate::RequestBuilder>,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<T>
-    where
-        T: serde::de::DeserializeOwned + schemars::JsonSchema,
-    {
-        let schema_value = serde_json::to_value(schemars::schema_for!(T))?;
-        let request: crate::RequestBuilder = messages.into();
-        let request = request.set_constraint(Constraint::JsonSchema(schema_value));
-        let response = self.send_chat_request_with_model(request, model_id).await?;
-        let content = response
-            .choices
-            .into_iter()
-            .next()
-            .and_then(|c| c.message.content)
-            .ok_or(SdkError::UnexpectedResponse {
-                expected: "content",
-            })?;
-        Ok(serde_json::from_str(&content)?)
-    }
-
-    // ========================================================================
-    // Image Generation Methods
-    // ========================================================================
-
-    /// Generate an image using the default model.
-    pub async fn generate_image(
-        &self,
-        prompt: impl ToString,
-        response_format: ImageGenerationResponseFormat,
-        generation_params: DiffusionGenerationParams,
-        save_file: Option<PathBuf>,
-    ) -> crate::error::Result<ImageGenerationResponse> {
-        self.generate_image_with_model(prompt, response_format, generation_params, None, save_file)
-            .await
-    }
-
-    /// Generate an image using a specific model.
-    /// If `model_id` is `None`, the request is sent to the default model.
-    pub async fn generate_image_with_model(
-        &self,
-        prompt: impl ToString,
-        response_format: ImageGenerationResponseFormat,
-        generation_params: DiffusionGenerationParams,
-        model_id: Option<&str>,
-        save_file: Option<PathBuf>,
-    ) -> crate::error::Result<ImageGenerationResponse> {
-        let messages = RequestMessage::ImageGeneration {
-            prompt: prompt.to_string(),
-            generation_params,
+    /// Requantizes the default model, which must have loaded with ISQ, to `isq`.
+    pub async fn re_isq_model(&self, isq: crate::IsqType) -> Result<()> {
+        let request = inference_api::operations::ReIsqRequest {
+            ggml_type: isq.to_string(),
+            model: None,
         };
-        let ResponseOk::ImageGeneration(generated) =
-            self.send_simple(messages, model_id, false).await?
-        else {
-            return Err(SdkError::UnexpectedResponse {
-                expected: "ImageGeneration",
-            });
-        };
-
-        Ok(inference_core::images::image_generation_response(
-            generated.created,
-            &generated.images,
-            response_format,
-            save_file.as_deref(),
-        )?)
+        self.engine.re_isq(request).await?;
+        Ok(())
     }
 
-    // ========================================================================
-    // Speech Generation Methods
-    // ========================================================================
-
-    /// Generate audio given a (model specific) prompt.
-    ///
-    /// This returns: (pcm, sampling rate, channels)
-    pub async fn generate_speech(
-        &self,
-        prompt: impl ToString,
-    ) -> crate::error::Result<(Arc<Vec<f32>>, usize, usize)> {
-        self.generate_speech_with_model(prompt, None).await
-    }
-
-    /// Generate audio given a (model specific) prompt using a specific model.
-    /// If `model_id` is `None`, the request is sent to the default model.
-    ///
-    /// This returns: (pcm, sampling rate, channels)
-    pub async fn generate_speech_with_model(
-        &self,
-        prompt: impl ToString,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<(Arc<Vec<f32>>, usize, usize)> {
-        let messages = RequestMessage::SpeechGeneration {
-            prompt: prompt.to_string(),
-        };
-        let ResponseOk::Speech {
-            pcm,
-            rate,
-            channels,
-        } = self.send_simple(messages, model_id, false).await?
-        else {
-            return Err(SdkError::UnexpectedResponse { expected: "Speech" });
-        };
-
-        Ok((pcm, rate, channels))
-    }
-
-    // ========================================================================
-    // Embedding Methods
-    // ========================================================================
-
-    /// Generate embeddings for one or more inputs configured via an [`EmbeddingRequestBuilder`].
-    ///
-    /// Returns one embedding vector per input in the same order they were added.
     pub async fn generate_embeddings(
         &self,
-        request: EmbeddingRequestBuilder,
-    ) -> crate::error::Result<Vec<Vec<f32>>> {
-        self.generate_embeddings_with_model(request, None).await
+        request: EmbeddingRequest,
+    ) -> Result<EmbeddingResponse> {
+        Ok(self.engine.embeddings(request).await?)
     }
 
-    /// Generate embeddings for one or more inputs using a specific model.
-    /// If `model_id` is `None`, the request is sent to the default model.
-    ///
-    /// Returns one embedding vector per input in the same order they were added.
-    pub async fn generate_embeddings_with_model(
-        &self,
-        request: EmbeddingRequestBuilder,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<Vec<Vec<f32>>> {
-        let request = request.build().map_err(|e| SdkError::Inference(e.into()))?;
-        let EmbeddingRequest {
-            inputs,
-            truncate_sequence,
-        } = request;
+    /// One text's embedding.
+    pub async fn generate_embedding(&self, text: impl Into<String>) -> Result<Vec<f32>> {
+        let mut request = crate::embedding::empty_embedding_request();
+        request.input = EmbeddingInput::Single(text.into());
+        let response = self.engine.embeddings(request).await?;
+        response
+            .data
+            .into_iter()
+            .next()
+            .and_then(|embedding| match embedding.embedding {
+                inference_api::openai::EmbeddingVector::Float(values) => Some(values),
+                inference_api::openai::EmbeddingVector::Base64(_) => None,
+            })
+            .ok_or(Error::Empty)
+    }
 
-        let futures = inputs.into_iter().map(|input| async move {
-            let messages = input.into_request_message();
-            match self
-                .send_simple(messages, model_id, truncate_sequence)
-                .await?
-            {
-                ResponseOk::Embeddings { embeddings, .. } => Ok(embeddings),
-                _ => Err(SdkError::UnexpectedResponse {
-                    expected: "Embeddings",
-                }),
+    pub async fn generate_image(
+        &self,
+        request: ImageGenerationRequest,
+    ) -> Result<inference_api::response::ImageGenerationResponse> {
+        Ok(self.engine.image_generation(request).await?)
+    }
+
+    pub async fn generate_speech(
+        &self,
+        request: SpeechGenerationRequest,
+    ) -> Result<inference_api::generation::SpeechAudio> {
+        Ok(self.engine.speech_generation(request).await?)
+    }
+
+    /// Uploads the skill directory at `dir` (its `SKILL.md` at the top) and returns the id requests mount it by.
+    pub fn upload_skill(&self, dir: impl AsRef<std::path::Path>) -> Result<String> {
+        let dir = dir.as_ref();
+        let mut files = inference_api::skill_store::SkillFiles::default();
+        let mut pending = vec![dir.to_path_buf()];
+        while let Some(current) = pending.pop() {
+            for entry in std::fs::read_dir(&current)? {
+                let entry = entry?;
+                // Links are skipped, so a cycle cannot loop; dotfiles (a `.git`) are not part of a skill.
+                let kind = entry.file_type()?;
+                if kind.is_symlink() || entry.file_name().to_string_lossy().starts_with('.') {
+                    continue;
+                }
+                let path = entry.path();
+                if kind.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                let relative = path.strip_prefix(dir).unwrap_or(&path);
+                let name = relative.to_string_lossy().replace('\\', "/");
+                files
+                    .push(name, std::fs::read(&path)?)
+                    .map_err(|error| Error::Request(format!("{error:#}")))?;
             }
-        });
-
-        let results = join_all(futures).await;
-        let mut embeddings = Vec::with_capacity(results.len());
-        for result in results {
-            embeddings.push(result?);
         }
-        Ok(embeddings)
-    }
-
-    /// Convenience wrapper for generating a single embedding.
-    pub async fn generate_embedding(
-        &self,
-        prompt: impl ToString,
-    ) -> crate::error::Result<Vec<f32>> {
-        self.generate_embedding_with_model(prompt, None).await
-    }
-
-    /// Convenience wrapper for generating a single embedding using a specific model.
-    /// If `model_id` is `None`, the request is sent to the default model.
-    pub async fn generate_embedding_with_model(
-        &self,
-        prompt: impl ToString,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<Vec<f32>> {
-        let mut embeddings = self
-            .generate_embeddings_with_model(
-                EmbeddingRequest::builder().add_prompt(prompt.to_string()),
-                model_id,
-            )
-            .await?;
-
-        Ok(embeddings
-            .pop()
-            .expect("EmbeddingRequestBuilder should guarantee at least one input"))
-    }
-
-    // ========================================================================
-    // Model Management Methods
-    // ========================================================================
-
-    /// Reapply ISQ to the model. This will be done on whatever device the model is already on.
-    pub async fn re_isq_model(&self, isq_type: IsqType) -> crate::error::Result<()> {
-        self.re_isq_model_with_model(isq_type, None).await
-    }
-
-    /// Reapply ISQ to a specific model.
-    /// If `model_id` is `None`, the request is sent to the default model.
-    pub async fn re_isq_model_with_model(
-        &self,
-        isq_type: IsqType,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<()> {
-        let request = Request::ReIsq(isq_type);
-
-        Ok(self.runner.get_sender(model_id)?.send(request).await?)
-    }
-
-    /// Begin online calibration: collect activation statistics from live traffic on every
-    /// ISQ-tracked layer. The model must have been loaded with ISQ.
-    pub async fn begin_calibration(&self) -> crate::error::Result<CalibrationStatus> {
-        self.send_calibration(CalibrationAction::Start, None).await
-    }
-
-    /// Begin online calibration on a specific model.
-    /// If `model_id` is `None`, the request is sent to the default model.
-    pub async fn begin_calibration_with_model(
-        &self,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<CalibrationStatus> {
-        self.send_calibration(CalibrationAction::Start, model_id)
-            .await
-    }
-
-    /// Report per-layer calibration collection progress.
-    pub async fn calibration_status(&self) -> crate::error::Result<CalibrationStatus> {
-        self.send_calibration(CalibrationAction::Status, None).await
-    }
-
-    /// Report calibration progress for a specific model.
-    /// If `model_id` is `None`, the request is sent to the default model.
-    pub async fn calibration_status_with_model(
-        &self,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<CalibrationStatus> {
-        self.send_calibration(CalibrationAction::Status, model_id)
-            .await
-    }
-
-    /// Requantize from the source weights with the collected statistics and hot-swap the
-    /// layers into the live model. Returns the pre-apply status. `save_cimatrix` optionally
-    /// writes the collected importance matrix to a `.cimatrix` file for reuse.
-    pub async fn apply_calibration(
-        &self,
-        save_cimatrix: Option<PathBuf>,
-    ) -> crate::error::Result<CalibrationStatus> {
-        self.send_calibration(CalibrationAction::Apply { save_cimatrix }, None)
-            .await
-    }
-
-    /// Apply calibration on a specific model.
-    /// If `model_id` is `None`, the request is sent to the default model.
-    pub async fn apply_calibration_with_model(
-        &self,
-        save_cimatrix: Option<PathBuf>,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<CalibrationStatus> {
-        self.send_calibration(CalibrationAction::Apply { save_cimatrix }, model_id)
-            .await
-    }
-
-    async fn send_calibration(
-        &self,
-        action: CalibrationAction,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<CalibrationStatus> {
-        let (tx, mut rx) = channel(1);
-        let request = Request::Calibration(CalibrationRequest {
-            action,
-            response: tx,
-        });
-        self.runner.get_sender(model_id)?.send(request).await?;
-
-        rx.recv()
-            .await
-            .ok_or(SdkError::Channel("channel closed unexpectedly".into()))?
-            .map_err(|e| SdkError::Inference(e.into()))
-    }
-
-    // ========================================================================
-    // Tokenization Methods
-    // ========================================================================
-
-    /// Tokenize some text or messages.
-    /// - `tools` is only used if messages are provided.
-    /// - `enable_thinking` is only used if messages are provided.
-    pub async fn tokenize(
-        &self,
-        text: Either<TextMessages, String>,
-        tools: Option<Vec<Tool>>,
-        add_special_tokens: bool,
-        add_generation_prompt: bool,
-        enable_thinking: Option<bool>,
-    ) -> crate::error::Result<Vec<u32>> {
-        self.tokenize_with_reasoning_effort(
-            text,
-            tools,
-            add_special_tokens,
-            add_generation_prompt,
-            enable_thinking,
-            None,
-        )
-        .await
-    }
-
-    /// Tokenize some text or messages with an optional reasoning effort.
-    /// - `tools` is only used if messages are provided.
-    /// - Reasoning controls are only used if messages are provided.
-    pub async fn tokenize_with_reasoning_effort(
-        &self,
-        text: Either<TextMessages, String>,
-        tools: Option<Vec<Tool>>,
-        add_special_tokens: bool,
-        add_generation_prompt: bool,
-        enable_thinking: Option<bool>,
-        reasoning_effort: Option<ReasoningEffort>,
-    ) -> crate::error::Result<Vec<u32>> {
-        self.tokenize_with_reasoning_effort_and_model(
-            text,
-            tools,
-            add_special_tokens,
-            add_generation_prompt,
-            enable_thinking,
-            reasoning_effort,
-            None,
-        )
-        .await
-    }
-
-    /// Tokenize some text or messages using a specific model.
-    /// If `model_id` is `None`, the request is sent to the default model.
-    /// - `tools` is only used if messages are provided.
-    /// - `enable_thinking` is only used if messages are provided.
-    pub async fn tokenize_with_model(
-        &self,
-        text: Either<TextMessages, String>,
-        tools: Option<Vec<Tool>>,
-        add_special_tokens: bool,
-        add_generation_prompt: bool,
-        enable_thinking: Option<bool>,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<Vec<u32>> {
-        self.tokenize_with_reasoning_effort_and_model(
-            text,
-            tools,
-            add_special_tokens,
-            add_generation_prompt,
-            enable_thinking,
-            None,
-            model_id,
-        )
-        .await
-    }
-
-    /// Tokenize some text or messages with an optional reasoning effort using a specific model.
-    /// If `model_id` is `None`, the request is sent to the default model.
-    /// - `tools` is only used if messages are provided.
-    /// - Reasoning controls are only used if messages are provided.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn tokenize_with_reasoning_effort_and_model(
-        &self,
-        text: Either<TextMessages, String>,
-        tools: Option<Vec<Tool>>,
-        add_special_tokens: bool,
-        add_generation_prompt: bool,
-        enable_thinking: Option<bool>,
-        reasoning_effort: Option<ReasoningEffort>,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<Vec<u32>> {
-        resolve_reasoning_controls(enable_thinking, reasoning_effort)
-            .map_err(|error| SdkError::RequestValidation(error.to_string()))?;
-        let (tx, mut rx) = channel(1);
-        let request = Request::Tokenize(TokenizationRequest {
-            text: text.map_left(Into::into),
-            tools,
-            add_special_tokens,
-            add_generation_prompt,
-            response: tx,
-            enable_thinking,
-            reasoning_effort,
-        });
-        self.runner.get_sender(model_id)?.send(request).await?;
-
-        rx.recv()
-            .await
-            .ok_or(SdkError::Channel("channel closed unexpectedly".into()))?
-            .map_err(|e| SdkError::Inference(e.into()))
-    }
-
-    /// Detokenize some tokens.
-    pub async fn detokenize(
-        &self,
-        tokens: Vec<u32>,
-        skip_special_tokens: bool,
-    ) -> crate::error::Result<String> {
-        self.detokenize_with_model(tokens, skip_special_tokens, None)
-            .await
-    }
-
-    /// Detokenize some tokens using a specific model.
-    /// If `model_id` is `None`, the request is sent to the default model.
-    pub async fn detokenize_with_model(
-        &self,
-        tokens: Vec<u32>,
-        skip_special_tokens: bool,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<String> {
-        let (tx, mut rx) = channel(1);
-        let request = Request::Detokenize(DetokenizationRequest {
-            tokens,
-            skip_special_tokens,
-            response: tx,
-        });
-        self.runner.get_sender(model_id)?.send(request).await?;
-
-        rx.recv()
-            .await
-            .ok_or(SdkError::Channel("channel closed unexpectedly".into()))?
-            .map_err(|e| SdkError::Inference(e.into()))
-    }
-
-    // ========================================================================
-    // Configuration Methods
-    // ========================================================================
-
-    /// Retrieve some information about this model.
-    pub fn config(&self) -> crate::error::Result<InferenceRsConfig> {
-        self.config_with_model(None)
-    }
-
-    /// Retrieve some information about a specific model.
-    /// If `model_id` is `None`, returns config for the default model.
-    pub fn config_with_model(
-        &self,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<InferenceRsConfig> {
-        self.runner
-            .config(model_id)
-            .map_err(|e| SdkError::Inference(e.into()))
-    }
-
-    /// Returns the maximum supported sequence length for this model, if applicable.
-    pub fn max_sequence_length(&self) -> crate::error::Result<Option<usize>> {
-        self.max_sequence_length_with_model(None)
-    }
-
-    /// Returns the maximum supported sequence length for a specific model, if applicable.
-    /// If `model_id` is `None`, returns for the default model.
-    pub fn max_sequence_length_with_model(
-        &self,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<Option<usize>> {
-        Ok(self.runner.max_sequence_length(model_id)?)
-    }
-
-    // ========================================================================
-    // Multi-Model Management Methods
-    // ========================================================================
-
-    /// List all available model IDs (aliases if configured).
-    pub fn list_models(&self) -> crate::error::Result<Vec<String>> {
-        self.runner
-            .list_models()
-            .map_err(|e| SdkError::Inference(e.into()))
-    }
-
-    /// Get the current default model ID.
-    pub fn get_default_model_id(&self) -> crate::error::Result<Option<String>> {
-        self.runner
-            .get_default_model_id()
-            .map_err(|e| SdkError::Inference(e.into()))
-    }
-
-    /// Set the default model ID.
-    pub fn set_default_model_id(&self, model_id: &str) -> crate::error::Result<()> {
-        self.runner
-            .set_default_model_id(model_id)
-            .map_err(|e| SdkError::Inference(e.into()))
-    }
-
-    /// Add a new model dynamically.
-    pub async fn add_model(
-        &self,
-        model_id: String,
-        pipeline: Arc<tokio::sync::Mutex<dyn Pipeline>>,
-        method: SchedulerConfig,
-        config: AddModelConfig,
-    ) -> crate::error::Result<()> {
-        self.runner
-            .add_model(model_id, pipeline, method, config)
-            .await
-            .map_err(|e| SdkError::Inference(e.into()))
-    }
-
-    /// Remove a model by ID.
-    pub fn remove_model(&self, model_id: &str) -> crate::error::Result<()> {
-        self.runner
-            .remove_model(model_id)
-            .map_err(|e| SdkError::Inference(e.into()))
-    }
-
-    /// Unload a model from memory (can be reloaded later).
-    pub fn unload_model(&self, model_id: &str) -> crate::error::Result<()> {
-        Ok(self.runner.unload_model(model_id)?)
-    }
-
-    /// Reload a previously unloaded model.
-    pub async fn reload_model(&self, model_id: &str) -> crate::error::Result<()> {
-        Ok(self.runner.reload_model(model_id).await?)
-    }
-
-    /// Check if a model is currently loaded.
-    pub fn is_model_loaded(&self, model_id: &str) -> crate::error::Result<bool> {
-        Ok(self.runner.is_model_loaded(model_id)?)
-    }
-
-    /// List all models with their status (Loaded, Unloaded, Reloading).
-    pub fn list_models_with_status(&self) -> crate::error::Result<Vec<(String, ModelStatus)>> {
-        Ok(self.runner.list_models_with_status()?)
-    }
-
-    /// Get the underlying InferenceRs instance.
-    pub fn inner(&self) -> &InferenceRs {
-        &self.runner
-    }
-
-    /// Export an agentic session by ID. `None` if missing.
-    pub fn export_session(
-        &self,
-        model_id: Option<&str>,
-        session_id: &str,
-    ) -> crate::error::Result<Option<inference_core::SerializedSession>> {
-        Ok(self.runner.export_session(model_id, session_id, None)?)
-    }
-
-    /// Import an agentic session. Replaces any existing session with the same ID.
-    pub fn import_session(
-        &self,
-        model_id: Option<&str>,
-        session_id: impl Into<String>,
-        session: inference_core::SerializedSession,
-    ) -> crate::error::Result<()> {
-        Ok(self
-            .runner
-            .import_session(model_id, session_id.into(), session, None)?)
-    }
-
-    /// Delete an agentic session. Returns whether the session existed.
-    pub fn delete_session(
-        &self,
-        model_id: Option<&str>,
-        session_id: &str,
-    ) -> crate::error::Result<bool> {
-        Ok(self.runner.delete_session(model_id, session_id, None)?)
-    }
-
-    /// Fork the first `num_turns` complete turns of `src` into `dest`. A turn ends at the first
-    /// assistant message without `tool_calls`. Used by branching so each branch has its own state.
-    pub fn fork_session(
-        &self,
-        model_id: Option<&str>,
-        src_session_id: &str,
-        dest_session_id: impl Into<String>,
-        num_turns: usize,
-    ) -> crate::error::Result<()> {
-        Ok(self.runner.fork_session(
-            model_id,
-            src_session_id,
-            dest_session_id.into(),
-            num_turns,
-            None,
-        )?)
-    }
-
-    /// All stored agentic session IDs.
-    pub fn list_session_ids(&self, model_id: Option<&str>) -> crate::error::Result<Vec<String>> {
-        Ok(self.runner.list_session_ids(model_id, None)?)
-    }
-
-    /// MCP-provided tools registered for `model_id`. Excludes built-ins (search, code exec). Returns `(name, description)` per tool.
-    pub fn list_mcp_tools(
-        &self,
-        model_id: Option<&str>,
-    ) -> crate::error::Result<Vec<(String, Option<String>)>> {
-        self.runner
-            .list_mcp_tools(model_id)
-            .map_err(|e| crate::error::Error::from(inference_core::InferenceRsError::Other(e)))
+        let uploaded: serde_json::Value =
+            serde_json::from_str(&self.engine.upload_skill_json(files)?)?;
+        uploaded["id"]
+            .as_str()
+            .map(str::to_string)
+            .ok_or(Error::Empty)
     }
 }
 
-// Tool-call progress and files become the final chat response's `agentic_tool_calls` and `files`.
-async fn final_response(rx: &mut Receiver<Response>) -> crate::error::Result<ResponseOk> {
-    let mut collector = ChatResponseCollector::default();
-    loop {
-        let response = rx
-            .recv()
-            .await
-            .ok_or(SdkError::Channel("channel closed unexpectedly".into()))?;
-        match collector.absorb(response) {
-            None | Some(Response::BlockDenoisingProgress(_)) => continue,
-            Some(Response::Done(response)) => {
-                return Ok(ResponseOk::Done(collector.finish(response)));
-            }
-            Some(Response::ModelError(message, response)) => {
-                let error = ResponseErr::ModelError(message, collector.finish(response));
-                return Err(Box::new(error).into());
-            }
-            Some(response) => return Ok(response.as_result()?),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn the_final_response_skips_denoising_progress() {
-        let (tx, mut rx) = channel(4);
-        let progress = BlockDenoisingProgress {
-            index: 0,
-            step: 1,
-            total_steps: 2,
-            tokens: Vec::new(),
-            text: String::new(),
-            finished: false,
-            final_block: false,
-        };
-        tx.send(Response::BlockDenoisingProgress(progress))
-            .await
-            .unwrap();
-        tx.send(Response::Raw {
-            logits_chunks: Vec::new(),
-            tokens: vec![7],
-        })
-        .await
-        .unwrap();
-        let ResponseOk::Raw { tokens, .. } = final_response(&mut rx).await.unwrap() else {
-            panic!("expected the raw response");
-        };
-        assert_eq!(tokens, vec![7]);
-        drop(tx);
-        assert!(matches!(
-            final_response(&mut rx).await,
-            Err(SdkError::Channel(_))
-        ));
-    }
+fn reply_text(response: &ChatCompletionResponse) -> String {
+    response
+        .choices
+        .first()
+        .and_then(|choice| choice.message.content.clone())
+        .unwrap_or_default()
 }

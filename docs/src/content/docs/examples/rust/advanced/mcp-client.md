@@ -24,8 +24,8 @@ Run with: `cargo run --release --example mcp_client -p inference-examples`
 
 use anyhow::Result;
 use inference::{
-    IsqBits, McpClientConfig, McpServerConfig, McpServerSource, ModelBuilder, TextMessageRole,
-    TextMessages,
+    IsqBits, McpClientConfig, ModelBuilder, TextMessageRole, TextMessages,
+    api::sdk::{McpServerConfig, McpServerSource},
 };
 
 #[tokio::main]

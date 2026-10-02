@@ -16,7 +16,9 @@ Run with: `cargo run --release --example error_handling -p inference-examples`
 //!
 //! Run with: `cargo run --release --example error_handling -p inference-examples`
 
-use inference::{IsqBits, ModelBuilder, TextMessageRole, TextMessages, error};
+use inference::{
+    ApiErrorKind, ChatStreamEvent, IsqBits, ModelBuilder, TextMessageRole, TextMessages, error,
+};
 
 #[tokio::main]
 async fn main() {
@@ -35,12 +37,26 @@ async fn load_and_chat() -> error::Result<String> {
 
     let messages = TextMessages::new().add_message(TextMessageRole::User, "Hello!");
 
-    let response = model.send_chat_request(messages).await?;
-    Ok(response.choices[0]
-        .message
-        .content
-        .clone()
-        .unwrap_or_default())
+    // Streaming keeps whatever the model produced before a mid-generation error.
+    let mut stream = model.stream_chat_request(messages).await?;
+    let mut text = String::new();
+    while let Some(event) = stream.next().await {
+        match event {
+            ChatStreamEvent::Chunk(chunk) => {
+                if let Some(delta) = chunk.choices.first().and_then(|c| c.delta.content.as_ref()) {
+                    text.push_str(delta);
+                }
+            }
+            ChatStreamEvent::Error(e) => {
+                if !text.is_empty() {
+                    eprintln!("Partial response recovered: {text}");
+                }
+                return Err(e.into());
+            }
+            _ => {}
+        }
+    }
+    Ok(text)
 }
 
 fn handle_error(err: error::Error) {
@@ -49,25 +65,11 @@ fn handle_error(err: error::Error) {
             eprintln!("Failed to load model: {e}");
             eprintln!("Check that the model ID is correct and you have network access.");
         }
-        error::Error::ModelError {
-            message,
-            partial_response,
-        } => {
-            eprintln!("Model error during generation: {message}");
-            if let Some(partial) = partial_response {
-                // Recover whatever the model produced before the error
-                if let Some(text) = partial
-                    .choices
-                    .first()
-                    .and_then(|c| c.message.content.as_ref())
-                {
-                    eprintln!("Partial response recovered: {text}");
-                }
-            }
-        }
-        error::Error::RequestValidation(msg) => {
-            eprintln!("Invalid request: {msg}");
-        }
+        error::Error::Api(e) => match e.kind {
+            ApiErrorKind::InvalidRequest => eprintln!("Invalid request: {}", e.message),
+            ApiErrorKind::Internal => eprintln!("Model error during generation: {}", e.message),
+            kind => eprintln!("Request failed ({kind:?}): {}", e.message),
+        },
         other => {
             eprintln!("Unexpected error: {other}");
         }

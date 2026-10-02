@@ -948,7 +948,18 @@ impl ChatEngine {
         tool_surface: OpenAiToolSurface,
         media: MediaAttachments,
     ) -> BoxFuture<'a, Result<PreparedChat, DispatchError>> {
-        Box::pin(self.prepare_inner(oairequest, tool_surface, media))
+        Box::pin(self.prepare_inner(oairequest, tool_surface, media, None))
+    }
+
+    /// As [`Self::prepare`], with `approver` answering the request's approvals in process, so Ask needs no stream.
+    pub fn prepare_with_approver<'a>(
+        &'a self,
+        oairequest: ChatCompletionRequest,
+        media: MediaAttachments,
+        approver: AgentToolApprovalHandler,
+    ) -> BoxFuture<'a, Result<PreparedChat, DispatchError>> {
+        let surface = OpenAiToolSurface::ChatCompletions;
+        Box::pin(self.prepare_inner(oairequest, surface, media, Some(approver)))
     }
 
     async fn prepare_inner(
@@ -956,6 +967,7 @@ impl ChatEngine {
         mut oairequest: ChatCompletionRequest,
         tool_surface: OpenAiToolSurface,
         media: MediaAttachments,
+        approver: Option<AgentToolApprovalHandler>,
     ) -> Result<PreparedChat, DispatchError> {
         let (tx, rx) = create_response_channel(None);
         let requested_model = oairequest.model.clone();
@@ -966,7 +978,7 @@ impl ChatEngine {
         self.apply_agent_policy(&mut oairequest);
         let asks = matches!(oairequest.agent_permission, Some(AgentPermission::Ask));
         let is_streaming = oairequest.stream.unwrap_or(false);
-        if asks && !is_streaming {
+        if asks && !is_streaming && approver.is_none() {
             return Err(DispatchError::Validation(Box::new(ApiError::new(
                 ApiErrorKind::InvalidRequest,
                 ASK_REQUIRES_STREAMING,
@@ -974,12 +986,15 @@ impl ChatEngine {
                 Some("agent_permission"),
             ))));
         }
-        let agent_approval_handler = asks.then(|| {
-            AgentToolApprovalHandler::from_async(
-                self.agentic.approval_broker.callback(self.owner.clone()),
-            )
+        let in_process = approver.is_some();
+        let agent_approval_handler = approver.filter(|_| asks).or_else(|| {
+            asks.then(|| {
+                AgentToolApprovalHandler::from_async(
+                    self.agentic.approval_broker.callback(self.owner.clone()),
+                )
+            })
         });
-        let agent_approval_notifier = asks.then(|| {
+        let agent_approval_notifier = (asks && !in_process).then(|| {
             self.agentic
                 .approval_broker
                 .notifier(tx.clone(), self.owner.clone())

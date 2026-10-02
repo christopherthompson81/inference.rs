@@ -154,17 +154,17 @@ Over HTTP, `grammar` is a tagged object (on Chat Completions, Responses, legacy 
 | `lark` | Lark grammar string | Context-free syntax: expressions, DSLs. |
 | `llguidance` | llguidance grammar object | Composed grammars; full control. |
 
-In the Python SDK the same four constraints are the `grammar` classes `t.GrammarRegex`, `t.GrammarJsonSchema`, `t.GrammarLark`, and `t.GrammarLlguidance`, each with the table's `value` (a dict for `json_schema`, a `t.GrammarLlguidanceValue` for `llguidance`). In Rust, pass a `Constraint` to `RequestBuilder::set_constraint`:
+In the Python SDK the same four constraints are the `grammar` classes `t.GrammarRegex`, `t.GrammarJsonSchema`, `t.GrammarLark`, and `t.GrammarLlguidance`, each with the table's `value` (a dict for `json_schema`, a `t.GrammarLlguidanceValue` for `llguidance`). In Rust, pass a `Grammar` to `RequestBuilder::set_grammar`:
 
 ```rust
 let request = RequestBuilder::new()
-    .set_constraint(inference::Constraint::Regex(
+    .set_grammar(inference::Grammar::Regex(
         "(- [^\n]*\n)+(- [^\n]*)(\n\n)?".to_string(),
     ))
     .add_message(TextMessageRole::User, "Please write a few jokes.");
 ```
 
-`Constraint::Regex`, `Constraint::Lark`, `Constraint::JsonSchema`, and `Constraint::Llguidance` mirror the HTTP variants.
+`Grammar::Regex`, `Grammar::Lark`, `Grammar::JsonSchema`, and `Grammar::Llguidance` are the HTTP variants themselves.
 
 Full examples: [regex](/examples/server/regex/), [lark](/examples/server/lark/), [llguidance](/examples/server/llguidance/) (HTTP); [regex](/examples/python/regex/), [lark_llg](/examples/python/lark-llg/) (Python); [grammar](/examples/rust/advanced/grammar/), [llguidance](/examples/rust/advanced/llguidance/) (Rust).
 

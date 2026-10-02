@@ -2,10 +2,10 @@
 //!
 //! Run with: `cargo run --release --example multi_model -p inference-examples`
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use inference::{
-    IsqBits, MultiModelBuilder, MultimodalModelBuilder, TextMessageRole, TextMessages,
-    TextModelBuilder,
+    IsqBits, ModelOperationRequest, ModelStatus, MultiModelBuilder, MultimodalModelBuilder,
+    RequestBuilder, TextMessageRole, TextMessages, TextModelBuilder,
 };
 
 // Model IDs - these are the actual HuggingFace model paths
@@ -15,6 +15,12 @@ const QWEN_MODEL_ID: &str = "Qwen/Qwen3-4B";
 const GEMMA_ALIAS: &str = "gemma-multimodal";
 const QWEN_ALIAS: &str = "qwen-text";
 
+fn target(model_id: &str) -> ModelOperationRequest {
+    ModelOperationRequest {
+        model_id: model_id.to_string(),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     println!("Loading multiple models...");
@@ -22,34 +28,32 @@ async fn main() -> Result<()> {
     let model = MultiModelBuilder::new()
         .add_model_with_alias(
             GEMMA_ALIAS,
-            MultimodalModelBuilder::new(GEMMA_MODEL_ID)
-                .with_auto_isq(IsqBits::Four)
-                .with_logging(),
+            MultimodalModelBuilder::new(GEMMA_MODEL_ID).with_auto_isq(IsqBits::Four),
         )
         .add_model_with_alias(
             QWEN_ALIAS,
             TextModelBuilder::new(QWEN_MODEL_ID).with_auto_isq(IsqBits::Four),
         )
         .with_default_model(GEMMA_ALIAS)
+        .with_logging()
         .build()
         .await?;
 
     // List available models
     println!("\n=== Available Models ===");
-    let models = model.list_models().map_err(|e| anyhow!(e))?;
-    for model_id in &models {
-        println!("  - {}", model_id);
+    let models = model.models()?;
+    for card in &models.data {
+        println!("  - {}", card.id);
     }
 
     // Get the default model
-    let default_model = model.get_default_model_id().map_err(|e| anyhow!(e))?;
+    let default_model = model.default_model_id();
     println!("\nDefault model: {:?}", default_model);
 
     // List models with their status
     println!("\n=== Model Status ===");
-    let status = model.list_models_with_status()?;
-    for (model_id, status) in &status {
-        println!("  {} -> {:?}", model_id, status);
+    for card in &model.models()?.data {
+        println!("  {} -> {:?}", card.id, card.status);
     }
 
     // Send a request to the default model (Gemma - multimodal model)
@@ -68,7 +72,7 @@ async fn main() -> Result<()> {
     let messages = TextMessages::new().add_message(TextMessageRole::User, "Say hello in one word.");
 
     let response = model
-        .send_chat_request_with_model(messages, Some(QWEN_ALIAS))
+        .send_chat_request(RequestBuilder::from(messages).with_model(QWEN_ALIAS))
         .await?;
     println!(
         "Response: {}",
@@ -77,10 +81,8 @@ async fn main() -> Result<()> {
 
     // Change the default model
     println!("\n=== Changing Default Model ===");
-    model
-        .set_default_model_id(QWEN_ALIAS)
-        .map_err(|e| anyhow!(e))?;
-    let new_default = model.get_default_model_id().map_err(|e| anyhow!(e))?;
+    model.set_default_model(target(QWEN_ALIAS))?;
+    let new_default = model.default_model_id();
     println!("New default model: {:?}", new_default);
 
     // Now requests without model_id go to Qwen
@@ -97,26 +99,23 @@ async fn main() -> Result<()> {
     println!("\n=== Model Unloading/Reloading ===");
 
     // Check if Gemma is loaded
-    let is_gemma_loaded = model.is_model_loaded(GEMMA_ALIAS)?;
+    let is_gemma_loaded = model.model_status(target(GEMMA_ALIAS))?.status == ModelStatus::Loaded;
     println!("Is '{}' loaded? {}", GEMMA_ALIAS, is_gemma_loaded);
 
     // Unload Gemma to free memory
     println!("Unloading '{}' model...", GEMMA_ALIAS);
-    model.unload_model(GEMMA_ALIAS)?;
+    model.unload_model(target(GEMMA_ALIAS))?;
 
     // Check status after unload
-    let status = model.list_models_with_status()?;
     println!("Status after unload:");
-    for (model_id, status) in &status {
-        println!("  {} -> {:?}", model_id, status);
+    for card in &model.models()?.data {
+        println!("  {} -> {:?}", card.id, card.status);
     }
 
     // Reload Gemma when needed
     println!("Reloading '{}' model...", GEMMA_ALIAS);
-    model.reload_model(GEMMA_ALIAS).await?;
-
-    // Check status after reload
-    let is_gemma_loaded = model.is_model_loaded(GEMMA_ALIAS)?;
+    let is_gemma_loaded =
+        model.reload_model(target(GEMMA_ALIAS)).await?.status == ModelStatus::Loaded;
     println!(
         "Is '{}' loaded after reload? {}",
         GEMMA_ALIAS, is_gemma_loaded
@@ -127,7 +126,7 @@ async fn main() -> Result<()> {
         TextMessages::new().add_message(TextMessageRole::User, "Hi! Respond with just 'Hello'.");
 
     let response = model
-        .send_chat_request_with_model(messages, Some(GEMMA_ALIAS))
+        .send_chat_request(RequestBuilder::from(messages).with_model(GEMMA_ALIAS))
         .await?;
     println!(
         "Response from reloaded {}: {}",

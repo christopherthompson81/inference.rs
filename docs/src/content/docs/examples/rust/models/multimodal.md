@@ -20,8 +20,8 @@ use std::io::Write;
 
 use anyhow::Result;
 use inference::{
-    AudioInput, ChatCompletionChunkResponse, ChunkChoice, Delta, MultimodalMessages,
-    MultimodalModelBuilder, Response, TextMessageRole,
+    AudioInput, ChatCompletionChunkResponse, ChatStreamEvent, ChunkChoice, Delta, MessageMedia,
+    MultimodalMessages, MultimodalModelBuilder, TextMessageRole,
 };
 
 #[tokio::main]
@@ -42,32 +42,37 @@ async fn main() -> Result<()> {
             .await?;
     let image = image::load_from_memory(&image_bytes)?;
 
+    let media = MessageMedia {
+        images: vec![image],
+        audios: vec![audio],
+        ..MessageMedia::default()
+    };
     let messages = MultimodalMessages::new().add_multimodal_message(
         TextMessageRole::User,
         "Describe in detail what is happening.",
-        vec![image],
-        vec![audio],
-        vec![],
+        media,
     );
 
     let mut stream = model.stream_chat_request(messages).await?;
 
-    while let Some(chunk) = stream.next().await {
-        if let Response::Chunk(ChatCompletionChunkResponse { choices, .. }) = chunk {
-            if let Some(ChunkChoice {
-                delta:
-                    Delta {
-                        content: Some(content),
-                        ..
-                    },
-                ..
-            }) = choices.first()
-            {
-                print!("{content}");
-                std::io::stdout().flush()?;
-            };
-        } else {
-            // Handle errors
+    while let Some(event) = stream.next().await {
+        match event {
+            ChatStreamEvent::Chunk(ChatCompletionChunkResponse { choices, .. }) => {
+                if let Some(ChunkChoice {
+                    delta:
+                        Delta {
+                            content: Some(content),
+                            ..
+                        },
+                    ..
+                }) = choices.first()
+                {
+                    print!("{content}");
+                    std::io::stdout().flush()?;
+                }
+            }
+            ChatStreamEvent::Error(error) => return Err(error.into()),
+            _ => {}
         }
     }
     Ok(())

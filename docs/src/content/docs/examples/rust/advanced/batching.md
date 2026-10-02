@@ -17,10 +17,7 @@ Run with: `cargo run --release --example batching -p inference-examples`
 //! Run with: `cargo run --release --example batching -p inference-examples`
 
 use anyhow::Result;
-use inference::{
-    ChatCompletionResponse, IsqBits, ModelBuilder, PagedAttentionMetaBuilder, TextMessageRole,
-    TextMessages, Usage,
-};
+use inference::{IsqBits, ModelBuilder, PagedAttentionMetaBuilder, TextMessageRole, TextMessages};
 
 const N_REQUESTS: usize = 10;
 
@@ -56,15 +53,8 @@ async fn main() -> Result<()> {
     let mut max_completion = f32::MIN;
 
     for response in responses {
-        let ChatCompletionResponse {
-            usage:
-                Usage {
-                    avg_compl_tok_per_sec,
-                    avg_prompt_tok_per_sec,
-                    ..
-                },
-            ..
-        } = response;
+        let avg_prompt_tok_per_sec = response.usage.avg_prompt_tok_per_sec;
+        let avg_compl_tok_per_sec = response.usage.avg_compl_tok_per_sec;
         dbg!(avg_compl_tok_per_sec, avg_prompt_tok_per_sec);
         if avg_compl_tok_per_sec > max_prompt {
             max_prompt = avg_prompt_tok_per_sec;

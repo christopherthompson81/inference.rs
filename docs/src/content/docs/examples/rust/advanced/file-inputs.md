@@ -35,10 +35,10 @@ async fn main() -> Result<()> {
         .build()
         .await?;
 
-    let sales = InputFile::from_text_with_mime(
+    let sales = InputFile::from_bytes_with_mime(
         "sales.csv",
-        "text/csv",
         "region,revenue\nnorth,120\nsouth,95\nwest,180\n",
+        "text/csv",
     );
     let messages = TextMessages::new().add_message(
         TextMessageRole::User,

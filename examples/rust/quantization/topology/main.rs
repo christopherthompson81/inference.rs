@@ -3,46 +3,19 @@
 //! Run with: `cargo run --release --example topology -p inference-examples`
 
 use anyhow::Result;
-use inference::{
-    IsqBits, IsqType, LayerTopology, ModelBuilder, PagedAttentionMetaBuilder, TextMessageRole,
-    TextMessages, Topology,
-};
+use inference::{IsqBits, ModelBuilder, PagedAttentionMetaBuilder, TextMessageRole, TextMessages};
+
+// Layers 0-8 at Q3K, 8-16 at Q4K, 16-24 at Q6K and 24-32 at Q8_0; the rest take the auto ISQ.
+const TOPOLOGY: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/quantization/topology/topology.yml"
+);
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let model = ModelBuilder::new("google/gemma-4-E4B-it")
         .with_auto_isq(IsqBits::Eight)
-        .with_topology(
-            Topology::empty()
-                .with_range(
-                    0..8,
-                    LayerTopology {
-                        isq: Some(IsqType::Q3K),
-                        device: None,
-                    },
-                )
-                .with_range(
-                    8..16,
-                    LayerTopology {
-                        isq: Some(IsqType::Q4K),
-                        device: None,
-                    },
-                )
-                .with_range(
-                    16..24,
-                    LayerTopology {
-                        isq: Some(IsqType::Q6K),
-                        device: None,
-                    },
-                )
-                .with_range(
-                    24..32,
-                    LayerTopology {
-                        isq: Some(IsqType::Q8_0),
-                        device: None,
-                    },
-                ),
-        )
+        .with_topology_from_path(TOPOLOGY)
         .with_logging()
         .with_paged_attn(PagedAttentionMetaBuilder::default().build()?)
         .build()

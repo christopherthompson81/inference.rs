@@ -18,7 +18,7 @@ Run with: `cargo run --release --example json_schema -p inference-examples`
 
 use anyhow::Result;
 use inference::{
-    IsqBits, ModelBuilder, PagedAttentionMetaBuilder, RequestBuilder, TextMessageRole,
+    Grammar, IsqBits, ModelBuilder, PagedAttentionMetaBuilder, RequestBuilder, TextMessageRole,
 };
 use serde_json::json;
 
@@ -32,7 +32,7 @@ async fn main() -> Result<()> {
         .await?;
 
     let request = RequestBuilder::new()
-        .set_constraint(inference::Constraint::JsonSchema(json!(
+        .set_grammar(Grammar::JsonSchema(json!(
             {
                 "type": "object",
                 "properties": {

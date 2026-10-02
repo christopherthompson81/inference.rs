@@ -7,9 +7,7 @@
 ///
 /// Run with: `cargo run --release --example cookbook_rag -p inference-examples`
 use anyhow::Result;
-use inference::{
-    EmbeddingModelBuilder, EmbeddingRequest, IsqBits, ModelBuilder, TextMessageRole, TextMessages,
-};
+use inference::{EmbeddingModelBuilder, IsqBits, ModelBuilder, TextMessageRole, TextMessages};
 
 /// Cosine similarity between two vectors.
 fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
@@ -41,22 +39,21 @@ async fn main() -> Result<()> {
     let mut doc_embeddings = Vec::new();
     for doc in &documents {
         let emb = embed_model
-            .generate_embeddings(EmbeddingRequest::builder().add_prompt(format!("passage: {doc}")))
+            .generate_embedding(format!("passage: {doc}"))
             .await?;
-        doc_embeddings.push(emb.first().unwrap().clone());
+        doc_embeddings.push(emb);
     }
 
     // ---- Step 3: Embed the query and find the best match ----
     let query = "What is inference.rs?";
-    let query_emb = embed_model
-        .generate_embeddings(EmbeddingRequest::builder().add_prompt(format!("query: {query}")))
+    let query_vec = embed_model
+        .generate_embedding(format!("query: {query}"))
         .await?;
-    let query_vec = query_emb.first().unwrap();
 
     let (best_idx, best_score) = doc_embeddings
         .iter()
         .enumerate()
-        .map(|(i, emb)| (i, cosine_similarity(query_vec, emb)))
+        .map(|(i, emb)| (i, cosine_similarity(&query_vec, emb)))
         .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
         .unwrap();
 

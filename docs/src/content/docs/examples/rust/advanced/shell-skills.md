@@ -9,14 +9,16 @@ sidebar:
 
 Local shell skill mount example.
 
-The request mounts a local skill directory under `skills/invoice-auditor/`.
+A local skill directory is uploaded to the engine's skill store, and the request mounts it under
+`skills/invoice-auditor/`.
 
 Run with: `cargo run --release --features code-execution --example shell_skills -p inference-examples`
 
 ```rust
 //! Local shell skill mount example.
 //!
-//! The request mounts a local skill directory under `skills/invoice-auditor/`.
+//! A local skill directory is uploaded to the engine's skill store, and the request mounts it under
+//! `skills/invoice-auditor/`.
 //!
 //! Run with: `cargo run --release --features code-execution --example shell_skills -p inference-examples`
 
@@ -75,20 +77,17 @@ async fn main() -> Result<()> {
     let model = ModelBuilder::new("google/gemma-4-E4B-it")
         .with_auto_isq(IsqBits::Four)
         .with_logging()
-        .with_shell_execution(ShellConfig::default())
+        .with_shell(ShellConfig::default())
         .build()
         .await?;
+    let skill_id = model.upload_skill(skill_dir)?;
 
     let messages = TextMessages::new().add_message(
         TextMessageRole::User,
         "Use the invoice-auditor skill to check the bundled invoice.",
     );
     let request = RequestBuilder::from(messages)
-        .with_shell_skill(
-            "invoice-auditor",
-            "Checks invoice line items and totals with a local Python helper.",
-            skill_dir,
-        )
+        .with_shell_skill(skill_id)
         .with_max_tool_rounds(6);
 
     let response = model.send_chat_request(request).await?;

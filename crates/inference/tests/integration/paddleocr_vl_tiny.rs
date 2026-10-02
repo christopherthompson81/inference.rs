@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use inference::{
     Model, ModelDType, MultimodalMessages, MultimodalModelBuilder, RequestBuilder, TextMessageRole,
 };
+use inference_api::models::{ModelOperationRequest, ModelStatus};
 
 #[path = "../support/paddleocr_vl_tiny.rs"]
 mod support;
@@ -32,7 +33,7 @@ async fn build(dir: &Path) -> anyhow::Result<Model> {
         builder = builder.with_paged_attn(inference::PagedAttentionMetaBuilder::default().build()?);
     }
     // The server runs with the prefix cacher on.
-    builder.with_prefix_cache_n(Some(16)).build().await
+    Ok(builder.with_prefix_cache_n(Some(16)).build().await?)
 }
 
 fn fixture(name: &str) -> anyhow::Result<image::DynamicImage> {
@@ -211,9 +212,17 @@ async fn reload_decodes_like_the_first_load() -> anyhow::Result<()> {
     let dir = tiny_checkpoint()?;
     let model = build(dir.path()).await?;
     // Unload and reload take the real model id; the `default` alias is not registered for them.
-    let ids = model.list_models()?;
+    let models = model.models()?.data;
+    let ids = models
+        .iter()
+        .filter(|m| m.default == Some(true))
+        .map(|m| m.id.clone())
+        .collect::<Vec<_>>();
     let [id] = ids.as_slice() else {
-        anyhow::bail!("expected exactly one model, got {ids:?}");
+        anyhow::bail!("expected exactly one default model, got {models:?}");
+    };
+    let op = || ModelOperationRequest {
+        model_id: id.clone(),
     };
     let first = trace(
         &model
@@ -222,10 +231,10 @@ async fn reload_decodes_like_the_first_load() -> anyhow::Result<()> {
     );
     assert!(!first.is_empty());
 
-    model.unload_model(id)?;
-    assert!(!model.is_model_loaded(id)?);
-    model.reload_model(id).await?;
-    assert!(model.is_model_loaded(id)?);
+    model.unload_model(op())?;
+    assert_eq!(model.model_status(op())?.status, ModelStatus::Unloaded);
+    model.reload_model(op()).await?;
+    assert_eq!(model.model_status(op())?.status, ModelStatus::Loaded);
 
     let reloaded = trace(
         &model

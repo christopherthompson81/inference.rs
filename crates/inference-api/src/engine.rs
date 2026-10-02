@@ -5,7 +5,7 @@ use std::sync::Arc;
 use candle_core::Device;
 use futures::StreamExt;
 use inference_core::{
-    AnyMoeSpec, CalibrationAction, CalibrationStatus, ChatCompletionResponse, CompletionResponse,
+    CalibrationAction, CalibrationStatus, ChatCompletionResponse, CompletionResponse,
     ImageGenerationResponse, InferenceRs, MtpConfig, MtpDraftSamplingMethod, Response,
     SandboxPolicy, SerializedSession,
 };
@@ -71,7 +71,7 @@ use crate::{
 
 // The vocabulary of a spec and of the selection that builds one, so a client names it without depending on core.
 pub use inference_core::{
-    AgentPermission, AutoDeviceMapParams, CodeExecutionConfig, CodeExecutionPermission,
+    AgentPermission, AnyMoeSpec, AutoDeviceMapParams, CodeExecutionConfig, CodeExecutionPermission,
     DEFAULT_CODE_EXEC_TIMEOUT_SECS, DEFAULT_LORA_MAX_ADAPTERS, DEFAULT_LORA_MAX_BYTES,
     DEFAULT_LORA_MAX_RANK, DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_NUM_BATCHED_TOKENS,
     DEFAULT_MAX_PREFILL_CHUNK_TOKENS, DEFAULT_MAX_TOOL_ROUNDS, DEFAULT_SHELL_TIMEOUT_SECS,
@@ -80,7 +80,14 @@ pub use inference_core::{
     NormalLoaderType, PagedCacheType, SandboxMode, SandboxProfile, SearchEmbeddingModel,
     ShellConfig, SpeechLoaderType, TokenSource, UqffWriteConfig, expand_isq_value, parse_isq_value,
 };
-pub use inference_selection::{MmprojSelection, ModelSelected, get_auto_device_map_params};
+pub use inference_selection::{
+    MmprojSelection, ModelSelected, SpeechGenerationSpec, get_auto_device_map_params,
+};
+// What an in-process approver sees and answers, for `Engine::chat_with_approver`.
+pub use inference_core::{
+    AgentToolApproval, AgentToolApprovalCallback, AgentToolApprovalDecision,
+    AgentToolApprovalHandler,
+};
 // The types `EngineCallbacks` carries: host tools and the search callback a client registers at load.
 pub use inference_core::{
     CalledFunction, SearchCallback, SearchFunctionParameters, SearchResult, Tool, ToolCallContext,
@@ -885,6 +892,30 @@ impl Engine {
     ) -> Result<ChatCompletionResponse, ApiError> {
         request.stream = Some(false);
         let prepared = self.prepare(request, media).await?;
+        self.collect_prepared_chat(prepared).await
+    }
+
+    /// Runs a chat completion to its end, with `approver` answering its tool approvals in this process.
+    pub async fn chat_with_approver(
+        &self,
+        mut request: ChatCompletionRequest,
+        media: MediaAttachments,
+        approver: AgentToolApprovalHandler,
+    ) -> Result<ChatCompletionResponse, ApiError> {
+        request.stream = Some(false);
+        let state = self.state().clone();
+        let prepared = self
+            .chat
+            .prepare_with_approver(request, media, approver)
+            .await
+            .map_err(|error| error.into_api_error(state))?;
+        self.collect_prepared_chat(prepared).await
+    }
+
+    async fn collect_prepared_chat(
+        &self,
+        prepared: crate::engine_chat::PreparedChat,
+    ) -> Result<ChatCompletionResponse, ApiError> {
         let mut rx = prepared.rx;
         let response = collect_chat(&mut rx, prepared.model_override.as_deref()).await;
         let state = self.state().clone();

@@ -5,7 +5,7 @@ use inference_core::{AudioInput, InferenceRs, InferenceRsError};
 use std::error::Error;
 use std::sync::Arc;
 
-use crate::media_source::{MediaAttachments, MediaSourcePolicy};
+use crate::media_source::{Media, MediaAttachments, MediaSourcePolicy};
 
 /// Parses and loads an image from a URL, file path, or data URL.
 ///
@@ -55,6 +55,9 @@ async fn parse_image_url_with_policy(
     policy: MediaSourcePolicy,
     attachments: &MediaAttachments,
 ) -> Result<DynamicImage, anyhow::Error> {
+    if let Some(Media::Image(image)) = attachments.attached(url_unparsed, "image")? {
+        return Ok(image.clone());
+    }
     let media = attachments.load(url_unparsed, policy, "image").await?;
     Ok(image::load_from_memory(&media.bytes)?)
 }
@@ -76,6 +79,9 @@ async fn parse_audio_url_with_policy(
     policy: MediaSourcePolicy,
     attachments: &MediaAttachments,
 ) -> Result<AudioInput, anyhow::Error> {
+    if let Some(Media::Audio(audio)) = attachments.attached(url_unparsed, "audio")? {
+        return Ok(audio.clone());
+    }
     let media = attachments.load(url_unparsed, policy, "audio").await?;
     AudioInput::from_bytes(&media.bytes)
 }
@@ -361,5 +367,17 @@ mod tests {
         assert_eq!(sanitized, "Root cause: Database connection failed");
         assert!(!sanitized.contains("backtrace"));
         assert!(!sanitized.contains("Request failed"));
+    }
+
+    #[tokio::test]
+    async fn a_decoded_image_attachment_skips_the_decode() {
+        let image = image::DynamicImage::new_rgb8(3, 2);
+        let attachments = MediaAttachments::from_media(vec![Media::Image(image.clone())]);
+        let loaded = parse_image_url_for_server("media://0", &attachments)
+            .await
+            .unwrap();
+        assert_eq!(loaded, image);
+        let as_audio = parse_audio_url_for_server("media://0", &attachments).await;
+        assert!(as_audio.is_err_and(|error| error.to_string().contains("decoded image")));
     }
 }

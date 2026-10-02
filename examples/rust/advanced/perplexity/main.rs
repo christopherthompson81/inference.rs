@@ -4,14 +4,13 @@
 
 use std::{fs::read_to_string, path::PathBuf, time::Instant};
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
-use either::Either;
 use inference::{
-    Constraint, DType, Device, InferenceRs, ModelBuilder, NormalRequest, Request, ResponseOk,
-    SamplingParams, Tensor, cross_entropy_loss, parse_isq_value,
+    LogitsOutput, ModelBuilder, PromptInput, PromptLogitsRequest, api::operations::TokenizeRequest,
 };
-use tokio::sync::mpsc::channel;
+
+const PROMPT_CHUNKSIZE: usize = 1024;
 
 /// Calculate perplexity of a model. By default, this uses the Llama 3.1 8B model.
 #[derive(Parser)]
@@ -25,7 +24,7 @@ struct Args {
     #[arg(short, long)]
     file: String,
 
-    /// ISQ quantization to run with.
+    /// ISQ quantization to run with (`4`, `q4k`, ...).
     #[arg(short, long)]
     isq: Option<String>,
 
@@ -34,84 +33,22 @@ struct Args {
     calibration_file: Option<PathBuf>,
 }
 
-async fn process_chunk(
-    runner: &InferenceRs,
-    chunk: Vec<u32>,
-) -> anyhow::Result<(Tensor, Vec<u32>)> {
-    let (tx, mut rx) = channel(1);
-
-    let request = Request::Normal(Box::new(NormalRequest {
-        messages: inference::RequestMessage::CompletionTokens(chunk),
-        sampling_params: SamplingParams {
-            max_len: Some(0),
-            ..SamplingParams::deterministic()
-        },
-        seed: None,
-        response: tx,
-        return_logprobs: false,
-        is_streaming: false,
-        id: 0,
-        queued_at: None,
-        constraint: Constraint::None,
-        suffix: None,
-        tools: None,
-        tool_choice: None,
-        logits_processors: None,
-        host_tools: Vec::new(),
-        sequential_tool_calls: false,
-        return_raw_logits: true,
-        web_search_options: None,
-        enable_code_execution: false,
-        enable_shell: false,
-        shell_options: None,
-        code_execution_permission: None,
-        code_execution_approval_notifier: None,
-        agent_permission: None,
-        agent_approval_handler: None,
-        agent_approval_notifier: None,
-        max_tool_rounds: None,
-        tool_dispatch_url: None,
-        model_id: None,
-        adapter: None,
-        truncate_sequence: false,
-        session_id: None,
-        owner: None,
-        files: None,
-        input_files: Vec::new(),
-        cancellation: None,
-    }));
-
-    runner.get_sender(None)?.send(request).await?;
-
-    let ResponseOk::Raw {
-        logits_chunks,
-        tokens,
-    } = rx
-        .recv()
-        .await
-        .context("Channel was erroneously closed!")?
-        .as_result()?
-    else {
-        anyhow::bail!("Got unexpected response type.")
-    };
-
-    Ok((logits_chunks[0].clone(), tokens))
+fn tokenize(text: String, add_special_tokens: bool) -> TokenizeRequest {
+    TokenizeRequest {
+        model: None,
+        text,
+        add_special_tokens,
+    }
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
-    let quant = if let Some(isq) = &args.isq {
-        Some(parse_isq_value(isq, None).map_err(anyhow::Error::msg)?)
-    } else {
-        None
-    };
-
-    let prompt_chunksize = 1024;
     let mut model_builder = ModelBuilder::new(&args.model_id).with_logging();
-    if let Some(quant) = quant {
-        model_builder = model_builder.with_isq(quant);
+    if let Some(isq) = &args.isq {
+        let isq = inference::parse_isq_value(isq, None).map_err(anyhow::Error::msg)?;
+        model_builder = model_builder.with_isq(isq);
     }
     if let Some(calibration_file) = &args.calibration_file {
         model_builder = model_builder.with_calibration_file(calibration_file.clone());
@@ -120,41 +57,37 @@ async fn main() -> Result<()> {
     let model = model_builder.build().await?;
 
     let text = read_to_string(&args.file)?;
-    let tokens = model
-        .tokenize(Either::Right(text), None, false, false, None)
-        .await?;
+    let tokens = model.tokenize(tokenize(text, false)).await?.tokens;
     let bos_token = model
-        .tokenize(Either::Right(" ".to_string()), None, true, false, None)
-        .await?[0];
-    let inner = model.inner();
+        .tokenize(tokenize(" ".to_string(), true))
+        .await?
+        .tokens[0];
 
     println!("Using bos token id `{bos_token}`.");
 
-    let n_chunks = tokens.len().div_ceil(prompt_chunksize);
+    let n_chunks = tokens.len().div_ceil(PROMPT_CHUNKSIZE);
     let mut ppl_measurements = Vec::new();
-    for (i, chunk) in tokens.chunks(prompt_chunksize).enumerate() {
+    for (i, chunk) in tokens.chunks(PROMPT_CHUNKSIZE).enumerate() {
         let start = Instant::now();
-        let (logits, tokens) = {
-            let chunk = [vec![bos_token], chunk.to_vec()].concat();
-            process_chunk(inner, chunk).await?
+        let request = PromptLogitsRequest {
+            model: None,
+            prompt: PromptInput::Tokens([vec![bos_token], chunk.to_vec()].concat()),
+            output: LogitsOutput::Logprobs,
         };
+        let scored = model.prompt_logits(request).await?;
 
-        // Upcast to float if we need to compute the loss to avoid potential precision issues
-        let logits = logits.to_device(&Device::Cpu)?.to_dtype(DType::F32)?;
-        // Shift so that tokens < n predict n
-        let shift_logits = logits.narrow(0, 0, logits.dim(0)? - 1)?.contiguous()?;
-        let shift_labels = Tensor::from_slice(&tokens[1..], (tokens.len() - 1,), &Device::Cpu)?;
-
-        let loss_fct = cross_entropy_loss(&shift_logits, &shift_labels)?;
-        let perplexity = loss_fct.exp()?.to_scalar::<f32>()?;
+        // The first token has no prediction; the rest give the mean negative log-likelihood.
+        let logprobs: Vec<f32> = scored.token_logprobs.iter().flatten().copied().collect();
+        let nll = -logprobs.iter().sum::<f32>() / logprobs.len() as f32;
+        let perplexity = nll.exp();
         let end = Instant::now();
 
         ppl_measurements.push(perplexity);
         println!(
             "Chunk {i}/{n_chunks} ({} tokens): Perplexity for `{}`, ISQ `{:?}`, {}s: {perplexity}",
-            tokens.len(),
+            scored.tokens.len(),
             args.file,
-            quant,
+            args.isq,
             end.duration_since(start).as_secs_f32(),
         );
     }
@@ -168,8 +101,8 @@ async fn main() -> Result<()> {
     let std_dev = variance.sqrt();
     println!();
     println!(
-        "Final perplexity for `{}`, ISQ `{:?}`: {}±{} ppl",
-        args.file, quant, mean, std_dev
+        "Final perplexity for `{}`, ISQ `{:?}`: {} +/- {} ppl",
+        args.file, args.isq, mean, std_dev
     );
 
     Ok(())

@@ -34,7 +34,7 @@
 //! | Embeddings | [`EmbeddingModelBuilder`] | `examples/rust/getting_started/embedding/` |
 //! | Structured output | [`Model::generate_structured`] | `examples/rust/advanced/json_schema/` |
 //! | Tool calling | [`Tool`], [`ToolChoice`] | `examples/rust/advanced/tools/` |
-//! | Agents | [`AgentBuilder`] | `examples/rust/advanced/agent/` |
+//! | Agents (the engine's tool loop) | [`TextModelBuilder::with_tool`], [`TextModelBuilder::with_max_tool_rounds`] | `examples/rust/advanced/agent/` |
 //! | Multi-model | [`MultiModelBuilder`] | `examples/rust/advanced/multi_model/` |
 //! | LoRA / X-LoRA | [`LoraModelBuilder`], [`XLoraModelBuilder`] | `examples/rust/advanced/lora/` |
 //! | AnyMoE | [`AnyMoeModelBuilder`] | `examples/rust/advanced/anymoe/` |
@@ -65,9 +65,9 @@
 //!
 //! | Type | Use When | Sampling |
 //! |---|---|---|
-//! | [`TextMessages`] | Simple text-only chat, no special settings needed | Deterministic |
-//! | [`MultimodalMessages`] | Your prompt includes images or audio | Deterministic |
-//! | [`RequestBuilder`] | You need tools, logprobs, custom sampling, constraints, adapters, or web search | Configurable |
+//! | [`TextMessages`] | Simple text-only chat, no special settings needed | Greedy |
+//! | [`MultimodalMessages`] | Your prompt includes images or audio | Greedy |
+//! | [`RequestBuilder`] | You need tools, logprobs, custom sampling, grammars, adapters, or web search | Greedy unless `set_sampler_topk` raises top-k |
 //!
 //! `TextMessages` and `MultimodalMessages` can be converted into a [`RequestBuilder`] via
 //! `Into<RequestBuilder>` if you start simple and later need more control.
@@ -75,7 +75,7 @@
 //! ## Streaming
 //!
 //! The stream returned by [`Model::stream_chat_request`] implements
-//! [`futures::Stream`], so you can use `StreamExt` combinators:
+//! [`futures::Stream`] of [`ChatStreamEvent`]s, so you can use `StreamExt` combinators:
 //!
 //! ```no_run
 //! use futures::StreamExt;
@@ -86,11 +86,11 @@
 //!     .add_message(TextMessageRole::User, "Tell me a joke.");
 //!
 //! let mut stream = model.stream_chat_request(messages).await?;
-//! while let Some(chunk) = stream.next().await {
-//!     if let Response::Chunk(c) = chunk {
-//!         if let Some(text) = c.choices.first().and_then(|ch| ch.delta.content.as_ref()) {
-//!             print!("{text}");
-//!         }
+//! while let Some(event) = stream.next().await {
+//!     if let ChatStreamEvent::Chunk(chunk) = event
+//!         && let Some(text) = chunk.choices.first().and_then(|ch| ch.delta.content.as_ref())
+//!     {
+//!         print!("{text}");
 //!     }
 //! }
 //! # Ok(())
@@ -145,11 +145,10 @@
 //!
 //! ## Error Handling
 //!
-//! All public methods return [`error::Result<T>`](error::Result) with a structured
-//! [`error::Error`] enum. Variants include [`ModelLoad`](error::Error::ModelLoad),
-//! [`Inference`](error::Error::Inference), [`RequestValidation`](error::Error::RequestValidation),
-//! and more. The error type implements `std::error::Error`, so it works seamlessly with
-//! `anyhow` and `eyre`.
+//! The SDK's methods return [`error::Result<T>`](error::Result). Its [`error::Error`] carries the engine's own
+//! [`Api`](error::Error::Api) errors (whose kind says whether the request or the engine was at fault) and
+//! [`ModelLoad`](error::Error::ModelLoad) failures. Engine methods reached through [`Model`]'s `Deref` return
+//! [`ApiError`] directly. Both implement `std::error::Error`, so they work with `anyhow` and `eyre`.
 //!
 //! ## MCP (Model Context Protocol)
 //!
@@ -202,176 +201,86 @@
 //! ```
 
 #[macro_use]
-mod builder_macros;
-mod agent;
+mod load;
 mod anymoe;
 mod auto_model;
 pub mod blocking;
 mod diffusion_model;
+mod embedding;
 mod embedding_model;
 pub mod error;
 mod gguf;
 mod gguf_lora_model;
 mod gguf_xlora_model;
-mod isq_setting;
 mod lora_model;
-mod messages;
 mod model;
-pub mod model_builder_trait;
+mod multi_model;
 mod multimodal_model;
+mod request;
 mod speech_model;
 mod text_model;
 mod xlora_model;
 
-pub(crate) use isq_setting::resolve_isq;
-pub use isq_setting::{IsqBits, IsqSetting};
-
-pub use agent::{
-    Agent, AgentBuilder, AgentConfig, AgentEvent, AgentResponse, AgentStep, AgentStopReason,
-    AgentStream, AsyncToolCallback, ToolCallbackType, ToolResult,
-};
 pub use anymoe::AnyMoeModelBuilder;
 pub use auto_model::ModelBuilder;
 pub use diffusion_model::DiffusionModelBuilder;
+pub use embedding::EmbeddingRequestBuilder;
 pub use embedding_model::{EmbeddingModelBuilder, UqffEmbeddingModelBuilder};
 pub use gguf::GgufModelBuilder;
 pub use gguf_lora_model::GgufLoraModelBuilder;
 pub use gguf_xlora_model::GgufXLoraModelBuilder;
-pub use inference_core::{
-    AdapterGenerationId, AdapterSelection, DEFAULT_LORA_MAX_ADAPTERS, DEFAULT_LORA_MAX_BYTES,
-    DEFAULT_LORA_MAX_RANK, LoraAdapterError, LoraAdapterInfo, LoraAdapterLoadPolicy,
-    LoraAdapterRoute, LoraAdapterSpec, LoraResidentGenerationInfo, LoraRuntimeConfig,
-    LoraRuntimeStatus, MAX_LORA_ALIAS_BYTES,
-};
-pub use inference_core::{
-    AgentPermission, AgentToolApproval, AgentToolApprovalAsyncCallback, AgentToolApprovalCallback,
-    AgentToolApprovalDecision, AgentToolApprovalFuture, AgentToolApprovalHandler, AgentToolKind,
-    AgentToolMetadata, AgentToolSource, CodeExecutionApproval, CodeExecutionApprovalCallback,
-    CodeExecutionConfig, CodeExecutionPermission, NetworkMode, SandboxPolicy, ShellConfig,
-    ShellOptions, ShellSkillMount,
-};
-pub use inference_core::{
-    AgenticToolCallRecord, File, FileContent, FileSource, MODEL_INLINE_BYTES, RequestedFile,
-    WIRE_EMBED_LIMIT_BYTES,
-};
-pub use inference_core::{CalibrationAction, CalibrationStatus};
-pub use inference_core::{INFERENCE_RS_GIT_REVISION, INFERENCE_RS_VERSION};
-pub use inference_core::{
-    McpClient, McpClientConfig, McpServerConfig, McpServerSource, McpToolInfo,
-};
-pub use inference_core::{
-    MultimodalToolCallback, SearchCallback, SearchResult, ToolCallContext, ToolCallback,
-    ToolCallbackKind, ToolOutput,
-};
-pub use inference_core::{SerializedSession, SerializedVideo};
+pub use load::{IsqBits, MemoryGpuConfig, PagedAttentionMetaBuilder, ToolCallback};
 pub use lora_model::LoraModelBuilder;
-pub use messages::{
-    EmbeddingRequest, EmbeddingRequestBuilder, EmbeddingRequestInput, InputFile,
-    MultimodalMessages, RequestBuilder, RequestLike, TextMessageRole, TextMessages,
-};
-pub use model::{Model, best_device};
-
-pub use model_builder_trait::{AnyModelBuilder, MultiModelBuilder};
+pub use model::{ChatEventStream, Model};
+pub use multi_model::{IntoModelSpec, MultiModelBuilder};
 pub use multimodal_model::{MultimodalModelBuilder, UqffMultimodalModelBuilder};
+pub use request::{
+    ChatRequest, DrySampling, EncodedKind, InputFile, MessageMedia, MultimodalMessages,
+    RequestBuilder, TextMessageRole, TextMessages, empty_chat_request,
+};
 pub use speech_model::SpeechModelBuilder;
-pub use text_model::{PagedAttentionMetaBuilder, TextModelBuilder, UqffTextModelBuilder};
+pub use text_model::{TextModelBuilder, UqffTextModelBuilder};
 pub use xlora_model::XLoraModelBuilder;
 
-pub use candle_core::{DType, Device, Result, Tensor};
-pub use candle_nn::loss::cross_entropy as cross_entropy_loss;
-
-/// Low-level types and internals re-exported from `inference_core`.
-///
-/// Most users don't need these types directly. They're available for advanced
-/// use cases like custom pipelines, device mapping, or direct engine access.
-pub mod core;
-
-// ========== Response Types ==========
-pub use inference_core::{
-    BlockDenoisingProgress, ChatCompletionChunkResponse, ChatCompletionResponse, Choice,
-    ChunkChoice, CompletionResponse, Delta, Logprobs, Response, ResponseMessage, TopLogprob, Usage,
+pub use image::DynamicImage;
+/// The engine surface the SDK builds on, for its request and response types by their own paths.
+pub use inference_api as api;
+pub use inference_api::{
+    Engine, EngineLoadError, EngineSpec, INFERENCE_RS_GIT_REVISION, INFERENCE_RS_VERSION,
+    api_error::{ApiError, ApiErrorKind},
+    engine::{
+        AgentPermission, AgentToolApproval, AgentToolApprovalDecision, AnyMoeSpec, CalledFunction,
+        CodeExecutionConfig, CodeExecutionPermission, DiffusionLoaderType, EngineCallbacks,
+        HfConfigOverrides, IsqOrganization, IsqType, LoraAdapterSpec, LoraRuntimeConfig,
+        McpClientConfig, ModelDType, ModelSelected, ModelSpec, MtpDraftSampling, NormalLoaderType,
+        PagedCacheSpec, PagedCacheType, SearchCallback, SearchEmbeddingModel, SearchResult,
+        ShellConfig, SpeechGenerationSpec, SpeechLoaderType, TokenSource, Tool, ToolCallContext,
+        ToolCallbackKind, ToolCallbackWithTool, UqffWriteConfig,
+    },
+    engine::{expand_isq_value, parse_isq_value},
+    engine_chat::{AgenticToolCallData, AgenticToolCallPhase, ChatStreamEvent, Usage},
+    engine_logits::{LogitsOutput, PromptInput, PromptLogits, PromptLogitsRequest},
+    generation::SpeechAudio,
+    initialize_logging,
+    logits_processors::{CustomLogitsProcessor, in_place},
+    media_source::MediaAttachment,
+    models::{ModelOperationRequest, ModelStatus},
+    openai::{
+        AdapterSelection, AudioResponseFormat, ChatCompletionRequest, EmbeddingRequest,
+        EmbeddingResponse, EmbeddingVector, Grammar, ImageGenerationRequest, OpenAiTool,
+        SpeechGenerationRequest, StopTokens,
+    },
+    response::{
+        ChatCompletionChunkResponse, ChatCompletionResponse, ChunkChoice, Delta,
+        ImageGenerationResponse,
+    },
+    sdk::{
+        AllowedToolChoice, AllowedToolsMode, AllowedToolsToolChoice, AllowedToolsToolChoiceType,
+        AnyMoeConfig, AnyMoeExpertType, AudioInput, DiffusionGenerationParams, EmbeddingLoaderType,
+        File, Function, ImageGenerationResponseFormat, LlguidanceGrammar, MultimodalLoaderType,
+        ReasoningEffort, RequestedFile, ToolCallResponse, ToolChoice, ToolType, VideoInput,
+        WebSearchOptions, fetch_url, llguidance,
+    },
 };
-
-// ========== Request Types ==========
-pub use inference_core::{
-    Constraint, LlguidanceGrammar, MessageContent, NormalRequest, ReasoningEffort, Request,
-};
-
-// ========== Sampling ==========
-pub use inference_core::{DrySamplingParams, ModelGenerationDefaults, SamplingParams, StopTokens};
-
-// ========== Tool Types ==========
-pub use inference_core::{
-    AllowedToolChoice, AllowedToolsMode, AllowedToolsToolChoice, AllowedToolsToolChoiceType,
-    CalledFunction, Function, Tool, ToolCallResponse, ToolCallType, ToolChoice, ToolType,
-};
-
-// ========== Config Types ==========
-pub use inference_core::{
-    DefaultSchedulerMethod, InferenceRsConfig, IsqType, MemoryGpuConfig, ModelDType,
-    PagedAttentionConfig, PagedCacheType, SchedulerConfig, WebSearchOptions,
-};
-
-// ========== Audio Types ==========
-pub use inference_core::AudioInput;
-
-// ========== Video Types ==========
-pub use inference_core::VideoInput;
-
-// ========== Custom Logits ==========
-pub use inference_core::CustomLogitsProcessor;
-
-// ========== Model Category ==========
-pub use inference_core::ModelCategory;
-
-// ========== Search Types ==========
-pub use inference_core::{SearchEmbeddingModel, SearchFunctionParameters};
-
-// ========== Speech Types ==========
-pub use inference_core::{SpeechLoaderType, speech_utils};
-
-// ========== AnyMoe Types ==========
-pub use inference_core::{AnyMoeConfig, AnyMoeExpertType};
-
-// ========== Diffusion Types ==========
-pub use inference_core::{
-    DiffusionGenerationParams, DiffusionLoaderType, ImageGenerationResponseFormat,
-};
-
-// ========== Speculative Types ==========
-pub use inference_core::{MtpConfig, SpeculativeConfig};
-
-// ========== Device Mapping ==========
-pub use inference_core::{AutoDeviceMapParams, DeviceMapSetting};
-
-// ========== Topology ==========
-pub use inference_core::{LayerTopology, Topology};
-
-// ========== Loader Types ==========
-pub use inference_core::{MultimodalLoaderType, NormalLoaderType};
-
-// ========== Token Source ==========
-pub use inference_core::TokenSource;
-
-// ========== Engine (Advanced) ==========
-pub use inference_core::{InferenceRs, IntervalLogger, RequestMessage, ResponseOk};
-
-// ========== Utilities ==========
-pub use inference_core::{initialize_logging, paged_attn_supported, parse_isq_value};
-
-// ========== llguidance ==========
-pub use inference_core::llguidance;
-
-// Re-export the tool proc macro for ergonomic tool definition
 pub use inference_macros::tool;
-
-// Re-export schemars for use in tool definitions
 pub use schemars;
-
-/// Downloads an http(s) URL, for example an image or audio clip to put in a request.
-pub async fn fetch_url(url: &str) -> error::Result<Vec<u8>> {
-    // `{:#}` keeps anyhow's context chain (the DNS, TLS or HTTP cause) in the message.
-    inference_core::remote_fetch::fetch_url(url)
-        .await
-        .map_err(|e| error::Error::Fetch(format!("{e:#}").into()))
-}

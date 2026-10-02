@@ -17,7 +17,10 @@ Run with: `cargo run --release --example batching_embeddings -p inference-exampl
 //! Run with: `cargo run --release --example batching_embeddings -p inference-examples`
 
 use anyhow::Result;
-use inference::{EmbeddingModelBuilder, EmbeddingRequest};
+use inference::{EmbeddingModelBuilder, EmbeddingRequestBuilder, api::openai::EmbeddingVector};
+
+const GRAPHENE: &str = "task: search result | query: What is graphene?";
+const GRAVITY: &str = "task: search result | query: What is an apple's significance to gravity?";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -26,35 +29,20 @@ async fn main() -> Result<()> {
         .build()
         .await?;
 
-    let a = model
-        .generate_embeddings(
-            EmbeddingRequest::builder()
-                .add_prompt("task: search result | query: What is graphene?"),
-        )
-        .await?;
-    let b =
-        model
-            .generate_embeddings(EmbeddingRequest::builder().add_prompt(
-                "task: search result | query: What is an apple's significance to gravity?",
-            ))
-            .await?;
+    let a = model.generate_embedding(GRAPHENE).await?;
+    let b = model.generate_embedding(GRAVITY).await?;
 
-    let batched = model
-        .generate_embeddings(EmbeddingRequest::builder().add_prompts((0..100).map(|i| {
-            if i % 2 == 0 {
-                "task: search result | query: What is graphene?"
-            } else {
-                "task: search result | query: What is an apple's significance to gravity?"
-            }
-        })))
-        .await?;
+    let request = EmbeddingRequestBuilder::new()
+        .add_prompts((0..100).map(|i| if i % 2 == 0 { GRAPHENE } else { GRAVITY }))
+        .build()?;
+    let batched = model.generate_embeddings(request).await?;
 
-    for (i, embedding) in batched.into_iter().enumerate() {
-        if i % 2 == 0 {
-            assert_eq!(embedding, a[0]);
-        } else {
-            assert_eq!(embedding, b[0]);
-        }
+    for (i, data) in batched.data.into_iter().enumerate() {
+        let EmbeddingVector::Float(embedding) = data.embedding else {
+            anyhow::bail!("expected float embeddings");
+        };
+        let expected = if i % 2 == 0 { &a } else { &b };
+        assert_eq!(&embedding, expected);
     }
 
     Ok(())

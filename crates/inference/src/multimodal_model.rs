@@ -1,225 +1,181 @@
-use candle_core::Device;
-use inference_core::*;
-use inference_core::{SearchCallback, Tool, ToolCallback, ToolCallbackKind};
+//! A vision or audio model from Hugging Face or a local directory.
 
-use crate::{IsqBits, IsqSetting};
-use std::collections::HashMap;
-use std::{
-    ops::{Deref, DerefMut},
-    path::PathBuf,
-    sync::Arc,
+use std::path::PathBuf;
+
+use inference_api::{
+    engine::{AutoDeviceMapParams, IsqOrganization, ModelDType, ModelSelected, UqffWriteConfig},
+    sdk::MultimodalLoaderType,
 };
 
-use crate::Model;
-use crate::model_builder_trait::{build_model_from_pipeline, build_multimodal_pipeline};
+use crate::{Model, error::Result, load::LoadOptions, text_model::uqff_files};
 
-#[derive(Clone)]
-/// Configure a multimodal model with the various parameters for loading, running, and other inference behaviors.
+/// Loads a multimodal model; every option has the engine's default until set.
 pub struct MultimodalModelBuilder {
-    // Loading model
     pub(crate) model_id: String,
-    pub(crate) token_source: TokenSource,
-    pub(crate) hf_revision: Option<String>,
-    pub(crate) write_uqff: Option<UqffWriteConfig>,
-    pub(crate) from_uqff: Option<Vec<PathBuf>>,
-    pub(crate) calibration_file: Option<PathBuf>,
-    pub(crate) imatrix: Option<PathBuf>,
-    pub(crate) chat_template: Option<String>,
-    pub(crate) jinja_explicit: Option<String>,
-    pub(crate) tokenizer_json: Option<String>,
-    pub(crate) device_mapping: Option<DeviceMapSetting>,
-    pub(crate) max_edge: Option<u32>,
-    pub(crate) max_model_len: Option<usize>,
-    pub(crate) hf_config_overrides: Option<HfConfigOverrides>,
-    pub(crate) hf_cache_path: Option<PathBuf>,
-    pub(crate) search_embedding_model: Option<SearchEmbeddingModel>,
-    pub(crate) search_callback: Option<Arc<SearchCallback>>,
-    pub(crate) tool_callbacks: HashMap<String, ToolCallbackWithTool>,
-    pub(crate) shell_config: Option<inference_core::ShellConfig>,
-    pub(crate) mtp_config: Option<MtpConfig>,
-    pub(crate) device: Option<Device>,
-    pub(crate) matformer_config_path: Option<PathBuf>,
-    pub(crate) matformer_slice_name: Option<String>,
-    pub(crate) organization: IsqOrganization,
-    pub(crate) encoder_cache_memory_bytes: Option<usize>,
-
-    // Model running
-    pub(crate) topology: Option<Topology>,
-    pub(crate) topology_path: Option<String>,
     pub(crate) loader_type: Option<MultimodalLoaderType>,
     pub(crate) dtype: ModelDType,
-    pub(crate) force_cpu: bool,
-    pub(crate) isq: Option<IsqSetting>,
-    pub(crate) throughput_logging: bool,
-
-    // Other things
-    pub(crate) paged_attn_cfg: Option<PagedAttentionConfig>,
-    pub(crate) max_num_seqs: usize,
-    pub(crate) with_logging: bool,
-    pub(crate) prefix_cache_n: Option<usize>,
+    pub(crate) tokenizer_json: Option<String>,
+    pub(crate) topology: Option<String>,
+    pub(crate) organization: IsqOrganization,
+    pub(crate) write_uqff: Option<UqffWriteConfig>,
+    pub(crate) from_uqff: Option<Vec<PathBuf>>,
+    pub(crate) imatrix: Option<PathBuf>,
+    pub(crate) calibration_file: Option<PathBuf>,
+    pub(crate) max_edge: Option<u32>,
+    pub(crate) hf_cache_path: Option<PathBuf>,
+    pub(crate) matformer_config_path: Option<PathBuf>,
+    pub(crate) matformer_slice_name: Option<String>,
+    pub(crate) options: LoadOptions,
 }
 
 impl MultimodalModelBuilder {
-    /// A few defaults are applied here:
-    /// - Token source is from the cache (.cache/huggingface/token)
-    /// - Maximum number of sequences running is 32
-    /// - Automatic device mapping with model defaults according to `AutoDeviceMapParams`
-    /// - By default, web searching compatible with the OpenAI `web_search_options` setting is disabled.
     pub fn new(model_id: impl ToString) -> Self {
         Self {
             model_id: model_id.to_string(),
-            topology: None,
-            topology_path: None,
-            write_uqff: None,
-            from_uqff: None,
-            chat_template: None,
-            tokenizer_json: None,
-            max_edge: None,
-            max_model_len: None,
-            hf_config_overrides: None,
             loader_type: None,
             dtype: ModelDType::Auto,
-            force_cpu: false,
-            token_source: TokenSource::CacheToken,
-            hf_revision: None,
-            isq: None,
-            max_num_seqs: 32,
-            with_logging: false,
-            device_mapping: None,
-            calibration_file: None,
+            tokenizer_json: None,
+            topology: None,
+            organization: IsqOrganization::Default,
+            write_uqff: None,
+            from_uqff: None,
             imatrix: None,
-            jinja_explicit: None,
-            throughput_logging: false,
-            paged_attn_cfg: None,
+            calibration_file: None,
+            max_edge: None,
             hf_cache_path: None,
-            search_embedding_model: None,
-            search_callback: None,
-            tool_callbacks: HashMap::new(),
-            shell_config: None,
-            mtp_config: None,
-            device: None,
             matformer_config_path: None,
             matformer_slice_name: None,
-            organization: IsqOrganization::Default,
-            encoder_cache_memory_bytes: None,
-            prefix_cache_n: None,
+            options: LoadOptions::new(),
         }
     }
 
-    // Shared methods from builder_macros.rs
-    common_builder_methods!();
+    load_options_methods!();
 
-    /// Enable shell execution.
-    pub fn with_shell_execution(mut self, config: inference_core::ShellConfig) -> Self {
-        self.shell_config = Some(config);
-        self
-    }
-
-    /// Manually set the model loader type. Otherwise, it will attempt to automatically
-    /// determine the loader type.
     pub fn with_loader_type(mut self, loader_type: MultimodalLoaderType) -> Self {
         self.loader_type = Some(loader_type);
         self
     }
 
-    /// Automatically resize and pad images to this maximum edge length. Aspect ratio is preserved.
-    /// This is only supported on the Qwen2-VL and Idefics 2 models. Others handle this internally.
+    pub fn with_dtype(mut self, dtype: ModelDType) -> Self {
+        self.dtype = dtype;
+        self
+    }
+
+    pub fn with_tokenizer_json(mut self, tokenizer_json: impl ToString) -> Self {
+        self.tokenizer_json = Some(tokenizer_json.to_string());
+        self
+    }
+
+    pub fn with_topology_from_path(mut self, path: impl AsRef<std::path::Path>) -> Self {
+        self.topology = Some(path.as_ref().to_string_lossy().into_owned());
+        self
+    }
+
+    pub fn with_mixture_qexperts_isq(mut self) -> Self {
+        self.organization = IsqOrganization::MoeExpertsOnly;
+        self
+    }
+
+    pub fn write_uqff(mut self, config: impl Into<UqffWriteConfig>) -> Self {
+        self.write_uqff = Some(config.into());
+        self
+    }
+
+    pub fn from_uqff(mut self, files: Vec<PathBuf>) -> Self {
+        self.from_uqff = Some(files);
+        self
+    }
+
+    pub fn with_imatrix(mut self, path: PathBuf) -> Self {
+        self.imatrix = Some(path);
+        self
+    }
+
+    pub fn with_calibration_file(mut self, path: PathBuf) -> Self {
+        self.calibration_file = Some(path);
+        self
+    }
+
+    /// Resizes images so their longer edge is at most `max_edge` pixels.
     pub fn with_max_edge(mut self, max_edge: u32) -> Self {
         self.max_edge = Some(max_edge);
         self
     }
 
-    /// Set the runtime model context length.
-    pub fn with_max_model_len(mut self, max_model_len: usize) -> Self {
-        assert!(max_model_len > 0, "maximum model length must be nonzero");
-        self.max_model_len = Some(max_model_len);
+    /// Bytes of encoder outputs kept for reuse across requests.
+    pub fn with_encoder_cache_memory_bytes(mut self, bytes: usize) -> Self {
+        self.options.runtime.encoder_cache_memory_bytes = Some(bytes);
         self
     }
 
-    /// Set recursively merged Hugging Face config.json overrides.
-    pub fn with_hf_config_overrides(mut self, overrides: HfConfigOverrides) -> Self {
-        self.hf_config_overrides = Some(overrides);
+    pub fn from_hf_cache_path(mut self, path: PathBuf) -> Self {
+        self.hf_cache_path = Some(path);
         self
     }
 
-    pub fn with_encoder_cache_memory_bytes(mut self, max_bytes: usize) -> Self {
-        assert!(
-            max_bytes > 0,
-            "encoder cache memory capacity must be nonzero"
-        );
-        self.encoder_cache_memory_bytes = Some(max_bytes);
+    pub fn with_matformer_config_path(mut self, path: PathBuf) -> Self {
+        self.matformer_config_path = Some(path);
         self
     }
 
-    /// Load the multimodal model and return a ready-to-use [`Model`].
-    pub async fn build(self) -> anyhow::Result<Model> {
-        let (pipeline, scheduler_config, add_model_config) =
-            build_multimodal_pipeline(self).await?;
-        Ok(build_model_from_pipeline(pipeline, scheduler_config, add_model_config).await)
+    pub fn with_matformer_slice_name(mut self, name: String) -> Self {
+        self.matformer_slice_name = Some(name);
+        self
+    }
+
+    pub(crate) fn model_selected(&self) -> ModelSelected {
+        ModelSelected::MultimodalPlain {
+            model_id: self.model_id.clone(),
+            quant: None,
+            tokenizer_json: self.tokenizer_json.clone(),
+            arch: self.loader_type.clone(),
+            dtype: self.dtype,
+            topology: self.topology.clone(),
+            write_uqff: self.write_uqff.clone(),
+            from_uqff: uqff_files(self.from_uqff.as_deref()),
+            max_edge: self.max_edge,
+            calibration_file: self.calibration_file.clone(),
+            imatrix: self.imatrix.clone(),
+            max_seq_len: self.options.auto_map.max_seq_len,
+            max_batch_size: self.options.auto_map.max_batch_size,
+            max_num_images: AutoDeviceMapParams::DEFAULT_MAX_NUM_IMAGES,
+            max_image_length: AutoDeviceMapParams::DEFAULT_MAX_IMAGE_LENGTH,
+            hf_cache_path: self.hf_cache_path.clone(),
+            matformer_config_path: self.matformer_config_path.clone(),
+            matformer_slice_name: self.matformer_slice_name.clone(),
+            organization: Some(self.organization),
+        }
+    }
+
+    pub fn into_spec(
+        self,
+    ) -> (
+        inference_api::EngineSpec,
+        inference_api::engine::EngineCallbacks,
+    ) {
+        let model = self.model_selected();
+        self.options.spec(model)
+    }
+
+    pub async fn build(self) -> Result<Model> {
+        let model = self.model_selected();
+        self.options.load(model).await
     }
 }
 
-#[derive(Clone)]
-/// Configure a UQFF multimodal model with the various parameters for loading, running, and other inference behaviors.
-/// This wraps and implements `DerefMut` for the MultimodalModelBuilder, so users should take care to not call UQFF-related methods.
+/// A multimodal model loaded from UQFF shards.
 pub struct UqffMultimodalModelBuilder(MultimodalModelBuilder);
 
 impl UqffMultimodalModelBuilder {
-    /// A few defaults are applied here:
-    /// - Token source is from the cache (.cache/huggingface/token)
-    /// - Maximum number of sequences running is 32
-    /// - Automatic device mapping with model defaults according to `AutoDeviceMapParams`
-    ///
-    /// For sharded UQFF models, you only need to specify the first shard file
-    /// (e.g., `q4k-0.uqff`). The remaining shards are auto-discovered from the
-    /// same directory or Hugging Face repository.
-    pub fn new(model_id: impl ToString, uqff_file: Vec<PathBuf>) -> Self {
-        let mut inner = MultimodalModelBuilder::new(model_id);
-        inner.from_uqff = Some(uqff_file);
-        Self(inner)
+    pub fn new(model_id: impl ToString, files: Vec<PathBuf>) -> Self {
+        Self(MultimodalModelBuilder::new(model_id).from_uqff(files))
     }
 
-    /// Load the UQFF multimodal model and return a ready-to-use [`Model`].
-    pub async fn build(self) -> anyhow::Result<Model> {
-        self.0.build().await
-    }
-
-    /// Unwrap into the inner [`MultimodalModelBuilder`]. Take care not to call UQFF-related methods on it.
     pub fn into_inner(self) -> MultimodalModelBuilder {
         self.0
     }
-}
 
-impl Deref for UqffMultimodalModelBuilder {
-    type Target = MultimodalModelBuilder;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for UqffMultimodalModelBuilder {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
-    }
-}
-
-impl From<UqffMultimodalModelBuilder> for MultimodalModelBuilder {
-    fn from(value: UqffMultimodalModelBuilder) -> Self {
-        value.0
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::MultimodalModelBuilder;
-
-    #[test]
-    fn max_model_len_is_configurable() {
-        let mut builder = MultimodalModelBuilder::new("model");
-        assert_eq!(builder.max_model_len, None);
-
-        builder = builder.with_max_model_len(8192);
-        assert_eq!(builder.max_model_len, Some(8192));
+    pub async fn build(self) -> Result<Model> {
+        self.0.build().await
     }
 }

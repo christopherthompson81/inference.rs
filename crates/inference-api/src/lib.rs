@@ -34,6 +34,7 @@ pub mod responses;
 pub use inference_protocol::responses_types;
 #[doc(hidden)]
 pub mod sampling;
+pub mod sdk;
 pub mod skill_store;
 pub mod system;
 pub mod types;

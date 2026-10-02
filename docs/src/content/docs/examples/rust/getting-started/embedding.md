@@ -17,7 +17,7 @@ Run with: `cargo run --release --example embedding -p inference-examples`
 //! Run with: `cargo run --release --example embedding -p inference-examples`
 
 use anyhow::Result;
-use inference::{EmbeddingModelBuilder, EmbeddingRequest};
+use inference::{EmbeddingModelBuilder, EmbeddingRequestBuilder};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -28,11 +28,12 @@ async fn main() -> Result<()> {
 
     let embeddings = model
         .generate_embeddings(
-            EmbeddingRequest::builder()
-                .add_prompt("task: search result | query: What is graphene?"),
+            EmbeddingRequestBuilder::new()
+                .add_prompt("task: search result | query: What is graphene?")
+                .build()?,
         )
         .await?;
-    println!("{:?}", embeddings.first());
+    println!("{:?}", embeddings.data.first().map(|data| &data.embedding));
 
     Ok(())
 }

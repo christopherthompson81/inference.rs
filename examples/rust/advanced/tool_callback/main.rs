@@ -4,8 +4,8 @@
 
 use anyhow::Result;
 use inference::{
-    CalledFunction, IsqBits, ModelBuilder, RequestBuilder, SearchResult, TextMessageRole,
-    TextMessages, Tool, ToolChoice, ToolType,
+    CalledFunction, Function, IsqBits, ModelBuilder, SearchResult, TextMessageRole, TextMessages,
+    Tool, ToolCallContext, ToolType,
 };
 use std::fs;
 use std::sync::Arc;
@@ -36,29 +36,13 @@ fn local_search(query: &str) -> Result<Vec<SearchResult>> {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Build the model and register the *tool callback*.
-    let model = ModelBuilder::new("google/gemma-4-E4B-it")
-        .with_auto_isq(IsqBits::Four)
-        .with_logging()
-        .with_tool_callback(
-            "local_search",
-            Arc::new(|f: &CalledFunction, _ctx: &inference::ToolCallContext| {
-                let args: serde_json::Value = serde_json::from_str(&f.arguments)?;
-                let query = args["query"].as_str().unwrap_or("");
-                Ok(serde_json::to_string(&local_search(query)?)?)
-            }),
-        )
-        .build()
-        .await?;
-
-    // Define the JSON schema for the tool the model can call.
     let parameters = std::collections::HashMap::from([(
         "query".to_string(),
         serde_json::json!({"type": "string", "description": "Query"}),
     )]);
     let tool = Tool {
         tp: ToolType::Function,
-        function: inference::Function {
+        function: Function {
             description: Some("Local filesystem search".to_string()),
             name: "local_search".to_string(),
             parameters: Some(parameters),
@@ -66,12 +50,23 @@ async fn main() -> Result<()> {
         },
     };
 
-    // Ask the user question and allow the model to call the tool automatically.
+    // Every request offers the tool, and the engine runs the callback when the model calls it.
+    let model = ModelBuilder::new("google/gemma-4-E4B-it")
+        .with_auto_isq(IsqBits::Four)
+        .with_logging()
+        .with_tool_callback_and_tool(
+            Arc::new(|f: &CalledFunction, _ctx: &ToolCallContext| {
+                let args: serde_json::Value = serde_json::from_str(&f.arguments)?;
+                let query = args["query"].as_str().unwrap_or("");
+                Ok(serde_json::to_string(&local_search(query)?)?)
+            }),
+            tool,
+        )
+        .build()
+        .await?;
+
     let messages =
         TextMessages::new().add_message(TextMessageRole::User, "Where is Cargo.toml in this repo?");
-    let messages = RequestBuilder::from(messages)
-        .set_tools(vec![tool])
-        .set_tool_choice(ToolChoice::Auto);
 
     let response = model.send_chat_request(messages).await?;
     println!("{}", response.choices[0].message.content.as_ref().unwrap());

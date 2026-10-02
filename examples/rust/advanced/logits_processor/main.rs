@@ -2,26 +2,11 @@
 //!
 //! Run with: `cargo run --release --example logits_processor -p inference-examples`
 
-use std::sync::Arc;
-
 use anyhow::Result;
 use inference::{
-    CustomLogitsProcessor, IsqBits, ModelBuilder, PagedAttentionMetaBuilder, RequestBuilder,
-    Tensor, TextMessageRole,
+    IsqBits, ModelBuilder, PagedAttentionMetaBuilder, RequestBuilder, TextMessageRole, in_place,
 };
 use rand::Rng;
-
-struct ThresholdLogitsProcessor {
-    threshold: f64,
-}
-
-impl CustomLogitsProcessor for ThresholdLogitsProcessor {
-    fn apply(&self, logits: &Tensor, _context: &[u32]) -> inference::Result<Tensor> {
-        // Mask is 1 for true, 0 for false.
-        let mask = logits.ge(self.threshold)?;
-        logits.broadcast_mul(&mask.to_dtype(logits.dtype())?)
-    }
-}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -33,14 +18,22 @@ async fn main() -> Result<()> {
         .await?;
 
     let mut rng = rand::rng();
-    let random_value: f64 = rng.random_range(0.0..=1.0);
-    let threshold: f64 = rng.random_range(0.0..=0.5);
+    let random_value: f32 = rng.random_range(0.0..=1.0);
+    let threshold: f32 = rng.random_range(0.0..=0.5);
 
     let request = RequestBuilder::new()
-        .add_logits_processor(Arc::new(move |logits: &Tensor, _context: &[u32]| {
-            logits * random_value
+        .add_logits_processor(in_place(move |logits, _context| {
+            logits.iter_mut().for_each(|logit| *logit *= random_value);
+            Ok(())
         }))
-        .add_logits_processor(Arc::new(ThresholdLogitsProcessor { threshold }))
+        // Zeroes every logit under the threshold.
+        .add_logits_processor(in_place(move |logits, _context| {
+            logits
+                .iter_mut()
+                .filter(|logit| **logit < threshold)
+                .for_each(|logit| *logit = 0.0);
+            Ok(())
+        }))
         .add_message(
             TextMessageRole::User,
             "Please write a mathematical equation where a few numbers are added.",

@@ -108,7 +108,7 @@ async fn build(paged: bool) -> anyhow::Result<Model> {
     }
     #[cfg(not(any(feature = "cuda", feature = "metal")))]
     let _ = paged;
-    builder.build().await
+    Ok(builder.build().await?)
 }
 
 macro_rules! skip_unless_model {

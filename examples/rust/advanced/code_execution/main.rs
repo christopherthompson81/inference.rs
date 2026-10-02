@@ -7,8 +7,8 @@
 
 use anyhow::Result;
 use inference::{
-    CodeExecutionConfig, IsqBits, ModelBuilder, NetworkMode, RequestBuilder, SandboxPolicy,
-    TextMessageRole, TextMessages,
+    CodeExecutionConfig, IsqBits, ModelBuilder, RequestBuilder, TextMessageRole, TextMessages,
+    api::{engine::NetworkMode, sdk::SandboxPolicy},
 };
 
 #[tokio::main]
