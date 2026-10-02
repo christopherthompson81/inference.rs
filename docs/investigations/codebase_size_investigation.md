@@ -2031,3 +2031,37 @@ Full CI: exit 0 (2395 + 2717 + 1); the test skips on CPU and passes on CUDA in 1
 Implication: the dense MTP accept path works on real weights. The test asserts exact greedy equality and an accept
 rate of at least 0.3. MoE acceptance would need the 70 GB Qwen3.6-35B-A3B safetensors; not done. Next: GGUF MTP plus
 moving speculative support to the text model.
+
+## Run 66 - 2026-10-02 (time approximate)
+
+Question: can Qwen3.5 speculative decoding (MTP, DFlash) live on the text model, so text-only checkpoints, and later
+GGUF, get it too?
+
+Finding: the wrapper's speculative impl (about 900 lines) used only `self.text` and four speculative fields
+(mtp_n_predict, draft_lm_head, dflash, pending_prompt_tails), with no vision state. The text model meanwhile had only
+the recurrent hooks.
+
+Change:
+- The impls moved onto `Qwen3_5TextModel`, along with the four fields. Four calls whose names collide with inherent
+  methods are written as `Qwen3_5TextModel::X(self)`.
+- The wrapper forwards the whole trait through a new `inference_nn::delegate_speculative_target!` placed beside the
+  trait. Every method, defaults included, goes through `<Inner as Trait>::`, so an inherent method of the same name
+  can't capture the call; e.g. the inherent `reserve_recurrent_decode_deferred_storage` lacks the proposer guard.
+- `Qwen3_5TextModel::paged_kv_config` (full-attention layers plus the MTP layer) now backs both models' `model_config`.
+- The text-only loader passes the injected MTP flag (it was hard-coded false), reports the hybrid paged-KV config
+  (before, every layer got KV), and sizes the MTP head.
+
+First text-only MTP run: "paged cache has no MTP layer". The normal pipeline built `layer_devices` for the cache's
+layers only. The multimodal pipeline pads them to `model_config().num_layers()`, putting the MTP layer on the
+non-mapped device; the normal pipeline now does the same.
+
+Tests:
+- `qwen3_5_mtp::text_only_builtin_mtp_accepts_drafts_and_keeps_greedy_output` builds a text-only view of the real
+  Qwen3.5-0.8B (its text_config as `Qwen3_5ForCausalLM`, symlinked weights).
+  Result: 40/40 and 25/25 greedy ids identical; 34 of 48 drafts accepted (0.71).
+- The multimodal real test (37/50) and both tiny MTP tests are unchanged.
+- A unit test checks that the text loader reserves the MTP layer and sizes the head as the multimodal loader does.
+
+Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`.
+Result: exit 0, 2397 + 2719 + 1 tests passed.
+Next: GGUF bindings for `blk.{n}.*` / `nextn.*`, and speculative attach in the GGUF pipeline.

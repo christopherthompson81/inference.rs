@@ -19,7 +19,7 @@ use crate::{
     layers::masker::PastKvLenCache,
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata},
     paged_attention::{
-        AttentionImplementation, HybridPagedKvCacheConfig, ModelConfigLike, ModelConfigMetadata,
+        AttentionImplementation, ModelConfigLike, ModelConfigMetadata,
         encoder_cache::{CacheModality, EncoderCacheManager},
     },
     qwen3_vl::{VisualEncoder, concatenate_visual_items, vision::Qwen3VLVisionModel},
@@ -46,13 +46,6 @@ pub struct Qwen3_5Model {
     vision_start_token_id: u32,
     vision_end_token_id: u32,
     encoder_cache: Arc<Mutex<EncoderCacheManager>>,
-    // Draft tokens per speculative step; 0 while MTP is not attached
-    pub(super) mtp_n_predict: std::sync::atomic::AtomicUsize,
-    // Draft-only lm_head at the base ISQ type; the target verifies with the promoted head
-    pub(super) draft_lm_head: Mutex<Option<std::sync::Arc<dyn inference_quant::QuantMethod>>>,
-    // External DFlash block-diffusion drafter, replacing the built-in MTP head when attached
-    pub(super) dflash: Mutex<Option<std::sync::Arc<crate::dflash::DFlashDraftModel>>>,
-    pending_prompt_tails: Mutex<std::collections::HashMap<usize, speculative::PendingPromptTail>>,
 }
 
 impl Qwen3_5Model {
@@ -96,10 +89,6 @@ impl Qwen3_5Model {
             vision_start_token_id: cfg.vision_start_token_id,
             vision_end_token_id: cfg.vision_end_token_id,
             encoder_cache: Arc::new(Mutex::new(EncoderCacheManager::new(32))),
-            mtp_n_predict: std::sync::atomic::AtomicUsize::new(0),
-            draft_lm_head: Mutex::new(None),
-            dflash: Mutex::new(None),
-            pending_prompt_tails: Mutex::new(std::collections::HashMap::new()),
         })
     }
 
@@ -509,10 +498,7 @@ impl MultimodalModel for Qwen3_5Model {
         &self.text.cfg
     }
     fn model_config(&self) -> Arc<dyn ModelConfigLike + Send + Sync> {
-        Arc::new(
-            HybridPagedKvCacheConfig::new(self.text.cfg.clone(), self.text.paged_kv_layers())
-                .with_uniform_prefix_prefill_attention_features(Default::default()),
-        )
+        self.text.paged_kv_config()
     }
     fn default_model_specific_args(&self, input_ids: &Tensor) -> Box<dyn Any> {
         let (batch_size, seq_len) = input_ids.dims2().expect("input ids must be rank 2");

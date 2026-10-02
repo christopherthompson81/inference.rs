@@ -3,6 +3,17 @@ use super::*;
 /// `NormalLoader` for the text backbone of a dense Qwen3.5 model.
 pub struct Qwen3_5TextLoader;
 
+// The loader injects the MTP flag at the top level, which for this loader is the text config itself.
+#[derive(serde::Deserialize)]
+struct MtpFlag {
+    #[serde(default, rename = "_inference_mtp")]
+    mtp: bool,
+}
+
+fn mtp_requested(config: &str) -> Result<bool> {
+    Ok(serde_json::from_str::<MtpFlag>(config)?.mtp)
+}
+
 fn parse_qwen35_text_config(config: &str) -> Result<crate::qwen3_5::TextConfig> {
     let cfg = crate::qwen3_5::TextConfig::from_json(config)?;
     cfg.check_experts(false)?;
@@ -37,7 +48,7 @@ impl NormalModelLoader for Qwen3_5TextLoader {
             &cfg,
             vb,
             cfg.tie_word_embeddings,
-            false,
+            mtp_requested(config)?,
             normal_loading_metadata,
             attention_mechanism,
         )?))
@@ -133,7 +144,12 @@ impl DeviceMappedModelLoader for Qwen3_5TextLoader {
         } else {
             cfg.hidden_size * cfg.vocab_size / lm_head_pack_factor
         };
-        Ok((embed_tokens + lm_head + cfg.hidden_size) * dtype.size_in_bytes())
+        let mtp_head = if mtp_requested(config)? {
+            super::qwen3_5::mtp_head_elems(&cfg, weight_pack_factor)?
+        } else {
+            0
+        };
+        Ok((embed_tokens + lm_head + cfg.hidden_size + mtp_head) * dtype.size_in_bytes())
     }
     fn layer_sizes_in_bytes(
         &self,
@@ -159,9 +175,10 @@ impl DeviceMappedModelLoader for Qwen3_5TextLoader {
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg = parse_qwen35_text_config(config)?;
-        Ok(Box::new(ModelConfigMetadata {
+        let mtp = mtp_requested(config)?;
+        let base = ModelConfigMetadata {
             max_seq_len: cfg.max_position_embeddings,
-            num_layers: cfg.num_hidden_layers,
+            num_layers: cfg.num_hidden_layers + cfg.mtp_layers(mtp),
             hidden_size: cfg.hidden_size,
             num_kv_heads: cfg.num_key_value_heads,
             num_attn_heads: cfg.num_attention_heads,
@@ -169,6 +186,10 @@ impl DeviceMappedModelLoader for Qwen3_5TextLoader {
             k_head_dim: cfg.head_dim,
             v_head_dim: cfg.head_dim,
             kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
-        }))
+        };
+        Ok(Box::new(
+            HybridPagedKvCacheConfig::new(base, cfg.paged_kv_layers(mtp))
+                .with_uniform_prefix_prefill_attention_features(Default::default()),
+        ))
     }
 }

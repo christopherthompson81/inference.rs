@@ -41,7 +41,8 @@ use crate::{
     layers::{self, CausalMasker, GemmaRmsNorm, Qwen3VLRotaryEmbedding, Sdpa, YarnRopeConfig},
     model::{ForwardMaskCache, IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     paged_attention::{
-        AttentionImplementation, ModelConfigMetadata, PagedAttention, load_fp8_attention_scales,
+        AttentionImplementation, HybridPagedKvCacheConfig, ModelConfigLike, ModelConfigMetadata,
+        PagedAttention, load_fp8_attention_scales,
     },
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
 };
@@ -1185,6 +1186,14 @@ pub struct Qwen3_5TextModel {
     // Target layers whose outputs a DFlash drafter consumes; empty when none is attached
     dflash_tap_layers: Mutex<Vec<usize>>,
     pub(super) yarn_rope_config: Option<YarnRopeConfig>,
+    // Draft tokens per speculative step; 0 while no proposer is attached
+    pub(super) mtp_n_predict: std::sync::atomic::AtomicUsize,
+    // Draft-only lm_head at the base ISQ type; the target verifies with the promoted head
+    pub(super) draft_lm_head: Mutex<Option<Arc<dyn QuantMethod>>>,
+    // External DFlash block-diffusion drafter, replacing the built-in MTP head when attached
+    pub(super) dflash: Mutex<Option<Arc<crate::dflash::DFlashDraftModel>>>,
+    pub(super) pending_prompt_tails:
+        Mutex<std::collections::HashMap<usize, super::speculative::PendingPromptTail>>,
 }
 
 impl Qwen3_5TextModel {
@@ -1436,6 +1445,10 @@ impl Qwen3_5TextModel {
             mapper,
             weight_prefix,
             mtp,
+            mtp_n_predict: std::sync::atomic::AtomicUsize::new(0),
+            draft_lm_head: Mutex::new(None),
+            dflash: Mutex::new(None),
+            pending_prompt_tails: Mutex::new(std::collections::HashMap::new()),
             store_spec_hidden: AtomicBool::new(false),
             last_spec_capture: Mutex::new(None),
             last_full_capture: Mutex::new(None),
@@ -2257,6 +2270,14 @@ impl Qwen3_5TextModel {
         layers
     }
 
+    /// Paged KV only for the full-attention layers and the MTP head's layer.
+    pub(super) fn paged_kv_config(&self) -> Arc<dyn ModelConfigLike + Send + Sync> {
+        Arc::new(
+            HybridPagedKvCacheConfig::new(self.cfg.clone(), self.paged_kv_layers())
+                .with_uniform_prefix_prefill_attention_features(Default::default()),
+        )
+    }
+
     pub fn embed_tokens(&self, input_ids: &Tensor) -> Result<Tensor> {
         self.embed_tokens.embedding_forward(input_ids, self.dtype)
     }
@@ -2704,40 +2725,6 @@ impl IsqModel for Qwen3_5TextModel {
     }
 }
 
-impl crate::speculative::SpeculativeTargetMixin for Qwen3_5TextModel {
-    fn supports_recurrent_speculative_checkpoints(&self) -> bool {
-        Qwen3_5TextModel::supports_recurrent_speculative_checkpoints(self)
-    }
-
-    fn supports_recurrent_speculative_transitions(&self) -> bool {
-        Qwen3_5TextModel::supports_recurrent_speculative_transitions(self)
-    }
-
-    fn reserve_recurrent_speculative_transition_storage(&self) -> Result<bool> {
-        self.reserve_recurrent_transition_storage()
-    }
-
-    fn reserve_recurrent_decode_deferred_storage(&self) -> Result<bool> {
-        Qwen3_5TextModel::reserve_recurrent_decode_deferred_storage(self)
-    }
-
-    fn disable_recurrent_decode_deferred_storage(&self) -> Result<bool> {
-        Qwen3_5TextModel::disable_recurrent_decode_deferred_storage(self)
-    }
-
-    fn apply_recurrent_speculative_transitions_for_current_batch(&self) -> Result<bool> {
-        self.apply_current_recurrent_transitions()
-    }
-
-    fn flush_recurrent_state_for_current_batch(&self) -> Result<()> {
-        self.flush_current_recurrent_state()
-    }
-
-    fn flush_recurrent_speculative_transitions(&self, seq_ids: &[usize]) -> Result<()> {
-        self.flush_recurrent_transitions_for_sequences(seq_ids)
-    }
-}
-
 #[cfg(feature = "cuda")]
 const SUPPORTS_CUDA_DECODE_GRAPHS: bool = true;
 
@@ -2816,6 +2803,10 @@ impl NormalModel for Qwen3_5TextModel {
 
     fn config(&self) -> &ModelConfigMetadata {
         &self.cfg
+    }
+
+    fn model_config(&self) -> Arc<dyn ModelConfigLike + Send + Sync> {
+        self.paged_kv_config()
     }
 
     fn supports_packed_prefill(&self) -> bool {
