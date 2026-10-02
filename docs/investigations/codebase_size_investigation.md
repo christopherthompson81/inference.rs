@@ -1503,3 +1503,25 @@ Finding: latent, not live; no load changes today. The issue overstated it and go
 Change: the multimodal session, its auto device map adjustment and the tensor-parallel mapper now take the runtime
 config, as normal's do; the UQFF artifact still keeps the source config. Every pipeline now sizes and builds from
 one config, so `ModelLoadInputs::session_config` is gone. No test can see the difference, since nothing reads it.
+
+## Run 51 - 2026-10-01 (time approximate)
+
+Question: which of the model crates' local MLP structs are copies of `inference_nn::layers::Mlp`?
+
+Survey: 56 MLP-like structs. Fingerprinting (fields, constructors, projection names, activation handling) the
+gated text-model ones: six build exactly the shared Mlp's column/row-parallel `gate_proj`/`up_proj`/`down_proj`
+with no bias and `act(gate) * up`: Qwen2-VL text, Qwen3-VL text (dense layers), Qwen3-MoE (dense layers),
+PaddleOCR-VL text, the LLaVA Llama LLM and MLlama text. The rest differ in kind: merged `gate_up_proj` on
+replicated layers (Phi-3, Phi-3-vision, Phi-4 with static LoRA), biases (Voxtral, Mistral3 vision), matformer and
+activation sparsity (Gemma 3n), `QLinear` (Idefics2), `w1/w2/w3` naming (LFM2), Granite's fused `input_linear`, and
+the X-LoRA copies, which are built on LoRA layers.
+
+Pinned first: Qwen3-MoE (layer 0 dense, layer 1 MoE, per-expert shapes declared) and LLaVA 1.5 got synthesized
+prefill snapshots plus name digests; the Qwen-VL tests and the PaddleOCR-VL engine tests covered the rest.
+
+Change: five of the six now use the shared Mlp (MLlama's takes a `candle_nn::Activation`, so it stays). The shared
+forward goes through `quantized_ffn`, which adds the fused CUDA/Metal gate-up kernels and a CPU shared-LHS gemv, but
+on CPU in F32 prefill it reduces to the same `mul_and_act`: every pin, F32 and BF16, is unchanged. Two local quirks
+went with the copies: Qwen2-VL/Qwen3-VL cast the MLP output back to the input dtype (a no-op, since the projections
+return it), and LLaVA's AnyMoE expert path now passes its SiLU and no quantization config explicitly, as before.
+Lines: the model code is -350/+37.
