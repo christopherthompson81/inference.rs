@@ -71,6 +71,7 @@ fn mistral_sizing() {
     config["head_dim"] = json!(HEAD_DIM);
     assert_eq!(
         sizing(&MistralLoader, &config),
-        ((123392, 61952), (2, 32, 32))
+        // sized with the config head_dim the model builds with; master used hidden_size / heads (123392)
+        ((172544, 86528), (2, 32, 32))
     );
 }
