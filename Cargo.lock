@@ -2498,22 +2498,20 @@ name = "inference"
 version = "0.9.3"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "candle-core",
  "candle-nn",
  "either",
  "futures",
  "image",
- "indexmap",
  "indicatif 0.18.3",
- "inference-agent",
- "inference-core",
+ "inference-api",
  "inference-macros",
  "inference-models-llama",
  "inference-models-other",
  "inference-models-qwen",
  "inference-nn",
  "inference-quant",
- "inference-selection",
  "rand 0.9.4",
  "rand_distr",
  "schemars",
@@ -2522,6 +2520,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

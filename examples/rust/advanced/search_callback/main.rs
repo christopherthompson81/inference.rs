@@ -53,7 +53,7 @@ async fn main() -> Result<()> {
     let model = ModelBuilder::new("Qwen/Qwen3-4B")
         .with_auto_isq(IsqBits::Four)
         .with_logging()
-        .with_search_callback(Arc::new(|params: &inference::SearchFunctionParameters| {
+        .with_search_callback(Arc::new(|params| {
             // In a real application there could be network or database calls here – but for the
             // sake of demonstration we simply perform a local filesystem search.
             local_search(&params.query)

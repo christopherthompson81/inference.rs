@@ -368,6 +368,18 @@ pub enum AdapterSelection {
     Generation(AdapterGenerationSelection),
 }
 
+impl From<&str> for AdapterSelection {
+    fn from(alias: &str) -> Self {
+        Self::Alias(alias.to_string())
+    }
+}
+
+impl From<String> for AdapterSelection {
+    fn from(alias: String) -> Self {
+        Self::Alias(alias)
+    }
+}
+
 /// Default value helper
 fn default_false() -> bool {
     false
@@ -1840,6 +1852,14 @@ pub struct ImageGenerationRequest {
     pub width: usize,
 }
 
+impl ImageGenerationRequest {
+    /// A request for one image of `prompt`, every other field at its default.
+    pub fn new(prompt: impl Into<String>) -> Self {
+        serde_json::from_value(serde_json::json!({"prompt": prompt.into()}))
+            .expect("an image request needs only its prompt")
+    }
+}
+
 /// Audio format options for speech generation responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default, ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -1896,6 +1916,17 @@ pub struct SpeechGenerationRequest {
     /// The desired audio format for the generated speech.
     #[schema(example = "mp3")]
     pub response_format: AudioResponseFormat,
+}
+
+impl SpeechGenerationRequest {
+    /// A request to speak `input` into `response_format` audio with the default model.
+    pub fn new(input: impl Into<String>, response_format: AudioResponseFormat) -> Self {
+        Self {
+            model: default_model(),
+            input: input.into(),
+            response_format,
+        }
+    }
 }
 
 /// Helper type for messages field in ResponsesCreateRequest

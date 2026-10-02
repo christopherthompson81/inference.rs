@@ -4,7 +4,7 @@
 
 use anyhow::Result;
 use inference::{
-    IsqBits, ModelBuilder, PagedAttentionMetaBuilder, RequestBuilder, TextMessageRole,
+    Grammar, IsqBits, ModelBuilder, PagedAttentionMetaBuilder, RequestBuilder, TextMessageRole,
 };
 
 #[tokio::main]
@@ -18,9 +18,7 @@ async fn main() -> Result<()> {
 
     // Bullet list regex
     let request = RequestBuilder::new()
-        .set_constraint(inference::Constraint::Regex(
-            "(- [^\n]*\n)+(- [^\n]*)(\n\n)?".to_string(),
-        ))
+        .set_grammar(Grammar::Regex("(- [^\n]*\n)+(- [^\n]*)(\n\n)?".to_string()))
         .add_message(TextMessageRole::User, "Please write a few jokes.");
 
     let response = model.send_chat_request(request).await?;

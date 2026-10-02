@@ -6,7 +6,9 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use image::DynamicImage;
 use inference_core::remote_fetch::{FetchOptions, NetworkPolicy, fetch_limited};
+use inference_core::{AudioInput, VideoInput};
 use tokio::{fs::File, io::AsyncReadExt};
 use url::Url;
 
@@ -41,13 +43,64 @@ pub struct MediaAttachment {
     pub mime_type: Option<String>,
 }
 
+/// One attachment: encoded bytes, or media a Rust caller already decoded, which skips an encode and decode.
+#[derive(Clone)]
+pub enum Media {
+    Encoded(MediaAttachment),
+    Image(DynamicImage),
+    Audio(AudioInput),
+    Video(VideoInput),
+}
+
+impl std::fmt::Debug for Media {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Encoded(attachment) => attachment.fmt(f),
+            decoded => write!(f, "decoded {}", decoded.kind()),
+        }
+    }
+}
+
+impl Media {
+    fn kind(&self) -> &'static str {
+        match self {
+            Self::Encoded(_) => "encoded",
+            Self::Image(_) => "image",
+            Self::Audio(_) => "audio",
+            Self::Video(_) => "video",
+        }
+    }
+}
+
 /// The attachments of one request, indexed by position.
 #[derive(Clone, Debug, Default)]
-pub struct MediaAttachments(Arc<Vec<MediaAttachment>>);
+pub struct MediaAttachments(Arc<Vec<Media>>);
 
 impl MediaAttachments {
     pub fn new(attachments: Vec<MediaAttachment>) -> Self {
-        Self(Arc::new(attachments))
+        Self::from_media(attachments.into_iter().map(Media::Encoded).collect())
+    }
+
+    pub fn from_media(media: Vec<Media>) -> Self {
+        Self(Arc::new(media))
+    }
+
+    /// The attachment `source` names, `None` when it names none (a URL or path).
+    pub(crate) fn attached(&self, source: &str, kind: &str) -> Result<Option<&Media>> {
+        let Some(index) = source.strip_prefix(ATTACHMENT_PREFIX) else {
+            return Ok(None);
+        };
+        index
+            .parse::<usize>()
+            .ok()
+            .and_then(|index| self.0.get(index))
+            .map(Some)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{kind} source `{source}` names no attachment ({} attached)",
+                    self.0.len()
+                )
+            })
     }
 
     /// Loads `source` from the attachments when it names one, otherwise as a URL or path under `policy`.
@@ -57,19 +110,13 @@ impl MediaAttachments {
         policy: MediaSourcePolicy,
         kind: &str,
     ) -> Result<LoadedMedia> {
-        let Some(index) = source.strip_prefix(ATTACHMENT_PREFIX) else {
-            return load_media_source(source, policy, kind).await;
+        let attachment = match self.attached(source, kind)? {
+            None => return load_media_source(source, policy, kind).await,
+            Some(Media::Encoded(attachment)) => attachment,
+            Some(decoded) => {
+                anyhow::bail!("{kind} source `{source}` is a decoded {}", decoded.kind())
+            }
         };
-        let attachment = index
-            .parse::<usize>()
-            .ok()
-            .and_then(|index| self.0.get(index))
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "{kind} source `{source}` names no attachment ({} attached)",
-                    self.0.len()
-                )
-            })?;
         Ok(LoadedMedia {
             bytes: attachment.bytes.clone(),
             mime_type: attachment.mime_type.clone(),

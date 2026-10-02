@@ -36,7 +36,7 @@ async fn main() -> inference::error::Result<()> {
 | Embeddings | `EmbeddingModelBuilder` | `examples/rust/getting_started/embedding/` |
 | Structured output | `Model::generate_structured` | `examples/rust/advanced/json_schema/` |
 | Tool calling | `Tool`, `ToolChoice` | `examples/rust/advanced/tools/` |
-| Agents | `AgentBuilder` | `examples/rust/advanced/agent/` |
+| Agents (the engine's tool loop) | `with_tool`, `with_max_tool_rounds` | `examples/rust/advanced/agent/` |
 | LoRA / X-LoRA | `LoraModelBuilder`, `XLoraModelBuilder` | `examples/rust/advanced/lora/` |
 | AnyMoE | `AnyMoeModelBuilder` | `examples/rust/advanced/anymoe/` |
 | MCP client | `McpClientConfig` | `examples/rust/advanced/mcp_client/` |
@@ -49,7 +49,7 @@ async fn main() -> inference::error::Result<()> {
 | `MultimodalMessages` | Prompt includes images or audio | Deterministic |
 | `RequestBuilder` | Tools, logprobs, custom sampling, constraints, adapters, or web search | Configurable |
 
-`TextMessages` and `MultimodalMessages` convert into `RequestBuilder` via `Into<RequestBuilder>`.
+`TextMessages` and `MultimodalMessages` convert into `RequestBuilder` via `Into<RequestBuilder>`. Every request decodes greedily (top-k 1) unless `set_sampler_topk` raises it; temperature and top-p only matter then.
 
 ## Feature Flags
 

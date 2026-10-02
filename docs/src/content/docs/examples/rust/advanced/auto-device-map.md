@@ -19,21 +19,15 @@ Runnable Rust SDK example `auto_device_map`.
 ///
 /// Run with: `cargo run --release --example auto_device_map -p inference-examples`
 use anyhow::Result;
-use inference::{
-    AutoDeviceMapParams, DeviceMapSetting, IsqBits, TextMessageRole, TextMessages, TextModelBuilder,
-};
+use inference::{IsqBits, TextMessageRole, TextMessages, TextModelBuilder};
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let auto_map_params = AutoDeviceMapParams::Text {
-        max_seq_len: 4096,
-        max_batch_size: 2,
-    };
-
     let model = TextModelBuilder::new("meta-llama/Llama-3.3-70B-Instruct")
         .with_auto_isq(IsqBits::Eight)
         .with_logging()
-        .with_device_mapping(DeviceMapSetting::Auto(auto_map_params))
+        // Without `with_device_layers`, layers spread over the devices, sized for 4096-token prompts in pairs.
+        .with_auto_map_sizing(4096, 2)
         .build()
         .await?;
 
@@ -55,16 +49,13 @@ async fn main() -> Result<()> {
         response.usage.avg_compl_tok_per_sec
     );
 
-    // For multimodal models, use MultimodalModelBuilder with the same DeviceMapSetting:
+    // Multimodal models map the same way; `with_device_layers` pins the split by hand instead:
     //
     // use inference::{MultimodalModelBuilder, MultimodalMessages};
     //
     // let model = MultimodalModelBuilder::new("lamm-mit/Cephalo-Llama-3.2-11B-Vision-Instruct-128k")
     //     .with_auto_isq(IsqBits::Four)
-    //     .with_device_mapping(DeviceMapSetting::Auto(AutoDeviceMapParams::Text {
-    //         max_seq_len: 4096,
-    //         max_batch_size: 2,
-    //     }))
+    //     .with_device_layers(vec!["0:20".into(), "1:20".into()])
     //     .build()
     //     .await?;
 

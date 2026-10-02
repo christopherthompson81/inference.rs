@@ -25,12 +25,10 @@ async fn main() -> Result<()> {
     let audio_bytes = std::fs::read("sample_audio.wav")?;
     let audio = AudioInput::from_bytes(&audio_bytes)?;
 
-    let messages = MultimodalMessages::new().add_multimodal_message(
+    let messages = MultimodalMessages::new().add_audio_message(
         TextMessageRole::User,
         "Transcribe this audio.",
-        vec![],
         vec![audio],
-        vec![],
     );
 
     let response = model.send_chat_request(messages).await?;

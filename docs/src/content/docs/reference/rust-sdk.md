@@ -3,9 +3,11 @@ title: Rust SDK reference
 description: The Model API surface of the inference crate, with signatures and links to runnable examples.
 ---
 
-`Model` is the object every builder (`ModelBuilder`, `GgufModelBuilder`, `EmbeddingModelBuilder`, ...) returns. All methods take `&self`; share one instance by reference or in an `Arc`. This page lists the surface; `cargo doc -p inference --open` builds the full rustdoc, and the [Rust examples](/examples/) are runnable.
+The `inference` crate is a Rust layer over the engine the server and the C ABI use. Every builder (`ModelBuilder`, `TextModelBuilder`, `GgufModelBuilder`, `EmbeddingModelBuilder`, ...) produces an engine spec and loads it into a `Model`. `Model` is a cheap handle: `Clone` shares the loaded engine. This page lists the surface; `cargo doc -p inference --open` builds the full rustdoc, and the [Rust examples](/examples/) are runnable.
 
-Most request methods have a `*_with_model(..., model_id: Option<&str>)` twin for multi-model setups; `None` targets the default model. The twins are omitted below.
+`Model` dereferences to the engine (`inference::Engine`), so every engine operation is a method on it: model management, sessions, LoRA adapters, tokenization, files, MCP tools. Those take and return the same request and response types the HTTP API uses. The methods below are the Rust conveniences `Model` adds. A request goes to a specific model when it names one (`RequestBuilder::with_model`); otherwise it goes to the default model.
+
+A builder's `into_spec()` returns the `EngineSpec` and callbacks it would load, for a caller that loads them itself or serves them over HTTP.
 
 ## Chat
 
@@ -15,23 +17,25 @@ async fn chat(&self, message: impl ToString) -> Result<String>
 Quick one-shot: send a single user message, get the assistant's text reply.
 
 ```rust
-async fn send_chat_request<R: RequestLike>(&self, request: R) -> Result<ChatCompletionResponse>
+async fn send_chat_request(&self, request: impl Into<ChatRequest>) -> Result<ChatCompletionResponse>
 ```
-Generate non-streaming. Accepts `TextMessages`, `MultimodalMessages`, or `RequestBuilder`. Example: [text-generation](/examples/rust/getting-started/text-generation/).
+Generate non-streaming. Accepts `TextMessages`, `MultimodalMessages`, `RequestBuilder`, or a raw `ChatCompletionRequest`. Example: [text-generation](/examples/rust/getting-started/text-generation/).
 
 ```rust
-async fn stream_chat_request<R: RequestLike>(&self, request: R) -> Result<Stream<'_>>
+async fn stream_chat_request(&self, request: impl Into<ChatRequest>) -> Result<ChatEventStream>
 ```
-Generate streaming. The returned `Stream` implements `futures::Stream<Item = Response>` and borrows the model. Guide: [streaming](/guides/rust/streaming/).
+Generate streaming. The returned stream yields `ChatStreamEvent`s. Guide: [streaming](/guides/rust/streaming/).
+
+## Scoring a prompt
 
 ```rust
-async fn send_raw_chat_request<R: RequestLike>(&self, request: R) -> Result<(Vec<Tensor>, Vec<u32>)>
+async fn prompt_logits(&self, request: PromptLogitsRequest) -> Result<PromptLogits, ApiError>
 ```
-Returns raw logits of the first generated token plus the prompt tokens. Example: [perplexity](/examples/rust/advanced/perplexity/).
+One forward pass over a prompt (text or token ids): each token's log-probability, and with `LogitsOutput::Logits` the row-major logits. Example: [perplexity](/examples/rust/advanced/perplexity/).
 
 ## Reasoning
 
-`ReasoningEffort::{Off, Low, Medium, High, XHigh}` is accepted by `TextMessages::with_reasoning_effort`, `MultimodalMessages::with_reasoning_effort`, `RequestBuilder::with_reasoning_effort`, and `AgentBuilder::with_reasoning_effort`. The existing `enable_thinking(bool)` or `with_enable_thinking(bool)` methods remain available. Omission leaves effort unspecified with thinking enabled; contradictory explicit controls return a request-validation error.
+`ReasoningEffort::{Off, Low, Medium, High, XHigh}` is accepted by `TextMessages::with_reasoning_effort`, `MultimodalMessages::with_reasoning_effort` and `RequestBuilder::with_reasoning_effort`. `enable_thinking(bool)` is available on the same three. Leaving both out leaves the effort unspecified with thinking enabled; contradictory explicit controls return a request-validation error.
 
 ```rust
 let messages = TextMessages::new()
@@ -44,101 +48,61 @@ The effort is passed to the model's chat template; it does not change sampling p
 ## Structured output
 
 ```rust
-async fn generate_structured<T>(&self, messages: impl Into<RequestBuilder>) -> Result<T>
+async fn generate_structured<T>(&self, request: impl Into<RequestBuilder>) -> Result<T>
 where T: DeserializeOwned + JsonSchema
 ```
 Constrains generation to the JSON schema derived from `T` (via `schemars`), then deserializes the reply into `T`. Example: [structured](/examples/rust/cookbook/structured/).
 
-## Agentic tools
+## Tools and agents
 
-Enable built-in executors on the model builder, then opt in per request:
+The engine runs the tool loop. Give the builder tools (a `#[tool]` function's `*_tool_with_callback()`, MCP servers, code execution, the shell), and a chat request runs every call the model makes, round after round, up to `max_tool_rounds`:
 
 ```rust
 let model = ModelBuilder::new("Qwen/Qwen3-4B")
+    .with_tool(get_weather_tool_with_callback())
     .with_code_execution(CodeExecutionConfig::default())
-    .with_shell_execution(ShellConfig::default())
+    .with_max_tool_rounds(6)
     .build()
     .await?;
 
-let req = RequestBuilder::from(messages)
-    .with_code_execution()
-    .with_shell_skill("my-skill", "Local task-specific skill.", "skills/my-skill")
-    .with_max_tool_rounds(6);
+let request = RequestBuilder::from(messages).with_code_execution();
+let response = model.send_chat_request(request).await?;
 ```
 
-`with_input_file(InputFile::from_text(...))` attaches user-provided request files. `with_shell_execution()` enables plain shell for a request. `with_shell_skill(...)` mounts a local skill directory using the same directory shape as OpenAI-compatible Skills. Guides: [file inputs](/guides/agents/file-inputs/), [code execution](/guides/agents/enable-code-execution/), [shell execution](/guides/agents/enable-shell/), [OpenAI-compatible Skills](/guides/agents/skills/). Examples: [file inputs](/examples/rust/advanced/file-inputs/), [code execution](/examples/rust/advanced/code-execution/), [shell](/examples/rust/advanced/shell/), [shell skills](/examples/rust/advanced/shell-skills/).
+The response's `agentic_tool_calls` records each call; a stream carries `AgenticToolCallProgress` events. Tools can also be registered after load with `model.register_tool(...)` and offered per request with `RequestBuilder::with_host_tool(name)`. `with_input_file(InputFile::from_text(...))` attaches request files, `with_shell_execution()` offers the shell, and `with_shell_skill(id)` mounts a skill uploaded to the engine's skill store. With `AgentPermission::Ask`, `with_agent_approval_callback` answers each approval in process. Guides: [build an agent](/guides/agents/build-an-agent/), [file inputs](/guides/agents/file-inputs/), [code execution](/guides/agents/enable-code-execution/), [shell execution](/guides/agents/enable-shell/), [OpenAI-compatible Skills](/guides/agents/skills/).
+
+## Logits processors
+
+`RequestBuilder::add_logits_processor(processor)` runs a processor on one request's logits each step, after the penalties; `inference::in_place(|logits, context| ...)` builds one from a closure over the `f32` logits. `model.register_logits_processor(name, processor)` makes one selectable by name from any request. Example: [logits processor](/examples/rust/advanced/logits-processor/).
 
 ## Embeddings
 
 ```rust
-async fn generate_embeddings(&self, request: EmbeddingRequestBuilder) -> Result<Vec<Vec<f32>>>
+async fn generate_embeddings(&self, request: EmbeddingRequest) -> Result<EmbeddingResponse>
 ```
-One embedding vector per input, in insertion order. Example: [embeddings](/examples/rust/advanced/embeddings/).
+One embedding per input, in order; build the request with `EmbeddingRequestBuilder`. Example: [embeddings](/examples/rust/advanced/embeddings/).
 
 ```rust
-async fn generate_embedding(&self, prompt: impl ToString) -> Result<Vec<f32>>
+async fn generate_embedding(&self, text: impl Into<String>) -> Result<Vec<f32>>
 ```
 Single-input convenience wrapper.
 
 ## Image and speech generation
 
 ```rust
-async fn generate_image(&self, prompt: impl ToString, response_format: ImageGenerationResponseFormat,
-    generation_params: DiffusionGenerationParams, save_file: Option<PathBuf>) -> Result<ImageGenerationResponse>
+async fn generate_image(&self, request: ImageGenerationRequest) -> Result<ImageGenerationResponse>
+async fn generate_speech(&self, request: SpeechGenerationRequest) -> Result<SpeechAudio>
 ```
-Diffusion image generation. Example: [diffusion](/examples/rust/models/diffusion/).
-
-```rust
-async fn generate_speech(&self, prompt: impl ToString) -> Result<(Arc<Vec<f32>>, usize, usize)>
-```
-Text to speech; returns `(pcm, sample_rate, channels)`. Example: [speech](/examples/rust/models/speech/).
+Diffusion image generation and text to speech, taking the same requests as `/v1/images/generations` and `/v1/audio/speech`. Examples: [diffusion](/examples/rust/models/diffusion/), [speech](/examples/rust/models/speech/).
 
 ## Quantization
 
-```rust
-async fn re_isq_model(&self, isq_type: IsqType) -> Result<()>
-```
-Reapply [ISQ (in-situ quantization)](/reference/quantization-types/) to the loaded model in place, on whatever device it is already on.
-
-```rust
-async fn begin_calibration(&self) -> Result<CalibrationStatus>
-async fn calibration_status(&self) -> Result<CalibrationStatus>
-async fn apply_calibration(&self, save_cimatrix: Option<PathBuf>) -> Result<CalibrationStatus>
-```
-Online calibration trio (model must be loaded with ISQ):
-
-- `begin_calibration` - start collecting activation statistics from live traffic.
-- `calibration_status` - report per-layer progress.
-- `apply_calibration` - requantize from source weights and hot-swap the layers; `save_cimatrix` optionally writes the importance matrix to a `.cimatrix` file for reuse.
-
-Guide: [online calibration](/guides/quantization/online-calibration/); example: [online-calibration](/examples/rust/quantization/online-calibration/).
+Through the engine: `re_isq(ReIsqRequest)` reapplies [ISQ (in-situ quantization)](/reference/quantization-types/) to a loaded model, and `calibration(CalibrationAction::{Start, Status, Apply}, model)` runs online calibration (the model must be loaded with ISQ). Guide: [online calibration](/guides/quantization/online-calibration/); example: [online-calibration](/examples/rust/quantization/online-calibration/).
 
 ## Tokenization
 
-```rust
-async fn tokenize(&self, text: Either<TextMessages, String>, tools: Option<Vec<Tool>>,
-    add_special_tokens: bool, add_generation_prompt: bool, enable_thinking: Option<bool>) -> Result<Vec<u32>>
-```
-Tokenize raw text or chat messages (messages go through the chat template; `tools` only applies to messages).
+Through the engine: `tokenize(TokenizeRequest)` tokenizes text, `tokenize_chat(ChatCompletionRequest)` tokenizes a chat as its template renders it (tools, reasoning controls and generation prompt included), and `detokenize(DetokenizeRequest)` reverses either.
 
-```rust
-async fn tokenize_with_reasoning_effort(&self, text: Either<TextMessages, String>,
-    tools: Option<Vec<Tool>>, add_special_tokens: bool, add_generation_prompt: bool,
-    enable_thinking: Option<bool>, reasoning_effort: Option<ReasoningEffort>) -> Result<Vec<u32>>
-```
+## Management
 
-Use this variant for chat messages when tokenization must reflect an explicit effort. Raw strings are tokenized directly and do not render the chat template.
-
-```rust
-async fn detokenize(&self, tokens: Vec<u32>, skip_special_tokens: bool) -> Result<String>
-```
-
-## Introspection and management
-
-- `config() -> Result<InferenceRsConfig>`: modalities and device info for the loaded model.
-- `max_sequence_length() -> Result<Option<usize>>`.
-- Multi-model: `list_models`, `add_model`, `remove_model`, `unload_model`, `reload_model`, `get_default_model_id`, `set_default_model_id`, `list_models_with_status`. Example: [multi-model](/examples/rust/advanced/multi-model/).
-- Sessions: `export_session`, `import_session`, `delete_session`, `fork_session`, `list_session_ids`. Guide: [sessions](/guides/agents/persist-sessions/).
-- `list_mcp_tools(model_id)`: [MCP (Model Context Protocol)](/guides/agents/connect-mcp-server/)-provided tools registered for a model, as `(name, description)` pairs.
-- `find_file(id)`: fetch the full body of a file emitted by the agentic runtime.
-- `inner() -> &InferenceRs`: escape hatch to the underlying engine; `Model::new(Arc<InferenceRs>)` wraps one back up.
+Through the engine: `models()`, `add_model(ModelSpec)`, `remove_model`, `unload_model`, `reload_model`, `model_status`, `set_default_model`, `add_model_alias`; sessions (`sessions`, `session`, `put_session`, `fork_session`, `delete_session`); LoRA adapters; files (`files`, `file_content`); `mcp_tools()`. A `MultiModelBuilder` loads several models into one engine. Example: [multi-model](/examples/rust/advanced/multi-model/); guide: [sessions](/guides/agents/persist-sessions/).

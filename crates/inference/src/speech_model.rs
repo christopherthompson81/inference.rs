@@ -1,92 +1,72 @@
-use inference_core::*;
+//! A speech synthesis model.
 
-use crate::Model;
-use crate::model_builder_trait::{build_model_from_pipeline, build_speech_pipeline};
+use inference_api::engine::{ModelDType, ModelSelected, SpeechGenerationSpec, SpeechLoaderType};
 
-/// Configure a speech model (text-to-speech) with the various parameters for loading, running, and other inference behaviors.
+use crate::{Model, error::Result, load::LoadOptions};
+
+/// Loads a speech model of the given architecture.
 pub struct SpeechModelBuilder {
-    // Loading model
     pub(crate) model_id: String,
     pub(crate) dac_model_id: Option<String>,
-    pub(crate) token_source: TokenSource,
-    pub(crate) hf_revision: Option<String>,
-    pub(crate) cfg: Option<SpeechGenerationConfig>,
-
-    // Model running
     pub(crate) loader_type: SpeechLoaderType,
     pub(crate) dtype: ModelDType,
-    pub(crate) force_cpu: bool,
-
-    // Other things
-    pub(crate) max_num_seqs: usize,
-    pub(crate) with_logging: bool,
+    pub(crate) generation: Option<SpeechGenerationSpec>,
+    pub(crate) options: LoadOptions,
 }
 
 impl SpeechModelBuilder {
-    /// A few defaults are applied here:
-    /// - Token source is from the cache (.cache/huggingface/token)
-    /// - Maximum number of sequences running is 32
     pub fn new(model_id: impl ToString, loader_type: SpeechLoaderType) -> Self {
         Self {
             model_id: model_id.to_string(),
+            dac_model_id: None,
             loader_type,
             dtype: ModelDType::Auto,
-            force_cpu: false,
-            token_source: TokenSource::CacheToken,
-            hf_revision: None,
-            max_num_seqs: 32,
-            with_logging: false,
-            cfg: None,
-            dac_model_id: None,
+            generation: None,
+            options: LoadOptions::new(),
         }
     }
 
-    /// DAC Model ID to load from. If not provided, this is automatically downloaded from the default path for the model.
-    /// This may be a HF hub repo or a local path.
-    pub fn with_dac_model_id(mut self, dac_model_id: String) -> Self {
-        self.dac_model_id = Some(dac_model_id);
+    load_options_methods!();
+
+    /// The audio codec the model decodes through, when not the architecture's default.
+    pub fn with_dac_model_id(mut self, dac_model_id: impl ToString) -> Self {
+        self.dac_model_id = Some(dac_model_id.to_string());
         self
     }
 
-    /// Load the model in a certain dtype.
     pub fn with_dtype(mut self, dtype: ModelDType) -> Self {
         self.dtype = dtype;
         self
     }
 
-    /// Force usage of the CPU device. Do not use PagedAttention with this.
-    pub fn with_force_cpu(mut self) -> Self {
-        self.force_cpu = true;
+    /// Sampling for every generation; unset fields keep the architecture's defaults.
+    pub fn with_generation(mut self, generation: SpeechGenerationSpec) -> Self {
+        self.generation = Some(generation);
         self
     }
 
-    /// Source of the Hugging Face token.
-    pub fn with_token_source(mut self, token_source: TokenSource) -> Self {
-        self.token_source = token_source;
-        self
+    pub(crate) fn model_selected(&self) -> ModelSelected {
+        ModelSelected::Speech {
+            model_id: self.model_id.clone(),
+            dac_model_id: self.dac_model_id.clone(),
+            arch: self.loader_type,
+            dtype: self.dtype,
+            generation: self.generation.clone(),
+        }
     }
 
-    /// Set the revision to use for a Hugging Face remote model.
-    pub fn with_hf_revision(mut self, revision: impl ToString) -> Self {
-        self.hf_revision = Some(revision.to_string());
-        self
+    pub fn into_spec(
+        self,
+    ) -> (
+        inference_api::EngineSpec,
+        inference_api::engine::EngineCallbacks,
+    ) {
+        let model = self.model_selected();
+        self.options.spec(model)
     }
 
-    /// Set the maximum number of sequences which can be run at once.
-    pub fn with_max_num_seqs(mut self, max_num_seqs: usize) -> Self {
-        self.max_num_seqs = max_num_seqs;
-        self
-    }
-
-    /// Enable logging.
-    pub fn with_logging(mut self) -> Self {
-        self.with_logging = true;
-        self
-    }
-
-    /// Load the speech model and return a ready-to-use [`Model`].
-    pub async fn build(self) -> anyhow::Result<Model> {
-        let (pipeline, scheduler_config, add_model_config) = build_speech_pipeline(self).await?;
-        Ok(build_model_from_pipeline(pipeline, scheduler_config, add_model_config).await)
+    pub async fn build(self) -> Result<Model> {
+        let model = self.model_selected();
+        self.options.load(model).await
     }
 }

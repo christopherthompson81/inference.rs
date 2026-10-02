@@ -84,7 +84,7 @@ The [Rust SDK reference](/reference/rust-sdk/) lists the full `Model` surface; s
 use anyhow::Result;
 use futures::StreamExt;
 use inference::{
-    ChatCompletionChunkResponse, ChunkChoice, Delta, IsqBits, ModelBuilder, Response,
+    ChatCompletionChunkResponse, ChatStreamEvent, ChunkChoice, Delta, IsqBits, ModelBuilder,
     TextMessageRole, TextMessages,
 };
 use std::io::Write;
@@ -105,8 +105,8 @@ async fn main() -> Result<()> {
     let stdout = std::io::stdout();
     let mut out = std::io::BufWriter::new(stdout.lock());
 
-    while let Some(item) = stream.next().await {
-        if let Response::Chunk(ChatCompletionChunkResponse { choices, .. }) = item {
+    while let Some(event) = stream.next().await {
+        if let ChatStreamEvent::Chunk(ChatCompletionChunkResponse { choices, .. }) = event {
             if let Some(ChunkChoice {
                 delta: Delta { content: Some(text), .. },
                 ..
@@ -122,10 +122,10 @@ async fn main() -> Result<()> {
 }
 ```
 
-The stream yields `Response` values. Most are `Response::Chunk` carrying assistant output in `choices[0].delta.content`; other variants cover errors and the final completion event, and production code should match them explicitly. The [streaming guide](/guides/rust/streaming/) covers the variant taxonomy, error handling, and tool-call progress events.
+The stream yields `ChatStreamEvent`s. Most are `Chunk`s carrying assistant output in `choices[0].delta.content`; an `Error` ends the stream, and tool-run events arrive when the engine runs tools. Production code should match them explicitly; the [streaming guide](/guides/rust/streaming/) covers each event.
 
 ## Notes
 
-`ModelBuilder::build()` performs all model loading and is expensive. Call it once at startup. `Model` methods take `&self` and are safe to call concurrently, so you can share one instance by reference. To move it across spawned tasks, wrap it in `Arc<Model>` (`Model` does not implement `Clone`).
+`ModelBuilder::build()` performs all model loading and is expensive. Call it once at startup. `Model` methods take `&self` and are safe to call concurrently, and `Model` is a cheap `Clone` that shares the loaded engine, so a clone can move into a spawned task.
 
-Requests through the Rust SDK bypass the HTTP layer; there is no `/v1/chat/completions` endpoint and no OpenAI compatibility shim. To expose a model over HTTP alongside direct in-process access, see the [embed-in-axum guide](/guides/rust/embed-in-axum/).
+Requests through the Rust SDK skip HTTP: they go to the same engine the server uses, as the same `ChatCompletionRequest` types, in process. To expose a model over HTTP alongside direct in-process access, see the [embed-in-axum guide](/guides/rust/embed-in-axum/).

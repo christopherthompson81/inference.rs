@@ -140,7 +140,7 @@ Use `session_id` when your app needs continuity across requests: message history
 | Surface | Current behavior |
 |---|---|
 | HTTP | Best surface for live model chunks, tool-progress timelines, files, and agent approval events. |
-| Rust SDK | Supports request input files via `InputFile` and `RequestBuilder::with_input_file(...)`; `Model::stream_chat_request` yields raw `Response::AgenticToolCallProgress` events. |
+| Rust SDK | Supports request input files via `InputFile` and `RequestBuilder::with_input_file(...)`; `Model::stream_chat_request` yields `ChatStreamEvent::AgenticToolCallProgress` events. |
 | Python SDK | Supports request input files via `InputFile`, plus agentic requests, callbacks, code execution, shell, local skill mounts, and sessions. The streaming iterator currently yields model chunks; use HTTP SSE for the full timeline. |
 | Web UI | Renders code execution, shell, search, reasoning blocks, generated media, and approval cards inline. |
 

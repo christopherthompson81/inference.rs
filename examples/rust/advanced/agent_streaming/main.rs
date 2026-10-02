@@ -2,7 +2,7 @@
 //!
 //! This example shows how to:
 //! 1. Define sync and async tools using the `#[tool]` macro
-//! 2. Create an agent with registered tools
+//! 2. Register the tools on the model, so the engine runs the tool loop
 //! 3. Run the agentic loop with streaming output
 //! 4. Process streaming events in real-time
 //! 5. Execute tools in parallel
@@ -13,8 +13,8 @@
 
 use anyhow::Result;
 use inference::{
-    AgentBuilder, AgentEvent, AgentStopReason, IsqBits, ModelBuilder, PagedAttentionMetaBuilder,
-    tool,
+    AgenticToolCallData, AgenticToolCallPhase, ChatStreamEvent, IsqBits, ModelBuilder,
+    PagedAttentionMetaBuilder, RequestBuilder, TextMessageRole, tool,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -94,105 +94,69 @@ async fn web_search(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Build the model
-    // Using a model that supports tool calling (e.g., Llama 3.1, Qwen, Mistral)
+    // get_weather runs on a blocking thread, web_search natively async; a round's calls run in parallel
     let model = ModelBuilder::new("google/gemma-4-E4B-it")
         .with_auto_isq(IsqBits::Four)
         .with_logging()
         .with_paged_attn(PagedAttentionMetaBuilder::default().build()?)
+        .with_tool(get_weather_tool_with_callback())
+        .with_tool(web_search_tool_with_callback())
+        .with_max_tool_rounds(5)
         .build()
         .await?;
 
-    // Create the agent with registered tools
-    // - get_weather is a sync tool (runs in spawn_blocking)
-    // - web_search is an async tool (runs natively async)
-    // Both can execute in parallel when the model calls multiple tools
-    let agent = AgentBuilder::new(model)
-        .with_system_prompt(
+    let user_message =
+        "What's the weather like in Boston, and can you find me some good restaurants there?";
+    println!("=== Agent with Streaming Output ===\n");
+    println!("User: {user_message}\n");
+    print!("Assistant: ");
+
+    let request = RequestBuilder::new()
+        .add_message(
+            TextMessageRole::System,
             "You are a helpful assistant with access to weather and web search tools. \
              Use them when needed to answer user questions accurately.",
         )
-        .with_max_iterations(5)
-        .with_parallel_tool_execution(true) // Enable parallel tool execution (default)
-        .register_tool(get_weather_tool_with_callback())
-        .register_tool(web_search_tool_with_callback())
-        .build();
-
-    println!("=== Agent with Streaming Output ===\n");
-    println!(
-        "User: What's the weather like in Boston, and can you find me some good restaurants there?\n"
-    );
-    print!("Assistant: ");
-
-    // Run the agent with streaming output
-    let mut stream = agent
-        .run_stream(
-            "What's the weather like in Boston, and can you find me some good restaurants there?",
-        )
-        .await?;
+        .add_message(TextMessageRole::User, user_message);
+    let mut stream = model.stream_chat_request(request).await?;
 
     let stdout = std::io::stdout();
     let mut handle = stdout.lock();
+    let mut tool_calls = 0;
 
-    // Process streaming events
     while let Some(event) = stream.next().await {
         match event {
-            AgentEvent::TextDelta(text) => {
-                // Print text as it streams - this gives real-time output
-                write!(handle, "{}", text)?;
-                handle.flush()?;
-            }
-            AgentEvent::ToolCallsStart(calls) => {
-                // Model is about to call tools
-                writeln!(handle, "\n\n[Calling {} tool(s)...]", calls.len())?;
-                for call in &calls {
-                    writeln!(
-                        handle,
-                        "  - {}: {}",
-                        call.function.name, call.function.arguments
-                    )?;
+            ChatStreamEvent::Chunk(chunk) => {
+                let Some(choice) = chunk.choices.first() else {
+                    continue;
+                };
+                if let Some(text) = &choice.delta.content {
+                    write!(handle, "{text}")?;
+                    handle.flush()?;
+                }
+                if let Some(reason) = &choice.finish_reason {
+                    writeln!(handle, "\n\n=== Agent Execution Summary ===")?;
+                    writeln!(handle, "Tool calls: {tool_calls}")?;
+                    writeln!(handle, "Finish reason: {reason}")?;
                 }
             }
-            AgentEvent::ToolResult(result) => {
-                // A single tool finished execution
-                let status = if result.result.is_ok() { "OK" } else { "ERROR" };
-                writeln!(
-                    handle,
-                    "  [Tool {} completed: {}]",
-                    result.tool_name, status
-                )?;
-            }
-            AgentEvent::ToolCallsComplete => {
-                // All tools finished, model will continue generating
-                writeln!(handle, "[All tools completed, continuing...]\n")?;
-                write!(handle, "Assistant: ")?;
-                handle.flush()?;
-            }
-            AgentEvent::Complete(response) => {
-                // Agent finished executing
-                writeln!(handle, "\n\n=== Agent Execution Summary ===")?;
-                writeln!(handle, "Completed in {} iteration(s)", response.iterations)?;
-                writeln!(handle, "Stop reason: {:?}", response.stop_reason)?;
-                writeln!(handle, "Steps taken: {}", response.steps.len())?;
-
-                match response.stop_reason {
-                    AgentStopReason::TextResponse => {
-                        writeln!(handle, "Final response delivered successfully.")?;
-                    }
-                    AgentStopReason::MaxIterations => {
-                        writeln!(
-                            handle,
-                            "Agent reached maximum iterations without producing a final response."
-                        )?;
-                    }
-                    AgentStopReason::NoAction => {
-                        writeln!(handle, "Agent produced no response.")?;
-                    }
-                    AgentStopReason::Error(e) => {
-                        writeln!(handle, "Agent encountered an error: {}", e)?;
-                    }
+            ChatStreamEvent::AgenticToolCallProgress(progress) => match progress.phase {
+                AgenticToolCallPhase::Calling(data) => {
+                    tool_calls += 1;
+                    let arguments = match data {
+                        AgenticToolCallData::Custom { arguments, .. } => arguments,
+                        _ => String::new(),
+                    };
+                    writeln!(handle, "\n\n[Calling {}: {arguments}]", progress.tool_name)?;
                 }
-            }
+                AgenticToolCallPhase::Complete(_) => {
+                    writeln!(handle, "  [Tool {} completed]", progress.tool_name)?;
+                    write!(handle, "Assistant: ")?;
+                    handle.flush()?;
+                }
+            },
+            ChatStreamEvent::Error(error) => return Err(error.into()),
+            _ => {}
         }
     }
 

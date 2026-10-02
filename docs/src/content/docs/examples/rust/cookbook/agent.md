@@ -12,16 +12,18 @@ Runnable Rust SDK example `agent`.
 <!-- needs-header -->
 
 ```rust
-/// Code review agent using the `#[tool]` macro and `AgentBuilder`.
+/// Code review agent using the `#[tool]` macro and the engine's tool loop.
 ///
 /// Demonstrates:
 /// - Defining a tool with the `#[tool]` proc macro
-/// - Building an agent that can call the tool
+/// - Registering the tool on the model so the engine can call it
 /// - Running the agent loop for a code review task
 ///
 /// Run with: `cargo run --release --example cookbook_agent -p inference-examples`
 use anyhow::Result;
-use inference::{AgentBuilder, IsqBits, ModelBuilder, PagedAttentionMetaBuilder, tool};
+use inference::{
+    IsqBits, ModelBuilder, PagedAttentionMetaBuilder, RequestBuilder, TextMessageRole, tool,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -61,31 +63,33 @@ async fn main() -> Result<()> {
         .with_auto_isq(IsqBits::Four)
         .with_logging()
         .with_paged_attn(PagedAttentionMetaBuilder::default().build()?)
+        .with_tool(read_file_tool_with_callback())
+        .with_max_tool_rounds(3)
         .build()
         .await?;
 
-    let agent = AgentBuilder::new(model)
-        .with_system_prompt(
+    println!("=== Code Review Agent ===\n");
+
+    let request = RequestBuilder::new()
+        .add_message(
+            TextMessageRole::System,
             "You are an expert Rust code reviewer. When asked to review code, \
              use the read_file tool to read the file, then provide specific, \
              actionable feedback on code quality, idiomatic Rust usage, and \
              potential bugs.",
         )
-        .with_max_iterations(3)
-        .register_tool(read_file_tool_with_callback())
-        .build();
+        .add_message(
+            TextMessageRole::User,
+            "Please review the file src/main.rs and suggest improvements.",
+        );
+    let response = model.send_chat_request(request).await?;
 
-    println!("=== Code Review Agent ===\n");
-
-    let response = agent
-        .run("Please review the file src/main.rs and suggest improvements.")
-        .await?;
-
-    if let Some(text) = &response.final_response {
+    if let Some(text) = &response.choices[0].message.content {
         println!("Review:\n{text}");
     }
 
-    println!("\nCompleted in {} iteration(s)", response.iterations);
+    let calls = response.agentic_tool_calls.unwrap_or_default();
+    println!("\nCompleted with {} tool call(s)", calls.len());
 
     Ok(())
 }

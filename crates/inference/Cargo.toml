@@ -13,24 +13,23 @@ license.workspace = true
 homepage.workspace = true
 
 [dependencies]
-inference-core.workspace = true
-inference-selection.workspace = true
-inference-agent.workspace = true
+inference-api.workspace = true
 inference-macros.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
-candle-core.workspace = true
-candle-nn.workspace = true
 serde_json.workspace = true
 serde.workspace = true
 schemars.workspace = true
 image.workspace = true
-indexmap.workspace = true
 either.workspace = true
 futures.workspace = true
+base64.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
+candle-core.workspace = true
+candle-nn.workspace = true
 indicatif.workspace = true
 inference-models-llama.workspace = true
 inference-models-other.workspace = true
@@ -46,28 +45,28 @@ no-default-features = true
 
 [features]
 default = ["all-models"]
-all-models = ["inference-core/all-models"]
-models-gemma = ["inference-core/models-gemma"]
-models-llama = ["inference-core/models-llama"]
-models-other = ["inference-core/models-other"]
-models-phi = ["inference-core/models-phi"]
-models-qwen = ["inference-core/models-qwen"]
+all-models = ["inference-api/all-models"]
+models-gemma = ["inference-api/models-gemma"]
+models-llama = ["inference-api/models-llama"]
+models-other = ["inference-api/models-other"]
+models-phi = ["inference-api/models-phi"]
+models-qwen = ["inference-api/models-qwen"]
 # NVIDIA CUDA GPU support
-cuda = ["inference-core/cuda", "inference-selection/cuda"]
-cutile = ["cuda", "inference-core/cutile", "inference-selection/cutile"]
+cuda = ["inference-api/cuda"]
+cutile = ["cuda", "inference-api/cutile"]
 # cuDNN acceleration (requires cuda)
-cudnn = ["inference-core/cudnn", "inference-selection/cudnn"]
+cudnn = ["inference-api/cudnn"]
 # Apple Metal GPU support (macOS/iOS)
-metal = ["inference-core/metal", "inference-selection/metal"]
+metal = ["inference-api/metal"]
 # Flash Attention 2 kernels (requires cuda)
-flash-attn = ["cuda", "inference-core/flash-attn", "inference-selection/flash-attn"]
+flash-attn = ["cuda", "inference-api/flash-attn"]
 # Apple Accelerate framework for BLAS operations
-accelerate = ["inference-core/accelerate", "inference-selection/accelerate"]
+accelerate = ["inference-api/accelerate"]
 # Intel MKL acceleration for BLAS operations
-mkl = ["inference-core/mkl", "inference-selection/mkl"]
+mkl = ["inference-api/mkl"]
 # Multi-GPU support via NCCL (requires cuda)
-nccl = ["inference-core/nccl"]
+nccl = ["inference-api/nccl"]
 # Use ring instead of aws-lc-rs for TLS
-ring = ["inference-core/ring"]
+ring = ["inference-api/ring"]
 # Python code execution tool
-code-execution = ["inference-core/code-execution"]
+code-execution = ["inference-api/code-execution"]

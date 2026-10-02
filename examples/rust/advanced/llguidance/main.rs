@@ -34,7 +34,7 @@ async fn main() -> Result<()> {
     };
 
     let request = RequestBuilder::new()
-        .set_constraint(inference::Constraint::Llguidance(LlguidanceGrammar {
+        .set_grammar(inference::Grammar::Llguidance(LlguidanceGrammar {
             grammars: vec![top, schema],
             max_tokens: None,
         }))

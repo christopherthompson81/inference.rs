@@ -1,200 +1,161 @@
-use candle_core::Device;
-use inference_core::*;
-use inference_core::{SearchCallback, Tool, ToolCallback, ToolCallbackKind};
+//! Any model, its kind detected from its config the way `inference run` does.
 
-use crate::{IsqBits, IsqSetting};
-use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::Arc;
 
-use crate::Model;
-use crate::model_builder_trait::{build_auto_pipeline, build_model_from_pipeline};
+use inference_api::engine::{IsqOrganization, ModelDType, ModelSelected, UqffWriteConfig};
 
-#[derive(Clone)]
-/// Configure a model with automatic detection of model type (text, multimodal, embedding, etc.).
-///
-/// This builder works like the CLI `run` command: it reads the model's `config.json` at build time
-/// to determine whether it should be loaded as a text, multimodal, or embedding model.
-///
-/// Use this when you don't know (or don't care) whether a model ID corresponds to a text or
-/// multimodal architecture. For example, `google/gemma-4-E4B-it` is detected as multimodal,
-/// while `Qwen/Qwen3-4B` is detected as text, both work seamlessly.
-///
-/// # Example
-///
-/// ```no_run
-/// use inference::{IsqBits, ModelBuilder, TextMessages, TextMessageRole};
-///
-/// #[tokio::main]
-/// async fn main() -> anyhow::Result<()> {
-///     let model = ModelBuilder::new("Qwen/Qwen3-4B")
-///         .with_auto_isq(IsqBits::Four)
-///         .with_logging()
-///         .build()
-///         .await?;
-///
-///     let messages = TextMessages::new()
-///         .add_message(TextMessageRole::User, "Hello!");
-///     let response = model.send_chat_request(messages).await?;
-///     println!("{}", response.choices[0].message.content.as_ref().unwrap());
-///     Ok(())
-/// }
-/// ```
+use crate::{Model, error::Result, load::LoadOptions, text_model::uqff_files};
+
+/// Loads a text, multimodal or embedding model by detecting its kind; every option has the engine's default until set.
 pub struct ModelBuilder {
-    // Shared fields (see builder_macros.rs for the canonical list)
     pub(crate) model_id: String,
-    pub(crate) token_source: TokenSource,
-    pub(crate) hf_revision: Option<String>,
+    pub(crate) quant: Option<String>,
+    pub(crate) dtype: ModelDType,
+    pub(crate) tokenizer_json: Option<String>,
+    pub(crate) topology: Option<String>,
+    pub(crate) organization: Option<IsqOrganization>,
     pub(crate) write_uqff: Option<UqffWriteConfig>,
     pub(crate) from_uqff: Option<Vec<PathBuf>>,
     pub(crate) imatrix: Option<PathBuf>,
     pub(crate) calibration_file: Option<PathBuf>,
-    pub(crate) chat_template: Option<String>,
-    pub(crate) jinja_explicit: Option<String>,
-    pub(crate) tokenizer_json: Option<String>,
-    pub(crate) device_mapping: Option<DeviceMapSetting>,
+    pub(crate) max_edge: Option<u32>,
     pub(crate) hf_cache_path: Option<PathBuf>,
-    pub(crate) hf_config_overrides: Option<HfConfigOverrides>,
-    pub(crate) max_model_len: Option<usize>,
-    pub(crate) search_embedding_model: Option<SearchEmbeddingModel>,
-    pub(crate) search_callback: Option<Arc<SearchCallback>>,
-    pub(crate) tool_callbacks: HashMap<String, ToolCallbackWithTool>,
-    pub(crate) mtp_config: Option<MtpConfig>,
-    pub(crate) device: Option<Device>,
     pub(crate) matformer_config_path: Option<PathBuf>,
     pub(crate) matformer_slice_name: Option<String>,
-    pub(crate) topology: Option<Topology>,
-    pub(crate) topology_path: Option<String>,
-    pub(crate) organization: IsqOrganization,
-    pub(crate) dtype: ModelDType,
-    pub(crate) force_cpu: bool,
-    pub(crate) isq: Option<IsqSetting>,
-    pub(crate) throughput_logging: bool,
-    pub(crate) paged_attn_cfg: Option<PagedAttentionConfig>,
-    pub(crate) max_num_seqs: usize,
-    pub(crate) with_logging: bool,
-    pub(crate) prefix_cache_n: Option<usize>,
-
-    // Auto-model unique fields
-    pub(crate) max_edge: Option<u32>,
-    pub(crate) no_kv_cache: bool,
-    pub(crate) mcp_client_config: Option<McpClientConfig>,
-    pub(crate) code_exec_config: Option<inference_core::CodeExecutionConfig>,
-    pub(crate) shell_config: Option<inference_core::ShellConfig>,
-    pub(crate) encoder_cache_memory_bytes: Option<usize>,
+    pub(crate) options: LoadOptions,
 }
 
 impl ModelBuilder {
-    /// A few defaults are applied here:
-    /// - MoQE ISQ organization
-    /// - Token source is from the cache (.cache/huggingface/token)
-    /// - Maximum number of sequences running is 32
-    /// - Number of sequences to hold in prefix cache is 16.
-    /// - Automatic device mapping with model defaults according to `AutoDeviceMapParams`
     pub fn new(model_id: impl ToString) -> Self {
         Self {
             model_id: model_id.to_string(),
+            quant: None,
+            dtype: ModelDType::Auto,
+            tokenizer_json: None,
             topology: None,
-            topology_path: None,
-            organization: IsqOrganization::Default,
+            organization: None,
             write_uqff: None,
             from_uqff: None,
-            chat_template: None,
-            tokenizer_json: None,
-            dtype: ModelDType::Auto,
-            force_cpu: false,
-            token_source: TokenSource::CacheToken,
-            hf_revision: None,
-            isq: None,
-            paged_attn_cfg: None,
-            max_num_seqs: 32,
-            prefix_cache_n: Some(16),
-            with_logging: false,
-            device_mapping: None,
             imatrix: None,
             calibration_file: None,
-            jinja_explicit: None,
-            throughput_logging: false,
+            max_edge: None,
             hf_cache_path: None,
-            hf_config_overrides: None,
-            max_model_len: None,
-            search_embedding_model: None,
-            search_callback: None,
-            tool_callbacks: HashMap::new(),
-            mtp_config: None,
-            device: None,
             matformer_config_path: None,
             matformer_slice_name: None,
-            // Unique fields
-            max_edge: None,
-            no_kv_cache: false,
-            mcp_client_config: None,
-            code_exec_config: None,
-            shell_config: None,
-            encoder_cache_memory_bytes: None,
+            options: LoadOptions::new(),
         }
     }
 
-    // Shared methods from builder_macros.rs
-    common_builder_methods!();
+    load_options_methods!();
 
-    /// Configure MCP client to connect to external MCP servers and automatically
-    /// register their tools for use in automatic tool calling.
-    pub fn with_mcp_client(mut self, config: McpClientConfig) -> Self {
-        self.mcp_client_config = Some(config);
+    /// A quantization level (`4`, `q4k`, `auto`) resolved against what the repository publishes: one of its GGUF
+    /// files, else a prebuilt UQFF, else ISQ at that level. Replaces `with_isq` and `with_auto_isq`.
+    pub fn with_quant(mut self, quant: impl ToString) -> Self {
+        self.quant = Some(quant.to_string());
         self
     }
 
-    /// Enable Python code execution. **Security**: lets the model run arbitrary code on the host with full network and filesystem access.
-    pub fn with_code_execution(mut self, config: inference_core::CodeExecutionConfig) -> Self {
-        self.code_exec_config = Some(config);
+    pub fn with_dtype(mut self, dtype: ModelDType) -> Self {
+        self.dtype = dtype;
         self
     }
 
-    /// Enable shell execution.
-    pub fn with_shell_execution(mut self, config: inference_core::ShellConfig) -> Self {
-        self.shell_config = Some(config);
+    pub fn with_tokenizer_json(mut self, tokenizer_json: impl ToString) -> Self {
+        self.tokenizer_json = Some(tokenizer_json.to_string());
         self
     }
 
-    /// Disable KV cache. Trade performance for memory usage. Only applies to text models.
-    pub fn with_no_kv_cache(mut self) -> Self {
-        self.no_kv_cache = true;
+    pub fn with_topology_from_path(mut self, path: impl AsRef<std::path::Path>) -> Self {
+        self.topology = Some(path.as_ref().to_string_lossy().into_owned());
         self
     }
 
-    /// Automatically resize and pad images to this maximum edge length. Aspect ratio is preserved.
-    /// Only applies to multimodal models that support this (e.g., Qwen2-VL, Idefics 2).
+    pub fn with_mixture_qexperts_isq(mut self) -> Self {
+        self.organization = Some(IsqOrganization::MoeExpertsOnly);
+        self
+    }
+
+    pub fn write_uqff(mut self, config: impl Into<UqffWriteConfig>) -> Self {
+        self.write_uqff = Some(config.into());
+        self
+    }
+
+    pub fn from_uqff(mut self, files: Vec<PathBuf>) -> Self {
+        self.from_uqff = Some(files);
+        self
+    }
+
+    pub fn with_imatrix(mut self, path: PathBuf) -> Self {
+        self.imatrix = Some(path);
+        self
+    }
+
+    pub fn with_calibration_file(mut self, path: PathBuf) -> Self {
+        self.calibration_file = Some(path);
+        self
+    }
+
+    /// Resizes images so their longer edge is at most `max_edge` pixels, for a multimodal model.
     pub fn with_max_edge(mut self, max_edge: u32) -> Self {
         self.max_edge = Some(max_edge);
         self
     }
 
-    /// Set recursively merged Hugging Face config.json overrides.
-    pub fn with_hf_config_overrides(mut self, overrides: HfConfigOverrides) -> Self {
-        self.hf_config_overrides = Some(overrides);
+    pub fn with_encoder_cache_memory_bytes(mut self, bytes: usize) -> Self {
+        self.options.runtime.encoder_cache_memory_bytes = Some(bytes);
         self
     }
 
-    /// Set the runtime model context length.
-    pub fn with_max_model_len(mut self, max_model_len: usize) -> Self {
-        assert!(max_model_len > 0, "maximum model length must be nonzero");
-        self.max_model_len = Some(max_model_len);
+    pub fn from_hf_cache_path(mut self, path: PathBuf) -> Self {
+        self.hf_cache_path = Some(path);
         self
     }
 
-    pub fn with_encoder_cache_memory_bytes(mut self, max_bytes: usize) -> Self {
-        assert!(
-            max_bytes > 0,
-            "encoder cache memory capacity must be nonzero"
-        );
-        self.encoder_cache_memory_bytes = Some(max_bytes);
+    pub fn with_matformer_config_path(mut self, path: PathBuf) -> Self {
+        self.matformer_config_path = Some(path);
         self
     }
 
-    /// Load the model (auto-detecting type) and return a ready-to-use [`Model`].
-    pub async fn build(self) -> anyhow::Result<Model> {
-        let (pipeline, scheduler_config, add_model_config) = build_auto_pipeline(self).await?;
-        Ok(build_model_from_pipeline(pipeline, scheduler_config, add_model_config).await)
+    pub fn with_matformer_slice_name(mut self, name: String) -> Self {
+        self.matformer_slice_name = Some(name);
+        self
+    }
+
+    pub(crate) fn model_selected(&self) -> ModelSelected {
+        ModelSelected::Run {
+            model_id: self.model_id.clone(),
+            quant: self.quant.clone(),
+            tokenizer_json: self.tokenizer_json.clone(),
+            dtype: self.dtype,
+            topology: self.topology.clone(),
+            organization: self.organization,
+            write_uqff: self.write_uqff.clone(),
+            from_uqff: uqff_files(self.from_uqff.as_deref()),
+            imatrix: self.imatrix.clone(),
+            calibration_file: self.calibration_file.clone(),
+            max_edge: self.max_edge,
+            max_seq_len: self.options.auto_map.max_seq_len,
+            max_batch_size: self.options.auto_map.max_batch_size,
+            max_num_images: None,
+            max_image_length: None,
+            hf_cache_path: self.hf_cache_path.clone(),
+            matformer_config_path: self.matformer_config_path.clone(),
+            matformer_slice_name: self.matformer_slice_name.clone(),
+        }
+    }
+
+    pub fn into_spec(
+        self,
+    ) -> (
+        inference_api::EngineSpec,
+        inference_api::engine::EngineCallbacks,
+    ) {
+        let model = self.model_selected();
+        self.options.spec(model)
+    }
+
+    pub async fn build(self) -> Result<Model> {
+        let model = self.model_selected();
+        self.options.load(model).await
     }
 }

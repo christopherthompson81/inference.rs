@@ -28,7 +28,7 @@ Server startup makes the executor available. OpenAI-compatible clients opt into 
 }
 ```
 
-Native SDK users enable shell on the engine or model builder, then opt in on each request. The Python SDK uses `t.AgenticSpec(shell=t.ShellConfig())` on the engine spec plus `ChatCompletionRequest.enable_shell=True` (or the `shell` tool on a Responses request); the Rust SDK uses `.with_shell_execution(...)` on the model builder and request builder.
+Native SDK users enable shell on the engine or model builder, then opt in on each request. The Python SDK uses `t.AgenticSpec(shell=t.ShellConfig())` on the engine spec plus `ChatCompletionRequest.enable_shell=True` (or the `shell` tool on a Responses request); the Rust SDK uses `.with_shell(ShellConfig)` on the model builder and `.with_shell_execution()` on the request builder.
 
 ## Configuration
 
@@ -109,7 +109,7 @@ with ir.Engine(spec) as engine:
 use inference::{ModelBuilder, RequestBuilder, ShellConfig, TextMessageRole, TextMessages};
 
 let model = ModelBuilder::new("Qwen/Qwen3-4B")
-    .with_shell_execution(ShellConfig::default())
+    .with_shell(ShellConfig::default())
     .build()
     .await?;
 

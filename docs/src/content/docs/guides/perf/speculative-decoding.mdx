@@ -53,7 +53,7 @@ let model = inference::ModelBuilder::new("google/gemma-4-E4B-it")
     .await?;
 ```
 
-For full control, `with_mtp_config(MtpConfig { model, n_predict })` is equivalent. The MTP builder methods exist on the text, multimodal, and auto-detecting model builders.
+`with_builtin_mtp(n_predict)` drafts with the head built into the checkpoint instead. The MTP builder methods exist on every model builder.
 
 </TabItem>
 </Tabs>

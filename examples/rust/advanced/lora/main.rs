@@ -19,6 +19,7 @@ const BASE_MODEL: &str = "Qwen/Qwen2.5-0.5B-Instruct";
 const BASE_REVISION: &str = "7ae557604adf67be50417f59c2c2f167def9a775";
 const ADAPTER: &str = "closestfriend/brie-qwen2.5-0.5b";
 const ADAPTER_REVISION: &str = "acad7d767bece1486f2e6644820f784b3bcb6b5e";
+const ADAPTER_ALIAS: &str = "philosophy";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,7 +28,7 @@ async fn main() -> Result<()> {
             .with_hf_revision(BASE_REVISION)
             .with_logging(),
     )
-    .with_adapter_revision("philosophy", ADAPTER, ADAPTER_REVISION)
+    .with_adapter_revision(ADAPTER_ALIAS, ADAPTER, ADAPTER_REVISION)
     .build()
     .await?;
 
@@ -37,7 +38,7 @@ async fn main() -> Result<()> {
     );
 
     let response = model
-        .send_chat_request(RequestBuilder::from(messages).set_adapter("philosophy"))
+        .send_chat_request(RequestBuilder::from(messages).set_adapter(ADAPTER_ALIAS))
         .await?;
 
     println!("{}", response.choices[0].message.content.as_ref().unwrap());

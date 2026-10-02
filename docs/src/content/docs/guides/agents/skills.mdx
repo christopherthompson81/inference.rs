@@ -199,18 +199,16 @@ with ir.Engine(spec) as engine:
 use inference::{ModelBuilder, RequestBuilder, ShellConfig, TextMessageRole, TextMessages};
 
 let model = ModelBuilder::new("Qwen/Qwen3-4B")
-    .with_shell_execution(ShellConfig::default())
+    .with_shell(ShellConfig::default())
     .build()
     .await?;
 
+// Uploads the directory (its SKILL.md at the top) to the engine's skill store.
+let skill_id = model.upload_skill("skills/my-skill")?;
 let messages = TextMessages::new()
     .add_message(TextMessageRole::User, "Use my-skill to complete the task.");
 let req = RequestBuilder::from(messages)
-    .with_shell_skill(
-        "my-skill",
-        "Local task-specific skill.",
-        "skills/my-skill",
-    )
+    .with_shell_skill(skill_id)
     .with_max_tool_rounds(6);
 
 let resp = model.send_chat_request(req).await?;

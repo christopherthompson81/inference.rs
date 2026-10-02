@@ -3,20 +3,17 @@
 //! Run with:
 //! `cargo run --release --features code-execution --example code_execution_approval -p inference-examples`
 
-use std::{
-    io::{self, Write},
-    sync::Arc,
-};
+use std::io::{self, Write};
 
 use anyhow::Result;
 use inference::{
-    AgentPermission, AgentToolApprovalCallback, AgentToolApprovalDecision, CodeExecutionConfig,
-    IsqBits, ModelBuilder, RequestBuilder, TextMessageRole, TextMessages,
+    AgentPermission, AgentToolApproval, AgentToolApprovalDecision, CodeExecutionConfig, IsqBits,
+    ModelBuilder, RequestBuilder, TextMessageRole, TextMessages,
 };
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    let approval_callback: AgentToolApprovalCallback = Arc::new(|approval| {
+    let approval_callback = |approval: &AgentToolApproval| {
         println!("\nAgent action approval required");
         println!("approval_id: {}", approval.approval_id);
         println!("session_id: {}", approval.session_id);
@@ -50,7 +47,7 @@ async fn main() -> Result<()> {
                 _ => println!("Please enter y, n, or a."),
             }
         }
-    });
+    };
 
     let model = ModelBuilder::new("google/gemma-4-E4B-it")
         .with_auto_isq(IsqBits::Four)

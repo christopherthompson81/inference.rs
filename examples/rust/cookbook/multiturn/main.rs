@@ -8,7 +8,7 @@
 /// Run with: `cargo run --release --example cookbook_multiturn -p inference-examples`
 use anyhow::Result;
 use inference::{
-    ChatCompletionChunkResponse, ChunkChoice, Delta, IsqBits, ModelBuilder, Response,
+    ChatCompletionChunkResponse, ChatStreamEvent, ChunkChoice, Delta, IsqBits, ModelBuilder,
     TextMessageRole, TextMessages,
 };
 use std::io::{self, BufRead, Write};
@@ -52,7 +52,7 @@ async fn main() -> Result<()> {
         let mut assistant_text = String::new();
 
         while let Some(chunk) = stream.next().await {
-            if let Response::Chunk(ChatCompletionChunkResponse { choices, .. }) = chunk
+            if let ChatStreamEvent::Chunk(ChatCompletionChunkResponse { choices, .. }) = chunk
                 && let Some(ChunkChoice {
                     delta:
                         Delta {

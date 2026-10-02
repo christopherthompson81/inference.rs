@@ -9,10 +9,7 @@
 use std::io::Write;
 
 use anyhow::Result;
-use inference::{
-    ChatCompletionChunkResponse, ChunkChoice, Delta, MultimodalModelBuilder, Response,
-    TextMessageRole, TextMessages,
-};
+use inference::{ChatStreamEvent, MultimodalModelBuilder, TextMessageRole, TextMessages};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -27,19 +24,17 @@ async fn main() -> Result<()> {
     );
 
     let mut stream = model.stream_chat_request(messages).await?;
-    while let Some(chunk) = stream.next().await {
-        if let Response::Chunk(ChatCompletionChunkResponse { choices, .. }) = chunk
-            && let Some(ChunkChoice {
-                delta:
-                    Delta {
-                        content: Some(content),
-                        ..
-                    },
-                ..
-            }) = choices.first()
-        {
-            print!("{content}");
-            std::io::stdout().flush()?;
+    while let Some(event) = stream.next().await {
+        match event {
+            ChatStreamEvent::Chunk(chunk) => {
+                if let Some(content) = chunk.choices.first().and_then(|c| c.delta.content.as_ref())
+                {
+                    print!("{content}");
+                    std::io::stdout().flush()?;
+                }
+            }
+            ChatStreamEvent::Error(error) => return Err(error.into()),
+            _ => {}
         }
     }
     println!();

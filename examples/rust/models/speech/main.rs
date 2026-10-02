@@ -5,7 +5,9 @@
 use std::time::Instant;
 
 use anyhow::Result;
-use inference::{SpeechLoaderType, SpeechModelBuilder, speech_utils};
+use inference::{
+    AudioResponseFormat, SpeechGenerationRequest, SpeechLoaderType, SpeechModelBuilder,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -19,12 +21,12 @@ async fn main() -> Result<()> {
     // let text_to_speak = "[S1] Dia is an open weights text to dialogue model. [S2] You get full control over scripts and voices. [S1] Wow. Amazing. (laughs) [S2] Try it now on Git hub or Hugging Face.";
     let text_to_speak = "[S1] mistral r s is a local LLM inference engine. [S2] You can run text and vision models, and also image generation and speech generation. [S1] There is agentic web search, tool calling, and a convenient Python API. [S2] Check it out on github.";
 
-    let (pcm, rate, channels) = model.generate_speech(text_to_speak).await?;
+    let request = SpeechGenerationRequest::new(text_to_speak, AudioResponseFormat::Wav);
+    let audio = model.generate_speech(request).await?;
 
     let finished = Instant::now();
 
-    let mut output = std::fs::File::create("out.wav").unwrap();
-    speech_utils::write_pcm_as_wav(&mut output, &pcm, rate as u32, channels as u16).unwrap();
+    std::fs::write("out.wav", &audio.bytes)?;
 
     println!(
         "Done! Took {} s. Audio saved at `out.wav`.",

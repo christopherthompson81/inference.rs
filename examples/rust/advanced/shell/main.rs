@@ -7,8 +7,8 @@
 
 use anyhow::Result;
 use inference::{
-    IsqBits, ModelBuilder, NetworkMode, RequestBuilder, SandboxPolicy, ShellConfig,
-    TextMessageRole, TextMessages,
+    IsqBits, ModelBuilder, RequestBuilder, ShellConfig, TextMessageRole, TextMessages,
+    api::{engine::NetworkMode, sdk::SandboxPolicy},
 };
 
 #[tokio::main]
@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
     let model = ModelBuilder::new("google/gemma-4-E4B-it")
         .with_auto_isq(IsqBits::Four)
         .with_logging()
-        .with_shell_execution(ShellConfig {
+        .with_shell(ShellConfig {
             sandbox_policy: Some(sandbox),
             ..ShellConfig::default()
         })

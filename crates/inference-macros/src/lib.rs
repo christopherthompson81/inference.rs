@@ -30,7 +30,7 @@
 //! // This generates:
 //! // - get_weather_tool() -> Tool
 //! // - get_weather_callback() -> Arc<ToolCallback>
-//! // - get_weather_tool_with_callback() -> (Tool, Arc<ToolCallback>)
+//! // - get_weather_tool_with_callback() -> ToolCallbackWithTool
 //! ```
 
 use darling::{FromMeta, ast::NestedMeta};
@@ -86,7 +86,7 @@ impl ParamArgs {
 ///
 /// - `{fn_name}_tool()` - Returns the `Tool` definition
 /// - `{fn_name}_callback()` - Returns an `Arc<ToolCallback>` that wraps the function
-/// - `{fn_name}_tool_with_callback()` - Returns both as a tuple
+/// - `{fn_name}_tool_with_callback()` - Returns both as a `ToolCallbackWithTool`
 ///
 /// # Attributes
 ///
@@ -261,7 +261,7 @@ fn generate_tool_impl(args: ToolArgs, input_fn: ItemFn) -> syn::Result<TokenStre
 
     // Build the output based on whether function is async or sync
     let output = if is_async {
-        // Async function: generate AsyncToolCallback
+        // Async function: its future runs on the blocking thread the engine calls tools on
         quote! {
             // Original function preserved (with custom attributes stripped)
             #stripped_fn
@@ -303,24 +303,23 @@ fn generate_tool_impl(args: ToolArgs, input_fn: ItemFn) -> syn::Result<TokenStre
                 }
             }
 
-            /// Returns an async callback that wraps this function for tool execution
-            #fn_vis fn #callback_fn_name() -> std::sync::Arc<inference::AsyncToolCallback> {
-                std::sync::Arc::new(|called: inference::CalledFunction| {
-                    Box::pin(async move {
-                        let args: #args_struct_name = serde_json::from_str(&called.arguments)
-                            .map_err(|e| anyhow::anyhow!("Failed to parse tool arguments: {}", e))?;
-
-                        let result = #fn_name(#(#call_args),*).await?;
-
-                        serde_json::to_string(&result)
-                            .map_err(|e| anyhow::anyhow!("Failed to serialize tool result: {}", e))
-                    })
+            /// Returns a callback that runs this function on the engine's blocking pool, driving its future there
+            #fn_vis fn #callback_fn_name() -> std::sync::Arc<inference::ToolCallback> {
+                std::sync::Arc::new(|called: &inference::CalledFunction, _ctx: &inference::ToolCallContext| {
+                    let args: #args_struct_name = serde_json::from_str(&called.arguments)
+                        .map_err(|e| anyhow::anyhow!("Failed to parse tool arguments: {}", e))?;
+                    let result = tokio::runtime::Handle::current().block_on(#fn_name(#(#call_args),*))?;
+                    serde_json::to_string(&result)
+                        .map_err(|e| anyhow::anyhow!("Failed to serialize tool result: {}", e))
                 })
             }
 
-            /// Returns both the Tool definition and callback as a tuple
-            #fn_vis fn #combined_fn_name() -> (inference::Tool, inference::ToolCallbackType) {
-                (#tool_fn_name(), inference::ToolCallbackType::Async(#callback_fn_name()))
+            /// Returns the Tool definition with its callback, ready for a builder's `with_tool`
+            #fn_vis fn #combined_fn_name() -> inference::ToolCallbackWithTool {
+                inference::ToolCallbackWithTool {
+                    callback: inference::ToolCallbackKind::Text(#callback_fn_name()),
+                    tool: #tool_fn_name(),
+                }
             }
         }
     } else {
@@ -379,9 +378,12 @@ fn generate_tool_impl(args: ToolArgs, input_fn: ItemFn) -> syn::Result<TokenStre
                 })
             }
 
-            /// Returns both the Tool definition and callback as a tuple
-            #fn_vis fn #combined_fn_name() -> (inference::Tool, inference::ToolCallbackType) {
-                (#tool_fn_name(), inference::ToolCallbackType::Sync(#callback_fn_name()))
+            /// Returns the Tool definition with its callback, ready for a builder's `with_tool`
+            #fn_vis fn #combined_fn_name() -> inference::ToolCallbackWithTool {
+                inference::ToolCallbackWithTool {
+                    callback: inference::ToolCallbackKind::Text(#callback_fn_name()),
+                    tool: #tool_fn_name(),
+                }
             }
         }
     };

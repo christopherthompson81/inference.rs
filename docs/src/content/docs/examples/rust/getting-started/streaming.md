@@ -18,8 +18,8 @@ Run with: `cargo run --release --example streaming -p inference-examples`
 
 use anyhow::Result;
 use inference::{
-    ChatCompletionChunkResponse, ChunkChoice, Delta, IsqBits, ModelBuilder,
-    PagedAttentionMetaBuilder, RequestBuilder, Response, TextMessageRole, TextMessages,
+    ChatStreamEvent, IsqBits, ModelBuilder, PagedAttentionMetaBuilder, RequestBuilder,
+    TextMessageRole, TextMessages,
 };
 use std::io::Write;
 
@@ -58,26 +58,20 @@ async fn main() -> Result<()> {
 
     let mut stream = model.stream_chat_request(request).await?;
 
-    let stdout = std::io::stdout();
-    let lock = stdout.lock();
-    let mut buf = std::io::BufWriter::new(lock);
-    while let Some(chunk) = stream.next().await {
-        if let Response::Chunk(ChatCompletionChunkResponse { choices, .. }) = chunk {
-            if let Some(ChunkChoice {
-                delta:
-                    Delta {
-                        content: Some(content),
-                        ..
-                    },
-                ..
-            }) = choices.first()
-            {
-                buf.write_all(content.as_bytes())?;
-            };
-        } else {
-            // Handle errors
+    while let Some(event) = stream.next().await {
+        match event {
+            ChatStreamEvent::Chunk(chunk) => {
+                if let Some(content) = chunk.choices.first().and_then(|c| c.delta.content.as_ref())
+                {
+                    print!("{content}");
+                    std::io::stdout().flush()?;
+                }
+            }
+            ChatStreamEvent::Error(error) => return Err(error.into()),
+            _ => {}
         }
     }
+    println!();
 
     Ok(())
 }

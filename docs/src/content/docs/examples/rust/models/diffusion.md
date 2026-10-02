@@ -20,7 +20,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use inference::{
-    DiffusionGenerationParams, DiffusionLoaderType, DiffusionModelBuilder,
+    DiffusionLoaderType, DiffusionModelBuilder, ImageGenerationRequest,
     ImageGenerationResponseFormat,
 };
 
@@ -36,14 +36,10 @@ async fn main() -> Result<()> {
 
     let start = Instant::now();
 
-    let response = model
-        .generate_image(
-            "A vibrant sunset in the mountains, 4k, high quality.".to_string(),
-            ImageGenerationResponseFormat::Url,
-            DiffusionGenerationParams::default(),
-            None,
-        )
-        .await?;
+    let mut request =
+        ImageGenerationRequest::new("A vibrant sunset in the mountains, 4k, high quality.");
+    request.response_format = ImageGenerationResponseFormat::Url;
+    let response = model.generate_image(request).await?;
 
     let finished = Instant::now();
 

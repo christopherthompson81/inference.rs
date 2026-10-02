@@ -24,8 +24,8 @@ Run with: `cargo run --release --features code-execution --example code_executio
 
 use anyhow::Result;
 use inference::{
-    CodeExecutionConfig, IsqBits, ModelBuilder, NetworkMode, RequestBuilder, SandboxPolicy,
-    TextMessageRole, TextMessages,
+    CodeExecutionConfig, IsqBits, ModelBuilder, RequestBuilder, TextMessageRole, TextMessages,
+    api::{engine::NetworkMode, sdk::SandboxPolicy},
 };
 
 #[tokio::main]

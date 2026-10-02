@@ -2,7 +2,7 @@
 //!
 //! This example shows how to:
 //! 1. Define sync and async tools using the `#[tool]` macro
-//! 2. Create an agent with registered tools
+//! 2. Register the tools on the model, so the engine runs the tool loop
 //! 3. Run the agentic loop (non-streaming)
 //! 4. Execute tools in parallel
 //!
@@ -12,7 +12,7 @@
 
 use anyhow::Result;
 use inference::{
-    AgentBuilder, AgentStopReason, IsqBits, ModelBuilder, PagedAttentionMetaBuilder, tool,
+    IsqBits, ModelBuilder, PagedAttentionMetaBuilder, RequestBuilder, TextMessageRole, tool,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -91,29 +91,16 @@ async fn web_search(
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Build the model
-    // Using a model that supports tool calling (e.g., Llama 3.1, Qwen, Mistral)
+    // get_weather runs on a blocking thread, web_search natively async; a round's calls run in parallel
     let model = ModelBuilder::new("Qwen/Qwen3-4B")
         .with_auto_isq(IsqBits::Four)
         .with_logging()
         .with_paged_attn(PagedAttentionMetaBuilder::default().build()?)
+        .with_tool(get_weather_tool_with_callback())
+        .with_tool(web_search_tool_with_callback())
+        .with_max_tool_rounds(5)
         .build()
         .await?;
-
-    // Create the agent with registered tools
-    // - get_weather is a sync tool (runs in spawn_blocking)
-    // - web_search is an async tool (runs natively async)
-    // Both can execute in parallel when the model calls multiple tools
-    let agent = AgentBuilder::new(model)
-        .with_system_prompt(
-            "You are a helpful assistant with access to weather and web search tools. \
-             Use them when needed to answer user questions accurately.",
-        )
-        .with_max_iterations(5)
-        .with_parallel_tool_execution(true) // Enable parallel tool execution (default)
-        .register_tool(get_weather_tool_with_callback())
-        .register_tool(web_search_tool_with_callback())
-        .build();
 
     println!("=== Agent Example (Non-Streaming) ===\n");
 
@@ -121,49 +108,31 @@ async fn main() -> Result<()> {
         "What's the weather like in Boston, and can you find me some good restaurants there?";
     println!("User: {}\n", user_message);
 
-    // Run the agent (waits for complete response)
-    let response = agent.run(user_message).await?;
+    let request = RequestBuilder::new()
+        .add_message(
+            TextMessageRole::System,
+            "You are a helpful assistant with access to weather and web search tools. \
+             Use them when needed to answer user questions accurately.",
+        )
+        .add_message(TextMessageRole::User, user_message);
+    let response = model.send_chat_request(request).await?;
 
-    // Print the final response
-    if let Some(text) = &response.final_response {
+    let choice = &response.choices[0];
+    if let Some(text) = &choice.message.content {
         println!("Assistant: {}\n", text);
     }
 
-    // Print execution summary
+    let calls = response.agentic_tool_calls.unwrap_or_default();
+    let rounds = calls.iter().map(|call| call.round + 1).max().unwrap_or(0);
     println!("=== Execution Summary ===");
-    println!("Completed in {} iteration(s)", response.iterations);
-    println!("Stop reason: {:?}", response.stop_reason);
-    println!("Steps taken: {}", response.steps.len());
+    println!("Tool rounds: {rounds}");
+    println!("Tool calls: {}", calls.len());
+    println!("Finish reason: {}", choice.finish_reason);
 
-    // Print details of each step
-    for (i, step) in response.steps.iter().enumerate() {
-        println!("\n--- Step {} ---", i + 1);
-        if !step.tool_calls.is_empty() {
-            println!("Tool calls:");
-            for call in &step.tool_calls {
-                println!("  - {}: {}", call.function.name, call.function.arguments);
-            }
-            println!("Tool results:");
-            for result in &step.tool_results {
-                let status = if result.result.is_ok() { "OK" } else { "ERROR" };
-                println!("  - {}: {}", result.tool_name, status);
-            }
-        }
-    }
-
-    match response.stop_reason {
-        AgentStopReason::TextResponse => {
-            println!("\nFinal response delivered successfully.");
-        }
-        AgentStopReason::MaxIterations => {
-            println!("\nAgent reached maximum iterations without producing a final response.");
-        }
-        AgentStopReason::NoAction => {
-            println!("\nAgent produced no response.");
-        }
-        AgentStopReason::Error(e) => {
-            println!("\nAgent encountered an error: {}", e);
-        }
+    for call in &calls {
+        println!("\n--- Round {} ---", call.round + 1);
+        println!("  - {}: {}", call.name, call.arguments);
+        println!("    result: {}", call.result_content);
     }
 
     Ok(())

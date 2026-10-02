@@ -26,8 +26,8 @@ Run with: `cargo run --release --features code-execution --example code_executio
 
 use anyhow::Result;
 use inference::{
-    CodeExecutionConfig, IsqBits, ModelBuilder, RequestBuilder, SandboxPolicy, TextMessageRole,
-    TextMessages,
+    CodeExecutionConfig, IsqBits, ModelBuilder, RequestBuilder, TextMessageRole, TextMessages,
+    api::sdk::SandboxPolicy,
 };
 
 #[tokio::main]
@@ -66,11 +66,9 @@ async fn main() -> Result<()> {
                 continue;
             }
             if f.is_truncated() {
-                // Wire body was elided; fetch the full File from the in-process store.
-                if let Some(full) = model.find_file(&f.id) {
-                    full.save(&f.name)?;
-                    println!("  fetched truncated body via find_file");
-                }
+                // Wire body was elided; fetch the full body from the engine's file store.
+                std::fs::write(&f.name, model.file_content(&f.id)?.bytes)?;
+                println!("  fetched truncated body via file_content");
             } else {
                 f.save(&f.name)?;
             }

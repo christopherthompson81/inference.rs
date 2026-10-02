@@ -92,12 +92,11 @@ In process, the Python bindings serve several models from an engine spec's `mode
 </TabItem>
 <TabItem label="Rust">
 
-Every request method on `Model` has a `_with_model` variant taking an optional id; `None` selects the default:
+A request names its model with `with_model`; one that names none goes to the default model:
 
 ```rust
-let response = model
-    .send_chat_request_with_model(messages, Some("gemma-vision"))
-    .await?;
+let request = RequestBuilder::from(messages).with_model("gemma-vision");
+let response = model.send_chat_request(request).await?;
 ```
 
 The id is the model's `model_id`, or its alias when added with `add_model_with_alias`. See the `MultiModelBuilder` below for loading the models.

@@ -9,6 +9,7 @@ mod support;
 
 mod logits_processors;
 mod responses_stream;
+mod shutdown;
 mod stopping;
 mod store;
 mod tool_loop;
