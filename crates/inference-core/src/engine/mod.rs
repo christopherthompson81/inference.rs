@@ -20,7 +20,7 @@ use crate::{
 use inference_quant::RingConfig;
 use interprocess::local_socket::{ListenerOptions, traits::Listener};
 use llguidance::ParserFactory;
-pub use logger::IntervalLogger;
+pub use logger::{IntervalLogger, SpeculativeStats};
 use paged_step::PagedStepCtx;
 use rand::SeedableRng;
 use rand_isaac::Isaac64Rng;

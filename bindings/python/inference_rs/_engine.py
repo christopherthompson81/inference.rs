@@ -405,6 +405,10 @@ class JsonEngine:
         """Each loaded model's cumulative prefix- and encoder-cache counters; diff two readings for a span."""
         return self._get("inference_models_cache_stats")
 
+    def speculative_stats(self) -> str:
+        """Each loaded model's cumulative speculative decoding counters; zero without a proposer."""
+        return self._get("inference_models_speculative_stats")
+
     def calibration_apply(self, request_json: str = "{}") -> str:
         return self._call("inference_calibration_apply", request_json)
 

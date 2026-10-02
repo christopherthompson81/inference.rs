@@ -117,6 +117,8 @@ These metrics are only populated when a model with a speculative proposer (MTP) 
 | `inference_speculative_staged_drops_total` | counter | - | Staged proposals discarded without verification (preemption, batch-shape mismatch, or a step that cannot verify). |
 | `inference_paged_preemptions_total` | counter | - | Running sequences preempted and returned to the waiting queue (paged attention). |
 
+The speculative counters except staged drops (and the preemption count) are also kept per model, without Prometheus: `GET /v1/models/speculative_stats` (`Engine::speculative_stats`, `inference_models_speculative_stats` in the C ABI, `speculative_stats()` in Python, `SpeculativeStats()` in C#). They count since the model loaded and stay zero without a proposer.
+
 ### Useful PromQL
 
 Acceptance is a ratio of cumulative counters, so rates and quantiles belong in PromQL rather than extra gauges:

@@ -198,6 +198,12 @@ calibration_status(
 cache_stats() -> types.CacheStats
 ```
 
+### `Engine.speculative_stats`
+
+```text
+speculative_stats() -> types.SpeculativeStats
+```
+
 ### `Engine.calibration_apply`
 
 ```text
@@ -916,6 +922,14 @@ cache_stats() -> str
 ```
 
 Each loaded model's cumulative prefix- and encoder-cache counters; diff two readings for a span.
+
+### `JsonEngine.speculative_stats`
+
+```text
+speculative_stats() -> str
+```
+
+Each loaded model's cumulative speculative decoding counters; zero without a proposer.
 
 ### `JsonEngine.calibration_apply`
 

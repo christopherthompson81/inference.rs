@@ -178,6 +178,7 @@ GROUPS = [
                 "Calibration",
                 "CacheStats",
                 "EncoderCacheStats",
+                "SpeculativeStats",
                 "ReIsq",
                 "Tune",
                 "Serialized",

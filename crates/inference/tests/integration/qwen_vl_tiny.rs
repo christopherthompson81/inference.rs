@@ -425,6 +425,19 @@ async fn builtin_mtp_keeps_greedy_output(checkpoint: tempfile::TempDir) -> anyho
             "MTP drafting changed the greedy output at step {agreed}: {drafted:?} vs {expected:?}"
         );
     }
+    let verified = |model: &Model| -> anyhow::Result<(usize, usize)> {
+        let stats = model.speculative_stats()?;
+        Ok(stats.data.iter().fold((0, 0), |(drafts, proposed), m| {
+            (drafts + m.drafts, proposed + m.draft_tokens_proposed)
+        }))
+    };
+    anyhow::ensure!(verified(&plain)? == (0, 0), "the plain model drafted");
+    // a random-weight head agrees with the target only by chance, so acceptance is left to real checkpoints
+    let (drafts, proposed) = verified(&mtp)?;
+    anyhow::ensure!(
+        drafts > 0 && proposed >= drafts,
+        "MTP verified {drafts} drafts of {proposed} tokens"
+    );
     Ok(())
 }
 

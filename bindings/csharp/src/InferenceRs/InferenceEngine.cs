@@ -319,6 +319,14 @@ public sealed unsafe class InferenceEngine : IDisposable
         return Text(status, response, nameof(NativeMethods.inference_models_cache_stats));
     }
 
+    /// <summary>Each loaded model's cumulative speculative decoding counters; zero without a proposer.</summary>
+    public string SpeculativeStats()
+    {
+        using var engine = Borrow();
+        var status = NativeMethods.inference_models_speculative_stats(engine.Handle, out var response);
+        return Text(status, response, nameof(NativeMethods.inference_models_speculative_stats));
+    }
+
     public string CalibrationStatus(string requestJson = "{}")
     {
         using var engine = Borrow();

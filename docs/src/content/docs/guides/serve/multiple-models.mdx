@@ -114,7 +114,7 @@ Each entry includes `id`, `object`, `created`, `owned_by`, plus optional `status
 
 ## Unloading and reloading on demand
 
-`POST /v1/models/unload` frees a model's memory, `POST /v1/models/reload` brings it back, and `POST /v1/models/status` queries its state; each takes `{"model_id": "..."}`. `GET /v1/models/cache_stats` reports each loaded model's cumulative prefix- and encoder-cache counters. Request and response schemas are in the [generated HTTP API reference](/reference/http-api-generated/).
+`POST /v1/models/unload` frees a model's memory, `POST /v1/models/reload` brings it back, and `POST /v1/models/status` queries its state; each takes `{"model_id": "..."}`. `GET /v1/models/cache_stats` reports each loaded model's cumulative prefix- and encoder-cache counters. `GET /v1/models/speculative_stats` reports its speculative decoding counters. Request and response schemas are in the [generated HTTP API reference](/reference/http-api-generated/).
 
 ## Adding and removing models at runtime
 

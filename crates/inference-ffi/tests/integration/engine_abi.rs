@@ -1469,6 +1469,9 @@ fn tokens_sessions_and_quantization_operations() {
     let (status, stats) = query(inference_models_cache_stats, engine);
     assert_eq!(status, INFERENCE_OK, "{stats}");
     assert!(stats["data"][0]["encoder_cache"].is_object(), "{stats}");
+    let (status, speculative) = query(inference_models_speculative_stats, engine);
+    assert_eq!(status, INFERENCE_OK, "{speculative}");
+    assert_eq!(speculative["data"][0]["drafts"], 0, "{speculative}");
     let (status, error) = request_call(inference_calibration_start, engine, &json!({}));
     assert_eq!(status, INFERENCE_ERR_INVALID_REQUEST, "{error}");
     assert!(

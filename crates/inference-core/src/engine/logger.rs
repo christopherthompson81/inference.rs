@@ -8,6 +8,17 @@ use std::time::Duration;
 
 use tracing::info;
 
+/// Cumulative speculative verification counters since load (or the last reset after warmup).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SpeculativeStats {
+    /// Sequences verified: one per sequence per step that ran speculative verification.
+    pub drafts: usize,
+    pub draft_tokens_proposed: usize,
+    pub draft_tokens_accepted: usize,
+    /// Accepted draft tokens at each 0-based proposal position.
+    pub accepted_per_position: Vec<usize>,
+}
+
 #[derive(Default)]
 struct PrefixCacheStats {
     hits: usize,
@@ -25,9 +36,7 @@ pub struct IntervalLogger {
     sequence_capacity: Arc<AtomicUsize>,
     encoder_cache_hits: Option<Arc<AtomicUsize>>,
     encoder_cache_misses: Option<Arc<AtomicUsize>>,
-    spec_drafts: Arc<AtomicUsize>,
-    spec_draft_tokens: Arc<AtomicUsize>,
-    spec_accepted_tokens: Arc<AtomicUsize>,
+    speculative: Arc<Mutex<SpeculativeStats>>,
     shutdown_tx: Sender<()>,
     worker: Option<JoinHandle<()>>,
     #[cfg(test)]
@@ -48,9 +57,7 @@ impl IntervalLogger {
         let num_running = Arc::new(AtomicUsize::new(0));
         let num_waiting = Arc::new(AtomicUsize::new(0));
         let sequence_capacity = Arc::new(AtomicUsize::new(0));
-        let spec_drafts = Arc::new(AtomicUsize::new(0));
-        let spec_draft_tokens = Arc::new(AtomicUsize::new(0));
-        let spec_accepted_tokens = Arc::new(AtomicUsize::new(0));
+        let speculative = Arc::new(Mutex::new(SpeculativeStats::default()));
 
         let t_prefix_cache_stats = prefix_cache_stats.clone();
         let t_tokens_processed = tokens_processed.clone();
@@ -60,9 +67,7 @@ impl IntervalLogger {
         let t_num_running = num_running.clone();
         let t_num_waiting = num_waiting.clone();
         let t_sequence_capacity = sequence_capacity.clone();
-        let t_spec_drafts = spec_drafts.clone();
-        let t_spec_draft_tokens = spec_draft_tokens.clone();
-        let t_spec_accepted_tokens = spec_accepted_tokens.clone();
+        let t_speculative = speculative.clone();
         let (encoder_cache_hits, encoder_cache_misses) = match encoder_cache_counters {
             Some((h, m)) => (Some(h), Some(m)),
             None => (None, None),
@@ -75,7 +80,7 @@ impl IntervalLogger {
         let t_worker_exited = worker_exited.clone();
         let (shutdown_tx, shutdown_rx) = mpsc::channel();
         let worker = thread::spawn(move || {
-            // Start the actual logging
+            let mut last_speculative = SpeculativeStats::default();
             while let Err(RecvTimeoutError::Timeout) = shutdown_rx.recv_timeout(interval) {
                 let num_running = t_num_running.load(Ordering::Relaxed);
                 let num_waiting = t_num_waiting.load(Ordering::Relaxed);
@@ -102,9 +107,22 @@ impl IntervalLogger {
                 let prefill_tokens_processed =
                     t_prefill_tokens_processed.swap(0, Ordering::Relaxed);
                 let decode_tokens_processed = t_decode_tokens_processed.swap(0, Ordering::Relaxed);
-                let spec_drafts = t_spec_drafts.swap(0, Ordering::Relaxed);
-                let spec_draft_tokens = t_spec_draft_tokens.swap(0, Ordering::Relaxed);
-                let spec_accepted_tokens = t_spec_accepted_tokens.swap(0, Ordering::Relaxed);
+                let speculative = t_speculative.lock().unwrap().clone();
+                // counters below the last snapshot mean a reset in between, so the interval counts from zero
+                if speculative.drafts < last_speculative.drafts {
+                    last_speculative = SpeculativeStats::default();
+                }
+                let delta = |now: usize, last: usize| now.saturating_sub(last);
+                let spec_drafts = delta(speculative.drafts, last_speculative.drafts);
+                let spec_draft_tokens = delta(
+                    speculative.draft_tokens_proposed,
+                    last_speculative.draft_tokens_proposed,
+                );
+                let spec_accepted_tokens = delta(
+                    speculative.draft_tokens_accepted,
+                    last_speculative.draft_tokens_accepted,
+                );
+                last_speculative = speculative;
 
                 if total_new_seqs != 0 && tokens_processed != 0 {
                     let enc_cache_info =
@@ -161,9 +179,7 @@ impl IntervalLogger {
             sequence_capacity,
             encoder_cache_hits,
             encoder_cache_misses,
-            spec_drafts,
-            spec_draft_tokens,
-            spec_accepted_tokens,
+            speculative,
             shutdown_tx,
             worker: Some(worker),
             #[cfg(test)]
@@ -189,9 +205,7 @@ impl IntervalLogger {
         if let Some(ref misses) = self.encoder_cache_misses {
             misses.store(0, Ordering::Relaxed);
         }
-        self.spec_drafts.store(0, Ordering::Relaxed);
-        self.spec_draft_tokens.store(0, Ordering::Relaxed);
-        self.spec_accepted_tokens.store(0, Ordering::Relaxed);
+        *self.speculative.lock().unwrap() = SpeculativeStats::default();
     }
 
     /// Count prompt (prefill) tokens through the pipeline. Also advances the
@@ -229,11 +243,20 @@ impl IntervalLogger {
         if num_drafts == 0 {
             return;
         }
-        self.spec_drafts.fetch_add(num_drafts, Ordering::Relaxed);
-        self.spec_draft_tokens
-            .fetch_add(num_draft_tokens, Ordering::Relaxed);
-        self.spec_accepted_tokens
-            .fetch_add(num_accepted_tokens, Ordering::Relaxed);
+        {
+            let mut stats = self.speculative.lock().unwrap();
+            stats.drafts += num_drafts;
+            stats.draft_tokens_proposed += num_draft_tokens;
+            stats.draft_tokens_accepted += num_accepted_tokens;
+            if stats.accepted_per_position.len() < accepted_per_pos.len() {
+                stats
+                    .accepted_per_position
+                    .resize(accepted_per_pos.len(), 0);
+            }
+            for (total, count) in stats.accepted_per_position.iter_mut().zip(accepted_per_pos) {
+                *total += count;
+            }
+        }
         metrics::counter!("inference_speculative_drafts_total").increment(num_drafts as u64);
         metrics::counter!("inference_speculative_draft_tokens_proposed_total")
             .increment(num_draft_tokens as u64);
@@ -281,6 +304,10 @@ impl IntervalLogger {
         (stats.hits, stats.total_sequences)
     }
 
+    pub fn speculative_stats(&self) -> SpeculativeStats {
+        self.speculative.lock().unwrap().clone()
+    }
+
     /// Return cumulative encoder cache (hits, misses), or `None` if no encoder cache exists.
     pub fn encoder_cache_stats(&self) -> Option<(usize, usize)> {
         match (&self.encoder_cache_hits, &self.encoder_cache_misses) {
@@ -316,6 +343,24 @@ mod tests {
             logger.sequence_capacity.load(Ordering::Relaxed),
             TEST_SEQUENCE_CAPACITY
         );
+    }
+
+    #[test]
+    fn speculative_stats_accumulate_until_reset() {
+        let logger = IntervalLogger::new(INACTIVE_LOGGER_INTERVAL, None);
+        logger.add_speculative_stats(2, 4, 3, &[2, 1]);
+        logger.add_speculative_stats(1, 3, 1, &[1, 0, 0]);
+        assert_eq!(
+            logger.speculative_stats(),
+            SpeculativeStats {
+                drafts: 3,
+                draft_tokens_proposed: 7,
+                draft_tokens_accepted: 4,
+                accepted_per_position: vec![3, 1, 0],
+            }
+        );
+        logger.reset();
+        assert_eq!(logger.speculative_stats(), SpeculativeStats::default());
     }
 
     #[test]

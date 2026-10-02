@@ -55,6 +55,20 @@ pub async fn model_cache_stats(OwnedEngine(engine): OwnedEngine) -> Response {
 #[cfg_attr(test, utoipa::path(
   get,
   tag = "inference.rs",
+  path = "/v1/models/speculative_stats",
+  responses(
+    (status = 200, description = "Each loaded model's cumulative speculative decoding counters",
+     body = inference_api::models::SpeculativeStats),
+    (status = 500, description = "Failed to inspect the model registry")
+  )
+))]
+pub async fn model_speculative_stats(OwnedEngine(engine): OwnedEngine) -> Response {
+    json_response(engine.speculative_stats())
+}
+
+#[cfg_attr(test, utoipa::path(
+  get,
+  tag = "inference.rs",
   path = "/health",
   responses((status = 200, description = "Server is healthy"))
 ))]
