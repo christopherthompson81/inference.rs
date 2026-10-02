@@ -129,16 +129,6 @@ impl VideoInput {
             })
             .collect()
     }
-
-    /// Compute a single hash representing the entire video (for prefix caching).
-    pub fn video_hash(&self) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        for frame in &self.frames {
-            frame.as_bytes().hash(&mut hasher);
-        }
-        self.fps.to_bits().hash(&mut hasher);
-        hasher.finish()
-    }
 }
 
 /// Sample `num_frames` frame indices uniformly from a video with `total_frames` frames.

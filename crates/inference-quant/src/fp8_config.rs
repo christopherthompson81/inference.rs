@@ -403,16 +403,6 @@ impl CheckpointQuantConfig {
         Ok(CheckpointDirectResolution::NoMatch)
     }
 
-    pub fn resolve_fused<S: AsRef<str>>(
-        &self,
-        prefixes: &[S],
-    ) -> Result<Option<CheckpointLinearSpec>, String> {
-        match self.resolve_fused_state(prefixes)? {
-            CheckpointDirectResolution::NoMatch => Ok(None),
-            CheckpointDirectResolution::Resolved(spec) => Ok(spec),
-        }
-    }
-
     fn resolve_fused_state<S: AsRef<str>>(
         &self,
         prefixes: &[S],

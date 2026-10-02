@@ -585,15 +585,6 @@ impl InferenceRs {
         }
     }
 
-    /// List all unloaded model IDs
-    pub fn list_unloaded_models(&self) -> Result<Vec<String>, InferenceRsError> {
-        let unloaded = self
-            .unloaded_models
-            .read()
-            .map_err(|_| InferenceRsError::EnginePoisoned)?;
-        Ok(unloaded.keys().cloned().collect())
-    }
-
     /// Check if a model is currently loaded (as opposed to unloaded)
     pub fn is_model_loaded(&self, model_id: &str) -> Result<bool, InferenceRsError> {
         let resolved_model_id = self.resolve_alias(model_id)?;

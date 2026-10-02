@@ -983,28 +983,7 @@ pub enum HybridLayerCache {
 }
 
 impl HybridLayerCache {
-    pub fn as_kv_cache(&self) -> Option<&KvCache> {
-        match self {
-            Self::Attention(kv) => Some(kv),
-            Self::Recurrent(_) => None,
-        }
-    }
-
-    pub fn as_kv_cache_mut(&mut self) -> Option<&mut KvCache> {
-        match self {
-            Self::Attention(kv) => Some(kv),
-            Self::Recurrent(_) => None,
-        }
-    }
-
     pub fn as_recurrent_pool(&self) -> Option<&RecurrentStatePool> {
-        match self {
-            Self::Attention(_) => None,
-            Self::Recurrent(pool) => Some(pool),
-        }
-    }
-
-    pub fn as_recurrent_pool_mut(&mut self) -> Option<&mut RecurrentStatePool> {
         match self {
             Self::Attention(_) => None,
             Self::Recurrent(pool) => Some(pool),
@@ -3899,18 +3878,7 @@ impl PastKvLenCache for HybridCache {
     }
 }
 
-impl HybridCache {
-    /// Truncate all attention layer KV caches to the given sequence length.
-    /// Recurrent layers are unchanged, use snapshot/restore for recurrent rollback.
-    pub fn truncate_attention_to(&mut self, len: usize) -> Result<()> {
-        for cache in &mut self.caches {
-            if let HybridLayerCache::Attention(kv) = cache {
-                kv.set_len(len)?;
-            }
-        }
-        Ok(())
-    }
-}
+impl HybridCache {}
 
 /// Snapshot of a single recurrent layer's state for prefix caching.
 #[derive(Clone, Debug)]

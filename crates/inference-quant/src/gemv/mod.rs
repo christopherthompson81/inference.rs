@@ -25,12 +25,14 @@ use crate::utils::{get_cuda_device, slice_ptr};
 #[cfg(feature = "cuda")]
 use half::{bf16, f16};
 
-use std::sync::LazyLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(feature = "cuda")]
-use std::{collections::HashMap, sync::Mutex};
+use std::{
+    collections::HashMap,
+    sync::{LazyLock, Mutex},
+};
 
 /// Maximum batch size supported by the GEMV kernel
+#[cfg(any(feature = "cuda", test))]
 pub const MAX_GEMV_BATCH_SIZE: usize = 8;
 #[cfg(any(feature = "cuda", test))]
 const MAX_GEMV_OUTPUT_ELEMENTS: usize = 4_096;
@@ -139,28 +141,6 @@ fn gemv_device_info(device: &CudaDevice) -> Option<GemvDeviceInfo> {
     Some(info)
 }
 
-/// Controller for enabling/disabling custom GEMV kernel.
-pub struct GemvController {
-    enabled: AtomicBool,
-}
-
-impl GemvController {
-    /// Enable or disable the custom GEMV kernel.
-    pub fn set_enabled(&self, value: bool) {
-        self.enabled.store(value, Ordering::SeqCst);
-    }
-
-    /// Check if the custom GEMV kernel is enabled.
-    pub fn is_enabled(&self) -> bool {
-        self.enabled.load(Ordering::SeqCst)
-    }
-}
-
-/// Global controller for the custom GEMV kernel.
-pub static GEMV_CONTROLLER: LazyLock<GemvController> = LazyLock::new(|| GemvController {
-    enabled: AtomicBool::new(true),
-});
-
 /// Check if custom GEMV should be used instead of cuBLAS.
 ///
 /// Returns true if:
@@ -172,11 +152,6 @@ pub static GEMV_CONTROLLER: LazyLock<GemvController> = LazyLock::new(|| GemvCont
 /// - K dimension is even (required for vectorized loads)
 #[cfg(feature = "cuda")]
 pub fn should_use_gemv(x: &Tensor, w: &Tensor) -> bool {
-    // Check if enabled
-    if !GEMV_CONTROLLER.is_enabled() {
-        return false;
-    }
-
     let candle_core::Device::Cuda(device) = x.device() else {
         return false;
     };
@@ -252,8 +227,7 @@ fn has_aligned_half_pairs(tensor: &Tensor) -> bool {
 
 #[cfg(feature = "cuda")]
 pub(crate) fn should_use_wide_gemv(x: &Tensor, w: &Tensor) -> bool {
-    if !GEMV_CONTROLLER.is_enabled()
-        || x.rank() < 2
+    if x.rank() < 2
         || !x.device().same_device(w.device())
         || x.dtype() != w.dtype()
         || !x.is_contiguous()
@@ -283,12 +257,6 @@ pub(crate) fn should_use_wide_gemv(x: &Tensor, w: &Tensor) -> bool {
         gemv_device_info(device),
     ) && has_aligned_half_pairs(x)
         && has_aligned_half_pairs(w)
-}
-
-/// Fallback for non-CUDA builds
-#[cfg(not(feature = "cuda"))]
-pub fn should_use_gemv(_x: &candle_core::Tensor, _w: &candle_core::Tensor) -> bool {
-    false
 }
 
 /// Execute custom GEMV: Y = X @ W^T + bias
@@ -561,16 +529,6 @@ fn gemv_f32(
     let y = Tensor::from((Storage::Cuda(y_storage), Shape::from(output_shape)));
 
     Ok(y)
-}
-
-/// Fallback for non-CUDA builds
-#[cfg(not(feature = "cuda"))]
-pub fn gemv(
-    _x: &candle_core::Tensor,
-    _w: &candle_core::Tensor,
-    _bias: Option<&candle_core::Tensor>,
-) -> candle_core::Result<candle_core::Tensor> {
-    candle_core::bail!("GEMV requires CUDA feature");
 }
 
 #[cfg(test)]

@@ -77,27 +77,6 @@ impl Topology {
         }
     }
 
-    pub fn is_dummy_device_map(&self) -> bool {
-        self.layers
-            .iter()
-            .all(|l| l.is_none() || l.as_ref().is_some_and(|l| l.device.is_none()))
-            && self
-                .patterns
-                .iter()
-                .all(|(_, topo)| topo.device.as_ref().is_none())
-    }
-
-    pub fn with_range(mut self, range: Range<usize>, layer: LayerTopology) -> Self {
-        if self.layers.len() < range.end {
-            self.layers
-                .extend(vec![None; range.end - self.layers.len()]);
-        }
-        for i in range.start..range.end {
-            self.layers[i] = Some(layer.clone());
-        }
-        self
-    }
-
     #[allow(clippy::should_implement_trait)]
     pub fn from_str(topology: &str) -> anyhow::Result<Self> {
         let deser: DeserTopology = serde_saphyr::from_str(topology)?;

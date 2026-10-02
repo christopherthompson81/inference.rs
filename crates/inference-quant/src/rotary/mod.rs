@@ -801,15 +801,6 @@ fn metal_apply_rotary_qk(
     ))
 }
 
-pub fn apply_rotary_q_preselected(
-    q: &Tensor,
-    cos: &Tensor,
-    sin: &Tensor,
-    is_neox: bool,
-) -> Result<Tensor> {
-    apply_rotary_q_inner(q, cos, sin, None, is_neox)
-}
-
 pub fn apply_rotary_q(
     q: &Tensor,
     cos: &Tensor,

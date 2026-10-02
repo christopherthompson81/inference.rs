@@ -143,39 +143,6 @@ impl MemoryUsage {
     }
 
     #[cfg(feature = "cuda")]
-    pub fn query_cuda_memory_pool(&self, device: &Device) -> Result<Option<CudaMemoryPoolUsage>> {
-        use candle_core::cuda_backend::WrapErr;
-        use candle_core::cuda_backend::cudarc::driver::sys;
-
-        let Device::Cuda(device) = device else {
-            return Ok(None);
-        };
-        let stream = device.cuda_stream();
-        stream.context().bind_to_thread().w()?;
-        if !stream.context().has_async_alloc() {
-            return Ok(None);
-        }
-
-        let mut pool = std::ptr::null_mut();
-        cuda_result(
-            unsafe { sys::cuDeviceGetMemPool(&mut pool, stream.context().cu_device()) },
-            "CUDA memory pool lookup",
-        )?;
-        let reserved = cuda_memory_pool_attribute(
-            pool,
-            sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_RESERVED_MEM_CURRENT,
-        )?;
-        let used = cuda_memory_pool_attribute(
-            pool,
-            sys::CUmemPool_attribute::CU_MEMPOOL_ATTR_USED_MEM_CURRENT,
-        )?;
-        Ok(Some(CudaMemoryPoolUsage {
-            reserved: usize::try_from(reserved)?,
-            used: usize::try_from(used)?,
-        }))
-    }
-
-    #[cfg(feature = "cuda")]
     pub fn query_cuda_allocator(&self, device: &Device) -> Result<Option<CudaAllocatorSnapshot>> {
         use candle_core::cuda::cudarc::driver::result;
         use candle_core::cuda_backend::WrapErr;

@@ -1825,25 +1825,6 @@ impl QLinear {
         }
     }
 
-    pub fn from_qparts(w: QTensor, b: Option<Tensor>) -> Self {
-        if let Some(ref b) = b {
-            assert_eq!(b.dtype(), DType::F32);
-        }
-        Self {
-            inner: QMatMul::QTensor(Arc::new(w)),
-            bias: b,
-            dtype: DType::F32,
-        }
-    }
-
-    pub fn from_old_and_qmatmul(inner: QMatMul, old: &Self) -> Self {
-        Self {
-            inner,
-            bias: old.bias.clone(),
-            dtype: old.dtype,
-        }
-    }
-
     pub fn inner(&mut self) -> &mut QMatMul {
         &mut self.inner
     }
@@ -1858,10 +1839,6 @@ impl QLinear {
 
     pub fn bias(&self) -> Option<&Tensor> {
         self.bias.as_ref()
-    }
-
-    pub fn bias_mut(&mut self) -> Option<&mut Tensor> {
-        self.bias.as_mut()
     }
 }
 

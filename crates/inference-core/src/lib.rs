@@ -15,13 +15,14 @@ pub use engine::{
     AgentRunner, DEFAULT_MAX_TOOL_ROUNDS, ENGINE_INSTRUCTIONS, Engine, EngineInstruction,
     IntervalLogger, SearchEmbeddingModel, TERMINATE_ALL_NEXT_STEP, agent, agentic_session,
     agentic_session::{AgenticSessionStore, SerializedSession, SerializedVideo},
-    get_engine_terminate_flag, reset_engine_terminate_flag, should_terminate_engine_sequences,
 };
 use hf_hub::Cache;
+use inference_nn::matformer;
 pub use lora::Ordering;
 pub use pipeline::CalibrationStatus;
 pub use pipeline::ModelCategory;
 pub use pipeline::Pipeline;
+use speculative::SpeculativeConfig;
 use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -82,16 +83,13 @@ use inference_nn::{
     amoe, attention, cuda, device_map, flashinfer, gdn, kv_cache, lora, model, moe,
     paged_attention, sampler, topology, utils,
 };
-pub use inference_nn::{layers, matformer};
 
 mod adapter;
 mod agent_approval;
 mod chat_collector;
 mod engine;
 use inference_nn::media_inputs::video as video_input;
-pub use video_input::{
-    DEFAULT_VIDEO_FRAME_LIMIT, VideoFrameSampling, VideoInput, sample_frame_indices,
-};
+pub use video_input::{VideoFrameSampling, VideoInput, sample_frame_indices};
 mod embedding_models;
 pub mod search;
 
@@ -111,7 +109,7 @@ mod response;
 mod scheduler;
 mod sequence;
 pub(crate) mod sequence_macros;
-pub mod speculative;
+pub(crate) mod speculative;
 use inference_protocol::tools;
 mod vision_models;
 mod xlora_models;
@@ -128,34 +126,28 @@ pub use adapter::{
 };
 pub use agent_approval::{
     AgentToolApproval, AgentToolApprovalAsyncCallback, AgentToolApprovalCallback,
-    AgentToolApprovalDecision, AgentToolApprovalFuture, AgentToolApprovalHandler,
+    AgentToolApprovalDecision, AgentToolApprovalHandler,
 };
 pub use amoe::{AnyMoeConfig, AnyMoeExpertType};
 pub use chat_collector::{ChatResponseCollector, encode_agentic_tool_images};
-pub use device_map::{
-    DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting, LayerDeviceMapper,
-};
+pub use device_map::{DeviceLayerMapMetadata, DeviceMapMetadata, DeviceMapSetting};
 pub use files::{
-    FILE_PURPOSE_AGENT_OUTPUT, FILE_PURPOSE_GENERATED_IMAGE, FILE_PURPOSE_USER_DATA, File,
-    FileContent, FileSource, FileStore, MODEL_INLINE_BYTES, RequestedFile, WIRE_EMBED_LIMIT_BYTES,
-    format_from_name, is_text_mime, mime_for_format,
+    FILE_PURPOSE_GENERATED_IMAGE, FILE_PURPOSE_USER_DATA, File, FileContent, FileSource, FileStore,
+    RequestedFile,
 };
 pub use gguf::{GGUF_MULTI_FILE_DELIMITER, GGUFArchitecture};
 pub use inference_audio::AudioInput;
 pub use inference_code_exec::{
-    CodeExecutionApproval, CodeExecutionApprovalCallback, CodeExecutionConfig,
-    DEFAULT_CODE_EXEC_TIMEOUT_SECS, DEFAULT_SHELL_TIMEOUT_SECS, ShellConfig,
+    CodeExecutionConfig, DEFAULT_CODE_EXEC_TIMEOUT_SECS, DEFAULT_SHELL_TIMEOUT_SECS, ShellConfig,
 };
 pub use inference_mcp::{
     AgentPermission, AgentToolApprovalNotifier, AgentToolApprovalRequest, AgentToolKind,
     AgentToolMetadata, AgentToolSource, CalledFunction, CodeExecutionApprovalNotifier,
-    CodeExecutionApprovalRequest, CodeExecutionPermission, Function, MultimodalToolCallback,
-    ShellOptions, ShellSkillMount, Tool, ToolCallContext, ToolCallback, ToolCallbackKind,
-    ToolCallbackWithTool, ToolOutput, ToolType, sandbox_key,
+    CodeExecutionPermission, Function, MultimodalToolCallback, ShellOptions, ShellSkillMount, Tool,
+    ToolCallContext, ToolCallback, ToolCallbackKind, ToolCallbackWithTool, ToolOutput, ToolType,
+    sandbox_key,
 };
-pub use inference_mcp::{
-    McpClient, McpClientConfig, McpServerConfig, McpServerSource, McpToolInfo,
-};
+pub use inference_mcp::{McpClient, McpClientConfig, McpServerConfig, McpServerSource};
 pub use inference_models_speech::{SpeechGenerationConfig, utils as speech_utils};
 pub use inference_quant::parse_isq_value;
 pub use inference_quant::{IsqBits, IsqType};
@@ -170,9 +162,8 @@ pub use pipeline::Starcoder2Loader;
 pub use pipeline::get_device_layers_for_loader;
 pub use pipeline::hf::build_api_with_cache;
 pub use pipeline::hf::{
-    HF_HUB_OFFLINE_ENV, get_model_file, hf_home_dir, hf_hub_cache_dir, hf_token_path,
-    is_hf_hub_offline, list_model_files, probe_hf_repo_files, read_model_file_range,
-    try_get_model_file,
+    HF_HUB_OFFLINE_ENV, hf_home_dir, hf_hub_cache_dir, hf_token_path, is_hf_hub_offline,
+    list_model_files, probe_hf_repo_files, read_model_file_range, try_get_model_file,
 };
 // Named only by the ModelSelected schema attributes.
 #[cfg(feature = "utoipa")]
@@ -199,10 +190,9 @@ pub use pipeline::{
 pub use pipeline::{Phi2Loader, Phi3Loader, Phi3VLoader};
 pub use request::{
     ApproximateUserLocation, CalibrationAction, CalibrationRequest, Constraint,
-    DEFAULT_ENABLE_THINKING, DetokenizationRequest, FINISH_REASON_CANCELED, FINISH_REASON_LENGTH,
+    DetokenizationRequest, FINISH_REASON_CANCELED, FINISH_REASON_LENGTH,
     ImageGenerationResponseFormat, LlguidanceGrammar, MessageContent, NormalRequest,
-    ReasoningControlError, ReasoningEffort, ReasoningEffortParseError, Request,
-    RequestCancellation, RequestMessage, ResolvedReasoningControls, SearchContextSize,
+    ReasoningEffort, Request, RequestCancellation, RequestMessage, SearchContextSize,
     TokenizationRequest, WebSearchContentType, WebSearchFilters, WebSearchImageSettings,
     WebSearchOptions, WebSearchReturnTokenBudget, WebSearchUserLocation,
     resolve_reasoning_controls,
@@ -213,25 +203,21 @@ pub use sampler::{
 };
 pub use scheduler::{
     DEFAULT_MAX_DECODE_STEPS_BEFORE_PREFILL, DEFAULT_MAX_NUM_BATCHED_TOKENS,
-    DEFAULT_MAX_PREFILL_CHUNK_TOKENS, DefaultSchedulerMethod, SchedulerConfig, SchedulerLimits,
+    DEFAULT_MAX_PREFILL_CHUNK_TOKENS, SchedulerConfig, SchedulerLimits,
 };
 pub use search::{SearchCallback, SearchEmbedder, SearchFunctionParameters, SearchResult};
 use serde::Serialize;
 pub use speculative::{
-    MtpConfig, MtpDraftSamplingMethod, MtpRuntimeConfig, SpeculativeConfig,
-    reserve_external_mtp_memory, reserve_external_mtp_memory_with_runtime,
+    MtpConfig, MtpDraftSamplingMethod, MtpRuntimeConfig, reserve_external_mtp_memory,
+    reserve_external_mtp_memory_with_runtime,
 };
 use tokio::runtime::Runtime;
 pub use tools::{
     AllowedToolChoice, AllowedToolsMode, AllowedToolsToolChoice, AllowedToolsToolChoiceType,
-    BuiltinToolChoice, BuiltinToolChoiceType, NamedFunctionToolChoice, ToolCallResponse,
-    ToolCallType, ToolCallbacks, ToolChoice,
+    NamedFunctionToolChoice, ToolCallResponse, ToolCallType, ToolChoice,
 };
-pub use topology::{LayerTopology, Topology};
-pub use utils::debug::{
-    LogVerbosity, default_inference_filter, initialize_inference_logging, initialize_logging,
-    initialize_logging_with_filter,
-};
+pub use topology::Topology;
+pub use utils::debug::{LogVerbosity, initialize_inference_logging, initialize_logging};
 pub use utils::memory_usage::MemoryUsage;
 pub use utils::normal::{ModelDType, TryIntoDType};
 pub use utils::{paged_attn_supported, using_flash_attn};
