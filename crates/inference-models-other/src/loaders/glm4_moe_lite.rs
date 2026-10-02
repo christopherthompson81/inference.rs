@@ -1,3 +1,4 @@
+use super::deepseek_family::*;
 use super::*;
 
 /// `NormalLoader` for a GLM 4 MoE Lite model (GLM-4.7-Flash).
@@ -38,202 +39,46 @@ impl NormalModelLoader for GLM4MoeLiteLoader {
     }
 }
 
-impl IsqModelLoader for GLM4MoeLiteLoader {
-    fn promoted_isq_predicates(&self, _config: &str) -> Result<Vec<Regex>> {
-        isq_regexes(&[
-            r"^model\.embed_tokens\.weight$",
-            r"^lm_head\.(weight|bias)$",
-        ])
-    }
-    fn isq_layer_regexes(&self, config: &str) -> Result<Vec<Regex>> {
-        let mut data = isq_regexes(&[
-            r"lm_head\.(weight|bias)$",
-            // Attention (MLA)
-            r"layers\.(\d+)\.self_attn\.kv_a_proj_with_mqa\.(weight|bias)$",
-            r"layers\.(\d+)\.self_attn\.(kv_b|k_b|v_b)_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
-            // Q LoRA projections
-            r"layers\.(\d+)\.self_attn\.q_a_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.self_attn\.q_b_proj\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
-        ])?;
+impl GLM4MoeLiteLoader {
+    fn spec(config: &str) -> Result<FamilyLoaderSpec> {
         let cfg = crate::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
-        for layer_idx in 0..cfg.num_hidden_layers {
-            if layer_idx >= cfg.first_k_dense_replace && layer_idx % cfg.moe_layer_freq == 0 {
-                // MoE layer
-                for i in 0..cfg.n_routed_experts {
-                    data.extend(isq_regexes(&[
-                        format!(
-                            r"layers\.{layer_idx}\.mlp\.experts\.{i}\.gate_proj\.(weight|bias)$"
-                        ),
-                        format!(r"layers\.{layer_idx}\.mlp\.experts\.{i}\.up_proj\.(weight|bias)$"),
-                        format!(
-                            r"layers\.{layer_idx}\.mlp\.experts\.{i}\.down_proj\.(weight|bias)$"
-                        ),
-                    ])?);
-                }
-                if cfg.n_shared_experts > 0 {
-                    data.extend(isq_regexes(&[
-                        format!(
-                            r"layers\.{layer_idx}\.mlp\.shared_experts\.gate_proj\.(weight|bias)$"
-                        ),
-                        format!(
-                            r"layers\.{layer_idx}\.mlp\.shared_experts\.up_proj\.(weight|bias)$"
-                        ),
-                        format!(
-                            r"layers\.{layer_idx}\.mlp\.shared_experts\.down_proj\.(weight|bias)$"
-                        ),
-                    ])?);
-                }
-            } else {
-                // Dense MLP layer
-                data.extend(isq_regexes(&[
-                    format!(r"layers\.{layer_idx}\.mlp\.gate_proj\.(weight|bias)$"),
-                    format!(r"layers\.{layer_idx}\.mlp\.up_proj\.(weight|bias)$"),
-                    format!(r"layers\.{layer_idx}\.mlp\.down_proj\.(weight|bias)$"),
-                ])?);
-            };
-        }
-        Ok(data)
-    }
-    fn immediate_isq_predicates(&self, config: &str) -> Result<Vec<Regex>> {
-        self.isq_layer_regexes(config)
-    }
-    fn isq_layer_regexes_moqe(&self, _config: &str) -> Result<Vec<Regex>> {
-        isq_regexes(&[
-            r"layers\.(\d+)\.mlp\.experts\.(\d+)\.(gate_proj|up_proj|down_proj)\.(weight|bias)$",
-            r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$",
-        ])
-    }
-    fn immediate_isq_predicates_moqe(&self, config: &str) -> Result<Vec<Regex>> {
-        self.isq_layer_regexes_moqe(config)
-    }
-}
-
-impl DeviceMappedModelLoader for GLM4MoeLiteLoader {
-    fn non_mapped_size_in_bytes(
-        &self,
-        config: &str,
-        dtype: DType,
-        weight_pack_factor: usize,
-        quantization: Option<&super::AutoDeviceMapQuantization<'_>>,
-        _matformer_config: Option<&MatformerSliceConfig>,
-    ) -> Result<usize> {
-        let cfg = crate::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
-        standard_non_mapped_size_in_bytes(
-            LanguageModelEnds {
-                hidden_size: cfg.hidden_size,
-                vocab_size: cfg.vocab_size,
-                tie_word_embeddings: cfg.tie_word_embeddings,
-            },
-            quantization,
-            dtype,
-            weight_pack_factor,
-        )
-    }
-    fn layer_sizes_in_bytes(
-        &self,
-        config: &str,
-        dtype: DType,
-        weight_pack_factor: usize,
-        _matformer_config: Option<&MatformerSliceConfig>,
-    ) -> Result<Vec<usize>> {
-        let cfg = crate::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
-        let mut per_layer_elems = Vec::new();
-
-        for layer_idx in 0..cfg.num_hidden_layers {
-            let input_layernorm = cfg.hidden_size;
-            let post_attention_layernorm = cfg.hidden_size;
-
-            // Q LoRA projection
-            let q_proj = {
-                let a = cfg.hidden_size * cfg.q_lora_rank / weight_pack_factor;
-                let norm = cfg.q_lora_rank;
-                let b = (cfg.num_attention_heads * cfg.q_head_dim()) * cfg.q_lora_rank
-                    / weight_pack_factor;
-                a + norm + b
-            };
-            let kv_a_proj_with_mqa =
-                cfg.hidden_size * (cfg.kv_lora_rank + cfg.qk_rope_head_dim) / weight_pack_factor;
-            let kv_a_layernorm = cfg.kv_lora_rank;
-            let kv_b_proj = cfg.kv_lora_rank
-                * cfg.num_attention_heads
-                * (cfg.q_head_dim() - cfg.qk_rope_head_dim + cfg.v_head_dim)
-                / weight_pack_factor;
-            let o_proj =
-                cfg.num_attention_heads * cfg.v_head_dim * cfg.hidden_size / weight_pack_factor;
-
-            let moe_block = {
-                let mut sum = 0;
-                if layer_idx >= cfg.first_k_dense_replace && layer_idx % cfg.moe_layer_freq == 0 {
-                    // MoE layer
-                    let h_size = cfg.hidden_size;
-                    let gate_proj = h_size * cfg.moe_intermediate_size / weight_pack_factor
-                        * cfg.n_routed_experts;
-                    let up_proj = h_size * cfg.moe_intermediate_size / weight_pack_factor
-                        * cfg.n_routed_experts;
-                    let down_proj = cfg.moe_intermediate_size * h_size / weight_pack_factor
-                        * cfg.n_routed_experts;
-                    let shared_experts = if cfg.n_shared_experts > 0 {
-                        let gate_proj = h_size * cfg.moe_intermediate_size / weight_pack_factor;
-                        let up_proj = h_size * cfg.moe_intermediate_size / weight_pack_factor;
-                        let down_proj = cfg.moe_intermediate_size * h_size / weight_pack_factor;
-                        gate_proj + up_proj + down_proj
-                    } else {
-                        0
-                    };
-                    let gate_weight = cfg.n_routed_experts * cfg.hidden_size;
-                    let e_score_correction_bias = cfg.n_routed_experts;
-                    sum += gate_proj
-                        + up_proj
-                        + down_proj
-                        + shared_experts
-                        + gate_weight
-                        + e_score_correction_bias;
-                } else {
-                    // Dense MLP layer
-                    let h_size = cfg.hidden_size;
-                    let i_size = cfg.intermediate_size;
-                    let gate_proj = h_size * i_size / weight_pack_factor;
-                    let up_proj = h_size * i_size / weight_pack_factor;
-                    let down_proj = i_size * h_size / weight_pack_factor;
-                    sum += gate_proj + up_proj + down_proj;
-                }
-                sum
-            };
-
-            per_layer_elems.push(
-                input_layernorm
-                    + post_attention_layernorm
-                    + q_proj
-                    + kv_a_layernorm
-                    + kv_a_proj_with_mqa
-                    + kv_b_proj
-                    + o_proj
-                    + moe_block,
-            );
-        }
-
-        Ok(per_layer_elems
-            .into_iter()
-            .map(|x| x * dtype.size_in_bytes())
-            .collect())
-    }
-    fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
-        let cfg = crate::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
-
-        let cfg = ModelConfigMetadata {
-            max_seq_len: cfg.max_position_embeddings,
-            num_layers: cfg.num_hidden_layers,
+        let mut isq_head = vec![LM_HEAD];
+        isq_head.extend(MLA_ATTENTION);
+        isq_head.extend(Q_LORA);
+        isq_head.push(STACKED_EXPERTS);
+        Ok(FamilyLoaderSpec {
             hidden_size: cfg.hidden_size,
+            vocab_size: cfg.vocab_size,
+            intermediate_size: cfg.intermediate_size,
+            num_hidden_layers: cfg.num_hidden_layers,
+            num_attention_heads: cfg.num_attention_heads,
+            max_position_embeddings: cfg.max_position_embeddings,
+            tie_word_embeddings: cfg.tie_word_embeddings,
             num_kv_heads: cfg.num_attention_heads,
-            num_attn_heads: cfg.num_attention_heads,
-            sliding_window: None,
             k_head_dim: cfg.qk_rope_head_dim + cfg.qk_nope_head_dim,
             v_head_dim: cfg.v_head_dim,
-            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
-        };
-
-        Ok(Box::new(cfg))
+            attention: AttentionSizing::Mla {
+                q_lora_rank: Some(cfg.q_lora_rank),
+                q_head_dim: cfg.q_head_dim(),
+                kv_lora_rank: cfg.kv_lora_rank,
+                qk_rope_head_dim: cfg.qk_rope_head_dim,
+                v_head_dim: cfg.v_head_dim,
+                attention_bias: false,
+                packed_q: true,
+            },
+            moe: Some(MoeSizing {
+                n_routed_experts: cfg.n_routed_experts,
+                moe_intermediate_size: cfg.moe_intermediate_size,
+                first_k_dense_replace: cfg.first_k_dense_replace,
+                moe_layer_freq: Some(cfg.moe_layer_freq),
+                shared_intermediate: (cfg.n_shared_experts > 0)
+                    .then_some(cfg.moe_intermediate_size),
+                correction_bias: true,
+            }),
+            isq_head,
+            loose_dense_up: false,
+        })
     }
 }
+
+family_loader!(GLM4MoeLiteLoader);
