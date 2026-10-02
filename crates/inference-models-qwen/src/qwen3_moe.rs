@@ -25,7 +25,8 @@ use crate::{
     attention::{AttentionDispatch, AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     layers::{
-        self, Activation, CausalMasker, RmsNorm, RotaryEmbedding, embedding_with_legacy_tied_uqff,
+        self, Activation, CausalMasker, Mlp, RmsNorm, RotaryEmbedding,
+        embedding_with_legacy_tied_uqff,
     },
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     serde_default_fn,
@@ -251,65 +252,6 @@ impl Attention {
     }
 }
 
-#[derive(Clone)]
-struct Mlp {
-    gate_proj: Arc<dyn QuantMethod>,
-    up_proj: Arc<dyn QuantMethod>,
-    down_proj: Arc<dyn QuantMethod>,
-    act_fn: Activation,
-}
-
-impl Mlp {
-    fn new(
-        cfg: &Config,
-        vb: ShardedVarBuilder,
-        comm: &Arc<inference_quant::Comm>,
-        i_size: usize,
-    ) -> Result<Self> {
-        let hidden_size = cfg.hidden_size;
-
-        let gate_proj = ColumnParallelLayer::new(
-            hidden_size,
-            i_size,
-            &cfg.quantization_config,
-            false,
-            comm,
-            vb.pp("gate_proj"),
-        )?;
-        let up_proj = RowParallelLayer::new(
-            hidden_size,
-            i_size,
-            &cfg.quantization_config,
-            false,
-            comm,
-            vb.pp("up_proj"),
-        )?;
-        let down_proj = ColumnParallelLayer::new(
-            i_size,
-            hidden_size,
-            &cfg.quantization_config,
-            false,
-            comm,
-            vb.pp("down_proj"),
-        )?;
-
-        Ok(Self {
-            gate_proj,
-            up_proj,
-            down_proj,
-            act_fn: cfg.hidden_act,
-        })
-    }
-
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let gate_out = self.gate_proj.forward(xs)?;
-        let up_out = self.up_proj.forward(xs)?;
-        let current_hidden_states = crate::ops::mul_and_act(&gate_out, &up_out, self.act_fn)?;
-        let res = self.down_proj.forward(&current_hidden_states)?;
-        Ok(res)
-    }
-}
-
 /// MoE MLP layer for Qwen3 MoE
 struct MoeMlp {
     gate: Linear,
@@ -453,10 +395,12 @@ impl DecoderLayer {
             MoeOrMlp::Moe(MoeMlp::new(cfg, vb, layer_device, comm, loading_isq)?)
         } else {
             MoeOrMlp::Mlp(Mlp::new(
-                cfg,
                 mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq),
-                comm,
+                cfg.hidden_size,
                 cfg.intermediate_size,
+                &cfg.quantization_config,
+                cfg.hidden_act,
+                comm,
             )?)
         };
         let input_layernorm = RmsNorm::new(

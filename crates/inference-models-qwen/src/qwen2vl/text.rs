@@ -12,7 +12,7 @@ use crate::{
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     kv_cache::{EitherCache, KvCache, NormalCache, NormalCacheType},
-    layers::{self, Activation, F32RmsNorm, Qwen2VLRotaryEmbedding, Sdpa},
+    layers::{self, F32RmsNorm, Mlp, Qwen2VLRotaryEmbedding, Sdpa},
     model::{IsqModel, ModelForwardContext, NormalLoadingMetadata},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
     utils::{progress::NiceProgressBar, unvarbuilder::UnVarBuilder},
@@ -33,64 +33,6 @@ fn cache_types(
             },
         })
         .collect()
-}
-
-struct Mlp {
-    gate_proj: Arc<dyn QuantMethod>,
-    up_proj: Arc<dyn QuantMethod>,
-    down_proj: Arc<dyn QuantMethod>,
-    act_fn: Activation,
-}
-
-impl Mlp {
-    fn new<V>(
-        cfg: &QwenVlConfig<V>,
-        vb: ShardedVarBuilder,
-        comm: &Arc<inference_quant::Comm>,
-    ) -> Result<Self> {
-        let hidden_sz = cfg.hidden_size;
-        let intermediate_sz = cfg.intermediate_size;
-        let gate_proj = ColumnParallelLayer::new(
-            hidden_sz,
-            intermediate_sz,
-            &cfg.quantization_config,
-            false,
-            comm,
-            vb.pp("gate_proj"),
-        )?;
-        let up_proj = ColumnParallelLayer::new(
-            hidden_sz,
-            intermediate_sz,
-            &cfg.quantization_config,
-            false,
-            comm,
-            vb.pp("up_proj"),
-        )?;
-        let down_proj = RowParallelLayer::new(
-            intermediate_sz,
-            hidden_sz,
-            &cfg.quantization_config,
-            false,
-            comm,
-            vb.pp("down_proj"),
-        )?;
-        Ok(Self {
-            gate_proj,
-            up_proj,
-            down_proj,
-            act_fn: cfg.hidden_act,
-        })
-    }
-
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let original_dtype = xs.dtype();
-        let xs = xs.clone();
-        let lhs = self.gate_proj.forward(&xs)?;
-        let rhs = self.up_proj.forward(&xs)?;
-        self.down_proj
-            .forward(&crate::ops::mul_and_act(&lhs, &rhs, self.act_fn)?)?
-            .to_dtype(original_dtype)
-    }
 }
 
 struct Attention {
@@ -339,8 +281,11 @@ impl DecoderLayer {
             comm,
         )?;
         let mlp = Mlp::new(
-            cfg,
             mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq),
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            &cfg.quantization_config,
+            cfg.hidden_act,
             comm,
         )?;
         let input_layernorm = F32RmsNorm::new(

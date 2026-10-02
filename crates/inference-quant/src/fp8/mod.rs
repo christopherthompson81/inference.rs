@@ -190,6 +190,12 @@ impl QuantMethod for FP8Linear {
                 let mut tgt_shape = x.dims().to_vec();
                 *tgt_shape.last_mut().unwrap() = self.lin.weight().dim(0)?;
 
+                // cuBLASLt writes BF16; callers get their activation dtype back, as from every other path
+                let out_dtype = match x.dtype() {
+                    DType::F8E4M3 => DType::BF16,
+                    dtype => dtype,
+                };
+
                 // Flatten for correct dims
                 let mut x = x.flatten_to(D::Minus(3))?;
 
@@ -228,7 +234,8 @@ impl QuantMethod for FP8Linear {
                         None,
                         None,
                     )?
-                    .reshape(tgt_shape)
+                    .reshape(tgt_shape)?
+                    .to_dtype(out_dtype)
             }
             None => {
                 // Dequantize matmul
@@ -353,5 +360,24 @@ impl QuantizedSerde for FP8Linear {
     }
     fn isq_type_from_uqff(_reader: &UqffReader, _prefix: &str) -> Result<IsqType> {
         Ok(IsqType::F8E4M3)
+    }
+}
+
+#[cfg(all(test, feature = "cuda"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[ignore = "needs sm_89+ FP8 tensor cores for the cuBLASLt path"]
+    fn cublaslt_fp8_returns_the_activation_dtype() -> Result<()> {
+        let device = Device::new_cuda(0)?;
+        let weight = Tensor::randn(0f32, 1., (16, 32), &device)?.to_dtype(DType::F16)?;
+        let layer = FP8Linear::new(QuantMethodConfig::FP8 {
+            lin: Linear::new(weight, None),
+            dtype: DType::F8E4M3,
+        })?;
+        let x = Tensor::randn(0f32, 1., (1, 4, 32), &device)?.to_dtype(DType::F16)?;
+        assert_eq!(layer.forward(&x)?.dtype(), DType::F16);
+        Ok(())
     }
 }

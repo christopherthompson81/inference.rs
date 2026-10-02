@@ -15,7 +15,7 @@ use crate::{
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     kv_cache::{EitherCache, KvCache, NormalCache},
-    layers::{self, Activation, F32RmsNorm, Qwen3VLRotaryEmbedding, RmsNorm, Sdpa},
+    layers::{self, F32RmsNorm, Mlp, Qwen3VLRotaryEmbedding, RmsNorm, Sdpa},
     model::{IsqModel, ModelForwardContext, NormalLoadingMetadata},
     moe::{MoEExperts, MoEExpertsConfig},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
@@ -58,65 +58,6 @@ impl ToTensors for TextNorm {
             Self::F32(norm) => norm.to_tensors(),
             Self::Fused(norm) => norm.to_tensors(),
         }
-    }
-}
-
-#[derive(Clone)]
-struct Mlp {
-    gate_proj: Arc<dyn QuantMethod>,
-    up_proj: Arc<dyn QuantMethod>,
-    down_proj: Arc<dyn QuantMethod>,
-    act_fn: Activation,
-}
-
-impl Mlp {
-    fn new(
-        cfg: &TextConfig,
-        vb: ShardedVarBuilder,
-        comm: &Arc<inference_quant::Comm>,
-        i_size: usize,
-    ) -> Result<Self> {
-        let hidden_size = cfg.hidden_size;
-
-        let gate_proj = ColumnParallelLayer::new(
-            hidden_size,
-            i_size,
-            &cfg.quantization_config,
-            false,
-            comm,
-            vb.pp("gate_proj"),
-        )?;
-        let up_proj = ColumnParallelLayer::new(
-            hidden_size,
-            i_size,
-            &cfg.quantization_config,
-            false,
-            comm,
-            vb.pp("up_proj"),
-        )?;
-        let down_proj = RowParallelLayer::new(
-            i_size,
-            hidden_size,
-            &cfg.quantization_config,
-            false,
-            comm,
-            vb.pp("down_proj"),
-        )?;
-
-        Ok(Self {
-            gate_proj,
-            up_proj,
-            down_proj,
-            act_fn: cfg.hidden_act,
-        })
-    }
-
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let lhs = self.gate_proj.forward(xs)?;
-        let rhs = self.up_proj.forward(xs)?;
-        self.down_proj
-            .forward(&crate::ops::mul_and_act(&lhs, &rhs, self.act_fn)?)?
-            .to_dtype(xs.dtype())
     }
 }
 
@@ -470,10 +411,12 @@ impl DecoderLayer {
             MoeOrMlp::Moe(MoeMlp::new(cfg, vb, layer_device, comm, loading_isq)?)
         } else {
             MoeOrMlp::Mlp(Mlp::new(
-                cfg,
                 mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq),
-                comm,
+                cfg.hidden_size,
                 cfg.intermediate_size,
+                &cfg.quantization_config,
+                cfg.hidden_act,
+                comm,
             )?)
         };
 

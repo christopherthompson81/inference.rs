@@ -1503,3 +1503,39 @@ Finding: latent, not live; no load changes today. The issue overstated it and go
 Change: the multimodal session, its auto device map adjustment and the tensor-parallel mapper now take the runtime
 config, as normal's do; the UQFF artifact still keeps the source config. Every pipeline now sizes and builds from
 one config, so `ModelLoadInputs::session_config` is gone. No test can see the difference, since nothing reads it.
+
+## Run 51 - 2026-10-01 (time approximate)
+
+Question: which of the model crates' local MLP structs are copies of `inference_nn::layers::Mlp`?
+
+Survey: 56 MLP-like structs. Fingerprinting (fields, constructors, projection names, activation handling) the
+gated text-model ones: six build exactly the shared Mlp's column/row-parallel `gate_proj`/`up_proj`/`down_proj`
+with no bias and `act(gate) * up`: Qwen2-VL text, Qwen3-VL text (dense layers), Qwen3-MoE (dense layers),
+PaddleOCR-VL text, the LLaVA Llama LLM and MLlama text. The rest differ in kind: merged `gate_up_proj` on
+replicated layers (Phi-3, Phi-3-vision, Phi-4 with static LoRA), biases (Voxtral, Mistral3 vision), matformer and
+activation sparsity (Gemma 3n), `QLinear` (Idefics2), `w1/w2/w3` naming (LFM2), Granite's fused `input_linear`, and
+the X-LoRA copies, which are built on LoRA layers.
+
+Pinned first: Qwen3-MoE (layer 0 dense, layer 1 MoE, per-expert shapes declared) and LLaVA 1.5 got synthesized
+prefill snapshots plus name digests; the Qwen-VL tests and the PaddleOCR-VL engine tests covered the rest.
+
+Change: five of the six now use the shared Mlp (MLlama's takes a `candle_nn::Activation`, so it stays). LLaVA's
+AnyMoE expert path passes its SiLU and no quantization config explicitly, as before. Lines: the model code is
+-350/+37. Every pin, F32 and BF16, is unchanged, and the `--cuda` run's real-checkpoint PaddleOCR-VL checks
+(greedy ids against transformers, ISQ Q8_0 OCR text) pass.
+
+Review of the branch (subagent), acted on:
+- Which forward runs: for unquantized loads with no immediate ISQ or weight source, `ColumnParallelLayer::new_packed`
+  succeeds and the gate/up run as one packed matmul into `split_mul_and_act`/`fused_split_glu`; `quantized_ffn`
+  (fused CUDA/Metal gate-up, CPU shared-LHS gemv) only runs when packing is declined (immediate ISQ, UQFF or another
+  weight source, GPTQ/AWQ, bias). Prequantized block-FP8 checkpoints now get the packed BlockwiseFp8 gate/up.
+  PaddleOCR-VL alone did `silu(gate) * up` with two roundings, so its BF16 numerics moved by ulps; the GPU parity
+  check above still passes.
+- A fix this brings: master's Qwen3-MoE dense MLP built `up_proj` row-parallel and `down_proj` column-parallel
+  (swapped), so tensor-parallel loads with dense layers (`mlp_only_layers`, `decoder_sparse_step > 1`) sharded them
+  on the wrong axes. The shared Mlp shards them correctly; single-rank loads are unchanged.
+- The dropped dtype cast in Qwen2-VL/Qwen3-VL was not always a no-op: on sm_89+ `FP8Linear`'s cuBLASLt path returns
+  BF16 whatever the activation dtype, so an F16 model with F8E4M3 ISQ on its MLP would hand BF16 to the residual
+  add. Fixed at the source: that path now returns the activation dtype, as the dequantize path and every other
+  QuantMethod do. This machine is sm_86, where the path never runs; the test for it is `#[ignore]`d for sm_89+.
+- Style: `Mlp` imported where it was spelled out; LLaVA's AnyMoE construction reuses its size locals.

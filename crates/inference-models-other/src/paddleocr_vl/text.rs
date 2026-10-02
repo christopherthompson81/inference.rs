@@ -8,6 +8,7 @@ use super::config::TextConfig;
 use crate::attention::{AttentionMask, Sdpa, SdpaParams};
 use crate::device_map::DeviceMapper;
 use crate::kv_cache::KvCache as EngineKvCache;
+use crate::layers::{Activation, Mlp};
 use crate::paged_attention::{AttentionImplementation, PagedAttention};
 use crate::utils::unvarbuilder::UnVarBuilder;
 use candle_core::{D, DType, Device, Result, Tensor};
@@ -259,60 +260,6 @@ impl Attention {
     }
 }
 
-struct Mlp {
-    gate_proj: Arc<dyn QuantMethod>,
-    up_proj: Arc<dyn QuantMethod>,
-    down_proj: Arc<dyn QuantMethod>,
-}
-
-impl Mlp {
-    fn load(
-        vb: ShardedVarBuilder,
-        cfg: &TextConfig,
-        mapper: &dyn DeviceMapper,
-        layer_idx: usize,
-        loading_isq: bool,
-        comm: &Arc<inference_quant::Comm>,
-    ) -> Result<Self> {
-        let (h, i) = (cfg.hidden_size, cfg.intermediate_size);
-        let gate_proj = ColumnParallelLayer::new(
-            h,
-            i,
-            &cfg.quantization_config,
-            false,
-            comm,
-            mapper.set_device(layer_idx, vb.pp("gate_proj"), loading_isq),
-        )?;
-        let up_proj = ColumnParallelLayer::new(
-            h,
-            i,
-            &cfg.quantization_config,
-            false,
-            comm,
-            mapper.set_device(layer_idx, vb.pp("up_proj"), loading_isq),
-        )?;
-        let down_proj = RowParallelLayer::new(
-            i,
-            h,
-            &cfg.quantization_config,
-            false,
-            comm,
-            mapper.set_device(layer_idx, vb.pp("down_proj"), loading_isq),
-        )?;
-        Ok(Self {
-            gate_proj,
-            up_proj,
-            down_proj,
-        })
-    }
-
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let gate = candle_nn::ops::silu(&self.gate_proj.forward(x)?)?;
-        let up = self.up_proj.forward(x)?;
-        self.down_proj.forward(&(gate * up)?)
-    }
-}
-
 struct DecoderLayer {
     input_layernorm: RmsNorm,
     self_attn: Attention,
@@ -350,7 +297,14 @@ impl DecoderLayer {
                 cfg.hidden_size,
                 cfg.rms_norm_eps,
             )?,
-            mlp: Mlp::load(vb.pp("mlp"), cfg, mapper, layer_idx, loading_isq, comm)?,
+            mlp: Mlp::new(
+                mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq),
+                cfg.hidden_size,
+                cfg.intermediate_size,
+                &cfg.quantization_config,
+                Activation::Silu,
+                comm,
+            )?,
         })
     }
 

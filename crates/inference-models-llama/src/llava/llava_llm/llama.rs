@@ -17,13 +17,13 @@ use inference_quant::{
 };
 
 use crate::{
-    amoe::{AnyMoeBaseModelMixin, AnyMoeTrainableLayer, MlpLayer, MoeMlp},
+    amoe::{AnyMoeBaseModelMixin, MlpLayer, MoeMlp},
     amoe::{AnyMoeConfig, AnyMoeExpertType},
     attention::{AttentionMask, SdpaParams},
     device_map::{DeviceMappedMask, DeviceMapper},
     get_delta_from_lora_ab,
     layers::masker::PastKvLenCache,
-    layers::{Activation, CausalMasker, MatMul, RmsNorm, Sdpa, embedding},
+    layers::{Activation, CausalMasker, MatMul, Mlp, RmsNorm, Sdpa, embedding},
     llama::Config,
     model::{IsqModel, ModelForwardContext, NormalLoadingMetadata, NormalModel},
     paged_attention::{AttentionImplementation, ModelConfigMetadata, PagedAttention},
@@ -202,105 +202,6 @@ impl CausalSelfAttention {
         })
     }
 }
-#[derive(Clone)]
-struct Mlp {
-    c_fc1: Arc<dyn QuantMethod>,
-    c_fc2: Arc<dyn QuantMethod>,
-    c_proj: Arc<dyn QuantMethod>,
-    params: Vec<usize>,
-}
-
-impl Mlp {
-    fn load(
-        vb: ShardedVarBuilder,
-        cfg: &Config,
-        comm: &Arc<inference_quant::Comm>,
-    ) -> Result<Self> {
-        let h_size = cfg.hidden_size;
-        let i_size = cfg.intermediate_size;
-        let c_fc1 = ColumnParallelLayer::new(
-            h_size,
-            i_size,
-            &cfg.quantization_config,
-            false,
-            comm,
-            vb.pp("gate_proj"),
-        )?;
-        let c_fc2 = ColumnParallelLayer::new(
-            h_size,
-            i_size,
-            &cfg.quantization_config,
-            false,
-            comm,
-            vb.pp("up_proj"),
-        )?;
-        let c_proj = RowParallelLayer::new(
-            i_size,
-            h_size,
-            &cfg.quantization_config,
-            false,
-            comm,
-            vb.pp("down_proj"),
-        )?;
-        Ok(Self {
-            c_fc1,
-            c_fc2,
-            c_proj,
-            params: vec![h_size, i_size],
-        })
-    }
-}
-
-impl AnyMoeTrainableLayer for Mlp {}
-
-impl MlpLayer for Mlp {
-    fn forward(&self, x: &Tensor) -> Result<Tensor> {
-        let lhs = self.c_fc1.forward(x)?;
-        let rhs = self.c_fc2.forward(x)?;
-        let x = crate::ops::mul_and_act(&lhs, &rhs, crate::layers::Activation::Silu)?;
-        let res = self.c_proj.forward(&x)?;
-        Ok(res)
-    }
-    fn clone(&self) -> Box<dyn MlpLayer> {
-        Box::new(Clone::clone(self))
-    }
-    fn get_params(&self) -> &[usize] {
-        &self.params
-    }
-    fn hidden_act(&self) -> Activation {
-        Activation::Silu
-    }
-    // c_fc1, c_fc2, c_proj
-    fn new_added_delta(&self, deltas: Vec<Option<Tensor>>) -> Result<Box<dyn MlpLayer>> {
-        let new_c_fc1 = if let Some(ref delta) = deltas[0] {
-            self.c_fc1.add_delta_w(delta)?
-        } else {
-            self.c_fc1.clone()
-        };
-        let new_c_fc2 = if let Some(ref delta) = deltas[1] {
-            self.c_fc2.add_delta_w(delta)?
-        } else {
-            self.c_fc2.clone()
-        };
-        let new_c_proj = if let Some(ref delta) = deltas[2] {
-            self.c_proj.add_delta_w(delta)?
-        } else {
-            self.c_proj.clone()
-        };
-
-        Ok(Box::new(Self {
-            c_fc1: new_c_fc1,
-            c_fc2: new_c_fc2,
-            c_proj: new_c_proj,
-            params: self.params.clone(),
-        }))
-    }
-
-    fn dtype_device(&self) -> (DType, Device) {
-        self.c_fc1.dtype_and_device()
-    }
-}
-
 struct Block {
     rms_1: RmsNorm,
     attn: CausalSelfAttention,
@@ -349,9 +250,12 @@ impl Block {
             paged_attn,
             comm,
         )?;
-        let mlp = Mlp::load(
+        let mlp = Mlp::new(
             mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq),
-            cfg,
+            cfg.hidden_size,
+            cfg.intermediate_size,
+            &cfg.quantization_config,
+            Activation::Silu,
             comm,
         )?;
         let rms_1 = RmsNorm::new(
@@ -641,13 +545,12 @@ impl AnyMoeBaseModelMixin for Llama {
                 match expert_type {
                     AnyMoeExpertType::FineTuned => {
                         let (dtype, device) = self.blocks[layer].mlp.dtype_device();
-                        row.push(Box::new(Mlp::load(
+                        row.push(Box::new(Mlp::new(
                             vb.pp(layer).pp(&mlp).set_dtype(dtype).set_device(device),
-                            &Config {
-                                intermediate_size: self.blocks[layer].mlp.get_params()[1],
-                                hidden_size: self.blocks[layer].mlp.get_params()[0],
-                                ..Default::default()
-                            },
+                            hidden_size,
+                            intermediate_size,
+                            &None,
+                            Activation::Silu,
                             &self.mapper.get_comm_for(layer)?,
                         )?));
                     }
