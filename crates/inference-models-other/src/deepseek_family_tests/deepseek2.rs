@@ -5,10 +5,10 @@ use serde_json::{Value, json};
 use super::DeepSeekV2Config;
 use crate::deepseek_family::MoeGate;
 use crate::deepseek_family_tests::{
-    Checkpoint, EXPERTS, HEADS, HIDDEN, INTERMEDIATE, KV_LORA, LAYERS, MAX_POS, MOE_INTERMEDIATE,
-    N_SHARED, NARROW_V_DIM, NOPE_DIM, Q_LORA, ROPE_DIM, SCALE, Snapshot, TOP_K, V_DIM, VOCAB,
-    assert_err_contains, assert_routes, assert_snapshot, load_and_forward, patched, router_input,
-    router_vb,
+    Checkpoint, EXPERTS, FamilyCheckpoint, HEADS, HIDDEN, INTERMEDIATE, KV_LORA, LAYERS, MAX_POS,
+    MOE_INTERMEDIATE, N_SHARED, NARROW_V_DIM, NOPE_DIM, Q_LORA, ROPE_DIM, SCALE, Snapshot, TOP_K,
+    V_DIM, VOCAB, assert_err_contains, assert_routes, assert_snapshot, load_and_forward, patched,
+    router_input, router_vb,
 };
 use crate::loaders::DeepSeekV2Loader;
 

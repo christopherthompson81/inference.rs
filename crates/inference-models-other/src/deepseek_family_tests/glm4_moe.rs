@@ -5,9 +5,9 @@ use serde_json::{Value, json};
 use super::Glm4MoeConfig;
 use crate::deepseek_family::MoeGate;
 use crate::deepseek_family_tests::{
-    Checkpoint, EXPERTS, HEAD_DIM, HEADS, HIDDEN, INTERMEDIATE, KV_HEADS, LAYERS, MAX_POS,
-    MOE_INTERMEDIATE, N_SHARED, SCALE, Snapshot, TOP_K, VOCAB, assert_err_contains, assert_routes,
-    assert_snapshot, load_and_forward, patched, router_input, router_vb,
+    Checkpoint, EXPERTS, FamilyCheckpoint, HEAD_DIM, HEADS, HIDDEN, INTERMEDIATE, KV_HEADS, LAYERS,
+    MAX_POS, MOE_INTERMEDIATE, N_SHARED, SCALE, Snapshot, TOP_K, VOCAB, assert_err_contains,
+    assert_routes, assert_snapshot, load_and_forward, patched, router_input, router_vb,
 };
 use crate::loaders::GLM4MoeLoader;
 
