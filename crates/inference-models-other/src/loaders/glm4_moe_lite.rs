@@ -13,7 +13,7 @@ impl NormalModelLoader for GLM4MoeLiteLoader {
     ) -> Result<Box<dyn NormalModel + Send + Sync>> {
         let cfg = crate::glm4_moe_lite::Glm4MoeLiteConfig::from_json(config)?;
         Ok(Box::new(crate::glm4_moe_lite::Glm4MoeLite::new(
-            &cfg,
+            &cfg.family(),
             vb,
             self.is_gptx_for(config, &normal_loading_metadata)?,
             normal_loading_metadata,

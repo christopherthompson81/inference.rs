@@ -2,7 +2,8 @@ use anyhow::Result;
 use candle_core::Tensor;
 use serde_json::{Value, json};
 
-use super::{Glm4MoeLiteConfig, MoeGate};
+use super::Glm4MoeLiteConfig;
+use crate::deepseek_family::MoeGate;
 use crate::deepseek_family_tests::{
     Checkpoint, EXPERTS, HEADS, HIDDEN, INTERMEDIATE, KV_HEADS, KV_LORA, LAYERS, MAX_POS,
     MOE_INTERMEDIATE, N_SHARED, NOPE_DIM, Q_LORA, ROPE_DIM, SCALE, Snapshot, TOP_K, V_DIM, VOCAB,
@@ -44,7 +45,7 @@ fn base_config() -> Value {
 fn gate(bias: bool) -> Result<MoeGate> {
     let cfg: Glm4MoeLiteConfig =
         serde_json::from_value(patched(base_config(), json!({"hidden_size": EXPERTS})))?;
-    Ok(MoeGate::new(&cfg, router_vb(bias)?, EXPERTS)?)
+    Ok(MoeGate::new(&cfg.family(), router_vb(bias)?, EXPERTS)?)
 }
 
 #[test]
