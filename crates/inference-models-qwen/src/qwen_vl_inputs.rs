@@ -161,7 +161,10 @@ fn token_id(tokenizer: &Tokenizer, token: &str, what: &str) -> Result<u32> {
         .ok_or_else(|| anyhow::anyhow!("Qwen tokenizer is missing {what} token"))
 }
 
-fn decode_prompts(tokenizer: &Tokenizer, input_seqs: &[&mut dyn MediaSequence]) -> Vec<String> {
+fn decode_prompts(
+    tokenizer: &Tokenizer,
+    input_seqs: &[&mut dyn MediaSequence],
+) -> Result<Vec<String>> {
     tokenizer
         .decode_batch(
             &input_seqs
@@ -170,7 +173,7 @@ fn decode_prompts(tokenizer: &Tokenizer, input_seqs: &[&mut dyn MediaSequence]) 
                 .collect::<Vec<_>>(),
             false,
         )
-        .expect("Detokenization failed!")
+        .map_err(anyhow::Error::msg)
 }
 
 fn concat_rows(rows: &[Tensor]) -> Result<Option<Tensor>> {
@@ -243,12 +246,11 @@ impl QwenVlInputs<'_> {
             .ok_or_else(|| anyhow::anyhow!("{} requires a specified tokenizer.", self.spec.name()))
     }
 
-    fn config(&self) -> &PreProcessorConfig {
+    fn config(&self) -> Result<&PreProcessorConfig> {
         self.other_config
             .as_ref()
-            .expect("Need a PreProcessorConfig config.")
-            .downcast_ref()
-            .expect("Downcast failed.")
+            .and_then(|config| config.downcast_ref())
+            .ok_or_else(|| anyhow::anyhow!("{} needs its PreProcessorConfig", self.spec.name()))
     }
 
     pub(crate) fn prepare(
@@ -257,7 +259,7 @@ impl QwenVlInputs<'_> {
         mut paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> Result<()> {
         let tokenizer = self.tokenizer()?;
-        let config = self.config();
+        let config = self.config()?;
         if !input_seqs
             .iter()
             .any(|seq| seq.has_images() || seq.has_videos())
@@ -266,7 +268,7 @@ impl QwenVlInputs<'_> {
         }
         self.validate_media(input_seqs, config)?;
 
-        let mut detok_seqs = decode_prompts(&tokenizer, input_seqs);
+        let mut detok_seqs = decode_prompts(&tokenizer, input_seqs)?;
         for (text, seq) in detok_seqs.iter_mut().zip(input_seqs.iter_mut()) {
             let (image_grid, video_grid) = if seq.has_images() || seq.has_videos() {
                 let (_, image_grid, video_grid) = self.load_media(&mut **seq, config)?;
@@ -380,7 +382,7 @@ impl QwenVlInputs<'_> {
         }
 
         let tokenizer = self.tokenizer()?;
-        let config = self.config();
+        let config = self.config()?;
         for seq in input_seqs.iter_mut() {
             if seq.multimodal().rope_img_grid_thw.is_none()
                 && seq.multimodal().rope_vid_grid_thw.is_none()
@@ -793,7 +795,7 @@ impl QwenVlInputs<'_> {
         let mut video_pixels = Vec::new();
         let mut image_grids = Vec::with_capacity(seq_count);
         let mut video_grids = Vec::with_capacity(seq_count);
-        let mut detok_seqs = decode_prompts(tokenizer, input_seqs);
+        let mut detok_seqs = decode_prompts(tokenizer, input_seqs)?;
 
         for (seq_idx, seq) in input_seqs.iter_mut().enumerate() {
             if !seq.has_images() && !seq.has_videos() {
@@ -1022,5 +1024,61 @@ impl QwenVlInputs<'_> {
             });
         }
         Ok(PackedMultimodalLayout::new(&requests)?)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn one_run_per_item_grouping_keeps_each_range() -> Result<()> {
+        let ranges = vec![(2, 4), (10, 6)];
+        assert_eq!(group_item_ranges(&ranges, &[1, 1])?, ranges);
+        Ok(())
+    }
+
+    #[test]
+    fn grouping_covers_each_item_runs_and_rejects_empty_items() -> Result<()> {
+        let ranges = [(2, 3), (6, 3), (12, 4)];
+        assert_eq!(group_item_ranges(&ranges, &[2, 1])?, vec![(2, 7), (12, 4)]);
+        assert!(group_item_ranges(&ranges, &[3, 0]).is_err());
+        assert!(group_item_ranges(&ranges, &[1, 1]).is_err());
+        Ok(())
+    }
+
+    // With one run per video the shift is master Qwen2-VL's shift_media_spans, at every prefix length.
+    #[test]
+    fn one_run_per_item_shift_matches_the_per_span_shift() {
+        let spans = vec![(2, 5), (8, 12), (12, 15)];
+        for prefix in 0..=16 {
+            let mut per_span = spans.clone();
+            let mut per_item = spans.clone();
+            let expected =
+                crate::qwen2vl::inputs_processor::shift_media_spans(&mut per_span, prefix);
+            let shifted = shift_item_runs(&mut per_item, &[1, 1, 1], prefix);
+            match (expected, shifted) {
+                (Ok(cached), Ok((shift_cached, current))) => {
+                    assert_eq!(
+                        (shift_cached, per_item.clone()),
+                        (cached, per_span),
+                        "prefix {prefix}"
+                    );
+                    assert_eq!(current, per_item.len(), "prefix {prefix}");
+                }
+                (Err(_), Err(_)) => {}
+                (expected, shifted) => panic!("prefix {prefix}: {expected:?} vs {shifted:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn multi_run_shift_caches_or_keeps_whole_items() -> Result<()> {
+        let mut runs = vec![(2, 5), (6, 9), (12, 16)];
+        assert_eq!(shift_item_runs(&mut runs, &[2, 1], 10)?, (1, 1));
+        assert_eq!(runs, vec![(2, 6)]);
+        let mut split = vec![(2, 5), (6, 9), (12, 16)];
+        assert!(shift_item_runs(&mut split, &[2, 1], 4).is_err());
+        Ok(())
     }
 }

@@ -1721,3 +1721,12 @@ Differences found while merging, and what was done:
   with both problems gets); Qwen2-VL's prompt MRoPE now reads the vision start/end ids from the tokenizer, which its
   feature recording already required; Qwen2-VL builds `input_ids_full` from the sequence when it has rope grids but no
   new media, which its model reads only when there are no prompt position ids (never, once grids exist).
+Review of the branch (subagent): no behaviour change on paged and chunked prefill, prefix-cache hits, packed prefill,
+mixed batches, MRoPE or decode for either model; it traced `prepare_for_paged_prompt_planning` running when a
+request is added (`engine/add_request.rs`) and on every prompt step (`pipeline/step.rs`), so the text-input order
+cannot differ in practice. Acted on: the panic-to-error change covered Qwen3-VL and Qwen3.5 too (their host input
+calls, encoding and id tensors), and the last two `expect`s (detokenizing, the preprocessor config downcast) are now
+errors; unit tests for the shared helpers (one run per video groups and shifts exactly like master Qwen2-VL's
+`shift_media_spans` at every prefix length, multi-run items cache or keep whole, empty and split items error). Some
+error texts changed with the generic helpers ("spans per video", "its items expect"); nothing matches on them.
+Still untested end to end: paged, chunked and packed media prefill, and mixed text/media batches.
