@@ -141,14 +141,15 @@ fn forward_split_kv_b_errors_on_2d_weights() -> Result<()> {
     Ok(())
 }
 
+// DeepSeek-V2/V3 value heads are narrower than their query heads (128 vs 192).
 #[test]
-fn forward_narrow_v_head_errors_on_cpu() -> Result<()> {
-    // pins current behaviour: CPU eager attention reads value rows at the query head width
-    assert_err_contains(
-        forward_case(None, false, NARROW_V_DIM),
-        "shape mismatch in matmul",
-    );
-    Ok(())
+fn forward_narrow_v_head() -> Result<()> {
+    let expected = Snapshot {
+        probes: [-0.2601225, 1.2632831, -1.8173112, 0.48527986],
+        sum: 6.293726,
+        l2: 17.189129,
+    };
+    assert_snapshot(&forward_case(None, false, NARROW_V_DIM)?, &expected)
 }
 
 #[test]
