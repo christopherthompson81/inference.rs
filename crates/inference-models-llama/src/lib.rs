@@ -12,6 +12,8 @@ pub mod idefics3;
 pub mod llama;
 pub mod llama4;
 pub mod llava;
+#[cfg(test)]
+mod llava_tests;
 pub mod loaders;
 pub mod mistral;
 pub mod mistral3;
