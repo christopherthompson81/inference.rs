@@ -1352,3 +1352,40 @@ Findings:
 - Lines: the four models and their loaders went from 5401 to 2822, plus the 204-line router in inference-nn.
 
 Next: the Run 44 bug fixes, each with its golden updated, and the flake above.
+
+## Run 47 - 2026-10-01 (time approximate)
+
+Fixes on top of the consolidation (Run 46), each against its own updated goldens:
+- CPU attention read value rows at the query head width (`let dv = d` in the CPU flash kernels), so a model whose
+  value heads are narrower than its query heads (DeepSeek-V2/V3: 128 vs 192) failed on CPU, or, depending on what
+  lay past each row, returned a wrong answer. That was the flaky pin Run 46 saw (`forward_narrow_v_head_errors_on_cpu`
+  passing about one run in ten after a fresh build). The kernels now use `v`'s width; a new kernel test against the
+  naive reference fails without the fix, and the DS2 narrow-value forward is a snapshot now.
+- Group-limited routing masked the 0/1 group mask instead of the scores, and DS2's `norm_topk_prob` division did not
+  broadcast. The router now multiplies the scores by the mask (HF's `scores.masked_fill(~score_mask, 0.0)`) and
+  broadcasts. The goldens are HF DeepSeek-V2 values computed independently, with `topk_group: 1` so the group limit
+  changes the answer (with two groups kept on these logits it picks what plain greedy does).
+- Shared experts: HF builds them `moe_intermediate_size * n_shared_experts` wide in all four models (checked in the
+  GLM4-MoE and GLM4-MoE-Lite modeling files). GLM built one expert's width; the DeepSeek loaders sized them at
+  `intermediate_size * n_shared` for the device map. The loader size changes were derived by hand (DeepSeek MoE layers
+  -12288 bytes, GLM +3072 at the test's dims, F32, pack factor 2) and matched before the constants were updated.
+Left as found, noted: Lite uses the MLA paged layout only on a CUDA device (DS2/DS3 whenever paged attention is on);
+DS3's loader leaves the correction bias out of its size; the DS loaders do not divide q projection sizes by the pack
+factor; the dense `up_proj` ISQ pattern has unescaped dots; loaders use `%` on `moe_layer_freq`, which panics at 0.
+
+Review of the branch (subagent, against master and HF): no unintended change to weight paths, device mapping, ISQ
+patterns, paged/MLA layout, rope, the GLM decode-graph flag or the GGUF-synthesised configs. Its findings, acted on:
+- DS3 renormalised under sigmoid scoring only, ignoring `norm_topk_prob`; HF DeepSeek-V3 renormalises when
+  `norm_topk_prob` (config default true) and always scales. DS3 now reads `norm_topk_prob` (default true) and shares
+  GLM4-MoE's rule; the GGUF synthesis already writes the key from `expert_weights_norm`. Real V3/R1 configs (sigmoid,
+  true) route as before; a softmax config now renormalises unless it says false. The new golden is the existing
+  softmax one renormalised by hand (1.556148/0.943852, 1.61414/0.88586) and matched first time.
+- The narrow-value kernel test only reached the tiled f32 path; two more cover mask, softcap (the full-qblock
+  fallback) and bf16/f16 (`compute_full_row`). All three fail with the kernel fix reverted.
+- Stale comments from before the fixes removed; `O_PROJ` named for the GLM GQA pattern; test-only items `pub(crate)`.
+Also left as found: GLM4-MoE shards KV for tensor parallelism from `hidden_size / num_attention_heads` rather than
+`head_dim`, which differs for GLM-4.5 dims; the loaders still report a `Standard` KV layout for MLA models (Run 44).
+- CI `--cuda`: the three group-limited router tests panicked (`not implemented!`, `ops/topk.rs`). With the `cuda`
+  feature built, `topk_unsorted` and the MoE gather backend's prefill sort always used the custom `ArgSort` op, whose
+  CPU path panics, so a CPU-device DS2 group-limited model in a CUDA build crashed. `ArgSortOp` now sends non-CUDA
+  tensors to candle's `arg_sort_last_dim`/`sort_last_dim`, and the callers' `cfg(feature = "cuda")` splits are gone.

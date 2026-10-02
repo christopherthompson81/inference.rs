@@ -76,7 +76,6 @@ impl DeepSeekV2Loader {
                 moe_intermediate_size: cfg.moe_intermediate_size,
                 first_k_dense_replace: cfg.first_k_dense_replace,
                 moe_layer_freq: Some(cfg.moe_layer_freq),
-                // sized at intermediate_size where the model builds moe_intermediate_size
                 shared_intermediate: cfg.n_shared_experts.map(|n| cfg.moe_intermediate_size * n),
                 correction_bias: false,
             }),

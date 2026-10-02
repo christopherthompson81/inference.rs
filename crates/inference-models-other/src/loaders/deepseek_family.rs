@@ -5,10 +5,11 @@ use super::*;
 pub(super) const LM_HEAD: &str = r"lm_head\.(weight|bias)$";
 pub(super) const STACKED_EXPERTS: &str =
     r"layers\.(\d+)\.mlp\.experts\.(gate_proj|up_proj|down_proj)\.weight$";
+pub(super) const O_PROJ: &str = r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$";
 pub(super) const MLA_ATTENTION: [&str; 3] = [
     r"layers\.(\d+)\.self_attn\.kv_a_proj_with_mqa\.(weight|bias)$",
     r"layers\.(\d+)\.self_attn\.(kv_b|k_b|v_b)_proj\.(weight|bias)$",
-    r"layers\.(\d+)\.self_attn\.o_proj\.(weight|bias)$",
+    O_PROJ,
 ];
 pub(super) const Q_LORA: [&str; 2] = [
     r"layers\.(\d+)\.self_attn\.q_a_proj\.(weight|bias)$",

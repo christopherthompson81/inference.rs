@@ -191,7 +191,7 @@ impl candle_core::CustomOp1 for ArgSort {
         _: &candle_core::CpuStorage,
         _: &candle_core::Layout,
     ) -> Result<(candle_core::CpuStorage, candle_core::Shape)> {
-        panic!("not implemented!")
+        candle_core::bail!("argsort: CPU tensors sort through candle's arg_sort_last_dim")
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -301,6 +301,9 @@ impl ArgSortOp for Tensor {
     /// descending order. The sort is unstable so there is no guarantees on the final order when it
     /// comes to ties.
     fn arg_sort(&self, asc: bool) -> Result<Tensor> {
+        if !self.device().is_cuda() {
+            return self.arg_sort_last_dim(asc);
+        }
         if !self.is_contiguous() {
             return Err(candle_core::Error::RequiresContiguous { op: "arg_sort" });
         }
@@ -323,6 +326,9 @@ impl ArgSortOp for Tensor {
     /// descending order. The sort is unstable so there is no guarantees on the final order when it
     /// comes to ties.
     fn sort(&self, asc: bool) -> Result<(Tensor, Tensor)> {
+        if !self.device().is_cuda() {
+            return self.sort_last_dim(asc);
+        }
         if !self.is_contiguous() {
             return Err(candle_core::Error::RequiresContiguous { op: "arg_sort" });
         }

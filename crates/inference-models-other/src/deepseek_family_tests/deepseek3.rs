@@ -55,13 +55,30 @@ fn gate(patch: Value, bias: bool) -> Result<MoeGate> {
 
 #[test]
 fn router_greedy_softmax_scales_without_renormalising() -> Result<()> {
-    let cfg = json!({"topk_method": "greedy", "scoring_func": "softmax"});
+    let cfg = json!({
+        "topk_method": "greedy",
+        "scoring_func": "softmax",
+        "norm_topk_prob": false,
+    });
     let routes = gate(cfg, false)?.forward(&router_input()?)?;
     assert_routes(
         routes,
         [
             [(1, 0.956273), (4, 0.580009)],
             [(3, 1.118709), (6, 0.613961)],
+        ],
+    )
+}
+
+#[test]
+fn router_greedy_softmax_norm_topk_prob_renormalises_then_scales() -> Result<()> {
+    let cfg = json!({"topk_method": "greedy", "scoring_func": "softmax"});
+    let routes = gate(cfg, false)?.forward(&router_input()?)?;
+    assert_routes(
+        routes,
+        [
+            [(1, 1.556_148), (4, 0.943_852)],
+            [(3, 1.614_14), (6, 0.885_86)],
         ],
     )
 }
@@ -101,6 +118,7 @@ fn router_group_limited_greedy_picks_within_the_best_group() -> Result<()> {
     let cfg = json!({
         "topk_method": "group_limited_greedy",
         "scoring_func": "softmax",
+        "norm_topk_prob": false,
         "n_group": 4,
         "topk_group": 1,
     });

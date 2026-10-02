@@ -36,10 +36,7 @@ impl TopKLastDimOp for Tensor {
         // Sorted descending
         let TopKOutput { values, indices } = self.topk(topk)?;
         // Reorder the indices ascending
-        #[cfg(feature = "cuda")]
         let reorder_indices = indices.arg_sort(true)?;
-        #[cfg(not(feature = "cuda"))]
-        let reorder_indices = indices.arg_sort_last_dim(true)?;
         let topk_indices_unsorted = indices
             .to_dtype(DType::F32)?
             .gather(&reorder_indices, D::Minus1)?

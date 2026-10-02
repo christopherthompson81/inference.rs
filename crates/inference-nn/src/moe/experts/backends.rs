@@ -787,13 +787,8 @@ impl FusedExpertsWeights {
         }
         let is_prefill = forward.shape.phase.is_prefill();
         let (expert_ids, sorted_token_ids) = if forward.shape.phase.is_prefill() {
-            #[cfg(feature = "cuda")]
-            {
-                use crate::ops::ArgSortOp;
-                forward.topk_ids.flatten_all()?.sort(true)?
-            }
-            #[cfg(not(feature = "cuda"))]
-            forward.topk_ids.flatten_all()?.sort_last_dim(true)?
+            use crate::ops::ArgSortOp;
+            forward.topk_ids.flatten_all()?.sort(true)?
         } else {
             forward.topk_ids.flatten_all()?.sort_last_dim(true)?
         };
@@ -834,13 +829,8 @@ impl FusedExpertsWeights {
     fn forward_lora(&self, forward: &MoEForward, config: MoEForwardConfig) -> Result<Tensor> {
         let is_prefill = forward.shape.phase.is_prefill();
         let (expert_ids, sorted_token_ids) = if is_prefill {
-            #[cfg(feature = "cuda")]
-            {
-                use crate::ops::ArgSortOp;
-                forward.topk_ids.flatten_all()?.sort(true)?
-            }
-            #[cfg(not(feature = "cuda"))]
-            forward.topk_ids.flatten_all()?.sort_last_dim(true)?
+            use crate::ops::ArgSortOp;
+            forward.topk_ids.flatten_all()?.sort(true)?
         } else {
             forward.topk_ids.flatten_all()?.sort_last_dim(true)?
         };

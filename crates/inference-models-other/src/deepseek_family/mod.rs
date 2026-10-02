@@ -193,7 +193,7 @@ impl SharedMlp {
     }
 }
 
-pub struct MoeGate {
+pub(crate) struct MoeGate {
     weight: Tensor,
     lora_site: Option<Arc<inference_quant::LoraSiteHandle>>,
     router: GroupedRouter,
@@ -237,7 +237,7 @@ impl MoeGate {
     }
 }
 
-pub fn add_moe_gate_residual_tensors(
+pub(crate) fn add_moe_gate_residual_tensors(
     uvb: &UnVarBuilder,
     weight: &Tensor,
     correction_bias: Option<&Tensor>,

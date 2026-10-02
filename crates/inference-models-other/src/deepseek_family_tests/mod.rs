@@ -25,7 +25,6 @@ pub const Q_LORA: usize = 16;
 pub const KV_LORA: usize = 16;
 pub const ROPE_DIM: usize = 8;
 pub const NOPE_DIM: usize = 8;
-// Equal to NOPE_DIM + ROPE_DIM: the CPU attention kernel assumes the value head width matches the query's.
 pub const V_DIM: usize = 16;
 pub const NARROW_V_DIM: usize = 8;
 pub const EXPERTS: usize = 8;

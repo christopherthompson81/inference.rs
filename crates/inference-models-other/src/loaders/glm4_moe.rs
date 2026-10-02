@@ -72,14 +72,7 @@ impl GLM4MoeLoader {
                     .then_some(cfg.moe_intermediate_size * cfg.n_shared_experts),
                 correction_bias: true,
             }),
-            isq_head: vec![
-                LM_HEAD,
-                Q_PROJ,
-                K_PROJ,
-                V_PROJ,
-                MLA_ATTENTION[2],
-                STACKED_EXPERTS,
-            ],
+            isq_head: vec![LM_HEAD, Q_PROJ, K_PROJ, V_PROJ, O_PROJ, STACKED_EXPERTS],
             loose_dense_up: false,
         })
     }

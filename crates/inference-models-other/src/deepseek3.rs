@@ -18,6 +18,7 @@ serde_default_fn!(usize, first_k_dense_replace, 0);
 serde_default_fn!(ScoringFunc, scoring_func, ScoringFunc::Softmax);
 serde_default_fn!(Activation, hidden_act, Activation::Silu);
 serde_default_fn!(bool, tie_word_embeddings, false);
+serde_default_fn!(bool, norm_topk_prob, true);
 
 #[derive(Deserialize, Clone, Debug)]
 enum TopkMethod {
@@ -56,6 +57,8 @@ pub struct DeepSeekV3Config {
     pub moe_layer_freq: usize,
     #[serde(default = "first_k_dense_replace")]
     pub first_k_dense_replace: usize,
+    #[serde(default = "norm_topk_prob")]
+    pub norm_topk_prob: bool,
     #[serde(default = "scoring_func")]
     scoring_func: ScoringFunc,
     #[serde(default = "hidden_act")]
@@ -93,7 +96,9 @@ impl DeepSeekV3Config {
             n_group: self.n_group,
             topk_group: self.topk_group,
             routed_scaling_factor: self.routed_scaling_factor,
-            renorm: RouterRenorm::SigmoidOnly,
+            renorm: RouterRenorm::TopkProb {
+                norm_topk_prob: self.norm_topk_prob,
+            },
         }
     }
 
