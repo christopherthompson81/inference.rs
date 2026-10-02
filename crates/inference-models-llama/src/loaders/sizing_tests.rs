@@ -175,3 +175,34 @@ fn llava_next_sizing() {
         );
     }
 }
+
+// The vision tower is non-mapped, so the device map sees it only through non_mapped_size_in_bytes.
+#[test]
+fn idefics2_sizes_every_vision_layer() {
+    const VISION_HIDDEN: usize = 32;
+    const VISION_INTERMEDIATE: usize = 48;
+    let non_mapped = |layers: usize| {
+        let config = json!({
+            "perceiver_config": {},
+            "vision_config": {
+                "hidden_size": VISION_HIDDEN,
+                "intermediate_size": VISION_INTERMEDIATE,
+                "num_hidden_layers": layers,
+                "num_attention_heads": 2,
+                "image_size": 32,
+                "patch_size": 8,
+            },
+            "text_config": mistral_text(),
+        });
+        Idefics2Loader
+            .non_mapped_size_in_bytes(&config.to_string(), DType::F32, 1, None, None)
+            .unwrap()
+    };
+    let (h, i) = (VISION_HIDDEN, VISION_INTERMEDIATE);
+    // two biased layer norms, biased fc1/fc2 and four biased attention projections
+    let layer_elems = 4 * h + (h * i + i) + (i * h + h) + 4 * (h * h + h);
+    assert_eq!(
+        non_mapped(3) - non_mapped(1),
+        2 * layer_elems * DType::F32.size_in_bytes()
+    );
+}

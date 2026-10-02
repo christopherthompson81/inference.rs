@@ -87,7 +87,7 @@ impl DeviceMappedModelLoader for Phi2Loader {
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<usize> {
         let cfg = crate::phi2::Config::from_json(config)?;
-        standard_non_mapped_size_in_bytes(
+        let ends = standard_non_mapped_size_in_bytes(
             LanguageModelEnds {
                 hidden_size: cfg.hidden_size,
                 vocab_size: cfg.vocab_size,
@@ -96,7 +96,9 @@ impl DeviceMappedModelLoader for Phi2Loader {
             quantization,
             dtype,
             weight_pack_factor,
-        )
+        )?;
+        // the lm_head bias and the affine final LayerNorm's bias
+        Ok(ends + (cfg.vocab_size + cfg.hidden_size) * dtype.size_in_bytes())
     }
     fn layer_sizes_in_bytes(
         &self,

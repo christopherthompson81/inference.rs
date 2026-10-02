@@ -44,7 +44,10 @@ pub struct Glm4MoeLiteConfig {
     pub n_group: usize,
     #[serde(default = "topk_group")]
     pub topk_group: usize,
-    #[serde(default = "moe_layer_freq")]
+    #[serde(
+        default = "moe_layer_freq",
+        deserialize_with = "crate::deepseek_family::nonzero_moe_layer_freq"
+    )]
     pub moe_layer_freq: usize,
     pub rms_norm_eps: f64,
     pub rope_theta: f32,

@@ -173,3 +173,12 @@ fn load_rejects_half_split_kv_b() -> Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn a_zero_moe_layer_freq_is_a_config_error() {
+    let config = patched(base_config(), json!({"moe_layer_freq": 0}));
+    assert_err_contains(
+        serde_json::from_value::<DeepSeekV2Config>(config),
+        "moe_layer_freq must be at least 1",
+    );
+}

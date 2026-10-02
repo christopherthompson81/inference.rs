@@ -49,7 +49,10 @@ pub struct DeepSeekV2Config {
     #[serde(default = "topk_method")]
     topk_method: TopkMethod,
     pub num_experts_per_tok: Option<usize>,
-    #[serde(default = "moe_layer_freq")]
+    #[serde(
+        default = "moe_layer_freq",
+        deserialize_with = "crate::deepseek_family::nonzero_moe_layer_freq"
+    )]
     pub moe_layer_freq: usize,
     #[serde(default = "first_k_dense_replace")]
     pub first_k_dense_replace: usize,
