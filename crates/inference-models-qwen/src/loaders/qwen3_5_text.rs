@@ -143,32 +143,15 @@ impl DeviceMappedModelLoader for Qwen3_5TextLoader {
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
         let cfg = parse_qwen35_text_config(config)?;
-        let mut sizes = Vec::with_capacity(cfg.num_hidden_layers);
-        for layer_type in cfg.layer_types() {
-            let attention = match layer_type {
-                crate::qwen3_5::config::LayerType::FullAttention => {
-                    let q_dim = cfg.head_dim * cfg.num_attention_heads;
-                    let kv_dim = cfg.head_dim * cfg.num_key_value_heads;
-                    (cfg.hidden_size * (q_dim * 2 + kv_dim * 2) + q_dim * cfg.hidden_size)
-                        / weight_pack_factor
-                        + cfg.head_dim * 2
-                }
-                crate::qwen3_5::config::LayerType::LinearAttention => {
-                    let value_dim = cfg.linear_value_dim();
-                    let projections = cfg.hidden_size
-                        * (cfg.linear_conv_dim() + value_dim + cfg.linear_num_value_heads * 2)
-                        / weight_pack_factor;
-                    let out_proj = value_dim * cfg.hidden_size / weight_pack_factor;
-                    let residual = cfg.linear_conv_dim() * cfg.linear_conv_kernel_dim
-                        + cfg.linear_num_value_heads * 2
-                        + cfg.linear_value_head_dim;
-                    projections + out_proj + residual
-                }
-            };
-            let mlp = cfg.hidden_size * cfg.dense_intermediate_size()? * 3 / weight_pack_factor;
-            sizes.push((cfg.hidden_size * 2 + attention + mlp) * dtype.size_in_bytes());
-        }
-        Ok(sizes)
+        cfg.layer_types()
+            .into_iter()
+            .map(|layer_type| {
+                Ok(
+                    super::qwen3_5::decoder_layer_elems(&cfg, layer_type, weight_pack_factor)?
+                        * dtype.size_in_bytes(),
+                )
+            })
+            .collect()
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg = parse_qwen35_text_config(config)?;

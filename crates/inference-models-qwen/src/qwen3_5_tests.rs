@@ -87,10 +87,13 @@ fn config(text: Value) -> Value {
 
 // HF stores the Qwen3.5 MoE experts one by one; layout detection reads these shapes before any tensor.
 fn expert_shapes() -> HashMap<String, Vec<usize>> {
-    (0..LAYERS)
-        .flat_map(|layer| (0..EXPERTS).map(move |expert| (layer, expert)))
-        .flat_map(|(layer, expert)| {
-            let p = format!("model.language_model.layers.{layer}.mlp.experts.{expert}");
+    experts_under((0..LAYERS).map(|layer| format!("model.language_model.layers.{layer}")))
+}
+
+fn experts_under(layers: impl Iterator<Item = String>) -> HashMap<String, Vec<usize>> {
+    layers
+        .flat_map(|layer| (0..EXPERTS).map(move |expert| format!("{layer}.mlp.experts.{expert}")))
+        .flat_map(|p| {
             [
                 (
                     format!("{p}.gate_proj.weight"),
@@ -123,7 +126,10 @@ fn prefill(
             AttentionImplementation::Eager,
         )
     })?;
-    Ok((forward_multimodal(model.as_ref())?, names_digest(&seen)))
+    Ok((
+        forward_multimodal(model.as_ref())?,
+        names_digest(seen.keys()),
+    ))
 }
 
 fn check(logits: Tensor, digest: u64, names: u64, expected: Snapshot) -> Result<()> {
@@ -185,4 +191,52 @@ fn qwen3_5_moe_prefill_bf16() -> Result<()> {
             l2: 52.16037,
         },
     )
+}
+
+// Device mapping places weights by these sizes, so each must be what the load actually reads.
+fn sizing_matches_the_loaded_weights(
+    loader: &impl MultimodalModelLoader,
+    text: Value,
+    mut shapes: HashMap<String, Vec<usize>>,
+) -> Result<()> {
+    let base = config(patched(text, json!({ "mtp_num_hidden_layers": 1 })));
+    let with_mtp = patched(base.clone(), json!({ "_inference_mtp": true }));
+    shapes.extend(experts_under(std::iter::once("mtp.layers.0".to_string())));
+    let (_, seen) = load_synthesized(MLX_NAMES, shapes, DType::F32, |vb| {
+        loader.load(
+            &with_mtp.to_string(),
+            vb,
+            metadata(),
+            AttentionImplementation::Eager,
+        )
+    })?;
+    let loaded_bytes = |prefix: &str| -> usize {
+        seen.iter()
+            .filter(|(name, _)| name.starts_with(prefix))
+            .map(|(_, elems)| elems * DType::F32.size_in_bytes())
+            .sum()
+    };
+    let layers = loader.layer_sizes_in_bytes(&base.to_string(), DType::F32, 1, None)?;
+    assert_eq!(
+        layers.iter().sum::<usize>(),
+        loaded_bytes("model.language_model.layers.")
+    );
+    let non_mapped = |config: &Value| {
+        loader.non_mapped_size_in_bytes(&config.to_string(), DType::F32, 1, None, None)
+    };
+    assert_eq!(
+        non_mapped(&with_mtp)? - non_mapped(&base)?,
+        loaded_bytes("mtp.")
+    );
+    Ok(())
+}
+
+#[test]
+fn qwen3_5_sizing_matches_the_loaded_weights() -> Result<()> {
+    sizing_matches_the_loaded_weights(&Qwen3_5Loader, text(), HashMap::new())
+}
+
+#[test]
+fn qwen3_5_moe_sizing_matches_the_loaded_weights() -> Result<()> {
+    sizing_matches_the_loaded_weights(&Qwen3_5MoeLoader, moe_text(), expert_shapes())
 }

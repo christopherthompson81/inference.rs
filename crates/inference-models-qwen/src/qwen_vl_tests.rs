@@ -88,10 +88,13 @@ fn prefill_as(
         .residual_tensors()
         .into_iter()
         .map(|(name, _)| name)
-        .filter(|name| !seen.contains(name))
+        .filter(|name| !seen.contains_key(name))
         .collect::<Vec<_>>();
     assert!(stray.is_empty(), "residual tensors never loaded: {stray:?}");
-    Ok((forward_multimodal(model.as_ref())?, names_digest(&seen)))
+    Ok((
+        forward_multimodal(model.as_ref())?,
+        names_digest(seen.keys()),
+    ))
 }
 
 fn prefill(
