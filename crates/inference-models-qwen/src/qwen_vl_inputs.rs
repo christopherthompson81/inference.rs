@@ -155,8 +155,7 @@ pub(crate) fn shift_item_runs(
     Ok((cached, current))
 }
 
-// The videos whose tokens lie in this prefill view: a chunk view holds only some of the prompt, so the runs it can
-// see belong to the videos inside its token window.
+// A chunk view holds part of the prompt, so its pad runs belong to the videos inside its token window.
 fn video_runs_in_view(seq: &dyn MediaSequence, prompt_runs: &[usize]) -> Vec<usize> {
     let (Some(query), Some(local)) = (
         seq.active_prompt_query_range(),
@@ -498,10 +497,10 @@ impl QwenVlInputs<'_> {
                 .active_prompt_local_query_range()
                 .map_or(seq.prefix_cache_len(), |query| query.start);
             let cached = shift_media_spans(img_pads, local_prefix)?;
-            let prompt_runs = self
-                .spec
-                .video_runs_per_item(seq.multimodal().rope_vid_grid_thw.as_ref())?;
             let runs_per_item = if media_in_batch {
+                let prompt_runs = self
+                    .spec
+                    .video_runs_per_item(seq.multimodal().rope_vid_grid_thw.as_ref())?;
                 video_runs_in_view(&**seq, &prompt_runs)
             } else {
                 Vec::new()
@@ -766,6 +765,10 @@ impl QwenVlInputs<'_> {
         detok: String,
         paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> Result<Vec<u32>> {
+        // Re-tokenizing a text-only sequence would reset its tokens and KV slots mid-step for nothing.
+        if seq.mm_features().is_empty() && !seq.has_images() && !seq.has_videos() {
+            return Ok(seq.get_toks().to_vec());
+        }
         let ids = tokenizer
             .encode_fast(detok.as_str(), false)
             .map_err(anyhow::Error::msg)?

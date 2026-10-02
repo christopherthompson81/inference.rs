@@ -298,7 +298,7 @@ macro_rules! load_options_methods {
             self
         }
 
-        /// Longest prompt chunk one prefill step takes; longer prompts prefill in chunks.
+        /// Longest prompt chunk the paged scheduler prefills in one step while others decode (always, for hybrid models).
         pub fn with_max_prefill_chunk_tokens(mut self, tokens: usize) -> Self {
             self.options.runtime.max_prefill_chunk_tokens = Some(tokens);
             self

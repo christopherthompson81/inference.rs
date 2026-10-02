@@ -1769,3 +1769,18 @@ Findings, in order:
      flattens the caches with `flattened_mrope_cache`, as Qwen3-VL's qk-norm path already did.
 - after these: all 8 Qwen-VL tests pass on CPU and on the GPU paged path, and the PaddleOCR-VL GPU parity tests
   still pass.
+Review of the branch (subagent): the four source fixes are correct; three of the new tests were weaker than claimed
+above, now fixed or removed:
+- the "fresh" reference model had the prefix cache on (the SDK default), so image b's decode matched a model that
+  could equally have served a's blocks; the reference is now built with the cache off.
+- the chunked-prefill test never chunked: the setting only reaches the CUDA paged scheduler while other sequences
+  decode (or hybrid models), and Qwen media features are unsplittable, so no boundary falls inside an image at any
+  setting. Removed. What does cover chunked media prefill is the image/video pin passing on CUDA, whose paged path
+  splits prompts at media boundaries (the path that hit failures 1 and 2), with CPU's single-prefill ids.
+- the mixed-batch test let the batched image request hit the first run's cached media blocks, so no media prefilled
+  next to text; the cache is now off there. It also covers batched MRoPE decode, where failure 3 lived; whether both
+  prefills share one step depends on timing, and the CPU scheduler never batches different lengths.
+Also from the review: `prompt_media` re-tokenized and re-committed text-only sequences in a media batch, resetting
+their tokens, prefix length and KV slots mid-step (a real BPE tokenizer can change tokens on that round trip);
+existed before #229 for Qwen3-VL and became reachable for Qwen2-VL with failure 3 fixed. Text-only sequences are now
+skipped. The SDK doc for `with_max_prefill_chunk_tokens` now says when it applies.

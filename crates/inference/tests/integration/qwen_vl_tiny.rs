@@ -22,8 +22,6 @@ const VIDEO_FRAMES: usize = 4;
 const VIDEO_FPS: f64 = 2.0;
 
 const ON_GPU: bool = cfg!(any(feature = "cuda", feature = "metal"));
-// Below one image's token count, so a chunk boundary falls inside every image and video.
-const PREFILL_CHUNK: usize = 3;
 const PREFIX_CACHE_SEQS: usize = 16;
 // Cached or chunked KV comes from a different prefill than a full recompute, so logprobs match only to rounding.
 const LOGPROB_TOLERANCE: f32 = 1e-3;
@@ -196,7 +194,8 @@ fn same_size_image(seed: u8) -> RequestBuilder {
 }
 
 async fn prefix_cache_serves_only_the_same_media(dir: &Path) -> anyhow::Result<()> {
-    let fresh = build(dir).await?;
+    // The SDK turns the prefix cache on by default, so the reference model has it off.
+    let fresh = builder(dir).with_prefix_cache_n(None).build().await?;
     let (fresh_a, _) = trace(&fresh, same_size_image(1)).await?;
     let (fresh_b, _) = trace(&fresh, same_size_image(200)).await?;
     let (fresh_video, _) = trace(&fresh, prompted_video(LONG_PROMPT)).await?;
@@ -231,25 +230,9 @@ async fn prefix_cache_serves_only_the_same_media(dir: &Path) -> anyhow::Result<(
     Ok(())
 }
 
-async fn chunked_prefill_matches_one_prefill(dir: &Path) -> anyhow::Result<()> {
-    let whole = build(dir).await?;
-    let chunked = builder(dir)
-        .with_max_prefill_chunk_tokens(PREFILL_CHUNK)
-        .build()
-        .await?;
-    for (what, request) in [("two images", images(&IMAGE_SIDES)), ("video", videos())] {
-        let (expected, _) = trace(&whole, request.clone()).await?;
-        let (steps, _) = trace(&chunked, request).await?;
-        anyhow::ensure!(
-            same_decode(&steps, &expected),
-            "chunked {what}: {expected:?} vs {steps:?}"
-        );
-    }
-    Ok(())
-}
-
+// With the prefix cache on, the batched image request would reuse the first run's media blocks instead of prefilling.
 async fn text_in_the_batch_leaves_media_unchanged(dir: &Path) -> anyhow::Result<()> {
-    let model = build(dir).await?;
+    let model = builder(dir).with_prefix_cache_n(None).build().await?;
     let (alone, _) = trace(&model, images(&IMAGE_SIDES)).await?;
     let text = RequestBuilder::new()
         .add_message(TextMessageRole::User, PROMPT)
@@ -278,16 +261,6 @@ async fn qwen2_vl_prefix_cache_serves_only_the_same_media() -> anyhow::Result<()
 #[tokio::test]
 async fn qwen3_vl_prefix_cache_serves_only_the_same_media() -> anyhow::Result<()> {
     prefix_cache_serves_only_the_same_media(tiny_qwen3_vl()?.path()).await
-}
-
-#[tokio::test]
-async fn qwen2_vl_chunked_prefill_matches_one_prefill() -> anyhow::Result<()> {
-    chunked_prefill_matches_one_prefill(tiny_qwen2_vl()?.path()).await
-}
-
-#[tokio::test]
-async fn qwen3_vl_chunked_prefill_matches_one_prefill() -> anyhow::Result<()> {
-    chunked_prefill_matches_one_prefill(tiny_qwen3_vl()?.path()).await
 }
 
 #[tokio::test]
