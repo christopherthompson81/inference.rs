@@ -2496,6 +2496,8 @@ pub enum Activation {
     LeakyRelu(f64),
     #[serde(alias = "gelu_pytorch_tanh")]
     GeluPytorchTanh,
+    // transformers' ACT2FN name
+    #[serde(alias = "quick_gelu")]
     QuickGelu,
 }
 
@@ -3198,11 +3200,24 @@ impl Module for ScaledEmbedding {
 #[cfg(test)]
 mod tests {
     use super::{
-        Qwen3VLRotaryEmbedding, YarnRopeConfig, contains_tensor_or_weight_source_with,
+        Activation, Qwen3VLRotaryEmbedding, YarnRopeConfig, contains_tensor_or_weight_source_with,
         use_legacy_tied_uqff_head, yarn_inv_freq_and_attention_factor,
     };
     use candle_core::{DType, Device, Tensor};
     use std::collections::HashSet;
+
+    #[test]
+    fn activations_parse_by_their_transformers_names() {
+        for (name, act) in [
+            ("quick_gelu", Activation::QuickGelu),
+            ("quickgelu", Activation::QuickGelu),
+            ("gelu_pytorch_tanh", Activation::GeluPytorchTanh),
+            ("silu", Activation::Silu),
+        ] {
+            let parsed: Activation = serde_json::from_str(&format!("\"{name}\"")).unwrap();
+            assert_eq!(parsed, act, "{name}");
+        }
+    }
 
     #[test]
     fn legacy_tied_uqff_head_is_only_used_without_a_packed_embedding() {

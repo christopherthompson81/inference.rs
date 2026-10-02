@@ -1633,3 +1633,62 @@ and Phi-2 passes `num_key_value_heads()`. For the second group the value is unch
 `Comm` reports world size 1 whatever it is built with, and the ring backend needs live peers, so a shard offset
 cannot be exercised on one CPU process; the check is the pairing above plus the build (each `head_dim` is the
 function's own).
+
+## Run 54 - 2026-10-02 (time approximate)
+
+Question: how much of the Qwen2-VL (1947 lines) and Qwen3-VL (1854) input processors is one implementation, and
+what differs by design versus by drift?
+
+Commands: function-by-function `diff` of `qwen2vl/inputs_processor.rs` and `qwen3_vl/inputs_processor.rs`, plus the
+other Qwen-family processors. Qwen3.5 has no processor (it reuses Qwen3-VL's); Muse-Glimmer's (1408) is shaped
+differently (process_inputs 212 lines) and is not a third copy.
+- `smart_resize` identical; `prepare_for_paged_prompt_planning` 55 of ~240 lines differ; `process_inputs` 216 of
+  ~650; `preprocess_inner` 44 of ~110; `preprocess` 21 of ~85. Qwen3-VL already imports the shared helpers
+  (`expand_media_placeholders`, `apply_mrope_position_delta`, ...) from qwen2vl.
+Differences by design (model behaviour):
+- video: Qwen3-VL reads a separate `video` preprocessor config, expands each video into timestamped per-frame spans
+  (`expand_video_placeholders`), groups feature ranges per video and shifts whole video pad runs on prefix hits;
+  Qwen2-VL treats a video as one placeholder run like an image.
+- MRoPE: Qwen3-VL's prompt MRoPE takes the vision start/end tokens (`qwen3_prompt_mrope`) and its own packed layout;
+  it applies per-sequence MRoPE deltas to decode positions here, where Qwen2-VL applies them in the model.
+- Qwen3-VL picks the recurrent batch kind from the host's staged batch width, for Qwen3.5's GDN layers.
+Checked, not drift: Qwen2-VL clears `mrope_position_delta` for grid-less sequences on every step and Qwen3-VL only on
+prompts, but the grids are set once and never cleared, so both clear exactly the text-only sequences.
+Unresolved: Qwen2-VL builds the text inputs (`host.prompt_inputs`) before the placeholder-expansion block, Qwen3-VL
+after it. Equivalent only if paged prompt planning always expands first; needs an image-input test to settle.
+
+Coverage: no test feeds an image or a video through either processor end to end (#219), so a shared core would be
+refactored blind. The common surface is roughly 600-700 lines (images identical, the step skeleton shared, video and
+MRoPE behind a per-model spec).
+
+Next (proposed): tiny-checkpoint engine tests that run one image and one video through Qwen2-VL and Qwen3-VL (decode
+greedy ids and the MRoPE positions pinned), then a spec-driven shared processor core.
+
+## Run 55 - 2026-10-02 (time approximate)
+
+Question: can the Qwen2-VL and Qwen3-VL image and video paths run end to end on tiny checkpoints, so a shared
+processor core has something to be checked against?
+
+Command: `cargo nextest run -p inference -E 'test(/qwen_vl_tiny/)'`, with fixtures from
+`crates/inference/tests/fixtures/qwen_vl/make_tiny.py` (byte-fallback tokenizer with the Qwen vision specials, a
+Qwen-format chat template written there, 2-layer configs, preprocessor min/max pixels holding images to a few
+patches; Qwen3-VL also gets a `video_preprocessor_config.json`) and weights recorded from the model constructors.
+Each test runs one 56x56 image, a 56x56 plus an 84x56 image, and a 4-frame video, pinning greedy ids and prompt
+lengths.
+
+Findings, in order:
+- Qwen2-VL's config failed to parse: `Activation` accepted `quickgelu` but not `quick_gelu`, transformers' ACT2FN
+  name and the one HF writes for the Qwen2-VL vision tower. Released Qwen2-VL configs omit `hidden_act` (the default
+  is QuickGelu), so they parse; any config that spells it out did not. Fixed with a serde alias and a parse test.
+- Qwen2-VL and Qwen2.5-VL could not take a video through chat messages: their processor flattens messages to text
+  (`MessagesAction::FlattenOnlyText`) and relies on the prefixer for placeholders, but the prefixer only had
+  `prefix_image`, so every video request failed with "Qwen Video has 0 placeholders but 1 media inputs". Added
+  `prefix_video` (`<|vision_start|><|video_pad|><|vision_end|>`, as HF's Qwen2-VL chat template renders a video).
+- Qwen3-VL ran first time (its chat template places the media).
+- Prompt lengths check by hand for Qwen2-VL: 27 text tokens and a start/end pair per medium; 56x56 is 4 merged
+  patches (33), the 84x56 image resizes to 28x56 under max_pixels (+2 patches, 37), the 4-frame video is 2 temporal
+  by 2x2 (8, 37). Qwen3-VL's video prompt (61) adds a timestamp per temporal patch.
+- Run 54's open question: on this (CPU, non-paged) path Qwen2-VL's placeholders are expanded before its text inputs
+  are built, or the prompt lengths could not come out as above; the ordering difference does not change this path.
+
+Next: the shared processor core, checked against these pins and the existing processor unit tests.
