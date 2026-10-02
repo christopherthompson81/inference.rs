@@ -65,8 +65,8 @@ pub(crate) trait QwenVlSpec: Sync {
         videos: &[VideoInput],
         config: &PreProcessorConfig,
     ) -> Result<()>;
-    // How many consecutive video pad runs make up each video.
-    fn video_runs_per_item(&self, grid: Option<&Tensor>, run_count: usize) -> Result<Vec<usize>>;
+    // How many consecutive video pad runs make up each of the prompt's videos, from its video grid.
+    fn video_runs_per_item(&self, grid: Option<&Tensor>) -> Result<Vec<usize>>;
     // Whether a packed text-only prefill still takes its MRoPE positions from the processor.
     fn packed_text_needs_prompt_mrope(&self) -> bool;
     fn mrope_position_source(
@@ -153,6 +153,26 @@ pub(crate) fn shift_item_runs(
     }
     *runs = kept;
     Ok((cached, current))
+}
+
+// A chunk view holds part of the prompt, so its pad runs belong to the videos inside its token window.
+fn video_runs_in_view(seq: &dyn MediaSequence, prompt_runs: &[usize]) -> Vec<usize> {
+    let (Some(query), Some(local)) = (
+        seq.active_prompt_query_range(),
+        seq.active_prompt_local_query_range(),
+    ) else {
+        return prompt_runs.to_vec();
+    };
+    let start = query.start - local.start;
+    let end = start + seq.get_toks().len();
+    seq.mm_features()
+        .iter()
+        .filter(|feature| {
+            feature.kind == MultimodalKind::Video && feature.offset >= start && feature.end() <= end
+        })
+        .flat_map(|feature| feature.item_range.clone())
+        .filter_map(|item| prompt_runs.get(item).copied())
+        .collect()
 }
 
 fn token_id(tokenizer: &Tokenizer, token: &str, what: &str) -> Result<u32> {
@@ -390,6 +410,10 @@ impl QwenVlInputs<'_> {
                 seq.multimodal_mut().mrope_position_delta = None;
             }
         }
+        // Pad runs are only collected when some sequence in the batch has media in its view.
+        let media_in_batch = input_seqs
+            .iter()
+            .any(|seq| seq.has_images() || seq.has_videos());
         let PromptMedia {
             input_ids_full,
             mut pixel_values,
@@ -400,10 +424,7 @@ impl QwenVlInputs<'_> {
             mut continuous_vid_pad,
             image_item_counts,
             video_item_counts,
-        } = if input_seqs
-            .iter()
-            .any(|seq| seq.has_images() || seq.has_videos())
-        {
+        } = if media_in_batch {
             self.prompt_media(&tokenizer, input_seqs, config, paged_attn_metadata.as_mut())?
         } else {
             PromptMedia {
@@ -476,9 +497,14 @@ impl QwenVlInputs<'_> {
                 .active_prompt_local_query_range()
                 .map_or(seq.prefix_cache_len(), |query| query.start);
             let cached = shift_media_spans(img_pads, local_prefix)?;
-            let runs_per_item = self
-                .spec
-                .video_runs_per_item(seq.multimodal().rope_vid_grid_thw.as_ref(), vid_pads.len())?;
+            let runs_per_item = if media_in_batch {
+                let prompt_runs = self
+                    .spec
+                    .video_runs_per_item(seq.multimodal().rope_vid_grid_thw.as_ref())?;
+                video_runs_in_view(&**seq, &prompt_runs)
+            } else {
+                Vec::new()
+            };
             let (cached_vids, current_vids) =
                 shift_item_runs(vid_pads, &runs_per_item, local_prefix)?;
             cached_images[seq_idx] = media_data_cached_offset(&**seq, cached);
@@ -739,6 +765,10 @@ impl QwenVlInputs<'_> {
         detok: String,
         paged_attn_metadata: Option<&mut PagedAttentionMeta>,
     ) -> Result<Vec<u32>> {
+        // Re-tokenizing a text-only sequence would reset its tokens and KV slots mid-step for nothing.
+        if seq.mm_features().is_empty() && !seq.has_images() && !seq.has_videos() {
+            return Ok(seq.get_toks().to_vec());
+        }
         let ids = tokenizer
             .encode_fast(detok.as_str(), false)
             .map_err(anyhow::Error::msg)?
@@ -762,10 +792,9 @@ impl QwenVlInputs<'_> {
             let vid_pad_id = token_id(tokenizer, VIDEO_PAD, "video pad")?;
             let video_ranges =
                 find_placeholder_delimited_ranges(&ids, vid_pad_id, start_id, end_id);
-            let runs_per_item = self.spec.video_runs_per_item(
-                seq.multimodal().rope_vid_grid_thw.as_ref(),
-                video_ranges.len(),
-            )?;
+            let runs_per_item = self
+                .spec
+                .video_runs_per_item(seq.multimodal().rope_vid_grid_thw.as_ref())?;
             let video_ranges = group_item_ranges(&video_ranges, &runs_per_item)?;
             features.extend(validated_mm_features(
                 &video_ranges,
@@ -957,10 +986,9 @@ impl QwenVlInputs<'_> {
                 );
             }
             let video_hashes = video_hashes(&**seq);
-            let runs_per_item = self.spec.video_runs_per_item(
-                seq.multimodal().rope_vid_grid_thw.as_ref(),
-                video_spans.len(),
-            )?;
+            let runs_per_item = self
+                .spec
+                .video_runs_per_item(seq.multimodal().rope_vid_grid_thw.as_ref())?;
             if video_hashes.len() != runs_per_item.len()
                 || video_spans.len() != runs_per_item.iter().sum::<usize>()
             {

@@ -48,6 +48,10 @@ impl MultimodalModelLoader for Qwen2_5VLLoader {
     fn supports_encoder_cache(&self, _config: &str) -> bool {
         true
     }
+    fn supports_prefix_cacher(&self, _config: &str) -> bool {
+        // Safe because the shared Qwen-VL inputs processor registers each media span in the cache key.
+        true
+    }
     fn prefixer(&self, _config: &str) -> Arc<dyn MultimodalPromptPrefixer> {
         Arc::new(Qwen2_5VLPrefixer)
     }

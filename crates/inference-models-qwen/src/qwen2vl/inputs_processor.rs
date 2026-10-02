@@ -514,8 +514,8 @@ impl QwenVlSpec for Qwen2VLImageProcessor {
         )
     }
 
-    fn video_runs_per_item(&self, _grid: Option<&Tensor>, run_count: usize) -> Result<Vec<usize>> {
-        Ok(vec![1; run_count])
+    fn video_runs_per_item(&self, grid: Option<&Tensor>) -> Result<Vec<usize>> {
+        Ok(vec![1; grid.map_or(Ok(0), |grid| grid.dim(0))?])
     }
 
     fn packed_text_needs_prompt_mrope(&self) -> bool {

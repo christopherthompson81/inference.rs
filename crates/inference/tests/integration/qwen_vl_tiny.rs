@@ -13,18 +13,39 @@ mod support;
 use support::{tiny_qwen2_vl, tiny_qwen3_vl};
 
 const PROMPT: &str = "describe";
+// Long enough that a shared prefix runs past the media into whole paged blocks; paged hits never end inside media.
+const LONG_PROMPT: &str = "describe every part of this picture in order, from the top left corner to the bottom right one.";
 const MAX_LEN: usize = 6;
 // Side lengths that resize to different patch grids, so each image yields its own token count.
 const IMAGE_SIDES: [(u32, u32); 2] = [(56, 56), (84, 56)];
 const VIDEO_FRAMES: usize = 4;
 const VIDEO_FPS: f64 = 2.0;
 
+const ON_GPU: bool = cfg!(any(feature = "cuda", feature = "metal"));
+const PREFIX_CACHE_SEQS: usize = 16;
+// Cached or chunked KV comes from a different prefill than a full recompute, so logprobs match only to rounding.
+const LOGPROB_TOLERANCE: f32 = 1e-3;
+// A scheduler spin never completes either request, so the mixed-batch check fails on this instead of hanging.
+const MIXED_BATCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
+fn builder(dir: &Path) -> MultimodalModelBuilder {
+    let builder = MultimodalModelBuilder::new(dir.to_string_lossy()).with_dtype(ModelDType::F32);
+    // GPU builds take the paged path, so `--cuda` covers paged media prefill.
+    #[cfg(any(feature = "cuda", feature = "metal"))]
+    let builder = builder.with_paged_attn(
+        inference::PagedAttentionMetaBuilder::default()
+            .build()
+            .unwrap(),
+    );
+    if ON_GPU {
+        builder
+    } else {
+        builder.with_force_cpu()
+    }
+}
+
 async fn build(dir: &Path) -> anyhow::Result<Model> {
-    Ok(MultimodalModelBuilder::new(dir.to_string_lossy())
-        .with_dtype(ModelDType::F32)
-        .with_force_cpu()
-        .build()
-        .await?)
+    Ok(builder(dir).build().await?)
 }
 
 // A deterministic gradient, so the pixels (and so the vision tokens) are the same every run.
@@ -83,9 +104,13 @@ fn images(sides: &[(u32, u32)]) -> RequestBuilder {
 }
 
 fn videos() -> RequestBuilder {
+    prompted_video(PROMPT)
+}
+
+fn prompted_video(prompt: &str) -> RequestBuilder {
     RequestBuilder::from(MultimodalMessages::new().add_video_message(
         TextMessageRole::User,
-        PROMPT,
+        prompt,
         vec![video()],
     ))
 }
@@ -107,9 +132,9 @@ async fn qwen2_vl_images_and_video() -> anyhow::Result<()> {
     // 27 text tokens, a start/end pair per medium; a 56x56 image is 4 merged patches, the 84x56 one resizes to 28x56
     // (2) under max_pixels, the 4-frame video is 2 temporal by 2x2 (8)
     let expected = vec![
-        (vec![118, 257, 160, 66, 203, 203], 33),
-        (vec![118, 223, 66, 203, 28, 223], 37),
-        (vec![66, 203, 223, 172, 203, 253], 37),
+        (vec![237, 100, 34, 185, 26, 163], 33),
+        (vec![257, 257, 187, 143, 256, 31], 37),
+        (vec![5, 74, 256, 166, 32, 236], 37),
     ];
     assert_eq!(traces, expected);
     Ok(())
@@ -122,10 +147,128 @@ async fn qwen3_vl_images_and_video() -> anyhow::Result<()> {
     let traces = traces(&model).await?;
     // the video prompt adds a timestamp per temporal patch in front of each frame's pads
     let expected = vec![
-        (vec![257, 205, 64, 111, 64, 111], 33),
-        (vec![254, 64, 111, 28, 64, 111], 37),
-        (vec![79, 79, 79, 79, 79, 79], 61),
+        (vec![91, 91, 91, 91, 91, 91], 33),
+        (vec![91, 142, 39, 91, 225, 39], 37),
+        (vec![161, 213, 91, 161, 213, 91], 61),
     ];
     assert_eq!(traces, expected);
     Ok(())
+}
+
+// (token, logprob) per greedy step and the prompt tokens served from the prefix cache.
+async fn trace(model: &Model, request: RequestBuilder) -> anyhow::Result<(Vec<(u32, f32)>, usize)> {
+    let response = model.send_chat_request(greedy(request)).await?;
+    let steps = response.choices[0]
+        .logprobs
+        .as_ref()
+        .and_then(|lp| lp.content.as_ref())
+        .map(|toks| {
+            toks.iter()
+                .map(|t| (t.top_logprobs[0].token, t.top_logprobs[0].logprob))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    anyhow::ensure!(!steps.is_empty(), "the model generated nothing");
+    let cached = response
+        .usage
+        .prompt_tokens_details
+        .as_ref()
+        .map_or(0, |details| details.cached_tokens);
+    Ok((steps, cached))
+}
+
+fn same_decode(a: &[(u32, f32)], b: &[(u32, f32)]) -> bool {
+    a.len() == b.len()
+        && a.iter()
+            .zip(b)
+            .all(|(x, y)| x.0 == y.0 && (x.1 - y.1).abs() < LOGPROB_TOLERANCE)
+}
+
+// Same-size images give identical prompts, so only the registered media span keeps their cached blocks apart.
+fn same_size_image(seed: u8) -> RequestBuilder {
+    RequestBuilder::from(MultimodalMessages::new().add_image_message(
+        TextMessageRole::User,
+        LONG_PROMPT,
+        vec![image(56, 56, seed)],
+    ))
+}
+
+async fn prefix_cache_serves_only_the_same_media(dir: &Path) -> anyhow::Result<()> {
+    // The SDK turns the prefix cache on by default, so the reference model has it off.
+    let fresh = builder(dir).with_prefix_cache_n(None).build().await?;
+    let (fresh_a, _) = trace(&fresh, same_size_image(1)).await?;
+    let (fresh_b, _) = trace(&fresh, same_size_image(200)).await?;
+    let (fresh_video, _) = trace(&fresh, prompted_video(LONG_PROMPT)).await?;
+
+    let warm = builder(dir)
+        .with_prefix_cache_n(Some(PREFIX_CACHE_SEQS))
+        .build()
+        .await?;
+    trace(&warm, same_size_image(1)).await?;
+    let (b, _) = trace(&warm, same_size_image(200)).await?;
+    anyhow::ensure!(
+        same_decode(&b, &fresh_b),
+        "image b was served image a's blocks: {b:?}"
+    );
+    let (a, cached) = trace(&warm, same_size_image(1)).await?;
+    anyhow::ensure!(cached > 0, "image a was not served from the prefix cache");
+    anyhow::ensure!(
+        same_decode(&a, &fresh_a),
+        "a prefix hit changed image a: {fresh_a:?} vs {a:?}"
+    );
+    trace(&warm, prompted_video(LONG_PROMPT)).await?;
+    let (video, cached) = trace(&warm, prompted_video(LONG_PROMPT)).await?;
+    // The non-paged prefix cacher never serves sequences with video; paged attention caches their blocks.
+    anyhow::ensure!(
+        (cached > 0) == ON_GPU,
+        "video prefix hit {cached} tokens, expected a hit only with paged attention"
+    );
+    anyhow::ensure!(
+        same_decode(&video, &fresh_video),
+        "a prefix hit changed the video: {video:?}"
+    );
+    Ok(())
+}
+
+// With the prefix cache on, the batched image request would reuse the first run's media blocks instead of prefilling.
+async fn text_in_the_batch_leaves_media_unchanged(dir: &Path) -> anyhow::Result<()> {
+    let model = builder(dir).with_prefix_cache_n(None).build().await?;
+    let (alone, _) = trace(&model, images(&IMAGE_SIDES)).await?;
+    let text = RequestBuilder::new()
+        .add_message(TextMessageRole::User, PROMPT)
+        .set_sampler_max_len(MAX_LEN);
+    let (batched, text) = tokio::time::timeout(MIXED_BATCH_TIMEOUT, async {
+        tokio::join!(
+            trace(&model, images(&IMAGE_SIDES)),
+            model.send_chat_request(text)
+        )
+    })
+    .await?;
+    text?;
+    let (batched, _) = batched?;
+    anyhow::ensure!(
+        same_decode(&batched, &alone),
+        "a text-only request in the batch changed the image output: {alone:?} vs {batched:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn qwen2_vl_prefix_cache_serves_only_the_same_media() -> anyhow::Result<()> {
+    prefix_cache_serves_only_the_same_media(tiny_qwen2_vl()?.path()).await
+}
+
+#[tokio::test]
+async fn qwen3_vl_prefix_cache_serves_only_the_same_media() -> anyhow::Result<()> {
+    prefix_cache_serves_only_the_same_media(tiny_qwen3_vl()?.path()).await
+}
+
+#[tokio::test]
+async fn qwen2_vl_text_in_the_batch_leaves_media_unchanged() -> anyhow::Result<()> {
+    text_in_the_batch_leaves_media_unchanged(tiny_qwen2_vl()?.path()).await
+}
+
+#[tokio::test]
+async fn qwen3_vl_text_in_the_batch_leaves_media_unchanged() -> anyhow::Result<()> {
+    text_in_the_batch_leaves_media_unchanged(tiny_qwen3_vl()?.path()).await
 }

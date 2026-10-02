@@ -1730,3 +1730,57 @@ errors; unit tests for the shared helpers (one run per video groups and shifts e
 `shift_media_spans` at every prefix length, multi-run items cache or keep whole, empty and split items error). Some
 error texts changed with the generic helpers ("spans per video", "its items expect"); nothing matches on them.
 Still untested end to end: paged, chunked and packed media prefill, and mixed text/media batches.
+
+## Run 57 - 2026-10-02 (time approximate)
+
+Question (#219): do the Qwen-VL media paths hold under prefix-cache hits, chunked prefill, mixed text/media batches
+and the GPU paged path, which the image/video pins (Run 55) never ran?
+
+Commands: `cargo nextest run -p inference -E 'test(/qwen_vl_tiny/)'` (CPU), and on GPU
+`cargo nextest run --profile cuda --features cuda --workspace -E 'package(inference) & test(/qwen_vl_tiny/)'`.
+New tests per model: same-size images must not be served each other's prefix blocks, a hit must decode like a fresh
+request; a chunked prefill (`with_max_prefill_chunk_tokens(3)`, below one image's tokens) must decode like one
+prefill, for two images and a video; a text-only request in the batch must leave the image output unchanged. GPU
+builds load with paged attention. The SDK gained `with_max_num_batched_tokens`, `with_max_prefill_chunk_tokens` and
+`with_max_decode_steps_before_prefill` (the engine's `RuntimeSpec` had them; no builder set them).
+
+Findings, in order:
+- Qwen2-VL and Qwen2.5-VL never enabled prefix caching (`supports_prefix_cacher` defaulted to false) although their
+  processor registers media spans like Qwen3-VL's; enabled, and the cache test passes (hits decode like fresh
+  requests, same-size images are kept apart).
+- the non-paged prefix cacher refuses video hits by design (`search_for_matching_cache`, pinned by
+  `normal_prefix_cache_rejects_video_hits`); the test expects video hits only with paged attention.
+- short prompts got no image hit on CPU: the hit has to run past the media, so the cache test uses a longer prompt.
+- every GPU run failed at first: the fixtures' head dim 16 is below the paged attention kernels' smallest (64; CUDA
+  and Metal take 64-512). Fixtures regenerated at head dim 64 (hidden 128); prompt lengths unchanged, ids re-pinned.
+- then, with engine logging switched on for the test (a temporary tracing subscriber, removed), three GPU failures,
+  all present before #229 too (checked by running these tests on the pre-#229 processors):
+  1. Qwen3-VL "video has 0 pad runs but grids expect 2": the paged scheduler prefills in chunks split at media,
+     and a chunk before a video has none of its pad runs, but the expected runs came from the whole prompt's video
+     grid. The spec now gives runs per video for the whole prompt (Qwen2-VL: one per grid row), and
+     `video_runs_in_view` keeps the videos whose recorded token range lies inside the view's window; when no
+     sequence in the batch has media no pad runs are collected, so none are expected either.
+  2. Qwen3-VL "vision_start_token_id without matching vision_end_token_id": a chunk can end right after a vision
+     start (the media feature begins at the pads), and `get_rope_index` required every start to close. A trailing
+     start with no media pads after it is now text (the positions the full prompt gives); a span cut inside its pads
+     still errors. Unit test added.
+  3. Qwen2-VL mixed batch "apply-rotary expects rank 2 caches": `Qwen2VLRotaryEmbedding::compute_cos_sin` squeezes
+     the batch dim, which only goes for batch 1, and the fused CUDA rotary takes one row per token. `forward` now
+     flattens the caches with `flattened_mrope_cache`, as Qwen3-VL's qk-norm path already did.
+- after these: all 8 Qwen-VL tests pass on CPU and on the GPU paged path, and the PaddleOCR-VL GPU parity tests
+  still pass.
+Review of the branch (subagent): the four source fixes are correct; three of the new tests were weaker than claimed
+above, now fixed or removed:
+- the "fresh" reference model had the prefix cache on (the SDK default), so image b's decode matched a model that
+  could equally have served a's blocks; the reference is now built with the cache off.
+- the chunked-prefill test never chunked: the setting only reaches the CUDA paged scheduler while other sequences
+  decode (or hybrid models), and Qwen media features are unsplittable, so no boundary falls inside an image at any
+  setting. Removed. What does cover chunked media prefill is the image/video pin passing on CUDA, whose paged path
+  splits prompts at media boundaries (the path that hit failures 1 and 2), with CPU's single-prefill ids.
+- the mixed-batch test let the batched image request hit the first run's cached media blocks, so no media prefilled
+  next to text; the cache is now off there. It also covers batched MRoPE decode, where failure 3 lived; whether both
+  prefills share one step depends on timing, and the CPU scheduler never batches different lengths.
+Also from the review: `prompt_media` re-tokenized and re-committed text-only sequences in a media batch, resetting
+their tokens, prefix length and KV slots mid-step (a real BPE tokenizer can change tokens on that round trip);
+existed before #229 for Qwen3-VL and became reachable for Qwen2-VL with failure 3 fixed. Text-only sequences are now
+skipped. The SDK doc for `with_max_prefill_chunk_tokens` now says when it applies.

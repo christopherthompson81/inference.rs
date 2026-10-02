@@ -140,9 +140,16 @@ pub fn get_rope_index(
                         end_idx += 1;
                     }
                     if end_idx == filtered_tokens.len() {
-                        candle_core::bail!(
-                            "vision_start_token_id without matching vision_end_token_id"
-                        );
+                        // A chunked prefill view can end just past a vision start; its span lies beyond the view.
+                        let truncated_media = filtered_tokens[span_idx + 1..]
+                            .iter()
+                            .any(|&token| token == image_token_id || token == video_token_id);
+                        if truncated_media {
+                            candle_core::bail!(
+                                "vision_start_token_id without matching vision_end_token_id"
+                            );
+                        }
+                        break;
                     }
                     spans.push((span_idx, end_idx));
                     span_idx = end_idx + 1;
@@ -1205,6 +1212,34 @@ mod tests {
         assert_eq!(
             positions.i((0, 0))?.to_vec1::<i64>()?,
             vec![0, 1, 1, 3, 4, 5, 5, 7, 8]
+        );
+        Ok(())
+    }
+
+    // A chunked prefill view can stop right after a vision start whose pads come in the next chunk.
+    #[test]
+    fn mrope_treats_a_view_ending_at_a_vision_start_as_text() -> Result<()> {
+        let video_grid = Tensor::new(&[[2u32, 4, 2]], &Device::Cpu)?;
+        let rope = |ids: &[u32]| {
+            get_rope_index(
+                &Tensor::new(ids, &Device::Cpu)?.unsqueeze(0)?,
+                None,
+                Some(&video_grid),
+                &AttentionMask::None,
+                2,
+                13,
+                12,
+                10,
+                11,
+            )
+        };
+        let (positions, _) = rope(&[7, 8, 10])?;
+        for axis in 0..3 {
+            assert_eq!(positions.i((axis, 0))?.to_vec1::<i64>()?, vec![0, 1, 2]);
+        }
+        assert!(
+            rope(&[7, 10, 12, 12]).is_err(),
+            "a span cut inside its pads must still fail"
         );
         Ok(())
     }
