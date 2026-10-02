@@ -95,55 +95,34 @@ impl DeviceMappedModelLoader for SmolLm3Loader {
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
         let cfg = crate::smollm3::Config::from_json(config)?;
-
-        let per_layer_elems = {
-            let input_layernorm = cfg.hidden_size;
-            let post_attention_layernorm = cfg.hidden_size;
-
-            let size_in = cfg.hidden_size;
-            let size_q = (cfg.hidden_size / cfg.num_attention_heads) * cfg.num_attention_heads;
-            let size_kv = (cfg.hidden_size / cfg.num_attention_heads) * cfg.num_key_value_heads;
-            let q_proj = size_in * size_q / weight_pack_factor;
-            let k_proj = size_in * size_kv / weight_pack_factor;
-            let v_proj = size_in * size_kv / weight_pack_factor;
-            let o_proj = size_q * size_in / weight_pack_factor;
-
-            let h_size = cfg.hidden_size;
-            let i_size = cfg.intermediate_size;
-            let gate_proj = h_size * i_size / weight_pack_factor;
-            let up_proj = h_size * i_size / weight_pack_factor;
-            let down_proj = i_size * h_size / weight_pack_factor;
-
-            input_layernorm
-                + post_attention_layernorm
-                + q_proj
-                + k_proj
-                + v_proj
-                + o_proj
-                + gate_proj
-                + up_proj
-                + down_proj
-        };
-        Ok(vec![
-            per_layer_elems * dtype.size_in_bytes();
-            cfg.num_hidden_layers
-        ])
+        Ok(decoder_shape(&cfg).layer_sizes_in_bytes(
+            cfg.num_hidden_layers,
+            dtype,
+            weight_pack_factor,
+        ))
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg = crate::smollm3::Config::from_json(config)?;
+        Ok(Box::new(decoder_shape(&cfg).model_config(
+            cfg.num_hidden_layers,
+            cfg.max_position_embeddings,
+            None,
+        )))
+    }
+}
 
-        let cfg = ModelConfigMetadata {
-            max_seq_len: cfg.max_position_embeddings,
-            num_layers: cfg.num_hidden_layers,
-            hidden_size: cfg.hidden_size,
-            num_kv_heads: cfg.num_key_value_heads,
-            num_attn_heads: cfg.num_attention_heads,
-            sliding_window: None,
-            k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
-            v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
-            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
-        };
-
-        Ok(Box::new(cfg))
+fn decoder_shape(cfg: &crate::smollm3::Config) -> DecoderLayerShape {
+    DecoderLayerShape {
+        hidden_size: cfg.hidden_size,
+        num_attention_heads: cfg.num_attention_heads,
+        num_key_value_heads: cfg.num_key_value_heads,
+        head_dim: cfg.hidden_size / cfg.num_attention_heads,
+        qkv_bias: false,
+        o_bias: false,
+        qk_norm: false,
+        norms: 2,
+        mlp: MlpShape::Gated {
+            intermediate_size: cfg.intermediate_size,
+        },
     }
 }

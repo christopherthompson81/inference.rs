@@ -106,50 +106,39 @@ impl DeviceMappedModelLoader for Phi2Loader {
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
         let cfg = crate::phi2::Config::from_json(config)?;
-
-        let per_layer_elems = {
-            let input_layernorm = cfg.hidden_size + cfg.hidden_size;
-
-            let size_in = cfg.hidden_size;
-            let size_q = cfg.head_dim() * cfg.num_attention_heads;
-            let size_kv = cfg.head_dim() * cfg.num_key_value_heads();
-            let q_proj = size_in * size_q / weight_pack_factor + size_q;
-            let k_proj = size_in * size_kv / weight_pack_factor + size_kv;
-            let v_proj = size_in * size_kv / weight_pack_factor + size_kv;
-            let o_proj = size_q * size_in / weight_pack_factor + size_in;
-            let (q_norm, k_norm) = if cfg.qk_layernorm {
-                (cfg.head_dim(), cfg.head_dim())
-            } else {
-                (0, 0)
-            };
-
-            let h_size = cfg.hidden_size;
-            let i_size = cfg.intermediate_size;
-            let fc1 = h_size * i_size / weight_pack_factor;
-            let fc2 = h_size * i_size / weight_pack_factor;
-
-            input_layernorm + q_proj + k_proj + v_proj + o_proj + q_norm + k_norm + fc1 + fc2
-        };
-        Ok(vec![
-            per_layer_elems * dtype.size_in_bytes();
-            cfg.num_hidden_layers
-        ])
+        let shape = decoder_shape(&cfg);
+        // q/k layernorms carry a bias the shape's qk norm does not count
+        let qk_norm_bias = bias_if!(cfg.qk_layernorm, 2 * shape.head_dim) * dtype.size_in_bytes();
+        Ok(shape
+            .layer_sizes_in_bytes(cfg.num_hidden_layers, dtype, weight_pack_factor)
+            .into_iter()
+            .map(|size| size + qk_norm_bias)
+            .collect())
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg = crate::phi2::Config::from_json(config)?;
+        Ok(Box::new(decoder_shape(&cfg).model_config(
+            cfg.num_hidden_layers,
+            cfg.max_position_embeddings,
+            None,
+        )))
+    }
+}
 
-        let cfg = ModelConfigMetadata {
-            max_seq_len: cfg.max_position_embeddings,
-            num_layers: cfg.num_hidden_layers,
-            hidden_size: cfg.hidden_size,
-            num_kv_heads: cfg.num_key_value_heads(),
-            num_attn_heads: cfg.num_attention_heads,
-            sliding_window: None,
-            k_head_dim: cfg.head_dim(),
-            v_head_dim: cfg.head_dim(),
-            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
-        };
-
-        Ok(Box::new(cfg))
+fn decoder_shape(cfg: &crate::phi2::Config) -> DecoderLayerShape {
+    DecoderLayerShape {
+        hidden_size: cfg.hidden_size,
+        num_attention_heads: cfg.num_attention_heads,
+        num_key_value_heads: cfg.num_key_value_heads(),
+        head_dim: cfg.head_dim(),
+        qkv_bias: true,
+        o_bias: true,
+        qk_norm: cfg.qk_layernorm,
+        // one LayerNorm shared by the parallel attention and MLP, weight and bias
+        norms: 2,
+        mlp: MlpShape::Plain {
+            intermediate_size: cfg.intermediate_size,
+            bias: true,
+        },
     }
 }

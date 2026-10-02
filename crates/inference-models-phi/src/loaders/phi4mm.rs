@@ -288,53 +288,39 @@ impl DeviceMappedModelLoader for Phi4MMLoader {
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
         let cfg = Phi4MMConfig::from_json(config)?;
-        let per_layer_elems = {
-            let input_layernorm = cfg.hidden_size;
-            let post_attention_layernorm = cfg.hidden_size;
-
-            let size_in = cfg.hidden_size;
-            let head_dim = cfg.head_dim();
-            let op_size =
-                cfg.num_attention_heads * head_dim + 2 * cfg.num_key_value_heads() * head_dim;
-            let qkv_proj = size_in * op_size / weight_pack_factor;
-            let o_proj = (cfg.num_attention_heads * head_dim) * size_in / weight_pack_factor;
-
-            let h_size = cfg.hidden_size;
-            let i_size = cfg.intermediate_size;
-            let gate_up_proj = h_size * (2 * i_size) / weight_pack_factor;
-            let down_proj = h_size * i_size / weight_pack_factor;
-
-            input_layernorm
-                + post_attention_layernorm
-                + qkv_proj
-                + o_proj
-                + gate_up_proj
-                + down_proj
-        };
-        Ok(vec![
-            per_layer_elems * dtype.size_in_bytes();
-            cfg.num_hidden_layers
-        ])
+        Ok(decoder_shape(&cfg).layer_sizes_in_bytes(
+            cfg.num_hidden_layers,
+            dtype,
+            weight_pack_factor,
+        ))
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg = Phi4MMConfig::from_json(config)?;
-
-        let cfg = ModelConfigMetadata {
-            max_seq_len: cfg.max_position_embeddings,
-            num_layers: cfg.num_hidden_layers,
-            hidden_size: cfg.hidden_size,
-            num_kv_heads: cfg.num_key_value_heads(),
-            num_attn_heads: cfg.num_attention_heads,
-            sliding_window: cfg.sliding_window,
-            k_head_dim: cfg.head_dim(),
-            v_head_dim: cfg.head_dim(),
-            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
-        };
-
-        Ok(Box::new(cfg))
+        Ok(Box::new(decoder_shape(&cfg).model_config(
+            cfg.num_hidden_layers,
+            cfg.max_position_embeddings,
+            cfg.sliding_window,
+        )))
     }
 
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
         Some(vec![NonMappedSubModel::Vision, NonMappedSubModel::Audio])
+    }
+}
+
+fn decoder_shape(cfg: &Phi4MMConfig) -> DecoderLayerShape {
+    DecoderLayerShape {
+        hidden_size: cfg.hidden_size,
+        num_attention_heads: cfg.num_attention_heads,
+        num_key_value_heads: cfg.num_key_value_heads(),
+        head_dim: cfg.head_dim(),
+        qkv_bias: false,
+        o_bias: false,
+        qk_norm: false,
+        norms: 2,
+        // gate_up_proj fuses gate and up, the same elements as split ones
+        mlp: MlpShape::Gated {
+            intermediate_size: cfg.intermediate_size,
+        },
     }
 }

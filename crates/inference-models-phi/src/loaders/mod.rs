@@ -30,6 +30,8 @@ mod phi3;
 mod phi3_5_moe;
 mod phi3v;
 mod phi4mm;
+#[cfg(test)]
+mod sizing_tests;
 
 pub use phi2::*;
 pub use phi3::*;

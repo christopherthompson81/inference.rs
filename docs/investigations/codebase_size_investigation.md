@@ -1539,3 +1539,58 @@ Review of the branch (subagent), acted on:
   add. Fixed at the source: that path now returns the activation dtype, as the dequantize path and every other
   QuantMethod do. This machine is sm_86, where the path never runs; the test for it is `#[ignore]`d for sm_89+.
 - Style: `Mlp` imported where it was spelled out; LLaVA's AnyMoE construction reuses its size locals.
+
+## Run 52 - 2026-10-01 (time approximate)
+
+Question: how much of the loaders' device-map sizing (`layer_sizes_in_bytes`, `non_mapped_size_in_bytes`) is one
+calculation written out per loader, and does it agree with the models?
+
+Measured: 53 loaders, about 5200 lines of sizing. `standard_non_mapped_size_in_bytes` already covers embeddings,
+final norm and lm_head for 18 of them; the per-layer arithmetic is hand-written everywhere. Diffing each loader's
+`layer_sizes_in_bytes` against Llama's: Mistral and SmolLM3 are identical (0 lines), Idefics2/3, Mistral3 and
+MiniCPM-o differ by 1, LLaVA/LLaVA-Next by 3, Qwen2/Qwen2-VL/Qwen2.5-VL by 6 (q/k/v biases); Hunyuan dense, GLM-4,
+Qwen3 (+ embedding, VL), Gemma/Gemma 2/EmbeddingGemma, PaddleOCR-VL, Mixtral, StarCoder2, Gemma 3 and the Phi-3
+family differ by 9-24 (qk-norm, extra norms, explicit head_dim, merged gate_up, biases). MoE, hybrid and
+vision-heavy loaders (Qwen3.5, Qwen3-Next, Gemma 3n/4, VLlama/VLlama4, Granite, LFM2) are 50-130 lines off.
+
+Drift found while diffing (sizing vs model code vs the loader's own `model_config`):
+- Mistral and Mistral3 size q/k/v/o with `hidden_size / num_attention_heads` while the models build them with
+  `head_dim()`. For an explicit head_dim (Mistral-Nemo style: head_dim 128 where hidden/heads is 160) the device
+  map overestimates every attention projection by 25%.
+- Gemma 2 and GLM-4 size layers with the config's head_dim, but their loader `model_config` reports
+  `hidden_size / num_attention_heads` as the K/V head dim, which the pre-load KV planning reads. Gemma 2 9B-style
+  dims (head_dim 256, 3584/16 = 224) under-plan KV by 12.5%.
+
+Next (proposed): a `DecoderLayerShape` in `inference_nn::loaders::sizing` (norm count, heads, KV heads, head_dim,
+q/k/v and o biases, qk-norm, gated MLP width) that yields the per-layer elements and the `ModelConfigMetadata`, so
+one struct feeds both and head_dim cannot disagree; pin every migrated loader's sizes and model_config at master
+values first, so each value that moves is a drift to verify against the model code.
+
+Run 52, results. `DecoderLayerShape` (norms, heads, KV heads, head_dim, q/k/v and o biases, qk-norm, gated or plain
+MLP) now builds both `layer_sizes_in_bytes` (text decoder part) and `model_config` for 27 loaders: Llama, Mistral,
+SmolLM3, Idefics2/3, Mistral3, LLaVA/LLaVA-Next; Qwen2, Qwen2-VL, Qwen2.5-VL, Qwen3, Qwen3-Embedding, Qwen3-VL,
+MiniCPM-o; Gemma, Gemma 2, EmbeddingGemma, Gemma 3; Phi-2, Phi-3, Phi-3-vision, Phi-4-MM; GLM-4, StarCoder2,
+Hunyuan dense, PaddleOCR-VL. Done by one agent per model crate after the Llama/Mistral pattern, each pinning master's
+values first (configs with head_dim 32 against hidden/heads 16) and setting the flags from the model code.
+
+Pins that moved (13), each against the model code:
+- head dim: Mistral and Mistral3 sized q/k/v/o with hidden/heads (+40% at the test dims); Gemma 2, EmbeddingGemma,
+  GLM-4, Qwen3 and Qwen3-Embedding planned KV with hidden/heads where the attention uses `head_dim`.
+- norms: Gemma 2, EmbeddingGemma and Gemma 3 missed the pre/post feedforward norms; EmbeddingGemma and Gemma 3 missed
+  q/k norms.
+- biases: Qwen3 and Qwen3-Embedding counted q/k/v biases they don't load; Phi-3 counted an o_proj bias it doesn't
+  load; GLM-4 counted q/k/v biases even without `attention_bias` (real configs set it, so unchanged for them);
+  MiniCPM-o missed the q/k/v biases of its Qwen2 LLM; Phi-2 missed its fc1/fc2 biases and the q/k layernorm biases.
+Unchanged: Llama, SmolLM3, Idefics2/3, LLaVA/LLaVA-Next, Qwen2/Qwen2-VL/Qwen2.5-VL, Qwen3-VL, Gemma, Phi-3-vision,
+Phi-4-MM, StarCoder2, Hunyuan dense, PaddleOCR-VL. Hand checks: Mistral 172544, GLM-4 (no bias) 173056, Qwen3
+172800 bytes per layer.
+
+Noticed by the agents, not changed (model code or out of scope):
+- tensor-parallel KV shard computed from hidden/heads instead of head_dim in GLM-4, Qwen3 and Qwen3-VL (as #210 is
+  for GLM4-MoE); Phi-2 passes `num_attention_heads` where `compute_kv_shard` wants KV heads (no GQA Phi-2 exists).
+- loaders report the config `sliding_window` where the models only use it under `use_sliding_window` past
+  `max_window_layers` (Qwen2 family, Qwen3), or report none where the model has one (Gemma 2/3), or one where the
+  Llama text stack has none (LLaVA).
+- Idefics2's non-mapped sizing counts one vision layer instead of `num_hidden_layers` of them (Idefics3 multiplies).
+- Phi-2's affine final LayerNorm bias and PaddleOCR-VL's quantization-blind non-mapped sizing.
+Lines: -1200/+778 across the 27 loaders, with 34 sizing pins added.

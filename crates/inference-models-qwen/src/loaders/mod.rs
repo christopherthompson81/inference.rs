@@ -55,6 +55,8 @@ mod qwen3_moe;
 mod qwen3_next;
 mod qwen3vl;
 mod qwen3vl_moe;
+#[cfg(test)]
+mod sizing_tests;
 
 pub use minicpm_o::*;
 pub use muse_glimmer::*;

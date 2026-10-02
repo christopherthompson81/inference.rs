@@ -271,49 +271,15 @@ impl DeviceMappedModelLoader for Gemma3Loader {
         _matformer_config: Option<&MatformerSliceConfig>,
     ) -> Result<Vec<usize>> {
         let cfg = Gemma3Config::from_json(config)?;
-
         let txt_cfg = match &cfg {
             Gemma3Config::Text(cfg) => cfg,
             Gemma3Config::WithVision { text_config, .. } => text_config,
         };
-        let per_layer_elems = {
-            let cfg = txt_cfg;
-
-            let input_layernorm = cfg.hidden_size;
-            let post_attention_layernorm = cfg.hidden_size;
-
-            let size_in = cfg.hidden_size;
-            let size_q = cfg.head_dim * cfg.num_attention_heads;
-            let size_kv = cfg.head_dim * cfg.num_key_value_heads;
-            let q_proj =
-                size_in * size_q / weight_pack_factor + bias_if!(cfg.attention_bias, size_q);
-            let k_proj =
-                size_in * size_kv / weight_pack_factor + bias_if!(cfg.attention_bias, size_kv);
-            let v_proj =
-                size_in * size_kv / weight_pack_factor + bias_if!(cfg.attention_bias, size_kv);
-            let o_proj =
-                size_q * size_in / weight_pack_factor + bias_if!(cfg.attention_bias, size_in);
-
-            let h_size = cfg.hidden_size;
-            let i_size = cfg.intermediate_size;
-            let gate_proj = h_size * i_size / weight_pack_factor;
-            let up_proj = h_size * i_size / weight_pack_factor;
-            let down_proj = i_size * h_size / weight_pack_factor;
-
-            input_layernorm
-                + post_attention_layernorm
-                + q_proj
-                + k_proj
-                + v_proj
-                + o_proj
-                + gate_proj
-                + up_proj
-                + down_proj
-        };
-        Ok(vec![
-            per_layer_elems * dtype.size_in_bytes();
-            txt_cfg.num_hidden_layers
-        ])
+        Ok(decoder_shape(txt_cfg).layer_sizes_in_bytes(
+            txt_cfg.num_hidden_layers,
+            dtype,
+            weight_pack_factor,
+        ))
     }
     fn num_layers(&self, config: &str) -> Result<usize> {
         let cfg = Gemma3Config::from_json(config)?;
@@ -327,25 +293,15 @@ impl DeviceMappedModelLoader for Gemma3Loader {
     }
     fn model_config(&self, config: &str) -> Result<Box<dyn ModelConfigLike>> {
         let cfg = Gemma3Config::from_json(config)?;
-
-        let cfg = match &cfg {
+        let txt_cfg = match &cfg {
             Gemma3Config::Text(cfg) => cfg,
             Gemma3Config::WithVision { text_config, .. } => text_config,
         };
-
-        let cfg = ModelConfigMetadata {
-            max_seq_len: cfg.max_position_embeddings,
-            num_layers: cfg.num_hidden_layers,
-            hidden_size: cfg.hidden_size,
-            num_kv_heads: cfg.num_key_value_heads,
-            num_attn_heads: cfg.num_attention_heads,
-            sliding_window: None, // None to be more forgiving, some do not
-            k_head_dim: cfg.head_dim,
-            v_head_dim: cfg.head_dim,
-            kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
-        };
-
-        Ok(Box::new(cfg))
+        Ok(Box::new(decoder_shape(txt_cfg).model_config(
+            txt_cfg.num_hidden_layers,
+            txt_cfg.max_position_embeddings,
+            None,
+        )))
     }
 
     fn non_mapped_sub_models(&self) -> Option<Vec<NonMappedSubModel>> {
@@ -368,5 +324,21 @@ pub struct Gemma3Prefixer;
 impl MultimodalPromptPrefixer for Gemma3Prefixer {
     fn prefix_image(&self, _image_indexes: Vec<usize>, prompt: &str) -> String {
         prompt.to_string()
+    }
+}
+
+fn decoder_shape(cfg: &crate::gemma3::config::Gemma3TextConfig) -> DecoderLayerShape {
+    DecoderLayerShape {
+        hidden_size: cfg.hidden_size,
+        num_attention_heads: cfg.num_attention_heads,
+        num_key_value_heads: cfg.num_key_value_heads,
+        head_dim: cfg.head_dim,
+        qkv_bias: cfg.attention_bias,
+        o_bias: cfg.attention_bias,
+        qk_norm: true,
+        norms: 4,
+        mlp: MlpShape::Gated {
+            intermediate_size: cfg.intermediate_size,
+        },
     }
 }
