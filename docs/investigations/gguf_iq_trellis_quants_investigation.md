@@ -513,3 +513,45 @@ Next: the IQK loaders. Their `_id.cu` files carry `_r4` / `_q8` variants, 16-ele
 (`MMQ_DP4A_TXS_Q8_0_16`, `MMQ_MMA_TILE_X_K_Q3_K`) and more helpers, so they get their own PR.
 - Review follow-ups: `mmq_byte_rows` lists the four KT ids instead of an id range, `row_stride` covers only KT until the IQK loaders land, and the provenance table lists `mmq_kt.cuh`.
 - Full CI: exit 0 (2408 + 2733 + 1 tests).
+
+## Run 12 - 2026-10-03 01:40
+
+Question: do ik's IQK mmq loaders close the IQK prefill gap, the way the KT loaders did in Run 11?
+
+Change:
+- `mmq_iqk.cuh` holds 11 loaders, copied by script from ik's `mmq-instance-iq*_k*_id.cu`. Left out: the `_r4`
+  (CPU-repacked) loaders and the `_q8` requant variants.
+- The `_q8` variants re-quantize block-16 tiles to Q8_0 at large `mmq_x`. They need several more ik-only helpers
+  (`get_int_from_table_16_q8`, `requant_int_q8`).
+- Tiles:
+  - IQ*_K: block-16 (`vec_dot_q8_0_16`; IQ6_K uses `vec_dot_q6_K` for mma).
+  - `_KS` / `_KSS` / `_KL`: Q8_0 tiles.
+- Byte row strides cover the IQK types too.
+- The shared tables and helpers moved to `mmq_ik_common.cuh`, which `mmq_kt.cuh` now includes as well.
+
+Prefill, tok/s at 512 / 2048 / 4096 tokens (dev CLI, 5 iterations; "before" is Run 10's dense path):
+
+| File | Before | mmq |
+|---|---|---|
+| IQ2_K | 13732 / 14537 / 12728 | 19159 / 16934 / 14354 |
+| IQ4_K | 14396 / 14561 / 12590 | 18531 / 16557 / 14004 |
+| IQ6_K | - | 17926 / 16114 / 13770 |
+| IQ2_KS | 15419 / 14602 / 12650 | 20333 / 17777 / 14988 |
+| IQ4_KS | 14456 / 14424 / 12571 | 20089 / 17609 / 14787 |
+| IQ2_KL | - | 19972 / 17487 / 14832 |
+
+- The `_KS` / `_KL` types now match the KT and IQ4_XS mmq numbers.
+- The IQ*_K types land about 5% lower. That is the block-16 path; ik's `_q8` requant wins there at large `mmq_x`
+  (its traits switch at `mmq_x >= 40-48`). That is a follow-up.
+
+Parity: both ik suites pass, all within 1%. Most IQK files moved closer to ik:
+
+| File | Ours | ik |
+|---|---|---|
+| IQ5_K | 9.0076 | 9.0040 |
+| IQ5_KS | 9.1166 | 9.1197 |
+| IQ4_KS | 9.7993 | 9.7813 |
+| IQ2_KS | 48.902 | 48.445 |
+| IQ2_KT default mix | 24.462 | 24.432 |
+- Review follow-ups: the MoE grouped paths take a `QTensor` (Candle types only), so ik types cannot reach them, but they now use `row_stride` too so a future raw type cannot get block units. `int_from_table_4` is `static`.
+- Full CI: exit 0 (2408 + 2733 + 1 tests). The first rerun failed to compile: a local `row_stride` binding shadowed the helper, which is now `mmq_row_stride`.

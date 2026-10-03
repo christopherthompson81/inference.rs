@@ -1429,6 +1429,17 @@ unsafe extern "C" {
         launch_mmq_gguf_iq2_kt,
         launch_mmq_gguf_iq3_kt,
         launch_mmq_gguf_iq4_kt,
+        launch_mmq_gguf_iq2_k,
+        launch_mmq_gguf_iq3_k,
+        launch_mmq_gguf_iq4_k,
+        launch_mmq_gguf_iq5_k,
+        launch_mmq_gguf_iq6_k,
+        launch_mmq_gguf_iq2_ks,
+        launch_mmq_gguf_iq3_ks,
+        launch_mmq_gguf_iq4_ks,
+        launch_mmq_gguf_iq4_kss,
+        launch_mmq_gguf_iq5_ks,
+        launch_mmq_gguf_iq2_kl,
     );
     declare_mmvq_fused_glu!(launch_mmvq_gguf_q4_0_bf16_fused_glu);
     declare_mmvq_fused_glu!(launch_mmvq_gguf_q4_1_bf16_fused_glu);

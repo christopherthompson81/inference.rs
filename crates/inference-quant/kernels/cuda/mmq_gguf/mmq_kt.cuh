@@ -2,16 +2,12 @@
 // Copied from ik_llama.cpp (MIT, Iwan Kawrakow) template-instances/mmq-instance-iq*_kt_id.cu; rows use byte strides.
 #pragma once
 
-#include "mmq_gguf.cuh"
+#include "mmq_ik_common.cuh"
 
 typedef struct { uint8_t sh[QK_K / 32]; uint8_t ql[QK_K / 8]; uint8_t qh[QK_K / 16]; } block_iq1_kt;
 typedef struct { uint8_t scales[QK_K / 64]; uint8_t ql[QK_K / 4]; } block_iq2_kt;
 typedef struct { uint8_t scales[QK_K / 64]; uint8_t ql[QK_K / 4]; uint8_t qh[QK_K / 8]; } block_iq3_kt;
 typedef struct { uint32_t qs[QK_K / 8]; } block_iq4_kt;
-
-static const __device__ int8_t iq4k_values[32] = {
-    -127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113,
-    -123, -100, -79, -61, -45, -31, -18, -6, 5, 17, 29, 42, 57, 73, 93, 117};
 
 // mmq-instance-iq1_kt_id.cu
 template <int mmq_y, bool need_check> static __device__ __forceinline__ void load_tiles_iq1_kt(
