@@ -58,7 +58,8 @@ impl GgufVersion {
     }
 }
 
-const KT_ROW_META_BYTES: usize = 4;
+const F32_ROW_META_BYTES: usize = 4;
+const F16_ROW_META_BYTES: usize = 2;
 const KT_TAIL_BLOCK: usize = 32;
 // Per 32-element tail sub-block: IQ3_KT 8 index bytes and 4 sign bytes (plus a nibble scale), IQ4_KT 16 bytes
 const KT3_TAIL_BYTES: usize = 12;
@@ -112,6 +113,17 @@ impl GgufDType {
             39 => "MXFP4",
             40 => "NVFP4",
             41 => "Q1_0",
+            137 => "IQ2_K",
+            138 => "IQ3_K",
+            139 => "IQ4_K",
+            140 => "IQ5_K",
+            141 => "IQ6_K",
+            144 => "IQ4_KS",
+            145 => "IQ2_KS",
+            146 => "IQ4_KSS",
+            152 => "IQ5_KS",
+            156 => "IQ3_KS",
+            157 => "IQ2_KL",
             153 => "IQ2_KT",
             154 => "IQ3_KT",
             155 => "IQ4_KT",
@@ -126,7 +138,7 @@ impl GgufDType {
             2 | 3 | 6..=9 | 20 | 39 => Some(32),
             40 => Some(64),
             41 => Some(128),
-            10..=19 | 21..=23 | 29 | 34 | 35 | 153..=155 | 158 => Some(256),
+            10..=19 | 21..=23 | 29 | 34 | 35 | 137..=141 | 144..=146 | 152..=158 => Some(256),
             _ => None,
         }
     }
@@ -165,6 +177,17 @@ impl GgufDType {
             39 => Some(17),
             40 => Some(36),
             41 => Some(18),
+            137 => Some(76),
+            138 => Some(110),
+            139 => Some(144),
+            140 => Some(176),
+            141 => Some(212),
+            144 => Some(136),
+            145 => Some(70),
+            146 => Some(128),
+            152 => Some(168),
+            156 => Some(102),
+            157 => Some(86),
             153 => Some(68),
             154 => Some(100),
             155 => Some(128),
@@ -173,10 +196,11 @@ impl GgufDType {
         }
     }
 
-    // ik_llama.cpp's trellis types start each row with an f32 scale
+    // ik_llama.cpp's trellis and `_KS` / `_KSS` / `_KL` types start each row with an f32 or f16 scale
     pub const fn row_meta_size(self) -> usize {
         match self.0 {
-            153..=155 | 158 => KT_ROW_META_BYTES,
+            144 | 146 | 152..=155 | 158 => F32_ROW_META_BYTES,
+            145 | 156 | 157 => F16_ROW_META_BYTES,
             _ => 0,
         }
     }
@@ -200,7 +224,7 @@ impl GgufDType {
                 KT4_TAIL_BYTES * tails
             };
             let bytes = self.row_meta_size() + ne0 / block_size * type_size + tail_bytes;
-            return Some(bytes.next_multiple_of(KT_ROW_META_BYTES));
+            return Some(bytes.next_multiple_of(F32_ROW_META_BYTES));
         }
         ne0.is_multiple_of(block_size)
             .then(|| self.row_meta_size() + ne0 / block_size * type_size)
@@ -1492,7 +1516,7 @@ mod tests {
         ]
     }
 
-    // ggml_row_size in ik_llama.cpp: the f32 row scale, whole blocks, IQ3_KT / IQ4_KT tails, padded to 4 bytes
+    // ggml_row_size in ik_llama.cpp: the f32 or f16 row scale, whole blocks, IQ3_KT / IQ4_KT tails (padded to 4 bytes)
     #[test]
     fn trellis_rows_carry_a_scale_and_tails() {
         let row = |raw, ne0| GgufDType::new(raw).row_size(ne0);
@@ -1504,6 +1528,13 @@ mod tests {
         assert_eq!(row(153, 288), None);
         assert_eq!(row(155, 300), None);
         assert_eq!(row(2, 64), Some(36));
+        assert_eq!(row(144, 512), Some(276));
+        assert_eq!(row(145, 512), Some(142));
+        assert_eq!(row(137, 512), Some(152));
+        assert_eq!(row(146, 512), Some(260));
+        assert_eq!(row(152, 512), Some(340));
+        assert_eq!(row(156, 512), Some(206));
+        assert_eq!(row(157, 512), Some(174));
     }
 
     #[test]

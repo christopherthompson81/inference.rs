@@ -61,6 +61,17 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
             | GgufType::Iq2Kt
             | GgufType::Iq3Kt
             | GgufType::Iq4Kt
+            | GgufType::Iq2K
+            | GgufType::Iq3K
+            | GgufType::Iq4K
+            | GgufType::Iq5K
+            | GgufType::Iq6K
+            | GgufType::Iq4Ks
+            | GgufType::Iq2Ks
+            | GgufType::Iq4Kss
+            | GgufType::Iq5Ks
+            | GgufType::Iq3Ks
+            | GgufType::Iq2Kl
     )
 }
 
@@ -196,6 +207,17 @@ fn plain_launcher_bf16(dtype: GgufType) -> Option<PlainLauncher> {
         GgufType::Iq2Kt => ffi::launch_mmvq_gguf_iq2_kt_bf16_plain,
         GgufType::Iq3Kt => ffi::launch_mmvq_gguf_iq3_kt_bf16_plain,
         GgufType::Iq4Kt => ffi::launch_mmvq_gguf_iq4_kt_bf16_plain,
+        GgufType::Iq2K => ffi::launch_mmvq_gguf_iq2_k_bf16_plain,
+        GgufType::Iq3K => ffi::launch_mmvq_gguf_iq3_k_bf16_plain,
+        GgufType::Iq4K => ffi::launch_mmvq_gguf_iq4_k_bf16_plain,
+        GgufType::Iq5K => ffi::launch_mmvq_gguf_iq5_k_bf16_plain,
+        GgufType::Iq6K => ffi::launch_mmvq_gguf_iq6_k_bf16_plain,
+        GgufType::Iq4Ks => ffi::launch_mmvq_gguf_iq4_ks_bf16_plain,
+        GgufType::Iq2Ks => ffi::launch_mmvq_gguf_iq2_ks_bf16_plain,
+        GgufType::Iq4Kss => ffi::launch_mmvq_gguf_iq4_kss_bf16_plain,
+        GgufType::Iq5Ks => ffi::launch_mmvq_gguf_iq5_ks_bf16_plain,
+        GgufType::Iq3Ks => ffi::launch_mmvq_gguf_iq3_ks_bf16_plain,
+        GgufType::Iq2Kl => ffi::launch_mmvq_gguf_iq2_kl_bf16_plain,
         _ => return None,
     };
     Some(f)
@@ -226,6 +248,17 @@ fn plain_launcher_f16(dtype: GgufType) -> Option<PlainLauncher> {
         GgufType::Iq2Kt => ffi::launch_mmvq_gguf_iq2_kt_f16_plain,
         GgufType::Iq3Kt => ffi::launch_mmvq_gguf_iq3_kt_f16_plain,
         GgufType::Iq4Kt => ffi::launch_mmvq_gguf_iq4_kt_f16_plain,
+        GgufType::Iq2K => ffi::launch_mmvq_gguf_iq2_k_f16_plain,
+        GgufType::Iq3K => ffi::launch_mmvq_gguf_iq3_k_f16_plain,
+        GgufType::Iq4K => ffi::launch_mmvq_gguf_iq4_k_f16_plain,
+        GgufType::Iq5K => ffi::launch_mmvq_gguf_iq5_k_f16_plain,
+        GgufType::Iq6K => ffi::launch_mmvq_gguf_iq6_k_f16_plain,
+        GgufType::Iq4Ks => ffi::launch_mmvq_gguf_iq4_ks_f16_plain,
+        GgufType::Iq2Ks => ffi::launch_mmvq_gguf_iq2_ks_f16_plain,
+        GgufType::Iq4Kss => ffi::launch_mmvq_gguf_iq4_kss_f16_plain,
+        GgufType::Iq5Ks => ffi::launch_mmvq_gguf_iq5_ks_f16_plain,
+        GgufType::Iq3Ks => ffi::launch_mmvq_gguf_iq3_ks_f16_plain,
+        GgufType::Iq2Kl => ffi::launch_mmvq_gguf_iq2_kl_f16_plain,
         _ => return None,
     };
     Some(f)
@@ -256,6 +289,17 @@ fn plain_launcher_f32(dtype: GgufType) -> Option<PlainLauncher> {
         GgufType::Iq2Kt => ffi::launch_mmvq_gguf_iq2_kt_f32_plain,
         GgufType::Iq3Kt => ffi::launch_mmvq_gguf_iq3_kt_f32_plain,
         GgufType::Iq4Kt => ffi::launch_mmvq_gguf_iq4_kt_f32_plain,
+        GgufType::Iq2K => ffi::launch_mmvq_gguf_iq2_k_f32_plain,
+        GgufType::Iq3K => ffi::launch_mmvq_gguf_iq3_k_f32_plain,
+        GgufType::Iq4K => ffi::launch_mmvq_gguf_iq4_k_f32_plain,
+        GgufType::Iq5K => ffi::launch_mmvq_gguf_iq5_k_f32_plain,
+        GgufType::Iq6K => ffi::launch_mmvq_gguf_iq6_k_f32_plain,
+        GgufType::Iq4Ks => ffi::launch_mmvq_gguf_iq4_ks_f32_plain,
+        GgufType::Iq2Ks => ffi::launch_mmvq_gguf_iq2_ks_f32_plain,
+        GgufType::Iq4Kss => ffi::launch_mmvq_gguf_iq4_kss_f32_plain,
+        GgufType::Iq5Ks => ffi::launch_mmvq_gguf_iq5_ks_f32_plain,
+        GgufType::Iq3Ks => ffi::launch_mmvq_gguf_iq3_ks_f32_plain,
+        GgufType::Iq2Kl => ffi::launch_mmvq_gguf_iq2_kl_f32_plain,
         _ => return None,
     };
     Some(f)
@@ -1019,8 +1063,45 @@ fn dequantize_launcher(ty: GgufType, dtype: DType) -> Option<DequantizeLauncher>
         (GgufType::Iq4Kt, DType::BF16) => ffi::launch_dequantize_iq4_kt_bf16,
         (GgufType::Iq4Kt, DType::F16) => ffi::launch_dequantize_iq4_kt_f16,
         (GgufType::Iq4Kt, DType::F32) => ffi::launch_dequantize_iq4_kt_f32,
+        (GgufType::Iq2K, DType::BF16) => ffi::launch_dequantize_iq2_k_bf16,
+        (GgufType::Iq2K, DType::F16) => ffi::launch_dequantize_iq2_k_f16,
+        (GgufType::Iq2K, DType::F32) => ffi::launch_dequantize_iq2_k_f32,
+        (GgufType::Iq3K, DType::BF16) => ffi::launch_dequantize_iq3_k_bf16,
+        (GgufType::Iq3K, DType::F16) => ffi::launch_dequantize_iq3_k_f16,
+        (GgufType::Iq3K, DType::F32) => ffi::launch_dequantize_iq3_k_f32,
+        (GgufType::Iq4K, DType::BF16) => ffi::launch_dequantize_iq4_k_bf16,
+        (GgufType::Iq4K, DType::F16) => ffi::launch_dequantize_iq4_k_f16,
+        (GgufType::Iq4K, DType::F32) => ffi::launch_dequantize_iq4_k_f32,
+        (GgufType::Iq5K, DType::BF16) => ffi::launch_dequantize_iq5_k_bf16,
+        (GgufType::Iq5K, DType::F16) => ffi::launch_dequantize_iq5_k_f16,
+        (GgufType::Iq5K, DType::F32) => ffi::launch_dequantize_iq5_k_f32,
+        (GgufType::Iq6K, DType::BF16) => ffi::launch_dequantize_iq6_k_bf16,
+        (GgufType::Iq6K, DType::F16) => ffi::launch_dequantize_iq6_k_f16,
+        (GgufType::Iq6K, DType::F32) => ffi::launch_dequantize_iq6_k_f32,
+        (GgufType::Iq4Ks, DType::BF16) => ffi::launch_dequantize_iq4_ks_bf16,
+        (GgufType::Iq4Ks, DType::F16) => ffi::launch_dequantize_iq4_ks_f16,
+        (GgufType::Iq4Ks, DType::F32) => ffi::launch_dequantize_iq4_ks_f32,
+        (GgufType::Iq2Ks, DType::BF16) => ffi::launch_dequantize_iq2_ks_bf16,
+        (GgufType::Iq2Ks, DType::F16) => ffi::launch_dequantize_iq2_ks_f16,
+        (GgufType::Iq2Ks, DType::F32) => ffi::launch_dequantize_iq2_ks_f32,
+        (GgufType::Iq4Kss, DType::BF16) => ffi::launch_dequantize_iq4_kss_bf16,
+        (GgufType::Iq4Kss, DType::F16) => ffi::launch_dequantize_iq4_kss_f16,
+        (GgufType::Iq4Kss, DType::F32) => ffi::launch_dequantize_iq4_kss_f32,
+        (GgufType::Iq5Ks, DType::BF16) => ffi::launch_dequantize_iq5_ks_bf16,
+        (GgufType::Iq5Ks, DType::F16) => ffi::launch_dequantize_iq5_ks_f16,
+        (GgufType::Iq5Ks, DType::F32) => ffi::launch_dequantize_iq5_ks_f32,
+        (GgufType::Iq3Ks, DType::BF16) => ffi::launch_dequantize_iq3_ks_bf16,
+        (GgufType::Iq3Ks, DType::F16) => ffi::launch_dequantize_iq3_ks_f16,
+        (GgufType::Iq3Ks, DType::F32) => ffi::launch_dequantize_iq3_ks_f32,
+        (GgufType::Iq2Kl, DType::BF16) => ffi::launch_dequantize_iq2_kl_bf16,
+        (GgufType::Iq2Kl, DType::F16) => ffi::launch_dequantize_iq2_kl_f16,
+        (GgufType::Iq2Kl, DType::F32) => ffi::launch_dequantize_iq2_kl_f32,
         _ => return None,
     })
+}
+
+pub fn can_dequantize(ty: GgufType, dtype: DType) -> bool {
+    dequantize_launcher(ty, dtype).is_some()
 }
 
 /// The weight dequantized on its GPU, as ggml does for prefill on types without an mmq tile.

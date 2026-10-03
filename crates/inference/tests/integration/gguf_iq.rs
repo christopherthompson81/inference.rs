@@ -74,6 +74,15 @@ const KT_SUITE: ParitySuite = ParitySuite {
     perplexity_env: "INFERENCE_TEST_IK_LLAMA_PERPLEXITY",
     types: &["IQ1_KT", "IQ2_KT", "IQ3_KT", "IQ4_KT"],
 };
+// ik_llama.cpp's IQ*_K types in its default mixes, plus a default IQ2_KT mix that needs them
+const IQK_SUITE: ParitySuite = ParitySuite {
+    dir_env: "INFERENCE_TEST_IQK_GGUF_DIR",
+    perplexity_env: "INFERENCE_TEST_IK_LLAMA_PERPLEXITY",
+    types: &[
+        "IQ2_K", "IQ3_K", "IQ4_K", "IQ5_K", "IQ6_K", "IQ2_KS", "IQ3_KS", "IQ4_KS", "IQ4_KSS",
+        "IQ5_KS", "IQ2_KL", "IQ2_KT",
+    ],
+};
 // Any text past two windows works; both sides read the same file.
 const PERPLEXITY_TEXT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md");
 // llama-perplexity's `-c 512 --chunks 1`: one 512-token window scored on its second half
@@ -155,6 +164,11 @@ async fn every_iq_gguf_matches_llama_cpp_perplexity() -> anyhow::Result<()> {
 #[tokio::test]
 async fn every_trellis_gguf_matches_ik_llama_cpp_perplexity() -> anyhow::Result<()> {
     matches_reference_perplexity(&KT_SUITE).await
+}
+
+#[tokio::test]
+async fn every_iqk_gguf_matches_ik_llama_cpp_perplexity() -> anyhow::Result<()> {
+    matches_reference_perplexity(&IQK_SUITE).await
 }
 
 async fn matches_reference_perplexity(suite: &ParitySuite) -> anyhow::Result<()> {

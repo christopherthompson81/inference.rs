@@ -124,6 +124,89 @@ impl RawGgufTensor {
         })
     }
 
+    /// Rows `ids` of the weight, dequantized to F32, shaped `ids.dims() + [cols]`, on the weight's device.
+    pub fn embedding(&self, ids: &Tensor) -> Result<Tensor> {
+        let (rows, cols) = self.shape.dims2()?;
+        let row_bytes = self.ty.row_bytes(cols).expect("validated at construction");
+        let mut dims = ids.dims().to_vec();
+        dims.push(cols);
+        let flat = ids.flatten_all()?.to_dtype(DType::U32)?;
+        if flat.elem_count() == 0 {
+            return Tensor::zeros(dims, DType::F32, &self.device());
+        }
+        let gathered = match &self.storage {
+            RawStorage::Cpu(bytes) => {
+                let ids = flat.to_vec1::<u32>()?;
+                if let Some(id) = ids.iter().find(|&&id| id as usize >= rows) {
+                    candle_core::bail!("embedding id {id} is out of range for {rows} rows");
+                }
+                let rows = ids
+                    .into_iter()
+                    .flat_map(|id| {
+                        bytes[id as usize * row_bytes..][..row_bytes]
+                            .iter()
+                            .copied()
+                    })
+                    .collect();
+                Self::new(self.ty, &[flat.elem_count(), cols], rows, &Device::Cpu)?
+            }
+            #[cfg(feature = "cuda")]
+            RawStorage::Cuda { .. } => self.gather_cuda(&flat, row_bytes)?,
+        };
+        #[cfg(feature = "cuda")]
+        if gathered.device().is_cuda() && super::fast_mmvq::can_dequantize(self.ty, DType::F32) {
+            return super::fast_mmvq::dequantize(&gathered, DType::F32)?.reshape(dims);
+        }
+        gathered.dequantize(&self.device())?.reshape(dims)
+    }
+
+    // The rows selected by `ids`, copied on the GPU into a weight of their own
+    #[cfg(feature = "cuda")]
+    fn gather_cuda(&self, ids: &Tensor, row_bytes: usize) -> Result<Self> {
+        use candle_core::cuda_backend::cudarc::driver::DevicePtr;
+        let RawStorage::Cuda { blocks, device, .. } = &self.storage else {
+            candle_core::bail!("{:?} gather needs the weight on CUDA", self.ty);
+        };
+        let ids = ids.to_device(&Device::Cuda(device.clone()))?.contiguous()?;
+        let (ids_storage, ids_layout) = ids.storage_and_layout();
+        let candle_core::Storage::Cuda(ids_cuda) = &*ids_storage else {
+            candle_core::bail!("embedding ids must live on CUDA");
+        };
+        let n = ids.elem_count();
+        let len = n * row_bytes;
+        let padding = MATRIX_ROW_PADDING * self.ty.type_size() / self.ty.block_size();
+        let mut rows = device.alloc_zeros::<u8>(len + padding)?;
+        let stream = device.cuda_stream();
+        {
+            let ids_slice = ids_cuda.as_cuda_slice::<u32>()?;
+            let (ids_ptr, _ids_guard) =
+                crate::utils::slice_ptr_on_stream(ids_slice, ids_layout.start_offset(), &stream);
+            let (src_ptr, _src_guard) = blocks.device_ptr(&stream);
+            let (dst_ptr, _dst_guard) =
+                crate::utils::slice_ptr_mut_on_stream(&mut rows, 0, &stream);
+            unsafe {
+                super::ffi::launch_gather_rows_u8(
+                    src_ptr as *const std::ffi::c_void,
+                    ids_ptr as *const std::ffi::c_void,
+                    dst_ptr as *mut std::ffi::c_void,
+                    row_bytes as i64,
+                    self.shape.dims2()?.0 as i64,
+                    n as i64,
+                    stream.cu_stream() as *mut std::ffi::c_void,
+                )
+            };
+        }
+        Ok(Self {
+            ty: self.ty,
+            shape: Shape::from((n, self.shape.dims2()?.1)),
+            storage: RawStorage::Cuda {
+                blocks: Arc::new(rows),
+                len,
+                device: device.clone(),
+            },
+        })
+    }
+
     /// The weight as an F32 tensor on `device`.
     pub fn dequantize(&self, device: &Device) -> Result<Tensor> {
         let values = dequantize_rows(self.ty, self.shape.dims2()?.1, &self.bytes()?)?;
@@ -163,8 +246,10 @@ impl super::kernel::KernelWeight for RawGgufTensor {
 
 /// ggml's reference dequantization (`dequantize_row_*` in ggml-quants.c, or ik_llama.cpp's) of rows of `cols`.
 pub fn dequantize_rows(ty: GgufType, cols: usize, bytes: &[u8]) -> Result<Vec<f32>> {
-    if ty.is_trellis() {
-        let (_, row_bytes) = ty.row_unit(cols)?;
+    if ty.is_trellis() || ty.is_iqk() {
+        let row_bytes = ty.row_bytes(cols).ok_or_else(|| {
+            candle_core::Error::Msg(format!("{ty:?} rows cannot hold {cols} elements"))
+        })?;
         if !bytes.len().is_multiple_of(row_bytes) {
             candle_core::bail!("{ty:?} data of {} bytes is not whole rows", bytes.len());
         }
@@ -173,7 +258,11 @@ pub fn dequantize_rows(ty: GgufType, cols: usize, bytes: &[u8]) -> Result<Vec<f3
             .chunks_exact(row_bytes)
             .zip(out.chunks_exact_mut(cols))
         {
-            super::kt_dequant::dequantize_row(ty, row, values);
+            if ty.is_trellis() {
+                super::kt_dequant::dequantize_row(ty, row, values);
+            } else {
+                super::iqk_dequant::dequantize_row(ty, row, values);
+            }
         }
         return Ok(out);
     }
@@ -271,7 +360,7 @@ impl GgufRawMatMul {
             _ if super::fast_mmq::supports(super::kernel::KernelWeight::gguf_type(&self.w)) => {
                 super::fast_mmq::plain(&self.w, a)?
             }
-            // IQ1_M and trellis types have no mmq tile here; like ggml, prefill dequantizes to F16 for a dense matmul
+            // IQ1_M and the ik types have no mmq tile here; like ggml, prefill dequantizes to F16 for a dense matmul
             _ => {
                 let compute = if a.dtype() == DType::F32 {
                     DType::F32
@@ -294,6 +383,10 @@ impl QuantMethod for GgufRawMatMul {
 
     fn dequantize_w(&self) -> Result<Tensor> {
         self.w.dequantize(&self.w.device())
+    }
+
+    fn embedding_forward_raw(&self, ids: &Tensor) -> Result<Tensor> {
+        self.w.embedding(ids)
     }
 
     fn forward_raw(&self, a: &Tensor) -> Result<Tensor> {
@@ -366,20 +459,22 @@ mod tests {
 
     // Blocks and expected values from gguf-py's IQ dequantizers (tests/fixtures/gguf_iq/make_goldens.py).
     const GOLDENS: &str = include_str!("../../tests/fixtures/gguf_iq/goldens.json");
-    // Trellis rows and values from ik_llama.cpp's reference dequantizers (tests/fixtures/gguf_kt/make_goldens.py).
-    const KT_GOLDENS: &str = include_str!("../../tests/fixtures/gguf_kt/goldens.json");
+    // Rows and values from ik_llama.cpp's reference dequantizers (tests/fixtures/gguf_ik/make_goldens.py).
+    const IK_GOLDENS: &str = include_str!("../../tests/fixtures/gguf_ik/goldens.json");
 
     #[derive(serde::Deserialize)]
     struct Golden {
         ty: String,
-        // Trellis goldens are one row of this many elements
+        // ik goldens are rows of this many elements
         #[serde(default)]
         cols: Option<usize>,
+        // Set where the reference computes values our kernels' tables round
+        #[serde(default)]
+        tolerance: Option<f32>,
         bytes: Vec<u8>,
         values: Vec<f32>,
     }
 
-    #[cfg(feature = "cuda")]
     const IQ1_M_SCALE_WORDS: usize = 48;
     // 480 columns end IQ3_KT / IQ4_KT rows in seven 32-element tail sub-blocks, reaching both scale nibbles
     #[cfg(feature = "cuda")]
@@ -387,23 +482,25 @@ mod tests {
     #[cfg(feature = "cuda")]
     const KT_TAIL_COLS: usize = 480;
 
-    // Trellis rows: a small finite f32 row scale, then arbitrary block bytes.
-    #[cfg(feature = "cuda")]
+    // Row-scaled rows: a small finite f32 or f16 row scale, then arbitrary block bytes.
     fn random_rows(ty: GgufType, rows: usize, cols: usize, seed: u64) -> Vec<u8> {
-        if !ty.is_trellis() {
+        if !ty.has_row_scale() {
             return random_blocks(ty, rows * cols / ty.block_size(), seed);
         }
-        let row_bytes = ty.row_bytes(cols).expect("valid trellis row");
+        let row_bytes = ty.row_bytes(cols).expect("valid row-scaled row");
         let mut bytes = random_blocks(GgufType::Q8_0, (rows * row_bytes).div_ceil(34), seed);
         bytes.truncate(rows * row_bytes);
         for (i, row) in bytes.chunks_exact_mut(row_bytes).enumerate() {
-            row[..4].copy_from_slice(&(0.0005 + 0.0002 * (i % 5) as f32).to_le_bytes());
+            let scale = 0.0005 + 0.0002 * (i % 5) as f32;
+            match ty.row_scale_bytes() {
+                2 => row[..2].copy_from_slice(&half::f16::from_f32(scale).to_le_bytes()),
+                _ => row[..4].copy_from_slice(&scale.to_le_bytes()),
+            }
         }
         bytes
     }
 
     // Deterministic blocks with a small finite f16 scale; every other byte is arbitrary scale bits and indices.
-    #[cfg(feature = "cuda")]
     fn random_blocks(ty: GgufType, blocks: usize, seed: u64) -> Vec<u8> {
         let mut state = seed;
         let mut next = move || {
@@ -484,6 +581,44 @@ mod tests {
         Ok(())
     }
 
+    // Tied embeddings in ik's mixes are IQ*_K; on CUDA, types without a GPU dequantizer go through the host
+    #[test]
+    fn embedding_rows_match_the_dequantized_weight() -> Result<()> {
+        const ROWS: usize = 40;
+        const COLS: usize = 512;
+        let ids = Tensor::new(&[[3u32, 0, 39], [17, 17, 8]], &Device::Cpu)?;
+        let devices: Vec<Device> = std::iter::once(Device::Cpu)
+            .chain(Device::new_cuda(0).ok().filter(|_| cfg!(feature = "cuda")))
+            .collect();
+        for ty in GgufType::RAW_BLOCKS {
+            let bytes = random_rows(ty, ROWS, COLS, 5);
+            let weight = RawGgufTensor::new(ty, &[ROWS, COLS], bytes.clone(), &Device::Cpu)?;
+            let expected = weight
+                .dequantize(&Device::Cpu)?
+                .embedding(&ids.flatten_all()?)?
+                .reshape((2, 3, COLS))?;
+            for device in &devices {
+                let weight = RawGgufTensor::new(ty, &[ROWS, COLS], bytes.clone(), device)?;
+                let actual = weight
+                    .embedding(&ids.to_device(device)?)?
+                    .to_device(&Device::Cpu)?;
+                let diff = (actual - &expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                assert!(
+                    diff < 1e-6,
+                    "{ty:?} on {device:?}: embedding differs by {diff}"
+                );
+                let empty = weight.embedding(&Tensor::zeros((0,), DType::U32, device)?)?;
+                assert_eq!(empty.dims(), [0, COLS]);
+            }
+            assert!(
+                weight
+                    .embedding(&Tensor::new(&[ROWS as u32], &Device::Cpu)?)
+                    .is_err()
+            );
+        }
+        Ok(())
+    }
+
     #[cfg(feature = "cuda")]
     #[test]
     fn cuda_dequantization_matches_the_cpu() -> Result<()> {
@@ -495,6 +630,7 @@ mod tests {
         };
         let cases = [GgufType::Iq1M, GgufType::Iq1Kt, GgufType::Iq2Kt]
             .into_iter()
+            .chain(GgufType::RAW_BLOCKS.into_iter().filter(|ty| ty.is_iqk()))
             .chain(KT_TAIL_TYPES)
             .map(|ty| (ty, COLS))
             .chain(KT_TAIL_TYPES.map(|ty| (ty, KT_TAIL_COLS)));
@@ -526,7 +662,7 @@ mod tests {
         let mut goldens: Vec<Golden> =
             serde_json::from_str(GOLDENS).map_err(candle_core::Error::wrap)?;
         goldens.extend(
-            serde_json::from_str::<Vec<Golden>>(KT_GOLDENS).map_err(candle_core::Error::wrap)?,
+            serde_json::from_str::<Vec<Golden>>(IK_GOLDENS).map_err(candle_core::Error::wrap)?,
         );
         assert!(!goldens.is_empty());
         for golden in goldens {
@@ -538,7 +674,20 @@ mod tests {
                 .unwrap_or_else(|| panic!("unexpected golden type {}", golden.ty));
             let cols = golden.cols.unwrap_or(golden.values.len());
             let values = dequantize_rows(ty, cols, &golden.bytes)?;
-            assert_eq!(values, golden.values, "{ty:?}");
+            match golden.tolerance {
+                Some(tolerance) => {
+                    let peak = golden.values.iter().fold(0f32, |m, v| m.max(v.abs()));
+                    let diff = values
+                        .iter()
+                        .zip(&golden.values)
+                        .fold(0f32, |m, (a, b)| m.max((a - b).abs()));
+                    assert!(
+                        diff <= tolerance * peak,
+                        "{ty:?}: differs by {diff} (peak {peak})"
+                    );
+                }
+                None => assert_eq!(values, golden.values, "{ty:?}"),
+            }
         }
         Ok(())
     }

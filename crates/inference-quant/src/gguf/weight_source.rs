@@ -15,9 +15,9 @@ use crate::{
     slice_blocked_data,
 };
 
-// No per-rank column count is a multiple of this, so tensor parallelism replicates trellis weights
-const TRELLIS_SHARD_ALIGNMENT: usize = usize::MAX;
-const DIRECT_GGUF_DTYPES: &str = "F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, Q2_K through Q8_K, IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, and IQ1_KT through IQ4_KT";
+// No per-rank column count is a multiple of this, so tensor parallelism replicates row-scaled weights
+const ROW_SCALED_SHARD_ALIGNMENT: usize = usize::MAX;
+const DIRECT_GGUF_DTYPES: &str = "F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, Q2_K through Q8_K, IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, IQ1_KT through IQ4_KT, IQ2_K through IQ6_K, and the IQ*_KS / IQ4_KSS / IQ2_KL types";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum GgufTensorBinding {
@@ -844,8 +844,8 @@ impl QuantizedWeightSource for GgufWeightSource {
             Ok(shard_unit(dtype))
         } else if let Some(source_name) = binding.direct_tensor() {
             let dtype = self.archive.tensor_info(source_name)?.dtype();
-            if dtype.gguf_type().is_some_and(GgufType::is_trellis) {
-                return Ok(TRELLIS_SHARD_ALIGNMENT);
+            if dtype.gguf_type().is_some_and(GgufType::has_row_scale) {
+                return Ok(ROW_SCALED_SHARD_ALIGNMENT);
             }
             dtype.block_size().ok_or_else(|| {
                 Error::msg(format!(
@@ -945,7 +945,7 @@ fn concat_packed_bindings(inputs: Vec<PackedBinding>, dim: usize) -> Result<Pack
         }
     }
 
-    if dtype.is_trellis() && dim == dims.len() - 1 {
+    if dtype.has_row_scale() && dim == dims.len() - 1 {
         candle_core::bail!(
             "{dtype:?} rows start with their scale, so they cannot be concatenated end to end"
         );
@@ -1041,10 +1041,10 @@ fn quant_linear(
     })
 }
 
-// A trellis row keeps one scale for its whole length, so no column split lines up with it
+// A row-scaled row keeps one scale for its whole length, so no column split lines up with it
 fn shard_unit(dtype: GgufType) -> usize {
-    if dtype.is_trellis() {
-        TRELLIS_SHARD_ALIGNMENT
+    if dtype.has_row_scale() {
+        ROW_SCALED_SHARD_ALIGNMENT
     } else {
         dtype.block_size()
     }
@@ -1788,7 +1788,7 @@ mod tests {
         let joined = concat_packed_bindings(vec![half(0..240), half(240..480)], 0)?;
         assert_eq!((joined.dims, joined.data), (dims.to_vec(), data.clone()));
         assert!(concat_packed_bindings(vec![half(0..240), half(240..480)], 1).is_err());
-        assert_eq!(shard_unit(dtype), TRELLIS_SHARD_ALIGNMENT);
+        assert_eq!(shard_unit(dtype), ROW_SCALED_SHARD_ALIGNMENT);
         Ok(())
     }
 

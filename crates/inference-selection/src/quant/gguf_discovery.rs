@@ -505,7 +505,8 @@ struct QuantPreferences {
 // IQ2_M, IQ3_XS and IQ3_M are llama-quantize mixes of the IQ types listed beside them
 const SUPPORTED_IQ_QUANTS: &[&str] = &[
     "IQ1_S", "IQ1_M", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ2_M", "IQ3_XXS", "IQ3_XS", "IQ3_S", "IQ3_M",
-    "IQ4_NL", "IQ4_XS", "IQ1_KT", "IQ2_KT", "IQ3_KT", "IQ4_KT",
+    "IQ4_NL", "IQ4_XS", "IQ1_KT", "IQ2_KT", "IQ3_KT", "IQ4_KT", "IQ2_K", "IQ3_K", "IQ4_K", "IQ5_K",
+    "IQ6_K", "IQ2_KS", "IQ3_KS", "IQ4_KS", "IQ5_KS", "IQ4_KSS", "IQ2_KL",
 ];
 
 fn quant_preferences(requested: &str) -> Result<QuantPreferences> {
@@ -819,7 +820,7 @@ mod tests {
             resolve_gguf_quant(&listing, "iq3_xxs").unwrap().label,
             "IQ3_XXS"
         );
-        let error = resolve_gguf_quant(&listing, "iq2_ks").unwrap_err();
+        let error = resolve_gguf_quant(&listing, "iq2_bn").unwrap_err();
         assert!(error.to_string().contains("is not supported"), "{error}");
         assert_eq!(
             resolve_gguf_quant(&listing, "ud-q4_k_xl").unwrap().label,
