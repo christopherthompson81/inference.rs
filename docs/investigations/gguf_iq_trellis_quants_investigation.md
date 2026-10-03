@@ -415,3 +415,54 @@ Run 9 review follow-ups (22:10):
 - Renamed trellis-only wording and constants to cover all row-scaled types. The archive row-size test now covers
   every `_KS` / `_KSS` / `_KL` id.
 - Full CI: exit 0 (2408 + 2732 + 1 tests).
+
+## Run 10 - 2026-10-02 23:20
+
+Questions:
+1. How do prefill and decode compare with ik_llama.cpp on the ik types?
+2. Is ik's mmq worth porting?
+3. Is the host round trip in mainline-IQ embedding lookups slow?
+
+Setup: our dev-profile CLI (`target/debug/inference bench --prompt-len 512,2048,4096 --gen-len 128 --iterations 5`)
+against ik's `llama-bench -p 512,2048,4096 -n 128 -r 5 -ngl 99`. Qwen3.5-0.8B on the RTX 3090. Our numbers are TTFT
+throughput, which includes request overhead.
+
+Rates in tok/s, prompt length in tokens:
+
+| File | ik 512 | ik 2048 | ik 4096 | ik decode | ours 512 | ours 2048 | ours 4096 | ours decode |
+|---|---|---|---|---|---|---|---|---|
+| IQ2_KT (pure) | 16109 | 18118 | 17937 | 515 | 14816 | 14640 | 12650 | 584 |
+| IQ4_KT (pure) | 15832 | 17588 | 17334 | 467 | 14509 | 14446 | 12604 | 536 |
+| IQ2_K (mix) | 16302 | 17803 | 17773 | 540 | 13732 | 14537 | 12728 | 602 |
+| IQ4_K (mix) | 16099 | 17681 | 17360 | 493 | 14396 | 14561 | 12590 | 542 |
+| IQ2_KS (mix) | 16187 | 18049 | 17774 | 511 | 15419 | 14602 | 12650 | 588 |
+| IQ4_KS (mix) | 16277 | 17724 | 17433 | 438 | 14456 | 14424 | 12571 | 547 |
+| IQ4_XS (pure, Q8_0 emb) | 16155 | 18266 | 18030 | - | 20148 | 17755 | 14932 | 537 |
+
+ik's 512-token runs are noisy (about +-5000).
+
+Findings:
+- Decode: ours is 10-25% faster on every ik type.
+- Prefill on the ik types: we use dequant plus a dense matmul, and it is flat at about 14.5k across types. On
+  IQ4_XS, which has an mmq tile, we reach 20.1k / 17.8k / 14.9k. So the dense path costs about 28% / 18% / 15%
+  against mmq on this model, and porting ik's mmq for its types would recover that.
+- The drop at 4096 appears on IQ4_XS too (14.9k ours vs 18.0k ik), so it is not a quant kernel. It is an
+  engine-level long-prompt cost (attention / GDN) and a separate question.
+
+Embedding round trip: two `--pure` IQ4_XS files, one with an IQ4_XS token embedding, one with Q8_0.
+- Decode: 212.4 tok/s with the IQ4_XS embedding vs 527.5 tok/s with Q8_0, 2.5x slower. My estimate of "a few
+  percent" was wrong.
+- Isolated timings at full vocab (248320 x 1024): the IQ4_XS embedding lookup takes 0.018 ms and the tied-head
+  mmvq 0.37 ms. Neither explains a 2.8 ms gap.
+- nsys (`-t cuda,osrt`, 128 decode tokens x 2) shows the cause:
+  - The IQ4_XS-embedding run made 220k `cudaLaunchKernel` calls, 948 `cuMemcpyDtoHAsync` and no `cuGraphLaunch`.
+  - The Q8_0 run made 381 `cuGraphLaunch`.
+  - The host copy in the embedding lookup cannot be captured, so decode loses its CUDA graph and runs eager.
+- Fix: GPU dequantizers for the mainline IQ types (IQ1_S, IQ2_XXS / XS / S, IQ3_XXS / S, IQ4_NL, IQ4_XS), copied from
+  llama.cpp `dequantize.cuh` at 4617ccc1a. IQ1_M already had one. With them every raw type now dequantizes on the
+  GPU, and a unit test pins that. ggml's IQ4_NL kernel fills whole 256-element super-blocks, so
+  its output is rounded up and trimmed. The weight's zeroed padding covers the extra reads.
+- After: IQ4_XS-embedding decode is 531.5 tok/s, against 537.3 with a Q8_0 embedding.
+- Review follow-ups: odd IQ4_NL element counts (for example one 288-element row) no longer fall back to the host; the
+  embedding test covers 6 x 288. The dequant launchers share one `dequantize_superblocks` kernel template.
+- Full CI: exit 0 (2408 + 2733 + 1 tests).

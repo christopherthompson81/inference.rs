@@ -20,6 +20,7 @@ use crate::{
 const Q8_1_BLOCK_SIZE: usize = 32;
 const Q8_1_TYPE_SIZE: usize = 36; // 2 halves (4 bytes) + QK8_1 int8 = 4 + 32 = 36
 const MATRIX_ROW_PADDING: usize = 512;
+const QK_K: usize = 256;
 
 #[inline]
 fn pad(p: usize, q: usize) -> usize {
@@ -1048,6 +1049,30 @@ type DequantizeLauncher = unsafe extern "C" fn(
 
 fn dequantize_launcher(ty: GgufType, dtype: DType) -> Option<DequantizeLauncher> {
     Some(match (ty, dtype) {
+        (GgufType::Iq2Xxs, DType::BF16) => ffi::launch_dequantize_iq2_xxs_bf16,
+        (GgufType::Iq2Xxs, DType::F16) => ffi::launch_dequantize_iq2_xxs_f16,
+        (GgufType::Iq2Xxs, DType::F32) => ffi::launch_dequantize_iq2_xxs_f32,
+        (GgufType::Iq2Xs, DType::BF16) => ffi::launch_dequantize_iq2_xs_bf16,
+        (GgufType::Iq2Xs, DType::F16) => ffi::launch_dequantize_iq2_xs_f16,
+        (GgufType::Iq2Xs, DType::F32) => ffi::launch_dequantize_iq2_xs_f32,
+        (GgufType::Iq2S, DType::BF16) => ffi::launch_dequantize_iq2_s_bf16,
+        (GgufType::Iq2S, DType::F16) => ffi::launch_dequantize_iq2_s_f16,
+        (GgufType::Iq2S, DType::F32) => ffi::launch_dequantize_iq2_s_f32,
+        (GgufType::Iq3Xxs, DType::BF16) => ffi::launch_dequantize_iq3_xxs_bf16,
+        (GgufType::Iq3Xxs, DType::F16) => ffi::launch_dequantize_iq3_xxs_f16,
+        (GgufType::Iq3Xxs, DType::F32) => ffi::launch_dequantize_iq3_xxs_f32,
+        (GgufType::Iq3S, DType::BF16) => ffi::launch_dequantize_iq3_s_bf16,
+        (GgufType::Iq3S, DType::F16) => ffi::launch_dequantize_iq3_s_f16,
+        (GgufType::Iq3S, DType::F32) => ffi::launch_dequantize_iq3_s_f32,
+        (GgufType::Iq1S, DType::BF16) => ffi::launch_dequantize_iq1_s_bf16,
+        (GgufType::Iq1S, DType::F16) => ffi::launch_dequantize_iq1_s_f16,
+        (GgufType::Iq1S, DType::F32) => ffi::launch_dequantize_iq1_s_f32,
+        (GgufType::Iq4Nl, DType::BF16) => ffi::launch_dequantize_iq4_nl_bf16,
+        (GgufType::Iq4Nl, DType::F16) => ffi::launch_dequantize_iq4_nl_f16,
+        (GgufType::Iq4Nl, DType::F32) => ffi::launch_dequantize_iq4_nl_f32,
+        (GgufType::Iq4Xs, DType::BF16) => ffi::launch_dequantize_iq4_xs_bf16,
+        (GgufType::Iq4Xs, DType::F16) => ffi::launch_dequantize_iq4_xs_f16,
+        (GgufType::Iq4Xs, DType::F32) => ffi::launch_dequantize_iq4_xs_f32,
         (GgufType::Iq1M, DType::BF16) => ffi::launch_dequantize_iq1_m_bf16,
         (GgufType::Iq1M, DType::F16) => ffi::launch_dequantize_iq1_m_f16,
         (GgufType::Iq1M, DType::F32) => ffi::launch_dequantize_iq1_m_f32,
@@ -1115,14 +1140,21 @@ pub fn dequantize<W: KernelWeight + ?Sized>(w: &W, dtype: DType) -> Result<Tenso
     };
     let shape = w.kernel_shape().clone();
     let elems = shape.elem_count();
-    let (nrows, ncols) = shape.dims2()?;
+    let (mut nrows, mut ncols) = shape.dims2()?;
+    // ggml's IQ4_NL dequantizer fills whole 256-element super-blocks; the weight's zeroed padding covers the reads
+    let filled = if ty.block_size() < QK_K {
+        (nrows, ncols) = (1, elems.next_multiple_of(QK_K));
+        ncols
+    } else {
+        elems
+    };
     let stream = dev.cuda_stream();
     let stream_ptr = stream.cu_stream() as *mut std::ffi::c_void;
     let (weight_ptr, _weight_guard) = w.kernel_ptr(&stream)?;
     let weight_ptr = weight_ptr as *const std::ffi::c_void;
     macro_rules! run {
         ($t:ty) => {{
-            let mut out = unsafe { dev.alloc::<$t>(elems)? };
+            let mut out = unsafe { dev.alloc::<$t>(filled)? };
             {
                 let (out_ptr, _out_guard) = slice_ptr_mut_on_stream(&mut out, 0, &stream);
                 unsafe {
@@ -1143,5 +1175,9 @@ pub fn dequantize<W: KernelWeight + ?Sized>(w: &W, dtype: DType) -> Result<Tenso
         DType::F16 => run!(half::f16),
         _ => run!(f32),
     };
-    Ok(Tensor::from((Storage::Cuda(storage), shape)))
+    let out = Tensor::from((Storage::Cuda(storage), Shape::from(filled)));
+    if filled == elems {
+        return out.reshape(shape);
+    }
+    out.narrow(0, 0, elems)?.reshape(shape)
 }
