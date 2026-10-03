@@ -52,3 +52,133 @@ async fn iq4_xs_greedy_continuation_matches_llama_cpp() -> anyhow::Result<()> {
     assert_eq!(text, LLAMA_CPP_CONTINUATION, "{response}");
     Ok(())
 }
+
+// A directory of IQ GGUFs and llama.cpp's `llama-perplexity`: each file's perplexity must match llama.cpp's.
+const IQ_DIR_ENV: &str = "INFERENCE_TEST_IQ_GGUF_DIR";
+const LLAMA_PERPLEXITY_ENV: &str = "INFERENCE_TEST_LLAMA_PERPLEXITY";
+// Any text past one window works; both sides read the same file.
+const PERPLEXITY_TEXT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md");
+// llama-perplexity's `-c 512 --chunks 1`: one 512-token window scored on its second half
+const PERPLEXITY_WINDOW: usize = 512;
+// Our kernels match the dequantized weights; what drifts is rounding elsewhere, about 1.2% on IQ1_S.
+// One file per type, named `*-<TYPE>.gguf` as llama-quantize suggests
+const IQ_TYPES: &[&str] = &[
+    "IQ1_S", "IQ1_M", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ3_XXS", "IQ3_S",
+];
+const PERPLEXITY_TOLERANCE: f64 = 0.02;
+
+fn llama_cpp_perplexity(llama_perplexity: &str, file: &Path) -> anyhow::Result<f64> {
+    let output = std::process::Command::new(llama_perplexity)
+        .arg("-m")
+        .arg(file)
+        .args([
+            "-f",
+            PERPLEXITY_TEXT,
+            "-c",
+            &PERPLEXITY_WINDOW.to_string(),
+            "--chunks",
+            "1",
+            "-ngl",
+            "99",
+        ])
+        .output()?;
+    anyhow::ensure!(
+        output.status.success(),
+        "llama-perplexity failed on {}",
+        file.display()
+    );
+    let log = String::from_utf8_lossy(&output.stderr);
+    let value = log
+        .split("Final estimate: PPL = ")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .ok_or_else(|| anyhow::anyhow!("no perplexity in llama-perplexity's output"))?;
+    Ok(value.parse()?)
+}
+
+// The tokens llama-perplexity scores: those after the window's first half, each given everything before it.
+async fn perplexity(model: &Model, text: &str) -> anyhow::Result<f64> {
+    let request = serde_json::json!({ "text": text, "add_special_tokens": true });
+    let tokenized: serde_json::Value =
+        serde_json::from_str(&model.tokenize_json(request.to_string().as_bytes()).await?)?;
+    let tokens = tokenized["tokens"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("tokenize returned no tokens"))?;
+    // llama-perplexity refuses texts shorter than two windows
+    anyhow::ensure!(
+        tokens.len() >= 2 * PERPLEXITY_WINDOW,
+        "the text is shorter than two windows"
+    );
+    let request = serde_json::json!({ "prompt": tokens[..PERPLEXITY_WINDOW] });
+    let (scored, _) = model
+        .prompt_logits_json(request.to_string().as_bytes())
+        .await?;
+    let scored: serde_json::Value = serde_json::from_str(&scored)?;
+    let logprobs = scored["token_logprobs"]
+        .as_array()
+        .ok_or_else(|| anyhow::anyhow!("scoring returned no logprobs"))?
+        [PERPLEXITY_WINDOW / 2 + 1..]
+        .iter()
+        .map(|logprob| {
+            logprob
+                .as_f64()
+                .ok_or_else(|| anyhow::anyhow!("a scored token has no logprob"))
+        })
+        .collect::<anyhow::Result<Vec<_>>>()?;
+    Ok((-logprobs.iter().sum::<f64>() / logprobs.len() as f64).exp())
+}
+
+#[tokio::test]
+async fn every_iq_gguf_matches_llama_cpp_perplexity() -> anyhow::Result<()> {
+    let (Some(dir), Some(llama_perplexity)) = (
+        std::env::var(IQ_DIR_ENV)
+            .ok()
+            .filter(|d| Path::new(d).is_dir()),
+        std::env::var(LLAMA_PERPLEXITY_ENV)
+            .ok()
+            .filter(|f| Path::new(f).is_file()),
+    ) else {
+        eprintln!(
+            "SKIP: {IQ_DIR_ENV} and {LLAMA_PERPLEXITY_ENV} must name a GGUF directory and llama-perplexity"
+        );
+        return Ok(());
+    };
+    if !ON_CUDA {
+        eprintln!("SKIP: IQ kernels need a CUDA build");
+        return Ok(());
+    }
+    let text = std::fs::read_to_string(PERPLEXITY_TEXT)?;
+    let mut files = std::fs::read_dir(&dir)?
+        .map(|entry| entry.map(|e| e.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    files.retain(|path| path.extension().is_some_and(|ext| ext == "gguf"));
+    files.sort();
+    let missing: Vec<_> = IQ_TYPES
+        .iter()
+        .filter(|ty| {
+            !files.iter().any(|f| {
+                f.file_stem()
+                    .is_some_and(|s| s.to_string_lossy().ends_with(*ty))
+            })
+        })
+        .collect();
+    anyhow::ensure!(missing.is_empty(), "{dir} has no GGUF for {missing:?}");
+    let mut mismatches = Vec::new();
+    for file in &files {
+        let expected = llama_cpp_perplexity(&llama_perplexity, file)?;
+        let actual = perplexity(&build(file).await?, &text).await?;
+        let drift = (actual / expected - 1.0).abs();
+        eprintln!(
+            "{}: ours {actual:.4}, llama.cpp {expected:.4}",
+            file.display()
+        );
+        if drift > PERPLEXITY_TOLERANCE {
+            mismatches.push(format!(
+                "{}: ours {actual:.4}, llama.cpp {expected:.4}",
+                file.display()
+            ));
+        }
+    }
+    anyhow::ensure!(mismatches.is_empty(), "{}", mismatches.join("\n"));
+    Ok(())
+}

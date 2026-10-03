@@ -502,7 +502,11 @@ struct QuantPreferences {
 }
 
 // IQ formats our GGUF kernels read; requested by name only, never as a fallback for a bit width
-const SUPPORTED_IQ_QUANTS: &[&str] = &["IQ4_NL", "IQ4_XS"];
+// IQ2_M, IQ3_XS and IQ3_M are llama-quantize mixes of the IQ types listed beside them
+const SUPPORTED_IQ_QUANTS: &[&str] = &[
+    "IQ1_S", "IQ1_M", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ2_M", "IQ3_XXS", "IQ3_XS", "IQ3_S", "IQ3_M",
+    "IQ4_NL", "IQ4_XS",
+];
 
 fn quant_preferences(requested: &str) -> Result<QuantPreferences> {
     let lowered = requested.trim().to_ascii_lowercase();
@@ -811,7 +815,11 @@ mod tests {
             resolve_gguf_quant(&listing, "iq4_nl").unwrap().label,
             "IQ4_NL"
         );
-        let error = resolve_gguf_quant(&listing, "iq3_xxs").unwrap_err();
+        assert_eq!(
+            resolve_gguf_quant(&listing, "iq3_xxs").unwrap().label,
+            "IQ3_XXS"
+        );
+        let error = resolve_gguf_quant(&listing, "iq2_ks").unwrap_err();
         assert!(error.to_string().contains("is not supported"), "{error}");
         assert_eq!(
             resolve_gguf_quant(&listing, "ud-q4_k_xl").unwrap().label,

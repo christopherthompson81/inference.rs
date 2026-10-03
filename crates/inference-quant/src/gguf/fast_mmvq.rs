@@ -50,6 +50,13 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
             | GgufType::Q6K
             | GgufType::Iq4Nl
             | GgufType::Iq4Xs
+            | GgufType::Iq2Xxs
+            | GgufType::Iq2Xs
+            | GgufType::Iq2S
+            | GgufType::Iq3Xxs
+            | GgufType::Iq3S
+            | GgufType::Iq1S
+            | GgufType::Iq1M
     )
 }
 
@@ -174,6 +181,13 @@ fn plain_launcher_bf16(dtype: GgufType) -> Option<PlainLauncher> {
         GgufType::Q6K => ffi::launch_mmvq_gguf_q6_k_bf16_plain,
         GgufType::Iq4Nl => ffi::launch_mmvq_gguf_iq4_nl_bf16_plain,
         GgufType::Iq4Xs => ffi::launch_mmvq_gguf_iq4_xs_bf16_plain,
+        GgufType::Iq2Xxs => ffi::launch_mmvq_gguf_iq2_xxs_bf16_plain,
+        GgufType::Iq2Xs => ffi::launch_mmvq_gguf_iq2_xs_bf16_plain,
+        GgufType::Iq2S => ffi::launch_mmvq_gguf_iq2_s_bf16_plain,
+        GgufType::Iq3Xxs => ffi::launch_mmvq_gguf_iq3_xxs_bf16_plain,
+        GgufType::Iq3S => ffi::launch_mmvq_gguf_iq3_s_bf16_plain,
+        GgufType::Iq1S => ffi::launch_mmvq_gguf_iq1_s_bf16_plain,
+        GgufType::Iq1M => ffi::launch_mmvq_gguf_iq1_m_bf16_plain,
         _ => return None,
     };
     Some(f)
@@ -193,6 +207,13 @@ fn plain_launcher_f16(dtype: GgufType) -> Option<PlainLauncher> {
         GgufType::Q6K => ffi::launch_mmvq_gguf_q6_k_f16_plain,
         GgufType::Iq4Nl => ffi::launch_mmvq_gguf_iq4_nl_f16_plain,
         GgufType::Iq4Xs => ffi::launch_mmvq_gguf_iq4_xs_f16_plain,
+        GgufType::Iq2Xxs => ffi::launch_mmvq_gguf_iq2_xxs_f16_plain,
+        GgufType::Iq2Xs => ffi::launch_mmvq_gguf_iq2_xs_f16_plain,
+        GgufType::Iq2S => ffi::launch_mmvq_gguf_iq2_s_f16_plain,
+        GgufType::Iq3Xxs => ffi::launch_mmvq_gguf_iq3_xxs_f16_plain,
+        GgufType::Iq3S => ffi::launch_mmvq_gguf_iq3_s_f16_plain,
+        GgufType::Iq1S => ffi::launch_mmvq_gguf_iq1_s_f16_plain,
+        GgufType::Iq1M => ffi::launch_mmvq_gguf_iq1_m_f16_plain,
         _ => return None,
     };
     Some(f)
@@ -212,6 +233,13 @@ fn plain_launcher_f32(dtype: GgufType) -> Option<PlainLauncher> {
         GgufType::Q6K => ffi::launch_mmvq_gguf_q6_k_f32_plain,
         GgufType::Iq4Nl => ffi::launch_mmvq_gguf_iq4_nl_f32_plain,
         GgufType::Iq4Xs => ffi::launch_mmvq_gguf_iq4_xs_f32_plain,
+        GgufType::Iq2Xxs => ffi::launch_mmvq_gguf_iq2_xxs_f32_plain,
+        GgufType::Iq2Xs => ffi::launch_mmvq_gguf_iq2_xs_f32_plain,
+        GgufType::Iq2S => ffi::launch_mmvq_gguf_iq2_s_f32_plain,
+        GgufType::Iq3Xxs => ffi::launch_mmvq_gguf_iq3_xxs_f32_plain,
+        GgufType::Iq3S => ffi::launch_mmvq_gguf_iq3_s_f32_plain,
+        GgufType::Iq1S => ffi::launch_mmvq_gguf_iq1_s_f32_plain,
+        GgufType::Iq1M => ffi::launch_mmvq_gguf_iq1_m_f32_plain,
         _ => return None,
     };
     Some(f)
@@ -948,4 +976,61 @@ pub fn fused_qkv(
         }
         _ => unreachable!(),
     }
+}
+
+type DequantizeLauncher = unsafe extern "C" fn(
+    *const std::ffi::c_void,
+    *mut std::ffi::c_void,
+    i64,
+    *mut std::ffi::c_void,
+);
+
+fn dequantize_launcher(ty: GgufType, dtype: DType) -> Option<DequantizeLauncher> {
+    match (ty, dtype) {
+        (GgufType::Iq1M, DType::BF16) => Some(ffi::launch_dequantize_iq1_m_bf16),
+        (GgufType::Iq1M, DType::F16) => Some(ffi::launch_dequantize_iq1_m_f16),
+        (GgufType::Iq1M, DType::F32) => Some(ffi::launch_dequantize_iq1_m_f32),
+        _ => None,
+    }
+}
+
+/// The weight dequantized on its GPU, as ggml does for prefill on types without an mmq tile.
+pub fn dequantize<W: KernelWeight + ?Sized>(w: &W, dtype: DType) -> Result<Tensor> {
+    let ty = w.gguf_type();
+    let Some(launcher) = dequantize_launcher(ty, dtype) else {
+        candle_core::bail!("no CUDA dequantizer for {ty:?} to {dtype:?}");
+    };
+    let Device::Cuda(dev) = w.kernel_device() else {
+        candle_core::bail!("fast_mmvq: weight must live on CUDA");
+    };
+    let shape = w.kernel_shape().clone();
+    let elems = shape.elem_count();
+    let nblocks = (elems / ty.block_size()) as i64;
+    let stream = dev.cuda_stream();
+    let stream_ptr = stream.cu_stream() as *mut std::ffi::c_void;
+    let (weight_ptr, _weight_guard) = w.kernel_ptr(&stream)?;
+    let weight_ptr = weight_ptr as *const std::ffi::c_void;
+    macro_rules! run {
+        ($t:ty) => {{
+            let mut out = unsafe { dev.alloc::<$t>(elems)? };
+            {
+                let (out_ptr, _out_guard) = slice_ptr_mut_on_stream(&mut out, 0, &stream);
+                unsafe {
+                    launcher(
+                        weight_ptr,
+                        out_ptr as *mut std::ffi::c_void,
+                        nblocks,
+                        stream_ptr,
+                    )
+                };
+            }
+            CudaStorage::wrap_cuda_slice(out, dev.clone())
+        }};
+    }
+    let storage = match dtype {
+        DType::BF16 => run!(half::bf16),
+        DType::F16 => run!(half::f16),
+        _ => run!(f32),
+    };
+    Ok(Tensor::from((Storage::Cuda(storage), shape)))
 }

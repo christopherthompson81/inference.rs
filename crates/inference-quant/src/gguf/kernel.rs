@@ -24,6 +24,13 @@ pub enum GgufType {
     Q8K,
     Iq4Nl,
     Iq4Xs,
+    Iq2Xxs,
+    Iq2Xs,
+    Iq2S,
+    Iq3Xxs,
+    Iq3S,
+    Iq1S,
+    Iq1M,
 }
 
 impl From<GgmlDType> for GgufType {
@@ -50,7 +57,17 @@ impl From<GgmlDType> for GgufType {
 
 impl GgufType {
     /// The types only our own kernels read; Candle cannot hold them in a `QTensor`.
-    pub const RAW_BLOCKS: [Self; 2] = [Self::Iq4Nl, Self::Iq4Xs];
+    pub const RAW_BLOCKS: [Self; 9] = [
+        Self::Iq4Nl,
+        Self::Iq4Xs,
+        Self::Iq2Xxs,
+        Self::Iq2Xs,
+        Self::Iq2S,
+        Self::Iq3Xxs,
+        Self::Iq3S,
+        Self::Iq1S,
+        Self::Iq1M,
+    ];
 
     /// The ggml type id, as stored in a GGUF tensor header.
     pub fn id(self) -> u32 {
@@ -69,8 +86,15 @@ impl GgufType {
             Self::Q5K => 13,
             Self::Q6K => 14,
             Self::Q8K => 15,
+            Self::Iq2Xxs => 16,
+            Self::Iq2Xs => 17,
+            Self::Iq3Xxs => 18,
+            Self::Iq1S => 19,
             Self::Iq4Nl => 20,
+            Self::Iq3S => 21,
+            Self::Iq2S => 22,
             Self::Iq4Xs => 23,
+            Self::Iq1M => 29,
             Self::BF16 => 30,
         }
     }

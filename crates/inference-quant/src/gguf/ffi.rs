@@ -1256,8 +1256,56 @@ unsafe extern "C" {
         launch_mmvq_gguf_iq4_xs_f16_plain,
         launch_mmvq_gguf_iq4_nl_f32_plain,
         launch_mmvq_gguf_iq4_xs_f32_plain,
+        launch_mmvq_gguf_iq2_xxs_bf16_plain,
+        launch_mmvq_gguf_iq2_xs_bf16_plain,
+        launch_mmvq_gguf_iq2_s_bf16_plain,
+        launch_mmvq_gguf_iq3_xxs_bf16_plain,
+        launch_mmvq_gguf_iq3_s_bf16_plain,
+        launch_mmvq_gguf_iq1_s_bf16_plain,
+        launch_mmvq_gguf_iq1_m_bf16_plain,
+        launch_mmvq_gguf_iq2_xxs_f16_plain,
+        launch_mmvq_gguf_iq2_xs_f16_plain,
+        launch_mmvq_gguf_iq2_s_f16_plain,
+        launch_mmvq_gguf_iq3_xxs_f16_plain,
+        launch_mmvq_gguf_iq3_s_f16_plain,
+        launch_mmvq_gguf_iq1_s_f16_plain,
+        launch_mmvq_gguf_iq1_m_f16_plain,
+        launch_mmvq_gguf_iq2_xxs_f32_plain,
+        launch_mmvq_gguf_iq2_xs_f32_plain,
+        launch_mmvq_gguf_iq2_s_f32_plain,
+        launch_mmvq_gguf_iq3_xxs_f32_plain,
+        launch_mmvq_gguf_iq3_s_f32_plain,
+        launch_mmvq_gguf_iq1_s_f32_plain,
+        launch_mmvq_gguf_iq1_m_f32_plain,
     );
-    declare_mmq!(launch_mmq_gguf_iq4_nl, launch_mmq_gguf_iq4_xs);
+    pub fn launch_dequantize_iq1_m_bf16(
+        vx: *const c_void,
+        dst: *mut c_void,
+        nblocks: i64,
+        stream: *mut c_void,
+    );
+    pub fn launch_dequantize_iq1_m_f16(
+        vx: *const c_void,
+        dst: *mut c_void,
+        nblocks: i64,
+        stream: *mut c_void,
+    );
+    pub fn launch_dequantize_iq1_m_f32(
+        vx: *const c_void,
+        dst: *mut c_void,
+        nblocks: i64,
+        stream: *mut c_void,
+    );
+    declare_mmq!(
+        launch_mmq_gguf_iq4_nl,
+        launch_mmq_gguf_iq4_xs,
+        launch_mmq_gguf_iq2_xxs,
+        launch_mmq_gguf_iq2_xs,
+        launch_mmq_gguf_iq2_s,
+        launch_mmq_gguf_iq3_xxs,
+        launch_mmq_gguf_iq3_s,
+        launch_mmq_gguf_iq1_s,
+    );
     declare_mmvq_fused_glu!(launch_mmvq_gguf_q4_0_bf16_fused_glu);
     declare_mmvq_fused_glu!(launch_mmvq_gguf_q4_1_bf16_fused_glu);
     declare_mmvq_fused_glu!(launch_mmvq_gguf_q5_0_bf16_fused_glu);

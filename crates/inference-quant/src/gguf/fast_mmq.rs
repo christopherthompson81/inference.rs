@@ -67,6 +67,12 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
             | GgufType::Q6K
             | GgufType::Iq4Nl
             | GgufType::Iq4Xs
+            | GgufType::Iq2Xxs
+            | GgufType::Iq2Xs
+            | GgufType::Iq2S
+            | GgufType::Iq3Xxs
+            | GgufType::Iq3S
+            | GgufType::Iq1S
     )
 }
 
@@ -84,7 +90,13 @@ fn qk_for(dtype: GgufType) -> usize {
         | GgufType::Q4K
         | GgufType::Q5K
         | GgufType::Q6K
-        | GgufType::Iq4Xs => 256,
+        | GgufType::Iq4Xs
+        | GgufType::Iq2Xxs
+        | GgufType::Iq2Xs
+        | GgufType::Iq2S
+        | GgufType::Iq3Xxs
+        | GgufType::Iq3S
+        | GgufType::Iq1S => 256,
         _ => unreachable!(),
     }
 }
@@ -106,7 +118,15 @@ fn ds_layout_for(dtype: GgufType) -> DsLayout {
         GgufType::Q2K => DsLayout::D2S6,
         GgufType::Q3K => DsLayout::D4,
         GgufType::Q4K | GgufType::Q5K => DsLayout::DS4,
-        GgufType::Q6K | GgufType::Iq4Nl | GgufType::Iq4Xs => DsLayout::D4,
+        GgufType::Q6K
+        | GgufType::Iq4Nl
+        | GgufType::Iq4Xs
+        | GgufType::Iq2Xxs
+        | GgufType::Iq2Xs
+        | GgufType::Iq2S
+        | GgufType::Iq3Xxs
+        | GgufType::Iq3S => DsLayout::D4,
+        GgufType::Iq1S => DsLayout::DS4,
         _ => unreachable!(),
     }
 }
@@ -231,6 +251,12 @@ fn mmq_launcher(dtype: GgufType) -> Option<MmqLauncher> {
         GgufType::Q6K => ffi::launch_mmq_gguf_q6_k,
         GgufType::Iq4Nl => ffi::launch_mmq_gguf_iq4_nl,
         GgufType::Iq4Xs => ffi::launch_mmq_gguf_iq4_xs,
+        GgufType::Iq2Xxs => ffi::launch_mmq_gguf_iq2_xxs,
+        GgufType::Iq2Xs => ffi::launch_mmq_gguf_iq2_xs,
+        GgufType::Iq2S => ffi::launch_mmq_gguf_iq2_s,
+        GgufType::Iq3Xxs => ffi::launch_mmq_gguf_iq3_xxs,
+        GgufType::Iq3S => ffi::launch_mmq_gguf_iq3_s,
+        GgufType::Iq1S => ffi::launch_mmq_gguf_iq1_s,
         _ => return None,
     };
     Some(f)
