@@ -77,6 +77,17 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
             | GgufType::Iq2Kt
             | GgufType::Iq3Kt
             | GgufType::Iq4Kt
+            | GgufType::Iq2K
+            | GgufType::Iq3K
+            | GgufType::Iq4K
+            | GgufType::Iq5K
+            | GgufType::Iq6K
+            | GgufType::Iq2Ks
+            | GgufType::Iq3Ks
+            | GgufType::Iq4Ks
+            | GgufType::Iq4Kss
+            | GgufType::Iq5Ks
+            | GgufType::Iq2Kl
     )
 }
 
@@ -85,9 +96,9 @@ pub fn supports_shape(dtype: GgufType, cols: usize) -> bool {
     supports(dtype) && (!dtype.is_trellis() || cols.is_multiple_of(256))
 }
 
-// The row stride mmq takes: blocks for ggml's types, bytes for ik's trellis types (whose rows start with a scale)
-fn row_stride(dtype: GgufType, k: usize) -> i64 {
-    if dtype.is_trellis() {
+// The row stride mmq takes: blocks for ggml's types, bytes for ik's (some of whose rows start with a scale)
+fn mmq_row_stride(dtype: GgufType, k: usize) -> i64 {
+    if dtype.is_trellis() || dtype.is_iqk() {
         dtype.row_bytes(k).expect("validated at construction") as i64
     } else {
         (k / qk_for(dtype)) as i64
@@ -118,7 +129,18 @@ fn qk_for(dtype: GgufType) -> usize {
         | GgufType::Iq1Kt
         | GgufType::Iq2Kt
         | GgufType::Iq3Kt
-        | GgufType::Iq4Kt => 256,
+        | GgufType::Iq4Kt
+        | GgufType::Iq2K
+        | GgufType::Iq3K
+        | GgufType::Iq4K
+        | GgufType::Iq5K
+        | GgufType::Iq6K
+        | GgufType::Iq2Ks
+        | GgufType::Iq3Ks
+        | GgufType::Iq4Ks
+        | GgufType::Iq4Kss
+        | GgufType::Iq5Ks
+        | GgufType::Iq2Kl => 256,
         _ => unreachable!(),
     }
 }
@@ -153,6 +175,17 @@ fn ds_layout_for(dtype: GgufType) -> DsLayout {
         GgufType::Iq2Kt => DsLayout::D4,
         GgufType::Iq3Kt => DsLayout::D4,
         GgufType::Iq4Kt => DsLayout::D4,
+        GgufType::Iq2K => DsLayout::D4,
+        GgufType::Iq3K => DsLayout::D4,
+        GgufType::Iq4K => DsLayout::D4,
+        GgufType::Iq5K => DsLayout::D4,
+        GgufType::Iq6K => DsLayout::D4,
+        GgufType::Iq2Ks => DsLayout::D4,
+        GgufType::Iq3Ks => DsLayout::D4,
+        GgufType::Iq4Ks => DsLayout::D4,
+        GgufType::Iq4Kss => DsLayout::D4,
+        GgufType::Iq5Ks => DsLayout::D4,
+        GgufType::Iq2Kl => DsLayout::D4,
         _ => unreachable!(),
     }
 }
@@ -287,6 +320,17 @@ fn mmq_launcher(dtype: GgufType) -> Option<MmqLauncher> {
         GgufType::Iq2Kt => ffi::launch_mmq_gguf_iq2_kt,
         GgufType::Iq3Kt => ffi::launch_mmq_gguf_iq3_kt,
         GgufType::Iq4Kt => ffi::launch_mmq_gguf_iq4_kt,
+        GgufType::Iq2K => ffi::launch_mmq_gguf_iq2_k,
+        GgufType::Iq3K => ffi::launch_mmq_gguf_iq3_k,
+        GgufType::Iq4K => ffi::launch_mmq_gguf_iq4_k,
+        GgufType::Iq5K => ffi::launch_mmq_gguf_iq5_k,
+        GgufType::Iq6K => ffi::launch_mmq_gguf_iq6_k,
+        GgufType::Iq2Ks => ffi::launch_mmq_gguf_iq2_ks,
+        GgufType::Iq3Ks => ffi::launch_mmq_gguf_iq3_ks,
+        GgufType::Iq4Ks => ffi::launch_mmq_gguf_iq4_ks,
+        GgufType::Iq4Kss => ffi::launch_mmq_gguf_iq4_kss,
+        GgufType::Iq5Ks => ffi::launch_mmq_gguf_iq5_ks,
+        GgufType::Iq2Kl => ffi::launch_mmq_gguf_iq2_kl,
         _ => return None,
     };
     Some(f)
@@ -693,7 +737,7 @@ fn shared_lhs<W: KernelWeight + ?Sized>(weights: &[&W], xs: &Tensor) -> Result<V
         k,
         k_padded,
         batch_size,
-        stride_row_x: row_stride(dtype, k),
+        stride_row_x: mmq_row_stride(dtype, k),
         type_x,
     };
     match input_ty {
@@ -969,7 +1013,7 @@ pub fn grouped(
     let out = unsafe { dev.alloc::<f32>(total_assignments * nrows)? };
 
     let weight_ptr = weight.device_ptr()? as *const std::ffi::c_void;
-    let stride_row_x = (k / qk) as i64;
+    let stride_row_x = mmq_row_stride(dtype, k);
     let stride_col_dst = nrows as i64;
     let di = get_device_info(dev);
 
@@ -1177,7 +1221,7 @@ fn grouped_from_glu(run: GroupedGluRun<'_>) -> Result<Tensor> {
     let out = unsafe { dev.alloc::<f32>(total_assignments * nrows)? };
 
     let weight_ptr = weight.device_ptr()? as *const std::ffi::c_void;
-    let stride_row_x = (k / qk) as i64;
+    let stride_row_x = mmq_row_stride(dtype, k);
     let stride_col_dst = nrows as i64;
     let di = get_device_info(dev);
 
@@ -1453,7 +1497,7 @@ pub fn grouped_pair_packed(
 
     let gate_ptr = gate.device_ptr()? as *const std::ffi::c_void;
     let up_ptr = up.device_ptr()? as *const std::ffi::c_void;
-    let stride_row_x = (k / qk) as i64;
+    let stride_row_x = mmq_row_stride(dtype, k);
     let stride_col_dst = (2 * nrows) as i64;
     let di = get_device_info(dev);
 

@@ -360,7 +360,7 @@ impl GgufRawMatMul {
             _ if super::fast_mmq::supports_shape(self.w.ty, self.w.shape.dims2()?.1) => {
                 super::fast_mmq::plain(&self.w, a)?
             }
-            // IQ1_M, IQK and trellis tail rows have no mmq tile; like ggml, prefill dequantizes to F16 for a dense matmul
+            // IQ1_M and trellis tail rows have no mmq tile; like ggml, prefill dequantizes to F16 for a dense matmul
             _ => {
                 let compute = if a.dtype() == DType::F32 {
                     DType::F32
