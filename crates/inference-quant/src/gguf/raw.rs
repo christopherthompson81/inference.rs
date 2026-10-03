@@ -581,24 +581,30 @@ mod tests {
         Ok(())
     }
 
-    // Tied embeddings in ik's mixes are IQ*_K; on CUDA, types without a GPU dequantizer go through the host
+    // Tied embeddings in ik's mixes are IQ*_K; one IQ4_NL row is less than the 256 elements its GPU dequantizer fills
     #[test]
     fn embedding_rows_match_the_dequantized_weight() -> Result<()> {
         const ROWS: usize = 40;
         const COLS: usize = 512;
+        const NL_COLS: usize = 288;
         let ids = Tensor::new(&[[3u32, 0, 39], [17, 17, 8]], &Device::Cpu)?;
         let devices: Vec<Device> = std::iter::once(Device::Cpu)
             .chain(Device::new_cuda(0).ok().filter(|_| cfg!(feature = "cuda")))
             .collect();
-        for ty in GgufType::RAW_BLOCKS {
-            let bytes = random_rows(ty, ROWS, COLS, 5);
-            let weight = RawGgufTensor::new(ty, &[ROWS, COLS], bytes.clone(), &Device::Cpu)?;
+        // 6 x 288 IQ4_NL elements leave the last of its 256-element super-blocks partly filled
+        let cases = GgufType::RAW_BLOCKS
+            .map(|ty| (ty, COLS))
+            .into_iter()
+            .chain([(GgufType::Iq4Nl, NL_COLS)]);
+        for (ty, cols) in cases {
+            let bytes = random_rows(ty, ROWS, cols, 5);
+            let weight = RawGgufTensor::new(ty, &[ROWS, cols], bytes.clone(), &Device::Cpu)?;
             let expected = weight
                 .dequantize(&Device::Cpu)?
                 .embedding(&ids.flatten_all()?)?
-                .reshape((2, 3, COLS))?;
+                .reshape((2, 3, cols))?;
             for device in &devices {
-                let weight = RawGgufTensor::new(ty, &[ROWS, COLS], bytes.clone(), device)?;
+                let weight = RawGgufTensor::new(ty, &[ROWS, cols], bytes.clone(), device)?;
                 let actual = weight
                     .embedding(&ids.to_device(device)?)?
                     .to_device(&Device::Cpu)?;
@@ -608,7 +614,7 @@ mod tests {
                     "{ty:?} on {device:?}: embedding differs by {diff}"
                 );
                 let empty = weight.embedding(&Tensor::zeros((0,), DType::U32, device)?)?;
-                assert_eq!(empty.dims(), [0, COLS]);
+                assert_eq!(empty.dims(), [0, cols]);
             }
             assert!(
                 weight
@@ -617,6 +623,18 @@ mod tests {
             );
         }
         Ok(())
+    }
+
+    // A host dequant in an embedding lookup breaks the decode CUDA graph, so every raw type needs a GPU dequantizer
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn every_raw_type_dequantizes_on_the_gpu() {
+        for ty in GgufType::RAW_BLOCKS {
+            assert!(
+                super::super::fast_mmvq::can_dequantize(ty, DType::F32),
+                "{ty:?}"
+            );
+        }
     }
 
     #[cfg(feature = "cuda")]
@@ -628,10 +646,8 @@ mod tests {
             eprintln!("SKIP: no CUDA device");
             return Ok(());
         };
-        let cases = [GgufType::Iq1M, GgufType::Iq1Kt, GgufType::Iq2Kt]
+        let cases = GgufType::RAW_BLOCKS
             .into_iter()
-            .chain(GgufType::RAW_BLOCKS.into_iter().filter(|ty| ty.is_iqk()))
-            .chain(KT_TAIL_TYPES)
             .map(|ty| (ty, COLS))
             .chain(KT_TAIL_TYPES.map(|ty| (ty, KT_TAIL_COLS)));
         for (ty, cols) in cases {

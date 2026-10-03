@@ -2128,6 +2128,189 @@ extern "C" void launch_mmvq_gguf_quantize_q8_1_f32(const void *x, void *vy,
                                                      kx_padded);
 }
 
+// ggml-cuda dequantize.cuh `dequantize_iq*`, for embedding rows of these types gathered on the GPU
+template <typename dst_t> static __device__ __forceinline__ dst_t ggml_cuda_cast(float x) { return dst_t(x); }
+
+template<typename dst_t>
+static __device__ __forceinline__ void dequantize_iq2_xxs(const void * vx, const int64_t ibs, dst_t * yy, const int tid) {
+
+    const block_iq2_xxs * x = (const block_iq2_xxs  *) vx;
+
+    const int64_t il = tid/8; // 0...3
+    const int64_t ib = tid%8; // 0...7
+    dst_t * y = yy + 32*ib + 8*il;
+    const uint16_t * q2 = x[ibs].qs + 4*ib;
+    const uint8_t  * aux8 = (const uint8_t *)q2;
+    const uint8_t  * grid = (const uint8_t *)(iq2xxs_grid + aux8[il]);
+    const uint32_t aux32 = q2[2] | (q2[3] << 16);
+    const float d = (float)x[ibs].d * (0.5f + (aux32 >> 28)) * 0.25f;
+    const uint8_t signs = ksigns_iq2xs[(aux32 >> 7*il) & 127];
+    for (int j = 0; j < 8; ++j) {
+        y[j] = ggml_cuda_cast<dst_t>(d * grid[j] * (signs & kmask_iq2xs[j] ? -1.f : 1.f));
+    }
+}
+
+template<typename dst_t>
+static __device__ __forceinline__ void dequantize_iq2_xs(const void * vx, const int64_t ibs, dst_t * yy, const int tid) {
+
+    const block_iq2_xs * x = (const block_iq2_xs *) vx;
+
+    const int64_t il = tid/8; // 0...3
+    const int64_t ib = tid%8; // 0...7
+    dst_t * y = yy + 32*ib + 8*il;
+    const uint16_t * q2 = x[ibs].qs + 4*ib;
+    const uint8_t  * grid = (const uint8_t *)(iq2xs_grid + (q2[il] & 511));
+    const float d = (float)x[ibs].d * (0.5f + ((x[ibs].scales[ib] >> 4*(il/2)) & 0xf)) * 0.25f;
+    const uint8_t signs = ksigns_iq2xs[q2[il] >> 9];
+    for (int j = 0; j < 8; ++j) {
+        y[j] = ggml_cuda_cast<dst_t>(d * grid[j] * (signs & kmask_iq2xs[j] ? -1.f : 1.f));
+    }
+}
+
+template<typename dst_t>
+static __device__ __forceinline__ void dequantize_iq2_s(const void * vx, const int64_t ibs, dst_t * yy, const int tid) {
+
+    const block_iq2_s * x = (const block_iq2_s *) vx;
+
+    const int64_t il = tid/8; // 0...3
+    const int64_t ib = tid%8; // 0...7
+    dst_t * y = yy + 32*ib + 8*il;
+    const uint8_t * grid = (const uint8_t *)(iq2s_grid + (x[ibs].qs[4*ib+il] | ((x[ibs].qh[ib] << (8-2*il)) & 0x300)));
+    const float d = (float)x[ibs].d * (0.5f + ((x[ibs].scales[ib] >> 4*(il/2)) & 0xf)) * 0.25f;
+    const uint8_t signs = x[ibs].qs[QK_K/8+4*ib+il];
+    for (int j = 0; j < 8; ++j) {
+        y[j] = ggml_cuda_cast<dst_t>(d * grid[j] * (signs & kmask_iq2xs[j] ? -1.f : 1.f));
+    }
+}
+
+template<typename dst_t>
+static __device__ __forceinline__ void dequantize_iq3_xxs(const void * vx, const int64_t ibs, dst_t * yy, const int tid) {
+
+    const block_iq3_xxs * x = (const block_iq3_xxs  *) vx;
+
+    const int64_t il = tid/8; // 0...3
+    const int64_t ib = tid%8; // 0...7
+    dst_t * y = yy + 32*ib + 8*il;
+    const uint8_t  * q3 = x[ibs].qs + 8*ib;
+    const uint16_t * gas = (const uint16_t *)(x[ibs].qs + QK_K/4) + 2*ib;
+    const uint8_t  * grid1 = (const uint8_t *)(iq3xxs_grid + q3[2*il+0]);
+    const uint8_t  * grid2 = (const uint8_t *)(iq3xxs_grid + q3[2*il+1]);
+    const uint32_t aux32 = gas[0] | (gas[1] << 16);
+    const float d = (float)x[ibs].d * (0.5f + (aux32 >> 28)) * 0.5f;
+    const uint8_t signs = ksigns_iq2xs[(aux32 >> 7*il) & 127];
+    for (int j = 0; j < 4; ++j) {
+        y[j+0] = ggml_cuda_cast<dst_t>(d * grid1[j] * (signs & kmask_iq2xs[j+0] ? -1.f : 1.f));
+        y[j+4] = ggml_cuda_cast<dst_t>(d * grid2[j] * (signs & kmask_iq2xs[j+4] ? -1.f : 1.f));
+    }
+}
+
+template<typename dst_t>
+static __device__ __forceinline__ void dequantize_iq3_s(const void * vx, const int64_t ibs, dst_t * yy, const int tid) {
+
+    const block_iq3_s * x = (const block_iq3_s *) vx;
+
+    const int64_t il = tid/8; // 0...3
+    const int64_t ib = tid%8; // 0...7
+    dst_t * y = yy + 32*ib + 8*il;
+    const uint8_t * qs = x[ibs].qs + 8*ib;
+    const uint8_t * grid1 = (const uint8_t *)(iq3s_grid + (qs[2*il+0] | ((x[ibs].qh[ib] << (8-2*il)) & 256)));
+    const uint8_t * grid2 = (const uint8_t *)(iq3s_grid + (qs[2*il+1] | ((x[ibs].qh[ib] << (7-2*il)) & 256)));
+    const float d = (float)x[ibs].d * (1 + 2*((x[ibs].scales[ib/2] >> 4*(ib%2)) & 0xf));
+    const uint8_t signs = x[ibs].signs[4*ib + il];
+    for (int j = 0; j < 4; ++j) {
+        y[j+0] = ggml_cuda_cast<dst_t>(d * grid1[j] * (signs & kmask_iq2xs[j+0] ? -1.f : 1.f));
+        y[j+4] = ggml_cuda_cast<dst_t>(d * grid2[j] * (signs & kmask_iq2xs[j+4] ? -1.f : 1.f));
+    }
+}
+
+template<typename dst_t>
+static __device__ __forceinline__ void dequantize_iq1_s(const void * vx, const int64_t ibs, dst_t * yy, const int tid) {
+
+    const block_iq1_s * x = (const block_iq1_s  *) vx;
+
+    const int64_t il = tid/8; // 0...3
+    const int64_t ib = tid%8; // 0...7
+    dst_t * y = yy + 32*ib + 8*il;
+    const float delta = x[ibs].qh[ib] & 0x8000 ? -1 - IQ1S_DELTA : -1 + IQ1S_DELTA;
+    const float d = (float)x[ibs].d * (2*((x[ibs].qh[ib] >> 12) & 7) + 1);
+    uint32_t grid32[2]; const int8_t * q = (const int8_t *)grid32;
+    grid32[0] = iq1s_grid_gpu[x[ibs].qs[4*ib+il] | (((x[ibs].qh[ib] >> 3*il) & 7) << 8)];
+    grid32[1] = (grid32[0] >> 4) & 0x0f0f0f0f;
+    grid32[0] &= 0x0f0f0f0f;
+    for (int j = 0; j < 8; ++j) {
+        y[j] = ggml_cuda_cast<dst_t>(d * (q[j] + delta));
+    }
+}
+
+template<typename dst_t>
+static __device__ __forceinline__ void dequantize_iq4_nl(const void * vx, const int64_t ibs, dst_t * yy, const int tid) {
+
+    const block_iq4_nl * x = (const block_iq4_nl *) vx + ibs*(QK_K/QK4_NL);
+
+    const int64_t il = tid/8; // 0...3
+    const int64_t ib = tid%8; // 0...7
+    dst_t * y = yy + 32*ib + 4*il;
+    const uint8_t  * q4 = x[ib].qs + 4*il;
+    const float d = (float)x[ib].d;
+    for (int j = 0; j < 4; ++j) {
+        y[j+ 0] = ggml_cuda_cast<dst_t>(d * kvalues_iq4nl[q4[j] & 0xf]);
+        y[j+16] = ggml_cuda_cast<dst_t>(d * kvalues_iq4nl[q4[j] >>  4]);
+    }
+}
+
+template<typename dst_t>
+static __device__ __forceinline__ void dequantize_iq4_xs(const void * vx, const int64_t ibs, dst_t * yy, const int tid) {
+    const block_iq4_xs * x = (const block_iq4_xs *)vx;
+
+    const int64_t il = tid/8; // 0...3
+    const int64_t ib = tid%8; // 0...7
+    dst_t * y = yy + 32*ib + 4*il;
+    const uint8_t  * q4 = x[ibs].qs + 16*ib + 4*il;
+    const float d = (float)x[ibs].d * ((((x[ibs].scales_l[ib/2] >> 4*(ib%2)) & 0xf) | (((x[ibs].scales_h >> 2*ib) & 3) << 4)) - 32);
+    for (int j = 0; j < 4; ++j) {
+        y[j+ 0] = ggml_cuda_cast<dst_t>(d * kvalues_iq4nl[q4[j] & 0xf]);
+        y[j+16] = ggml_cuda_cast<dst_t>(d * kvalues_iq4nl[q4[j] >>  4]);
+    }
+}
+
+template <typename dst_t, void (*dequantize)(const void *, const int64_t, dst_t *, const int)>
+static __global__ void dequantize_superblocks(const void *__restrict__ vx, dst_t *__restrict__ yy) {
+  dequantize(vx, blockIdx.x, yy + blockIdx.x * QK_K, threadIdx.x);
+}
+
+#define DEQUANTIZE_IQ_LAUNCHER(tag, dst_tag, dst_c_type)                                                         \
+  extern "C" void launch_dequantize_##tag##_##dst_tag(const void *vx, void *dst, int64_t nrows, int64_t ncols,  \
+                                                      void *stream) {                                          \
+    dequantize_superblocks<dst_c_type, dequantize_##tag<dst_c_type>>                                           \
+        <<<(unsigned int)(nrows * ncols / QK_K), WARP_SIZE, 0, static_cast<cudaStream_t>(stream)>>>(          \
+            vx, (dst_c_type *)dst);                                                                           \
+  }
+
+DEQUANTIZE_IQ_LAUNCHER(iq2_xxs, bf16, __nv_bfloat16)
+DEQUANTIZE_IQ_LAUNCHER(iq2_xxs, f16, half)
+DEQUANTIZE_IQ_LAUNCHER(iq2_xxs, f32, float)
+DEQUANTIZE_IQ_LAUNCHER(iq2_xs, bf16, __nv_bfloat16)
+DEQUANTIZE_IQ_LAUNCHER(iq2_xs, f16, half)
+DEQUANTIZE_IQ_LAUNCHER(iq2_xs, f32, float)
+DEQUANTIZE_IQ_LAUNCHER(iq2_s, bf16, __nv_bfloat16)
+DEQUANTIZE_IQ_LAUNCHER(iq2_s, f16, half)
+DEQUANTIZE_IQ_LAUNCHER(iq2_s, f32, float)
+DEQUANTIZE_IQ_LAUNCHER(iq3_xxs, bf16, __nv_bfloat16)
+DEQUANTIZE_IQ_LAUNCHER(iq3_xxs, f16, half)
+DEQUANTIZE_IQ_LAUNCHER(iq3_xxs, f32, float)
+DEQUANTIZE_IQ_LAUNCHER(iq3_s, bf16, __nv_bfloat16)
+DEQUANTIZE_IQ_LAUNCHER(iq3_s, f16, half)
+DEQUANTIZE_IQ_LAUNCHER(iq3_s, f32, float)
+DEQUANTIZE_IQ_LAUNCHER(iq1_s, bf16, __nv_bfloat16)
+DEQUANTIZE_IQ_LAUNCHER(iq1_s, f16, half)
+DEQUANTIZE_IQ_LAUNCHER(iq1_s, f32, float)
+DEQUANTIZE_IQ_LAUNCHER(iq4_nl, bf16, __nv_bfloat16)
+DEQUANTIZE_IQ_LAUNCHER(iq4_nl, f16, half)
+DEQUANTIZE_IQ_LAUNCHER(iq4_nl, f32, float)
+DEQUANTIZE_IQ_LAUNCHER(iq4_xs, bf16, __nv_bfloat16)
+DEQUANTIZE_IQ_LAUNCHER(iq4_xs, f16, half)
+DEQUANTIZE_IQ_LAUNCHER(iq4_xs, f32, float)
+
 #define DEQUANTIZE_IQ1_M_LAUNCHER(dst_tag, dst_c_type)                                                  \
   extern "C" void launch_dequantize_iq1_m_##dst_tag(const void *vx, void *dst, int64_t nrows, int64_t ncols, void *stream) { \
     const int64_t nblocks = nrows * ncols / QK_K;                                                      \
