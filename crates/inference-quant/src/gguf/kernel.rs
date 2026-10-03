@@ -4,6 +4,9 @@ use candle_core::quantized::GgmlDType;
 
 use super::archive::GgufDType;
 
+// ik_llama.cpp numbers its own types from IQ2_K
+const IQK_FIRST_ID: u32 = 137;
+
 /// A ggml tensor type; Candle's variants keep their names so the kernel tables read the same.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum GgufType {
@@ -35,6 +38,17 @@ pub enum GgufType {
     Iq2Kt,
     Iq3Kt,
     Iq4Kt,
+    Iq2K,
+    Iq3K,
+    Iq4K,
+    Iq5K,
+    Iq6K,
+    Iq4Ks,
+    Iq2Ks,
+    Iq4Kss,
+    Iq5Ks,
+    Iq3Ks,
+    Iq2Kl,
 }
 
 impl From<GgmlDType> for GgufType {
@@ -61,7 +75,7 @@ impl From<GgmlDType> for GgufType {
 
 impl GgufType {
     /// The types only our own kernels read; Candle cannot hold them in a `QTensor`.
-    pub const RAW_BLOCKS: [Self; 13] = [
+    pub const RAW_BLOCKS: [Self; 24] = [
         Self::Iq4Nl,
         Self::Iq4Xs,
         Self::Iq2Xxs,
@@ -75,6 +89,17 @@ impl GgufType {
         Self::Iq2Kt,
         Self::Iq3Kt,
         Self::Iq4Kt,
+        Self::Iq2K,
+        Self::Iq3K,
+        Self::Iq4K,
+        Self::Iq5K,
+        Self::Iq6K,
+        Self::Iq4Ks,
+        Self::Iq2Ks,
+        Self::Iq4Kss,
+        Self::Iq5Ks,
+        Self::Iq3Ks,
+        Self::Iq2Kl,
     ];
 
     /// The ggml type id, as stored in a GGUF tensor header.
@@ -108,6 +133,17 @@ impl GgufType {
             Self::Iq3Kt => 154,
             Self::Iq4Kt => 155,
             Self::Iq1Kt => 158,
+            Self::Iq2K => 137,
+            Self::Iq3K => 138,
+            Self::Iq4K => 139,
+            Self::Iq5K => 140,
+            Self::Iq6K => 141,
+            Self::Iq4Ks => 144,
+            Self::Iq2Ks => 145,
+            Self::Iq4Kss => 146,
+            Self::Iq5Ks => 152,
+            Self::Iq3Ks => 156,
+            Self::Iq2Kl => 157,
         }
     }
 
@@ -131,14 +167,27 @@ impl GgufType {
         GgufDType::new(self.id()).row_size(cols)
     }
 
-    /// ik_llama.cpp's trellis types prefix each row with its scale, so their rows are the unit bytes split on.
-    pub fn is_trellis(self) -> bool {
-        GgufDType::new(self.id()).row_meta_size() > 0
+    /// ik_llama.cpp's row-scaled types prefix each row with its scale, so their rows are the unit bytes split on.
+    pub fn has_row_scale(self) -> bool {
+        self.row_scale_bytes() > 0
     }
 
-    /// The (elements, bytes) unit rows of `cols` elements are cut into: a block, or a whole trellis row.
+    pub fn row_scale_bytes(self) -> usize {
+        GgufDType::new(self.id()).row_meta_size()
+    }
+
+    pub fn is_trellis(self) -> bool {
+        matches!(self, Self::Iq1Kt | Self::Iq2Kt | Self::Iq3Kt | Self::Iq4Kt)
+    }
+
+    /// ik_llama.cpp's non-trellis types, dequantized a row at a time by `iqk_dequant`.
+    pub fn is_iqk(self) -> bool {
+        self.id() >= IQK_FIRST_ID && !self.is_trellis()
+    }
+
+    /// The (elements, bytes) unit rows of `cols` elements are cut into: a block, or a whole row-scaled row.
     pub fn row_unit(self, cols: usize) -> candle_core::Result<(usize, usize)> {
-        if !self.is_trellis() {
+        if !self.has_row_scale() {
             return Ok((self.block_size(), self.type_size()));
         }
         let bytes = self.row_bytes(cols).ok_or_else(|| {

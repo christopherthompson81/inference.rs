@@ -333,3 +333,85 @@ Run 8 review follow-ups (20:50):
   factor into the row scale like ik's reference. They differ only in the last bit.
 - First full CI run failed clippy (`chunks_exact_to_as_chunks` in `kt_dequant.rs`); fixed with `as_chunks_mut`.
 - Full CI: exit 0 (2406 + 2730 + 1 tests). The parity test now runs llama-perplexity in a temp dir, because ik's build writes llama.log into its working directory.
+
+## Run 9 - 2026-10-02 21:40
+
+Question: can ik_llama.cpp's IQK types load and run, including in its default mixes (which also unblocks its
+default trellis mixes)?
+
+The types are IQ2_K 137, IQ3_K 138, IQ4_K 139, IQ5_K 140, IQ6_K 141, IQ4_KS 144, IQ2_KS 145, IQ4_KSS 146, IQ5_KS 152,
+IQ3_KS 156 and IQ2_KL 157. All use 256-element blocks.
+
+Row scales: IQ*_K blocks carry an f16 scale. The `_KS` / `_KSS` / `_KL` types put one scale before each row: f32 for
+IQ4_KS, IQ4_KSS and IQ5_KS; f16 for IQ2_KS, IQ3_KS and IQ2_KL.
+
+IQ6_K discrepancy: ik's CUDA and CPU-GEMM kernels read IQ6_K values from `iq6nl_values`, whose second half is the
+first plus one. Its reference `dequantize_row_iq6_k` instead evaluates the cubic that table rounds. We follow the
+kernels.
+
+Change:
+- Row-scaled sizing generalized from the trellis types to every type with row metadata (2 or 4 bytes).
+- `mmvq_rows.cuh` now holds the shared byte-stride matvec kernel. `mmvq_kt.cu` and the new `mmvq_iqk.cu` instantiate
+  it.
+- `mmvq_iqk.cu` is assembled from ik's sources: its 11 vec_dots and 11 dequant kernels, the value tables and
+  helpers, copied verbatim by a brace-matching script, plus our launchers.
+- CPU dequantizers (`iqk_dequant.rs`) ported from `dequantize_row_iq*_k*`.
+- Prefill runs dequant plus a dense matmul, as for the trellis types.
+
+Goldens:
+- The ik golden generator (now `tests/fixtures/gguf_ik/`) also covers the 11 IQK types.
+- First run: every IQK value came out 0. `GGML_FP16_TO_FP32` reads a table that `ggml_init` fills, so the script
+  now calls `ggml_init` first.
+- Result: ours matches ik's reference to the bit for 10 types. IQ6_K is within 1% of the row peak, the table
+  rounding above.
+- GPU: ik's CUDA code agrees with our CPU port (dequant within one rounding step; mmvq cosine > 0.999).
+
+Real files: Qwen3.5-0.8B quantized with ik's default rules, no `--pure`. The mixes add IQ3_K, IQ4_K, IQ5_K, IQ4_KS,
+Q2_K and Q6_K tensors. A default IQ2_KT mix is included too: 153 IQ2_KT, 27 IQ3_K, 7 IQ4_K.
+
+First run failed: "gguf-raw does not support `embedding_forward`". ik's mixes store the tied token embedding in an
+IQK type.
+- Added `RawGgufTensor::embedding`. A small CUDA kernel (`gather_rows.cu`) gathers the selected rows' bytes on the
+  device.
+- Those rows are then dequantized on the GPU where the type has a dequant kernel, or on the host otherwise (the
+  mainline IQ types).
+- Covered by a unit test on CPU and CUDA.
+
+Perplexity against ik's `llama-perplexity -c 512 --chunks 1 -ngl 99` (README text):
+
+| File | Ours | ik_llama.cpp |
+|---|---|---|
+| IQ2_K | 30.070 | 30.375 |
+| IQ2_KL | 19.887 | 20.049 |
+| IQ2_KS | 48.366 | 48.445 |
+| IQ2_KT (default mix) | 24.230 | 24.432 |
+| IQ3_K | 11.542 | 11.529 |
+| IQ3_KS | 14.219 | 14.195 |
+| IQ4_K | 9.2229 | 9.1275 |
+| IQ4_KS | 9.7094 | 9.7813 |
+| IQ4_KSS | 10.329 | 10.330 |
+| IQ5_K | 8.9767 | 9.0040 |
+| IQ5_KS | 9.1433 | 9.1197 |
+| IQ6_K | 8.8717 | 8.9436 |
+
+All within 1.05% (worst: IQ4_K). The new test, `every_iqk_gguf_matches_ik_llama_cpp_perplexity`, reads
+`INFERENCE_TEST_IQK_GGUF_DIR`.
+
+Not done:
+- mmq tiles for the ik types: measure prefill against ik first.
+- ik's bitnet and `_R4` / `_R8` repacked types.
+- MoE expert stacks.
+- Metal.
+
+Run 9 review follow-ups (22:10):
+- Embedding lookups bounds-check ids. On the CPU an out-of-range id is an error. On CUDA the gather writes a zeroed row
+  instead of reading past the weight, so no host sync is needed for a check.
+- Empty id lists return an empty tensor before any launch.
+- The embedding test now runs on CPU builds too and covers all 24 raw types, empty ids and an out-of-range id.
+  Previously it was CUDA-only and covered 4 types.
+- Known cost: mainline IQ types (IQ1_S through IQ4_XS) have no CUDA dequantizer. Their embedding rows go to the host
+  for dequantization, which adds a sync on each decode step when the token embedding is one of them. ik's mixes use
+  IQK types there, which stay on the GPU.
+- Renamed trellis-only wording and constants to cover all row-scaled types. The archive row-size test now covers
+  every `_KS` / `_KSS` / `_KL` id.
+- Full CI: exit 0 (2408 + 2732 + 1 tests).

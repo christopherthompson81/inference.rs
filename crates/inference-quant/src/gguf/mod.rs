@@ -10,6 +10,7 @@ pub mod fast_mmvq;
 mod ffi;
 mod iq_dequant;
 mod iq_tables;
+mod iqk_dequant;
 pub mod kernel;
 mod kt_dequant;
 #[cfg(all(feature = "cuda", has_marlin_kernels))]

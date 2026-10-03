@@ -1,22 +1,9 @@
 // Matvec and dequantize kernels for ik_llama.cpp's trellis GGUF types (IQ1_KT through IQ4_KT), Q8_1 activations.
 // Adapted from ik_llama.cpp (MIT, Iwan Kawrakow): iqk_mmvq_templates.cuh, mmvq-instance-iq*_kt.cu and convert.cu.
-#include "cuda_bf16.h"
-#include "cuda_fp16.h"
-#include <stdint.h>
+#include "mmvq_rows.cuh"
 
-#define WARP_SIZE 32
-#define QK_K 256
-#define QK8_1 32
-#define QI4_XS (QK_K / 8)
-#define VDR_KT 4
 #define KT_ROW_META 4
-#define KT_TAIL_BLOCK 32
 #define KT_INDEX_OFFSET 4096
-
-typedef struct {
-  half2 ds;
-  int8_t qs[QK8_1];
-} block_q8_1;
 
 typedef struct { uint8_t sh[QK_K / 32]; uint8_t ql[QK_K / 8]; uint8_t qh[QK_K / 16]; } block_iq1_kt;
 typedef struct { uint8_t scales[QK_K / 64]; uint8_t ql[QK_K / 4]; } block_iq2_kt;
@@ -25,24 +12,6 @@ typedef struct { uint32_t qs[QK_K / 8]; } block_iq4_kt;
 
 static __constant__ int8_t iq4k_values[16] = {-127, -104, -83, -65, -49, -35, -22, -10,
                                               1,    13,   25,  38,  53,  69,  89,  113};
-
-static __device__ __forceinline__ float warp_reduce_sum(float x) {
-#pragma unroll
-  for (int mask = 16; mask > 0; mask >>= 1) {
-    x += __shfl_xor_sync(0xffffffff, x, mask, WARP_SIZE);
-  }
-  return x;
-}
-
-static __device__ __forceinline__ int ggml_cuda_dp4a(const int a, const int b, int c) {
-#if __CUDA_ARCH__ >= 610
-  return __dp4a(a, b, c);
-#else
-  const int8_t *a8 = (const int8_t *)&a;
-  const int8_t *b8 = (const int8_t *)&b;
-  return c + a8[0] * b8[0] + a8[1] * b8[1] + a8[2] * b8[2] + a8[3] * b8[3];
-#endif
-}
 
 // ggml_row_size for these types: the f32 row scale, whole blocks, then IQ3_KT / IQ4_KT 32-element tail sub-blocks
 static __host__ __device__ int64_t kt_row_size(int type_size, bool iq3, int ncols) {
@@ -79,6 +48,7 @@ struct kt_iq1 {
   static constexpr int type_size = sizeof(block_iq1_kt);
   static constexpr bool iq3 = false;
   static constexpr bool has_tail = false;
+  static __host__ __device__ int64_t row_size(int ncols) { return kt_row_size(type_size, iq3, ncols); }
   static __device__ __forceinline__ void vec_dot(const void *vbq, const block_q8_1 *bq8_1, int kbx, int iqs,
                                                  float *result) {
     const float scale = *(const float *)vbq;
@@ -103,6 +73,7 @@ struct kt_iq2 {
   static constexpr int type_size = sizeof(block_iq2_kt);
   static constexpr bool iq3 = false;
   static constexpr bool has_tail = false;
+  static __host__ __device__ int64_t row_size(int ncols) { return kt_row_size(type_size, iq3, ncols); }
   static __device__ __forceinline__ void vec_dot(const void *vbq, const block_q8_1 *bq8_1, int kbx, int iqs,
                                                  float *result) {
     const float scale = *(const float *)vbq;
@@ -127,6 +98,7 @@ struct kt_iq3 {
   static constexpr int type_size = sizeof(block_iq3_kt);
   static constexpr bool iq3 = true;
   static constexpr bool has_tail = true;
+  static __host__ __device__ int64_t row_size(int ncols) { return kt_row_size(type_size, iq3, ncols); }
   static __device__ __forceinline__ void vec_dot(const void *vbq, const block_q8_1 *bq8_1, int kbx, int iqs,
                                                  float *result) {
     const float scale = *(const float *)vbq;
@@ -173,6 +145,7 @@ struct kt_iq4 {
   static constexpr int type_size = sizeof(block_iq4_kt);
   static constexpr bool iq3 = false;
   static constexpr bool has_tail = true;
+  static __host__ __device__ int64_t row_size(int ncols) { return kt_row_size(type_size, iq3, ncols); }
   static __device__ __forceinline__ void vec_dot(const void *vbq, const block_q8_1 *bq8_1, int kbx, int iqs,
                                                  float *result) {
     const float scale = *(const float *)vbq;
@@ -215,118 +188,6 @@ struct kt_iq4 {
     *result += dl * __low2float(bq8_1[ib32].ds) * sumi;
   }
 };
-
-template <typename dst_t> static __device__ __forceinline__ dst_t from_float(float x) { return dst_t(x); }
-
-// iqk_mul_mat_vec_q_kernel: rows are `row_size` bytes apart, each starting with its f32 scale
-template <typename kt, int ncols_y, typename dst_t>
-static __global__ void mmvq_kt_kernel(const void *__restrict__ vx, const void *__restrict__ vy, dst_t *__restrict__ dst,
-                                      const int ncols_x, const int nrows_x, const int stride_col_y,
-                                      const int stride_col_dst) {
-  constexpr int qk = QK_K;
-  constexpr int qi = QI4_XS;
-  constexpr int vdr = VDR_KT;
-  constexpr int nwarps = ncols_y <= 4 ? 4 : 2;
-  constexpr int rows_per_cuda_block = ncols_y == 1 ? 1 : 2;
-
-  const int tid = WARP_SIZE * threadIdx.y + threadIdx.x;
-  const int row0 = rows_per_cuda_block * blockIdx.x;
-  const int blocks_per_row_x = ncols_x / qk;
-  constexpr int blocks_per_iter = vdr * nwarps * WARP_SIZE / qi;
-  const int64_t row_size = kt_row_size(kt::type_size, kt::iq3, ncols_x);
-
-  float tmp[ncols_y][rows_per_cuda_block] = {{0.0f}};
-  const block_q8_1 *y = (const block_q8_1 *)vy;
-
-  int kbx = tid / (qi / vdr);
-  for (; kbx < blocks_per_row_x; kbx += blocks_per_iter) {
-    const int kby = kbx * (qk / QK8_1);
-    const int kqs = vdr * (tid % (qi / vdr));
-#pragma unroll
-    for (int j = 0; j < ncols_y; ++j) {
-#pragma unroll
-      for (int i = 0; i < rows_per_cuda_block; ++i) {
-        if (row0 + i < nrows_x) {
-          kt::vec_dot((const char *)vx + (row0 + i) * row_size, &y[j * stride_col_y + kby], kbx, kqs, &tmp[j][i]);
-        }
-      }
-    }
-  }
-  if constexpr (kt::has_tail) {
-    const int nt = (ncols_x % qk) / KT_TAIL_BLOCK;
-    if (nt > 0 && kbx == blocks_per_row_x) {
-      const int kby = kbx * (qk / QK8_1);
-      const int kqs = vdr * (tid % (qi / vdr));
-#pragma unroll
-      for (int j = 0; j < ncols_y; ++j) {
-#pragma unroll
-        for (int i = 0; i < rows_per_cuda_block; ++i) {
-          if (row0 + i < nrows_x) {
-            kt::vec_dot_tail((const char *)vx + (row0 + i) * row_size, &y[j * stride_col_y + kby], kbx, kqs, nt,
-                             &tmp[j][i]);
-          }
-        }
-      }
-    }
-  }
-
-  __shared__ float tmp_shared[nwarps - 1 > 0 ? nwarps - 1 : 1][ncols_y][rows_per_cuda_block][WARP_SIZE];
-  if (threadIdx.y > 0) {
-#pragma unroll
-    for (int j = 0; j < ncols_y; ++j) {
-#pragma unroll
-      for (int i = 0; i < rows_per_cuda_block; ++i) {
-        tmp_shared[threadIdx.y - 1][j][i][threadIdx.x] = tmp[j][i];
-      }
-    }
-  }
-  __syncthreads();
-  if (threadIdx.y > 0) {
-    return;
-  }
-#pragma unroll
-  for (int j = 0; j < ncols_y; ++j) {
-#pragma unroll
-    for (int i = 0; i < rows_per_cuda_block; ++i) {
-#pragma unroll
-      for (int l = 0; l < nwarps - 1; ++l) {
-        tmp[j][i] += tmp_shared[l][j][i][threadIdx.x];
-      }
-      tmp[j][i] = warp_reduce_sum(tmp[j][i]);
-    }
-    if (threadIdx.x < rows_per_cuda_block && row0 + threadIdx.x < nrows_x) {
-      dst[j * stride_col_dst + row0 + threadIdx.x] = from_float<dst_t>(tmp[j][threadIdx.x]);
-    }
-  }
-}
-
-template <typename kt, int ncols_y, typename dst_t>
-static void launch_mmvq_kt_cols(const void *vx, const void *vy, dst_t *dst, int ncols_x, int nrows_x,
-                                int stride_col_y, int stride_col_dst, cudaStream_t stream) {
-  constexpr int nwarps = ncols_y <= 4 ? 4 : 2;
-  constexpr int rows_per_cuda_block = ncols_y == 1 ? 1 : 2;
-  const dim3 grid((nrows_x + rows_per_cuda_block - 1) / rows_per_cuda_block, 1, 1);
-  const dim3 block(WARP_SIZE, nwarps, 1);
-  mmvq_kt_kernel<kt, ncols_y, dst_t>
-      <<<grid, block, 0, stream>>>(vx, vy, dst, ncols_x, nrows_x, stride_col_y, stride_col_dst);
-}
-
-template <typename kt, typename dst_t>
-static void launch_mmvq_kt(const void *vx, const void *vy, void *dst, int ncols_x, int nrows_x, int stride_col_y,
-                           int stride_col_dst, int b_size, void *stream) {
-  cudaStream_t s = static_cast<cudaStream_t>(stream);
-  dst_t *out = (dst_t *)dst;
-  switch (b_size) {
-  case 1: launch_mmvq_kt_cols<kt, 1>(vx, vy, out, ncols_x, nrows_x, stride_col_y, stride_col_dst, s); break;
-  case 2: launch_mmvq_kt_cols<kt, 2>(vx, vy, out, ncols_x, nrows_x, stride_col_y, stride_col_dst, s); break;
-  case 3: launch_mmvq_kt_cols<kt, 3>(vx, vy, out, ncols_x, nrows_x, stride_col_y, stride_col_dst, s); break;
-  case 4: launch_mmvq_kt_cols<kt, 4>(vx, vy, out, ncols_x, nrows_x, stride_col_y, stride_col_dst, s); break;
-  case 5: launch_mmvq_kt_cols<kt, 5>(vx, vy, out, ncols_x, nrows_x, stride_col_y, stride_col_dst, s); break;
-  case 6: launch_mmvq_kt_cols<kt, 6>(vx, vy, out, ncols_x, nrows_x, stride_col_y, stride_col_dst, s); break;
-  case 7: launch_mmvq_kt_cols<kt, 7>(vx, vy, out, ncols_x, nrows_x, stride_col_y, stride_col_dst, s); break;
-  default: launch_mmvq_kt_cols<kt, 8>(vx, vy, out, ncols_x, nrows_x, stride_col_y, stride_col_dst, s); break;
-  }
-}
 
 // convert.cu dequantize_block_iq*_kt: one 32-thread block per 256 elements of a row, eight values per thread
 template <typename dst_t>
@@ -448,13 +309,6 @@ static __global__ void dequantize_iq4_kt(const void *__restrict__ vx, dst_t *__r
   }
 }
 
-#define MMVQ_KT_LAUNCHER(tag, kt, dst_tag, dst_c_type)                                                          \
-  extern "C" void launch_mmvq_gguf_##tag##_##dst_tag##_plain(const void *vx, const void *vy, void *dst,        \
-                                                            int ncols_x, int nrows_x, int stride_col_y,        \
-                                                            int stride_col_dst, int b_size, void *stream) {   \
-    launch_mmvq_kt<kt, dst_c_type>(vx, vy, dst, ncols_x, nrows_x, stride_col_y, stride_col_dst, b_size, stream); \
-  }
-
 #define DEQUANTIZE_KT_LAUNCHER(tag, dst_tag, dst_c_type)                                                        \
   extern "C" void launch_dequantize_##tag##_##dst_tag(const void *vx, void *dst, int64_t nrows, int64_t ncols,  \
                                                       void *stream) {                                          \
@@ -464,9 +318,9 @@ static __global__ void dequantize_iq4_kt(const void *__restrict__ vx, dst_t *__r
   }
 
 #define KT_LAUNCHERS(tag, kt)                         \
-  MMVQ_KT_LAUNCHER(tag, kt, bf16, __nv_bfloat16)      \
-  MMVQ_KT_LAUNCHER(tag, kt, f16, half)                \
-  MMVQ_KT_LAUNCHER(tag, kt, f32, float)               \
+  MMVQ_ROWS_LAUNCHER(tag, kt, bf16, __nv_bfloat16)      \
+  MMVQ_ROWS_LAUNCHER(tag, kt, f16, half)                \
+  MMVQ_ROWS_LAUNCHER(tag, kt, f32, float)               \
   DEQUANTIZE_KT_LAUNCHER(tag, bf16, __nv_bfloat16)    \
   DEQUANTIZE_KT_LAUNCHER(tag, f16, half)              \
   DEQUANTIZE_KT_LAUNCHER(tag, f32, float)
