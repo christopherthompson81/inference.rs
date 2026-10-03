@@ -2199,3 +2199,49 @@ Result: the pin holds exactly (same digest, same snapshot), and all 22 Phi crate
 added, 73 of them the new test.
 - Review follow-ups: Phi-3-Vision's own `From<Config> for PhiRopeConfig` was dead once the RoPE is built from `text_config()`, so it is deleted. `Attention` and `DecoderLayer.self_attn` stay private; only the layer types, `Mlp::new` and the fields Phi-3-Vision reads are `pub(crate)`.
 Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`. Result: exit 0, 2409 + 2734 + 1 tests passed.
+
+## Run 70 - 2026-10-03 10:40
+
+Question: can Idefics2 and Idefics3 use the shared SigLIP tower (`inference_nn::vision::siglip`) instead of their own
+copies? The Idefics2 copy is about 450 lines inside `idefics2/mod.rs`; Idefics3 has `idefics3/vision.rs`.
+
+Survey:
+- `diff -w` of `idefics3/vision.rs` against `siglip.rs`: the algorithm is the same (patch-masked embeddings with
+  bucketized positions, encoder, post layer norm). The shared tower adds `tgt_sizes` for MiniCPM-o. Everything else is
+  names and config types.
+- Both Idefics vision configs map field for field onto `SiglipVisionConfig`.
+
+Pins first, on master's code: `idefics_vision_tests` builds each tower from synthesized weights and runs a fixed
+two-image batch. The second image covers only 3x3 of its 4x4 patches, so the ragged position ids and the mask both
+apply. Each tower is pinned by its tensor-name digest (identical for both) and an output snapshot.
+
+Change: both models build `SiglipVisionTransformer` from a new `siglip()` config conversion. The copies are deleted;
+the Idefics3 connector stays.
+
+Result:
+- First image:
+  - Idefics3: matches master exactly.
+  - Idefics2: moved by up to 1.5e-4 (probe -0.38771605 became -0.38786536). Its copy computed attention as its own
+    matmul plus softmax; the shared tower uses `Sdpa`, the fused CPU path.
+- Second, masked image: it moved (probes `[-0.795, -0.198]` became `[-0.877, -0.104]`).
+
+Cause: the Idefics copies never masked padded patches.
+- `CausalMasker::expand_mask` returns an additive mask: 0 for valid patches and `f32::MIN` for padded ones, as HF's
+  `_prepare_4d_attention_mask` does.
+- The copies cast that to U8, which makes both 0 and `f32::MIN` zero, then rebuilt a 0/-inf mask from it. The
+  rebuilt mask was all zeros, so valid patches attended to padding.
+- The shared tower uses the additive mask directly, which is HF's behavior.
+
+New test: `padded_patches_do_not_reach_valid_ones` changes the pixels of the second image's padded patch row and
+requires its 9 valid patches to stay bit-identical.
+- With the mask it passes.
+- With the mask dropped, a valid patch moves by 0.09, so the test catches the old behavior.
+
+The tower pins are updated to the masked values; both models now pin the same ones, through one test.
+
+Review follow-ups:
+- The cast claim is confirmed for both backends: candle's CPU f32-to-u8 is a saturating `as`, and CUDA's
+  `static_cast<uint8_t>` clamps under PTX. So Idefics2's `apply_mask_one_and_zero` was unmasked too.
+- The tower tests share one config helper per model.
+- Doc comments that only restated the function name are dropped.
+Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`. Result: exit 0, 2411 + 2736 + 1 tests passed.

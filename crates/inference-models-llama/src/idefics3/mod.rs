@@ -11,8 +11,9 @@ use std::{
 
 use candle_core::{D, DType, Device, Result, Tensor};
 pub use config::Idefics3Config;
+use inference_nn::vision::siglip::SiglipVisionTransformer;
 use inference_quant::{NonZeroOp, ShardedVarBuilder};
-use vision::{Idefics3Connector, Idefics3VisionTransformer};
+use vision::Idefics3Connector;
 
 use crate::attention::AttentionMask;
 use crate::{
@@ -42,7 +43,7 @@ pub struct Idefics3SpecificArgs {
 pub struct Idefics3Model {
     text_model: Llama,
     connector: Idefics3Connector,
-    vision: Idefics3VisionTransformer,
+    vision: SiglipVisionTransformer,
     config: Idefics3Config,
     dtype: DType,
     encoder_cache: Arc<Mutex<EncoderCacheManager>>,
@@ -73,8 +74,8 @@ impl Idefics3Model {
                 .pp("connector")
                 .set_device(normal_loading_metadata.real_device.clone()),
         )?;
-        let vision = Idefics3VisionTransformer::new(
-            &cfg.vision_config,
+        let vision = SiglipVisionTransformer::new(
+            &cfg.vision_config.siglip(),
             non_text_vb
                 .pp("vision_model")
                 .set_device(normal_loading_metadata.real_device.clone()),
@@ -245,9 +246,9 @@ impl Idefics3Model {
                         let count = subimage_counts[i];
                         let pv = pixel_values.narrow(0, offsets[i], count)?;
                         let mask = patch_attention_mask.narrow(0, offsets[i], count)?;
-                        let hidden = self
-                            .vision
-                            .forward(&pv, &AttentionMask::Custom(mask.clone()))?;
+                        let hidden =
+                            self.vision
+                                .forward(&pv, &AttentionMask::Custom(mask.clone()), None)?;
                         let hidden = self.connector.forward(&hidden)?;
                         let outputs = (0..count)
                             .map(|index| hidden.get(index))
@@ -288,6 +289,7 @@ impl Idefics3Model {
                     let image_hidden_states = self.vision.forward(
                         &pixel_values,
                         &AttentionMask::Custom(patch_attention_mask.clone()),
+                        None,
                     )?;
                     (self.connector.forward(&image_hidden_states)?, None)
                 };
