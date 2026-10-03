@@ -624,7 +624,7 @@ impl Encoder {
     }
 }
 
-struct VisionTransformer {
+pub(crate) struct VisionTransformer {
     embeddings: VisionEmbeddings,
     encoder: Encoder,
     post_layernorm: LayerNorm,
@@ -632,7 +632,7 @@ struct VisionTransformer {
 }
 
 impl VisionTransformer {
-    fn new(config: &VisionConfig, vb: ShardedVarBuilder) -> Result<Self> {
+    pub(crate) fn new(config: &VisionConfig, vb: ShardedVarBuilder) -> Result<Self> {
         let embeddings = VisionEmbeddings::new(config, vb.pp("embeddings"))?;
         let post_layernorm = layer_norm(
             config.hidden_size,
@@ -648,7 +648,11 @@ impl VisionTransformer {
         })
     }
 
-    fn forward(&self, pixel_values: &Tensor, attention_mask: &AttentionMask) -> Result<Tensor> {
+    pub(crate) fn forward(
+        &self,
+        pixel_values: &Tensor,
+        attention_mask: &AttentionMask,
+    ) -> Result<Tensor> {
         let bs = pixel_values.dim(0)?;
         let patch_attention_mask = if let AttentionMask::Custom(attn_mask) = attention_mask {
             attn_mask.clone()

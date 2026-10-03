@@ -9,6 +9,8 @@ use inference_nn::{
 
 pub mod idefics2;
 pub mod idefics3;
+#[cfg(test)]
+mod idefics_vision_tests;
 pub mod llama;
 pub mod llama4;
 pub mod llava;
