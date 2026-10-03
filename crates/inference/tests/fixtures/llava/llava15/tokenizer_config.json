@@ -1,0 +1,12 @@
+{
+ "add_bos_token": false,
+ "add_eos_token": false,
+ "bos_token": "<s>",
+ "eos_token": "</s>",
+ "pad_token": "<unk>",
+ "unk_token": "<unk>",
+ "clean_up_tokenization_spaces": false,
+ "model_max_length": 4096,
+ "tokenizer_class": "LlamaTokenizer",
+ "chat_template": "{{- bos_token -}}{%- for message in messages -%}{%- if message['role'] == 'user' -%}{{- 'USER: ' + message['content'] + '\\n' -}}{%- else -%}{{- 'ASSISTANT: ' + message['content'] + eos_token -}}{%- endif -%}{%- endfor -%}{%- if add_generation_prompt -%}{{- 'ASSISTANT:' -}}{%- endif -%}"
+}

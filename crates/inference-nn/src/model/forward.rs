@@ -623,3 +623,56 @@ pub fn extract_logits(
     LogitsSelection::from_context_lens(logits, &context_lens, &[logits.device().clone()])?
         .select(logits)
 }
+
+#[cfg(test)]
+mod tests {
+    use candle_core::{Device, Result, Tensor};
+
+    use super::*;
+
+    #[test]
+    fn ordinary_batch_expands_each_sequence_offset() -> Result<()> {
+        let offsets = [4, 12];
+        let context_lens = [(0, 1), (0, 1)];
+        let position_ids = [3, 3];
+        let flash_params = FlashParams::empty(true);
+        let mut ctx =
+            ModelForwardContext::new(&offsets, &context_lens, &position_ids, None, &flash_params);
+
+        assert_eq!(
+            ctx.text_positions(&Device::Cpu, 3)?
+                .unwrap()
+                .to_vec1::<u32>()?,
+            vec![4, 5, 6, 12, 13, 14]
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn packed_batch_uses_ragged_token_positions() -> Result<()> {
+        let offsets = [4, 12];
+        let context_lens = [(2, 1), (1, 1)];
+        let position_ids = [3, 2];
+        let packed_positions = Tensor::new(&[4u32, 5, 6, 12, 13], &Device::Cpu)?;
+        let mut metadata = PagedAttentionInputMetadata::dummy(&Device::Cpu)?;
+        metadata.rope_positions = Some(HashMap::from([(Device::Cpu.location(), packed_positions)]));
+        let mut flash_params = FlashParams::empty(true);
+        flash_params.packed = true;
+        let kv_cache = Vec::new();
+        let mut ctx = ModelForwardContext::new(
+            &offsets,
+            &context_lens,
+            &position_ids,
+            Some((kv_cache.as_slice(), &metadata)),
+            &flash_params,
+        );
+
+        assert_eq!(
+            ctx.text_positions(&Device::Cpu, 5)?
+                .unwrap()
+                .to_vec1::<u32>()?,
+            vec![4, 5, 6, 12, 13]
+        );
+        Ok(())
+    }
+}

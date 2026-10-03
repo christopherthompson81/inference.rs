@@ -47,14 +47,19 @@ fn llava_llama_prefill() -> Result<()> {
         "vision_feature_layer": -2,
         "vision_feature_select_strategy": "default",
     });
-    let (model, names) = load_synthesized(&[], HashMap::new(), DType::F32, |vb| {
-        LLaVALoader.load(
-            &config.to_string(),
-            vb,
-            metadata(),
-            AttentionImplementation::Eager,
-        )
-    })?;
+    let (model, names) = load_synthesized(
+        &["language_model.model.rope_freqs.weight"],
+        HashMap::new(),
+        DType::F32,
+        |vb| {
+            LLaVALoader.load(
+                &config.to_string(),
+                vb,
+                metadata(),
+                AttentionImplementation::Eager,
+            )
+        },
+    )?;
     assert_eq!(
         names_digest(names.keys()),
         0x4089_c6c3_0a5b_bc83,
@@ -62,9 +67,9 @@ fn llava_llama_prefill() -> Result<()> {
         names_digest(names.keys())
     );
     let expected = Snapshot {
-        probes: [-0.44500175, 0.26666418, 0.32315516, -0.076289274],
-        sum: 86.59143,
-        l2: 17.094133,
+        probes: [-0.4448259, 0.26605448, 0.3236212, -0.07645021],
+        sum: 86.58469,
+        l2: 17.093431,
     };
     assert_snapshot(&forward_multimodal(model.as_ref())?, VOCAB, &expected)
 }

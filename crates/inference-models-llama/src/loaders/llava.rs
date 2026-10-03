@@ -28,8 +28,9 @@ impl MultimodalModelLoader for LLaVALoader {
             attention_mechanism,
         )?))
     }
+    // HF Llama and Mistral text weights use half-split RoPE, as the Llama and Mistral loaders do
     fn is_gptx(&self, _config: &str) -> bool {
-        false
+        true
     }
     fn get_config_repr(&self, config: &str) -> Result<Box<dyn Debug>> {
         let cfg = crate::llava::config::Config::from_json(config)?;

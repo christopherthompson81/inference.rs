@@ -2112,3 +2112,63 @@ Review follow-ups:
 
 Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`.
 Result: exit 0, 2399 + 2721 + 1 tests passed.
+
+## Run 68 - 2026-10-03 08:30
+
+Question: can LLaVA 1.5 and LLaVA-NeXT run on the shared Llama and Mistral text models, instead of the
+`llava/llava_llm/{llama,mistral}.rs` copies (705 + 848 lines)?
+
+Survey:
+- The copies have drifted a long way from the base models: `diff -w` gives 579 differing lines for Llama (606 + 705)
+  and 692 for Mistral (690 + 848).
+- The `LLaVALLM` trait only adds `embed` and `forward_input_embed`. The base models already have both:
+  `get_input_embeddings` and `forward_embeds(input_ids, embeds, ctx)`.
+- The constructors take the same arguments, load the same tensor names (`model.embed_tokens`, `model.layers.N.*`,
+  `model.norm`, `lm_head`) and implement the same traits.
+
+Pins first, committed on master's code:
+- New `llava_tiny` integration tests: tiny LLaVA 1.5 (Llama text) and LLaVA-NeXT (Mistral text) checkpoints from
+  `tests/fixtures/llava/make_tiny.py`, each running a text prompt and an image prompt, with greedy ids, logprobs and
+  prompt-token counts pinned.
+- `support/recording.rs` gained `record_checkpoint_seeded_by_name`, which seeds each tensor from a hash of its name, so
+  a constructor that requests the same tensors in another order sees the same weights. The existing pins are
+  unchanged.
+- With identical name-seeded weights, the two text-only traces are identical. That is expected: Mistral without a
+  sliding window is Llama.
+
+Change: `LLaVALLM` is implemented for `llama::Llama` and `mistral::Model`, and the copies are deleted.
+The `text_positions` tests that went through the copies' helper moved to `inference_nn::model::forward`.
+
+Three findings along the way:
+
+1. The base Llama constructor probes an optional `rope_freqs.weight` (GGUF-converted Llama 3). Both synthesized-weight
+   harnesses list it as absent.
+2. RoPE pairing:
+   - Both LLaVA loaders reported `is_gptx = false` (adjacent pairing). The copies ignored the flag and always applied
+     half-split RoPE, which is right for HF Llama and Mistral weights. The base models honor it, so the first run
+     diverged (text-only first token 131 vs 149).
+   - The loaders now report `true`, as the Llama and Mistral loaders do.
+3. Images were spliced twice after a prefix-cache hit:
+   - The copies used a `FullCache`, which prefix caching never reuses. On the base models' normal cache, the image
+     prompt now reuses the text prompt's 7-token cached prefix, and the next decode step re-sent the pixel values:
+     "LLaVA input has 0 image markers but 1 encoder outputs".
+   - The LLaVA processors relied on `take_images` emptying the sequence, which a prefix hit does not. Like Qwen-VL's
+     `!is_prompt` branch, both processors now attach media only on prompt steps.
+
+Result:
+- Every greedy id matches the master pins, on both models and both prompts.
+- Logprobs moved by at most 2.5e-3, and `llava_llama_prefill`'s logit snapshot by at most 6e-4. The base path makes
+  Q/K contiguous at different points and dispatches attention differently; the large tiny-model weights (std 0.5)
+  amplify the rounding.
+- Both pins now carry the shared path's values at the same tight tolerances. Run 68's old values are the ones above.
+
+Lines: LLaVA's text stacks are gone. LLaVA now gets what the base text models have: prefix caching, fused paths, Llama
+`rope_scaling` (the copies' plain RoPE ignored it), and the pre-quantized lm_head path (the Llama copy built lm_head
+without the quantization config). CUDA decode graphs stay off, because the LLaVA wrapper keeps the trait default.
+
+Review follow-ups:
+- The loader test now asserts half-split RoPE for both LLaVA loaders.
+- The tiny test asserts that the image prompt is partly served from the prefix cache, so the decode-after-hit path
+  stays covered whatever order the requests run in.
+- Not done: a Mistral sliding-window case. The fixture has no window, so the LLaVA-NeXT text trace equals LLaVA 1.5's.
+Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`. Result: exit 0, 2408 + 2733 + 1 tests passed.
