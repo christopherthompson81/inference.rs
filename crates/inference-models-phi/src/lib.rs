@@ -13,6 +13,8 @@ pub mod phi2;
 pub mod phi3;
 pub mod phi3_5_moe;
 pub mod phi3_vision;
+#[cfg(test)]
+mod phi3v_tests;
 pub mod phi4;
 pub mod xlora;
 

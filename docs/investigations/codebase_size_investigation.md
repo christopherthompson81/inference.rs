@@ -2172,3 +2172,30 @@ Review follow-ups:
   stays covered whatever order the requests run in.
 - Not done: a Mistral sliding-window case. The fixture has no window, so the LLaVA-NeXT text trace equals LLaVA 1.5's.
 Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`. Result: exit 0, 2408 + 2733 + 1 tests passed.
+
+## Run 69 - 2026-10-03 09:40
+
+Question: can Phi-3-Vision and Phi-4-MM build the shared Phi-3 text layers instead of their own copies?
+
+Survey, `diff -w` of each model's Attention, Mlp and DecoderLayer against `phi3.rs`:
+- Phi-3-Vision: 21 lines differ, all cosmetic (names and formatting).
+- Phi-4-MM: 435 lines differ. It builds its linears through `linear_no_bias_static_lora` (the vision and speech LoRA
+  merged at load), has its own `Phi4MMRotaryEmbedding` (partial rotary), and has no AnyMoE. Sharing it needs the layers
+  to be parameterized over the linear builder and the rotary type. It is not done here.
+
+Pin first, on master's code: `phi3v_tests::phi3v_text_prefill` is a synthesized-weight text prefill through
+`Phi3VLoader`, pinned by its tensor-name digest and logit snapshot. The CLIP tower is fixed at ViT-L/14-336
+(`PHI3V_CLIP_CONFIG`), so the test builds it at full size. It runs in about 1 s. An end-to-end tiny checkpoint like
+LLaVA's would need ~300M random vision parameters, so that is not practical.
+
+Change:
+- `phi3::{Attention, Mlp, DecoderLayer}` are `pub(crate)`.
+- Phi-3-Vision deletes its copies. `Config::text_config()` converts its config to `phi3::Config` (no attention
+  scaling factor, no partial rotary, as its own RoPE config already had), and its layers and RoPE are built from that.
+- The AnyMoE expert uses `phi3::Mlp`.
+- The section banners in the file are gone.
+
+Result: the pin holds exactly (same digest, same snapshot), and all 22 Phi crate tests pass. Lines: 295 removed, 119
+added, 73 of them the new test.
+- Review follow-ups: Phi-3-Vision's own `From<Config> for PhiRopeConfig` was dead once the RoPE is built from `text_config()`, so it is deleted. `Attention` and `DecoderLayer.self_attn` stay private; only the layer types, `Mlp::new` and the fields Phi-3-Vision reads are `pub(crate)`.
+Command: `./scripts/local_ci.sh --lint --tests --cuda --slim --bindings --docs --sweep`. Result: exit 0, 2409 + 2734 + 1 tests passed.
