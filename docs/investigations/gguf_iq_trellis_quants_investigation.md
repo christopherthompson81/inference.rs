@@ -595,3 +595,39 @@ Findings:
 
 Implication: the 4096-token gap is in the Qwen3.5 model path (copies, launch count, the prefill attention kernel),
 not in quantization. Each is its own optimization. Copies and casts are the biggest: about 200 ms of 922.
+
+## Run 14 - 2026-10-03 06:50
+
+Question: which call sites produce Run 13's copies and casts?
+
+Attribution: gdb with Python breakpoints on Candle's `CudaStorage::copy_strided_src` and `to_dtype` (quoted trait-impl
+names; raw addresses fail under PIE). Each hit records the first two `inference_*` frames. nsys CUDA backtraces need
+CPU sampling, which `perf_event_paranoid` disables here. Run: 2048-token prompt, 1 iteration, 1084 hits.
+
+- `repeat_kv` in `Sdpa::run_attention_noflash`: 420 copies (GQA 2 -> 8 heads, K and V).
+- `run_attention_noflash` casts and copies, plus the paged-prefix gather (`prefix_gather_causal_mask`,
+  `prefix_attention_output_layout`): about 230.
+- `finish_recurrence` f32 -> bf16 cast: 144.
+- The rest is load-time (norm and GDN weight casts).
+
+The attention path was the non-flash one because the CLI under test was built with `--features cuda` only. The
+standard CUDA build (CLAUDE.md) is `cuda flash-attn cudnn`. That build mistake invalidates Run 10's and Run 13's
+long-prompt conclusions: ik was measured with flash attention and we were not.
+
+Re-measured with `cargo build -p inference-cli --features "cuda flash-attn cudnn"`. tok/s at 512 / 2048 / 4096
+prompt tokens, then decode:
+
+| File | Ours | ik (Runs 10-11) |
+|---|---|---|
+| IQ4_XS (Q8_0 embedding) | 19854 / 21771 / 22524, 534 | 16155 / 18266 / 18030 |
+| IQ2_KT | 19016 / 21686 / 22453, 584 | 16109 / 18118 / 17937, 515 |
+| IQ4_KS | 21101 / 22609 / 22418, 553 | 16277 / 17724 / 17433, 438 |
+
+Corrected conclusion: with flash attention we are 20-28% faster than ik at 2048 and 4096 tokens on every ik type,
+and faster at 512 too. There is no engine-level long-prompt gap. What Run 13 measured was the non-flash fallback:
+`repeat_kv` copies, casts and a separate softmax.
+
+Still true for builds without flash-attn: the fallback's `repeat_kv` expands K and V per prefill chunk. That only
+affects non-flash builds, and the default CUDA build includes flash-attn, so it is not worth optimizing now.
+
+Benchmark rule: build the CLI with the full CUDA feature set before comparing against llama.cpp or ik.
