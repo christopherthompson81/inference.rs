@@ -466,3 +466,50 @@ Embedding round trip: two `--pure` IQ4_XS files, one with an IQ4_XS token embedd
 - Review follow-ups: odd IQ4_NL element counts (for example one 288-element row) no longer fall back to the host; the
   embedding test covers 6 x 288. The dequant launchers share one `dequantize_superblocks` kernel template.
 - Full CI: exit 0 (2408 + 2733 + 1 tests).
+
+## Run 11 - 2026-10-03 00:30
+
+Question: do ik's mmq loaders close the trellis prefill gap from Run 10?
+
+How ik does it:
+- ik's mmq expands trellis values into Q8_0-style int8 tiles, then reuses `vec_dot_q8_0_q8_1_{mma,dp4a}` with the D4 layout.
+- Its `template-instances/mmq-instance-iq*_kt_id.cu` already use the current mainline loader signature
+  (`load_tiles<mmq_y, need_check>`, `mmq_get_nwarps_device()`), so they drop into our port. The one difference: ik
+  addresses rows by byte stride (`x + i*stride`), while ggml uses block stride.
+
+Change:
+- `mmq_byte_rows(type)` marks ik's types. `mul_mat_q_process_tile` then advances `x` by a 64-bit byte offset, and
+  host code passes the row size in bytes as `stride_row_x`.
+- `mmq_kt.cuh` holds the four KT loaders, copied by script, with `INT8_MMA_AVAILABLE` mapped to our MMA guard.
+- IQ3_KT / IQ4_KT rows with tails keep the dense path (`fast_mmq::supports_shape`).
+
+Prefill, tok/s (dev CLI, 5 iterations; the before row is Run 10's dense path):
+
+| File | 512 | 2048 | 4096 |
+|---|---|---|---|
+| IQ2_KT before | 14816 | 14640 | 12650 |
+| IQ2_KT mmq | 20380 | 17833 | 14983 |
+| IQ4_KT before | 14509 | 14446 | 12604 |
+| IQ4_KT mmq | 19391 | 17095 | 14558 |
+| ik IQ2_KT | 16109 | 18118 | 17937 |
+
+That is +38% / +22% / +18% on IQ2_KT, matching our IQ4_XS mmq numbers. We are now ahead of ik at 512 tokens and level
+at 2048. The 4096 gap is the engine-level cost from Run 10.
+
+Parity: all three perplexity suites pass. The KT numbers moved because mmq quantizes activations to Q8_1, as ik
+does:
+
+| File | Before | Now | ik |
+|---|---|---|---|
+| IQ1_KT | 160.29 | 162.15 | 160.40 |
+| IQ2_KT | 33.28 | 33.82 | 33.39 |
+| IQ3_KT | 11.54 | 11.53 | 11.64 |
+| IQ4_KT | 9.737 | 9.702 | 9.735 |
+| IQ2_KT default mix | 24.23 | 24.50 | 24.43 |
+
+The largest drift is 1.3% (IQ2_KT).
+
+Next: the IQK loaders. Their `_id.cu` files carry `_r4` / `_q8` variants, 16-element tile layouts
+(`MMQ_DP4A_TXS_Q8_0_16`, `MMQ_MMA_TILE_X_K_Q3_K`) and more helpers, so they get their own PR.
+- Review follow-ups: `mmq_byte_rows` lists the four KT ids instead of an id range, `row_stride` covers only KT until the IQK loaders land, and the provenance table lists `mmq_kt.cuh`.
+- Full CI: exit 0 (2408 + 2733 + 1 tests).
