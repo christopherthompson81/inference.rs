@@ -15,7 +15,9 @@ use crate::{
     slice_blocked_data,
 };
 
-const DIRECT_GGUF_DTYPES: &str = "F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, Q2_K through Q8_K, IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, and IQ4_XS";
+// No per-rank column count is a multiple of this, so tensor parallelism replicates trellis weights
+const TRELLIS_SHARD_ALIGNMENT: usize = usize::MAX;
+const DIRECT_GGUF_DTYPES: &str = "F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, Q2_K through Q8_K, IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, IQ4_XS, and IQ1_KT through IQ4_KT";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum GgufTensorBinding {
@@ -414,7 +416,8 @@ impl GgufWeightSource {
                     .is_err() =>
             {
                 let raw = self.raw_tensor(name)?;
-                let values = super::raw::dequantize_blocks(raw.dtype, &raw.data)?;
+                let cols = raw.dims.last().copied().unwrap_or(1);
+                let values = super::raw::dequantize_rows(raw.dtype, cols, &raw.data)?;
                 Tensor::from_vec(values, raw.dims, &Device::Cpu)?.to_device(device)
             }
             GgufTensorBinding::Tensor(name) => {
@@ -570,15 +573,8 @@ impl GgufWeightSource {
             }
             let dtype = quant_type(info.dtype(), source_name)?;
             let data = self.archive.tensor_data(source_name)?;
-            let bytes = slice_blocked_data(
-                data.bytes(),
-                &dims,
-                dtype.block_size(),
-                dtype.type_size(),
-                dim,
-                start,
-                len,
-            )?;
+            let (unit, unit_bytes) = dtype.row_unit(dims[dims.len() - 1])?;
+            let bytes = slice_blocked_data(data.bytes(), &dims, unit, unit_bytes, dim, start, len)?;
             dims[dim] = len;
             PackedBinding {
                 dtype,
@@ -614,11 +610,12 @@ impl GgufWeightSource {
         }
         let range = shard_range(shard, &packed.dims)?;
         if let Some((dim, start, len)) = range {
+            let (unit, unit_bytes) = packed.dtype.row_unit(packed.dims[packed.dims.len() - 1])?;
             packed.data = slice_blocked_data(
                 &packed.data,
                 &packed.dims,
-                packed.dtype.block_size(),
-                packed.dtype.type_size(),
+                unit,
+                unit_bytes,
                 dim,
                 start,
                 len,
@@ -655,11 +652,13 @@ impl GgufWeightSource {
                 let Some(mut packed) = self.materialize_packed_binding(input)? else {
                     return Ok(None);
                 };
+                let (unit, unit_bytes) =
+                    packed.dtype.row_unit(packed.dims[packed.dims.len() - 1])?;
                 packed.data = slice_blocked_data(
                     &packed.data,
                     &packed.dims,
-                    packed.dtype.block_size(),
-                    packed.dtype.type_size(),
+                    unit,
+                    unit_bytes,
                     *dim,
                     *start,
                     *len,
@@ -842,17 +841,17 @@ impl QuantizedWeightSource for GgufWeightSource {
         let weight_name = self.weight_name(key);
         let binding = self.binding(&weight_name)?;
         if let Some(dtype) = self.structural_quant_dtype(binding)? {
-            Ok(dtype.block_size())
+            Ok(shard_unit(dtype))
         } else if let Some(source_name) = binding.direct_tensor() {
-            self.archive
-                .tensor_info(source_name)?
-                .dtype()
-                .block_size()
-                .ok_or_else(|| {
-                    Error::msg(format!(
-                        "GGUF tensor `{source_name}` has unknown shard alignment"
-                    ))
-                })
+            let dtype = self.archive.tensor_info(source_name)?.dtype();
+            if dtype.gguf_type().is_some_and(GgufType::is_trellis) {
+                return Ok(TRELLIS_SHARD_ALIGNMENT);
+            }
+            dtype.block_size().ok_or_else(|| {
+                Error::msg(format!(
+                    "GGUF tensor `{source_name}` has unknown shard alignment"
+                ))
+            })
         } else {
             Ok(1)
         }
@@ -946,8 +945,12 @@ fn concat_packed_bindings(inputs: Vec<PackedBinding>, dim: usize) -> Result<Pack
         }
     }
 
-    let block = dtype.block_size();
-    let block_bytes = dtype.type_size();
+    if dtype.is_trellis() && dim == dims.len() - 1 {
+        candle_core::bail!(
+            "{dtype:?} rows start with their scale, so they cannot be concatenated end to end"
+        );
+    }
+    let (block, block_bytes) = dtype.row_unit(dims[dims.len() - 1])?;
     if inputs
         .iter()
         .any(|input| !input.dims[input.dims.len() - 1].is_multiple_of(block))
@@ -1038,27 +1041,27 @@ fn quant_linear(
     })
 }
 
+// A trellis row keeps one scale for its whole length, so no column split lines up with it
+fn shard_unit(dtype: GgufType) -> usize {
+    if dtype.is_trellis() {
+        TRELLIS_SHARD_ALIGNMENT
+    } else {
+        dtype.block_size()
+    }
+}
+
 fn packed_byte_len(dims: &[usize], dtype: GgufType) -> Result<usize> {
-    let Some(last) = dims.last() else {
+    let Some(&last) = dims.last() else {
         candle_core::bail!("packed GGUF tensors cannot be scalar");
     };
-    if !last.is_multiple_of(dtype.block_size()) {
-        candle_core::bail!(
-            "packed GGUF tensor last dimension {last} is not divisible by {:?} block size {}",
-            dtype,
+    let row_bytes = dtype.row_bytes(last).ok_or_else(|| {
+        Error::msg(format!(
+            "packed GGUF tensor last dimension {last} is not a whole {dtype:?} row (block size {})",
             dtype.block_size()
-        );
-    }
-    let elements = checked_elem_count(dims)?;
-    if !elements.is_multiple_of(dtype.block_size()) {
-        candle_core::bail!(
-            "packed GGUF tensor has {elements} elements, not divisible by {:?} block size {}",
-            dtype,
-            dtype.block_size()
-        );
-    }
-    (elements / dtype.block_size())
-        .checked_mul(dtype.type_size())
+        ))
+    })?;
+    (checked_elem_count(dims)? / last.max(1))
+        .checked_mul(row_bytes)
         .ok_or_else(|| Error::msg("packed GGUF tensor byte length overflow"))
 }
 
@@ -1761,6 +1764,31 @@ mod tests {
         assert_eq!(lhs.dims(), rhs.dims());
         let max_diff = (lhs - rhs)?.abs()?.max_all()?.to_scalar::<f32>()?;
         assert!(max_diff <= 0.003, "max diff {max_diff}");
+        Ok(())
+    }
+
+    // IQ3_KT rows of 288 elements are 120 bytes: the f32 scale, one block, one tail sub-block, then padding
+    #[test]
+    fn trellis_tensors_split_and_join_by_whole_rows() -> Result<()> {
+        const COLS: usize = 288;
+        const ROW_BYTES: usize = 120;
+        let dtype = GgufType::Iq3Kt;
+        let dims = [4, COLS];
+        let data: Vec<u8> = (0..4 * ROW_BYTES).map(|i| (i % 251) as u8).collect();
+        assert_eq!(packed_byte_len(&dims, dtype)?, data.len());
+        let (unit, unit_bytes) = dtype.row_unit(COLS)?;
+        let rows = slice_blocked_data(&data, &dims, unit, unit_bytes, 0, 1, 2)?;
+        assert_eq!(rows, data[ROW_BYTES..3 * ROW_BYTES]);
+        assert!(slice_blocked_data(&data, &dims, unit, unit_bytes, 1, 0, COLS / 2).is_err());
+        let half = |range: std::ops::Range<usize>| PackedBinding {
+            dtype,
+            dims: vec![2, COLS],
+            data: data[range].to_vec(),
+        };
+        let joined = concat_packed_bindings(vec![half(0..240), half(240..480)], 0)?;
+        assert_eq!((joined.dims, joined.data), (dims.to_vec(), data.clone()));
+        assert!(concat_packed_bindings(vec![half(0..240), half(240..480)], 1).is_err());
+        assert_eq!(shard_unit(dtype), TRELLIS_SHARD_ALIGNMENT);
         Ok(())
     }
 

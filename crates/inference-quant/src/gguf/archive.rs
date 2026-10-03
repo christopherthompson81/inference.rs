@@ -58,6 +58,12 @@ impl GgufVersion {
     }
 }
 
+const KT_ROW_META_BYTES: usize = 4;
+const KT_TAIL_BLOCK: usize = 32;
+// Per 32-element tail sub-block: IQ3_KT 8 index bytes and 4 sign bytes (plus a nibble scale), IQ4_KT 16 bytes
+const KT3_TAIL_BYTES: usize = 12;
+const KT4_TAIL_BYTES: usize = 16;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GgufDType(u32);
 
@@ -106,6 +112,10 @@ impl GgufDType {
             39 => "MXFP4",
             40 => "NVFP4",
             41 => "Q1_0",
+            153 => "IQ2_KT",
+            154 => "IQ3_KT",
+            155 => "IQ4_KT",
+            158 => "IQ1_KT",
             _ => "UNKNOWN",
         }
     }
@@ -116,7 +126,7 @@ impl GgufDType {
             2 | 3 | 6..=9 | 20 | 39 => Some(32),
             40 => Some(64),
             41 => Some(128),
-            10..=19 | 21..=23 | 29 | 34 | 35 => Some(256),
+            10..=19 | 21..=23 | 29 | 34 | 35 | 153..=155 | 158 => Some(256),
             _ => None,
         }
     }
@@ -155,8 +165,45 @@ impl GgufDType {
             39 => Some(17),
             40 => Some(36),
             41 => Some(18),
+            153 => Some(68),
+            154 => Some(100),
+            155 => Some(128),
+            158 => Some(56),
             _ => None,
         }
+    }
+
+    // ik_llama.cpp's trellis types start each row with an f32 scale
+    pub const fn row_meta_size(self) -> usize {
+        match self.0 {
+            153..=155 | 158 => KT_ROW_META_BYTES,
+            _ => 0,
+        }
+    }
+
+    // IQ3_KT and IQ4_KT rows may end in 32-element sub-blocks after the whole blocks
+    const fn has_kt_tail(self) -> bool {
+        matches!(self.0, 154 | 155)
+    }
+
+    /// Bytes per row of `ne0` elements (`ggml_row_size`), if `ne0` is a valid row length for this type.
+    pub fn row_size(self, ne0: usize) -> Option<usize> {
+        let (block_size, type_size) = (self.block_size()?, self.type_size()?);
+        if self.has_kt_tail() {
+            if !ne0.is_multiple_of(KT_TAIL_BLOCK) {
+                return None;
+            }
+            let tails = (ne0 % block_size) / KT_TAIL_BLOCK;
+            let tail_bytes = if self.0 == 154 {
+                tails.div_ceil(2) + KT3_TAIL_BYTES * tails
+            } else {
+                KT4_TAIL_BYTES * tails
+            };
+            let bytes = self.row_meta_size() + ne0 / block_size * type_size + tail_bytes;
+            return Some(bytes.next_multiple_of(KT_ROW_META_BYTES));
+        }
+        ne0.is_multiple_of(block_size)
+            .then(|| self.row_meta_size() + ne0 / block_size * type_size)
     }
 
     /// The type our kernels read this as: Candle's, or one we keep as raw ggml blocks.
@@ -190,21 +237,19 @@ impl GgufDType {
     }
 
     fn tensor_byte_len(self, name: &str, shape: &[usize]) -> Result<Option<usize>> {
-        let (Some(block_size), Some(type_size)) = (self.block_size(), self.type_size()) else {
+        let Some(block_size) = self.block_size() else {
             return Ok(None);
         };
-        let row_size = shape.last().copied().unwrap_or(1);
-        if !row_size.is_multiple_of(block_size) {
+        let ne0 = shape.last().copied().unwrap_or(1);
+        let Some(row_bytes) = self.row_size(ne0) else {
             candle_core::bail!(
-                "GGUF tensor `{name}` has {row_size} elements per row, not a multiple of dtype {} block size {block_size}",
+                "GGUF tensor `{name}` has {ne0} elements per row, not a whole row of dtype {} (block size {block_size})",
                 self.0
             );
-        }
+        };
         let elem_count = checked_elem_count(name, shape)?;
-        let blocks = elem_count
-            .checked_div(block_size)
-            .ok_or_else(|| Error::msg(format!("invalid block size for GGUF tensor `{name}`")))?;
-        Ok(Some(blocks.checked_mul(type_size).ok_or_else(|| {
+        let rows = elem_count.checked_div(ne0).unwrap_or(0);
+        Ok(Some(rows.checked_mul(row_bytes).ok_or_else(|| {
             Error::msg(format!("byte size overflow for GGUF tensor `{name}`"))
         })?))
     }
@@ -1445,6 +1490,20 @@ mod tests {
                 ]),
             ),
         ]
+    }
+
+    // ggml_row_size in ik_llama.cpp: the f32 row scale, whole blocks, IQ3_KT / IQ4_KT tails, padded to 4 bytes
+    #[test]
+    fn trellis_rows_carry_a_scale_and_tails() {
+        let row = |raw, ne0| GgufDType::new(raw).row_size(ne0);
+        assert_eq!(row(158, 512), Some(116));
+        assert_eq!(row(153, 512), Some(140));
+        assert_eq!(row(154, 544), Some(220));
+        assert_eq!(row(155, 544), Some(276));
+        assert_eq!(row(154, 288), Some(120));
+        assert_eq!(row(153, 288), None);
+        assert_eq!(row(155, 300), None);
+        assert_eq!(row(2, 64), Some(36));
     }
 
     #[test]

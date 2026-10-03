@@ -2129,7 +2129,8 @@ extern "C" void launch_mmvq_gguf_quantize_q8_1_f32(const void *x, void *vy,
 }
 
 #define DEQUANTIZE_IQ1_M_LAUNCHER(dst_tag, dst_c_type)                                                  \
-  extern "C" void launch_dequantize_iq1_m_##dst_tag(const void *vx, void *dst, int64_t nblocks, void *stream) { \
+  extern "C" void launch_dequantize_iq1_m_##dst_tag(const void *vx, void *dst, int64_t nrows, int64_t ncols, void *stream) { \
+    const int64_t nblocks = nrows * ncols / QK_K;                                                      \
     dequantize_block_iq1_m<dst_c_type>                                                                 \
         <<<(unsigned int)nblocks, WARP_SIZE, 0, static_cast<cudaStream_t>(stream)>>>(vx, (dst_c_type *)dst); \
   }

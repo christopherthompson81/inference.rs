@@ -31,6 +31,10 @@ pub enum GgufType {
     Iq3S,
     Iq1S,
     Iq1M,
+    Iq1Kt,
+    Iq2Kt,
+    Iq3Kt,
+    Iq4Kt,
 }
 
 impl From<GgmlDType> for GgufType {
@@ -57,7 +61,7 @@ impl From<GgmlDType> for GgufType {
 
 impl GgufType {
     /// The types only our own kernels read; Candle cannot hold them in a `QTensor`.
-    pub const RAW_BLOCKS: [Self; 9] = [
+    pub const RAW_BLOCKS: [Self; 13] = [
         Self::Iq4Nl,
         Self::Iq4Xs,
         Self::Iq2Xxs,
@@ -67,6 +71,10 @@ impl GgufType {
         Self::Iq3S,
         Self::Iq1S,
         Self::Iq1M,
+        Self::Iq1Kt,
+        Self::Iq2Kt,
+        Self::Iq3Kt,
+        Self::Iq4Kt,
     ];
 
     /// The ggml type id, as stored in a GGUF tensor header.
@@ -96,6 +104,10 @@ impl GgufType {
             Self::Iq4Xs => 23,
             Self::Iq1M => 29,
             Self::BF16 => 30,
+            Self::Iq2Kt => 153,
+            Self::Iq3Kt => 154,
+            Self::Iq4Kt => 155,
+            Self::Iq1Kt => 158,
         }
     }
 
@@ -112,6 +124,27 @@ impl GgufType {
         GgufDType::new(self.id())
             .block_size()
             .expect("every GgufType has a ggml block size")
+    }
+
+    /// Bytes per row of `cols` elements, if that is a valid row length for this type.
+    pub fn row_bytes(self, cols: usize) -> Option<usize> {
+        GgufDType::new(self.id()).row_size(cols)
+    }
+
+    /// ik_llama.cpp's trellis types prefix each row with its scale, so their rows are the unit bytes split on.
+    pub fn is_trellis(self) -> bool {
+        GgufDType::new(self.id()).row_meta_size() > 0
+    }
+
+    /// The (elements, bytes) unit rows of `cols` elements are cut into: a block, or a whole trellis row.
+    pub fn row_unit(self, cols: usize) -> candle_core::Result<(usize, usize)> {
+        if !self.is_trellis() {
+            return Ok((self.block_size(), self.type_size()));
+        }
+        let bytes = self.row_bytes(cols).ok_or_else(|| {
+            candle_core::Error::Msg(format!("{self:?} rows cannot hold {cols} elements"))
+        })?;
+        Ok((cols, bytes))
     }
 
     pub fn type_size(self) -> usize {

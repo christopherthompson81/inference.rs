@@ -57,6 +57,10 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
             | GgufType::Iq3S
             | GgufType::Iq1S
             | GgufType::Iq1M
+            | GgufType::Iq1Kt
+            | GgufType::Iq2Kt
+            | GgufType::Iq3Kt
+            | GgufType::Iq4Kt
     )
 }
 
@@ -188,6 +192,10 @@ fn plain_launcher_bf16(dtype: GgufType) -> Option<PlainLauncher> {
         GgufType::Iq3S => ffi::launch_mmvq_gguf_iq3_s_bf16_plain,
         GgufType::Iq1S => ffi::launch_mmvq_gguf_iq1_s_bf16_plain,
         GgufType::Iq1M => ffi::launch_mmvq_gguf_iq1_m_bf16_plain,
+        GgufType::Iq1Kt => ffi::launch_mmvq_gguf_iq1_kt_bf16_plain,
+        GgufType::Iq2Kt => ffi::launch_mmvq_gguf_iq2_kt_bf16_plain,
+        GgufType::Iq3Kt => ffi::launch_mmvq_gguf_iq3_kt_bf16_plain,
+        GgufType::Iq4Kt => ffi::launch_mmvq_gguf_iq4_kt_bf16_plain,
         _ => return None,
     };
     Some(f)
@@ -214,6 +222,10 @@ fn plain_launcher_f16(dtype: GgufType) -> Option<PlainLauncher> {
         GgufType::Iq3S => ffi::launch_mmvq_gguf_iq3_s_f16_plain,
         GgufType::Iq1S => ffi::launch_mmvq_gguf_iq1_s_f16_plain,
         GgufType::Iq1M => ffi::launch_mmvq_gguf_iq1_m_f16_plain,
+        GgufType::Iq1Kt => ffi::launch_mmvq_gguf_iq1_kt_f16_plain,
+        GgufType::Iq2Kt => ffi::launch_mmvq_gguf_iq2_kt_f16_plain,
+        GgufType::Iq3Kt => ffi::launch_mmvq_gguf_iq3_kt_f16_plain,
+        GgufType::Iq4Kt => ffi::launch_mmvq_gguf_iq4_kt_f16_plain,
         _ => return None,
     };
     Some(f)
@@ -240,6 +252,10 @@ fn plain_launcher_f32(dtype: GgufType) -> Option<PlainLauncher> {
         GgufType::Iq3S => ffi::launch_mmvq_gguf_iq3_s_f32_plain,
         GgufType::Iq1S => ffi::launch_mmvq_gguf_iq1_s_f32_plain,
         GgufType::Iq1M => ffi::launch_mmvq_gguf_iq1_m_f32_plain,
+        GgufType::Iq1Kt => ffi::launch_mmvq_gguf_iq1_kt_f32_plain,
+        GgufType::Iq2Kt => ffi::launch_mmvq_gguf_iq2_kt_f32_plain,
+        GgufType::Iq3Kt => ffi::launch_mmvq_gguf_iq3_kt_f32_plain,
+        GgufType::Iq4Kt => ffi::launch_mmvq_gguf_iq4_kt_f32_plain,
         _ => return None,
     };
     Some(f)
@@ -982,16 +998,29 @@ type DequantizeLauncher = unsafe extern "C" fn(
     *const std::ffi::c_void,
     *mut std::ffi::c_void,
     i64,
+    i64,
     *mut std::ffi::c_void,
 );
 
 fn dequantize_launcher(ty: GgufType, dtype: DType) -> Option<DequantizeLauncher> {
-    match (ty, dtype) {
-        (GgufType::Iq1M, DType::BF16) => Some(ffi::launch_dequantize_iq1_m_bf16),
-        (GgufType::Iq1M, DType::F16) => Some(ffi::launch_dequantize_iq1_m_f16),
-        (GgufType::Iq1M, DType::F32) => Some(ffi::launch_dequantize_iq1_m_f32),
-        _ => None,
-    }
+    Some(match (ty, dtype) {
+        (GgufType::Iq1M, DType::BF16) => ffi::launch_dequantize_iq1_m_bf16,
+        (GgufType::Iq1M, DType::F16) => ffi::launch_dequantize_iq1_m_f16,
+        (GgufType::Iq1M, DType::F32) => ffi::launch_dequantize_iq1_m_f32,
+        (GgufType::Iq1Kt, DType::BF16) => ffi::launch_dequantize_iq1_kt_bf16,
+        (GgufType::Iq1Kt, DType::F16) => ffi::launch_dequantize_iq1_kt_f16,
+        (GgufType::Iq1Kt, DType::F32) => ffi::launch_dequantize_iq1_kt_f32,
+        (GgufType::Iq2Kt, DType::BF16) => ffi::launch_dequantize_iq2_kt_bf16,
+        (GgufType::Iq2Kt, DType::F16) => ffi::launch_dequantize_iq2_kt_f16,
+        (GgufType::Iq2Kt, DType::F32) => ffi::launch_dequantize_iq2_kt_f32,
+        (GgufType::Iq3Kt, DType::BF16) => ffi::launch_dequantize_iq3_kt_bf16,
+        (GgufType::Iq3Kt, DType::F16) => ffi::launch_dequantize_iq3_kt_f16,
+        (GgufType::Iq3Kt, DType::F32) => ffi::launch_dequantize_iq3_kt_f32,
+        (GgufType::Iq4Kt, DType::BF16) => ffi::launch_dequantize_iq4_kt_bf16,
+        (GgufType::Iq4Kt, DType::F16) => ffi::launch_dequantize_iq4_kt_f16,
+        (GgufType::Iq4Kt, DType::F32) => ffi::launch_dequantize_iq4_kt_f32,
+        _ => return None,
+    })
 }
 
 /// The weight dequantized on its GPU, as ggml does for prefill on types without an mmq tile.
@@ -1005,7 +1034,7 @@ pub fn dequantize<W: KernelWeight + ?Sized>(w: &W, dtype: DType) -> Result<Tenso
     };
     let shape = w.kernel_shape().clone();
     let elems = shape.elem_count();
-    let nblocks = (elems / ty.block_size()) as i64;
+    let (nrows, ncols) = shape.dims2()?;
     let stream = dev.cuda_stream();
     let stream_ptr = stream.cu_stream() as *mut std::ffi::c_void;
     let (weight_ptr, _weight_guard) = w.kernel_ptr(&stream)?;
@@ -1019,7 +1048,8 @@ pub fn dequantize<W: KernelWeight + ?Sized>(w: &W, dtype: DType) -> Result<Tenso
                     launcher(
                         weight_ptr,
                         out_ptr as *mut std::ffi::c_void,
-                        nblocks,
+                        nrows as i64,
+                        ncols as i64,
                         stream_ptr,
                     )
                 };
