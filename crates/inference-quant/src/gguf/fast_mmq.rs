@@ -73,7 +73,25 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
             | GgufType::Iq3Xxs
             | GgufType::Iq3S
             | GgufType::Iq1S
+            | GgufType::Iq1Kt
+            | GgufType::Iq2Kt
+            | GgufType::Iq3Kt
+            | GgufType::Iq4Kt
     )
+}
+
+/// Whether mmq reads a weight of `cols` columns: ik's loaders take whole 256-element blocks, not trellis tails.
+pub fn supports_shape(dtype: GgufType, cols: usize) -> bool {
+    supports(dtype) && (!dtype.is_trellis() || cols.is_multiple_of(256))
+}
+
+// The row stride mmq takes: blocks for ggml's types, bytes for ik's trellis types (whose rows start with a scale)
+fn row_stride(dtype: GgufType, k: usize) -> i64 {
+    if dtype.is_trellis() {
+        dtype.row_bytes(k).expect("validated at construction") as i64
+    } else {
+        (k / qk_for(dtype)) as i64
+    }
 }
 
 /// qk (block quantization size) per dtype.
@@ -96,7 +114,11 @@ fn qk_for(dtype: GgufType) -> usize {
         | GgufType::Iq2S
         | GgufType::Iq3Xxs
         | GgufType::Iq3S
-        | GgufType::Iq1S => 256,
+        | GgufType::Iq1S
+        | GgufType::Iq1Kt
+        | GgufType::Iq2Kt
+        | GgufType::Iq3Kt
+        | GgufType::Iq4Kt => 256,
         _ => unreachable!(),
     }
 }
@@ -127,6 +149,10 @@ fn ds_layout_for(dtype: GgufType) -> DsLayout {
         | GgufType::Iq3Xxs
         | GgufType::Iq3S => DsLayout::D4,
         GgufType::Iq1S => DsLayout::DS4,
+        GgufType::Iq1Kt => DsLayout::D4,
+        GgufType::Iq2Kt => DsLayout::D4,
+        GgufType::Iq3Kt => DsLayout::D4,
+        GgufType::Iq4Kt => DsLayout::D4,
         _ => unreachable!(),
     }
 }
@@ -257,6 +283,10 @@ fn mmq_launcher(dtype: GgufType) -> Option<MmqLauncher> {
         GgufType::Iq3Xxs => ffi::launch_mmq_gguf_iq3_xxs,
         GgufType::Iq3S => ffi::launch_mmq_gguf_iq3_s,
         GgufType::Iq1S => ffi::launch_mmq_gguf_iq1_s,
+        GgufType::Iq1Kt => ffi::launch_mmq_gguf_iq1_kt,
+        GgufType::Iq2Kt => ffi::launch_mmq_gguf_iq2_kt,
+        GgufType::Iq3Kt => ffi::launch_mmq_gguf_iq3_kt,
+        GgufType::Iq4Kt => ffi::launch_mmq_gguf_iq4_kt,
         _ => return None,
     };
     Some(f)
@@ -420,7 +450,7 @@ struct DenseMmqRun<'a, W: KernelWeight + ?Sized> {
     k: usize,
     k_padded: usize,
     batch_size: usize,
-    qk: usize,
+    stride_row_x: i64,
     type_x: i32,
 }
 
@@ -466,7 +496,7 @@ impl<W: KernelWeight + ?Sized> DenseMmqRun<'_, W> {
                         self.k as i64,
                         nrows as i64,
                         self.batch_size as i64,
-                        (self.k / self.qk) as i64,
+                        self.stride_row_x,
                         nrows as i64,
                         self.device_info.cc,
                         self.device_info.nsm,
@@ -663,7 +693,7 @@ fn shared_lhs<W: KernelWeight + ?Sized>(weights: &[&W], xs: &Tensor) -> Result<V
         k,
         k_padded,
         batch_size,
-        qk,
+        stride_row_x: row_stride(dtype, k),
         type_x,
     };
     match input_ty {

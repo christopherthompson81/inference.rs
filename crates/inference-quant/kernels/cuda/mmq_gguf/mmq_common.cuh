@@ -54,7 +54,16 @@ enum ggml_type {
     GGML_TYPE_BF16    = 30,
     GGML_TYPE_MXFP4   = 39,
     GGML_TYPE_NVFP4   = 40,
+    GGML_TYPE_IQ2_KT  = 153,
+    GGML_TYPE_IQ3_KT  = 154,
+    GGML_TYPE_IQ4_KT  = 155,
+    GGML_TYPE_IQ1_KT  = 158,
 };
+
+// ik_llama.cpp's types: rows are addressed by byte stride, since some start with a row scale
+static constexpr __host__ __device__ bool mmq_byte_rows(ggml_type type) {
+    return type == GGML_TYPE_IQ1_KT || type == GGML_TYPE_IQ2_KT || type == GGML_TYPE_IQ3_KT || type == GGML_TYPE_IQ4_KT;
+}
 
 // ============================================================
 // Quantization constants
@@ -471,6 +480,10 @@ template<> struct ggml_cuda_type_traits<GGML_TYPE_IQ3_S>   { static constexpr in
 template<> struct ggml_cuda_type_traits<GGML_TYPE_IQ1_S>   { static constexpr int qk = QK_K;   static constexpr int qr = QR1_S;   static constexpr int qi = QI1_S; };
 template<> struct ggml_cuda_type_traits<GGML_TYPE_IQ4_NL>  { static constexpr int qk = QK4_NL; static constexpr int qr = QR4_NL;  static constexpr int qi = QI4_NL; };
 template<> struct ggml_cuda_type_traits<GGML_TYPE_IQ4_XS>  { static constexpr int qk = QK_K;   static constexpr int qr = QR4_XS;  static constexpr int qi = QI4_XS; };
+template<> struct ggml_cuda_type_traits<GGML_TYPE_IQ1_KT>  { static constexpr int qk = QK_K;   static constexpr int qr = QR4_XS;  static constexpr int qi = QI4_XS; };
+template<> struct ggml_cuda_type_traits<GGML_TYPE_IQ2_KT>  { static constexpr int qk = QK_K;   static constexpr int qr = QR4_XS;  static constexpr int qi = QI4_XS; };
+template<> struct ggml_cuda_type_traits<GGML_TYPE_IQ3_KT>  { static constexpr int qk = QK_K;   static constexpr int qr = QR4_XS;  static constexpr int qi = QI4_XS; };
+template<> struct ggml_cuda_type_traits<GGML_TYPE_IQ4_KT>  { static constexpr int qk = QK_K;   static constexpr int qr = QR4_XS;  static constexpr int qi = QI4_XS; };
 
 // ============================================================
 // Additional macros and helpers

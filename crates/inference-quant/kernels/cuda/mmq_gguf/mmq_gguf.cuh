@@ -130,6 +130,10 @@ static mmq_q8_1_ds_layout mmq_get_q8_1_ds_layout(const ggml_type type_x) {
             return MMQ_Q8_1_DS_LAYOUT_DS4;
         case GGML_TYPE_IQ4_XS:
         case GGML_TYPE_IQ4_NL:
+        case GGML_TYPE_IQ1_KT:
+        case GGML_TYPE_IQ2_KT:
+        case GGML_TYPE_IQ3_KT:
+        case GGML_TYPE_IQ4_KT:
             return MMQ_Q8_1_DS_LAYOUT_D4;
         default:
             GGML_ABORT("fatal error");
@@ -247,6 +251,10 @@ static constexpr __host__ __device__ tile_x_sizes mmq_get_dp4a_tile_x_sizes(ggml
         case GGML_TYPE_IQ1_S:   return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_IQ4_XS:  return MMQ_DP4A_TXS_Q8_0;
         case GGML_TYPE_IQ4_NL:  return MMQ_DP4A_TXS_Q8_0;
+        case GGML_TYPE_IQ1_KT:  return MMQ_DP4A_TXS_Q8_0;
+        case GGML_TYPE_IQ2_KT:  return MMQ_DP4A_TXS_Q8_0;
+        case GGML_TYPE_IQ3_KT:  return MMQ_DP4A_TXS_Q8_0;
+        case GGML_TYPE_IQ4_KT:  return MMQ_DP4A_TXS_Q8_0;
         default:                return tile_x_sizes{0, 0, 0};
     }
 }
@@ -292,6 +300,10 @@ static constexpr __host__ __device__ int mmq_get_mma_tile_x_k(ggml_type type) {
         case GGML_TYPE_IQ1_S:   return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_IQ4_XS:  return MMQ_MMA_TILE_X_K_Q8_0;
         case GGML_TYPE_IQ4_NL:  return MMQ_MMA_TILE_X_K_Q8_0;
+        case GGML_TYPE_IQ1_KT:  return MMQ_MMA_TILE_X_K_Q8_0;
+        case GGML_TYPE_IQ2_KT:  return MMQ_MMA_TILE_X_K_Q8_0;
+        case GGML_TYPE_IQ3_KT:  return MMQ_MMA_TILE_X_K_Q8_0;
+        case GGML_TYPE_IQ4_KT:  return MMQ_MMA_TILE_X_K_Q8_0;
         default:                return 0;
     }
 }
@@ -3483,7 +3495,7 @@ struct mmq_type_traits<mmq_x, mmq_y, need_check, GGML_TYPE_IQ4_XS> {
 
 template <ggml_type type, int mmq_x, bool need_check, bool fixup>
 static __device__ __forceinline__ void mul_mat_q_process_tile(
-        const char * __restrict__ x, const int offset_x, const int * __restrict__ y,
+        const char * __restrict__ x, const int64_t offset_x, const int * __restrict__ y,
         const int * __restrict__ ids_dst, void * __restrict__ dst, const ggml_type type_dst, float * __restrict__ tmp_fixup,
         const int stride_row_x, const int ncols_y, const int stride_col_dst,
         const int tile_x_max_i, const int tile_y_max_j, const int kb0_start, const int kb0_stop) {
@@ -3521,7 +3533,11 @@ static __device__ __forceinline__ void mul_mat_q_process_tile(
     constexpr int sz = sizeof(block_q8_1_mmq) / sizeof(int);
 
     for (int kb0 = kb0_start; kb0 < kb0_stop; kb0 += blocks_per_iter) {
-        load_tiles(x, tile_x, offset_x + kb0, tile_x_max_i, stride_row_x);
+        if constexpr (mmq_byte_rows(type)) {
+            load_tiles(x + offset_x, tile_x, kb0, tile_x_max_i, stride_row_x);
+        } else {
+            load_tiles(x, tile_x, int(offset_x) + kb0, tile_x_max_i, stride_row_x);
+        }
         {
             const int * by0 = y + ncols_y * (kb0 * qk / ne_block) * sz;
 #pragma unroll
@@ -3662,7 +3678,7 @@ static __global__ void mul_mat_q(
         const int tile_x_max_i = nrows_x  - it*mmq_y - 1;
         const int tile_y_max_j = col_diff - jt*mmq_x - 1;
 
-        const int offset_x = fastdiv(wt, sample_ratio)*stride_sample_x + fastdiv(zt, channel_ratio)*stride_channel_x + it*mmq_y*stride_row_x;
+        const int64_t offset_x = int64_t(fastdiv(wt, sample_ratio))*stride_sample_x + int64_t(fastdiv(zt, channel_ratio))*stride_channel_x + int64_t(it)*mmq_y*stride_row_x;
 
         constexpr bool fixup = false;
         mul_mat_q_process_tile<type, mmq_x, need_check, fixup>
@@ -3744,7 +3760,7 @@ static __global__ void mul_mat_q(
         const int tile_x_max_i = nrows_x  - it*mmq_y - 1;
         const int tile_y_max_j = col_diff - jt*mmq_x - 1;
 
-        const int offset_x = fastdiv(wt, sample_ratio)*stride_sample_x + fastdiv(zt, channel_ratio)*stride_channel_x + it*mmq_y*stride_row_x;
+        const int64_t offset_x = int64_t(fastdiv(wt, sample_ratio))*stride_sample_x + int64_t(fastdiv(zt, channel_ratio))*stride_channel_x + int64_t(it)*mmq_y*stride_row_x;
 
         constexpr bool fixup = false; // All but (potentially) the last iterations write their data to dst rather than the fixup buffer.
         mul_mat_q_process_tile<type, mmq_x, need_check, fixup>
@@ -3813,7 +3829,7 @@ static __global__ void mul_mat_q(
     const int tile_x_max_i = nrows_x  - it*mmq_y - 1;
     const int tile_y_max_j = col_diff - jt*mmq_x - 1;
 
-    const int offset_x = fastdiv(wt, sample_ratio)*stride_sample_x + fastdiv(zt, channel_ratio)*stride_channel_x + it*mmq_y*stride_row_x;
+    const int64_t offset_x = int64_t(fastdiv(wt, sample_ratio))*stride_sample_x + int64_t(fastdiv(zt, channel_ratio))*stride_channel_x + int64_t(it)*mmq_y*stride_row_x;
 
     constexpr bool fixup = true; // Last index writes its data to fixup buffer to avoid data races with other blocks.
     mul_mat_q_process_tile<type, mmq_x, need_check, fixup>
