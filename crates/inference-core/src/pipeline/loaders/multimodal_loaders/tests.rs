@@ -738,6 +738,8 @@ fn direct_gguf_adjacent_rope_overrides_multimodal_defaults() {
     for loader in [
         &Idefics3Loader as &dyn MultimodalModelLoader,
         &Mistral3Loader as &dyn MultimodalModelLoader,
+        &LLaVALoader as &dyn MultimodalModelLoader,
+        &LLaVANextLoader as &dyn MultimodalModelLoader,
     ] {
         assert!(loader.is_gptx(""));
         assert!(!loader.is_gptx_for("{}", &metadata).unwrap());

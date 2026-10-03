@@ -319,7 +319,8 @@ impl MultimodalInputsProcessor for LLaVANextInputProcessor {
             *config.crop_size.as_ref().unwrap().get("height").unwrap(),
         );
 
-        let has_images = input_seqs.iter().any(|seq| seq.has_images());
+        // a prefix-cache hit leaves the images on the sequence, so decode steps must not splice them again
+        let has_images = is_prompt && input_seqs.iter().any(|seq| seq.has_images());
         if !has_images {
             return host
                 .text_only_inputs(

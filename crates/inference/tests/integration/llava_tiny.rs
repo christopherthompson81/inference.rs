@@ -15,7 +15,10 @@ const PROMPT: &str = "describe";
 const MAX_LEN: usize = 6;
 // The fixtures' CLIP side; LLaVA-NeXT's anyres grid also takes the 2:1 image as two tiles.
 const IMAGE_SIDE: u32 = 28;
+// Kernel reassociation that moves F32 logprobs by ~1e-6 grows to ~1e-3 through these large-weight layers.
 const LOGPROB_TOLERANCE: f32 = 1e-4;
+// The image prompt shares the text prompt's opening, so a warm model serves it partly from the prefix cache.
+const MIN_CACHED_PREFIX: usize = 1;
 
 fn builder(dir: &Path) -> MultimodalModelBuilder {
     MultimodalModelBuilder::new(dir.to_string_lossy())
@@ -33,8 +36,11 @@ fn image(width: u32, height: u32, seed: u8) -> DynamicImage {
     }))
 }
 
-// Greedy (token, logprob) per step and the prompt length.
-async fn trace(model: &Model, request: RequestBuilder) -> anyhow::Result<(Vec<(u32, f32)>, usize)> {
+// Greedy (token, logprob) per step, the prompt length, and the prompt tokens served from the prefix cache.
+async fn trace(
+    model: &Model,
+    request: RequestBuilder,
+) -> anyhow::Result<(Vec<(u32, f32)>, usize, usize)> {
     let request = request
         .set_sampler_max_len(MAX_LEN)
         .set_sampler_topk(1)
@@ -52,7 +58,12 @@ async fn trace(model: &Model, request: RequestBuilder) -> anyhow::Result<(Vec<(u
         })
         .unwrap_or_default();
     anyhow::ensure!(!steps.is_empty(), "the model generated nothing");
-    Ok((steps, response.usage.prompt_tokens))
+    let cached = response
+        .usage
+        .prompt_tokens_details
+        .as_ref()
+        .map_or(0, |details| details.cached_tokens);
+    Ok((steps, response.usage.prompt_tokens, cached))
 }
 
 async fn traces(model: &Model, side: (u32, u32)) -> anyhow::Result<Vec<(Vec<(u32, f32)>, usize)>> {
@@ -63,10 +74,14 @@ async fn traces(model: &Model, side: (u32, u32)) -> anyhow::Result<Vec<(Vec<(u32
         PROMPT,
         vec![image(side.0, side.1, 90)],
     ));
-    Ok(vec![
-        trace(model, text).await?,
-        trace(model, with_image).await?,
-    ])
+    let (text_steps, text_prompt, _) = trace(model, text).await?;
+    // After a prefix hit the image must reach the model once, on the prompt step, and never again on decode.
+    let (image_steps, image_prompt, cached) = trace(model, with_image).await?;
+    anyhow::ensure!(
+        cached >= MIN_CACHED_PREFIX,
+        "the image prompt was not served from the prefix cache"
+    );
+    Ok(vec![(text_steps, text_prompt), (image_steps, image_prompt)])
 }
 
 fn check(actual: &[(Vec<(u32, f32)>, usize)], expected: &[(Vec<(u32, f32)>, usize)]) {
@@ -90,27 +105,27 @@ async fn llava15_text_and_image() -> anyhow::Result<()> {
     let checkpoint = tiny_llava15()?;
     let model = builder(checkpoint.path()).build().await?;
     let traces = traces(&model, (IMAGE_SIDE, IMAGE_SIDE)).await?;
-    // 4 vision tokens: a 28-pixel image at patch 14
+    // 4 vision tokens: a 28-pixel image at patch 14; the image prompt reuses the text prompt's cached prefix
     let expected = [
         (
             vec![
-                (149, -2.3602328),
-                (189, -2.1962988),
-                (99, -2.836937),
-                (226, -2.4474363),
-                (99, -2.557251),
-                (175, -2.5741384),
+                (149, -2.3598313),
+                (189, -2.1979446),
+                (99, -2.8372998),
+                (226, -2.4462297),
+                (99, -2.5567582),
+                (175, -2.5719965),
             ],
             26,
         ),
         (
             vec![
-                (33, -1.8135748),
-                (93, -2.881034),
-                (150, -1.8875551),
-                (33, -1.0386267),
-                (93, -1.7178918),
-                (2, -2.1032774),
+                (33, -1.8118622),
+                (93, -2.884374),
+                (150, -1.8899802),
+                (33, -1.039323),
+                (93, -1.7181377),
+                (2, -2.1036007),
             ],
             30,
         ),
@@ -128,23 +143,23 @@ async fn llava_next_text_and_image() -> anyhow::Result<()> {
     let expected = [
         (
             vec![
-                (149, -2.3602328),
-                (189, -2.1962988),
-                (99, -2.836937),
-                (226, -2.4474363),
-                (99, -2.557251),
-                (175, -2.5741384),
+                (149, -2.3598313),
+                (189, -2.1979446),
+                (99, -2.8372998),
+                (226, -2.4462297),
+                (99, -2.5567582),
+                (175, -2.5719965),
             ],
             26,
         ),
         (
             vec![
-                (141, -2.585176),
-                (98, -3.0661695),
-                (136, -2.8283815),
-                (192, -1.8187708),
-                (3, -2.5006533),
-                (55, -2.5450103),
+                (141, -2.5872004),
+                (98, -3.0652235),
+                (136, -2.8261824),
+                (192, -1.8183632),
+                (3, -2.502676),
+                (55, -2.5459356),
             ],
             40,
         ),

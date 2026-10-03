@@ -14,6 +14,8 @@ const LLAVA_NEXT: &str = concat!(
 );
 // From the fixtures' text_config, written by make_tiny.py.
 const TEXT_LAYERS: usize = 2;
+// Optional tensors the text constructors probe for (GGUF-converted Llama 3 RoPE frequencies); real LLaVA has none.
+const ABSENT: &[&str] = &["language_model.model.rope_freqs.weight"];
 
 fn record(
     dir: &str,
@@ -27,7 +29,7 @@ fn record(
         serde_json::from_str(&std::fs::read_to_string(format!("{dir}/config.json"))?)?;
     let files = recording::fixture_files(dir)?;
     let files = files.iter().map(|path| path.as_path()).collect::<Vec<_>>();
-    recording::record_checkpoint_seeded_by_name(&files, TEXT_LAYERS, &[], |vb, metadata| {
+    recording::record_checkpoint_seeded_by_name(&files, TEXT_LAYERS, ABSENT, |vb, metadata| {
         build(&cfg, vb, metadata)
     })
 }

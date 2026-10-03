@@ -62,8 +62,10 @@ impl SimpleBackend for RecordingWeights {
             return Ok(t.clone());
         }
         let normal = Normal::new(0f32, WEIGHT_STD).map_err(candle_core::Error::wrap)?;
-        let mut named = StdRng::seed_from_u64(WEIGHT_SEED ^ fnv1a(name));
-        let rng = if self.3 { &mut named } else { rng };
+        let mut named = self
+            .3
+            .then(|| StdRng::seed_from_u64(WEIGHT_SEED ^ fnv1a(name)));
+        let rng = named.as_mut().unwrap_or(rng);
         let data = (0..s.elem_count())
             .map(|_| normal.sample(rng))
             .collect::<Vec<_>>();

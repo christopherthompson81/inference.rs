@@ -280,7 +280,8 @@ impl MultimodalInputsProcessor for LLaVAInputProcessor {
             .expect("Need a PreProcessorConfig config.");
         let config: &PreProcessorConfig = config.downcast_ref().expect("Downcast failed.");
 
-        let has_images = input_seqs.iter().any(|seq| seq.has_images());
+        // a prefix-cache hit leaves the images on the sequence, so decode steps must not splice them again
+        let has_images = is_prompt && input_seqs.iter().any(|seq| seq.has_images());
 
         let (pixel_values, num_img_tokens) = if has_images {
             let mut pixel_values_accum = Vec::new();
