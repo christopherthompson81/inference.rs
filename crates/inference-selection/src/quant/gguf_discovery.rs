@@ -505,7 +505,7 @@ struct QuantPreferences {
 // IQ2_M, IQ3_XS and IQ3_M are llama-quantize mixes of the IQ types listed beside them
 const SUPPORTED_IQ_QUANTS: &[&str] = &[
     "IQ1_S", "IQ1_M", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ2_M", "IQ3_XXS", "IQ3_XS", "IQ3_S", "IQ3_M",
-    "IQ4_NL", "IQ4_XS",
+    "IQ4_NL", "IQ4_XS", "IQ1_KT", "IQ2_KT", "IQ3_KT", "IQ4_KT",
 ];
 
 fn quant_preferences(requested: &str) -> Result<QuantPreferences> {

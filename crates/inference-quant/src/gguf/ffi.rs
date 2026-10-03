@@ -79,6 +79,12 @@ macro_rules! declare_mmvq_plain {
     )*};
 }
 
+macro_rules! declare_dequantize {
+    ($($fn_name:ident),* $(,)?) => {$(
+        pub fn $fn_name(vx: *const c_void, dst: *mut c_void, nrows: i64, ncols: i64, stream: *mut c_void);
+    )*};
+}
+
 macro_rules! declare_mmq {
     ($($fn_name:ident),* $(,)?) => {$(
         pub fn $fn_name(
@@ -1278,23 +1284,36 @@ unsafe extern "C" {
         launch_mmvq_gguf_iq1_s_f32_plain,
         launch_mmvq_gguf_iq1_m_f32_plain,
     );
-    pub fn launch_dequantize_iq1_m_bf16(
-        vx: *const c_void,
-        dst: *mut c_void,
-        nblocks: i64,
-        stream: *mut c_void,
+    declare_mmvq_plain!(
+        launch_mmvq_gguf_iq1_kt_bf16_plain,
+        launch_mmvq_gguf_iq1_kt_f16_plain,
+        launch_mmvq_gguf_iq1_kt_f32_plain,
+        launch_mmvq_gguf_iq2_kt_bf16_plain,
+        launch_mmvq_gguf_iq2_kt_f16_plain,
+        launch_mmvq_gguf_iq2_kt_f32_plain,
+        launch_mmvq_gguf_iq3_kt_bf16_plain,
+        launch_mmvq_gguf_iq3_kt_f16_plain,
+        launch_mmvq_gguf_iq3_kt_f32_plain,
+        launch_mmvq_gguf_iq4_kt_bf16_plain,
+        launch_mmvq_gguf_iq4_kt_f16_plain,
+        launch_mmvq_gguf_iq4_kt_f32_plain,
     );
-    pub fn launch_dequantize_iq1_m_f16(
-        vx: *const c_void,
-        dst: *mut c_void,
-        nblocks: i64,
-        stream: *mut c_void,
-    );
-    pub fn launch_dequantize_iq1_m_f32(
-        vx: *const c_void,
-        dst: *mut c_void,
-        nblocks: i64,
-        stream: *mut c_void,
+    declare_dequantize!(
+        launch_dequantize_iq1_m_bf16,
+        launch_dequantize_iq1_m_f16,
+        launch_dequantize_iq1_m_f32,
+        launch_dequantize_iq1_kt_bf16,
+        launch_dequantize_iq1_kt_f16,
+        launch_dequantize_iq1_kt_f32,
+        launch_dequantize_iq2_kt_bf16,
+        launch_dequantize_iq2_kt_f16,
+        launch_dequantize_iq2_kt_f32,
+        launch_dequantize_iq3_kt_bf16,
+        launch_dequantize_iq3_kt_f16,
+        launch_dequantize_iq3_kt_f32,
+        launch_dequantize_iq4_kt_bf16,
+        launch_dequantize_iq4_kt_f16,
+        launch_dequantize_iq4_kt_f32,
     );
     declare_mmq!(
         launch_mmq_gguf_iq4_nl,

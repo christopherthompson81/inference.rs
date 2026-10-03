@@ -261,3 +261,75 @@ Results:
 - Memory: each IQ1_M prefill matmul allocates its dense F16 weight for the call. It is freed after, and the
   memory planner does not reserve it. That is about 180 MB for a 5120x17408 projection.
 - Full CI: exit 0 (2403 + 2727 + 1 tests).
+
+## Run 8 - 2026-10-02 20:15
+
+Question: can the trellis types (IQ1_KT through IQ4_KT) load and run, matching ik_llama.cpp?
+
+Format, from ik_llama.cpp at `5f89bfc` (`ggml-common.h`, `ggml.c`, `iqk_quantize.cpp`, ggml-cuda):
+- Type ids: IQ2_KT 153, IQ3_KT 154, IQ4_KT 155, IQ1_KT 158.
+- 256-element blocks of 68, 100, 128 and 56 bytes. The blocks carry no scale: each row starts with an f32 row
+  scale (`row_meta_size = 4`).
+- IQ3_KT and IQ4_KT rows may also end in 32-element tail sub-blocks (`ggml_row_size`, padded to 4 bytes).
+- Values come from an integer trellis. A 12-16 bit index plus 4096 seeds a state that is multiplied by
+  0xCBAC1FED; each value is the sum of the state's four 6-bit bytes minus 126. Scales are IQ4_NL codebook nibbles
+  (IQ1/IQ2), plain nibbles (IQ3, which stores signs separately), or a 7-bit signed scale (IQ4).
+- Discrepancy: the CUDA and CPU-GEMM kernels scale IQ2_KT by 1.05, but the reference `dequantize_row_iq2_kt` does
+  not. IQ3_KT's 1.01 appears in all of them. We follow the kernels, since that is what inference computes.
+
+Change:
+- Row-unit sizing: a trellis tensor's unit is the whole row (cols, row bytes). Slicing and concatenating along rows
+  works; splitting a row is refused.
+- A CPU dequantizer ported from ik's CUDA dequant kernels.
+- CUDA:
+  - mmvq: a new translation unit, `mmvq_kt.cu`, porting `iqk_mul_mat_vec_q_kernel` and the four KT vec_dots,
+    with tails.
+  - Prefill: dequantize to F16 plus a dense matmul, the IQ1_M path. ik has KT mmq tiles; we don't port them yet.
+
+Checks:
+- Goldens (`tests/fixtures/gguf_kt/make_goldens.py`): it calls ik's `dequantize_row_iq*_kt` through its
+  `libggml.so` via ctypes, with IQ2_KT's row scale pre-multiplied by 1.05. Ours matches to the bit for all four
+  types, including a tail on IQ3_KT and IQ4_KT.
+- GPU dequant matches the CPU within one rounding step. mmvq and the dense prefill reach cosine > 0.999 against the
+  dequantized weight, including tail rows.
+
+Real files:
+- Built ik_llama.cpp with CUDA (sm_86) in the scratchpad.
+- ik's `llama-quantize` could not read mainline's GGUF-format imatrix ("failed reading number of values for entry
+  1"). Regenerated it with ik's `llama-imatrix` on the same calibration text.
+- ik's default KT mixes put some tensors in `IQ3_K` / `IQ4_K` / `IQ5_K` / `Q6_K`; we don't support the `IQ*_K`
+  types yet. Requantized with `--pure --token-embedding-type q8_0`.
+
+Perplexity on this repo's README, against ik's `llama-perplexity -c 512 --chunks 1 -ngl 99`:
+
+| Type | Ours | ik_llama.cpp |
+|---|---|---|
+| IQ1_KT | 160.29 | 160.40 |
+| IQ2_KT | 33.280 | 33.388 |
+| IQ3_KT | 11.545 | 11.643 |
+| IQ4_KT | 9.7366 | 9.7347 |
+
+All within 0.85%.
+- `every_trellis_gguf_matches_ik_llama_cpp_perplexity` reads `INFERENCE_TEST_KT_GGUF_DIR` and
+  `INFERENCE_TEST_IK_LLAMA_PERPLEXITY`.
+- ik prints its estimate to stdout in a different form, and the parser takes both.
+
+Also fixed: `gguf-support.md` still said IQ types were unsupported, which has been wrong since #238.
+
+Not done:
+- KT mmq tiles.
+- The `IQ*_K` family, which ik's default KT mixes need.
+- KT MoE expert stacks.
+- Metal.
+
+Run 8 review follow-ups (20:50):
+- `shard_alignment` returned 256 for trellis types. It now returns an alignment no rank split meets, so the MoE
+  planner replicates rather than failing mid-load. Concatenating trellis rows end to end is refused explicitly.
+- Goldens now hold two rows each, plus 480-column IQ3_KT / IQ4_KT rows (seven tails, both IQ3_KT scale nibbles).
+  They still match ik to the bit.
+- GPU tests use an odd row count and batch 3, and cover 480-column tails.
+- New weight-source unit test: trellis tensors slice and concatenate by whole rows and refuse column splits.
+- Not changed: our CUDA mmvq applies 1.05/1.01 as `scale * ls * f` like ik's CUDA, while the CPU port folds the
+  factor into the row scale like ik's reference. They differ only in the last bit.
+- First full CI run failed clippy (`chunks_exact_to_as_chunks` in `kt_dequant.rs`); fixed with `as_chunks_mut`.
+- Full CI: exit 0 (2406 + 2730 + 1 tests). The parity test now runs llama-perplexity in a temp dir, because ik's build writes llama.log into its working directory.

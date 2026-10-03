@@ -53,22 +53,39 @@ async fn iq4_xs_greedy_continuation_matches_llama_cpp() -> anyhow::Result<()> {
     Ok(())
 }
 
-// A directory of IQ GGUFs and llama.cpp's `llama-perplexity`: each file's perplexity must match llama.cpp's.
-const IQ_DIR_ENV: &str = "INFERENCE_TEST_IQ_GGUF_DIR";
-const LLAMA_PERPLEXITY_ENV: &str = "INFERENCE_TEST_LLAMA_PERPLEXITY";
-// Any text past one window works; both sides read the same file.
+// A directory of GGUFs (one per type, named `*-<TYPE>.gguf` as llama-quantize suggests) and the matching
+// `llama-perplexity`: each file's perplexity must match the reference implementation's.
+struct ParitySuite {
+    dir_env: &'static str,
+    perplexity_env: &'static str,
+    types: &'static [&'static str],
+}
+
+const IQ_SUITE: ParitySuite = ParitySuite {
+    dir_env: "INFERENCE_TEST_IQ_GGUF_DIR",
+    perplexity_env: "INFERENCE_TEST_LLAMA_PERPLEXITY",
+    types: &[
+        "IQ1_S", "IQ1_M", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ3_XXS", "IQ3_S",
+    ],
+};
+// ik_llama.cpp's trellis types, checked against its own llama-perplexity
+const KT_SUITE: ParitySuite = ParitySuite {
+    dir_env: "INFERENCE_TEST_KT_GGUF_DIR",
+    perplexity_env: "INFERENCE_TEST_IK_LLAMA_PERPLEXITY",
+    types: &["IQ1_KT", "IQ2_KT", "IQ3_KT", "IQ4_KT"],
+};
+// Any text past two windows works; both sides read the same file.
 const PERPLEXITY_TEXT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../README.md");
 // llama-perplexity's `-c 512 --chunks 1`: one 512-token window scored on its second half
 const PERPLEXITY_WINDOW: usize = 512;
 // Our kernels match the dequantized weights; what drifts is rounding elsewhere, about 1.2% on IQ1_S.
-// One file per type, named `*-<TYPE>.gguf` as llama-quantize suggests
-const IQ_TYPES: &[&str] = &[
-    "IQ1_S", "IQ1_M", "IQ2_XXS", "IQ2_XS", "IQ2_S", "IQ3_XXS", "IQ3_S",
-];
 const PERPLEXITY_TOLERANCE: f64 = 0.02;
 
 fn llama_cpp_perplexity(llama_perplexity: &str, file: &Path) -> anyhow::Result<f64> {
+    // ik's build writes llama.log into its working directory
+    let scratch = tempfile::tempdir()?;
     let output = std::process::Command::new(llama_perplexity)
+        .current_dir(scratch.path())
         .arg("-m")
         .arg(file)
         .args([
@@ -87,11 +104,13 @@ fn llama_cpp_perplexity(llama_perplexity: &str, file: &Path) -> anyhow::Result<f
         "llama-perplexity failed on {}",
         file.display()
     );
-    let log = String::from_utf8_lossy(&output.stderr);
+    // mainline logs `Final estimate: PPL = x` to stderr, ik `... PPL over 1 chunks for n_ctx=512 = x` to stdout
+    let log = String::from_utf8_lossy(&output.stderr) + String::from_utf8_lossy(&output.stdout);
     let value = log
-        .split("Final estimate: PPL = ")
-        .nth(1)
-        .and_then(|rest| rest.split_whitespace().next())
+        .lines()
+        .find_map(|line| line.split_once("Final estimate: PPL").map(|(_, rest)| rest))
+        .and_then(|line| line.rsplit_once(" = "))
+        .and_then(|(_, rest)| rest.split_whitespace().next())
         .ok_or_else(|| anyhow::anyhow!("no perplexity in llama-perplexity's output"))?;
     Ok(value.parse()?)
 }
@@ -130,21 +149,31 @@ async fn perplexity(model: &Model, text: &str) -> anyhow::Result<f64> {
 
 #[tokio::test]
 async fn every_iq_gguf_matches_llama_cpp_perplexity() -> anyhow::Result<()> {
+    matches_reference_perplexity(&IQ_SUITE).await
+}
+
+#[tokio::test]
+async fn every_trellis_gguf_matches_ik_llama_cpp_perplexity() -> anyhow::Result<()> {
+    matches_reference_perplexity(&KT_SUITE).await
+}
+
+async fn matches_reference_perplexity(suite: &ParitySuite) -> anyhow::Result<()> {
     let (Some(dir), Some(llama_perplexity)) = (
-        std::env::var(IQ_DIR_ENV)
+        std::env::var(suite.dir_env)
             .ok()
             .filter(|d| Path::new(d).is_dir()),
-        std::env::var(LLAMA_PERPLEXITY_ENV)
+        std::env::var(suite.perplexity_env)
             .ok()
             .filter(|f| Path::new(f).is_file()),
     ) else {
         eprintln!(
-            "SKIP: {IQ_DIR_ENV} and {LLAMA_PERPLEXITY_ENV} must name a GGUF directory and llama-perplexity"
+            "SKIP: {} and {} must name a GGUF directory and llama-perplexity",
+            suite.dir_env, suite.perplexity_env
         );
         return Ok(());
     };
     if !ON_CUDA {
-        eprintln!("SKIP: IQ kernels need a CUDA build");
+        eprintln!("SKIP: these kernels need a CUDA build");
         return Ok(());
     }
     let text = std::fs::read_to_string(PERPLEXITY_TEXT)?;
@@ -153,7 +182,8 @@ async fn every_iq_gguf_matches_llama_cpp_perplexity() -> anyhow::Result<()> {
         .collect::<std::io::Result<Vec<_>>>()?;
     files.retain(|path| path.extension().is_some_and(|ext| ext == "gguf"));
     files.sort();
-    let missing: Vec<_> = IQ_TYPES
+    let missing: Vec<_> = suite
+        .types
         .iter()
         .filter(|ty| {
             !files.iter().any(|f| {
@@ -169,12 +199,12 @@ async fn every_iq_gguf_matches_llama_cpp_perplexity() -> anyhow::Result<()> {
         let actual = perplexity(&build(file).await?, &text).await?;
         let drift = (actual / expected - 1.0).abs();
         eprintln!(
-            "{}: ours {actual:.4}, llama.cpp {expected:.4}",
+            "{}: ours {actual:.4}, reference {expected:.4}",
             file.display()
         );
         if drift > PERPLEXITY_TOLERANCE {
             mismatches.push(format!(
-                "{}: ours {actual:.4}, llama.cpp {expected:.4}",
+                "{}: ours {actual:.4}, reference {expected:.4}",
                 file.display()
             ));
         }

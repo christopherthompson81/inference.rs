@@ -48,13 +48,13 @@ impl RawGgufTensor {
         let &[rows, cols] = dims else {
             candle_core::bail!("{ty:?} weights must be rank 2, got {dims:?}");
         };
-        if !cols.is_multiple_of(ty.block_size()) {
+        let Some(row_bytes) = ty.row_bytes(cols) else {
             candle_core::bail!(
                 "{ty:?} rows of {cols} elements are not whole {}-element blocks",
                 ty.block_size()
             );
-        }
-        let expected = rows * cols / ty.block_size() * ty.type_size();
+        };
+        let expected = rows * row_bytes;
         if bytes.len() != expected {
             candle_core::bail!(
                 "{ty:?} [{rows}, {cols}] takes {expected} bytes, got {}",
@@ -126,7 +126,7 @@ impl RawGgufTensor {
 
     /// The weight as an F32 tensor on `device`.
     pub fn dequantize(&self, device: &Device) -> Result<Tensor> {
-        let values = dequantize_blocks(self.ty, &self.bytes()?)?;
+        let values = dequantize_rows(self.ty, self.shape.dims2()?.1, &self.bytes()?)?;
         Tensor::from_vec(values, self.shape.clone(), &Device::Cpu)?.to_device(device)
     }
 }
@@ -161,8 +161,22 @@ impl super::kernel::KernelWeight for RawGgufTensor {
     }
 }
 
-/// ggml's reference dequantization (`dequantize_row_*` in ggml-quants.c) of whole blocks.
-pub fn dequantize_blocks(ty: GgufType, bytes: &[u8]) -> Result<Vec<f32>> {
+/// ggml's reference dequantization (`dequantize_row_*` in ggml-quants.c, or ik_llama.cpp's) of rows of `cols`.
+pub fn dequantize_rows(ty: GgufType, cols: usize, bytes: &[u8]) -> Result<Vec<f32>> {
+    if ty.is_trellis() {
+        let (_, row_bytes) = ty.row_unit(cols)?;
+        if !bytes.len().is_multiple_of(row_bytes) {
+            candle_core::bail!("{ty:?} data of {} bytes is not whole rows", bytes.len());
+        }
+        let mut out = vec![0f32; bytes.len() / row_bytes * cols];
+        for (row, values) in bytes
+            .chunks_exact(row_bytes)
+            .zip(out.chunks_exact_mut(cols))
+        {
+            super::kt_dequant::dequantize_row(ty, row, values);
+        }
+        return Ok(out);
+    }
     let (block, size) = (ty.block_size(), ty.type_size());
     if !bytes.len().is_multiple_of(size) {
         candle_core::bail!("{ty:?} data of {} bytes is not whole blocks", bytes.len());
@@ -257,7 +271,7 @@ impl GgufRawMatMul {
             _ if super::fast_mmq::supports(super::kernel::KernelWeight::gguf_type(&self.w)) => {
                 super::fast_mmq::plain(&self.w, a)?
             }
-            // ggml has no IQ1_M mmq tile; like ggml, prefill dequantizes to F16 (not BF16) for a dense matmul
+            // IQ1_M and trellis types have no mmq tile here; like ggml, prefill dequantizes to F16 for a dense matmul
             _ => {
                 let compute = if a.dtype() == DType::F32 {
                     DType::F32
@@ -352,16 +366,41 @@ mod tests {
 
     // Blocks and expected values from gguf-py's IQ dequantizers (tests/fixtures/gguf_iq/make_goldens.py).
     const GOLDENS: &str = include_str!("../../tests/fixtures/gguf_iq/goldens.json");
+    // Trellis rows and values from ik_llama.cpp's reference dequantizers (tests/fixtures/gguf_kt/make_goldens.py).
+    const KT_GOLDENS: &str = include_str!("../../tests/fixtures/gguf_kt/goldens.json");
 
     #[derive(serde::Deserialize)]
     struct Golden {
         ty: String,
+        // Trellis goldens are one row of this many elements
+        #[serde(default)]
+        cols: Option<usize>,
         bytes: Vec<u8>,
         values: Vec<f32>,
     }
 
     #[cfg(feature = "cuda")]
     const IQ1_M_SCALE_WORDS: usize = 48;
+    // 480 columns end IQ3_KT / IQ4_KT rows in seven 32-element tail sub-blocks, reaching both scale nibbles
+    #[cfg(feature = "cuda")]
+    const KT_TAIL_TYPES: [GgufType; 2] = [GgufType::Iq3Kt, GgufType::Iq4Kt];
+    #[cfg(feature = "cuda")]
+    const KT_TAIL_COLS: usize = 480;
+
+    // Trellis rows: a small finite f32 row scale, then arbitrary block bytes.
+    #[cfg(feature = "cuda")]
+    fn random_rows(ty: GgufType, rows: usize, cols: usize, seed: u64) -> Vec<u8> {
+        if !ty.is_trellis() {
+            return random_blocks(ty, rows * cols / ty.block_size(), seed);
+        }
+        let row_bytes = ty.row_bytes(cols).expect("valid trellis row");
+        let mut bytes = random_blocks(GgufType::Q8_0, (rows * row_bytes).div_ceil(34), seed);
+        bytes.truncate(rows * row_bytes);
+        for (i, row) in bytes.chunks_exact_mut(row_bytes).enumerate() {
+            row[..4].copy_from_slice(&(0.0005 + 0.0002 * (i % 5) as f32).to_le_bytes());
+        }
+        bytes
+    }
 
     // Deterministic blocks with a small finite f16 scale; every other byte is arbitrary scale bits and indices.
     #[cfg(feature = "cuda")]
@@ -409,7 +448,8 @@ mod tests {
     #[cfg(feature = "cuda")]
     #[test]
     fn cuda_kernels_match_the_dequantized_weight() -> Result<()> {
-        const ROWS: usize = 64;
+        // An odd row count leaves the last mmvq row pair half empty
+        const ROWS: usize = 63;
         // 288 columns leave IQ4_NL rows short of a whole mmq K tile, so the tail reads the padding
         const NL_COLS: usize = 288;
         const COLS: usize = 512;
@@ -421,13 +461,14 @@ mod tests {
             .into_iter()
             .map(|ty| (ty, COLS))
             .chain([(GgufType::Iq4Nl, NL_COLS)])
+            .chain(KT_TAIL_TYPES.map(|ty| (ty, KT_TAIL_COLS)))
         {
-            let bytes = random_blocks(ty, ROWS * cols / ty.block_size(), 7);
+            let bytes = random_rows(ty, ROWS, cols, 7);
             let cpu = RawGgufTensor::new(ty, &[ROWS, cols], bytes.clone(), &Device::Cpu)?;
             let gpu =
                 GgufRawMatMul::new(RawGgufTensor::new(ty, &[ROWS, cols], bytes, &cuda)?, None);
             let weight = cpu.dequantize(&Device::Cpu)?;
-            for batch in [1, 8, 33] {
+            for batch in [1, 3, 8, 33] {
                 let xs = Tensor::randn(0f32, 1f32, (batch, cols), &Device::Cpu)?;
                 let expected = xs.matmul(&weight.t()?)?;
                 for dtype in [DType::F32, DType::BF16, DType::F16] {
@@ -452,29 +493,41 @@ mod tests {
             eprintln!("SKIP: no CUDA device");
             return Ok(());
         };
-        let ty = GgufType::Iq1M;
-        let bytes = random_blocks(ty, ROWS * COLS / ty.block_size(), 11);
-        let expected = RawGgufTensor::new(ty, &[ROWS, COLS], bytes.clone(), &Device::Cpu)?
-            .dequantize(&Device::Cpu)?;
-        let gpu = RawGgufTensor::new(ty, &[ROWS, COLS], bytes, &cuda)?;
-        for dtype in [DType::F32, DType::F16, DType::BF16] {
-            let actual = super::super::fast_mmvq::dequantize(&gpu, dtype)?
-                .to_device(&Device::Cpu)?
-                .to_dtype(DType::F32)?;
-            let rounded = expected.to_dtype(dtype)?.to_dtype(DType::F32)?;
-            let diff = (actual - rounded)?.abs()?.max_all()?.to_scalar::<f32>()?;
-            assert!(
-                diff < 1e-5,
-                "IQ1_M CUDA dequantization to {dtype:?} differs by {diff}"
-            );
+        let cases = [GgufType::Iq1M, GgufType::Iq1Kt, GgufType::Iq2Kt]
+            .into_iter()
+            .chain(KT_TAIL_TYPES)
+            .map(|ty| (ty, COLS))
+            .chain(KT_TAIL_TYPES.map(|ty| (ty, KT_TAIL_COLS)));
+        for (ty, cols) in cases {
+            let bytes = random_rows(ty, ROWS, cols, 11);
+            let expected = RawGgufTensor::new(ty, &[ROWS, cols], bytes.clone(), &Device::Cpu)?
+                .dequantize(&Device::Cpu)?;
+            let peak = expected.abs()?.max_all()?.to_scalar::<f32>()?;
+            let gpu = RawGgufTensor::new(ty, &[ROWS, cols], bytes, &cuda)?;
+            // One rounding step of the target dtype, relative to the largest value
+            for (dtype, tolerance) in [(DType::F32, 1e-6), (DType::F16, 1e-3), (DType::BF16, 8e-3)]
+            {
+                let actual = super::super::fast_mmvq::dequantize(&gpu, dtype)?
+                    .to_device(&Device::Cpu)?
+                    .to_dtype(DType::F32)?;
+                let rounded = expected.to_dtype(dtype)?.to_dtype(DType::F32)?;
+                let diff = (actual - rounded)?.abs()?.max_all()?.to_scalar::<f32>()?;
+                assert!(
+                    diff <= tolerance * peak,
+                    "{ty:?} [{ROWS}, {cols}] CUDA dequantization to {dtype:?} differs by {diff} (peak {peak})"
+                );
+            }
         }
         Ok(())
     }
 
     #[test]
-    fn dequantization_matches_gguf_py() -> Result<()> {
-        let goldens: Vec<Golden> =
+    fn dequantization_matches_the_references() -> Result<()> {
+        let mut goldens: Vec<Golden> =
             serde_json::from_str(GOLDENS).map_err(candle_core::Error::wrap)?;
+        goldens.extend(
+            serde_json::from_str::<Vec<Golden>>(KT_GOLDENS).map_err(candle_core::Error::wrap)?,
+        );
         assert!(!goldens.is_empty());
         for golden in goldens {
             let ty = GgufType::RAW_BLOCKS
@@ -483,7 +536,8 @@ mod tests {
                     format!("{ty:?}").to_uppercase().replace('_', "") == golden.ty.replace('_', "")
                 })
                 .unwrap_or_else(|| panic!("unexpected golden type {}", golden.ty));
-            let values = dequantize_blocks(ty, &golden.bytes)?;
+            let cols = golden.cols.unwrap_or(golden.values.len());
+            let values = dequantize_rows(ty, cols, &golden.bytes)?;
             assert_eq!(values, golden.values, "{ty:?}");
         }
         Ok(())

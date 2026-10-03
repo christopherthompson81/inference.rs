@@ -11,6 +11,7 @@ mod ffi;
 mod iq_dequant;
 mod iq_tables;
 pub mod kernel;
+mod kt_dequant;
 #[cfg(all(feature = "cuda", has_marlin_kernels))]
 mod packed_affine;
 pub mod raw;
