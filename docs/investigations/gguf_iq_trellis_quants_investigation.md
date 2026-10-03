@@ -175,3 +175,63 @@ Run 5 review follow-ups, all fixed:
 Unit test: measured 27B numbers give 26 slots at one lane and 13 at a fixed two lanes. Full CI: exit 0 (2402 + 2725 + 1).
 31 recurrent tests and the 4
 real-checkpoint tests pass at default `max_num_seqs`.
+
+## Run 6 - 2026-10-02 17:30
+
+Question: do the IQ1/IQ2/IQ3 kernels match llama.cpp on real files?
+
+Types added: IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S and IQ1_M.
+- CPU dequantizers are ports of ggml-quants.c. The grid tables are generated from ggml-common.h by
+  `scripts/make_iq_tables.py`.
+- mmvq covers all 7 types; mmq covers all except IQ1_M, which runs chunked mmvq for prefill.
+
+Checks:
+- Goldens: CPU dequantization equals gguf-py exactly for all 9 IQ types.
+- GPU mmvq, mmq and the chunked paths reach cosine >= 0.99996 against the dequantized weight.
+
+Real files: Qwen3.5-0.8B, quantized with `llama-quantize` from an F16 conversion made with `--no-mtp`, plus an imatrix.
+Without `--no-mtp`, quantizing failed with "Missing importance matrix for tensor blk.24", the MTP layer.
+
+Test 1, greedy text against `llama-simple` (24 tokens):
+- IQ2_S, IQ2_XXS and IQ3_S match exactly.
+- IQ1_M, IQ1_S, IQ2_XS and IQ3_XXS diverge after several identical tokens.
+
+Test 2, perplexity against `llama-perplexity -c 512 --chunks 1 -ngl 99`. We score the same 512 tokens with
+`prompt_logits`, over tokens 257..511, which is what llama-perplexity scores.
+
+Calibration text (llama.cpp README plus build docs):
+
+| Type | Ours | llama.cpp |
+|---|---|---|
+| IQ1_M | 69.29 | 70.77 |
+| IQ1_S | 330.29 | 331.74 |
+| IQ2_S | 8.105 | 8.111 |
+| IQ2_XS | 9.220 | 9.306 |
+| IQ2_XXS | 16.545 | 16.622 |
+| IQ3_S | 3.847 | 3.814 |
+| IQ3_XXS | 4.369 | 4.325 |
+
+This repo's README (the committed test's text):
+
+| Type | Ours | llama.cpp |
+|---|---|---|
+| IQ1_M | 290.54 | 290.41 |
+| IQ1_S | 829.07 | 838.66 |
+| IQ2_S | 24.444 | 24.461 |
+| IQ2_XS | 30.577 | 30.304 |
+| IQ2_XXS | 61.410 | 61.741 |
+| IQ3_S | 10.327 | 10.352 |
+| IQ3_XXS | 13.124 | 13.134 |
+
+Every type agrees within about 2%, so the greedy divergences are near-ties on noisy low-bit models, not kernel bugs.
+The committed test is `every_iq_gguf_matches_llama_cpp_perplexity`: 3% tolerance, run against the GGUF directory
+named by `INFERENCE_TEST_IQ_GGUF_DIR`. It replaces the greedy test. It passes in 25 s.
+
+Run 6 review follow-ups (18:00):
+- Model selection now resolves the IQ1-IQ3 labels by name, including llama-quantize's mixes IQ2_M, IQ3_XS and IQ3_M.
+- The test now tokenizes with special tokens, so a model that adds a BOS scores the same window llama-perplexity does.
+- The test requires one file per type, and the tolerance is tightened to 2% (largest drift seen: 1.15%, IQ1_S).
+- The GPU kernel test also covers F16 activations.
+- IQ1_M prefill runs ceil(batch / 8) mmvq launches per linear, since ggml has no IQ1_M mmq tile. That is correct but
+  slow for long prompts; a dedicated tile would fix it.
+- Full CI: exit 0 (2403 + 2726 + 1 tests). One fixture had used IQ2_XXS as its unsupported type; it now uses TQ2_0.

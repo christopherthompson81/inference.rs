@@ -50,6 +50,13 @@ pub fn supports(dtype: impl Into<GgufType>) -> bool {
             | GgufType::Q6K
             | GgufType::Iq4Nl
             | GgufType::Iq4Xs
+            | GgufType::Iq2Xxs
+            | GgufType::Iq2Xs
+            | GgufType::Iq2S
+            | GgufType::Iq3Xxs
+            | GgufType::Iq3S
+            | GgufType::Iq1S
+            | GgufType::Iq1M
     )
 }
 
@@ -174,6 +181,13 @@ fn plain_launcher_bf16(dtype: GgufType) -> Option<PlainLauncher> {
         GgufType::Q6K => ffi::launch_mmvq_gguf_q6_k_bf16_plain,
         GgufType::Iq4Nl => ffi::launch_mmvq_gguf_iq4_nl_bf16_plain,
         GgufType::Iq4Xs => ffi::launch_mmvq_gguf_iq4_xs_bf16_plain,
+        GgufType::Iq2Xxs => ffi::launch_mmvq_gguf_iq2_xxs_bf16_plain,
+        GgufType::Iq2Xs => ffi::launch_mmvq_gguf_iq2_xs_bf16_plain,
+        GgufType::Iq2S => ffi::launch_mmvq_gguf_iq2_s_bf16_plain,
+        GgufType::Iq3Xxs => ffi::launch_mmvq_gguf_iq3_xxs_bf16_plain,
+        GgufType::Iq3S => ffi::launch_mmvq_gguf_iq3_s_bf16_plain,
+        GgufType::Iq1S => ffi::launch_mmvq_gguf_iq1_s_bf16_plain,
+        GgufType::Iq1M => ffi::launch_mmvq_gguf_iq1_m_bf16_plain,
         _ => return None,
     };
     Some(f)
@@ -193,6 +207,13 @@ fn plain_launcher_f16(dtype: GgufType) -> Option<PlainLauncher> {
         GgufType::Q6K => ffi::launch_mmvq_gguf_q6_k_f16_plain,
         GgufType::Iq4Nl => ffi::launch_mmvq_gguf_iq4_nl_f16_plain,
         GgufType::Iq4Xs => ffi::launch_mmvq_gguf_iq4_xs_f16_plain,
+        GgufType::Iq2Xxs => ffi::launch_mmvq_gguf_iq2_xxs_f16_plain,
+        GgufType::Iq2Xs => ffi::launch_mmvq_gguf_iq2_xs_f16_plain,
+        GgufType::Iq2S => ffi::launch_mmvq_gguf_iq2_s_f16_plain,
+        GgufType::Iq3Xxs => ffi::launch_mmvq_gguf_iq3_xxs_f16_plain,
+        GgufType::Iq3S => ffi::launch_mmvq_gguf_iq3_s_f16_plain,
+        GgufType::Iq1S => ffi::launch_mmvq_gguf_iq1_s_f16_plain,
+        GgufType::Iq1M => ffi::launch_mmvq_gguf_iq1_m_f16_plain,
         _ => return None,
     };
     Some(f)
@@ -212,6 +233,13 @@ fn plain_launcher_f32(dtype: GgufType) -> Option<PlainLauncher> {
         GgufType::Q6K => ffi::launch_mmvq_gguf_q6_k_f32_plain,
         GgufType::Iq4Nl => ffi::launch_mmvq_gguf_iq4_nl_f32_plain,
         GgufType::Iq4Xs => ffi::launch_mmvq_gguf_iq4_xs_f32_plain,
+        GgufType::Iq2Xxs => ffi::launch_mmvq_gguf_iq2_xxs_f32_plain,
+        GgufType::Iq2Xs => ffi::launch_mmvq_gguf_iq2_xs_f32_plain,
+        GgufType::Iq2S => ffi::launch_mmvq_gguf_iq2_s_f32_plain,
+        GgufType::Iq3Xxs => ffi::launch_mmvq_gguf_iq3_xxs_f32_plain,
+        GgufType::Iq3S => ffi::launch_mmvq_gguf_iq3_s_f32_plain,
+        GgufType::Iq1S => ffi::launch_mmvq_gguf_iq1_s_f32_plain,
+        GgufType::Iq1M => ffi::launch_mmvq_gguf_iq1_m_f32_plain,
         _ => return None,
     };
     Some(f)

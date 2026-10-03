@@ -15,8 +15,7 @@ use crate::{
     slice_blocked_data,
 };
 
-const DIRECT_GGUF_DTYPES: &str =
-    "F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, Q2_K through Q8_K, IQ4_NL, and IQ4_XS";
+const DIRECT_GGUF_DTYPES: &str = "F32, F16, BF16, Q4_0, Q4_1, Q5_0, Q5_1, Q8_0, Q8_1, Q2_K through Q8_K, IQ1_S, IQ1_M, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ4_NL, and IQ4_XS";
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum GgufTensorBinding {
@@ -1476,7 +1475,7 @@ mod tests {
         bytes.extend_from_slice(&2u32.to_le_bytes());
         bytes.extend_from_slice(&256u64.to_le_bytes());
         bytes.extend_from_slice(&1u64.to_le_bytes());
-        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&35u32.to_le_bytes());
         bytes.extend_from_slice(&0u64.to_le_bytes());
         bytes.resize(align(bytes.len(), 32), 0);
         bytes.extend_from_slice(&[0; 66]);
@@ -2095,10 +2094,10 @@ mod tests {
             GgufTensorBinding::tensor("unsupported.weight"),
         );
         let error = GgufWeightSource::new(archive, &bindings, DType::F32)
-            .expect_err("IQ2_XXS must be rejected before model construction")
+            .expect_err("TQ2_0 must be rejected before model construction")
             .to_string();
         assert!(error.contains("unsupported.weight"));
-        assert!(error.contains("IQ2_XXS (16)"));
+        assert!(error.contains("TQ2_0 (35)"));
         assert!(error.contains("Q2_K through Q8_K"));
         Ok(())
     }

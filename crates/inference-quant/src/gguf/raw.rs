@@ -172,6 +172,13 @@ pub fn dequantize_blocks(ty: GgufType, bytes: &[u8]) -> Result<Vec<f32>> {
         match ty {
             GgufType::Iq4Nl => dequantize_iq4_nl(block_bytes, values),
             GgufType::Iq4Xs => dequantize_iq4_xs(block_bytes, values),
+            GgufType::Iq2Xxs => super::iq_dequant::iq2_xxs(block_bytes, values),
+            GgufType::Iq2Xs => super::iq_dequant::iq2_xs(block_bytes, values),
+            GgufType::Iq2S => super::iq_dequant::iq2_s(block_bytes, values),
+            GgufType::Iq3Xxs => super::iq_dequant::iq3_xxs(block_bytes, values),
+            GgufType::Iq3S => super::iq_dequant::iq3_s(block_bytes, values),
+            GgufType::Iq1S => super::iq_dequant::iq1_s(block_bytes, values),
+            GgufType::Iq1M => super::iq_dequant::iq1_m(block_bytes, values),
             other => candle_core::bail!("{other:?} is held by Candle, not as raw GGUF blocks"),
         }
     }
@@ -247,7 +254,23 @@ impl GgufRawMatMul {
             batch if batch <= super::fast_mmvq::MMVQ_MAX_BATCH => {
                 super::fast_mmvq::plain(&self.w, a)?
             }
-            _ => super::fast_mmq::plain(&self.w, a)?,
+            _ if super::fast_mmq::supports(super::kernel::KernelWeight::gguf_type(&self.w)) => {
+                super::fast_mmq::plain(&self.w, a)?
+            }
+            // ggml has no IQ1_M mmq tile; decode-sized mmvq chunks keep it on the GPU
+            batch => {
+                let rows = a.reshape((batch, a.dim(candle_core::D::Minus1)?))?;
+                let chunks = (0..batch)
+                    .step_by(super::fast_mmvq::MMVQ_MAX_BATCH)
+                    .map(|start| {
+                        let len = super::fast_mmvq::MMVQ_MAX_BATCH.min(batch - start);
+                        super::fast_mmvq::plain(&self.w, &rows.narrow(0, start, len)?)
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let mut dims = a.dims().to_vec();
+                *dims.last_mut().expect("rank checked by the kernels") = self.w.shape().dims2()?.0;
+                Tensor::cat(&chunks, 0)?.reshape(dims)?
+            }
         };
         Ok(Some(out))
     }
@@ -330,7 +353,7 @@ impl QuantizedSerde for GgufRawMatMul {
 mod tests {
     use super::*;
 
-    // Blocks and expected values from gguf-py's IQ4_NL / IQ4_XS dequantizers (tests/fixtures/gguf_iq/make_goldens.py).
+    // Blocks and expected values from gguf-py's IQ dequantizers (tests/fixtures/gguf_iq/make_goldens.py).
     const GOLDENS: &str = include_str!("../../tests/fixtures/gguf_iq/goldens.json");
 
     #[derive(serde::Deserialize)]
@@ -339,6 +362,9 @@ mod tests {
         bytes: Vec<u8>,
         values: Vec<f32>,
     }
+
+    #[cfg(feature = "cuda")]
+    const IQ1_M_SCALE_WORDS: usize = 48;
 
     // Deterministic blocks with a small finite f16 scale; every other byte is arbitrary scale bits and indices.
     #[cfg(feature = "cuda")]
@@ -353,8 +379,18 @@ mod tests {
         (0..blocks)
             .flat_map(|i| {
                 let mut block = (0..ty.type_size()).map(|_| next()).collect::<Vec<_>>();
-                let scale = half::f16::from_f32(0.002 + 0.001 * (i % 7) as f32);
-                block[..2].copy_from_slice(&scale.to_le_bytes());
+                let scale = half::f16::from_f32(0.002 + 0.001 * (i % 7) as f32).to_bits();
+                if ty == GgufType::Iq1M {
+                    // IQ1_M's f16 is the top nibble of each of the four u16 scale words
+                    for k in 0..4 {
+                        let at = IQ1_M_SCALE_WORDS + 2 * k;
+                        let word = u16::from_le_bytes([block[at], block[at + 1]]) & 0x0FFF
+                            | ((scale >> (4 * k)) & 0xF) << 12;
+                        block[at..at + 2].copy_from_slice(&word.to_le_bytes());
+                    }
+                } else {
+                    block[..2].copy_from_slice(&scale.to_le_bytes());
+                }
                 block
             })
             .collect()
@@ -397,7 +433,7 @@ mod tests {
             for batch in [1, 8, 33] {
                 let xs = Tensor::randn(0f32, 1f32, (batch, cols), &Device::Cpu)?;
                 let expected = xs.matmul(&weight.t()?)?;
-                for dtype in [DType::F32, DType::BF16] {
+                for dtype in [DType::F32, DType::BF16, DType::F16] {
                     let actual = gpu.forward(&xs.to_dtype(dtype)?.to_device(&cuda)?)?;
                     let similarity = cosine(&actual.to_device(&Device::Cpu)?, &expected)?;
                     assert!(
@@ -416,11 +452,12 @@ mod tests {
             serde_json::from_str(GOLDENS).map_err(candle_core::Error::wrap)?;
         assert!(!goldens.is_empty());
         for golden in goldens {
-            let ty = match golden.ty.as_str() {
-                "IQ4_NL" => GgufType::Iq4Nl,
-                "IQ4_XS" => GgufType::Iq4Xs,
-                other => panic!("unexpected golden type {other}"),
-            };
+            let ty = GgufType::RAW_BLOCKS
+                .into_iter()
+                .find(|ty| {
+                    format!("{ty:?}").to_uppercase().replace('_', "") == golden.ty.replace('_', "")
+                })
+                .unwrap_or_else(|| panic!("unexpected golden type {}", golden.ty));
             let values = dequantize_blocks(ty, &golden.bytes)?;
             assert_eq!(values, golden.values, "{ty:?}");
         }
