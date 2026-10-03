@@ -555,3 +555,43 @@ Parity: both ik suites pass, all within 1%. Most IQK files moved closer to ik:
 | IQ2_KT default mix | 24.462 | 24.432 |
 - Review follow-ups: the MoE grouped paths take a `QTensor` (Candle types only), so ik types cannot reach them, but they now use `row_stride` too so a future raw type cannot get block units. `int_from_table_4` is `static`.
 - Full CI: exit 0 (2408 + 2733 + 1 tests). The first rerun failed to compile: a local `row_stride` binding shadowed the helper, which is now `mmq_row_stride`.
+
+## Run 13 - 2026-10-03 06:30
+
+Question: where does the remaining gap to ik at 4096 prompt tokens come from? It shows on IQ4_XS too (14.9k vs 18.0k
+tok/s), so it is not a quant kernel.
+
+Setup: `nsys profile -t cuda,osrt`, then `nsys export --type sqlite` and a query of `CUPTI_ACTIVITY_KIND_KERNEL`.
+- Ours: `inference bench -f pure-IQ4_XS-q8emb.gguf --prompt-len 4096 --gen-len 0 --iterations 3`.
+- ik: `llama-bench -p 4096 -n 0 -r 3 -ngl 99`, same file.
+- Totals are over the whole run (warmup plus 3).
+
+Two traps along the way:
+- `local_ci.sh --sweep` deletes the dev CLI's shared kernel libraries, so rebuild the CLI after CI before profiling.
+- `nsys stats` reads a stale SQLite export unless given `--force-export=true`.
+
+Kernel time by category:
+
+| Category | Ours | ik |
+|---|---|---|
+| mmq (`mul_mat_q` + stream-k fixup) | 340.9 ms | 199.5 ms |
+| GDN recurrence | 245.6 ms | 252.2 ms |
+| copies and casts (`ucopy_bf16`, `cast_f32_bf16`, `cast_bf16_f32`) | 127.7 + 74.8 ms | 9.7 ms |
+| attention | 54.7 ms (`softmax_f32` 51.0) | 20.6 ms (`flash_attn_mma_ext_f16`) |
+| cuBLAS bf16 GEMM | 33.6 ms | 0 |
+| total | 921.9 ms | 551.0 ms |
+
+Findings:
+- GDN is not the gap: about equal time. We launch 3.1x more recurrence kernels for the same total.
+- mmq: about the same cost per call (ours 43.5 us vs ik 38.8 us on the `(82,1,1)` stream-k grid), but 1.55x as many
+  calls (5952 vs 3843). Both use 512-token prefill chunks (our `DEFAULT_MAX_PREFILL_CHUNK_TOKENS`, ik's ubatch), so
+  chunking is not the cause. More likely we run separately what ik keeps fused (QKV, gate/up), or we route some
+  projections differently. The bf16 cuBLAS GEMMs are projections ik runs through mmq.
+- Copies and casts are 22% of our kernel time (2% for ik). The large `ucopy_bf16` grids (6144, 7168, 8192, 12288,
+  14336, 16384 blocks) match activation widths in the GDN and MLP blocks, so they look like `contiguous()` after
+  splits or transposes, plus f32/bf16 round trips around the f32 recurrence.
+- Attention: chunked prefill uses matmul plus `softmax_f32` (198 calls, 51 ms) rather than flash attention for the 6
+  full-attention layers.
+
+Implication: the 4096-token gap is in the Qwen3.5 model path (copies, launch count, the prefill attention kernel),
+not in quantization. Each is its own optimization. Copies and casts are the biggest: about 200 ms of 922.
