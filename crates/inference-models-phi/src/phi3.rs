@@ -207,7 +207,7 @@ impl Attention {
 }
 
 #[derive(Clone)]
-struct Mlp {
+pub(crate) struct Mlp {
     gate_up_proj: Arc<dyn QuantMethod>,
     down_proj: Arc<dyn QuantMethod>,
     act_fn: Activation,
@@ -216,7 +216,7 @@ struct Mlp {
 }
 
 impl Mlp {
-    fn new(cfg: &Config, vb: ShardedVarBuilder) -> Result<Self> {
+    pub(crate) fn new(cfg: &Config, vb: ShardedVarBuilder) -> Result<Self> {
         let hidden_size = cfg.hidden_size;
         let i_size = cfg.intermediate_size;
 
@@ -290,15 +290,15 @@ impl MlpLayer for Mlp {
     }
 }
 
-struct DecoderLayer {
+pub(crate) struct DecoderLayer {
     self_attn: Attention,
-    mlp: Box<dyn MlpLayer>,
-    input_layernorm: RmsNorm,
-    post_attention_layernorm: RmsNorm,
+    pub(crate) mlp: Box<dyn MlpLayer>,
+    pub(crate) input_layernorm: RmsNorm,
+    pub(crate) post_attention_layernorm: RmsNorm,
 }
 
 impl DecoderLayer {
-    fn new(
+    pub(crate) fn new(
         rotary_emb: Arc<PhiRotaryEmbedding>,
         cfg: &Config,
         vb: ShardedVarBuilder,
@@ -332,7 +332,7 @@ impl DecoderLayer {
         })
     }
 
-    fn forward(
+    pub(crate) fn forward(
         &self,
         xs: &Tensor,
         attention_mask: &AttentionMask,

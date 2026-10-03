@@ -5,6 +5,7 @@ pub mod inputs_processor;
 // This implementation is based on:
 // https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/blob/main/modeling_phi3.py
 use crate::layers::masker::CausalMaskConfig;
+use crate::phi3::DecoderLayer;
 use candle_core::{
     D, DType, Device, IndexOp, Module, Result, Shape, Tensor, shape::ShapeWithOneHole,
 };
@@ -19,14 +20,11 @@ use std::{
 };
 
 use crate::{
-    amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, AnyMoeTrainableLayer, MlpLayer},
-    attention::{AttentionDispatch, AttentionMask, SdpaParams},
+    amoe::{AnyMoeBaseModelMixin, AnyMoeLoraTarget, MlpLayer},
+    attention::AttentionMask,
     device_map::{DeviceMappedMask, DeviceMapper},
-    kv_cache::{EitherCache, KvCache, NormalCache},
-    layers::{
-        self, Activation, CausalMasker, PhiRopeConfig, PhiRopeScalingConfig, PhiRotaryEmbedding,
-        RmsNorm,
-    },
+    kv_cache::{EitherCache, NormalCache},
+    layers::{self, Activation, CausalMasker, PhiRopeScalingConfig, PhiRotaryEmbedding, RmsNorm},
     model::{IsqModel, ModelForwardContext, MultimodalModel, NormalLoadingMetadata},
     paged_attention::{
         AttentionImplementation, ModelConfigMetadata, PagedAttention,
@@ -86,23 +84,34 @@ pub struct Config {
     pub tie_word_embeddings: bool,
 }
 
-impl From<Config> for PhiRopeConfig {
-    fn from(val: Config) -> Self {
-        PhiRopeConfig {
-            rope_scaling: val.rope_scaling,
-            scaling_attn_factor: None,
-            max_position_embeddings: val.max_position_embeddings,
-            original_max_position_embeddings: val.original_max_position_embeddings,
-            rope_theta: val.rope_theta,
-            head_dim: val.hidden_size / val.num_attention_heads,
-            partial_rotary_factor: None,
-        }
-    }
-}
-
 impl Config {
     pub fn head_dim(&self) -> usize {
         self.hidden_size / self.num_attention_heads
+    }
+
+    /// The Phi-3 text model config these layers are built from.
+    pub fn text_config(&self) -> crate::phi3::Config {
+        crate::phi3::Config {
+            vocab_size: self.vocab_size,
+            hidden_act: self.hidden_act,
+            hidden_size: self.hidden_size,
+            intermediate_size: self.intermediate_size,
+            num_hidden_layers: self.num_hidden_layers,
+            num_attention_heads: self.num_attention_heads,
+            num_key_value_heads: self.num_key_value_heads,
+            rms_norm_eps: self.rms_norm_eps,
+            rope_theta: self.rope_theta,
+            bos_token_id: self.bos_token_id,
+            eos_token_id: self.eos_token_id,
+            rope_scaling: self.rope_scaling.clone(),
+            rope_scaling_attn_factor: None,
+            max_position_embeddings: self.max_position_embeddings,
+            sliding_window: self.sliding_window,
+            original_max_position_embeddings: self.original_max_position_embeddings,
+            quantization_config: self.quantization_config.clone(),
+            tie_word_embeddings: self.tie_word_embeddings,
+            partial_rotary_factor: None,
+        }
     }
 }
 
@@ -158,282 +167,6 @@ impl ShapeWithOneHole for BigShapeWithOneHole {
         Ok((d1, d2, d3, d4, d5, d).into())
     }
 }
-
-// =================== BASE LAYERS ===================
-
-struct Attention {
-    qkv_proj: Arc<dyn QuantMethod>,
-    o_proj: Arc<dyn QuantMethod>,
-    num_heads: usize,
-    num_kv_heads: usize,
-    head_dim: usize,
-    rotary_emb: Arc<PhiRotaryEmbedding>,
-    paged_attn: Option<PagedAttention>,
-    sdpa_params: SdpaParams,
-}
-
-impl Attention {
-    fn new(
-        rotary_emb: Arc<PhiRotaryEmbedding>,
-        cfg: &Config,
-        vb: ShardedVarBuilder,
-        paged_attn: Option<PagedAttention>,
-    ) -> Result<Self> {
-        let num_heads = cfg.num_attention_heads;
-        let num_kv_heads = cfg.num_key_value_heads;
-        let head_dim = cfg.head_dim();
-        let op_size = num_heads * head_dim + 2 * num_kv_heads * head_dim;
-
-        // No TP here.
-        let qkv_proj = inference_quant::linear_no_bias(
-            cfg.hidden_size,
-            op_size,
-            &cfg.quantization_config,
-            vb.pp("qkv_proj"),
-        )?;
-
-        let o_proj = inference_quant::linear_no_bias(
-            num_heads * head_dim,
-            cfg.hidden_size,
-            &cfg.quantization_config,
-            vb.pp("o_proj"),
-        )?;
-
-        Ok(Self {
-            qkv_proj,
-            o_proj,
-            rotary_emb,
-            num_heads,
-            num_kv_heads,
-            head_dim,
-            paged_attn,
-            sdpa_params: SdpaParams {
-                n_kv_groups: num_heads / num_kv_heads,
-                softcap: None,
-                softmax_scale: 1.0 / (head_dim as f32).sqrt(),
-                sliding_window: cfg.sliding_window,
-                sinks: None,
-            },
-        })
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    fn forward(
-        &self,
-        xs: &Tensor,
-        attention_mask: &AttentionMask,
-        kv_cache: &mut KvCache,
-        ctx: &mut ModelForwardContext<'_>,
-        layer_idx: usize,
-    ) -> Result<Tensor> {
-        let (b_sz, q_len, _) = xs.dims3()?;
-
-        let qkv = self.qkv_proj.forward(xs)?;
-        let query_pos = self.num_heads * self.head_dim;
-        let q = qkv.narrow(D::Minus1, 0, query_pos)?;
-        let k = qkv.narrow(D::Minus1, query_pos, self.num_kv_heads * self.head_dim)?;
-        let v = qkv.narrow(
-            D::Minus1,
-            query_pos + self.num_kv_heads * self.head_dim,
-            self.num_kv_heads * self.head_dim,
-        )?;
-
-        let (q, k, v) = if q_len != 1 {
-            let q = q
-                .reshape((b_sz, q_len, self.num_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            let k = k
-                .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            let v = v
-                .reshape((b_sz, q_len, self.num_kv_heads, self.head_dim))?
-                .transpose(1, 2)?;
-            (q, k, v)
-        } else {
-            let q = q.reshape((b_sz, self.num_heads, q_len, self.head_dim))?;
-            let k = k.reshape((b_sz, self.num_kv_heads, q_len, self.head_dim))?;
-            let v = v.reshape((b_sz, self.num_kv_heads, q_len, self.head_dim))?;
-            (q, k, v)
-        };
-
-        let position_ids = ctx.position_ids_vec();
-        let positions = ctx
-            .text_positions(q.device(), q.dim(2)?)?
-            .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?;
-        let (q, k) = self.rotary_emb.forward(&q, &k, positions, &position_ids)?;
-
-        let metadata = ctx.paged_layer(layer_idx);
-        let flash_params = ctx.flash_params();
-        let mut attn_output = AttentionDispatch {
-            paged_attn: self.paged_attn.as_ref(),
-            paged_layer: metadata,
-            kv_cache,
-            sdpa_params: &self.sdpa_params,
-            flash_params,
-        }
-        .run(&q, &k.contiguous()?, &v.contiguous()?, attention_mask)?;
-
-        attn_output = if !matches!(attention_mask, AttentionMask::None) {
-            attn_output.transpose(1, 2)?.reshape((b_sz, q_len, ()))?
-        } else {
-            attn_output.reshape((b_sz, q_len, ()))?
-        };
-        let res = self.o_proj.forward(&attn_output)?;
-        Ok(res)
-    }
-}
-
-#[derive(Clone)]
-struct Mlp {
-    gate_up_proj: Arc<dyn QuantMethod>,
-    down_proj: Arc<dyn QuantMethod>,
-    act_fn: Activation,
-    i_size: usize,
-    params: Vec<usize>,
-}
-
-impl Mlp {
-    fn new(cfg: &Config, vb: ShardedVarBuilder) -> Result<Self> {
-        let hidden_size = cfg.hidden_size;
-        let i_size = cfg.intermediate_size;
-
-        // No TP here.
-        let gate_up_proj = inference_quant::linear_no_bias(
-            hidden_size,
-            2 * i_size,
-            &cfg.quantization_config,
-            vb.pp("gate_up_proj"),
-        )?;
-
-        let down_proj = inference_quant::linear_no_bias(
-            i_size,
-            hidden_size,
-            &cfg.quantization_config,
-            vb.pp("down_proj"),
-        )?;
-
-        Ok(Self {
-            gate_up_proj,
-            down_proj,
-            act_fn: cfg.hidden_act,
-            i_size,
-            params: vec![hidden_size, i_size],
-        })
-    }
-}
-
-impl AnyMoeTrainableLayer for Mlp {}
-
-impl MlpLayer for Mlp {
-    fn forward(&self, xs: &Tensor) -> Result<Tensor> {
-        let up_states = self.gate_up_proj.forward(xs)?;
-        let up_states = crate::ops::split_mul_and_act(&up_states, self.i_size, self.act_fn)?;
-        let res = self.down_proj.forward(&up_states)?;
-        Ok(res)
-    }
-    fn clone(&self) -> Box<dyn MlpLayer> {
-        Box::new(Clone::clone(self))
-    }
-    fn get_params(&self) -> &[usize] {
-        &self.params
-    }
-    fn hidden_act(&self) -> Activation {
-        self.act_fn
-    }
-    // gate_up, down
-    fn new_added_delta(&self, deltas: Vec<Option<Tensor>>) -> Result<Box<dyn MlpLayer>> {
-        let new_gate_up = if let Some(ref delta) = deltas[0] {
-            self.gate_up_proj.add_delta_w(delta)?
-        } else {
-            self.gate_up_proj.clone()
-        };
-        let new_down = if let Some(ref delta) = deltas[1] {
-            self.down_proj.add_delta_w(delta)?
-        } else {
-            self.down_proj.clone()
-        };
-
-        Ok(Box::new(Self {
-            gate_up_proj: new_gate_up,
-            down_proj: new_down,
-            act_fn: self.act_fn,
-            i_size: self.i_size,
-            params: self.params.clone(),
-        }))
-    }
-
-    fn dtype_device(&self) -> (DType, Device) {
-        self.gate_up_proj.dtype_and_device()
-    }
-}
-
-struct DecoderLayer {
-    self_attn: Attention,
-    mlp: Box<dyn MlpLayer>,
-    input_layernorm: RmsNorm,
-    post_attention_layernorm: RmsNorm,
-}
-
-impl DecoderLayer {
-    fn new(
-        rotary_emb: Arc<PhiRotaryEmbedding>,
-        cfg: &Config,
-        vb: ShardedVarBuilder,
-        mapper: &dyn DeviceMapper,
-        layer_idx: usize,
-        loading_isq: bool,
-        paged_attn: Option<PagedAttention>,
-    ) -> Result<Self> {
-        let self_attn = Attention::new(
-            rotary_emb,
-            cfg,
-            mapper.set_device(layer_idx, vb.pp("self_attn"), loading_isq),
-            paged_attn,
-        )?;
-        let mlp = Mlp::new(cfg, mapper.set_device(layer_idx, vb.pp("mlp"), loading_isq))?;
-        let input_layernorm = RmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("input_layernorm"), false),
-        )?;
-        let post_attention_layernorm = RmsNorm::new(
-            cfg.hidden_size,
-            cfg.rms_norm_eps,
-            mapper.set_device(layer_idx, vb.pp("post_attention_layernorm"), false),
-        )?;
-        Ok(Self {
-            self_attn,
-            mlp: Box::new(mlp),
-            input_layernorm,
-            post_attention_layernorm,
-        })
-    }
-
-    fn forward(
-        &self,
-        xs: &Tensor,
-        attention_mask: &AttentionMask,
-        kv_cache: &mut KvCache,
-        ctx: &mut ModelForwardContext<'_>,
-        layer_idx: usize,
-    ) -> Result<Tensor> {
-        let residual = xs;
-        let xs = self.input_layernorm.forward(xs)?;
-        let xs = self
-            .self_attn
-            .forward(&xs, attention_mask, kv_cache, ctx, layer_idx)?;
-        let xs = (xs + residual)?;
-        let residual = &xs;
-        let xs = self
-            .mlp
-            .forward(&xs.apply(&self.post_attention_layernorm)?)?;
-        residual + xs
-    }
-}
-
-// =================== ============= ===================
-
-// =================== VISION LAYERS ===================
 
 const MAX_INPUT_ID: f64 = 1e9;
 
@@ -1144,8 +877,6 @@ impl ImageEmbedding {
     }
 }
 
-// =================== ============= ===================
-
 pub struct Model {
     vision_embed_tokens: ImageEmbedding,
     embed_tokens: Arc<dyn QuantMethod>,
@@ -1191,11 +922,12 @@ impl Model {
             mapper.set_nm_device(vb_m.pp("vision_embed_tokens"), false),
         )?;
         let vb_l = vb_m.pp("layers");
+        let text_cfg = cfg.text_config();
         let ropes = crate::device_map::per_layer_device(
             &*mapper,
             cfg.num_hidden_layers,
             &normal_loading_metadata.real_device,
-            |device| PhiRotaryEmbedding::new(vb.dtype(), cfg.clone(), device),
+            |device| PhiRotaryEmbedding::new(vb.dtype(), text_cfg.clone(), device),
         )?;
         let layers = NiceProgressBar::<_, 'b'>(
             0..cfg.num_hidden_layers,
@@ -1218,7 +950,7 @@ impl Model {
             };
             DecoderLayer::new(
                 rotary_emb,
-                cfg,
+                &text_cfg,
                 vb_l.pp(layer_idx),
                 &*mapper,
                 layer_idx,
@@ -1448,8 +1180,8 @@ impl AnyMoeBaseModelMixin for Model {
         base: &dyn MlpLayer,
         vb: ShardedVarBuilder,
     ) -> Result<Box<dyn MlpLayer>> {
-        Ok(Box::new(Mlp::new(
-            &Config {
+        Ok(Box::new(crate::phi3::Mlp::new(
+            &crate::phi3::Config {
                 intermediate_size: base.get_params()[1],
                 hidden_size: base.get_params()[0],
                 ..Default::default()
