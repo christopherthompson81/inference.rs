@@ -5,6 +5,7 @@
 mod embedding_tiny;
 mod gguf_iq;
 mod llama_tiny;
+mod llava_tiny;
 mod paddleocr_vl;
 mod paddleocr_vl_tiny;
 mod qwen3_5_mtp;
