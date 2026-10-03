@@ -1278,6 +1278,24 @@ unsafe extern "C" {
         launch_mmvq_gguf_iq1_s_f32_plain,
         launch_mmvq_gguf_iq1_m_f32_plain,
     );
+    pub fn launch_dequantize_iq1_m_bf16(
+        vx: *const c_void,
+        dst: *mut c_void,
+        nblocks: i64,
+        stream: *mut c_void,
+    );
+    pub fn launch_dequantize_iq1_m_f16(
+        vx: *const c_void,
+        dst: *mut c_void,
+        nblocks: i64,
+        stream: *mut c_void,
+    );
+    pub fn launch_dequantize_iq1_m_f32(
+        vx: *const c_void,
+        dst: *mut c_void,
+        nblocks: i64,
+        stream: *mut c_void,
+    );
     declare_mmq!(
         launch_mmq_gguf_iq4_nl,
         launch_mmq_gguf_iq4_xs,

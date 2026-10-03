@@ -232,6 +232,32 @@ Run 6 review follow-ups (18:00):
 - The test now tokenizes with special tokens, so a model that adds a BOS scores the same window llama-perplexity does.
 - The test requires one file per type, and the tolerance is tightened to 2% (largest drift seen: 1.15%, IQ1_S).
 - The GPU kernel test also covers F16 activations.
-- IQ1_M prefill runs ceil(batch / 8) mmvq launches per linear, since ggml has no IQ1_M mmq tile. That is correct but
-  slow for long prompts; a dedicated tile would fix it.
+- IQ1_M prefill ran ceil(batch / 8) mmvq launches per linear, since ggml has no IQ1_M mmq tile. Run 7 replaces it.
 - Full CI: exit 0 (2403 + 2726 + 1 tests). One fixture had used IQ2_XXS as its unsupported type; it now uses TQ2_0.
+
+## Run 7 - 2026-10-02 19:10
+
+Question: how does llama.cpp run IQ1_M prefill, and does doing the same fix our slow fallback?
+
+Upstream master on GitHub (`bed0a856`, newer than the local checkout):
+- `ggml_cuda_should_use_mmq` in `mmq.cu` lists every IQ type except IQ1_M, and there is no `mmq-instance-iq1_m.cu`.
+- For prompt-sized batches, ggml dequantizes the weight to F16 (`convert.cu`) and runs a cuBLAS GEMM.
+
+Change: ported `dequantize_iq1_m` from `dequantize.cuh` (BF16, F16 and F32 outputs). IQ1_M batches above 8 now
+dequantize the weight on the GPU and run a dense matmul.
+
+Results:
+- CUDA dequantization matches the CPU port within 1e-5 at each output dtype (a new unit test).
+- Timing, a temporary microbenchmark not committed: 3584x1024 IQ1_M weight, 512 BF16 rows, 50 iterations after
+  warmup, on this machine's GPU:
+  - chunked mmvq: 1.227 ms
+  - dequantize plus matmul: 0.099 ms, about 12x faster
+- Perplexity:
+  - IQ1_M with a BF16 dense weight: 294.47 vs llama.cpp's 290.41 (1.4%). It was 290.54 with mmvq.
+  - Review pointed out that ggml dequantizes to F16, not BF16. With F16 weight and activations (F32 stays F32):
+    293.61 (1.1%).
+  - The remaining gap is unexplained; this path also keeps unquantized activations where mmvq used Q8_1.
+  - The other six types are unchanged.
+- Memory: each IQ1_M prefill matmul allocates its dense F16 weight for the call. It is freed after, and the
+  memory planner does not reserve it. That is about 180 MB for a 5120x17408 projection.
+- Full CI: exit 0 (2403 + 2727 + 1 tests).

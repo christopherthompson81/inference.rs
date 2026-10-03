@@ -257,19 +257,16 @@ impl GgufRawMatMul {
             _ if super::fast_mmq::supports(super::kernel::KernelWeight::gguf_type(&self.w)) => {
                 super::fast_mmq::plain(&self.w, a)?
             }
-            // ggml has no IQ1_M mmq tile; decode-sized mmvq chunks keep it on the GPU
-            batch => {
-                let rows = a.reshape((batch, a.dim(candle_core::D::Minus1)?))?;
-                let chunks = (0..batch)
-                    .step_by(super::fast_mmvq::MMVQ_MAX_BATCH)
-                    .map(|start| {
-                        let len = super::fast_mmvq::MMVQ_MAX_BATCH.min(batch - start);
-                        super::fast_mmvq::plain(&self.w, &rows.narrow(0, start, len)?)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let mut dims = a.dims().to_vec();
-                *dims.last_mut().expect("rank checked by the kernels") = self.w.shape().dims2()?.0;
-                Tensor::cat(&chunks, 0)?.reshape(dims)?
+            // ggml has no IQ1_M mmq tile; like ggml, prefill dequantizes to F16 (not BF16) for a dense matmul
+            _ => {
+                let compute = if a.dtype() == DType::F32 {
+                    DType::F32
+                } else {
+                    DType::F16
+                };
+                let w = super::fast_mmvq::dequantize(&self.w, compute)?;
+                candle_nn::Module::forward(&Linear::new(w, None), &a.to_dtype(compute)?)?
+                    .to_dtype(a.dtype())?
             }
         };
         Ok(Some(out))
@@ -408,7 +405,7 @@ mod tests {
         Ok(dot / norms)
     }
 
-    // mmvq serves batches up to 8 and mmq the rest; both quantize activations to Q8_1, hence a cosine bound.
+    // Batches up to 8 take mmvq, larger ones mmq or IQ1_M's dense matmul; Q8_1 activations make it a cosine bound.
     #[cfg(feature = "cuda")]
     #[test]
     fn cuda_kernels_match_the_dequantized_weight() -> Result<()> {
@@ -442,6 +439,34 @@ mod tests {
                     );
                 }
             }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn cuda_dequantization_matches_the_cpu() -> Result<()> {
+        const ROWS: usize = 16;
+        const COLS: usize = 512;
+        let Ok(cuda) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let ty = GgufType::Iq1M;
+        let bytes = random_blocks(ty, ROWS * COLS / ty.block_size(), 11);
+        let expected = RawGgufTensor::new(ty, &[ROWS, COLS], bytes.clone(), &Device::Cpu)?
+            .dequantize(&Device::Cpu)?;
+        let gpu = RawGgufTensor::new(ty, &[ROWS, COLS], bytes, &cuda)?;
+        for dtype in [DType::F32, DType::F16, DType::BF16] {
+            let actual = super::super::fast_mmvq::dequantize(&gpu, dtype)?
+                .to_device(&Device::Cpu)?
+                .to_dtype(DType::F32)?;
+            let rounded = expected.to_dtype(dtype)?.to_dtype(DType::F32)?;
+            let diff = (actual - rounded)?.abs()?.max_all()?.to_scalar::<f32>()?;
+            assert!(
+                diff < 1e-5,
+                "IQ1_M CUDA dequantization to {dtype:?} differs by {diff}"
+            );
         }
         Ok(())
     }

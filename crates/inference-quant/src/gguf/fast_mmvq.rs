@@ -977,3 +977,60 @@ pub fn fused_qkv(
         _ => unreachable!(),
     }
 }
+
+type DequantizeLauncher = unsafe extern "C" fn(
+    *const std::ffi::c_void,
+    *mut std::ffi::c_void,
+    i64,
+    *mut std::ffi::c_void,
+);
+
+fn dequantize_launcher(ty: GgufType, dtype: DType) -> Option<DequantizeLauncher> {
+    match (ty, dtype) {
+        (GgufType::Iq1M, DType::BF16) => Some(ffi::launch_dequantize_iq1_m_bf16),
+        (GgufType::Iq1M, DType::F16) => Some(ffi::launch_dequantize_iq1_m_f16),
+        (GgufType::Iq1M, DType::F32) => Some(ffi::launch_dequantize_iq1_m_f32),
+        _ => None,
+    }
+}
+
+/// The weight dequantized on its GPU, as ggml does for prefill on types without an mmq tile.
+pub fn dequantize<W: KernelWeight + ?Sized>(w: &W, dtype: DType) -> Result<Tensor> {
+    let ty = w.gguf_type();
+    let Some(launcher) = dequantize_launcher(ty, dtype) else {
+        candle_core::bail!("no CUDA dequantizer for {ty:?} to {dtype:?}");
+    };
+    let Device::Cuda(dev) = w.kernel_device() else {
+        candle_core::bail!("fast_mmvq: weight must live on CUDA");
+    };
+    let shape = w.kernel_shape().clone();
+    let elems = shape.elem_count();
+    let nblocks = (elems / ty.block_size()) as i64;
+    let stream = dev.cuda_stream();
+    let stream_ptr = stream.cu_stream() as *mut std::ffi::c_void;
+    let (weight_ptr, _weight_guard) = w.kernel_ptr(&stream)?;
+    let weight_ptr = weight_ptr as *const std::ffi::c_void;
+    macro_rules! run {
+        ($t:ty) => {{
+            let mut out = unsafe { dev.alloc::<$t>(elems)? };
+            {
+                let (out_ptr, _out_guard) = slice_ptr_mut_on_stream(&mut out, 0, &stream);
+                unsafe {
+                    launcher(
+                        weight_ptr,
+                        out_ptr as *mut std::ffi::c_void,
+                        nblocks,
+                        stream_ptr,
+                    )
+                };
+            }
+            CudaStorage::wrap_cuda_slice(out, dev.clone())
+        }};
+    }
+    let storage = match dtype {
+        DType::BF16 => run!(half::bf16),
+        DType::F16 => run!(half::f16),
+        _ => run!(f32),
+    };
+    Ok(Tensor::from((Storage::Cuda(storage), shape)))
+}

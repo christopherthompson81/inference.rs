@@ -1409,6 +1409,32 @@ static __device__ __forceinline__ float vec_dot_iq1_m_q8_1(
 }
 
 // ---------------------------------------------------------------------------
+
+// ggml-cuda dequantize.cuh `dequantize_iq1_m`: one 32-thread block per IQ1_M block, eight values per thread
+template <typename dst_t>
+static __global__ void dequantize_block_iq1_m(const void *__restrict__ vx, dst_t *__restrict__ yy) {
+    const int64_t ibs = blockIdx.x;
+    const int tid = threadIdx.x;
+    const block_iq1_m *x = (const block_iq1_m *)vx;
+    const int64_t il = tid / 8;
+    const int64_t ib = tid % 8;
+    dst_t *y = yy + ibs * QK_K + 32 * ib + 8 * il;
+    const uint16_t *sc = (const uint16_t *)x[ibs].scales;
+    iq1m_scale_t scale;
+    scale.u16 = (sc[0] >> 12) | ((sc[1] >> 8) & 0x00f0) | ((sc[2] >> 4) & 0x0f00) | (sc[3] & 0xf000);
+    const int64_t ib16 = 2 * ib + il / 2;
+    const float d = __half2float(scale.f16) * (2 * ((sc[ib16 / 4] >> 3 * (ib16 % 4)) & 0x7) + 1);
+    const float delta = x[ibs].qh[2 * ib + il / 2] & (0x08 << 4 * (il % 2)) ? -1 - IQ1M_DELTA : -1 + IQ1M_DELTA;
+    uint32_t grid32[2];
+    const int8_t *q = (const int8_t *)grid32;
+    grid32[0] = iq1s_grid_gpu[x[ibs].qs[4 * ib + il] | (((x[ibs].qh[2 * ib + il / 2] >> 4 * (il % 2)) & 7) << 8)];
+    grid32[1] = (grid32[0] >> 4) & 0x0f0f0f0f;
+    grid32[0] &= 0x0f0f0f0f;
+    for (int j = 0; j < 8; ++j) {
+        y[j] = dst_t(d * (q[j] + delta));
+    }
+}
+
 // Extern-C kernel entry points
 //
 // Macro expands `MMVQ_PLAIN_ENTRY(tag, block_q_t, qk, qi, vdr, vec_dot,
@@ -2101,3 +2127,13 @@ extern "C" void launch_mmvq_gguf_quantize_q8_1_f32(const void *x, void *vy,
   mmvq_gguf_quantize_q8_1_f32<<<grid, block, 0, s>>>((const float *)x, vy, kx,
                                                      kx_padded);
 }
+
+#define DEQUANTIZE_IQ1_M_LAUNCHER(dst_tag, dst_c_type)                                                  \
+  extern "C" void launch_dequantize_iq1_m_##dst_tag(const void *vx, void *dst, int64_t nblocks, void *stream) { \
+    dequantize_block_iq1_m<dst_c_type>                                                                 \
+        <<<(unsigned int)nblocks, WARP_SIZE, 0, static_cast<cudaStream_t>(stream)>>>(vx, (dst_c_type *)dst); \
+  }
+
+DEQUANTIZE_IQ1_M_LAUNCHER(bf16, __nv_bfloat16)
+DEQUANTIZE_IQ1_M_LAUNCHER(f16, half)
+DEQUANTIZE_IQ1_M_LAUNCHER(f32, float)
