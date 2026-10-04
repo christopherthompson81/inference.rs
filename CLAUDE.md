@@ -18,7 +18,7 @@ inference.rs is a blazing-fast LLM inference engine written in Rust. It supports
 cargo build --release
 
 # With CUDA support (Linux)
-cargo build --release --features "cuda flash-attn cudnn"
+cargo build --release --features "cuda flash-attn"
 
 # With Metal support (macOS)
 cargo build --release --features metal

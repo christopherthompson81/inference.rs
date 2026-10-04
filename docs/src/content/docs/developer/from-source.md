@@ -26,10 +26,10 @@ The CLI binary is in the `inference-cli` crate:
 
 ```bash
 # Release build in-place
-cargo build --release --locked --features "cuda nccl flash-attn cudnn" -p inference-cli
+cargo build --release --locked --features "cuda nccl flash-attn" -p inference-cli
 
 # Or install globally from the checkout
-cargo install --path crates/inference-cli --locked --features "cuda nccl flash-attn cudnn"
+cargo install --path crates/inference-cli --locked --features "cuda nccl flash-attn"
 ```
 
 The flags above target CUDA. On macOS use `--features metal`; on CPU omit `--features` entirely. See the [cargo features reference](/reference/cargo-features/) for the full list.
@@ -46,8 +46,8 @@ Common per-platform flag strings:
 |---|---|
 | CPU | (none) |
 | macOS / Metal | `metal` |
-| CUDA | `cuda flash-attn cudnn` |
-| CUDA multi-GPU | `cuda flash-attn cudnn nccl` |
+| CUDA | `cuda flash-attn` |
+| CUDA multi-GPU | `cuda flash-attn nccl` |
 
 The full flag list, per-hardware recommendations, and per-flag effects live in the [cargo features reference](/reference/cargo-features/). Add `nccl` on Linux when NCCL is installed and you want CUDA multi-GPU tensor parallelism.
 
@@ -68,7 +68,7 @@ In the quantization crate, some tests run only with a specific backend feature e
 The Python package is pure Python over `libinference_ffi`. `python scripts/release/build_wheels.py [--accelerator cpu|cuda|metal] [--features ...]` builds the library in release and packages it into `target/wheels/`. For development, build the library with the features you want and install the package in place:
 
 ```bash
-cargo build --release -p inference-ffi --features "cuda nccl flash-attn cudnn"
+cargo build --release -p inference-ffi --features "cuda nccl flash-attn"
 pip install -e bindings/python
 ```
 

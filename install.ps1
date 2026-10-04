@@ -262,24 +262,6 @@ function Test-IntelCpu {
     }
 }
 
-# Check if cuDNN is installed
-function Test-CuDNN {
-    # Check common cuDNN library paths on Windows
-    $cudnnPaths = @(
-        "$env:CUDA_PATH\bin\cudnn*.dll",
-        "C:\Program Files\NVIDIA GPU Computing Toolkit\CUDA\*\bin\cudnn*.dll",
-        "C:\Program Files\NVIDIA\CUDNN\*\bin\cudnn*.dll"
-        "C:\Program Files\NVIDIA\CUDNN\*\bin\*\x64\cudnn*.dll"
-    )
-
-    foreach ($pattern in $cudnnPaths) {
-        if (Get-Item $pattern -ErrorAction SilentlyContinue) {
-            return $true
-        }
-    }
-    return $false
-}
-
 # Check if NCCL is installed
 function Test-NCCL {
     $ncclPaths = @(
@@ -324,14 +306,6 @@ function Get-Features {
             Write-Warn "INFERENCE_RS_INSTALL_NCCL=1 set but NCCL was not detected; the build may fail unless NCCL is on the linker path"
         } else {
             Write-Warn "NCCL not found - skipping nccl. Install NCCL or set INFERENCE_RS_INSTALL_NCCL=1 to force it; NCCL is the preferred CUDA multi-GPU path."
-        }
-
-        # Check for cuDNN
-        if (Test-CuDNN) {
-            $features += "cudnn"
-            Write-Info "cuDNN detected - enabling cudnn"
-        } else {
-            Write-Info "cuDNN not found - skipping cudnn feature"
         }
 
         # Add flash attention based on compute capability

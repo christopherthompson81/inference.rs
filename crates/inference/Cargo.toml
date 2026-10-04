@@ -54,7 +54,7 @@ models-qwen = ["inference-api/models-qwen"]
 # NVIDIA CUDA GPU support
 cuda = ["inference-api/cuda"]
 cutile = ["cuda", "inference-api/cutile"]
-# cuDNN acceleration (requires cuda)
+# cuDNN for candle's convolutions (requires cuda); slower than the default path, not recommended
 cudnn = ["inference-api/cudnn"]
 # Apple Metal GPU support (macOS/iOS)
 metal = ["inference-api/metal"]

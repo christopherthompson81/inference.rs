@@ -57,7 +57,7 @@ async fn main() -> inference::error::Result<()> {
 |---|---|
 | `cuda` | CUDA GPU support |
 | `flash-attn` | Flash Attention 2 kernels (requires `cuda`) |
-| `cudnn` | cuDNN acceleration (requires `cuda`) |
+| `cudnn` | cuDNN for candle's convolutions (requires `cuda`; slower than the default, not recommended) |
 | `nccl` | Multi-GPU via NCCL (requires `cuda` and NCCL) |
 | `metal` | Apple Metal GPU support |
 | `accelerate` | Apple Accelerate framework |
