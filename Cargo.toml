@@ -21,6 +21,7 @@ members = [
     "crates/inference-quant",
     "crates/inference-paged-attn",
     "crates/inference-metal-compile",
+    "crates/inference-fattn",
     "crates/inference-flash-attn",
 
     "crates/inference-audio",
@@ -56,6 +57,7 @@ default-members = [
     "crates/inference-quant",
     "crates/inference-paged-attn",
     "crates/inference-metal-compile",
+    "crates/inference-fattn",
     "crates/inference-flash-attn",
 
     "crates/inference-audio",
@@ -239,6 +241,7 @@ inference-models-qwen = { path = "crates/inference-models-qwen", version = "0.9.
 inference-models-speech = { path = "crates/inference-models-speech", version = "0.9.3" }
 inference-paged-attn = { path = "crates/inference-paged-attn", version = "0.9.3" }
 inference-metal-compile = { path = "crates/inference-metal-compile", version = "0.9.3" }
+inference-fattn = { path = "crates/inference-fattn", version = "0.9.3" }
 inference-flash-attn = { path = "crates/inference-flash-attn", version = "0.9.3" }
 inference-quant = { path = "crates/inference-quant", version = "0.9.3" }
 inference-vision = { path = "crates/inference-vision", version = "0.9.3" }
