@@ -113,10 +113,10 @@ impl CustomOp1 for MaskToBox {
         let dev = &s.device;
         let m = s.as_cuda_slice::<f32>()?.slice(l.start_offset()..);
         let mut out = unsafe { dev.alloc::<f32>(b * q * 4)? };
-        let func = dev.get_or_load_custom_func(
+        let func = dev.get_or_load_custom_image(
             crate::cuda_kernels::MASK_TO_BOX,
             crate::cuda_kernels::MODULE,
-            crate::cuda_kernels::ptx()?,
+            crate::cuda_kernels::IMAGE,
         )?;
         let (h, w) = (i32::try_from(self.h)?, i32::try_from(self.w)?);
         let mut builder = func.builder();

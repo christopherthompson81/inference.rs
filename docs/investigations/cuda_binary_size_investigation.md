@@ -382,3 +382,36 @@ Review follow-up (2026-10-04 09:15):
   builds also record `libcuda.so.1` as `NEEDED`.
 - **Dead code.** inference-core's MSVC `cudnn.lib` search path is removed, since nothing links cuDNN any more.
 
+## Run 11 - 2026-10-04 09:39
+
+Step 4, part two: drop the last runtime NVRTC compile. inference-layout compiled its four kernels (depthwise conv,
+im2col, mask-to-box, multi-scale deformable attention) from an inline source string with `nvrtc::compile_ptx`,
+once per process.
+
+Change:
+- The source moves to `crates/inference-layout/kernels/cuda/layout.cu`, which defines `MASK_TO_BOX_BLOCK` itself; a
+  unit test pins it to the Rust constant.
+- A new `build.rs` builds one compressed SASS fatbin through cudaforge (`build_fatbin`, no extra nvcc flags). The
+  numerics defaults match NVRTC's (fmad on, no flush-to-zero, precise div/sqrt, no fast math). The target does not:
+  NVRTC emitted PTX for its default virtual arch, which the driver JIT-compiled for any GPU; this is SASS for the
+  build's arch only, the same policy as candle-kernels since #261. The four call sites load it with a new `CudaDevice::get_or_load_custom_image` in the vendored
+  candle-core, which shares `get_or_load_custom_func`'s module cache.
+
+Command: `cargo nextest run -p inference-layout --features cuda --profile cuda`. Then the release
+`pp_doclayout_v3_bench --batch 1 --warmup 3 --iters 20`, two runs each, interleaved with Run 9's NVRTC build; then one
+`CUDA_CACHE_DISABLE=1` launch each; then `env -u LD_LIBRARY_PATH LD_DEBUG=libs` on both.
+
+Finding:
+- 14 of 14 layout tests pass. They run on every device `devices()` returns, CUDA included, so the dispatch,
+  mask-to-box, sampler and batched-forward tests run the new kernels.
+- Per image: NVRTC build 27.42, 27.72 ms; fatbin 27.34, 27.81 ms.
+- Cold launch with the cache disabled: 0.52 s vs 0.49 s. The source is small, so the compile it saves is ~30 ms.
+- Libraries loaded: the NVRTC build loads `libnvrtc.so.12` and `libnvrtc-builtins.so.12.8`; the fatbin build loads
+  neither.
+- The bench still loads `libcurand.so.10`, because the example generates its input with `Tensor::rand` on the
+  GPU; the detector itself does not.
+
+Implication: nothing in the workspace compiles CUDA at runtime any more, so no bundle needs NVRTC. cudarc's `nvrtc`
+feature stays on only because `CudaContext::load_module` and its `Ptx` type sit behind it; NVRTC itself is never
+loaded.
+

@@ -2798,6 +2798,7 @@ dependencies = [
  "candle-core",
  "candle-nn",
  "clap",
+ "cudaforge",
  "gemm",
  "image",
  "num_cpus",

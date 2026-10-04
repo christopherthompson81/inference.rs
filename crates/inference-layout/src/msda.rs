@@ -164,10 +164,10 @@ impl CustomOp3 for MsDeformAttn {
         let attn = sa.as_cuda_slice::<f32>()?.slice(la.start_offset()..);
         let n = g.b * g.q * g.h * g.d;
         let mut out = unsafe { dev.alloc::<f32>(n)? };
-        let func = dev.get_or_load_custom_func(
+        let func = dev.get_or_load_custom_image(
             crate::cuda_kernels::MS_DEFORM_ATTN,
             crate::cuda_kernels::MODULE,
-            crate::cuda_kernels::ptx()?,
+            crate::cuda_kernels::IMAGE,
         )?;
         let mut lvl = [0i32; 3 * MAX_LEVELS];
         let mut start = 0;

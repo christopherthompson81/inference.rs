@@ -336,6 +336,27 @@ impl CudaDevice {
         module_name: &str,
         ptx: &str,
     ) -> Result<CudaFunc> {
+        self.get_or_load_custom(fn_name, module_name, || ptx.into())
+    }
+
+    /// Like `get_or_load_custom_func`, from a compiled cubin or fatbin, so loading needs no JIT.
+    pub fn get_or_load_custom_image(
+        &self,
+        fn_name: &str,
+        module_name: &str,
+        image: &[u8],
+    ) -> Result<CudaFunc> {
+        self.get_or_load_custom(fn_name, module_name, || {
+            cudarc::nvrtc::Ptx::from_binary(image.to_vec())
+        })
+    }
+
+    fn get_or_load_custom(
+        &self,
+        fn_name: &str,
+        module_name: &str,
+        module: impl FnOnce() -> cudarc::nvrtc::Ptx,
+    ) -> Result<CudaFunc> {
         let ms = self.custom_modules.read().unwrap();
         if let Some(mdl) = ms.get(module_name).as_ref() {
             let func = mdl.load_function(fn_name).w()?;
@@ -346,7 +367,7 @@ impl CudaDevice {
         }
         drop(ms);
         let mut ms = self.custom_modules.write().unwrap();
-        let cuda_module = self.context.load_module(ptx.into()).w()?;
+        let cuda_module = self.context.load_module(module()).w()?;
         ms.insert(module_name.to_string(), cuda_module.clone());
         let func = cuda_module.load_function(fn_name).w()?;
         Ok(CudaFunc {
