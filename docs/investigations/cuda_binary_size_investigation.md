@@ -320,3 +320,65 @@ Correction and review follow-up (2026-10-04 08:20):
   times our whole library after steps 1-2. So for a bundle it stays opt-in either way.
 - `install.ps1` had the same cuDNN auto-enable as `install.sh`; it is removed too.
 
+## Run 10 - 2026-10-04 08:56
+
+Step 4 of #258: cuRAND (130 MB) and NVRTC (106 MB) as hard runtime dependencies.
+
+Where they come from:
+- Only the vendored candle-core sets cudarc's features; the workspace reaches cudarc through candle's re-export.
+  `dynamic-linking` turned every enabled library into a `NEEDED` entry.
+- cuRAND: candle-core creates a generator in every `CudaDevice` (`CudaRng::new(299792458, ...)`) and uses it only
+  for `rand_uniform`/`rand_normal`. The non-test GPU callers are FLUX's noise and VAE sampling and diffusion-gemma's
+  generation (uniform draws, Gumbel noise), so cuRAND cannot just go.
+- NVRTC: candle-core uses only its `Ptx` type and error type, and cudarc's `CudaContext::load_module` sits behind the
+  `nvrtc` feature, so the feature has to stay. The one runtime compile is inference-layout's
+  `cuda_kernels::ptx()` (`compile_ptx` of its inline sources).
+
+Change:
+- cudarc `dynamic-linking` -> `dynamic-loading` in the vendored candle-core: each library is `dlopen`ed on first use.
+- The cuRAND generator is created on first use from the stored seed (`set_seed` now stores the seed and drops the
+  generator, which keeps the old recreate-on-seed semantics). It checks `curand::sys::is_culib_present()` first and
+  returns an error, since cudarc panics on a missing library. inference-layout does the same for NVRTC.
+- cudaforge's `build_lib`/`build_shared_lib` print the toolkit's `lib64` as a link search path. The kernel crates
+  link `cudart`, and only cudarc's `dynamic-linking` build script used to put that directory on the search path. The
+  first release link failed with `rust-lld: error: unable to find library -lcudart`.
+
+Command: `cargo build --release -p inference-cli --features "cuda flash-attn"`, `readelf -d`, then
+`LD_DEBUG=libs inference bench -m Qwen3.5-0.8B --prompt-len 512 --gen-len 128 --paged-attn on`, then that bench three
+times interleaved with Run 7's binary.
+
+Finding:
+- `NEEDED`: `libcudart.so.12` is the only CUDA library left (Run 3: cudart, cuda, nvrtc, curand, cublas, cublasLt,
+  cudnn).
+- Loaded during the text-model run: `libcuda`, `libcudart`, `libcublas`, `libcublasLt`. No cuRAND, no NVRTC.
+- Throughput, Run 7's binary vs this one: prefill 23.1-23.4k vs 23.4-23.8k tok/s, decode 389-397 vs 394-397 tok/s.
+  No cost from the indirection.
+- New GPU test `seeded_cuda_draws_repeat`: seeded `randn`/`rand` on CUDA repeat after `set_seed` and stay in range.
+
+Implication: a text-model bundle needs cudart (~1 MB, redistributable), cuBLAS and cuBLASLt (~830 MB, the same set
+llama.cpp needs) and the driver. cuRAND is only needed for GPU random draws (the diffusion models), and NVRTC only for
+the layout detector. Building the layout kernels ahead of time like every other crate would remove NVRTC entirely and
+the layout detector's first-use compile with it. A missing optional library is now an error on the path that needs
+it, not a load failure for the whole library (see the follow-up below: the first version of this run was measured
+with `LD_LIBRARY_PATH` pointing at CUDA 12.8 and missed a version mix).
+
+Review follow-up (2026-10-04 09:15):
+- **Version mix.** cudarc's `get_lib_name_candidates` tried the unversioned `libcublas.so` first. That name is a
+  dev-package symlink to whichever toolkit was installed last; here the loader cache maps it to
+  `/usr/local/cuda` = 13.4. The measurement above only looked right because the shell sets
+  `LD_LIBRARY_PATH=/usr/local/cuda-12.8/lib64`. Reproduced with `env -u LD_LIBRARY_PATH LD_DEBUG=libs inference
+  bench ...` on the unpatched build: it loaded `libcublas.so` and `libcublasLt.so.13` from CUDA 13.4 next to
+  `libcudart.so.12`.
+- **NCCL.** The list also never tried `.so.2`, so NCCL (`libnccl.so.2`) could not load on a runtime-only install.
+- **Fix.** cudarc 0.19.10 is vendored too (`third_party/cudarc`, `[patch.crates-io]`). Its candidate list now tries
+  sonames first (`.so.<cuda major>`, then the driver's `.1`, NCCL's `.2`, cuDNN's `.9` and cuRAND's `.10`) and the
+  unversioned names last. Same command on the patched build: `libcuda.so.1`, `libcudart.so.12`,
+  `libcublas.so.12` and `libcublasLt.so.12`, all from `/usr/local/cuda-12`. That is the set a linked binary resolves.
+- **Missing driver or cuBLAS.** Creating a `CudaDevice` checks `is_culib_present()` for the driver and cuBLAS, so a
+  host without them gets an error instead of cudarc's panic. cuBLASLt's wrapper (`inference-quant`) already
+  `unwrap`ed its creation, unchanged.
+- **Driver stub.** The sm90 DeepGEMM provider links `-lcuda`. inference-quant now adds the toolkit's `lib64/stubs`
+  to the search path, which cudarc's linking mode used to do, so build hosts without a driver still link. Those
+  builds also record `libcuda.so.1` as `NEEDED`.
+- **Dead code.** inference-core's MSVC `cudnn.lib` search path is removed, since nothing links cuDNN any more.
+

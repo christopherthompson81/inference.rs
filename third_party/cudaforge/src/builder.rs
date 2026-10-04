@@ -313,6 +313,7 @@ impl KernelBuilder {
     /// Build a static library from all kernel sources
     pub fn build_lib<P: Into<PathBuf>>(&self, out_file: P) -> Result<()> {
         let out_file = out_file.into();
+        self.emit_cuda_link_search()?;
         let Some((toolkit, objects)) = self.compile_objects(&out_file)? else {
             return Ok(());
         };
@@ -347,6 +348,7 @@ impl KernelBuilder {
             Some(t) => t,
             None => CudaToolkit::detect()?,
         };
+        println!("cargo:rustc-link-search=native={}", toolkit.lib_dir.display());
         let mut key = DefaultHasher::new();
         name.hash(&mut key);
         self.extra_args.hash(&mut key);
@@ -386,6 +388,16 @@ impl KernelBuilder {
         }
         println!("cargo:rustc-link-search=native={}", dir.display());
         println!("cargo:rustc-link-lib=dylib={name}");
+        Ok(())
+    }
+
+    /// Kernel libraries link cudart, whose directory nothing else puts on the search path once cudarc loads at runtime.
+    fn emit_cuda_link_search(&self) -> Result<()> {
+        let lib_dir = match &self.toolkit {
+            Some(t) => t.lib_dir.clone(),
+            None => CudaToolkit::detect()?.lib_dir,
+        };
+        println!("cargo:rustc-link-search=native={}", lib_dir.display());
         Ok(())
     }
 

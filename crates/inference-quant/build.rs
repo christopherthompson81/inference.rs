@@ -344,6 +344,14 @@ fn main() -> Result<(), String> {
         println!("cargo:rustc-link-lib=dylib=cudart");
         if deepgemm_fp8_sm90 {
             println!("cargo:rustc-link-lib=inferencedeepgemm");
+            // the driver's stub, for build hosts without a driver installed
+            let lib_dir = cudaforge::CudaToolkit::detect()
+                .expect("CUDA toolkit")
+                .lib_dir;
+            println!(
+                "cargo:rustc-link-search=native={}",
+                lib_dir.join("stubs").display()
+            );
             println!("cargo:rustc-link-lib=dylib=cuda");
         }
 
