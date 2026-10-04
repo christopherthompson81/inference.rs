@@ -4,10 +4,14 @@
 > - `src/lib.rs`: the `Module` items are statics instead of consts. Each use of a const embedded its own copy of the
 >   module's PTX string, so a release `libinference_ffi.so` carried 38 copies of the 11 modules (50 MiB of PTX for 10.6 MiB of
 >   modules).
-> - `build.rs`: the statically linked MoE/mmq/mmvq kernels compress their fatbin (`KernelBuilder::compress_fatbin`).
+> - `build.rs`: the statically linked MoE kernels compress their fatbin (`KernelBuilder::compress_fatbin`).
 > - `build.rs`, `src/lib.rs`: the 11 runtime-loaded modules ship as compressed SASS fatbins built from their PTX
 >   (`KernelBuilder::build_fatbin`), so loading them needs no driver JIT. The PTX stays a build intermediate, and each
 >   `Module` carries the entry names parsed from it (`Module::entries`) in place of `Module::ptx`.
+>
+> - `src/mmvq_gguf.cu`, `src/mmq_gguf/` and their FFI declarations are removed. inference-quant exports the same 46
+>   launcher names, so the two archives collided at link time; its 10 MMQ launchers also take an extra `type_dst`
+>   argument, so calls through candle's declarations were undefined behaviour. The MoE kernels stay for candle-nn.
 >
 > Everything else is upstream. To re-sync, copy `candle-kernels/` from the new rev and reapply the changes above.
 

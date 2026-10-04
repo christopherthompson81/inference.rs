@@ -296,37 +296,7 @@ impl GgufMatMul {
 
     #[cfg(feature = "cuda")]
     fn uses_fast_mmvq(&self) -> bool {
-        matches!(
-            &self.w,
-            QMatMul::QTensor(q) if q.device().is_cuda() && fast_mmvq::supports(q.dtype())
-        )
-    }
-
-    #[cfg(feature = "cuda")]
-    fn try_fast_forward(&self, a: &Tensor) -> Result<Option<Tensor>> {
-        if !self.uses_fast_mmvq() || !matches!(a.dtype(), DType::BF16 | DType::F16 | DType::F32) {
-            return Ok(None);
-        }
-
-        let flat_batch = a.dims()[..a.dims().len().saturating_sub(1)]
-            .iter()
-            .product::<usize>();
-
-        let QMatMul::QTensor(q) = &self.w else {
-            unreachable!("uses_fast_mmvq() requires QTensor weights")
-        };
-
-        // Batch 1-8: use MMVQ (decode kernel)
-        if (1..=fast_mmvq::MMVQ_MAX_BATCH).contains(&flat_batch) {
-            return Ok(Some(fast_mmvq::plain(q.as_ref(), a)?));
-        }
-
-        // Batch > 8: use MMQ (prompt kernel)
-        if flat_batch > fast_mmvq::MMVQ_MAX_BATCH {
-            return Ok(Some(fast_mmq::plain(q.as_ref(), a)?));
-        }
-
-        Ok(None)
+        uses_fast_mmvq(&self.w)
     }
 
     #[cfg(all(feature = "cuda", has_marlin_kernels))]
@@ -407,6 +377,55 @@ impl GgufMatMul {
     }
 }
 
+#[cfg(feature = "cuda")]
+fn uses_fast_mmvq(w: &QMatMul) -> bool {
+    matches!(w, QMatMul::QTensor(q) if q.device().is_cuda() && fast_mmvq::supports(q.dtype()))
+}
+
+#[cfg(feature = "cuda")]
+fn try_fast_forward(w: &QMatMul, a: &Tensor) -> Result<Option<Tensor>> {
+    if !uses_fast_mmvq(w) || !matches!(a.dtype(), DType::BF16 | DType::F16 | DType::F32) {
+        return Ok(None);
+    }
+    let QMatMul::QTensor(q) = w else {
+        unreachable!("uses_fast_mmvq() requires QTensor weights")
+    };
+    let flat_batch = a.dims()[..a.dims().len().saturating_sub(1)]
+        .iter()
+        .product::<usize>();
+    // decode batches take MMVQ, larger ones the MMQ prompt kernel
+    if (1..=fast_mmvq::MMVQ_MAX_BATCH).contains(&flat_batch) {
+        return Ok(Some(fast_mmvq::plain(q.as_ref(), a)?));
+    }
+    if flat_batch > fast_mmvq::MMVQ_MAX_BATCH {
+        return Ok(Some(fast_mmq::plain(q.as_ref(), a)?));
+    }
+    Ok(None)
+}
+
+/// `a @ w^T` for a candle `QMatMul`, through this crate's GGUF kernels wherever they cover the type.
+pub fn qmatmul_forward(w: &QMatMul, a: &Tensor) -> Result<Tensor> {
+    #[cfg(feature = "cuda")]
+    {
+        if let Some(out) = try_fast_forward(w, a)? {
+            return Ok(out);
+        }
+        if let QMatMul::QTensor(weight) = w
+            && weight.device().is_cuda()
+            && matches!(weight.dtype(), GgmlDType::Q8_1 | GgmlDType::Q8K)
+        {
+            candle_core::bail!(
+                "CUDA {:?} weights require the packed GGUF affine backend with a tile-compatible shape",
+                weight.dtype()
+            );
+        }
+    }
+    // candle's QMatMul only takes F32
+    let original_dtype = a.dtype();
+    let x = w.forward(&a.to_dtype(DType::F32)?)?;
+    x.to_dtype(original_dtype)
+}
+
 impl QuantMethod for GgufMatMul {
     fn new(method: QuantMethodConfig) -> Result<Self>
     where
@@ -452,35 +471,7 @@ impl QuantMethod for GgufMatMul {
                 return self.add_bias(out);
             }
         }
-        #[cfg(feature = "cuda")]
-        {
-            if let Some(out) = self.try_fast_forward(a)? {
-                return self.add_bias(out);
-            }
-            if let QMatMul::QTensor(weight) = &self.w
-                && weight.device().is_cuda()
-                && matches!(weight.dtype(), GgmlDType::Q8_1 | GgmlDType::Q8K)
-            {
-                candle_core::bail!(
-                    "CUDA {:?} weights require the packed GGUF affine backend with a tile-compatible shape",
-                    weight.dtype()
-                );
-            }
-        }
-
-        // Fallback: Candle QMatMul requires F32
-        let original_dtype = a.dtype();
-        let a_f32 = if original_dtype == DType::F32 {
-            a.clone()
-        } else {
-            a.to_dtype(DType::F32)?
-        };
-        let x = self.w.forward(&a_f32)?;
-        let x = if original_dtype == DType::F32 {
-            x
-        } else {
-            x.to_dtype(original_dtype)?
-        };
+        let x = qmatmul_forward(&self.w, a)?;
         self.add_bias(x)
     }
 
@@ -838,6 +829,49 @@ mod tests {
         assert_eq!(actual.dtype(), DType::F32);
         let max_diff = (actual - expected)?.abs()?.max_all()?.to_scalar::<f32>()?;
         assert!(max_diff <= 1e-6, "{dtype:?}: max_diff={max_diff}");
+        Ok(())
+    }
+
+    #[cfg(feature = "cuda")]
+    #[test]
+    fn qmatmul_forward_matches_dequantized_matmul_on_cuda() -> Result<()> {
+        // a decode batch (mmvq) and a prompt batch (mmq)
+        const BATCHES: [usize; 2] = [3, 40];
+        const ROWS: usize = 64;
+        const COLS: usize = 512;
+        // activations are quantized to Q8_1 on the way in, so the error scales with the output
+        const RELATIVE_TOLERANCE: f32 = 0.02;
+        let Ok(device) = Device::new_cuda(0) else {
+            eprintln!("SKIP: no CUDA device");
+            return Ok(());
+        };
+        let values = (0..ROWS * COLS)
+            .map(|index| ((index % 29) as f32 - 14.0) / 9.0)
+            .collect::<Vec<_>>();
+        let weight = Tensor::from_vec(values, (ROWS, COLS), &device)?;
+        for dtype in [GgmlDType::Q4K, GgmlDType::Q8_0] {
+            let quantized = Arc::new(QTensor::quantize(&weight, dtype)?);
+            let dense = quantized.dequantize(&device)?;
+            let w = QMatMul::QTensor(quantized);
+            for (batch, input) in BATCHES
+                .into_iter()
+                .flat_map(|b| [(b, DType::F32), (b, DType::BF16)])
+            {
+                let x = Tensor::randn(0f32, 1., (batch, COLS), &device)?.to_dtype(input)?;
+                let want = x.to_dtype(DType::F32)?.matmul(&dense.t()?)?;
+                let got = qmatmul_forward(&w, &x)?;
+                assert_eq!(got.dtype(), input);
+                let err = (got.to_dtype(DType::F32)? - &want)?
+                    .abs()?
+                    .max_all()?
+                    .to_scalar::<f32>()?;
+                let scale = want.abs()?.max_all()?.to_scalar::<f32>()?;
+                assert!(
+                    err <= RELATIVE_TOLERANCE * scale,
+                    "{dtype:?} {input:?} batch {batch}: max error {err}, output scale {scale}"
+                );
+            }
+        }
         Ok(())
     }
 
