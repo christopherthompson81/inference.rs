@@ -91,7 +91,7 @@ Implication, ranked by size saved per effort:
 
 Projected with the first and third levers: ~150 MiB, vs llama.cpp's 44 MiB.
 
-## Run 4 - 2026-10-04 08:30
+## Run 4 - 2026-10-04 06:30 (approximate)
 
 Step 1 of #258: compress the fatbins.
 
@@ -121,7 +121,69 @@ Notes:
   uncompressed rebuild took 1m 42s from cache.
 
 Implication: the repack estimate holds (61 MiB projected, 62.2 MiB built). On this workload the compressed launch is
-20 ms slower at the median (the whole range sits 30-40 ms higher), within run-to-run noise but not ruled out. One small
-dense GGUF never touches FA2 or paged attention, the largest compressed modules, so a model that does is the check
-still owed. The prefill gap is the uncompressed run's +/- 2.0k variance, not a change; decode is identical. Step 1 is done; candle-kernels' PTX (`.rodata`,
+20 ms slower at the median (the whole range sits 30-40 ms higher), within run-to-run noise but not ruled out. Paged
+attention is on by default on CUDA, so this run loaded it (Run 6 corrects an earlier note here that it did not).
+Whether this run exercised FA2 was not checked. The prefill gap is the uncompressed run's +/- 2.0k variance, not a change; decode is identical. Step 1 is done; candle-kernels' PTX (`.rodata`,
 67 MiB in the CLI) is now the largest GPU-side item.
+
+## Run 5 - 2026-10-04 07:00 (approximate)
+
+Step 2 of #258. Question: where does the 50 MiB of PTX in `.rodata` come from? candle-kernels' 11 modules are only
+10.6 MiB (`target/debug/build/candle-kernels-*/out/*.ptx`, 705 entries), and no other crate builds PTX.
+
+Command: scan built binaries for NVVM PTX headers, keyed by each blob's first `.entry` name.
+
+Finding: the modules are duplicated. In the CUDA integration-test binary: 38 blobs; the binary-ops module (2.3 MiB)
+13 times, unary 5, reduce 4, the rest twice. In `inference_core`'s test binary: 24 blobs. The cause is
+`candle-kernels/src/lib.rs`: each module is a `pub const X: Module` over an `include_str!` const, and every use of a
+const in another codegen unit or crate embeds its own copy of the string. candle-core takes every module by reference
+(`get_or_load_func(name, &kernels::X)`), so `pub static` keeps its API.
+
+Change: vendor candle-kernels at our candle rev into `third_party/candle-kernels`, patched in through
+`[patch."https://github.com/huggingface/candle.git"]`. The `mdl!` items become statics, and the MoE/mmq/mmvq archive it
+links statically calls `compress_fatbin()`.
+
+Finding (`cargo build --release -p inference-ffi --features "cuda flash-attn cudnn"`, 3m 36s):
+
+| `libinference_ffi.so` | file | stripped | `.rodata` | `.nv_fatbin` | PTX blobs |
+|---|---|---|---|---|---|
+| master before #259 (Run 3) | 682 MiB | 628 MiB | 55.8 MiB | 492.2 MiB | 38 |
+| this change | 180.0 MiB | 157.4 MiB | 16.4 MiB | 61.1 MiB | 11 |
+
+The baseline row also predates #259's compression; no post-#259 `libinference_ffi.so` was measured. This change's own
+effect is the `.rodata` drop (39.4 MiB, the 50.0 - 10.6 MiB of duplicate PTX) and 1.1 MiB of `.nv_fatbin` from
+compressing candle's archive. The 13/5/4 per-module breakdown above is from the integration-test binary; on the `.so`
+only the blob count (38, then 11) was checked.
+
+## Run 6 - 2026-10-04 07:10 (approximate)
+
+Question (owed from Run 4): is the compressed build's launch cost still invisible on a safetensors model with paged
+attention forced on? And what does the remaining PTX cost at load?
+
+Command: `inference bench -m Qwen3.5-0.8B --prompt-len 512 --gen-len 1 --iterations 1 --warmup 0 --paged-attn on`
+under `/usr/bin/time`, three binaries interleaved (Run 4's uncompressed and compressed CLIs, and a release CLI built
+from this change with `cargo build --release -p inference-cli --features "cuda flash-attn cudnn"`, 2m 26s), then again
+with `CUDA_CACHE_DISABLE=1`. Qwen3.5 is a hybrid with GDN layers; whether its full-attention layers took the FA2 path
+was not checked.
+
+Finding (seconds, launch to first token):
+
+| binary | run 1 | runs 2-6 | `CUDA_CACHE_DISABLE=1` |
+|---|---|---|---|
+| uncompressed | 2.13 | 1.97-1.99 | 16.97, 16.94 |
+| compressed (#259) | 2.02 | 1.99-2.05 | |
+| deduplicated PTX | 6.88 | 1.98-2.02 | 17.00, 16.86 |
+
+Steady state (`--prompt-len 512 --gen-len 128 --paged-attn on`, this change): prefill 20.9k +/- 2.1k tok/s, decode
+396 tok/s (safetensors, BF16).
+
+Implication:
+- Compression costs nothing measurable on this model either.
+- The PTX costs ~15 s of driver JIT whenever the compute cache misses: a fresh machine, a container without a
+  persistent `~/.nv`, or an eviction. The new binary's first run (6.88 s) is unexplained: all three embed byte-identical PTX, so
+  the earlier runs should have filled the cache; an eviction is possible but was not shown. `~/.nv/ComputeCache` is
+  228 MiB against the driver's 256 MiB default `CUDA_CACHE_MAXSIZE`. Every candle module is loaded at startup
+  (`preload_candle_ptx`, inference-core/src/inference_rs/mod.rs), so the whole 10.6 MiB is JIT-compiled on a miss.
+- For a bundled library that is a worse problem than the 10.6 MiB. Shipping SASS for candle's modules fixes both, but
+  candle-core loads them with `load_module(mdl.ptx().into())` from a `&str` (cuda_backend/device.rs:350). Loading a
+  fatbin needs `Ptx::from_binary`, which means patching candle-core as well, not only candle-kernels.

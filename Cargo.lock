@@ -495,7 +495,6 @@ dependencies = [
 [[package]]
 name = "candle-kernels"
 version = "0.11.0"
-source = "git+https://github.com/huggingface/candle.git?rev=e65eb1de3cfe41008fc3acc99ed3f1c72a8d250f#e65eb1de3cfe41008fc3acc99ed3f1c72a8d250f"
 dependencies = [
  "cudaforge",
 ]
