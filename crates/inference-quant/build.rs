@@ -58,6 +58,7 @@ fn prepare_cuda_archive(path: std::path::PathBuf) -> std::path::PathBuf {
 #[cfg(feature = "cuda")]
 fn cuda_kernel_builder(build_dir: &std::path::Path) -> cudaforge::KernelBuilder {
     cudaforge::KernelBuilder::new()
+        .compress_fatbin()
         .out_dir(build_dir)
         .arg("-std=c++17")
         .arg("-O3")
@@ -317,6 +318,7 @@ fn main() -> Result<(), String> {
                 .source_files(["kernels/cuda/nvfp4_cutlass/nvfp4_cutlass.cu"])
                 .watch(["kernels/cuda/nvfp4_cutlass"])
                 .compute_cap_arch("121a")
+                .compress_fatbin()
                 .with_compute_override_arch("nvfp4_cutlass.cu", "121a")
                 .arg("-std=c++17")
                 .arg("-O3")
