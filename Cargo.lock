@@ -2736,6 +2736,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "inference-fattn"
+version = "0.9.3"
+dependencies = [
+ "anyhow",
+ "candle-core",
+ "candle-nn",
+ "cudaforge",
+ "half",
+ "inference-flash-attn",
+]
+
+[[package]]
 name = "inference-ffi"
 version = "0.9.3"
 dependencies = [

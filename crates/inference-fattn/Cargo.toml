@@ -1,0 +1,27 @@
+[package]
+name = "inference-fattn"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+
+description = "llama.cpp's FlashAttention kernels (fattn) for inference.rs."
+repository.workspace = true
+license.workspace = true
+
+[dependencies]
+candle-core.workspace = true
+half = { workspace = true }
+inference-flash-attn = { workspace = true, optional = true }
+
+[build-dependencies]
+cudaforge = { workspace = true, optional = true }
+
+[dev-dependencies]
+anyhow = { workspace = true, features = ["backtrace"] }
+candle-nn.workspace = true
+
+[features]
+default = []
+cuda = ["dep:cudaforge", "candle-core/cuda"]
+# The FA2 comparison in tests/integration/bench.rs; a plain dev-dependency would switch CUDA on for the CPU suite.
+bench-fa2 = ["cuda", "dep:inference-flash-attn", "inference-flash-attn/cuda"]
