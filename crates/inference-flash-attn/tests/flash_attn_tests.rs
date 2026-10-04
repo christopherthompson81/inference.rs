@@ -169,6 +169,82 @@ fn flash_attn_acausal() -> Result<()> {
     Ok(())
 }
 
+// Max |flash - reference| per dtype for unit-scale random inputs.
+const UNEVEN_K_TOLERANCE: [(DType, f32); 2] = [(DType::F16, 5e-3), (DType::BF16, 3e-2)];
+
+fn fa_reference(q: &Tensor, k: &Tensor, v: &Tensor, scale: f32, causal: bool) -> Result<Tensor> {
+    let (q, k, v) = (
+        q.to_dtype(DType::F32)?,
+        k.to_dtype(DType::F32)?,
+        v.to_dtype(DType::F32)?,
+    );
+    let att = (q.matmul(&k.t()?)? * scale as f64)?;
+    let att = if causal {
+        let (q_len, k_len) = (att.dim(D::Minus2)?, att.dim(D::Minus1)?);
+        let mask: Vec<f32> = (0..q_len)
+            .flat_map(|i| (0..k_len).map(move |j| if j <= i { 0. } else { f32::NEG_INFINITY }))
+            .collect();
+        att.broadcast_add(&Tensor::from_vec(mask, (q_len, k_len), att.device())?)?
+    } else {
+        att
+    };
+    Ok(candle_nn::ops::softmax(&att, D::Minus1)?.matmul(&v.contiguous()?)?)
+}
+
+// Head dims with no instance of their own run on the next one up with an uneven K.
+fn uneven_head_dim(head_dim: usize) -> Result<()> {
+    let device = Device::new_cuda(0)?;
+    let (batch, seq, heads) = (2, 37, 4);
+    let scale = 1. / (head_dim as f32).sqrt();
+    for (dtype, tolerance) in UNEVEN_K_TOLERANCE {
+        let rand =
+            || Tensor::randn(0f32, 1., (batch, heads, seq, head_dim), &device)?.to_dtype(dtype);
+        let (q, k, v) = (rand()?, rand()?, rand()?);
+        for causal in [false, true] {
+            let want = fa_reference(&q, &k, &v, scale, causal)?;
+            let got = inference_flash_attn::flash_attn(
+                &q.transpose(1, 2)?,
+                &k.transpose(1, 2)?,
+                &v.transpose(1, 2)?,
+                scale,
+                causal,
+            )?
+            .transpose(1, 2)?
+            .to_dtype(DType::F32)?;
+            let diff = (got - want)?
+                .abs()?
+                .flatten_all()?
+                .max(0)?
+                .to_vec0::<f32>()?;
+            assert!(
+                diff < tolerance,
+                "hd{head_dim} {dtype:?} causal={causal}: max diff {diff}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn flash_attn_uneven_head_dim_32() -> Result<()> {
+    uneven_head_dim(32)
+}
+
+#[test]
+fn flash_attn_uneven_head_dim_160() -> Result<()> {
+    uneven_head_dim(160)
+}
+
+#[test]
+fn flash_attn_uneven_head_dim_200() -> Result<()> {
+    uneven_head_dim(200)
+}
+
+#[test]
+fn flash_attn_uneven_head_dim_224() -> Result<()> {
+    uneven_head_dim(224)
+}
+
 #[test]
 fn flash_attn_varlen_paged_mm_prefix_windowed() -> Result<()> {
     let device = Device::new_cuda(0)?;

@@ -415,3 +415,55 @@ Implication: nothing in the workspace compiles CUDA at runtime any more, so no b
 feature stays on only because `CudaContext::load_module` and its `Ptx` type sit behind it; NVRTC itself is never
 loaded.
 
+## Run 12 - 2026-10-04 10:16
+
+Step 5 of #258: trim the attention kernel set.
+
+Question: which FA2 head-dim instances do supported models reach, and what does each cost?
+
+Command:
+- `size -A` on each object in `target/debug/cuda-kernels/flashattention-*`, grouped by head dim (compressed, sm_86).
+- A survey of 1-3 public checkpoints per supported architecture, fetching `config.json` from Hugging Face; gated repos
+  were read through public mirrors. For every attention stack that can reach FA2 on CUDA (text decoders, MLA prefill,
+  unmasked vision/audio towers), it took the head dim and mapped it to its `HEADDIM_SWITCH` bucket.
+
+Finding, cost per bucket (fp16+bf16, causal and not):
+
+| bucket | 32 | 64 | 96 | 128 | 160 | 192 | 224 | 256 | 512 |
+|---|---|---|---|---|---|---|---|---|---|
+| MiB | 2.91 | 3.23 | 2.89 | 3.45 | 3.01 | 1.43 | 2.31 | 2.60 | 0.69 |
+
+Split-kv (paged prefix-prefill only): 64 1.39, 128 1.57, 256 1.65, 512 1.17 MiB.
+
+Who uses each bucket:
+- 32: no real model; only the FA crate's tests and tiny random fixtures.
+- 64: Llama-3.2-1B, Qwen2.5-0.5B, LFM2, granite-4.0-micro, SmolVLM, some vision towers.
+- 96: Phi-2 (80), Phi-3-mini (96), and the SigLIP-so400m towers (72): Gemma 3/4, Qwen3.5/3.6 and Qwen3-VL-MoE
+  vision, PaddleOCR-VL, Phi-4-MM.
+- 128: the large majority.
+- 160 and 224: nothing.
+- 192: only DeepSeek V2/V3/R1 MLA prefill.
+- 256: Gemma 1-3, Gemma 4 sliding layers, Qwen3-Next and Qwen3.5/3.6 full attention, GLM-4.7-Flash MLA.
+- 512: Gemma 4 and DiffusionGemma global layers.
+
+Every split-kv bucket is used. Paged decode goes to FlashInfer or the PagedAttention kernels, not FA2.
+
+Paged attention (13.7 MiB compressed) splits into the FlashInfer decode base kernels (f16/bf16/f32, 3.6 MiB), their
+FP8-KV variants (3 dtypes x 4 head dims, 7.6 MiB), the older v1/v2 kernels (2.3 MiB) and small cache kernels. All of
+them are reachable for some dtype and KV-cache combination, so nothing is trimmed there.
+
+Change: drop the 12 instances of buckets 32, 160 and 224. `HEADDIM_SWITCH` now sends head dims up to 64 to 64, 129-192
+to 192 and 193-256 to 256. A head dim below its instance runs with `Is_even_K = false`: every Q/K/V/O access is masked by
+`col < params.d`, and the paged split-kv kernels already rely on it.
+
+Review follow-up: the existing tests did not cover the rerouted non-split path. The hd96/hd160 tests go through
+`block_table` into the split-kv kernel, no test used head dim 32, and local_ci does not enable `flash-attn`. New tests
+`flash_attn_uneven_head_dim_{32,160,200,224}` compare non-paged `flash_attn` with an F32 reference. They cover fp16
+(max |diff| < 5e-3) and bf16 (< 3e-2), causal and not, with batch 2, seq 37 and 4 heads of random inputs.
+
+Finding: `cargo nextest run --features cuda -E 'package(inference-flash-attn)'` passes 16/16 with the new tests, and
+`libflashattention.so`'s `.nv_fatbin` drops from 28.31 to 20.08 MiB (41 objects instead of 53).
+
+Implication: 8.2 MiB less GPU code, with no supported model changing paths. Bucket 192 stays for DeepSeek; folding it
+into 256 would save another 1.4 MiB but cost DeepSeek's MLA prefill about 33% more attention work.
+
