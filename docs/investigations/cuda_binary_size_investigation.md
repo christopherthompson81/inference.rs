@@ -467,3 +467,47 @@ Finding: `cargo nextest run --features cuda -E 'package(inference-flash-attn)'` 
 Implication: 8.2 MiB less GPU code, with no supported model changing paths. Bucket 192 stays for DeepSeek; folding it
 into 256 would save another 1.4 MiB but cost DeepSeek's MLA prefill about 33% more attention work.
 
+## Run 13 - 2026-10-04 11:16
+
+Step 6 of #258: host code (`.text` 64.4 MiB).
+
+`panic = "abort"` is ruled out: the C ABI catches panics at its boundary (`catch_unwind` in
+`crates/inference-ffi/src/lib.rs`) and turns them into errors, and abort would take the host process down instead.
+
+Command: `cargo build --release -p inference-ffi -p inference-cli` with
+`--features inference-ffi/cuda,inference-ffi/flash-attn,inference-cli/cuda,inference-cli/flash-attn`, three ways:
+plain; `--config 'profile.release.lto="thin"'`; and `--config 'profile.release.lto="fat"' --config
+'profile.release.codegen-units=1'`. Then `strip` and `size -A` on the library, then the Qwen3.5-0.8B bench
+(`--prompt-len 512 --gen-len 128 --paged-attn on`) three times interleaved, default vs fat CLI.
+
+Finding:
+
+| variant | build (both crates) | `libinference_ffi.so` stripped | `.text` | CLI |
+|---|---|---|---|---|
+| release (no LTO, 16 CGUs) | 198 s | 139.0 MiB | 64.4 MiB | 184.5 MiB |
+| ThinLTO | 283 s | 139.0 MiB | 64.4 MiB | 187.6 MiB |
+| fat LTO, 1 CGU | 634 s | 130.8 MiB | 59.4 MiB | 158.7 MiB |
+
+Fat LTO also shrinks unwind tables (`.eh_frame` 6.1 -> 4.5 MiB, `.gcc_except_table` 3.0 -> 2.4 MiB). Throughput is
+the same: prefill 23.73-23.76k (default) vs 23.78-23.87k (fat) tok/s, decode 400.0-401.1 vs 400.1-400.5 tok/s.
+The release library here (139.0 MiB, `.nv_fatbin` 52.9 MiB) is the current master after #266/#267, down from
+Run 7's 147.5 MiB.
+
+Model families: `inference-ffi` hard-coded `inference-api`'s `all-models`. It now passes `all-models` (default) and
+`models-{gemma,llama,other,phi,qwen}` through. Measured with
+`--no-default-features --features cuda,flash-attn,code-execution,models-qwen`:
+- release: 127.4 MiB stripped (`.text` 55.0 MiB).
+- new `bundle` profile (release + fat LTO + 1 CGU + `strip = true`): 120.3 MiB, built in 205 s, with no `.symtab`
+  and all 94 exported `inference_*` functions (the all-models library exports the same 94).
+
+Change: `[profile.bundle]` in the workspace `Cargo.toml`; `scripts/release/build_wheels.py` builds with it (wheels
+shipped the unstripped release library before); `inference-ffi` family features; the build docs gain a section on
+bundling the C ABI library.
+
+Implication: a Qwen-only CUDA bundle is 120 MiB against Run 3's 628 MiB (682 MiB unstripped). For text models it needs
+only cudart, cuBLAS/cuBLASLt and the driver at runtime; cuRAND too if it runs FLUX or Dia. llama.cpp's equivalent is 44 MiB. What remains is ~53 MiB of GPU
+code (quant's GGUF/IQ/KT/IQK kernels, FA2, paged attention; measured on the all-models build) and an estimated ~50 MiB
+of `.text` (55.0 MiB measured for Qwen-only release, scaled by fat LTO's 59.4/64.4) for the engine, server-shaped API,
+agent, MCP, audio and TLS stacks. These sizes were measured with the checkout's `target-cpu=native`; generic
+(`RUSTFLAGS=""`) builds will differ slightly.
+

@@ -4,7 +4,7 @@
 Usage:
     python scripts/release/build_wheels.py                     # release build, accelerator picked for this machine
     python scripts/release/build_wheels.py --accelerator cuda --features flash-attn
-    python scripts/release/build_wheels.py --library target/release/libinference_ffi.so   # package a built library
+    python scripts/release/build_wheels.py --library target/bundle/libinference_ffi.so    # package a built library
 
 The wheel is as portable as its library: a Linux CPU wheel needs the newest glibc the build host's library links
 against, and a CUDA wheel needs the CUDA runtime its library links and a GPU of the compute capability it was built for.
@@ -137,7 +137,7 @@ def platform_tag(library: Path, accelerator: str) -> str:
 
 def build_library(accelerator: str, features: list[str]) -> Path:
     features = ACCELERATOR_FEATURES[accelerator] + features
-    command = ["cargo", "build", "--release", "-p", "inference-ffi"]
+    command = ["cargo", "build", "--profile", "bundle", "-p", "inference-ffi"]
     if features:
         command += ["--features", ",".join(features)]
     env = dict(os.environ)
@@ -150,7 +150,7 @@ def build_library(accelerator: str, features: list[str]) -> Path:
         )
     print("+", " ".join(command))
     subprocess.run(command, check=True, cwd=REPO_ROOT, env=env)
-    return REPO_ROOT / "target" / "release" / library_name()
+    return REPO_ROOT / "target" / "bundle" / library_name()
 
 
 def stage(library: Path, into: Path, local_version: str | None) -> Path:
