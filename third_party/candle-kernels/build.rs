@@ -1,8 +1,10 @@
 use cudaforge::{KernelBuilder, Result};
 use std::env;
+use std::io::Write;
 use std::path::PathBuf;
 
 const CUTILE_FEATURE: &str = "CARGO_FEATURE_CUTILE";
+const PTX_ENTRY_PREFIX: &str = ".visible .entry ";
 
 fn main() -> Result<()> {
     println!("cargo::rerun-if-changed=build.rs");
@@ -11,18 +13,36 @@ fn main() -> Result<()> {
     println!("cargo::rerun-if-changed=src/cuda_utils.cuh");
     println!("cargo::rerun-if-changed=src/binary_op_macros.cuh");
 
-    // Build for PTX
+    // PTX is an intermediate: its entry names feed the preloader, and the SASS fatbins built from it ship.
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let ptx_path = out_dir.join("ptx.rs");
-    let bindings = KernelBuilder::new()
+    let ptx = KernelBuilder::new()
         .source_dir("src") // Scan src/ for .cu files
         .exclude(&["moe_*.cu", "mmvq_gguf.cu", "mmq_*.cu"]) // Exclude statically compiled kernels from ptx build
         .arg("--expt-relaxed-constexpr")
         .arg("-std=c++17")
         .arg("-O3")
         .build_ptx()?;
-
-    bindings.write(&ptx_path)?;
+    let fatbins = KernelBuilder::new()
+        .source_files(ptx.images())
+        .compress_fatbin()
+        .build_fatbin()?;
+    let images_path = out_dir.join("images.rs");
+    fatbins.write(&images_path)?;
+    let mut images = std::fs::OpenOptions::new().append(true).open(&images_path)?;
+    for path in ptx.images() {
+        let name = path.file_stem().and_then(|s| s.to_str()).unwrap();
+        let name = name.to_uppercase();
+        let entries = std::fs::read_to_string(&path)?
+            .lines()
+            .filter_map(|line| {
+                let entry = line.trim_start().strip_prefix(PTX_ENTRY_PREFIX)?;
+                entry.split_once('(')
+            })
+            .map(|(entry, _)| format!("{:?}", entry.trim()))
+            .collect::<Vec<_>>()
+            .join(", ");
+        writeln!(images, "pub const {name}_ENTRIES: &[&str] = &[{entries}];")?;
+    }
 
     let mut moe_sources = vec![
         "src/moe/moe_gguf.cu",

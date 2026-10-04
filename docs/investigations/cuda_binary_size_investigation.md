@@ -187,3 +187,63 @@ Implication:
 - For a bundled library that is a worse problem than the 10.6 MiB. Shipping SASS for candle's modules fixes both, but
   candle-core loads them with `load_module(mdl.ptx().into())` from a `&str` (cuda_backend/device.rs:350). Loading a
   fatbin needs `Ptx::from_binary`, which means patching candle-core as well, not only candle-kernels.
+
+## Run 7 - 2026-10-04 07:37
+
+Step 2 of #258, part two: ship SASS for candle's 11 runtime-loaded modules instead of PTX.
+
+Change:
+- candle-core is vendored at our candle rev too (`third_party/candle-core`, same `[patch]`). `get_or_load_func`
+  loads `Ptx::from_binary(mdl.image())`.
+- candle-kernels still builds PTX, then builds one compressed SASS fatbin per module from it with a new
+  `KernelBuilder::build_fatbin` in cudaforge, so the `.cu` files compile once. The PTX entry names become per-module
+  `entries` lists, which the startup preloader (`preload_candle_kernels`, formerly `preload_candle_ptx`) uses in
+  place of parsing PTX at run time.
+
+Question: does the JIT cost go away, and what does it cost in size and throughput?
+
+Command: `cargo build --release -p inference-ffi --features "cuda flash-attn cudnn"` (2m 53s) and the same for
+`-p inference-cli` (2m 44s); `cuobjdump -lelf -lptx -symbols` on `target/release/build/candle-kernels-*/out/*.fatbin`;
+then `inference bench -m Qwen3.5-0.8B --prompt-len 512 --gen-len 1 --iterations 1 --warmup 0 --paged-attn on` under
+`/usr/bin/time`, 3 cached and 2 `CUDA_CACHE_DISABLE=1` runs each of Run 5's CLI and this one.
+
+Finding:
+- The fatbins hold one sm_86 ELF each and no PTX (binary: 96 entries in 38 KiB; quantized: 142 in 327 KiB).
+  All 11 together are 0.56 MiB, against 10.6 MiB of PTX. The build lists 705 entry names, matching the PTX.
+- `libinference_ffi.so`: 170.2 MiB file, 147.5 MiB stripped, `.rodata` 16.4 -> 6.4 MiB.
+
+| binary | launch to first token, cached | `CUDA_CACHE_DISABLE=1` |
+|---|---|---|
+| deduplicated PTX (Run 5) | 2.16, 2.06, 2.08 s | 17.81, 17.74 s |
+| SASS fatbins | 2.08, 2.05, 2.06 s | 2.06, 2.11 s |
+
+Steady state (`--prompt-len 512 --gen-len 128 --paged-attn on`): prefill 23.9k (spread < 0.1k) tok/s, decode 401
+tok/s (Run 6: 20.9k +/- 2.1k, 396; within that run's spread, not a speedup). "Preloaded 705 Candle CUDA functions" at startup.
+
+Implication: a cold machine no longer pays ~15 s of JIT, and the driver's compute cache no longer matters for these
+modules. Portability is now the same as for the other kernel crates. SASS for sm_X.y runs on later minors of the same
+major (X.z, z >= y), not on other majors or from arch-specific targets (`90a`); the PTX used to JIT there. A bundled build targets its GPUs through `CUDA_COMPUTE_CAP` like
+the rest. candle-core now uses NVRTC only for an error type (`cuda_backend/error.rs`), which matters for step 4.
+
+Review follow-up: cudaforge printed `rerun-if-changed` for the fatbin pass's sources, the PTX it writes into
+`OUT_DIR`, which made every PTX rewrite cost one more full rebuild of candle and everything above it. It now skips
+sources under its own out dir. Check: append a line to `fill.cu`, `cargo test --no-run --features cuda --workspace
+--lib --bins --tests` (rebuilds candle and up), then the same again: `Finished` in 0.28 s, nothing recompiled.
+
+## Run 8 - 2026-10-04 07:51
+
+Question: at 0.56 MiB for one arch, could candle's modules ship every arch and still undercut the 10.6 MiB of PTX?
+
+Command: in `third_party/candle-kernels/src`, for each of the 11 module sources, `nvcc --fatbin -compress-mode=size
+--expt-relaxed-constexpr -std=c++17 -O3` with `-gencode=arch=compute_N,code=sm_N` for N in 75 80 86 89 90 100 120
+and `-gencode=arch=compute_120,code=compute_120` (PTX for later GPUs to JIT). Each arch compiles from `.cu`, since
+the kernels branch on `__CUDA_ARCH__`.
+
+Finding: 5.14 MiB in all (quantized 3.0 MiB, conv 0.51, unary 0.47, binary 0.38, reduce 0.33, the rest < 0.25),
+5m 21s of wall time with the 11 in parallel (quantized dominates).
+
+Implication: half the old PTX for 7 archs with no JIT on any of them. But the other kernel crates are 61 MiB of
+compressed SASS for one arch (Run 4), so a bundle built for sm_86 already fails on sm_90 and later whatever candle
+ships. Portability is a build-wide choice: every crate for 7 archs would be on the order of 7 x 61 = 430 MiB before
+per-crate minimum archs (FA2, Marlin and the WMMA paths are sm_80+) and step 5's instance trim. Next: a build-wide
+arch list (`CUDA_COMPUTE_CAP` taking several caps) applied by cudaforge to every crate, measured per crate.

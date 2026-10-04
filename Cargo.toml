@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["third_party/candle-kernels", "third_party/cudaforge"]
+exclude = ["third_party/candle-core", "third_party/candle-kernels", "third_party/cudaforge"]
 members = [
     "crates/inference-server-core",
     "crates/inference-api",
@@ -287,6 +287,7 @@ debug = true
 [patch.crates-io]
 cudaforge = { path = "third_party/cudaforge" }
 
-# candle-kernels with its PTX in statics and a compressed fatbin; see third_party/candle-kernels/README.md
+# candle-core and candle-kernels shipping compressed SASS instead of PTX; see their READMEs in third_party/
 [patch."https://github.com/huggingface/candle.git"]
+candle-core = { path = "third_party/candle-core" }
 candle-kernels = { path = "third_party/candle-kernels" }

@@ -661,10 +661,10 @@ impl InferenceRs {
         let device = get_mut_arcmutex!(pipeline).device();
         inference_quant::cublaslt::maybe_init_cublas_lt_wrapper(device.clone());
         #[cfg(feature = "cuda")]
-        match cuda::preload::preload_candle_ptx(&device) {
-            Ok(count) if count > 0 => info!("Preloaded {count} Candle CUDA PTX functions."),
+        match cuda::preload::preload_candle_kernels(&device) {
+            Ok(count) if count > 0 => info!("Preloaded {count} Candle CUDA functions."),
             Ok(_) => {}
-            Err(err) => warn!("Failed to preload Candle CUDA PTX functions: {err}"),
+            Err(err) => warn!("Failed to preload Candle CUDA functions: {err}"),
         }
 
         let no_kv_cache = no_kv_cache.unwrap_or(false);

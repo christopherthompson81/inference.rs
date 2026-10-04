@@ -449,7 +449,6 @@ checksum = "ade8366b8bd5ba243f0a58f036cc0ca8a2f069cff1a2351ef1cac6b083e16fc0"
 [[package]]
 name = "candle-core"
 version = "0.11.0"
-source = "git+https://github.com/huggingface/candle.git?rev=e65eb1de3cfe41008fc3acc99ed3f1c72a8d250f#e65eb1de3cfe41008fc3acc99ed3f1c72a8d250f"
 dependencies = [
  "accelerate-src",
  "byteorder",
