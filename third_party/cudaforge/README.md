@@ -13,6 +13,8 @@
 > - `src/builder.rs`: `build_fatbin` builds one fatbin per source with the incremental, parallel path of `build_ptx`
 >   (both now pass `-o`), and `PtxOutput` writes `include_bytes!` consts for fatbins and lists the built `images()`.
 >   Sources inside the builder's own out dir (generated PTX) get no `rerun-if-changed`, which would rerun every build.
+> - `src/builder.rs`: `build_lib` and `build_shared_lib` print the toolkit's library directory as a link search path,
+>   since the kernel libraries link `cudart` and cudarc no longer adds it when it loads its libraries at runtime.
 > - `src/builder.rs`: adds `KernelBuilder::compress_fatbin`, which passes `-compress-mode=size` from CUDA 12.8 and
 >   `-Xfatbin=-compress-all` before it, with a unit test for the version threshold
 >   (`cargo test --manifest-path third_party/cudaforge/Cargo.toml`, since the crate is outside the workspace).

@@ -139,6 +139,10 @@ static PTX: OnceLock<std::result::Result<String, String>> = OnceLock::new();
 pub fn ptx() -> candle_core::Result<&'static str> {
     use candle_core::cuda_backend::cudarc::nvrtc;
     PTX.get_or_init(|| {
+        // cudarc panics on a missing library; a bundle may leave libnvrtc out
+        if !unsafe { nvrtc::sys::is_culib_present() } {
+            return Err("libnvrtc was not found".to_string());
+        }
         nvrtc::compile_ptx(format!(
             "#define MASK_TO_BOX_BLOCK {MASK_TO_BOX_BLOCK}\n{SRC}"
         ))

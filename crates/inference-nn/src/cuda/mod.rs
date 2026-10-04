@@ -17,6 +17,8 @@ pub mod moe;
 pub mod phase_timer;
 #[cfg(feature = "cuda")]
 pub mod preload;
+#[cfg(all(test, feature = "cuda"))]
+mod rng_tests;
 #[cfg(feature = "cuda")]
 pub mod speculative_rejection;
 pub mod ssm;
