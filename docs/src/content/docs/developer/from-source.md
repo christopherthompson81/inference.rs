@@ -65,7 +65,7 @@ In the quantization crate, some tests run only with a specific backend feature e
 
 ## Python SDK
 
-The Python package is pure Python over `libinference_ffi`. `python scripts/release/build_wheels.py [--accelerator cpu|cuda|metal] [--features ...]` builds the library in release and packages it into `target/wheels/`. For development, build the library with the features you want and install the package in place:
+The Python package is pure Python over `libinference_ffi`. `python scripts/release/build_wheels.py [--accelerator cpu|cuda|metal] [--features ...]` builds the library with the `bundle` profile and packages it into `target/wheels/`. For development, build the library with the features you want and install the package in place:
 
 ```bash
 cargo build --release -p inference-ffi --features "cuda nccl flash-attn"
@@ -73,6 +73,16 @@ pip install -e bindings/python
 ```
 
 The package finds the library in the checkout's `target/release` (or `target/debug`); set `INFERENCE_NATIVE_DIR` to load it from elsewhere.
+
+## Bundling the C ABI library
+
+To ship `libinference_ffi` inside another project, build it with the `bundle` profile and only the model families you need:
+
+```bash
+RUSTFLAGS="" cargo build --profile bundle -p inference-ffi --no-default-features --features "cuda flash-attn code-execution models-qwen"
+```
+
+The `bundle` profile is `release` plus fat LTO, one codegen unit and stripping: a smaller library for about three times the build time, with the same throughput. `RUSTFLAGS=""` overrides the checkout's `target-cpu=native`, so the library runs on any CPU of its arch. The library lands in `target/bundle/`; to load it from the in-place Python or C# packages, point `INFERENCE_NATIVE_DIR` there. `build_wheels.py` uses this profile. Its only link-time CUDA dependency is `libcudart` (plus the driver on sm_90 builds, for the DeepGEMM provider). At runtime a text model also loads the driver, cuBLAS and cuBLASLt. cuRAND is needed only for random draws on the GPU (the diffusion models), and cuDNN only with the opt-in `cudnn` feature.
 
 ## Version pinning in a consumer crate
 

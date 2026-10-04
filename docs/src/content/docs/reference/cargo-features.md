@@ -40,12 +40,12 @@ For Linux CUDA multi-GPU, add `nccl` when NCCL is installed. The Linux installer
 
 ## Model families
 
-Each model family is its own crate (`inference-models-{gemma,llama,other,phi,qwen}`), compiled only when its feature is on (`inference-ffi` always builds every family). Speech (Dia) and image generation (FLUX) models are always built.
+Each model family is its own crate (`inference-models-{gemma,llama,other,phi,qwen}`), compiled only when its feature is on. Speech (Dia) and image generation (FLUX) models are always built.
 
 | Feature | Crates | Purpose |
 |---|---|---|
-| `all-models` | `inference-cli`, `inference`, `inference-core`, `inference-server-core`, `inference-api` | Every model family. On by default in each. |
-| `models-gemma`, `models-llama`, `models-other`, `models-phi`, `models-qwen` | as above | One family. With `--no-default-features`, list the families to build; a smaller set builds faster. |
+| `all-models` | `inference-cli`, `inference`, `inference-core`, `inference-server-core`, `inference-api`, `inference-ffi` | Every model family. On by default in each. |
+| `models-gemma`, `models-llama`, `models-other`, `models-phi`, `models-qwen` | as above | One family. With `--no-default-features`, list the families to build; a smaller set builds faster and, for `inference-ffi`, ships a smaller library. |
 
 ## Enabling features
 
@@ -70,7 +70,7 @@ inference = { git = "https://github.com/christopherthompson81/inference.rs", fea
 
 ## Default features
 
-`inference-cli` defaults to `code-execution`, `swagger-ui` and `all-models`; `inference-server-core` to `swagger-ui` and `all-models`; `inference`, `inference-core` and `inference-api` to `all-models`; `inference-ffi` to `code-execution`. To exclude defaults, use `--no-default-features` (then name the model families you want).
+`inference-cli` defaults to `code-execution`, `swagger-ui` and `all-models`; `inference-server-core` to `swagger-ui` and `all-models`; `inference`, `inference-core` and `inference-api` to `all-models`; `inference-ffi` to `code-execution` and `all-models`. To exclude defaults, use `--no-default-features` (then name the model families you want).
 
 No crate enables an accelerator feature by default. Opt in to the accelerator matching your hardware.
 

@@ -21,7 +21,7 @@ crate-type = ["cdylib", "rlib"]
 anyhow.workspace = true
 candle-core.workspace = true
 image.workspace = true
-inference-api = { workspace = true, features = ["all-models"] }
+inference-api = { workspace = true }
 inference-layout = { path = "../inference-layout" }
 serde_json.workspace = true
 
@@ -37,7 +37,14 @@ rand_distr.workspace = true
 tempfile.workspace = true
 
 [features]
-default = ["code-execution"]
+default = ["all-models", "code-execution"]
+# Model families; an integrator shipping one family builds with --no-default-features and just that one.
+all-models = ["inference-api/all-models"]
+models-gemma = ["inference-api/models-gemma"]
+models-llama = ["inference-api/models-llama"]
+models-other = ["inference-api/models-other"]
+models-phi = ["inference-api/models-phi"]
+models-qwen = ["inference-api/models-qwen"]
 cuda = ["candle-core/cuda", "inference-api/cuda", "inference-layout/cuda"]
 metal = ["candle-core/metal", "inference-api/metal", "inference-layout/metal"]
 cutile = ["cuda", "inference-api/cutile"]
