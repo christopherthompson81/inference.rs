@@ -1,5 +1,5 @@
 [workspace]
-exclude = ["third_party/cudaforge"]
+exclude = ["third_party/candle-kernels", "third_party/cudaforge"]
 members = [
     "crates/inference-server-core",
     "crates/inference-api",
@@ -286,3 +286,7 @@ debug = true
 # cudaforge with cargo jobserver support, so kernel crates building in parallel share `cargo -j`; see third_party/cudaforge/README.md
 [patch.crates-io]
 cudaforge = { path = "third_party/cudaforge" }
+
+# candle-kernels with its PTX in statics and a compressed fatbin; see third_party/candle-kernels/README.md
+[patch."https://github.com/huggingface/candle.git"]
+candle-kernels = { path = "third_party/candle-kernels" }
