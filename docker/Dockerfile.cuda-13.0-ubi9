@@ -1,4 +1,4 @@
-FROM nvidia/cuda:13.0.2-cudnn-devel-ubi9 AS builder
+FROM nvidia/cuda:13.0.2-devel-ubi9 AS builder
 
 RUN dnf install -y git
 RUN curl https://sh.rustup.rs -sSf | bash -s -- -y
@@ -14,10 +14,10 @@ ARG CUDA_COMPUTE_CAP=80
 ARG RAYON_NUM_THREADS=4
 ARG RUST_NUM_THREADS=4
 ARG RUSTFLAGS="-Z threads=${RUST_NUM_THREADS}"
-ARG WITH_FEATURES="cuda,cudnn"
+ARG WITH_FEATURES="cuda"
 RUN cargo build --release -p inference-cli --features "${WITH_FEATURES}"
 
-FROM nvidia/cuda:13.0.2-cudnn-runtime-ubi9
+FROM nvidia/cuda:13.0.2-runtime-ubi9
 
 COPY --chmod=755 --from=builder /inference/target/release/inference /usr/local/bin/inference
 # Chat templates for models that ship without one

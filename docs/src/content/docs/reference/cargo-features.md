@@ -10,7 +10,7 @@ inference.rs uses Cargo features to gate platform-specific and optional function
 | Feature | Crates | Purpose |
 |---|---|---|
 | `cuda` | `inference-cli`, `inference`, `inference-core`, `inference-server-core`, `inference-api`, `inference-ffi`, `inference-selection` | NVIDIA CUDA acceleration, including [paged attention](/guides/perf/paged-attention/). |
-| `cudnn` | as above | cuDNN-accelerated kernels. |
+| `cudnn` | as above | Routes candle's `conv1d`/`conv2d` through cuDNN. Not recommended: candle's integration plans every call from scratch, which measured 1.7-22x slower than the default path in BF16 and F16, and cuDNN adds ~1.15 GB of runtime libraries. |
 | `flash-attn` | as above | Flash attention v2 (Ampere+, requires `cuda`). |
 | `flash-attn-v3` | `inference-cli`, `inference-core`, `inference-server-core`, `inference-api`, `inference-ffi`, `inference-selection` | Flash attention v3 (Hopper, requires `cuda`). Not exposed by the top-level `inference` crate. |
 | `cutile` | `inference-cli`, `inference`, `inference-core`, `inference-ffi`, `inference-api`, `inference-selection` | cuTile acceleration for quantized linears, MoE, and routed LoRA. Enables `cuda`. Requires CUDA >= 13.2 on Ampere/Ada and Blackwell+, CUDA >= 13.3 on Hopper, and a compatible `tileiras` installation. [NVFP4](/reference/quantization-types/#nvfp4) requires Blackwell and CUDA >= 13.3. See [cuTile setup](/developer/moe-backends/). |
@@ -21,10 +21,10 @@ inference.rs uses Cargo features to gate platform-specific and optional function
 
 Typical combinations:
 
-- NVIDIA Hopper: `cuda flash-attn flash-attn-v3 cudnn` (add `cutile` with CUDA >= 13.3)
-- NVIDIA Ampere or Ada: `cuda flash-attn cudnn` (add `cutile` with CUDA >= 13.2)
-- NVIDIA Blackwell with CUDA >= 13.2 and a compatible `tileiras`: `cuda flash-attn cudnn cutile`
-- NVIDIA older: `cuda cudnn`
+- NVIDIA Hopper: `cuda flash-attn flash-attn-v3` (add `cutile` with CUDA >= 13.3)
+- NVIDIA Ampere or Ada: `cuda flash-attn` (add `cutile` with CUDA >= 13.2)
+- NVIDIA Blackwell with CUDA >= 13.2 and a compatible `tileiras`: `cuda flash-attn cutile`
+- NVIDIA older: `cuda`
 - Apple Silicon: `metal`
 - Intel CPU with MKL: `mkl`
 
@@ -52,20 +52,20 @@ Each model family is its own crate (`inference-models-{gemma,llama,other,phi,qwe
 From the repository with `cargo install`:
 
 ```bash
-cargo install --git https://github.com/christopherthompson81/inference.rs inference-cli --features "cuda nccl flash-attn cudnn"
+cargo install --git https://github.com/christopherthompson81/inference.rs inference-cli --features "cuda nccl flash-attn"
 ```
 
 From a source checkout:
 
 ```bash
-cargo install --path crates/inference-cli --features "cuda nccl flash-attn cudnn"
+cargo install --path crates/inference-cli --features "cuda nccl flash-attn"
 ```
 
 In a consumer crate depending on `inference`:
 
 ```toml
 [dependencies]
-inference = { git = "https://github.com/christopherthompson81/inference.rs", features = ["cuda", "nccl", "flash-attn", "cudnn"] }
+inference = { git = "https://github.com/christopherthompson81/inference.rs", features = ["cuda", "nccl", "flash-attn"] }
 ```
 
 ## Default features

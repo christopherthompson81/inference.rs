@@ -287,17 +287,6 @@ check_metal_toolchain() {
     fi
 }
 
-# Check if cuDNN is installed
-detect_cudnn() {
-    # Check common cuDNN library paths
-    for path in /usr/lib/x86_64-linux-gnu /usr/lib/aarch64-linux-gnu /usr/local/cuda/lib64 /usr/lib64; do
-        if [ -f "$path/libcudnn.so" ] || ls "$path"/libcudnn.so.* >/dev/null 2>&1; then
-            return 0
-        fi
-    done
-    return 1
-}
-
 # Check if NCCL is installed
 detect_nccl() {
     for root in "$NCCL_ROOT" "$NCCL_HOME" "$CUDA_HOME" "$CUDA_PATH" /usr/local/cuda; do
@@ -350,14 +339,6 @@ build_features() {
                 warn "INFERENCE_RS_INSTALL_NCCL=1 set but NCCL was not detected; the build may fail unless libnccl is on the linker path"
             else
                 warn "NCCL not found - skipping nccl. Install NCCL or set INFERENCE_RS_INSTALL_NCCL=1 to force it; NCCL is the preferred CUDA multi-GPU path."
-            fi
-
-            # Check for cuDNN
-            if detect_cudnn; then
-                features="$features cudnn"
-                info "cuDNN detected - enabling cudnn"
-            else
-                info "cuDNN not found - skipping cudnn feature"
             fi
 
             # Add flash attention based on compute capability

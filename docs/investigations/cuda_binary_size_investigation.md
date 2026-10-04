@@ -247,3 +247,76 @@ compressed SASS for one arch (Run 4), so a bundle built for sm_86 already fails 
 ships. Portability is a build-wide choice: every crate for 7 archs would be on the order of 7 x 61 = 430 MiB before
 per-crate minimum archs (FA2, Marlin and the WMMA paths are sm_80+) and step 5's instance trim. Next: a build-wide
 arch list (`CUDA_COMPUTE_CAP` taking several caps) applied by cudaforge to every crate, measured per crate.
+
+## Run 9 - 2026-10-04 08:15
+
+Step 3 of #258: what does leaving out `cudnn` cost? cuDNN backs only candle-core's `conv1d` and `conv2d`
+(`cuda_backend/mod.rs`, `#[cfg(feature = "cudnn")]`); without it they take candle's im2col + GEMM path. Our crates
+only pass `cudnn_fwd_algo: None`. local_ci's `--cuda` mode builds without `cudnn`, so the fallback is the tested path.
+
+First attempt: `pp_doclayout_v3_bench` (release, `--features cuda` vs `cuda candle-core/cudnn`, batch 1 and 4, 3
+warmup, 20 iters). It measured 26.15 vs 26.27 ms/image at batch 1, and 26.10 vs 26.16 at batch 4. But nsys on the
+cuDNN build shows no cuDNN kernels: PP-DocLayoutV3 convolves with inference-layout's own `im2col_cols_last_f32`
+(22.1% of GPU time) and `depthwise_conv2d_f32` (2.4%). So it never calls candle's conv and says nothing about cuDNN.
+The models that do call candle's conv are the gemma3n vision tower (MobileNet-style), the conformer and gemma
+audio encoders, and the vision patch embeddings. None of those checkpoints are on disk.
+
+Command: a scratch crate on the vendored candle-core (`features = ["cuda"]`, plus a `cudnn` feature for
+`candle-core/cudnn`, release). It times `Tensor::conv2d`/`conv1d` at representative shapes: 3 warmup, then the mean
+of 20 iterations between `synchronize()` calls. Inputs are randn in BF16 and F32.
+
+Finding (ms per call):
+
+| dtype | case | default (im2col) | cudnn | cudnn / default |
+|---|---|---|---|---|
+| BF16 | conv2d 3x3 256->256 @64x64 | 0.379 | 2.109 | 5.6x |
+| BF16 | conv2d 1x1 640->1280 @32x32 | 0.106 | 2.301 | 21.7x |
+| BF16 | conv2d dw 3x3 640 @32x32 | 14.051 | 119.479 | 8.5x |
+| BF16 | conv2d patch 14 3->1152 @896 | 0.294 | 0.494 | 1.7x |
+| BF16 | conv1d k3 128->512 L3000 | 0.088 | 1.973 | 22.4x |
+| BF16 | conv1d dw k15 1024 L1500 | 22.626 | 106.826 | 4.7x |
+| F32 | conv2d 3x3 256->256 @64x64 | 0.574 | 0.527 | 0.9x |
+| F32 | conv2d 1x1 640->1280 @32x32 | 0.156 | 0.390 | 2.5x |
+| F32 | conv2d dw 3x3 640 @32x32 | 14.273 | 156.255 | 10.9x |
+| F32 | conv2d patch 14 3->1152 @896 | 0.564 | 0.334 | 0.6x |
+| F32 | conv1d k3 128->512 L3000 | 0.137 | 0.378 | 2.8x |
+| F32 | conv1d dw k15 1024 L1500 | 23.053 | 134.750 | 5.8x |
+
+cuDNN as candle integrates it is slower in 10 of 12 cases; it only wins two F32 cases (3x3 256 channels, the
+14x14 patch embed). The reason is in `cuda_backend/cudnn.rs`: every call builds its descriptors, runs
+`pick_algorithm()` and allocates a zeroed workspace (`alloc_zeros`), and BF16 goes through the `<bf16, f32>`
+mixed path in NCHW. Both paths are slow on depthwise (14-23 ms); that is a separate perf item, not a size one.
+
+Implication: dropping `cudnn` from the recommended builds costs nothing in speed and removes ~1.15 GB of runtime
+libraries. The feature stays for anyone who wants it, but nothing recommends or auto-enables it any more:
+install.sh, the CUDA 13 Dockerfile (whose base images drop from `-cudnn-` to the plain devel/runtime ones), the
+build docs, the feature reference and CLAUDE.md. The microbenchmark compares two feature builds and is not a
+correctness check, so it stays here as a record rather than a committed test.
+
+Correction and review follow-up (2026-10-04 08:20):
+- The slow path is candle's cuDNN integration, not cuDNN. Each call builds four descriptors and runs
+  `pick_algorithm()` (cudarc's `cudnnGetConvolutionForwardAlgorithm_v7` heuristic, uncached). It then allocates and
+  zeroes a fresh workspace, and BF16 runs NCHW with F32 compute instead of a BF16 tensor-core path. An integration
+  that caches the algorithm and workspace per shape could well beat im2col; that was not measured here.
+- Depthwise is slow on both paths for a different reason: `Tensor::conv2d` with `groups > 1` splits the input and
+  runs one convolution per group, then concatenates (`candle-core/src/conv.rs`). The 640-channel case is 640 convs,
+  and on the cuDNN path each one pays the per-call setup.
+- F16 is the default dtype below compute capability 8.0 (`inference-nn/src/utils/normal.rs`), and candle sends it
+  to cuDNN as `<f16, f16>`. Same scratch crate, F16 only:
+
+| dtype | case | default (im2col) | cudnn | cudnn / default |
+|---|---|---|---|---|
+| F16 | conv2d 3x3 256->256 @64x64 | 0.379 | 2.184 | 5.8x |
+| F16 | conv2d 1x1 640->1280 @32x32 | 0.108 | 1.736 | 16.1x |
+| F16 | conv2d dw 3x3 640 @32x32 | 14.555 | 139.982 | 9.6x |
+| F16 | conv2d patch 14 3->1152 @896 | 0.296 | 2.925 | 9.9x |
+| F16 | conv1d k3 128->512 L3000 | 0.089 | 1.576 | 17.7x |
+| F16 | conv1d dw k15 1024 L1500 | 22.841 | 126.130 | 5.5x |
+
+- "Costs nothing in speed" holds at the default dtypes. cuDNN only wins F32 dense 3x3 and the patch embed, and no
+  model runs those shapes in F32 by default. The one model that forces F32 convs, Phi-4-MM's conformer, runs
+  depthwise and k=1 pointwise conv1d, where cuDNN loses 2.5-5.8x.
+- The size case does not depend on speed: whatever the integration, cuDNN's runtime libraries are ~1.15 GB, several
+  times our whole library after steps 1-2. So for a bundle it stays opt-in either way.
+- `install.ps1` had the same cuDNN auto-enable as `install.sh`; it is removed too.
+

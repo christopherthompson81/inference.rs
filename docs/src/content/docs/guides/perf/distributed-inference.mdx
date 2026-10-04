@@ -39,7 +39,7 @@ Linux CUDA installs enable `nccl` when the installer or wheel builder finds `lib
 Manual Linux CUDA build with NCCL:
 
 ```bash
-cargo install --git https://github.com/christopherthompson81/inference.rs inference-cli --features "cuda nccl flash-attn cudnn"
+cargo install --git https://github.com/christopherthompson81/inference.rs inference-cli --features "cuda nccl flash-attn"
 ```
 
 If NCCL is not installed, omit `nccl`. To force the installer decision, use `INFERENCE_RS_INSTALL_NCCL=1` or `INFERENCE_RS_INSTALL_NO_NCCL=1`. To disable NCCL at runtime without rebuilding:

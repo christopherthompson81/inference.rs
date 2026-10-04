@@ -17,8 +17,8 @@ Installer-managed binaries are exposed at `~/.local/bin/inference`, backed by `~
 
 Flash attention requires compute capability 8.0+ (see [hardware support](/reference/hardware-support/)). On older GPUs, drop `flash-attn` and rebuild:
 
-- `cuda nccl cudnn` on Linux with NCCL installed.
-- `cuda cudnn` otherwise.
+- `cuda nccl` on Linux with NCCL installed.
+- `cuda` otherwise.
 
 ### `inference login` rejects the token
 
