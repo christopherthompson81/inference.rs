@@ -11,6 +11,8 @@
 >   only when a code path calls them, so a bundle can leave out the ones it never uses.
 > - `src/cuda_backend/device.rs`: the cuRAND generator is created on first use (from the stored seed, so `set_seed`
 >   keeps its sequence). A missing driver, cuBLAS or cuRAND is an error rather than cudarc's panic.
+> - `src/cuda_backend/device.rs`: `get_or_load_custom_image` loads a custom module from a cubin or fatbin, beside
+>   `get_or_load_custom_func`'s PTX.
 > - `src/cpu/erf.rs`: drops `use std::f64;`, which made `f64::INFINITY` resolve to the module constants that Rust 1.99
 >   deprecates (a path dependency's lints are not capped like a git dependency's).
 >

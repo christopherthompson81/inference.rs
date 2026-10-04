@@ -125,10 +125,10 @@ impl CustomOp3 for DepthwiseConv {
         let bias = sb.as_cuda_slice::<f32>()?.slice(lb.start_offset()..);
         let n = g.b * g.c * g.ho * g.wo;
         let mut out = unsafe { dev.alloc::<f32>(n)? };
-        let func = dev.get_or_load_custom_func(
+        let func = dev.get_or_load_custom_image(
             crate::cuda_kernels::DEPTHWISE,
             crate::cuda_kernels::MODULE,
-            crate::cuda_kernels::ptx()?,
+            crate::cuda_kernels::IMAGE,
         )?;
         let dims = [g.c, g.h, g.w, g.ho, g.wo, g.k, self.stride, self.padding].map(|v| v as i32);
         let n_i32 = i32::try_from(n)?;

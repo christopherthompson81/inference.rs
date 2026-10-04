@@ -92,10 +92,10 @@ impl CustomOp1 for Im2Col {
         let x = s.as_cuda_slice::<f32>()?.slice(l.start_offset()..);
         let rows = c * k * k + 1;
         let mut out = unsafe { dev.alloc::<f32>(b * rows * ho * wo)? };
-        let func = dev.get_or_load_custom_func(
+        let func = dev.get_or_load_custom_image(
             crate::cuda_kernels::IM2COL,
             crate::cuda_kernels::MODULE,
-            crate::cuda_kernels::ptx()?,
+            crate::cuda_kernels::IMAGE,
         )?;
         let n_rows = b * rows;
         let dims = [rows, n_rows, c, h, w, ho, wo, k, self.stride, self.padding]
