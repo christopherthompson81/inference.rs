@@ -604,6 +604,15 @@ impl KernelBuilder {
 
     /// Build PTX files from all kernel sources
     pub fn build_ptx(&self) -> Result<PtxOutput> {
+        self.build_images(ImageKind::Ptx)
+    }
+
+    /// Build one fatbin (SASS for the target arch) per source, to load without a JIT; overrides match the source name.
+    pub fn build_fatbin(&self) -> Result<PtxOutput> {
+        self.build_images(ImageKind::Fatbin)
+    }
+
+    fn build_images(&self, kind: ImageKind) -> Result<PtxOutput> {
         crate::jobserver::init();
         let toolkit = match &self.toolkit {
             Some(t) => t.clone(),
@@ -621,8 +630,8 @@ impl KernelBuilder {
             toolkit.include_dir.display()
         );
 
-        // Emit cargo:rerun-if-changed
-        for file in &kernel_files {
+        // Sources generated into out_dir (PTX feeding a fatbin build) are rewritten after cargo stamps the run
+        for file in kernel_files.iter().filter(|f| !f.starts_with(&self.out_dir)) {
             println!("cargo:rerun-if-changed={}", file.display());
         }
         for path in self.sources.watch_paths() {
@@ -651,7 +660,7 @@ impl KernelBuilder {
 
             let output_file = self
                 .out_dir
-                .join(kernel_file.with_extension("ptx").file_name().unwrap());
+                .join(kernel_file.with_extension(kind.extension()).file_name().unwrap());
 
             // Check if output is current using BuildCache
             if self.incremental
@@ -670,31 +679,33 @@ impl KernelBuilder {
         }
 
         if compile_jobs.is_empty() {
-            println!("cargo:warning=All PTX kernels up-to-date, skipping compilation");
+            println!("cargo:warning=All {kind:?} kernels up-to-date, skipping compilation");
             return Ok(PtxOutput {
                 paths: kernel_files,
                 out_dir: self.out_dir.clone(),
+                kind,
             });
         }
 
         println!(
-            "cargo:warning=Compiling {} of {} PTX kernels",
+            "cargo:warning=Compiling {} of {} {kind:?} kernels",
             compile_jobs.len(),
             kernel_files.len()
         );
 
         // Compile in parallel
         compile_jobs.par_iter().try_for_each(
-            |(kernel_file, _output_file, gpu_arch)| -> Result<()> {
+            |(kernel_file, output_file, gpu_arch)| -> Result<()> {
                 let _slot = crate::jobserver::acquire();
                 let gencode_arg = gpu_arch.to_gencode_arg();
 
                 let mut command = Command::new(&toolkit.nvcc_path);
                 command
                     .arg(&gencode_arg)
-                    .arg("--ptx")
+                    .arg(kind.nvcc_flag())
                     .args(["--default-stream", "per-thread"])
-                    .args(["--output-directory", &self.out_dir.to_string_lossy()]);
+                    .arg("-o")
+                    .arg(output_file);
 
                 for arg in &self.extra_args {
                     command.arg(arg);
@@ -742,7 +753,7 @@ impl KernelBuilder {
             },
         )?;
 
-        // Update cache for PTX files
+        // Update cache for the built images
         if self.incremental {
             for kernel_file in &kernel_files {
                 let filename = kernel_file
@@ -752,7 +763,7 @@ impl KernelBuilder {
                 let gpu_arch = self.compute_cap.get_for_file(filename)?;
                 let output_file = self
                     .out_dir
-                    .join(kernel_file.with_extension("ptx").file_name().unwrap());
+                    .join(kernel_file.with_extension(kind.extension()).file_name().unwrap());
 
                 cache.update(
                     kernel_file,
@@ -768,6 +779,7 @@ impl KernelBuilder {
         Ok(PtxOutput {
             paths: kernel_files,
             out_dir: self.out_dir.clone(),
+            kind,
         })
     }
 
@@ -824,15 +836,45 @@ fn shared_lib_root() -> Result<PathBuf> {
     Ok(profile_dir.join("cuda-kernels"))
 }
 
-/// Output from PTX compilation
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ImageKind {
+    Ptx,
+    Fatbin,
+}
+
+impl ImageKind {
+    fn extension(self) -> &'static str {
+        match self {
+            ImageKind::Ptx => "ptx",
+            ImageKind::Fatbin => "fatbin",
+        }
+    }
+
+    fn nvcc_flag(self) -> &'static str {
+        match self {
+            ImageKind::Ptx => "--ptx",
+            ImageKind::Fatbin => "--fatbin",
+        }
+    }
+}
+
+/// Output from PTX or fatbin compilation
 pub struct PtxOutput {
     paths: Vec<PathBuf>,
-    #[allow(dead_code)]
     out_dir: PathBuf,
+    kind: ImageKind,
 }
 
 impl PtxOutput {
-    /// Write a Rust source file with `const` declarations for each PTX file
+    /// Path of the built image for each kernel source
+    pub fn images(&self) -> impl Iterator<Item = PathBuf> + '_ {
+        self.paths.iter().map(|p| {
+            self.out_dir
+                .join(p.with_extension(self.kind.extension()).file_name().unwrap())
+        })
+    }
+
+    /// Write a Rust source file with `const` declarations for each PTX (`&str`) or fatbin (`&[u8]`) file
     pub fn write<P: AsRef<Path>>(&self, out: P) -> Result<()> {
         let mut file = std::fs::File::create(out.as_ref())?;
 
@@ -842,12 +884,17 @@ impl PtxOutput {
                 .and_then(|s| s.to_str())
                 .unwrap_or("KERNEL");
 
-            writeln!(
-                file,
-                r#"pub const {}: &str = include_str!(concat!(env!("OUT_DIR"), "/{}.ptx"));"#,
-                name.to_uppercase().replace(['.', '-'], "_"),
-                name
-            )?;
+            let ident = name.to_uppercase().replace(['.', '-'], "_");
+            match self.kind {
+                ImageKind::Ptx => writeln!(
+                    file,
+                    r#"pub const {ident}: &str = include_str!(concat!(env!("OUT_DIR"), "/{name}.ptx"));"#
+                )?,
+                ImageKind::Fatbin => writeln!(
+                    file,
+                    r#"pub const {ident}: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/{name}.fatbin"));"#
+                )?,
+            }
         }
 
         Ok(())

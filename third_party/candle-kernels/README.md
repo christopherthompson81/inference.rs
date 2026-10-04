@@ -5,6 +5,9 @@
 >   module's PTX string, so a release `libinference_ffi.so` carried 38 copies of the 11 modules (50 MiB of PTX for 10.6 MiB of
 >   modules).
 > - `build.rs`: the statically linked MoE/mmq/mmvq kernels compress their fatbin (`KernelBuilder::compress_fatbin`).
+> - `build.rs`, `src/lib.rs`: the 11 runtime-loaded modules ship as compressed SASS fatbins built from their PTX
+>   (`KernelBuilder::build_fatbin`), so loading them needs no driver JIT. The PTX stays a build intermediate, and each
+>   `Module` carries the entry names parsed from it (`Module::entries`) in place of `Module::ptx`.
 >
 > Everything else is upstream. To re-sync, copy `candle-kernels/` from the new rev and reapply the changes above.
 
