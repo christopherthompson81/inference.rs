@@ -6,6 +6,13 @@
 > - `src/parallel.rs`: the default pool size is raised from half to all cores, since the jobserver now bounds
 >   concurrency. `CUDAFORGE_THREADS` still caps it, and its test is updated to match.
 > - `Cargo.toml`: adds the `jobserver` dependency.
+> - `src/builder.rs`: `build_and_link` builds a kernel library as `lib{name}.so` in Linux dev builds and as a static
+>   archive otherwise. `build_shared_lib` keys the shared library by its compile inputs under
+>   `<target>/<profile>/cuda-kernels`, so every cargo variant maps one copy. `build_lib` shares `compile_objects` with
+>   it, which removes a stale output when a compile fails, and links through `run_link`.
+> - `src/builder.rs`: adds `KernelBuilder::compress_fatbin`, which passes `-compress-mode=size` from CUDA 12.8 and
+>   `-Xfatbin=-compress-all` before it, with a unit test for the version threshold
+>   (`cargo test --manifest-path third_party/cudaforge/Cargo.toml`, since the crate is outside the workspace).
 >
 > Everything else is upstream 0.1.6. To re-sync, diff against a new release.
 

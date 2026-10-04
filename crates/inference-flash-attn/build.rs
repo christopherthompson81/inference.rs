@@ -168,6 +168,7 @@ mod cuda_build {
             .watch(["kernels/cuda"])
             .out_dir(&build_dir)
             .with_cutlass(Some(&cutlass_commit))
+            .compress_fatbin()
             .arg("-std=c++17")
             .arg("-O3")
             .arg("-U__CUDA_NO_HALF_OPERATORS__")

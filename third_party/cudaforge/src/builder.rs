@@ -16,6 +16,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+const SIZE_COMPRESSION_SINCE: (u32, u32) = (12, 8);
+
 /// Main builder for CUDA kernel compilation
 #[derive(Debug)]
 pub struct KernelBuilder {
@@ -270,6 +272,25 @@ impl KernelBuilder {
         for arg in args {
             self.extra_args.push(arg.as_ref().to_string());
         }
+        self
+    }
+
+    /// Compress the embedded fatbins: `-compress-mode=size` from CUDA 12.8 (as llama.cpp does), `-compress-all` before.
+    pub fn compress_fatbin(mut self) -> Self {
+        if self.toolkit.is_none() {
+            self.toolkit = CudaToolkit::detect().ok();
+        }
+        let version = self.toolkit.as_ref().and_then(|t| t.version.as_deref());
+        let parsed = version.and_then(parse_major_minor);
+        if parsed.is_none() {
+            println!("cargo:warning=cudaforge: unknown CUDA version {version:?}, falling back to -Xfatbin=-compress-all");
+        }
+        let flag = if parsed >= Some(SIZE_COMPRESSION_SINCE) {
+            "-compress-mode=size"
+        } else {
+            "-Xfatbin=-compress-all"
+        };
+        self.extra_args.push(flag.to_string());
         self
     }
 
@@ -765,6 +786,11 @@ impl KernelBuilder {
     }
 }
 
+fn parse_major_minor(version: &str) -> Option<(u32, u32)> {
+    let (major, minor) = version.split_once('.')?;
+    Some((major.parse().ok()?, minor.split('.').next()?.parse().ok()?))
+}
+
 fn run_link(mut command: Command) -> Result<()> {
     let output = command
         .spawn()
@@ -833,6 +859,16 @@ mod tests {
     use super::*;
     use std::fs;
     use std::time::Duration;
+
+    #[test]
+    fn size_compression_starts_at_cuda_12_8() {
+        let mode = |v| parse_major_minor(v) >= Some(SIZE_COMPRESSION_SINCE);
+        assert!(!mode("12.6"));
+        assert!(mode("12.8"));
+        assert!(mode("13.0"));
+        assert_eq!(parse_major_minor("12.10.1"), Some((12, 10)));
+        assert_eq!(parse_major_minor("dev"), None);
+    }
 
     #[test]
     fn test_incremental_rebuild_on_header_change() {
