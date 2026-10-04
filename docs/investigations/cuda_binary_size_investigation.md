@@ -511,3 +511,110 @@ of `.text` (55.0 MiB measured for Qwen-only release, scaled by fat LTO's 59.4/64
 agent, MCP, audio and TLS stacks. These sizes were measured with the checkout's `target-cpu=native`; generic
 (`RUSTFLAGS=""`) builds will differ slightly.
 
+## Run 14 - 2026-10-04 11:37
+
+Question: after steps 1-6, a Qwen-only CUDA bundle is still ~3x llama.cpp. Where does the remaining difference come
+from?
+
+Command:
+- `RUSTFLAGS="" cargo build --profile bundle -p inference-ffi --no-default-features --features
+  cuda,flash-attn,code-execution,models-qwen`, then `size -A`.
+- The same build in `--release`, unstripped, for symbols: `nm -S -C`, with each symbol credited to the first
+  non-std crate in its path, so a std generic instantiated for a crate's type counts for that crate. C++ namespaces
+  are grouped.
+- `.nv_fatbin` per object in `target/debug/cuda-kernels/*` (the same compressed SASS the bundle links) and in
+  llama.cpp's `build_cuda/ggml/src/ggml-cuda/**/*.o`.
+
+Totals:
+
+| | ours, Qwen-only bundle (generic CPU) | llama.cpp `build_cuda`, all libraries |
+|---|---|---|
+| file | 118.9 MiB | ggml-cuda 37.5 + llama 4.5 + base/cpu/ggml 2.1 = 44 MiB; 58 MiB with common, server-impl, mtmd |
+| GPU code (`.nv_fatbin`) | 52.9 MiB | 15.1 MiB |
+| host `.text` | 49.2 MiB | 24.5 MiB (ggml-cuda 14.6, common 2.9, llama 2.5, server-impl 1.9, mtmd 1.3, base/cpu 1.4) |
+| unwind, rodata, relocs | 16.8 MiB | |
+
+GPU code by family (compressed, sm_86):
+
+| family | ours | llama.cpp |
+|---|---|---|
+| attention | 33.8: FA2 20.1 (prefill 14.3 + paged split-kv 5.8), paged attention 13.7 (FlashInfer decode 3.6 + its FP8-KV variants 7.6 + v1/v2 2.3 + sinks/MLA/cache 0.2) | 5.9: fattn-mma 3.5, fattn-tile 1.7, fattn-vec 0.6, other 0.1 |
+| mainline GGUF mmq | 5.1 (13 types) in inference-quant, plus candle's own archive (`libmoe.a`: mmq q4_0..q6_k, mmvq, MoE GGUF/WMMA) 5.2 | 6.2 (23 types) |
+| ik_llama.cpp types (KT, IQK: mmq 8.8, mmvq 0.8) | 9.6 | none |
+| other (mmvq_gguf 1.1, Marlin 1.5, nn 0.9, candle modules 0.6, small quant ops) | ~4.5 | ~3 (mmf 0.9, mmvq 0.6, argsort, ...) |
+
+Host `.text` by owner (54.4 MiB of symbols in the unstripped Qwen-only release build):
+
+| owner | MiB |
+|---|---|
+| C/C++ host code of the kernel crates | 13.6: FlashInfer templates 5.4, mmq launch instantiations ~3.0 (`instantiate_mmq` 2.3 over 528 instances, stream-k fixup 0.5), CUTLASS 1.1, Marlin 0.4, CUDA registration 0.4, mmvq launchers 0.4, rest |
+| candle (core, nn) | 8.2 |
+| std generics and small crates not attributed (drop glue 4.0, sorts, collections) | 9.2 |
+| serde/json | 3.3 |
+| tokenizers, chat templates, grammar, regex | 2.8 |
+| inference-* crates | ~12 (core 1.9, nn 1.9, quant 1.8, models-qwen 1.4, api 0.8, protocol 0.5, gguf 0.4, ...) |
+| async/networking 1.8, image codecs 1.1, rayon 0.9, agent/MCP/web 0.7, TLS 0.7, cudarc 0.6, audio 0.4, CPU gemm 0.3 | 6.5 |
+
+Implication, the difference ranked by size:
+1. **Attention, ~28 MiB of GPU code plus ~5 MiB of FlashInfer host code.** We ship several attention
+   implementations where llama.cpp ships one family for prefill and decode: Dao FA2 for prefill and paged
+   prefix-prefill, FlashInfer decode with a full FP8-KV-cache copy, the older v1/v2 paged kernels, sinks, MLA and FA3.
+   Candidates: make the FP8-KV variants opt-in (7.6 MiB plus their share of the host templates); check whether
+   v1/v2 is still reachable once FlashInfer covers a configuration (2.3 MiB); longer term, consolidate on fewer
+   kernels.
+2. **ik_llama.cpp quant types, 9.6 MiB** of GPU code (plus host launchers) that llama.cpp does not carry. They
+   would fit an opt-in feature (`ik-quants`) for bundles that do not load those files.
+3. **Two mainline GGUF matmul sets, ~5 MiB** (measured on the dev build's objects). candle-core's quantized CUDA
+   path (`fast_mmq.rs`, `fast_mmvq.rs`) links candle's `libmoe.a`, and inference-quant carries its own mmq instances.
+   Which one the engine dispatches per type needs a trace before either can go. (Run 15: the release link never
+   included candle's set, so this item is 0 MiB of the shipped gap.)
+4. **candle 8.2 MiB of host code**, mostly its CPU backend and generic ops, compiled even for a CUDA bundle.
+5. Our feature breadth beyond llama.cpp's libraries (networking, TLS, agent/MCP/web, image, audio): ~5 MiB. Small,
+   and part of what the C ABI offers.
+
+Next: trace the GGUF dispatch (item 3), then the attention reachability per configuration (item 1). Those decide
+how much of the gap is duplication rather than capability.
+
+## Run 15 - 2026-10-04 11:55
+
+#270 step 2: trace GGUF matmul dispatch on CUDA, and keep one set.
+
+Trace (code reading):
+- inference-quant's `GgufMatMul::forward_raw` tries packed affine (Marlin), then its own `fast_mmvq` (batch 1-8) or
+  `fast_mmq` (batch > 8) for every type `fast_mmvq::supports` lists. Only other types fell through to candle's
+  `QMatMul::forward`.
+- QLoRA (`inference-nn/src/lora/qloralinear.rs`) converts its `QMatMul` to `GgufMatMul`. `QLinear`
+  (`inference-nn/src/layers/mod.rs`) is only built from dense weights.
+- The direct candle callers on CUDA were `inference_quant::MatMul::qmatmul`, used by the X-LoRA Llama MoE router
+  gate, and `GgufMatMul`'s fallback. candle's `QCudaStorage::fwd` then tried its own `fast_mmvq`/`fast_mmq`, which
+  call candle-kernels' `libmoe.a`.
+- candle's MoE kernels (`moe_gemm_gguf`, `moe_gemm_wmma`) are referenced only by candle-nn's `moe` module, which
+  nothing in the workspace uses.
+- `libmoe.a` split (dev objects, compressed): mmq instances 4.85 MiB, mmvq 0.21 MiB, MoE 0.15 MiB.
+
+Change:
+- `inference_quant::gguf::qmatmul_forward(&QMatMul, &Tensor)` now holds the dispatch `GgufMatMul` used, and
+  `MatMul::qmatmul` goes through it.
+- The vendored candle-core drops `quantized/fast_mmq.rs` and `fast_mmvq.rs` and their call in `QCudaStorage::fwd`;
+  what still reaches candle's `QMatMul` takes its dequantize/dmmv path.
+- The vendored candle-kernels drops `mmvq_gguf.cu` and `mmq_gguf/` and their 46 FFI declarations. Its MoE kernels
+  stay for candle-nn until candle-nn is ours too (#270 step 5).
+- New GPU test `qmatmul_forward_matches_dequantized_matmul_on_cuda`: Q4_K and Q8_0 at batch 3 (mmvq) and 40 (mmq)
+  against a dequantized F32 matmul, within 2% of the output scale.
+
+Finding: the Qwen-only bundle is unchanged, 118.9 MiB (`.nv_fatbin` 52.89, `.text` 49.24 -> 49.22 MiB). All 46 of
+candle's GGUF launcher names (`launch_mmq_gguf_q4_k`, `launch_mmvq_gguf_q4_k_bf16_plain`, ...) are also exported by
+inference-quant's archive. In the final link each name resolved to one definition, inference-quant's, so candle's
+archive members were never pulled in. The signatures did not all match:
+- The 30 mmvq launchers and 6 Q8_1 quantize launchers are identical.
+- The 10 mainline `launch_mmq_gguf_*` launchers in inference-quant take an extra `type_dst: i32` (output dtype)
+  before `stream`, and candle's `fast_mmq` called them with candle's 14-argument signature.
+
+So any call through candle's MMQ path was undefined behaviour: the stream pointer landed in `type_dst`, and `stream`
+was read from an unwritten slot. The only way in was `MatMul::qmatmul` (the X-LoRA Llama MoE router) at a flat batch
+above 8 with a quantized gate, which is usually stored as F32, so it stayed latent.
+
+Implication: no shipped-size win. The change still removes a latent ABI mismatch, a 46-symbol collision between
+two archives, a duplicate set from the build (11 mmq instances compiled for nothing), and a second dispatch path. Lesson for the
+inventory: measure duplicates in the linked artifact, not in the build's objects.
+

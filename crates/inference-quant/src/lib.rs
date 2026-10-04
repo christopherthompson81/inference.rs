@@ -890,7 +890,7 @@ impl MatMul {
 
     /// Compute quantized matrix-matrix product.
     pub fn qmatmul(&self, x: &Tensor, matmul: &QMatMul) -> Result<Tensor> {
-        matmul.forward(x)
+        gguf::qmatmul_forward(matmul, x)
     }
 }
 
