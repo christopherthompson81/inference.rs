@@ -2793,7 +2793,7 @@ mod tests {
         ));
         assert_eq!(
             packed_varlen_flash_is_usable(true, true, DType::F16, 128, false, false),
-            cfg!(any(feature = "flash-attn", feature = "flash-attn-v3"))
+            cfg!(feature = "cuda")
         );
     }
 

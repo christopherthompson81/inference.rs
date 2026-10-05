@@ -143,11 +143,20 @@ async fn qwen2_vl_images_and_video() -> anyhow::Result<()> {
     let traces = traces(&model).await?;
     // 27 text tokens, a start/end pair per medium; a 56x56 image is 4 merged patches, the 84x56 one resizes to 28x56
     // (2) under max_pixels, the 4-frame video is 2 temporal by 2x2 (8)
-    let expected = vec![
-        (vec![237, 100, 34, 185, 26, 163], 33),
-        (vec![257, 257, 187, 143, 256, 31], 37),
-        (vec![5, 74, 256, 166, 32, 236], 37),
-    ];
+    // CUDA's flash path (fattn, and FA2 token for token) rounds these near-tied random logits unlike eager
+    let expected = if cfg!(feature = "cuda") {
+        vec![
+            (vec![5, 74, 169, 46, 249, 213], 33),
+            (vec![243, 212, 200, 20, 6, 237], 37),
+            (vec![5, 74, 256, 166, 220, 237], 37),
+        ]
+    } else {
+        vec![
+            (vec![237, 100, 34, 185, 26, 163], 33),
+            (vec![257, 257, 187, 143, 256, 31], 37),
+            (vec![5, 74, 256, 166, 32, 236], 37),
+        ]
+    };
     assert_eq!(traces, expected);
     Ok(())
 }

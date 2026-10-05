@@ -748,3 +748,80 @@ Review and CI follow-up:
 - `MIN_AGREED` is per prompt: 16 for counting, which never parts before it, and 5 for the rhyme.
 - Not covered: on SM90 the FA3 fp8 decode runs before fattn, and the decode test's "plan unused" check cannot tell
   the two apart. This machine is sm86.
+
+## Run 11 - 2026-10-05 07:15
+
+Question: can fattn be the CUDA flash backend for `Sdpa` (prompt prefill, packed prefill, the gather-SDPA prefix
+path, encoders, embedding models) in every CUDA build, with FA2 only behind it?
+
+Design:
+- `using_flash_attn()` is true with `cuda`. Builds without `flash-attn` used to run CUDA prefill eagerly: explicit
+  causal masks, no packed prefill.
+- `flash_backend_supports*` are fattn's static capabilities joined with FA2/FA3's:
+  - fattn takes head dims 64/80/96/112/128/256 in every layout, with softcap only at 128/256;
+  - 192/320/512/576 run only GQA-batched, so they are not claimed.
+- `backends::flash_attn` now returns `Option`. Order: FA3 for its head dims (when built), then fattn
+  (`try_fattn`), then FA2 (when built).
+- `try_fattn` mirrors FA2's split. Varlen (`supported_varlen`/`flash_attn_varlen` over the `FlashParams` cu_seqlens)
+  when the batch, the lengths or packing call for it, else dense. It uses FA2's causal default (`seq_len > 1`) and
+  falls back for bidirectional windows.
+- When no kernel takes a call, `run_attention` goes eager with the same mask the unsupported-head-dim branch builds.
+  A packed call has no eager form, so it is an error. `supported()` and the new `supported_varlen()` answer false
+  for operand limits (f32 K/V, alignment, fp8 scales).
+
+Prefill profile first, at the weak row from Run 9 (Qwen 1 x 512 x 512, fattn 107.6 us against FA2 54.2). The mma
+kernel took 63.9 us and `flash_attn_stream_k_fixup_general` took 40.9 us, serial after it. The grid had 164 blocks
+over 64 output tiles. Rounding down to 128 would have lost 22% of the blocks, over upstream's 5% limit, so the
+general fixup ran. Three attempts at the fixup itself made it worse:
+- One CUDA block per stream-k block, looping over the 64 columns: 105 us. The columns' dependent chains ran
+  serially.
+- The contributing blocks found first, then their partials loaded in batches of 8: 67 us.
+- One thread finds the chain once into shared memory: 100 us.
+The cost is the many short-lived blocks (164 x 16 x 4 = 10,496 of 256 threads), each a short dependent chain,
+across ~16 waves. Fix at the host instead: whenever rounding leaves more than one block per tile, round down
+(uniform fixup). Qwen 1 x 512 x 512 fell to 72-79 us (mma 58.7 us with 128 blocks, uniform fixup 17.4 us). An A/B
+against master (min of 5, one test thread) moved only that row (-37%); everything else was within +-3%.
+
+Found by the suite: the tiny Qwen2-VL test pins greedy ids recorded on the eager path. On master built with
+`flash-attn`, FA2 gives exactly the ids fattn gives, and both differ from eager (near-tied random logits). The test
+now expects the flash ids under `cuda`. Two gemma tests asserted that softcap at head dim 128 needs FA2; fattn has
+it.
+
+Engine prompt latency (`inference bench --prompt-len ... --gen-len 0`, min of 2 interleaved rounds of 3, ms):
+
+| model, prompt | FA2 build: master / branch | cuda-only build: master (eager) / branch (fattn) |
+|---|---|---|
+| Qwen3.5-0.8B 128 | 9.20 / 9.35 (+1.6%) | 9.08 / 9.41 (+3.6%) |
+| Qwen3.5-0.8B 512 | 22.45 / 22.92 (+2.1%) | 24.52 / 22.97 (-6.3%) |
+| Qwen3.5-0.8B 2048 | 84.68 / 84.91 | 106.68 / 86.20 (-19%) |
+| Qwen3.5-0.8B 8192 | 356.83 / 356.91 | 660.02 / 361.41 (-45%) |
+| Qwen2.5-Coder-3B Q4_K_M 128 | 32.86 / 34.02 (+3.5%) | - / 30.44 |
+| Qwen2.5-Coder-3B 512 | 49.19 / 50.12 (+1.9%) | - / 51.38 |
+| Qwen2.5-Coder-3B 2048 | 166.64 / 165.70 | - / 171.62 |
+| Qwen2.5-Coder-3B 8192 | 762.54 / 759.33 | out of memory / 794.26 |
+
+- Notes on the table:
+  - The cuda-only eager runs of the coder model were lost to a script error except at 8192, where eager attention
+    runs out of memory (it materializes the scores).
+  - The cuda-only branch is ~4% behind the FA2-built branch at 2-8k, where both run fattn. FA2 builds still take
+    `PrefixPrefillPlan::FlashAttentionPaged` (FA2 over the paged cache) for chunked prefill, and cuda-only builds
+    gather.
+- Short prompts lose 1.6-3.6% (fattn's fixed per-launch cost, as in decode, Run 10).
+
+Next: the paged prefix/chunked prefill plan onto `flash_attn_paged_varlen`, replacing `FlashAttentionPaged`
+(image prefix ranges need a decision there). Then FA2 can go.
+
+Review follow-up. Most of these already existed in FA2 builds, but making the flash path the CUDA default would
+have spread them to every CUDA build:
+- A device-mapped CUDA model shares one `CausalFlash` mask across its layers. A layer on the CPU then ran the CPU
+  flash kernel with no mask, attending to future tokens. f32 on CUDA (no flash kernel) lost causality on the
+  cuBLASLt-less routes and the sliding window everywhere. Both now build the eager mask whenever the mask is
+  `CausalFlash` or a window is set. New tests `causal_flash_masks_a_cpu_mapped_layer` (max abs diff 4.25 without
+  the fix) and `causal_flash_masks_f32_on_cuda`.
+- Before Turing, fattn runs causal, packed and paged calls on no kernel (mma only), so the static claim would have
+  enabled packed prefill and then failed. `inference_fattn::mma_available()` (every visible device >= 7.5, cached)
+  now gates `using_flash_attn()` and fattn's capabilities, so such builds keep their eager masks.
+- Decode over gathered K/V (standard-layout cache with a window) passes `causal: false`, which fattn refuses with
+  a window. One query per sequence sees the same keys either way, so `try_fattn` treats `seq_len == 1` as causal.
+- Left as is: with head dims fattn doesn't claim (32/40/72/192), the eager fallback rebuilds its mask on the host
+  each layer. That is FA2 builds' behaviour for their unsupported dims too, now reached in cuda-only builds.

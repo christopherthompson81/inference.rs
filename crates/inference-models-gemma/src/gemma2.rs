@@ -717,10 +717,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn packed_softcap_requires_a_supported_flash_v2_head_dim() {
+    fn packed_softcap_requires_a_flash_head_dim_with_softcap() {
         assert_eq!(
             layers_support_packed_prefill(128, [true]),
-            cfg!(feature = "flash-attn")
+            cfg!(feature = "cuda")
         );
         assert!(!layers_support_packed_prefill(512, [true]));
         assert_eq!(
