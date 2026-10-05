@@ -327,15 +327,19 @@ where
         let k_base = b_i * ctx.k.stride[0] + kv_pos * ctx.k.stride[1] + k_head * ctx.k.stride[2];
         let k_row = &ctx.k.data[k_base..k_base + meta.d];
 
-        let mut s_val = T::dot(q_row, k_row) * ctx.scale;
-        if ctx.logit_softcap != 0.0 {
-            s_val = ctx.logit_softcap * (s_val / ctx.logit_softcap).tanh();
-        }
         let mask_delta = ctx
             .mask
             .as_ref()
             .map(|mask| slope * mask.value(b_i, h_i, 0, kv_pos))
             .unwrap_or(0.0);
+        // a masked key before the first live one (a chunked mask) would otherwise score exp(-inf - -inf)
+        if mask_delta == f32::NEG_INFINITY {
+            continue;
+        }
+        let mut s_val = T::dot(q_row, k_row) * ctx.scale;
+        if ctx.logit_softcap != 0.0 {
+            s_val = ctx.logit_softcap * (s_val / ctx.logit_softcap).tanh();
+        }
         s_val += mask_delta;
 
         let m_old = m;

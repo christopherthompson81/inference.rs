@@ -106,7 +106,7 @@ fn sinks_attn_regular(
     window_size: usize,
 ) -> Result<Tensor> {
     if mask.is_some() {
-        return sinks_attn_cpu(q, k, v, sinks, mask, sdpa_params);
+        return sinks_attn_unfused(q, k, v, sinks, mask, sdpa_params);
     }
 
     #[cfg(all(feature = "cuda", target_family = "unix"))]
@@ -133,8 +133,8 @@ fn sinks_attn_regular(
         );
     }
 
-    // CPU fallback: unfused matmul + softmax_with_sinks
-    sinks_attn_cpu(q, k, v, sinks, mask, sdpa_params)
+    // CPU: unfused matmul + softmax_with_sinks
+    sinks_attn_unfused(q, k, v, sinks, mask, sdpa_params)
 }
 
 /// Varlen sinks attention: Q [B, H, max_q, D], K/V packed [total_kv, kv_H, D]
@@ -215,8 +215,8 @@ fn sinks_attn_varlen(
     )
 }
 
-/// CPU fallback: unfused matmul + softmax_with_sinks
-fn sinks_attn_cpu(
+/// Unfused matmul + softmax_with_sinks: the CPU path, and any device's path for a custom mask
+fn sinks_attn_unfused(
     q: &Tensor,
     k: &Tensor,
     v: &Tensor,
@@ -227,7 +227,9 @@ fn sinks_attn_cpu(
     let k = repeat_kv(k.clone(), sdpa_params.n_kv_groups)?;
     let v = repeat_kv(v.clone(), sdpa_params.n_kv_groups)?;
 
-    let att = MatMul.matmul_affine_mul(q, &k.t()?, sdpa_params.softmax_scale.into())?;
+    // a prompt's query arrives head-transposed, which the GPU matmul cannot stride over
+    let q = q.contiguous()?;
+    let att = MatMul.matmul_affine_mul(&q, &k.t()?, sdpa_params.softmax_scale.into())?;
     let att = inference_quant::softmax_with_sinks(&att, sinks, mask)?;
     MatMul.matmul(&att, &v)
 }
@@ -265,7 +267,7 @@ fn sinks_attn_cpu_varlen(
             .transpose(0, 1)?
             .unsqueeze(0)?;
 
-        let oi = sinks_attn_cpu(&qi, &ki, &vi, sinks, None, sdpa_params)?;
+        let oi = sinks_attn_unfused(&qi, &ki, &vi, sinks, None, sdpa_params)?;
 
         // Pad back to max_q
         if q_len < max_q {

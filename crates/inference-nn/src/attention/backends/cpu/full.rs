@@ -329,6 +329,11 @@ where
             let tile_row = &mut s_tile[j * KV_BLOCK..j * KV_BLOCK + bn];
             let live = &mut tile_row[lo - bs..hi - bs];
             let bmax = super::elem::simd_max_f32(live);
+            // a fully masked tile before any live key would softmax against a -inf max into NaN
+            if bmax == f32::NEG_INFINITY {
+                live.fill(0.0);
+                continue;
+            }
             if bmax > m[j] {
                 if m[j] != f32::NEG_INFINITY {
                     let corr = fast_exp(m[j] - bmax);

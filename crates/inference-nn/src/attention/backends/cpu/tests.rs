@@ -158,6 +158,38 @@ fn test_flash_attn_cpu_single_q() -> CandleResult<()> {
 }
 
 #[test]
+fn test_flash_attn_cpu_single_q_with_leading_masked_keys() -> CandleResult<()> {
+    let (b, h, d, kv_len, hidden) = (1, 2, 4, 5, 3);
+    let q = ramp((b, 1, h, d), 0.1)?;
+    let k = ramp((b, kv_len, h, d), 0.2)?;
+    let v = ramp((b, kv_len, h, d), 0.3)?;
+    let mask = (0..kv_len)
+        .map(|key| if key < hidden { f32::NEG_INFINITY } else { 0.0 })
+        .collect::<Vec<_>>();
+    let mask = Tensor::from_vec(mask, (1, kv_len), &Device::Cpu)?;
+    let out = run_flash_attn_cpu::<f32>(&q, &k, &v, Some(&mask), &sdpa(None))?;
+    assert_close(&out, &naive_attention(&q, &k, &v, Some(&mask), None)?)
+}
+
+#[test]
+fn test_flash_attn_cpu_full_q_with_a_masked_leading_tile() -> CandleResult<()> {
+    // a whole leading KV tile masked, and a bias after it so the mask rows take the general path
+    let (b, q_len, h, d, kv_len, hidden) = (1, 3, 2, 4, 300, 160);
+    let q = ramp((b, q_len, h, d), 0.1)?;
+    let k = ramp((b, kv_len, h, d), 0.2)?;
+    let v = ramp((b, kv_len, h, d), 0.3)?;
+    let mask = (0..q_len * kv_len)
+        .map(|i| match i % kv_len {
+            key if key < hidden => f32::NEG_INFINITY,
+            key => (key % 5) as f32 * 0.1,
+        })
+        .collect::<Vec<_>>();
+    let mask = Tensor::from_vec(mask, (q_len, kv_len), &Device::Cpu)?;
+    let out = run_flash_attn_cpu::<f32>(&q, &k, &v, Some(&mask), &sdpa(None))?;
+    assert_close(&out, &naive_attention(&q, &k, &v, Some(&mask), None)?)
+}
+
+#[test]
 fn test_flash_attn_cpu_single_q_multiple_kv_chunks() -> CandleResult<()> {
     let (b, h, d, kv_len) = (1, 4, 8, 1024);
     let q = Tensor::from_vec(
