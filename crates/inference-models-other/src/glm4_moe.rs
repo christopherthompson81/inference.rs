@@ -333,6 +333,7 @@ impl FamilyAttention for Glm4MoeAttention {
                 softmax_scale: 1.0 / (head_dim as f32).sqrt(),
                 sliding_window: None,
                 sinks: None,
+                chunk: None,
             },
         })
     }

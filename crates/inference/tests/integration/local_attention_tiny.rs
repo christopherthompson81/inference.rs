@@ -1,4 +1,4 @@
-//! Tiny gpt-oss (sliding window, sinks) and Llama 4 (chunked) checkpoints whose paged GPU decode must match the CPU.
+//! Tiny gpt-oss (sliding window, sinks) and Llama 4 (chunked) checkpoints whose GPU decode must match the CPU.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -15,10 +15,13 @@ mod recording;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
 // Byte-level, so every character is a token: the prompt alone is several windows long.
-const PROMPTS: [&str; 3] = [
+const PROMPTS: [&str; 6] = [
     "the quick brown fox jumps over the lazy dog",
     "pack my box with five dozen liquor jugs",
     "how vexingly quick daft zebras jump",
+    "sphinx of black quartz, judge my vow",
+    "the five boxing wizards jump quickly",
+    "jackdaws love my big sphinx of quartz",
 ];
 const MAX_LEN: usize = 24;
 // Head dim 64 is the smallest every CUDA attention backend serves.
@@ -32,6 +35,8 @@ const GPT_OSS_EXPERTS: usize = 2;
 // Near the top attention scores of these random weights, so a backend that drops the sinks moves the output.
 const SINK_LOGIT: f64 = 8.0;
 const LLAMA4_LAYERS: usize = 4;
+// Not a divisor of the 32-row blocks, so a window's tables start mid-chunk, as with real Llama 4's 8192.
+const LLAMA4_CHUNK: usize = 12;
 const LLAMA4_HIDDEN: usize = 2 * HEAD_DIM;
 const LLAMA4_EXPERT_INTER: usize = 64;
 const LLAMA4_EXPERTS: usize = 2;
@@ -206,7 +211,7 @@ fn tiny_llama4() -> anyhow::Result<tempfile::TempDir> {
             "interleave_moe_layer_step": LLAMA4_MOE_STEP,
             "num_local_experts": LLAMA4_EXPERTS,
             "num_experts_per_tok": LLAMA4_EXPERTS,
-            "attention_chunk_size": WINDOW,
+            "attention_chunk_size": LLAMA4_CHUNK,
             // Every fourth layer is the global NoPE one; a small floor scale makes its temperature tuning act.
             "floor_scale": 4.0,
             "tie_word_embeddings": false
@@ -287,29 +292,52 @@ fn paged_cache() -> inference::PagedCacheSpec {
         .unwrap()
 }
 
-async fn gpt_oss(dir: &Path, gpu: bool) -> anyhow::Result<Model> {
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Run {
+    Cpu,
+    // the model's own KV cache, no paged attention
+    Eager,
+    Paged,
+    // the prompts again, all at once, in short chunks: a repeat hits the prefix cache and prefills its tail over the
+    // paged cache, padded beside the others (Llama 4 neither splits prompts nor caches prefixes, so runs them fresh)
+    PagedRepeat,
+}
+
+const GPU_RUNS: [Run; 3] = [Run::Eager, Run::Paged, Run::PagedRepeat];
+const PREFILL_CHUNK_TOKENS: usize = 16;
+
+macro_rules! configure {
+    ($builder:expr, $run:expr) => {
+        match $run {
+            Run::Cpu => $builder.with_force_cpu(),
+            Run::Eager => $builder,
+            Run::Paged => $builder.with_paged_attn(paged_cache()),
+            Run::PagedRepeat => $builder
+                .with_paged_attn(paged_cache())
+                .with_max_prefill_chunk_tokens(PREFILL_CHUNK_TOKENS),
+        }
+    };
+}
+
+async fn gpt_oss(dir: &Path, run: Run) -> anyhow::Result<Model> {
     // f16 rounds finer than bf16, so another kernel's rounding flips fewer of the random weights' near ties
     let builder = TextModelBuilder::new(dir.to_string_lossy()).with_dtype(ModelDType::F16);
-    let builder = if gpu {
-        builder.with_paged_attn(paged_cache())
-    } else {
-        builder.with_force_cpu()
-    };
-    Ok(builder.build().await?)
+    Ok(configure!(builder, run).build().await?)
 }
 
-async fn llama4(dir: &Path, gpu: bool) -> anyhow::Result<Model> {
+async fn llama4(dir: &Path, run: Run) -> anyhow::Result<Model> {
     // its random weights overflow f16
     let builder = MultimodalModelBuilder::new(dir.to_string_lossy()).with_dtype(ModelDType::BF16);
-    let builder = if gpu {
-        builder.with_paged_attn(paged_cache())
-    } else {
-        builder.with_force_cpu()
-    };
-    Ok(builder.build().await?)
+    Ok(configure!(builder, run).build().await?)
 }
 
-async fn traces(model: &Model) -> anyhow::Result<Vec<Vec<Step>>> {
+async fn traces(model: &Model, run: Run) -> anyhow::Result<Vec<Vec<Step>>> {
+    if run == Run::PagedRepeat {
+        for prompt in PROMPTS {
+            trace(model, prompt).await?;
+        }
+        return futures::future::try_join_all(PROMPTS.map(|prompt| trace(model, prompt))).await;
+    }
     let mut traces = Vec::with_capacity(PROMPTS.len());
     for prompt in PROMPTS {
         traces.push(trace(model, prompt).await?);
@@ -348,32 +376,31 @@ fn ensure_close(gpu: &[Vec<Step>], cpu: &[Vec<Step>]) -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn gpt_oss_decodes_alike_on_cpu_and_paged_gpu() -> anyhow::Result<()> {
+async fn gpt_oss_decodes_alike_on_cpu_and_gpu() -> anyhow::Result<()> {
     let checkpoint = tiny_gpt_oss()?;
-    let cpu = traces(&gpt_oss(checkpoint.path(), false).await?).await?;
-    assert_eq!(
-        cpu,
-        traces(&gpt_oss(checkpoint.path(), false).await?).await?
-    );
+    let cpu = traces(&gpt_oss(checkpoint.path(), Run::Cpu).await?, Run::Cpu).await?;
+    let again = traces(&gpt_oss(checkpoint.path(), Run::Cpu).await?, Run::Cpu).await?;
+    assert_eq!(cpu, again);
     if ON_GPU {
-        ensure_close(
-            &traces(&gpt_oss(checkpoint.path(), true).await?).await?,
-            &cpu,
-        )?;
+        for run in GPU_RUNS {
+            let gpu = traces(&gpt_oss(checkpoint.path(), run).await?, run).await?;
+            ensure_close(&gpu, &cpu).map_err(|e| e.context(format!("{run:?}")))?;
+        }
     }
     Ok(())
 }
 
 #[tokio::test]
-async fn llama4_decodes_alike_on_cpu_and_paged_gpu() -> anyhow::Result<()> {
+async fn llama4_decodes_alike_on_cpu_and_gpu() -> anyhow::Result<()> {
     let checkpoint = tiny_llama4()?;
-    let cpu = traces(&llama4(checkpoint.path(), false).await?).await?;
-    assert_eq!(cpu, traces(&llama4(checkpoint.path(), false).await?).await?);
+    let cpu = traces(&llama4(checkpoint.path(), Run::Cpu).await?, Run::Cpu).await?;
+    let again = traces(&llama4(checkpoint.path(), Run::Cpu).await?, Run::Cpu).await?;
+    assert_eq!(cpu, again);
     if ON_GPU {
-        ensure_close(
-            &traces(&llama4(checkpoint.path(), true).await?).await?,
-            &cpu,
-        )?;
+        for run in GPU_RUNS {
+            let gpu = traces(&llama4(checkpoint.path(), run).await?, run).await?;
+            ensure_close(&gpu, &cpu).map_err(|e| e.context(format!("{run:?}")))?;
+        }
     }
     Ok(())
 }

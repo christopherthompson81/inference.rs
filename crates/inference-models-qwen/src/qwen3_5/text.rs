@@ -239,6 +239,7 @@ impl FullAttention {
                 softmax_scale: 1.0 / (head_dim as f32).sqrt(),
                 sliding_window: None,
                 sinks: None,
+                chunk: None,
             },
         })
     }

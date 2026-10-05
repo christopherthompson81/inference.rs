@@ -573,10 +573,11 @@ static __device__ __forceinline__ int fattn_kv_tiles_visible(
     return (visible + nbatch_fa - 1) / nbatch_fa;
 }
 
-// Writes the implicit mask (fattn_layout) where load_mask loads one; row j's query sits at qkv.x + j0 + j of qkv.y.
+// Writes the implicit mask (fattn_layout) where load_mask loads one; row j's query sits at qkv.x + j0 + j of qkv.y,
+// and row 0 at absolute position qkv.z.
 template<int ncols1, int nwarps, int nbatch_fa>
 static __device__ __forceinline__ void flash_attn_ext_f16_make_mask(
-        half * const __restrict__ tile_mask, const int k_VKQ_0, const int j0, const int2 qkv, const fattn_layout & lay) {
+        half * const __restrict__ tile_mask, const int k_VKQ_0, const int j0, const int3 qkv, const fattn_layout & lay) {
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
 #pragma unroll
     for (int e0 = 0; e0 < ncols1*nbatch_fa; e0 += nwarps*warp_size) {
@@ -588,7 +589,8 @@ static __device__ __forceinline__ void flash_attn_ext_f16_make_mask(
         const int i  = e % nbatch_fa;
         const int qp = qkv.x + j0 + j;
         const int kp = k_VKQ_0 + i;
-        const bool visible = kp < qkv.y && (!lay.causal || kp <= qp) && (lay.window_left < 0 || qp - kp <= lay.window_left);
+        const bool visible = kp < qkv.y && (!lay.causal || kp <= qp) && (lay.window_left < 0 || qp - kp <= lay.window_left)
+            && (lay.chunk <= 0 || (kp + qkv.z) / lay.chunk == (qp + qkv.z) / lay.chunk);
         tile_mask[j*(nbatch_fa + 8) + i] = visible ? half(0.0f) : half(-INFINITY);
     }
 }
@@ -713,7 +715,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_iter(
         const bool KV_convert,
         const fattn_layout & lay,
         const int sequence,
-        const int2 qkv) {
+        const int3 qkv) {
 #if defined(VOLTA_MMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE) || defined(AMD_MFMA_AVAILABLE)
     constexpr int  warp_size       = ggml_cuda_get_physical_warp_size();
     constexpr int  ncols           = ncols1 * ncols2;
@@ -1318,7 +1320,7 @@ static __device__ __forceinline__ void flash_attn_ext_f16_process_tile(
 #if defined(VOLTA_MMA_AVAILABLE) || defined(TURING_MMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE) || defined(AMD_MFMA_AVAILABLE)
     //In this kernel Q, K, V are matrices while i, j, k are matrix indices.
     const int  kv_len = lay.block_table || lay.cu_kv ? fattn_sequence_rows(lay, sequence, false).len : ne11;
-    const int2 qkv    = make_int2(kv_len - q_len, kv_len);
+    const int3 qkv    = make_int3(kv_len - q_len, kv_len, lay.full_lens ? __ldg(lay.full_lens + sequence) - kv_len : 0);
 
     constexpr int warp_size = ggml_cuda_get_physical_warp_size();
     constexpr int ncols = ncols1 * ncols2;

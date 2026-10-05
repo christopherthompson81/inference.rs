@@ -241,6 +241,8 @@ pub struct SdpaParams {
     pub softmax_scale: f32,
     pub sliding_window: Option<usize>,
     pub sinks: Option<Tensor>,
+    /// Llama 4's chunked attention: each query sees only keys in its own chunk of this many positions.
+    pub chunk: Option<usize>,
 }
 
 pub struct Sdpa;
@@ -274,6 +276,18 @@ impl Sdpa {
                 || !packed_attention_backend_is_available(q, sdpa_params)?)
         {
             candle_core::bail!("packed prefill requires causal varlen attention support");
+        }
+
+        // chunks run on fattn alone; a custom mask carries them itself
+        if sdpa_params.chunk.is_some() && !mask.is_custom() {
+            #[cfg(feature = "cuda")]
+            if q.device().is_cuda() {
+                let (qt, kt, vt) = (q.transpose(1, 2)?, k.transpose(1, 2)?, v.transpose(1, 2)?);
+                if let Some(out) = flash_attn(&qt, &kt, &vt, flash_params, sdpa_params)? {
+                    return out.transpose(1, 2);
+                }
+            }
+            candle_core::bail!("chunked attention without a mask runs only on fattn");
         }
 
         if let Some(sinks) = &sdpa_params.sinks {
@@ -343,6 +357,7 @@ impl Sdpa {
                         softmax_scale: sdpa_params.softmax_scale,
                         sliding_window: sdpa_params.sliding_window,
                         sinks: sdpa_params.sinks.clone(),
+                        chunk: None,
                     },
                 ))
             } else {
@@ -769,6 +784,7 @@ mod tests {
             softmax_scale: 1.0,
             sliding_window: None,
             sinks: None,
+            chunk: None,
         };
 
         let out = Sdpa.run_attention(
@@ -810,6 +826,7 @@ mod tests {
             softmax_scale: 1.0,
             sliding_window: window,
             sinks: None,
+            chunk: None,
         };
         // unscaled d = 64 random logits are peaky enough that rounding drifted past the tolerance in ~1 run of 100
         let q = (q / (d as f64).sqrt())?;
@@ -851,6 +868,7 @@ mod tests {
                 softmax_scale: 1. / (d as f32).sqrt(),
                 sliding_window: window,
                 sinks: Some(Tensor::new(&[0.5f32, -1., 2., 0.], &Device::Cpu)?),
+                chunk: None,
             };
             let mask = eager_attention_mask(len, len, true, window, DType::F32, &Device::Cpu)?;
             let expected = Sdpa.run_attention(
@@ -907,6 +925,7 @@ mod tests {
                     softmax_scale: 1. / (d as f32).sqrt(),
                     sliding_window: window,
                     sinks: Some(Tensor::arange(0f32, h as f32, device)?.affine(0.25, sink)?),
+                    chunk: None,
                 })
             };
             let cpu_mask =

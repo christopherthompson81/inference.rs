@@ -138,6 +138,7 @@ impl VisionAttention {
             softcap: None,
             softmax_scale: self.scale as f32,
             sinks: None,
+            chunk: None,
         };
         let flash_params = FlashParams::empty(false);
         let ctx = Sdpa.run_attention(

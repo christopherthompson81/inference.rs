@@ -4,6 +4,7 @@ use crate::attention::FlashKMeta;
 use crate::attention::FlashParams;
 use crate::layers::masker::CausalMaskConfig;
 use crate::paged_attention::PagedAttentionInputMetadata;
+use crate::paged_attention::attention_backend::{AttentionBackend, AttentionLayerSpec};
 use candle_core::{DType, Device, Result, Tensor};
 use candle_nn::Module;
 use inference_quant::{
@@ -315,6 +316,20 @@ struct CausalSelfAttention {
     floor_scale: Option<f32>,
     attn_scale: Option<f32>,
     attn_temperature_tuning: Option<f32>,
+    // a chunked layer fattn masks itself, from the plain causal mask; elsewhere the model builds the chunk masks
+    chunks_on_fattn: bool,
+    // without paged attention: the full cache has no window's tables, and a window would make fattn read K as one
+    eager_chunk_params: Option<SdpaParams>,
+}
+
+// fattn masks the chunks wherever it serves the layer: a CUDA device it runs on, at a half dtype, and (paged) the HND
+// cache it decodes over
+fn chunks_on_fattn(device: &Device, dtype: DType, spec: AttentionLayerSpec) -> bool {
+    device.is_cuda()
+        && matches!(dtype, DType::F16 | DType::BF16)
+        && crate::utils::using_flash_attn()
+        && crate::attention::fattn_supports(spec.k_head_dim, false)
+        && inference_nn::flashinfer::FlashInferAttentionBackend.supports_layer(spec)
 }
 
 impl CausalSelfAttention {
@@ -373,6 +388,21 @@ impl CausalSelfAttention {
         )?;
         let use_rope = !(layer_idx + 1).is_multiple_of(4);
         let head_dim = cfg.hidden_size / cfg.num_attention_heads;
+        let layer_vb = mapper.set_device(layer_idx, vb.clone(), false);
+        let spec = AttentionLayerSpec {
+            q_heads: cfg.num_attention_heads / comm.world_size(),
+            kv_heads: (cfg.num_key_value_heads / comm.world_size()).max(1),
+            k_head_dim: head_dim,
+            v_head_dim: head_dim,
+        };
+        let chunks_on_fattn =
+            use_rope && chunks_on_fattn(layer_vb.device(), layer_vb.dtype(), spec);
+        let n_kv_groups = inference_quant::compute_n_kv_groups(
+            cfg.num_key_value_heads,
+            cfg.num_attention_heads,
+            comm,
+        )?;
+        let softmax_scale = 1.0 / (head_dim as f32).sqrt();
         let norm = if cfg.use_qk_norm && use_rope {
             let vb = mapper.set_device(layer_idx, vb, false);
             Some(RmsNorm::from_w(
@@ -395,21 +425,28 @@ impl CausalSelfAttention {
             max_seq_len: cfg.max_position_embeddings,
             paged_attn,
             sdpa_params: SdpaParams {
-                n_kv_groups: inference_quant::compute_n_kv_groups(
-                    cfg.num_key_value_heads,
-                    cfg.num_attention_heads,
-                    comm,
-                )?,
+                n_kv_groups,
                 softcap: None,
-                softmax_scale: 1.0 / (head_dim as f32).sqrt(),
+                softmax_scale,
+                // the window keeps each chunk's rows in a window's paged tables
                 sliding_window: use_rope.then_some(cfg.attention_chunk_size),
                 sinks: None,
+                chunk: chunks_on_fattn.then_some(cfg.attention_chunk_size),
             },
+            eager_chunk_params: chunks_on_fattn.then_some(SdpaParams {
+                n_kv_groups,
+                softcap: None,
+                softmax_scale,
+                sliding_window: None,
+                sinks: None,
+                chunk: Some(cfg.attention_chunk_size),
+            }),
             norm,
             use_rope,
             floor_scale: cfg.floor_scale,
             attn_scale: cfg.attn_scale,
             attn_temperature_tuning: cfg.attn_temperature_tuning,
+            chunks_on_fattn,
         })
     }
 
@@ -471,6 +508,7 @@ impl CausalSelfAttention {
             softmax_scale: self.sdpa_params.softmax_scale,
             sliding_window: None,
             sinks: self.sdpa_params.sinks.clone(),
+            chunk: None,
         });
         let sdpa_params = packed_sdpa_params.as_ref().unwrap_or(&self.sdpa_params);
         let mut y = match &self.paged_attn {
@@ -514,7 +552,7 @@ impl CausalSelfAttention {
                     &v.contiguous()?,
                     attention_mask,
                     Some(flash_params),
-                    sdpa_params,
+                    self.eager_chunk_params.as_ref().unwrap_or(sdpa_params),
                 )?
             }
         };
@@ -722,7 +760,10 @@ impl Block {
     ) -> Result<Tensor> {
         let residual = x;
         let x = self.rms_1.forward(x)?;
-        let mask = if self.use_chunked_attention {
+        // the model built chunk masks (or packed chunk segments) whenever a chunked layer needs them this step
+        let model_chunks = self.use_chunked_attention
+            && (chunked_flash_params.is_some() || !matches!(chunked_mask, AttentionMask::None));
+        let mask = if model_chunks {
             if chunked_flash_params.is_some() {
                 AttentionMask::CausalFlash
             } else {
@@ -731,7 +772,7 @@ impl Block {
         } else {
             attention_mask.clone()
         };
-        let flash_params_override = if self.use_chunked_attention {
+        let flash_params_override = if model_chunks {
             chunked_flash_params
         } else {
             None
@@ -762,6 +803,8 @@ pub struct TextModel {
     mapper: Box<dyn DeviceMapper + Send + Sync>,
     cfg: ModelConfigMetadata,
     attention_chunk_size: usize,
+    // some chunked layer runs where fattn cannot mask its chunks, so the model builds them
+    builds_chunk_masks: bool,
 }
 
 impl TextModel {
@@ -869,6 +912,9 @@ impl TextModel {
             )
         })?;
 
+        let builds_chunk_masks = blocks
+            .iter()
+            .any(|block| block.use_chunked_attention && !block.attn.chunks_on_fattn);
         Ok(Self {
             wte,
             blocks,
@@ -890,10 +936,11 @@ impl TextModel {
                 sliding_window: Some(cfg.attention_chunk_size),
                 k_head_dim: cfg.hidden_size / cfg.num_attention_heads,
                 v_head_dim: cfg.hidden_size / cfg.num_attention_heads,
-                kv_cache_layout: crate::paged_attention::KvCacheLayout::StandardNoFlashInfer,
+                kv_cache_layout: crate::paged_attention::KvCacheLayout::Standard,
             },
             mapper,
             attention_chunk_size: cfg.attention_chunk_size,
+            builds_chunk_masks,
         })
     }
 
@@ -938,7 +985,14 @@ impl TextModel {
         } else {
             mask
         };
-        let chunked_flash_params = if ctx.flash_params().packed {
+        // fattn's paged prefill takes no padded rows, so later chunks of uneven length gather with the chunk masks
+        let padded_prompt_chunk = !ctx.is_first_prompt_chunk()
+            && ctx
+                .paged_input_metadata()
+                .and_then(|metadata| metadata.query_lens.as_deref())
+                .is_some_and(|lens| lens.iter().any(|&len| len != input_ids.dim(1).unwrap_or(0)));
+        let chunk_masks = self.builds_chunk_masks || padded_prompt_chunk;
+        let chunked_flash_params = if chunk_masks && ctx.flash_params().packed {
             if ctx.seqlen_offsets().iter().any(|&offset| offset != 0) {
                 candle_core::bail!("Llama4 packed chunked attention does not support cached keys");
             }
@@ -970,7 +1024,7 @@ impl TextModel {
         } else {
             None
         };
-        let chunked_mask = if chunked_flash_params.is_none() {
+        let chunked_mask = if chunk_masks && chunked_flash_params.is_none() {
             fixed_chunk_attention_mask(
                 input_ids,
                 ctx.seqlen_offsets(),

@@ -677,6 +677,7 @@ impl Gemma4MtpAttention {
                 None
             },
             sinks: None,
+            chunk: None,
         };
         Ok(Self {
             q_proj,

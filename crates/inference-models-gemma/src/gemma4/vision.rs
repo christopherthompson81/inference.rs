@@ -352,6 +352,7 @@ impl VisionAttention {
                 softcap: None,
                 softmax_scale: 1.0,
                 sinks: None,
+                chunk: None,
             },
         })
     }

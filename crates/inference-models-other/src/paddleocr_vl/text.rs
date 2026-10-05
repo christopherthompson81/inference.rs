@@ -169,6 +169,7 @@ impl Attention {
                 softmax_scale: (hd as f32).powf(-0.5),
                 sliding_window: None,
                 sinks: None,
+                chunk: None,
             },
         })
     }

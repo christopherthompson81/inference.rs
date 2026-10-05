@@ -211,6 +211,7 @@ impl Attention {
                 softmax_scale: 1.0 / (cfg.head_dim as f32).sqrt(),
                 sliding_window,
                 sinks: None,
+                chunk: None,
             },
         })
     }

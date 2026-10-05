@@ -1653,6 +1653,7 @@ impl CausalSelfAttention {
                 softmax_scale: cfg.attention_multiplier,
                 sliding_window: None,
                 sinks: None,
+                chunk: None,
             },
         })
     }

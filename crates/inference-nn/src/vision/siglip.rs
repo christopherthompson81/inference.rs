@@ -291,6 +291,7 @@ impl Attention {
             softcap: None,
             softmax_scale: self.scale,
             sinks: None,
+            chunk: None,
         };
 
         // Build FlashParams with causal=false for bidirectional vision attention.

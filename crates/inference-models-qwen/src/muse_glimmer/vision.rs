@@ -332,6 +332,7 @@ impl VisionAttention {
             softmax_scale: 1.0 / (self.head_dim as f32).sqrt(),
             sliding_window: None,
             sinks: None,
+            chunk: None,
         };
         let mut outputs = Vec::with_capacity(cu_seqlens.len().saturating_sub(1));
         for bounds in cu_seqlens.windows(2) {

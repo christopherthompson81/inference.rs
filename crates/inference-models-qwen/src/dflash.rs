@@ -3628,6 +3628,7 @@ impl DFlashDraftModel {
                     v_cache: &value_cache,
                     block_table: &metadata.block_tables,
                     seq_lens: &seq_lens,
+                    full_lens: None,
                 };
                 let q_seqs = inference_fattn::Packed {
                     cu_seqlens: &metadata.cumulative_query_lens,

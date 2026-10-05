@@ -63,6 +63,8 @@ mod ffi {
         pub implicit_mask: i32,
         pub causal: i32,
         pub window_left: i32,
+        pub chunk: i32,
+        pub full_lens: *const core::ffi::c_void,
     }
 
     #[repr(C)]
@@ -246,6 +248,14 @@ fn validate_operands(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) ->
     {
         candle_core::bail!(
             "fattn's window_left is an implicit mask (no mask tensor) and must fit an i32"
+        );
+    }
+    if opts
+        .chunk
+        .is_some_and(|c| opts.mask.is_some() || c == 0 || c > i32::MAX as usize)
+    {
+        candle_core::bail!(
+            "fattn's chunk is an implicit mask (no mask tensor) and must be in 1..=i32::MAX"
         );
     }
     if let Some(mask) = &opts.mask
@@ -445,6 +455,7 @@ struct Addrs {
     sinks: Option<u64>,
     block_table: Option<u64>,
     seq_lens: Option<u64>,
+    full_lens: Option<u64>,
     cu_q: Option<u64>,
     cu_kv: Option<u64>,
 }
@@ -509,6 +520,7 @@ impl Fattn<'_> {
             let es = k_dt.size_in_bytes() as i64;
             lay.block_table = null_or(a.block_table);
             lay.seq_lens = null_or(a.seq_lens);
+            lay.full_lens = null_or(a.full_lens);
             lay.max_blocks = p.block_table.dim(1)? as i32;
             lay.block_size_log2 = k_l.dims()[2].trailing_zeros() as i32;
             lay.block_stride_k = k_l.stride()[0] as i64 * es;
@@ -583,6 +595,7 @@ impl Fattn<'_> {
             sinks: present(self.opts.sinks.as_ref()),
             block_table: present(self.paged.map(|p| p.block_table)),
             seq_lens: present(self.paged.map(|p| p.seq_lens)),
+            full_lens: present(self.paged.and_then(|p| p.full_lens)),
             cu_q: present(self.q_seqs.map(|p| p.cu_seqlens)),
             cu_kv: present(self.kv_seqs.map(|p| p.cu_seqlens)),
         };
@@ -631,6 +644,7 @@ impl candle_core::CustomOp3 for Fattn<'_> {
         let sinks = held(self.opts.sinks.as_ref());
         let block_table = held(self.paged.map(|p| p.block_table));
         let seq_lens = held(self.paged.map(|p| p.seq_lens));
+        let full_lens = held(self.paged.and_then(|p| p.full_lens));
         let cu_q = held(self.q_seqs.map(|p| p.cu_seqlens));
         let cu_kv = held(self.kv_seqs.map(|p| p.cu_seqlens));
         let mut guards = Guards::new();
@@ -642,6 +656,7 @@ impl candle_core::CustomOp3 for Fattn<'_> {
             sinks: held_ptr(&sinks, &stream, &mut guards)?,
             block_table: held_ptr(&block_table, &stream, &mut guards)?,
             seq_lens: held_ptr(&seq_lens, &stream, &mut guards)?,
+            full_lens: held_ptr(&full_lens, &stream, &mut guards)?,
             cu_q: held_ptr(&cu_q, &stream, &mut guards)?,
             cu_kv: held_ptr(&cu_kv, &stream, &mut guards)?,
         };
@@ -725,8 +740,10 @@ fn dense_layout(
     let scales = opts.kv_scales.unwrap_or_default();
     // one query with no window sees every key, so causal masks nothing and the call can keep the vec kernel; the
     // head dims that only run GQA-batched still need a mask (real or implicit) to be selected at all
-    let masks_nothing =
-        seq_q == 1 && opts.window_left.is_none() && !GQA_ONLY_HEAD_DIMS.contains(&head_dim);
+    let masks_nothing = seq_q == 1
+        && opts.window_left.is_none()
+        && opts.chunk.is_none()
+        && !GQA_ONLY_HEAD_DIMS.contains(&head_dim);
     let causal = opts.causal && !masks_nothing;
     ffi::FattnLayout {
         block_table: std::ptr::null(),
@@ -740,9 +757,13 @@ fn dense_layout(
         v_scale: scales.v,
         cu_q: std::ptr::null(),
         cu_kv: std::ptr::null(),
-        implicit_mask: (opts.mask.is_none() && (causal || opts.window_left.is_some())) as i32,
+        implicit_mask: (opts.mask.is_none()
+            && (causal || opts.window_left.is_some() || opts.chunk.is_some()))
+            as i32,
         causal: causal as i32,
         window_left: opts.window_left.map_or(-1, |w| w as i32),
+        chunk: opts.chunk.map_or(0, |c| c as i32),
+        full_lens: std::ptr::null(),
     }
 }
 
@@ -888,6 +909,16 @@ fn validate_paged(
             "fattn needs contiguous u32 block tables (batch, max_blocks) and seq lens (batch,), got {:?} and {:?}",
             kv.block_table.shape(),
             kv.seq_lens.shape()
+        );
+    }
+    if let Some(full_lens) = kv.full_lens
+        && (full_lens.dtype() != DType::U32
+            || full_lens.dims1()? != b
+            || !full_lens.is_contiguous())
+    {
+        candle_core::bail!(
+            "fattn needs contiguous u32 full lens (batch,), got {:?}",
+            full_lens.shape()
         );
     }
     // rows past a sequence's length are read from its first row, so only the mask keeps them out

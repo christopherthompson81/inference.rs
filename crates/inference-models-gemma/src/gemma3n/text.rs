@@ -403,6 +403,7 @@ impl Attention {
                 softmax_scale: 1.0,
                 sliding_window,
                 sinks: None,
+                chunk: None,
             },
             q_norm,
             k_norm,

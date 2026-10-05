@@ -36,6 +36,9 @@ struct fattn_layout {
     int32_t implicit_mask;
     int32_t causal;
     int32_t window_left;
+    // chunk > 0: kp and qp in the same chunk of absolute positions, row 0 at full_lens[s] - kv_len (or 0)
+    int32_t chunk;
+    const int32_t * full_lens;   // [n_seq] or null
 };
 
 // Rows of sequence s's Q and dst: its packed start and length, or s's batch slot of ne01 rows.

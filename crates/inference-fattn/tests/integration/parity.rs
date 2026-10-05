@@ -446,6 +446,61 @@ fn implicit_sliding_window() -> Result<()> {
 }
 
 #[test]
+fn implicit_chunks() -> Result<()> {
+    // the kernel's chunked mask (each query sees only its own chunk of positions) against the same mask as a tensor
+    let Some(dev) = cuda() else { return Ok(()) };
+    // (seq_q, seq_kv, chunk, causal): decode at a chunk's first row, prefill across many chunks, a non-causal block
+    let runs = [
+        (1usize, 513usize, 64usize, true),
+        (1, 512, 64, true),
+        (64, 300, 40, true),
+        (200, 200, 7, true),
+        (16, 300, 40, false),
+    ];
+    for (seq_q, seq_kv, chunk, causal) in runs {
+        let c = case(128, 2, seq_q, seq_kv);
+        let q =
+            Tensor::randn(0f32, 1., (BATCH, seq_q, N_HEAD, 128), &dev)?.to_dtype(DType::BF16)?;
+        let k = Tensor::randn(0f32, 1., (BATCH, seq_kv, 2, 128), &dev)?.to_dtype(DType::BF16)?;
+        let v = Tensor::randn(0f32, 1., (BATCH, seq_kv, 2, 128), &dev)?.to_dtype(DType::BF16)?;
+        let offset = seq_kv - seq_q;
+        let chunk_mask: Vec<f32> = (0..seq_q)
+            .flat_map(|i| {
+                (0..seq_kv).map(move |j| {
+                    let qp = i + offset;
+                    if (!causal || j <= qp) && j / chunk == qp / chunk {
+                        0.
+                    } else {
+                        f32::NEG_INFINITY
+                    }
+                })
+            })
+            .collect();
+        let mask = Tensor::from_vec(chunk_mask, (1, seq_q, seq_kv), &dev)?.to_dtype(DType::F16)?;
+        let scale = 1. / (128f32).sqrt();
+        let opts = FattnOptions {
+            scale,
+            causal,
+            chunk: Some(chunk),
+            ..Default::default()
+        };
+        let got = flash_attn(&q, &k, &v, &opts)?.to_dtype(DType::F32)?;
+        let want = reference(&q, &k, &v, Some(&mask), None, &c, scale)?;
+        let diff = (got - &want)?
+            .abs()?
+            .flatten_all()?
+            .max(0)?
+            .to_scalar::<f32>()?;
+        let peak = want.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
+        assert!(
+            diff <= 1e-2 * peak,
+            "chunk {chunk} q {seq_q} kv {seq_kv}: max diff {diff}, peak {peak}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
 fn rejects_a_mask_with_causal_or_a_window() -> Result<()> {
     let Some(dev) = cuda() else { return Ok(()) };
     let t = |s: usize, h: usize| Tensor::zeros((1, s, h, 64), DType::BF16, &dev);
@@ -463,6 +518,12 @@ fn rejects_a_mask_with_causal_or_a_window() -> Result<()> {
         ..Default::default()
     };
     assert!(flash_attn(&t(8, 8)?, &t(8, 2)?, &t(8, 2)?, &window_and_mask).is_err());
+    let chunk_and_mask = FattnOptions {
+        chunk: Some(4),
+        window_left: None,
+        ..window_and_mask.clone()
+    };
+    assert!(flash_attn(&t(8, 8)?, &t(8, 2)?, &t(8, 2)?, &chunk_and_mask).is_err());
     // causal needs the queries to be the last positions of the keys
     let causal = FattnOptions {
         scale: 1.,

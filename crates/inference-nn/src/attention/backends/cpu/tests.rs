@@ -11,6 +11,7 @@ fn sdpa(softcap: Option<f32>) -> SdpaParams {
         n_kv_groups: 1,
         sliding_window: None,
         sinks: None,
+        chunk: None,
     }
 }
 

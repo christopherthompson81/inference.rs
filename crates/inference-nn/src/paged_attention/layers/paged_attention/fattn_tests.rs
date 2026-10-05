@@ -45,6 +45,8 @@ struct Case {
     layer_window: Option<usize>,
     softcap: Option<f32>,
     sinks: bool,
+    // Llama 4's chunks, over the window's tables the model metadata builds
+    chunk: Option<usize>,
     // fattn refuses the call, so the layer gathers (its output keeps a query axis: rank 4 against fattn's 3)
     gather: bool,
 }
@@ -126,6 +128,7 @@ fn check_with(c: Case, capture: bool) -> Result<()> {
             .as_ref()
             .map(|s| Tensor::new(s.as_slice(), &dev)?.to_dtype(q_dtype))
             .transpose()?,
+        chunk: c.chunk,
     };
     let scales = fp8.then_some(Fp8AttentionScales {
         q: 1.,
@@ -176,6 +179,7 @@ fn check_with(c: Case, capture: bool) -> Result<()> {
             window: c.layer_window,
             softcap: c.softcap,
             sinks: sinks.as_deref(),
+            chunk: c.chunk,
             heads: c.heads,
         },
         &packed,
@@ -220,6 +224,7 @@ fn decode_matches_a_reference() -> Result<()> {
                 layer_window: None,
                 softcap: None,
                 sinks: false,
+                chunk: None,
                 gather: false,
             })?;
         }
@@ -242,6 +247,7 @@ fn sliding_window_decode_matches_a_reference() -> Result<()> {
                 layer_window,
                 softcap,
                 sinks: false,
+                chunk: None,
                 gather: false,
             })?;
         }
@@ -262,6 +268,7 @@ fn softcap_without_a_fattn_kernel_falls_back_to_the_gather() -> Result<()> {
         layer_window: None,
         softcap: Some(30.),
         sinks: false,
+        chunk: None,
         gather: true,
     })
 }
@@ -281,6 +288,7 @@ fn decode_with_any_gqa_group() -> Result<()> {
             layer_window: None,
             softcap: None,
             sinks: false,
+            chunk: None,
             gather: false,
         })?;
     }
@@ -301,6 +309,7 @@ fn gather_decode_refuses_graph_capture() -> Result<()> {
             layer_window: None,
             softcap: Some(30.),
             sinks: false,
+            chunk: None,
             gather: true,
         },
         true,
@@ -320,6 +329,7 @@ fn multi_token_decode_matches_a_reference() -> Result<()> {
         layer_window: None,
         softcap: None,
         sinks: false,
+        chunk: None,
         gather: false,
     })
 }
@@ -337,6 +347,7 @@ fn f32_caches_fall_back_to_the_gather() -> Result<()> {
         layer_window: None,
         softcap: None,
         sinks: false,
+        chunk: None,
         gather: true,
     })
 }
@@ -350,6 +361,7 @@ struct PrefillCase {
     causal: bool,
     window: Option<usize>,
     sinks: bool,
+    chunk: Option<usize>,
 }
 
 // The shape of a reference attention: each sequence's queries are the last of its rows.
@@ -364,6 +376,7 @@ struct Reference<'a> {
     window: Option<usize>,
     softcap: Option<f32>,
     sinks: Option<&'a [f32]>,
+    chunk: Option<usize>,
 }
 
 fn sink_logits(n_head: usize) -> Vec<f32> {
@@ -400,7 +413,8 @@ fn attention_reference(
                 let qp = kv_len - q_len + j;
                 (0..kv_len).map(move |kp| {
                     let too_old = kp <= qp && c.window.is_some_and(|w| qp - kp >= w);
-                    let hidden = c.causal && kp > qp || too_old;
+                    let other_chunk = c.chunk.is_some_and(|n| kp / n != qp / n);
+                    let hidden = c.causal && kp > qp || too_old || other_chunk;
                     if hidden { f32::NEG_INFINITY } else { 0. }
                 })
             })
@@ -501,6 +515,7 @@ fn check_prefill(c: PrefillCase) -> Result<()> {
             .as_ref()
             .map(|s| Tensor::new(s.as_slice(), &dev)?.to_dtype(q_dtype))
             .transpose()?,
+        chunk: c.chunk,
     };
     let scales = if fp8 {
         FP8_SCALES
@@ -563,6 +578,7 @@ fn check_prefill(c: PrefillCase) -> Result<()> {
             window: c.window,
             softcap: None,
             sinks: sinks.as_deref(),
+            chunk: c.chunk,
             heads: (N_HEAD, N_HEAD_KV),
         },
         &packed,
@@ -600,6 +616,7 @@ fn prefix_prefill_over_a_cached_prefix() -> Result<()> {
             causal: true,
             window: None,
             sinks: false,
+            chunk: None,
         })?;
         // packed: sequences of their own lengths in one row
         check_prefill(PrefillCase {
@@ -610,6 +627,7 @@ fn prefix_prefill_over_a_cached_prefix() -> Result<()> {
             causal: true,
             window: None,
             sinks: false,
+            chunk: None,
         })?;
     }
     Ok(())
@@ -625,6 +643,7 @@ fn prefix_prefill_with_a_window_and_without_causality() -> Result<()> {
         causal: true,
         window: Some(24),
         sinks: false,
+        chunk: None,
     })?;
     // a bidirectional prompt chunk sees every row of its sequence, and a window bounds only its left
     check_prefill(PrefillCase {
@@ -635,6 +654,7 @@ fn prefix_prefill_with_a_window_and_without_causality() -> Result<()> {
         causal: false,
         window: None,
         sinks: false,
+        chunk: None,
     })?;
     check_prefill(PrefillCase {
         head_dim: 128,
@@ -644,6 +664,7 @@ fn prefix_prefill_with_a_window_and_without_causality() -> Result<()> {
         causal: false,
         window: Some(20),
         sinks: false,
+        chunk: None,
     })
 }
 
@@ -669,6 +690,7 @@ fn decode_with_sinks_matches_a_reference() -> Result<()> {
                 layer_window,
                 softcap: None,
                 sinks: true,
+                chunk: None,
                 gather: false,
             })?;
         }
@@ -687,6 +709,49 @@ fn prefix_prefill_with_sinks_matches_a_reference() -> Result<()> {
             causal: true,
             window,
             sinks: true,
+            chunk: None,
+        })?;
+    }
+    Ok(())
+}
+
+#[test]
+fn chunked_decode_matches_a_reference() -> Result<()> {
+    // Llama 4: the window keeps each chunk's rows, so the tables start block-aligned and the chunks count from the
+    // full lengths; a chunk of 100 over 32-row blocks puts chunk edges mid-table
+    for cache_dtype in [DType::BF16, DType::F8E4M3] {
+        for query_len in [1, 3] {
+            check(Case {
+                head_dim: 128,
+                heads: (N_HEAD, N_HEAD_KV),
+                block_size: 32,
+                cache_dtype,
+                full_lens: &[5, 99, 101, 333, 250],
+                query_len,
+                model_window: Some(100),
+                layer_window: Some(100),
+                softcap: None,
+                sinks: false,
+                chunk: Some(100),
+                gather: false,
+            })?;
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn chunked_prefix_prefill_matches_a_reference() -> Result<()> {
+    for (query_lens, chunk) in [(&[8, 8][..], 16), (&[20, 9][..], 24)] {
+        check_prefill(PrefillCase {
+            head_dim: 128,
+            cache_dtype: DType::BF16,
+            kv_lens: &[90, 33],
+            query_lens,
+            causal: true,
+            window: Some(chunk),
+            sinks: false,
+            chunk: Some(chunk),
         })?;
     }
     Ok(())

@@ -284,6 +284,7 @@ fn check_paged(c: VarlenCase, extras: Extras) -> Result<()> {
             v_cache: &v_cache,
             block_table: &block_table,
             seq_lens: &seq_lens,
+            full_lens: None,
         };
         let cu_q = cu(c.q_lens, &dev)?;
         let q_seqs = Packed {
