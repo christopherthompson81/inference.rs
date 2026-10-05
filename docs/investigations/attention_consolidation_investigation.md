@@ -1199,3 +1199,9 @@ Review follow-up (three real faults, all fixed):
   `chunks_on_fattn` now also asks `FlashInferAttentionBackend::supports_layer`, as Gemma 4 does.
 - Also: a missing device entry in the full lengths now fails instead of counting from 0, and the unused
   `KvCacheLayout::StandardNoFlashInfer` is gone.
+
+Master CI after the outage: the re-run at #286's merge passed every check but Test, where
+`llava_tiny::llava_next_text_and_image` (CPU f32 goldens) missed by 4.2e-4 on one logprob against a 1e-4 tolerance;
+ids matched and the other values were within ~1e-6. Test passed at #285's merge and failed at #284's (logs
+expired). The goldens come from this machine (i7-10700K, AVX2 only); GitHub's runners vary, and the CPU kernels take
+AVX-512 where it exists. The tolerance is now 1e-3, as the paddleocr and qwen-vl tiny goldens already use.

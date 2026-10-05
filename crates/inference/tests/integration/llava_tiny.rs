@@ -15,8 +15,8 @@ const PROMPT: &str = "describe";
 const MAX_LEN: usize = 6;
 // The fixtures' CLIP side; LLaVA-NeXT's anyres grid also takes the 2:1 image as two tiles.
 const IMAGE_SIDE: u32 = 28;
-// Kernel reassociation that moves F32 logprobs by ~1e-6 grows to ~1e-3 through these large-weight layers.
-const LOGPROB_TOLERANCE: f32 = 1e-4;
+// Reassociation (AVX-512 kernels where the machine has them, AVX2 elsewhere) moves F32 logprobs by ~1e-6, ~1e-3 here.
+const LOGPROB_TOLERANCE: f32 = 1e-3;
 // The image prompt shares the text prompt's opening, so a warm model serves it partly from the prefix cache.
 const MIN_CACHED_PREFIX: usize = 1;
 
