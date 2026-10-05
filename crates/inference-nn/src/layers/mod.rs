@@ -1941,8 +1941,9 @@ pub fn yarn_inv_freq_and_attention_factor(
     Ok((inv_freq, attention_factor))
 }
 
+// the flash kernels take the strided rope output as is; the eager kernels want it contiguous
 fn post_rope_output(mut x: Tensor) -> Result<Tensor> {
-    if !(cfg!(feature = "flash-attn") || cfg!(feature = "flash-attn-v3")) {
+    if !crate::utils::using_flash_attn() {
         x = x.contiguous()?;
     }
     Ok(x)

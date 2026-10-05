@@ -5,7 +5,7 @@ use std::{collections::HashMap, sync::Once};
 
 use candle_core::{DType, Device, DeviceLocation, Result, Tensor};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
-use inference_fattn::{FattnOptions, KvScales as FattnKvScales, PagedKv};
+use inference_fattn::{FattnOptions, KvScales as FattnKvScales, Packed, PagedKv};
 #[cfg(all(feature = "cuda", target_family = "unix"))]
 use inference_paged_attn::{
     DEFAULT_FP8_KV_CACHE_SCALES, Fa3DecodeParams, FlashInferDecodeScratch,
@@ -80,6 +80,18 @@ struct FlashInferDecodeCall<'call, 'ctx> {
     value_cache: &'call Tensor,
     dev: &'call DeviceLocation,
     attention_mask: &'call AttentionMask,
+}
+
+#[cfg(all(feature = "cuda", target_family = "unix"))]
+struct FattnPrefillCall<'call, 'ctx> {
+    ctx: &'call PagedForwardCtx<'ctx>,
+    query: &'call Tensor,
+    key_cache: &'call Tensor,
+    value_cache: &'call Tensor,
+    block_tables: &'call Tensor,
+    query_lens: &'call [usize],
+    cu_kv: &'call Tensor,
+    causal: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -1120,6 +1132,8 @@ impl PagedAttention {
             mm_prefix_ranges.is_some(),
         );
         let causality_known = !tensors.attention_mask.is_custom() || ctx.flash_params.is_some();
+        // one query per sequence sees the same keys causal or not, as the planner assumes
+        let single_queries = query_lens.iter().all(|&len| len == 1);
         let attention_backend = AttentionBackendKind::from_cache(
             key_cache.as_ref().unwrap(),
             value_cache.as_ref().unwrap(),
@@ -1152,13 +1166,31 @@ impl PagedAttention {
             q_heads: ctx.dims.attention_heads,
             kv_heads: ctx.dims.key_value_heads,
             writes_cache: write_cache,
-            is_causal: prefix_causal,
+            is_causal: prefix_causal || single_queries,
             has_noncausal_mm_context: mm_prefix_ranges.is_some(),
             fa3_supported,
             block_size,
             attention_backend,
         };
-        let prefill_plan = PrefixPrefillPlan::choose(prefill_plan_input);
+        #[cfg_attr(not(all(feature = "cuda", target_family = "unix")), allow(unused_mut))]
+        let mut prefill_plan = PrefixPrefillPlan::choose(prefill_plan_input);
+        #[cfg(all(feature = "cuda", target_family = "unix"))]
+        if matches!(prefill_plan, PrefixPrefillPlan::FattnPaged) {
+            let output = self.try_run_fattn_paged_prefill(FattnPrefillCall {
+                ctx,
+                query: tensors.query,
+                key_cache: key_cache.as_ref().unwrap(),
+                value_cache: value_cache.as_ref().unwrap(),
+                block_tables,
+                query_lens: &query_lens,
+                cu_kv: &cu_kv,
+                causal: prefix_causal || single_queries,
+            })?;
+            if let Some(output) = output {
+                return prefix_attention_output_layout(output, tensors.attention_mask).map(Some);
+            }
+            prefill_plan = PrefixPrefillPlan::choose_without_fattn(prefill_plan_input);
+        }
         if matches!(prefill_plan, PrefixPrefillPlan::GatherSdpa)
             && let Some(limit) = ctx.input_metadata.prefix_gather_workspace_limit
         {
@@ -1213,6 +1245,8 @@ impl PagedAttention {
                 )?;
                 return prefix_attention_output_layout(output, tensors.attention_mask).map(Some);
             }
+            #[cfg(all(feature = "cuda", target_family = "unix"))]
+            PrefixPrefillPlan::FattnPaged => {}
             PrefixPrefillPlan::GatherSdpa => {}
         }
         let simple_full_causal = matches!(tensors.attention_mask, AttentionMask::CausalFlash)
@@ -1940,6 +1974,79 @@ impl PagedAttention {
             ))
         })?;
         Ok(Some(output))
+    }
+
+    // Prefix and chunked prefill over the cache in place: batched (b, s) queries, or sequences packed into one row.
+    #[cfg(all(feature = "cuda", target_family = "unix"))]
+    fn try_run_fattn_paged_prefill(
+        &self,
+        call: FattnPrefillCall<'_, '_>,
+    ) -> Result<Option<Tensor>> {
+        let FattnPrefillCall {
+            ctx,
+            query,
+            key_cache,
+            value_cache,
+            block_tables,
+            query_lens,
+            cu_kv,
+            causal,
+        } = call;
+        let (b, h, s, d) = query.dims4()?;
+        let nseq = query_lens.len();
+        // the lengths on the device, from the offsets the gather path would use
+        let seq_lens = (cu_kv.narrow(0, 1, nseq)? - cu_kv.narrow(0, 0, nseq)?)?;
+        let kv = PagedKv {
+            k_cache: key_cache,
+            v_cache: value_cache,
+            block_table: block_tables,
+            seq_lens: &seq_lens,
+        };
+        let opts = FattnOptions {
+            scale: ctx.sdpa_params.softmax_scale,
+            softcap: ctx.sdpa_params.softcap.unwrap_or(0.),
+            kv_scales: (key_cache.dtype() == DType::F8E4M3).then(|| {
+                let scales = self.cache_scales(key_cache).flashinfer(key_cache);
+                FattnKvScales {
+                    k: scales.k,
+                    v: scales.v,
+                }
+            }),
+            causal,
+            window_left: causal
+                .then(|| sliding_window_left(ctx.sdpa_params.sliding_window))
+                .flatten(),
+            ..Default::default()
+        };
+        let q = query.transpose(1, 2)?;
+        // the plan admits no padding: b rows of s queries each, or every sequence packed into one row
+        let batched = query_lens.len() == b && query_lens.iter().all(|&len| len == s);
+        let out = if batched {
+            if !inference_fattn::supported_paged(&q, &kv, &opts)? {
+                return Ok(None);
+            }
+            inference_fattn::flash_attn_paged(&q, &kv, &opts)?
+        } else {
+            let cu_q = match ctx.flash_params {
+                Some(fp) if !fp.cumulative_seqlens_q.is_empty() => resolve_tensor_for_device(
+                    &fp.cumulative_seqlens_q,
+                    query.device(),
+                    "cumulative_seqlens_q",
+                )?,
+                _ => cumulative_seqlens_from_lengths(query_lens, query.device())?,
+            };
+            let q_seqs = Packed {
+                cu_seqlens: &cu_q,
+                max_len: query_lens.iter().copied().max().unwrap_or(0),
+            };
+            let q = q.reshape((b * s, h, d))?;
+            if !inference_fattn::supported_paged_varlen(&q, &q_seqs, &kv, &opts)? {
+                return Ok(None);
+            }
+            inference_fattn::flash_attn_paged_varlen(&q, &q_seqs, &kv, &opts)?
+                .reshape((b, s, h, d))?
+        };
+        out.transpose(1, 2).map(Some)
     }
 
     // fattn reads the cache in place through the padded block tables and needs none of FlashInfer's plan.
@@ -3337,4 +3444,4 @@ mod mixed_cached_prefix_tests {
 }
 
 #[cfg(all(test, feature = "cuda", target_family = "unix"))]
-mod fattn_decode_tests;
+mod fattn_tests;

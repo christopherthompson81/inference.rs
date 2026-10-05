@@ -825,3 +825,70 @@ have spread them to every CUDA build:
   a window. One query per sequence sees the same keys either way, so `try_fattn` treats `seq_len == 1` as causal.
 - Left as is: with head dims fattn doesn't claim (32/40/72/192), the eager fallback rebuilds its mask on the host
   each layer. That is FA2 builds' behaviour for their unsupported dims too, now reached in cuda-only builds.
+
+## Run 12 - 2026-10-05 (afternoon)
+
+Question: can prefix-cache and chunked prefill read the paged cache in place through fattn in every CUDA build?
+Until now FA2 builds had `PrefixPrefillPlan::FlashAttentionPaged` and the rest gathered K/V into a workspace.
+
+Design:
+- New plan `FattnPaged`, after FA3's fp8 plan and before FA2's. It takes f16/bf16 activations over f16, bf16 or
+  fp8 caches (FA2 needed the cache dtype to match), power-of-two blocks, the FlashInfer layout, fattn's head dims,
+  and a window only when causal.
+- Image prefix ranges (bidirectional spans inside causal attention), sinks, alibi and custom masks stay on the
+  existing paths.
+- `try_run_fattn_paged_prefill` takes the sequence lengths from `cu_kv` on the device (two narrows and a subtract,
+  no host copy). One sequence per batch row of exactly `s` queries goes to `flash_attn_paged`; anything else is
+  packed into one row and goes to `flash_attn_paged_varlen` with cu_q. fattn gained `supported_paged_varlen`. If a
+  probe says no, the call falls back to the gather.
+- First test run: "fattn needs contiguous u32 block tables ... got [2, 6] and [2]". The layer's
+  `query_layout_is_dense` means padding-free, which a packed row is too, so the batched path got a packed query.
+  The runner now tests for one sequence per batch row itself.
+- Workspace planning already counts only the output for non-gather plans. The prompt workspace of the planner's
+  test model (2 x 128 queries over 1k/8k cached rows, 16 heads, head dim 256) fell from 740 MB (padded gather) or
+  39 MB (packed) to 4 MB. Six plan tests now expect `FattnPaged` and the output-only workspace when fattn can run
+  (`fattn_reads_cache`, which asks fattn's own capability check).
+
+Coverage: making the runner panic failed only the three tiny Qwen3.5 tests; the other tiny models' head dims
+gather. So there are new direct GPU tests: `prefix_prefill_over_a_cached_prefix` (bf16, f16 and fp8 caches,
+batched and packed queries over cached prefixes, head dims 128/256) and
+`prefix_prefill_with_a_window_and_without_causality`. Both run on shuffled block tables against a reference over
+rows gathered by hand. Halving the window gives a max abs diff of 1.99. One f16 case measured 0.00216, so the f16
+tolerance is now 4e-3 (two ulps at O(1)).
+
+Bench (`inference bench --prompt-len ... --gen-len 0`, min of 2 interleaved rounds of 3, ms):
+
+| model, prompt | FA2 build: #280 / branch | cuda-only: #280 / branch |
+|---|---|---|
+| Qwen3.5-0.8B 2048 | 87.3 / 87.4 | 88.4 / 87.8 |
+| Qwen3.5-0.8B 8192 | 372.0 / 361.5 (-2.8%) | 372.4 / 364.7 (-2.1%) |
+| Qwen3.5-0.8B 16384 | 798.6 / 787.2 (-1.4%) | 813.3 / 792.6 (-2.6%) |
+| Qwen2.5-Coder-3B 2048 | 178.1 / 178.1 | 181.8 / 185.7 |
+| Qwen2.5-Coder-3B 8192 | 803.0 / 800.3 | 830.1 / 830.1 |
+
+The coder model takes no prefix path here, and its cuda-only build was 2-4% behind with fattn on both. nsys, per
+2048-token prefill: 108 extra `ucopy_bf16` kernels (5.4 ms) in the cuda-only build. `post_rope_output` made the
+rope output contiguous unless FA2/FA3 were built, but fattn takes it strided. It now keys off
+`using_flash_attn()`. After that, cuda-only 177.7 / 783.8 ms against the FA2 build's 175.6 / 785.1: FA2 no longer
+buys anything on these paths.
+
+Next: delete FA2 (`inference-flash-attn`, the `flash-attn` feature and `FlashAttentionPaged`). The dflash drafter
+and image prefix ranges still call FA2 directly, so they need fattn paths or the gather first.
+
+Review follow-up:
+- Padded multi-sequence batches would have produced wrong output silently. Sequences with cache hits or a chunk
+  offset run padded, not packed, and the plan never checked `query_layout_is_dense`. Such calls took the packed
+  branch with cu_q offsets built from the padded length, so each shorter sequence's queries landed at the wrong end
+  of its keys. `fattn_paged_prefill_supported` now requires a padding-free layout, and the runner's comment says
+  why its batched/packed split is then exact. New plan test `fattn_reads_the_cache_only_without_padded_rows`.
+- The planner reserves no gather workspace for `FattnPaged` layers, so a runtime refusal followed by a gather
+  would fail the preflight limit (0 bytes).
+  - The common trigger was a prefix hit with one new token per sequence on a sliding-window model. The runtime
+    called that non-causal (no sequence has two queries), which fattn refuses with a window. The planner assumed
+    causal. One query sees the same keys either way, so both plan input and runner now count single-query batches
+    as causal.
+  - A refusal now re-chooses without fattn (`choose_without_fattn`), so FA2 builds keep FA2's paged kernel rather
+    than gathering.
+  - Remaining refusals the static check cannot see: fp8 scales outside (0, 146], more than 16 devices.
+- f16 activations: fattn computes f16 queries in f32 (an f32 Q copy and f32 output beside the f16 result), so the
+  planner reserves 5 output-sized units for `FattnPaged` at f16 instead of 2.
