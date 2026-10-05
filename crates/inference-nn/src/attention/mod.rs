@@ -782,6 +782,8 @@ mod tests {
             sliding_window: window,
             sinks: None,
         };
+        // unscaled d = 64 random logits are peaky enough that rounding drifted past the tolerance in ~1 run of 100
+        let q = (q / (d as f64).sqrt())?;
         let out = Sdpa.run_attention(
             &q,
             &k,

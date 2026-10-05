@@ -913,7 +913,7 @@ impl TextModel {
         let position_ids = ctx
             .text_positions(input_ids.device(), input_ids.dim(1)?)?
             .ok_or_else(|| candle_core::Error::msg("missing RoPE positions"))?
-            .to_dtype(DType::I32)?;
+            .clone();
         let mask_cache = ctx.mask_cache(cache);
 
         let mask = CausalMasker.make_causal_mask(

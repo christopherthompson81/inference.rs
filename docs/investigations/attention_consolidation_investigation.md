@@ -1031,3 +1031,64 @@ Review follow-up:
   fattn lacks (72).
 - Not measured: MHA (group 1) at 80/96/112, which Phi-2 and Phi-3-mini now take to HND. No such checkpoint is local.
   Phi-3-mini's window gains: Standard with a window gathered, HND runs fattn's window.
+
+## Run 16 - 2026-10-05 13:32
+
+Question: before moving gpt-oss (sinks plus a sliding window) and Llama 4 (chunked attention) off the Standard
+layout, do they have any coverage, and does their CUDA paged decode agree with CPU today?
+
+Neither had a test or a local checkpoint. `crates/inference/tests/integration/local_attention_tiny.rs` builds tiny
+random-weight checkpoints at test time (head dim 64, window and chunk 8, prompts several windows long, 24 decode
+steps). CPU runs twice must match exactly; on CUDA, paged bf16 decode is compared with CPU bf16 over three prompts.
+
+```
+cargo nextest run -p inference [--features cuda] --test integration -E 'test(/^local_attention_tiny::/)'
+```
+
+Raw findings, in the order they surfaced:
+- Llama 4 on CPU: "Invalid sampling probability at index 0: NaN". The prompt step was fine, decode was not, and only
+  with a chunk smaller than the prompt. Cause: the single-query CPU kernel (`cpu/single_q.rs`) starts with
+  `m = -inf`; a masked key ahead of the first live one scores `-inf`, and `exp(-inf - -inf)` is NaN. A chunked decode
+  mask hides the keys before its chunk, so every Llama 4 CPU decode past the first chunk returned NaN. Causal and
+  rotating-window caches never have leading masked keys, which is why nothing else hit it. Fixed by skipping `-inf`
+  keys (the multi-query path already guarded this); `test_flash_attn_cpu_single_q_with_leading_masked_keys` is NaN
+  before the fix.
+- Llama 4 on CUDA: `DriverError(CUDA_ERROR_NOT_FOUND, "named symbol not found")` from `position_ids.to_dtype(I32)`.
+  candle's CUDA cast kernels have no integer-to-i32 casts at all, so Llama 4 never ran on CUDA. The only consumer
+  casts to f32, so the i32 cast is gone.
+- gpt-oss on CUDA: "matmul is only supported for contiguous tensors" with a `[1, 2, 81, 64]` query at strides
+  `[10368, 64, 128, 1]`. Its sliding layers get a custom mask once the prompt exceeds the window, which routes sinks
+  attention to the unfused fallback, and that passed the head-transposed prompt query to a GPU matmul. Any gpt-oss
+  prompt longer than its 128-token window on CUDA would have failed this way. The fallback now makes q contiguous.
+- Comparison design (dead ends kept): exact token equality over 24 steps fails on random weights; bf16 flips a near
+  tie at step 13 (logprobs -2.021 vs -2.020). Stopping at the first step where either side's margin is under 0.1
+  left only 5 steps. f16 did not help (same 5 steps, and Llama 4 overflowed to NaN on the GPU). What holds: each
+  trace must match token for token until it splits, the split must be at a CPU near tie (margin under 0.5), and the
+  matched steps across three prompts must reach 24. Baseline: 35 (gpt-oss) and 49 (Llama 4). bf16 logprob drift
+  reached 0.30 on matching tokens, hence the 0.5 tolerance.
+- Random sinks (std 0.5) are invisible next to scores of std ~4: dropping the sinks from the paged decode kernel
+  still passed. The fixture now sets every sink to logit 8, near the top scores.
+- Mutation checks, GPU side only, each reverted: no window or mask in sinks prefill fails gpt-oss; no sinks in paged
+  decode fails gpt-oss; no chunking in prefill or decode masks fails Llama 4 (divergence at step 1).
+
+Today's paths: Llama 4 is right on CUDA (its decode builds the chunked mask from paged metadata, then gathers K/V for
+SDPA), but slow; gpt-oss decodes on the vLLM paged kernel with sinks. Both are the ground truth for the fattn moves.
+
+Next: gpt-oss onto fattn sinks over the HND layout, retiring `flash_attn_sinks.cu`.
+
+Review follow-up:
+- Same class of NaN in the multi-query tiled CPU kernel (`cpu/full.rs`): a general (non-binary) mask row whose first
+  128-key tile is fully masked softmaxed against a `-inf` max. Causal, window and chunked masks are binary and take
+  another path, so it needs a biased mask. Fully masked tiles are now skipped;
+  `test_flash_attn_cpu_full_q_with_a_masked_leading_tile` is NaN before the fix. The single-query skip moved ahead of
+  the dot product, as in the other paths.
+- The unfused sinks path serves every device for a custom mask, so it is `sinks_attn_unfused` now.
+- The comparison got stricter: where a trace splits, the GPU must take the CPU's runner-up at a near tie (not any
+  token), runner-up logprobs are compared as well, and a step with fewer than two top logprobs is an error. A minimum
+  per prompt was tried and dropped: Llama 4's second prompt meets a genuine tie at step 1 (margin 0.094, GPU took the
+  runner-up), so per-prompt counts are 24/1/24 there and 5/6/24 for gpt-oss. The total (24) stays. Both decode
+  mutations still fail.
+- Full CI caught `causal_flash_masks_a_cpu_mapped_layer` at max diff 0.0102 against its 0.01 tolerance. It passes
+  alone; `--stress-count 300` failed 1 of 93 before stopping. The inputs are unseeded `randn` with d = 64 and
+  scale 1.0, so logits have std ~8. With queries scaled by 1/sqrt(d), as real models do, 2000 of 2000 runs pass.
+  It predates this PR and is not touched by the kernel fixes (6 queries, binary mask rows).
