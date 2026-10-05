@@ -6,12 +6,14 @@ use candle_core::{
     backend::BackendStorage,
 };
 
-use crate::{FattnOptions, PagedKv};
+use crate::{FattnOptions, KvScales, PagedKv};
 
 // ggml_type ids
 const GGML_TYPE_F32: i32 = 0;
 const GGML_TYPE_F16: i32 = 1;
 const GGML_TYPE_BF16: i32 = 30;
+// fp8 e4m3 K/V travel as a one-byte type; fattn_kv_src::fp8 says how to read them
+const GGML_TYPE_I8: i32 = 24;
 // GGML_CUDA_MAX_DEVICES in ggml-cuda.h; fattn keeps per-device state in arrays of this size
 const MAX_DEVICES: usize = 16;
 // The MLA head dim: fattn reads V out of K's tiles for it (`V_is_K_view = DKQ == 576`, fattn-mma-f16.cuh)
@@ -22,6 +24,8 @@ const Q_LOAD_ALIGN: usize = 16;
 const KV_LOAD_ALIGN: usize = 16;
 // supported() never launches, but fattn reads a null mask or sinks pointer as absent, so it describes operands at this
 const PROBE_PTR: u64 = 256;
+// e4m3's largest value times this reaches f16's largest (65504 / 448), where dequantized K/V would overflow
+const FP8_MAX_SCALE: f32 = 146.;
 // FATTN_KQ_STRIDE: a paged call's K/V length is padded to it, which the GQA-batched kernels and tile skipping need
 const PAGED_KV_PAD: usize = 256;
 
@@ -35,15 +39,18 @@ mod ffi {
         pub nb: [i64; 4],
     }
 
-    // fattn_paged_kv in fattn-common.cuh
+    // fattn_kv_src in fattn-common.cuh
     #[repr(C)]
-    pub struct Paged {
+    pub struct KvSrc {
         pub block_table: *const core::ffi::c_void,
         pub seq_lens: *const core::ffi::c_void,
         pub max_blocks: i32,
         pub block_size_log2: i32,
         pub block_stride_k: i64,
         pub block_stride_v: i64,
+        pub fp8: i32,
+        pub k_scale: f32,
+        pub v_scale: f32,
     }
 
     #[repr(C)]
@@ -60,7 +67,7 @@ mod ffi {
         pub softcap: f32,
         pub device: i32,
         pub stream: *mut core::ffi::c_void,
-        pub paged: *const Paged,
+        pub kv_src: *const KvSrc,
     }
 
     unsafe extern "C" {
@@ -86,6 +93,7 @@ fn ggml_type(dtype: DType) -> Result<i32> {
         DType::F32 => GGML_TYPE_F32,
         DType::F16 => GGML_TYPE_F16,
         DType::BF16 => GGML_TYPE_BF16,
+        DType::F8E4M3 => GGML_TYPE_I8,
         dt => candle_core::bail!("fattn does not take {dt:?}"),
     })
 }
@@ -148,12 +156,32 @@ fn validate_operands(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) ->
             "fattn reads K/V rows in {KV_LOAD_ALIGN}-byte chunks; their offsets and strides must align"
         );
     }
-    if !matches!(k.dtype(), DType::F16 | DType::BF16) || k.dtype() != v.dtype() {
+    if !matches!(k.dtype(), DType::F16 | DType::BF16 | DType::F8E4M3) || k.dtype() != v.dtype() {
         candle_core::bail!(
-            "fattn takes f16 or bf16 K and V of one dtype, got {:?} and {:?}",
+            "fattn takes f16, bf16 or fp8 e4m3 K and V of one dtype, got {:?} and {:?}",
             k.dtype(),
             v.dtype()
         );
+    }
+    let fp8 = k.dtype() == DType::F8E4M3;
+    if opts.kv_scales.is_some() && !fp8 {
+        candle_core::bail!(
+            "fattn's kv_scales dequantize fp8 K/V; these are {:?}",
+            k.dtype()
+        );
+    }
+    if let Some(KvScales { k: ks, v: vs }) = opts.kv_scales
+        && ![ks, vs]
+            .iter()
+            .all(|s| s.is_finite() && *s > 0. && *s <= FP8_MAX_SCALE)
+    {
+        candle_core::bail!(
+            "fattn's fp8 scales must lie in (0, {FP8_MAX_SCALE}], got k {ks} v {vs}"
+        );
+    }
+    // at 576 V is read out of K's tiles, which are dequantized with the K scale
+    if fp8 && q.dim(3)? == MLA_HEAD_DIM {
+        candle_core::bail!("fattn does not take fp8 K/V at head dim {MLA_HEAD_DIM}");
     }
     if let Some(mask) = &opts.mask
         && (mask.dtype() != DType::F16 || mask.layout().stride()[2] != 1)
@@ -247,6 +275,12 @@ fn device_ptr<'a>(
             let (p, g) = storage.as_cuda_slice::<u32>()?.device_ptr(stream);
             (p, Box::new(g))
         }
+        DType::F8E4M3 => {
+            let (p, g) = storage
+                .as_cuda_slice::<float8::F8E4M3>()?
+                .device_ptr(stream);
+            (p, Box::new(g))
+        }
         dt => candle_core::bail!("fattn does not take {dt:?}"),
     };
     guards.push(guard);
@@ -275,7 +309,7 @@ fn args(
         softcap: opts.softcap,
         device: stream.context().ordinal() as i32,
         stream: stream.cu_stream() as *mut _,
-        paged: std::ptr::null(),
+        kv_src: std::ptr::null(),
     }
 }
 
@@ -362,24 +396,20 @@ impl candle_core::CustomOp3 for Fattn<'_> {
         let q_t = bhsd(device_ptr(q, q_l, &stream, &mut guards)?, q.dtype(), q_l)?;
         let k_ptr = device_ptr(k, k_l, &stream, &mut guards)?;
         let v_ptr = device_ptr(v, v_l, &stream, &mut guards)?;
-        let paged = match (&self.paged, &tables) {
-            (Some(p), Some(((table, table_l), (lens, lens_l)))) => {
-                let (Storage::Cuda(table), Storage::Cuda(lens)) = (&**table, &**lens) else {
-                    candle_core::bail!("fattn operands must be on CUDA")
-                };
-                let block_size = k_l.dims()[2];
-                let es = k.dtype().size_in_bytes() as i64;
-                Some(ffi::Paged {
-                    block_table: device_ptr(table, table_l, &stream, &mut guards)? as *const _,
-                    seq_lens: device_ptr(lens, lens_l, &stream, &mut guards)? as *const _,
-                    max_blocks: p.block_table.dim(1)? as i32,
-                    block_size_log2: block_size.trailing_zeros() as i32,
-                    block_stride_k: k_l.stride()[0] as i64 * es,
-                    block_stride_v: v_l.stride()[0] as i64 * es,
-                })
-            }
-            _ => None,
-        };
+        let fp8 = k.dtype() == DType::F8E4M3;
+        let mut kv_src = dense_kv_src(k.dtype(), self.opts);
+        if let (Some(p), Some(((table, table_l), (lens, lens_l)))) = (&self.paged, &tables) {
+            let (Storage::Cuda(table), Storage::Cuda(lens)) = (&**table, &**lens) else {
+                candle_core::bail!("fattn operands must be on CUDA")
+            };
+            let es = k.dtype().size_in_bytes() as i64;
+            kv_src.block_table = device_ptr(table, table_l, &stream, &mut guards)? as *const _;
+            kv_src.seq_lens = device_ptr(lens, lens_l, &stream, &mut guards)? as *const _;
+            kv_src.max_blocks = p.block_table.dim(1)? as i32;
+            kv_src.block_size_log2 = k_l.dims()[2].trailing_zeros() as i32;
+            kv_src.block_stride_k = k_l.stride()[0] as i64 * es;
+            kv_src.block_stride_v = v_l.stride()[0] as i64 * es;
+        }
         let (k_t, v_t) = match &self.paged {
             Some(p) => {
                 let n_kv = paged_kv_len(p)?;
@@ -393,8 +423,8 @@ impl candle_core::CustomOp3 for Fattn<'_> {
         let mask_t = extra_operand(&mask, mask_descriptor, &stream, &mut guards)?;
         let sinks_t = extra_operand(&sinks, sinks_descriptor, &stream, &mut guards)?;
         let mut args = args(q_t, k_t, v_t, mask_t, sinks_t, self.opts, &stream);
-        if let Some(paged) = &paged {
-            args.paged = paged;
+        if self.paged.is_some() || fp8 {
+            args.kv_src = &kv_src;
         }
         if !unsafe { ffi::inference_fattn_supported(&args) } {
             candle_core::bail!(
@@ -462,6 +492,22 @@ fn kernel_q(q: &Tensor) -> Result<Tensor> {
     }
 }
 
+// The K/V source of a dense call: only fp8 storage and its scales; the paged fields stay empty.
+fn dense_kv_src(k_dtype: DType, opts: &FattnOptions) -> ffi::KvSrc {
+    let scales = opts.kv_scales.unwrap_or_default();
+    ffi::KvSrc {
+        block_table: std::ptr::null(),
+        seq_lens: std::ptr::null(),
+        max_blocks: 0,
+        block_size_log2: 0,
+        block_stride_k: 0,
+        block_stride_v: 0,
+        fp8: (k_dtype == DType::F8E4M3) as i32,
+        k_scale: scales.k,
+        v_scale: scales.v,
+    }
+}
+
 /// Attention over `q (b, seq_q, n_head, d_qk)`, `k (b, seq_kv, n_head_kv, d_qk)`, `v (b, seq_kv, n_head_kv, d_v)`.
 pub fn flash_attn(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Result<Tensor> {
     validate(q, k, v, opts)?;
@@ -493,7 +539,11 @@ pub fn supported(q: &Tensor, k: &Tensor, v: &Tensor, opts: &FattnOptions) -> Res
         Some(s) => sinks_descriptor(PROBE_PTR, &layout(s))?,
         None => ABSENT,
     };
-    let args = args(q_t, k_t, v_t, mask_t, sinks_t, opts, &dev.cuda_stream());
+    let mut args = args(q_t, k_t, v_t, mask_t, sinks_t, opts, &dev.cuda_stream());
+    let kv_src = dense_kv_src(k.dtype(), opts);
+    if kv_src.fp8 != 0 {
+        args.kv_src = &kv_src;
+    }
     Ok(unsafe { ffi::inference_fattn_supported(&args) })
 }
 

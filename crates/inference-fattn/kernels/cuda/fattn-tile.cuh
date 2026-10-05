@@ -812,7 +812,7 @@ static __global__ void flash_attn_tile(
                             const int32_t nb21, const int32_t nb22, const int64_t nb23,
                             const int32_t ne31, const int32_t ne32, const int32_t ne33,
                             const int32_t nb31, const int32_t nb32, const int64_t nb33,
-        const bool Q_bf16, const bool dst_bf16, const bool KV_bf16, const fattn_paged_kv paged) {
+        const bool Q_bf16, const bool dst_bf16, const bool KV_convert, const fattn_kv_src kv_src) {
 #ifdef FLASH_ATTN_AVAILABLE
     const char * GGML_CUDA_RESTRICT Q        = Q_ptr;
     const char * GGML_CUDA_RESTRICT K        = K_ptr;
@@ -834,7 +834,7 @@ static __global__ void flash_attn_tile(
                   nb11, nb12, nb13,
                   nb21, nb22, nb23,
                   ne31, ne32, ne33,
-                  nb31, nb32, nb33, Q_bf16, dst_bf16, KV_bf16, paged);
+                  nb31, nb32, nb33, Q_bf16, dst_bf16, KV_convert, kv_src);
         NO_DEVICE_CODE;
         return;
     }
@@ -1164,7 +1164,7 @@ static __global__ void flash_attn_tile(
               nb11, nb12, nb13,
               nb21, nb22, nb23,
               ne31, ne32, ne33,
-              nb31, nb32, nb33, Q_bf16, dst_bf16, KV_bf16, paged);
+              nb31, nb32, nb33, Q_bf16, dst_bf16, KV_convert, kv_src);
     NO_DEVICE_CODE;
 #endif // FLASH_ATTN_AVAILABLE
 }

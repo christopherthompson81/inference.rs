@@ -415,3 +415,76 @@ Review follow-up:
   beyond it; and a 600-row bf16 prefill over 700 rows, which converts in the loads where dense would convert first.
 - Note on the bench's batch-1 decode rows: on Ada and newer, dense would choose the vec kernel there, while paged is
   always mma. On this Ampere card both take mma.
+
+## Run 7 - 2026-10-04 21:36
+
+Question: can fattn read fp8 (e4m3) K/V caches, which `--pa-cache-type f8e4m3` produces with per-layer scalar K/V
+scales, in place?
+
+Design:
+- `fattn_paged_kv` became `fattn_kv_src`: where K/V live (paged or dense) plus how they are stored (`fp8`, `k_scale`,
+  `v_scale`). fp8 tensors reach ggml as `GGML_TYPE_I8`, a one-byte type, so the strides and element-size asserts hold.
+- Kernel selection sends fp8 to the mma kernel; launch never makes an f16 copy of fp8 K/V.
+- The mma tile loader dequantizes `x * scale` into f16 shared memory. One-byte elements break the half2 pointer
+  arithmetic the call sites used for column offsets (`K_h2 + k0_start`), so the loader now takes the column offset
+  explicitly and addresses fp8 rows in bytes.
+- Rust: `FattnOptions::kv_scales: Option<KvScales {k, v}>`, valid only with F8E4M3 K/V (an error otherwise). fp8 is
+  rejected at head dim 576, where V is read out of K's tiles, which carry the K scale.
+
+Tests: a new `fp8` module (dense decode and prefill at head dims 64/128/256, plus 600 Q rows) and an fp8 mode in
+every paged case. Scales are k 0.05 and v 0.2, and the reference uses the exactly dequantized values, at tolerance
+1e-2 with bf16 Q. Sanity check: swapping the K and V scales on the Rust side fails both fp8 suites. 22 tests pass.
+
+Three performance findings, in the order they surfaced:
+
+1. A runtime fp8 branch per 16-byte chunk inside the unrolled sync-load loop halved bf16 decode, even when not taken.
+   Qwen q1 kv16384 went from 58 to 114 us, and Llama from 96 to 206 us. Register counts were unchanged, and moving
+   the fp8 code out of line (`__noinline__`) did not help. Fix: fp8 is a separate instantiation of the loop body,
+   chosen once per tile by a `std::integral_constant` tag (`ggml_cuda_unroll` forwards extra arguments).
+
+2. That fixed decode, but bf16 prefill up to 512 Q rows was still about 1.7x slower than master (Llama q256 kv4096: 557
+   vs 326 us). Bisecting by experiment:
+   - with the fp8 instantiation removed: still slow;
+   - with every fp8 reference removed from the loader: fast.
+   The remaining culprit was the cp.async gate `if (!KV_bf16 && !rows.fp8)`. Many prefill instances gained 15-20
+   registers with it (for example 128/128 8x4: 213 -> 233, 16x4: 229 -> 245). Fix: fp8 folds into the existing
+   per-call flag, renamed `KV_convert` (the loads convert: bf16 or fp8), so the gate is one bool again. bf16 rows
+   then matched master on every row (Llama q256 kv4096 330.8 us).
+
+3. fp8 itself was 2.4-5.4x slower than bf16. On sm86, `__nv_cvt_fp8x2_to_halfraw2` has no hardware instruction (it
+   arrives with sm89), so it is emulated. Replaced by exact bit placement: `__byte_perm` spreads 4 bytes into two
+   half2 lanes, the sign goes to bit 15 and the exponent and mantissa shift up by 7, then a multiply by 2^8 covers
+   the bias gap (15 - 7), exactly for normals and subnormals. The scale then multiplies in half2. That puts a 2^-11
+   relative rounding on the scale, small next to fp8's own 2^-4 step. e4m3 NaN bytes are not preserved, which only
+   matters for unwritten slots, and those are redirected or masked.
+
+fp8 / bf16 after (us):
+
+| row | Qwen3.5-0.8B | Llama-8B |
+|---|---|---|
+| b 1 q 1 kv 4096 | 21.7 / 25.4 | 42.1 / 35.4 |
+| b 1 q 1 kv 16384 | 69.8 / 57.9 | 112.1 / 91.7 |
+| b 8 q 1 kv 16384 | 449.7 / 346.3 | 1071.2 / 767.4 |
+| b 1 q 256 kv 4096 | 208.3 / 174.3 | 382.6 / 296.3 |
+| b 1 q 1024 kv 4096 | 795.6 / 633.7 | 1257.1 / 959.8 |
+
+fp8 reads half the bytes and is still 1.2-1.4x slower. Llama q1 kv16384 is about 300 GB/s against bf16's ~700. Each
+thread loads 8 bytes per 16-byte f16 chunk, which leaves the fp8 path latency-bound. Follow-up: load 16 fp8 bytes (two
+chunks) per thread. For now, fp8 here buys memory capacity, not speed.
+
+Next: varlen (packed) Q. Then wiring: CUDA paged caches move to the HND layout, decode and prefix-prefill move to
+fattn behind parity tests, and FA2, FlashInfer and vLLM v1/v2 are deleted.
+
+Review follow-up:
+- Bug: `supported()` built its args without the K/V source, so fp8 K (described as `I8`) failed the K/V type check
+  and every fp8 call answered false; `flash_attn` itself was fine. Both now share `dense_kv_src`, and every fp8 test
+  asserts `supported()`.
+- Coverage: for head dims 64-256 the tile loads take each row in one slice, so the new explicit column offset was
+  always 0. Head dim 512 loads K and V in column slices, and a 512 case now covers the fp8 byte offset of a slice.
+  112 adds the narrower load widths. Further new cases: f32 Q, softcap with sinks, and `every_code_decodes`. In that
+  test every V row holds all 254 non-NaN e4m3 codes, so the output must equal the decoded row whatever the weights,
+  which pins down +-0, the subnormals and +-448.
+- The 2^8 bias gap now folds into the scale before it rounds to f16: one multiply per element instead of two, and a
+  small scale keeps its precision (on its own it would round to an f16 subnormal below 6.1e-5).
+- Scales must be finite and in (0, 146]: 448 * 146 is just under f16's 65504.
+- C-side assert: no fp8 at head dim 576.

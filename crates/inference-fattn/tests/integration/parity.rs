@@ -151,6 +151,7 @@ fn check(case: Case) -> Result<()> {
             softcap: case.softcap,
             mask: mask.clone(),
             sinks: sinks.clone(),
+            ..Default::default()
         };
         assert!(inference_fattn::supported(&q, &k, &v, &opts)?);
         let got = flash_attn(&q, &k, &v, &opts)?;

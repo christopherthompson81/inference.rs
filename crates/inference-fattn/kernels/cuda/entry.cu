@@ -22,7 +22,7 @@ struct inference_fattn_args {
     float   softcap;
     int32_t device;
     void *  stream; // cudaStream_t
-    const fattn_paged_kv * paged; // null: dense K/V; otherwise k/v describe one block's head and row strides
+    const fattn_kv_src * kv_src; // null: dense f16/bf16 K/V
 };
 
 namespace {
@@ -62,7 +62,7 @@ struct operands {
         dst.src[4] = a.sinks.data ? &sinks : nullptr;
         const float params[3] = {a.scale, a.max_bias, a.softcap};
         memcpy(dst.op_params, params, sizeof(params));
-        memcpy(dst.op_params + FATTN_OP_PARAMS_PAGED, &a.paged, sizeof(a.paged));
+        memcpy(dst.op_params + FATTN_OP_PARAMS_KV_SRC, &a.kv_src, sizeof(a.kv_src));
     }
 };
 

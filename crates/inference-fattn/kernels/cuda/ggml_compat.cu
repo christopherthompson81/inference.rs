@@ -22,6 +22,7 @@ type_traits_t traits(ggml_type type) {
         case GGML_TYPE_F16:  return {"f16", 1, sizeof(ggml_fp16_t), false};
         case GGML_TYPE_BF16: return {"bf16", 1, sizeof(ggml_bf16_t), false};
         case GGML_TYPE_I32:  return {"i32", 1, sizeof(int32_t), false};
+        case GGML_TYPE_I8:   return {"i8", 1, sizeof(int8_t), false}; // fp8 e4m3 K/V (fattn_kv_src::fp8)
         case GGML_TYPE_Q4_0: return {"q4_0", QK4_0, sizeof(block_q4_0), true};
         case GGML_TYPE_Q4_1: return {"q4_1", QK4_1, sizeof(block_q4_1), true};
         case GGML_TYPE_Q5_0: return {"q5_0", QK5_0, sizeof(block_q5_0), true};

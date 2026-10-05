@@ -6,6 +6,7 @@ use inference_fattn::{
     FattnOptions, PagedKv, causal_mask, flash_attn_paged, paged_causal_mask, paged_kv_len,
 };
 
+use crate::fp8::{FP8_SCALES, FP8_TOLERANCE, store};
 use crate::parity::{Case, N_HEAD, QLayout, TOLERANCE, case, cuda, reference};
 
 const NUM_BLOCKS: usize = 48;
@@ -47,15 +48,30 @@ fn check(c: PagedCase) -> Result<()> {
         "the case needs more than {NUM_BLOCKS} blocks"
     );
     let scale = 1. / (d as f32).sqrt();
-    for (dtype, tolerance) in TOLERANCE {
-        let rows: Vec<(Tensor, Tensor)> = seq_lens
+    // (q dtype, cache dtype, tolerance, fp8 scales)
+    let modes = TOLERANCE
+        .map(|(dtype, tol)| (dtype, dtype, tol, None))
+        .into_iter()
+        .chain([(DType::BF16, DType::F8E4M3, FP8_TOLERANCE, Some(FP8_SCALES))]);
+    for (dtype, kv_dtype, tolerance, kv_scales) in modes {
+        // per sequence: the stored K/V, then the values they stand for (dequantized for fp8)
+        let rows: Vec<((Tensor, Tensor), (Tensor, Tensor))> = seq_lens
             .iter()
             .map(|&len| -> Result<_> {
-                let r = || Tensor::randn(0f32, 1., (len, h_kv, d), &Device::Cpu);
-                Ok((r()?.to_dtype(dtype)?, r()?.to_dtype(dtype)?))
+                let scales = kv_scales.unwrap_or_default();
+                let r = |s: f32| -> Result<(Tensor, Tensor)> {
+                    store(
+                        &Tensor::randn(0f32, 1., (len, h_kv, d), &Device::Cpu)?,
+                        kv_dtype,
+                        s,
+                    )
+                };
+                let ((k, k_ref), (v, v_ref)) = (r(scales.k)?, r(scales.v)?);
+                Ok(((k, v), (k_ref, v_ref)))
             })
             .collect::<Result<_>>()?;
-        let cache = |pick: fn(&(Tensor, Tensor)) -> &Tensor| -> Result<Tensor> {
+        type Rows = ((Tensor, Tensor), (Tensor, Tensor));
+        let cache = |pick: fn(&Rows) -> &Tensor| -> Result<Tensor> {
             let mut data = vec![f32::NAN; NUM_BLOCKS * h_kv * bs * d];
             for (s, len) in seq_lens.iter().enumerate() {
                 let src = pick(&rows[s]).to_dtype(DType::F32)?.to_vec3::<f32>()?;
@@ -67,9 +83,13 @@ fn check(c: PagedCase) -> Result<()> {
                     }
                 }
             }
-            Ok(Tensor::from_vec(data, (NUM_BLOCKS, h_kv, bs, d), &dev)?.to_dtype(dtype)?)
+            Ok(
+                Tensor::from_vec(data, (NUM_BLOCKS, h_kv, bs, d), &Device::Cpu)?
+                    .to_dtype(kv_dtype)?
+                    .to_device(&dev)?,
+            )
         };
-        let (k_cache, v_cache) = (cache(|r| &r.0)?, cache(|r| &r.1)?);
+        let (k_cache, v_cache) = (cache(|r| &r.0.0)?, cache(|r| &r.0.1)?);
         let block_table = Tensor::from_vec(tables.clone(), (b, max_blocks), &dev)?;
         let lens: Vec<u32> = seq_lens.iter().map(|&l| l as u32).collect();
         let seq_lens_t = Tensor::from_vec(lens, b, &dev)?;
@@ -88,6 +108,7 @@ fn check(c: PagedCase) -> Result<()> {
                 paged_kv_len(&kv)?,
                 &dev,
             )?),
+            kv_scales,
             ..Default::default()
         };
         let got = flash_attn_paged(&q, &kv, &opts)?;
@@ -98,8 +119,8 @@ fn check(c: PagedCase) -> Result<()> {
                 q_layout: QLayout::Contiguous,
                 ..case(d, h_kv, seq_q, len)
             };
-            let k = rows[s].0.to_device(&dev)?.unsqueeze(0)?;
-            let v = rows[s].1.to_device(&dev)?.unsqueeze(0)?;
+            let k = rows[s].1.0.to_device(&dev)?.unsqueeze(0)?;
+            let v = rows[s].1.1.to_device(&dev)?.unsqueeze(0)?;
             let q_s = q.narrow(0, s, 1)?;
             let mask = causal_mask(seq_q, len, &dev)?;
             let want = reference(&q_s, &k, &v, Some(&mask), None, &seq, scale)?;
@@ -112,7 +133,7 @@ fn check(c: PagedCase) -> Result<()> {
             let peak = want.abs()?.flatten_all()?.max(0)?.to_scalar::<f32>()?;
             assert!(
                 diff <= tolerance * peak,
-                "hd {d} bs {bs} seq {s} (len {len}) q {seq_q} {dtype:?}: max diff {diff}, peak {peak}"
+                "hd {d} bs {bs} seq {s} (len {len}) q {seq_q} {kv_dtype:?}: max diff {diff}, peak {peak}"
             );
         }
     }
